@@ -5,33 +5,33 @@ session and captures the operational state of the project plus the rules that
 must never be violated. The full specification lives in the claude.ai
 knowledge base — see § Quick links spec.
 
-> **Status:** Phase −1 — S0 in progress
+> **Status:** Phase −1 — S1 next
 >
-> Current scope is bootstrap: Zig 0.16.x build skeleton, CI on Linux + Windows,
-> local hooks (lefthook), repo metadata. No engine code yet.
+> S0 closed: Zig 0.16.x build skeleton in place, CI green on Linux + Windows
+> (Debug + ReleaseSafe), local hooks (lefthook) installed, repo metadata
+> committed. Next milestone is S1 (mini-ECS Zig spike).
 
 ## Current state
 
 | Field | Value |
 |---|---|
 | Phase | −1 (Spikes) |
-| Current milestone | S0 — Bootstrap repo and CI |
-| Last released tag | _(none yet)_ |
-| Active branch | `phase-pre-0/bootstrap/repo-and-ci` |
+| Current milestone | _(none active — S0 closed)_ |
+| Last released tag | `v0.0.1-S0-bootstrap` |
+| Active branch | `main` |
 | Next planned milestone | S1 — Mini-ECS Zig (Chase-Lev jobs + comptime SoA archetype) |
 
 ## Tags
 
 | Tag | Date | Milestone | Notes |
 |---|---|---|---|
-
-_(Empty until S0 closes — first row will be `v0.0.1-S0-bootstrap` posted by Guy after merge.)_
+| `v0.0.1-S0-bootstrap` | 2026-05-08 | S0 — Bootstrap repo and CI | First milestone. Build infra, CI on `{ubuntu-24.04, windows-2025} × {Debug, ReleaseSafe}`, lefthook, `CLAUDE.md`. Tag posted by Guy after merge of PR #1. |
 
 ## Hypotheses validated by spikes
 
 | Spike | Hypothesis | Status |
 |---|---|---|
-| S0 | Infrastructure ready (no engineering hypothesis) | pending |
+| S0 | Infrastructure ready (no engineering hypothesis) | validated |
 | S1 | comptime ECS + Chase-Lev work-stealing iterates 100k entities < 1 ms | pending |
 | S2 | Window Win32 + Wayland + Vulkan triangle, native Zig, no SDL/GLFW | pending |
 | S3 | Etch grammar EBNF v0.5 implementable, parsing < 5 ms / file | pending |
