@@ -1,0 +1,25 @@
+# Lefthook configuration for the Weld engine.
+# See https://lefthook.dev/configuration/ for the reference.
+# Spec: briefs/S0-bootstrap.md, "lefthook.yml specification".
+
+pre-commit:
+  parallel: true
+  commands:
+    zig-fmt:
+      glob: "*.zig"
+      run: zig fmt --check {staged_files}
+
+commit-msg:
+  commands:
+    conventional-commits:
+      run: bash scripts/check-commit-msg.sh {1}
+
+pre-push:
+  piped: true
+  commands:
+    build:
+      run: zig build
+    test:
+      run: zig build test
+    test-release:
+      run: zig build test -Doptimize=ReleaseSafe

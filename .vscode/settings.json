@@ -1,0 +1,26 @@
+{
+  "[zig]": {
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "ziglang.vscode-zig"
+  },
+  "files.associations": {
+    "*.zon": "zig"
+  },
+  "files.eol": "\n",
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+  "files.exclude": {
+    "**/.zig-cache": true,
+    "**/zig-out": true,
+    "**/zig-pkg": true
+  },
+  "files.watcherExclude": {
+    "**/.zig-cache/**": true,
+    "**/zig-out/**": true,
+    "**/zig-pkg/**": true
+  },
+  "zig.path": "zig",
+  "zig.zls.enabled": "on",
+  "zig.zls.path": "zls",
+  "zig.buildOnSaveProvider": "zls"
+}

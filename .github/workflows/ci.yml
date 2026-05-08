@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        mode: [Debug, ReleaseSafe]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      # Brief specifies `version: 0.16.x` for patch fluidity. As of v2 of
+      # this action, that syntax is taken literally and resolves to
+      # zig-...-0.16.x.tar.xz on the mirrors (404 everywhere). Pinned to
+      # 0.16.0 exact until the action supports semver ranges or we switch
+      # to `version-file: build.zig.zon`. Tracked as an acted deviation in
+      # briefs/S0-bootstrap.md. The build.zig minor-version guard still
+      # enforces the 0.16.x invariant on the local toolchain.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: zig fmt --check
+        run: zig fmt --check src tests build.zig
+
+      - name: zig build
+        run: zig build -Doptimize=${{ matrix.mode }}
+
+      - name: zig build test
+        run: zig build test -Doptimize=${{ matrix.mode }}

@@ -1,0 +1,15 @@
+.{
+    .name = .weld,
+    .version = "0.0.1",
+    .fingerprint = 0x1a27cf1846a92a3e,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "src",
+        "tests",
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "README.md",
+    },
+}
