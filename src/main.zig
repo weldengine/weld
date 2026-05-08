@@ -1,12 +1,14 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn main(init: std.process.Init) !void {
-    const io = init.io;
-    var stdout_buffer: [256]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
-    const stdout = &stdout_writer.interface;
-    try stdout.print("Weld engine — Phase -1 / S0 bootstrap\n", .{});
-    try stdout.flush();
+    var stdout_buffer: [128]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    try stdout.interface.print(
+        "Weld bootstrap OK ({s})\n",
+        .{@tagName(builtin.mode)},
+    );
+    try stdout.interface.flush();
 }
 
 test "main module compiles" {

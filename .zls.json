@@ -1,0 +1,10 @@
+{
+    "enable_build_on_save": true,
+    "build_on_save_args": [],
+    "warn_style": true,
+    "highlight_global_var_declarations": true,
+    "skip_std_references": false,
+    "prefer_ast_check_as_child_process": true,
+    "completion_label_details": true,
+    "enable_argument_placeholders": false
+}

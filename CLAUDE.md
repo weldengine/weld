@@ -69,10 +69,34 @@ Core docs (must read first for most milestones):
 
 Module / topic docs available in the knowledge base:
 
-- `engine-c-bindings.md`, `engine-ipc.md`, `engine-render.md`, `engine-vfx-ember.md`, `engine-physics-forge.md`, `engine-audio-pulse.md`, `engine-ai-cortex.md`, `engine-network-relay.md`, `engine-asset-pipeline.md`, `engine-editor-islandz.md`, `engine-tier0-interfaces.md`, `engine-c-api.md`, `engine-directory-structure.md`, `engine-phase-1-criteria.md`
-- `etch-spec.md`, `etch-grammar.md`, `etch-runtime.md`, …
+- Tier 0 / API : `weld-tier0-interfaces.md`, `weld-c-api.md`
+- Modules Tier 1 : `engine-render.md`, `engine-physics-forge.md`,
+  `engine-physics-forge-2d.md`, `engine-audio-pulse.md`,
+  `engine-ai-cortex.md`, `engine-vfx-ember.md`,
+  `engine-animation-kinesis.md`, `engine-networking-relay.md`,
+  `engine-ui.md`, `engine-tools-editor.md`, `engine-sequencer.md`,
+  `engine-sprite.md`, `engine-input-system.md`, `engine-debug.md`,
+  `engine-media.md`, `engine-asset-pipeline.md`
+- Sous-systèmes : `engine-c-bindings.md`, `engine-ipc.md`,
+  `engine-ecs-internals.md`, `engine-coordinate-system.md`,
+  `engine-units.md`, `engine-color-picker.md`,
+  `engine-collaboration.md`, `engine-platform.md`, `engine-vr-ar.md`,
+  `engine-movement.md`, `engine-motion-design.md`,
+  `engine-scene-serialization.md`, `engine-gameplay-systems.md`,
+  `engine-mach-reference.md`, `engine-project-settings.md`,
+  `engine-directory-structure.md`, `engine-terminologie.md`,
+  `engine-phase-1-criteria.md`
+- Etch : `etch-grammar.md`, `etch-visual-scripting.md`
+- Templates : `brief-milestone_template.md`,
+  `prompt-claude-code_template.md`
+- Mockups : `prompt-editor-mockups.md`
 
-The full set of `engine-*.md` and `etch-*.md` files lives in the claude.ai project. Ask Guy to paste an excerpt when needed mid-session — never guess.
+The full set of `engine-*.md`, `etch-*.md`, `weld-*.md`, and template
+files lives in the claude.ai project. **Never guess a spec filename.**
+If a spec referenced in a brief or in conversation is not in the list
+above and you are uncertain of its exact name, stop and ask Guy — do
+not invent a plausible-looking filename. Hallucinated filenames cause
+friction in subsequent sessions.
 
 ## Workflow reminder (Claude Code protocol)
 

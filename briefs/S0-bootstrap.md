@@ -73,6 +73,8 @@ All entries are creations — the repo is empty before this milestone.
 - `lefthook.yml` — creation — see specification below
 - `scripts/check-commit-msg.sh` — creation — POSIX shell, executable bit set, validates Conventional Commits
 - `scripts/install-hooks.sh` — creation — POSIX shell, executable bit set, runs `lefthook install` idempotently
+- `.zls.json` — creation — project-level zls config (build-on-save,
+  warn_style, no argument placeholders)
 - `.vscode/extensions.json` — creation — recommends `ziglang.vscode-zig` and `tamasfe.even-better-toml`
 - `.vscode/settings.json` — creation — see content below
 
@@ -266,6 +268,7 @@ None. Benchmark infrastructure is deferred to S1+.
 - 2026-05-08 10:35 — Second CI run on PR #1: 4/4 green. Slowest job 1m43s (windows-2025 ReleaseSafe). Run URL: https://github.com/weldengine/weld/actions/runs/25545765639.
 - 2026-05-08 10:40 — Demo PR #2 opened (https://github.com/weldengine/weld/pull/2): branch `demo/ci-readme-tweak` from milestone tip + 1 newline in README, target `main`. CI run https://github.com/weldengine/weld/actions/runs/25546101581 — 4/4 green, slowest 1m37s. PR closed without merge as instructed by the brief.
 - 2026-05-08 10:45 — CLAUDE.md final patch applied (status to "S1 next", tag row added, S0 hypothesis to validated, branch field to main). Brief Status flipped ACTIVE → CLOSED, Closed date set, Closing notes filled.
+- 2026-05-08 11:54 — Post-review fixes applied: simplified `src/main.zig` to print build mode via `@tagName(builtin.mode)`; switched `build.zig` version guard from `@panic` to `@compileError` with explicit `comptime` block and major+minor check; corrected hallucinated spec filenames in `CLAUDE.md` § Quick links spec and added explicit no-guess rule; cleared Blockers placeholder; enabled zls in `.vscode/settings.json` and added project-level `.zls.json`. Single commit, branch retipped before push to PR #1.
 
 ## Acted deviations
 
@@ -273,11 +276,19 @@ None. Benchmark infrastructure is deferred to S1+.
 
 - `429de07` — `.github/workflows/ci.yml` step 2 pinned to `version: 0.16.0` instead of the brief's `version: 0.16.x` (cf. § Files to create or modify → `.github/workflows/ci.yml` specification, step 2). **Reason:** `mlugg/setup-zig@v2` — the action mandated by both the brief and `engine-spec.md` §22.3.0 — takes the version string literally and tries to fetch `zig-x86_64-{linux,windows}-0.16.x.tar.xz`, which 404s on every mirror. Tool capability fact, not a design choice. The brief's underlying intent (run on the latest 0.16 patch automatically) is preserved as future work once the action supports semver ranges, or via `version-file: build.zig.zon`. The `build.zig` minor-version guard continues to enforce the 0.16.x invariant on the local toolchain. Mechanical deviation — no Claude.ai round-trip; flagged here for review and surfaced in the PR's review notes.
 
+- `<sha-du-commit-fix>` — `src/main.zig` rewritten: print now includes the build mode via `@tagName(builtin.mode)` instead of the static phase tag, and the I/O path is condensed (single `print` + `flush` on a 128-byte stack buffer instead of the original 256-byte version with separate writer variable). The brief's "minimal hello-world" intent is preserved; the change is a refinement, not a scope expansion. Decided in Claude.ai post-review.
+
+- `<sha-du-commit-fix>` — `build.zig` version guard switched from `@panic` (runtime, with stacktrace dump) to `@compileError` (compile-time, single-line diagnostic) inside an explicit `comptime` block. Major + minor checked instead of minor only. The brief's intent — fail at build time on wrong Zig version — is preserved; the mechanism is upgraded to the semantically correct primitive. Decided in Claude.ai post-review.
+
+- `<sha-du-commit-fix>` — `.vscode/settings.json` extended with `zig.zls.enabled: "on"`, `zig.zls.path: "zls"`, `zig.path: "zig"` to actually start zls in VSCode (the extension does not start it by default). Brief originally specified format-on-save settings only; zls activation was an oversight at brief drafting time. Decided in Claude.ai post-review.
+
+- `<sha-du-commit-fix>` — `.zls.json` added to repo root with project-level zls configuration (editor-agnostic). This file was not in the brief's original "Files to create or modify" list; FROZEN SECTION updated accordingly with a new entry (see Fix 7). Decided in Claude.ai post-review.
+
 ## Blockers encountered
 
 *Blocking points that required a return to Claude.ai (cf. `engine-development-workflow.md` §2.4). Two or more distinct blockers signals a re-scope.*
 
-- <summary> — resolved by <commit SHA> or <Claude.ai conversation reference>
+*None.*
 
 ## Closing notes
 

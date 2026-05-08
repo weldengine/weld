@@ -2,11 +2,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    if (builtin.zig_version.minor != 16) {
-        @panic(std.fmt.comptimePrint(
-            "Weld requires Zig 0.16.x, got {d}.{d}.{d}",
-            .{ builtin.zig_version.major, builtin.zig_version.minor, builtin.zig_version.patch },
-        ));
+    comptime {
+        if (builtin.zig_version.major != 0 or builtin.zig_version.minor != 16) {
+            @compileError(std.fmt.comptimePrint(
+                "Weld requires Zig 0.16.x, got {d}.{d}.{d}",
+                .{ builtin.zig_version.major, builtin.zig_version.minor, builtin.zig_version.patch },
+            ));
+        }
     }
 
     const target = b.standardTargetOptions(.{});

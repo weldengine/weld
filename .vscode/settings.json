@@ -8,5 +8,8 @@
   },
   "files.eol": "\n",
   "files.insertFinalNewline": true,
-  "files.trimTrailingWhitespace": true
+  "files.trimTrailingWhitespace": true,
+  "zig.zls.enabled": "on",
+  "zig.zls.path": "zls",
+  "zig.path": "zig"
 }
