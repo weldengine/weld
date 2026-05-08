@@ -21,3 +21,5 @@ pre-push:
       run: zig build
     test:
       run: zig build test
+    test-release:
+      run: zig build test -Doptimize=ReleaseSafe
