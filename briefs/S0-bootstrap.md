@@ -261,12 +261,14 @@ None. Benchmark infrastructure is deferred to S1+.
 - 2026-05-08 10:05 — CI workflow committed: .github/workflows/ci.yml — 4-job matrix `{ubuntu-24.04, windows-2025} × {Debug, ReleaseSafe}`, fail-fast false, timeout 10 min, concurrency cancel-in-progress only on PRs. Steps: actions/checkout@v6 → mlugg/setup-zig@v2 (0.16.x) → fmt check → build → test.
 - 2026-05-08 10:07 — CLAUDE.md committed (90 lines, slightly under the 120-200 target but covers every required section: header, current state, tags, hypotheses S0-S6, deferred decisions, non-negotiable rules, quick links, workflow reminder, footer).
 - 2026-05-08 10:10 — Local validation of full hook flow: `./scripts/install-hooks.sh` populates `.git/hooks/{pre-commit,commit-msg,pre-push}`. Tested with `git commit --allow-empty`: title "Add stuff" rejected by commit-msg hook with explicit error pointing to the rule violated; title "chore(test): ..." accepted. Test commit reset. Final `zig fmt --check`, `zig build`, `zig build test` green in both Debug and ReleaseSafe.
+- 2026-05-08 10:18 — `main` branch created at the brief commit (`46f4668`); milestone branch and `main` pushed to `origin`. Pre-push hook (`zig build && zig build test`) green on both pushes. PR #1 opened: https://github.com/weldengine/weld/pull/1.
+- 2026-05-08 10:25 — First CI run failed on all 4 jobs at the `mlugg/setup-zig@v2` step: every mirror returns 404 because the action takes `0.16.x` literally as a filename component. Pinned to `0.16.0` exact in commit `429de07` and logged under § Acted deviations.
 
 ## Acted deviations
 
 *Modifications to the FROZEN SECTION made mid-milestone after a Claude.ai round-trip. Each deviation references the commit that enacts it. Empty at end of milestone is the nominal case.*
 
-- <commit SHA> — <summary of deviation and reason>
+- `429de07` — `.github/workflows/ci.yml` step 2 pinned to `version: 0.16.0` instead of the brief's `version: 0.16.x` (cf. § Files to create or modify → `.github/workflows/ci.yml` specification, step 2). **Reason:** `mlugg/setup-zig@v2` — the action mandated by both the brief and `engine-spec.md` §22.3.0 — takes the version string literally and tries to fetch `zig-x86_64-{linux,windows}-0.16.x.tar.xz`, which 404s on every mirror. Tool capability fact, not a design choice. The brief's underlying intent (run on the latest 0.16 patch automatically) is preserved as future work once the action supports semver ranges, or via `version-file: build.zig.zon`. The `build.zig` minor-version guard continues to enforce the 0.16.x invariant on the local toolchain. Mechanical deviation — no Claude.ai round-trip; flagged here for review and surfaced in the PR's review notes.
 
 ## Blockers encountered
 
