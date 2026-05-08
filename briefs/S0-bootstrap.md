@@ -1,12 +1,12 @@
 # S0 — Bootstrap repo and CI
 
-> **Status:** ACTIVE
+> **Status:** CLOSED
 > **Phase:** -1
 > **Branch:** `phase-pre-0/bootstrap/repo-and-ci`
 > **Planned tag:** `v0.0.1-S0-bootstrap`
 > **Dependencies:** none
 > **Opened:** 2026-05-08
-> **Closed:** —
+> **Closed:** 2026-05-08
 
 ---
 
@@ -263,6 +263,9 @@ None. Benchmark infrastructure is deferred to S1+.
 - 2026-05-08 10:10 — Local validation of full hook flow: `./scripts/install-hooks.sh` populates `.git/hooks/{pre-commit,commit-msg,pre-push}`. Tested with `git commit --allow-empty`: title "Add stuff" rejected by commit-msg hook with explicit error pointing to the rule violated; title "chore(test): ..." accepted. Test commit reset. Final `zig fmt --check`, `zig build`, `zig build test` green in both Debug and ReleaseSafe.
 - 2026-05-08 10:18 — `main` branch created at the brief commit (`46f4668`); milestone branch and `main` pushed to `origin`. Pre-push hook (`zig build && zig build test`) green on both pushes. PR #1 opened: https://github.com/weldengine/weld/pull/1.
 - 2026-05-08 10:25 — First CI run failed on all 4 jobs at the `mlugg/setup-zig@v2` step: every mirror returns 404 because the action takes `0.16.x` literally as a filename component. Pinned to `0.16.0` exact in commit `429de07` and logged under § Acted deviations.
+- 2026-05-08 10:35 — Second CI run on PR #1: 4/4 green. Slowest job 1m43s (windows-2025 ReleaseSafe). Run URL: https://github.com/weldengine/weld/actions/runs/25545765639.
+- 2026-05-08 10:40 — Demo PR #2 opened (https://github.com/weldengine/weld/pull/2): branch `demo/ci-readme-tweak` from milestone tip + 1 newline in README, target `main`. CI run https://github.com/weldengine/weld/actions/runs/25546101581 — 4/4 green, slowest 1m37s. PR closed without merge as instructed by the brief.
+- 2026-05-08 10:45 — CLAUDE.md final patch applied (status to "S1 next", tag row added, S0 hypothesis to validated, branch field to main). Brief Status flipped ACTIVE → CLOSED, Closed date set, Closing notes filled.
 
 ## Acted deviations
 
@@ -281,7 +284,30 @@ None. Benchmark infrastructure is deferred to S1+.
 *To be filled at the Status → CLOSED transition, just before opening the PR.*
 
 - **What worked**:
+  - The full Étape 0 → Étape 4 protocol ran cleanly: brief committed verbatim as the first commit, specs read, status transitioned through PLANNED → ACTIVE → CLOSED, granular Conventional Commits with appropriate scopes (`docs(brief)`, `chore(repo)`, `chore(vscode)`, `feat(build)`, `chore(hooks)`, `ci`, `docs(claude-md)`, `fix(ci)`, `docs(readme)`).
+  - `zig fmt`, `zig build` (Debug + ReleaseSafe), `zig build test` (Debug + ReleaseSafe), `zig build run` all green locally on Zig 0.16.0 (darwin-arm64).
+  - Lefthook flow validated end-to-end: `./scripts/install-hooks.sh` populates the three hooks, `commit-msg` rejects "Add stuff" with an explicit error citing the rule, accepts conformant titles. Hooks fired on every commit + push of this milestone.
+  - `scripts/check-commit-msg.sh` is POSIX-strict (validated under `/bin/sh` and `/bin/dash`).
+  - CI green on the second run after the `0.16.x → 0.16.0` fix. Slowest job 1m43s on the milestone PR, 1m37s on the demo PR. Both well under the 3 min criterion.
+
 - **What deviated from the original spec**:
+  - One acted deviation, recorded above: `.github/workflows/ci.yml` pins Zig to `0.16.0` exact instead of the brief's `0.16.x` semver wildcard, because `mlugg/setup-zig@v2` does not resolve `x` as a wildcard (it 404s on every mirror trying to fetch `zig-...-0.16.x.tar.xz`). The brief's intent — patch fluidity — is preserved as a future fix once the action supports semver ranges or via `version-file: build.zig.zon`. The `build.zig` minor-version guard continues to enforce 0.16.x locally. See § Acted deviations, commit `429de07`.
+  - No FROZEN scope/criteria changes.
+
 - **What to flag explicitly in review**:
-- **Final measurements**: CI duration on `README.md`-only PR (job-by-job), CI run URL archived as proof of the < 3 min criterion
+  1. **Brief's `engine-zig-conventions.md §17` reference** — the actual section about Zig version policy is §18 (§17 is "Build system and package management"). Both are pertinent. Documented in the Specs read section at milestone start, no FROZEN change requested.
+  2. **`std.fs.File.stdout()` vs `std.Io.File.stdout()`** — the convention doc §6 example does not match the actual Zig 0.16.0 stdlib path. `src/main.zig` follows the actual stdlib (`std.Io.File.stdout().writer(io, &buf)`). Flag for a future docs PR on the conventions.
+  3. **Workflow doc §4.6 "Exception historique S0"** — the workflow says S0 was previously merged via merge commit, but this is a fresh first-time S0. The brief overrides with `Merge strategy: squash-and-merge`. Following the brief.
+  4. **`main` initial state** — `main` was created at the brief commit only (the unborn HEAD was renamed to the milestone branch first, then `main` branched from the brief commit). This is why the demo PR (#2) couldn't satisfy the strict letter of the criterion ("PR modifying only README.md") against `main` directly: `zig build` would fail with no `build.zig.zon`. The demo PR was opened from the milestone branch tip + 1 README newline, validating the duration criterion in spirit. Future milestones won't have this constraint.
+  5. **GitHub repo Settings → "Squash and merge" as the only enabled option** — recommended by `engine-development-workflow.md` §4.6. Out of scope of this PR (Claude Code does not have admin rights). Guy to apply before merging.
+  6. **`build.zig.zon` fingerprint** — Zig 0.16 requires a fingerprint with the high 32 bits derived from the package name. Initial random value was rejected; the value `0x1a27cf1846a92a3e` was suggested by the Zig toolchain itself and used as-is. Stable from now on (changing it has security/trust implications per Zig's own warning).
+
+- **Final measurements**:
+  - **Milestone PR #1 second CI run** (after `0.16.x → 0.16.0` fix): https://github.com/weldengine/weld/actions/runs/25545765639 — ubuntu-24.04 Debug 24s, ubuntu-24.04 ReleaseSafe 52s, windows-2025 Debug 1m20s, windows-2025 ReleaseSafe 1m43s. Slowest 1m43s, criterion (< 3 min) met.
+  - **Demo PR #2 CI run** (README-only tweak, target main, source = milestone branch tip + 1 newline): https://github.com/weldengine/weld/actions/runs/25546101581 — ubuntu-24.04 Debug 22s, ubuntu-24.04 ReleaseSafe 1m11s, windows-2025 Debug 57s, windows-2025 ReleaseSafe 1m37s. Slowest 1m37s, criterion (< 3 min) met. PR closed without merge as instructed: https://github.com/weldengine/weld/pull/2.
+
 - **Residual risks / technical debt left intentionally**:
+  - Zig version pinned to `0.16.0` exact in CI (instead of the brief's `0.16.x`). Patch fluidity will need to be re-introduced when 0.16.1+ ships, either by switching CI to `version-file: build.zig.zon` or by upgrading the action.
+  - `commit-msg` validation is a POSIX shell script, not a Zig binary. To be replaced by the Zig linter milestone post-S1 (see CLAUDE.md § Open / deferred decisions).
+  - `pre-push` hook duration is fine at S0 (sub-second `zig build` + `zig build test`) but will need re-evaluation in Phase 0.1+ once the ECS lands. Convention doc §4.5 already plans this.
+  - macOS not in CI matrix. Local development on macOS works but is unverified by CI. Reconsidered after Phase 0.
