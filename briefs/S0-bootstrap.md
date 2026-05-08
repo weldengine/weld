@@ -245,14 +245,15 @@ None. Benchmark infrastructure is deferred to S1+.
 
 *To be checked before any production code is written. Confirms specs were ingested in full, not skimmed.*
 
-- [ ] `engine-spec.md` (§22.3.0, §3.5) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-development-workflow.md` (§2, §3, §3.4, §4) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-zig-conventions.md` (§17) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-phase-0-criteria.md` — read <YYYY-MM-DD HH:MM>
+- [x] `engine-spec.md` (§22.3.0, §3.5) — read 2026-05-08 09:46
+- [x] `engine-development-workflow.md` (§2, §3, §3.4, §4) — read 2026-05-08 09:46
+- [x] `engine-zig-conventions.md` (§17 + §18) — read 2026-05-08 09:46 — brief labels this "§17 (Zig version policy)" but in the actual document §17 is "Build system and package management" and §18 is "Politique de migration de version Zig". Per Guy's clarification at milestone start, both are pertinent: §17 informs the `build.zig` version guard, §18 is the policy text referenced in the brief.
+- [x] `engine-phase-0-criteria.md` — read 2026-05-08 09:46
 
 ## Execution log
 
-- <YYYY-MM-DD HH:MM> — <summary>
+- 2026-05-08 09:42 — Repo initialized (`git init` already done). Branch `phase-pre-0/bootstrap/repo-and-ci` created from unborn `main` via `git symbolic-ref HEAD`. Brief committed verbatim as first commit (`docs(brief): add S0 bootstrap milestone brief`).
+- 2026-05-08 09:46 — All 4 spec documents read (engine-spec.md §22.3.0+§3.5, engine-development-workflow.md §2+§3+§3.4+§4, engine-zig-conventions.md §17+§18, engine-phase-0-criteria.md full). Brief's reference to "engine-zig-conventions.md §17" was clarified by Guy at milestone start to mean §17 (Build system) + §18 (Migration policy) — actual section number for "Zig version policy" is §18, not §17. Both are pertinent.
 
 ## Acted deviations
 
