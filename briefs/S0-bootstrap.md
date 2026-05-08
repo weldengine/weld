@@ -1,6 +1,6 @@
 # S0 — Bootstrap repo and CI
 
-> **Status:** PLANNED
+> **Status:** ACTIVE
 > **Phase:** -1
 > **Branch:** `phase-pre-0/bootstrap/repo-and-ci`
 > **Planned tag:** `v0.0.1-S0-bootstrap`
