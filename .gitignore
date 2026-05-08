@@ -1,0 +1,28 @@
+# Zig build outputs
+zig-out/
+.zig-cache/
+zig-pkg/
+
+# Editor / IDE — VSCode (project-level files whitelisted)
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Editor / IDE — alternatives
+.idea/
+.helix/
+.zed/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Claude Code (project-level settings whitelisted)
+.claude/*
+!.claude/settings.json
