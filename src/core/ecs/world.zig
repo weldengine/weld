@@ -59,11 +59,11 @@ pub const World = struct {
 
     /// Despawn an entity. The entity must have been spawned and not yet
     /// despawned (S1 has no generational checks — the caller is responsible).
+    /// Despawning an unknown id is a programmer error and panics in every
+    /// build mode (Phase 0.1 will replace this with a generational-index
+    /// check that returns a dedicated error).
     pub fn despawn(self: *World, id: EntityId) void {
-        const location = self.entity_locations.get(id) orelse {
-            std.debug.assert(false); // unknown entity id
-            return;
-        };
+        const location = self.entity_locations.get(id) orelse @panic("despawn of unknown entity id");
         if (self.archetype.removeSwap(location)) |swapped_id| {
             // The entity that was at the last slot has been moved to `location.slot`.
             self.entity_locations.getPtr(swapped_id).?.* = location;
