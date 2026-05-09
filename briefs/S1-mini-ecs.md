@@ -161,7 +161,13 @@ Second spike of Phase −1. Validates the core architectural hypothesis of Weld'
 
 *One entry per logical work sequence (objective reached, test green, blocker hit). Chronological. Short — one to three lines per entry.*
 
-- <YYYY-MM-DD HH:MM> — <summary>
+- 2026-05-09 02:34 — Branch created, brief copied verbatim, specs read, Status flipped to ACTIVE.
+- 2026-05-09 03:00 — ECS components locked to the brief's suggested baseline (Transform 48 B / Velocity 32 B, both 16-byte aligned). Comptime asserts on size and align.
+- 2026-05-09 03:15 — Chunk layout computed at comptime; capacity = 185 for (Transform, Velocity), all per-component arrays 16-aligned, total 16 KiB exact. Capacity locked in `tests/ecs/chunk_test.zig`.
+- 2026-05-09 03:30 — Archetype, query, world wired together; Debug + ReleaseSafe tests green for ecs/* and the 100k spawn/despawn no-leak test.
+- 2026-05-09 03:45 — Chase-Lev deque written; deque tests (LIFO + concurrent steal of every element exactly once) green.
+- 2026-05-09 04:15 — First scheduler design had main thread pushing to per-worker deques. That violates Chase-Lev's single-owner invariant: bench iter K+1 corrupted the deque and chunks were consumed twice or dropped (pending stuck at 4 out of 55). Fix: workers push their own share (stride `i mod worker_count`) into their own deques on a generation-counter signal from main; main only writes to a shared chunk pointer array. No deviation against the brief — the ownership invariant was implicit in "Chase-Lev work-stealing deque per worker".
+- 2026-05-09 04:30 — Bench harness produces `zig-out/bench/ecs_iteration.md`. ReleaseSafe run on the M4 Pro reference: median **53 625 ns**, mean 49 122 ns, p95 58 291 ns, max 68 916 ns; load imbalance 7.63 %. Verdict: **GO** against the 1.0 ms primary gate (and the 0.5 ms secondary target is hit). CI smoke job `bench-ecs-smoke` added on Linux + Windows in ReleaseSafe.
 
 ## Acted deviations
 
