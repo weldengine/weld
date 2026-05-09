@@ -69,6 +69,12 @@ pub const Scheduler = struct {
     shutdown: std.atomic.Value(bool) align(64) = .init(false),
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io) !Scheduler {
+        // gpa is unused in S1 — workers are stack-allocated as a fixed
+        // [worker_count]Worker and chunks[] is a static MaxChunksPerDispatch
+        // slot. Phase 0.1 introduces dynamic worker count (CPU-topology-driven)
+        // and dynamic chunks capacity, both of which will allocate here. Kept
+        // in the signature now to avoid a breaking change to every
+        // `Scheduler.init` call site at that point.
         _ = gpa;
         var self: Scheduler = .{
             .io = io,
