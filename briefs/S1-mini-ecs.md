@@ -151,11 +151,11 @@ Second spike of Phase −1. Validates the core architectural hypothesis of Weld'
 
 *To check before any production code is written. Confirms the spec was ingested in full, not skimmed.*
 
-- [ ] `engine-spec.md` (§2, §3.5, §22.3.0 sub-section S1) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-ecs-internals.md` (§1, §2, §4, §12) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-zig-conventions.md` (full) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-development-workflow.md` (§2, §3, §4, §5) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-directory-structure.md` — read <YYYY-MM-DD HH:MM>
+- [x] `engine-spec.md` (§2, §3.5, §22.3.0 sub-section S1) — read 2026-05-09 02:34
+- [x] `engine-ecs-internals.md` (§1, §2, §4, §12) — read 2026-05-09 02:34
+- [x] `engine-zig-conventions.md` (full) — read 2026-05-09 02:34
+- [x] `engine-development-workflow.md` (§2, §3, §4, §5) — read 2026-05-09 02:34
+- [x] `engine-directory-structure.md` — read 2026-05-09 02:34
 
 ## Execution journal
 
