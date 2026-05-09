@@ -206,13 +206,14 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
         if (maybe_job) |job| {
             const fn_int = sched.current_fn.load(.acquire);
             const ctx_int = sched.current_ctx.load(.acquire);
-            if (fn_int == 0 or ctx_int == 0) {
-                // Stale job — drop and continue. Should not happen in
-                // practice because dispatch sets these before bumping
-                // `generation`, which workers acquire-read first.
-                _ = sched.pending_count.fetchSub(1, .acq_rel);
-                continue;
-            }
+            // Hard invariant: if the worker has a job in hand, dispatch must
+            // have published a non-zero (fn, ctx) pair before bumping the
+            // generation that caused the worker to enqueue this job in the
+            // first place. The release-acquire pair on `generation` and the
+            // matching pair on the deque's `bottom` both establish that
+            // happens-before. A zero load here means the protocol is
+            // broken — fail loudly.
+            std.debug.assert(fn_int != 0 and ctx_int != 0);
             const fn_ptr: TrampolineFn = @ptrFromInt(fn_int);
             const ctx_ptr: *anyopaque = @ptrFromInt(ctx_int);
 
