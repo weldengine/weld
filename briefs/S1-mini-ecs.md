@@ -1,6 +1,6 @@
 # S1 — Mini-ECS Zig
 
-> **Status:** PLANNED
+> **Status:** ACTIVE
 > **Phase:** -1
 > **Branch:** `phase-pre-0/core/mini-ecs`
 > **Planned tag:** `v0.0.2-S1-mini-ecs`
