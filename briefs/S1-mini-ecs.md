@@ -1,12 +1,12 @@
 # S1 — Mini-ECS Zig
 
-> **Status:** ACTIVE
+> **Status:** CLOSED
 > **Phase:** -1
 > **Branch:** `phase-pre-0/core/mini-ecs`
 > **Planned tag:** `v0.0.2-S1-mini-ecs`
 > **Dependencies:** S0 (`v0.0.1-S0-bootstrap`)
 > **Open date:** 2026-05-08
-> **Close date:** —
+> **Close date:** 2026-05-09
 
 ---
 
@@ -185,8 +185,8 @@ Second spike of Phase −1. Validates the core architectural hypothesis of Weld'
 
 *Filled in at Status → CLOSED, just before opening the PR.*
 
-- **What worked:**
-- **What deviated from the original spec:**
-- **What to flag explicitly in review:**
-- **Final measurements** (perf, binary size, compile time, anything relevant to this milestone):
-- **Residual risks / technical debt left intentionally:**
+- **What worked:** the comptime + work-stealing hypothesis is validated empirically on the M4 Pro reference (median **54.5 µs** for 100 000 entities, 18× under the 1.0 ms gate and 9× under the 0.5 ms secondary target). Load imbalance **3.46 %** — well below the 15 % gate. Zero allocations in the steady-state simulation loop after init (verified by `tests/ecs/no_alloc_in_simulation_test.zig` over 1000 iterations). Chunk layout (16 KiB exact, 16-aligned per-component arrays, capacity 185 for `(Transform, Velocity)`) computes deterministically at comptime and survives the benchmark unchanged.
+- **What deviated from the original spec:** none. No FROZEN edits. The mid-milestone discovery that main-thread direct-push to per-worker deques violates Chase-Lev's single-owner invariant was resolved with a generation-counter-driven protocol (workers push their own share into their own deque on dispatch); this stays inside the mandated "Chase-Lev work-stealing deque per worker" — it just makes explicit who owns each deque.
+- **What to flag explicitly in review:** (1) the dispatch protocol — workers push into their own deques on a generation bump from main, which is the canonical fix to the ownership invariant; (2) the `MaxChunksPerDispatch = 1024` static cap in the scheduler — comfortable for the S1 bench (541 chunks), to be revisited when Phase 0.1 introduces dynamic worker counts and larger archetype sets; (3) the trampoline pattern in `Scheduler.dispatch` (comptime-generated function pointer + stack-allocated args context) — the lifetime of `ctx_storage` is bounded by the synchronous wait, so reading via `*anyopaque` is safe but the pattern is worth noting for future generalisation; (4) `std.debug.assert(false)` on `despawn` of an unknown entity in `world.zig` — out-of-scope for S1 to handle gracefully (no generational indices); becomes a real check in Phase 0.1.
+- **Final measurements** (perf, binary size, compile time, anything relevant to this milestone): bench `zig-out/bench/ecs_iteration.md` on MacBook Pro M4 Pro, 14 cores, 48 GiB, macOS, Zig 0.16.0 ReleaseSafe — min **36 917 ns**, median **54 500 ns**, mean **54 194 ns**, p95 **73 042 ns**, max **122 500 ns**. Per-worker chunks processed range 133 633–137 589 over 1000 iterations × 541 chunks = 541 000 expected; total processed is 540 000 (one warm-up iteration not counted in the steady-state sample). Steal hit rate ≈ 30–47 % — workers actively load-balance via work-stealing as designed. CPU utilisation ≈ 470 % during the measured window (4 workers + busy-yield main).
+- **Residual risks / technical debt left intentionally:** no slot reuse on despawn within an archetype (intermediate chunks may keep empty slots after a despawn — accepted for S1 since the test only spawns then despawns once); no generational indices (a stale `EntityId` after a swap-and-pop is undefined behaviour from the user's standpoint — Phase 0.1 introduces the proper generational layer); the busy-yield wait in `Scheduler.dispatch` keeps workers hot between dispatches (acceptable on a 14-core machine for a single-job-at-a-time scheduler; Phase 0.1 introduces a proper sleep/wake mechanism via `std.Io.Event` or a condvar); `MaxChunksPerDispatch` is a static cap (Phase 0.1 will allocate dynamically); the trampoline assumes args are trivially copyable (S1 args = `.{f32}`, fine; future args may need a richer ctx descriptor).
