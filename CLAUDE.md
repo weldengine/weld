@@ -5,34 +5,38 @@ session and captures the operational state of the project plus the rules that
 must never be violated. The full specification lives in the claude.ai
 knowledge base — see § Quick links spec.
 
-> **Status:** Phase −1 — S1 next
+> **Status:** Phase −1 — S1 in review
 >
-> S0 closed: Zig 0.16.x build skeleton in place, CI green on Linux + Windows
-> (Debug + ReleaseSafe), local hooks (lefthook) installed, repo metadata
-> committed. Next milestone is S1 (mini-ECS Zig spike).
+> S1 closed locally: comptime SoA archetype (16 KiB chunks, 16-aligned
+> per-component arrays), Chase-Lev work-stealing scheduler with 4 workers
+> and per-worker deque ownership, and bench harness all green. Bench median
+> on M4 Pro reference: **54.5 µs / 100k entities** (gate ≤ 1.0 ms — GO).
+> PR `Phase -1 / Core / Mini-ECS Zig` open; tag `v0.0.2-S1-mini-ecs` will be
+> posted by Guy after merge.
 
 ## Current state
 
 | Field | Value |
 |---|---|
 | Phase | −1 (Spikes) |
-| Current milestone | _(none active — S0 closed)_ |
+| Current milestone | S1 — Mini-ECS Zig (in review) |
 | Last released tag | `v0.0.1-S0-bootstrap` |
-| Active branch | `main` |
-| Next planned milestone | S1 — Mini-ECS Zig (Chase-Lev jobs + comptime SoA archetype) |
+| Active branch | `phase-pre-0/core/mini-ecs` |
+| Next planned milestone | S2 — Window natif + Vulkan triangle |
 
 ## Tags
 
 | Tag | Date | Milestone | Notes |
 |---|---|---|---|
 | `v0.0.1-S0-bootstrap` | 2026-05-08 | S0 — Bootstrap repo and CI | First milestone. Build infra, CI on `{ubuntu-24.04, windows-2025} × {Debug, ReleaseSafe}`, lefthook, `CLAUDE.md`. Tag posted by Guy after merge of PR #1. |
+| `v0.0.2-S1-mini-ecs` | 2026-05-09 (planned) | S1 — Mini-ECS Zig | Comptime SoA archetype + Chase-Lev work-stealing scheduler. Validates the comptime + work-stealing hypothesis (100k entities iterated in 54.5 µs median ReleaseSafe on M4 Pro reference, gate 1 ms). Tag posted by Guy after squash-merge of PR `Phase -1 / Core / Mini-ECS Zig`. |
 
 ## Hypotheses validated by spikes
 
 | Spike | Hypothesis | Status |
 |---|---|---|
 | S0 | Infrastructure ready (no engineering hypothesis) | validated |
-| S1 | comptime ECS + Chase-Lev work-stealing iterates 100k entities < 1 ms | pending |
+| S1 | comptime ECS + Chase-Lev work-stealing iterates 100k entities < 1 ms | validated (54.5 µs median on M4 Pro) |
 | S2 | Window Win32 + Wayland + Vulkan triangle, native Zig, no SDL/GLFW | pending |
 | S3 | Etch grammar EBNF v0.5 implementable, parsing < 5 ms / file | pending |
 | S4 | AST tree-walking interpreter executes Etch correctly with ECS bridge | pending |
@@ -111,4 +115,4 @@ The `briefs/` directory is the source of truth for milestone state. The brief's 
 
 ---
 
-Last updated: 2026-05-08
+Last updated: 2026-05-09
