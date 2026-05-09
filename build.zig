@@ -14,13 +14,24 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Shared `weld_core` module — Tier 0 internals consumed by the runtime,
+    // the bench harness, and every test executable.
+    const core_module = b.createModule(.{
+        .root_source_file = b.path("src/core/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Main executable.
+    const exe_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_module.addImport("weld_core", core_module);
     const exe = b.addExecutable(.{
         .name = "weld",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = exe_module,
     });
     b.installArtifact(exe);
 
@@ -30,21 +41,60 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the weld executable");
     run_step.dependOn(&run_cmd.step);
 
-    const main_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
-    const run_main_tests = b.addRunArtifact(main_tests);
-
-    const smoke_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/smoke_test.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_smoke_tests = b.addRunArtifact(smoke_tests);
+    // -------------------------------------------------------------- Tests --
 
     const test_step = b.step("test", "Run all tests");
-    test_step.dependOn(&run_main_tests.step);
-    test_step.dependOn(&run_smoke_tests.step);
+
+    // Inline tests living next to the core code.
+    const core_tests = b.addTest(.{ .root_module = core_module });
+    test_step.dependOn(&b.addRunArtifact(core_tests).step);
+
+    // Inline tests in src/main.zig.
+    const main_tests = b.addTest(.{ .root_module = exe_module });
+    test_step.dependOn(&b.addRunArtifact(main_tests).step);
+
+    // Out-of-tree tests. Each file is its own root_module and imports
+    // `weld_core` to reach the engine internals.
+    const test_files = [_][]const u8{
+        "tests/smoke_test.zig",
+        "tests/ecs/world_test.zig",
+        "tests/ecs/chunk_test.zig",
+        "tests/ecs/query_test.zig",
+        "tests/ecs/no_alloc_in_simulation_test.zig",
+        "tests/jobs/deque_test.zig",
+        "tests/jobs/scheduler_test.zig",
+    };
+    for (test_files) |path| {
+        const t_mod = b.createModule(.{
+            .root_source_file = b.path(path),
+            .target = target,
+            .optimize = optimize,
+        });
+        t_mod.addImport("weld_core", core_module);
+        const t = b.addTest(.{ .root_module = t_mod });
+        test_step.dependOn(&b.addRunArtifact(t).step);
+    }
+
+    // ----------------------------------------------------- ECS bench step --
+
+    const bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/ecs_iteration.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_module.addImport("weld_core", core_module);
+    const bench_exe = b.addExecutable(.{
+        .name = "ecs-iteration-bench",
+        .root_module = bench_module,
+    });
+    b.installArtifact(bench_exe);
+
+    const bench_run = b.addRunArtifact(bench_exe);
+    bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| bench_run.addArgs(args);
+    const bench_step = b.step(
+        "bench-ecs",
+        "Run the S1 ECS iteration bench (pass `-- --smoke` for a CI sanity run)",
+    );
+    bench_step.dependOn(&bench_run.step);
 }
