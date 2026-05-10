@@ -242,14 +242,14 @@ Read `engine-spec.md` §22.3 / S2 in full first — the post-conversation precis
 
 *To check before any production code is written. Confirms the spec was fully ingested, not skim-grepped.*
 
-- [ ] `engine-spec.md` (§22.3 / S2, §1, §3.5, §1.6) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-c-bindings.md` (§1.1–§1.4, §4.2, §10.1) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-platform.md` (§1, §2 windowing) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-mach-reference.md` (§5) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-render.md` (§3) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-zig-conventions.md` (§1, §14, §17) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-development-workflow.md` (§3, §4.3, §4.5, §4.6, §5) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-directory-structure.md` — read <YYYY-MM-DD HH:MM>
+- [x] `engine-spec.md` (§22.3 / S2, §1, §3.5, §1.6) — read 2026-05-10 01:29
+- [x] `engine-c-bindings.md` (§1.1–§1.4, §4.2, §10.1) — read 2026-05-10 01:29
+- [x] `engine-platform.md` (§1, §2 windowing) — read 2026-05-10 01:29
+- [x] `engine-mach-reference.md` (§5) — read 2026-05-10 01:29
+- [x] `engine-render.md` (§3) — read 2026-05-10 01:29
+- [x] `engine-zig-conventions.md` (§1, §14, §17) — read 2026-05-10 01:29
+- [x] `engine-development-workflow.md` (§3, §4.3, §4.5, §4.6, §5) — read 2026-05-10 01:29
+- [x] `engine-directory-structure.md` — read 2026-05-10 01:29
 
 ## Journal d'exécution
 
