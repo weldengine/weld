@@ -453,6 +453,10 @@ pub const ApiConstant = struct {
     /// expression — emitter resolves the small handful of well-known
     /// idioms.
     value: []const u8,
+    /// Original C type attribute when present (`uint32_t`, `uint64_t`,
+    /// `float`, …). Lets the emitter pick the correct Zig representation
+    /// for `(~NU)` style values.
+    c_type: ?[]const u8 = null,
 };
 
 pub const Command = struct {
@@ -663,6 +667,7 @@ pub fn extractModel(gpa: std.mem.Allocator, tree: Tree) !Model {
                 try api_constants.append(A, .{
                     .name = try A.dupe(u8, cname),
                     .value = try A.dupe(u8, cval),
+                    .c_type = if (ec.attr("type")) |ty| try A.dupe(u8, ty) else null,
                 });
             }
             continue;

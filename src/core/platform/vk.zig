@@ -32,43 +32,43 @@ pub const HWND = *opaque {};
 
 // ---- API Constants ----
 
-pub const MAX_PHYSICAL_DEVICE_NAME_SIZE = 256;
-pub const UUID_SIZE = 16;
-pub const LUID_SIZE = 8;
-pub const MAX_EXTENSION_NAME_SIZE = 256;
-pub const MAX_DESCRIPTION_SIZE = 256;
-pub const MAX_MEMORY_TYPES = 32;
-pub const MAX_MEMORY_HEAPS = 16;
-pub const LOD_CLAMP_NONE = 1000.0;
-pub const REMAINING_MIP_LEVELS = @as(u32, 0xFFFF_FFFF);
-pub const REMAINING_ARRAY_LAYERS = @as(u32, 0xFFFF_FFFF);
-pub const REMAINING_3D_SLICES_EXT = @as(u32, 0xFFFF_FFFF);
-pub const WHOLE_SIZE = @as(u64, 0xFFFF_FFFF_FFFF_FFFF);
-pub const ATTACHMENT_UNUSED = @as(u32, 0xFFFF_FFFF);
-pub const TRUE = 1;
-pub const FALSE = 0;
-pub const QUEUE_FAMILY_IGNORED = @as(u32, 0xFFFF_FFFF);
-pub const QUEUE_FAMILY_EXTERNAL = ~1;
-pub const QUEUE_FAMILY_FOREIGN_EXT = ~2;
-pub const SUBPASS_EXTERNAL = @as(u32, 0xFFFF_FFFF);
-pub const MAX_DEVICE_GROUP_SIZE = 32;
-pub const MAX_DRIVER_NAME_SIZE = 256;
-pub const MAX_DRIVER_INFO_SIZE = 256;
-pub const SHADER_UNUSED_KHR = @as(u32, 0xFFFF_FFFF);
-pub const MAX_GLOBAL_PRIORITY_SIZE = 16;
-pub const MAX_SHADER_MODULE_IDENTIFIER_SIZE_EXT = 32;
-pub const MAX_PIPELINE_BINARY_KEY_SIZE_KHR = 32;
-pub const MAX_VIDEO_AV1_REFERENCES_PER_FRAME_KHR = 7;
-pub const MAX_VIDEO_VP9_REFERENCES_PER_FRAME_KHR = 3;
-pub const SHADER_INDEX_UNUSED_AMDX = @as(u32, 0xFFFF_FFFF);
-pub const PARTITIONED_ACCELERATION_STRUCTURE_PARTITION_INDEX_GLOBAL_NV = @as(u32, 0xFFFF_FFFF);
-pub const COMPRESSED_TRIANGLE_FORMAT_DGF1_BYTE_ALIGNMENT_AMDX = 128;
-pub const COMPRESSED_TRIANGLE_FORMAT_DGF1_BYTE_STRIDE_AMDX = 128;
-pub const MAX_PHYSICAL_DEVICE_DATA_GRAPH_OPERATION_SET_NAME_SIZE_ARM = 128;
-pub const DATA_GRAPH_MODEL_TOOLCHAIN_VERSION_LENGTH_QCOM = 3;
-pub const COMPUTE_OCCUPANCY_PRIORITY_LOW_NV = 0.25;
-pub const COMPUTE_OCCUPANCY_PRIORITY_NORMAL_NV = 0.50;
-pub const COMPUTE_OCCUPANCY_PRIORITY_HIGH_NV = 0.75;
+pub const MAX_PHYSICAL_DEVICE_NAME_SIZE: u32 = 256;
+pub const UUID_SIZE: u32 = 16;
+pub const LUID_SIZE: u32 = 8;
+pub const MAX_EXTENSION_NAME_SIZE: u32 = 256;
+pub const MAX_DESCRIPTION_SIZE: u32 = 256;
+pub const MAX_MEMORY_TYPES: u32 = 32;
+pub const MAX_MEMORY_HEAPS: u32 = 16;
+pub const LOD_CLAMP_NONE: f32 = 1000.0;
+pub const REMAINING_MIP_LEVELS: u32 = 0xFFFFFFFF;
+pub const REMAINING_ARRAY_LAYERS: u32 = 0xFFFFFFFF;
+pub const REMAINING_3D_SLICES_EXT: u32 = 0xFFFFFFFF;
+pub const WHOLE_SIZE: u64 = 0xFFFFFFFFFFFFFFFF;
+pub const ATTACHMENT_UNUSED: u32 = 0xFFFFFFFF;
+pub const TRUE: u32 = 1;
+pub const FALSE: u32 = 0;
+pub const QUEUE_FAMILY_IGNORED: u32 = 0xFFFFFFFF;
+pub const QUEUE_FAMILY_EXTERNAL: u32 = 0xFFFFFFFE;
+pub const QUEUE_FAMILY_FOREIGN_EXT: u32 = 0xFFFFFFFD;
+pub const SUBPASS_EXTERNAL: u32 = 0xFFFFFFFF;
+pub const MAX_DEVICE_GROUP_SIZE: u32 = 32;
+pub const MAX_DRIVER_NAME_SIZE: u32 = 256;
+pub const MAX_DRIVER_INFO_SIZE: u32 = 256;
+pub const SHADER_UNUSED_KHR: u32 = 0xFFFFFFFF;
+pub const MAX_GLOBAL_PRIORITY_SIZE: u32 = 16;
+pub const MAX_SHADER_MODULE_IDENTIFIER_SIZE_EXT: u32 = 32;
+pub const MAX_PIPELINE_BINARY_KEY_SIZE_KHR: u32 = 32;
+pub const MAX_VIDEO_AV1_REFERENCES_PER_FRAME_KHR: u32 = 7;
+pub const MAX_VIDEO_VP9_REFERENCES_PER_FRAME_KHR: u32 = 3;
+pub const SHADER_INDEX_UNUSED_AMDX: u32 = 0xFFFFFFFF;
+pub const PARTITIONED_ACCELERATION_STRUCTURE_PARTITION_INDEX_GLOBAL_NV: u32 = 0xFFFFFFFF;
+pub const COMPRESSED_TRIANGLE_FORMAT_DGF1_BYTE_ALIGNMENT_AMDX: u32 = 128;
+pub const COMPRESSED_TRIANGLE_FORMAT_DGF1_BYTE_STRIDE_AMDX: u32 = 128;
+pub const MAX_PHYSICAL_DEVICE_DATA_GRAPH_OPERATION_SET_NAME_SIZE_ARM: u32 = 128;
+pub const DATA_GRAPH_MODEL_TOOLCHAIN_VERSION_LENGTH_QCOM: u32 = 3;
+pub const COMPUTE_OCCUPANCY_PRIORITY_LOW_NV: f32 = 0.25;
+pub const COMPUTE_OCCUPANCY_PRIORITY_NORMAL_NV: f32 = 0.50;
+pub const COMPUTE_OCCUPANCY_PRIORITY_HIGH_NV: f32 = 0.75;
 
 // ---- Enums (and bitmask FlagBits enums) ----
 
@@ -3309,10 +3309,10 @@ pub const QueryPoolCreateFlags = packed struct(u32) {
 };
 
 pub const RenderPassCreateFlags = packed struct(u32) {
-    reserved_0: bool = false,
+    _reserved_0: bool = false,
     transform: bool = false,
     per_layer_fragment_density: bool = false,
-    reserved_3: bool = false,
+    _reserved_3: bool = false,
     _reserved_4: bool = false,
     _reserved_5: bool = false,
     _reserved_6: bool = false,
@@ -3383,7 +3383,7 @@ pub const SamplerCreateFlags = packed struct(u32) {
 };
 
 pub const PipelineLayoutCreateFlags = packed struct(u32) {
-    reserved_0: bool = false,
+    _reserved_0: bool = false,
     independent_sets: bool = false,
     _reserved_2: bool = false,
     _reserved_3: bool = false,
@@ -3548,7 +3548,7 @@ pub const PipelineShaderStageCreateFlags = packed struct(u32) {
     allow_varying_subgroup_size: bool = false,
     require_full_subgroups: bool = false,
     _reserved_2: bool = false,
-    reserved_3: bool = false,
+    _reserved_3: bool = false,
     _reserved_4: bool = false,
     _reserved_5: bool = false,
     _reserved_6: bool = false,
@@ -3585,7 +3585,7 @@ pub const DescriptorSetLayoutCreateFlags = packed struct(u32) {
     push_descriptor: bool = false,
     update_after_bind_pool: bool = false,
     host_only_pool: bool = false,
-    reserved_3: bool = false,
+    _reserved_3: bool = false,
     descriptor_buffer: bool = false,
     embedded_immutable_samplers: bool = false,
     per_stage: bool = false,
@@ -3622,7 +3622,7 @@ pub const BufferViewCreateFlags = u32;
 
 pub const InstanceCreateFlags = packed struct(u32) {
     enumerate_portability: bool = false,
-    reserved_616: bool = false,
+    _reserved_616: bool = false,
     _reserved_2: bool = false,
     _reserved_3: bool = false,
     _reserved_4: bool = false,
@@ -3661,7 +3661,7 @@ pub const DeviceCreateFlags = u32;
 
 pub const DeviceQueueCreateFlags = packed struct(u32) {
     protected: bool = false,
-    reserved_1: bool = false,
+    _reserved_1: bool = false,
     internally_synchronized: bool = false,
     _reserved_3: bool = false,
     _reserved_4: bool = false,
@@ -3704,13 +3704,13 @@ pub const QueueFlags = packed struct(u32) {
     protected: bool = false,
     video_decode: bool = false,
     video_encode: bool = false,
-    reserved_7: bool = false,
+    _reserved_7: bool = false,
     optical_flow: bool = false,
-    reserved_9: bool = false,
+    _reserved_9: bool = false,
     data_graph: bool = false,
-    reserved_11: bool = false,
-    reserved_12: bool = false,
-    reserved_13: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
     _reserved_14: bool = false,
     _reserved_15: bool = false,
     _reserved_16: bool = false,
@@ -3889,7 +3889,7 @@ pub const BufferCreateFlags = packed struct(u32) {
     device_address_capture_replay: bool = false,
     descriptor_buffer_capture_replay: bool = false,
     video_profile_independent: bool = false,
-    reserved_7: bool = false,
+    _reserved_7: bool = false,
     _reserved_8: bool = false,
     _reserved_9: bool = false,
     _reserved_10: bool = false,
@@ -3934,8 +3934,8 @@ pub const ShaderStageFlags = packed struct(u32) {
     intersection: bool = false,
     callable: bool = false,
     subpass_shading: bool = false,
-    reserved_15: bool = false,
-    reserved_16: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
     _reserved_17: bool = false,
     _reserved_18: bool = false,
     cluster_culling: bool = false,
@@ -3972,21 +3972,21 @@ pub const ImageUsageFlags = packed struct(u32) {
     video_encode_dst: bool = false,
     video_encode_src: bool = false,
     video_encode_dpb: bool = false,
-    reserved_16: bool = false,
-    reserved_27: bool = false,
+    _reserved_16: bool = false,
+    _reserved_27: bool = false,
     invocation_mask: bool = false,
     attachment_feedback_loop: bool = false,
     sample_weight: bool = false,
     sample_block_match: bool = false,
     host_transfer: bool = false,
     tensor_aliasing: bool = false,
-    reserved_24_bit_coreavi: bool = false,
+    _reserved_24_bit_coreavi: bool = false,
     video_encode_quantization_delta_map: bool = false,
     video_encode_emphasis_map: bool = false,
     tile_memory: bool = false,
-    reserved_28: bool = false,
-    reserved_29: bool = false,
-    reserved_30: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
     _reserved_31: bool = false,
 
     pub const empty: @This() = .{};
@@ -4014,8 +4014,8 @@ pub const ImageCreateFlags = packed struct(u32) {
     multisampled_render_to_single_sampled: bool = false,
     _reserved_19: bool = false,
     video_profile_independent: bool = false,
-    reserved_21: bool = false,
-    reserved_22: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
     _reserved_23: bool = false,
     _reserved_24: bool = false,
     _reserved_25: bool = false,
@@ -4368,7 +4368,7 @@ pub const CommandPoolCreateFlags = packed struct(u32) {
 
 pub const CommandPoolResetFlags = packed struct(u32) {
     release_resources: bool = false,
-    reserved_1_bit_coreavi: bool = false,
+    _reserved_1_bit_coreavi: bool = false,
     _reserved_2: bool = false,
     _reserved_3: bool = false,
     _reserved_4: bool = false,
@@ -4444,8 +4444,8 @@ pub const CommandBufferUsageFlags = packed struct(u32) {
     one_time_submit: bool = false,
     render_pass_continue: bool = false,
     simultaneous_use: bool = false,
-    reserved_3: bool = false,
-    reserved_4: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
     _reserved_5: bool = false,
     _reserved_6: bool = false,
     _reserved_7: bool = false,
@@ -4563,7 +4563,7 @@ pub const ImageAspectFlags = packed struct(u32) {
     memory_plane_1: bool = false,
     memory_plane_2: bool = false,
     memory_plane_3: bool = false,
-    reserved_11: bool = false,
+    _reserved_11: bool = false,
     _reserved_12: bool = false,
     _reserved_13: bool = false,
     _reserved_14: bool = false,
@@ -5292,7 +5292,7 @@ pub const RenderingFlags = packed struct(u32) {
     fragment_region: bool = false,
     custom_resolve: bool = false,
     local_read_concurrent_access_control: bool = false,
-    reserved_9: bool = false,
+    _reserved_9: bool = false,
     _reserved_10: bool = false,
     _reserved_11: bool = false,
     _reserved_12: bool = false,
@@ -5398,11 +5398,11 @@ pub const SwapchainCreateFlagsKHR = packed struct(u32) {
     protected: bool = false,
     mutable_format: bool = false,
     deferred_memory_allocation: bool = false,
-    reserved_4: bool = false,
-    reserved_5: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
     present_id_2: bool = false,
     present_wait_2: bool = false,
-    reserved_8: bool = false,
+    _reserved_8: bool = false,
     present_timing: bool = false,
     _reserved_10: bool = false,
     _reserved_11: bool = false,
@@ -5926,7 +5926,7 @@ pub const DescriptorBindingFlags = packed struct(u32) {
     update_unused_while_pending: bool = false,
     partially_bound: bool = false,
     variable_descriptor_count: bool = false,
-    reserved_4: bool = false,
+    _reserved_4: bool = false,
     _reserved_5: bool = false,
     _reserved_6: bool = false,
     _reserved_7: bool = false,
@@ -9569,211 +9569,393 @@ pub fn loadDevice(device: *Device) Error!void {
 
 // ---- Loader-level functions (no `self`) ----
 
-pub fn createInstance(p_create_info: *const InstanceCreateInfo, p_allocator: ?*const AllocationCallbacks, p_instance: **Instance) Error!void {
-    const _r = base.vkCreateInstance(p_create_info, p_allocator, p_instance);
+pub fn createInstance(create_info: *const InstanceCreateInfo, allocator: ?*const AllocationCallbacks) Error!*Instance {
+    var _out: *Instance = undefined;
+    const _r = base.vkCreateInstance(create_info, allocator, &_out);
     try checkResult(_r);
+    return _out;
 }
 
-pub fn enumerateInstanceVersion(p_api_version: *u32) Error!void {
-    const _r = base.vkEnumerateInstanceVersion(p_api_version);
+pub fn enumerateInstanceVersion() Error!u32 {
+    var _out: u32 = undefined;
+    const _r = base.vkEnumerateInstanceVersion(&_out);
     try checkResult(_r);
+    return _out;
 }
 
-pub fn enumerateInstanceLayerProperties(p_property_count: *u32, p_properties: ?[]LayerProperties) Error!void {
-    const _r = base.vkEnumerateInstanceLayerProperties(p_property_count, p_properties);
-    try checkResult(_r);
+pub fn enumerateInstanceLayerProperties(gpa: std.mem.Allocator) Error![]LayerProperties {
+    var _count: u32 = 0;
+    {
+        const _r = base.vkEnumerateInstanceLayerProperties(&_count, null);
+        try checkResult(_r);
+    }
+    const _out = gpa.alloc(LayerProperties, _count) catch return error.OutOfHostMemory;
+    errdefer gpa.free(_out);
+    {
+        const _r = base.vkEnumerateInstanceLayerProperties(&_count, _out.ptr);
+        try checkResult(_r);
+    }
+    return _out[0.._count];
 }
 
-pub fn enumerateInstanceExtensionProperties(p_layer_name: ?[*:0]const u8, p_property_count: *u32, p_properties: ?[]ExtensionProperties) Error!void {
-    const _r = base.vkEnumerateInstanceExtensionProperties(p_layer_name, p_property_count, p_properties);
-    try checkResult(_r);
+pub fn enumerateInstanceExtensionProperties(layer_name: ?[*:0]const u8, gpa: std.mem.Allocator) Error![]ExtensionProperties {
+    var _count: u32 = 0;
+    {
+        const _r = base.vkEnumerateInstanceExtensionProperties(layer_name, &_count, null);
+        try checkResult(_r);
+    }
+    const _out = gpa.alloc(ExtensionProperties, _count) catch return error.OutOfHostMemory;
+    errdefer gpa.free(_out);
+    {
+        const _r = base.vkEnumerateInstanceExtensionProperties(layer_name, &_count, _out.ptr);
+        try checkResult(_r);
+    }
+    return _out[0.._count];
 }
 
 // ---- Handle types (with methods) ----
 
 pub const Instance = opaque {
-    pub fn destroyInstance(self: *Instance, p_allocator: ?*const AllocationCallbacks) void {
-        instance_dispatch.vkDestroyInstance(self, p_allocator);
+    pub fn destroyInstance(self: *Instance, allocator: ?*const AllocationCallbacks) void {
+        return instance_dispatch.vkDestroyInstance(self, allocator);
     }
 
-    pub fn enumeratePhysicalDevices(self: *Instance, p_physical_device_count: *u32, p_physical_devices: ?**PhysicalDevice) Error!void {
-        const _r = instance_dispatch.vkEnumeratePhysicalDevices(self, p_physical_device_count, p_physical_devices);
+    pub fn enumeratePhysicalDevices(self: *Instance, gpa: std.mem.Allocator) Error![]*PhysicalDevice {
+        var _count: u32 = 0;
+        {
+            const _r = instance_dispatch.vkEnumeratePhysicalDevices(self, &_count, null);
+            try checkResult(_r);
+        }
+        const _out = gpa.alloc(*PhysicalDevice, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            const _r = instance_dispatch.vkEnumeratePhysicalDevices(self, &_count, _out.ptr);
+            try checkResult(_r);
+        }
+        return _out[0.._count];
+    }
+
+    pub fn getInstanceProcAddr(self: *Instance, name: [*:0]const u8) PFN_vkVoidFunction {
+        return instance_dispatch.vkGetInstanceProcAddr(self, name);
+    }
+
+    pub fn destroySurfaceKHR(self: *Instance, surface: SurfaceKHR, allocator: ?*const AllocationCallbacks) void {
+        return instance_dispatch.vkDestroySurfaceKHR(self, surface, allocator);
+    }
+
+    pub fn createWaylandSurfaceKHR(self: *Instance, create_info: *const WaylandSurfaceCreateInfoKHR, allocator: ?*const AllocationCallbacks) Error!SurfaceKHR {
+        var _out: SurfaceKHR = undefined;
+        const _r = instance_dispatch.vkCreateWaylandSurfaceKHR(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn getInstanceProcAddr(self: *Instance, p_name: [*:0]const u8) PFN_vkVoidFunction {
-        return instance_dispatch.vkGetInstanceProcAddr(self, p_name);
-    }
-
-    pub fn destroySurfaceKHR(self: *Instance, surface: SurfaceKHR, p_allocator: ?*const AllocationCallbacks) void {
-        instance_dispatch.vkDestroySurfaceKHR(self, surface, p_allocator);
-    }
-
-    pub fn createWaylandSurfaceKHR(self: *Instance, p_create_info: *const WaylandSurfaceCreateInfoKHR, p_allocator: ?*const AllocationCallbacks, p_surface: *SurfaceKHR) Error!void {
-        const _r = instance_dispatch.vkCreateWaylandSurfaceKHR(self, p_create_info, p_allocator, p_surface);
+    pub fn createWin32SurfaceKHR(self: *Instance, create_info: *const Win32SurfaceCreateInfoKHR, allocator: ?*const AllocationCallbacks) Error!SurfaceKHR {
+        var _out: SurfaceKHR = undefined;
+        const _r = instance_dispatch.vkCreateWin32SurfaceKHR(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn createWin32SurfaceKHR(self: *Instance, p_create_info: *const Win32SurfaceCreateInfoKHR, p_allocator: ?*const AllocationCallbacks, p_surface: *SurfaceKHR) Error!void {
-        const _r = instance_dispatch.vkCreateWin32SurfaceKHR(self, p_create_info, p_allocator, p_surface);
+    pub fn enumeratePhysicalDeviceGroups(self: *Instance, gpa: std.mem.Allocator) Error![]PhysicalDeviceGroupProperties {
+        var _count: u32 = 0;
+        {
+            const _r = instance_dispatch.vkEnumeratePhysicalDeviceGroups(self, &_count, null);
+            try checkResult(_r);
+        }
+        const _out = gpa.alloc(PhysicalDeviceGroupProperties, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            const _r = instance_dispatch.vkEnumeratePhysicalDeviceGroups(self, &_count, _out.ptr);
+            try checkResult(_r);
+        }
+        return _out[0.._count];
+    }
+
+    pub fn createDebugUtilsMessengerEXT(self: *Instance, create_info: *const DebugUtilsMessengerCreateInfoEXT, allocator: ?*const AllocationCallbacks) Error!DebugUtilsMessengerEXT {
+        var _out: DebugUtilsMessengerEXT = undefined;
+        const _r = instance_dispatch.vkCreateDebugUtilsMessengerEXT(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn enumeratePhysicalDeviceGroups(self: *Instance, p_physical_device_group_count: *u32, p_physical_device_group_properties: ?[]PhysicalDeviceGroupProperties) Error!void {
-        const _r = instance_dispatch.vkEnumeratePhysicalDeviceGroups(self, p_physical_device_group_count, p_physical_device_group_properties);
-        try checkResult(_r);
+    pub fn destroyDebugUtilsMessengerEXT(self: *Instance, messenger: DebugUtilsMessengerEXT, allocator: ?*const AllocationCallbacks) void {
+        return instance_dispatch.vkDestroyDebugUtilsMessengerEXT(self, messenger, allocator);
     }
 
-    pub fn createDebugUtilsMessengerEXT(self: *Instance, p_create_info: *const DebugUtilsMessengerCreateInfoEXT, p_allocator: ?*const AllocationCallbacks, p_messenger: *DebugUtilsMessengerEXT) Error!void {
-        const _r = instance_dispatch.vkCreateDebugUtilsMessengerEXT(self, p_create_info, p_allocator, p_messenger);
-        try checkResult(_r);
-    }
-
-    pub fn destroyDebugUtilsMessengerEXT(self: *Instance, messenger: DebugUtilsMessengerEXT, p_allocator: ?*const AllocationCallbacks) void {
-        instance_dispatch.vkDestroyDebugUtilsMessengerEXT(self, messenger, p_allocator);
-    }
-
-    pub fn submitDebugUtilsMessageEXT(self: *Instance, message_severity: DebugUtilsMessageSeverityFlagBitsEXT, message_types: DebugUtilsMessageTypeFlagsEXT, p_callback_data: *const DebugUtilsMessengerCallbackDataEXT) void {
-        instance_dispatch.vkSubmitDebugUtilsMessageEXT(self, message_severity, message_types, p_callback_data);
+    pub fn submitDebugUtilsMessageEXT(self: *Instance, message_severity: DebugUtilsMessageSeverityFlagBitsEXT, message_types: DebugUtilsMessageTypeFlagsEXT, callback_data: *const DebugUtilsMessengerCallbackDataEXT) void {
+        return instance_dispatch.vkSubmitDebugUtilsMessageEXT(self, message_severity, message_types, callback_data);
     }
 };
 
 pub const PhysicalDevice = opaque {
-    pub fn getPhysicalDeviceProperties(self: *PhysicalDevice, p_properties: *PhysicalDeviceProperties) void {
-        instance_dispatch.vkGetPhysicalDeviceProperties(self, p_properties);
+    pub fn getPhysicalDeviceProperties(self: *PhysicalDevice) PhysicalDeviceProperties {
+        var _out: PhysicalDeviceProperties = undefined;
+        instance_dispatch.vkGetPhysicalDeviceProperties(self, &_out);
+        return _out;
     }
 
-    pub fn getPhysicalDeviceQueueFamilyProperties(self: *PhysicalDevice, p_queue_family_property_count: *u32, p_queue_family_properties: ?[]QueueFamilyProperties) void {
-        instance_dispatch.vkGetPhysicalDeviceQueueFamilyProperties(self, p_queue_family_property_count, p_queue_family_properties);
+    pub fn getPhysicalDeviceQueueFamilyProperties(self: *PhysicalDevice, gpa: std.mem.Allocator) Error![]QueueFamilyProperties {
+        var _count: u32 = 0;
+        {
+            instance_dispatch.vkGetPhysicalDeviceQueueFamilyProperties(self, &_count, null);
+        }
+        const _out = gpa.alloc(QueueFamilyProperties, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            instance_dispatch.vkGetPhysicalDeviceQueueFamilyProperties(self, &_count, _out.ptr);
+        }
+        return _out[0.._count];
     }
 
-    pub fn getPhysicalDeviceMemoryProperties(self: *PhysicalDevice, p_memory_properties: *PhysicalDeviceMemoryProperties) void {
-        instance_dispatch.vkGetPhysicalDeviceMemoryProperties(self, p_memory_properties);
+    pub fn getPhysicalDeviceMemoryProperties(self: *PhysicalDevice) PhysicalDeviceMemoryProperties {
+        var _out: PhysicalDeviceMemoryProperties = undefined;
+        instance_dispatch.vkGetPhysicalDeviceMemoryProperties(self, &_out);
+        return _out;
     }
 
-    pub fn getPhysicalDeviceFeatures(self: *PhysicalDevice, p_features: *PhysicalDeviceFeatures) void {
-        instance_dispatch.vkGetPhysicalDeviceFeatures(self, p_features);
+    pub fn getPhysicalDeviceFeatures(self: *PhysicalDevice) PhysicalDeviceFeatures {
+        var _out: PhysicalDeviceFeatures = undefined;
+        instance_dispatch.vkGetPhysicalDeviceFeatures(self, &_out);
+        return _out;
     }
 
-    pub fn getPhysicalDeviceFormatProperties(self: *PhysicalDevice, format: Format, p_format_properties: *FormatProperties) void {
-        instance_dispatch.vkGetPhysicalDeviceFormatProperties(self, format, p_format_properties);
+    pub fn getPhysicalDeviceFormatProperties(self: *PhysicalDevice, format: Format) FormatProperties {
+        var _out: FormatProperties = undefined;
+        instance_dispatch.vkGetPhysicalDeviceFormatProperties(self, format, &_out);
+        return _out;
     }
 
-    pub fn getPhysicalDeviceImageFormatProperties(self: *PhysicalDevice, format: Format, @"type": ImageType, tiling: ImageTiling, usage: ImageUsageFlags, flags: ImageCreateFlags, p_image_format_properties: *ImageFormatProperties) Error!void {
-        const _r = instance_dispatch.vkGetPhysicalDeviceImageFormatProperties(self, format, @"type", tiling, usage, flags, p_image_format_properties);
+    pub fn getPhysicalDeviceImageFormatProperties(self: *PhysicalDevice, format: Format, @"type": ImageType, tiling: ImageTiling, usage: ImageUsageFlags, flags: ImageCreateFlags) Error!ImageFormatProperties {
+        var _out: ImageFormatProperties = undefined;
+        const _r = instance_dispatch.vkGetPhysicalDeviceImageFormatProperties(self, format, @"type", tiling, usage, flags, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn createDevice(self: *PhysicalDevice, p_create_info: *const DeviceCreateInfo, p_allocator: ?*const AllocationCallbacks, p_device: **Device) Error!void {
-        const _r = instance_dispatch.vkCreateDevice(self, p_create_info, p_allocator, p_device);
+    pub fn createDevice(self: *PhysicalDevice, create_info: *const DeviceCreateInfo, allocator: ?*const AllocationCallbacks) Error!*Device {
+        var _out: *Device = undefined;
+        const _r = instance_dispatch.vkCreateDevice(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn enumerateDeviceLayerProperties(self: *PhysicalDevice, p_property_count: *u32, p_properties: ?[]LayerProperties) Error!void {
-        const _r = instance_dispatch.vkEnumerateDeviceLayerProperties(self, p_property_count, p_properties);
+    pub fn enumerateDeviceLayerProperties(self: *PhysicalDevice, gpa: std.mem.Allocator) Error![]LayerProperties {
+        var _count: u32 = 0;
+        {
+            const _r = instance_dispatch.vkEnumerateDeviceLayerProperties(self, &_count, null);
+            try checkResult(_r);
+        }
+        const _out = gpa.alloc(LayerProperties, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            const _r = instance_dispatch.vkEnumerateDeviceLayerProperties(self, &_count, _out.ptr);
+            try checkResult(_r);
+        }
+        return _out[0.._count];
+    }
+
+    pub fn enumerateDeviceExtensionProperties(self: *PhysicalDevice, layer_name: ?[*:0]const u8, gpa: std.mem.Allocator) Error![]ExtensionProperties {
+        var _count: u32 = 0;
+        {
+            const _r = instance_dispatch.vkEnumerateDeviceExtensionProperties(self, layer_name, &_count, null);
+            try checkResult(_r);
+        }
+        const _out = gpa.alloc(ExtensionProperties, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            const _r = instance_dispatch.vkEnumerateDeviceExtensionProperties(self, layer_name, &_count, _out.ptr);
+            try checkResult(_r);
+        }
+        return _out[0.._count];
+    }
+
+    pub fn getPhysicalDeviceSparseImageFormatProperties(self: *PhysicalDevice, format: Format, @"type": ImageType, samples: SampleCountFlagBits, usage: ImageUsageFlags, tiling: ImageTiling, gpa: std.mem.Allocator) Error![]SparseImageFormatProperties {
+        var _count: u32 = 0;
+        {
+            instance_dispatch.vkGetPhysicalDeviceSparseImageFormatProperties(self, format, @"type", samples, usage, tiling, &_count, null);
+        }
+        const _out = gpa.alloc(SparseImageFormatProperties, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            instance_dispatch.vkGetPhysicalDeviceSparseImageFormatProperties(self, format, @"type", samples, usage, tiling, &_count, _out.ptr);
+        }
+        return _out[0.._count];
+    }
+
+    pub fn getPhysicalDeviceSurfaceSupportKHR(self: *PhysicalDevice, queue_family_index: u32, surface: SurfaceKHR) Error!Bool32 {
+        var _out: Bool32 = undefined;
+        const _r = instance_dispatch.vkGetPhysicalDeviceSurfaceSupportKHR(self, queue_family_index, surface, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn enumerateDeviceExtensionProperties(self: *PhysicalDevice, p_layer_name: ?[*:0]const u8, p_property_count: *u32, p_properties: ?[]ExtensionProperties) Error!void {
-        const _r = instance_dispatch.vkEnumerateDeviceExtensionProperties(self, p_layer_name, p_property_count, p_properties);
+    pub fn getPhysicalDeviceSurfaceCapabilitiesKHR(self: *PhysicalDevice, surface: SurfaceKHR) Error!SurfaceCapabilitiesKHR {
+        var _out: SurfaceCapabilitiesKHR = undefined;
+        const _r = instance_dispatch.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(self, surface, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn getPhysicalDeviceSparseImageFormatProperties(self: *PhysicalDevice, format: Format, @"type": ImageType, samples: SampleCountFlagBits, usage: ImageUsageFlags, tiling: ImageTiling, p_property_count: *u32, p_properties: ?[]SparseImageFormatProperties) void {
-        instance_dispatch.vkGetPhysicalDeviceSparseImageFormatProperties(self, format, @"type", samples, usage, tiling, p_property_count, p_properties);
+    pub fn getPhysicalDeviceSurfaceFormatsKHR(self: *PhysicalDevice, surface: SurfaceKHR, gpa: std.mem.Allocator) Error![]SurfaceFormatKHR {
+        var _count: u32 = 0;
+        {
+            const _r = instance_dispatch.vkGetPhysicalDeviceSurfaceFormatsKHR(self, surface, &_count, null);
+            try checkResult(_r);
+        }
+        const _out = gpa.alloc(SurfaceFormatKHR, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            const _r = instance_dispatch.vkGetPhysicalDeviceSurfaceFormatsKHR(self, surface, &_count, _out.ptr);
+            try checkResult(_r);
+        }
+        return _out[0.._count];
     }
 
-    pub fn getPhysicalDeviceSurfaceSupportKHR(self: *PhysicalDevice, queue_family_index: u32, surface: SurfaceKHR, p_supported: *Bool32) Error!void {
-        const _r = instance_dispatch.vkGetPhysicalDeviceSurfaceSupportKHR(self, queue_family_index, surface, p_supported);
-        try checkResult(_r);
+    pub fn getPhysicalDeviceSurfacePresentModesKHR(self: *PhysicalDevice, surface: SurfaceKHR, gpa: std.mem.Allocator) Error![]PresentModeKHR {
+        var _count: u32 = 0;
+        {
+            const _r = instance_dispatch.vkGetPhysicalDeviceSurfacePresentModesKHR(self, surface, &_count, null);
+            try checkResult(_r);
+        }
+        const _out = gpa.alloc(PresentModeKHR, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            const _r = instance_dispatch.vkGetPhysicalDeviceSurfacePresentModesKHR(self, surface, &_count, _out.ptr);
+            try checkResult(_r);
+        }
+        return _out[0.._count];
     }
 
-    pub fn getPhysicalDeviceSurfaceCapabilitiesKHR(self: *PhysicalDevice, surface: SurfaceKHR, p_surface_capabilities: *SurfaceCapabilitiesKHR) Error!void {
-        const _r = instance_dispatch.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(self, surface, p_surface_capabilities);
-        try checkResult(_r);
-    }
-
-    pub fn getPhysicalDeviceSurfaceFormatsKHR(self: *PhysicalDevice, surface: SurfaceKHR, p_surface_format_count: *u32, p_surface_formats: ?[]SurfaceFormatKHR) Error!void {
-        const _r = instance_dispatch.vkGetPhysicalDeviceSurfaceFormatsKHR(self, surface, p_surface_format_count, p_surface_formats);
-        try checkResult(_r);
-    }
-
-    pub fn getPhysicalDeviceSurfacePresentModesKHR(self: *PhysicalDevice, surface: SurfaceKHR, p_present_mode_count: *u32, p_present_modes: ?[]PresentModeKHR) Error!void {
-        const _r = instance_dispatch.vkGetPhysicalDeviceSurfacePresentModesKHR(self, surface, p_present_mode_count, p_present_modes);
-        try checkResult(_r);
-    }
-
-    pub fn getPhysicalDeviceWaylandPresentationSupportKHR(self: *PhysicalDevice, queue_family_index: u32, display: *wl_display) Bool32 {
-        return instance_dispatch.vkGetPhysicalDeviceWaylandPresentationSupportKHR(self, queue_family_index, display);
+    pub fn getPhysicalDeviceWaylandPresentationSupportKHR(self: *PhysicalDevice, queue_family_index: u32) wl_display {
+        var _out: wl_display = undefined;
+        instance_dispatch.vkGetPhysicalDeviceWaylandPresentationSupportKHR(self, queue_family_index, &_out);
+        return _out;
     }
 
     pub fn getPhysicalDeviceWin32PresentationSupportKHR(self: *PhysicalDevice, queue_family_index: u32) Bool32 {
         return instance_dispatch.vkGetPhysicalDeviceWin32PresentationSupportKHR(self, queue_family_index);
     }
 
-    pub fn getPhysicalDeviceFeatures2(self: *PhysicalDevice, p_features: *PhysicalDeviceFeatures2) void {
-        instance_dispatch.vkGetPhysicalDeviceFeatures2(self, p_features);
+    pub fn getPhysicalDeviceFeatures2(self: *PhysicalDevice) PhysicalDeviceFeatures2 {
+        var _out: PhysicalDeviceFeatures2 = undefined;
+        instance_dispatch.vkGetPhysicalDeviceFeatures2(self, &_out);
+        return _out;
     }
 
-    pub fn getPhysicalDeviceProperties2(self: *PhysicalDevice, p_properties: *PhysicalDeviceProperties2) void {
-        instance_dispatch.vkGetPhysicalDeviceProperties2(self, p_properties);
+    pub fn getPhysicalDeviceProperties2(self: *PhysicalDevice) PhysicalDeviceProperties2 {
+        var _out: PhysicalDeviceProperties2 = undefined;
+        instance_dispatch.vkGetPhysicalDeviceProperties2(self, &_out);
+        return _out;
     }
 
-    pub fn getPhysicalDeviceFormatProperties2(self: *PhysicalDevice, format: Format, p_format_properties: *FormatProperties2) void {
-        instance_dispatch.vkGetPhysicalDeviceFormatProperties2(self, format, p_format_properties);
+    pub fn getPhysicalDeviceFormatProperties2(self: *PhysicalDevice, format: Format) FormatProperties2 {
+        var _out: FormatProperties2 = undefined;
+        instance_dispatch.vkGetPhysicalDeviceFormatProperties2(self, format, &_out);
+        return _out;
     }
 
-    pub fn getPhysicalDeviceImageFormatProperties2(self: *PhysicalDevice, p_image_format_info: *const PhysicalDeviceImageFormatInfo2, p_image_format_properties: *ImageFormatProperties2) Error!void {
-        const _r = instance_dispatch.vkGetPhysicalDeviceImageFormatProperties2(self, p_image_format_info, p_image_format_properties);
+    pub fn getPhysicalDeviceImageFormatProperties2(self: *PhysicalDevice, image_format_info: *const PhysicalDeviceImageFormatInfo2) Error!ImageFormatProperties2 {
+        var _out: ImageFormatProperties2 = undefined;
+        const _r = instance_dispatch.vkGetPhysicalDeviceImageFormatProperties2(self, image_format_info, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn getPhysicalDeviceQueueFamilyProperties2(self: *PhysicalDevice, p_queue_family_property_count: *u32, p_queue_family_properties: ?[]QueueFamilyProperties2) void {
-        instance_dispatch.vkGetPhysicalDeviceQueueFamilyProperties2(self, p_queue_family_property_count, p_queue_family_properties);
+    pub fn getPhysicalDeviceQueueFamilyProperties2(self: *PhysicalDevice, gpa: std.mem.Allocator) Error![]QueueFamilyProperties2 {
+        var _count: u32 = 0;
+        {
+            instance_dispatch.vkGetPhysicalDeviceQueueFamilyProperties2(self, &_count, null);
+        }
+        const _out = gpa.alloc(QueueFamilyProperties2, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            instance_dispatch.vkGetPhysicalDeviceQueueFamilyProperties2(self, &_count, _out.ptr);
+        }
+        return _out[0.._count];
     }
 
-    pub fn getPhysicalDeviceMemoryProperties2(self: *PhysicalDevice, p_memory_properties: *PhysicalDeviceMemoryProperties2) void {
-        instance_dispatch.vkGetPhysicalDeviceMemoryProperties2(self, p_memory_properties);
+    pub fn getPhysicalDeviceMemoryProperties2(self: *PhysicalDevice) PhysicalDeviceMemoryProperties2 {
+        var _out: PhysicalDeviceMemoryProperties2 = undefined;
+        instance_dispatch.vkGetPhysicalDeviceMemoryProperties2(self, &_out);
+        return _out;
     }
 
-    pub fn getPhysicalDeviceSparseImageFormatProperties2(self: *PhysicalDevice, p_format_info: *const PhysicalDeviceSparseImageFormatInfo2, p_property_count: *u32, p_properties: ?[]SparseImageFormatProperties2) void {
-        instance_dispatch.vkGetPhysicalDeviceSparseImageFormatProperties2(self, p_format_info, p_property_count, p_properties);
+    pub fn getPhysicalDeviceSparseImageFormatProperties2(self: *PhysicalDevice, format_info: *const PhysicalDeviceSparseImageFormatInfo2, gpa: std.mem.Allocator) Error![]SparseImageFormatProperties2 {
+        var _count: u32 = 0;
+        {
+            instance_dispatch.vkGetPhysicalDeviceSparseImageFormatProperties2(self, format_info, &_count, null);
+        }
+        const _out = gpa.alloc(SparseImageFormatProperties2, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            instance_dispatch.vkGetPhysicalDeviceSparseImageFormatProperties2(self, format_info, &_count, _out.ptr);
+        }
+        return _out[0.._count];
     }
 
-    pub fn getPhysicalDeviceExternalBufferProperties(self: *PhysicalDevice, p_external_buffer_info: *const PhysicalDeviceExternalBufferInfo, p_external_buffer_properties: *ExternalBufferProperties) void {
-        instance_dispatch.vkGetPhysicalDeviceExternalBufferProperties(self, p_external_buffer_info, p_external_buffer_properties);
+    pub fn getPhysicalDeviceExternalBufferProperties(self: *PhysicalDevice, external_buffer_info: *const PhysicalDeviceExternalBufferInfo) ExternalBufferProperties {
+        var _out: ExternalBufferProperties = undefined;
+        instance_dispatch.vkGetPhysicalDeviceExternalBufferProperties(self, external_buffer_info, &_out);
+        return _out;
     }
 
-    pub fn getPhysicalDeviceExternalSemaphoreProperties(self: *PhysicalDevice, p_external_semaphore_info: *const PhysicalDeviceExternalSemaphoreInfo, p_external_semaphore_properties: *ExternalSemaphoreProperties) void {
-        instance_dispatch.vkGetPhysicalDeviceExternalSemaphoreProperties(self, p_external_semaphore_info, p_external_semaphore_properties);
+    pub fn getPhysicalDeviceExternalSemaphoreProperties(self: *PhysicalDevice, external_semaphore_info: *const PhysicalDeviceExternalSemaphoreInfo) ExternalSemaphoreProperties {
+        var _out: ExternalSemaphoreProperties = undefined;
+        instance_dispatch.vkGetPhysicalDeviceExternalSemaphoreProperties(self, external_semaphore_info, &_out);
+        return _out;
     }
 
-    pub fn getPhysicalDeviceExternalFenceProperties(self: *PhysicalDevice, p_external_fence_info: *const PhysicalDeviceExternalFenceInfo, p_external_fence_properties: *ExternalFenceProperties) void {
-        instance_dispatch.vkGetPhysicalDeviceExternalFenceProperties(self, p_external_fence_info, p_external_fence_properties);
+    pub fn getPhysicalDeviceExternalFenceProperties(self: *PhysicalDevice, external_fence_info: *const PhysicalDeviceExternalFenceInfo) ExternalFenceProperties {
+        var _out: ExternalFenceProperties = undefined;
+        instance_dispatch.vkGetPhysicalDeviceExternalFenceProperties(self, external_fence_info, &_out);
+        return _out;
     }
 
-    pub fn getPhysicalDevicePresentRectanglesKHR(self: *PhysicalDevice, surface: SurfaceKHR, p_rect_count: *u32, p_rects: ?[]Rect2D) Error!void {
-        const _r = instance_dispatch.vkGetPhysicalDevicePresentRectanglesKHR(self, surface, p_rect_count, p_rects);
-        try checkResult(_r);
+    pub fn getPhysicalDevicePresentRectanglesKHR(self: *PhysicalDevice, surface: SurfaceKHR, gpa: std.mem.Allocator) Error![]Rect2D {
+        var _count: u32 = 0;
+        {
+            const _r = instance_dispatch.vkGetPhysicalDevicePresentRectanglesKHR(self, surface, &_count, null);
+            try checkResult(_r);
+        }
+        const _out = gpa.alloc(Rect2D, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            const _r = instance_dispatch.vkGetPhysicalDevicePresentRectanglesKHR(self, surface, &_count, _out.ptr);
+            try checkResult(_r);
+        }
+        return _out[0.._count];
     }
 
-    pub fn getPhysicalDeviceToolProperties(self: *PhysicalDevice, p_tool_count: *u32, p_tool_properties: ?[]PhysicalDeviceToolProperties) Error!void {
-        const _r = instance_dispatch.vkGetPhysicalDeviceToolProperties(self, p_tool_count, p_tool_properties);
-        try checkResult(_r);
+    pub fn getPhysicalDeviceToolProperties(self: *PhysicalDevice, gpa: std.mem.Allocator) Error![]PhysicalDeviceToolProperties {
+        var _count: u32 = 0;
+        {
+            const _r = instance_dispatch.vkGetPhysicalDeviceToolProperties(self, &_count, null);
+            try checkResult(_r);
+        }
+        const _out = gpa.alloc(PhysicalDeviceToolProperties, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            const _r = instance_dispatch.vkGetPhysicalDeviceToolProperties(self, &_count, _out.ptr);
+            try checkResult(_r);
+        }
+        return _out[0.._count];
     }
 };
 
 pub const Device = opaque {
-    pub fn getDeviceProcAddr(self: *Device, p_name: [*:0]const u8) PFN_vkVoidFunction {
-        return device_dispatch.vkGetDeviceProcAddr(self, p_name);
+    pub fn getDeviceProcAddr(self: *Device, name: [*:0]const u8) PFN_vkVoidFunction {
+        return device_dispatch.vkGetDeviceProcAddr(self, name);
     }
 
-    pub fn destroyDevice(self: *Device, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyDevice(self, p_allocator);
+    pub fn destroyDevice(self: *Device, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyDevice(self, allocator);
     }
 
-    pub fn getDeviceQueue(self: *Device, queue_family_index: u32, queue_index: u32, p_queue: **Queue) void {
-        device_dispatch.vkGetDeviceQueue(self, queue_family_index, queue_index, p_queue);
+    pub fn getDeviceQueue(self: *Device, queue_family_index: u32, queue_index: u32) *Queue {
+        var _out: *Queue = undefined;
+        device_dispatch.vkGetDeviceQueue(self, queue_family_index, queue_index, &_out);
+        return _out;
     }
 
     pub fn waitIdle(self: *Device) Error!void {
@@ -9781,40 +9963,48 @@ pub const Device = opaque {
         try checkResult(_r);
     }
 
-    pub fn allocateMemory(self: *Device, p_allocate_info: *const MemoryAllocateInfo, p_allocator: ?*const AllocationCallbacks, p_memory: *DeviceMemory) Error!void {
-        const _r = device_dispatch.vkAllocateMemory(self, p_allocate_info, p_allocator, p_memory);
+    pub fn allocateMemory(self: *Device, allocate_info: *const MemoryAllocateInfo, allocator: ?*const AllocationCallbacks) Error!DeviceMemory {
+        var _out: DeviceMemory = undefined;
+        const _r = device_dispatch.vkAllocateMemory(self, allocate_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn freeMemory(self: *Device, memory: DeviceMemory, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkFreeMemory(self, memory, p_allocator);
+    pub fn freeMemory(self: *Device, memory: DeviceMemory, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkFreeMemory(self, memory, allocator);
     }
 
-    pub fn mapMemory(self: *Device, memory: DeviceMemory, offset: DeviceSize, size: DeviceSize, flags: MemoryMapFlags, pp_data: [*c]anyopaque) Error!void {
-        const _r = device_dispatch.vkMapMemory(self, memory, offset, size, flags, pp_data);
+    pub fn mapMemory(self: *Device, memory: DeviceMemory, offset: DeviceSize, size: DeviceSize, flags: MemoryMapFlags) Error!void {
+        var _out: void = undefined;
+        const _r = device_dispatch.vkMapMemory(self, memory, offset, size, flags, &_out);
         try checkResult(_r);
+        return _out;
     }
 
     pub fn unmapMemory(self: *Device, memory: DeviceMemory) void {
-        device_dispatch.vkUnmapMemory(self, memory);
+        return device_dispatch.vkUnmapMemory(self, memory);
     }
 
-    pub fn flushMappedMemoryRanges(self: *Device, memory_range_count: u32, p_memory_ranges: []const MappedMemoryRange) Error!void {
-        const _r = device_dispatch.vkFlushMappedMemoryRanges(self, memory_range_count, p_memory_ranges);
+    pub fn flushMappedMemoryRanges(self: *Device, memory_ranges: []const MappedMemoryRange) Error!void {
+        const _r = device_dispatch.vkFlushMappedMemoryRanges(self, @intCast(memory_ranges.len), memory_ranges.ptr);
         try checkResult(_r);
     }
 
-    pub fn invalidateMappedMemoryRanges(self: *Device, memory_range_count: u32, p_memory_ranges: []const MappedMemoryRange) Error!void {
-        const _r = device_dispatch.vkInvalidateMappedMemoryRanges(self, memory_range_count, p_memory_ranges);
+    pub fn invalidateMappedMemoryRanges(self: *Device, memory_ranges: []const MappedMemoryRange) Error!void {
+        const _r = device_dispatch.vkInvalidateMappedMemoryRanges(self, @intCast(memory_ranges.len), memory_ranges.ptr);
         try checkResult(_r);
     }
 
-    pub fn getDeviceMemoryCommitment(self: *Device, memory: DeviceMemory, p_committed_memory_in_bytes: *DeviceSize) void {
-        device_dispatch.vkGetDeviceMemoryCommitment(self, memory, p_committed_memory_in_bytes);
+    pub fn getDeviceMemoryCommitment(self: *Device, memory: DeviceMemory) DeviceSize {
+        var _out: DeviceSize = undefined;
+        device_dispatch.vkGetDeviceMemoryCommitment(self, memory, &_out);
+        return _out;
     }
 
-    pub fn getBufferMemoryRequirements(self: *Device, buffer: Buffer, p_memory_requirements: *MemoryRequirements) void {
-        device_dispatch.vkGetBufferMemoryRequirements(self, buffer, p_memory_requirements);
+    pub fn getBufferMemoryRequirements(self: *Device, buffer: Buffer) MemoryRequirements {
+        var _out: MemoryRequirements = undefined;
+        device_dispatch.vkGetBufferMemoryRequirements(self, buffer, &_out);
+        return _out;
     }
 
     pub fn bindBufferMemory(self: *Device, buffer: Buffer, memory: DeviceMemory, memory_offset: DeviceSize) Error!void {
@@ -9822,8 +10012,10 @@ pub const Device = opaque {
         try checkResult(_r);
     }
 
-    pub fn getImageMemoryRequirements(self: *Device, image: Image, p_memory_requirements: *MemoryRequirements) void {
-        device_dispatch.vkGetImageMemoryRequirements(self, image, p_memory_requirements);
+    pub fn getImageMemoryRequirements(self: *Device, image: Image) MemoryRequirements {
+        var _out: MemoryRequirements = undefined;
+        device_dispatch.vkGetImageMemoryRequirements(self, image, &_out);
+        return _out;
     }
 
     pub fn bindImageMemory(self: *Device, image: Image, memory: DeviceMemory, memory_offset: DeviceSize) Error!void {
@@ -9831,21 +10023,32 @@ pub const Device = opaque {
         try checkResult(_r);
     }
 
-    pub fn getImageSparseMemoryRequirements(self: *Device, image: Image, p_sparse_memory_requirement_count: *u32, p_sparse_memory_requirements: ?[]SparseImageMemoryRequirements) void {
-        device_dispatch.vkGetImageSparseMemoryRequirements(self, image, p_sparse_memory_requirement_count, p_sparse_memory_requirements);
+    pub fn getImageSparseMemoryRequirements(self: *Device, image: Image, gpa: std.mem.Allocator) Error![]SparseImageMemoryRequirements {
+        var _count: u32 = 0;
+        {
+            device_dispatch.vkGetImageSparseMemoryRequirements(self, image, &_count, null);
+        }
+        const _out = gpa.alloc(SparseImageMemoryRequirements, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            device_dispatch.vkGetImageSparseMemoryRequirements(self, image, &_count, _out.ptr);
+        }
+        return _out[0.._count];
     }
 
-    pub fn createFence(self: *Device, p_create_info: *const FenceCreateInfo, p_allocator: ?*const AllocationCallbacks, p_fence: *Fence) Error!void {
-        const _r = device_dispatch.vkCreateFence(self, p_create_info, p_allocator, p_fence);
+    pub fn createFence(self: *Device, create_info: *const FenceCreateInfo, allocator: ?*const AllocationCallbacks) Error!Fence {
+        var _out: Fence = undefined;
+        const _r = device_dispatch.vkCreateFence(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn destroyFence(self: *Device, fence: Fence, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyFence(self, fence, p_allocator);
+    pub fn destroyFence(self: *Device, fence: Fence, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyFence(self, fence, allocator);
     }
 
-    pub fn resetFences(self: *Device, fence_count: u32, p_fences: []const Fence) Error!void {
-        const _r = device_dispatch.vkResetFences(self, fence_count, p_fences);
+    pub fn resetFences(self: *Device, fences: []const Fence) Error!void {
+        const _r = device_dispatch.vkResetFences(self, @intCast(fences.len), fences.ptr);
         try checkResult(_r);
     }
 
@@ -9854,27 +10057,31 @@ pub const Device = opaque {
         try checkResult(_r);
     }
 
-    pub fn waitForFences(self: *Device, fence_count: u32, p_fences: []const Fence, wait_all: Bool32, timeout: u64) Error!void {
-        const _r = device_dispatch.vkWaitForFences(self, fence_count, p_fences, wait_all, timeout);
+    pub fn waitForFences(self: *Device, fences: []const Fence, wait_all: Bool32, timeout: u64) Error!void {
+        const _r = device_dispatch.vkWaitForFences(self, @intCast(fences.len), fences.ptr, wait_all, timeout);
         try checkResult(_r);
     }
 
-    pub fn createSemaphore(self: *Device, p_create_info: *const SemaphoreCreateInfo, p_allocator: ?*const AllocationCallbacks, p_semaphore: *Semaphore) Error!void {
-        const _r = device_dispatch.vkCreateSemaphore(self, p_create_info, p_allocator, p_semaphore);
+    pub fn createSemaphore(self: *Device, create_info: *const SemaphoreCreateInfo, allocator: ?*const AllocationCallbacks) Error!Semaphore {
+        var _out: Semaphore = undefined;
+        const _r = device_dispatch.vkCreateSemaphore(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn destroySemaphore(self: *Device, semaphore: Semaphore, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroySemaphore(self, semaphore, p_allocator);
+    pub fn destroySemaphore(self: *Device, semaphore: Semaphore, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroySemaphore(self, semaphore, allocator);
     }
 
-    pub fn createEvent(self: *Device, p_create_info: *const EventCreateInfo, p_allocator: ?*const AllocationCallbacks, p_event: *Event) Error!void {
-        const _r = device_dispatch.vkCreateEvent(self, p_create_info, p_allocator, p_event);
+    pub fn createEvent(self: *Device, create_info: *const EventCreateInfo, allocator: ?*const AllocationCallbacks) Error!Event {
+        var _out: Event = undefined;
+        const _r = device_dispatch.vkCreateEvent(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn destroyEvent(self: *Device, event: Event, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyEvent(self, event, p_allocator);
+    pub fn destroyEvent(self: *Device, event: Event, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyEvent(self, event, allocator);
     }
 
     pub fn getEventStatus(self: *Device, event: Event) Error!void {
@@ -9892,140 +10099,164 @@ pub const Device = opaque {
         try checkResult(_r);
     }
 
-    pub fn createQueryPool(self: *Device, p_create_info: *const QueryPoolCreateInfo, p_allocator: ?*const AllocationCallbacks, p_query_pool: *QueryPool) Error!void {
-        const _r = device_dispatch.vkCreateQueryPool(self, p_create_info, p_allocator, p_query_pool);
+    pub fn createQueryPool(self: *Device, create_info: *const QueryPoolCreateInfo, allocator: ?*const AllocationCallbacks) Error!QueryPool {
+        var _out: QueryPool = undefined;
+        const _r = device_dispatch.vkCreateQueryPool(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn destroyQueryPool(self: *Device, query_pool: QueryPool, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyQueryPool(self, query_pool, p_allocator);
+    pub fn destroyQueryPool(self: *Device, query_pool: QueryPool, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyQueryPool(self, query_pool, allocator);
     }
 
-    pub fn getQueryPoolResults(self: *Device, query_pool: QueryPool, first_query: u32, query_count: u32, data_size: usize, p_data: []anyopaque, stride: DeviceSize, flags: QueryResultFlags) Error!void {
-        const _r = device_dispatch.vkGetQueryPoolResults(self, query_pool, first_query, query_count, data_size, p_data, stride, flags);
+    pub fn getQueryPoolResults(self: *Device, query_pool: QueryPool, first_query: u32, query_count: u32, data: []void, stride: DeviceSize, flags: QueryResultFlags) Error!void {
+        const _r = device_dispatch.vkGetQueryPoolResults(self, query_pool, first_query, query_count, @intCast(data.len), data.ptr, stride, flags);
         try checkResult(_r);
     }
 
     pub fn resetQueryPool(self: *Device, query_pool: QueryPool, first_query: u32, query_count: u32) void {
-        device_dispatch.vkResetQueryPool(self, query_pool, first_query, query_count);
+        return device_dispatch.vkResetQueryPool(self, query_pool, first_query, query_count);
     }
 
-    pub fn createBuffer(self: *Device, p_create_info: *const BufferCreateInfo, p_allocator: ?*const AllocationCallbacks, p_buffer: *Buffer) Error!void {
-        const _r = device_dispatch.vkCreateBuffer(self, p_create_info, p_allocator, p_buffer);
+    pub fn createBuffer(self: *Device, create_info: *const BufferCreateInfo, allocator: ?*const AllocationCallbacks) Error!Buffer {
+        var _out: Buffer = undefined;
+        const _r = device_dispatch.vkCreateBuffer(self, create_info, allocator, &_out);
+        try checkResult(_r);
+        return _out;
+    }
+
+    pub fn destroyBuffer(self: *Device, buffer: Buffer, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyBuffer(self, buffer, allocator);
+    }
+
+    pub fn createBufferView(self: *Device, create_info: *const BufferViewCreateInfo, allocator: ?*const AllocationCallbacks) Error!BufferView {
+        var _out: BufferView = undefined;
+        const _r = device_dispatch.vkCreateBufferView(self, create_info, allocator, &_out);
+        try checkResult(_r);
+        return _out;
+    }
+
+    pub fn destroyBufferView(self: *Device, buffer_view: BufferView, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyBufferView(self, buffer_view, allocator);
+    }
+
+    pub fn createImage(self: *Device, create_info: *const ImageCreateInfo, allocator: ?*const AllocationCallbacks) Error!Image {
+        var _out: Image = undefined;
+        const _r = device_dispatch.vkCreateImage(self, create_info, allocator, &_out);
+        try checkResult(_r);
+        return _out;
+    }
+
+    pub fn destroyImage(self: *Device, image: Image, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyImage(self, image, allocator);
+    }
+
+    pub fn getImageSubresourceLayout(self: *Device, image: Image, subresource: *const ImageSubresource) SubresourceLayout {
+        var _out: SubresourceLayout = undefined;
+        device_dispatch.vkGetImageSubresourceLayout(self, image, subresource, &_out);
+        return _out;
+    }
+
+    pub fn createImageView(self: *Device, create_info: *const ImageViewCreateInfo, allocator: ?*const AllocationCallbacks) Error!ImageView {
+        var _out: ImageView = undefined;
+        const _r = device_dispatch.vkCreateImageView(self, create_info, allocator, &_out);
+        try checkResult(_r);
+        return _out;
+    }
+
+    pub fn destroyImageView(self: *Device, image_view: ImageView, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyImageView(self, image_view, allocator);
+    }
+
+    pub fn createShaderModule(self: *Device, create_info: *const ShaderModuleCreateInfo, allocator: ?*const AllocationCallbacks) Error!ShaderModule {
+        var _out: ShaderModule = undefined;
+        const _r = device_dispatch.vkCreateShaderModule(self, create_info, allocator, &_out);
+        try checkResult(_r);
+        return _out;
+    }
+
+    pub fn destroyShaderModule(self: *Device, shader_module: ShaderModule, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyShaderModule(self, shader_module, allocator);
+    }
+
+    pub fn createPipelineCache(self: *Device, create_info: *const PipelineCacheCreateInfo, allocator: ?*const AllocationCallbacks) Error!PipelineCache {
+        var _out: PipelineCache = undefined;
+        const _r = device_dispatch.vkCreatePipelineCache(self, create_info, allocator, &_out);
+        try checkResult(_r);
+        return _out;
+    }
+
+    pub fn destroyPipelineCache(self: *Device, pipeline_cache: PipelineCache, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyPipelineCache(self, pipeline_cache, allocator);
+    }
+
+    pub fn getPipelineCacheData(self: *Device, pipeline_cache: PipelineCache, data_size: *usize, data: []void) Error!void {
+        const _r = device_dispatch.vkGetPipelineCacheData(self, pipeline_cache, data_size, data.ptr);
         try checkResult(_r);
     }
 
-    pub fn destroyBuffer(self: *Device, buffer: Buffer, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyBuffer(self, buffer, p_allocator);
-    }
-
-    pub fn createBufferView(self: *Device, p_create_info: *const BufferViewCreateInfo, p_allocator: ?*const AllocationCallbacks, p_view: *BufferView) Error!void {
-        const _r = device_dispatch.vkCreateBufferView(self, p_create_info, p_allocator, p_view);
+    pub fn mergePipelineCaches(self: *Device, dst_cache: PipelineCache, src_caches: []const PipelineCache) Error!void {
+        const _r = device_dispatch.vkMergePipelineCaches(self, dst_cache, @intCast(src_caches.len), src_caches.ptr);
         try checkResult(_r);
     }
 
-    pub fn destroyBufferView(self: *Device, buffer_view: BufferView, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyBufferView(self, buffer_view, p_allocator);
-    }
-
-    pub fn createImage(self: *Device, p_create_info: *const ImageCreateInfo, p_allocator: ?*const AllocationCallbacks, p_image: *Image) Error!void {
-        const _r = device_dispatch.vkCreateImage(self, p_create_info, p_allocator, p_image);
+    pub fn createGraphicsPipelines(self: *Device, pipeline_cache: PipelineCache, create_infos: []const GraphicsPipelineCreateInfo, allocator: ?*const AllocationCallbacks, pipelines: []Pipeline) Error!void {
+        const _r = device_dispatch.vkCreateGraphicsPipelines(self, pipeline_cache, @intCast(create_infos.len), create_infos.ptr, allocator, pipelines.ptr);
         try checkResult(_r);
     }
 
-    pub fn destroyImage(self: *Device, image: Image, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyImage(self, image, p_allocator);
-    }
-
-    pub fn getImageSubresourceLayout(self: *Device, image: Image, p_subresource: *const ImageSubresource, p_layout: *SubresourceLayout) void {
-        device_dispatch.vkGetImageSubresourceLayout(self, image, p_subresource, p_layout);
-    }
-
-    pub fn createImageView(self: *Device, p_create_info: *const ImageViewCreateInfo, p_allocator: ?*const AllocationCallbacks, p_view: *ImageView) Error!void {
-        const _r = device_dispatch.vkCreateImageView(self, p_create_info, p_allocator, p_view);
+    pub fn createComputePipelines(self: *Device, pipeline_cache: PipelineCache, create_infos: []const ComputePipelineCreateInfo, allocator: ?*const AllocationCallbacks, pipelines: []Pipeline) Error!void {
+        const _r = device_dispatch.vkCreateComputePipelines(self, pipeline_cache, @intCast(create_infos.len), create_infos.ptr, allocator, pipelines.ptr);
         try checkResult(_r);
     }
 
-    pub fn destroyImageView(self: *Device, image_view: ImageView, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyImageView(self, image_view, p_allocator);
+    pub fn destroyPipeline(self: *Device, pipeline: Pipeline, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyPipeline(self, pipeline, allocator);
     }
 
-    pub fn createShaderModule(self: *Device, p_create_info: *const ShaderModuleCreateInfo, p_allocator: ?*const AllocationCallbacks, p_shader_module: *ShaderModule) Error!void {
-        const _r = device_dispatch.vkCreateShaderModule(self, p_create_info, p_allocator, p_shader_module);
+    pub fn createPipelineLayout(self: *Device, create_info: *const PipelineLayoutCreateInfo, allocator: ?*const AllocationCallbacks) Error!PipelineLayout {
+        var _out: PipelineLayout = undefined;
+        const _r = device_dispatch.vkCreatePipelineLayout(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn destroyShaderModule(self: *Device, shader_module: ShaderModule, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyShaderModule(self, shader_module, p_allocator);
+    pub fn destroyPipelineLayout(self: *Device, pipeline_layout: PipelineLayout, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyPipelineLayout(self, pipeline_layout, allocator);
     }
 
-    pub fn createPipelineCache(self: *Device, p_create_info: *const PipelineCacheCreateInfo, p_allocator: ?*const AllocationCallbacks, p_pipeline_cache: *PipelineCache) Error!void {
-        const _r = device_dispatch.vkCreatePipelineCache(self, p_create_info, p_allocator, p_pipeline_cache);
+    pub fn createSampler(self: *Device, create_info: *const SamplerCreateInfo, allocator: ?*const AllocationCallbacks) Error!Sampler {
+        var _out: Sampler = undefined;
+        const _r = device_dispatch.vkCreateSampler(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn destroyPipelineCache(self: *Device, pipeline_cache: PipelineCache, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyPipelineCache(self, pipeline_cache, p_allocator);
+    pub fn destroySampler(self: *Device, sampler: Sampler, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroySampler(self, sampler, allocator);
     }
 
-    pub fn getPipelineCacheData(self: *Device, pipeline_cache: PipelineCache, p_data_size: *usize, p_data: ?[]anyopaque) Error!void {
-        const _r = device_dispatch.vkGetPipelineCacheData(self, pipeline_cache, p_data_size, p_data);
+    pub fn createDescriptorSetLayout(self: *Device, create_info: *const DescriptorSetLayoutCreateInfo, allocator: ?*const AllocationCallbacks) Error!DescriptorSetLayout {
+        var _out: DescriptorSetLayout = undefined;
+        const _r = device_dispatch.vkCreateDescriptorSetLayout(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn mergePipelineCaches(self: *Device, dst_cache: PipelineCache, src_cache_count: u32, p_src_caches: []const PipelineCache) Error!void {
-        const _r = device_dispatch.vkMergePipelineCaches(self, dst_cache, src_cache_count, p_src_caches);
+    pub fn destroyDescriptorSetLayout(self: *Device, descriptor_set_layout: DescriptorSetLayout, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyDescriptorSetLayout(self, descriptor_set_layout, allocator);
+    }
+
+    pub fn createDescriptorPool(self: *Device, create_info: *const DescriptorPoolCreateInfo, allocator: ?*const AllocationCallbacks) Error!DescriptorPool {
+        var _out: DescriptorPool = undefined;
+        const _r = device_dispatch.vkCreateDescriptorPool(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn createGraphicsPipelines(self: *Device, pipeline_cache: PipelineCache, create_info_count: u32, p_create_infos: []const GraphicsPipelineCreateInfo, p_allocator: ?*const AllocationCallbacks, p_pipelines: []Pipeline) Error!void {
-        const _r = device_dispatch.vkCreateGraphicsPipelines(self, pipeline_cache, create_info_count, p_create_infos, p_allocator, p_pipelines);
-        try checkResult(_r);
-    }
-
-    pub fn createComputePipelines(self: *Device, pipeline_cache: PipelineCache, create_info_count: u32, p_create_infos: []const ComputePipelineCreateInfo, p_allocator: ?*const AllocationCallbacks, p_pipelines: []Pipeline) Error!void {
-        const _r = device_dispatch.vkCreateComputePipelines(self, pipeline_cache, create_info_count, p_create_infos, p_allocator, p_pipelines);
-        try checkResult(_r);
-    }
-
-    pub fn destroyPipeline(self: *Device, pipeline: Pipeline, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyPipeline(self, pipeline, p_allocator);
-    }
-
-    pub fn createPipelineLayout(self: *Device, p_create_info: *const PipelineLayoutCreateInfo, p_allocator: ?*const AllocationCallbacks, p_pipeline_layout: *PipelineLayout) Error!void {
-        const _r = device_dispatch.vkCreatePipelineLayout(self, p_create_info, p_allocator, p_pipeline_layout);
-        try checkResult(_r);
-    }
-
-    pub fn destroyPipelineLayout(self: *Device, pipeline_layout: PipelineLayout, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyPipelineLayout(self, pipeline_layout, p_allocator);
-    }
-
-    pub fn createSampler(self: *Device, p_create_info: *const SamplerCreateInfo, p_allocator: ?*const AllocationCallbacks, p_sampler: *Sampler) Error!void {
-        const _r = device_dispatch.vkCreateSampler(self, p_create_info, p_allocator, p_sampler);
-        try checkResult(_r);
-    }
-
-    pub fn destroySampler(self: *Device, sampler: Sampler, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroySampler(self, sampler, p_allocator);
-    }
-
-    pub fn createDescriptorSetLayout(self: *Device, p_create_info: *const DescriptorSetLayoutCreateInfo, p_allocator: ?*const AllocationCallbacks, p_set_layout: *DescriptorSetLayout) Error!void {
-        const _r = device_dispatch.vkCreateDescriptorSetLayout(self, p_create_info, p_allocator, p_set_layout);
-        try checkResult(_r);
-    }
-
-    pub fn destroyDescriptorSetLayout(self: *Device, descriptor_set_layout: DescriptorSetLayout, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyDescriptorSetLayout(self, descriptor_set_layout, p_allocator);
-    }
-
-    pub fn createDescriptorPool(self: *Device, p_create_info: *const DescriptorPoolCreateInfo, p_allocator: ?*const AllocationCallbacks, p_descriptor_pool: *DescriptorPool) Error!void {
-        const _r = device_dispatch.vkCreateDescriptorPool(self, p_create_info, p_allocator, p_descriptor_pool);
-        try checkResult(_r);
-    }
-
-    pub fn destroyDescriptorPool(self: *Device, descriptor_pool: DescriptorPool, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyDescriptorPool(self, descriptor_pool, p_allocator);
+    pub fn destroyDescriptorPool(self: *Device, descriptor_pool: DescriptorPool, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyDescriptorPool(self, descriptor_pool, allocator);
     }
 
     pub fn resetDescriptorPool(self: *Device, descriptor_pool: DescriptorPool, flags: DescriptorPoolResetFlags) Error!void {
@@ -10033,49 +10264,57 @@ pub const Device = opaque {
         try checkResult(_r);
     }
 
-    pub fn allocateDescriptorSets(self: *Device, p_allocate_info: *const DescriptorSetAllocateInfo, p_descriptor_sets: []DescriptorSet) Error!void {
-        const _r = device_dispatch.vkAllocateDescriptorSets(self, p_allocate_info, p_descriptor_sets);
+    pub fn allocateDescriptorSets(self: *Device, allocate_info: *const DescriptorSetAllocateInfo, descriptor_sets: []DescriptorSet) Error!void {
+        const _r = device_dispatch.vkAllocateDescriptorSets(self, allocate_info, descriptor_sets.ptr);
         try checkResult(_r);
     }
 
-    pub fn freeDescriptorSets(self: *Device, descriptor_pool: DescriptorPool, descriptor_set_count: u32, p_descriptor_sets: []const DescriptorSet) Error!void {
-        const _r = device_dispatch.vkFreeDescriptorSets(self, descriptor_pool, descriptor_set_count, p_descriptor_sets);
+    pub fn freeDescriptorSets(self: *Device, descriptor_pool: DescriptorPool, descriptor_sets: []const DescriptorSet) Error!void {
+        const _r = device_dispatch.vkFreeDescriptorSets(self, descriptor_pool, @intCast(descriptor_sets.len), descriptor_sets.ptr);
         try checkResult(_r);
     }
 
-    pub fn updateDescriptorSets(self: *Device, descriptor_write_count: u32, p_descriptor_writes: []const WriteDescriptorSet, descriptor_copy_count: u32, p_descriptor_copies: []const CopyDescriptorSet) void {
-        device_dispatch.vkUpdateDescriptorSets(self, descriptor_write_count, p_descriptor_writes, descriptor_copy_count, p_descriptor_copies);
+    pub fn updateDescriptorSets(self: *Device, descriptor_writes: []const WriteDescriptorSet, descriptor_copies: []const CopyDescriptorSet) void {
+        return device_dispatch.vkUpdateDescriptorSets(self, @intCast(descriptor_writes.len), descriptor_writes.ptr, @intCast(descriptor_copies.len), descriptor_copies.ptr);
     }
 
-    pub fn createFramebuffer(self: *Device, p_create_info: *const FramebufferCreateInfo, p_allocator: ?*const AllocationCallbacks, p_framebuffer: *Framebuffer) Error!void {
-        const _r = device_dispatch.vkCreateFramebuffer(self, p_create_info, p_allocator, p_framebuffer);
+    pub fn createFramebuffer(self: *Device, create_info: *const FramebufferCreateInfo, allocator: ?*const AllocationCallbacks) Error!Framebuffer {
+        var _out: Framebuffer = undefined;
+        const _r = device_dispatch.vkCreateFramebuffer(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn destroyFramebuffer(self: *Device, framebuffer: Framebuffer, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyFramebuffer(self, framebuffer, p_allocator);
+    pub fn destroyFramebuffer(self: *Device, framebuffer: Framebuffer, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyFramebuffer(self, framebuffer, allocator);
     }
 
-    pub fn createRenderPass(self: *Device, p_create_info: *const RenderPassCreateInfo, p_allocator: ?*const AllocationCallbacks, p_render_pass: *RenderPass) Error!void {
-        const _r = device_dispatch.vkCreateRenderPass(self, p_create_info, p_allocator, p_render_pass);
+    pub fn createRenderPass(self: *Device, create_info: *const RenderPassCreateInfo, allocator: ?*const AllocationCallbacks) Error!RenderPass {
+        var _out: RenderPass = undefined;
+        const _r = device_dispatch.vkCreateRenderPass(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn destroyRenderPass(self: *Device, render_pass: RenderPass, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyRenderPass(self, render_pass, p_allocator);
+    pub fn destroyRenderPass(self: *Device, render_pass: RenderPass, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyRenderPass(self, render_pass, allocator);
     }
 
-    pub fn getRenderAreaGranularity(self: *Device, render_pass: RenderPass, p_granularity: *Extent2D) void {
-        device_dispatch.vkGetRenderAreaGranularity(self, render_pass, p_granularity);
+    pub fn getRenderAreaGranularity(self: *Device, render_pass: RenderPass) Extent2D {
+        var _out: Extent2D = undefined;
+        device_dispatch.vkGetRenderAreaGranularity(self, render_pass, &_out);
+        return _out;
     }
 
-    pub fn createCommandPool(self: *Device, p_create_info: *const CommandPoolCreateInfo, p_allocator: ?*const AllocationCallbacks, p_command_pool: *CommandPool) Error!void {
-        const _r = device_dispatch.vkCreateCommandPool(self, p_create_info, p_allocator, p_command_pool);
+    pub fn createCommandPool(self: *Device, create_info: *const CommandPoolCreateInfo, allocator: ?*const AllocationCallbacks) Error!CommandPool {
+        var _out: CommandPool = undefined;
+        const _r = device_dispatch.vkCreateCommandPool(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn destroyCommandPool(self: *Device, command_pool: CommandPool, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyCommandPool(self, command_pool, p_allocator);
+    pub fn destroyCommandPool(self: *Device, command_pool: CommandPool, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyCommandPool(self, command_pool, allocator);
     }
 
     pub fn resetCommandPool(self: *Device, command_pool: CommandPool, flags: CommandPoolResetFlags) Error!void {
@@ -10083,170 +10322,232 @@ pub const Device = opaque {
         try checkResult(_r);
     }
 
-    pub fn allocateCommandBuffers(self: *Device, p_allocate_info: *const CommandBufferAllocateInfo, p_command_buffers: **CommandBuffer) Error!void {
-        const _r = device_dispatch.vkAllocateCommandBuffers(self, p_allocate_info, p_command_buffers);
+    pub fn allocateCommandBuffers(self: *Device, allocate_info: *const CommandBufferAllocateInfo, command_buffers: []*CommandBuffer) Error!void {
+        const _r = device_dispatch.vkAllocateCommandBuffers(self, allocate_info, command_buffers.ptr);
         try checkResult(_r);
     }
 
-    pub fn freeCommandBuffers(self: *Device, command_pool: CommandPool, command_buffer_count: u32, p_command_buffers: *const *CommandBuffer) void {
-        device_dispatch.vkFreeCommandBuffers(self, command_pool, command_buffer_count, p_command_buffers);
+    pub fn freeCommandBuffers(self: *Device, command_pool: CommandPool, command_buffers: []const *CommandBuffer) void {
+        return device_dispatch.vkFreeCommandBuffers(self, command_pool, @intCast(command_buffers.len), command_buffers.ptr);
     }
 
-    pub fn createSwapchainKHR(self: *Device, p_create_info: *const SwapchainCreateInfoKHR, p_allocator: ?*const AllocationCallbacks, p_swapchain: *SwapchainKHR) Error!void {
-        const _r = device_dispatch.vkCreateSwapchainKHR(self, p_create_info, p_allocator, p_swapchain);
+    pub fn createSwapchainKHR(self: *Device, create_info: *const SwapchainCreateInfoKHR, allocator: ?*const AllocationCallbacks) Error!SwapchainKHR {
+        var _out: SwapchainKHR = undefined;
+        const _r = device_dispatch.vkCreateSwapchainKHR(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn destroySwapchainKHR(self: *Device, swapchain: SwapchainKHR, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroySwapchainKHR(self, swapchain, p_allocator);
+    pub fn destroySwapchainKHR(self: *Device, swapchain: SwapchainKHR, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroySwapchainKHR(self, swapchain, allocator);
     }
 
-    pub fn getSwapchainImagesKHR(self: *Device, swapchain: SwapchainKHR, p_swapchain_image_count: *u32, p_swapchain_images: ?[]Image) Error!void {
-        const _r = device_dispatch.vkGetSwapchainImagesKHR(self, swapchain, p_swapchain_image_count, p_swapchain_images);
+    pub fn getSwapchainImagesKHR(self: *Device, swapchain: SwapchainKHR, gpa: std.mem.Allocator) Error![]Image {
+        var _count: u32 = 0;
+        {
+            const _r = device_dispatch.vkGetSwapchainImagesKHR(self, swapchain, &_count, null);
+            try checkResult(_r);
+        }
+        const _out = gpa.alloc(Image, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            const _r = device_dispatch.vkGetSwapchainImagesKHR(self, swapchain, &_count, _out.ptr);
+            try checkResult(_r);
+        }
+        return _out[0.._count];
+    }
+
+    pub fn acquireNextImageKHR(self: *Device, swapchain: SwapchainKHR, timeout: u64, semaphore: Semaphore, fence: Fence) Error!u32 {
+        var _out: u32 = undefined;
+        const _r = device_dispatch.vkAcquireNextImageKHR(self, swapchain, timeout, semaphore, fence, &_out);
         try checkResult(_r);
-    }
-
-    pub fn acquireNextImageKHR(self: *Device, swapchain: SwapchainKHR, timeout: u64, semaphore: Semaphore, fence: Fence, p_image_index: *u32) Error!void {
-        const _r = device_dispatch.vkAcquireNextImageKHR(self, swapchain, timeout, semaphore, fence, p_image_index);
-        try checkResult(_r);
+        return _out;
     }
 
     pub fn trimCommandPool(self: *Device, command_pool: CommandPool, flags: CommandPoolTrimFlags) void {
-        device_dispatch.vkTrimCommandPool(self, command_pool, flags);
+        return device_dispatch.vkTrimCommandPool(self, command_pool, flags);
     }
 
-    pub fn getDeviceGroupPeerMemoryFeatures(self: *Device, heap_index: u32, local_device_index: u32, remote_device_index: u32, p_peer_memory_features: *PeerMemoryFeatureFlags) void {
-        device_dispatch.vkGetDeviceGroupPeerMemoryFeatures(self, heap_index, local_device_index, remote_device_index, p_peer_memory_features);
+    pub fn getDeviceGroupPeerMemoryFeatures(self: *Device, heap_index: u32, local_device_index: u32, remote_device_index: u32) PeerMemoryFeatureFlags {
+        var _out: PeerMemoryFeatureFlags = undefined;
+        device_dispatch.vkGetDeviceGroupPeerMemoryFeatures(self, heap_index, local_device_index, remote_device_index, &_out);
+        return _out;
     }
 
-    pub fn bindBufferMemory2(self: *Device, bind_info_count: u32, p_bind_infos: []const BindBufferMemoryInfo) Error!void {
-        const _r = device_dispatch.vkBindBufferMemory2(self, bind_info_count, p_bind_infos);
+    pub fn bindBufferMemory2(self: *Device, bind_infos: []const BindBufferMemoryInfo) Error!void {
+        const _r = device_dispatch.vkBindBufferMemory2(self, @intCast(bind_infos.len), bind_infos.ptr);
         try checkResult(_r);
     }
 
-    pub fn bindImageMemory2(self: *Device, bind_info_count: u32, p_bind_infos: []const BindImageMemoryInfo) Error!void {
-        const _r = device_dispatch.vkBindImageMemory2(self, bind_info_count, p_bind_infos);
+    pub fn bindImageMemory2(self: *Device, bind_infos: []const BindImageMemoryInfo) Error!void {
+        const _r = device_dispatch.vkBindImageMemory2(self, @intCast(bind_infos.len), bind_infos.ptr);
         try checkResult(_r);
     }
 
-    pub fn getDeviceGroupPresentCapabilitiesKHR(self: *Device, p_device_group_present_capabilities: *DeviceGroupPresentCapabilitiesKHR) Error!void {
-        const _r = device_dispatch.vkGetDeviceGroupPresentCapabilitiesKHR(self, p_device_group_present_capabilities);
+    pub fn getDeviceGroupPresentCapabilitiesKHR(self: *Device) Error!DeviceGroupPresentCapabilitiesKHR {
+        var _out: DeviceGroupPresentCapabilitiesKHR = undefined;
+        const _r = device_dispatch.vkGetDeviceGroupPresentCapabilitiesKHR(self, &_out);
+        try checkResult(_r);
+        return _out;
+    }
+
+    pub fn getDeviceGroupSurfacePresentModesKHR(self: *Device, surface: SurfaceKHR) Error!DeviceGroupPresentModeFlagsKHR {
+        var _out: DeviceGroupPresentModeFlagsKHR = undefined;
+        const _r = device_dispatch.vkGetDeviceGroupSurfacePresentModesKHR(self, surface, &_out);
+        try checkResult(_r);
+        return _out;
+    }
+
+    pub fn acquireNextImage2KHR(self: *Device, acquire_info: *const AcquireNextImageInfoKHR) Error!u32 {
+        var _out: u32 = undefined;
+        const _r = device_dispatch.vkAcquireNextImage2KHR(self, acquire_info, &_out);
+        try checkResult(_r);
+        return _out;
+    }
+
+    pub fn createDescriptorUpdateTemplate(self: *Device, create_info: *const DescriptorUpdateTemplateCreateInfo, allocator: ?*const AllocationCallbacks) Error!DescriptorUpdateTemplate {
+        var _out: DescriptorUpdateTemplate = undefined;
+        const _r = device_dispatch.vkCreateDescriptorUpdateTemplate(self, create_info, allocator, &_out);
+        try checkResult(_r);
+        return _out;
+    }
+
+    pub fn destroyDescriptorUpdateTemplate(self: *Device, descriptor_update_template: DescriptorUpdateTemplate, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyDescriptorUpdateTemplate(self, descriptor_update_template, allocator);
+    }
+
+    pub fn updateDescriptorSetWithTemplate(self: *Device, descriptor_set: DescriptorSet, descriptor_update_template: DescriptorUpdateTemplate, data: *const anyopaque) void {
+        return device_dispatch.vkUpdateDescriptorSetWithTemplate(self, descriptor_set, descriptor_update_template, data);
+    }
+
+    pub fn getBufferMemoryRequirements2(self: *Device, info: *const BufferMemoryRequirementsInfo2) MemoryRequirements2 {
+        var _out: MemoryRequirements2 = undefined;
+        device_dispatch.vkGetBufferMemoryRequirements2(self, info, &_out);
+        return _out;
+    }
+
+    pub fn getImageMemoryRequirements2(self: *Device, info: *const ImageMemoryRequirementsInfo2) MemoryRequirements2 {
+        var _out: MemoryRequirements2 = undefined;
+        device_dispatch.vkGetImageMemoryRequirements2(self, info, &_out);
+        return _out;
+    }
+
+    pub fn getImageSparseMemoryRequirements2(self: *Device, info: *const ImageSparseMemoryRequirementsInfo2, gpa: std.mem.Allocator) Error![]SparseImageMemoryRequirements2 {
+        var _count: u32 = 0;
+        {
+            device_dispatch.vkGetImageSparseMemoryRequirements2(self, info, &_count, null);
+        }
+        const _out = gpa.alloc(SparseImageMemoryRequirements2, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            device_dispatch.vkGetImageSparseMemoryRequirements2(self, info, &_count, _out.ptr);
+        }
+        return _out[0.._count];
+    }
+
+    pub fn getDeviceBufferMemoryRequirements(self: *Device, info: *const DeviceBufferMemoryRequirements) MemoryRequirements2 {
+        var _out: MemoryRequirements2 = undefined;
+        device_dispatch.vkGetDeviceBufferMemoryRequirements(self, info, &_out);
+        return _out;
+    }
+
+    pub fn getDeviceImageMemoryRequirements(self: *Device, info: *const DeviceImageMemoryRequirements) MemoryRequirements2 {
+        var _out: MemoryRequirements2 = undefined;
+        device_dispatch.vkGetDeviceImageMemoryRequirements(self, info, &_out);
+        return _out;
+    }
+
+    pub fn getDeviceImageSparseMemoryRequirements(self: *Device, info: *const DeviceImageMemoryRequirements, gpa: std.mem.Allocator) Error![]SparseImageMemoryRequirements2 {
+        var _count: u32 = 0;
+        {
+            device_dispatch.vkGetDeviceImageSparseMemoryRequirements(self, info, &_count, null);
+        }
+        const _out = gpa.alloc(SparseImageMemoryRequirements2, _count) catch return error.OutOfHostMemory;
+        errdefer gpa.free(_out);
+        {
+            device_dispatch.vkGetDeviceImageSparseMemoryRequirements(self, info, &_count, _out.ptr);
+        }
+        return _out[0.._count];
+    }
+
+    pub fn createSamplerYcbcrConversion(self: *Device, create_info: *const SamplerYcbcrConversionCreateInfo, allocator: ?*const AllocationCallbacks) Error!SamplerYcbcrConversion {
+        var _out: SamplerYcbcrConversion = undefined;
+        const _r = device_dispatch.vkCreateSamplerYcbcrConversion(self, create_info, allocator, &_out);
+        try checkResult(_r);
+        return _out;
+    }
+
+    pub fn destroySamplerYcbcrConversion(self: *Device, ycbcr_conversion: SamplerYcbcrConversion, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroySamplerYcbcrConversion(self, ycbcr_conversion, allocator);
+    }
+
+    pub fn getDeviceQueue2(self: *Device, queue_info: *const DeviceQueueInfo2) *Queue {
+        var _out: *Queue = undefined;
+        device_dispatch.vkGetDeviceQueue2(self, queue_info, &_out);
+        return _out;
+    }
+
+    pub fn getDescriptorSetLayoutSupport(self: *Device, create_info: *const DescriptorSetLayoutCreateInfo) DescriptorSetLayoutSupport {
+        var _out: DescriptorSetLayoutSupport = undefined;
+        device_dispatch.vkGetDescriptorSetLayoutSupport(self, create_info, &_out);
+        return _out;
+    }
+
+    pub fn setDebugUtilsObjectNameEXT(self: *Device, name_info: *const DebugUtilsObjectNameInfoEXT) Error!void {
+        const _r = device_dispatch.vkSetDebugUtilsObjectNameEXT(self, name_info);
         try checkResult(_r);
     }
 
-    pub fn getDeviceGroupSurfacePresentModesKHR(self: *Device, surface: SurfaceKHR, p_modes: *DeviceGroupPresentModeFlagsKHR) Error!void {
-        const _r = device_dispatch.vkGetDeviceGroupSurfacePresentModesKHR(self, surface, p_modes);
+    pub fn setDebugUtilsObjectTagEXT(self: *Device, tag_info: *const DebugUtilsObjectTagInfoEXT) Error!void {
+        const _r = device_dispatch.vkSetDebugUtilsObjectTagEXT(self, tag_info);
         try checkResult(_r);
     }
 
-    pub fn acquireNextImage2KHR(self: *Device, p_acquire_info: *const AcquireNextImageInfoKHR, p_image_index: *u32) Error!void {
-        const _r = device_dispatch.vkAcquireNextImage2KHR(self, p_acquire_info, p_image_index);
+    pub fn createRenderPass2(self: *Device, create_info: *const RenderPassCreateInfo2, allocator: ?*const AllocationCallbacks) Error!RenderPass {
+        var _out: RenderPass = undefined;
+        const _r = device_dispatch.vkCreateRenderPass2(self, create_info, allocator, &_out);
+        try checkResult(_r);
+        return _out;
+    }
+
+    pub fn getSemaphoreCounterValue(self: *Device, semaphore: Semaphore) Error!u64 {
+        var _out: u64 = undefined;
+        const _r = device_dispatch.vkGetSemaphoreCounterValue(self, semaphore, &_out);
+        try checkResult(_r);
+        return _out;
+    }
+
+    pub fn waitSemaphores(self: *Device, wait_info: *const SemaphoreWaitInfo, timeout: u64) Error!void {
+        const _r = device_dispatch.vkWaitSemaphores(self, wait_info, timeout);
         try checkResult(_r);
     }
 
-    pub fn createDescriptorUpdateTemplate(self: *Device, p_create_info: *const DescriptorUpdateTemplateCreateInfo, p_allocator: ?*const AllocationCallbacks, p_descriptor_update_template: *DescriptorUpdateTemplate) Error!void {
-        const _r = device_dispatch.vkCreateDescriptorUpdateTemplate(self, p_create_info, p_allocator, p_descriptor_update_template);
+    pub fn signalSemaphore(self: *Device, signal_info: *const SemaphoreSignalInfo) Error!void {
+        const _r = device_dispatch.vkSignalSemaphore(self, signal_info);
         try checkResult(_r);
     }
 
-    pub fn destroyDescriptorUpdateTemplate(self: *Device, descriptor_update_template: DescriptorUpdateTemplate, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyDescriptorUpdateTemplate(self, descriptor_update_template, p_allocator);
+    pub fn getBufferOpaqueCaptureAddress(self: *Device, info: *const BufferDeviceAddressInfo) u64 {
+        return device_dispatch.vkGetBufferOpaqueCaptureAddress(self, info);
     }
 
-    pub fn updateDescriptorSetWithTemplate(self: *Device, descriptor_set: DescriptorSet, descriptor_update_template: DescriptorUpdateTemplate, p_data: *const anyopaque) void {
-        device_dispatch.vkUpdateDescriptorSetWithTemplate(self, descriptor_set, descriptor_update_template, p_data);
+    pub fn getBufferDeviceAddress(self: *Device, info: *const BufferDeviceAddressInfo) DeviceAddress {
+        return device_dispatch.vkGetBufferDeviceAddress(self, info);
     }
 
-    pub fn getBufferMemoryRequirements2(self: *Device, p_info: *const BufferMemoryRequirementsInfo2, p_memory_requirements: *MemoryRequirements2) void {
-        device_dispatch.vkGetBufferMemoryRequirements2(self, p_info, p_memory_requirements);
+    pub fn getDeviceMemoryOpaqueCaptureAddress(self: *Device, info: *const DeviceMemoryOpaqueCaptureAddressInfo) u64 {
+        return device_dispatch.vkGetDeviceMemoryOpaqueCaptureAddress(self, info);
     }
 
-    pub fn getImageMemoryRequirements2(self: *Device, p_info: *const ImageMemoryRequirementsInfo2, p_memory_requirements: *MemoryRequirements2) void {
-        device_dispatch.vkGetImageMemoryRequirements2(self, p_info, p_memory_requirements);
-    }
-
-    pub fn getImageSparseMemoryRequirements2(self: *Device, p_info: *const ImageSparseMemoryRequirementsInfo2, p_sparse_memory_requirement_count: *u32, p_sparse_memory_requirements: ?[]SparseImageMemoryRequirements2) void {
-        device_dispatch.vkGetImageSparseMemoryRequirements2(self, p_info, p_sparse_memory_requirement_count, p_sparse_memory_requirements);
-    }
-
-    pub fn getDeviceBufferMemoryRequirements(self: *Device, p_info: *const DeviceBufferMemoryRequirements, p_memory_requirements: *MemoryRequirements2) void {
-        device_dispatch.vkGetDeviceBufferMemoryRequirements(self, p_info, p_memory_requirements);
-    }
-
-    pub fn getDeviceImageMemoryRequirements(self: *Device, p_info: *const DeviceImageMemoryRequirements, p_memory_requirements: *MemoryRequirements2) void {
-        device_dispatch.vkGetDeviceImageMemoryRequirements(self, p_info, p_memory_requirements);
-    }
-
-    pub fn getDeviceImageSparseMemoryRequirements(self: *Device, p_info: *const DeviceImageMemoryRequirements, p_sparse_memory_requirement_count: *u32, p_sparse_memory_requirements: ?[]SparseImageMemoryRequirements2) void {
-        device_dispatch.vkGetDeviceImageSparseMemoryRequirements(self, p_info, p_sparse_memory_requirement_count, p_sparse_memory_requirements);
-    }
-
-    pub fn createSamplerYcbcrConversion(self: *Device, p_create_info: *const SamplerYcbcrConversionCreateInfo, p_allocator: ?*const AllocationCallbacks, p_ycbcr_conversion: *SamplerYcbcrConversion) Error!void {
-        const _r = device_dispatch.vkCreateSamplerYcbcrConversion(self, p_create_info, p_allocator, p_ycbcr_conversion);
+    pub fn createPrivateDataSlot(self: *Device, create_info: *const PrivateDataSlotCreateInfo, allocator: ?*const AllocationCallbacks) Error!PrivateDataSlot {
+        var _out: PrivateDataSlot = undefined;
+        const _r = device_dispatch.vkCreatePrivateDataSlot(self, create_info, allocator, &_out);
         try checkResult(_r);
+        return _out;
     }
 
-    pub fn destroySamplerYcbcrConversion(self: *Device, ycbcr_conversion: SamplerYcbcrConversion, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroySamplerYcbcrConversion(self, ycbcr_conversion, p_allocator);
-    }
-
-    pub fn getDeviceQueue2(self: *Device, p_queue_info: *const DeviceQueueInfo2, p_queue: **Queue) void {
-        device_dispatch.vkGetDeviceQueue2(self, p_queue_info, p_queue);
-    }
-
-    pub fn getDescriptorSetLayoutSupport(self: *Device, p_create_info: *const DescriptorSetLayoutCreateInfo, p_support: *DescriptorSetLayoutSupport) void {
-        device_dispatch.vkGetDescriptorSetLayoutSupport(self, p_create_info, p_support);
-    }
-
-    pub fn setDebugUtilsObjectNameEXT(self: *Device, p_name_info: *const DebugUtilsObjectNameInfoEXT) Error!void {
-        const _r = device_dispatch.vkSetDebugUtilsObjectNameEXT(self, p_name_info);
-        try checkResult(_r);
-    }
-
-    pub fn setDebugUtilsObjectTagEXT(self: *Device, p_tag_info: *const DebugUtilsObjectTagInfoEXT) Error!void {
-        const _r = device_dispatch.vkSetDebugUtilsObjectTagEXT(self, p_tag_info);
-        try checkResult(_r);
-    }
-
-    pub fn createRenderPass2(self: *Device, p_create_info: *const RenderPassCreateInfo2, p_allocator: ?*const AllocationCallbacks, p_render_pass: *RenderPass) Error!void {
-        const _r = device_dispatch.vkCreateRenderPass2(self, p_create_info, p_allocator, p_render_pass);
-        try checkResult(_r);
-    }
-
-    pub fn getSemaphoreCounterValue(self: *Device, semaphore: Semaphore, p_value: *u64) Error!void {
-        const _r = device_dispatch.vkGetSemaphoreCounterValue(self, semaphore, p_value);
-        try checkResult(_r);
-    }
-
-    pub fn waitSemaphores(self: *Device, p_wait_info: *const SemaphoreWaitInfo, timeout: u64) Error!void {
-        const _r = device_dispatch.vkWaitSemaphores(self, p_wait_info, timeout);
-        try checkResult(_r);
-    }
-
-    pub fn signalSemaphore(self: *Device, p_signal_info: *const SemaphoreSignalInfo) Error!void {
-        const _r = device_dispatch.vkSignalSemaphore(self, p_signal_info);
-        try checkResult(_r);
-    }
-
-    pub fn getBufferOpaqueCaptureAddress(self: *Device, p_info: *const BufferDeviceAddressInfo) u64 {
-        return device_dispatch.vkGetBufferOpaqueCaptureAddress(self, p_info);
-    }
-
-    pub fn getBufferDeviceAddress(self: *Device, p_info: *const BufferDeviceAddressInfo) DeviceAddress {
-        return device_dispatch.vkGetBufferDeviceAddress(self, p_info);
-    }
-
-    pub fn getDeviceMemoryOpaqueCaptureAddress(self: *Device, p_info: *const DeviceMemoryOpaqueCaptureAddressInfo) u64 {
-        return device_dispatch.vkGetDeviceMemoryOpaqueCaptureAddress(self, p_info);
-    }
-
-    pub fn createPrivateDataSlot(self: *Device, p_create_info: *const PrivateDataSlotCreateInfo, p_allocator: ?*const AllocationCallbacks, p_private_data_slot: *PrivateDataSlot) Error!void {
-        const _r = device_dispatch.vkCreatePrivateDataSlot(self, p_create_info, p_allocator, p_private_data_slot);
-        try checkResult(_r);
-    }
-
-    pub fn destroyPrivateDataSlot(self: *Device, private_data_slot: PrivateDataSlot, p_allocator: ?*const AllocationCallbacks) void {
-        device_dispatch.vkDestroyPrivateDataSlot(self, private_data_slot, p_allocator);
+    pub fn destroyPrivateDataSlot(self: *Device, private_data_slot: PrivateDataSlot, allocator: ?*const AllocationCallbacks) void {
+        return device_dispatch.vkDestroyPrivateDataSlot(self, private_data_slot, allocator);
     }
 
     pub fn setPrivateData(self: *Device, object_type: ObjectType, object_handle: u64, private_data_slot: PrivateDataSlot, data: u64) Error!void {
@@ -10254,14 +10555,16 @@ pub const Device = opaque {
         try checkResult(_r);
     }
 
-    pub fn getPrivateData(self: *Device, object_type: ObjectType, object_handle: u64, private_data_slot: PrivateDataSlot, p_data: *u64) void {
-        device_dispatch.vkGetPrivateData(self, object_type, object_handle, private_data_slot, p_data);
+    pub fn getPrivateData(self: *Device, object_type: ObjectType, object_handle: u64, private_data_slot: PrivateDataSlot) u64 {
+        var _out: u64 = undefined;
+        device_dispatch.vkGetPrivateData(self, object_type, object_handle, private_data_slot, &_out);
+        return _out;
     }
 };
 
 pub const Queue = opaque {
-    pub fn submit(self: *Queue, submit_count: u32, p_submits: []const SubmitInfo, fence: Fence) Error!void {
-        const _r = device_dispatch.vkQueueSubmit(self, submit_count, p_submits, fence);
+    pub fn submit(self: *Queue, submits: []const SubmitInfo, fence: Fence) Error!void {
+        const _r = device_dispatch.vkQueueSubmit(self, @intCast(submits.len), submits.ptr, fence);
         try checkResult(_r);
     }
 
@@ -10270,37 +10573,37 @@ pub const Queue = opaque {
         try checkResult(_r);
     }
 
-    pub fn bindSparse(self: *Queue, bind_info_count: u32, p_bind_info: []const BindSparseInfo, fence: Fence) Error!void {
-        const _r = device_dispatch.vkQueueBindSparse(self, bind_info_count, p_bind_info, fence);
+    pub fn bindSparse(self: *Queue, bind_info: []const BindSparseInfo, fence: Fence) Error!void {
+        const _r = device_dispatch.vkQueueBindSparse(self, @intCast(bind_info.len), bind_info.ptr, fence);
         try checkResult(_r);
     }
 
-    pub fn presentKHR(self: *Queue, p_present_info: *const PresentInfoKHR) Error!void {
-        const _r = device_dispatch.vkQueuePresentKHR(self, p_present_info);
+    pub fn presentKHR(self: *Queue, present_info: *const PresentInfoKHR) Error!void {
+        const _r = device_dispatch.vkQueuePresentKHR(self, present_info);
         try checkResult(_r);
     }
 
-    pub fn beginDebugUtilsLabelEXT(self: *Queue, p_label_info: *const DebugUtilsLabelEXT) void {
-        device_dispatch.vkQueueBeginDebugUtilsLabelEXT(self, p_label_info);
+    pub fn beginDebugUtilsLabelEXT(self: *Queue, label_info: *const DebugUtilsLabelEXT) void {
+        return device_dispatch.vkQueueBeginDebugUtilsLabelEXT(self, label_info);
     }
 
     pub fn endDebugUtilsLabelEXT(self: *Queue) void {
-        device_dispatch.vkQueueEndDebugUtilsLabelEXT(self);
+        return device_dispatch.vkQueueEndDebugUtilsLabelEXT(self);
     }
 
-    pub fn insertDebugUtilsLabelEXT(self: *Queue, p_label_info: *const DebugUtilsLabelEXT) void {
-        device_dispatch.vkQueueInsertDebugUtilsLabelEXT(self, p_label_info);
+    pub fn insertDebugUtilsLabelEXT(self: *Queue, label_info: *const DebugUtilsLabelEXT) void {
+        return device_dispatch.vkQueueInsertDebugUtilsLabelEXT(self, label_info);
     }
 
-    pub fn submit2(self: *Queue, submit_count: u32, p_submits: []const SubmitInfo2, fence: Fence) Error!void {
-        const _r = device_dispatch.vkQueueSubmit2(self, submit_count, p_submits, fence);
+    pub fn submit2(self: *Queue, submits: []const SubmitInfo2, fence: Fence) Error!void {
+        const _r = device_dispatch.vkQueueSubmit2(self, @intCast(submits.len), submits.ptr, fence);
         try checkResult(_r);
     }
 };
 
 pub const CommandBuffer = opaque {
-    pub fn beginCommandBuffer(self: *CommandBuffer, p_begin_info: *const CommandBufferBeginInfo) Error!void {
-        const _r = device_dispatch.vkBeginCommandBuffer(self, p_begin_info);
+    pub fn beginCommandBuffer(self: *CommandBuffer, begin_info: *const CommandBufferBeginInfo) Error!void {
+        const _r = device_dispatch.vkBeginCommandBuffer(self, begin_info);
         try checkResult(_r);
     }
 
@@ -10315,331 +10618,331 @@ pub const CommandBuffer = opaque {
     }
 
     pub fn cmdBindPipeline(self: *CommandBuffer, pipeline_bind_point: PipelineBindPoint, pipeline: Pipeline) void {
-        device_dispatch.vkCmdBindPipeline(self, pipeline_bind_point, pipeline);
+        return device_dispatch.vkCmdBindPipeline(self, pipeline_bind_point, pipeline);
     }
 
-    pub fn cmdSetViewport(self: *CommandBuffer, first_viewport: u32, viewport_count: u32, p_viewports: []const Viewport) void {
-        device_dispatch.vkCmdSetViewport(self, first_viewport, viewport_count, p_viewports);
+    pub fn cmdSetViewport(self: *CommandBuffer, first_viewport: u32, viewports: []const Viewport) void {
+        return device_dispatch.vkCmdSetViewport(self, first_viewport, @intCast(viewports.len), viewports.ptr);
     }
 
-    pub fn cmdSetScissor(self: *CommandBuffer, first_scissor: u32, scissor_count: u32, p_scissors: []const Rect2D) void {
-        device_dispatch.vkCmdSetScissor(self, first_scissor, scissor_count, p_scissors);
+    pub fn cmdSetScissor(self: *CommandBuffer, first_scissor: u32, scissors: []const Rect2D) void {
+        return device_dispatch.vkCmdSetScissor(self, first_scissor, @intCast(scissors.len), scissors.ptr);
     }
 
     pub fn cmdSetLineWidth(self: *CommandBuffer, line_width: f32) void {
-        device_dispatch.vkCmdSetLineWidth(self, line_width);
+        return device_dispatch.vkCmdSetLineWidth(self, line_width);
     }
 
     pub fn cmdSetDepthBias(self: *CommandBuffer, depth_bias_constant_factor: f32, depth_bias_clamp: f32, depth_bias_slope_factor: f32) void {
-        device_dispatch.vkCmdSetDepthBias(self, depth_bias_constant_factor, depth_bias_clamp, depth_bias_slope_factor);
+        return device_dispatch.vkCmdSetDepthBias(self, depth_bias_constant_factor, depth_bias_clamp, depth_bias_slope_factor);
     }
 
     pub fn cmdSetBlendConstants(self: *CommandBuffer, blend_constants: [4]f32) void {
-        device_dispatch.vkCmdSetBlendConstants(self, blend_constants);
+        return device_dispatch.vkCmdSetBlendConstants(self, blend_constants);
     }
 
     pub fn cmdSetDepthBounds(self: *CommandBuffer, min_depth_bounds: f32, max_depth_bounds: f32) void {
-        device_dispatch.vkCmdSetDepthBounds(self, min_depth_bounds, max_depth_bounds);
+        return device_dispatch.vkCmdSetDepthBounds(self, min_depth_bounds, max_depth_bounds);
     }
 
     pub fn cmdSetStencilCompareMask(self: *CommandBuffer, face_mask: StencilFaceFlags, compare_mask: u32) void {
-        device_dispatch.vkCmdSetStencilCompareMask(self, face_mask, compare_mask);
+        return device_dispatch.vkCmdSetStencilCompareMask(self, face_mask, compare_mask);
     }
 
     pub fn cmdSetStencilWriteMask(self: *CommandBuffer, face_mask: StencilFaceFlags, write_mask: u32) void {
-        device_dispatch.vkCmdSetStencilWriteMask(self, face_mask, write_mask);
+        return device_dispatch.vkCmdSetStencilWriteMask(self, face_mask, write_mask);
     }
 
     pub fn cmdSetStencilReference(self: *CommandBuffer, face_mask: StencilFaceFlags, reference: u32) void {
-        device_dispatch.vkCmdSetStencilReference(self, face_mask, reference);
+        return device_dispatch.vkCmdSetStencilReference(self, face_mask, reference);
     }
 
-    pub fn cmdBindDescriptorSets(self: *CommandBuffer, pipeline_bind_point: PipelineBindPoint, layout: PipelineLayout, first_set: u32, descriptor_set_count: u32, p_descriptor_sets: []const DescriptorSet, dynamic_offset_count: u32, p_dynamic_offsets: []const u32) void {
-        device_dispatch.vkCmdBindDescriptorSets(self, pipeline_bind_point, layout, first_set, descriptor_set_count, p_descriptor_sets, dynamic_offset_count, p_dynamic_offsets);
+    pub fn cmdBindDescriptorSets(self: *CommandBuffer, pipeline_bind_point: PipelineBindPoint, layout: PipelineLayout, first_set: u32, descriptor_sets: []const DescriptorSet, dynamic_offsets: []const u32) void {
+        return device_dispatch.vkCmdBindDescriptorSets(self, pipeline_bind_point, layout, first_set, @intCast(descriptor_sets.len), descriptor_sets.ptr, @intCast(dynamic_offsets.len), dynamic_offsets.ptr);
     }
 
     pub fn cmdBindIndexBuffer(self: *CommandBuffer, buffer: Buffer, offset: DeviceSize, index_type: IndexType) void {
-        device_dispatch.vkCmdBindIndexBuffer(self, buffer, offset, index_type);
+        return device_dispatch.vkCmdBindIndexBuffer(self, buffer, offset, index_type);
     }
 
-    pub fn cmdBindVertexBuffers(self: *CommandBuffer, first_binding: u32, binding_count: u32, p_buffers: []const Buffer, p_offsets: []const DeviceSize) void {
-        device_dispatch.vkCmdBindVertexBuffers(self, first_binding, binding_count, p_buffers, p_offsets);
+    pub fn cmdBindVertexBuffers(self: *CommandBuffer, first_binding: u32, buffers: []const Buffer, offsets: []const DeviceSize) void {
+        return device_dispatch.vkCmdBindVertexBuffers(self, first_binding, @intCast(buffers.len), buffers.ptr, offsets.ptr);
     }
 
     pub fn cmdDraw(self: *CommandBuffer, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) void {
-        device_dispatch.vkCmdDraw(self, vertex_count, instance_count, first_vertex, first_instance);
+        return device_dispatch.vkCmdDraw(self, vertex_count, instance_count, first_vertex, first_instance);
     }
 
     pub fn cmdDrawIndexed(self: *CommandBuffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32) void {
-        device_dispatch.vkCmdDrawIndexed(self, index_count, instance_count, first_index, vertex_offset, first_instance);
+        return device_dispatch.vkCmdDrawIndexed(self, index_count, instance_count, first_index, vertex_offset, first_instance);
     }
 
     pub fn cmdDrawIndirect(self: *CommandBuffer, buffer: Buffer, offset: DeviceSize, draw_count: u32, stride: u32) void {
-        device_dispatch.vkCmdDrawIndirect(self, buffer, offset, draw_count, stride);
+        return device_dispatch.vkCmdDrawIndirect(self, buffer, offset, draw_count, stride);
     }
 
     pub fn cmdDrawIndexedIndirect(self: *CommandBuffer, buffer: Buffer, offset: DeviceSize, draw_count: u32, stride: u32) void {
-        device_dispatch.vkCmdDrawIndexedIndirect(self, buffer, offset, draw_count, stride);
+        return device_dispatch.vkCmdDrawIndexedIndirect(self, buffer, offset, draw_count, stride);
     }
 
     pub fn cmdDispatch(self: *CommandBuffer, group_count_x: u32, group_count_y: u32, group_count_z: u32) void {
-        device_dispatch.vkCmdDispatch(self, group_count_x, group_count_y, group_count_z);
+        return device_dispatch.vkCmdDispatch(self, group_count_x, group_count_y, group_count_z);
     }
 
     pub fn cmdDispatchIndirect(self: *CommandBuffer, buffer: Buffer, offset: DeviceSize) void {
-        device_dispatch.vkCmdDispatchIndirect(self, buffer, offset);
+        return device_dispatch.vkCmdDispatchIndirect(self, buffer, offset);
     }
 
-    pub fn cmdCopyBuffer(self: *CommandBuffer, src_buffer: Buffer, dst_buffer: Buffer, region_count: u32, p_regions: []const BufferCopy) void {
-        device_dispatch.vkCmdCopyBuffer(self, src_buffer, dst_buffer, region_count, p_regions);
+    pub fn cmdCopyBuffer(self: *CommandBuffer, src_buffer: Buffer, dst_buffer: Buffer, regions: []const BufferCopy) void {
+        return device_dispatch.vkCmdCopyBuffer(self, src_buffer, dst_buffer, @intCast(regions.len), regions.ptr);
     }
 
-    pub fn cmdCopyImage(self: *CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_image: Image, dst_image_layout: ImageLayout, region_count: u32, p_regions: []const ImageCopy) void {
-        device_dispatch.vkCmdCopyImage(self, src_image, src_image_layout, dst_image, dst_image_layout, region_count, p_regions);
+    pub fn cmdCopyImage(self: *CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_image: Image, dst_image_layout: ImageLayout, regions: []const ImageCopy) void {
+        return device_dispatch.vkCmdCopyImage(self, src_image, src_image_layout, dst_image, dst_image_layout, @intCast(regions.len), regions.ptr);
     }
 
-    pub fn cmdBlitImage(self: *CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_image: Image, dst_image_layout: ImageLayout, region_count: u32, p_regions: []const ImageBlit, filter: Filter) void {
-        device_dispatch.vkCmdBlitImage(self, src_image, src_image_layout, dst_image, dst_image_layout, region_count, p_regions, filter);
+    pub fn cmdBlitImage(self: *CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_image: Image, dst_image_layout: ImageLayout, regions: []const ImageBlit, filter: Filter) void {
+        return device_dispatch.vkCmdBlitImage(self, src_image, src_image_layout, dst_image, dst_image_layout, @intCast(regions.len), regions.ptr, filter);
     }
 
-    pub fn cmdCopyBufferToImage(self: *CommandBuffer, src_buffer: Buffer, dst_image: Image, dst_image_layout: ImageLayout, region_count: u32, p_regions: []const BufferImageCopy) void {
-        device_dispatch.vkCmdCopyBufferToImage(self, src_buffer, dst_image, dst_image_layout, region_count, p_regions);
+    pub fn cmdCopyBufferToImage(self: *CommandBuffer, src_buffer: Buffer, dst_image: Image, dst_image_layout: ImageLayout, regions: []const BufferImageCopy) void {
+        return device_dispatch.vkCmdCopyBufferToImage(self, src_buffer, dst_image, dst_image_layout, @intCast(regions.len), regions.ptr);
     }
 
-    pub fn cmdCopyImageToBuffer(self: *CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_buffer: Buffer, region_count: u32, p_regions: []const BufferImageCopy) void {
-        device_dispatch.vkCmdCopyImageToBuffer(self, src_image, src_image_layout, dst_buffer, region_count, p_regions);
+    pub fn cmdCopyImageToBuffer(self: *CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_buffer: Buffer, regions: []const BufferImageCopy) void {
+        return device_dispatch.vkCmdCopyImageToBuffer(self, src_image, src_image_layout, dst_buffer, @intCast(regions.len), regions.ptr);
     }
 
-    pub fn cmdUpdateBuffer(self: *CommandBuffer, dst_buffer: Buffer, dst_offset: DeviceSize, data_size: DeviceSize, p_data: []const anyopaque) void {
-        device_dispatch.vkCmdUpdateBuffer(self, dst_buffer, dst_offset, data_size, p_data);
+    pub fn cmdUpdateBuffer(self: *CommandBuffer, dst_buffer: Buffer, dst_offset: DeviceSize, data_size: DeviceSize, data: []const void) void {
+        return device_dispatch.vkCmdUpdateBuffer(self, dst_buffer, dst_offset, data_size, data.ptr);
     }
 
     pub fn cmdFillBuffer(self: *CommandBuffer, dst_buffer: Buffer, dst_offset: DeviceSize, size: DeviceSize, data: u32) void {
-        device_dispatch.vkCmdFillBuffer(self, dst_buffer, dst_offset, size, data);
+        return device_dispatch.vkCmdFillBuffer(self, dst_buffer, dst_offset, size, data);
     }
 
-    pub fn cmdClearColorImage(self: *CommandBuffer, image: Image, image_layout: ImageLayout, p_color: *const ClearColorValue, range_count: u32, p_ranges: []const ImageSubresourceRange) void {
-        device_dispatch.vkCmdClearColorImage(self, image, image_layout, p_color, range_count, p_ranges);
+    pub fn cmdClearColorImage(self: *CommandBuffer, image: Image, image_layout: ImageLayout, color: *const ClearColorValue, ranges: []const ImageSubresourceRange) void {
+        return device_dispatch.vkCmdClearColorImage(self, image, image_layout, color, @intCast(ranges.len), ranges.ptr);
     }
 
-    pub fn cmdClearDepthStencilImage(self: *CommandBuffer, image: Image, image_layout: ImageLayout, p_depth_stencil: *const ClearDepthStencilValue, range_count: u32, p_ranges: []const ImageSubresourceRange) void {
-        device_dispatch.vkCmdClearDepthStencilImage(self, image, image_layout, p_depth_stencil, range_count, p_ranges);
+    pub fn cmdClearDepthStencilImage(self: *CommandBuffer, image: Image, image_layout: ImageLayout, depth_stencil: *const ClearDepthStencilValue, ranges: []const ImageSubresourceRange) void {
+        return device_dispatch.vkCmdClearDepthStencilImage(self, image, image_layout, depth_stencil, @intCast(ranges.len), ranges.ptr);
     }
 
-    pub fn cmdClearAttachments(self: *CommandBuffer, attachment_count: u32, p_attachments: []const ClearAttachment, rect_count: u32, p_rects: []const ClearRect) void {
-        device_dispatch.vkCmdClearAttachments(self, attachment_count, p_attachments, rect_count, p_rects);
+    pub fn cmdClearAttachments(self: *CommandBuffer, attachments: []const ClearAttachment, rects: []const ClearRect) void {
+        return device_dispatch.vkCmdClearAttachments(self, @intCast(attachments.len), attachments.ptr, @intCast(rects.len), rects.ptr);
     }
 
-    pub fn cmdResolveImage(self: *CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_image: Image, dst_image_layout: ImageLayout, region_count: u32, p_regions: []const ImageResolve) void {
-        device_dispatch.vkCmdResolveImage(self, src_image, src_image_layout, dst_image, dst_image_layout, region_count, p_regions);
+    pub fn cmdResolveImage(self: *CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_image: Image, dst_image_layout: ImageLayout, regions: []const ImageResolve) void {
+        return device_dispatch.vkCmdResolveImage(self, src_image, src_image_layout, dst_image, dst_image_layout, @intCast(regions.len), regions.ptr);
     }
 
     pub fn cmdSetEvent(self: *CommandBuffer, event: Event, stage_mask: PipelineStageFlags) void {
-        device_dispatch.vkCmdSetEvent(self, event, stage_mask);
+        return device_dispatch.vkCmdSetEvent(self, event, stage_mask);
     }
 
     pub fn cmdResetEvent(self: *CommandBuffer, event: Event, stage_mask: PipelineStageFlags) void {
-        device_dispatch.vkCmdResetEvent(self, event, stage_mask);
+        return device_dispatch.vkCmdResetEvent(self, event, stage_mask);
     }
 
-    pub fn cmdWaitEvents(self: *CommandBuffer, event_count: u32, p_events: []const Event, src_stage_mask: PipelineStageFlags, dst_stage_mask: PipelineStageFlags, memory_barrier_count: u32, p_memory_barriers: []const MemoryBarrier, buffer_memory_barrier_count: u32, p_buffer_memory_barriers: []const BufferMemoryBarrier, image_memory_barrier_count: u32, p_image_memory_barriers: []const ImageMemoryBarrier) void {
-        device_dispatch.vkCmdWaitEvents(self, event_count, p_events, src_stage_mask, dst_stage_mask, memory_barrier_count, p_memory_barriers, buffer_memory_barrier_count, p_buffer_memory_barriers, image_memory_barrier_count, p_image_memory_barriers);
+    pub fn cmdWaitEvents(self: *CommandBuffer, events: []const Event, src_stage_mask: PipelineStageFlags, dst_stage_mask: PipelineStageFlags, memory_barriers: []const MemoryBarrier, buffer_memory_barriers: []const BufferMemoryBarrier, image_memory_barriers: []const ImageMemoryBarrier) void {
+        return device_dispatch.vkCmdWaitEvents(self, @intCast(events.len), events.ptr, src_stage_mask, dst_stage_mask, @intCast(memory_barriers.len), memory_barriers.ptr, @intCast(buffer_memory_barriers.len), buffer_memory_barriers.ptr, @intCast(image_memory_barriers.len), image_memory_barriers.ptr);
     }
 
-    pub fn cmdPipelineBarrier(self: *CommandBuffer, src_stage_mask: PipelineStageFlags, dst_stage_mask: PipelineStageFlags, dependency_flags: DependencyFlags, memory_barrier_count: u32, p_memory_barriers: []const MemoryBarrier, buffer_memory_barrier_count: u32, p_buffer_memory_barriers: []const BufferMemoryBarrier, image_memory_barrier_count: u32, p_image_memory_barriers: []const ImageMemoryBarrier) void {
-        device_dispatch.vkCmdPipelineBarrier(self, src_stage_mask, dst_stage_mask, dependency_flags, memory_barrier_count, p_memory_barriers, buffer_memory_barrier_count, p_buffer_memory_barriers, image_memory_barrier_count, p_image_memory_barriers);
+    pub fn cmdPipelineBarrier(self: *CommandBuffer, src_stage_mask: PipelineStageFlags, dst_stage_mask: PipelineStageFlags, dependency_flags: DependencyFlags, memory_barriers: []const MemoryBarrier, buffer_memory_barriers: []const BufferMemoryBarrier, image_memory_barriers: []const ImageMemoryBarrier) void {
+        return device_dispatch.vkCmdPipelineBarrier(self, src_stage_mask, dst_stage_mask, dependency_flags, @intCast(memory_barriers.len), memory_barriers.ptr, @intCast(buffer_memory_barriers.len), buffer_memory_barriers.ptr, @intCast(image_memory_barriers.len), image_memory_barriers.ptr);
     }
 
     pub fn cmdBeginQuery(self: *CommandBuffer, query_pool: QueryPool, query: u32, flags: QueryControlFlags) void {
-        device_dispatch.vkCmdBeginQuery(self, query_pool, query, flags);
+        return device_dispatch.vkCmdBeginQuery(self, query_pool, query, flags);
     }
 
     pub fn cmdEndQuery(self: *CommandBuffer, query_pool: QueryPool, query: u32) void {
-        device_dispatch.vkCmdEndQuery(self, query_pool, query);
+        return device_dispatch.vkCmdEndQuery(self, query_pool, query);
     }
 
     pub fn cmdResetQueryPool(self: *CommandBuffer, query_pool: QueryPool, first_query: u32, query_count: u32) void {
-        device_dispatch.vkCmdResetQueryPool(self, query_pool, first_query, query_count);
+        return device_dispatch.vkCmdResetQueryPool(self, query_pool, first_query, query_count);
     }
 
     pub fn cmdWriteTimestamp(self: *CommandBuffer, pipeline_stage: PipelineStageFlagBits, query_pool: QueryPool, query: u32) void {
-        device_dispatch.vkCmdWriteTimestamp(self, pipeline_stage, query_pool, query);
+        return device_dispatch.vkCmdWriteTimestamp(self, pipeline_stage, query_pool, query);
     }
 
     pub fn cmdCopyQueryPoolResults(self: *CommandBuffer, query_pool: QueryPool, first_query: u32, query_count: u32, dst_buffer: Buffer, dst_offset: DeviceSize, stride: DeviceSize, flags: QueryResultFlags) void {
-        device_dispatch.vkCmdCopyQueryPoolResults(self, query_pool, first_query, query_count, dst_buffer, dst_offset, stride, flags);
+        return device_dispatch.vkCmdCopyQueryPoolResults(self, query_pool, first_query, query_count, dst_buffer, dst_offset, stride, flags);
     }
 
-    pub fn cmdPushConstants(self: *CommandBuffer, layout: PipelineLayout, stage_flags: ShaderStageFlags, offset: u32, size: u32, p_values: []const anyopaque) void {
-        device_dispatch.vkCmdPushConstants(self, layout, stage_flags, offset, size, p_values);
+    pub fn cmdPushConstants(self: *CommandBuffer, layout: PipelineLayout, stage_flags: ShaderStageFlags, offset: u32, values: []const void) void {
+        return device_dispatch.vkCmdPushConstants(self, layout, stage_flags, offset, @intCast(values.len), values.ptr);
     }
 
-    pub fn cmdBeginRenderPass(self: *CommandBuffer, p_render_pass_begin: *const RenderPassBeginInfo, contents: SubpassContents) void {
-        device_dispatch.vkCmdBeginRenderPass(self, p_render_pass_begin, contents);
+    pub fn cmdBeginRenderPass(self: *CommandBuffer, render_pass_begin: *const RenderPassBeginInfo, contents: SubpassContents) void {
+        return device_dispatch.vkCmdBeginRenderPass(self, render_pass_begin, contents);
     }
 
     pub fn cmdNextSubpass(self: *CommandBuffer, contents: SubpassContents) void {
-        device_dispatch.vkCmdNextSubpass(self, contents);
+        return device_dispatch.vkCmdNextSubpass(self, contents);
     }
 
     pub fn cmdEndRenderPass(self: *CommandBuffer) void {
-        device_dispatch.vkCmdEndRenderPass(self);
+        return device_dispatch.vkCmdEndRenderPass(self);
     }
 
-    pub fn cmdExecuteCommands(self: *CommandBuffer, command_buffer_count: u32, p_command_buffers: *const *CommandBuffer) void {
-        device_dispatch.vkCmdExecuteCommands(self, command_buffer_count, p_command_buffers);
+    pub fn cmdExecuteCommands(self: *CommandBuffer, command_buffers: []const *CommandBuffer) void {
+        return device_dispatch.vkCmdExecuteCommands(self, @intCast(command_buffers.len), command_buffers.ptr);
     }
 
     pub fn cmdSetDeviceMask(self: *CommandBuffer, device_mask: u32) void {
-        device_dispatch.vkCmdSetDeviceMask(self, device_mask);
+        return device_dispatch.vkCmdSetDeviceMask(self, device_mask);
     }
 
     pub fn cmdDispatchBase(self: *CommandBuffer, base_group_x: u32, base_group_y: u32, base_group_z: u32, group_count_x: u32, group_count_y: u32, group_count_z: u32) void {
-        device_dispatch.vkCmdDispatchBase(self, base_group_x, base_group_y, base_group_z, group_count_x, group_count_y, group_count_z);
+        return device_dispatch.vkCmdDispatchBase(self, base_group_x, base_group_y, base_group_z, group_count_x, group_count_y, group_count_z);
     }
 
-    pub fn cmdBeginDebugUtilsLabelEXT(self: *CommandBuffer, p_label_info: *const DebugUtilsLabelEXT) void {
-        device_dispatch.vkCmdBeginDebugUtilsLabelEXT(self, p_label_info);
+    pub fn cmdBeginDebugUtilsLabelEXT(self: *CommandBuffer, label_info: *const DebugUtilsLabelEXT) void {
+        return device_dispatch.vkCmdBeginDebugUtilsLabelEXT(self, label_info);
     }
 
     pub fn cmdEndDebugUtilsLabelEXT(self: *CommandBuffer) void {
-        device_dispatch.vkCmdEndDebugUtilsLabelEXT(self);
+        return device_dispatch.vkCmdEndDebugUtilsLabelEXT(self);
     }
 
-    pub fn cmdInsertDebugUtilsLabelEXT(self: *CommandBuffer, p_label_info: *const DebugUtilsLabelEXT) void {
-        device_dispatch.vkCmdInsertDebugUtilsLabelEXT(self, p_label_info);
+    pub fn cmdInsertDebugUtilsLabelEXT(self: *CommandBuffer, label_info: *const DebugUtilsLabelEXT) void {
+        return device_dispatch.vkCmdInsertDebugUtilsLabelEXT(self, label_info);
     }
 
-    pub fn cmdBeginRenderPass2(self: *CommandBuffer, p_render_pass_begin: *const RenderPassBeginInfo, p_subpass_begin_info: *const SubpassBeginInfo) void {
-        device_dispatch.vkCmdBeginRenderPass2(self, p_render_pass_begin, p_subpass_begin_info);
+    pub fn cmdBeginRenderPass2(self: *CommandBuffer, render_pass_begin: *const RenderPassBeginInfo, subpass_begin_info: *const SubpassBeginInfo) void {
+        return device_dispatch.vkCmdBeginRenderPass2(self, render_pass_begin, subpass_begin_info);
     }
 
-    pub fn cmdNextSubpass2(self: *CommandBuffer, p_subpass_begin_info: *const SubpassBeginInfo, p_subpass_end_info: *const SubpassEndInfo) void {
-        device_dispatch.vkCmdNextSubpass2(self, p_subpass_begin_info, p_subpass_end_info);
+    pub fn cmdNextSubpass2(self: *CommandBuffer, subpass_begin_info: *const SubpassBeginInfo, subpass_end_info: *const SubpassEndInfo) void {
+        return device_dispatch.vkCmdNextSubpass2(self, subpass_begin_info, subpass_end_info);
     }
 
-    pub fn cmdEndRenderPass2(self: *CommandBuffer, p_subpass_end_info: *const SubpassEndInfo) void {
-        device_dispatch.vkCmdEndRenderPass2(self, p_subpass_end_info);
+    pub fn cmdEndRenderPass2(self: *CommandBuffer, subpass_end_info: *const SubpassEndInfo) void {
+        return device_dispatch.vkCmdEndRenderPass2(self, subpass_end_info);
     }
 
     pub fn cmdDrawIndirectCount(self: *CommandBuffer, buffer: Buffer, offset: DeviceSize, count_buffer: Buffer, count_buffer_offset: DeviceSize, max_draw_count: u32, stride: u32) void {
-        device_dispatch.vkCmdDrawIndirectCount(self, buffer, offset, count_buffer, count_buffer_offset, max_draw_count, stride);
+        return device_dispatch.vkCmdDrawIndirectCount(self, buffer, offset, count_buffer, count_buffer_offset, max_draw_count, stride);
     }
 
     pub fn cmdDrawIndexedIndirectCount(self: *CommandBuffer, buffer: Buffer, offset: DeviceSize, count_buffer: Buffer, count_buffer_offset: DeviceSize, max_draw_count: u32, stride: u32) void {
-        device_dispatch.vkCmdDrawIndexedIndirectCount(self, buffer, offset, count_buffer, count_buffer_offset, max_draw_count, stride);
+        return device_dispatch.vkCmdDrawIndexedIndirectCount(self, buffer, offset, count_buffer, count_buffer_offset, max_draw_count, stride);
     }
 
     pub fn cmdSetCullMode(self: *CommandBuffer, cull_mode: CullModeFlags) void {
-        device_dispatch.vkCmdSetCullMode(self, cull_mode);
+        return device_dispatch.vkCmdSetCullMode(self, cull_mode);
     }
 
     pub fn cmdSetFrontFace(self: *CommandBuffer, front_face: FrontFace) void {
-        device_dispatch.vkCmdSetFrontFace(self, front_face);
+        return device_dispatch.vkCmdSetFrontFace(self, front_face);
     }
 
     pub fn cmdSetPrimitiveTopology(self: *CommandBuffer, primitive_topology: PrimitiveTopology) void {
-        device_dispatch.vkCmdSetPrimitiveTopology(self, primitive_topology);
+        return device_dispatch.vkCmdSetPrimitiveTopology(self, primitive_topology);
     }
 
-    pub fn cmdSetViewportWithCount(self: *CommandBuffer, viewport_count: u32, p_viewports: []const Viewport) void {
-        device_dispatch.vkCmdSetViewportWithCount(self, viewport_count, p_viewports);
+    pub fn cmdSetViewportWithCount(self: *CommandBuffer, viewports: []const Viewport) void {
+        return device_dispatch.vkCmdSetViewportWithCount(self, @intCast(viewports.len), viewports.ptr);
     }
 
-    pub fn cmdSetScissorWithCount(self: *CommandBuffer, scissor_count: u32, p_scissors: []const Rect2D) void {
-        device_dispatch.vkCmdSetScissorWithCount(self, scissor_count, p_scissors);
+    pub fn cmdSetScissorWithCount(self: *CommandBuffer, scissors: []const Rect2D) void {
+        return device_dispatch.vkCmdSetScissorWithCount(self, @intCast(scissors.len), scissors.ptr);
     }
 
-    pub fn cmdBindVertexBuffers2(self: *CommandBuffer, first_binding: u32, binding_count: u32, p_buffers: []const Buffer, p_offsets: []const DeviceSize, p_sizes: ?[]const DeviceSize, p_strides: ?[]const DeviceSize) void {
-        device_dispatch.vkCmdBindVertexBuffers2(self, first_binding, binding_count, p_buffers, p_offsets, p_sizes, p_strides);
+    pub fn cmdBindVertexBuffers2(self: *CommandBuffer, first_binding: u32, buffers: []const Buffer, offsets: []const DeviceSize, sizes: []const DeviceSize, strides: []const DeviceSize) void {
+        return device_dispatch.vkCmdBindVertexBuffers2(self, first_binding, @intCast(buffers.len), buffers.ptr, offsets.ptr, sizes.ptr, strides.ptr);
     }
 
     pub fn cmdSetDepthTestEnable(self: *CommandBuffer, depth_test_enable: Bool32) void {
-        device_dispatch.vkCmdSetDepthTestEnable(self, depth_test_enable);
+        return device_dispatch.vkCmdSetDepthTestEnable(self, depth_test_enable);
     }
 
     pub fn cmdSetDepthWriteEnable(self: *CommandBuffer, depth_write_enable: Bool32) void {
-        device_dispatch.vkCmdSetDepthWriteEnable(self, depth_write_enable);
+        return device_dispatch.vkCmdSetDepthWriteEnable(self, depth_write_enable);
     }
 
     pub fn cmdSetDepthCompareOp(self: *CommandBuffer, depth_compare_op: CompareOp) void {
-        device_dispatch.vkCmdSetDepthCompareOp(self, depth_compare_op);
+        return device_dispatch.vkCmdSetDepthCompareOp(self, depth_compare_op);
     }
 
     pub fn cmdSetDepthBoundsTestEnable(self: *CommandBuffer, depth_bounds_test_enable: Bool32) void {
-        device_dispatch.vkCmdSetDepthBoundsTestEnable(self, depth_bounds_test_enable);
+        return device_dispatch.vkCmdSetDepthBoundsTestEnable(self, depth_bounds_test_enable);
     }
 
     pub fn cmdSetStencilTestEnable(self: *CommandBuffer, stencil_test_enable: Bool32) void {
-        device_dispatch.vkCmdSetStencilTestEnable(self, stencil_test_enable);
+        return device_dispatch.vkCmdSetStencilTestEnable(self, stencil_test_enable);
     }
 
     pub fn cmdSetStencilOp(self: *CommandBuffer, face_mask: StencilFaceFlags, fail_op: StencilOp, pass_op: StencilOp, depth_fail_op: StencilOp, compare_op: CompareOp) void {
-        device_dispatch.vkCmdSetStencilOp(self, face_mask, fail_op, pass_op, depth_fail_op, compare_op);
+        return device_dispatch.vkCmdSetStencilOp(self, face_mask, fail_op, pass_op, depth_fail_op, compare_op);
     }
 
     pub fn cmdSetRasterizerDiscardEnable(self: *CommandBuffer, rasterizer_discard_enable: Bool32) void {
-        device_dispatch.vkCmdSetRasterizerDiscardEnable(self, rasterizer_discard_enable);
+        return device_dispatch.vkCmdSetRasterizerDiscardEnable(self, rasterizer_discard_enable);
     }
 
     pub fn cmdSetDepthBiasEnable(self: *CommandBuffer, depth_bias_enable: Bool32) void {
-        device_dispatch.vkCmdSetDepthBiasEnable(self, depth_bias_enable);
+        return device_dispatch.vkCmdSetDepthBiasEnable(self, depth_bias_enable);
     }
 
     pub fn cmdSetPrimitiveRestartEnable(self: *CommandBuffer, primitive_restart_enable: Bool32) void {
-        device_dispatch.vkCmdSetPrimitiveRestartEnable(self, primitive_restart_enable);
+        return device_dispatch.vkCmdSetPrimitiveRestartEnable(self, primitive_restart_enable);
     }
 
-    pub fn cmdCopyBuffer2(self: *CommandBuffer, p_copy_buffer_info: *const CopyBufferInfo2) void {
-        device_dispatch.vkCmdCopyBuffer2(self, p_copy_buffer_info);
+    pub fn cmdCopyBuffer2(self: *CommandBuffer, copy_buffer_info: *const CopyBufferInfo2) void {
+        return device_dispatch.vkCmdCopyBuffer2(self, copy_buffer_info);
     }
 
-    pub fn cmdCopyImage2(self: *CommandBuffer, p_copy_image_info: *const CopyImageInfo2) void {
-        device_dispatch.vkCmdCopyImage2(self, p_copy_image_info);
+    pub fn cmdCopyImage2(self: *CommandBuffer, copy_image_info: *const CopyImageInfo2) void {
+        return device_dispatch.vkCmdCopyImage2(self, copy_image_info);
     }
 
-    pub fn cmdBlitImage2(self: *CommandBuffer, p_blit_image_info: *const BlitImageInfo2) void {
-        device_dispatch.vkCmdBlitImage2(self, p_blit_image_info);
+    pub fn cmdBlitImage2(self: *CommandBuffer, blit_image_info: *const BlitImageInfo2) void {
+        return device_dispatch.vkCmdBlitImage2(self, blit_image_info);
     }
 
-    pub fn cmdCopyBufferToImage2(self: *CommandBuffer, p_copy_buffer_to_image_info: *const CopyBufferToImageInfo2) void {
-        device_dispatch.vkCmdCopyBufferToImage2(self, p_copy_buffer_to_image_info);
+    pub fn cmdCopyBufferToImage2(self: *CommandBuffer, copy_buffer_to_image_info: *const CopyBufferToImageInfo2) void {
+        return device_dispatch.vkCmdCopyBufferToImage2(self, copy_buffer_to_image_info);
     }
 
-    pub fn cmdCopyImageToBuffer2(self: *CommandBuffer, p_copy_image_to_buffer_info: *const CopyImageToBufferInfo2) void {
-        device_dispatch.vkCmdCopyImageToBuffer2(self, p_copy_image_to_buffer_info);
+    pub fn cmdCopyImageToBuffer2(self: *CommandBuffer, copy_image_to_buffer_info: *const CopyImageToBufferInfo2) void {
+        return device_dispatch.vkCmdCopyImageToBuffer2(self, copy_image_to_buffer_info);
     }
 
-    pub fn cmdResolveImage2(self: *CommandBuffer, p_resolve_image_info: *const ResolveImageInfo2) void {
-        device_dispatch.vkCmdResolveImage2(self, p_resolve_image_info);
+    pub fn cmdResolveImage2(self: *CommandBuffer, resolve_image_info: *const ResolveImageInfo2) void {
+        return device_dispatch.vkCmdResolveImage2(self, resolve_image_info);
     }
 
-    pub fn cmdSetEvent2(self: *CommandBuffer, event: Event, p_dependency_info: *const DependencyInfo) void {
-        device_dispatch.vkCmdSetEvent2(self, event, p_dependency_info);
+    pub fn cmdSetEvent2(self: *CommandBuffer, event: Event, dependency_info: *const DependencyInfo) void {
+        return device_dispatch.vkCmdSetEvent2(self, event, dependency_info);
     }
 
     pub fn cmdResetEvent2(self: *CommandBuffer, event: Event, stage_mask: PipelineStageFlags2) void {
-        device_dispatch.vkCmdResetEvent2(self, event, stage_mask);
+        return device_dispatch.vkCmdResetEvent2(self, event, stage_mask);
     }
 
-    pub fn cmdWaitEvents2(self: *CommandBuffer, event_count: u32, p_events: []const Event, p_dependency_infos: []const DependencyInfo) void {
-        device_dispatch.vkCmdWaitEvents2(self, event_count, p_events, p_dependency_infos);
+    pub fn cmdWaitEvents2(self: *CommandBuffer, events: []const Event, dependency_infos: []const DependencyInfo) void {
+        return device_dispatch.vkCmdWaitEvents2(self, @intCast(events.len), events.ptr, dependency_infos.ptr);
     }
 
-    pub fn cmdPipelineBarrier2(self: *CommandBuffer, p_dependency_info: *const DependencyInfo) void {
-        device_dispatch.vkCmdPipelineBarrier2(self, p_dependency_info);
+    pub fn cmdPipelineBarrier2(self: *CommandBuffer, dependency_info: *const DependencyInfo) void {
+        return device_dispatch.vkCmdPipelineBarrier2(self, dependency_info);
     }
 
     pub fn cmdWriteTimestamp2(self: *CommandBuffer, stage: PipelineStageFlags2, query_pool: QueryPool, query: u32) void {
-        device_dispatch.vkCmdWriteTimestamp2(self, stage, query_pool, query);
+        return device_dispatch.vkCmdWriteTimestamp2(self, stage, query_pool, query);
     }
 
-    pub fn cmdBeginRendering(self: *CommandBuffer, p_rendering_info: *const RenderingInfo) void {
-        device_dispatch.vkCmdBeginRendering(self, p_rendering_info);
+    pub fn cmdBeginRendering(self: *CommandBuffer, rendering_info: *const RenderingInfo) void {
+        return device_dispatch.vkCmdBeginRendering(self, rendering_info);
     }
 
     pub fn cmdEndRendering(self: *CommandBuffer) void {
-        device_dispatch.vkCmdEndRendering(self);
+        return device_dispatch.vkCmdEndRendering(self);
     }
 };
 

@@ -220,30 +220,83 @@ fn writeApiConstants(ctx: *Ctx) !void {
     try ctx.append("// ---- API Constants ----\n\n");
     for (ctx.model.api_constants) |c| {
         const zig_name = stripVkPrefix(c.name);
-        // Try to render the value as a numeric or string literal.
-        const value = try renderConstantValue(ctx, c.value);
-        try ctx.print("pub const {s} = {s};\n", .{ zig_name, value });
+        const decl = try renderConstantDecl(ctx, c);
+        try ctx.print("pub const {s}{s};\n", .{ zig_name, decl });
     }
     try ctx.append("\n");
 }
 
-fn renderConstantValue(ctx: *Ctx, raw: []const u8) ![]const u8 {
-    const v = std.mem.trim(u8, raw, " ()\t");
-    // `(~0U)` and friends become 0xFFFF_FFFF / 0xFFFF_FFFF_FFFF_FFFF.
-    if (std.mem.eql(u8, v, "~0U") or std.mem.eql(u8, v, "(~0U)")) return "@as(u32, 0xFFFF_FFFF)";
-    if (std.mem.eql(u8, v, "~0ULL") or std.mem.eql(u8, v, "(~0ULL)")) return "@as(u64, 0xFFFF_FFFF_FFFF_FFFF)";
-    if (std.mem.eql(u8, v, "~0U-1") or std.mem.eql(u8, v, "(~0U-1)")) return "@as(u32, 0xFFFF_FFFE)";
-    if (std.mem.eql(u8, v, "~0U-2") or std.mem.eql(u8, v, "(~0U-2)")) return "@as(u32, 0xFFFF_FFFD)";
-    // Numeric constants suffixed with U / ULL / F.
-    if (v.len > 0) {
-        // Drop trailing U/F suffixes.
-        var end = v.len;
-        while (end > 0 and (v[end - 1] == 'U' or v[end - 1] == 'L' or v[end - 1] == 'F' or v[end - 1] == 'f')) {
-            end -= 1;
+/// Render the type-annotation + initializer for a `pub const NAME …;`
+/// declaration. Returns the suffix (`: u32 = 0xFFFF_FFFE`, ` = 4`, …).
+fn renderConstantDecl(ctx: *Ctx, c: parser.ApiConstant) ![]const u8 {
+    const v = std.mem.trim(u8, c.value, " ()\t");
+
+    // Bitwise-not idioms `(~NU)`, `(~NULL)`, written by Vulkan to denote
+    // "all-1s minus N" sentinels. Render them as typed `@as(u32, value)`
+    // expressions per `engine-c-bindings.md` review item #5 — keeps them
+    // out of `comptime_int` arithmetic where `~1` would mean -2.
+    if (parseTildeForm(v)) |tilde| {
+        const ty: []const u8 = if (tilde.bits == 64) "u64" else "u32";
+        if (tilde.bits == 64) {
+            const inv: u64 = ~tilde.n;
+            return try std.fmt.allocPrint(ctx.A, ": {s} = 0x{X:0>16}", .{ ty, inv });
+        } else {
+            const inv: u32 = ~@as(u32, @intCast(tilde.n));
+            return try std.fmt.allocPrint(ctx.A, ": {s} = 0x{X:0>8}", .{ ty, inv });
         }
-        return v[0..end];
     }
-    return try ctx.A.dupe(u8, raw);
+
+    // Aliases (value carries the canonical name, not a numeric literal).
+    if (v.len > 0 and (std.ascii.isAlphabetic(v[0]) or v[0] == '_') and !std.mem.eql(u8, v, "true") and !std.mem.eql(u8, v, "false")) {
+        const target = stripVkPrefix(v);
+        return try std.fmt.allocPrint(ctx.A, " = {s}", .{target});
+    }
+
+    // Numeric / float literals — strip C suffixes.
+    var end = v.len;
+    while (end > 0 and (v[end - 1] == 'U' or v[end - 1] == 'L' or v[end - 1] == 'F' or v[end - 1] == 'f')) {
+        end -= 1;
+    }
+    const numeric = v[0..end];
+
+    if (c.c_type) |ty| {
+        const zig_ty = mapBaseName(ty);
+        return try std.fmt.allocPrint(ctx.A, ": {s} = {s}", .{ zig_ty, numeric });
+    }
+    return try std.fmt.allocPrint(ctx.A, " = {s}", .{numeric});
+}
+
+const TildeForm = struct { n: u64, bits: u8 };
+
+fn parseTildeForm(v: []const u8) ?TildeForm {
+    // Match `~<digits>U`, `~<digits>ULL`, optionally with `-1` / `-2` etc.
+    if (v.len < 3 or v[0] != '~') return null;
+    var i: usize = 1;
+    var n: u64 = 0;
+    while (i < v.len and std.ascii.isDigit(v[i])) : (i += 1) {
+        n = n * 10 + (v[i] - '0');
+    }
+    if (i == 1) return null;
+
+    var bits: u8 = 32;
+    if (i + 3 <= v.len and std.mem.eql(u8, v[i .. i + 3], "ULL")) {
+        bits = 64;
+        i += 3;
+    } else if (i < v.len and (v[i] == 'U' or v[i] == 'u')) {
+        i += 1;
+    }
+    // Optional `-K` decrement.
+    if (i < v.len and v[i] == '-') {
+        i += 1;
+        var dec: u64 = 0;
+        while (i < v.len and std.ascii.isDigit(v[i])) : (i += 1) {
+            dec = dec * 10 + (v[i] - '0');
+        }
+        // We want the bit-flipped value of (n + dec), so just bump n.
+        n += dec;
+    }
+    if (i != v.len) return null;
+    return .{ .n = n, .bits = bits };
 }
 
 // ================================================================ handles =
@@ -675,6 +728,214 @@ fn writeLoaderFunctions(ctx: *Ctx) !void {
     }
 }
 
+/// Per-command rendering plan. Captures the §4.2 idiomatic transformations:
+/// hoisted out-params (review item #2), two-pass count/array hoisting
+/// (review item #3), and slice-input collapse (review item #4).
+const WrapperPlan = struct {
+    /// Param indices to drop from the wrapper signature (their value is
+    /// computed inside the wrapper body).
+    omitted: []const usize,
+    /// Pairs (slice_idx, count_idx) — the count param is omitted, the slice
+    /// param keeps its position with type `[]T` (or `[]const T`).
+    slice_inputs: []const SliceInput,
+    /// Indices of slice-typed params whose `len` is a composite expression
+    /// (`pAllocateInfo->commandBufferCount`, …). Rendered as Zig slices in
+    /// the signature; the body passes `slice.ptr` and the matching length
+    /// is the caller's responsibility (it lives in a struct field).
+    composite_slices: []const usize,
+    /// Out-param hoist (singular). `null` if no hoist.
+    out_param: ?usize,
+    /// Two-pass count/array hoist.
+    two_pass: ?TwoPass,
+    /// Wrapper signature kind.
+    kind: enum {
+        plain,
+        check_result_void,
+        plain_hoist,
+        check_result_hoist,
+        two_pass_hoist,
+    },
+    /// Resulting Zig return type expression.
+    return_type: []const u8,
+    /// Whether the wrapper takes an extra `gpa: std.mem.Allocator` param
+    /// (always paired with `two_pass_hoist`).
+    needs_allocator: bool,
+};
+
+const SliceInput = struct {
+    slice_idx: usize,
+    count_idx: usize,
+};
+
+const TwoPass = struct {
+    count_idx: usize,
+    array_idx: usize,
+};
+
+fn buildPlan(ctx: *Ctx, c: parser.Command, has_self: bool) !WrapperPlan {
+    var omitted: std.ArrayList(usize) = .empty;
+    var slices: std.ArrayList(SliceInput) = .empty;
+    var composite_slices: std.ArrayList(usize) = .empty;
+
+    const returns_vk_result = std.mem.eql(u8, c.return_type.base, "VkResult");
+
+    // -- Slice inputs (review item #4) ---------------------------------
+    // For each parameter `p` with a `len` attribute, render as a Zig slice.
+    //   - If `len` matches a sibling u32 param, drop that count (slice_inputs).
+    //   - If `len` references a struct field (e.g. `pAllocateInfo->X`), keep
+    //     the param as a slice but rely on the caller to size it (composite_slices).
+    //   - `len="null-terminated"` is a cstring and handled by mapCType.
+    for (c.params, 0..) |p, i| {
+        if (has_self and i == 0) continue;
+        const len = p.len orelse continue;
+        if (p.c_type.pointer_depth == 0) continue;
+        if (std.mem.eql(u8, len, "null-terminated")) continue;
+        if (std.mem.indexOfAny(u8, len, "->,()") != null) {
+            try composite_slices.append(ctx.A, i);
+            continue;
+        }
+        var matched = false;
+        for (c.params, 0..) |sibling, j| {
+            if (j == i) continue;
+            if (!std.mem.eql(u8, sibling.name, len)) continue;
+            if (!std.mem.eql(u8, sibling.c_type.base, "uint32_t") and !std.mem.eql(u8, sibling.c_type.base, "size_t")) continue;
+            if (sibling.c_type.pointer_depth != 0) continue;
+            try slices.append(ctx.A, .{ .slice_idx = i, .count_idx = j });
+            var already = false;
+            for (omitted.items) |o| if (o == j) {
+                already = true;
+                break;
+            };
+            if (!already) try omitted.append(ctx.A, j);
+            matched = true;
+            break;
+        }
+        if (!matched) {
+            // `len` references something we couldn't resolve (e.g. literal
+            // `commandBufferCount` from the same param list but typed
+            // unusually). Keep it as a slice without dropping anything.
+            try composite_slices.append(ctx.A, i);
+        }
+    }
+
+    // -- Two-pass count/array (review item #3) -------------------------
+    // VkResult or void command whose two trailing params are
+    // `(uint32_t* pCount, T* pArray)` with `pArray` having `len="pCount"`.
+    var two_pass: ?TwoPass = null;
+    if (c.params.len >= 2) {
+        const count_idx = c.params.len - 2;
+        const array_idx = c.params.len - 1;
+        const cnt = c.params[count_idx];
+        const arr = c.params[array_idx];
+        const looks_like_count = std.mem.eql(u8, cnt.c_type.base, "uint32_t") and cnt.c_type.pointer_depth == 1 and !cnt.c_type.is_const;
+        const arr_len = arr.len orelse "";
+        const len_matches_count = std.mem.eql(u8, arr_len, cnt.name);
+        const arr_is_array_out = arr.c_type.pointer_depth == 1 and !arr.c_type.is_const;
+        if (looks_like_count and len_matches_count and arr_is_array_out) {
+            two_pass = .{ .count_idx = count_idx, .array_idx = array_idx };
+            // The two trailing params become the (gpa, return-slice).
+            try omitted.append(ctx.A, count_idx);
+            try omitted.append(ctx.A, array_idx);
+        }
+    }
+
+    // -- Singular out-param (review item #2) ---------------------------
+    // Only when no two-pass hoist already claimed the trailing param.
+    var out_param: ?usize = null;
+    if (two_pass == null and c.params.len > 0) {
+        const last_idx = c.params.len - 1;
+        const last = c.params[last_idx];
+        const not_self = !(has_self and last_idx == 0);
+        const eligible = not_self and last.c_type.pointer_depth >= 1 and !last.c_type.is_const and !last.optional and last.len == null;
+        if (eligible and !indexInList(omitted.items, last_idx)) {
+            out_param = last_idx;
+            try omitted.append(ctx.A, last_idx);
+        }
+    }
+
+    // -- Decide return type + body kind --------------------------------
+    var return_type: []const u8 = undefined;
+    var kind: @TypeOf(@as(WrapperPlan, undefined).kind) = undefined;
+    var needs_allocator = false;
+
+    if (two_pass) |tp| {
+        const elem_ty = try hoistedElementType(ctx, c.params[tp.array_idx]);
+        return_type = try std.fmt.allocPrint(ctx.A, "Error![]{s}", .{elem_ty});
+        kind = .two_pass_hoist;
+        needs_allocator = true;
+    } else if (out_param) |op| {
+        const ret_inner = try hoistedReturnInner(ctx, c.params[op]);
+        if (returns_vk_result) {
+            return_type = try std.fmt.allocPrint(ctx.A, "Error!{s}", .{ret_inner});
+            kind = .check_result_hoist;
+        } else {
+            return_type = ret_inner;
+            kind = .plain_hoist;
+        }
+    } else if (returns_vk_result) {
+        return_type = "Error!void";
+        kind = .check_result_void;
+    } else {
+        const ret_zig = try mapCType(ctx, c.return_type, false, null, .api_return);
+        return_type = ret_zig;
+        kind = .plain;
+    }
+
+    return .{
+        .omitted = try omitted.toOwnedSlice(ctx.A),
+        .slice_inputs = try slices.toOwnedSlice(ctx.A),
+        .composite_slices = try composite_slices.toOwnedSlice(ctx.A),
+        .out_param = out_param,
+        .two_pass = two_pass,
+        .kind = kind,
+        .return_type = return_type,
+        .needs_allocator = needs_allocator,
+    };
+}
+
+fn indexInList(list: []const usize, x: usize) bool {
+    for (list) |v| if (v == x) return true;
+    return false;
+}
+
+/// Strip the leading `pp_` / `p_` Hungarian prefix from a wrapper parameter
+/// name (review item #1). Struct field names keep their prefix because they
+/// document the underlying ABI shape.
+fn stripParamPrefix(s: []const u8) []const u8 {
+    var t = s;
+    while (true) {
+        if (std.mem.startsWith(u8, t, "p_") and t.len > 2 and !std.ascii.isDigit(t[2])) {
+            t = t[2..];
+            continue;
+        }
+        break;
+    }
+    return t;
+}
+
+/// For a `T**` out-param (last param of a `vkCreate*` command), the hoisted
+/// return type is `*T` (pointer to opaque) when T is dispatchable, or `T`
+/// (value) when T is a struct or non-dispatchable handle.
+fn hoistedReturnInner(ctx: *Ctx, p: parser.Member) ![]const u8 {
+    const base = mapBaseName(p.c_type.base);
+    const handle_kind = ctx.type_names.get(p.c_type.base) orelse Ctx.TypeKind.basetype;
+    if (handle_kind == .handle_dispatchable) {
+        return try std.fmt.allocPrint(ctx.A, "*{s}", .{base});
+    }
+    return base;
+}
+
+/// Slice element type for `Error![]T`. Same logic as `hoistedReturnInner`
+/// but never wraps in a pointer — slice element is the value type.
+fn hoistedElementType(ctx: *Ctx, p: parser.Member) ![]const u8 {
+    const base = mapBaseName(p.c_type.base);
+    const handle_kind = ctx.type_names.get(p.c_type.base) orelse Ctx.TypeKind.basetype;
+    if (handle_kind == .handle_dispatchable) {
+        return try std.fmt.allocPrint(ctx.A, "*{s}", .{base});
+    }
+    return base;
+}
+
 fn emitWrapper(ctx: *Ctx, c: parser.Command, dispatch: Dispatch, _self: ?parser.Handle) !void {
     const method_name = try methodName(ctx.A, c.name, _self);
     const dispatch_var = switch (dispatch) {
@@ -683,54 +944,202 @@ fn emitWrapper(ctx: *Ctx, c: parser.Command, dispatch: Dispatch, _self: ?parser.
         .device => "device_dispatch",
     };
     const indent: []const u8 = if (_self != null) "    " else "";
+    const has_self = _self != null;
+
+    const plan = try buildPlan(ctx, c, has_self);
 
     // --- Signature ----------------------------------------------------
     try ctx.print("{s}pub fn {s}(", .{ indent, method_name });
+    var first_emitted = true;
     for (c.params, 0..) |p, i| {
-        if (i > 0) try ctx.append(", ");
-        if (i == 0 and _self != null) {
-            // Render the first parameter as `self: *<HandleType>` when
-            // emitted inside the opaque — `engine-c-bindings.md` §4.2 calls
-            // for methods attached to their owning type. Zig does not have
-            // a magic `Self` keyword, so we spell the type explicitly.
+        if (indexInList(plan.omitted, i)) continue;
+        if (!first_emitted) try ctx.append(", ");
+        first_emitted = false;
+        if (has_self and i == 0) {
             try ctx.print("self: *{s}", .{stripVkPrefix(_self.?.name)});
             continue;
         }
-        const pname = try snakeCase(ctx.A, p.name);
+        const pname_raw = try snakeCase(ctx.A, p.name);
+        const pname = stripParamPrefix(pname_raw);
+        // Slice inputs (paired count or composite-len) render as `[]T`.
+        if (findSliceInput(plan.slice_inputs, i) != null or indexInList(plan.composite_slices, i)) {
+            const elem = mapBaseName(p.c_type.base);
+            const handle_kind = ctx.type_names.get(p.c_type.base) orelse Ctx.TypeKind.basetype;
+            const elem_zig = if (handle_kind == .handle_dispatchable)
+                try std.fmt.allocPrint(ctx.A, "*{s}", .{elem})
+            else
+                try ctx.A.dupe(u8, elem);
+            const ty = if (p.c_type.is_const)
+                try std.fmt.allocPrint(ctx.A, "[]const {s}", .{elem_zig})
+            else
+                try std.fmt.allocPrint(ctx.A, "[]{s}", .{elem_zig});
+            try ctx.print("{s}: {s}", .{ pname, ty });
+            continue;
+        }
         const ptype = try mapCType(ctx, p.c_type, p.optional, p.len, .api_param);
         try ctx.print("{s}: {s}", .{ pname, ptype });
     }
-    const returns_vk_result = std.mem.eql(u8, c.return_type.base, "VkResult");
-    const ret_zig = try mapCType(ctx, c.return_type, false, null, .api_return);
-    if (returns_vk_result) {
-        try ctx.print(") Error!void {{\n", .{});
-    } else if (std.mem.eql(u8, ret_zig, "void")) {
-        try ctx.print(") void {{\n", .{});
-    } else {
-        try ctx.print(") {s} {{\n", .{ret_zig});
+    if (plan.needs_allocator) {
+        if (!first_emitted) try ctx.append(", ");
+        try ctx.append("gpa: std.mem.Allocator");
+        first_emitted = false;
     }
+    try ctx.print(") {s} {{\n", .{plan.return_type});
 
     // --- Body ----------------------------------------------------------
-    try ctx.print("{s}    ", .{indent});
-    if (returns_vk_result) {
-        try ctx.append("const _r = ");
-    } else if (!std.mem.eql(u8, ret_zig, "void")) {
-        try ctx.append("return ");
+    switch (plan.kind) {
+        .plain => try emitBodyPlain(ctx, c, dispatch_var, has_self, plan, indent),
+        .check_result_void => try emitBodyCheckResultVoid(ctx, c, dispatch_var, has_self, plan, indent),
+        .plain_hoist => try emitBodyPlainHoist(ctx, c, dispatch_var, has_self, plan, indent),
+        .check_result_hoist => try emitBodyCheckResultHoist(ctx, c, dispatch_var, has_self, plan, indent),
+        .two_pass_hoist => try emitBodyTwoPass(ctx, c, dispatch_var, has_self, plan, indent),
     }
-    try ctx.print("{s}.{s}(", .{ dispatch_var, c.name });
+    try ctx.print("{s}}}\n\n", .{indent});
+}
+
+fn findSliceInput(slices: []const SliceInput, idx: usize) ?SliceInput {
+    for (slices) |si| if (si.slice_idx == idx) return si;
+    return null;
+}
+
+fn writeCallArgs(
+    ctx: *Ctx,
+    c: parser.Command,
+    has_self: bool,
+    plan: WrapperPlan,
+    /// When non-null, override the value emitted at this index.
+    override_idx: ?usize,
+    override_value: ?[]const u8,
+) !void {
     for (c.params, 0..) |p, i| {
         if (i > 0) try ctx.append(", ");
-        if (i == 0 and _self != null) {
+        if (override_idx) |oi| if (oi == i) {
+            try ctx.append(override_value.?);
+            continue;
+        };
+        if (has_self and i == 0) {
             try ctx.append("self");
             continue;
         }
-        try ctx.print("{s}", .{try snakeCase(ctx.A, p.name)});
+        // Slice param (paired or composite): pass `.ptr`.
+        if (findSliceInput(plan.slice_inputs, i) != null or indexInList(plan.composite_slices, i)) {
+            const pname = stripParamPrefix(try snakeCase(ctx.A, p.name));
+            try ctx.print("{s}.ptr", .{pname});
+            continue;
+        }
+        // Sibling count of a paired slice: emit `@intCast(slice.len)`.
+        if (sliceCountSource(plan.slice_inputs, i)) |slice_idx| {
+            const slice_p = c.params[slice_idx];
+            const sname = stripParamPrefix(try snakeCase(ctx.A, slice_p.name));
+            try ctx.print("@intCast({s}.len)", .{sname});
+            continue;
+        }
+        const pname = stripParamPrefix(try snakeCase(ctx.A, p.name));
+        try ctx.append(pname);
     }
+}
+
+fn sliceCountSource(slices: []const SliceInput, idx: usize) ?usize {
+    for (slices) |si| if (si.count_idx == idx) return si.slice_idx;
+    return null;
+}
+
+fn emitBodyPlain(ctx: *Ctx, c: parser.Command, dispatch_var: []const u8, has_self: bool, plan: WrapperPlan, indent: []const u8) !void {
+    try ctx.print("{s}    return {s}.{s}(", .{ indent, dispatch_var, c.name });
+    try writeCallArgs(ctx, c, has_self, plan, null, null);
     try ctx.append(");\n");
-    if (returns_vk_result) {
-        try ctx.print("{s}    try checkResult(_r);\n", .{indent});
+}
+
+fn emitBodyCheckResultVoid(ctx: *Ctx, c: parser.Command, dispatch_var: []const u8, has_self: bool, plan: WrapperPlan, indent: []const u8) !void {
+    try ctx.print("{s}    const _r = {s}.{s}(", .{ indent, dispatch_var, c.name });
+    try writeCallArgs(ctx, c, has_self, plan, null, null);
+    try ctx.append(");\n");
+    try ctx.print("{s}    try checkResult(_r);\n", .{indent});
+}
+
+fn emitBodyPlainHoist(ctx: *Ctx, c: parser.Command, dispatch_var: []const u8, has_self: bool, plan: WrapperPlan, indent: []const u8) !void {
+    const op = plan.out_param.?;
+    const inner = try hoistedReturnInner(ctx, c.params[op]);
+    try ctx.print("{s}    var _out: {s} = undefined;\n", .{ indent, inner });
+    try ctx.print("{s}    {s}.{s}(", .{ indent, dispatch_var, c.name });
+    try writeCallArgs(ctx, c, has_self, plan, op, "&_out");
+    try ctx.append(");\n");
+    try ctx.print("{s}    return _out;\n", .{indent});
+}
+
+fn emitBodyCheckResultHoist(ctx: *Ctx, c: parser.Command, dispatch_var: []const u8, has_self: bool, plan: WrapperPlan, indent: []const u8) !void {
+    const op = plan.out_param.?;
+    const inner = try hoistedReturnInner(ctx, c.params[op]);
+    try ctx.print("{s}    var _out: {s} = undefined;\n", .{ indent, inner });
+    try ctx.print("{s}    const _r = {s}.{s}(", .{ indent, dispatch_var, c.name });
+    try writeCallArgs(ctx, c, has_self, plan, op, "&_out");
+    try ctx.append(");\n");
+    try ctx.print("{s}    try checkResult(_r);\n", .{indent});
+    try ctx.print("{s}    return _out;\n", .{indent});
+}
+
+fn emitBodyTwoPass(ctx: *Ctx, c: parser.Command, dispatch_var: []const u8, has_self: bool, plan: WrapperPlan, indent: []const u8) !void {
+    const tp = plan.two_pass.?;
+    const arr_p = c.params[tp.array_idx];
+    const elem = try hoistedElementType(ctx, arr_p);
+    const returns_vk_result = std.mem.eql(u8, c.return_type.base, "VkResult");
+    try ctx.print("{s}    var _count: u32 = 0;\n", .{indent});
+    // First call: query count, pass null for the array.
+    try ctx.print("{s}    ", .{indent});
+    if (returns_vk_result) try ctx.append("{ const _r = ") else try ctx.append("{ ");
+    try ctx.print("{s}.{s}(", .{ dispatch_var, c.name });
+    try writeCallArgsTwoPass(ctx, c, has_self, plan, tp, "&_count", "null");
+    try ctx.append(");\n");
+    if (returns_vk_result) try ctx.print("{s}        try checkResult(_r);\n", .{indent});
+    try ctx.print("{s}    }}\n", .{indent});
+    try ctx.print("{s}    const _out = gpa.alloc({s}, _count) catch return error.OutOfHostMemory;\n", .{ indent, elem });
+    try ctx.print("{s}    errdefer gpa.free(_out);\n", .{indent});
+    try ctx.print("{s}    ", .{indent});
+    if (returns_vk_result) try ctx.append("{ const _r = ") else try ctx.append("{ ");
+    try ctx.print("{s}.{s}(", .{ dispatch_var, c.name });
+    try writeCallArgsTwoPass(ctx, c, has_self, plan, tp, "&_count", "_out.ptr");
+    try ctx.append(");\n");
+    if (returns_vk_result) try ctx.print("{s}        try checkResult(_r);\n", .{indent});
+    try ctx.print("{s}    }}\n", .{indent});
+    try ctx.print("{s}    return _out[0.._count];\n", .{indent});
+}
+
+fn writeCallArgsTwoPass(
+    ctx: *Ctx,
+    c: parser.Command,
+    has_self: bool,
+    plan: WrapperPlan,
+    tp: TwoPass,
+    count_arg: []const u8,
+    array_arg: []const u8,
+) !void {
+    for (c.params, 0..) |p, i| {
+        if (i > 0) try ctx.append(", ");
+        if (i == tp.count_idx) {
+            try ctx.append(count_arg);
+            continue;
+        }
+        if (i == tp.array_idx) {
+            try ctx.append(array_arg);
+            continue;
+        }
+        if (has_self and i == 0) {
+            try ctx.append("self");
+            continue;
+        }
+        if (findSliceInput(plan.slice_inputs, i) != null or indexInList(plan.composite_slices, i)) {
+            const pname = stripParamPrefix(try snakeCase(ctx.A, p.name));
+            try ctx.print("{s}.ptr", .{pname});
+            continue;
+        }
+        if (sliceCountSource(plan.slice_inputs, i)) |slice_idx| {
+            const sname = stripParamPrefix(try snakeCase(ctx.A, c.params[slice_idx].name));
+            try ctx.print("@intCast({s}.len)", .{sname});
+            continue;
+        }
+        const pname = stripParamPrefix(try snakeCase(ctx.A, p.name));
+        try ctx.append(pname);
     }
-    try ctx.print("{s}}}\n\n", .{indent});
 }
 
 fn methodName(A: std.mem.Allocator, c_name: []const u8, _self: ?parser.Handle) ![]const u8 {
@@ -995,6 +1404,11 @@ fn stripBitSuffix(A: std.mem.Allocator, s: []const u8) ![]const u8 {
     }
     if (std.mem.endsWith(u8, t, "_bit")) t = t[0 .. t.len - 4];
     if (t.len == 0) t = "_unnamed";
+    // Review item #6: align named "reserved_N" bits with the synthesized
+    // unnamed bits so the field naming is uniformly `_reserved_N`.
+    if (std.mem.startsWith(u8, t, "reserved")) {
+        return try std.fmt.allocPrint(A, "_{s}", .{t});
+    }
     const dup = try A.dupe(u8, t);
     return try escapeKeyword(A, dup);
 }
