@@ -1,6 +1,6 @@
 # S2 — Native Window + Vulkan Triangle
 
-> **Status:** PLANNED
+> **Status:** ACTIVE
 > **Phase:** −1
 > **Branche:** `phase-pre-0/platform/window-vulkan-triangle`
 > **Tag prévu:** `v0.0.3-S2-window-vulkan-triangle`
