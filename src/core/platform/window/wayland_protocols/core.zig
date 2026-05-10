@@ -82,6 +82,10 @@ pub const LibWaylandDispatch = struct {
     wl_display_connect: *const fn (?[*:0]const u8) callconv(.c) ?*wl_display = undefined,
     wl_display_disconnect: *const fn (*wl_display) callconv(.c) void = undefined,
     wl_display_dispatch: *const fn (*wl_display) callconv(.c) c_int = undefined,
+    wl_display_dispatch_pending: *const fn (*wl_display) callconv(.c) c_int = undefined,
+    wl_display_prepare_read: *const fn (*wl_display) callconv(.c) c_int = undefined,
+    wl_display_read_events: *const fn (*wl_display) callconv(.c) c_int = undefined,
+    wl_display_cancel_read: *const fn (*wl_display) callconv(.c) void = undefined,
     wl_display_roundtrip: *const fn (*wl_display) callconv(.c) c_int = undefined,
     wl_display_flush: *const fn (*wl_display) callconv(.c) c_int = undefined,
     wl_display_get_fd: *const fn (*wl_display) callconv(.c) c_int = undefined,
@@ -114,6 +118,7 @@ pub var lib_wayland: LibWaylandDispatch = .{};
 var lib_handle: ?std.DynLib = null;
 
 pub fn loadLibWayland() Error!void {
+    if (lib_handle != null) return; // idempotent
     const candidates = &[_][:0]const u8{ "libwayland-client.so.0", "libwayland-client.so" };
     for (candidates) |path| {
         if (std.DynLib.open(path)) |dl| {

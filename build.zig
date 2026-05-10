@@ -64,6 +64,7 @@ pub fn build(b: *std.Build) void {
         "tests/jobs/deque_test.zig",
         "tests/jobs/scheduler_test.zig",
         "tests/window/win32_open_close_test.zig",
+        "tests/window/wayland_open_close_test.zig",
     };
     for (test_files) |path| {
         const t_mod = b.createModule(.{
