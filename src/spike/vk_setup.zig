@@ -50,6 +50,7 @@ pub const SetupError = error{
     NoCompatibleDevice,
     NoCompatibleQueueFamily,
     NoCompatibleSurfaceFormat,
+    NoCompatibleCompositeAlpha,
     SurfaceCreateFailed,
     SwapchainCreateFailed,
     ShaderModuleCreateFailed,
@@ -69,6 +70,13 @@ pub const Renderer = struct {
     queue_family_index: u32,
 
     physical_device_name: [256]u8 = undefined,
+
+    /// Most recent window-side surface size in physical pixels. Used as
+    /// the swapchain extent fallback when `caps.current_extent` carries
+    /// the `(0xFFFFFFFF, 0xFFFFFFFF)` sentinel that Wayland compositors
+    /// emit to let the client choose the size. Updated by the main loop
+    /// from `Event.resize`; seeded at `init` time from the window desc.
+    last_known_size: vk.Extent2D,
 
     swapchain: vk.SwapchainKHR = .null,
     swapchain_format: vk.Format = .undefined,
@@ -101,6 +109,7 @@ pub const Renderer = struct {
     pub fn init(
         gpa: std.mem.Allocator,
         window: *window_mod.Window,
+        initial_size: vk.Extent2D,
         args: cli.Args,
     ) SetupError!Renderer {
         try vk.loadLoader();
@@ -116,6 +125,7 @@ pub const Renderer = struct {
             .surface = .null,
             .queue = undefined,
             .queue_family_index = 0,
+            .last_known_size = initial_size,
         };
 
         r.instance = try createInstance(gpa);
@@ -140,7 +150,7 @@ pub const Renderer = struct {
 
         r.queue = r.device.getDeviceQueue(r.queue_family_index, 0);
 
-        try createSwapchainAndViews(&r, gpa, window);
+        try createSwapchainAndViews(&r, gpa);
         errdefer destroySwapchainResources(&r);
 
         try createRenderPass(&r);
@@ -187,7 +197,7 @@ pub const Renderer = struct {
         self.instance.destroyInstance(null);
     }
 
-    pub fn recreateSwapchain(self: *Renderer, window: *window_mod.Window) SetupError!void {
+    pub fn recreateSwapchain(self: *Renderer) SetupError!void {
         self.device.waitIdle() catch {};
         // Tear down the old swapchain-dependent resources.
         for (self.framebuffers) |fb| self.device.destroyFramebuffer(fb, null);
@@ -200,7 +210,7 @@ pub const Renderer = struct {
         self.swapchain_images = &.{};
         const old_swapchain = self.swapchain;
 
-        try createSwapchainAndViews(self, self.gpa, window);
+        try createSwapchainAndViews(self, self.gpa);
         if (old_swapchain != .null) self.device.destroySwapchainKHR(old_swapchain, null);
         try createFramebuffers(self, self.gpa);
         self.swapchain_dirty = false;
@@ -392,8 +402,7 @@ fn createLogicalDevice(r: *Renderer, gpa: std.mem.Allocator) !void {
     r.device = try r.physical_device.createDevice(&ci, null);
 }
 
-fn createSwapchainAndViews(r: *Renderer, gpa: std.mem.Allocator, window: *window_mod.Window) !void {
-    _ = window;
+fn createSwapchainAndViews(r: *Renderer, gpa: std.mem.Allocator) !void {
     const caps = try r.physical_device.getPhysicalDeviceSurfaceCapabilitiesKHR(r.surface);
     const formats = try r.physical_device.getPhysicalDeviceSurfaceFormatsKHR(r.surface, gpa);
     defer gpa.free(formats);
@@ -412,9 +421,24 @@ fn createSwapchainAndViews(r: *Renderer, gpa: std.mem.Allocator, window: *window
         min_image_count = caps.max_image_count;
     }
 
-    const extent = caps.current_extent;
+    // Wayland compositors return `(0xFFFFFFFF, 0xFFFFFFFF)` in `current_extent`
+    // to delegate sizing to the client. In that case we fall back to the
+    // most recent size reported by the window (seeded from the initial
+    // desc, updated by `Event.resize` in the main loop), clamped to the
+    // capability bounds.
+    const sentinel: u32 = 0xFFFFFFFF;
+    const extent: vk.Extent2D = blk: {
+        if (caps.current_extent.width != sentinel and caps.current_extent.height != sentinel) {
+            break :blk caps.current_extent;
+        }
+        const w = std.math.clamp(r.last_known_size.width, caps.min_image_extent.width, caps.max_image_extent.width);
+        const h = std.math.clamp(r.last_known_size.height, caps.min_image_extent.height, caps.max_image_extent.height);
+        break :blk .{ .width = w, .height = h };
+    };
     r.swapchain_extent = extent;
     r.swapchain_format = fmt.format;
+
+    const composite_alpha = pickCompositeAlpha(caps.supported_composite_alpha) orelse return error.NoCompatibleCompositeAlpha;
 
     var image_usage: vk.ImageUsageFlags = .empty;
     image_usage.color_attachment = true;
@@ -433,7 +457,7 @@ fn createSwapchainAndViews(r: *Renderer, gpa: std.mem.Allocator, window: *window
         .queue_family_index_count = 0,
         .p_queue_family_indices = undefined,
         .pre_transform = caps.current_transform,
-        .composite_alpha = .opaque_bit,
+        .composite_alpha = composite_alpha,
         .present_mode = present_mode_preference,
         .clipped = 1,
         .old_swapchain = .null,
@@ -462,6 +486,19 @@ fn createSwapchainAndViews(r: *Renderer, gpa: std.mem.Allocator, window: *window
         views[i] = try r.device.createImageView(&view_ci, null);
     }
     r.swapchain_views = views;
+}
+
+/// Pick the most preferred composite-alpha mode advertised by the surface.
+/// Order rationale: `opaque` is what every desktop compositor supports for
+/// solid windows; `inherit` lets the compositor manage blending; the two
+/// pre/post-multiplied modes are last-resort fallbacks for surfaces that
+/// only advertise blended composition (rare on the validation matrix).
+fn pickCompositeAlpha(supported: vk.CompositeAlphaFlagsKHR) ?vk.CompositeAlphaFlagBitsKHR {
+    if (supported.@"opaque") return .opaque_bit;
+    if (supported.inherit) return .inherit_bit;
+    if (supported.pre_multiplied) return .pre_multiplied_bit;
+    if (supported.post_multiplied) return .post_multiplied_bit;
+    return null;
 }
 
 fn destroySwapchainResources(r: *Renderer) void {
