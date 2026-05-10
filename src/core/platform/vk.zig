@@ -10915,19 +10915,28 @@ pub fn loadLoader() Error!void {
     }
 }
 
+// InstanceDispatch / DeviceDispatch mix universal entry points with
+// platform- and extension-conditional ones (e.g. `vkCreateWin32SurfaceKHR`
+// is NULL on Linux, `vkCreateDebugUtilsMessengerEXT` is NULL whenever
+// `VK_EXT_debug_utils` is not enabled in the InstanceCreateInfo). A
+// missing symbol is *not* an error — callers are responsible for only
+// invoking entry points whose extension / platform precondition holds.
+// Slots that the loader could not resolve stay at their default
+// (`= undefined`); calling them is a programmer bug, same as calling
+// `vkDestroyInstance` after `vkDestroyInstance`.
 pub fn loadInstance(instance: *Instance) Error!void {
     inline for (@typeInfo(InstanceDispatch).@"struct".fields) |f| {
-        const sym = base.vkGetInstanceProcAddr(instance, f.name.ptr);
-        if (sym == null) return error.SymbolNotFound;
-        @field(instance_dispatch, f.name) = @ptrCast(@alignCast(sym));
+        if (base.vkGetInstanceProcAddr(instance, f.name.ptr)) |sym| {
+            @field(instance_dispatch, f.name) = @ptrCast(@alignCast(sym));
+        }
     }
 }
 
 pub fn loadDevice(device: *Device) Error!void {
     inline for (@typeInfo(DeviceDispatch).@"struct".fields) |f| {
-        const sym = instance_dispatch.vkGetDeviceProcAddr(device, f.name.ptr);
-        if (sym == null) return error.SymbolNotFound;
-        @field(device_dispatch, f.name) = @ptrCast(@alignCast(sym));
+        if (instance_dispatch.vkGetDeviceProcAddr(device, f.name.ptr)) |sym| {
+            @field(device_dispatch, f.name) = @ptrCast(@alignCast(sym));
+        }
     }
 }
 
