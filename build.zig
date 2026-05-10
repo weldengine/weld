@@ -118,4 +118,23 @@ pub fn build(b: *std.Build) void {
     vk_gen_run.has_side_effects = true;
     const vk_gen_step = b.step("bindgen-vk", "Regenerate src/core/platform/vk.zig from vk.xml");
     vk_gen_step.dependOn(&vk_gen_run.step);
+
+    // ----------------------------------------- wayland_gen (S2 bindgen) --
+
+    const wayland_gen_module = b.createModule(.{
+        .root_source_file = b.path("tools/wayland_gen/main.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const wayland_gen_exe = b.addExecutable(.{
+        .name = "wayland_gen",
+        .root_module = wayland_gen_module,
+    });
+    const wayland_gen_run = b.addRunArtifact(wayland_gen_exe);
+    wayland_gen_run.has_side_effects = true;
+    const wayland_gen_step = b.step(
+        "bindgen-wayland",
+        "Regenerate src/core/platform/window/wayland_protocols/*.zig from wayland-protocols XMLs",
+    );
+    wayland_gen_step.dependOn(&wayland_gen_run.step);
 }
