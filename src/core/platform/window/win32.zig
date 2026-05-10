@@ -299,7 +299,11 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.c) L
     // Stash it in user-data so subsequent messages can find it without a
     // global lookup.
     if (msg == WM_NCCREATE) {
-        const cs: *const CREATESTRUCTW = @ptrCast(@alignCast(@as(*anyopaque, @ptrFromInt(@as(usize, @intCast(lparam))))));
+        // `lparam` carries the CREATESTRUCTW pointer as an isize. Use
+        // `@bitCast` (not `@intCast`) so the conversion preserves the bit
+        // pattern even if the address has the high bit set — `@intCast`
+        // would panic on a negative isize that's a valid usize address.
+        const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lparam)));
         if (cs.lp_create_params) |p| {
             _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, @intFromPtr(p));
         }

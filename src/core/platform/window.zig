@@ -36,9 +36,10 @@ pub const Event = union(enum) {
     close,
     /// Client area resized — both fields are physical pixels (HiDPI-aware).
     resize: struct { width: u32, height: u32 },
-    /// Integer scale factor changed (1.0, 1.25, 1.5, 2.0, …). The window
-    /// has already been moved/resized to track the new monitor; the
-    /// caller is expected to recreate the swapchain.
+    /// Scale factor changed (1.0 = 100%, 1.5 = 150%, 2.0 = 200%). Derived
+    /// from per-monitor DPI on Win32; Wayland S2 only delivers integer
+    /// values. The window has already been moved/resized to track the new
+    /// monitor; the caller is expected to recreate the swapchain.
     dpi_changed: f32,
 };
 
