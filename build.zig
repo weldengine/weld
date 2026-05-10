@@ -97,4 +97,25 @@ pub fn build(b: *std.Build) void {
         "Run the S1 ECS iteration bench (pass `-- --smoke` for a CI sanity run)",
     );
     bench_step.dependOn(&bench_run.step);
+
+    // ------------------------------------------------ vk_gen (S2 bindgen) --
+    //
+    // Throwaway generator that re-emits `src/core/platform/vk.zig` from the
+    // vendored `bindings/upstream/vulkan/vk.xml`. Replaced in S3 by the
+    // unified bindgen system. Run explicitly via `zig build bindgen-vk`,
+    // never as part of the default `zig build`.
+
+    const vk_gen_module = b.createModule(.{
+        .root_source_file = b.path("tools/vk_gen/main.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const vk_gen_exe = b.addExecutable(.{
+        .name = "vk_gen",
+        .root_module = vk_gen_module,
+    });
+    const vk_gen_run = b.addRunArtifact(vk_gen_exe);
+    vk_gen_run.has_side_effects = true;
+    const vk_gen_step = b.step("bindgen-vk", "Regenerate src/core/platform/vk.zig from vk.xml");
+    vk_gen_step.dependOn(&vk_gen_run.step);
 }
