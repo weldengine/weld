@@ -349,7 +349,19 @@ fn writeEnums(ctx: *Ctx) !void {
         defer seen_values.deinit(ctx.A);
         for (g.values) |v| {
             if (v.alias != null) continue; // Aliases handled below as `pub const`.
-            const key = v.value orelse continue;
+            // bitmask enums use `bitpos` rather than `value`. Compute the
+            // integer (1 << bp) so the FlagBits enum carries the same
+            // numeric values as the corresponding packed-struct flag type.
+            // Arena-allocate the key so the dedupe map keeps it valid
+            // across iterations.
+            const key: []const u8 = blk: {
+                if (v.value) |s| break :blk s;
+                if (v.bitpos) |bp| {
+                    const n: u64 = @as(u64, 1) << @intCast(bp);
+                    break :blk try std.fmt.allocPrint(ctx.A, "{d}", .{n});
+                }
+                continue;
+            };
             const r = try seen_values.getOrPut(ctx.A, key);
             if (r.found_existing) continue;
             const variant_name = try stripEnumPrefix(ctx, g.name, v.name);
@@ -422,9 +434,18 @@ fn writeBitmasks(ctx: *Ctx) !void {
             try ctx.append("};\n\n");
             continue;
         }
-        // No enum yet — emit as a plain integer alias so the binding can be
-        // re-emitted later when the bits are added.
-        try ctx.print("pub const {s} = {s};\n\n", .{ zig_name, repr });
+        // No FlagBits enum yet — emit as a packed struct of all-reserved
+        // bits, uniform with the named-bit case so flag struct-fields
+        // always support `.empty` regardless of whether the registry has
+        // assigned individual bits.
+        try ctx.print("pub const {s} = packed struct({s}) {{\n", .{ zig_name, repr });
+        const total: u8 = if (bm.width == 64) 64 else 32;
+        var i: u8 = 0;
+        while (i < total) : (i += 1) {
+            try ctx.print("    _reserved_{d}: bool = false,\n", .{i});
+        }
+        try ctx.append("\n    pub const empty: @This() = .{};\n");
+        try ctx.append("};\n\n");
     }
     try ctx.append("\n");
 }
@@ -571,7 +592,7 @@ fn writeErrorSet(ctx: *Ctx) !void {
         \\        .error_native_window_in_use_khr => error.NativeWindowInUse,
         \\        .error_out_of_date_khr => error.OutOfDate,
         \\        .error_incompatible_display_khr => error.IncompatibleDisplay,
-        \\        .error_validation_failed_ext => error.ValidationFailed,
+        \\        .error_validation_failed => error.ValidationFailed,
         \\        .error_invalid_shader_nv => error.InvalidShader,
         \\        else => if (@intFromEnum(r) < 0) error.Unknown else {},
         \\    };
@@ -610,6 +631,14 @@ fn writePfnTypes(ctx: *Ctx) !void {
 const Dispatch = enum { base, instance, device };
 
 fn classifyCommand(ctx: *Ctx, c: parser.Command) Dispatch {
+    // `vkGetInstanceProcAddr` is conceptually loader-level even though its
+    // first parameter is `VkInstance` — it accepts a null instance to
+    // resolve loader-level symbols, and it must be the first thing dlsym'd
+    // before any other Vulkan call. Special-case it into BaseDispatch.
+    if (std.mem.eql(u8, c.name, "vkGetInstanceProcAddr")) return .base;
+    // Same logic for `vkGetDeviceProcAddr` — must live in InstanceDispatch
+    // (loaded before the DeviceDispatch table is filled), not DeviceDispatch.
+    if (std.mem.eql(u8, c.name, "vkGetDeviceProcAddr")) return .instance;
     if (c.params.len == 0) return .base;
     const first = c.params[0].c_type.base;
     if (std.mem.eql(u8, first, "VkInstance") or std.mem.eql(u8, first, "VkPhysicalDevice")) return .instance;
@@ -668,31 +697,57 @@ fn writeLoader(ctx: *Ctx) !void {
         \\// Phase 3: once `vkCreateDevice` returns, call `loadDevice(handle)` to
         \\//          fill the `DeviceDispatch` table via vkGetDeviceProcAddr.
         \\
-        \\var lib_handle: ?std.DynLib = null;
+        \\var lib_handle: ?*anyopaque = null;
+        \\
+        \\// `std.DynLib` is `@compileError("unsupported platform")` on Windows in
+        \\// Zig 0.16's stdlib, so we hand-roll a tiny dlopen/LoadLibrary
+        \\// abstraction here. Linux + macOS use POSIX `dlopen`/`dlsym`; Windows
+        \\// uses `LoadLibraryA`/`GetProcAddress`. Both keep the loader as a
+        \\// `?*anyopaque` so the surrounding code stays OS-agnostic.
+        \\const _dl = if (builtin.os.tag == .windows) struct {
+        \\    extern "kernel32" fn LoadLibraryA(name: [*:0]const u8) callconv(.c) ?*anyopaque;
+        \\    extern "kernel32" fn GetProcAddress(module: *anyopaque, name: [*:0]const u8) callconv(.c) ?*anyopaque;
+        \\} else struct {
+        \\    extern "c" fn dlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque;
+        \\    extern "c" fn dlsym(handle: ?*anyopaque, symbol: [*:0]const u8) ?*anyopaque;
+        \\};
+        \\
+        \\fn _dlOpen(path_z: [*:0]const u8) ?*anyopaque {
+        \\    return if (comptime builtin.os.tag == .windows)
+        \\        _dl.LoadLibraryA(path_z)
+        \\    else
+        \\        _dl.dlopen(path_z, 2); // RTLD_NOW
+        \\}
+        \\
+        \\fn _dlLookup(handle: *anyopaque, name_z: [*:0]const u8) ?*anyopaque {
+        \\    return if (comptime builtin.os.tag == .windows)
+        \\        _dl.GetProcAddress(handle, name_z)
+        \\    else
+        \\        _dl.dlsym(handle, name_z);
+        \\}
         \\
         \\pub fn loadLoader() Error!void {
-        \\    const candidates: []const []const u8 = switch (builtin.os.tag) {
+        \\    const candidates: []const [:0]const u8 = switch (builtin.os.tag) {
         \\        .linux => &.{ "libvulkan.so.1", "libvulkan.so" },
         \\        .windows => &.{"vulkan-1.dll"},
         \\        .macos, .ios => &.{ "libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib" },
         \\        else => return error.LoaderNotFound,
         \\    };
         \\    for (candidates) |path| {
-        \\        if (std.DynLib.open(path)) |dl| {
-        \\            lib_handle = dl;
+        \\        if (_dlOpen(path.ptr)) |h| {
+        \\            lib_handle = h;
         \\            break;
-        \\        } else |_| continue;
+        \\        }
         \\    }
         \\    if (lib_handle == null) return error.LoaderNotFound;
         \\
-        \\    base.vkGetInstanceProcAddr = lib_handle.?.lookup(PFN_vkGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse
-        \\        return error.SymbolNotFound;
-        \\
+        \\    // Resolve every BaseDispatch symbol directly — vkGetInstanceProcAddr
+        \\    // would work for instance-level lookups but the C ABI requires an
+        \\    // instance handle (vk.xml does not mark it optional), so we sidestep
+        \\    // by calling the OS loader for everything here.
         \\    inline for (@typeInfo(BaseDispatch).@"struct".fields) |f| {
-        \\        if (comptime std.mem.eql(u8, f.name, "vkGetInstanceProcAddr")) continue;
-        \\        const sym = base.vkGetInstanceProcAddr(null, f.name.ptr);
-        \\        if (sym == null) return error.SymbolNotFound;
-        \\        @field(base, f.name) = @ptrCast(sym);
+        \\        const sym = _dlLookup(lib_handle.?, f.name.ptr) orelse return error.SymbolNotFound;
+        \\        @field(base, f.name) = @ptrCast(@alignCast(sym));
         \\    }
         \\}
         \\
@@ -700,7 +755,7 @@ fn writeLoader(ctx: *Ctx) !void {
         \\    inline for (@typeInfo(InstanceDispatch).@"struct".fields) |f| {
         \\        const sym = base.vkGetInstanceProcAddr(instance, f.name.ptr);
         \\        if (sym == null) return error.SymbolNotFound;
-        \\        @field(instance_dispatch, f.name) = @ptrCast(sym);
+        \\        @field(instance_dispatch, f.name) = @ptrCast(@alignCast(sym));
         \\    }
         \\}
         \\
@@ -708,7 +763,7 @@ fn writeLoader(ctx: *Ctx) !void {
         \\    inline for (@typeInfo(DeviceDispatch).@"struct".fields) |f| {
         \\        const sym = instance_dispatch.vkGetDeviceProcAddr(device, f.name.ptr);
         \\        if (sym == null) return error.SymbolNotFound;
-        \\        @field(device_dispatch, f.name) = @ptrCast(sym);
+        \\        @field(device_dispatch, f.name) = @ptrCast(@alignCast(sym));
         \\    }
         \\}
         \\
@@ -917,6 +972,11 @@ fn stripParamPrefix(s: []const u8) []const u8 {
 /// return type is `*T` (pointer to opaque) when T is dispatchable, or `T`
 /// (value) when T is a struct or non-dispatchable handle.
 fn hoistedReturnInner(ctx: *Ctx, p: parser.Member) ![]const u8 {
+    // `void**` out-param (vkMapMemory): the inner value is the data pointer
+    // itself (`void*` in C, `?*anyopaque` in Zig).
+    if (std.mem.eql(u8, p.c_type.base, "void") and p.c_type.pointer_depth >= 1) {
+        return "?*anyopaque";
+    }
     const base = mapBaseName(p.c_type.base);
     const handle_kind = ctx.type_names.get(p.c_type.base) orelse Ctx.TypeKind.basetype;
     if (handle_kind == .handle_dispatchable) {
@@ -1021,10 +1081,13 @@ fn writeCallArgs(
             try ctx.append("self");
             continue;
         }
-        // Slice param (paired or composite): pass `.ptr`.
+        // Slice param (paired or composite): pass `.ptr` cast to whatever
+        // the PFN expects (`?*T` in vk.xml's C ABI; the Zig type system
+        // refuses the implicit `[*]T → ?*T` conversion even though the
+        // ABI representation is identical).
         if (findSliceInput(plan.slice_inputs, i) != null or indexInList(plan.composite_slices, i)) {
             const pname = stripParamPrefix(try snakeCase(ctx.A, p.name));
-            try ctx.print("{s}.ptr", .{pname});
+            try ctx.print("@ptrCast({s}.ptr)", .{pname});
             continue;
         }
         // Sibling count of a paired slice: emit `@intCast(slice.len)`.
@@ -1097,7 +1160,7 @@ fn emitBodyTwoPass(ctx: *Ctx, c: parser.Command, dispatch_var: []const u8, has_s
     try ctx.print("{s}    ", .{indent});
     if (returns_vk_result) try ctx.append("{ const _r = ") else try ctx.append("{ ");
     try ctx.print("{s}.{s}(", .{ dispatch_var, c.name });
-    try writeCallArgsTwoPass(ctx, c, has_self, plan, tp, "&_count", "_out.ptr");
+    try writeCallArgsTwoPass(ctx, c, has_self, plan, tp, "&_count", "@ptrCast(_out.ptr)");
     try ctx.append(");\n");
     if (returns_vk_result) try ctx.print("{s}        try checkResult(_r);\n", .{indent});
     try ctx.print("{s}    }}\n", .{indent});
@@ -1129,7 +1192,7 @@ fn writeCallArgsTwoPass(
         }
         if (findSliceInput(plan.slice_inputs, i) != null or indexInList(plan.composite_slices, i)) {
             const pname = stripParamPrefix(try snakeCase(ctx.A, p.name));
-            try ctx.print("{s}.ptr", .{pname});
+            try ctx.print("@ptrCast({s}.ptr)", .{pname});
             continue;
         }
         if (sliceCountSource(plan.slice_inputs, i)) |slice_idx| {
@@ -1191,6 +1254,13 @@ fn mapCType(
         "anyopaque"
     else
         mapBaseName(ct.base);
+
+    // `void**` (caller-supplied out-pointer for `vkMapMemory`) is the only
+    // double-indirection-to-opaque the API uses. Zig rejects `[*c]anyopaque`
+    // (no indexing into opaque), so emit a typed pointer chain.
+    if (std.mem.eql(u8, ct.base, "void") and ct.pointer_depth == 2) {
+        return if (ct.is_const) "?*const ?*anyopaque" else "?*?*anyopaque";
+    }
     const handle_kind = ctx.type_names.get(ct.base) orelse Ctx.TypeKind.basetype;
 
     // Array suffix (`T name[N]`) — render as `[N]T` regardless of context.

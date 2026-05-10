@@ -49,6 +49,16 @@ pub const Error = error{
     WindowCreateFailed,
 } || std.mem.Allocator.Error;
 
+/// Native OS-level handles needed by the GPU layer to create a
+/// `VkSurfaceKHR`. Layout per OS — Windows wants `(HINSTANCE, HWND)`,
+/// Wayland wants `(*wl_display, *wl_surface)`, and the stub backend
+/// returns an empty struct.
+///
+/// Not part of the long-term Tier 0 surface — the Phase 0.4 GAL absorbs
+/// surface creation behind a backend-agnostic API. Kept here for the S2
+/// spike binary, which is the only consumer.
+pub const NativeHandles = backend.NativeHandles;
+
 pub const Window = struct {
     impl: backend.Backend,
 
@@ -70,5 +80,10 @@ pub const Window = struct {
     /// Internally pumps the OS event loop on each call.
     pub fn pollEvent(self: *Window) ?Event {
         return self.impl.pollEvent();
+    }
+
+    /// Transient S2 escape hatch — see `NativeHandles` doc above.
+    pub fn nativeHandles(self: *const Window) NativeHandles {
+        return self.impl.nativeHandles();
     }
 };

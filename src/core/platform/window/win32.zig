@@ -203,8 +203,20 @@ const State = struct {
     last_dpi: u32 = 96,
 };
 
+pub const NativeHandles = struct {
+    hinstance: *anyopaque,
+    hwnd: *anyopaque,
+};
+
 pub const Backend = struct {
     state: *State,
+
+    pub fn nativeHandles(self: *const Backend) NativeHandles {
+        return .{
+            .hinstance = @ptrCast(GetModuleHandleW(null)),
+            .hwnd = @ptrCast(self.state.hwnd),
+        };
+    }
 
     pub fn create(gpa: std.mem.Allocator, desc: window.Desc) window.Error!Backend {
         ensureDpiAwareness();

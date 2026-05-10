@@ -24,4 +24,5 @@ pub const testing = struct {
 
 pub const platform = struct {
     pub const window = @import("platform/window.zig");
+    pub const vk = @import("platform/vk.zig");
 };

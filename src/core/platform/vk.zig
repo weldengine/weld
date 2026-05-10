@@ -257,6 +257,10 @@ pub const PipelineCacheHeaderVersion = enum(i32) {
 };
 
 pub const PipelineCacheCreateFlagBits = enum(i32) {
+    externally_synchronized_bit = 1,
+    read_only_bit = 2,
+    use_application_storage_bit = 4,
+    internally_synchronized_merge_bit_khr = 8,
     _,
 };
 pub const PipelineCacheCreateFlagBits_externally_synchronized_bit_ext: PipelineCacheCreateFlagBits = .externally_synchronized_bit;
@@ -2538,34 +2542,98 @@ pub const ObjectType_sampler_ycbcr_conversion_khr: ObjectType = .sampler_ycbcr_c
 pub const ObjectType_private_data_slot_ext: ObjectType = .private_data_slot;
 
 pub const QueueFlagBits = enum(i32) {
+    graphics_bit = 1,
+    compute_bit = 2,
+    transfer_bit = 4,
+    sparse_binding_bit = 8,
+    protected_bit = 16,
+    video_decode_bit_khr = 32,
+    video_encode_bit_khr = 64,
+    reserved_7_bit_qcom = 128,
+    optical_flow_bit_nv = 256,
+    data_graph_bit_arm = 1024,
+    reserved_12_bit_ext = 4096,
+    reserved_9_bit_ext = 512,
+    reserved_13_bit_ext = 8192,
+    reserved_11_bit_arm = 2048,
     _,
 };
 
 pub const CullModeFlagBits = enum(i32) {
     none = 0,
+    front_bit = 1,
+    back_bit = 2,
     front_and_back = 0x00000003,
     _,
 };
 
 pub const RenderPassCreateFlagBits = enum(i32) {
+    reserved_3_bit_img = 8,
+    reserved_0_bit_khr = 1,
+    transform_bit_qcom = 2,
+    per_layer_fragment_density_bit_valve = 4,
     _,
 };
 
 pub const DeviceQueueCreateFlagBits = enum(i32) {
+    protected_bit = 1,
+    reserved_1_bit_qcom = 2,
+    internally_synchronized_bit_khr = 4,
     _,
 };
 
 pub const MemoryPropertyFlagBits = enum(i32) {
+    device_local_bit = 1,
+    host_visible_bit = 2,
+    host_coherent_bit = 4,
+    host_cached_bit = 8,
+    lazily_allocated_bit = 16,
+    protected_bit = 32,
+    device_coherent_bit_amd = 64,
+    device_uncached_bit_amd = 128,
+    rdma_capable_bit_nv = 256,
     _,
 };
 
 pub const MemoryHeapFlagBits = enum(i32) {
+    device_local_bit = 1,
+    multi_instance_bit = 2,
+    seu_safe_bit = 4,
+    tile_memory_bit_qcom = 8,
     _,
 };
 pub const MemoryHeapFlagBits_multi_instance_bit_khr: MemoryHeapFlagBits = .multi_instance_bit;
 
 pub const AccessFlagBits = enum(i32) {
+    indirect_command_read_bit = 1,
+    index_read_bit = 2,
+    vertex_attribute_read_bit = 4,
+    uniform_read_bit = 8,
+    input_attachment_read_bit = 16,
+    shader_read_bit = 32,
+    shader_write_bit = 64,
+    color_attachment_read_bit = 128,
+    color_attachment_write_bit = 256,
+    depth_stencil_attachment_read_bit = 512,
+    depth_stencil_attachment_write_bit = 1024,
+    transfer_read_bit = 2048,
+    transfer_write_bit = 4096,
+    host_read_bit = 8192,
+    host_write_bit = 16384,
+    memory_read_bit = 32768,
+    memory_write_bit = 65536,
     none = 0,
+    transform_feedback_write_bit_ext = 33554432,
+    transform_feedback_counter_read_bit_ext = 67108864,
+    transform_feedback_counter_write_bit_ext = 134217728,
+    conditional_rendering_read_bit_ext = 1048576,
+    color_attachment_read_noncoherent_bit_ext = 524288,
+    acceleration_structure_read_bit_khr = 2097152,
+    acceleration_structure_write_bit_khr = 4194304,
+    fragment_density_map_read_bit_ext = 16777216,
+    fragment_shading_rate_attachment_read_bit_khr = 8388608,
+    command_preprocess_read_bit_ext = 131072,
+    command_preprocess_write_bit_ext = 262144,
     _,
 };
 pub const AccessFlagBits_shading_rate_image_read_bit_nv: AccessFlagBits = .fragment_shading_rate_attachment_read_bit_khr;
@@ -2576,6 +2644,34 @@ pub const AccessFlagBits_command_preprocess_write_bit_nv: AccessFlagBits = .comm
 pub const AccessFlagBits_none_khr: AccessFlagBits = .none;
 
 pub const BufferUsageFlagBits = enum(i32) {
+    transfer_src_bit = 1,
+    transfer_dst_bit = 2,
+    uniform_texel_buffer_bit = 4,
+    storage_texel_buffer_bit = 8,
+    uniform_buffer_bit = 16,
+    storage_buffer_bit = 32,
+    index_buffer_bit = 64,
+    vertex_buffer_bit = 128,
+    indirect_buffer_bit = 256,
+    shader_device_address_bit = 131072,
+    video_decode_src_bit_khr = 8192,
+    video_decode_dst_bit_khr = 16384,
+    transform_feedback_buffer_bit_ext = 2048,
+    transform_feedback_counter_buffer_bit_ext = 4096,
+    conditional_rendering_bit_ext = 512,
+    execution_graph_scratch_bit_amdx = 33554432,
+    descriptor_heap_bit_ext = 268435456,
+    acceleration_structure_build_input_read_only_bit_khr = 524288,
+    acceleration_structure_storage_bit_khr = 1048576,
+    shader_binding_table_bit_khr = 1024,
+    video_encode_dst_bit_khr = 32768,
+    video_encode_src_bit_khr = 65536,
+    sampler_descriptor_buffer_bit_ext = 2097152,
+    resource_descriptor_buffer_bit_ext = 4194304,
+    push_descriptors_descriptor_buffer_bit_ext = 67108864,
+    micromap_build_input_read_only_bit_ext = 8388608,
+    micromap_storage_bit_ext = 16777216,
+    tile_memory_bit_qcom = 134217728,
     _,
 };
 pub const BufferUsageFlagBits_ray_tracing_bit_nv: BufferUsageFlagBits = .shader_binding_table_bit_khr;
@@ -2583,14 +2679,40 @@ pub const BufferUsageFlagBits_shader_device_address_bit_ext: BufferUsageFlagBits
 pub const BufferUsageFlagBits_shader_device_address_bit_khr: BufferUsageFlagBits = .shader_device_address_bit;
 
 pub const BufferCreateFlagBits = enum(i32) {
+    sparse_binding_bit = 1,
+    sparse_residency_bit = 2,
+    sparse_aliased_bit = 4,
+    protected_bit = 8,
+    device_address_capture_replay_bit = 16,
+    reserved_7_bit_img = 128,
+    descriptor_buffer_capture_replay_bit_ext = 32,
+    video_profile_independent_bit_khr = 64,
     _,
 };
 pub const BufferCreateFlagBits_device_address_capture_replay_bit_ext: BufferCreateFlagBits = .device_address_capture_replay_bit;
 pub const BufferCreateFlagBits_device_address_capture_replay_bit_khr: BufferCreateFlagBits = .device_address_capture_replay_bit;
 
 pub const ShaderStageFlagBits = enum(i32) {
+    vertex_bit = 1,
+    tessellation_control_bit = 2,
+    tessellation_evaluation_bit = 4,
+    geometry_bit = 8,
+    fragment_bit = 16,
+    compute_bit = 32,
     all_graphics = 0x0000001F,
     all = 0x7FFFFFFF,
+    raygen_bit_khr = 256,
+    any_hit_bit_khr = 512,
+    closest_hit_bit_khr = 1024,
+    miss_bit_khr = 2048,
+    intersection_bit_khr = 4096,
+    callable_bit_khr = 8192,
+    task_bit_ext = 64,
+    mesh_bit_ext = 128,
+    subpass_shading_bit_huawei = 16384,
+    cluster_culling_bit_huawei = 524288,
+    reserved_15_bit_nv = 32768,
+    reserved_16_bit_huawei = 65536,
     _,
 };
 pub const ShaderStageFlagBits_raygen_bit_nv: ShaderStageFlagBits = .raygen_bit_khr;
@@ -2603,12 +2725,65 @@ pub const ShaderStageFlagBits_task_bit_nv: ShaderStageFlagBits = .task_bit_ext;
 pub const ShaderStageFlagBits_mesh_bit_nv: ShaderStageFlagBits = .mesh_bit_ext;
 
 pub const ImageUsageFlagBits = enum(i32) {
+    transfer_src_bit = 1,
+    transfer_dst_bit = 2,
+    sampled_bit = 4,
+    storage_bit = 8,
+    color_attachment_bit = 16,
+    depth_stencil_attachment_bit = 32,
+    transient_attachment_bit = 64,
+    input_attachment_bit = 128,
+    host_transfer_bit = 4194304,
+    video_decode_dst_bit_khr = 1024,
+    video_decode_src_bit_khr = 2048,
+    video_decode_dpb_bit_khr = 4096,
+    fragment_density_map_bit_ext = 512,
+    fragment_shading_rate_attachment_bit_khr = 256,
+    video_encode_dst_bit_khr = 8192,
+    video_encode_src_bit_khr = 16384,
+    video_encode_dpb_bit_khr = 32768,
+    attachment_feedback_loop_bit_ext = 524288,
+    invocation_mask_bit_huawei = 262144,
+    sample_weight_bit_qcom = 1048576,
+    sample_block_match_bit_qcom = 2097152,
+    reserved_24_bit_coreavi = 16777216,
+    tensor_aliasing_bit_arm = 8388608,
+    reserved_28_bit_ext = 268435456,
+    tile_memory_bit_qcom = 134217728,
+    video_encode_quantization_delta_map_bit_khr = 33554432,
+    video_encode_emphasis_map_bit_khr = 67108864,
+    reserved_29_bit_khr = 536870912,
+    reserved_30_bit_khr = 1073741824,
+    reserved_16_bit_huawei = 65536,
+    reserved_27_bit_huawei = 131072,
     _,
 };
 pub const ImageUsageFlagBits_shading_rate_image_bit_nv: ImageUsageFlagBits = .fragment_shading_rate_attachment_bit_khr;
 pub const ImageUsageFlagBits_host_transfer_bit_ext: ImageUsageFlagBits = .host_transfer_bit;
 
 pub const ImageCreateFlagBits = enum(i32) {
+    sparse_binding_bit = 1,
+    sparse_residency_bit = 2,
+    sparse_aliased_bit = 4,
+    mutable_format_bit = 8,
+    cube_compatible_bit = 16,
+    alias_bit = 1024,
+    split_instance_bind_regions_bit = 64,
+    _2d_array_compatible_bit = 32,
+    block_texel_view_compatible_bit = 128,
+    extended_usage_bit = 256,
+    protected_bit = 2048,
+    disjoint_bit = 512,
+    corner_sampled_bit_nv = 8192,
+    reserved_21_bit_img = 2097152,
+    descriptor_heap_capture_replay_bit_ext = 65536,
+    sample_locations_compatible_depth_bit_ext = 4096,
+    subsampled_bit_ext = 16384,
+    multisampled_render_to_single_sampled_bit_ext = 262144,
+    _2d_view_compatible_bit_ext = 131072,
+    video_profile_independent_bit_khr = 1048576,
+    fragment_density_map_offset_bit_ext = 32768,
+    reserved_22_bit_khr = 4194304,
     _,
 };
 pub const ImageCreateFlagBits_split_instance_bind_regions_bit_khr: ImageCreateFlagBits = .split_instance_bind_regions_bit;
@@ -2621,14 +2796,53 @@ pub const ImageCreateFlagBits_descriptor_buffer_capture_replay_bit_ext: ImageCre
 pub const ImageCreateFlagBits_fragment_density_map_offset_bit_qcom: ImageCreateFlagBits = .fragment_density_map_offset_bit_ext;
 
 pub const ImageViewCreateFlagBits = enum(i32) {
+    fragment_density_map_dynamic_bit_ext = 1,
+    descriptor_buffer_capture_replay_bit_ext = 4,
+    fragment_density_map_deferred_bit_ext = 2,
     _,
 };
 
 pub const SamplerCreateFlagBits = enum(i32) {
+    subsampled_bit_ext = 1,
+    subsampled_coarse_reconstruction_bit_ext = 2,
+    descriptor_buffer_capture_replay_bit_ext = 8,
+    non_seamless_cube_map_bit_ext = 4,
+    image_processing_bit_qcom = 16,
     _,
 };
 
 pub const PipelineCreateFlagBits = enum(i32) {
+    disable_optimization_bit = 1,
+    allow_derivatives_bit = 2,
+    derivative_bit = 4,
+    dispatch_base_bit = 16,
+    view_index_from_device_index_bit = 8,
+    fail_on_pipeline_compile_required_bit = 256,
+    early_return_on_failure_bit = 512,
+    no_protected_access_bit = 134217728,
+    protected_access_only_bit = 1073741824,
+    ray_tracing_no_null_any_hit_shaders_bit_khr = 16384,
+    ray_tracing_no_null_closest_hit_shaders_bit_khr = 32768,
+    ray_tracing_no_null_miss_shaders_bit_khr = 65536,
+    ray_tracing_no_null_intersection_shaders_bit_khr = 131072,
+    ray_tracing_skip_triangles_bit_khr = 4096,
+    ray_tracing_skip_aabbs_bit_khr = 8192,
+    ray_tracing_shader_group_handle_capture_replay_bit_khr = 524288,
+    defer_compile_bit_nv = 32,
+    rendering_fragment_density_map_attachment_bit_ext = 4194304,
+    rendering_fragment_shading_rate_attachment_bit_khr = 2097152,
+    capture_statistics_bit_khr = 64,
+    capture_internal_representations_bit_khr = 128,
+    indirect_bindable_bit_nv = 262144,
+    library_bit_khr = 2048,
+    descriptor_buffer_bit_ext = 536870912,
+    retain_link_time_optimization_info_bit_ext = 8388608,
+    link_time_optimization_bit_ext = 1024,
+    ray_tracing_allow_motion_bit_nv = 1048576,
+    color_attachment_feedback_loop_bit_ext = 33554432,
+    depth_stencil_attachment_feedback_loop_bit_ext = 67108864,
+    ray_tracing_opacity_micromap_bit_ext = 16777216,
+    ray_tracing_displacement_micromap_bit_nv = 268435456,
     _,
 };
 pub const PipelineCreateFlagBits_dispatch_base: PipelineCreateFlagBits = .dispatch_base_bit;
@@ -2643,20 +2857,59 @@ pub const PipelineCreateFlagBits_no_protected_access_bit_ext: PipelineCreateFlag
 pub const PipelineCreateFlagBits_protected_access_only_bit_ext: PipelineCreateFlagBits = .protected_access_only_bit;
 
 pub const PipelineShaderStageCreateFlagBits = enum(i32) {
+    allow_varying_subgroup_size_bit = 1,
+    require_full_subgroups_bit = 2,
+    reserved_3_bit_khr = 8,
     _,
 };
 pub const PipelineShaderStageCreateFlagBits_allow_varying_subgroup_size_bit_ext: PipelineShaderStageCreateFlagBits = .allow_varying_subgroup_size_bit;
 pub const PipelineShaderStageCreateFlagBits_require_full_subgroups_bit_ext: PipelineShaderStageCreateFlagBits = .require_full_subgroups_bit;
 
 pub const ColorComponentFlagBits = enum(i32) {
+    r_bit = 1,
+    g_bit = 2,
+    b_bit = 4,
+    a_bit = 8,
     _,
 };
 
 pub const FenceCreateFlagBits = enum(i32) {
+    signaled_bit = 1,
     _,
 };
 
 pub const FormatFeatureFlagBits = enum(i32) {
+    sampled_image_bit = 1,
+    storage_image_bit = 2,
+    storage_image_atomic_bit = 4,
+    uniform_texel_buffer_bit = 8,
+    storage_texel_buffer_bit = 16,
+    storage_texel_buffer_atomic_bit = 32,
+    vertex_buffer_bit = 64,
+    color_attachment_bit = 128,
+    color_attachment_blend_bit = 256,
+    depth_stencil_attachment_bit = 512,
+    blit_src_bit = 1024,
+    blit_dst_bit = 2048,
+    sampled_image_filter_linear_bit = 4096,
+    transfer_src_bit = 16384,
+    transfer_dst_bit = 32768,
+    midpoint_chroma_samples_bit = 131072,
+    sampled_image_ycbcr_conversion_linear_filter_bit = 262144,
+    sampled_image_ycbcr_conversion_separate_reconstruction_filter_bit = 524288,
+    sampled_image_ycbcr_conversion_chroma_reconstruction_explicit_bit = 1048576,
+    sampled_image_ycbcr_conversion_chroma_reconstruction_explicit_forceable_bit = 2097152,
+    disjoint_bit = 4194304,
+    cosited_chroma_samples_bit = 8388608,
+    sampled_image_filter_minmax_bit = 65536,
+    video_decode_output_bit_khr = 33554432,
+    video_decode_dpb_bit_khr = 67108864,
+    acceleration_structure_vertex_buffer_bit_khr = 536870912,
+    sampled_image_filter_cubic_bit_ext = 8192,
+    fragment_density_map_bit_ext = 16777216,
+    fragment_shading_rate_attachment_bit_khr = 1073741824,
+    video_encode_input_bit_khr = 134217728,
+    video_encode_dpb_bit_khr = 268435456,
     _,
 };
 pub const FormatFeatureFlagBits_sampled_image_filter_cubic_bit_img: FormatFeatureFlagBits = .sampled_image_filter_cubic_bit_ext;
@@ -2672,27 +2925,65 @@ pub const FormatFeatureFlagBits_disjoint_bit_khr: FormatFeatureFlagBits = .disjo
 pub const FormatFeatureFlagBits_cosited_chroma_samples_bit_khr: FormatFeatureFlagBits = .cosited_chroma_samples_bit;
 
 pub const QueryControlFlagBits = enum(i32) {
+    precise_bit = 1,
     _,
 };
 
 pub const QueryResultFlagBits = enum(i32) {
+    _64_bit = 1,
+    wait_bit = 2,
+    with_availability_bit = 4,
+    partial_bit = 8,
+    with_status_bit_khr = 16,
     _,
 };
 
 pub const CommandBufferUsageFlagBits = enum(i32) {
+    one_time_submit_bit = 1,
+    render_pass_continue_bit = 2,
+    simultaneous_use_bit = 4,
+    reserved_3_bit_huawei = 8,
+    reserved_4_bit_huawei = 16,
     _,
 };
 
 pub const QueryPipelineStatisticFlagBits = enum(i32) {
+    input_assembly_vertices_bit = 1,
+    input_assembly_primitives_bit = 2,
+    vertex_shader_invocations_bit = 4,
+    geometry_shader_invocations_bit = 8,
+    geometry_shader_primitives_bit = 16,
+    clipping_invocations_bit = 32,
+    clipping_primitives_bit = 64,
+    fragment_shader_invocations_bit = 128,
+    tessellation_control_shader_patches_bit = 256,
+    tessellation_evaluation_shader_invocations_bit = 512,
+    compute_shader_invocations_bit = 1024,
+    task_shader_invocations_bit_ext = 2048,
+    mesh_shader_invocations_bit_ext = 4096,
+    cluster_culling_shader_invocations_bit_huawei = 8192,
     _,
 };
 
 pub const MemoryMapFlagBits = enum(i32) {
+    placed_bit_ext = 1,
     _,
 };
 
 pub const ImageAspectFlagBits = enum(i32) {
+    color_bit = 1,
+    depth_bit = 2,
+    stencil_bit = 4,
+    metadata_bit = 8,
+    plane_0_bit = 16,
+    plane_1_bit = 32,
+    plane_2_bit = 64,
     none = 0,
+    memory_plane_0_bit_ext = 128,
+    memory_plane_1_bit_ext = 256,
+    memory_plane_2_bit_ext = 512,
+    memory_plane_3_bit_ext = 1024,
+    reserved_11_bit_huawei = 2048,
     _,
 };
 pub const ImageAspectFlagBits_plane_0_bit_khr: ImageAspectFlagBits = .plane_0_bit;
@@ -2701,15 +2992,45 @@ pub const ImageAspectFlagBits_plane_2_bit_khr: ImageAspectFlagBits = .plane_2_bi
 pub const ImageAspectFlagBits_none_khr: ImageAspectFlagBits = .none;
 
 pub const SparseImageFormatFlagBits = enum(i32) {
+    single_miptail_bit = 1,
+    aligned_mip_size_bit = 2,
+    nonstandard_block_size_bit = 4,
     _,
 };
 
 pub const SparseMemoryBindFlagBits = enum(i32) {
+    metadata_bit = 1,
     _,
 };
 
 pub const PipelineStageFlagBits = enum(i32) {
+    top_of_pipe_bit = 1,
+    draw_indirect_bit = 2,
+    vertex_input_bit = 4,
+    vertex_shader_bit = 8,
+    tessellation_control_shader_bit = 16,
+    tessellation_evaluation_shader_bit = 32,
+    geometry_shader_bit = 64,
+    fragment_shader_bit = 128,
+    early_fragment_tests_bit = 256,
+    late_fragment_tests_bit = 512,
+    color_attachment_output_bit = 1024,
+    compute_shader_bit = 2048,
+    transfer_bit = 4096,
+    bottom_of_pipe_bit = 8192,
+    host_bit = 16384,
+    all_graphics_bit = 32768,
+    all_commands_bit = 65536,
     none = 0,
+    transform_feedback_bit_ext = 16777216,
+    conditional_rendering_bit_ext = 262144,
+    acceleration_structure_build_bit_khr = 33554432,
+    ray_tracing_shader_bit_khr = 2097152,
+    fragment_density_process_bit_ext = 8388608,
+    fragment_shading_rate_attachment_bit_khr = 4194304,
+    task_shader_bit_ext = 524288,
+    mesh_shader_bit_ext = 1048576,
+    command_preprocess_bit_ext = 131072,
     _,
 };
 pub const PipelineStageFlagBits_shading_rate_image_bit_nv: PipelineStageFlagBits = .fragment_shading_rate_attachment_bit_khr;
@@ -2721,38 +3042,68 @@ pub const PipelineStageFlagBits_command_preprocess_bit_nv: PipelineStageFlagBits
 pub const PipelineStageFlagBits_none_khr: PipelineStageFlagBits = .none;
 
 pub const CommandPoolCreateFlagBits = enum(i32) {
+    transient_bit = 1,
+    reset_command_buffer_bit = 2,
+    protected_bit = 4,
     _,
 };
 
 pub const CommandPoolResetFlagBits = enum(i32) {
+    release_resources_bit = 1,
+    reserved_1_bit_coreavi = 2,
     _,
 };
 
 pub const CommandBufferResetFlagBits = enum(i32) {
+    release_resources_bit = 1,
     _,
 };
 
 pub const SampleCountFlagBits = enum(i32) {
+    _1_bit = 1,
+    _2_bit = 2,
+    _4_bit = 4,
+    _8_bit = 8,
+    _16_bit = 16,
+    _32_bit = 32,
+    _64_bit = 64,
     _,
 };
 
 pub const AttachmentDescriptionFlagBits = enum(i32) {
+    may_alias_bit = 1,
+    resolve_skip_transfer_function_bit_khr = 2,
+    resolve_enable_transfer_function_bit_khr = 4,
     _,
 };
 
 pub const StencilFaceFlagBits = enum(i32) {
+    front_bit = 1,
+    back_bit = 2,
     front_and_back = 0x00000003,
     _,
 };
 pub const StencilFaceFlagBits_stencil_front_and_back: StencilFaceFlagBits = .front_and_back;
 
 pub const DescriptorPoolCreateFlagBits = enum(i32) {
+    free_descriptor_set_bit = 1,
+    update_after_bind_bit = 2,
+    host_only_bit_ext = 4,
+    allow_overallocation_sets_bit_nv = 8,
+    allow_overallocation_pools_bit_nv = 16,
     _,
 };
 pub const DescriptorPoolCreateFlagBits_update_after_bind_bit_ext: DescriptorPoolCreateFlagBits = .update_after_bind_bit;
 pub const DescriptorPoolCreateFlagBits_host_only_bit_valve: DescriptorPoolCreateFlagBits = .host_only_bit_ext;
 
 pub const DependencyFlagBits = enum(i32) {
+    by_region_bit = 1,
+    device_group_bit = 4,
+    view_local_bit = 2,
+    feedback_loop_bit_ext = 8,
+    queue_family_ownership_transfer_use_all_stages_bit_khr = 32,
+    asymmetric_event_bit_khr = 64,
+    extension_586_bit_img = 16,
     _,
 };
 pub const DependencyFlagBits_view_local_bit_khr: DependencyFlagBits = .view_local_bit;
@@ -2767,6 +3118,7 @@ pub const SemaphoreType_binary_khr: SemaphoreType = .binary;
 pub const SemaphoreType_timeline_khr: SemaphoreType = .timeline;
 
 pub const SemaphoreWaitFlagBits = enum(i32) {
+    any_bit = 1,
     _,
 };
 pub const SemaphoreWaitFlagBits_any_bit_khr: SemaphoreWaitFlagBits = .any_bit;
@@ -2806,14 +3158,38 @@ pub const ColorSpaceKHR_colorspace_srgb_nonlinear: ColorSpaceKHR = .srgb_nonline
 pub const ColorSpaceKHR_dci_p3_linear_ext: ColorSpaceKHR = .display_p3_linear_ext;
 
 pub const CompositeAlphaFlagBitsKHR = enum(i32) {
+    opaque_bit = 1,
+    pre_multiplied_bit = 2,
+    post_multiplied_bit = 4,
+    inherit_bit = 8,
     _,
 };
 
 pub const SurfaceTransformFlagBitsKHR = enum(i32) {
+    identity_bit = 1,
+    rotate_90_bit = 2,
+    rotate_180_bit = 4,
+    rotate_270_bit = 8,
+    horizontal_mirror_bit = 16,
+    horizontal_mirror_rotate_90_bit = 32,
+    horizontal_mirror_rotate_180_bit = 64,
+    horizontal_mirror_rotate_270_bit = 128,
+    inherit_bit = 256,
     _,
 };
 
 pub const SubgroupFeatureFlagBits = enum(i32) {
+    basic_bit = 1,
+    vote_bit = 2,
+    arithmetic_bit = 4,
+    ballot_bit = 8,
+    shuffle_bit = 16,
+    shuffle_relative_bit = 32,
+    clustered_bit = 64,
+    quad_bit = 128,
+    rotate_bit = 512,
+    rotate_clustered_bit = 1024,
+    partitioned_bit_ext = 256,
     _,
 };
 pub const SubgroupFeatureFlagBits_partitioned_bit_nv: SubgroupFeatureFlagBits = .partitioned_bit_ext;
@@ -2821,6 +3197,14 @@ pub const SubgroupFeatureFlagBits_rotate_bit_khr: SubgroupFeatureFlagBits = .rot
 pub const SubgroupFeatureFlagBits_rotate_clustered_bit_khr: SubgroupFeatureFlagBits = .rotate_clustered_bit;
 
 pub const DescriptorSetLayoutCreateFlagBits = enum(i32) {
+    update_after_bind_pool_bit = 2,
+    push_descriptor_bit = 1,
+    descriptor_buffer_bit_ext = 16,
+    embedded_immutable_samplers_bit_ext = 32,
+    reserved_3_bit_amd = 8,
+    indirect_bindable_bit_nv = 128,
+    host_only_pool_bit_ext = 4,
+    per_stage_bit_nv = 64,
     _,
 };
 pub const DescriptorSetLayoutCreateFlagBits_push_descriptor_bit_khr: DescriptorSetLayoutCreateFlagBits = .push_descriptor_bit;
@@ -2828,6 +3212,25 @@ pub const DescriptorSetLayoutCreateFlagBits_update_after_bind_pool_bit_ext: Desc
 pub const DescriptorSetLayoutCreateFlagBits_host_only_pool_bit_valve: DescriptorSetLayoutCreateFlagBits = .host_only_pool_bit_ext;
 
 pub const ExternalMemoryHandleTypeFlagBits = enum(i32) {
+    opaque_fd_bit = 1,
+    opaque_win32_bit = 2,
+    opaque_win32_kmt_bit = 4,
+    d3d11_texture_bit = 8,
+    d3d11_texture_kmt_bit = 16,
+    d3d12_heap_bit = 32,
+    d3d12_resource_bit = 64,
+    dma_buf_bit_ext = 512,
+    android_hardware_buffer_bit_android = 1024,
+    host_allocation_bit_ext = 128,
+    host_mapped_foreign_memory_bit_ext = 256,
+    zircon_vmo_bit_fuchsia = 2048,
+    rdma_address_bit_nv = 4096,
+    sci_buf_bit_nv = 8192,
+    oh_native_buffer_bit_ohos = 32768,
+    screen_buffer_bit_qnx = 16384,
+    mtlbuffer_bit_ext = 65536,
+    mtltexture_bit_ext = 131072,
+    mtlheap_bit_ext = 262144,
     _,
 };
 pub const ExternalMemoryHandleTypeFlagBits_opaque_fd_bit_khr: ExternalMemoryHandleTypeFlagBits = .opaque_fd_bit;
@@ -2839,6 +3242,9 @@ pub const ExternalMemoryHandleTypeFlagBits_d3d12_heap_bit_khr: ExternalMemoryHan
 pub const ExternalMemoryHandleTypeFlagBits_d3d12_resource_bit_khr: ExternalMemoryHandleTypeFlagBits = .d3d12_resource_bit;
 
 pub const ExternalMemoryFeatureFlagBits = enum(i32) {
+    dedicated_only_bit = 1,
+    exportable_bit = 2,
+    importable_bit = 4,
     _,
 };
 pub const ExternalMemoryFeatureFlagBits_dedicated_only_bit_khr: ExternalMemoryFeatureFlagBits = .dedicated_only_bit;
@@ -2846,6 +3252,13 @@ pub const ExternalMemoryFeatureFlagBits_exportable_bit_khr: ExternalMemoryFeatur
 pub const ExternalMemoryFeatureFlagBits_importable_bit_khr: ExternalMemoryFeatureFlagBits = .importable_bit;
 
 pub const ExternalSemaphoreHandleTypeFlagBits = enum(i32) {
+    opaque_fd_bit = 1,
+    opaque_win32_bit = 2,
+    opaque_win32_kmt_bit = 4,
+    d3d12_fence_bit = 8,
+    sync_fd_bit = 16,
+    zircon_event_bit_fuchsia = 128,
+    sci_sync_obj_bit_nv = 32,
     _,
 };
 pub const ExternalSemaphoreHandleTypeFlagBits_d3d11_fence_bit: ExternalSemaphoreHandleTypeFlagBits = .d3d12_fence_bit;
@@ -2856,17 +3269,26 @@ pub const ExternalSemaphoreHandleTypeFlagBits_d3d12_fence_bit_khr: ExternalSemap
 pub const ExternalSemaphoreHandleTypeFlagBits_sync_fd_bit_khr: ExternalSemaphoreHandleTypeFlagBits = .sync_fd_bit;
 
 pub const ExternalSemaphoreFeatureFlagBits = enum(i32) {
+    exportable_bit = 1,
+    importable_bit = 2,
     _,
 };
 pub const ExternalSemaphoreFeatureFlagBits_exportable_bit_khr: ExternalSemaphoreFeatureFlagBits = .exportable_bit;
 pub const ExternalSemaphoreFeatureFlagBits_importable_bit_khr: ExternalSemaphoreFeatureFlagBits = .importable_bit;
 
 pub const SemaphoreImportFlagBits = enum(i32) {
+    temporary_bit = 1,
     _,
 };
 pub const SemaphoreImportFlagBits_temporary_bit_khr: SemaphoreImportFlagBits = .temporary_bit;
 
 pub const ExternalFenceHandleTypeFlagBits = enum(i32) {
+    opaque_fd_bit = 1,
+    opaque_win32_bit = 2,
+    opaque_win32_kmt_bit = 4,
+    sync_fd_bit = 8,
+    sci_sync_obj_bit_nv = 16,
+    sci_sync_fence_bit_nv = 32,
     _,
 };
 pub const ExternalFenceHandleTypeFlagBits_opaque_fd_bit_khr: ExternalFenceHandleTypeFlagBits = .opaque_fd_bit;
@@ -2875,17 +3297,24 @@ pub const ExternalFenceHandleTypeFlagBits_opaque_win32_kmt_bit_khr: ExternalFenc
 pub const ExternalFenceHandleTypeFlagBits_sync_fd_bit_khr: ExternalFenceHandleTypeFlagBits = .sync_fd_bit;
 
 pub const ExternalFenceFeatureFlagBits = enum(i32) {
+    exportable_bit = 1,
+    importable_bit = 2,
     _,
 };
 pub const ExternalFenceFeatureFlagBits_exportable_bit_khr: ExternalFenceFeatureFlagBits = .exportable_bit;
 pub const ExternalFenceFeatureFlagBits_importable_bit_khr: ExternalFenceFeatureFlagBits = .importable_bit;
 
 pub const FenceImportFlagBits = enum(i32) {
+    temporary_bit = 1,
     _,
 };
 pub const FenceImportFlagBits_temporary_bit_khr: FenceImportFlagBits = .temporary_bit;
 
 pub const PeerMemoryFeatureFlagBits = enum(i32) {
+    copy_src_bit = 1,
+    copy_dst_bit = 2,
+    generic_src_bit = 4,
+    generic_dst_bit = 8,
     _,
 };
 pub const PeerMemoryFeatureFlagBits_copy_src_bit_khr: PeerMemoryFeatureFlagBits = .copy_src_bit;
@@ -2894,6 +3323,10 @@ pub const PeerMemoryFeatureFlagBits_generic_src_bit_khr: PeerMemoryFeatureFlagBi
 pub const PeerMemoryFeatureFlagBits_generic_dst_bit_khr: PeerMemoryFeatureFlagBits = .generic_dst_bit;
 
 pub const MemoryAllocateFlagBits = enum(i32) {
+    device_mask_bit = 1,
+    device_address_bit = 2,
+    device_address_capture_replay_bit = 4,
+    zero_initialize_bit_ext = 8,
     _,
 };
 pub const MemoryAllocateFlagBits_device_mask_bit_khr: MemoryAllocateFlagBits = .device_mask_bit;
@@ -2901,15 +3334,38 @@ pub const MemoryAllocateFlagBits_device_address_bit_khr: MemoryAllocateFlagBits 
 pub const MemoryAllocateFlagBits_device_address_capture_replay_bit_khr: MemoryAllocateFlagBits = .device_address_capture_replay_bit;
 
 pub const DeviceGroupPresentModeFlagBitsKHR = enum(i32) {
+    local_bit = 1,
+    remote_bit = 2,
+    sum_bit = 4,
+    local_multi_device_bit = 8,
     _,
 };
 
 pub const SwapchainCreateFlagBitsKHR = enum(i32) {
+    split_instance_bind_regions_bit = 1,
+    protected_bit = 2,
+    mutable_format_bit = 4,
+    present_timing_bit_ext = 512,
+    reserved_5_bit_ext = 32,
+    reserved_4_bit_ext = 16,
+    present_id_2_bit = 64,
+    present_wait_2_bit = 128,
+    deferred_memory_allocation_bit = 8,
+    reserved_8_bit_ext = 256,
     _,
 };
 pub const SwapchainCreateFlagBitsKHR_deferred_memory_allocation_bit_ext: SwapchainCreateFlagBitsKHR = .deferred_memory_allocation_bit;
 
 pub const SubpassDescriptionFlagBits = enum(i32) {
+    per_view_attributes_bit_nvx = 1,
+    per_view_position_x_only_bit_nvx = 2,
+    tile_shading_apron_bit_qcom = 256,
+    rasterization_order_attachment_color_access_bit_ext = 16,
+    rasterization_order_attachment_depth_access_bit_ext = 32,
+    rasterization_order_attachment_stencil_access_bit_ext = 64,
+    enable_legacy_dithering_bit_ext = 128,
+    fragment_region_bit_ext = 4,
+    custom_resolve_bit_ext = 8,
     _,
 };
 pub const SubpassDescriptionFlagBits_fragment_region_bit_qcom: SubpassDescriptionFlagBits = .fragment_region_bit_ext;
@@ -2976,14 +3432,27 @@ pub const ChromaLocation_cosited_even_khr: ChromaLocation = .cosited_even;
 pub const ChromaLocation_midpoint_khr: ChromaLocation = .midpoint;
 
 pub const DebugUtilsMessageSeverityFlagBitsEXT = enum(i32) {
+    verbose_bit = 1,
+    info_bit = 16,
+    warning_bit = 256,
+    error_bit = 4096,
     _,
 };
 
 pub const DebugUtilsMessageTypeFlagBitsEXT = enum(i32) {
+    general_bit = 1,
+    validation_bit = 2,
+    performance_bit = 4,
+    device_address_binding_bit = 8,
     _,
 };
 
 pub const DescriptorBindingFlagBits = enum(i32) {
+    update_after_bind_bit = 1,
+    update_unused_while_pending_bit = 2,
+    partially_bound_bit = 4,
+    variable_descriptor_count_bit = 8,
+    reserved_4_bit_qcom = 16,
     _,
 };
 pub const DescriptorBindingFlagBits_update_after_bind_bit_ext: DescriptorBindingFlagBits = .update_after_bind_bit;
@@ -3049,6 +3518,12 @@ pub const DriverId_broadcom_proprietary_khr: DriverId = .broadcom_proprietary;
 
 pub const ResolveModeFlagBits = enum(i32) {
     none = 0,
+    sample_zero_bit = 1,
+    average_bit = 2,
+    min_bit = 4,
+    max_bit = 8,
+    external_format_downsample_bit_android = 16,
+    custom_bit_ext = 32,
     _,
 };
 pub const ResolveModeFlagBits_none_khr: ResolveModeFlagBits = .none;
@@ -3059,15 +3534,20 @@ pub const ResolveModeFlagBits_max_bit_khr: ResolveModeFlagBits = .max_bit;
 pub const ResolveModeFlagBits_external_format_downsample_android: ResolveModeFlagBits = .external_format_downsample_bit_android;
 
 pub const FramebufferCreateFlagBits = enum(i32) {
+    imageless_bit = 1,
     _,
 };
 pub const FramebufferCreateFlagBits_imageless_bit_khr: FramebufferCreateFlagBits = .imageless_bit;
 
 pub const QueryPoolCreateFlagBits = enum(i32) {
+    reset_bit_khr = 1,
     _,
 };
 
 pub const PipelineCreationFeedbackFlagBits = enum(i32) {
+    valid_bit = 1,
+    application_pipeline_cache_hit_bit = 2,
+    base_pipeline_acceleration_bit = 4,
     _,
 };
 pub const PipelineCreationFeedbackFlagBits_valid_bit_ext: PipelineCreationFeedbackFlagBits = .valid_bit;
@@ -3085,6 +3565,13 @@ pub const ShaderFloatControlsIndependence_all_khr: ShaderFloatControlsIndependen
 pub const ShaderFloatControlsIndependence_none_khr: ShaderFloatControlsIndependence = .none;
 
 pub const ToolPurposeFlagBits = enum(i32) {
+    validation_bit = 1,
+    profiling_bit = 2,
+    tracing_bit = 4,
+    additional_features_bit = 8,
+    modifying_features_bit = 16,
+    debug_reporting_bit_ext = 32,
+    debug_markers_bit_ext = 64,
     _,
 };
 pub const ToolPurposeFlagBits_validation_bit_ext: ToolPurposeFlagBits = .validation_bit;
@@ -3095,6 +3582,63 @@ pub const ToolPurposeFlagBits_modifying_features_bit_ext: ToolPurposeFlagBits = 
 
 pub const AccessFlagBits2 = enum(u64) {
     _2_none = 0,
+    _2_indirect_command_read_bit = 1,
+    _2_index_read_bit = 2,
+    _2_vertex_attribute_read_bit = 4,
+    _2_uniform_read_bit = 8,
+    _2_input_attachment_read_bit = 16,
+    _2_shader_read_bit = 32,
+    _2_shader_write_bit = 64,
+    _2_color_attachment_read_bit = 128,
+    _2_color_attachment_write_bit = 256,
+    _2_depth_stencil_attachment_read_bit = 512,
+    _2_depth_stencil_attachment_write_bit = 1024,
+    _2_transfer_read_bit = 2048,
+    _2_transfer_write_bit = 4096,
+    _2_host_read_bit = 8192,
+    _2_host_write_bit = 16384,
+    _2_memory_read_bit = 32768,
+    _2_memory_write_bit = 65536,
+    _2_shader_sampled_read_bit = 4294967296,
+    _2_shader_storage_read_bit = 8589934592,
+    _2_shader_storage_write_bit = 17179869184,
+    _2_video_decode_read_bit_khr = 34359738368,
+    _2_video_decode_write_bit_khr = 68719476736,
+    _2_sampler_heap_read_bit_ext = 144115188075855872,
+    _2_resource_heap_read_bit_ext = 288230376151711744,
+    _2_reserved_46_bit_intel = 70368744177664,
+    _2_video_encode_read_bit_khr = 137438953472,
+    _2_video_encode_write_bit_khr = 274877906944,
+    _2_shader_tile_attachment_read_bit_qcom = 2251799813685248,
+    _2_shader_tile_attachment_write_bit_qcom = 4503599627370496,
+    _2_transform_feedback_write_bit_ext = 33554432,
+    _2_transform_feedback_counter_read_bit_ext = 67108864,
+    _2_transform_feedback_counter_write_bit_ext = 134217728,
+    _2_conditional_rendering_read_bit_ext = 1048576,
+    _2_command_preprocess_read_bit_ext = 131072,
+    _2_command_preprocess_write_bit_ext = 262144,
+    _2_fragment_shading_rate_attachment_read_bit_khr = 8388608,
+    _2_acceleration_structure_read_bit_khr = 2097152,
+    _2_acceleration_structure_write_bit_khr = 4194304,
+    _2_fragment_density_map_read_bit_ext = 16777216,
+    _2_color_attachment_read_noncoherent_bit_ext = 524288,
+    _2_descriptor_buffer_read_bit_ext = 2199023255552,
+    _2_invocation_mask_read_bit_huawei = 549755813888,
+    _2_shader_binding_table_read_bit_khr = 1099511627776,
+    _2_micromap_read_bit_ext = 17592186044416,
+    _2_micromap_write_bit_ext = 35184372088832,
+    _2_optical_flow_read_bit_nv = 4398046511104,
+    _2_optical_flow_write_bit_nv = 8796093022208,
+    _2_data_graph_read_bit_arm = 140737488355328,
+    _2_data_graph_write_bit_arm = 281474976710656,
+    _2_memory_decompression_read_bit_ext = 36028797018963968,
+    _2_memory_decompression_write_bit_ext = 72057594037927936,
+    _2_reserved_62_bit_ext = 4611686018427387904,
+    _2_reserved_63_bit_ext = 9223372036854775808,
+    _2_reserved_60_bit_khr = 1152921504606846976,
+    _2_reserved_61_bit_khr = 2305843009213693952,
+    _2_reserved_49_bit_arm = 562949953421312,
+    _2_reserved_50_bit_arm = 1125899906842624,
     _,
 };
 pub const AccessFlagBits2__2_none_khr: AccessFlagBits2 = ._2_none;
@@ -3126,6 +3670,55 @@ pub const AccessFlagBits2__2_acceleration_structure_write_bit_nv: AccessFlagBits
 
 pub const PipelineStageFlagBits2 = enum(u64) {
     _2_none = 0,
+    _2_top_of_pipe_bit = 1,
+    _2_draw_indirect_bit = 2,
+    _2_vertex_input_bit = 4,
+    _2_vertex_shader_bit = 8,
+    _2_tessellation_control_shader_bit = 16,
+    _2_tessellation_evaluation_shader_bit = 32,
+    _2_geometry_shader_bit = 64,
+    _2_fragment_shader_bit = 128,
+    _2_early_fragment_tests_bit = 256,
+    _2_late_fragment_tests_bit = 512,
+    _2_color_attachment_output_bit = 1024,
+    _2_compute_shader_bit = 2048,
+    _2_all_transfer_bit = 4096,
+    _2_bottom_of_pipe_bit = 8192,
+    _2_host_bit = 16384,
+    _2_all_graphics_bit = 32768,
+    _2_all_commands_bit = 65536,
+    _2_copy_bit = 4294967296,
+    _2_resolve_bit = 8589934592,
+    _2_blit_bit = 17179869184,
+    _2_clear_bit = 34359738368,
+    _2_index_input_bit = 68719476736,
+    _2_vertex_attribute_input_bit = 137438953472,
+    _2_pre_rasterization_shaders_bit = 274877906944,
+    _2_video_decode_bit_khr = 67108864,
+    _2_video_encode_bit_khr = 134217728,
+    _2_transform_feedback_bit_ext = 16777216,
+    _2_conditional_rendering_bit_ext = 262144,
+    _2_command_preprocess_bit_ext = 131072,
+    _2_fragment_shading_rate_attachment_bit_khr = 4194304,
+    _2_acceleration_structure_build_bit_khr = 33554432,
+    _2_ray_tracing_shader_bit_khr = 2097152,
+    _2_fragment_density_process_bit_ext = 8388608,
+    _2_task_shader_bit_ext = 524288,
+    _2_mesh_shader_bit_ext = 1048576,
+    _2_subpass_shader_bit_huawei = 549755813888,
+    _2_invocation_mask_bit_huawei = 1099511627776,
+    _2_acceleration_structure_copy_bit_khr = 268435456,
+    _2_micromap_build_bit_ext = 1073741824,
+    _2_cluster_culling_shader_bit_huawei = 2199023255552,
+    _2_optical_flow_bit_nv = 536870912,
+    _2_convert_cooperative_vector_matrix_bit_nv = 17592186044416,
+    _2_data_graph_bit_arm = 4398046511104,
+    _2_copy_indirect_bit_khr = 70368744177664,
+    _2_memory_decompression_bit_ext = 35184372088832,
+    _2_reserved_49_bit_ext = 562949953421312,
+    _2_reserved_47_bit_khr = 140737488355328,
+    _2_reserved_43_bit_arm = 8796093022208,
+    _2_reserved_48_bit_huawei = 281474976710656,
     _,
 };
 pub const PipelineStageFlagBits2__2_transfer_bit: PipelineStageFlagBits2 = ._2_all_transfer_bit;
@@ -3164,31 +3757,99 @@ pub const PipelineStageFlagBits2__2_mesh_shader_bit_nv: PipelineStageFlagBits2 =
 pub const PipelineStageFlagBits2__2_subpass_shading_bit_huawei: PipelineStageFlagBits2 = ._2_subpass_shader_bit_huawei;
 
 pub const SubmitFlagBits = enum(i32) {
+    protected_bit = 1,
     _,
 };
 pub const SubmitFlagBits_protected_bit_khr: SubmitFlagBits = .protected_bit;
 
 pub const EventCreateFlagBits = enum(i32) {
+    device_only_bit = 1,
     _,
 };
 pub const EventCreateFlagBits_device_only_bit_khr: EventCreateFlagBits = .device_only_bit;
 
 pub const PipelineLayoutCreateFlagBits = enum(i32) {
+    reserved_0_bit_amd = 1,
+    independent_sets_bit_ext = 2,
     _,
 };
 
 pub const PipelineColorBlendStateCreateFlagBits = enum(i32) {
+    rasterization_order_attachment_access_bit_ext = 1,
     _,
 };
 pub const PipelineColorBlendStateCreateFlagBits_rasterization_order_attachment_access_bit_arm: PipelineColorBlendStateCreateFlagBits = .rasterization_order_attachment_access_bit_ext;
 
 pub const PipelineDepthStencilStateCreateFlagBits = enum(i32) {
+    rasterization_order_attachment_depth_access_bit_ext = 1,
+    rasterization_order_attachment_stencil_access_bit_ext = 2,
     _,
 };
 pub const PipelineDepthStencilStateCreateFlagBits_rasterization_order_attachment_depth_access_bit_arm: PipelineDepthStencilStateCreateFlagBits = .rasterization_order_attachment_depth_access_bit_ext;
 pub const PipelineDepthStencilStateCreateFlagBits_rasterization_order_attachment_stencil_access_bit_arm: PipelineDepthStencilStateCreateFlagBits = .rasterization_order_attachment_stencil_access_bit_ext;
 
 pub const FormatFeatureFlagBits2 = enum(u64) {
+    _2_sampled_image_bit = 1,
+    _2_storage_image_bit = 2,
+    _2_storage_image_atomic_bit = 4,
+    _2_uniform_texel_buffer_bit = 8,
+    _2_storage_texel_buffer_bit = 16,
+    _2_storage_texel_buffer_atomic_bit = 32,
+    _2_vertex_buffer_bit = 64,
+    _2_color_attachment_bit = 128,
+    _2_color_attachment_blend_bit = 256,
+    _2_depth_stencil_attachment_bit = 512,
+    _2_blit_src_bit = 1024,
+    _2_blit_dst_bit = 2048,
+    _2_sampled_image_filter_linear_bit = 4096,
+    _2_transfer_src_bit = 16384,
+    _2_transfer_dst_bit = 32768,
+    _2_sampled_image_filter_minmax_bit = 65536,
+    _2_midpoint_chroma_samples_bit = 131072,
+    _2_sampled_image_ycbcr_conversion_linear_filter_bit = 262144,
+    _2_sampled_image_ycbcr_conversion_separate_reconstruction_filter_bit = 524288,
+    _2_sampled_image_ycbcr_conversion_chroma_reconstruction_explicit_bit = 1048576,
+    _2_sampled_image_ycbcr_conversion_chroma_reconstruction_explicit_forceable_bit = 2097152,
+    _2_disjoint_bit = 4194304,
+    _2_cosited_chroma_samples_bit = 8388608,
+    _2_storage_read_without_format_bit = 2147483648,
+    _2_storage_write_without_format_bit = 4294967296,
+    _2_sampled_image_depth_comparison_bit = 8589934592,
+    _2_sampled_image_filter_cubic_bit = 8192,
+    _2_host_image_transfer_bit = 70368744177664,
+    _2_video_decode_output_bit_khr = 33554432,
+    _2_video_decode_dpb_bit_khr = 67108864,
+    _2_acceleration_structure_vertex_buffer_bit_khr = 536870912,
+    _2_fragment_density_map_bit_ext = 16777216,
+    _2_fragment_shading_rate_attachment_bit_khr = 1073741824,
+    _2_video_encode_input_bit_khr = 134217728,
+    _2_video_encode_dpb_bit_khr = 268435456,
+    _2_reserved_44_bit_qcom = 17592186044416,
+    _2_acceleration_structure_radius_buffer_bit_nv = 2251799813685248,
+    _2_linear_color_attachment_bit_nv = 274877906944,
+    _2_weight_image_bit_qcom = 17179869184,
+    _2_weight_sampled_image_bit_qcom = 34359738368,
+    _2_block_matching_bit_qcom = 68719476736,
+    _2_box_filter_sampled_bit_qcom = 137438953472,
+    _2_tensor_shader_bit_arm = 549755813888,
+    _2_tensor_image_aliasing_bit_arm = 8796093022208,
+    _2_optical_flow_image_bit_nv = 1099511627776,
+    _2_optical_flow_vector_bit_nv = 2199023255552,
+    _2_optical_flow_cost_bit_nv = 4398046511104,
+    _2_tensor_data_graph_bit_arm = 281474976710656,
+    _2_reserved_60_bit_ext = 1152921504606846976,
+    _2_copy_image_indirect_dst_bit_khr = 576460752303423488,
+    _2_video_encode_quantization_delta_map_bit_khr = 562949953421312,
+    _2_video_encode_emphasis_map_bit_khr = 1125899906842624,
+    _2_depth_copy_on_compute_queue_bit_khr = 4503599627370496,
+    _2_depth_copy_on_transfer_queue_bit_khr = 9007199254740992,
+    _2_stencil_copy_on_compute_queue_bit_khr = 18014398509481984,
+    _2_stencil_copy_on_transfer_queue_bit_khr = 36028797018963968,
+    _2_reserved_56_bit_arm = 72057594037927936,
+    _2_reserved_57_bit_arm = 144115188075855872,
+    _2_reserved_58_bit_arm = 288230376151711744,
+    _2_reserved_47_bit_arm = 140737488355328,
+    _2_reserved_61_bit_huawei = 2305843009213693952,
     _,
 };
 pub const FormatFeatureFlagBits2__2_host_image_transfer_bit_ext: FormatFeatureFlagBits2 = ._2_host_image_transfer_bit;
@@ -3221,6 +3882,16 @@ pub const FormatFeatureFlagBits2__2_sampled_image_filter_minmax_bit_khr: FormatF
 pub const FormatFeatureFlagBits2__2_sampled_image_filter_cubic_bit_ext: FormatFeatureFlagBits2 = ._2_sampled_image_filter_cubic_bit;
 
 pub const RenderingFlagBits = enum(i32) {
+    contents_secondary_command_buffers_bit = 1,
+    suspending_bit = 2,
+    resuming_bit = 4,
+    reserved_9_bit_img = 512,
+    enable_legacy_dithering_bit_ext = 8,
+    contents_inline_bit_khr = 16,
+    per_layer_fragment_density_bit_valve = 32,
+    fragment_region_bit_ext = 64,
+    custom_resolve_bit_ext = 128,
+    local_read_concurrent_access_control_bit_khr = 256,
     _,
 };
 pub const RenderingFlagBits_contents_secondary_command_buffers_bit_khr: RenderingFlagBits = .contents_secondary_command_buffers_bit;
@@ -3229,6 +3900,8 @@ pub const RenderingFlagBits_resuming_bit_khr: RenderingFlagBits = .resuming_bit;
 pub const RenderingFlagBits_contents_inline_bit_ext: RenderingFlagBits = .contents_inline_bit_khr;
 
 pub const InstanceCreateFlagBits = enum(i32) {
+    enumerate_portability_bit_khr = 1,
+    reserved_616_bit_ext = 2,
     _,
 };
 
@@ -3493,7 +4166,42 @@ pub const PipelineDepthStencilStateCreateFlags = packed struct(u32) {
     pub const empty: @This() = .{};
 };
 
-pub const PipelineDynamicStateCreateFlags = u32;
+pub const PipelineDynamicStateCreateFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
+
+    pub const empty: @This() = .{};
+};
 
 pub const PipelineColorBlendStateCreateFlags = packed struct(u32) {
     rasterization_order_attachment_access: bool = false,
@@ -3532,17 +4240,227 @@ pub const PipelineColorBlendStateCreateFlags = packed struct(u32) {
     pub const empty: @This() = .{};
 };
 
-pub const PipelineMultisampleStateCreateFlags = u32;
+pub const PipelineMultisampleStateCreateFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
 
-pub const PipelineRasterizationStateCreateFlags = u32;
+    pub const empty: @This() = .{};
+};
 
-pub const PipelineViewportStateCreateFlags = u32;
+pub const PipelineRasterizationStateCreateFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
 
-pub const PipelineTessellationStateCreateFlags = u32;
+    pub const empty: @This() = .{};
+};
 
-pub const PipelineInputAssemblyStateCreateFlags = u32;
+pub const PipelineViewportStateCreateFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
 
-pub const PipelineVertexInputStateCreateFlags = u32;
+    pub const empty: @This() = .{};
+};
+
+pub const PipelineTessellationStateCreateFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
+
+    pub const empty: @This() = .{};
+};
+
+pub const PipelineInputAssemblyStateCreateFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
+
+    pub const empty: @This() = .{};
+};
+
+pub const PipelineVertexInputStateCreateFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
+
+    pub const empty: @This() = .{};
+};
 
 pub const PipelineShaderStageCreateFlags = packed struct(u32) {
     allow_varying_subgroup_size: bool = false,
@@ -3618,7 +4536,42 @@ pub const DescriptorSetLayoutCreateFlags = packed struct(u32) {
     pub const empty: @This() = .{};
 };
 
-pub const BufferViewCreateFlags = u32;
+pub const BufferViewCreateFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
+
+    pub const empty: @This() = .{};
+};
 
 pub const InstanceCreateFlags = packed struct(u32) {
     enumerate_portability: bool = false,
@@ -3657,7 +4610,42 @@ pub const InstanceCreateFlags = packed struct(u32) {
     pub const empty: @This() = .{};
 };
 
-pub const DeviceCreateFlags = u32;
+pub const DeviceCreateFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
+
+    pub const empty: @This() = .{};
+};
 
 pub const DeviceQueueCreateFlags = packed struct(u32) {
     protected: bool = false,
@@ -4177,7 +5165,42 @@ pub const FenceCreateFlags = packed struct(u32) {
     pub const empty: @This() = .{};
 };
 
-pub const SemaphoreCreateFlags = u32;
+pub const SemaphoreCreateFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
+
+    pub const empty: @This() = .{};
+};
 
 pub const FormatFeatureFlags = packed struct(u32) {
     sampled_image: bool = false,
@@ -4290,7 +5313,42 @@ pub const QueryResultFlags = packed struct(u32) {
     pub const empty: @This() = .{};
 };
 
-pub const ShaderModuleCreateFlags = u32;
+pub const ShaderModuleCreateFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
+
+    pub const empty: @This() = .{};
+};
 
 pub const EventCreateFlags = packed struct(u32) {
     device_only: bool = false,
@@ -4921,7 +5979,42 @@ pub const DescriptorPoolCreateFlags = packed struct(u32) {
     pub const empty: @This() = .{};
 };
 
-pub const DescriptorPoolResetFlags = u32;
+pub const DescriptorPoolResetFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
+
+    pub const empty: @This() = .{};
+};
 
 pub const DependencyFlags = packed struct(u32) {
     by_region: bool = false,
@@ -4997,9 +6090,79 @@ pub const SubgroupFeatureFlags = packed struct(u32) {
     pub const empty: @This() = .{};
 };
 
-pub const PrivateDataSlotCreateFlags = u32;
+pub const PrivateDataSlotCreateFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
 
-pub const DescriptorUpdateTemplateCreateFlags = u32;
+    pub const empty: @This() = .{};
+};
+
+pub const DescriptorUpdateTemplateCreateFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
+
+    pub const empty: @This() = .{};
+};
 
 pub const PipelineCreationFeedbackFlags = packed struct(u32) {
     valid: bool = false,
@@ -5430,9 +6593,79 @@ pub const SwapchainCreateFlagsKHR = packed struct(u32) {
     pub const empty: @This() = .{};
 };
 
-pub const WaylandSurfaceCreateFlagsKHR = u32;
+pub const WaylandSurfaceCreateFlagsKHR = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
 
-pub const Win32SurfaceCreateFlagsKHR = u32;
+    pub const empty: @This() = .{};
+};
+
+pub const Win32SurfaceCreateFlagsKHR = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
+
+    pub const empty: @This() = .{};
+};
 
 pub const PeerMemoryFeatureFlags = packed struct(u32) {
     copy_src: bool = false,
@@ -5545,7 +6778,42 @@ pub const DeviceGroupPresentModeFlagsKHR = packed struct(u32) {
     pub const empty: @This() = .{};
 };
 
-pub const CommandPoolTrimFlags = u32;
+pub const CommandPoolTrimFlags = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
+
+    pub const empty: @This() = .{};
+};
 
 pub const ExternalMemoryHandleTypeFlags = packed struct(u32) {
     opaque_fd: bool = false,
@@ -5917,9 +7185,79 @@ pub const DebugUtilsMessageTypeFlagsEXT = packed struct(u32) {
     pub const empty: @This() = .{};
 };
 
-pub const DebugUtilsMessengerCreateFlagsEXT = u32;
+pub const DebugUtilsMessengerCreateFlagsEXT = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
 
-pub const DebugUtilsMessengerCallbackDataFlagsEXT = u32;
+    pub const empty: @This() = .{};
+};
+
+pub const DebugUtilsMessengerCallbackDataFlagsEXT = packed struct(u32) {
+    _reserved_0: bool = false,
+    _reserved_1: bool = false,
+    _reserved_2: bool = false,
+    _reserved_3: bool = false,
+    _reserved_4: bool = false,
+    _reserved_5: bool = false,
+    _reserved_6: bool = false,
+    _reserved_7: bool = false,
+    _reserved_8: bool = false,
+    _reserved_9: bool = false,
+    _reserved_10: bool = false,
+    _reserved_11: bool = false,
+    _reserved_12: bool = false,
+    _reserved_13: bool = false,
+    _reserved_14: bool = false,
+    _reserved_15: bool = false,
+    _reserved_16: bool = false,
+    _reserved_17: bool = false,
+    _reserved_18: bool = false,
+    _reserved_19: bool = false,
+    _reserved_20: bool = false,
+    _reserved_21: bool = false,
+    _reserved_22: bool = false,
+    _reserved_23: bool = false,
+    _reserved_24: bool = false,
+    _reserved_25: bool = false,
+    _reserved_26: bool = false,
+    _reserved_27: bool = false,
+    _reserved_28: bool = false,
+    _reserved_29: bool = false,
+    _reserved_30: bool = false,
+    _reserved_31: bool = false,
+
+    pub const empty: @This() = .{};
+};
 
 pub const DescriptorBindingFlags = packed struct(u32) {
     update_after_bind: bool = false,
@@ -9002,7 +10340,7 @@ pub fn checkResult(r: Result) Error!void {
         .error_native_window_in_use_khr => error.NativeWindowInUse,
         .error_out_of_date_khr => error.OutOfDate,
         .error_incompatible_display_khr => error.IncompatibleDisplay,
-        .error_validation_failed_ext => error.ValidationFailed,
+        .error_validation_failed => error.ValidationFailed,
         .error_invalid_shader_nv => error.InvalidShader,
         else => if (@intFromEnum(r) < 0) error.Unknown else {},
     };
@@ -9034,7 +10372,7 @@ pub const PFN_vkQueueWaitIdle = *const fn (*Queue) callconv(.c) Result;
 pub const PFN_vkDeviceWaitIdle = *const fn (*Device) callconv(.c) Result;
 pub const PFN_vkAllocateMemory = *const fn (*Device, *const MemoryAllocateInfo, ?*const AllocationCallbacks, *DeviceMemory) callconv(.c) Result;
 pub const PFN_vkFreeMemory = *const fn (*Device, DeviceMemory, ?*const AllocationCallbacks) callconv(.c) void;
-pub const PFN_vkMapMemory = *const fn (*Device, DeviceMemory, DeviceSize, DeviceSize, MemoryMapFlags, [*c]anyopaque) callconv(.c) Result;
+pub const PFN_vkMapMemory = *const fn (*Device, DeviceMemory, DeviceSize, DeviceSize, MemoryMapFlags, ?*?*anyopaque) callconv(.c) Result;
 pub const PFN_vkUnmapMemory = *const fn (*Device, DeviceMemory) callconv(.c) void;
 pub const PFN_vkFlushMappedMemoryRanges = *const fn (*Device, u32, *const MappedMemoryRange) callconv(.c) Result;
 pub const PFN_vkInvalidateMappedMemoryRanges = *const fn (*Device, u32, *const MappedMemoryRange) callconv(.c) Result;
@@ -9259,6 +10597,7 @@ pub const PFN_vkCmdEndRendering = *const fn (*CommandBuffer) callconv(.c) void;
 
 pub const BaseDispatch = struct {
     vkCreateInstance: PFN_vkCreateInstance = undefined,
+    vkGetInstanceProcAddr: PFN_vkGetInstanceProcAddr = undefined,
     vkEnumerateInstanceVersion: PFN_vkEnumerateInstanceVersion = undefined,
     vkEnumerateInstanceLayerProperties: PFN_vkEnumerateInstanceLayerProperties = undefined,
     vkEnumerateInstanceExtensionProperties: PFN_vkEnumerateInstanceExtensionProperties = undefined,
@@ -9267,7 +10606,7 @@ pub const BaseDispatch = struct {
 pub const InstanceDispatch = struct {
     vkDestroyInstance: PFN_vkDestroyInstance = undefined,
     vkEnumeratePhysicalDevices: PFN_vkEnumeratePhysicalDevices = undefined,
-    vkGetInstanceProcAddr: PFN_vkGetInstanceProcAddr = undefined,
+    vkGetDeviceProcAddr: PFN_vkGetDeviceProcAddr = undefined,
     vkGetPhysicalDeviceProperties: PFN_vkGetPhysicalDeviceProperties = undefined,
     vkGetPhysicalDeviceQueueFamilyProperties: PFN_vkGetPhysicalDeviceQueueFamilyProperties = undefined,
     vkGetPhysicalDeviceMemoryProperties: PFN_vkGetPhysicalDeviceMemoryProperties = undefined,
@@ -9306,7 +10645,6 @@ pub const InstanceDispatch = struct {
 };
 
 pub const DeviceDispatch = struct {
-    vkGetDeviceProcAddr: PFN_vkGetDeviceProcAddr = undefined,
     vkDestroyDevice: PFN_vkDestroyDevice = undefined,
     vkGetDeviceQueue: PFN_vkGetDeviceQueue = undefined,
     vkQueueSubmit: PFN_vkQueueSubmit = undefined,
@@ -9523,31 +10861,57 @@ pub var device_dispatch: DeviceDispatch = .{};
 // Phase 3: once `vkCreateDevice` returns, call `loadDevice(handle)` to
 //          fill the `DeviceDispatch` table via vkGetDeviceProcAddr.
 
-var lib_handle: ?std.DynLib = null;
+var lib_handle: ?*anyopaque = null;
+
+// `std.DynLib` is `@compileError("unsupported platform")` on Windows in
+// Zig 0.16's stdlib, so we hand-roll a tiny dlopen/LoadLibrary
+// abstraction here. Linux + macOS use POSIX `dlopen`/`dlsym`; Windows
+// uses `LoadLibraryA`/`GetProcAddress`. Both keep the loader as a
+// `?*anyopaque` so the surrounding code stays OS-agnostic.
+const _dl = if (builtin.os.tag == .windows) struct {
+    extern "kernel32" fn LoadLibraryA(name: [*:0]const u8) callconv(.c) ?*anyopaque;
+    extern "kernel32" fn GetProcAddress(module: *anyopaque, name: [*:0]const u8) callconv(.c) ?*anyopaque;
+} else struct {
+    extern "c" fn dlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque;
+    extern "c" fn dlsym(handle: ?*anyopaque, symbol: [*:0]const u8) ?*anyopaque;
+};
+
+fn _dlOpen(path_z: [*:0]const u8) ?*anyopaque {
+    return if (comptime builtin.os.tag == .windows)
+        _dl.LoadLibraryA(path_z)
+    else
+        _dl.dlopen(path_z, 2); // RTLD_NOW
+}
+
+fn _dlLookup(handle: *anyopaque, name_z: [*:0]const u8) ?*anyopaque {
+    return if (comptime builtin.os.tag == .windows)
+        _dl.GetProcAddress(handle, name_z)
+    else
+        _dl.dlsym(handle, name_z);
+}
 
 pub fn loadLoader() Error!void {
-    const candidates: []const []const u8 = switch (builtin.os.tag) {
+    const candidates: []const [:0]const u8 = switch (builtin.os.tag) {
         .linux => &.{ "libvulkan.so.1", "libvulkan.so" },
         .windows => &.{"vulkan-1.dll"},
         .macos, .ios => &.{ "libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib" },
         else => return error.LoaderNotFound,
     };
     for (candidates) |path| {
-        if (std.DynLib.open(path)) |dl| {
-            lib_handle = dl;
+        if (_dlOpen(path.ptr)) |h| {
+            lib_handle = h;
             break;
-        } else |_| continue;
+        }
     }
     if (lib_handle == null) return error.LoaderNotFound;
 
-    base.vkGetInstanceProcAddr = lib_handle.?.lookup(PFN_vkGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse
-        return error.SymbolNotFound;
-
+    // Resolve every BaseDispatch symbol directly — vkGetInstanceProcAddr
+    // would work for instance-level lookups but the C ABI requires an
+    // instance handle (vk.xml does not mark it optional), so we sidestep
+    // by calling the OS loader for everything here.
     inline for (@typeInfo(BaseDispatch).@"struct".fields) |f| {
-        if (comptime std.mem.eql(u8, f.name, "vkGetInstanceProcAddr")) continue;
-        const sym = base.vkGetInstanceProcAddr(null, f.name.ptr);
-        if (sym == null) return error.SymbolNotFound;
-        @field(base, f.name) = @ptrCast(sym);
+        const sym = _dlLookup(lib_handle.?, f.name.ptr) orelse return error.SymbolNotFound;
+        @field(base, f.name) = @ptrCast(@alignCast(sym));
     }
 }
 
@@ -9555,7 +10919,7 @@ pub fn loadInstance(instance: *Instance) Error!void {
     inline for (@typeInfo(InstanceDispatch).@"struct".fields) |f| {
         const sym = base.vkGetInstanceProcAddr(instance, f.name.ptr);
         if (sym == null) return error.SymbolNotFound;
-        @field(instance_dispatch, f.name) = @ptrCast(sym);
+        @field(instance_dispatch, f.name) = @ptrCast(@alignCast(sym));
     }
 }
 
@@ -9563,7 +10927,7 @@ pub fn loadDevice(device: *Device) Error!void {
     inline for (@typeInfo(DeviceDispatch).@"struct".fields) |f| {
         const sym = instance_dispatch.vkGetDeviceProcAddr(device, f.name.ptr);
         if (sym == null) return error.SymbolNotFound;
-        @field(device_dispatch, f.name) = @ptrCast(sym);
+        @field(device_dispatch, f.name) = @ptrCast(@alignCast(sym));
     }
 }
 
@@ -9592,7 +10956,7 @@ pub fn enumerateInstanceLayerProperties(gpa: std.mem.Allocator) Error![]LayerPro
     const _out = gpa.alloc(LayerProperties, _count) catch return error.OutOfHostMemory;
     errdefer gpa.free(_out);
     {
-        const _r = base.vkEnumerateInstanceLayerProperties(&_count, _out.ptr);
+        const _r = base.vkEnumerateInstanceLayerProperties(&_count, @ptrCast(_out.ptr));
         try checkResult(_r);
     }
     return _out[0.._count];
@@ -9607,7 +10971,7 @@ pub fn enumerateInstanceExtensionProperties(layer_name: ?[*:0]const u8, gpa: std
     const _out = gpa.alloc(ExtensionProperties, _count) catch return error.OutOfHostMemory;
     errdefer gpa.free(_out);
     {
-        const _r = base.vkEnumerateInstanceExtensionProperties(layer_name, &_count, _out.ptr);
+        const _r = base.vkEnumerateInstanceExtensionProperties(layer_name, &_count, @ptrCast(_out.ptr));
         try checkResult(_r);
     }
     return _out[0.._count];
@@ -9629,14 +10993,14 @@ pub const Instance = opaque {
         const _out = gpa.alloc(*PhysicalDevice, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            const _r = instance_dispatch.vkEnumeratePhysicalDevices(self, &_count, _out.ptr);
+            const _r = instance_dispatch.vkEnumeratePhysicalDevices(self, &_count, @ptrCast(_out.ptr));
             try checkResult(_r);
         }
         return _out[0.._count];
     }
 
     pub fn getInstanceProcAddr(self: *Instance, name: [*:0]const u8) PFN_vkVoidFunction {
-        return instance_dispatch.vkGetInstanceProcAddr(self, name);
+        return base.vkGetInstanceProcAddr(self, name);
     }
 
     pub fn destroySurfaceKHR(self: *Instance, surface: SurfaceKHR, allocator: ?*const AllocationCallbacks) void {
@@ -9666,7 +11030,7 @@ pub const Instance = opaque {
         const _out = gpa.alloc(PhysicalDeviceGroupProperties, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            const _r = instance_dispatch.vkEnumeratePhysicalDeviceGroups(self, &_count, _out.ptr);
+            const _r = instance_dispatch.vkEnumeratePhysicalDeviceGroups(self, &_count, @ptrCast(_out.ptr));
             try checkResult(_r);
         }
         return _out[0.._count];
@@ -9703,7 +11067,7 @@ pub const PhysicalDevice = opaque {
         const _out = gpa.alloc(QueueFamilyProperties, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            instance_dispatch.vkGetPhysicalDeviceQueueFamilyProperties(self, &_count, _out.ptr);
+            instance_dispatch.vkGetPhysicalDeviceQueueFamilyProperties(self, &_count, @ptrCast(_out.ptr));
         }
         return _out[0.._count];
     }
@@ -9749,7 +11113,7 @@ pub const PhysicalDevice = opaque {
         const _out = gpa.alloc(LayerProperties, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            const _r = instance_dispatch.vkEnumerateDeviceLayerProperties(self, &_count, _out.ptr);
+            const _r = instance_dispatch.vkEnumerateDeviceLayerProperties(self, &_count, @ptrCast(_out.ptr));
             try checkResult(_r);
         }
         return _out[0.._count];
@@ -9764,7 +11128,7 @@ pub const PhysicalDevice = opaque {
         const _out = gpa.alloc(ExtensionProperties, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            const _r = instance_dispatch.vkEnumerateDeviceExtensionProperties(self, layer_name, &_count, _out.ptr);
+            const _r = instance_dispatch.vkEnumerateDeviceExtensionProperties(self, layer_name, &_count, @ptrCast(_out.ptr));
             try checkResult(_r);
         }
         return _out[0.._count];
@@ -9778,7 +11142,7 @@ pub const PhysicalDevice = opaque {
         const _out = gpa.alloc(SparseImageFormatProperties, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            instance_dispatch.vkGetPhysicalDeviceSparseImageFormatProperties(self, format, @"type", samples, usage, tiling, &_count, _out.ptr);
+            instance_dispatch.vkGetPhysicalDeviceSparseImageFormatProperties(self, format, @"type", samples, usage, tiling, &_count, @ptrCast(_out.ptr));
         }
         return _out[0.._count];
     }
@@ -9806,7 +11170,7 @@ pub const PhysicalDevice = opaque {
         const _out = gpa.alloc(SurfaceFormatKHR, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            const _r = instance_dispatch.vkGetPhysicalDeviceSurfaceFormatsKHR(self, surface, &_count, _out.ptr);
+            const _r = instance_dispatch.vkGetPhysicalDeviceSurfaceFormatsKHR(self, surface, &_count, @ptrCast(_out.ptr));
             try checkResult(_r);
         }
         return _out[0.._count];
@@ -9821,7 +11185,7 @@ pub const PhysicalDevice = opaque {
         const _out = gpa.alloc(PresentModeKHR, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            const _r = instance_dispatch.vkGetPhysicalDeviceSurfacePresentModesKHR(self, surface, &_count, _out.ptr);
+            const _r = instance_dispatch.vkGetPhysicalDeviceSurfacePresentModesKHR(self, surface, &_count, @ptrCast(_out.ptr));
             try checkResult(_r);
         }
         return _out[0.._count];
@@ -9870,7 +11234,7 @@ pub const PhysicalDevice = opaque {
         const _out = gpa.alloc(QueueFamilyProperties2, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            instance_dispatch.vkGetPhysicalDeviceQueueFamilyProperties2(self, &_count, _out.ptr);
+            instance_dispatch.vkGetPhysicalDeviceQueueFamilyProperties2(self, &_count, @ptrCast(_out.ptr));
         }
         return _out[0.._count];
     }
@@ -9889,7 +11253,7 @@ pub const PhysicalDevice = opaque {
         const _out = gpa.alloc(SparseImageFormatProperties2, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            instance_dispatch.vkGetPhysicalDeviceSparseImageFormatProperties2(self, format_info, &_count, _out.ptr);
+            instance_dispatch.vkGetPhysicalDeviceSparseImageFormatProperties2(self, format_info, &_count, @ptrCast(_out.ptr));
         }
         return _out[0.._count];
     }
@@ -9921,7 +11285,7 @@ pub const PhysicalDevice = opaque {
         const _out = gpa.alloc(Rect2D, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            const _r = instance_dispatch.vkGetPhysicalDevicePresentRectanglesKHR(self, surface, &_count, _out.ptr);
+            const _r = instance_dispatch.vkGetPhysicalDevicePresentRectanglesKHR(self, surface, &_count, @ptrCast(_out.ptr));
             try checkResult(_r);
         }
         return _out[0.._count];
@@ -9936,7 +11300,7 @@ pub const PhysicalDevice = opaque {
         const _out = gpa.alloc(PhysicalDeviceToolProperties, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            const _r = instance_dispatch.vkGetPhysicalDeviceToolProperties(self, &_count, _out.ptr);
+            const _r = instance_dispatch.vkGetPhysicalDeviceToolProperties(self, &_count, @ptrCast(_out.ptr));
             try checkResult(_r);
         }
         return _out[0.._count];
@@ -9945,7 +11309,7 @@ pub const PhysicalDevice = opaque {
 
 pub const Device = opaque {
     pub fn getDeviceProcAddr(self: *Device, name: [*:0]const u8) PFN_vkVoidFunction {
-        return device_dispatch.vkGetDeviceProcAddr(self, name);
+        return instance_dispatch.vkGetDeviceProcAddr(self, name);
     }
 
     pub fn destroyDevice(self: *Device, allocator: ?*const AllocationCallbacks) void {
@@ -9974,8 +11338,8 @@ pub const Device = opaque {
         return device_dispatch.vkFreeMemory(self, memory, allocator);
     }
 
-    pub fn mapMemory(self: *Device, memory: DeviceMemory, offset: DeviceSize, size: DeviceSize, flags: MemoryMapFlags) Error!void {
-        var _out: void = undefined;
+    pub fn mapMemory(self: *Device, memory: DeviceMemory, offset: DeviceSize, size: DeviceSize, flags: MemoryMapFlags) Error!?*anyopaque {
+        var _out: ?*anyopaque = undefined;
         const _r = device_dispatch.vkMapMemory(self, memory, offset, size, flags, &_out);
         try checkResult(_r);
         return _out;
@@ -9986,12 +11350,12 @@ pub const Device = opaque {
     }
 
     pub fn flushMappedMemoryRanges(self: *Device, memory_ranges: []const MappedMemoryRange) Error!void {
-        const _r = device_dispatch.vkFlushMappedMemoryRanges(self, @intCast(memory_ranges.len), memory_ranges.ptr);
+        const _r = device_dispatch.vkFlushMappedMemoryRanges(self, @intCast(memory_ranges.len), @ptrCast(memory_ranges.ptr));
         try checkResult(_r);
     }
 
     pub fn invalidateMappedMemoryRanges(self: *Device, memory_ranges: []const MappedMemoryRange) Error!void {
-        const _r = device_dispatch.vkInvalidateMappedMemoryRanges(self, @intCast(memory_ranges.len), memory_ranges.ptr);
+        const _r = device_dispatch.vkInvalidateMappedMemoryRanges(self, @intCast(memory_ranges.len), @ptrCast(memory_ranges.ptr));
         try checkResult(_r);
     }
 
@@ -10031,7 +11395,7 @@ pub const Device = opaque {
         const _out = gpa.alloc(SparseImageMemoryRequirements, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            device_dispatch.vkGetImageSparseMemoryRequirements(self, image, &_count, _out.ptr);
+            device_dispatch.vkGetImageSparseMemoryRequirements(self, image, &_count, @ptrCast(_out.ptr));
         }
         return _out[0.._count];
     }
@@ -10048,7 +11412,7 @@ pub const Device = opaque {
     }
 
     pub fn resetFences(self: *Device, fences: []const Fence) Error!void {
-        const _r = device_dispatch.vkResetFences(self, @intCast(fences.len), fences.ptr);
+        const _r = device_dispatch.vkResetFences(self, @intCast(fences.len), @ptrCast(fences.ptr));
         try checkResult(_r);
     }
 
@@ -10058,7 +11422,7 @@ pub const Device = opaque {
     }
 
     pub fn waitForFences(self: *Device, fences: []const Fence, wait_all: Bool32, timeout: u64) Error!void {
-        const _r = device_dispatch.vkWaitForFences(self, @intCast(fences.len), fences.ptr, wait_all, timeout);
+        const _r = device_dispatch.vkWaitForFences(self, @intCast(fences.len), @ptrCast(fences.ptr), wait_all, timeout);
         try checkResult(_r);
     }
 
@@ -10111,7 +11475,7 @@ pub const Device = opaque {
     }
 
     pub fn getQueryPoolResults(self: *Device, query_pool: QueryPool, first_query: u32, query_count: u32, data: []void, stride: DeviceSize, flags: QueryResultFlags) Error!void {
-        const _r = device_dispatch.vkGetQueryPoolResults(self, query_pool, first_query, query_count, @intCast(data.len), data.ptr, stride, flags);
+        const _r = device_dispatch.vkGetQueryPoolResults(self, query_pool, first_query, query_count, @intCast(data.len), @ptrCast(data.ptr), stride, flags);
         try checkResult(_r);
     }
 
@@ -10192,22 +11556,22 @@ pub const Device = opaque {
     }
 
     pub fn getPipelineCacheData(self: *Device, pipeline_cache: PipelineCache, data_size: *usize, data: []void) Error!void {
-        const _r = device_dispatch.vkGetPipelineCacheData(self, pipeline_cache, data_size, data.ptr);
+        const _r = device_dispatch.vkGetPipelineCacheData(self, pipeline_cache, data_size, @ptrCast(data.ptr));
         try checkResult(_r);
     }
 
     pub fn mergePipelineCaches(self: *Device, dst_cache: PipelineCache, src_caches: []const PipelineCache) Error!void {
-        const _r = device_dispatch.vkMergePipelineCaches(self, dst_cache, @intCast(src_caches.len), src_caches.ptr);
+        const _r = device_dispatch.vkMergePipelineCaches(self, dst_cache, @intCast(src_caches.len), @ptrCast(src_caches.ptr));
         try checkResult(_r);
     }
 
     pub fn createGraphicsPipelines(self: *Device, pipeline_cache: PipelineCache, create_infos: []const GraphicsPipelineCreateInfo, allocator: ?*const AllocationCallbacks, pipelines: []Pipeline) Error!void {
-        const _r = device_dispatch.vkCreateGraphicsPipelines(self, pipeline_cache, @intCast(create_infos.len), create_infos.ptr, allocator, pipelines.ptr);
+        const _r = device_dispatch.vkCreateGraphicsPipelines(self, pipeline_cache, @intCast(create_infos.len), @ptrCast(create_infos.ptr), allocator, @ptrCast(pipelines.ptr));
         try checkResult(_r);
     }
 
     pub fn createComputePipelines(self: *Device, pipeline_cache: PipelineCache, create_infos: []const ComputePipelineCreateInfo, allocator: ?*const AllocationCallbacks, pipelines: []Pipeline) Error!void {
-        const _r = device_dispatch.vkCreateComputePipelines(self, pipeline_cache, @intCast(create_infos.len), create_infos.ptr, allocator, pipelines.ptr);
+        const _r = device_dispatch.vkCreateComputePipelines(self, pipeline_cache, @intCast(create_infos.len), @ptrCast(create_infos.ptr), allocator, @ptrCast(pipelines.ptr));
         try checkResult(_r);
     }
 
@@ -10265,17 +11629,17 @@ pub const Device = opaque {
     }
 
     pub fn allocateDescriptorSets(self: *Device, allocate_info: *const DescriptorSetAllocateInfo, descriptor_sets: []DescriptorSet) Error!void {
-        const _r = device_dispatch.vkAllocateDescriptorSets(self, allocate_info, descriptor_sets.ptr);
+        const _r = device_dispatch.vkAllocateDescriptorSets(self, allocate_info, @ptrCast(descriptor_sets.ptr));
         try checkResult(_r);
     }
 
     pub fn freeDescriptorSets(self: *Device, descriptor_pool: DescriptorPool, descriptor_sets: []const DescriptorSet) Error!void {
-        const _r = device_dispatch.vkFreeDescriptorSets(self, descriptor_pool, @intCast(descriptor_sets.len), descriptor_sets.ptr);
+        const _r = device_dispatch.vkFreeDescriptorSets(self, descriptor_pool, @intCast(descriptor_sets.len), @ptrCast(descriptor_sets.ptr));
         try checkResult(_r);
     }
 
     pub fn updateDescriptorSets(self: *Device, descriptor_writes: []const WriteDescriptorSet, descriptor_copies: []const CopyDescriptorSet) void {
-        return device_dispatch.vkUpdateDescriptorSets(self, @intCast(descriptor_writes.len), descriptor_writes.ptr, @intCast(descriptor_copies.len), descriptor_copies.ptr);
+        return device_dispatch.vkUpdateDescriptorSets(self, @intCast(descriptor_writes.len), @ptrCast(descriptor_writes.ptr), @intCast(descriptor_copies.len), @ptrCast(descriptor_copies.ptr));
     }
 
     pub fn createFramebuffer(self: *Device, create_info: *const FramebufferCreateInfo, allocator: ?*const AllocationCallbacks) Error!Framebuffer {
@@ -10323,12 +11687,12 @@ pub const Device = opaque {
     }
 
     pub fn allocateCommandBuffers(self: *Device, allocate_info: *const CommandBufferAllocateInfo, command_buffers: []*CommandBuffer) Error!void {
-        const _r = device_dispatch.vkAllocateCommandBuffers(self, allocate_info, command_buffers.ptr);
+        const _r = device_dispatch.vkAllocateCommandBuffers(self, allocate_info, @ptrCast(command_buffers.ptr));
         try checkResult(_r);
     }
 
     pub fn freeCommandBuffers(self: *Device, command_pool: CommandPool, command_buffers: []const *CommandBuffer) void {
-        return device_dispatch.vkFreeCommandBuffers(self, command_pool, @intCast(command_buffers.len), command_buffers.ptr);
+        return device_dispatch.vkFreeCommandBuffers(self, command_pool, @intCast(command_buffers.len), @ptrCast(command_buffers.ptr));
     }
 
     pub fn createSwapchainKHR(self: *Device, create_info: *const SwapchainCreateInfoKHR, allocator: ?*const AllocationCallbacks) Error!SwapchainKHR {
@@ -10351,7 +11715,7 @@ pub const Device = opaque {
         const _out = gpa.alloc(Image, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            const _r = device_dispatch.vkGetSwapchainImagesKHR(self, swapchain, &_count, _out.ptr);
+            const _r = device_dispatch.vkGetSwapchainImagesKHR(self, swapchain, &_count, @ptrCast(_out.ptr));
             try checkResult(_r);
         }
         return _out[0.._count];
@@ -10375,12 +11739,12 @@ pub const Device = opaque {
     }
 
     pub fn bindBufferMemory2(self: *Device, bind_infos: []const BindBufferMemoryInfo) Error!void {
-        const _r = device_dispatch.vkBindBufferMemory2(self, @intCast(bind_infos.len), bind_infos.ptr);
+        const _r = device_dispatch.vkBindBufferMemory2(self, @intCast(bind_infos.len), @ptrCast(bind_infos.ptr));
         try checkResult(_r);
     }
 
     pub fn bindImageMemory2(self: *Device, bind_infos: []const BindImageMemoryInfo) Error!void {
-        const _r = device_dispatch.vkBindImageMemory2(self, @intCast(bind_infos.len), bind_infos.ptr);
+        const _r = device_dispatch.vkBindImageMemory2(self, @intCast(bind_infos.len), @ptrCast(bind_infos.ptr));
         try checkResult(_r);
     }
 
@@ -10440,7 +11804,7 @@ pub const Device = opaque {
         const _out = gpa.alloc(SparseImageMemoryRequirements2, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            device_dispatch.vkGetImageSparseMemoryRequirements2(self, info, &_count, _out.ptr);
+            device_dispatch.vkGetImageSparseMemoryRequirements2(self, info, &_count, @ptrCast(_out.ptr));
         }
         return _out[0.._count];
     }
@@ -10465,7 +11829,7 @@ pub const Device = opaque {
         const _out = gpa.alloc(SparseImageMemoryRequirements2, _count) catch return error.OutOfHostMemory;
         errdefer gpa.free(_out);
         {
-            device_dispatch.vkGetDeviceImageSparseMemoryRequirements(self, info, &_count, _out.ptr);
+            device_dispatch.vkGetDeviceImageSparseMemoryRequirements(self, info, &_count, @ptrCast(_out.ptr));
         }
         return _out[0.._count];
     }
@@ -10564,7 +11928,7 @@ pub const Device = opaque {
 
 pub const Queue = opaque {
     pub fn submit(self: *Queue, submits: []const SubmitInfo, fence: Fence) Error!void {
-        const _r = device_dispatch.vkQueueSubmit(self, @intCast(submits.len), submits.ptr, fence);
+        const _r = device_dispatch.vkQueueSubmit(self, @intCast(submits.len), @ptrCast(submits.ptr), fence);
         try checkResult(_r);
     }
 
@@ -10574,7 +11938,7 @@ pub const Queue = opaque {
     }
 
     pub fn bindSparse(self: *Queue, bind_info: []const BindSparseInfo, fence: Fence) Error!void {
-        const _r = device_dispatch.vkQueueBindSparse(self, @intCast(bind_info.len), bind_info.ptr, fence);
+        const _r = device_dispatch.vkQueueBindSparse(self, @intCast(bind_info.len), @ptrCast(bind_info.ptr), fence);
         try checkResult(_r);
     }
 
@@ -10596,7 +11960,7 @@ pub const Queue = opaque {
     }
 
     pub fn submit2(self: *Queue, submits: []const SubmitInfo2, fence: Fence) Error!void {
-        const _r = device_dispatch.vkQueueSubmit2(self, @intCast(submits.len), submits.ptr, fence);
+        const _r = device_dispatch.vkQueueSubmit2(self, @intCast(submits.len), @ptrCast(submits.ptr), fence);
         try checkResult(_r);
     }
 };
@@ -10622,11 +11986,11 @@ pub const CommandBuffer = opaque {
     }
 
     pub fn cmdSetViewport(self: *CommandBuffer, first_viewport: u32, viewports: []const Viewport) void {
-        return device_dispatch.vkCmdSetViewport(self, first_viewport, @intCast(viewports.len), viewports.ptr);
+        return device_dispatch.vkCmdSetViewport(self, first_viewport, @intCast(viewports.len), @ptrCast(viewports.ptr));
     }
 
     pub fn cmdSetScissor(self: *CommandBuffer, first_scissor: u32, scissors: []const Rect2D) void {
-        return device_dispatch.vkCmdSetScissor(self, first_scissor, @intCast(scissors.len), scissors.ptr);
+        return device_dispatch.vkCmdSetScissor(self, first_scissor, @intCast(scissors.len), @ptrCast(scissors.ptr));
     }
 
     pub fn cmdSetLineWidth(self: *CommandBuffer, line_width: f32) void {
@@ -10658,7 +12022,7 @@ pub const CommandBuffer = opaque {
     }
 
     pub fn cmdBindDescriptorSets(self: *CommandBuffer, pipeline_bind_point: PipelineBindPoint, layout: PipelineLayout, first_set: u32, descriptor_sets: []const DescriptorSet, dynamic_offsets: []const u32) void {
-        return device_dispatch.vkCmdBindDescriptorSets(self, pipeline_bind_point, layout, first_set, @intCast(descriptor_sets.len), descriptor_sets.ptr, @intCast(dynamic_offsets.len), dynamic_offsets.ptr);
+        return device_dispatch.vkCmdBindDescriptorSets(self, pipeline_bind_point, layout, first_set, @intCast(descriptor_sets.len), @ptrCast(descriptor_sets.ptr), @intCast(dynamic_offsets.len), @ptrCast(dynamic_offsets.ptr));
     }
 
     pub fn cmdBindIndexBuffer(self: *CommandBuffer, buffer: Buffer, offset: DeviceSize, index_type: IndexType) void {
@@ -10666,7 +12030,7 @@ pub const CommandBuffer = opaque {
     }
 
     pub fn cmdBindVertexBuffers(self: *CommandBuffer, first_binding: u32, buffers: []const Buffer, offsets: []const DeviceSize) void {
-        return device_dispatch.vkCmdBindVertexBuffers(self, first_binding, @intCast(buffers.len), buffers.ptr, offsets.ptr);
+        return device_dispatch.vkCmdBindVertexBuffers(self, first_binding, @intCast(buffers.len), @ptrCast(buffers.ptr), @ptrCast(offsets.ptr));
     }
 
     pub fn cmdDraw(self: *CommandBuffer, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) void {
@@ -10694,27 +12058,27 @@ pub const CommandBuffer = opaque {
     }
 
     pub fn cmdCopyBuffer(self: *CommandBuffer, src_buffer: Buffer, dst_buffer: Buffer, regions: []const BufferCopy) void {
-        return device_dispatch.vkCmdCopyBuffer(self, src_buffer, dst_buffer, @intCast(regions.len), regions.ptr);
+        return device_dispatch.vkCmdCopyBuffer(self, src_buffer, dst_buffer, @intCast(regions.len), @ptrCast(regions.ptr));
     }
 
     pub fn cmdCopyImage(self: *CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_image: Image, dst_image_layout: ImageLayout, regions: []const ImageCopy) void {
-        return device_dispatch.vkCmdCopyImage(self, src_image, src_image_layout, dst_image, dst_image_layout, @intCast(regions.len), regions.ptr);
+        return device_dispatch.vkCmdCopyImage(self, src_image, src_image_layout, dst_image, dst_image_layout, @intCast(regions.len), @ptrCast(regions.ptr));
     }
 
     pub fn cmdBlitImage(self: *CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_image: Image, dst_image_layout: ImageLayout, regions: []const ImageBlit, filter: Filter) void {
-        return device_dispatch.vkCmdBlitImage(self, src_image, src_image_layout, dst_image, dst_image_layout, @intCast(regions.len), regions.ptr, filter);
+        return device_dispatch.vkCmdBlitImage(self, src_image, src_image_layout, dst_image, dst_image_layout, @intCast(regions.len), @ptrCast(regions.ptr), filter);
     }
 
     pub fn cmdCopyBufferToImage(self: *CommandBuffer, src_buffer: Buffer, dst_image: Image, dst_image_layout: ImageLayout, regions: []const BufferImageCopy) void {
-        return device_dispatch.vkCmdCopyBufferToImage(self, src_buffer, dst_image, dst_image_layout, @intCast(regions.len), regions.ptr);
+        return device_dispatch.vkCmdCopyBufferToImage(self, src_buffer, dst_image, dst_image_layout, @intCast(regions.len), @ptrCast(regions.ptr));
     }
 
     pub fn cmdCopyImageToBuffer(self: *CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_buffer: Buffer, regions: []const BufferImageCopy) void {
-        return device_dispatch.vkCmdCopyImageToBuffer(self, src_image, src_image_layout, dst_buffer, @intCast(regions.len), regions.ptr);
+        return device_dispatch.vkCmdCopyImageToBuffer(self, src_image, src_image_layout, dst_buffer, @intCast(regions.len), @ptrCast(regions.ptr));
     }
 
     pub fn cmdUpdateBuffer(self: *CommandBuffer, dst_buffer: Buffer, dst_offset: DeviceSize, data_size: DeviceSize, data: []const void) void {
-        return device_dispatch.vkCmdUpdateBuffer(self, dst_buffer, dst_offset, data_size, data.ptr);
+        return device_dispatch.vkCmdUpdateBuffer(self, dst_buffer, dst_offset, data_size, @ptrCast(data.ptr));
     }
 
     pub fn cmdFillBuffer(self: *CommandBuffer, dst_buffer: Buffer, dst_offset: DeviceSize, size: DeviceSize, data: u32) void {
@@ -10722,19 +12086,19 @@ pub const CommandBuffer = opaque {
     }
 
     pub fn cmdClearColorImage(self: *CommandBuffer, image: Image, image_layout: ImageLayout, color: *const ClearColorValue, ranges: []const ImageSubresourceRange) void {
-        return device_dispatch.vkCmdClearColorImage(self, image, image_layout, color, @intCast(ranges.len), ranges.ptr);
+        return device_dispatch.vkCmdClearColorImage(self, image, image_layout, color, @intCast(ranges.len), @ptrCast(ranges.ptr));
     }
 
     pub fn cmdClearDepthStencilImage(self: *CommandBuffer, image: Image, image_layout: ImageLayout, depth_stencil: *const ClearDepthStencilValue, ranges: []const ImageSubresourceRange) void {
-        return device_dispatch.vkCmdClearDepthStencilImage(self, image, image_layout, depth_stencil, @intCast(ranges.len), ranges.ptr);
+        return device_dispatch.vkCmdClearDepthStencilImage(self, image, image_layout, depth_stencil, @intCast(ranges.len), @ptrCast(ranges.ptr));
     }
 
     pub fn cmdClearAttachments(self: *CommandBuffer, attachments: []const ClearAttachment, rects: []const ClearRect) void {
-        return device_dispatch.vkCmdClearAttachments(self, @intCast(attachments.len), attachments.ptr, @intCast(rects.len), rects.ptr);
+        return device_dispatch.vkCmdClearAttachments(self, @intCast(attachments.len), @ptrCast(attachments.ptr), @intCast(rects.len), @ptrCast(rects.ptr));
     }
 
     pub fn cmdResolveImage(self: *CommandBuffer, src_image: Image, src_image_layout: ImageLayout, dst_image: Image, dst_image_layout: ImageLayout, regions: []const ImageResolve) void {
-        return device_dispatch.vkCmdResolveImage(self, src_image, src_image_layout, dst_image, dst_image_layout, @intCast(regions.len), regions.ptr);
+        return device_dispatch.vkCmdResolveImage(self, src_image, src_image_layout, dst_image, dst_image_layout, @intCast(regions.len), @ptrCast(regions.ptr));
     }
 
     pub fn cmdSetEvent(self: *CommandBuffer, event: Event, stage_mask: PipelineStageFlags) void {
@@ -10746,11 +12110,11 @@ pub const CommandBuffer = opaque {
     }
 
     pub fn cmdWaitEvents(self: *CommandBuffer, events: []const Event, src_stage_mask: PipelineStageFlags, dst_stage_mask: PipelineStageFlags, memory_barriers: []const MemoryBarrier, buffer_memory_barriers: []const BufferMemoryBarrier, image_memory_barriers: []const ImageMemoryBarrier) void {
-        return device_dispatch.vkCmdWaitEvents(self, @intCast(events.len), events.ptr, src_stage_mask, dst_stage_mask, @intCast(memory_barriers.len), memory_barriers.ptr, @intCast(buffer_memory_barriers.len), buffer_memory_barriers.ptr, @intCast(image_memory_barriers.len), image_memory_barriers.ptr);
+        return device_dispatch.vkCmdWaitEvents(self, @intCast(events.len), @ptrCast(events.ptr), src_stage_mask, dst_stage_mask, @intCast(memory_barriers.len), @ptrCast(memory_barriers.ptr), @intCast(buffer_memory_barriers.len), @ptrCast(buffer_memory_barriers.ptr), @intCast(image_memory_barriers.len), @ptrCast(image_memory_barriers.ptr));
     }
 
     pub fn cmdPipelineBarrier(self: *CommandBuffer, src_stage_mask: PipelineStageFlags, dst_stage_mask: PipelineStageFlags, dependency_flags: DependencyFlags, memory_barriers: []const MemoryBarrier, buffer_memory_barriers: []const BufferMemoryBarrier, image_memory_barriers: []const ImageMemoryBarrier) void {
-        return device_dispatch.vkCmdPipelineBarrier(self, src_stage_mask, dst_stage_mask, dependency_flags, @intCast(memory_barriers.len), memory_barriers.ptr, @intCast(buffer_memory_barriers.len), buffer_memory_barriers.ptr, @intCast(image_memory_barriers.len), image_memory_barriers.ptr);
+        return device_dispatch.vkCmdPipelineBarrier(self, src_stage_mask, dst_stage_mask, dependency_flags, @intCast(memory_barriers.len), @ptrCast(memory_barriers.ptr), @intCast(buffer_memory_barriers.len), @ptrCast(buffer_memory_barriers.ptr), @intCast(image_memory_barriers.len), @ptrCast(image_memory_barriers.ptr));
     }
 
     pub fn cmdBeginQuery(self: *CommandBuffer, query_pool: QueryPool, query: u32, flags: QueryControlFlags) void {
@@ -10774,7 +12138,7 @@ pub const CommandBuffer = opaque {
     }
 
     pub fn cmdPushConstants(self: *CommandBuffer, layout: PipelineLayout, stage_flags: ShaderStageFlags, offset: u32, values: []const void) void {
-        return device_dispatch.vkCmdPushConstants(self, layout, stage_flags, offset, @intCast(values.len), values.ptr);
+        return device_dispatch.vkCmdPushConstants(self, layout, stage_flags, offset, @intCast(values.len), @ptrCast(values.ptr));
     }
 
     pub fn cmdBeginRenderPass(self: *CommandBuffer, render_pass_begin: *const RenderPassBeginInfo, contents: SubpassContents) void {
@@ -10790,7 +12154,7 @@ pub const CommandBuffer = opaque {
     }
 
     pub fn cmdExecuteCommands(self: *CommandBuffer, command_buffers: []const *CommandBuffer) void {
-        return device_dispatch.vkCmdExecuteCommands(self, @intCast(command_buffers.len), command_buffers.ptr);
+        return device_dispatch.vkCmdExecuteCommands(self, @intCast(command_buffers.len), @ptrCast(command_buffers.ptr));
     }
 
     pub fn cmdSetDeviceMask(self: *CommandBuffer, device_mask: u32) void {
@@ -10846,15 +12210,15 @@ pub const CommandBuffer = opaque {
     }
 
     pub fn cmdSetViewportWithCount(self: *CommandBuffer, viewports: []const Viewport) void {
-        return device_dispatch.vkCmdSetViewportWithCount(self, @intCast(viewports.len), viewports.ptr);
+        return device_dispatch.vkCmdSetViewportWithCount(self, @intCast(viewports.len), @ptrCast(viewports.ptr));
     }
 
     pub fn cmdSetScissorWithCount(self: *CommandBuffer, scissors: []const Rect2D) void {
-        return device_dispatch.vkCmdSetScissorWithCount(self, @intCast(scissors.len), scissors.ptr);
+        return device_dispatch.vkCmdSetScissorWithCount(self, @intCast(scissors.len), @ptrCast(scissors.ptr));
     }
 
     pub fn cmdBindVertexBuffers2(self: *CommandBuffer, first_binding: u32, buffers: []const Buffer, offsets: []const DeviceSize, sizes: []const DeviceSize, strides: []const DeviceSize) void {
-        return device_dispatch.vkCmdBindVertexBuffers2(self, first_binding, @intCast(buffers.len), buffers.ptr, offsets.ptr, sizes.ptr, strides.ptr);
+        return device_dispatch.vkCmdBindVertexBuffers2(self, first_binding, @intCast(buffers.len), @ptrCast(buffers.ptr), @ptrCast(offsets.ptr), @ptrCast(sizes.ptr), @ptrCast(strides.ptr));
     }
 
     pub fn cmdSetDepthTestEnable(self: *CommandBuffer, depth_test_enable: Bool32) void {
@@ -10926,7 +12290,7 @@ pub const CommandBuffer = opaque {
     }
 
     pub fn cmdWaitEvents2(self: *CommandBuffer, events: []const Event, dependency_infos: []const DependencyInfo) void {
-        return device_dispatch.vkCmdWaitEvents2(self, @intCast(events.len), events.ptr, dependency_infos.ptr);
+        return device_dispatch.vkCmdWaitEvents2(self, @intCast(events.len), @ptrCast(events.ptr), @ptrCast(dependency_infos.ptr));
     }
 
     pub fn cmdPipelineBarrier2(self: *CommandBuffer, dependency_info: *const DependencyInfo) void {

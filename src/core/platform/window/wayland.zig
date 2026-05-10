@@ -54,8 +54,20 @@ const State = struct {
     xdg_toplevel_listener: xdg_shell.xdg_toplevel_listener,
 };
 
+pub const NativeHandles = struct {
+    display: *anyopaque,
+    surface: *anyopaque,
+};
+
 pub const Backend = struct {
     state: *State,
+
+    pub fn nativeHandles(self: *const Backend) NativeHandles {
+        return .{
+            .display = @ptrCast(self.state.display),
+            .surface = @ptrCast(self.state.surface),
+        };
+    }
 
     pub fn create(gpa: std.mem.Allocator, desc: window.Desc) window.Error!Backend {
         // libwayland-client is loaded once per process; idempotent.

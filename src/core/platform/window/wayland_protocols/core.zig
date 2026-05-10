@@ -115,22 +115,49 @@ pub const LibWaylandDispatch = struct {
 };
 
 pub var lib_wayland: LibWaylandDispatch = .{};
-var lib_handle: ?std.DynLib = null;
+var lib_handle: ?*anyopaque = null;
+
+// `std.DynLib` is `@compileError("unsupported platform")` on Windows
+// in Zig 0.16's stdlib, so we hand-roll a tiny dlopen abstraction.
+// In practice `loadLibWayland` is only called on Linux (the Wayland
+// backend is wired only there) but the generated code must still
+// compile on Windows / macOS targets.
+const _dl = if (@import("builtin").os.tag == .windows) struct {
+    extern "kernel32" fn LoadLibraryA(name: [*:0]const u8) callconv(.c) ?*anyopaque;
+    extern "kernel32" fn GetProcAddress(module: *anyopaque, name: [*:0]const u8) callconv(.c) ?*anyopaque;
+} else struct {
+    extern "c" fn dlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque;
+    extern "c" fn dlsym(handle: ?*anyopaque, symbol: [*:0]const u8) ?*anyopaque;
+};
+
+fn _dlOpen(path_z: [*:0]const u8) ?*anyopaque {
+    return if (comptime @import("builtin").os.tag == .windows)
+        _dl.LoadLibraryA(path_z)
+    else
+        _dl.dlopen(path_z, 2); // RTLD_NOW
+}
+
+fn _dlLookup(handle: *anyopaque, name_z: [*:0]const u8) ?*anyopaque {
+    return if (comptime @import("builtin").os.tag == .windows)
+        _dl.GetProcAddress(handle, name_z)
+    else
+        _dl.dlsym(handle, name_z);
+}
 
 pub fn loadLibWayland() Error!void {
     if (lib_handle != null) return; // idempotent
     const candidates = &[_][:0]const u8{ "libwayland-client.so.0", "libwayland-client.so" };
     for (candidates) |path| {
-        if (std.DynLib.open(path)) |dl| {
-            lib_handle = dl;
+        if (_dlOpen(path.ptr)) |h| {
+            lib_handle = h;
             break;
-        } else |_| continue;
+        }
     }
     if (lib_handle == null) return error.LibraryNotFound;
 
     inline for (@typeInfo(LibWaylandDispatch).@"struct".fields) |f| {
-        const sym = lib_handle.?.lookup(f.type, f.name) orelse return error.SymbolNotFound;
-        @field(lib_wayland, f.name) = sym;
+        const sym = _dlLookup(lib_handle.?, f.name.ptr) orelse return error.SymbolNotFound;
+        @field(lib_wayland, f.name) = @ptrCast(@alignCast(sym));
     }
 }
 

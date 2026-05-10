@@ -20,6 +20,11 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/core/root.zig"),
         .target = target,
         .optimize = optimize,
+        // Generated Vulkan + Wayland bindings use `extern "c"` for the
+        // dlopen/dlsym wrapper on POSIX hosts. Linking libc satisfies the
+        // resolver; on Windows the same code path takes the kernel32
+        // branch and libc is not actually referenced.
+        .link_libc = true,
     });
 
     // Main executable.
@@ -29,6 +34,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe_module.addImport("weld_core", core_module);
+
+    // Shaders embedding — the SPIR-V files live under `assets/shaders/`,
+    // outside the spike binary's source root. `@embedFile` cannot escape
+    // the package directory, so we wrap the embeds in a tiny module
+    // rooted at `assets/shaders/embed.zig` and import it as `shaders`.
+    const shaders_module = b.createModule(.{
+        .root_source_file = b.path("assets/shaders/embed.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_module.addImport("shaders", shaders_module);
     const exe = b.addExecutable(.{
         .name = "weld",
         .root_module = exe_module,

@@ -7,6 +7,8 @@
 const std = @import("std");
 const window = @import("../window.zig");
 
+pub const NativeHandles = struct {};
+
 pub const Backend = struct {
     pub fn create(gpa: std.mem.Allocator, desc: window.Desc) window.Error!Backend {
         _ = gpa;
@@ -25,5 +27,10 @@ pub const Backend = struct {
     pub fn pollEvent(self: *Backend) ?window.Event {
         _ = self;
         return null;
+    }
+
+    pub fn nativeHandles(self: *const Backend) NativeHandles {
+        _ = self;
+        return .{};
     }
 };
