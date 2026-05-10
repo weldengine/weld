@@ -3,13 +3,12 @@
 //! Wayland protocol `xdg_shell` bindings emitted from upstream XML.
 //! Throwaway: S3 unifier replaces this generator.
 
+const std = @import("std");
 const core = @import("core.zig");
 const WlInterface = core.WlInterface;
 const WlMessage = core.WlMessage;
 
 // ---- xdg_wm_base (v7) ----
-
-pub const xdg_wm_base = opaque {};
 
 pub const xdg_wm_base_error = enum(u32) {
     role = 0,
@@ -57,9 +56,40 @@ pub const xdg_wm_base_interface = WlInterface{
     .events = &xdg_wm_base_events,
 };
 
-// ---- xdg_positioner (v7) ----
+pub const xdg_wm_base = opaque {
+    pub fn destroy(self: *xdg_wm_base) void {
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_wm_base_request.destroy, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), core.WL_MARSHAL_FLAG_DESTROY, null);
+    }
 
-pub const xdg_positioner = opaque {};
+    pub fn createPositioner(self: *xdg_wm_base) core.Error!*xdg_positioner {
+        var args: [1]core.WlArgument = undefined;
+        args[0].n = 0;
+        const _proxy = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_wm_base_request.create_positioner, &xdg_positioner_interface, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
+
+    pub fn getXdgSurface(self: *xdg_wm_base, surface: *core.wl_surface) core.Error!*xdg_surface {
+        var args: [2]core.WlArgument = undefined;
+        args[0].n = 0;
+        args[1].o = @ptrCast(surface);
+        const _proxy = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_wm_base_request.get_xdg_surface, &xdg_surface_interface, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
+
+    pub fn pong(self: *xdg_wm_base, serial: u32) void {
+        var args: [1]core.WlArgument = undefined;
+        args[0].u = serial;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_wm_base_request.pong, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn addListener(self: *xdg_wm_base, listener: *const xdg_wm_base_listener, data: ?*anyopaque) core.Error!void {
+        if (core.lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- xdg_positioner (v7) ----
 
 pub const xdg_positioner_error = enum(u32) {
     invalid_input = 0,
@@ -138,9 +168,71 @@ pub const xdg_positioner_interface = WlInterface{
     .events = null,
 };
 
-// ---- xdg_surface (v7) ----
+pub const xdg_positioner = opaque {
+    pub fn destroy(self: *xdg_positioner) void {
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_positioner_request.destroy, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), core.WL_MARSHAL_FLAG_DESTROY, null);
+    }
 
-pub const xdg_surface = opaque {};
+    pub fn setSize(self: *xdg_positioner, width: i32, height: i32) void {
+        var args: [2]core.WlArgument = undefined;
+        args[0].i = width;
+        args[1].i = height;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_positioner_request.set_size, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setAnchorRect(self: *xdg_positioner, x: i32, y: i32, width: i32, height: i32) void {
+        var args: [4]core.WlArgument = undefined;
+        args[0].i = x;
+        args[1].i = y;
+        args[2].i = width;
+        args[3].i = height;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_positioner_request.set_anchor_rect, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setAnchor(self: *xdg_positioner, anchor: u32) void {
+        var args: [1]core.WlArgument = undefined;
+        args[0].u = anchor;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_positioner_request.set_anchor, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setGravity(self: *xdg_positioner, gravity: u32) void {
+        var args: [1]core.WlArgument = undefined;
+        args[0].u = gravity;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_positioner_request.set_gravity, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setConstraintAdjustment(self: *xdg_positioner, constraint_adjustment: u32) void {
+        var args: [1]core.WlArgument = undefined;
+        args[0].u = constraint_adjustment;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_positioner_request.set_constraint_adjustment, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setOffset(self: *xdg_positioner, x: i32, y: i32) void {
+        var args: [2]core.WlArgument = undefined;
+        args[0].i = x;
+        args[1].i = y;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_positioner_request.set_offset, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setReactive(self: *xdg_positioner) void {
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_positioner_request.set_reactive, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, null);
+    }
+
+    pub fn setParentSize(self: *xdg_positioner, parent_width: i32, parent_height: i32) void {
+        var args: [2]core.WlArgument = undefined;
+        args[0].i = parent_width;
+        args[1].i = parent_height;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_positioner_request.set_parent_size, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setParentConfigure(self: *xdg_positioner, serial: u32) void {
+        var args: [1]core.WlArgument = undefined;
+        args[0].u = serial;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_positioner_request.set_parent_configure, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+};
+
+// ---- xdg_surface (v7) ----
 
 pub const xdg_surface_error = enum(u32) {
     not_constructed = 1,
@@ -189,9 +281,50 @@ pub const xdg_surface_interface = WlInterface{
     .events = &xdg_surface_events,
 };
 
-// ---- xdg_toplevel (v7) ----
+pub const xdg_surface = opaque {
+    pub fn destroy(self: *xdg_surface) void {
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_surface_request.destroy, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), core.WL_MARSHAL_FLAG_DESTROY, null);
+    }
 
-pub const xdg_toplevel = opaque {};
+    pub fn getToplevel(self: *xdg_surface) core.Error!*xdg_toplevel {
+        var args: [1]core.WlArgument = undefined;
+        args[0].n = 0;
+        const _proxy = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_surface_request.get_toplevel, &xdg_toplevel_interface, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
+
+    pub fn getPopup(self: *xdg_surface, parent: ?*xdg_surface, positioner: *xdg_positioner) core.Error!*xdg_popup {
+        var args: [3]core.WlArgument = undefined;
+        args[0].n = 0;
+        args[1].o = if (parent) |__p| @ptrCast(__p) else null;
+        args[2].o = @ptrCast(positioner);
+        const _proxy = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_surface_request.get_popup, &xdg_popup_interface, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
+
+    pub fn setWindowGeometry(self: *xdg_surface, x: i32, y: i32, width: i32, height: i32) void {
+        var args: [4]core.WlArgument = undefined;
+        args[0].i = x;
+        args[1].i = y;
+        args[2].i = width;
+        args[3].i = height;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_surface_request.set_window_geometry, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn ackConfigure(self: *xdg_surface, serial: u32) void {
+        var args: [1]core.WlArgument = undefined;
+        args[0].u = serial;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_surface_request.ack_configure, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn addListener(self: *xdg_surface, listener: *const xdg_surface_listener, data: ?*anyopaque) core.Error!void {
+        if (core.lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- xdg_toplevel (v7) ----
 
 pub const xdg_toplevel_error = enum(u32) {
     invalid_resize_edge = 0,
@@ -302,9 +435,97 @@ pub const xdg_toplevel_interface = WlInterface{
     .events = &xdg_toplevel_events,
 };
 
-// ---- xdg_popup (v7) ----
+pub const xdg_toplevel = opaque {
+    pub fn destroy(self: *xdg_toplevel) void {
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.destroy, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), core.WL_MARSHAL_FLAG_DESTROY, null);
+    }
 
-pub const xdg_popup = opaque {};
+    pub fn setParent(self: *xdg_toplevel, parent: ?*xdg_toplevel) void {
+        var args: [1]core.WlArgument = undefined;
+        args[0].o = if (parent) |__p| @ptrCast(__p) else null;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.set_parent, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setTitle(self: *xdg_toplevel, title: [*:0]const u8) void {
+        var args: [1]core.WlArgument = undefined;
+        args[0].s = title;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.set_title, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setAppId(self: *xdg_toplevel, app_id: [*:0]const u8) void {
+        var args: [1]core.WlArgument = undefined;
+        args[0].s = app_id;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.set_app_id, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn showWindowMenu(self: *xdg_toplevel, seat: *core.wl_seat, serial: u32, x: i32, y: i32) void {
+        var args: [4]core.WlArgument = undefined;
+        args[0].o = @ptrCast(seat);
+        args[1].u = serial;
+        args[2].i = x;
+        args[3].i = y;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.show_window_menu, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn move(self: *xdg_toplevel, seat: *core.wl_seat, serial: u32) void {
+        var args: [2]core.WlArgument = undefined;
+        args[0].o = @ptrCast(seat);
+        args[1].u = serial;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.move, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn resize(self: *xdg_toplevel, seat: *core.wl_seat, serial: u32, edges: u32) void {
+        var args: [3]core.WlArgument = undefined;
+        args[0].o = @ptrCast(seat);
+        args[1].u = serial;
+        args[2].u = edges;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.resize, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setMaxSize(self: *xdg_toplevel, width: i32, height: i32) void {
+        var args: [2]core.WlArgument = undefined;
+        args[0].i = width;
+        args[1].i = height;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.set_max_size, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setMinSize(self: *xdg_toplevel, width: i32, height: i32) void {
+        var args: [2]core.WlArgument = undefined;
+        args[0].i = width;
+        args[1].i = height;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.set_min_size, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setMaximized(self: *xdg_toplevel) void {
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.set_maximized, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, null);
+    }
+
+    pub fn unsetMaximized(self: *xdg_toplevel) void {
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.unset_maximized, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, null);
+    }
+
+    pub fn setFullscreen(self: *xdg_toplevel, output: ?*core.wl_output) void {
+        var args: [1]core.WlArgument = undefined;
+        args[0].o = if (output) |__p| @ptrCast(__p) else null;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.set_fullscreen, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn unsetFullscreen(self: *xdg_toplevel) void {
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.unset_fullscreen, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, null);
+    }
+
+    pub fn setMinimized(self: *xdg_toplevel) void {
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_toplevel_request.set_minimized, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, null);
+    }
+
+    pub fn addListener(self: *xdg_toplevel, listener: *const xdg_toplevel_listener, data: ?*anyopaque) core.Error!void {
+        if (core.lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- xdg_popup (v7) ----
 
 pub const xdg_popup_error = enum(u32) {
     invalid_grab = 0,
@@ -348,4 +569,30 @@ pub const xdg_popup_interface = WlInterface{
     .methods = &xdg_popup_requests,
     .event_count = 3,
     .events = &xdg_popup_events,
+};
+
+pub const xdg_popup = opaque {
+    pub fn destroy(self: *xdg_popup) void {
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_popup_request.destroy, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), core.WL_MARSHAL_FLAG_DESTROY, null);
+    }
+
+    pub fn grab(self: *xdg_popup, seat: *core.wl_seat, serial: u32) void {
+        var args: [2]core.WlArgument = undefined;
+        args[0].o = @ptrCast(seat);
+        args[1].u = serial;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_popup_request.grab, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn reposition(self: *xdg_popup, positioner: *xdg_positioner, token: u32) void {
+        var args: [2]core.WlArgument = undefined;
+        args[0].o = @ptrCast(positioner);
+        args[1].u = token;
+        _ = core.lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), xdg_popup_request.reposition, null, core.lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn addListener(self: *xdg_popup, listener: *const xdg_popup_listener, data: ?*anyopaque) core.Error!void {
+        if (core.lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
 };

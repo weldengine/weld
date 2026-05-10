@@ -3,6 +3,7 @@
 //! Wayland protocol `wayland` bindings emitted from upstream XML.
 //! Throwaway: S3 unifier replaces this generator.
 
+const std = @import("std");
 // ---- Wayland C ABI (libwayland-client) common types ----
 
 pub const WlInterface = extern struct {
@@ -26,9 +27,109 @@ pub const WlArray = extern struct {
     data: ?*anyopaque,
 };
 
-// ---- wl_display (v1) ----
+/// Argument union passed to `wl_proxy_marshal_array_flags`. Field tags match
+/// the wire-signature characters: i u f s o n a h.
+pub const WlArgument = extern union {
+    i: i32,
+    u: u32,
+    f: i32, // wl_fixed_t (24.8 fixed-point)
+    s: ?[*:0]const u8,
+    o: ?*anyopaque,
+    n: u32,
+    a: ?*WlArray,
+    h: i32,
+};
 
-pub const wl_display = opaque {};
+/// 24.8 fixed-point scalar used by Wayland for sub-pixel coordinates.
+pub const Fixed = enum(i32) {
+    _,
+    pub fn fromDouble(d: f64) Fixed {
+        return @enumFromInt(@as(i32, @intFromFloat(d * 256.0)));
+    }
+    pub fn toDouble(self: Fixed) f64 {
+        return @as(f64, @floatFromInt(@intFromEnum(self))) / 256.0;
+    }
+    pub fn fromInt(i: i32) Fixed {
+        return @enumFromInt(i << 8);
+    }
+    pub fn toInt(self: Fixed) i32 {
+        return @intFromEnum(self) >> 8;
+    }
+};
+
+/// `flags` argument passed to `wl_proxy_marshal_array_flags`. Set on
+/// destructor requests to free the proxy after the call returns.
+pub const WL_MARSHAL_FLAG_DESTROY: u32 = 1;
+
+pub const Error = error{
+    LibraryNotFound,
+    SymbolNotFound,
+    ListenerAlreadySet,
+    ProxyMarshalFailed,
+    ConnectFailed,
+};
+
+// ---- libwayland-client dispatch ----
+//
+// dlopen the wayland client library and resolve the function pointers
+// the spike binary needs. Variadic marshal entry points are kept in the
+// dispatch table as `*const anyopaque` for completeness — the actual
+// generated wrappers below all call `wl_proxy_marshal_array_flags`,
+// the non-variadic equivalent.
+
+pub const LibWaylandDispatch = struct {
+    // Display lifecycle and event pumping.
+    wl_display_connect: *const fn (?[*:0]const u8) callconv(.c) ?*wl_display = undefined,
+    wl_display_disconnect: *const fn (*wl_display) callconv(.c) void = undefined,
+    wl_display_dispatch: *const fn (*wl_display) callconv(.c) c_int = undefined,
+    wl_display_roundtrip: *const fn (*wl_display) callconv(.c) c_int = undefined,
+    wl_display_flush: *const fn (*wl_display) callconv(.c) c_int = undefined,
+    wl_display_get_fd: *const fn (*wl_display) callconv(.c) c_int = undefined,
+
+    // Variadic marshalling — opaque pointers (variadic ABI is not exposed by
+    // generated wrappers). Kept here for callers that need them.
+    wl_proxy_marshal_constructor: *const anyopaque = undefined,
+    wl_proxy_marshal_constructor_versioned: *const anyopaque = undefined,
+    wl_proxy_marshal_flags: *const anyopaque = undefined,
+
+    // Non-variadic marshalling — every generated method calls this.
+    wl_proxy_marshal_array_flags: *const fn (
+        proxy: *anyopaque,
+        opcode: u32,
+        interface: ?*const WlInterface,
+        version: u32,
+        flags: u32,
+        args: ?[*]WlArgument,
+    ) callconv(.c) ?*anyopaque = undefined,
+
+    // Listener registration + lifecycle.
+    wl_proxy_add_listener: *const fn (*anyopaque, ?*const anyopaque, ?*anyopaque) callconv(.c) c_int = undefined,
+    wl_proxy_destroy: *const fn (*anyopaque) callconv(.c) void = undefined,
+    wl_proxy_get_version: *const fn (*anyopaque) callconv(.c) u32 = undefined,
+    wl_proxy_set_user_data: *const fn (*anyopaque, ?*anyopaque) callconv(.c) void = undefined,
+    wl_proxy_get_user_data: *const fn (*anyopaque) callconv(.c) ?*anyopaque = undefined,
+};
+
+pub var lib_wayland: LibWaylandDispatch = .{};
+var lib_handle: ?std.DynLib = null;
+
+pub fn loadLibWayland() Error!void {
+    const candidates = &[_][:0]const u8{ "libwayland-client.so.0", "libwayland-client.so" };
+    for (candidates) |path| {
+        if (std.DynLib.open(path)) |dl| {
+            lib_handle = dl;
+            break;
+        } else |_| continue;
+    }
+    if (lib_handle == null) return error.LibraryNotFound;
+
+    inline for (@typeInfo(LibWaylandDispatch).@"struct".fields) |f| {
+        const sym = lib_handle.?.lookup(f.type, f.name) orelse return error.SymbolNotFound;
+        @field(lib_wayland, f.name) = sym;
+    }
+}
+
+// ---- wl_display (v1) ----
 
 pub const wl_display_error = enum(u32) {
     invalid_object = 0,
@@ -49,7 +150,7 @@ pub const wl_display_event = struct {
 };
 
 pub const wl_display_listener = extern struct {
-    @"error": *const fn (data: ?*anyopaque, proxy: *wl_display, object_id: *anyopaque, code: u32, message: [*:0]const u8) callconv(.c) void,
+    @"error": *const fn (data: ?*anyopaque, proxy: *wl_display, object_id: ?*anyopaque, code: u32, message: [*:0]const u8) callconv(.c) void,
     delete_id: *const fn (data: ?*anyopaque, proxy: *wl_display, id: u32) callconv(.c) void,
 };
 
@@ -72,9 +173,29 @@ pub const wl_display_interface = WlInterface{
     .events = &wl_display_events,
 };
 
-// ---- wl_registry (v1) ----
+pub const wl_display = opaque {
+    pub fn sync(self: *wl_display) Error!*wl_callback {
+        var args: [1]WlArgument = undefined;
+        args[0].n = 0;
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_display_request.sync, &wl_callback_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
 
-pub const wl_registry = opaque {};
+    pub fn getRegistry(self: *wl_display) Error!*wl_registry {
+        var args: [1]WlArgument = undefined;
+        args[0].n = 0;
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_display_request.get_registry, &wl_registry_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
+
+    pub fn addListener(self: *wl_display, listener: *const wl_display_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_registry (v1) ----
 
 pub const wl_registry_request = struct {
     pub const bind: u32 = 0;
@@ -108,9 +229,25 @@ pub const wl_registry_interface = WlInterface{
     .events = &wl_registry_events,
 };
 
-// ---- wl_callback (v1) ----
+pub const wl_registry = opaque {
+    pub fn bind(self: *wl_registry, name: u32, interface: *const WlInterface, version: u32) Error!*anyopaque {
+        var args: [4]WlArgument = undefined;
+        args[0].u = name;
+        args[1].s = interface.name;
+        args[2].u = version;
+        args[3].n = 0;
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_registry_request.bind, interface, version, 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
 
-pub const wl_callback = opaque {};
+    pub fn addListener(self: *wl_registry, listener: *const wl_registry_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_callback (v1) ----
 
 pub const wl_callback_event = struct {
     pub const done: u32 = 0;
@@ -133,9 +270,15 @@ pub const wl_callback_interface = WlInterface{
     .events = &wl_callback_events,
 };
 
-// ---- wl_compositor (v7) ----
+pub const wl_callback = opaque {
+    pub fn addListener(self: *wl_callback, listener: *const wl_callback_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
 
-pub const wl_compositor = opaque {};
+// ---- wl_compositor (v7) ----
 
 pub const wl_compositor_request = struct {
     pub const create_surface: u32 = 0;
@@ -158,9 +301,27 @@ pub const wl_compositor_interface = WlInterface{
     .events = null,
 };
 
-// ---- wl_shm_pool (v2) ----
+pub const wl_compositor = opaque {
+    pub fn createSurface(self: *wl_compositor) Error!*wl_surface {
+        var args: [1]WlArgument = undefined;
+        args[0].n = 0;
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_compositor_request.create_surface, &wl_surface_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
 
-pub const wl_shm_pool = opaque {};
+    pub fn createRegion(self: *wl_compositor) Error!*wl_region {
+        var args: [1]WlArgument = undefined;
+        args[0].n = 0;
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_compositor_request.create_region, &wl_region_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
+
+    pub fn release(self: *wl_compositor) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_compositor_request.release, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
+};
+
+// ---- wl_shm_pool (v2) ----
 
 pub const wl_shm_pool_request = struct {
     pub const create_buffer: u32 = 0;
@@ -183,9 +344,31 @@ pub const wl_shm_pool_interface = WlInterface{
     .events = null,
 };
 
-// ---- wl_shm (v2) ----
+pub const wl_shm_pool = opaque {
+    pub fn createBuffer(self: *wl_shm_pool, offset: i32, width: i32, height: i32, stride: i32, format: u32) Error!*wl_buffer {
+        var args: [6]WlArgument = undefined;
+        args[0].n = 0;
+        args[1].i = offset;
+        args[2].i = width;
+        args[3].i = height;
+        args[4].i = stride;
+        args[5].u = format;
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shm_pool_request.create_buffer, &wl_buffer_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
 
-pub const wl_shm = opaque {};
+    pub fn destroy(self: *wl_shm_pool) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shm_pool_request.destroy, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
+
+    pub fn resize(self: *wl_shm_pool, size: i32) void {
+        var args: [1]WlArgument = undefined;
+        args[0].i = size;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shm_pool_request.resize, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+};
+
+// ---- wl_shm (v2) ----
 
 pub const wl_shm_error = enum(u32) {
     invalid_format = 0,
@@ -372,9 +555,28 @@ pub const wl_shm_interface = WlInterface{
     .events = &wl_shm_events,
 };
 
-// ---- wl_buffer (v1) ----
+pub const wl_shm = opaque {
+    pub fn createPool(self: *wl_shm, fd: std.posix.fd_t, size: i32) Error!*wl_shm_pool {
+        var args: [3]WlArgument = undefined;
+        args[0].n = 0;
+        args[1].h = fd;
+        args[2].i = size;
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shm_request.create_pool, &wl_shm_pool_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
 
-pub const wl_buffer = opaque {};
+    pub fn release(self: *wl_shm) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shm_request.release, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
+
+    pub fn addListener(self: *wl_shm, listener: *const wl_shm_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_buffer (v1) ----
 
 pub const wl_buffer_request = struct {
     pub const destroy: u32 = 0;
@@ -405,9 +607,19 @@ pub const wl_buffer_interface = WlInterface{
     .events = &wl_buffer_events,
 };
 
-// ---- wl_data_offer (v4) ----
+pub const wl_buffer = opaque {
+    pub fn destroy(self: *wl_buffer) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_buffer_request.destroy, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
 
-pub const wl_data_offer = opaque {};
+    pub fn addListener(self: *wl_buffer, listener: *const wl_buffer_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_data_offer (v4) ----
 
 pub const wl_data_offer_error = enum(u32) {
     invalid_finish = 0,
@@ -460,9 +672,44 @@ pub const wl_data_offer_interface = WlInterface{
     .events = &wl_data_offer_events,
 };
 
-// ---- wl_data_source (v4) ----
+pub const wl_data_offer = opaque {
+    pub fn accept(self: *wl_data_offer, serial: u32, mime_type: ?[*:0]const u8) void {
+        var args: [2]WlArgument = undefined;
+        args[0].u = serial;
+        args[1].s = mime_type;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_offer_request.accept, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
 
-pub const wl_data_source = opaque {};
+    pub fn receive(self: *wl_data_offer, mime_type: [*:0]const u8, fd: std.posix.fd_t) void {
+        var args: [2]WlArgument = undefined;
+        args[0].s = mime_type;
+        args[1].h = fd;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_offer_request.receive, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn destroy(self: *wl_data_offer) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_offer_request.destroy, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
+
+    pub fn finish(self: *wl_data_offer) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_offer_request.finish, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, null);
+    }
+
+    pub fn setActions(self: *wl_data_offer, dnd_actions: u32, preferred_action: u32) void {
+        var args: [2]WlArgument = undefined;
+        args[0].u = dnd_actions;
+        args[1].u = preferred_action;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_offer_request.set_actions, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn addListener(self: *wl_data_offer, listener: *const wl_data_offer_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_data_source (v4) ----
 
 pub const wl_data_source_error = enum(u32) {
     invalid_action_mask = 0,
@@ -487,7 +734,7 @@ pub const wl_data_source_event = struct {
 
 pub const wl_data_source_listener = extern struct {
     target: *const fn (data: ?*anyopaque, proxy: *wl_data_source, mime_type: ?[*:0]const u8) callconv(.c) void,
-    send: *const fn (data: ?*anyopaque, proxy: *wl_data_source, mime_type: [*:0]const u8, fd: i32) callconv(.c) void,
+    send: *const fn (data: ?*anyopaque, proxy: *wl_data_source, mime_type: [*:0]const u8, fd: std.posix.fd_t) callconv(.c) void,
     cancelled: *const fn (data: ?*anyopaque, proxy: *wl_data_source) callconv(.c) void,
     dnd_drop_performed: *const fn (data: ?*anyopaque, proxy: *wl_data_source) callconv(.c) void,
     dnd_finished: *const fn (data: ?*anyopaque, proxy: *wl_data_source) callconv(.c) void,
@@ -518,9 +765,31 @@ pub const wl_data_source_interface = WlInterface{
     .events = &wl_data_source_events,
 };
 
-// ---- wl_data_device (v4) ----
+pub const wl_data_source = opaque {
+    pub fn offer(self: *wl_data_source, mime_type: [*:0]const u8) void {
+        var args: [1]WlArgument = undefined;
+        args[0].s = mime_type;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_source_request.offer, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
 
-pub const wl_data_device = opaque {};
+    pub fn destroy(self: *wl_data_source) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_source_request.destroy, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
+
+    pub fn setActions(self: *wl_data_source, dnd_actions: u32) void {
+        var args: [1]WlArgument = undefined;
+        args[0].u = dnd_actions;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_source_request.set_actions, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn addListener(self: *wl_data_source, listener: *const wl_data_source_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_data_device (v4) ----
 
 pub const wl_data_device_error = enum(u32) {
     role = 0,
@@ -545,9 +814,9 @@ pub const wl_data_device_event = struct {
 
 pub const wl_data_device_listener = extern struct {
     data_offer: *const fn (data: ?*anyopaque, proxy: *wl_data_device, id: *wl_data_offer) callconv(.c) void,
-    enter: *const fn (data: ?*anyopaque, proxy: *wl_data_device, serial: u32, surface: *wl_surface, x: i32, y: i32, id: ?*wl_data_offer) callconv(.c) void,
+    enter: *const fn (data: ?*anyopaque, proxy: *wl_data_device, serial: u32, surface: *wl_surface, x: Fixed, y: Fixed, id: ?*wl_data_offer) callconv(.c) void,
     leave: *const fn (data: ?*anyopaque, proxy: *wl_data_device) callconv(.c) void,
-    motion: *const fn (data: ?*anyopaque, proxy: *wl_data_device, time: u32, x: i32, y: i32) callconv(.c) void,
+    motion: *const fn (data: ?*anyopaque, proxy: *wl_data_device, time: u32, x: Fixed, y: Fixed) callconv(.c) void,
     drop: *const fn (data: ?*anyopaque, proxy: *wl_data_device) callconv(.c) void,
     selection: *const fn (data: ?*anyopaque, proxy: *wl_data_device, id: ?*wl_data_offer) callconv(.c) void,
 };
@@ -576,9 +845,35 @@ pub const wl_data_device_interface = WlInterface{
     .events = &wl_data_device_events,
 };
 
-// ---- wl_data_device_manager (v4) ----
+pub const wl_data_device = opaque {
+    pub fn startDrag(self: *wl_data_device, source: ?*wl_data_source, origin: *wl_surface, icon: ?*wl_surface, serial: u32) void {
+        var args: [4]WlArgument = undefined;
+        args[0].o = if (source) |__p| @ptrCast(__p) else null;
+        args[1].o = @ptrCast(origin);
+        args[2].o = if (icon) |__p| @ptrCast(__p) else null;
+        args[3].u = serial;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_device_request.start_drag, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
 
-pub const wl_data_device_manager = opaque {};
+    pub fn setSelection(self: *wl_data_device, source: ?*wl_data_source, serial: u32) void {
+        var args: [2]WlArgument = undefined;
+        args[0].o = if (source) |__p| @ptrCast(__p) else null;
+        args[1].u = serial;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_device_request.set_selection, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn release(self: *wl_data_device) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_device_request.release, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
+
+    pub fn addListener(self: *wl_data_device, listener: *const wl_data_device_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_data_device_manager (v4) ----
 
 pub const wl_data_device_manager_dnd_action = enum(u32) {
     none = 0,
@@ -609,9 +904,28 @@ pub const wl_data_device_manager_interface = WlInterface{
     .events = null,
 };
 
-// ---- wl_shell (v1) ----
+pub const wl_data_device_manager = opaque {
+    pub fn createDataSource(self: *wl_data_device_manager) Error!*wl_data_source {
+        var args: [1]WlArgument = undefined;
+        args[0].n = 0;
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_device_manager_request.create_data_source, &wl_data_source_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
 
-pub const wl_shell = opaque {};
+    pub fn getDataDevice(self: *wl_data_device_manager, seat: *wl_seat) Error!*wl_data_device {
+        var args: [2]WlArgument = undefined;
+        args[0].n = 0;
+        args[1].o = @ptrCast(seat);
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_device_manager_request.get_data_device, &wl_data_device_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
+
+    pub fn release(self: *wl_data_device_manager) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_data_device_manager_request.release, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
+};
+
+// ---- wl_shell (v1) ----
 
 pub const wl_shell_error = enum(u32) {
     role = 0,
@@ -635,9 +949,17 @@ pub const wl_shell_interface = WlInterface{
     .events = null,
 };
 
-// ---- wl_shell_surface (v1) ----
+pub const wl_shell = opaque {
+    pub fn getShellSurface(self: *wl_shell, surface: *wl_surface) Error!*wl_shell_surface {
+        var args: [2]WlArgument = undefined;
+        args[0].n = 0;
+        args[1].o = @ptrCast(surface);
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shell_request.get_shell_surface, &wl_shell_surface_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
+};
 
-pub const wl_shell_surface = opaque {};
+// ---- wl_shell_surface (v1) ----
 
 pub const wl_shell_surface_resize = enum(u32) {
     none = 0,
@@ -718,9 +1040,86 @@ pub const wl_shell_surface_interface = WlInterface{
     .events = &wl_shell_surface_events,
 };
 
-// ---- wl_surface (v7) ----
+pub const wl_shell_surface = opaque {
+    pub fn pong(self: *wl_shell_surface, serial: u32) void {
+        var args: [1]WlArgument = undefined;
+        args[0].u = serial;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shell_surface_request.pong, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
 
-pub const wl_surface = opaque {};
+    pub fn move(self: *wl_shell_surface, seat: *wl_seat, serial: u32) void {
+        var args: [2]WlArgument = undefined;
+        args[0].o = @ptrCast(seat);
+        args[1].u = serial;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shell_surface_request.move, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn resize(self: *wl_shell_surface, seat: *wl_seat, serial: u32, edges: u32) void {
+        var args: [3]WlArgument = undefined;
+        args[0].o = @ptrCast(seat);
+        args[1].u = serial;
+        args[2].u = edges;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shell_surface_request.resize, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setToplevel(self: *wl_shell_surface) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shell_surface_request.set_toplevel, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, null);
+    }
+
+    pub fn setTransient(self: *wl_shell_surface, parent: *wl_surface, x: i32, y: i32, flags: u32) void {
+        var args: [4]WlArgument = undefined;
+        args[0].o = @ptrCast(parent);
+        args[1].i = x;
+        args[2].i = y;
+        args[3].u = flags;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shell_surface_request.set_transient, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setFullscreen(self: *wl_shell_surface, method: u32, framerate: u32, output: ?*wl_output) void {
+        var args: [3]WlArgument = undefined;
+        args[0].u = method;
+        args[1].u = framerate;
+        args[2].o = if (output) |__p| @ptrCast(__p) else null;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shell_surface_request.set_fullscreen, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setPopup(self: *wl_shell_surface, seat: *wl_seat, serial: u32, parent: *wl_surface, x: i32, y: i32, flags: u32) void {
+        var args: [6]WlArgument = undefined;
+        args[0].o = @ptrCast(seat);
+        args[1].u = serial;
+        args[2].o = @ptrCast(parent);
+        args[3].i = x;
+        args[4].i = y;
+        args[5].u = flags;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shell_surface_request.set_popup, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setMaximized(self: *wl_shell_surface, output: ?*wl_output) void {
+        var args: [1]WlArgument = undefined;
+        args[0].o = if (output) |__p| @ptrCast(__p) else null;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shell_surface_request.set_maximized, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setTitle(self: *wl_shell_surface, title: [*:0]const u8) void {
+        var args: [1]WlArgument = undefined;
+        args[0].s = title;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shell_surface_request.set_title, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setClass(self: *wl_shell_surface, class_: [*:0]const u8) void {
+        var args: [1]WlArgument = undefined;
+        args[0].s = class_;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_shell_surface_request.set_class, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn addListener(self: *wl_shell_surface, listener: *const wl_shell_surface_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_surface (v7) ----
 
 pub const wl_surface_error = enum(u32) {
     invalid_scale = 0,
@@ -792,9 +1191,94 @@ pub const wl_surface_interface = WlInterface{
     .events = &wl_surface_events,
 };
 
-// ---- wl_seat (v10) ----
+pub const wl_surface = opaque {
+    pub fn destroy(self: *wl_surface) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_surface_request.destroy, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
 
-pub const wl_seat = opaque {};
+    pub fn attach(self: *wl_surface, buffer: ?*wl_buffer, x: i32, y: i32) void {
+        var args: [3]WlArgument = undefined;
+        args[0].o = if (buffer) |__p| @ptrCast(__p) else null;
+        args[1].i = x;
+        args[2].i = y;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_surface_request.attach, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn damage(self: *wl_surface, x: i32, y: i32, width: i32, height: i32) void {
+        var args: [4]WlArgument = undefined;
+        args[0].i = x;
+        args[1].i = y;
+        args[2].i = width;
+        args[3].i = height;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_surface_request.damage, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn frame(self: *wl_surface) Error!*wl_callback {
+        var args: [1]WlArgument = undefined;
+        args[0].n = 0;
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_surface_request.frame, &wl_callback_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
+
+    pub fn setOpaqueRegion(self: *wl_surface, region: ?*wl_region) void {
+        var args: [1]WlArgument = undefined;
+        args[0].o = if (region) |__p| @ptrCast(__p) else null;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_surface_request.set_opaque_region, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setInputRegion(self: *wl_surface, region: ?*wl_region) void {
+        var args: [1]WlArgument = undefined;
+        args[0].o = if (region) |__p| @ptrCast(__p) else null;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_surface_request.set_input_region, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn commit(self: *wl_surface) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_surface_request.commit, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, null);
+    }
+
+    pub fn setBufferTransform(self: *wl_surface, transform: i32) void {
+        var args: [1]WlArgument = undefined;
+        args[0].i = transform;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_surface_request.set_buffer_transform, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setBufferScale(self: *wl_surface, scale: i32) void {
+        var args: [1]WlArgument = undefined;
+        args[0].i = scale;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_surface_request.set_buffer_scale, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn damageBuffer(self: *wl_surface, x: i32, y: i32, width: i32, height: i32) void {
+        var args: [4]WlArgument = undefined;
+        args[0].i = x;
+        args[1].i = y;
+        args[2].i = width;
+        args[3].i = height;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_surface_request.damage_buffer, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn offset(self: *wl_surface, x: i32, y: i32) void {
+        var args: [2]WlArgument = undefined;
+        args[0].i = x;
+        args[1].i = y;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_surface_request.offset, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn getRelease(self: *wl_surface) Error!*wl_callback {
+        var args: [1]WlArgument = undefined;
+        args[0].n = 0;
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_surface_request.get_release, &wl_callback_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
+
+    pub fn addListener(self: *wl_surface, listener: *const wl_surface_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_seat (v10) ----
 
 pub const wl_seat_capability = enum(u32) {
     pointer = 1,
@@ -846,9 +1330,40 @@ pub const wl_seat_interface = WlInterface{
     .events = &wl_seat_events,
 };
 
-// ---- wl_pointer (v10) ----
+pub const wl_seat = opaque {
+    pub fn getPointer(self: *wl_seat) Error!*wl_pointer {
+        var args: [1]WlArgument = undefined;
+        args[0].n = 0;
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_seat_request.get_pointer, &wl_pointer_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
 
-pub const wl_pointer = opaque {};
+    pub fn getKeyboard(self: *wl_seat) Error!*wl_keyboard {
+        var args: [1]WlArgument = undefined;
+        args[0].n = 0;
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_seat_request.get_keyboard, &wl_keyboard_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
+
+    pub fn getTouch(self: *wl_seat) Error!*wl_touch {
+        var args: [1]WlArgument = undefined;
+        args[0].n = 0;
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_seat_request.get_touch, &wl_touch_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
+
+    pub fn release(self: *wl_seat) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_seat_request.release, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
+
+    pub fn addListener(self: *wl_seat, listener: *const wl_seat_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_pointer (v10) ----
 
 pub const wl_pointer_error = enum(u32) {
     role = 0,
@@ -901,11 +1416,11 @@ pub const wl_pointer_event = struct {
 };
 
 pub const wl_pointer_listener = extern struct {
-    enter: *const fn (data: ?*anyopaque, proxy: *wl_pointer, serial: u32, surface: *wl_surface, surface_x: i32, surface_y: i32) callconv(.c) void,
+    enter: *const fn (data: ?*anyopaque, proxy: *wl_pointer, serial: u32, surface: *wl_surface, surface_x: Fixed, surface_y: Fixed) callconv(.c) void,
     leave: *const fn (data: ?*anyopaque, proxy: *wl_pointer, serial: u32, surface: *wl_surface) callconv(.c) void,
-    motion: *const fn (data: ?*anyopaque, proxy: *wl_pointer, time: u32, surface_x: i32, surface_y: i32) callconv(.c) void,
+    motion: *const fn (data: ?*anyopaque, proxy: *wl_pointer, time: u32, surface_x: Fixed, surface_y: Fixed) callconv(.c) void,
     button: *const fn (data: ?*anyopaque, proxy: *wl_pointer, serial: u32, time: u32, button: u32, state: u32) callconv(.c) void,
-    axis: *const fn (data: ?*anyopaque, proxy: *wl_pointer, time: u32, axis: u32, value: i32) callconv(.c) void,
+    axis: *const fn (data: ?*anyopaque, proxy: *wl_pointer, time: u32, axis: u32, value: Fixed) callconv(.c) void,
     frame: *const fn (data: ?*anyopaque, proxy: *wl_pointer) callconv(.c) void,
     axis_source: *const fn (data: ?*anyopaque, proxy: *wl_pointer, axis_source: u32) callconv(.c) void,
     axis_stop: *const fn (data: ?*anyopaque, proxy: *wl_pointer, time: u32, axis: u32) callconv(.c) void,
@@ -942,9 +1457,28 @@ pub const wl_pointer_interface = WlInterface{
     .events = &wl_pointer_events,
 };
 
-// ---- wl_keyboard (v10) ----
+pub const wl_pointer = opaque {
+    pub fn setCursor(self: *wl_pointer, serial: u32, surface: ?*wl_surface, hotspot_x: i32, hotspot_y: i32) void {
+        var args: [4]WlArgument = undefined;
+        args[0].u = serial;
+        args[1].o = if (surface) |__p| @ptrCast(__p) else null;
+        args[2].i = hotspot_x;
+        args[3].i = hotspot_y;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_pointer_request.set_cursor, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
 
-pub const wl_keyboard = opaque {};
+    pub fn release(self: *wl_pointer) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_pointer_request.release, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
+
+    pub fn addListener(self: *wl_pointer, listener: *const wl_pointer_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_keyboard (v10) ----
 
 pub const wl_keyboard_keymap_format = enum(u32) {
     no_keymap = 0,
@@ -973,7 +1507,7 @@ pub const wl_keyboard_event = struct {
 };
 
 pub const wl_keyboard_listener = extern struct {
-    keymap: *const fn (data: ?*anyopaque, proxy: *wl_keyboard, format: u32, fd: i32, size: u32) callconv(.c) void,
+    keymap: *const fn (data: ?*anyopaque, proxy: *wl_keyboard, format: u32, fd: std.posix.fd_t, size: u32) callconv(.c) void,
     enter: *const fn (data: ?*anyopaque, proxy: *wl_keyboard, serial: u32, surface: *wl_surface, keys: *WlArray) callconv(.c) void,
     leave: *const fn (data: ?*anyopaque, proxy: *wl_keyboard, serial: u32, surface: *wl_surface) callconv(.c) void,
     key: *const fn (data: ?*anyopaque, proxy: *wl_keyboard, serial: u32, time: u32, key: u32, state: u32) callconv(.c) void,
@@ -1003,9 +1537,19 @@ pub const wl_keyboard_interface = WlInterface{
     .events = &wl_keyboard_events,
 };
 
-// ---- wl_touch (v10) ----
+pub const wl_keyboard = opaque {
+    pub fn release(self: *wl_keyboard) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_keyboard_request.release, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
 
-pub const wl_touch = opaque {};
+    pub fn addListener(self: *wl_keyboard, listener: *const wl_keyboard_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_touch (v10) ----
 
 pub const wl_touch_request = struct {
     pub const release: u32 = 0;
@@ -1022,13 +1566,13 @@ pub const wl_touch_event = struct {
 };
 
 pub const wl_touch_listener = extern struct {
-    down: *const fn (data: ?*anyopaque, proxy: *wl_touch, serial: u32, time: u32, surface: *wl_surface, id: i32, x: i32, y: i32) callconv(.c) void,
+    down: *const fn (data: ?*anyopaque, proxy: *wl_touch, serial: u32, time: u32, surface: *wl_surface, id: i32, x: Fixed, y: Fixed) callconv(.c) void,
     up: *const fn (data: ?*anyopaque, proxy: *wl_touch, serial: u32, time: u32, id: i32) callconv(.c) void,
-    motion: *const fn (data: ?*anyopaque, proxy: *wl_touch, time: u32, id: i32, x: i32, y: i32) callconv(.c) void,
+    motion: *const fn (data: ?*anyopaque, proxy: *wl_touch, time: u32, id: i32, x: Fixed, y: Fixed) callconv(.c) void,
     frame: *const fn (data: ?*anyopaque, proxy: *wl_touch) callconv(.c) void,
     cancel: *const fn (data: ?*anyopaque, proxy: *wl_touch) callconv(.c) void,
-    shape: *const fn (data: ?*anyopaque, proxy: *wl_touch, id: i32, major: i32, minor: i32) callconv(.c) void,
-    orientation: *const fn (data: ?*anyopaque, proxy: *wl_touch, id: i32, orientation: i32) callconv(.c) void,
+    shape: *const fn (data: ?*anyopaque, proxy: *wl_touch, id: i32, major: Fixed, minor: Fixed) callconv(.c) void,
+    orientation: *const fn (data: ?*anyopaque, proxy: *wl_touch, id: i32, orientation: Fixed) callconv(.c) void,
 };
 
 const wl_touch_requests = [_]WlMessage{
@@ -1054,9 +1598,19 @@ pub const wl_touch_interface = WlInterface{
     .events = &wl_touch_events,
 };
 
-// ---- wl_output (v4) ----
+pub const wl_touch = opaque {
+    pub fn release(self: *wl_touch) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_touch_request.release, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
 
-pub const wl_output = opaque {};
+    pub fn addListener(self: *wl_touch, listener: *const wl_touch_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_output (v4) ----
 
 pub const wl_output_subpixel = enum(u32) {
     unknown = 0,
@@ -1130,9 +1684,19 @@ pub const wl_output_interface = WlInterface{
     .events = &wl_output_events,
 };
 
-// ---- wl_region (v7) ----
+pub const wl_output = opaque {
+    pub fn release(self: *wl_output) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_output_request.release, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
 
-pub const wl_region = opaque {};
+    pub fn addListener(self: *wl_output, listener: *const wl_output_listener, data: ?*anyopaque) Error!void {
+        if (lib_wayland.wl_proxy_add_listener(@ptrCast(self), @ptrCast(listener), data) != 0) {
+            return error.ListenerAlreadySet;
+        }
+    }
+};
+
+// ---- wl_region (v7) ----
 
 pub const wl_region_request = struct {
     pub const destroy: u32 = 0;
@@ -1155,9 +1719,31 @@ pub const wl_region_interface = WlInterface{
     .events = null,
 };
 
-// ---- wl_subcompositor (v1) ----
+pub const wl_region = opaque {
+    pub fn destroy(self: *wl_region) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_region_request.destroy, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
 
-pub const wl_subcompositor = opaque {};
+    pub fn add(self: *wl_region, x: i32, y: i32, width: i32, height: i32) void {
+        var args: [4]WlArgument = undefined;
+        args[0].i = x;
+        args[1].i = y;
+        args[2].i = width;
+        args[3].i = height;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_region_request.add, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn subtract(self: *wl_region, x: i32, y: i32, width: i32, height: i32) void {
+        var args: [4]WlArgument = undefined;
+        args[0].i = x;
+        args[1].i = y;
+        args[2].i = width;
+        args[3].i = height;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_region_request.subtract, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+};
+
+// ---- wl_subcompositor (v1) ----
 
 pub const wl_subcompositor_error = enum(u32) {
     bad_surface = 0,
@@ -1184,9 +1770,22 @@ pub const wl_subcompositor_interface = WlInterface{
     .events = null,
 };
 
-// ---- wl_subsurface (v1) ----
+pub const wl_subcompositor = opaque {
+    pub fn destroy(self: *wl_subcompositor) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_subcompositor_request.destroy, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
 
-pub const wl_subsurface = opaque {};
+    pub fn getSubsurface(self: *wl_subcompositor, surface: *wl_surface, parent: *wl_surface) Error!*wl_subsurface {
+        var args: [3]WlArgument = undefined;
+        args[0].n = 0;
+        args[1].o = @ptrCast(surface);
+        args[2].o = @ptrCast(parent);
+        const _proxy = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_subcompositor_request.get_subsurface, &wl_subsurface_interface, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args) orelse return error.ProxyMarshalFailed;
+        return @ptrCast(_proxy);
+    }
+};
+
+// ---- wl_subsurface (v1) ----
 
 pub const wl_subsurface_error = enum(u32) {
     bad_surface = 0,
@@ -1220,9 +1819,40 @@ pub const wl_subsurface_interface = WlInterface{
     .events = null,
 };
 
-// ---- wl_fixes (v1) ----
+pub const wl_subsurface = opaque {
+    pub fn destroy(self: *wl_subsurface) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_subsurface_request.destroy, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
 
-pub const wl_fixes = opaque {};
+    pub fn setPosition(self: *wl_subsurface, x: i32, y: i32) void {
+        var args: [2]WlArgument = undefined;
+        args[0].i = x;
+        args[1].i = y;
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_subsurface_request.set_position, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn placeAbove(self: *wl_subsurface, sibling: *wl_surface) void {
+        var args: [1]WlArgument = undefined;
+        args[0].o = @ptrCast(sibling);
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_subsurface_request.place_above, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn placeBelow(self: *wl_subsurface, sibling: *wl_surface) void {
+        var args: [1]WlArgument = undefined;
+        args[0].o = @ptrCast(sibling);
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_subsurface_request.place_below, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
+
+    pub fn setSync(self: *wl_subsurface) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_subsurface_request.set_sync, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, null);
+    }
+
+    pub fn setDesync(self: *wl_subsurface) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_subsurface_request.set_desync, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, null);
+    }
+};
+
+// ---- wl_fixes (v1) ----
 
 pub const wl_fixes_request = struct {
     pub const destroy: u32 = 0;
@@ -1241,4 +1871,16 @@ pub const wl_fixes_interface = WlInterface{
     .methods = &wl_fixes_requests,
     .event_count = 0,
     .events = null,
+};
+
+pub const wl_fixes = opaque {
+    pub fn destroy(self: *wl_fixes) void {
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_fixes_request.destroy, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), WL_MARSHAL_FLAG_DESTROY, null);
+    }
+
+    pub fn destroyRegistry(self: *wl_fixes, registry: *wl_registry) void {
+        var args: [1]WlArgument = undefined;
+        args[0].o = @ptrCast(registry);
+        _ = lib_wayland.wl_proxy_marshal_array_flags(@ptrCast(self), wl_fixes_request.destroy_registry, null, lib_wayland.wl_proxy_get_version(@ptrCast(self)), 0, &args);
+    }
 };
