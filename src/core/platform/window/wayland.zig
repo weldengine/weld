@@ -110,7 +110,12 @@ pub const Backend = struct {
         state.xdg_wm_base.?.addListener(&state.xdg_wm_base_listener, state) catch return error.BackendInitFailed;
 
         state.surface = state.compositor.?.createSurface() catch return error.BackendInitFailed;
-        state.surface.addListener(&state.surface_listener, state) catch {};
+        state.surface.addListener(&state.surface_listener, state) catch return error.BackendInitFailed;
+        // Pin the buffer scale to 1.0 explicitly. Without this, on a HiDPI
+        // monitor the compositor falls back to its own scale heuristic and
+        // upscales our buffer (blurry output). `onSurfacePreferredScale`
+        // updates this when the compositor sends a different value.
+        state.surface.setBufferScale(1);
 
         state.xdg_surface_p = state.xdg_wm_base.?.getXdgSurface(state.surface) catch return error.BackendInitFailed;
         state.xdg_surface_p.addListener(&state.xdg_surface_listener, state) catch return error.BackendInitFailed;
@@ -341,13 +346,16 @@ fn onSurfacePreferredScale(
     proxy: *core.wl_surface,
     factor: i32,
 ) callconv(.c) void {
-    _ = proxy;
     const state: *State = @ptrCast(@alignCast(data.?));
     if (factor > 0 and factor != state.last_scale) {
         state.last_scale = factor;
         state.scale = factor;
         const scale_f: f32 = @floatFromInt(factor);
         state.events.append(state.gpa, .{ .dpi_changed = scale_f }) catch {};
+        // Acknowledge the new scale to the compositor so subsequent buffer
+        // attaches are interpreted at the right physical resolution.
+        proxy.setBufferScale(factor);
+        proxy.commit();
     }
 }
 
