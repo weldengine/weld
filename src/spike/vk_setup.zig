@@ -101,6 +101,11 @@ pub const Renderer = struct {
     in_flight: [max_frames_in_flight]vk.Fence = .{ .null, .null },
     current_frame: u32 = 0,
 
+    /// Most recent successfully-presented swapchain image index. The
+    /// smoke-test PPM capture reads from `swapchain_images[?]` once
+    /// `vkDeviceWaitIdle` has returned.
+    last_presented_image: ?u32 = null,
+
     /// Tracks the largest VkResult deviation from `.success` returned by
     /// `acquireNextImageKHR` or `queuePresentKHR`. The render loop reads
     /// it to decide when to recreate the swapchain.

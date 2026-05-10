@@ -77,6 +77,10 @@ pub fn drawFrame(r: *setup.Renderer) vk.Error!bool {
         else => try vk.checkResult(present_call),
     }
 
+    // Track the most recent successfully-presented image for the
+    // smoke-test PPM capture path.
+    r.last_presented_image = image_index;
+
     r.current_frame = (r.current_frame + 1) % setup.max_frames_in_flight;
     return true;
 }
