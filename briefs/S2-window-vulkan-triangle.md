@@ -255,7 +255,7 @@ Read `engine-spec.md` §22.3 / S2 in full first — the post-conversation precis
 
 *One entry per logical work sequence (typically: a goal reached, a green test, a blocker). Chronological order. Short — 1 to 3 lines per entry.*
 
-- <YYYY-MM-DD HH:MM> — <summary>
+- 2026-05-10 01:42 — Vendored upstream XML registries under `bindings/upstream/`. Vulkan: `vk.xml` from Vulkan-Headers tag `vulkan-sdk-1.4.341.0` (commit b5c8f99). Wayland core: `wayland.xml` from wayland tag `1.25.0` (commit 3e673a4). Protocols: `xdg-shell.xml` + `xdg-decoration-unstable-v1.xml` from wayland-protocols tag `1.48` (commit 02e63e7). LICENSE notices written for each vendor (Apache-2.0 OR MIT for Vulkan, MIT for Wayland). All four XML files validate as well-formed.
 
 ## Déviations actées
 
