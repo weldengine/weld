@@ -71,24 +71,56 @@ pub fn build(b: *std.Build) void {
 
     // Out-of-tree tests. Each file is its own root_module and imports
     // `weld_core` to reach the engine internals.
-    const test_files = [_][]const u8{
-        "tests/smoke_test.zig",
-        "tests/ecs/world_test.zig",
-        "tests/ecs/chunk_test.zig",
-        "tests/ecs/query_test.zig",
-        "tests/ecs/no_alloc_in_simulation_test.zig",
-        "tests/jobs/deque_test.zig",
-        "tests/jobs/scheduler_test.zig",
-        "tests/window/win32_open_close_test.zig",
-        "tests/window/wayland_open_close_test.zig",
+    // Out-of-tree spike + bindings tests need to reach files that live
+    // outside `weld_core`'s module tree. Each group is exposed via a
+    // thin facade module — Zig 0.16 forbids a single file from belonging
+    // to two module trees, so we can't expose siblings as separate
+    // modules when they `@import` each other. The facades sit next to
+    // the code they shepherd so the throwaway-blast-radius is preserved.
+    const spike_test_module = b.createModule(.{
+        .root_source_file = b.path("src/spike/tests_facade.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const wl_protocols_test_module = b.createModule(.{
+        .root_source_file = b.path("src/core/platform/window/wayland_protocols/tests_facade.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const TestSpec = struct {
+        path: []const u8,
+        spike: bool = false,
+        wl_protocols: bool = false,
     };
-    for (test_files) |path| {
+    const test_specs = [_]TestSpec{
+        .{ .path = "tests/smoke_test.zig" },
+        .{ .path = "tests/ecs/world_test.zig" },
+        .{ .path = "tests/ecs/chunk_test.zig" },
+        .{ .path = "tests/ecs/query_test.zig" },
+        .{ .path = "tests/ecs/no_alloc_in_simulation_test.zig" },
+        .{ .path = "tests/jobs/deque_test.zig" },
+        .{ .path = "tests/jobs/scheduler_test.zig" },
+        .{ .path = "tests/window/win32_open_close_test.zig" },
+        .{ .path = "tests/window/wayland_open_close_test.zig" },
+        .{ .path = "tests/spike/scoring_test.zig", .spike = true },
+        .{ .path = "tests/spike/cli_test.zig", .spike = true },
+        .{ .path = "tests/bindings/vk_abi_test.zig" },
+        .{ .path = "tests/bindings/wayland_abi_test.zig", .wl_protocols = true },
+    };
+    for (test_specs) |spec| {
         const t_mod = b.createModule(.{
-            .root_source_file = b.path(path),
+            .root_source_file = b.path(spec.path),
             .target = target,
             .optimize = optimize,
         });
         t_mod.addImport("weld_core", core_module);
+        if (spec.spike) {
+            t_mod.addImport("spike", spike_test_module);
+        }
+        if (spec.wl_protocols) {
+            t_mod.addImport("wl_protocols", wl_protocols_test_module);
+        }
         const t = b.addTest(.{ .root_module = t_mod });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
