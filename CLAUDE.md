@@ -5,24 +5,30 @@ session and captures the operational state of the project plus the rules that
 must never be violated. The full specification lives in the claude.ai
 knowledge base — see § Quick links spec.
 
-> **Status:** Phase −1 — S1 in review
+> **Status:** Phase −1 — S2 code-complete, hardware validation pending
 >
-> S1 closed locally: comptime SoA archetype (16 KiB chunks, 16-aligned
-> per-component arrays), Chase-Lev work-stealing scheduler with 4 workers
-> and per-worker deque ownership, and bench harness all green. Bench median
-> on M4 Pro reference: **54.5 µs / 100k entities** (gate ≤ 1.0 ms — GO).
-> PR `Phase -1 / Core / Mini-ECS Zig` open; tag `v0.0.2-S1-mini-ecs` will be
-> posted by Guy after merge.
+> S2 code-complete locally on branch
+> `phase-pre-0/platform/window-vulkan-triangle`: vendored XML registries
+> (vk.xml, wayland.xml, xdg-shell.xml, xdg-decoration-unstable-v1.xml),
+> custom `tools/vk_gen/` + `tools/wayland_gen/` emitting idiomatic Zig
+> bindings, native Win32 + Wayland windowing (no SDL/GLFW, no @cImport),
+> Vulkan triangle render path, smoke-test PPM capture with 5 s wall-clock
+> + SIGINT / CTRL_C handling, frame-time stats (`--measure-frame-time`),
+> 34 tests passing (`zig build test`). Step (j) — three hardware
+> validation runs (Win11 + RTX 4080 Super, Fedora 44 + Mesa ANV, Fedora
+> 44 + NVIDIA proprietary) plus the `validation/s2-go-nogo.md` report —
+> is operator-driven and pending. Tag `v0.0.3-S2-window-vulkan-triangle`
+> will be posted by Guy after step (j) is green and the PR merges.
 
 ## Current state
 
 | Field | Value |
 |---|---|
 | Phase | −1 (Spikes) |
-| Current milestone | S1 — Mini-ECS Zig (in review) |
-| Last released tag | `v0.0.1-S0-bootstrap` |
-| Active branch | `phase-pre-0/core/mini-ecs` |
-| Next planned milestone | S2 — Window natif + Vulkan triangle |
+| Current milestone | S2 — Window + Vulkan triangle (code-complete, awaiting hardware validation) |
+| Last released tag | `v0.0.2-S1-mini-ecs` |
+| Active branch | `phase-pre-0/platform/window-vulkan-triangle` |
+| Next planned milestone | S3 — Etch grammar EBNF v0.5 |
 
 ## Tags
 
@@ -37,7 +43,7 @@ knowledge base — see § Quick links spec.
 |---|---|---|
 | S0 | Infrastructure ready (no engineering hypothesis) | validated |
 | S1 | comptime ECS + Chase-Lev work-stealing iterates 100k entities < 1 ms | validated (54.5 µs median on M4 Pro) |
-| S2 | Window Win32 + Wayland + Vulkan triangle, native Zig, no SDL/GLFW | pending |
+| S2 | Window Win32 + Wayland + Vulkan triangle, native Zig, no SDL/GLFW | code-complete; runtime validation on three target machines pending step (j) |
 | S3 | Etch grammar EBNF v0.5 implementable, parsing < 5 ms / file | pending |
 | S4 | AST tree-walking interpreter executes Etch correctly with ECS bridge | pending |
 | S5 | Etch → Zig codegen viable build-time-wise (incremental < 2 s) | pending |
