@@ -547,14 +547,14 @@ fn createGraphicsPipeline(r: *Renderer) !void {
     const stages = [_]vk.PipelineShaderStageCreateInfo{
         .{
             .flags = .empty,
-            .stage = .{ .vertex = true },
+            .stage = .vertex_bit,
             .module = r.vert_module,
             .p_name = "main",
             .p_specialization_info = null,
         },
         .{
             .flags = .empty,
-            .stage = .{ .fragment = true },
+            .stage = .fragment_bit,
             .module = r.frag_module,
             .p_name = "main",
             .p_specialization_info = null,
@@ -575,7 +575,7 @@ fn createGraphicsPipeline(r: *Renderer) !void {
         .vertex_binding_description_count = 1,
         .p_vertex_binding_descriptions = @ptrCast(&binding),
         .vertex_attribute_description_count = attrs.len,
-        .p_vertex_attribute_descriptions = &attrs,
+        .p_vertex_attribute_descriptions = @ptrCast(&attrs),
     };
     const ia: vk.PipelineInputAssemblyStateCreateInfo = .{
         .flags = .empty,
@@ -605,7 +605,7 @@ fn createGraphicsPipeline(r: *Renderer) !void {
     const dyn_state: vk.PipelineDynamicStateCreateInfo = .{
         .flags = .empty,
         .dynamic_state_count = dyn.len,
-        .p_dynamic_states = &dyn,
+        .p_dynamic_states = @ptrCast(&dyn),
     };
     const rs: vk.PipelineRasterizationStateCreateInfo = .{
         .flags = .empty,
@@ -661,7 +661,7 @@ fn createGraphicsPipeline(r: *Renderer) !void {
         .{
             .flags = .empty,
             .stage_count = stages.len,
-            .p_stages = &stages,
+            .p_stages = @ptrCast(&stages),
             .p_vertex_input_state = &vi,
             .p_input_assembly_state = &ia,
             .p_tessellation_state = null,
