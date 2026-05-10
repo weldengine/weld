@@ -72,14 +72,16 @@ pub fn drawFrame(r: *setup.Renderer) vk.Error!bool {
     // the swapchain rebuild path.
     const present_call = vk.device_dispatch.vkQueuePresentKHR(r.queue, &present_info);
     switch (present_call) {
-        .success => {},
-        .suboptimal_khr, .error_out_of_date_khr => r.swapchain_dirty = true,
+        // `.suboptimal_khr` still presents the frame (just with scaling),
+        // so the swapchain image contents are valid for the PPM capture
+        // path. `.error_out_of_date_khr` did *not* present — leaving
+        // `last_presented_image` untouched here avoids the field
+        // indexing into a stale `swapchain_images` slice after the
+        // upcoming rebuild.
+        .success, .suboptimal_khr => r.last_presented_image = image_index,
+        .error_out_of_date_khr => r.swapchain_dirty = true,
         else => try vk.checkResult(present_call),
     }
-
-    // Track the most recent successfully-presented image for the
-    // smoke-test PPM capture path.
-    r.last_presented_image = image_index;
 
     r.current_frame = (r.current_frame + 1) % setup.max_frames_in_flight;
     return true;

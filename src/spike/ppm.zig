@@ -19,6 +19,7 @@ pub const Error = error{
     NoPresentedImage,
     NoCompatibleMemory,
     CaptureWriteFailed,
+    UnsupportedSwapchainFormat,
 } || setup.SetupError;
 
 /// Capture `r.swapchain_images[r.last_presented_image]` into `path`.
@@ -32,6 +33,15 @@ pub fn capture(
     dir: std.Io.Dir,
     path: []const u8,
 ) Error!void {
+    // BGRA → RGB swizzle below assumes the swapchain is one of the
+    // B8G8R8A8 variants. Fail loud rather than silently writing a PPM
+    // with swapped R/B channels if `pickSwapchainFormat` ever returns
+    // something else.
+    switch (r.swapchain_format) {
+        .b8g8r8a8_unorm, .b8g8r8a8_srgb => {},
+        else => return error.UnsupportedSwapchainFormat,
+    }
+
     const image_index = r.last_presented_image orelse return error.NoPresentedImage;
     const image = r.swapchain_images[image_index];
     const width = r.swapchain_extent.width;
