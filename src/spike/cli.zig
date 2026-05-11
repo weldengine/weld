@@ -17,9 +17,11 @@ pub const Args = struct {
     gpu_prefer: ?GpuPrefer = null,
     /// `--smoke-test` — run the non-interactive capture flow.
     smoke_test: bool = false,
-    /// `--measure-frame-time[=N]` — render N frames and emit timing
-    /// statistics to stdout. `null` = not requested. Default N when the
-    /// flag is bare: 300 (per brief).
+    /// `--measure-frame-time[=N]` — sample N **post-warmup** frame
+    /// durations and emit median / p95 / max to stdout. `null` = not
+    /// requested. Default N when the flag is bare: 300 (per brief).
+    /// The first 10 frames are skipped — see `measure_warmup_frames` in
+    /// `main.zig` and the brief's "after the first 10 frames" carve-out.
     measure_frame_time: ?u32 = null,
     /// `--verbose` — log window events to stdout in interactive mode.
     /// Always on in `--smoke-test` mode regardless of this flag.

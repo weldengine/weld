@@ -10,7 +10,10 @@
 //!   * tear everything down on close
 //!
 //! `--measure-frame-time[=N]` (step f) samples `std.Io.Clock.now(.awake, io)`
-//! around each `drawFrame` and reports median / p95 / max.
+//! around each `drawFrame` and reports median / p95 / max **over `N`
+//! post-warmup frames** (the brief's perf gate excludes the first 10
+//! frames; `measure_warmup_frames` mirrors that — total frames presented
+//! is `measure_warmup_frames + N`).
 //!
 //! Step (g) adds: PPM capture of the last presented swapchain image to
 //! `zig-out/smoke/<os>-<gpu>.ppm`, a 5 s wall-clock budget for smoke-test
@@ -37,6 +40,14 @@ const initial_width: u32 = 800;
 const initial_height: u32 = 600;
 const smoke_test_timeout_ns: u64 = 5 * std.time.ns_per_s;
 const smoke_test_target_frames: u32 = 10;
+
+/// Brief's perf criteria are explicit: "no frame time above 33 ms after the
+/// first 10 frames (post-warmup)". The first frames pay one-shot costs the
+/// brief explicitly excludes — driver compiling the PSO on first use,
+/// validation layer attaching, descriptor pool first allocation, compositor
+/// negotiating buffer ages, etc. `--measure-frame-time=N` reports stats
+/// over `N` post-warmup frames; total frames presented = warmup_frames + N.
+const measure_warmup_frames: u32 = 10;
 
 /// Set asynchronously by the SIGINT / CTRL_C_EVENT handler. The handler
 /// only writes this atomic — every other side-effect (logging, teardown)
@@ -183,7 +194,11 @@ pub fn main(init: std.process.Init) !u8 {
             return err;
         };
         if (presented) {
-            if (timings) |buf| if (timings_count < buf.len) {
+            // Skip the first `measure_warmup_frames` samples — the brief
+            // carves them out explicitly. Without the skip, a single
+            // driver-warmup stall on the first frame inflates `max` past
+            // the 33 ms threshold even on a healthy steady state.
+            if (timings) |buf| if (timings_count < buf.len and frames_presented >= measure_warmup_frames) {
                 const t1 = std.Io.Clock.now(.awake, init.io);
                 const elapsed: i96 = t0.durationTo(t1).nanoseconds;
                 buf[timings_count] = @intCast(@max(@as(i96, 0), elapsed));
@@ -228,12 +243,13 @@ pub fn main(init: std.process.Init) !u8 {
         const p95 = slice[@min(p95_idx, slice.len - 1)];
         const max = slice[slice.len - 1];
         try stdout.print(
-            "frame-time-ms: median={d:.3} p95={d:.3} max={d:.3} over {d} frames\n",
+            "frame-time-ms: median={d:.3} p95={d:.3} max={d:.3} over {d} post-warmup frames (skipped first {d})\n",
             .{
                 @as(f64, @floatFromInt(median)) / std.time.ns_per_ms,
                 @as(f64, @floatFromInt(p95)) / std.time.ns_per_ms,
                 @as(f64, @floatFromInt(max)) / std.time.ns_per_ms,
                 slice.len,
+                measure_warmup_frames,
             },
         );
     };
