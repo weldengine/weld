@@ -334,7 +334,7 @@ Read `engine-spec.md` §22.3 / S2 in full first — the post-conversation precis
 
 *Modifications to the FROZEN SECTION that occurred mid-milestone after a Claude.ai round-trip. Each deviation references the commit that enacts it. Empty at end of milestone is the nominal case.*
 
-- <commit SHA> — <summary of deviation and reason>
+- **Row 3 (Fedora + NVIDIA + GNOME Wayland) — "resize 100× sans crash" not testable on this configuration.** GNOME Shell ignores our `zxdg_toplevel_decoration_v1.set_mode(server_side)` request and the spike does not implement client-side decorations (out-of-scope per § Out-of-scope). The window opens without a titlebar / borders / resize handles, so mouse-driven resize is unreachable. The underlying `recreateSwapchain` code path that the criterion is meant to exercise is verified on Row 1 (Win11 + DWM, which always supplies its own decorations). No commit — documented limitation, captured in `validation/s2-go-nogo.md` Row 3.
 
 ## Blocages rencontrés
 
