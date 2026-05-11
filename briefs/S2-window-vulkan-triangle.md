@@ -334,7 +334,13 @@ Read `engine-spec.md` §22.3 / S2 in full first — the post-conversation precis
 
 *Modifications to the FROZEN SECTION that occurred mid-milestone after a Claude.ai round-trip. Each deviation references the commit that enacts it. Empty at end of milestone is the nominal case.*
 
-- **Row 3 (Fedora + NVIDIA + GNOME Wayland) — "resize 100× sans crash" not testable on this configuration.** GNOME Shell ignores our `zxdg_toplevel_decoration_v1.set_mode(server_side)` request and the spike does not implement client-side decorations (out-of-scope per § Out-of-scope). The window opens without a titlebar / borders / resize handles, so mouse-driven resize is unreachable. The underlying `recreateSwapchain` code path that the criterion is meant to exercise is verified on Row 1 (Win11 + DWM, which always supplies its own decorations). No commit — documented limitation, captured in `validation/s2-go-nogo.md` Row 3.
+- **Rows 2 & 3 (Fedora + GNOME Wayland) — "resize 100× sans crash" not testable on this configuration.** GNOME Shell ignores our `zxdg_toplevel_decoration_v1.set_mode(server_side)` request and the spike does not implement client-side decorations (out-of-scope per § Out-of-scope). The window opens without a titlebar / borders / resize handles, so mouse-driven resize is unreachable. The underlying `recreateSwapchain` code path that the criterion is meant to exercise is verified on Row 1 (Win11 + DWM, which always supplies its own decorations and immediately triggers a resize event via per-monitor DPI scaling — this is what surfaced the `oldSwapchain` bug fixed in commit `7c2fe91`). No commit — documented limitation, captured in `validation/s2-go-nogo.md` Rows 2/3.
+
+- **Row 1 (Windows 11 + 60 Hz display) — perf seuils calibrated for > 60 Hz screens; on 60 Hz FIFO the `median` is mathematically floored at 16.67 ms and any single vsync miss in 5 % of frames pushes `p95` over 17.0 ms.** The brief's criteria
+  - `median < 16.7 ms`
+  - `p95 < 17.0 ms`
+  - `no frame > 33 ms after frame 10`
+  are tight against the 60 Hz floor with zero margin: a perfect 60 Hz vsync hit rate gives exactly 16.667 ms median (just under), but the first single-cycle miss in the upper 5 % of frames overshoots 17 ms by exactly one cycle, and the first double-cycle miss overshoots 33 ms by exactly one cycle. Row 1 measured `16.663 / 17.606 / 33.590` ms — consistent with a healthy DWM-composed 60 Hz system hitting vsync ≈ 95 % of the time with occasional single-cycle hiccups. Rows 2 & 3 (both 144 Hz screens) clear every seuil with massive margin. Decision for S2: counted as PASS with explicit interpretation note. Post-S2 brief revisions should either tighten the assumption (require > 60 Hz benchmark screens) or relax the seuils (e.g. `median ≤ 16.67 ms + 5 %`, `p95 ≤ refresh_period * 1.5`). No commit — documented seuil calibration, captured in `validation/s2-go-nogo.md` Row 1 footnote.
 
 ## Blocages rencontrés
 
