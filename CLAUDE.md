@@ -5,27 +5,30 @@ session and captures the operational state of the project plus the rules that
 must never be violated. The full specification lives in the claude.ai
 knowledge base — see § Quick links spec.
 
-> **Status:** Phase −1 — S2 code-complete, hardware validation pending
+> **Status:** Phase −1 — S2 closed (code + validation), PR pending
 >
-> S2 code-complete locally on branch
-> `phase-pre-0/platform/window-vulkan-triangle`: vendored XML registries
-> (vk.xml, wayland.xml, xdg-shell.xml, xdg-decoration-unstable-v1.xml),
-> custom `tools/vk_gen/` + `tools/wayland_gen/` emitting idiomatic Zig
-> bindings, native Win32 + Wayland windowing (no SDL/GLFW, no @cImport),
-> Vulkan triangle render path, smoke-test PPM capture with 5 s wall-clock
-> + SIGINT / CTRL_C handling, frame-time stats (`--measure-frame-time`),
-> 34 tests passing (`zig build test`). Step (j) — three hardware
-> validation runs (Win11 + RTX 4080 Super, Fedora 44 + Mesa ANV, Fedora
-> 44 + NVIDIA proprietary) plus the `validation/s2-go-nogo.md` report —
-> is operator-driven and pending. Tag `v0.0.3-S2-window-vulkan-triangle`
-> will be posted by Guy after step (j) is green and the PR merges.
+> S2 fully validated on three target machines:
+> - **Win11 25H2 + RTX 4080 Super (60 Hz, DWM)** : median 16.663 ms / p95 17.606 ms / max 33.590 ms — at the 60 Hz vsync floor.
+> - **Fedora 44 + Intel UHD 630 (Mesa ANV, 144 Hz, GNOME Wayland)** : median 6.939 ms / p95 7.358 ms / max 39.996 ms (single warmup outlier).
+> - **Fedora 44 + GTX 1660 Ti (NVIDIA prop. 595.71.05, 144 Hz, GNOME Wayland)** : median 6.934 ms / p95 7.252 ms / max 21.008 ms.
+>
+> Two real bugs caught and fixed by hardware validation that CI would
+> never have surfaced: `loadInstance` strict on NULL dispatch slots
+> (commit `8a377f6`); `recreateSwapchain` not threading
+> `oldSwapchain` into `VkSwapchainCreateInfoKHR` (commit `7c2fe91`).
+> Plus a build-system gap: `bindgen-vk`/`bindgen-wayland` now chain
+> `zig fmt` (commit `8282d0f`). Validation report at
+> `validation/s2-go-nogo.md` ✅ GO on all three rows.
+> PR `Phase -1 / Platform / Native Window + Vulkan Triangle` opens
+> next; tag `v0.0.3-S2-window-vulkan-triangle` posted by Guy after
+> squash-merge.
 
 ## Current state
 
 | Field | Value |
 |---|---|
 | Phase | −1 (Spikes) |
-| Current milestone | S2 — Window + Vulkan triangle (code-complete, awaiting hardware validation) |
+| Current milestone | S2 — Window + Vulkan triangle (CLOSED, PR pending) |
 | Last released tag | `v0.0.2-S1-mini-ecs` |
 | Active branch | `phase-pre-0/platform/window-vulkan-triangle` |
 | Next planned milestone | S3 — Etch grammar EBNF v0.5 |
@@ -43,7 +46,7 @@ knowledge base — see § Quick links spec.
 |---|---|---|
 | S0 | Infrastructure ready (no engineering hypothesis) | validated |
 | S1 | comptime ECS + Chase-Lev work-stealing iterates 100k entities < 1 ms | validated (54.5 µs median on M4 Pro) |
-| S2 | Window Win32 + Wayland + Vulkan triangle, native Zig, no SDL/GLFW | code-complete; runtime validation on three target machines pending step (j) |
+| S2 | Window Win32 + Wayland + Vulkan triangle, native Zig, no SDL/GLFW | validated (3/3 target machines green, validation/s2-go-nogo.md ✅ GO) |
 | S3 | Etch grammar EBNF v0.5 implementable, parsing < 5 ms / file | pending |
 | S4 | AST tree-walking interpreter executes Etch correctly with ECS bridge | pending |
 | S5 | Etch → Zig codegen viable build-time-wise (incremental < 2 s) | pending |

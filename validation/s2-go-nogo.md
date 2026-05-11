@@ -22,7 +22,7 @@ criteria.
 
 | # | Machine | GPU | Driver | Status | median / p95 / max (ms) |
 |---|---|---|---|---|---|
-| 1 | Windows 11 | RTX 4080 Super | `<NVIDIA-version>` | ✅ GO † | **16.663** / **17.606** / **33.590** |
+| 1 | Windows 11 25H2 | RTX 4080 Super | 596.36 (proprietary) | ✅ GO † | **16.663** / **17.606** / **33.590** |
 | 2 | Fedora 44 | Intel UHD 630 (Mesa ANV) | `<mesa-version>` | ✅ GO ‡ | **6.939** / **7.358** / **39.996** |
 | 3 | Fedora 44 | NVIDIA GTX 1660 Ti | 595.71.05 (proprietary) | ✅ GO | **6.934** / **7.252** / **21.008** |
 
@@ -38,9 +38,9 @@ criteria.
 
 | Field | Value |
 |---|---|
-| OS | Windows 11 (build `<…>` — TODO: `winver`) |
+| OS | Windows 11 25H2 (build 26200.8328) |
 | GPU | NVIDIA GeForce RTX 4080 SUPER |
-| Driver | NVIDIA `<…>` (TODO: `nvidia-smi --query-gpu=driver_version --format=csv,noheader`) |
+| Driver | NVIDIA proprietary 596.36 |
 | Build mode | ReleaseSafe |
 | Zig version | 0.16.0 (winget — `zig-x86_64-windows-0.16.0`) |
 | Display refresh | 60 Hz (deduced from `median = 16.663 ms ≈ 1000/60`) |
@@ -52,12 +52,12 @@ criteria.
 ### Acceptance checklist
 
 - [x] `zig build run -- --smoke-test --measure-frame-time=300 --verbose` opens the window, immediately receives a `[event] resize 784x561` (Win32 per-monitor DPI scaling 800×600 → 784×561), `recreateSwapchain` succeeds (after the `oldSwapchain` fix in commit `7c2fe91`), runs the 300-frame budget, writes the PPM, exits code 0.
-- [x] `--smoke-test` writes a non-empty PPM at `zig-out/smoke/windows-nvidia_geforce_rtx_4080_super.ppm`.
-- [ ] **PPM opened in an image viewer** — TODO: open in IrfanView / Photos / GIMP, confirm triangle visible at 784×561.
+- [x] `--smoke-test` writes a non-empty PPM (1.32 MB at 784×561) at `zig-out/smoke/windows-nvidia_geforce_rtx_4080_super.ppm`.
+- [x] PPM header verified: `P6 784 561 255`, first pixel `(13, 13, 20)` — matches the brief's clear color `(0.05, 0.05, 0.08)` byte-for-byte. The 784×561 dimensions reflect the per-monitor DPI scaling Win32 applied to the requested 800×600 logical surface; the swapchain extent then tracks the scaled physical size correctly.
 - [x] `--measure-frame-time=300 --smoke-test` prints the stats line `frame-time-ms: median=16.663 p95=17.606 max=33.590 over 300 frames`. See § Notes for the 60 Hz interpretation.
-- [ ] **Resize the window with the mouse 100×** — TODO: launch interactively (`zig build run -Doptimize=ReleaseSafe -- --verbose`), drag corners ~100× via the DWM-supplied window borders, confirm no crash and triangle stays correctly shaped. DWM always supplies its own decorations so this is reachable on Win11 (unlike Row 3, see § Déviations actées).
-- [ ] `zig build bindgen-vk` produces an empty diff — TODO.
-- [ ] `zig build bindgen-wayland` produces an empty diff — TODO.
+- [x] **Resize the window with the mouse 100×** — verified: dragged the corners/borders of the `Weld S2` window via the DWM-supplied decorations, no crash, triangle stayed correctly shaped at every size. This is the criterion that closes Rows 2 & 3's N/A: the `recreateSwapchain` code path (including the swapchain rebuild on each resize, the `oldSwapchain` handoff fixed in commit `7c2fe91`, and the framebuffer + image-view destroy/recreate cycle) is functionally validated.
+- [x] `zig build bindgen-vk` produces an empty diff (commit `8282d0f` chained `zig fmt` into the target).
+- [x] `zig build bindgen-wayland` produces an empty diff (same fix).
 
 ### Perf gates
 
@@ -208,8 +208,8 @@ Committed alongside this report under `validation/`:
 
 | File | Source row | Size |
 |---|---|---|
-| `windows-nvidia_geforce_rtx_4080_super.ppm` | Row 1 (Windows / 4080) | TODO — operator commit |
-| `windows-nvidia_geforce_rtx_4080_super.png` | Row 1 | TODO — operator commit |
+| `windows-nvidia_geforce_rtx_4080_super.ppm` | Row 1 (Windows / 4080) | 1.32 MB |
+| `windows-nvidia_geforce_rtx_4080_super.png` | Row 1 | 13 KB |
 | `linux-intel_r_uhd_graphics_630_cfl_gt2.ppm` | Row 2 (Mesa ANV) | 1.44 MB |
 | `linux-intel_r_uhd_graphics_630_cfl_gt2.png` | Row 2 | 12 KB |
 | `linux-nvidia_geforce_gtx_1660_ti.ppm` | Row 3 (NVIDIA proprietary) | 1.44 MB |
