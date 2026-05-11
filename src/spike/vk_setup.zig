@@ -155,7 +155,7 @@ pub const Renderer = struct {
 
         r.queue = r.device.getDeviceQueue(r.queue_family_index, 0);
 
-        try createSwapchainAndViews(&r, gpa);
+        try createSwapchainAndViews(&r, gpa, .null);
         errdefer destroySwapchainResources(&r);
 
         try createRenderPass(&r);
@@ -215,7 +215,9 @@ pub const Renderer = struct {
         self.swapchain_images = &.{};
         const old_swapchain = self.swapchain;
 
-        try createSwapchainAndViews(self, self.gpa);
+        // Pass the old handle so the driver can recycle resources;
+        // destroy it once the new one is in hand.
+        try createSwapchainAndViews(self, self.gpa, old_swapchain);
         if (old_swapchain != .null) self.device.destroySwapchainKHR(old_swapchain, null);
         try createFramebuffers(self, self.gpa);
         self.swapchain_dirty = false;
@@ -407,7 +409,7 @@ fn createLogicalDevice(r: *Renderer, gpa: std.mem.Allocator) !void {
     r.device = try r.physical_device.createDevice(&ci, null);
 }
 
-fn createSwapchainAndViews(r: *Renderer, gpa: std.mem.Allocator) !void {
+fn createSwapchainAndViews(r: *Renderer, gpa: std.mem.Allocator, old_swapchain: vk.SwapchainKHR) !void {
     const caps = try r.physical_device.getPhysicalDeviceSurfaceCapabilitiesKHR(r.surface);
     const formats = try r.physical_device.getPhysicalDeviceSurfaceFormatsKHR(r.surface, gpa);
     defer gpa.free(formats);
@@ -465,7 +467,12 @@ fn createSwapchainAndViews(r: *Renderer, gpa: std.mem.Allocator) !void {
         .composite_alpha = composite_alpha,
         .present_mode = present_mode_preference,
         .clipped = 1,
-        .old_swapchain = .null,
+        // Threaded by the caller — `.null` on first init, the previous
+        // swapchain handle on recreate so the driver can recycle the
+        // GPU-side resources before we destroy the old one below.
+        // Without this, Vulkan returns `VK_ERROR_NATIVE_WINDOW_IN_USE_KHR`
+        // because the surface still has a swapchain attached.
+        .old_swapchain = old_swapchain,
     };
     r.swapchain = try r.device.createSwapchainKHR(&ci, null);
 
