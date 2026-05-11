@@ -166,8 +166,15 @@ pub fn build(b: *std.Build) void {
     });
     const vk_gen_run = b.addRunArtifact(vk_gen_exe);
     vk_gen_run.has_side_effects = true;
+    // Generator output is unformatted; the brief's "bindgen-vk produces
+    // an empty diff" criterion only holds after `zig fmt` normalises
+    // identifier escapes (e.g. `@"undefined"` → `undefined`) and trims
+    // trailing blank lines. Pipe through fmt in the same step so the
+    // command is self-sufficient regardless of pre-commit hooks.
+    const vk_gen_fmt = b.addSystemCommand(&.{ b.graph.zig_exe, "fmt", "src/core/platform/vk.zig" });
+    vk_gen_fmt.step.dependOn(&vk_gen_run.step);
     const vk_gen_step = b.step("bindgen-vk", "Regenerate src/core/platform/vk.zig from vk.xml");
-    vk_gen_step.dependOn(&vk_gen_run.step);
+    vk_gen_step.dependOn(&vk_gen_fmt.step);
 
     // ----------------------------------------- wayland_gen (S2 bindgen) --
 
@@ -182,9 +189,18 @@ pub fn build(b: *std.Build) void {
     });
     const wayland_gen_run = b.addRunArtifact(wayland_gen_exe);
     wayland_gen_run.has_side_effects = true;
+    // Same fmt pass as vk_gen — see comment there.
+    const wayland_gen_fmt = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "fmt",
+        "src/core/platform/window/wayland_protocols/core.zig",
+        "src/core/platform/window/wayland_protocols/xdg_shell.zig",
+        "src/core/platform/window/wayland_protocols/xdg_decoration.zig",
+    });
+    wayland_gen_fmt.step.dependOn(&wayland_gen_run.step);
     const wayland_gen_step = b.step(
         "bindgen-wayland",
         "Regenerate src/core/platform/window/wayland_protocols/*.zig from wayland-protocols XMLs",
     );
-    wayland_gen_step.dependOn(&wayland_gen_run.step);
+    wayland_gen_step.dependOn(&wayland_gen_fmt.step);
 }
