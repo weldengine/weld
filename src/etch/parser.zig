@@ -34,6 +34,12 @@ pub const ParseResult = struct {
 
 pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
     var lexer = Lexer.init(source);
+    // Without this `errdefer`, an OOM coming from `lexer.next` or
+    // `parser.parseFile` after the lexer has already appended a comment
+    // span would leak the `Lexer.comment_spans` slab. The two explicit
+    // `lexer.deinit(gpa)` calls on the value-return paths still fire
+    // (errdefer does not run on value returns).
+    errdefer lexer.deinit(gpa);
     var arena = try AstArena.init(gpa);
     errdefer arena.deinit(gpa);
 
@@ -1026,4 +1032,40 @@ test "parser captures annotation kind and args" {
     // applicability is deferred — only "kind + args reachable" is required.
     try std.testing.expect(result.diagnostic == null);
     try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
+}
+
+test "parser does not leak comment spans on OOM during init" {
+    // FailingAllocator wraps std.testing.allocator (which itself flags any
+    // leak as a test failure). Each `fail_index` from 1..N forces the Nth
+    // allocation to fail; we walk the range so that every distinct
+    // allocation site between the first byte read and the first parsed
+    // token gets exercised. The success path (no OOM at all) is excluded
+    // because that case is already covered by the rest of the test suite.
+    const sources = [_][]const u8{
+        "// header\ncomponent X { f: int }",
+        "/* block */\ncomponent X { f: int }",
+        "// header line\n/// doc line\ncomponent X { f: int = 1 }",
+    };
+    for (sources) |src| {
+        var fail_index: usize = 1;
+        while (fail_index < 64) : (fail_index += 1) {
+            var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+            const result = parse(failing.allocator(), src);
+            if (result) |ok| {
+                // No OOM happened at this fail index — the parser
+                // ran to completion with a real allocator. Free and
+                // move on; the test passes because no leak is reported.
+                var ok_mut = ok;
+                if (ok_mut.diagnostic) |*d| d.deinit(failing.allocator());
+                ok_mut.ast.deinit(failing.allocator());
+                break;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                // std.testing.allocator under the failing wrapper will
+                // detect any leak when the test scope ends; the inner
+                // allocator is the testing allocator, so its leak
+                // tracker fires if `parse` failed to free.
+            }
+        }
+    }
 }

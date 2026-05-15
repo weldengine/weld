@@ -74,6 +74,14 @@ pub const StringPool = struct {
 
     pub fn init(gpa: std.mem.Allocator) !StringPool {
         var pool: StringPool = .{};
+        // `intern` arms two errdefers on its own internals (`gpa.free(owned)`
+        // and `slices.pop()`) which roll back the per-call mutations. They
+        // do not, however, release the spare *capacity* of `slices` or
+        // `map` once one of them has grown. If the very first `intern`
+        // call fails after `slices.append` succeeded but before `map.put`
+        // completes, the unfreed slab capacity leaks. Guard the whole
+        // init with a top-level errdefer so partial state never escapes.
+        errdefer pool.deinit(gpa);
         _ = try pool.intern(gpa, "");
         return pool;
     }

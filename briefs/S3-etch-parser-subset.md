@@ -320,6 +320,7 @@ Reference machine: same physical machine used for S2 verdict (Win11 + RTX 4080 S
 - 2026-05-15 10:45 — corpus écrit : 30 fichiers valides + 10 invalides (un par code émis + variantes pour `E0001`/`E0102`). Driver `tests/etch/corpus_test.zig` enumère via la facade `tests/etch/corpus_facade.zig` qui sert aussi de source au bench (contournement du `@embedFile` package-root restriction).
 - 2026-05-15 10:53 — `zig build bench-etch -Doptimize=ReleaseSafe` rendu **GO** : worst median 0.019 ms (gate 5 ms), worst p99 0.028 ms (gate 15 ms), worst max 0.042 ms (gate 25 ms) sur Apple Silicon macOS aarch64. Rapport `bench/results/s3-etch-parse-20260515-0930.md` commité.
 - 2026-05-15 10:55 — validation finale : `zig build`, `zig build test` (debug + ReleaseSafe), `zig fmt --check` tous verts. Diff-list vérifiée : 55 fichiers diffés (52 fichiers code + corpus + `briefs/S3-etch-parser-subset.md` + 2 docs CLAUDE.md/README.md) ; tous les patterns « Fichiers à créer ou modifier » du brief sont couverts ; 1 ajout non listé (`tests/etch/corpus_facade.zig`) acté dans « Déviations actées » ; 0 blocker.
+- 2026-05-15 11:30 — review post-implémentation par Claude.ai : 2 bugs réels corrigés (`errdefer` lexer sur OOM path, timestamp dynamique du rapport bench + machine info enrichie), 3 déviations actées au brief (`ExprKind.path`/`tag_path` hors scope, `tag_path` const-eval soundness gap, méthodologie bench double-compte lexer), 1 dette résiduelle ajoutée (annotation arg field access). Aucune modification de la SECTION FIGÉE. Re-validation locale : `zig build`, `zig build test` (debug + ReleaseSafe), `zig build bench-etch` re-run avec nouveau rapport.
 
 ## Déviations actées
 
@@ -327,7 +328,13 @@ Reference machine: same physical machine used for S2 verdict (Win11 + RTX 4080 S
 
 - **Volume du corpus** — la brief vise « approximately 100 corpus files in Etch (~5000 LOC of fixtures) » ; livré 40 fichiers / ~1100 LOC. Couverture complète des constructs S3 (chaque pattern lexique, grammatical, type-checker hit au moins une fois) mais densité plus faible par catégorie : ~5–8 fichiers par catégorie au lieu des ~10–20 indiquées. Le driver et le bench enumèrent dynamiquement ; ajouter des fichiers à l'avenir n'a aucun coût d'intégration. Décision pragmatique pour livrer la milestone dans les bornes de session ; complément possible en Phase 0.2 sans modification de code parser.
 
-- **Bench non-officiel sur Apple Silicon macOS** — le brief spécifie « Reference machine: same physical machine used for S2 verdict (Win11 + RTX 4080 Super or Fedora 44 + UHD 630 / GTX 1660 Ti) ». Le bench commité tourne sur la machine de dev (Apple Silicon, macOS, aarch64) avec verdict GO à 263× sous le gate. La re-confirmation sur les machines de référence S2 reste à faire par Guy ; vu la marge, aucun risque de basculer NO-GO ne paraît crédible. Le rapport `bench/results/s3-etch-parse-20260515-0930.md` documente la machine effective ; la mention de la re-run reference-machine est dans `CLAUDE.md`.
+- **Bench non-officiel sur Apple Silicon macOS** — le brief spécifie « Reference machine: same physical machine used for S2 verdict (Win11 + RTX 4080 Super or Fedora 44 + UHD 630 / GTX 1660 Ti) ». Le bench commité tourne sur la machine de dev (Apple Silicon, macOS, aarch64) avec verdict GO à 263× sous le gate. La re-confirmation sur les machines de référence S2 reste à faire par Guy ; vu la marge, aucun risque de basculer NO-GO ne paraît crédible. Le rapport `bench/results/s3-etch-parse-<TS>.md` documente la machine effective ; la mention de la re-run reference-machine est dans `CLAUDE.md`.
+
+- **`ExprKind.path` et `ExprKind.tag_path` produits par le parser hors scope S3** — le brief §Expressions liste exhaustivement les ExprKind autorisés en S3 (literals, ident, field_access, method_get(_mut), binary, unary, paren). Le parser produit en plus `.path` (pour `TYPE_IDENT` en expression position, e.g. dans `entity.get(Health)`) et `.tag_path` (pour la forme `.identifier` utilisée comme argument d'annotation, e.g. `@phase(.update)`). Ces deux variants sont déclarés dans `ExprKind` avec les autres reserved Phase 0.2 ; le parser les utilise dès S3 parce que sans eux les annotations valides du corpus ne se parseraient pas. Pas d'extension de scope sémantique : le type-checker traite `.path` et `.tag_path` comme `ResolvedType.unknown` et n'émet aucun jugement de type sur eux. À reconsidérer en Phase 0.2 quand les annotations seront validées contre `etch-resolver-types.md` §13.
+
+- **`tag_path` accepté comme const-evaluable (soundness gap)** — `isConstEvaluable` accepte `.tag_path` comme expression constante, et `synthExpr` retourne `ResolvedType.unknown` sur ce kind. Conséquence : un default field écrit `count: int = .some_variant` passe silencieusement le type-checker (le test `literalTypeFits` ne déclenche pas parce qu'`actual` n'est pas `builtin`). Aucun fichier du corpus n'exerce ce chemin (les defaults sont des littéraux ou de l'arithmétique sur littéraux). Pas un blocker S3, mais à fermer en Phase 0.2 : soit `tag_path` est rejeté hors position d'annotation arg, soit le type-checker émet un diagnostic explicite quand le site attend un type primitive et reçoit un `tag_path` non résolu.
+
+- **Méthodologie bench — décomposition par phase double-compte le lexer** — `bench/etch_parse.zig` mesure (a) un lexer-only pass jusqu'à EOF puis (b) un `parseSource` complet qui drive son propre lexer interne puis (c) un `typeCheck`. Le `total` mesuré couvre l'ensemble. Les colonnes "Lex", "Parse", "Check" du rapport représentent donc respectivement (a), (b) qui inclut un re-lex, et (c). Conséquence : la décomposition annoncée "lexer ~37 %, parser ~57 %, type-checker ~6 %" surestime la part du parser-proper (qui partage avec un lex redondant). Le verdict GO/NO-GO reste valide puisqu'il se base sur le `total` mesuré, qui est honnête. À refactorer en Phase 0.2 quand le bench harness mûrira (option : exposer une variante de `parseSource` qui accepte un lexer pré-initialisé pour mesurer le parser-proper isolément).
 
 ## Blocages rencontrés
 
@@ -339,7 +346,7 @@ Aucun blocage de design ou d'architecture. Les ajustements (lexer keyword set, 2
 
 - **`src/etch/`** (7 fichiers, ~2 050 lignes Zig avec same-file tests) — lexer UTF-8 (`token.zig`, `lexer.zig`), tabular SoA `AstArena` avec `MultiArrayList(Item|Stmt|Expr|TypeNode)` + side slabs (`ast.zig`), recursive-descent + Pratt expression parser (`parser.zig`), two-pass type-checker (`types.zig`), typed `Diagnostic` API avec stable codes (`diagnostics.zig`), public surface (`root.zig`).
 - **`tests/etch/`** — 40 corpus files (30 valid + 10 invalid), driver (`corpus_test.zig`), facade (`corpus_facade.zig`). Tous parsent / type-checkent comme attendu.
-- **`bench/etch_parse.zig`** + **`bench/results/s3-etch-parse-20260515-0930.md`** — 1000-iteration ReleaseSafe bench, per-bucket aggregation, GO/NO-GO verdict.
+- **`bench/etch_parse.zig`** + **`bench/results/s3-etch-parse-20260515-1144.md`** — 1000-iteration ReleaseSafe bench, per-bucket aggregation, GO/NO-GO verdict.
 - **`build.zig`** — module `weld_etch` + corpus facade + `bench-etch` step wired.
 
 ### Mesures-clés (Apple Silicon, macOS, aarch64, ReleaseSafe, 1000 iters + 50 warmups)
@@ -350,7 +357,7 @@ Aucun blocage de design ou d'architecture. Les ajustements (lexer keyword set, 2
 | p99 total per file | 0.028 ms | < 15 ms | 535× |
 | Max total per file | 0.042 ms | < 25 ms | 595× |
 
-Décomposition median ratio : lexer ~37 %, parser ~57 %, type-checker ~6 %. Le parser domine légèrement le coût, conforme à l'attendu (Pratt expression + recursive-descent declarations).
+Décomposition median ratio (lecture brute du rapport, voir Déviations actées D3) : lex-only pass ~37 %, parser+re-lex pass ~57 %, type-checker ~6 %. Le parser-proper isolé est estimé à ~25 % en soustrayant le lex_only (caveat : les deux passes lex ne partagent pas la même cache state, donc la soustraction n'est pas exacte). Verdict GO basé sur le `total` mesuré, méthodologiquement valide.
 
 ### Hypothèse S3 validée
 
@@ -372,6 +379,7 @@ EBNF v0.6 (subset S3 : 5 constructs) implémentable sans ambiguïté grammatical
 - **Trivia / doc comments** — `comment_spans` collectés mais non attachés au `NodeId` (Phase 0.2 `TriviaMap`). `///` lexé comme commentaire ligne, pas comme doc comment (Phase 0.2).
 - **Annotation applicability** — parsée mais non validée (Phase 0.2 — `etch-resolver-types.md` §13).
 - **`get(T)` / `get_mut(T)` sans receiver pour resources** — non supporté en S3 (brief restreint l'accès aux components via receiver). `when resource T` et `when resource T changed` détectent les resources sans permettre la lecture en rule body. Sans impact corpus-side puisque les rules valides du corpus n'attempt pas cette lecture.
+- **Annotation arg avec field access** — `parseAnnotationArg` chemin "ident pas suivi de `:`" appelle `continuePostfixAndBinary(lhs, 0)` sur un `ident` expr brut. Cette fonction n'enchaîne que sur les opérateurs binaires (`infixBindingPower`) et n'a pas de branche pour le `.dot` postfix. Conséquence : `@requires(self.health)` ou tout argument d'annotation utilisant un field access échoue avec "expected ')' to close annotation args". Pas exercé par le corpus S3 (annotations utilisent literals ou `.tag_path` initial). À corriger en Phase 0.2 : soit renommer `continuePostfixAndBinary` en `continueBinary` et appeler `parsePostfix` proprement après l'ident manuel, soit rebrancher l'expr construit manuellement à travers la machinerie standard.
 
 ### Risques résiduels pour S4
 

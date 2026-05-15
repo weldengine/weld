@@ -158,10 +158,41 @@ fn fmtMs(ns: u64, buf: []u8) ![]u8 {
     return try std.fmt.bufPrint(buf, "{d:.3} ms", .{ms});
 }
 
+const Stamp = struct {
+    year: u16,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+};
+
+fn wallClockStamp(io: std.Io) Stamp {
+    const wall = std.Io.Clock.now(.real, io);
+    const secs: u64 = @intCast(@max(@as(i96, 0), wall.toSeconds()));
+    const epoch_secs = std.time.epoch.EpochSeconds{ .secs = secs };
+    const day = epoch_secs.getEpochDay();
+    const day_secs = epoch_secs.getDaySeconds();
+    const year_day = day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    return .{
+        .year = year_day.year,
+        .month = month_day.month.numeric(),
+        .day = @as(u8, month_day.day_index) + 1,
+        .hour = day_secs.getHoursIntoDay(),
+        .minute = day_secs.getMinutesIntoHour(),
+    };
+}
+
+fn hostnameOrUnavailable(buf: *[std.posix.HOST_NAME_MAX]u8) []const u8 {
+    return std.posix.gethostname(buf) catch "<unavailable>";
+}
+
 fn writeReport(gpa: std.mem.Allocator, io: std.Io, stats: []const FileStats) !void {
+    const stamp = wallClockStamp(io);
+
     var buf: [256]u8 = undefined;
     const filename = try std.fmt.bufPrint(&buf, "bench/results/s3-etch-parse-{d:0>4}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}.md", .{
-        2026, 5, 15, 9, 30,
+        stamp.year, stamp.month, stamp.day, stamp.hour, stamp.minute,
     });
 
     var dir = std.Io.Dir.cwd();
@@ -172,10 +203,15 @@ fn writeReport(gpa: std.mem.Allocator, io: std.Io, stats: []const FileStats) !vo
     var w = file.writer(io, &report_buf);
     const writer = &w.interface;
 
+    var host_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+    const hostname = hostnameOrUnavailable(&host_buf);
+
     try writer.print("# S3 Etch parser bench — {s}\n\n", .{filename[14..]});
+    try writer.print("Hostname: {s}\n", .{hostname});
+    try writer.print("CPU model: {s}\n", .{builtin.cpu.model.name});
+    try writer.print("Target: {s}-{s}\n", .{ @tagName(builtin.cpu.arch), @tagName(builtin.os.tag) });
     try writer.print("Zig {d}.{d}.{d}\n", .{ builtin.zig_version.major, builtin.zig_version.minor, builtin.zig_version.patch });
     try writer.print("Build mode: {s}\n", .{@tagName(builtin.mode)});
-    try writer.print("Target: {s}-{s}\n", .{ @tagName(builtin.cpu.arch), @tagName(builtin.os.tag) });
     try writer.print("Iterations per file: {d} (warmup {d})\n\n", .{ Iterations, WarmupIterations });
 
     try writer.print("## Per-file timings (total = lexer + parser + type-checker)\n\n", .{});
