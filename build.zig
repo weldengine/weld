@@ -101,11 +101,17 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const etch_corpus_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch/corpus_facade.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const TestSpec = struct {
         path: []const u8,
         spike: bool = false,
         wl_protocols: bool = false,
+        etch: bool = false,
     };
     const test_specs = [_]TestSpec{
         .{ .path = "tests/smoke_test.zig" },
@@ -121,6 +127,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/spike/cli_test.zig", .spike = true },
         .{ .path = "tests/bindings/vk_abi_test.zig" },
         .{ .path = "tests/bindings/wayland_abi_test.zig", .wl_protocols = true },
+        .{ .path = "tests/etch/corpus_test.zig", .etch = true },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
@@ -134,6 +141,10 @@ pub fn build(b: *std.Build) void {
         }
         if (spec.wl_protocols) {
             t_mod.addImport("wl_protocols", wl_protocols_test_module);
+        }
+        if (spec.etch) {
+            t_mod.addImport("weld_etch", etch_module);
+            t_mod.addImport("corpus_facade", etch_corpus_module);
         }
         const t = b.addTest(.{ .root_module = t_mod });
         test_step.dependOn(&b.addRunArtifact(t).step);
@@ -161,6 +172,30 @@ pub fn build(b: *std.Build) void {
         "Run the S1 ECS iteration bench (pass `-- --smoke` for a CI sanity run)",
     );
     bench_step.dependOn(&bench_run.step);
+
+    // ---------------------------------------------------- Etch parse bench --
+
+    const etch_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/etch_parse.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    etch_bench_module.addImport("weld_etch", etch_module);
+    etch_bench_module.addImport("corpus_facade", etch_corpus_module);
+    const etch_bench_exe = b.addExecutable(.{
+        .name = "etch-parse-bench",
+        .root_module = etch_bench_module,
+    });
+    b.installArtifact(etch_bench_exe);
+
+    const etch_bench_run = b.addRunArtifact(etch_bench_exe);
+    etch_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| etch_bench_run.addArgs(args);
+    const etch_bench_step = b.step(
+        "bench-etch",
+        "Run the S3 Etch parse bench (pass `-- --smoke` for a CI sanity run)",
+    );
+    etch_bench_step.dependOn(&etch_bench_run.step);
 
     // ------------------------------------------------ vk_gen (S2 bindgen) --
     //

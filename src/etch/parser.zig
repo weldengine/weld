@@ -799,6 +799,14 @@ pub const Parser = struct {
                 const id = try self.internSlice(tok.span);
                 return try self.arena.addExpr(self.gpa, .ident, id, tok.span);
             },
+            .type_ident => {
+                // TYPE_IDENT in expression position is a path-like value.
+                // S3 only accepts it as annotation argument shape — the
+                // type-checker does not resolve annotation args (Phase 0.2).
+                const tok = try self.advance();
+                const id = try self.internSlice(tok.span);
+                return try self.arena.addExpr(self.gpa, .path, id, tok.span);
+            },
             .lparen => {
                 _ = try self.advance();
                 const inner = try self.parseExpr(0);

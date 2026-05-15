@@ -60,45 +60,44 @@ pub const NodeId = packed struct(u32) {
 pub const StringId = u32;
 
 /// Deduplicating interner. Identifier names and string literal contents
-/// share a single pool keyed by byte equality. Empty string is reserved
-/// at id 0 so `StringId(0)` means "absent" for fields that may be unset.
+/// share a single pool keyed by byte equality. Strings are stored in
+/// individual allocations so the slices remain stable across calls —
+/// the hash map's keys are owned slices, not pointers into a moving
+/// ArrayList. The empty string is reserved at id 0 so `StringId(0)`
+/// means "absent" for fields that may be unset.
 pub const StringPool = struct {
-    /// Concatenated null-terminated byte storage.
-    bytes: std.ArrayListUnmanaged(u8) = .empty,
-    /// Maps interned slice → StringId. Lookup uses byte-equality of the
-    /// stored slice (no allocation on the hot path).
+    /// Each entry is a heap-allocated slice. `slices[id]` returns the
+    /// canonical bytes for `StringId(id)`. Index 0 is the empty string.
+    slices: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// Maps canonical bytes → StringId.
     map: std.StringHashMapUnmanaged(StringId) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) !StringPool {
         var pool: StringPool = .{};
-        // Reserve id 0 for the empty string sentinel.
         _ = try pool.intern(gpa, "");
         return pool;
     }
 
     pub fn deinit(self: *StringPool, gpa: std.mem.Allocator) void {
-        self.bytes.deinit(gpa);
+        for (self.slices.items) |s| gpa.free(s);
+        self.slices.deinit(gpa);
         self.map.deinit(gpa);
     }
 
     pub fn intern(self: *StringPool, gpa: std.mem.Allocator, s: []const u8) !StringId {
         if (self.map.get(s)) |existing| return existing;
-        const id: StringId = @intCast(self.bytes.items.len);
-        try self.bytes.appendSlice(gpa, s);
-        // Store the canonical slice that lives inside `bytes` so the map
-        // key remains valid across future appends. Re-fetch after the
-        // append in case ArrayList reallocated.
-        const canonical = self.bytes.items[id .. id + s.len];
-        try self.bytes.append(gpa, 0); // null terminator simplifies lookup
-        try self.map.put(gpa, canonical, id);
+        const owned = try gpa.dupe(u8, s);
+        errdefer gpa.free(owned);
+        const id: StringId = @intCast(self.slices.items.len);
+        try self.slices.append(gpa, owned);
+        errdefer _ = self.slices.pop();
+        try self.map.put(gpa, owned, id);
         return id;
     }
 
     pub fn slice(self: *const StringPool, id: StringId) []const u8 {
-        const start = id;
-        var end = start;
-        while (end < self.bytes.items.len and self.bytes.items[end] != 0) : (end += 1) {}
-        return self.bytes.items[start..end];
+        if (id >= self.slices.items.len) return &[_]u8{};
+        return self.slices.items[id];
     }
 };
 

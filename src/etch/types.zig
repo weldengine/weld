@@ -228,12 +228,35 @@ pub const TypeChecker = struct {
         const declared = self.namedTypeToResolved(type_node);
         const actual = self.synthExpr(value, null);
         if (declared == .builtin and actual == .builtin) {
-            if (!declared.eql(actual)) {
+            if (!self.literalTypeFits(declared.builtin, value, actual.builtin)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "default value type does not match declared field type", .{});
             }
         }
         // If declared isn't builtin (e.g. unknown), we already emitted a
         // diagnostic during field-type resolution — skip cascade.
+    }
+
+    /// Polymorphic int / float literal rule (cf. `etch-reference-part1.md`
+    /// §4.3). When the declared context type is given and the value is a
+    /// literal of the same numeric family (int family → any integer
+    /// builtin, float family → any float builtin), the literal fits. All
+    /// other forms require exact equality (no implicit numeric coercion).
+    fn literalTypeFits(self: *TypeChecker, declared: BuiltinType, actual_expr: NodeId, actual: BuiltinType) bool {
+        if (declared == actual) return true;
+        const kind = self.arena.exprKind(actual_expr);
+        if (kind == .int_lit and actual == .int_ and declared.isInteger()) return true;
+        if (kind == .float_lit and actual == .float_ and declared.isFloat()) return true;
+        // Negative literals via unary minus on a literal also fit when the
+        // operand is a matching numeric literal.
+        if (kind == .unary) {
+            const un = self.arena.unary_exprs.items[self.arena.exprData(actual_expr)];
+            if (un.op == .neg) {
+                const inner_kind = self.arena.exprKind(un.operand);
+                if (inner_kind == .int_lit and actual == .int_ and declared.isInteger()) return true;
+                if (inner_kind == .float_lit and actual == .float_ and declared.isFloat()) return true;
+            }
+        }
+        return false;
     }
 
     fn namedTypeToResolved(self: *TypeChecker, type_node: NodeId) ResolvedType {
@@ -397,12 +420,16 @@ pub const TypeChecker = struct {
                 }
                 const inferred = self.synthExpr(let.value, ctx);
                 const final = if (declared) |d| blk: {
-                    if (d == .builtin and inferred == .builtin and !d.eql(inferred)) {
+                    if (d == .builtin and inferred == .builtin and !self.literalTypeFits(d.builtin, let.value, inferred.builtin)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(let.value), "let initializer type does not match declared type", .{});
                     }
                     break :blk d;
                 } else inferred;
-                try ctx.locals.put(self.gpa, let.name, .{ .type_ = final, .is_mut = let.is_mut });
+                // A binding to `entity.get_mut(T)` aliases the mutable
+                // component reference, so the local inherits mutability
+                // even when written `let h = ...` without `mut`.
+                const value_is_get_mut = self.arena.exprKind(let.value) == .method_get_mut;
+                try ctx.locals.put(self.gpa, let.name, .{ .type_ = final, .is_mut = let.is_mut or value_is_get_mut });
             },
             .assign_stmt => {
                 const assign = self.arena.assign_stmts.items[data];
@@ -416,7 +443,7 @@ pub const TypeChecker = struct {
                             try self.emit(.type_mismatch, .error_, span, "cannot assign to immutable binding (use 'let mut')", .{});
                         }
                         const rhs_type = self.synthExpr(assign.value, ctx);
-                        if (local.type_ == .builtin and rhs_type == .builtin and !local.type_.eql(rhs_type)) {
+                        if (local.type_ == .builtin and rhs_type == .builtin and !self.literalTypeFits(local.type_.builtin, assign.value, rhs_type.builtin)) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match binding type", .{});
                         }
                     } else {
@@ -424,15 +451,18 @@ pub const TypeChecker = struct {
                         try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(assign.target), "unknown binding '{s}'", .{name});
                     }
                 } else if (target_kind == .field_access) {
-                    // Walk down to ensure the chain originates from a get_mut.
-                    const ok = isFieldAccessThroughGetMut(self.arena, assign.target);
+                    // Walk down: assignment is valid if the chain ends at
+                    // either `entity.get_mut(T)` directly or an ident
+                    // whose local binding is mutable (e.g. one bound via
+                    // `let h = entity.get_mut(T)`).
+                    const ok = isAssignTargetReachable(self.arena, ctx, assign.target);
                     if (!ok) {
-                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.target), "assignment target field must be accessed via entity.get_mut(T)", .{});
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.target), "assignment target field must be accessed via entity.get_mut(T) or a mutable binding", .{});
                     }
                     // Synthesize the field type and check the value matches it.
                     const lhs_type = self.synthExpr(assign.target, ctx);
                     const rhs_type = self.synthExpr(assign.value, ctx);
-                    if (lhs_type == .builtin and rhs_type == .builtin and !lhs_type.eql(rhs_type)) {
+                    if (lhs_type == .builtin and rhs_type == .builtin and !self.literalTypeFits(lhs_type.builtin, assign.value, rhs_type.builtin)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match field type", .{});
                     }
                 } else {
@@ -625,7 +655,7 @@ pub fn isConstEvaluable(arena: *const AstArena, id: NodeId) bool {
     };
 }
 
-fn isFieldAccessThroughGetMut(arena: *const AstArena, id: NodeId) bool {
+fn isAssignTargetReachable(arena: *const AstArena, ctx: *TypeChecker.RuleCtx, id: NodeId) bool {
     var cur = id;
     while (true) {
         const k = arena.exprKind(cur);
@@ -635,6 +665,12 @@ fn isFieldAccessThroughGetMut(arena: *const AstArena, id: NodeId) bool {
                 cur = fa.receiver;
             },
             .method_get_mut => return true,
+            .method_get => return false,
+            .ident => {
+                const name_id = arena.exprData(cur);
+                if (ctx.locals.get(name_id)) |local| return local.is_mut;
+                return false;
+            },
             else => return false,
         }
     }

@@ -1,0 +1,28 @@
+// Spatial transform components — Vec3 / Color / Duration builtin types
+// reach the type-checker; their fields omit const defaults because S3
+// only exposes int / float / bool literals (DURATION_LIT and color
+// literals are out of scope per `briefs/S3-etch-parser-subset.md`
+// Operators / punctuation recognized).
+
+component Transform {
+    @unit(.meters)
+    position: Vec3
+    rotation: Vec3
+    scale: float = 1.0
+}
+
+component Velocity {
+    @unit(.meters)
+    linear: Vec3
+    angular: Vec3
+}
+
+component Tint {
+    color: Color
+}
+
+component Lifetime {
+    @unit(.seconds)
+    remaining: Duration
+    expired: bool = false
+}

@@ -1,0 +1,33 @@
+// Multiple `has` clauses with the same entity binding — repeated uses
+// of `entity` across the when chain.
+
+component Hp {
+    v: float = 100.0
+}
+
+component Mp {
+    v: float = 50.0
+}
+
+component Tag {
+    is_set: bool = false
+}
+
+rule three(entity: Entity)
+    when entity has Hp
+    and entity has Mp
+    and entity has Tag
+{
+    let mut x: int = 0
+    x = 1
+}
+
+rule four(entity: Entity)
+    when entity has Hp
+    and entity has Mp
+    and entity has Tag
+    and not entity has Hp
+{
+    let mut x: int = 0
+    x = 1
+}

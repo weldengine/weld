@@ -1,0 +1,43 @@
+// `when resource T` and `when resource T changed` over multiple resource
+// shapes. Demonstrates resource-only and resource-changed forms.
+
+@config
+resource Config1 {
+    enabled: bool = true
+}
+
+@state
+resource State1 {
+    value: int = 0
+}
+
+@state
+resource Weather {
+    intensity: float = 0.0
+}
+
+rule on_state(entity: Entity)
+    when resource State1
+{
+    let mut x: int = 0
+    x = 1
+}
+
+rule on_weather_changed(entity: Entity)
+    when resource Weather changed
+{
+    let mut tmp: float = 0.0
+    tmp = 1.0
+}
+
+rule combined(entity: Entity)
+    when entity has Counter
+    and resource State1
+{
+    let mut tmp: int = 0
+    tmp = 1
+}
+
+component Counter {
+    n: int = 0
+}

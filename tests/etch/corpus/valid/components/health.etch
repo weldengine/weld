@@ -1,0 +1,32 @@
+// Canonical health component — every S3 builtin primitive type is exercised
+// through a field, with annotations + const default values so the type-
+// checker walks the full happy path (POD enforcement, builtin resolution,
+// const-eval, annotation parsing without applicability validation).
+
+component Health {
+    @range(0, 999)
+    @unit(.health_points)
+    current: float = 100.0
+
+    @range(1, 999)
+    @unit(.health_points)
+    max: float = 100.0
+
+    @range(0, 100)
+    regen_rate: float = 1.0
+
+    invulnerable: bool = false
+
+    damage_resist: float = 0.0
+
+    armor_class: i32 = 0
+
+    last_damage_tick: u32 = 0
+
+    crit_chance: f32 = 0.05
+
+    crit_multiplier: f64 = 2.0
+
+    @hidden
+    internal_seed: i32 = 42
+}

@@ -1,0 +1,38 @@
+// `entity has T` exhaustively over every S3 component + a 3-way and chain.
+
+component A {
+    v: int = 0
+}
+
+component B {
+    v: int = 0
+}
+
+component C {
+    v: int = 0
+}
+
+rule and_three(entity: Entity)
+    when entity has A
+    and entity has B
+    and entity has C
+{
+    let mut x: int = 0
+    x = 1
+}
+
+rule or_pair(entity: Entity)
+    when entity has A
+    or entity has B
+{
+    let mut x: int = 0
+    x = 1
+}
+
+rule not_inverse(entity: Entity)
+    when entity has A
+    and not entity has C
+{
+    let mut x: int = 0
+    x = 1
+}

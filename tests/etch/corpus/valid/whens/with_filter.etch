@@ -1,0 +1,47 @@
+// `entity has T { field == value }` — every primitive field type matched
+// against a const value of the matching builtin type.
+
+component Health {
+    current: float = 100.0
+    max: float = 100.0
+}
+
+component Level {
+    value: int = 1
+}
+
+component Flagged {
+    on: bool = false
+}
+
+component Reputation {
+    score: int = 0
+}
+
+rule on_max_health(entity: Entity)
+    when entity has Health { current == 100.0 }
+{
+    let mut x: int = 0
+    x = 1
+}
+
+rule on_level_one(entity: Entity)
+    when entity has Level { value == 1 }
+{
+    let mut x: int = 0
+    x = 1
+}
+
+rule on_flagged(entity: Entity)
+    when entity has Flagged { on == true }
+{
+    let mut x: int = 0
+    x = 1
+}
+
+rule on_high_rep(entity: Entity)
+    when entity has Reputation { score == 0 }
+{
+    let mut x: int = 0
+    x = 1
+}

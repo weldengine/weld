@@ -1,0 +1,15 @@
+// Rule references a component declared later in the file — pass 1 / pass 2
+// architecture must support forward references.
+
+rule reference_later(entity: Entity)
+    when entity has Energy
+{
+    let e = entity.get(Energy)
+    let mut x: float = 0.0
+    x = e.current
+}
+
+component Energy {
+    current: float = 100.0
+    max: float = 100.0
+}

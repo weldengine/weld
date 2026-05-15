@@ -173,8 +173,12 @@ pub const non_s3_keywords = [_][]const u8{
     // ── Timers / emit / lifecycle (out of S3) ──
     "emit",        "after",        "every",       "after_unscaled", "quantize",
 
-    // ── Misc reserved (out of S3 expression / declaration set) ──
-    "as",          "where",        "self",        "none",           "some",
+    // Note: `as`, `where`, `self`, `none`, `some` are intentionally NOT
+    // listed — they appear in legitimate identifier-shaped positions in
+    // S3 annotation args (e.g. `@pause_group(.none)`). The S3 parser
+    // accepts them as plain identifiers; their grammar-level uses (cast,
+    // generic bound, impl self param, Optional construction) only show
+    // up in constructs already rejected at the top level.
 };
 
 test "non_s3_keywords does not collide with s3_keywords" {

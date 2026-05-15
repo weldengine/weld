@@ -1,0 +1,33 @@
+// Canonical resource — @config lifecycle, full primitive coverage.
+
+@config
+resource GameMode {
+    @range(1, 32)
+    max_players: int = 4
+
+    @range(0.0, 999.0)
+    @unit(.seconds)
+    respawn_time: float = 5.0
+
+    friendly_fire: bool = false
+
+    @range(0, 9999)
+    win_score: i32 = 100
+
+    seed: u32 = 0
+}
+
+@state
+resource GameState {
+    round: i32 = 0
+    timer: float = 0.0
+    is_paused: bool = false
+}
+
+@transient
+resource DebugFlags {
+    show_colliders: bool = false
+    show_navmesh: bool = false
+    show_fps: bool = false
+    god_mode: bool = false
+}

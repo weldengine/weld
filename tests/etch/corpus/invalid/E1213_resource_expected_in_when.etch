@@ -1,0 +1,9 @@
+// E1213 ResourceExpectedInWhen — the `when resource T` clause references
+// a name that is not registered as a resource.
+
+rule tick(entity: Entity)
+    when resource NotARealResource
+{
+    let mut x: int = 0
+    x = 1
+}

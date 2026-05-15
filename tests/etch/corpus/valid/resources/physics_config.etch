@@ -1,0 +1,33 @@
+// Physics + audio config bundled in a single file — multiple @config
+// resources declared at top level.
+
+@config
+resource PhysicsConfig {
+    @range(0.0, 100.0)
+    gravity_y: float = 9.81
+
+    @range(1, 240)
+    fixed_rate: i32 = 60
+
+    @range(1, 32)
+    solver_iterations: i32 = 8
+
+    allow_sleep: bool = true
+}
+
+@config
+resource AudioConfig {
+    master_volume: float = 1.0
+    music_volume: float = 0.7
+    sfx_volume: float = 1.0
+    voice_volume: float = 1.0
+    muted: bool = false
+}
+
+@config
+resource RenderConfig {
+    resolution_scale: float = 1.0
+    shadow_quality: i32 = 3
+    vsync: bool = true
+    bloom_intensity: float = 0.5
+}

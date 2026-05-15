@@ -1,0 +1,30 @@
+// Multiple component declarations in a single file — pass 1 must register
+// each name without collision, and pass 2 must resolve cross-references in
+// rules (covered by tests/etch/corpus/valid/rules/*).
+
+component Stamina {
+    current: float = 100.0
+    max: float = 100.0
+    regen_per_second: float = 5.0
+}
+
+component Mana {
+    current: f32 = 50.0
+    max: f32 = 100.0
+    regen_per_second: f32 = 2.0
+}
+
+component Energy {
+    current: f64 = 75.0
+    max: f64 = 100.0
+}
+
+component Focus {
+    current: int = 0
+    max: int = 5
+}
+
+component Rage {
+    current: i32 = 0
+    max: i32 = 100
+}

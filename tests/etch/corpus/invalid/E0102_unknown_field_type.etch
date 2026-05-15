@@ -1,0 +1,6 @@
+// E0102 UndefinedSymbol — `NotARealType` is neither an S3 builtin nor a
+// user-declared component or resource.
+
+component Bad {
+    value: NotARealType = 0
+}

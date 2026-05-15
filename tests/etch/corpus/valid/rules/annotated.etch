@@ -1,0 +1,39 @@
+// Rules with scheduling annotations — S3 parses but does not validate
+// applicability.
+
+component Burnable {
+    is_burning: bool = false
+    burn_dps: float = 1.0
+    burn_left: float = 0.0
+}
+
+@phase(.update)
+@priority(100)
+rule tick_burn(entity: Entity, dt: float)
+    when entity has Burnable
+{
+    let b = entity.get_mut(Burnable)
+    b.burn_left -= dt
+}
+
+@phase(.fixed_update)
+@run_on(.server)
+rule server_tick(entity: Entity, dt: float)
+    when entity has Burnable
+{
+    let mut x: float = 0.0
+    x = dt
+}
+
+@pause_group(.none)
+rule menu_tick(dt: float)
+    when resource AlwaysOn
+{
+    let mut tick: float = 0.0
+    tick = dt
+}
+
+@state
+resource AlwaysOn {
+    enabled: bool = true
+}

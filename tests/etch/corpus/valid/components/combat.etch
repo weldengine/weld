@@ -1,0 +1,31 @@
+// Combat-oriented components — multiple defaults exercise the const eval.
+
+component Armor {
+    @range(0.0, 1.0)
+    resistance: float = 0.5
+    physical: f32 = 0.3
+    magical: f32 = 0.2
+}
+
+component Damager {
+    @range(0, 9999)
+    amount: float = 10.0
+    is_critical: bool = false
+    pierce: float = 0.0
+}
+
+component CombatTags {
+    is_player: bool = true
+    is_invulnerable: bool = false
+    is_stunned: bool = false
+    is_burning: bool = false
+    is_frozen: bool = false
+}
+
+component AmmoStash {
+    arrows: i32 = 20
+    bolts: i32 = 0
+    bullets: i32 = 0
+    grenades: i32 = 0
+    max_per_kind: i32 = 99
+}
