@@ -1,0 +1,18 @@
+// Rule body with no when clause — global-effect rule, exercises the
+// optional when_clause arm of the grammar.
+
+resource Counters {
+    total_calls: int = 0
+}
+
+rule update_counters()
+{
+    let mut n: int = 0
+    n = 1
+}
+
+rule tick_world(dt: float)
+{
+    let mut elapsed: float = 0.0
+    elapsed += dt
+}

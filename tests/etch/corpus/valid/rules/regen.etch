@@ -1,0 +1,26 @@
+// Health regeneration — single component access via get/get_mut, arithmetic
+// on float fields, compound assignment via field path.
+
+component Health {
+    current: float = 100.0
+    max: float = 100.0
+    regen_rate: float = 1.0
+}
+
+rule tick_regen(entity: Entity, dt: float)
+    when entity has Health
+{
+    let h = entity.get_mut(Health)
+    let delta = h.regen_rate * dt
+    h.current += delta
+}
+
+rule cap_at_max(entity: Entity)
+    when entity has Health
+{
+    let h = entity.get_mut(Health)
+    let m = h.max
+    let c = h.current
+    let over = c - m
+    h.current -= over
+}

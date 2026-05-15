@@ -1,0 +1,24 @@
+// Comparison + logical expressions resolving to bool.
+
+component CmpStash {
+    v: int = 0
+}
+
+rule comparisons(entity: Entity)
+    when entity has CmpStash
+{
+    let a = 1
+    let b = 2
+    let lt = a < b
+    let gt = a > b
+    let le = a <= b
+    let ge = a >= b
+    let eq = a == b
+    let neq = a != b
+    let combined = lt and gt
+    let alt = lt or gt
+    let negated = not lt
+    let chain = (a < b) and (b < a) or not eq
+    let mut answer: bool = false
+    answer = chain
+}

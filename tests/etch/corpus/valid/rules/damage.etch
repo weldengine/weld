@@ -1,0 +1,32 @@
+// Damage pipeline — `let` with explicit type annotation, mixed get/get_mut.
+
+component HP {
+    current: float = 100.0
+    max: float = 100.0
+}
+
+component Resist {
+    physical: float = 0.0
+    magic: float = 0.0
+}
+
+rule apply_damage(entity: Entity, amount: float)
+    when entity has HP
+    and entity has Resist
+{
+    let r: float = entity.get(Resist).physical
+    let one_minus_r = 1.0 - r
+    let reduced = amount * one_minus_r
+    let h = entity.get_mut(HP)
+    h.current -= reduced
+}
+
+rule cap_floor(entity: Entity)
+    when entity has HP
+{
+    let mut current = entity.get(HP).current
+    let mut clamped = current
+    let zero = 0.0
+    let below = clamped - zero
+    entity.get_mut(HP).current = clamped
+}

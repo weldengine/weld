@@ -1,0 +1,41 @@
+// Multiple rules in a single file with shared component dependencies —
+// pass 2 must resolve cross-rule access without interference.
+
+component Charge {
+    energy: float = 100.0
+    drain_per_second: float = 5.0
+}
+
+component Shield {
+    is_active: bool = false
+    strength: float = 0.0
+}
+
+rule drain(entity: Entity, dt: float)
+    when entity has Charge
+{
+    let h = entity.get_mut(Charge)
+    h.energy -= h.drain_per_second * dt
+}
+
+rule recharge(entity: Entity, dt: float)
+    when entity has Charge
+{
+    let mut amount: float = 0.0
+    amount = dt * 2.0
+    entity.get_mut(Charge).energy += amount
+}
+
+rule pulse_shield(entity: Entity)
+    when entity has Shield
+{
+    let s = entity.get_mut(Shield)
+    s.strength = 10.0
+}
+
+rule disable_shield(entity: Entity)
+    when entity has Shield
+{
+    let s = entity.get_mut(Shield)
+    s.strength = 0.0
+}

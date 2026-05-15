@@ -1,0 +1,17 @@
+// @state resource modelling persistent weather. Used by rules in the
+// rules/ corpus to exercise `when resource X changed`.
+
+@state
+resource WeatherState {
+    @range(0.0, 1.0)
+    intensity: float = 0.0
+
+    @range(0.0, 1.0)
+    wind: float = 0.0
+
+    is_raining: bool = false
+    is_thundering: bool = false
+    is_snowing: bool = false
+
+    last_change_tick: u32 = 0
+}

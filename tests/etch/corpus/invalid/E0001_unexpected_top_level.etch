@@ -1,0 +1,4 @@
+// E0001 ParseError — a bare expression at top level is not a valid S3
+// declaration; the parser emits ParseError at the offending token.
+
+let x = 5

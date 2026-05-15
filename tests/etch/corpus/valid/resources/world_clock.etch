@@ -1,0 +1,22 @@
+// World clock resource — drives day/night cycle.
+
+@state
+resource WorldClock {
+    @range(0.0, 86400.0)
+    @unit(.seconds)
+    seconds_in_day: float = 0.0
+
+    @range(0.0, 1.0)
+    day_phase: float = 0.0
+
+    is_day: bool = true
+
+    day_count: i32 = 0
+}
+
+@transient
+resource FrameInfo {
+    dt: float = 0.0
+    total: float = 0.0
+    frame_index: u32 = 0
+}

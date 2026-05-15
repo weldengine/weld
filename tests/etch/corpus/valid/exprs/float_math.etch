@@ -1,0 +1,22 @@
+// Float arithmetic with mixed precedence and unary negation.
+
+component FloatStash {
+    v: float = 0.0
+}
+
+rule float_math(entity: Entity, dt: float)
+    when entity has FloatStash
+{
+    let a = 1.5
+    let b = 2.5
+    let c = -a
+    let d = a + b
+    let e = a * b
+    let f = a / b
+    let g = a - b
+    let h = a + b - c * d
+    let i = (a + b) / (c - d)
+    let j = dt * 60.0
+    let mut sum: float = 0.0
+    sum = j
+}

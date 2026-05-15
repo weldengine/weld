@@ -1,0 +1,6 @@
+// E1101 NotConstEvaluable — the default value references an identifier
+// (`some_var`) which is not a literal / arithmetic / parenthesized form.
+
+component Bad {
+    value: float = some_var
+}

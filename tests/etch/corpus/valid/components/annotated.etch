@@ -1,0 +1,36 @@
+// Components decorated with every S3-recognised annotation kind. The S3
+// type-checker accepts unknown annotation arg shapes (applicability is
+// deferred Phase 0.2), so the diverse arg patterns here all parse.
+
+@requires(Transform)
+component Light {
+    @hidden
+    enabled: bool = true
+
+    @range(0, 100000)
+    intensity: float = 1000.0
+
+    @readonly
+    cached_world_index: i32 = 0
+}
+
+@save
+component Achievement {
+    unlocked: bool = false
+    unlock_tick: u32 = 0
+}
+
+@replicated(predicted)
+component Predicted {
+    flag: bool = false
+}
+
+@networked
+component Networked {
+    seq_no: u32 = 0
+}
+
+@storage(sparse)
+component Damaged {
+    amount_this_frame: float = 0.0
+}

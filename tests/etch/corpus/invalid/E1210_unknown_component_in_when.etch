@@ -1,0 +1,9 @@
+// E1210 UnknownComponentInWhen — the rule's `when` clause references a
+// component that hasn't been declared.
+
+rule tick(entity: Entity)
+    when entity has NotAComponent
+{
+    let mut x: int = 0
+    x = 1
+}

@@ -1,0 +1,11 @@
+// E0200 TypeMismatch — int + float without an explicit cast is rejected.
+
+component Stash {
+    v: int = 0
+}
+
+rule mixed(entity: Entity)
+    when entity has Stash
+{
+    let x = 1 + 2.0
+}

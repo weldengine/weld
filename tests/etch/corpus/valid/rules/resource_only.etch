@@ -1,0 +1,27 @@
+// Rule with no entity binding — operates on resources only.
+
+@state
+resource Score {
+    points: int = 0
+    multiplier: int = 1
+}
+
+@state
+resource Combo {
+    active: bool = false
+    count: i32 = 0
+}
+
+rule reset_combo()
+    when resource Score
+{
+    let mut x: int = 0
+    x = 5
+}
+
+rule on_score_changed()
+    when resource Score changed
+{
+    let mut tmp: i32 = 0
+    tmp = 1
+}

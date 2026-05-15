@@ -1,0 +1,29 @@
+// Single file with a representative mix of lifecycle annotations.
+
+@config
+resource UIConfig {
+    text_scale: float = 1.0
+    high_contrast: bool = false
+    show_tooltips: bool = true
+}
+
+@state
+resource Score {
+    points: int = 0
+    multiplier: float = 1.0
+    streak: i32 = 0
+}
+
+@state
+resource Wave {
+    current: i32 = 0
+    enemies_alive: i32 = 0
+    boss_pending: bool = false
+}
+
+@transient
+resource ProfilerStats {
+    last_frame_ms: float = 0.0
+    p99_ms: float = 0.0
+    sample_count: u32 = 0
+}

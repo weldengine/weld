@@ -1,0 +1,29 @@
+// Numeric inventory — every field is a primitive with a const default.
+
+component Inventory {
+    gold: int = 0
+
+    @range(0, 65000)
+    weight: float = 0.0
+
+    @range(1, 65000)
+    max_weight: float = 50.0
+
+    @hidden
+    slot_count: i32 = 0
+
+    @readonly
+    last_collected_tick: u32 = 0
+}
+
+component Wallet {
+    coins: int = 0
+    gems: int = 0
+    dust: i32 = 0
+}
+
+component Backpack {
+    capacity: i32 = 30
+    free_slots: i32 = 30
+    locked: bool = false
+}

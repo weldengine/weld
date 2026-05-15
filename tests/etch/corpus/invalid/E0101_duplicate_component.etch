@@ -1,0 +1,10 @@
+// E0101 DuplicateSymbol — two `component Health` declarations in the same
+// file collide on the symbol table built by pass 1.
+
+component Health {
+    current: float = 100.0
+}
+
+component Health {
+    max: float = 100.0
+}

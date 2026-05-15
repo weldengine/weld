@@ -1,0 +1,14 @@
+// Trivially minimal component — exercises empty-body and single-field paths.
+
+component Flag {
+    set: bool = false
+}
+
+component Counter {
+    value: i32 = 0
+}
+
+component Tagged {
+    tag_id: u32 = 0
+    weight: float = 0.0
+}

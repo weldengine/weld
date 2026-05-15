@@ -1,0 +1,20 @@
+// Literal coverage — int / float / bool used in let bindings.
+
+component LitStash {
+    v: int = 0
+}
+
+rule literals(entity: Entity)
+    when entity has LitStash
+{
+    let i_a = 0
+    let i_b = 42
+    let i_c = 1000000
+    let f_a = 0.0
+    let f_b = 3.14
+    let f_c = -2.5
+    let b_t = true
+    let b_f = false
+    let mut x: int = 0
+    x = i_b
+}

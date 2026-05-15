@@ -1,0 +1,13 @@
+// E1211 InvalidFieldFilter — `current` is `float`, filtered against an
+// `int` literal: the type-checker emits the field-filter mismatch.
+
+component Health {
+    current: float = 100.0
+}
+
+rule tick(entity: Entity)
+    when entity has Health { current == 5 }
+{
+    let mut x: int = 0
+    x = 1
+}

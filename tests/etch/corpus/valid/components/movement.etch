@@ -1,0 +1,28 @@
+// Movement / steering components.
+
+component Speed {
+    @range(0.0, 200.0)
+    @unit(.meters_per_second)
+    walk: float = 4.0
+
+    @range(0.0, 200.0)
+    @unit(.meters_per_second)
+    sprint: float = 8.0
+
+    @range(0.0, 200.0)
+    @unit(.meters_per_second)
+    crouch: float = 2.0
+}
+
+component Drag {
+    linear: float = 0.5
+    angular: float = 0.2
+}
+
+component MoveIntent {
+    forward: float = 0.0
+    strafe: float = 0.0
+    pitch: float = 0.0
+    yaw: float = 0.0
+    is_jumping: bool = false
+}

@@ -1,0 +1,22 @@
+// Pure expression coverage — int arithmetic with full precedence chain.
+
+component IntStash {
+    v: int = 0
+}
+
+rule int_math(entity: Entity)
+    when entity has IntStash
+{
+    let a = 1
+    let b = 2
+    let c = 3
+    let d = a + b * c
+    let e = (a + b) * c
+    let f = a - b
+    let g = a * b + c
+    let h = a / b
+    let i = a % b
+    let j = a + b + c + d + e
+    let mut sum: int = 0
+    sum = j
+}

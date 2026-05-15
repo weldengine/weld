@@ -1,0 +1,6 @@
+// E0102 UndefinedSymbol — `string` is not in the S3 POD builtin set; the
+// type-checker rejects it on a component field with a POD-specific message.
+
+component Bad {
+    name: string
+}

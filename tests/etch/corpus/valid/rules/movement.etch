@@ -1,0 +1,34 @@
+// Movement integration rule — combines two component reads (Velocity,
+// Speed) with a get_mut on a third component (Transform-like position).
+
+component Position {
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+}
+
+component LinearVelocity {
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+}
+
+component MoveSpeed {
+    walk: float = 4.0
+    sprint: float = 8.0
+    is_sprinting: bool = false
+}
+
+rule integrate(entity: Entity, dt: float)
+    when entity has Position
+    and entity has LinearVelocity
+    and entity has MoveSpeed
+{
+    let speed = entity.get(MoveSpeed).walk
+    let dx = entity.get(LinearVelocity).x * speed * dt
+    let dy = entity.get(LinearVelocity).y * speed * dt
+    let dz = entity.get(LinearVelocity).z * speed * dt
+    entity.get_mut(Position).x += dx
+    entity.get_mut(Position).y += dy
+    entity.get_mut(Position).z += dz
+}
