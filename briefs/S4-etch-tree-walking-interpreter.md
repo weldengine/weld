@@ -225,18 +225,18 @@ The PR description (cf. Conventions below) must list the documentation files mod
 
 *To tick before any production code is written. Confirms the spec was ingested in full, not skim-read.*
 
-- [ ] `engine-spec.md` (§22.3 / S4, §22.3.0, §3.5) — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-grammar.md` (§3, §5, §6, §18, §19) — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-reference-part1.md` (§3, §4, §5, §6) — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-resolver-types.md` (§11, §12, §19) — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-ast-ir.md` (§3.2, §3.3, §3.4) — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-memory-model.md` (surface invariants only) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-ecs-internals.md` (§1, §2, §4, §5) — read <YYYY-MM-DD HH:MM>
-- [ ] `briefs/S1-mini-ecs-zig.md` — read <YYYY-MM-DD HH:MM>
-- [ ] `briefs/S3-etch-parser-subset.md` — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-zig-conventions.md` (§3, §4, §13, §17) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-development-workflow.md` (§2, §3, §4) — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-directory-structure.md` (§9.1, §9.3) — read <YYYY-MM-DD HH:MM>
+- [x] `engine-spec.md` (§22.3 / S4, §22.3.0, §3.5) — read 2026-05-15 20:11
+- [x] `etch-grammar.md` (§3, §5, §6, §18, §19) — read 2026-05-15 20:11
+- [x] `etch-reference-part1.md` (§3, §4, §5, §6) — read 2026-05-15 20:11
+- [x] `etch-resolver-types.md` (§11, §12, §19) — read 2026-05-15 20:11
+- [x] `etch-ast-ir.md` (§3.2, §3.3, §3.4) — read 2026-05-15 20:11
+- [x] `etch-memory-model.md` (surface invariants only) — read 2026-05-15 20:11
+- [x] `engine-ecs-internals.md` (§1, §2, §4, §5) — read 2026-05-15 20:11
+- [x] `briefs/S1-mini-ecs-zig.md` — read 2026-05-15 20:11
+- [x] `briefs/S3-etch-parser-subset.md` — read 2026-05-15 20:11
+- [x] `engine-zig-conventions.md` (§3, §4, §13, §17) — read 2026-05-15 20:11
+- [x] `engine-development-workflow.md` (§2, §3, §4) — read 2026-05-15 20:11
+- [x] `engine-directory-structure.md` (§9.1, §9.3) — read 2026-05-15 20:11
 
 ## Execution journal
 
