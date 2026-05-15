@@ -297,17 +297,17 @@ Reference machine: same physical machine used for S2 verdict (Win11 + RTX 4080 S
 
 ## Specs lues
 
-- [ ] `engine-spec.md` (§22.3 sub-section S3, §3.5, §22 Couche 2) — lu YYYY-MM-DD HH:MM
-- [ ] `etch-grammar.md` (entire file) — lu YYYY-MM-DD HH:MM
-- [ ] `etch-reference-part1.md` (§2, §3, §6) — lu YYYY-MM-DD HH:MM
-- [ ] `etch-ast-ir.md` (§1, §3, §10) — lu YYYY-MM-DD HH:MM
-- [ ] `etch-resolver-types.md` (§1, §11, §12, §13, §17, §19) — lu YYYY-MM-DD HH:MM
-- [ ] `etch-diagnostics.md` (§1, §2) — lu YYYY-MM-DD HH:MM
-- [ ] `etch-reference-part3.md` (Part III §1-§6) — lu YYYY-MM-DD HH:MM
-- [ ] `etch-visual-scripting.md` (Pipeline de compilation) — lu YYYY-MM-DD HH:MM
-- [ ] `engine-zig-conventions.md` (§3, §4, §13) — lu YYYY-MM-DD HH:MM
-- [ ] `engine-development-workflow.md` (§2, §3, §4) — lu YYYY-MM-DD HH:MM
-- [ ] `engine-directory-structure.md` (§9.1, §9.3) — lu YYYY-MM-DD HH:MM
+- [x] `engine-spec.md` (§22.3 sub-section S3, §3.5, §22 Couche 2) — lu 2026-05-15 09:27
+- [x] `etch-grammar.md` (entire file) — lu 2026-05-15 09:27
+- [x] `etch-reference-part1.md` (§2, §3, §6) — lu 2026-05-15 09:27
+- [x] `etch-ast-ir.md` (§1, §3, §10) — lu 2026-05-15 09:27
+- [x] `etch-resolver-types.md` (§1, §11, §12, §13, §17, §19) — lu 2026-05-15 09:27
+- [x] `etch-diagnostics.md` (§1, §2) — lu 2026-05-15 09:27
+- [x] `etch-reference-part3.md` (Part III §1-§6) — lu 2026-05-15 09:27
+- [x] `etch-visual-scripting.md` (Pipeline de compilation) — lu 2026-05-15 09:27
+- [x] `engine-zig-conventions.md` (§3, §4, §13) — lu 2026-05-15 09:27
+- [x] `engine-development-workflow.md` (§2, §3, §4) — lu 2026-05-15 09:27
+- [x] `engine-directory-structure.md` (§9.1, §9.3) — lu 2026-05-15 09:27
 
 ## Journal d'exécution
 
