@@ -1,0 +1,13 @@
+component Counter {
+  value: int = 0
+}
+
+resource GameMode {
+  running: bool = true
+}
+
+rule update(entity: Entity)
+  when entity has Counter and resource GameMode
+{
+  entity.get_mut(Counter).value += 1
+}

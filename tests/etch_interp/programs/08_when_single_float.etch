@@ -1,0 +1,13 @@
+component Score {
+  value: float = 0.0
+}
+
+component Marker {
+  flag: bool = false
+}
+
+rule update(entity: Entity)
+  when entity has Score
+{
+  entity.get_mut(Score).value += 0.5
+}

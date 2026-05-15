@@ -1,0 +1,9 @@
+component Health {
+  current: float = 100.0
+}
+
+rule decay(entity: Entity)
+  when entity has Health
+{
+  entity.get_mut(Health).current -= 10.0
+}

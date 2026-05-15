@@ -1,0 +1,13 @@
+component Counter {
+  value: int = 0
+}
+
+resource Event {
+  flag: bool = false
+}
+
+rule update(entity: Entity)
+  when entity has Counter and resource Event changed
+{
+  entity.get_mut(Counter).value += 1
+}

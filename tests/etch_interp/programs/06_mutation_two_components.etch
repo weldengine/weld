@@ -1,0 +1,14 @@
+component A {
+  x: int = 0
+}
+
+component B {
+  y: int = 0
+}
+
+rule update(entity: Entity)
+  when entity has A and entity has B
+{
+  entity.get_mut(A).x += 1
+  entity.get_mut(B).y -= 1
+}

@@ -66,19 +66,44 @@ const FieldFilter = struct {
     expected_value: Value,
 };
 
+/// Resolved view of a `when` clause node. The interpreter walks
+/// `predicate_pool` at iteration time to filter archetypes.
+const PredicateNodeKind = enum {
+    and_,
+    or_,
+    not_,
+    has,
+};
+
+const PredicateNode = struct {
+    kind: PredicateNodeKind,
+    /// Indices into the rule's `predicate_pool`. `no_child` if absent.
+    lhs: u32 = no_child,
+    rhs: u32 = no_child,
+    /// Resolved component id for `has` nodes.
+    component_id: ComponentId = 0,
+
+    pub const no_child: u32 = std.math.maxInt(u32);
+};
+
 const RuleDesc = struct {
     rule_idx: u32,
     name: StringId,
-    include_ids: []ComponentId,
-    exclude_ids: []ComponentId,
+    /// Pool of resolved predicate nodes. `predicate_root` indexes into it.
+    /// Empty when the rule has no component-side `when` clause (resource-
+    /// only or no when).
+    predicate_pool: []PredicateNode,
+    predicate_root: ?u32,
     resource_deps: []ResourceDep,
     field_filter: ?FieldFilter,
     entity_param_name: ?StringId,
+    /// True iff the rule iterates entities (predicate references at least
+    /// one component and a parameter of type Entity is present). False if
+    /// the rule runs once per tick (resource-only or no-when).
     is_entity_bound: bool,
 
     fn deinit(self: *RuleDesc, gpa: std.mem.Allocator) void {
-        gpa.free(self.include_ids);
-        gpa.free(self.exclude_ids);
+        gpa.free(self.predicate_pool);
         gpa.free(self.resource_deps);
     }
 };
@@ -230,23 +255,24 @@ pub const Interpreter = struct {
             report.rules_matched += 1;
             return;
         }
-        const query = world.query_dynamic(rd.include_ids, rd.exclude_ids);
         var rule_matched = false;
-        var it = query.chunkIter();
-        while (it.next()) |match| {
-            const arch = match.archetype;
-            const chunk = match.chunk;
-            const ids = arch.entityIdsConst(chunk);
-            const count = chunk.header().entity_count;
-            var slot: u32 = 0;
-            while (slot < count) : (slot += 1) {
-                if (rd.field_filter) |ff| {
-                    if (!filterPasses(arch, chunk, ff, slot)) continue;
+        for (world.archetypes.items) |arch| {
+            if (rd.predicate_root) |root| {
+                if (!evalPredicate(rd.predicate_pool, root, arch)) continue;
+            }
+            for (arch.chunks.items) |chunk| {
+                const ids = arch.entityIdsConst(chunk);
+                const count = chunk.header().entity_count;
+                var slot: u32 = 0;
+                while (slot < count) : (slot += 1) {
+                    if (rd.field_filter) |ff| {
+                        if (!filterPasses(arch, chunk, ff, slot)) continue;
+                    }
+                    report.entities_iterated += 1;
+                    rule_matched = true;
+                    const entity_id: EntityId = ids[slot];
+                    try self.execBody(world, rd, entity_id, report);
                 }
-                report.entities_iterated += 1;
-                rule_matched = true;
-                const entity_id: EntityId = ids[slot];
-                try self.execBody(world, rd, entity_id, report);
             }
         }
         if (rule_matched) report.rules_matched += 1;
@@ -405,6 +431,16 @@ fn resourceDepsSatisfied(world: *World, rd: RuleDesc) bool {
         if (dep.must_be_changed and !world.resources.isDirty(dep.resource_id)) return false;
     }
     return true;
+}
+
+fn evalPredicate(pool: []const PredicateNode, root: u32, arch: *const DynamicArchetype) bool {
+    const node = pool[root];
+    return switch (node.kind) {
+        .and_ => evalPredicate(pool, node.lhs, arch) and evalPredicate(pool, node.rhs, arch),
+        .or_ => evalPredicate(pool, node.lhs, arch) or evalPredicate(pool, node.rhs, arch),
+        .not_ => !evalPredicate(pool, node.lhs, arch),
+        .has => arch.hasComponent(node.component_id),
+    };
 }
 
 fn filterPasses(arch: *DynamicArchetype, chunk: *Chunk, ff: FieldFilter, slot: u32) bool {
@@ -660,16 +696,17 @@ fn compileRule(
 ) !RuleDesc {
     const rule = ast.rule_decls.items[rule_data];
 
-    var includes: std.ArrayListUnmanaged(ComponentId) = .empty;
-    errdefer includes.deinit(gpa);
-    var excludes: std.ArrayListUnmanaged(ComponentId) = .empty;
-    errdefer excludes.deinit(gpa);
+    var pool: std.ArrayListUnmanaged(PredicateNode) = .empty;
+    errdefer pool.deinit(gpa);
     var res_deps: std.ArrayListUnmanaged(ResourceDep) = .empty;
     errdefer res_deps.deinit(gpa);
     var field_filter: ?FieldFilter = null;
+    var predicate_root: ?u32 = null;
+    var has_component_ref: bool = false;
 
     if (rule.when_root != ast_mod.RuleDecl.none_when) {
-        try collectWhen(ast, bridge, registry, &includes, &excludes, &res_deps, &field_filter, gpa, rule.when_root, false);
+        const r = try lowerWhen(ast, bridge, registry, &pool, &res_deps, &field_filter, gpa, rule.when_root, &has_component_ref);
+        predicate_root = r;
     }
 
     var entity_param_name: ?StringId = null;
@@ -683,13 +720,13 @@ fn compileRule(
             break;
         }
     }
-    const is_entity_bound = (entity_param_name != null) and (includes.items.len > 0);
+    const is_entity_bound = (entity_param_name != null) and has_component_ref;
 
     return .{
         .rule_idx = rule_data,
         .name = rule.name,
-        .include_ids = try includes.toOwnedSlice(gpa),
-        .exclude_ids = try excludes.toOwnedSlice(gpa),
+        .predicate_pool = try pool.toOwnedSlice(gpa),
+        .predicate_root = predicate_root,
         .resource_deps = try res_deps.toOwnedSlice(gpa),
         .field_filter = field_filter,
         .entity_param_name = entity_param_name,
@@ -697,44 +734,54 @@ fn compileRule(
     };
 }
 
-fn collectWhen(
+/// Recursively lower a `when` tree into a flat `PredicateNode` pool plus
+/// a list of resource deps and at most one field filter. Returns the
+/// pool-index of the lowered node, or `PredicateNode.no_child` when the
+/// when subtree contributes only resource deps (and thus no archetype-
+/// side predicate).
+fn lowerWhen(
     ast: *const AstArena,
     bridge: *Bridge,
     registry: *const Registry,
-    includes: *std.ArrayListUnmanaged(ComponentId),
-    excludes: *std.ArrayListUnmanaged(ComponentId),
+    pool: *std.ArrayListUnmanaged(PredicateNode),
     res_deps: *std.ArrayListUnmanaged(ResourceDep),
     filter: *?FieldFilter,
     gpa: std.mem.Allocator,
     when_idx: u32,
-    negated: bool,
-) !void {
+    has_component_ref: *bool,
+) error{ OutOfMemory, InvalidProgram }!u32 {
     const node = ast.when_nodes.items[when_idx];
     switch (node.kind) {
         .logical_and, .logical_or => {
-            try collectWhen(ast, bridge, registry, includes, excludes, res_deps, filter, gpa, node.lhs, negated);
-            try collectWhen(ast, bridge, registry, includes, excludes, res_deps, filter, gpa, node.rhs, negated);
+            const lhs_idx = try lowerWhen(ast, bridge, registry, pool, res_deps, filter, gpa, node.lhs, has_component_ref);
+            const rhs_idx = try lowerWhen(ast, bridge, registry, pool, res_deps, filter, gpa, node.rhs, has_component_ref);
+            // If a branch contributed only resource deps, propagate the
+            // other branch's predicate unchanged.
+            if (lhs_idx == PredicateNode.no_child) return rhs_idx;
+            if (rhs_idx == PredicateNode.no_child) return lhs_idx;
+            const kind: PredicateNodeKind = if (node.kind == .logical_and) .and_ else .or_;
+            const idx: u32 = @intCast(pool.items.len);
+            try pool.append(gpa, .{ .kind = kind, .lhs = lhs_idx, .rhs = rhs_idx });
+            return idx;
         },
         .logical_not => {
-            try collectWhen(ast, bridge, registry, includes, excludes, res_deps, filter, gpa, node.lhs, !negated);
+            const child = try lowerWhen(ast, bridge, registry, pool, res_deps, filter, gpa, node.lhs, has_component_ref);
+            if (child == PredicateNode.no_child) return PredicateNode.no_child;
+            const idx: u32 = @intCast(pool.items.len);
+            try pool.append(gpa, .{ .kind = .not_, .lhs = child });
+            return idx;
         },
         .has => {
             const tname = ast.strings.slice(node.type_name);
             const id = bridge.componentIdOf(tname) orelse return error.InvalidProgram;
-            if (negated) {
-                try excludes.append(gpa, id);
-            } else {
-                try includes.append(gpa, id);
-            }
+            const idx: u32 = @intCast(pool.items.len);
+            try pool.append(gpa, .{ .kind = .has, .component_id = id });
+            has_component_ref.* = true;
+            return idx;
         },
         .has_with_filter => {
             const tname = ast.strings.slice(node.type_name);
             const id = bridge.componentIdOf(tname) orelse return error.InvalidProgram;
-            if (negated) {
-                try excludes.append(gpa, id);
-                return;
-            }
-            try includes.append(gpa, id);
             const fname = ast.strings.slice(node.field_name);
             const fd = registry.findField(id, fname) orelse return error.InvalidProgram;
             const v = evalConst(ast, node.filter_value) catch return error.InvalidProgram;
@@ -744,16 +791,22 @@ fn collectWhen(
                 .field_kind = fd.kind,
                 .expected_value = v,
             };
+            const idx: u32 = @intCast(pool.items.len);
+            try pool.append(gpa, .{ .kind = .has, .component_id = id });
+            has_component_ref.* = true;
+            return idx;
         },
         .resource => {
             const tname = ast.strings.slice(node.type_name);
             const rid = bridge.resourceIdOf(tname) orelse return error.InvalidProgram;
             try res_deps.append(gpa, .{ .resource_id = rid, .must_be_changed = false });
+            return PredicateNode.no_child;
         },
         .resource_changed => {
             const tname = ast.strings.slice(node.type_name);
             const rid = bridge.resourceIdOf(tname) orelse return error.InvalidProgram;
             try res_deps.append(gpa, .{ .resource_id = rid, .must_be_changed = true });
+            return PredicateNode.no_child;
         },
     }
 }

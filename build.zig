@@ -110,11 +110,46 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // S4 differential corpus — `tests/etch_interp/` houses 20 .etch
+    // programs and their sidecar `expected.zig` files. The facade is the
+    // shared module the corpus_test driver and the bench harness both
+    // import (same pattern as the S3 corpus facade above).
+    // Generic test driver module (independent of the corpus + runner) so it
+    // can be reused by S5's codegen-runner without modifying call sites.
+    const etch_interp_driver_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/diff_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    etch_interp_driver_module.addImport("weld_core", core_module);
+    // S4 differential corpus — `tests/etch_interp/` houses 20 .etch
+    // programs and their sidecar `expected.zig` files. The facade enumerates
+    // them and is consumed by `corpus_test.zig` (the test driver) and by
+    // the bench harness. Sidecars in `programs/` reach the diff_runner
+    // types through the `diff_runner` module dependency below.
+    const etch_interp_corpus_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/corpus_facade.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    etch_interp_corpus_module.addImport("weld_core", core_module);
+    etch_interp_corpus_module.addImport("weld_etch", etch_module);
+    etch_interp_corpus_module.addImport("diff_runner", etch_interp_driver_module);
+    // Runner module — the interpreter backend.
+    const etch_interp_runner_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/runner_interp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    etch_interp_runner_module.addImport("weld_core", core_module);
+    etch_interp_runner_module.addImport("weld_etch", etch_module);
+
     const TestSpec = struct {
         path: []const u8,
         spike: bool = false,
         wl_protocols: bool = false,
         etch: bool = false,
+        etch_interp: bool = false,
     };
     const test_specs = [_]TestSpec{
         .{ .path = "tests/smoke_test.zig" },
@@ -131,6 +166,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/bindings/vk_abi_test.zig" },
         .{ .path = "tests/bindings/wayland_abi_test.zig", .wl_protocols = true },
         .{ .path = "tests/etch/corpus_test.zig", .etch = true },
+        .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
@@ -148,6 +184,12 @@ pub fn build(b: *std.Build) void {
         if (spec.etch) {
             t_mod.addImport("weld_etch", etch_module);
             t_mod.addImport("corpus_facade", etch_corpus_module);
+        }
+        if (spec.etch_interp) {
+            t_mod.addImport("weld_etch", etch_module);
+            t_mod.addImport("corpus_facade", etch_interp_corpus_module);
+            t_mod.addImport("diff_runner", etch_interp_driver_module);
+            t_mod.addImport("runner_interp", etch_interp_runner_module);
         }
         const t = b.addTest(.{ .root_module = t_mod });
         test_step.dependOn(&b.addRunArtifact(t).step);

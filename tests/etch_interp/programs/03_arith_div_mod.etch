@@ -1,0 +1,11 @@
+component Result {
+  quot: int = 0
+  rem: int = 0
+}
+
+rule update(entity: Entity)
+  when entity has Result
+{
+  entity.get_mut(Result).quot = 10 / 3
+  entity.get_mut(Result).rem = 10 % 3
+}
