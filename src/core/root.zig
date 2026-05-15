@@ -10,6 +10,11 @@ pub const ecs = struct {
     pub const archetype = @import("ecs/archetype.zig");
     pub const query = @import("ecs/query.zig");
     pub const world = @import("ecs/world.zig");
+    // S4 — runtime side: registry, dynamic archetype, resources, runtime query.
+    pub const registry = @import("ecs/registry.zig");
+    pub const archetype_dynamic = @import("ecs/archetype_dynamic.zig");
+    pub const resources = @import("ecs/resources.zig");
+    pub const query_runtime = @import("ecs/query_runtime.zig");
 };
 
 pub const jobs = struct {
