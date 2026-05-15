@@ -1,12 +1,12 @@
 # S4 — Etch tree-walking interpreter
 
-> **Status:** ACTIVE
+> **Status:** CLOSED
 > **Phase:** -1
 > **Branch:** `phase-pre-0/etch/tree-walking-interpreter`
 > **Planned tag:** `v0.0.5-S4-etch-tree-walking-interpreter`
 > **Dependencies:** S0 (bootstrap), S1 (mini-ECS, comptime SoA archetype + Chase-Lev jobs), S3 (Etch lexer + parser + two-pass type-checker on the S3 subset)
 > **Opening date:** 2026-05-15
-> **Closing date:** —
+> **Closing date:** 2026-05-15
 
 ---
 
@@ -243,25 +243,34 @@ The PR description (cf. Conventions below) must list the documentation files mod
 *One entry per logical work sequence (typically: an objective reached, a test green, a refactor, a blocker). Chronological order. Short format — 1 to 3 lines per entry.*
 
 - 2026-05-15 20:11 — Branch `phase-pre-0/etch/tree-walking-interpreter` created, brief copied verbatim, specs read, Status flipped to ACTIVE.
+- 2026-05-15 20:30 — Tier 0 ECS extensions implemented (registry, archetype_dynamic, resources, query_runtime, world). All inline tests + the S1 tests green. Per `engine-zig-conventions.md` §3, Registry / ResourceStore / DynamicArchetype are unmanaged (gpa at every op) so `World.init()` stays zero-arg and the S1 call sites are untouched.
+- 2026-05-15 20:45 — Etch interpreter pieces (value, ecs_bridge, interp). Initial implementation used (includes, excludes) sets, refactored to a `PredicateNode` pool so `entity has A or entity has B` resolves correctly per-archetype. `evalConst` reuses the same arithmetic backend; `tag_path` returns `UnsupportedExpr`.
+- 2026-05-15 20:55 — Differential corpus + driver wired. Hit a lifetime bug — the Interpreter held `*const Ast` pointing to a stack-resident `Ast` (from the parser's value-returning `parse`). Fix: heap-box the Ast in the runner so the borrowed pointer survives the Runner move. All 20 corpus programs green in debug + ReleaseSafe.
+- 2026-05-15 21:10 — Bench + demo. Apple Silicon dev primary, ReleaseSafe, 1 000 ticks @ 1 000 entities + 100 ticks @ 10 000 entities, 50 warmup ticks: median 0.603 ms / tick at 1 000 × 5 (gate 10 ms), median 6.593 ms / tick at 10 000 × 5 (gate 100 ms). Demo OK summary line emitted on `zig build run-demo-etch-interp -Doptimize=ReleaseSafe` in ~40 ms total. Reports archived under `bench/results/`.
+- 2026-05-15 21:20 — README + CLAUDE.md updated. Status flipped to CLOSED.
 
 ## Acknowledged deviations
 
 *Modifications to the FROZEN SECTION occurring mid-milestone after a Claude.ai round-trip. Each deviation references the commit that enacts it. If empty at milestone end: nominal case.*
 
-- <commit SHA> — <deviation summary and reason>
+No modifications to the FROZEN SECTION. Three additions outside the explicit "Files to create or modify" list, each justified below — none extend the technical scope of the milestone.
+
+- **Addition not listed: `tests/etch_interp/corpus_test.zig`** — the brief lists `tests/etch_interp/diff_runner.zig` as the generic driver but does not name a test entry point. The driver is a parameterised function; the test binary that calls it lives in `corpus_test.zig` (same pattern as `tests/etch/corpus_test.zig` from S3). No additional public surface.
+- **Addition not listed: `bench/fixture_facade.zig`** — `@embedFile` cannot escape the package root of the module that invokes it (Zig 0.16 restriction). The bench (`bench/etch_interp.zig`) and the demo binary (`src/demo_etch_interp.zig`) have distinct module roots so they cannot share `@embedFile("fixtures/demo_5_rules.etch")` directly. The facade is a one-line module that holds the embed and is consumed by both. Same workaround as the S3 corpus facade.
+- **Addition not listed: `bench/results/s4-etch-interp-20260515-1946.md`** — bench report file committed for traceability per the brief's Acceptance criteria / Benchmarks observable behaviour ("The bench Markdown report exists under `bench/results/s4-etch-interp-<YYYYMMDD-HHMM>.md`"). Filename follows the timestamp template.
 
 ## Blockers encountered
 
 *Blocking points that required a return to Claude.ai (cf. `engine-development-workflow.md` §2.4). If 2+ distinct blockers: signal for re-scope.*
 
-- <blocker summary> — resolved by <commit SHA> or <Claude.ai conversation reference>
+None. Internal refactors (predicate-based when iteration, runner Ast lifetime) were settled by Claude Code from the spec without round-trip.
 
 ## Closure notes
 
 *To fill at Status → CLOSED, just before opening the PR.*
 
-- **What worked:**
-- **What deviated from the original spec:**
-- **What to flag explicitly in review:**
-- **Final measurements** (perf, binary size, compile time, anything pertinent to the milestone — bench median per tick at 1000 and 10 000 entities, total LoC, etc.):
-- **Residual risks / debt intentionally left:**
+- **What worked:** the tree-walking interpreter hypothesis is validated empirically on the dev primary — median 0.603 ms / tick at 1 000 entities × 5 rules (gate 10 ms, target 5 ms — gate beaten 16×, target beaten 8×) and 6.593 ms / tick at 10 000 × 5 (gate 100 ms, target 50 ms — gate beaten 15×, target beaten 7.5×). The 20-program differential corpus exercises every supported `when` form (single, and, not, or via predicate eval, field-equality filter on int/bool/float, resource gate, resource changed dirty/clean) and multi-rule ordering; all green in debug and ReleaseSafe with zero leaks under `std.testing.allocator`. The additive Tier 0 ECS surface (`registry.zig`, `archetype_dynamic.zig`, `resources.zig`, `query_runtime.zig`) leaves the S1 comptime `(Transform, Velocity)` path untouched — `World.init()` stayed zero-arg, all S1 tests and the S1 bench still green. The `Runner`-parameterised driver is ~70 LoC and exposes a contract that S5 will plug into without modifying the harness.
+- **What deviated from the original spec:** none on the technical scope. Three filenames added outside the explicit list (`tests/etch_interp/corpus_test.zig`, `bench/fixture_facade.zig`, the bench report file) — each justified under "Acknowledged deviations" above. The `or` semantics on `when` clauses required a refactor mid-milestone from (includes, excludes) sets to a `PredicateNode` pool — same scope, cleaner implementation; documented in the execution journal.
+- **What to flag explicitly in review:** (1) the Tier 0 ECS surface is intentionally additive — verify no S1 path was modified (the S1 bench and tests remain unchanged); (2) `or` predicates compile to a `PredicateNode` tree and the runtime walks every dynamic archetype to evaluate it — adequate for S4 corpus volume but a bitset short-cut may be needed in Phase 0.5 when archetype counts grow; (3) the runner heap-boxes the `Ast` because the Interpreter stores a borrowed `*const Ast` — the value-return path of `parse(gpa, source)` would otherwise leave a dangling pointer once `Ast` is moved into the runner struct; (4) field defaults are materialised by `evalConst` at compile time and memcpy'd into each freshly spawned slot — non-const-evaluable defaults emit a diagnostic, never a runtime fallback; (5) resource semantics — `getMutResource` sets the dirty bit and `tickBoundary` clears it; the differential corpus uses an `initial_dirty: bool` flag on `ResourceInit` to trigger `when resource T changed` once on tick 1, after which the bit clears naturally.
+- **Final measurements** (Apple Silicon dev primary, macOS, aarch64, Zig 0.16.0, ReleaseSafe, 50 warmup ticks + sample window per sweep): bench `bench/results/s4-etch-interp-20260515-1946.md` — sweep "1 000 × 5 × 1 000": median 0.603 ms, p99 0.618 ms, max 0.716 ms, min 0.576 ms per tick. Sweep "10 000 × 5 × 100": median 6.593 ms, p99 9.252 ms, max 9.252 ms, min 6.493 ms per tick. Demo `zig build run-demo-etch-interp -Doptimize=ReleaseSafe`: `Demo S4 OK | mode=ReleaseSafe | entities=1000 | rules=5 | ticks=60 | rules_matched=300 | errors=0 | total=39.605ms`. Production LoC under `src/core/ecs/` (S4 additions): ~750 lines including same-file tests. Production LoC under `src/etch/` (S4 additions): ~830 lines. Differential corpus (driver + runner + facade + sidecars + .etch): ~750 lines.
+- **Residual risks / debt intentionally left:** (a) bench verdict on Apple Silicon dev primary only — re-confirmation on the S2 reference machines (Win11 + RTX 4080, Fedora 44 + UHD 630 / GTX 1660 Ti) is Guy's call, vu the 15-16× margin against both gates the risk of flipping NO-GO is negligible; (b) inherited S3 debts (`ExprKind.path` and `ExprKind.tag_path` reaching the interpreter, `tag_path` const-eval soundness gap, annotation applicability not validated, etc.) untouched per brief Out-of-scope — they remain on the rolling debt list; (c) inherited S2 debts (D1 vk_gen whitelist, D2 VkResult aliases, Win32 thread-safety globals, vk_frame.zig dispatch bypass, PPM capture path) untouched per brief Out-of-scope; (d) `or` predicate evaluation walks every dynamic archetype — fine for S4 corpus volume (a handful of archetypes) but a future bitset short-cut might be needed when archetype counts grow; (e) no explicit per-rule `RuntimeError` propagation in `RuntimeReport.last_error` — counter only; (f) field filter limited to a single `has_with_filter` clause per rule (multiple filters would require an array); (g) resource field access from rule bodies remains an inherited S3 debt — not addressed in S4 per brief Out-of-scope.
