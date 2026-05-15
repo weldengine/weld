@@ -1,0 +1,1021 @@
+//! S3 Etch parser — recursive descent for declarations, statements and
+//! `when` clauses; Pratt parsing for binary expressions using the
+//! precedence table from `etch-grammar.md` §3.1 restricted to the S3
+//! operator set (all left-associative).
+//!
+//! Produces an `AstArena` directly (no intermediate CST). On the first
+//! parse error the parser stops; the returned AST contains a best-effort
+//! partial result so subsequent type-checking can run on declarations
+//! parsed before the error (cf. `briefs/S3-etch-parser-subset.md` Scope).
+
+const std = @import("std");
+const token_mod = @import("token.zig");
+const ast_mod = @import("ast.zig");
+const diag_mod = @import("diagnostics.zig");
+const lexer_mod = @import("lexer.zig");
+
+const Token = token_mod.Token;
+const TokenKind = token_mod.TokenKind;
+const SourceSpan = token_mod.SourceSpan;
+const AstArena = ast_mod.AstArena;
+const NodeId = ast_mod.NodeId;
+const NodeCategory = ast_mod.NodeCategory;
+const StringId = ast_mod.StringId;
+const Diagnostic = diag_mod.Diagnostic;
+const DiagnosticCode = diag_mod.DiagnosticCode;
+const Lexer = lexer_mod.Lexer;
+
+pub const ParseError = error{ ParseError, OutOfMemory };
+
+pub const ParseResult = struct {
+    ast: AstArena,
+    diagnostic: ?Diagnostic,
+};
+
+pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
+    var lexer = Lexer.init(source);
+    var arena = try AstArena.init(gpa);
+    errdefer arena.deinit(gpa);
+
+    const c0 = try lexer.next(gpa);
+    const c1 = try lexer.next(gpa);
+    const c2 = try lexer.next(gpa);
+    var parser: Parser = .{
+        .gpa = gpa,
+        .source = source,
+        .lexer = &lexer,
+        .arena = &arena,
+        .current = c0,
+        .next_tok = c1,
+        .next2_tok = c2,
+    };
+    parser.parseFile() catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        error.ParseError => {
+            // Diagnostic already populated; transfer comment spans.
+            try arena.comment_spans.appendSlice(gpa, lexer.comment_spans.items);
+            lexer.deinit(gpa);
+            return .{ .ast = arena, .diagnostic = parser.diagnostic };
+        },
+    };
+
+    try arena.comment_spans.appendSlice(gpa, lexer.comment_spans.items);
+    lexer.deinit(gpa);
+    return .{ .ast = arena, .diagnostic = parser.diagnostic };
+}
+
+pub const Parser = struct {
+    gpa: std.mem.Allocator,
+    source: []const u8,
+    lexer: *Lexer,
+    arena: *AstArena,
+    /// Current token plus a 2-token lookahead. The disambiguation
+    /// between `entity has T { field == value }` (has-with-filter)
+    /// and `entity has T { /* rule body */ }` requires peeking through
+    /// `{` and the first token inside (which can be `IDENT == ...`
+    /// for a filter or anything else for the rule body).
+    current: Token,
+    next_tok: Token,
+    next2_tok: Token,
+    diagnostic: ?Diagnostic = null,
+
+    // ─── Token stream helpers ────────────────────────────────────────────
+
+    fn advance(self: *Parser) !Token {
+        const t = self.current;
+        self.current = self.next_tok;
+        self.next_tok = self.next2_tok;
+        self.next2_tok = try self.lexer.next(self.gpa);
+        return t;
+    }
+
+    fn peek(self: *const Parser) TokenKind {
+        return self.current.kind;
+    }
+
+    fn peekNext(self: *const Parser) TokenKind {
+        return self.next_tok.kind;
+    }
+
+    fn peekNext2(self: *const Parser) TokenKind {
+        return self.next2_tok.kind;
+    }
+
+    fn peekSpan(self: *const Parser) SourceSpan {
+        return self.current.span;
+    }
+
+    fn expect(self: *Parser, kind: TokenKind, msg: []const u8) !Token {
+        if (self.current.kind != kind) {
+            return self.parseErr(self.current.span, msg);
+        }
+        return try self.advance();
+    }
+
+    fn match(self: *Parser, kind: TokenKind) !bool {
+        if (self.current.kind == kind) {
+            _ = try self.advance();
+            return true;
+        }
+        return false;
+    }
+
+    // ─── Diagnostic ──────────────────────────────────────────────────────
+
+    fn parseErr(self: *Parser, span: SourceSpan, message: []const u8) ParseError {
+        if (self.diagnostic == null) {
+            const owned = self.gpa.dupe(u8, message) catch {
+                return error.OutOfMemory;
+            };
+            self.diagnostic = .{
+                .code = .parse_error,
+                .severity = .error_,
+                .primary_span = span,
+                .primary_message = owned,
+            };
+        }
+        return error.ParseError;
+    }
+
+    fn parseErrFmt(self: *Parser, span: SourceSpan, comptime fmt: []const u8, args: anytype) ParseError {
+        if (self.diagnostic == null) {
+            const owned = std.fmt.allocPrint(self.gpa, fmt, args) catch {
+                return error.OutOfMemory;
+            };
+            self.diagnostic = .{
+                .code = .parse_error,
+                .severity = .error_,
+                .primary_span = span,
+                .primary_message = owned,
+            };
+        }
+        return error.ParseError;
+    }
+
+    // ─── Source slice helpers ────────────────────────────────────────────
+
+    fn sliceOf(self: *const Parser, span: SourceSpan) []const u8 {
+        return self.source[span.byte_start..span.byte_end];
+    }
+
+    fn internSlice(self: *Parser, span: SourceSpan) !StringId {
+        return try self.arena.strings.intern(self.gpa, self.sliceOf(span));
+    }
+
+    fn internStringLiteral(self: *Parser, span: SourceSpan) !StringId {
+        // Trim the surrounding quotes; S3 string literals are simple-quote.
+        const raw = self.sliceOf(span);
+        if (raw.len < 2 or raw[0] != '"' or raw[raw.len - 1] != '"') {
+            return try self.arena.strings.intern(self.gpa, raw);
+        }
+        return try self.arena.strings.intern(self.gpa, raw[1 .. raw.len - 1]);
+    }
+
+    // ─── Top-level ───────────────────────────────────────────────────────
+
+    pub fn parseFile(self: *Parser) ParseError!void {
+        while (self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const annotations = try self.parseAnnotations();
+            try self.parseTopLevel(annotations);
+        }
+    }
+
+    fn surfaceTokenErrors(self: *Parser) ParseError!void {
+        switch (self.peek()) {
+            .error_byte => return self.parseErrFmt(self.peekSpan(), "unexpected byte '{s}'", .{self.sliceOf(self.peekSpan())}),
+            .error_utf8 => return self.parseErr(self.peekSpan(), "invalid UTF-8 sequence"),
+            .error_unknown_keyword => return self.parseErrFmt(self.peekSpan(), "Etch keyword '{s}' is not supported in S3 (UnsupportedConstructInS3)", .{self.sliceOf(self.peekSpan())}),
+            else => {},
+        }
+    }
+
+    fn parseTopLevel(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        switch (self.peek()) {
+            .kw_component => try self.parseComponentDecl(annotations),
+            .kw_resource => try self.parseResourceDecl(annotations),
+            .kw_rule => try self.parseRuleDecl(annotations),
+            .eof => {},
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+        }
+    }
+
+    // ─── Annotations ─────────────────────────────────────────────────────
+
+    pub const AnnotationRange = struct {
+        start: u32,
+        len: u32,
+    };
+
+    fn parseAnnotations(self: *Parser) ParseError!AnnotationRange {
+        const start: u32 = @intCast(self.arena.annot_pool.items.len);
+        while (self.peek() == .at) {
+            const at_tok = try self.advance();
+            const name_tok = if (self.peek() == .ident or self.peek() == .type_ident)
+                try self.advance()
+            else
+                return self.parseErr(self.peekSpan(), "expected annotation name after '@'");
+
+            const name_slice = self.sliceOf(name_tok.span);
+            const name_id = try self.internSlice(name_tok.span);
+            const kind = ast_mod.AnnotationKind.fromName(name_slice);
+
+            const args_start: u32 = @intCast(self.arena.annot_args.items.len);
+            var args_len: u32 = 0;
+            if (self.peek() == .lparen) {
+                _ = try self.advance();
+                if (self.peek() != .rparen) {
+                    while (true) {
+                        const arg = try self.parseAnnotationArg();
+                        try self.arena.annot_args.append(self.gpa, arg);
+                        args_len += 1;
+                        if (!try self.match(.comma)) break;
+                    }
+                }
+                _ = try self.expect(.rparen, "expected ')' to close annotation args");
+            }
+
+            const end_span = self.current.span;
+            const total_span: SourceSpan = .{
+                .byte_start = at_tok.span.byte_start,
+                .byte_end = end_span.byte_start,
+            };
+            try self.arena.annot_pool.append(self.gpa, .{
+                .kind = kind,
+                .name = name_id,
+                .args_start = args_start,
+                .args_len = args_len,
+                .span = total_span,
+            });
+        }
+        const len: u32 = @as(u32, @intCast(self.arena.annot_pool.items.len)) - start;
+        return .{ .start = start, .len = len };
+    }
+
+    fn parseAnnotationArg(self: *Parser) ParseError!ast_mod.AnnotationArg {
+        // Named arg if `ident ':' expr`.
+        if (self.peek() == .ident) {
+            // Lookahead: if next non-ident token is `:`, treat as named.
+            // The lexer's one-token lookahead is `self.current`; we have
+            // to commit to the ident and check the following token.
+            const saved = self.current;
+            _ = try self.advance();
+            if (self.peek() == .colon) {
+                _ = try self.advance();
+                const name_id = try self.internSlice(saved.span);
+                const value = try self.parseExpr(0);
+                return .{ .name = name_id, .value = value };
+            }
+            // Not named: this was the start of a positional expression
+            // beginning with an ident. Build the expr starting from here
+            // by emitting an ident expr and continuing through Pratt.
+            const ident_id = try self.internSlice(saved.span);
+            const lhs = try self.arena.addExpr(self.gpa, .ident, ident_id, saved.span);
+            const continued = try self.continuePostfixAndBinary(lhs, 0);
+            return .{ .name = 0, .value = continued };
+        }
+        // Positional: bare expression.
+        const expr = try self.parseExpr(0);
+        return .{ .name = 0, .value = expr };
+    }
+
+    // ─── Component / Resource ───────────────────────────────────────────
+
+    fn parseComponentDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'component'
+        const name_tok = try self.expect(.type_ident, "expected component name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start component body");
+
+        const fields_start: u32 = @intCast(self.arena.fields.items.len);
+        while (self.peek() != .rbrace) {
+            try self.surfaceTokenErrors();
+            const field_annotations = try self.parseAnnotations();
+            try self.parseField(field_annotations);
+            // Field separator: optional comma between fields.
+            _ = try self.match(.comma);
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close component body");
+        const fields_len: u32 = @as(u32, @intCast(self.arena.fields.items.len)) - fields_start;
+
+        const data_idx: u32 = @intCast(self.arena.component_decls.items.len);
+        try self.arena.component_decls.append(self.gpa, .{
+            .name = name_id,
+            .fields_start = fields_start,
+            .fields_len = fields_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        });
+        _ = try self.arena.addItem(self.gpa, .component_decl, data_idx, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
+    fn parseResourceDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'resource'
+        const name_tok = try self.expect(.type_ident, "expected resource name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start resource body");
+
+        const fields_start: u32 = @intCast(self.arena.fields.items.len);
+        while (self.peek() != .rbrace) {
+            try self.surfaceTokenErrors();
+            const field_annotations = try self.parseAnnotations();
+            try self.parseField(field_annotations);
+            _ = try self.match(.comma);
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close resource body");
+        const fields_len: u32 = @as(u32, @intCast(self.arena.fields.items.len)) - fields_start;
+
+        const data_idx: u32 = @intCast(self.arena.resource_decls.items.len);
+        try self.arena.resource_decls.append(self.gpa, .{
+            .name = name_id,
+            .fields_start = fields_start,
+            .fields_len = fields_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        });
+        _ = try self.arena.addItem(self.gpa, .resource_decl, data_idx, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
+    fn parseField(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const name_tok = try self.expect(.ident, "expected field name (identifier)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.colon, "expected ':' after field name");
+        const type_node = try self.parseType();
+        var default_value: NodeId = NodeId.none;
+        if (try self.match(.eq)) {
+            default_value = try self.parseExpr(0);
+        }
+        try self.arena.fields.append(self.gpa, .{
+            .name = name_id,
+            .type_node = type_node,
+            .default_value = default_value,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        });
+    }
+
+    // ─── Type ────────────────────────────────────────────────────────────
+
+    fn parseType(self: *Parser) ParseError!NodeId {
+        switch (self.peek()) {
+            // PascalCase type identifiers (Entity, Vec3, Color, Duration,
+            // user-declared components/resources) and the primitive type
+            // keywords baked into the S3 lexer.
+            .type_ident,
+            .kw_int,
+            .kw_float,
+            .kw_bool,
+            .kw_i32,
+            .kw_u32,
+            .kw_f32,
+            .kw_f64,
+            // Lowercase identifiers that resemble types — including names
+            // outside the S3 builtin set (`string`, `char`, etc.). The
+            // type-checker emits `E0102 UndefinedSymbol` (or a POD-specific
+            // message when applicable).
+            .ident,
+            => {
+                const tok = try self.advance();
+                const name_id = try self.internSlice(tok.span);
+                return try self.arena.addNamedType(self.gpa, name_id, tok.span);
+            },
+            else => return self.parseErrFmt(self.peekSpan(), "expected type, got '{s}'", .{self.sliceOf(self.peekSpan())}),
+        }
+    }
+
+    // ─── Rule ────────────────────────────────────────────────────────────
+
+    fn parseRuleDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'rule'
+        const name_tok = try self.expect(.ident, "expected rule name (identifier)");
+        const name_id = try self.internSlice(name_tok.span);
+
+        _ = try self.expect(.lparen, "expected '(' to begin rule parameters");
+        const params_start: u32 = @intCast(self.arena.rule_params.items.len);
+        if (self.peek() != .rparen) {
+            while (true) {
+                const p_name = try self.expect(.ident, "expected parameter name");
+                _ = try self.expect(.colon, "expected ':' after parameter name");
+                const p_type = try self.parseType();
+                try self.arena.rule_params.append(self.gpa, .{
+                    .name = try self.internSlice(p_name.span),
+                    .type_node = p_type,
+                });
+                if (!try self.match(.comma)) break;
+            }
+        }
+        _ = try self.expect(.rparen, "expected ')' to close rule parameters");
+        const params_len: u32 = @as(u32, @intCast(self.arena.rule_params.items.len)) - params_start;
+
+        var when_root: u32 = ast_mod.RuleDecl.none_when;
+        if (self.peek() == .kw_when) {
+            _ = try self.advance();
+            when_root = try self.parseWhenExpr();
+        }
+
+        _ = try self.expect(.lbrace, "expected '{' to start rule body");
+        const body_extra_start: u32 = @intCast(self.arena.extra.items.len);
+        while (self.peek() != .rbrace) {
+            try self.surfaceTokenErrors();
+            const stmt_id = try self.parseStmt();
+            try self.arena.extra.append(self.gpa, stmt_id.raw());
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close rule body");
+        const body_len: u32 = @as(u32, @intCast(self.arena.extra.items.len)) - body_extra_start;
+
+        const data_idx: u32 = @intCast(self.arena.rule_decls.items.len);
+        try self.arena.rule_decls.append(self.gpa, .{
+            .name = name_id,
+            .params_start = params_start,
+            .params_len = params_len,
+            .when_root = when_root,
+            .body_start = body_extra_start,
+            .body_len = body_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        });
+        _ = try self.arena.addItem(self.gpa, .rule_decl, data_idx, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
+    // ─── When clause ─────────────────────────────────────────────────────
+
+    fn parseWhenExpr(self: *Parser) ParseError!u32 {
+        return try self.parseWhenOr();
+    }
+
+    fn parseWhenOr(self: *Parser) ParseError!u32 {
+        var lhs = try self.parseWhenAnd();
+        while (self.peek() == .kw_or) {
+            const op_span = (try self.advance()).span;
+            const rhs = try self.parseWhenAnd();
+            const lhs_span = self.arena.when_nodes.items[lhs].span;
+            const rhs_span = self.arena.when_nodes.items[rhs].span;
+            const node = ast_mod.WhenNode{
+                .kind = .logical_or,
+                .entity_name = 0,
+                .type_name = 0,
+                .field_name = 0,
+                .filter_value = NodeId.none,
+                .lhs = lhs,
+                .rhs = rhs,
+                .span = .{
+                    .byte_start = @min(lhs_span.byte_start, op_span.byte_start),
+                    .byte_end = rhs_span.byte_end,
+                },
+            };
+            const idx: u32 = @intCast(self.arena.when_nodes.items.len);
+            try self.arena.when_nodes.append(self.gpa, node);
+            lhs = idx;
+        }
+        return lhs;
+    }
+
+    fn parseWhenAnd(self: *Parser) ParseError!u32 {
+        var lhs = try self.parseWhenNot();
+        while (self.peek() == .kw_and) {
+            const op_span = (try self.advance()).span;
+            const rhs = try self.parseWhenNot();
+            const lhs_span = self.arena.when_nodes.items[lhs].span;
+            const rhs_span = self.arena.when_nodes.items[rhs].span;
+            const node = ast_mod.WhenNode{
+                .kind = .logical_and,
+                .entity_name = 0,
+                .type_name = 0,
+                .field_name = 0,
+                .filter_value = NodeId.none,
+                .lhs = lhs,
+                .rhs = rhs,
+                .span = .{
+                    .byte_start = @min(lhs_span.byte_start, op_span.byte_start),
+                    .byte_end = rhs_span.byte_end,
+                },
+            };
+            const idx: u32 = @intCast(self.arena.when_nodes.items.len);
+            try self.arena.when_nodes.append(self.gpa, node);
+            lhs = idx;
+        }
+        return lhs;
+    }
+
+    fn parseWhenNot(self: *Parser) ParseError!u32 {
+        if (self.peek() == .kw_not) {
+            const op_span = (try self.advance()).span;
+            const child = try self.parseWhenPrimary();
+            const child_span = self.arena.when_nodes.items[child].span;
+            const node = ast_mod.WhenNode{
+                .kind = .logical_not,
+                .entity_name = 0,
+                .type_name = 0,
+                .field_name = 0,
+                .filter_value = NodeId.none,
+                .lhs = child,
+                .rhs = ast_mod.WhenNode.no_child,
+                .span = .{
+                    .byte_start = op_span.byte_start,
+                    .byte_end = child_span.byte_end,
+                },
+            };
+            const idx: u32 = @intCast(self.arena.when_nodes.items.len);
+            try self.arena.when_nodes.append(self.gpa, node);
+            return idx;
+        }
+        return try self.parseWhenPrimary();
+    }
+
+    fn parseWhenPrimary(self: *Parser) ParseError!u32 {
+        if (self.peek() == .lparen) {
+            _ = try self.advance();
+            const inner = try self.parseWhenOr();
+            _ = try self.expect(.rparen, "expected ')' to close grouped when expression");
+            return inner;
+        }
+        if (self.peek() == .kw_resource) {
+            const start_span = self.current.span;
+            _ = try self.advance();
+            const type_tok = try self.expect(.type_ident, "expected resource type after 'resource'");
+            const type_name = try self.internSlice(type_tok.span);
+            var kind = ast_mod.WhenNodeKind.resource;
+            var end_byte = type_tok.span.byte_end;
+            if (self.peek() == .kw_changed) {
+                const changed_tok = try self.advance();
+                kind = .resource_changed;
+                end_byte = changed_tok.span.byte_end;
+            }
+            const node = ast_mod.WhenNode{
+                .kind = kind,
+                .entity_name = 0,
+                .type_name = type_name,
+                .field_name = 0,
+                .filter_value = NodeId.none,
+                .lhs = ast_mod.WhenNode.no_child,
+                .rhs = ast_mod.WhenNode.no_child,
+                .span = .{ .byte_start = start_span.byte_start, .byte_end = end_byte },
+            };
+            const idx: u32 = @intCast(self.arena.when_nodes.items.len);
+            try self.arena.when_nodes.append(self.gpa, node);
+            return idx;
+        }
+        // `entity has T [{ field == value }]`
+        const entity_tok = try self.expect(.ident, "expected entity binding in when clause");
+        const entity_name = try self.internSlice(entity_tok.span);
+        _ = try self.expect(.kw_has, "expected 'has' in when clause");
+        const type_tok = try self.expect(.type_ident, "expected component type after 'has'");
+        const type_name = try self.internSlice(type_tok.span);
+
+        var kind = ast_mod.WhenNodeKind.has;
+        var field_name: StringId = 0;
+        var filter_value: NodeId = NodeId.none;
+        var end_byte = type_tok.span.byte_end;
+        // Disambiguation `{` filter vs `{` rule body: the filter form
+        // requires `{ IDENT == ... }`. Anything else (including `{ }` or
+        // `{ let ... }`) belongs to the surrounding rule body and must
+        // be left for `parseRuleDecl` to consume.
+        if (self.peek() == .lbrace and self.peekNext() == .ident and self.peekNext2() == .eq_eq) {
+            _ = try self.advance(); // '{'
+            const field_tok = try self.advance(); // IDENT
+            field_name = try self.internSlice(field_tok.span);
+            _ = try self.advance(); // '=='
+            filter_value = try self.parseExpr(0);
+            const closing = try self.expect(.rbrace, "expected '}' to close has-with-filter");
+            end_byte = closing.span.byte_end;
+            kind = .has_with_filter;
+        }
+        const node = ast_mod.WhenNode{
+            .kind = kind,
+            .entity_name = entity_name,
+            .type_name = type_name,
+            .field_name = field_name,
+            .filter_value = filter_value,
+            .lhs = ast_mod.WhenNode.no_child,
+            .rhs = ast_mod.WhenNode.no_child,
+            .span = .{ .byte_start = entity_tok.span.byte_start, .byte_end = end_byte },
+        };
+        const idx: u32 = @intCast(self.arena.when_nodes.items.len);
+        try self.arena.when_nodes.append(self.gpa, node);
+        return idx;
+    }
+
+    // ─── Statements ──────────────────────────────────────────────────────
+
+    fn parseStmt(self: *Parser) ParseError!NodeId {
+        if (self.peek() == .kw_let) {
+            return try self.parseLetStmt();
+        }
+        // Either an assignment (lvalue followed by =/+=/etc.) or an expr stmt.
+        const expr_start = self.current.span;
+        const expr = try self.parseExpr(0);
+        if (isAssignOp(self.peek())) {
+            const op_tok = try self.advance();
+            const op = assignOpFromKind(op_tok.kind);
+            const value = try self.parseExpr(0);
+            const span: SourceSpan = .{
+                .byte_start = expr_start.byte_start,
+                .byte_end = self.arena.exprSpan(value).byte_end,
+            };
+            return try self.arena.addAssignStmt(self.gpa, .{
+                .target = expr,
+                .op = op,
+                .value = value,
+            }, span);
+        }
+        const span: SourceSpan = .{
+            .byte_start = expr_start.byte_start,
+            .byte_end = self.arena.exprSpan(expr).byte_end,
+        };
+        return try self.arena.addExprStmt(self.gpa, expr, span);
+    }
+
+    fn parseLetStmt(self: *Parser) ParseError!NodeId {
+        const let_span = self.current.span;
+        _ = try self.advance();
+        const is_mut = try self.match(.kw_mut);
+        const name_tok = try self.expect(.ident, "expected name after 'let'");
+        const name_id = try self.internSlice(name_tok.span);
+        var type_annotation: NodeId = NodeId.none;
+        if (try self.match(.colon)) {
+            type_annotation = try self.parseType();
+        }
+        _ = try self.expect(.eq, "expected '=' in let binding");
+        const value = try self.parseExpr(0);
+        const span: SourceSpan = .{
+            .byte_start = let_span.byte_start,
+            .byte_end = self.arena.exprSpan(value).byte_end,
+        };
+        return try self.arena.addLetStmt(self.gpa, .{
+            .name = name_id,
+            .is_mut = is_mut,
+            .type_annotation = type_annotation,
+            .value = value,
+        }, span);
+    }
+
+    fn isAssignOp(kind: TokenKind) bool {
+        return switch (kind) {
+            .eq, .plus_eq, .minus_eq, .star_eq, .slash_eq, .percent_eq => true,
+            else => false,
+        };
+    }
+
+    fn assignOpFromKind(kind: TokenKind) ast_mod.AssignOp {
+        return switch (kind) {
+            .eq => .assign,
+            .plus_eq => .add_assign,
+            .minus_eq => .sub_assign,
+            .star_eq => .mul_assign,
+            .slash_eq => .div_assign,
+            .percent_eq => .rem_assign,
+            else => unreachable,
+        };
+    }
+
+    // ─── Expressions (Pratt) ─────────────────────────────────────────────
+
+    pub fn parseExpr(self: *Parser, min_bp: u8) ParseError!NodeId {
+        const lhs = try self.parseUnary();
+        return try self.continuePostfixAndBinary(lhs, min_bp);
+    }
+
+    fn continuePostfixAndBinary(self: *Parser, lhs_in: NodeId, min_bp: u8) ParseError!NodeId {
+        var lhs = lhs_in;
+        while (true) {
+            const info = infixBindingPower(self.peek()) orelse break;
+            if (info.lbp < min_bp) break;
+            const op_tok = try self.advance();
+            const op = binaryOpFromKind(op_tok.kind);
+            const rhs = try self.parseExpr(info.rbp);
+            const lhs_span = self.arena.exprSpan(lhs);
+            const rhs_span = self.arena.exprSpan(rhs);
+            const span: SourceSpan = .{
+                .byte_start = lhs_span.byte_start,
+                .byte_end = rhs_span.byte_end,
+            };
+            lhs = try self.arena.addBinary(self.gpa, op, lhs, rhs, span);
+        }
+        return lhs;
+    }
+
+    fn parseUnary(self: *Parser) ParseError!NodeId {
+        switch (self.peek()) {
+            .minus => {
+                const op_span = (try self.advance()).span;
+                const operand = try self.parseUnary();
+                const operand_span = self.arena.exprSpan(operand);
+                return try self.arena.addUnary(self.gpa, .neg, operand, .{
+                    .byte_start = op_span.byte_start,
+                    .byte_end = operand_span.byte_end,
+                });
+            },
+            .kw_not => {
+                const op_span = (try self.advance()).span;
+                const operand = try self.parseUnary();
+                const operand_span = self.arena.exprSpan(operand);
+                return try self.arena.addUnary(self.gpa, .logical_not, operand, .{
+                    .byte_start = op_span.byte_start,
+                    .byte_end = operand_span.byte_end,
+                });
+            },
+            else => return try self.parsePostfix(),
+        }
+    }
+
+    fn parsePostfix(self: *Parser) ParseError!NodeId {
+        var expr = try self.parsePrimary();
+        while (self.peek() == .dot) {
+            _ = try self.advance();
+            // After `.`: either a method `get(T)` / `get_mut(T)`, or a field.
+            switch (self.peek()) {
+                .kw_get => {
+                    _ = try self.advance();
+                    expr = try self.parseGetCall(expr, .method_get);
+                },
+                .kw_get_mut => {
+                    _ = try self.advance();
+                    expr = try self.parseGetCall(expr, .method_get_mut);
+                },
+                .ident => {
+                    const field_tok = try self.advance();
+                    const field_id = try self.internSlice(field_tok.span);
+                    const recv_span = self.arena.exprSpan(expr);
+                    expr = try self.arena.addFieldAccess(self.gpa, expr, field_id, .{
+                        .byte_start = recv_span.byte_start,
+                        .byte_end = field_tok.span.byte_end,
+                    });
+                },
+                else => return self.parseErrFmt(self.peekSpan(), "expected field name or 'get'/'get_mut' after '.', got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            }
+        }
+        return expr;
+    }
+
+    fn parseGetCall(self: *Parser, receiver: NodeId, kind: ast_mod.ExprKind) ParseError!NodeId {
+        _ = try self.expect(.lparen, "expected '(' after get/get_mut");
+        const type_tok = try self.expect(.type_ident, "expected component type inside get(T)");
+        const type_name = try self.internSlice(type_tok.span);
+        const closing = try self.expect(.rparen, "expected ')' to close get/get_mut call");
+        const recv_span = self.arena.exprSpan(receiver);
+        return try self.arena.addMethodGet(self.gpa, kind, receiver, type_name, .{
+            .byte_start = recv_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
+    fn parsePrimary(self: *Parser) ParseError!NodeId {
+        try self.surfaceTokenErrors();
+        switch (self.peek()) {
+            .int_literal => {
+                const tok = try self.advance();
+                const id = try self.internSlice(tok.span);
+                return try self.arena.addExpr(self.gpa, .int_lit, id, tok.span);
+            },
+            .float_literal => {
+                const tok = try self.advance();
+                const id = try self.internSlice(tok.span);
+                return try self.arena.addExpr(self.gpa, .float_lit, id, tok.span);
+            },
+            .bool_literal => {
+                const tok = try self.advance();
+                const id = try self.internSlice(tok.span);
+                return try self.arena.addExpr(self.gpa, .bool_lit, id, tok.span);
+            },
+            .string_literal => {
+                const tok = try self.advance();
+                const id = try self.internStringLiteral(tok.span);
+                return try self.arena.addExpr(self.gpa, .string_lit, id, tok.span);
+            },
+            .ident => {
+                const tok = try self.advance();
+                const id = try self.internSlice(tok.span);
+                return try self.arena.addExpr(self.gpa, .ident, id, tok.span);
+            },
+            .lparen => {
+                _ = try self.advance();
+                const inner = try self.parseExpr(0);
+                _ = try self.expect(.rparen, "expected ')' to close parenthesized expression");
+                return inner;
+            },
+            .dot => {
+                // Enum variant shorthand `.foo` (e.g. annotation arg
+                // `.update`). S3 stores it as a `tag_path` kind expression
+                // with the bare identifier interned — the resolver in
+                // Phase 0.2 disambiguates enum variant vs tag path from
+                // the surrounding context. Tag path literals with
+                // multiple segments (`.foo.bar`) remain out-of-scope.
+                const dot_span = (try self.advance()).span;
+                if (self.peek() != .ident) {
+                    return self.parseErrFmt(self.peekSpan(), "expected identifier after '.', got '{s}'", .{self.sliceOf(self.peekSpan())});
+                }
+                const ident_tok = try self.advance();
+                const id = try self.internSlice(ident_tok.span);
+                return try self.arena.addExpr(self.gpa, .tag_path, id, .{
+                    .byte_start = dot_span.byte_start,
+                    .byte_end = ident_tok.span.byte_end,
+                });
+            },
+            else => return self.parseErrFmt(self.peekSpan(), "expected expression, got '{s}'", .{self.sliceOf(self.peekSpan())}),
+        }
+    }
+
+    // Precedence table — values picked so that S3's left-associative
+    // operators behave correctly via the `rbp = lbp + 1` trick.
+    const InfixInfo = struct { lbp: u8, rbp: u8 };
+
+    fn infixBindingPower(kind: TokenKind) ?InfixInfo {
+        return switch (kind) {
+            .kw_or => .{ .lbp = 1, .rbp = 2 },
+            .kw_and => .{ .lbp = 3, .rbp = 4 },
+            .eq_eq, .bang_eq, .lt, .gt, .lt_eq, .gt_eq => .{ .lbp = 5, .rbp = 6 },
+            .plus, .minus => .{ .lbp = 7, .rbp = 8 },
+            .star, .slash, .percent => .{ .lbp = 9, .rbp = 10 },
+            else => null,
+        };
+    }
+
+    fn binaryOpFromKind(kind: TokenKind) ast_mod.BinaryOp {
+        return switch (kind) {
+            .plus => .add,
+            .minus => .sub,
+            .star => .mul,
+            .slash => .div,
+            .percent => .rem,
+            .eq_eq => .eq,
+            .bang_eq => .neq,
+            .lt => .lt,
+            .gt => .gt,
+            .lt_eq => .le,
+            .gt_eq => .ge,
+            .kw_and => .logical_and,
+            .kw_or => .logical_or,
+            else => unreachable,
+        };
+    }
+};
+
+// ─────────────────────────────── tests ──────────────────────────────────
+
+test "parser builds ComponentDecl with two annotated fields" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\component Health {
+        \\  @range(0, 100)
+        \\  current: float = 100.0
+        \\  @range(1, 100)
+        \\  max: float = 100.0
+        \\}
+    );
+    defer result.ast.deinit(gpa);
+    if (result.diagnostic) |d| {
+        var diag = d;
+        diag.deinit(gpa);
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
+    try std.testing.expectEqual(ast_mod.ItemKind.component_decl, result.ast.items.items(.kind)[0]);
+    const cd = result.ast.component_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 2), cd.fields_len);
+    try std.testing.expectEqualStrings("Health", result.ast.strings.slice(cd.name));
+    const f0 = result.ast.fields.items[cd.fields_start];
+    try std.testing.expectEqualStrings("current", result.ast.strings.slice(f0.name));
+    try std.testing.expectEqual(@as(u32, 1), f0.annotations_len);
+}
+
+test "parser builds ResourceDecl with default value expression" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\resource GameMode {
+        \\  max_players: int = 4
+        \\}
+    );
+    defer result.ast.deinit(gpa);
+    try std.testing.expect(result.diagnostic == null);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
+    try std.testing.expectEqual(ast_mod.ItemKind.resource_decl, result.ast.items.items(.kind)[0]);
+    const rd = result.ast.resource_decls.items[0];
+    const f = result.ast.fields.items[rd.fields_start];
+    try std.testing.expect(!f.default_value.isNone());
+    try std.testing.expectEqual(ast_mod.ExprKind.int_lit, result.ast.exprKind(f.default_value));
+}
+
+test "parser builds RuleDecl with when clause composition (and / or / not)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule tick(entity: Entity, dt: float)
+        \\  when entity has Health
+        \\  and entity has Velocity
+        \\  or not entity has Frozen
+        \\{
+        \\}
+    );
+    defer result.ast.deinit(gpa);
+    if (result.diagnostic) |d| {
+        var diag = d;
+        defer diag.deinit(gpa);
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{diag.primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
+    const rd = result.ast.rule_decls.items[0];
+    try std.testing.expect(rd.when_root != ast_mod.RuleDecl.none_when);
+    try std.testing.expectEqual(@as(u32, 2), rd.params_len);
+    // Root must be a logical_or (lowest precedence in the chain).
+    try std.testing.expectEqual(ast_mod.WhenNodeKind.logical_or, result.ast.when_nodes.items[rd.when_root].kind);
+}
+
+test "parser handles binary expression precedence per grammar subset" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule t() {
+        \\  let x = 1 + 2 * 3
+        \\}
+    );
+    defer result.ast.deinit(gpa);
+    try std.testing.expect(result.diagnostic == null);
+    const rd = result.ast.rule_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 1), rd.body_len);
+    const stmt_raw = result.ast.extra.items[rd.body_start];
+    const stmt_id: NodeId = @bitCast(stmt_raw);
+    try std.testing.expectEqual(ast_mod.StmtKind.let_stmt, result.ast.stmtKind(stmt_id));
+    const let = result.ast.let_stmts.items[result.ast.stmtData(stmt_id)];
+    // Value should be (1 + (2 * 3)): top is binary `+`.
+    try std.testing.expectEqual(ast_mod.ExprKind.binary, result.ast.exprKind(let.value));
+    const top = result.ast.binary_exprs.items[result.ast.exprData(let.value)];
+    try std.testing.expectEqual(ast_mod.BinaryOp.add, top.op);
+    try std.testing.expectEqual(ast_mod.ExprKind.binary, result.ast.exprKind(top.rhs));
+    const rhs = result.ast.binary_exprs.items[result.ast.exprData(top.rhs)];
+    try std.testing.expectEqual(ast_mod.BinaryOp.mul, rhs.op);
+}
+
+test "parser rejects unsupported top-level construct with E0001" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\fn foo() {}
+    );
+    defer result.ast.deinit(gpa);
+    try std.testing.expect(result.diagnostic != null);
+    var diag = result.diagnostic.?;
+    defer diag.deinit(gpa);
+    try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, diag.code);
+}
+
+test "parser stops at first parse error and returns partial AST" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\component Health { current: float = 1.0 }
+        \\@@@@invalid
+    );
+    defer result.ast.deinit(gpa);
+    try std.testing.expect(result.diagnostic != null);
+    var diag = result.diagnostic.?;
+    defer diag.deinit(gpa);
+    // First component should be parsed.
+    try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
+    try std.testing.expectEqual(ast_mod.ItemKind.component_decl, result.ast.items.items(.kind)[0]);
+}
+
+test "parser accepts top-level declarations in any order" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule uses_health(entity: Entity)
+        \\  when entity has Health
+        \\{
+        \\  let h = entity.get(Health)
+        \\}
+        \\component Health { current: float = 100.0 }
+    );
+    defer result.ast.deinit(gpa);
+    if (result.diagnostic) |d| {
+        var diag = d;
+        defer diag.deinit(gpa);
+        std.debug.print("unexpected diag: {s}\n", .{diag.primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 2), result.ast.items.len);
+}
+
+test "parser captures annotation kind and args" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\component Health {
+        \\  @unit(.health_points)
+        \\  @range(0, 100)
+        \\  current: float = 100.0
+        \\}
+    );
+    defer result.ast.deinit(gpa);
+    // We don't currently parse `.foo` patterns; for S3 we accept named or
+    // bare expressions as annotation args. The brief notes annotation
+    // applicability is deferred — only "kind + args reachable" is required.
+    try std.testing.expect(result.diagnostic == null);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
+}

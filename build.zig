@@ -14,6 +14,16 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Shared `weld_etch` module — S3 parser + type-checker (foundation
+    // submodule per `engine-directory-structure.md` §9.1). Etch is not
+    // a Tier 1 module; it is conceptually a foundation submodule and
+    // ships as its own top-level public surface under `src/etch/root.zig`.
+    const etch_module = b.createModule(.{
+        .root_source_file = b.path("src/etch/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Shared `weld_core` module — Tier 0 internals consumed by the runtime,
     // the bench harness, and every test executable.
     const core_module = b.createModule(.{
@@ -68,6 +78,10 @@ pub fn build(b: *std.Build) void {
     // Inline tests in src/main.zig.
     const main_tests = b.addTest(.{ .root_module = exe_module });
     test_step.dependOn(&b.addRunArtifact(main_tests).step);
+
+    // Same-file tests inside src/etch/*.zig.
+    const etch_tests = b.addTest(.{ .root_module = etch_module });
+    test_step.dependOn(&b.addRunArtifact(etch_tests).step);
 
     // Out-of-tree tests. Each file is its own root_module and imports
     // `weld_core` to reach the engine internals.
