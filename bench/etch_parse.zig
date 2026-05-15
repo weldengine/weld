@@ -183,8 +183,32 @@ fn wallClockStamp(io: std.Io) Stamp {
     };
 }
 
-fn hostnameOrUnavailable(buf: *[std.posix.HOST_NAME_MAX]u8) []const u8 {
-    return std.posix.gethostname(buf) catch "<unavailable>";
+/// Resolve the host name through whichever portable API the target OS
+/// exposes. `std.posix.gethostname` only compiles on POSIX
+/// (`std.posix.HOST_NAME_MAX` is `void` on Windows). On platforms without
+/// a stable Zig API we fall back to `"<unavailable>"` rather than pull in
+/// a per-OS shim — the brief explicitly allowed this fallback.
+///
+/// Gating is on `builtin.os.tag` (not `@hasDecl(std.posix, "HOST_NAME_MAX")`)
+/// because the latter still returns `true` on Windows where the constant
+/// is declared as a `void` placeholder; using its value still trips a
+/// compile error.
+const has_posix_hostname: bool = switch (builtin.os.tag) {
+    .windows => false,
+    else => true,
+};
+
+const hostname_buf_len: usize = if (has_posix_hostname)
+    std.posix.HOST_NAME_MAX
+else
+    1; // unused on non-POSIX; the value just has to compile
+
+fn hostnameOrUnavailable(buf: *[hostname_buf_len]u8) []const u8 {
+    if (comptime has_posix_hostname) {
+        return std.posix.gethostname(buf) catch "<unavailable>";
+    } else {
+        return "<unavailable>";
+    }
 }
 
 fn writeReport(gpa: std.mem.Allocator, io: std.Io, stats: []const FileStats) !void {
@@ -203,7 +227,7 @@ fn writeReport(gpa: std.mem.Allocator, io: std.Io, stats: []const FileStats) !vo
     var w = file.writer(io, &report_buf);
     const writer = &w.interface;
 
-    var host_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+    var host_buf: [hostname_buf_len]u8 = undefined;
     const hostname = hostnameOrUnavailable(&host_buf);
 
     try writer.print("# S3 Etch parser bench — {s}\n\n", .{filename[14..]});
