@@ -1,6 +1,6 @@
 # S4 — Etch tree-walking interpreter
 
-> **Status:** PLANNED
+> **Status:** ACTIVE
 > **Phase:** -1
 > **Branch:** `phase-pre-0/etch/tree-walking-interpreter`
 > **Planned tag:** `v0.0.5-S4-etch-tree-walking-interpreter`
@@ -242,8 +242,7 @@ The PR description (cf. Conventions below) must list the documentation files mod
 
 *One entry per logical work sequence (typically: an objective reached, a test green, a refactor, a blocker). Chronological order. Short format — 1 to 3 lines per entry.*
 
-- <YYYY-MM-DD HH:MM> — <summary>
-- <YYYY-MM-DD HH:MM> — <summary>
+- 2026-05-15 20:11 — Branch `phase-pre-0/etch/tree-walking-interpreter` created, brief copied verbatim, specs read, Status flipped to ACTIVE.
 
 ## Acknowledged deviations
 
