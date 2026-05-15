@@ -319,7 +319,7 @@ Reference machine: same physical machine used for S2 verdict (Win11 + RTX 4080 S
 - 2026-05-15 10:30 — bug `StringPool` corrigé : map's keys pointaient dans un `ArrayList(u8)` mouvant ; reformulé en `ArrayList([]const u8)` heap-allocated par intern.
 - 2026-05-15 10:45 — corpus écrit : 30 fichiers valides + 10 invalides (un par code émis + variantes pour `E0001`/`E0102`). Driver `tests/etch/corpus_test.zig` enumère via la facade `tests/etch/corpus_facade.zig` qui sert aussi de source au bench (contournement du `@embedFile` package-root restriction).
 - 2026-05-15 10:53 — `zig build bench-etch -Doptimize=ReleaseSafe` rendu **GO** : worst median 0.019 ms (gate 5 ms), worst p99 0.028 ms (gate 15 ms), worst max 0.042 ms (gate 25 ms) sur Apple Silicon macOS aarch64. Rapport `bench/results/s3-etch-parse-20260515-0930.md` commité.
-- 2026-05-15 10:55 — validation finale : `zig build`, `zig build test` (debug + ReleaseSafe), `zig fmt --check` tous verts. Diff-list vérifiée : 52 fichiers diffés / 18 patterns brief × wildcards expansés / 1 déviation actée (`corpus_facade.zig`) / 0 blocker.
+- 2026-05-15 10:55 — validation finale : `zig build`, `zig build test` (debug + ReleaseSafe), `zig fmt --check` tous verts. Diff-list vérifiée : 55 fichiers diffés (52 fichiers code + corpus + `briefs/S3-etch-parser-subset.md` + 2 docs CLAUDE.md/README.md) ; tous les patterns « Fichiers à créer ou modifier » du brief sont couverts ; 1 ajout non listé (`tests/etch/corpus_facade.zig`) acté dans « Déviations actées » ; 0 blocker.
 
 ## Déviations actées
 
