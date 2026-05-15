@@ -1,0 +1,57 @@
+component Position {
+  x: float = 0.0
+  y: float = 0.0
+}
+
+component Velocity {
+  dx: float = 1.0
+  dy: float = 0.5
+}
+
+component Health {
+  current: float = 100.0
+}
+
+component Score {
+  value: int = 0
+}
+
+component Active {
+  flag: bool = true
+}
+
+resource GameMode {
+  running: bool = true
+}
+
+rule move(entity: Entity)
+  when entity has Position and entity has Velocity
+{
+  entity.get_mut(Position).x += entity.get(Velocity).dx
+  entity.get_mut(Position).y += entity.get(Velocity).dy
+}
+
+rule damp(entity: Entity)
+  when entity has Velocity
+{
+  entity.get_mut(Velocity).dx *= 0.95
+  entity.get_mut(Velocity).dy *= 0.95
+}
+
+rule heal(entity: Entity)
+  when entity has Health and entity has Active { flag == true }
+{
+  entity.get_mut(Health).current += 0.5
+}
+
+rule increment_score(entity: Entity)
+  when entity has Score and resource GameMode
+{
+  entity.get_mut(Score).value += 1
+}
+
+rule bonus(entity: Entity)
+  when entity has Score and entity has Active
+{
+  entity.get_mut(Score).value += 1
+}

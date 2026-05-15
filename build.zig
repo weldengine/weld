@@ -218,6 +218,65 @@ pub fn build(b: *std.Build) void {
     );
     bench_step.dependOn(&bench_run.step);
 
+    // -------------------------------------------- Fixture facade (S4 demo) --
+
+    // `@embedFile` cannot escape the package root of the module that
+    // invokes it, so both the S4 bench and the S4 demo binary import this
+    // tiny facade module that holds the fixture at its canonical path.
+    const fixture_facade_module = b.createModule(.{
+        .root_source_file = b.path("bench/fixture_facade.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // ------------------------------------------------- S4 demo binary ------
+
+    const demo_module = b.createModule(.{
+        .root_source_file = b.path("src/demo_etch_interp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    demo_module.addImport("weld_core", core_module);
+    demo_module.addImport("weld_etch", etch_module);
+    demo_module.addImport("fixture_facade", fixture_facade_module);
+    const demo_exe = b.addExecutable(.{
+        .name = "demo-etch-interp",
+        .root_module = demo_module,
+    });
+    b.installArtifact(demo_exe);
+    const demo_run = b.addRunArtifact(demo_exe);
+    demo_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| demo_run.addArgs(args);
+    const demo_step = b.step(
+        "run-demo-etch-interp",
+        "Run the S4 demo (1000 entities × 5 rules × 60 ticks)",
+    );
+    demo_step.dependOn(&demo_run.step);
+
+    // -------------------------------------------- S4 Etch interpreter bench --
+
+    const interp_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/etch_interp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    interp_bench_module.addImport("weld_core", core_module);
+    interp_bench_module.addImport("weld_etch", etch_module);
+    interp_bench_module.addImport("fixture_facade", fixture_facade_module);
+    const interp_bench_exe = b.addExecutable(.{
+        .name = "etch-interp-bench",
+        .root_module = interp_bench_module,
+    });
+    b.installArtifact(interp_bench_exe);
+    const interp_bench_run = b.addRunArtifact(interp_bench_exe);
+    interp_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| interp_bench_run.addArgs(args);
+    const interp_bench_step = b.step(
+        "bench-etch-interp",
+        "Run the S4 interpreter bench (pass `-- --smoke` for a CI sanity run)",
+    );
+    interp_bench_step.dependOn(&interp_bench_run.step);
+
     // ---------------------------------------------------- Etch parse bench --
 
     const etch_bench_module = b.createModule(.{
