@@ -1,6 +1,6 @@
 # S3 — Etch parser on subset
 
-> **Status :** PLANNED
+> **Status :** ACTIVE
 > **Phase :** −1
 > **Branche :** `phase--1/etch/parser-subset`
 > **Tag prévu :** `v0.0.4-S3-etch-parser-subset`
