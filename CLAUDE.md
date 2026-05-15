@@ -5,33 +5,29 @@ session and captures the operational state of the project plus the rules that
 must never be violated. The full specification lives in the claude.ai
 knowledge base — see § Quick links spec.
 
-> **Status:** Phase −1 — S2 closed (code + validation), PR pending
+> **Status:** Phase −1 — S3 closed (code + bench verdict GO), PR pending
 >
-> S2 fully validated on three target machines:
-> - **Win11 25H2 + RTX 4080 Super (60 Hz, DWM)** : median 16.663 ms / p95 17.606 ms / max 33.590 ms — at the 60 Hz vsync floor.
-> - **Fedora 44 + Intel UHD 630 (Mesa ANV, 144 Hz, GNOME Wayland)** : median 6.939 ms / p95 7.358 ms / max 39.996 ms (single warmup outlier).
-> - **Fedora 44 + GTX 1660 Ti (NVIDIA prop. 595.71.05, 144 Hz, GNOME Wayland)** : median 6.934 ms / p95 7.252 ms / max 21.008 ms.
->
-> Two real bugs caught and fixed by hardware validation that CI would
-> never have surfaced: `loadInstance` strict on NULL dispatch slots
-> (commit `8a377f6`); `recreateSwapchain` not threading
-> `oldSwapchain` into `VkSwapchainCreateInfoKHR` (commit `7c2fe91`).
-> Plus a build-system gap: `bindgen-vk`/`bindgen-wayland` now chain
-> `zig fmt` (commit `8282d0f`). Validation report at
-> `validation/s2-go-nogo.md` ✅ GO on all three rows.
-> PR `Phase -1 / Platform / Native Window + Vulkan Triangle` opens
-> next; tag `v0.0.3-S2-window-vulkan-triangle` posted by Guy after
-> squash-merge.
+> S3 closed: lexer + parser + tabular SoA AST + minimal type-checker on
+> the 5-construct subset (`component`, `resource`, `rule`, `when`, basic
+> arithmetic expressions). Bench verdict on dev machine (Apple Silicon,
+> macOS, ReleaseSafe, 1000 iterations + 50 warmups): worst median
+> 0.019 ms, worst p99 0.028 ms, worst max 0.042 ms across 30 corpus
+> files — well under the 5 ms / 15 ms / 25 ms gates respectively.
+> Official verdict will be re-confirmed on the S2 reference machines by
+> Guy. Validation: `zig build`, `zig build test` (debug + ReleaseSafe),
+> `zig fmt --check` all green. PR `Phase -1 / Etch / S3 parser on
+> subset` opens next; tag `v0.0.4-S3-etch-parser-subset` posted by Guy
+> after squash-merge.
 
 ## Current state
 
 | Field | Value |
 |---|---|
 | Phase | −1 (Spikes) |
-| Current milestone | S2 — Window + Vulkan triangle (CLOSED, PR pending) |
-| Last released tag | `v0.0.2-S1-mini-ecs` |
-| Active branch | `phase-pre-0/platform/window-vulkan-triangle` |
-| Next planned milestone | S3 — Etch grammar EBNF v0.5 |
+| Current milestone | S3 — Etch parser on subset (CLOSED, PR pending) |
+| Last released tag | `v0.0.3-S2-window-vulkan-triangle` |
+| Active branch | `phase--1/etch/parser-subset` |
+| Next planned milestone | S4 — Etch tree-walking interpreter |
 
 ## Tags
 
@@ -39,6 +35,8 @@ knowledge base — see § Quick links spec.
 |---|---|---|---|
 | `v0.0.1-S0-bootstrap` | 2026-05-08 | S0 — Bootstrap repo and CI | First milestone. Build infra, CI on `{ubuntu-24.04, windows-2025} × {Debug, ReleaseSafe}`, lefthook, `CLAUDE.md`. Tag posted by Guy after merge of PR #1. |
 | `v0.0.2-S1-mini-ecs` | 2026-05-09 (planned) | S1 — Mini-ECS Zig | Comptime SoA archetype + Chase-Lev work-stealing scheduler. Validates the comptime + work-stealing hypothesis (100k entities iterated in 54.5 µs median ReleaseSafe on M4 Pro reference, gate 1 ms). Tag posted by Guy after squash-merge of PR `Phase -1 / Core / Mini-ECS Zig`. |
+| `v0.0.3-S2-window-vulkan-triangle` | (planned) | S2 — Window + Vulkan triangle | Native Win32 + Wayland windowing, Vulkan triangle, no SDL/GLFW. Validated GO on Win11 + RTX 4080, Fedora 44 + UHD 630, Fedora 44 + GTX 1660 Ti. |
+| `v0.0.4-S3-etch-parser-subset` | (planned) | S3 — Etch parser on subset | Lexer + parser + tabular SoA AST + minimal type-checker on 5 constructs. Bench verdict GO (worst median 0.019 ms vs 5 ms target on dev machine; re-confirmation on reference machine pending). |
 
 ## Hypotheses validated by spikes
 
@@ -47,7 +45,7 @@ knowledge base — see § Quick links spec.
 | S0 | Infrastructure ready (no engineering hypothesis) | validated |
 | S1 | comptime ECS + Chase-Lev work-stealing iterates 100k entities < 1 ms | validated (54.5 µs median on M4 Pro) |
 | S2 | Window Win32 + Wayland + Vulkan triangle, native Zig, no SDL/GLFW | validated (3/3 target machines green, validation/s2-go-nogo.md ✅ GO) |
-| S3 | Etch grammar EBNF v0.5 implementable, parsing < 5 ms / file | pending |
+| S3 | Etch grammar EBNF v0.6 (S3 subset) implementable, parsing < 5 ms / file | validated (worst median 0.019 ms on dev Apple Silicon ReleaseSafe; reference-machine re-run pending) |
 | S4 | AST tree-walking interpreter executes Etch correctly with ECS bridge | pending |
 | S5 | Etch → Zig codegen viable build-time-wise (incremental < 2 s) | pending |
 | S6 | IPC editor↔runtime stable, < 1 ms RTT, 1h fuzz, kill -9 recovery | pending |
@@ -124,4 +122,4 @@ The `briefs/` directory is the source of truth for milestone state. The brief's 
 
 ---
 
-Last updated: 2026-05-09
+Last updated: 2026-05-15

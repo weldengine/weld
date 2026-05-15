@@ -2,7 +2,7 @@
 
 A game engine written in Zig 0.16.x.
 
-> **Status:** Phase −1 — Native Window + Vulkan triangle spike (S2)
+> **Status:** Phase −1 — Etch parser on subset (S3)
 >
 > Weld is in its earliest exploratory phase: the spike list of Phase −1 is
 > validating the core architectural hypotheses (comptime ECS, work-stealing
@@ -23,6 +23,14 @@ A game engine written in Zig 0.16.x.
 > generators emitting ~34 000 lines of idiomatic Zig from the vendored
 > upstream registries, Vulkan 1.3 triangle render path. Full report:
 > [`validation/s2-go-nogo.md`](validation/s2-go-nogo.md).
+>
+> **S3** (closed, tag `v0.0.4-S3-etch-parser-subset` pending merge)
+> validated the Etch grammar (EBNF v0.6, S3 subset: `component`,
+> `resource`, `rule`, `when`, basic arithmetic expressions) — lexer +
+> recursive-descent + Pratt parser + tabular SoA `AstArena` + minimal
+> two-pass type-checker. Worst median 0.019 ms / file across 30 corpus
+> files on dev Apple Silicon ReleaseSafe (gate: < 5 ms). Run the bench
+> locally with `zig build bench-etch -Doptimize=ReleaseSafe`.
 
 ## Prerequisites
 
@@ -37,9 +45,11 @@ A game engine written in Zig 0.16.x.
 ```sh
 zig build                                                # build the weld executable
 zig build run                                            # build and run (S2 spike — open window + render triangle)
-zig build test                                           # run all tests (34 across spike + ABI + ECS + jobs)
+zig build test                                           # run all tests (S0/S1/S2/S3: spike + ABI + ECS + jobs + Etch corpus)
 zig build bench-ecs -Doptimize=ReleaseSafe               # S1 ECS iteration bench
+zig build bench-etch -Doptimize=ReleaseSafe              # S3 Etch parser bench (report under bench/results/)
 zig build bench-ecs -- --smoke                           # short bench run (used by CI)
+zig build bench-etch -- --smoke                          # short Etch bench run (sanity)
 ./scripts/install-hooks.sh                               # install local git hooks (run once after clone)
 ```
 
@@ -76,7 +86,9 @@ src/
       window.zig                   public Window interface (create/destroy/pollEvent/nativeHandles)
       window/{win32,wayland,stub}.zig  per-OS backends (no SDL/GLFW, no @cImport)
       window/wayland_protocols/    ~3 000 lines — generated from wayland XMLs by tools/wayland_gen
+  etch/                            S3 Etch parser — lexer, parser, tabular SoA AST, type-checker
   spike/                           throwaway S2 spike code (CLI parser, scoring, vk_setup, vk_frame, ppm)
+tests/etch/                        Etch corpus driver + ~30 valid + ~10 invalid `.etch` fixtures
 tools/
   vk_gen/                          XML → Zig generator for Vulkan bindings
   wayland_gen/                     XML → Zig generator for Wayland protocol bindings
