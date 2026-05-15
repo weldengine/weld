@@ -14,16 +14,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Shared `weld_etch` module — S3 parser + type-checker (foundation
-    // submodule per `engine-directory-structure.md` §9.1). Etch is not
-    // a Tier 1 module; it is conceptually a foundation submodule and
-    // ships as its own top-level public surface under `src/etch/root.zig`.
-    const etch_module = b.createModule(.{
-        .root_source_file = b.path("src/etch/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     // Shared `weld_core` module — Tier 0 internals consumed by the runtime,
     // the bench harness, and every test executable.
     const core_module = b.createModule(.{
@@ -36,6 +26,19 @@ pub fn build(b: *std.Build) void {
         // branch and libc is not actually referenced.
         .link_libc = true,
     });
+
+    // Shared `weld_etch` module — S3 parser + type-checker + S4 tree-walking
+    // interpreter (foundation submodule per `engine-directory-structure.md`
+    // §9.1). Etch is not a Tier 1 module; it is conceptually a foundation
+    // submodule and ships as its own top-level public surface under
+    // `src/etch/root.zig`. The S4 interpreter pulls in `weld_core` to drive
+    // the runtime registry / dynamic archetype / resource store.
+    const etch_module = b.createModule(.{
+        .root_source_file = b.path("src/etch/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    etch_module.addImport("weld_core", core_module);
 
     // Main executable.
     const exe_module = b.createModule(.{

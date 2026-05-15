@@ -1,0 +1,859 @@
+//! S4 tree-walking interpreter for Etch.
+//!
+//! Walks the tabular AST produced by S3 (`etch/ast.zig`), compiles each
+//! component / resource / rule into runtime descriptors (registry ids,
+//! include/exclude sets, field filters), and executes the rule bodies
+//! one tick at a time over the dynamic side of the world.
+//!
+//! Boundaries (cf. `briefs/S4-etch-tree-walking-interpreter.md` Out-of-scope):
+//! - No HIR — walks the AST directly.
+//! - No bytecode VM.
+//! - No structural mutation (`spawn`, `despawn`, `add(T)`, `remove(T)`).
+//! - No job system use; rules run sequentially on the calling thread.
+//! - `ExprKind.path` and `ExprKind.tag_path` produce `RuntimeError.UnsupportedExpr`.
+
+const std = @import("std");
+const ast_mod = @import("ast.zig");
+const types_mod = @import("types.zig");
+const parser_mod = @import("parser.zig");
+const diag_mod = @import("diagnostics.zig");
+const value_mod = @import("value.zig");
+const bridge_mod = @import("ecs_bridge.zig");
+
+const weld_core = @import("weld_core");
+const Registry = weld_core.ecs.registry.Registry;
+const ComponentId = weld_core.ecs.registry.ComponentId;
+const FieldDesc = weld_core.ecs.registry.FieldDesc;
+const FieldKind = weld_core.ecs.registry.FieldKind;
+const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
+const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
+const World = weld_core.ecs.world.World;
+
+const AstArena = ast_mod.AstArena;
+const NodeId = ast_mod.NodeId;
+const StringId = ast_mod.StringId;
+const Diagnostic = diag_mod.Diagnostic;
+const Value = value_mod.Value;
+const RuntimeError = value_mod.RuntimeError;
+const RuntimeErrorKind = value_mod.RuntimeErrorKind;
+const EntityId = value_mod.EntityId;
+const Bridge = bridge_mod.Bridge;
+
+pub const RuntimeReport = struct {
+    entities_iterated: u64 = 0,
+    rules_evaluated: u64 = 0,
+    rules_matched: u64 = 0,
+    runtime_errors: u64 = 0,
+    last_error: ?RuntimeError = null,
+};
+
+pub const InterpError = error{
+    UnsupportedConstruct,
+    InvalidProgram,
+    OutOfMemory,
+    DiagnosticsPresent,
+};
+
+const ResourceDep = struct {
+    resource_id: ComponentId,
+    must_be_changed: bool,
+};
+
+const FieldFilter = struct {
+    component_id: ComponentId,
+    field_offset: u16,
+    field_kind: FieldKind,
+    expected_value: Value,
+};
+
+const RuleDesc = struct {
+    rule_idx: u32,
+    name: StringId,
+    include_ids: []ComponentId,
+    exclude_ids: []ComponentId,
+    resource_deps: []ResourceDep,
+    field_filter: ?FieldFilter,
+    entity_param_name: ?StringId,
+    is_entity_bound: bool,
+
+    fn deinit(self: *RuleDesc, gpa: std.mem.Allocator) void {
+        gpa.free(self.include_ids);
+        gpa.free(self.exclude_ids);
+        gpa.free(self.resource_deps);
+    }
+};
+
+const Local = struct {
+    value: Value,
+    is_mut: bool,
+};
+
+const Locals = struct {
+    map: std.AutoHashMapUnmanaged(StringId, Local) = .empty,
+
+    pub fn deinit(self: *Locals, gpa: std.mem.Allocator) void {
+        self.map.deinit(gpa);
+    }
+
+    pub fn put(self: *Locals, gpa: std.mem.Allocator, name: StringId, v: Value, is_mut: bool) !void {
+        try self.map.put(gpa, name, .{ .value = v, .is_mut = is_mut });
+    }
+
+    pub fn get(self: *const Locals, name: StringId) ?Value {
+        if (self.map.get(name)) |l| return l.value;
+        return null;
+    }
+
+    pub fn getPtr(self: *Locals, name: StringId) ?*Value {
+        if (self.map.getPtr(name)) |l| return &l.value;
+        return null;
+    }
+};
+
+const StmtError = error{ OutOfMemory, RuntimeFailure };
+
+pub const Interpreter = struct {
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    bridge: Bridge,
+    rule_descs: []RuleDesc,
+
+    pub fn deinit(self: *Interpreter) void {
+        for (self.rule_descs) |*r| r.deinit(self.gpa);
+        self.gpa.free(self.rule_descs);
+        self.bridge.deinit(self.gpa);
+        self.* = undefined;
+    }
+
+    /// Parse + type-check + compile + run for `ticks` ticks. Diagnostics
+    /// from parser or type-checker turn into `error.DiagnosticsPresent`.
+    pub fn runProgram(
+        gpa: std.mem.Allocator,
+        source: []const u8,
+        world: *World,
+        ticks: u32,
+    ) !RuntimeReport {
+        var pr = try parser_mod.parse(gpa, source);
+        defer {
+            if (pr.diagnostic) |*d| {
+                var dd = d.*;
+                dd.deinit(gpa);
+            }
+            pr.ast.deinit(gpa);
+        }
+        if (pr.diagnostic) |_| return error.DiagnosticsPresent;
+
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        if (diags.items.len > 0) return error.DiagnosticsPresent;
+
+        return try run(gpa, &pr.ast, world, ticks);
+    }
+
+    pub fn run(
+        gpa: std.mem.Allocator,
+        ast: *const AstArena,
+        world: *World,
+        ticks: u32,
+    ) !RuntimeReport {
+        var interp = try compile(gpa, ast, world);
+        defer interp.deinit();
+        return try interp.runFor(world, ticks);
+    }
+
+    pub fn compile(gpa: std.mem.Allocator, ast: *const AstArena, world: *World) !Interpreter {
+        var bridge = Bridge.init();
+        errdefer bridge.deinit(gpa);
+
+        // Pass A — register components and resources with the world.
+        var i: u28 = 0;
+        while (i < ast.items.len) : (i += 1) {
+            const kind = ast.items.items(.kind)[i];
+            const data = ast.items.items(.data)[i];
+            switch (kind) {
+                .component_decl => try compileComponent(gpa, ast, world, &bridge, ast.component_decls.items[data]),
+                .resource_decl => try compileResource(gpa, ast, world, &bridge, ast.resource_decls.items[data]),
+                else => {},
+            }
+        }
+
+        // Pass B — compile rules. Need the registry to resolve field
+        // filter offsets/kinds.
+        var rule_descs: std.ArrayListUnmanaged(RuleDesc) = .empty;
+        errdefer {
+            for (rule_descs.items) |*r| r.deinit(gpa);
+            rule_descs.deinit(gpa);
+        }
+        i = 0;
+        while (i < ast.items.len) : (i += 1) {
+            const kind = ast.items.items(.kind)[i];
+            const data = ast.items.items(.data)[i];
+            if (kind != .rule_decl) continue;
+            const desc = try compileRule(gpa, ast, &bridge, &world.registry, data);
+            try rule_descs.append(gpa, desc);
+        }
+
+        const slice = try rule_descs.toOwnedSlice(gpa);
+        return .{
+            .gpa = gpa,
+            .ast = ast,
+            .bridge = bridge,
+            .rule_descs = slice,
+        };
+    }
+
+    pub fn runFor(self: *Interpreter, world: *World, ticks: u32) !RuntimeReport {
+        var report: RuntimeReport = .{};
+        var t: u32 = 0;
+        while (t < ticks) : (t += 1) {
+            try self.stepOnce(world, &report);
+            world.tickBoundary();
+        }
+        return report;
+    }
+
+    pub fn stepOnce(self: *Interpreter, world: *World, report: *RuntimeReport) !void {
+        for (self.rule_descs) |*rd| {
+            report.rules_evaluated += 1;
+            if (!resourceDepsSatisfied(world, rd.*)) continue;
+            try self.runRule(world, rd.*, report);
+        }
+    }
+
+    fn runRule(self: *Interpreter, world: *World, rd: RuleDesc, report: *RuntimeReport) !void {
+        if (!rd.is_entity_bound) {
+            try self.execBody(world, rd, null, report);
+            report.rules_matched += 1;
+            return;
+        }
+        const query = world.query_dynamic(rd.include_ids, rd.exclude_ids);
+        var rule_matched = false;
+        var it = query.chunkIter();
+        while (it.next()) |match| {
+            const arch = match.archetype;
+            const chunk = match.chunk;
+            const ids = arch.entityIdsConst(chunk);
+            const count = chunk.header().entity_count;
+            var slot: u32 = 0;
+            while (slot < count) : (slot += 1) {
+                if (rd.field_filter) |ff| {
+                    if (!filterPasses(arch, chunk, ff, slot)) continue;
+                }
+                report.entities_iterated += 1;
+                rule_matched = true;
+                const entity_id: EntityId = ids[slot];
+                try self.execBody(world, rd, entity_id, report);
+            }
+        }
+        if (rule_matched) report.rules_matched += 1;
+    }
+
+    fn execBody(self: *Interpreter, world: *World, rd: RuleDesc, entity_id: ?EntityId, report: *RuntimeReport) !void {
+        const rule = self.ast.rule_decls.items[rd.rule_idx];
+
+        var locals: Locals = .{};
+        defer locals.deinit(self.gpa);
+        try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
+
+        var s: u32 = 0;
+        while (s < rule.body_len) : (s += 1) {
+            const stmt_raw = self.ast.extra.items[rule.body_start + s];
+            const stmt_id: NodeId = @bitCast(stmt_raw);
+            self.execStmt(world, &locals, stmt_id) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.RuntimeFailure => {
+                    report.runtime_errors += 1;
+                    return;
+                },
+            };
+        }
+    }
+
+    fn execStmt(self: *Interpreter, world: *World, locals: *Locals, stmt_id: NodeId) StmtError!void {
+        const kind = self.ast.stmtKind(stmt_id);
+        const data = self.ast.stmtData(stmt_id);
+        switch (kind) {
+            .let_stmt => {
+                const let = self.ast.let_stmts.items[data];
+                const v = try self.evalExpr(world, locals, let.value);
+                try locals.put(self.gpa, let.name, v, let.is_mut or self.ast.exprKind(let.value) == .method_get_mut);
+            },
+            .assign_stmt => {
+                const assign = self.ast.assign_stmts.items[data];
+                try self.execAssign(world, locals, assign);
+            },
+            .expr_stmt => {
+                const eid: NodeId = @bitCast(data);
+                _ = try self.evalExpr(world, locals, eid);
+            },
+            else => return error.RuntimeFailure,
+        }
+    }
+
+    fn execAssign(self: *Interpreter, world: *World, locals: *Locals, assign: ast_mod.AssignStmt) StmtError!void {
+        const target_kind = self.ast.exprKind(assign.target);
+        if (target_kind == .ident) {
+            const name_id: StringId = self.ast.exprData(assign.target);
+            const cur = locals.get(name_id) orelse return error.RuntimeFailure;
+            const rhs = try self.evalExpr(world, locals, assign.value);
+            const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
+            const ptr = locals.getPtr(name_id) orelse return error.RuntimeFailure;
+            ptr.* = new_v;
+            return;
+        }
+        if (target_kind == .field_access) {
+            const fa = self.ast.field_accesses.items[self.ast.exprData(assign.target)];
+            const recv = try self.evalExpr(world, locals, fa.receiver);
+            if (recv != .component_ref or !recv.component_ref.mutable) return error.RuntimeFailure;
+            const field_name = self.ast.strings.slice(fa.field_name);
+            const cur = Bridge.readComponentField(&world.registry, recv.component_ref, world, field_name) catch return error.RuntimeFailure;
+            const rhs = try self.evalExpr(world, locals, assign.value);
+            const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
+            Bridge.writeComponentField(&world.registry, recv.component_ref, world, field_name, new_v) catch return error.RuntimeFailure;
+            return;
+        }
+        return error.RuntimeFailure;
+    }
+
+    fn evalExpr(self: *Interpreter, world: *World, locals: *Locals, id: NodeId) StmtError!Value {
+        const kind = self.ast.exprKind(id);
+        const data = self.ast.exprData(id);
+        switch (kind) {
+            .int_lit => {
+                const text = self.ast.strings.slice(data);
+                const v = std.fmt.parseInt(i64, text, 10) catch return error.RuntimeFailure;
+                return Value{ .int_ = v };
+            },
+            .float_lit => {
+                const text = self.ast.strings.slice(data);
+                const v = std.fmt.parseFloat(f64, text) catch return error.RuntimeFailure;
+                return Value{ .float_ = v };
+            },
+            .bool_lit => {
+                const text = self.ast.strings.slice(data);
+                return Value{ .bool_ = std.mem.eql(u8, text, "true") };
+            },
+            .string_lit => return Value{ .string_id = data },
+            .ident => {
+                const name_id: StringId = data;
+                if (locals.get(name_id)) |v| return v;
+                return error.RuntimeFailure;
+            },
+            .field_access => {
+                const fa = self.ast.field_accesses.items[data];
+                const recv = try self.evalExpr(world, locals, fa.receiver);
+                if (recv != .component_ref) return error.RuntimeFailure;
+                const field_name = self.ast.strings.slice(fa.field_name);
+                return Bridge.readComponentField(&world.registry, recv.component_ref, world, field_name) catch error.RuntimeFailure;
+            },
+            .method_get, .method_get_mut => {
+                const mg = self.ast.method_gets.items[data];
+                const recv = try self.evalExpr(world, locals, mg.receiver);
+                if (recv != .entity_id) return error.RuntimeFailure;
+                const comp_name = self.ast.strings.slice(mg.type_name);
+                const comp_id = self.bridge.componentIdOf(comp_name) orelse return error.RuntimeFailure;
+                const mutable = (kind == .method_get_mut);
+                const cref = Bridge.componentRefOf(world, recv.entity_id, comp_id, mutable) catch return error.RuntimeFailure;
+                return Value{ .component_ref = cref };
+            },
+            .binary => {
+                const b = self.ast.binary_exprs.items[data];
+                const lhs = try self.evalExpr(world, locals, b.lhs);
+                const rhs = try self.evalExpr(world, locals, b.rhs);
+                return switch (b.op) {
+                    .add, .sub, .mul, .div, .rem => binaryArith(b.op, lhs, rhs) catch return error.RuntimeFailure,
+                    .eq, .neq, .lt, .gt, .le, .ge => binaryCompare(b.op, lhs, rhs) catch return error.RuntimeFailure,
+                    .logical_and => {
+                        if (lhs != .bool_ or rhs != .bool_) return error.RuntimeFailure;
+                        return Value{ .bool_ = lhs.bool_ and rhs.bool_ };
+                    },
+                    .logical_or => {
+                        if (lhs != .bool_ or rhs != .bool_) return error.RuntimeFailure;
+                        return Value{ .bool_ = lhs.bool_ or rhs.bool_ };
+                    },
+                };
+            },
+            .unary => {
+                const u = self.ast.unary_exprs.items[data];
+                const v = try self.evalExpr(world, locals, u.operand);
+                return switch (u.op) {
+                    .neg => switch (v) {
+                        .int_ => |x| Value{ .int_ = -x },
+                        .float_ => |x| Value{ .float_ = -x },
+                        else => error.RuntimeFailure,
+                    },
+                    .logical_not => switch (v) {
+                        .bool_ => |x| Value{ .bool_ = !x },
+                        else => error.RuntimeFailure,
+                    },
+                };
+            },
+            else => return error.RuntimeFailure, // path / tag_path / unsupported variants
+        }
+    }
+};
+
+// ─── Helpers ─────────────────────────────────────────────────────────────
+
+fn resourceDepsSatisfied(world: *World, rd: RuleDesc) bool {
+    for (rd.resource_deps) |dep| {
+        if (!world.resources.contains(dep.resource_id)) return false;
+        if (dep.must_be_changed and !world.resources.isDirty(dep.resource_id)) return false;
+    }
+    return true;
+}
+
+fn filterPasses(arch: *DynamicArchetype, chunk: *Chunk, ff: FieldFilter, slot: u32) bool {
+    const idx = arch.componentIndex(ff.component_id) orelse return false;
+    const slot_bytes = arch.componentSlot(chunk, idx, slot);
+    const f_bytes = slot_bytes[ff.field_offset .. ff.field_offset + @as(u16, @intCast(ff.field_kind.sizeBytes()))];
+    const v = bridge_mod.readBytesAsValue(ff.field_kind, f_bytes);
+    return v.eql(ff.expected_value);
+}
+
+fn bindParams(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    rule: ast_mod.RuleDecl,
+    entity_id: ?EntityId,
+    locals: *Locals,
+) !void {
+    var i: u32 = 0;
+    while (i < rule.params_len) : (i += 1) {
+        const p = ast.rule_params.items[rule.params_start + i];
+        const v: Value = blk: {
+            const tnode = ast.named_types.items[ast.typeNodeData(p.type_node)];
+            const tname = ast.strings.slice(tnode.name);
+            if (std.mem.eql(u8, tname, "Entity")) {
+                if (entity_id) |id| break :blk Value{ .entity_id = id };
+                break :blk Value{ .entity_id = value_mod.invalid_entity };
+            }
+            if (std.mem.eql(u8, tname, "int")) break :blk Value{ .int_ = 0 };
+            if (std.mem.eql(u8, tname, "float")) break :blk Value{ .float_ = 0.0 };
+            if (std.mem.eql(u8, tname, "bool")) break :blk Value{ .bool_ = false };
+            if (std.mem.eql(u8, tname, "i32") or std.mem.eql(u8, tname, "u32")) break :blk Value{ .int_ = 0 };
+            if (std.mem.eql(u8, tname, "f32") or std.mem.eql(u8, tname, "f64")) break :blk Value{ .float_ = 0.0 };
+            break :blk Value{ .unit = {} };
+        };
+        try locals.put(gpa, p.name, v, false);
+    }
+}
+
+fn applyAssignOp(cur: Value, op: ast_mod.AssignOp, rhs: Value) !Value {
+    return switch (op) {
+        .assign => rhs,
+        .add_assign => try binaryArith(.add, cur, rhs),
+        .sub_assign => try binaryArith(.sub, cur, rhs),
+        .mul_assign => try binaryArith(.mul, cur, rhs),
+        .div_assign => try binaryArith(.div, cur, rhs),
+        .rem_assign => try binaryArith(.rem, cur, rhs),
+    };
+}
+
+fn binaryArith(op: ast_mod.BinaryOp, a: Value, b: Value) !Value {
+    if (a == .int_ and b == .int_) {
+        return switch (op) {
+            .add => Value{ .int_ = value_mod.intAddChecked(a.int_, b.int_) orelse return error.RuntimeFailure },
+            .sub => Value{ .int_ = value_mod.intSubChecked(a.int_, b.int_) orelse return error.RuntimeFailure },
+            .mul => Value{ .int_ = value_mod.intMulChecked(a.int_, b.int_) orelse return error.RuntimeFailure },
+            .div => Value{ .int_ = value_mod.intDiv(a.int_, b.int_) orelse return error.RuntimeFailure },
+            .rem => Value{ .int_ = value_mod.intRem(a.int_, b.int_) orelse return error.RuntimeFailure },
+            else => unreachable,
+        };
+    }
+    if (a == .float_ and b == .float_) {
+        return switch (op) {
+            .add => Value{ .float_ = a.float_ + b.float_ },
+            .sub => Value{ .float_ = a.float_ - b.float_ },
+            .mul => Value{ .float_ = a.float_ * b.float_ },
+            .div => Value{ .float_ = a.float_ / b.float_ },
+            .rem => Value{ .float_ = @rem(a.float_, b.float_) },
+            else => unreachable,
+        };
+    }
+    return error.RuntimeFailure;
+}
+
+fn binaryCompare(op: ast_mod.BinaryOp, a: Value, b: Value) !Value {
+    if (a == .int_ and b == .int_) {
+        const r = switch (op) {
+            .eq => a.int_ == b.int_,
+            .neq => a.int_ != b.int_,
+            .lt => a.int_ < b.int_,
+            .gt => a.int_ > b.int_,
+            .le => a.int_ <= b.int_,
+            .ge => a.int_ >= b.int_,
+            else => unreachable,
+        };
+        return Value{ .bool_ = r };
+    }
+    if (a == .float_ and b == .float_) {
+        const r = switch (op) {
+            .eq => a.float_ == b.float_,
+            .neq => a.float_ != b.float_,
+            .lt => a.float_ < b.float_,
+            .gt => a.float_ > b.float_,
+            .le => a.float_ <= b.float_,
+            .ge => a.float_ >= b.float_,
+            else => unreachable,
+        };
+        return Value{ .bool_ = r };
+    }
+    if (a == .bool_ and b == .bool_) {
+        const r = switch (op) {
+            .eq => a.bool_ == b.bool_,
+            .neq => a.bool_ != b.bool_,
+            else => return error.RuntimeFailure,
+        };
+        return Value{ .bool_ = r };
+    }
+    return error.RuntimeFailure;
+}
+
+// ── Const evaluator ──
+
+pub fn evalConst(ast: *const AstArena, node: NodeId) !Value {
+    const kind = ast.exprKind(node);
+    const data = ast.exprData(node);
+    switch (kind) {
+        .int_lit => return Value{ .int_ = try std.fmt.parseInt(i64, ast.strings.slice(data), 10) },
+        .float_lit => return Value{ .float_ = try std.fmt.parseFloat(f64, ast.strings.slice(data)) },
+        .bool_lit => return Value{ .bool_ = std.mem.eql(u8, ast.strings.slice(data), "true") },
+        .binary => {
+            const b = ast.binary_exprs.items[data];
+            const a = try evalConst(ast, b.lhs);
+            const c = try evalConst(ast, b.rhs);
+            return switch (b.op) {
+                .add, .sub, .mul, .div, .rem => binaryArith(b.op, a, c) catch return error.NotConstEvaluable,
+                .eq, .neq, .lt, .gt, .le, .ge => binaryCompare(b.op, a, c) catch return error.NotConstEvaluable,
+                else => return error.NotConstEvaluable,
+            };
+        },
+        .unary => {
+            const u = ast.unary_exprs.items[data];
+            const v = try evalConst(ast, u.operand);
+            return switch (u.op) {
+                .neg => switch (v) {
+                    .int_ => |x| Value{ .int_ = -x },
+                    .float_ => |x| Value{ .float_ = -x },
+                    else => return error.NotConstEvaluable,
+                },
+                .logical_not => switch (v) {
+                    .bool_ => |x| Value{ .bool_ = !x },
+                    else => return error.NotConstEvaluable,
+                },
+            };
+        },
+        else => return error.UnsupportedExpr,
+    }
+}
+
+// ── Compilation passes ──
+
+fn compileComponent(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    world: *World,
+    bridge: *Bridge,
+    decl: ast_mod.ComponentDecl,
+) !void {
+    const name = ast.strings.slice(decl.name);
+    _ = try compileTypeDecl(gpa, ast, world, bridge, name, decl.fields_start, decl.fields_len, .component);
+}
+
+fn compileResource(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    world: *World,
+    bridge: *Bridge,
+    decl: ast_mod.ResourceDecl,
+) !void {
+    const name = ast.strings.slice(decl.name);
+    const id = try compileTypeDecl(gpa, ast, world, bridge, name, decl.fields_start, decl.fields_len, .resource);
+    const default_bytes = world.registry.componentDefaultBytes(id);
+    try world.addResource(gpa, id, default_bytes);
+}
+
+const RegKind = enum { component, resource };
+
+fn compileTypeDecl(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    world: *World,
+    bridge: *Bridge,
+    name: []const u8,
+    fields_start: u32,
+    fields_len: u32,
+    reg_kind: RegKind,
+) !ComponentId {
+    var fields: std.ArrayListUnmanaged(FieldDesc) = .empty;
+    defer fields.deinit(gpa);
+    var size: usize = 0;
+    var max_align: usize = 1;
+
+    var f_i: u32 = 0;
+    while (f_i < fields_len) : (f_i += 1) {
+        const f = ast.fields.items[fields_start + f_i];
+        const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
+        const tname = ast.strings.slice(tnode.name);
+        const kind = fieldKindFromTypeName(tname) orelse return error.InvalidProgram;
+        const align_b = kind.alignBytes();
+        if (align_b > max_align) max_align = align_b;
+        const off = std.mem.alignForward(usize, size, align_b);
+        size = off + kind.sizeBytes();
+        try fields.append(gpa, .{
+            .name = ast.strings.slice(f.name),
+            .offset = @intCast(off),
+            .kind = kind,
+        });
+    }
+    size = std.mem.alignForward(usize, size, max_align);
+
+    var default_buf: []u8 = try gpa.alloc(u8, size);
+    defer gpa.free(default_buf);
+    @memset(default_buf, 0);
+    f_i = 0;
+    while (f_i < fields_len) : (f_i += 1) {
+        const f = ast.fields.items[fields_start + f_i];
+        if (f.default_value.isNone()) continue;
+        const v = evalConst(ast, f.default_value) catch continue;
+        const fd = fields.items[f_i];
+        const slot = default_buf[fd.offset .. fd.offset + @as(u16, @intCast(fd.kind.sizeBytes()))];
+        bridge_mod.writeValueAsBytes(fd.kind, slot, v);
+    }
+
+    const id = try world.registry.registerComponentRaw(gpa, .{
+        .name = name,
+        .size = @intCast(size),
+        .alignment = @intCast(max_align),
+        .default_bytes = default_buf,
+        .fields = fields.items,
+    });
+    switch (reg_kind) {
+        .component => try bridge.mapComponent(gpa, name, id),
+        .resource => try bridge.mapResource(gpa, name, id),
+    }
+    return id;
+}
+
+fn fieldKindFromTypeName(name: []const u8) ?FieldKind {
+    if (std.mem.eql(u8, name, "int")) return .int_;
+    if (std.mem.eql(u8, name, "float")) return .float_;
+    if (std.mem.eql(u8, name, "bool")) return .bool_;
+    if (std.mem.eql(u8, name, "i32")) return .i32_;
+    if (std.mem.eql(u8, name, "u32")) return .u32_;
+    if (std.mem.eql(u8, name, "f32")) return .f32_;
+    if (std.mem.eql(u8, name, "f64")) return .f64_;
+    return null;
+}
+
+fn compileRule(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    bridge: *Bridge,
+    registry: *const Registry,
+    rule_data: u32,
+) !RuleDesc {
+    const rule = ast.rule_decls.items[rule_data];
+
+    var includes: std.ArrayListUnmanaged(ComponentId) = .empty;
+    errdefer includes.deinit(gpa);
+    var excludes: std.ArrayListUnmanaged(ComponentId) = .empty;
+    errdefer excludes.deinit(gpa);
+    var res_deps: std.ArrayListUnmanaged(ResourceDep) = .empty;
+    errdefer res_deps.deinit(gpa);
+    var field_filter: ?FieldFilter = null;
+
+    if (rule.when_root != ast_mod.RuleDecl.none_when) {
+        try collectWhen(ast, bridge, registry, &includes, &excludes, &res_deps, &field_filter, gpa, rule.when_root, false);
+    }
+
+    var entity_param_name: ?StringId = null;
+    var p_i: u32 = 0;
+    while (p_i < rule.params_len) : (p_i += 1) {
+        const p = ast.rule_params.items[rule.params_start + p_i];
+        const tnode = ast.named_types.items[ast.typeNodeData(p.type_node)];
+        const tname = ast.strings.slice(tnode.name);
+        if (std.mem.eql(u8, tname, "Entity")) {
+            entity_param_name = p.name;
+            break;
+        }
+    }
+    const is_entity_bound = (entity_param_name != null) and (includes.items.len > 0);
+
+    return .{
+        .rule_idx = rule_data,
+        .name = rule.name,
+        .include_ids = try includes.toOwnedSlice(gpa),
+        .exclude_ids = try excludes.toOwnedSlice(gpa),
+        .resource_deps = try res_deps.toOwnedSlice(gpa),
+        .field_filter = field_filter,
+        .entity_param_name = entity_param_name,
+        .is_entity_bound = is_entity_bound,
+    };
+}
+
+fn collectWhen(
+    ast: *const AstArena,
+    bridge: *Bridge,
+    registry: *const Registry,
+    includes: *std.ArrayListUnmanaged(ComponentId),
+    excludes: *std.ArrayListUnmanaged(ComponentId),
+    res_deps: *std.ArrayListUnmanaged(ResourceDep),
+    filter: *?FieldFilter,
+    gpa: std.mem.Allocator,
+    when_idx: u32,
+    negated: bool,
+) !void {
+    const node = ast.when_nodes.items[when_idx];
+    switch (node.kind) {
+        .logical_and, .logical_or => {
+            try collectWhen(ast, bridge, registry, includes, excludes, res_deps, filter, gpa, node.lhs, negated);
+            try collectWhen(ast, bridge, registry, includes, excludes, res_deps, filter, gpa, node.rhs, negated);
+        },
+        .logical_not => {
+            try collectWhen(ast, bridge, registry, includes, excludes, res_deps, filter, gpa, node.lhs, !negated);
+        },
+        .has => {
+            const tname = ast.strings.slice(node.type_name);
+            const id = bridge.componentIdOf(tname) orelse return error.InvalidProgram;
+            if (negated) {
+                try excludes.append(gpa, id);
+            } else {
+                try includes.append(gpa, id);
+            }
+        },
+        .has_with_filter => {
+            const tname = ast.strings.slice(node.type_name);
+            const id = bridge.componentIdOf(tname) orelse return error.InvalidProgram;
+            if (negated) {
+                try excludes.append(gpa, id);
+                return;
+            }
+            try includes.append(gpa, id);
+            const fname = ast.strings.slice(node.field_name);
+            const fd = registry.findField(id, fname) orelse return error.InvalidProgram;
+            const v = evalConst(ast, node.filter_value) catch return error.InvalidProgram;
+            filter.* = .{
+                .component_id = id,
+                .field_offset = fd.offset,
+                .field_kind = fd.kind,
+                .expected_value = v,
+            };
+        },
+        .resource => {
+            const tname = ast.strings.slice(node.type_name);
+            const rid = bridge.resourceIdOf(tname) orelse return error.InvalidProgram;
+            try res_deps.append(gpa, .{ .resource_id = rid, .must_be_changed = false });
+        },
+        .resource_changed => {
+            const tname = ast.strings.slice(node.type_name);
+            const rid = bridge.resourceIdOf(tname) orelse return error.InvalidProgram;
+            try res_deps.append(gpa, .{ .resource_id = rid, .must_be_changed = true });
+        },
+    }
+}
+
+// ─── tests ────────────────────────────────────────────────────────────────
+
+test "run on empty AST returns zero-rule report" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var ast = try AstArena.init(gpa);
+    defer ast.deinit(gpa);
+
+    const report = try Interpreter.run(gpa, &ast, &world, 3);
+    try std.testing.expectEqual(@as(u64, 0), report.rules_evaluated);
+    try std.testing.expectEqual(@as(u64, 0), report.entities_iterated);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+}
+
+test "evalConst on int literal returns Value.int" {
+    const gpa = std.testing.allocator;
+    var ast = try AstArena.init(gpa);
+    defer ast.deinit(gpa);
+
+    const lit_id = try ast.strings.intern(gpa, "42");
+    const node = try ast.addExpr(gpa, .int_lit, lit_id, .{ .byte_start = 0, .byte_end = 2 });
+
+    const v = try evalConst(&ast, node);
+    try std.testing.expectEqual(@as(i64, 42), v.int_);
+}
+
+test "evalConst on arithmetic on literals folds correctly" {
+    const gpa = std.testing.allocator;
+    var ast = try AstArena.init(gpa);
+    defer ast.deinit(gpa);
+
+    const lit_a = try ast.strings.intern(gpa, "2");
+    const a = try ast.addExpr(gpa, .int_lit, lit_a, .{ .byte_start = 0, .byte_end = 0 });
+    const lit_b = try ast.strings.intern(gpa, "3");
+    const b = try ast.addExpr(gpa, .int_lit, lit_b, .{ .byte_start = 0, .byte_end = 0 });
+    const bin = try ast.addBinary(gpa, .add, a, b, .{ .byte_start = 0, .byte_end = 0 });
+
+    const v = try evalConst(&ast, bin);
+    try std.testing.expectEqual(@as(i64, 5), v.int_);
+}
+
+test "evalConst on tag_path returns UnsupportedExpr" {
+    const gpa = std.testing.allocator;
+    var ast = try AstArena.init(gpa);
+    defer ast.deinit(gpa);
+
+    const lit_id = try ast.strings.intern(gpa, "update");
+    const node = try ast.addExpr(gpa, .tag_path, lit_id, .{ .byte_start = 0, .byte_end = 0 });
+    try std.testing.expectError(error.UnsupportedExpr, evalConst(&ast, node));
+}
+
+test "runProgram on minimal component + rule mutates entity" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const source =
+        \\component Health { current: float = 100.0 }
+        \\rule heal(entity: Entity)
+        \\  when entity has Health
+        \\{
+        \\  entity.get_mut(Health).current += 1.0
+        \\}
+    ;
+
+    // Compile manually, spawn one entity, then runFor.
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.ast.deinit(gpa);
+    try std.testing.expect(pr.diagnostic == null);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const comp_id = world.registry.idOf("Health").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{comp_id});
+
+    const report = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // Read the resulting current value back from the chunk.
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    const idx = arch.componentIndex(comp_id).?;
+    const slot = arch.componentSlot(chunk, idx, loc.slot);
+    var current: f64 = 0;
+    @memcpy(std.mem.asBytes(&current), slot[0..@sizeOf(f64)]);
+    try std.testing.expectApproxEqAbs(@as(f64, 103.0), current, 0.0001);
+}

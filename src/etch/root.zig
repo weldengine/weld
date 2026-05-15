@@ -20,6 +20,11 @@ pub const types = @import("types.zig");
 pub const diagnostics = @import("diagnostics.zig");
 pub const token = @import("token.zig");
 
+// S4 interpreter surface.
+pub const value = @import("value.zig");
+pub const ecs_bridge = @import("ecs_bridge.zig");
+pub const interp = @import("interp.zig");
+
 pub const Lexer = lexer.Lexer;
 pub const Token = token.Token;
 pub const TokenKind = token.TokenKind;
@@ -35,6 +40,14 @@ pub const Diagnostic = diagnostics.Diagnostic;
 pub const DiagnosticCode = diagnostics.DiagnosticCode;
 pub const Severity = diagnostics.Severity;
 pub const LineIndex = diagnostics.LineIndex;
+
+pub const Value = value.Value;
+pub const RuntimeError = value.RuntimeError;
+pub const Interpreter = interp.Interpreter;
+pub const RuntimeReport = interp.RuntimeReport;
+pub const runProgram = interp.Interpreter.runProgram;
+pub const runWithAst = interp.Interpreter.run;
+pub const evalConst = interp.evalConst;
 
 /// Parse a full Etch source file. The returned `ParseResult` owns its
 /// `AstArena` — call `result.ast.deinit(gpa)` when done. The diagnostic
