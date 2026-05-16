@@ -1,0 +1,17 @@
+component Counter {
+  value: int = 0
+}
+
+component A {
+  x: int = 0
+}
+
+component B {
+  y: int = 0
+}
+
+rule update(entity: Entity)
+  when entity has Counter and (entity has A or entity has B)
+{
+  entity.get_mut(Counter).value += 1
+}

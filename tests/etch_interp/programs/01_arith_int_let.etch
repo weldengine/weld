@@ -1,0 +1,10 @@
+component Counter {
+  value: int = 0
+}
+
+rule update(entity: Entity)
+  when entity has Counter
+{
+  let x = 2 + 3
+  entity.get_mut(Counter).value = x
+}

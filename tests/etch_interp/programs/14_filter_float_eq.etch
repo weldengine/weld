@@ -1,0 +1,13 @@
+component Score {
+  value: float = 0.0
+}
+
+component Counter {
+  c: int = 0
+}
+
+rule update(entity: Entity)
+  when entity has Score { value == 10.0 } and entity has Counter
+{
+  entity.get_mut(Counter).c += 1
+}

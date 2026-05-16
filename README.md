@@ -2,7 +2,7 @@
 
 A game engine written in Zig 0.16.x.
 
-> **Status:** Phase −1 — Etch parser on subset (S3)
+> **Status:** Phase −1 — Etch tree-walking interpreter (S4)
 >
 > Weld is in its earliest exploratory phase: the spike list of Phase −1 is
 > validating the core architectural hypotheses (comptime ECS, work-stealing
@@ -15,8 +15,8 @@ A game engine written in Zig 0.16.x.
 > iterated on the M4 Pro reference (gate: ≤ 1 ms). Run the bench locally
 > with `zig build bench-ecs -Doptimize=ReleaseSafe`.
 >
-> **S2** (closed, tag `v0.0.3-S2-window-vulkan-triangle` pending merge)
-> validated the "100 % Zig windowing + Vulkan triangle" hypothesis on three
+> **S2** (closed, tag `v0.0.3-S2-window-vulkan-triangle`) validated the
+> "100 % Zig windowing + Vulkan triangle" hypothesis on three
 > target machines: Win11 + RTX 4080 Super, Fedora 44 + Intel UHD 630 (Mesa
 > ANV), Fedora 44 + GTX 1660 Ti (NVIDIA proprietary). Native Win32 +
 > Wayland windowing (no SDL/GLFW, no `@cImport`), custom XML → Zig binding
@@ -24,13 +24,25 @@ A game engine written in Zig 0.16.x.
 > upstream registries, Vulkan 1.3 triangle render path. Full report:
 > [`validation/s2-go-nogo.md`](validation/s2-go-nogo.md).
 >
-> **S3** (closed, tag `v0.0.4-S3-etch-parser-subset` pending merge)
-> validated the Etch grammar (EBNF v0.6, S3 subset: `component`,
+> **S3** (closed, tag `v0.0.4-S3-etch-parser-subset`) validated the Etch
+> grammar (EBNF v0.6, S3 subset: `component`,
 > `resource`, `rule`, `when`, basic arithmetic expressions) — lexer +
 > recursive-descent + Pratt parser + tabular SoA `AstArena` + minimal
 > two-pass type-checker. Worst median 0.019 ms / file across 30 corpus
 > files on dev Apple Silicon ReleaseSafe (gate: < 5 ms). Run the bench
 > locally with `zig build bench-etch -Doptimize=ReleaseSafe`.
+>
+> **S4** (closed, tag `v0.0.5-S4-etch-tree-walking-interpreter` pending
+> merge) validated the tree-walking interpreter hypothesis — the AST
+> emitted by S3 is correctly executable, and a runtime bridge exists
+> between the interpreter and the dynamic ECS surface (runtime component
+> registry, dynamic SoA archetype, resource store, runtime query). On the
+> dev primary (Apple Silicon, ReleaseSafe) the bench reports a median per
+> tick of **0.603 ms** at 1 000 entities × 5 rules and **6.593 ms** at
+> 10 000 entities × 5 rules — well under the 10 ms / 100 ms gates
+> respectively. Run the bench locally with
+> `zig build bench-etch-interp -Doptimize=ReleaseSafe` and the demo with
+> `zig build run-demo-etch-interp -Doptimize=ReleaseSafe`.
 
 ## Prerequisites
 
@@ -48,8 +60,11 @@ zig build run                                            # build and run (S2 spi
 zig build test                                           # run all tests (S0/S1/S2/S3: spike + ABI + ECS + jobs + Etch corpus)
 zig build bench-ecs -Doptimize=ReleaseSafe               # S1 ECS iteration bench
 zig build bench-etch -Doptimize=ReleaseSafe              # S3 Etch parser bench (report under bench/results/)
+zig build bench-etch-interp -Doptimize=ReleaseSafe       # S4 Etch interpreter bench (report under bench/results/)
+zig build run-demo-etch-interp -Doptimize=ReleaseSafe    # S4 demo (1000 entities × 5 rules × 60 ticks)
 zig build bench-ecs -- --smoke                           # short bench run (used by CI)
 zig build bench-etch -- --smoke                          # short Etch bench run (sanity)
+zig build bench-etch-interp -- --smoke                   # short S4 bench run (sanity)
 ./scripts/install-hooks.sh                               # install local git hooks (run once after clone)
 ```
 
@@ -88,12 +103,13 @@ src/
       window/wayland_protocols/    ~3 000 lines — generated from wayland XMLs by tools/wayland_gen
   etch/                            S3 Etch parser — lexer, parser, tabular SoA AST, type-checker
   spike/                           throwaway S2 spike code (CLI parser, scoring, vk_setup, vk_frame, ppm)
-tests/etch/                        Etch corpus driver + ~30 valid + ~10 invalid `.etch` fixtures
+tests/etch/                        S3 parser corpus driver + ~30 valid + ~10 invalid `.etch` fixtures
+tests/etch_interp/                 S4 differential corpus — 20 `.etch` programs + sidecars + generic driver
 tools/
   vk_gen/                          XML → Zig generator for Vulkan bindings
   wayland_gen/                     XML → Zig generator for Wayland protocol bindings
 assets/shaders/                    GLSL sources + pre-compiled SPIR-V (triangle.vert, triangle.frag)
-bench/                             performance benchmarks (`zig build bench-ecs`)
+bench/                             performance benchmarks (see "Basic commands" above)
 tests/                             out-of-tree tests wired into `zig build test`
 validation/                        hardware validation reports + PPM/PNG artefacts (step (j) per milestone)
 scripts/                           POSIX shell helpers (commit-msg validation, hook setup, shader compile)

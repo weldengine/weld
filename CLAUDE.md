@@ -5,38 +5,44 @@ session and captures the operational state of the project plus the rules that
 must never be violated. The full specification lives in the claude.ai
 knowledge base — see § Quick links spec.
 
-> **Status:** Phase −1 — S3 closed (code + bench verdict GO), PR pending
+> **Status:** Phase −1 — S4 closed (code + bench verdict GO), PR pending
 >
-> S3 closed: lexer + parser + tabular SoA AST + minimal type-checker on
-> the 5-construct subset (`component`, `resource`, `rule`, `when`, basic
-> arithmetic expressions). Bench verdict on dev machine (Apple Silicon,
-> macOS, ReleaseSafe, 1000 iterations + 50 warmups): worst median
-> 0.019 ms, worst p99 0.028 ms, worst max 0.042 ms across 30 corpus
-> files — well under the 5 ms / 15 ms / 25 ms gates respectively.
-> Official verdict will be re-confirmed on the S2 reference machines by
-> Guy. Validation: `zig build`, `zig build test` (debug + ReleaseSafe),
-> `zig fmt --check` all green. PR `Phase -1 / Etch / S3 parser on
-> subset` opens next; tag `v0.0.4-S3-etch-parser-subset` posted by Guy
-> after squash-merge.
+> S4 closed: tree-walking interpreter over the S3 AST plus the additive
+> Tier 0 ECS surface required to host it (runtime component registry,
+> dynamic SoA archetype, resource store, runtime query, world dynamic
+> spawn / tickBoundary). Public surface `Interpreter`, `Value`,
+> `RuntimeReport`, `runProgram`, `evalConst` exported through
+> `src/etch/root.zig`. 20-program differential corpus under
+> `tests/etch_interp/` parameterised by a `Runner` interface
+> (interpreter runner today, codegen runner in S5). Bench verdict on dev
+> machine (Apple Silicon, macOS, ReleaseSafe, 1 000 ticks @ 1 000
+> entities + 100 ticks @ 10 000 entities, 50 warmup ticks): median
+> 0.603 ms / tick at 1 000 × 5 (gate 10 ms), median 6.593 ms / tick at
+> 10 000 × 5 (gate 100 ms). Validation: `zig build`, `zig build test`
+> (debug + ReleaseSafe), `zig fmt --check` all green. PR
+> `Phase -1 / Etch / Tree-walking interpreter` opens next; tag
+> `v0.0.5-S4-etch-tree-walking-interpreter` posted by Guy after
+> squash-merge.
 
 ## Current state
 
 | Field | Value |
 |---|---|
 | Phase | −1 (Spikes) |
-| Current milestone | S3 — Etch parser on subset (CLOSED, PR pending) |
-| Last released tag | `v0.0.3-S2-window-vulkan-triangle` |
-| Active branch | `phase--1/etch/parser-subset` |
-| Next planned milestone | S4 — Etch tree-walking interpreter |
+| Current milestone | S4 — Etch tree-walking interpreter (CLOSED, PR pending) |
+| Last released tag | `v0.0.4-S3-etch-parser-subset` |
+| Active branch | `phase-pre-0/etch/tree-walking-interpreter` |
+| Next planned milestone | S5 — Etch → Zig codegen + compile-time measurement |
 
 ## Tags
 
 | Tag | Date | Milestone | Notes |
 |---|---|---|---|
 | `v0.0.1-S0-bootstrap` | 2026-05-08 | S0 — Bootstrap repo and CI | First milestone. Build infra, CI on `{ubuntu-24.04, windows-2025} × {Debug, ReleaseSafe}`, lefthook, `CLAUDE.md`. Tag posted by Guy after merge of PR #1. |
-| `v0.0.2-S1-mini-ecs` | 2026-05-09 (planned) | S1 — Mini-ECS Zig | Comptime SoA archetype + Chase-Lev work-stealing scheduler. Validates the comptime + work-stealing hypothesis (100k entities iterated in 54.5 µs median ReleaseSafe on M4 Pro reference, gate 1 ms). Tag posted by Guy after squash-merge of PR `Phase -1 / Core / Mini-ECS Zig`. |
-| `v0.0.3-S2-window-vulkan-triangle` | (planned) | S2 — Window + Vulkan triangle | Native Win32 + Wayland windowing, Vulkan triangle, no SDL/GLFW. Validated GO on Win11 + RTX 4080, Fedora 44 + UHD 630, Fedora 44 + GTX 1660 Ti. |
-| `v0.0.4-S3-etch-parser-subset` | (planned) | S3 — Etch parser on subset | Lexer + parser + tabular SoA AST + minimal type-checker on 5 constructs. Bench verdict GO (worst median 0.019 ms vs 5 ms target on dev machine; re-confirmation on reference machine pending). |
+| `v0.0.2-S1-mini-ecs` | 2026-05-09 | S1 — Mini-ECS Zig | Comptime SoA archetype + Chase-Lev work-stealing scheduler. Validates the comptime + work-stealing hypothesis (100k entities iterated in 54.5 µs median ReleaseSafe on M4 Pro reference, gate 1 ms). |
+| `v0.0.3-S2-window-vulkan-triangle` | 2026-05-11 | S2 — Window + Vulkan triangle | Native Win32 + Wayland windowing, Vulkan triangle, no SDL/GLFW. Validated GO on Win11 + RTX 4080, Fedora 44 + UHD 630, Fedora 44 + GTX 1660 Ti. |
+| `v0.0.4-S3-etch-parser-subset` | 2026-05-15 | S3 — Etch parser on subset | Lexer + parser + tabular SoA AST + minimal type-checker on 5 constructs. Bench verdict GO (worst median 0.019 ms vs 5 ms target on dev machine; re-confirmation on reference machine pending). |
+| `v0.0.5-S4-etch-tree-walking-interpreter` | (planned) | S4 — Etch tree-walking interpreter | Interpreter over S3 AST + additive Tier 0 ECS (runtime registry, dynamic archetype, resource store, runtime query). 20-program differential corpus. Bench verdict GO (median 0.603 ms / tick at 1 000 entities × 5 rules, gate 10 ms; median 6.593 ms / tick at 10 000 × 5, gate 100 ms) on dev Apple Silicon ReleaseSafe. Tag posted by Guy after squash-merge of PR `Phase -1 / Etch / Tree-walking interpreter`. |
 
 ## Hypotheses validated by spikes
 
@@ -46,7 +52,7 @@ knowledge base — see § Quick links spec.
 | S1 | comptime ECS + Chase-Lev work-stealing iterates 100k entities < 1 ms | validated (54.5 µs median on M4 Pro) |
 | S2 | Window Win32 + Wayland + Vulkan triangle, native Zig, no SDL/GLFW | validated (3/3 target machines green, validation/s2-go-nogo.md ✅ GO) |
 | S3 | Etch grammar EBNF v0.6 (S3 subset) implementable, parsing < 5 ms / file | validated (worst median 0.019 ms on dev Apple Silicon ReleaseSafe; reference-machine re-run pending) |
-| S4 | AST tree-walking interpreter executes Etch correctly with ECS bridge | pending |
+| S4 | AST tree-walking interpreter executes Etch correctly with ECS bridge | validated (20-program differential corpus green; bench median 0.603 ms / tick @ 1 000 × 5 vs 10 ms gate on dev Apple Silicon ReleaseSafe) |
 | S5 | Etch → Zig codegen viable build-time-wise (incremental < 2 s) | pending |
 | S6 | IPC editor↔runtime stable, < 1 ms RTT, 1h fuzz, kill -9 recovery | pending |
 
@@ -122,4 +128,4 @@ The `briefs/` directory is the source of truth for milestone state. The brief's 
 
 ---
 
-Last updated: 2026-05-15
+Last updated: 2026-05-16

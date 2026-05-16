@@ -1,0 +1,10 @@
+component Velocity {
+  dx: float = 0.0
+}
+
+rule update(entity: Entity)
+  when entity has Velocity
+{
+  let delta = 0.5 * 3.0
+  entity.get_mut(Velocity).dx += delta
+}

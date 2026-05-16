@@ -1,0 +1,13 @@
+component Score {
+  v: int = 0
+}
+
+resource Config {
+  multiplier: int = 1
+}
+
+rule increment(entity: Entity)
+  when entity has Score and resource Config
+{
+  entity.get_mut(Score).v += 1
+}

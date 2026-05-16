@@ -1,0 +1,19 @@
+component A {
+  x: int = 0
+}
+
+component B {
+  y: int = 0
+}
+
+rule rule_a(entity: Entity)
+  when entity has A
+{
+  entity.get_mut(A).x += 1
+}
+
+rule rule_b(entity: Entity)
+  when entity has A and entity has B
+{
+  entity.get_mut(B).y = entity.get(A).x
+}

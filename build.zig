@@ -14,16 +14,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Shared `weld_etch` module — S3 parser + type-checker (foundation
-    // submodule per `engine-directory-structure.md` §9.1). Etch is not
-    // a Tier 1 module; it is conceptually a foundation submodule and
-    // ships as its own top-level public surface under `src/etch/root.zig`.
-    const etch_module = b.createModule(.{
-        .root_source_file = b.path("src/etch/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     // Shared `weld_core` module — Tier 0 internals consumed by the runtime,
     // the bench harness, and every test executable.
     const core_module = b.createModule(.{
@@ -36,6 +26,19 @@ pub fn build(b: *std.Build) void {
         // branch and libc is not actually referenced.
         .link_libc = true,
     });
+
+    // Shared `weld_etch` module — S3 parser + type-checker + S4 tree-walking
+    // interpreter (foundation submodule per `engine-directory-structure.md`
+    // §9.1). Etch is not a Tier 1 module; it is conceptually a foundation
+    // submodule and ships as its own top-level public surface under
+    // `src/etch/root.zig`. The S4 interpreter pulls in `weld_core` to drive
+    // the runtime registry / dynamic archetype / resource store.
+    const etch_module = b.createModule(.{
+        .root_source_file = b.path("src/etch/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    etch_module.addImport("weld_core", core_module);
 
     // Main executable.
     const exe_module = b.createModule(.{
@@ -107,11 +110,46 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // S4 differential corpus — `tests/etch_interp/` houses 20 .etch
+    // programs and their sidecar `expected.zig` files. The facade is the
+    // shared module the corpus_test driver and the bench harness both
+    // import (same pattern as the S3 corpus facade above).
+    // Generic test driver module (independent of the corpus + runner) so it
+    // can be reused by S5's codegen-runner without modifying call sites.
+    const etch_interp_driver_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/diff_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    etch_interp_driver_module.addImport("weld_core", core_module);
+    // S4 differential corpus — `tests/etch_interp/` houses 20 .etch
+    // programs and their sidecar `expected.zig` files. The facade enumerates
+    // them and is consumed by `corpus_test.zig` (the test driver) and by
+    // the bench harness. Sidecars in `programs/` reach the diff_runner
+    // types through the `diff_runner` module dependency below.
+    const etch_interp_corpus_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/corpus_facade.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    etch_interp_corpus_module.addImport("weld_core", core_module);
+    etch_interp_corpus_module.addImport("weld_etch", etch_module);
+    etch_interp_corpus_module.addImport("diff_runner", etch_interp_driver_module);
+    // Runner module — the interpreter backend.
+    const etch_interp_runner_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/runner_interp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    etch_interp_runner_module.addImport("weld_core", core_module);
+    etch_interp_runner_module.addImport("weld_etch", etch_module);
+
     const TestSpec = struct {
         path: []const u8,
         spike: bool = false,
         wl_protocols: bool = false,
         etch: bool = false,
+        etch_interp: bool = false,
     };
     const test_specs = [_]TestSpec{
         .{ .path = "tests/smoke_test.zig" },
@@ -128,6 +166,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/bindings/vk_abi_test.zig" },
         .{ .path = "tests/bindings/wayland_abi_test.zig", .wl_protocols = true },
         .{ .path = "tests/etch/corpus_test.zig", .etch = true },
+        .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
@@ -145,6 +184,12 @@ pub fn build(b: *std.Build) void {
         if (spec.etch) {
             t_mod.addImport("weld_etch", etch_module);
             t_mod.addImport("corpus_facade", etch_corpus_module);
+        }
+        if (spec.etch_interp) {
+            t_mod.addImport("weld_etch", etch_module);
+            t_mod.addImport("corpus_facade", etch_interp_corpus_module);
+            t_mod.addImport("diff_runner", etch_interp_driver_module);
+            t_mod.addImport("runner_interp", etch_interp_runner_module);
         }
         const t = b.addTest(.{ .root_module = t_mod });
         test_step.dependOn(&b.addRunArtifact(t).step);
@@ -172,6 +217,65 @@ pub fn build(b: *std.Build) void {
         "Run the S1 ECS iteration bench (pass `-- --smoke` for a CI sanity run)",
     );
     bench_step.dependOn(&bench_run.step);
+
+    // -------------------------------------------- Fixture facade (S4 demo) --
+
+    // `@embedFile` cannot escape the package root of the module that
+    // invokes it, so both the S4 bench and the S4 demo binary import this
+    // tiny facade module that holds the fixture at its canonical path.
+    const fixture_facade_module = b.createModule(.{
+        .root_source_file = b.path("bench/fixture_facade.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // ------------------------------------------------- S4 demo binary ------
+
+    const demo_module = b.createModule(.{
+        .root_source_file = b.path("src/demo_etch_interp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    demo_module.addImport("weld_core", core_module);
+    demo_module.addImport("weld_etch", etch_module);
+    demo_module.addImport("fixture_facade", fixture_facade_module);
+    const demo_exe = b.addExecutable(.{
+        .name = "demo-etch-interp",
+        .root_module = demo_module,
+    });
+    b.installArtifact(demo_exe);
+    const demo_run = b.addRunArtifact(demo_exe);
+    demo_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| demo_run.addArgs(args);
+    const demo_step = b.step(
+        "run-demo-etch-interp",
+        "Run the S4 demo (1000 entities × 5 rules × 60 ticks)",
+    );
+    demo_step.dependOn(&demo_run.step);
+
+    // -------------------------------------------- S4 Etch interpreter bench --
+
+    const interp_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/etch_interp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    interp_bench_module.addImport("weld_core", core_module);
+    interp_bench_module.addImport("weld_etch", etch_module);
+    interp_bench_module.addImport("fixture_facade", fixture_facade_module);
+    const interp_bench_exe = b.addExecutable(.{
+        .name = "etch-interp-bench",
+        .root_module = interp_bench_module,
+    });
+    b.installArtifact(interp_bench_exe);
+    const interp_bench_run = b.addRunArtifact(interp_bench_exe);
+    interp_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| interp_bench_run.addArgs(args);
+    const interp_bench_step = b.step(
+        "bench-etch-interp",
+        "Run the S4 interpreter bench (pass `-- --smoke` for a CI sanity run)",
+    );
+    interp_bench_step.dependOn(&interp_bench_run.step);
 
     // ---------------------------------------------------- Etch parse bench --
 
