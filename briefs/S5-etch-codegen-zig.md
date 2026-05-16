@@ -1,6 +1,6 @@
 # S5 — Etch → Zig codegen and compile-time measurement
 
-> **Status:** PLANNED
+> **Status:** ACTIVE
 > **Phase:** -1
 > **Branche:** `phase-pre-0/etch/codegen-zig`
 > **Tag prévu:** `v0.0.6-S5-etch-codegen-zig`
@@ -285,7 +285,7 @@ If during implementation the comptime path produces compile times that exceed th
 
 *One entry per logical work sequence (typically: an objective reached, a test passing, a blocker). Chronological order. Short format — 1 to 3 lines per entry.*
 
-- <YYYY-MM-DD HH:MM> — <summary>
+- 2026-05-17 01:35 — Branche `phase-pre-0/etch/codegen-zig` créée depuis `main` (commit 483062b S4). Brief copié verbatim, premier commit. Specs lues intégralement (17 documents), section « Specs lues » cochée. Status flipped to ACTIVE.
 
 ## Déviations actées
 
