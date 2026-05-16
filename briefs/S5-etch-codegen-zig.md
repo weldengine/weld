@@ -263,23 +263,23 @@ If during implementation the comptime path produces compile times that exceed th
 
 *To be checked before any production code is written. Confirms the spec was fully ingested, not skimmed.*
 
-- [ ] `engine-spec.md` §25.3 / S5 + §25.3 / S4 + §25.3 / S3 + §25.3 / S1 + §3.5 — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-grammar.md` §5 + §6 + §7 + §19 — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-reference-part1.md` §3 + §5 + §8 — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-reference-part2.md` §3 + §4 — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-ast-ir.md` §3 + §5 + §6 — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-memory-model.md` §1 + §6 — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-resolver-types.md` §11 + §12 + §19 — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-bytecode.md` §18 — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-abi-zig.md` §12 — read <YYYY-MM-DD HH:MM>
-- [ ] `etch-visual-scripting.md` §4 — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-ecs-internals.md` §1 + §3 + §4 + §5 — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-zig-conventions.md` §3 + §4 + §9 + §13 — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-development-workflow.md` §2 + §3 + §4 — read <YYYY-MM-DD HH:MM>
-- [ ] `engine-directory-structure.md` §9 + §9.1 — read <YYYY-MM-DD HH:MM>
-- [ ] `briefs/S1-mini-ecs-zig.md` — read <YYYY-MM-DD HH:MM>
-- [ ] `briefs/S3-etch-parser-subset.md` — read <YYYY-MM-DD HH:MM>
-- [ ] `briefs/S4-etch-tree-walking-interpreter.md` — read <YYYY-MM-DD HH:MM>
+- [x] `engine-spec.md` §25.3 / S5 + §25.3 / S4 + §25.3 / S3 + §25.3 / S1 + §3.5 — read 2026-05-17 01:35
+- [x] `etch-grammar.md` §5 + §6 + §7 + §19 — read 2026-05-17 01:35
+- [x] `etch-reference-part1.md` §3 + §5 + §8 — read 2026-05-17 01:35
+- [x] `etch-reference-part2.md` §3 + §4 — read 2026-05-17 01:35
+- [x] `etch-ast-ir.md` §3 + §5 + §6 — read 2026-05-17 01:35
+- [x] `etch-memory-model.md` §1 + §6 — read 2026-05-17 01:35
+- [x] `etch-resolver-types.md` §11 + §12 + §19 — read 2026-05-17 01:35
+- [x] `etch-bytecode.md` §18 — read 2026-05-17 01:35
+- [x] `etch-abi-zig.md` §12 — read 2026-05-17 01:35
+- [x] `etch-visual-scripting.md` §4 — read 2026-05-17 01:35
+- [x] `engine-ecs-internals.md` §1 + §3 + §4 + §5 — read 2026-05-17 01:35
+- [x] `engine-zig-conventions.md` §3 + §4 + §9 + §13 — read 2026-05-17 01:35
+- [x] `engine-development-workflow.md` §2 + §3 + §4 — read 2026-05-17 01:35
+- [x] `engine-directory-structure.md` §9 + §9.1 — read 2026-05-17 01:35
+- [x] `briefs/S1-mini-ecs-zig.md` (présent localement sous `briefs/S1-mini-ecs.md`) — read 2026-05-17 01:35
+- [x] `briefs/S3-etch-parser-subset.md` — read 2026-05-17 01:35
+- [x] `briefs/S4-etch-tree-walking-interpreter.md` — read 2026-05-17 01:35
 
 ## Journal d'exécution
 
