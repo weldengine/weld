@@ -15,8 +15,8 @@ A game engine written in Zig 0.16.x.
 > iterated on the M4 Pro reference (gate: ≤ 1 ms). Run the bench locally
 > with `zig build bench-ecs -Doptimize=ReleaseSafe`.
 >
-> **S2** (closed, tag `v0.0.3-S2-window-vulkan-triangle` pending merge)
-> validated the "100 % Zig windowing + Vulkan triangle" hypothesis on three
+> **S2** (closed, tag `v0.0.3-S2-window-vulkan-triangle`) validated the
+> "100 % Zig windowing + Vulkan triangle" hypothesis on three
 > target machines: Win11 + RTX 4080 Super, Fedora 44 + Intel UHD 630 (Mesa
 > ANV), Fedora 44 + GTX 1660 Ti (NVIDIA proprietary). Native Win32 +
 > Wayland windowing (no SDL/GLFW, no `@cImport`), custom XML → Zig binding
@@ -24,8 +24,8 @@ A game engine written in Zig 0.16.x.
 > upstream registries, Vulkan 1.3 triangle render path. Full report:
 > [`validation/s2-go-nogo.md`](validation/s2-go-nogo.md).
 >
-> **S3** (closed, tag `v0.0.4-S3-etch-parser-subset` pending merge)
-> validated the Etch grammar (EBNF v0.6, S3 subset: `component`,
+> **S3** (closed, tag `v0.0.4-S3-etch-parser-subset`) validated the Etch
+> grammar (EBNF v0.6, S3 subset: `component`,
 > `resource`, `rule`, `when`, basic arithmetic expressions) — lexer +
 > recursive-descent + Pratt parser + tabular SoA `AstArena` + minimal
 > two-pass type-checker. Worst median 0.019 ms / file across 30 corpus
@@ -109,7 +109,7 @@ tools/
   vk_gen/                          XML → Zig generator for Vulkan bindings
   wayland_gen/                     XML → Zig generator for Wayland protocol bindings
 assets/shaders/                    GLSL sources + pre-compiled SPIR-V (triangle.vert, triangle.frag)
-bench/                             performance benchmarks (`zig build bench-ecs`)
+bench/                             performance benchmarks (see "Basic commands" above)
 tests/                             out-of-tree tests wired into `zig build test`
 validation/                        hardware validation reports + PPM/PNG artefacts (step (j) per milestone)
 scripts/                           POSIX shell helpers (commit-msg validation, hook setup, shader compile)
