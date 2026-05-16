@@ -51,7 +51,9 @@ test "lowers resource declaration to extern struct + singleton spawn" {
     , &out);
     try std.testing.expectEqual(@as(u32, 1), stats.resources);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "pub const GameMode = extern struct {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "world.addResource(gpa, GameMode_id") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "world.addResource(gpa, GameMode_id, std.mem.asBytes(&default));") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "registerComponentRaw(gpa, .{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, ".name = \"GameMode\",") != null);
 }
 
 test "lowers rule with single component when clause" {

@@ -138,6 +138,8 @@ fn emitImports(w: *Writer) CodegenError!void {
     try w.line("const weld_core = @import(\"weld_core\");");
     try w.line("const World = weld_core.ecs.world.World;");
     try w.line("const ComponentId = weld_core.ecs.registry.ComponentId;");
+    try w.line("const FieldDesc = weld_core.ecs.registry.FieldDesc;");
+    try w.line("const FieldKind = weld_core.ecs.registry.FieldKind;");
     try w.line("const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;");
     try w.line("const Chunk = weld_core.ecs.archetype_dynamic.Chunk;");
     try w.blankLine();
@@ -200,6 +202,12 @@ fn emitRegister(w: *Writer, ast: *const AstArena) CodegenError!void {
     try w.line("/// Register every component and resource declared in the source");
     try w.line("/// program with the world's RTTI and seed the resource store.");
     try w.line("/// Must be called once at program start, before `tick`.");
+    try w.line("///");
+    try w.line("/// Uses `registerComponentRaw` with the explicit Etch type name so");
+    try w.line("/// `world.registry.idOf(\"Counter\")` works regardless of the file's");
+    try w.line("/// package path (the comptime helper `registerComponent` would key");
+    try w.line("/// by `@typeName(T)`, which carries the module path on top-level");
+    try w.line("/// generated files and breaks name-based lookup).");
     try w.line("pub fn register(world: *World, gpa: std.mem.Allocator) !void {");
     w.indentBy(1);
 
@@ -209,13 +217,12 @@ fn emitRegister(w: *Writer, ast: *const AstArena) CodegenError!void {
         const data = ast.items.items(.data)[i];
         switch (kind) {
             .component_decl => {
-                const name = ast.strings.slice(ast.component_decls.items[data].name);
-                try w.printLine("_ = try world.registerComponent(gpa, {s});", .{name});
+                const decl = ast.component_decls.items[data];
+                try emitRegisterCall(w, ast, ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, false);
             },
             .resource_decl => {
-                const name = ast.strings.slice(ast.resource_decls.items[data].name);
-                try w.printLine("const {s}_id = try world.registerComponent(gpa, {s});", .{ name, name });
-                try w.printLine("{{ var v: {s} = .{{}}; try world.addResource(gpa, {s}_id, std.mem.asBytes(&v)); }}", .{ name, name });
+                const decl = ast.resource_decls.items[data];
+                try emitRegisterCall(w, ast, ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, true);
             },
             else => {},
         }
@@ -224,6 +231,63 @@ fn emitRegister(w: *Writer, ast: *const AstArena) CodegenError!void {
     w.indentBy(-1);
     try w.line("}");
     try w.blankLine();
+}
+
+fn emitRegisterCall(
+    w: *Writer,
+    ast: *const AstArena,
+    name: []const u8,
+    fields_start: u32,
+    fields_len: u32,
+    is_resource: bool,
+) CodegenError!void {
+    // Emit a scoped block per type so the local `default`, `fields` and the
+    // computed `id` do not collide across registrations.
+    try w.line("{");
+    w.indentBy(1);
+    try w.printLine("var default: {s} = .{{}};", .{name});
+    try w.printLine("var fields = [_]FieldDesc{{", .{});
+    w.indentBy(1);
+    var f_i: u32 = 0;
+    while (f_i < fields_len) : (f_i += 1) {
+        const f = ast.fields.items[fields_start + f_i];
+        const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
+        const etch_t = ast.strings.slice(tnode.name);
+        const zig_t = type_map.mapBuiltin(etch_t) orelse return CodegenError.NonPodComponent;
+        const fname = ast.strings.slice(f.name);
+        const fkind = fieldKindLiteral(zig_t);
+        try w.printLine(".{{ .name = \"{s}\", .offset = @offsetOf({s}, \"{s}\"), .kind = {s} }},", .{ fname, name, fname, fkind });
+    }
+    w.indentBy(-1);
+    try w.line("};");
+    try w.printLine("const {s}_id = try world.registry.registerComponentRaw(gpa, .{{", .{name});
+    w.indentBy(1);
+    try w.printLine(".name = \"{s}\",", .{name});
+    try w.printLine(".size = @sizeOf({s}),", .{name});
+    try w.printLine(".alignment = @alignOf({s}),", .{name});
+    try w.printLine(".default_bytes = std.mem.asBytes(&default),", .{});
+    try w.printLine(".fields = &fields,", .{});
+    w.indentBy(-1);
+    try w.line("});");
+    if (is_resource) {
+        try w.printLine("try world.addResource(gpa, {s}_id, std.mem.asBytes(&default));", .{name});
+    } else {
+        try w.printLine("_ = {s}_id;", .{name});
+    }
+    w.indentBy(-1);
+    try w.line("}");
+}
+
+fn fieldKindLiteral(zig_type: []const u8) []const u8 {
+    if (std.mem.eql(u8, zig_type, "i64")) return "FieldKind.int_";
+    if (std.mem.eql(u8, zig_type, "f64")) return "FieldKind.float_";
+    if (std.mem.eql(u8, zig_type, "bool")) return "FieldKind.bool_";
+    if (std.mem.eql(u8, zig_type, "i32")) return "FieldKind.i32_";
+    if (std.mem.eql(u8, zig_type, "u32")) return "FieldKind.u32_";
+    if (std.mem.eql(u8, zig_type, "f32")) return "FieldKind.f32_";
+    if (std.mem.eql(u8, zig_type, "f64")) return "FieldKind.f64_";
+    // Unreachable per the S3 type-checker — kept defensive.
+    return "FieldKind.int_";
 }
 
 // ─── Rules ──────────────────────────────────────────────────────────────────
