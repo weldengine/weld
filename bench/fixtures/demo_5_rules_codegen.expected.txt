@@ -1,0 +1,4 @@
+Demo S5 OK | ticks=10
+entity 0: Counter.value=20 Score.total=7.500 Active.flag=true
+entity 1: Counter.value=10 Score.total=7.500
+entity 2: Counter.value=10

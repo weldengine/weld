@@ -386,6 +386,41 @@ pub fn build(b: *std.Build) void {
     const codegen_parity_test = b.addTest(.{ .root_module = codegen_parity_module });
     test_step.dependOn(&b.addRunArtifact(codegen_parity_test).step);
 
+    // -------------------------------- S5 demo binary (run-demo-etch-codegen) --
+
+    const cook_demo_run = b.addRunArtifact(etch_cook_exe);
+    cook_demo_run.addArg("--output");
+    const demo_codegen_path = cook_demo_run.addOutputFileArg("cooked_demo.zig");
+    cook_demo_run.addArg("demo=bench/fixtures/demo_5_rules_codegen.etch");
+
+    const cooked_demo_module = b.createModule(.{
+        .root_source_file = demo_codegen_path,
+        .target = target,
+        .optimize = optimize,
+    });
+    cooked_demo_module.addImport("weld_core", core_module);
+
+    const demo_codegen_module = b.createModule(.{
+        .root_source_file = b.path("src/demo_etch_codegen.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    demo_codegen_module.addImport("weld_core", core_module);
+    demo_codegen_module.addImport("cooked_demo", cooked_demo_module);
+    const demo_codegen_exe = b.addExecutable(.{
+        .name = "demo-etch-codegen",
+        .root_module = demo_codegen_module,
+    });
+    b.installArtifact(demo_codegen_exe);
+    const demo_codegen_run = b.addRunArtifact(demo_codegen_exe);
+    demo_codegen_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| demo_codegen_run.addArgs(args);
+    const demo_codegen_step = b.step(
+        "run-demo-etch-codegen",
+        "Run the S5 codegen demo (cooks demo_5_rules_codegen.etch, runs 10 ticks)",
+    );
+    demo_codegen_step.dependOn(&demo_codegen_run.step);
+
     // ------------------------------------------------ vk_gen (S2 bindgen) --
     //
     // Throwaway generator that re-emits `src/core/platform/vk.zig` from the
