@@ -107,8 +107,18 @@ const Entry = struct {
 pub const Registry = struct {
     entries: std.ArrayListUnmanaged(Entry) = .empty,
     /// Inverse map for lookup by name. Used by the Etch bridge to resolve
-    /// `entity.get(T)` strings into a `ComponentId`.
+    /// `entity.get(T)` strings into a `ComponentId`. Each entry's primary
+    /// `desc.name` slice is owned by `entries[id]`; alias slices added via
+    /// `registerAlias` are owned by the `aliases` ArrayList below.
     by_name: std.StringHashMapUnmanaged(ComponentId) = .empty,
+    /// Extra name slices that map to existing component ids. Lets a single
+    /// component be reached by both its Etch name (via `idOf("Counter")`)
+    /// and its Zig type's `@typeName(T)` (so the S5 codegen's comptime
+    /// `world.query(.{T})` can resolve to the same `ComponentId` as
+    /// `world.spawnDynamic(gpa, &.{idOf("Counter").?})`). Stored separately
+    /// from the primary names so `deinit` can free them without
+    /// double-freeing the entries' own names.
+    aliases: std.ArrayListUnmanaged([]const u8) = .empty,
 
     pub fn init() Registry {
         return .{};
@@ -124,6 +134,8 @@ pub const Registry = struct {
         }
         self.entries.deinit(gpa);
         self.by_name.deinit(gpa);
+        for (self.aliases.items) |a| gpa.free(a);
+        self.aliases.deinit(gpa);
         self.* = undefined;
     }
 
@@ -227,9 +239,32 @@ pub const Registry = struct {
     }
 
     /// Resolve a component name to its id. Returns `null` if the name is
-    /// not registered.
+    /// not registered. Both the primary registration name and any aliases
+    /// added via `registerAlias` resolve to the same id.
     pub fn idOf(self: *const Registry, name: []const u8) ?ComponentId {
         return self.by_name.get(name);
+    }
+
+    /// Add an additional name → id mapping for an already-registered
+    /// component. Used by the S5 codegen's `register()` function so the
+    /// component is reachable by both its Etch name (e.g. `"Counter"`)
+    /// and its Zig `@typeName(T)` (e.g. `"corpus_codegen.p01_…Counter"`).
+    /// The two names share one entry — no duplication of the underlying
+    /// descriptor.
+    ///
+    /// Errors `DuplicateComponent` if `alias_name` already maps to a
+    /// different id. Idempotent when the alias already maps to `id`.
+    pub fn registerAlias(self: *Registry, gpa: std.mem.Allocator, alias_name: []const u8, id: ComponentId) RegistryError!void {
+        std.debug.assert(id < self.entries.items.len);
+        if (self.by_name.get(alias_name)) |existing| {
+            if (existing == id) return;
+            return RegistryError.DuplicateComponent;
+        }
+        const owned = try gpa.dupe(u8, alias_name);
+        errdefer gpa.free(owned);
+        try self.aliases.append(gpa, owned);
+        errdefer _ = self.aliases.pop();
+        try self.by_name.put(gpa, owned, id);
     }
 };
 
@@ -295,6 +330,43 @@ test "componentDefaultBytes initializes per registered default" {
     @memcpy(std.mem.asBytes(&buf), bytes);
     try std.testing.expectEqual(@as(f64, 100.0), buf.current);
     try std.testing.expectEqual(@as(f64, 100.0), buf.max);
+}
+
+test "registerAlias maps additional name to same id" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    const Foo = struct { v: i64 = 0 };
+    const id = try reg.registerComponent(gpa, Foo);
+    try reg.registerAlias(gpa, "Foo", id);
+
+    try std.testing.expectEqual(@as(?ComponentId, id), reg.idOf("Foo"));
+    try std.testing.expectEqual(@as(?ComponentId, id), reg.idOf(@typeName(Foo)));
+}
+
+test "registerAlias is idempotent on identical (name, id) pair" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    const Foo = struct { v: i64 = 0 };
+    const id = try reg.registerComponent(gpa, Foo);
+    try reg.registerAlias(gpa, "Foo", id);
+    try reg.registerAlias(gpa, "Foo", id);
+}
+
+test "registerAlias rejects conflicting alias" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    const Foo = struct { v: i64 = 0 };
+    const Bar = struct { v: i64 = 0 };
+    const id_foo = try reg.registerComponent(gpa, Foo);
+    const id_bar = try reg.registerComponent(gpa, Bar);
+    try reg.registerAlias(gpa, "Shared", id_foo);
+    try std.testing.expectError(error.DuplicateComponent, reg.registerAlias(gpa, "Shared", id_bar));
 }
 
 test "registerComponentRaw and findField roundtrip" {

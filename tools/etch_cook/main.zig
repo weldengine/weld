@@ -65,13 +65,27 @@ pub fn main(init: std.process.Init) !void {
     try emitConsolidatedHeader(gpa, &buffer);
 
     const cwd = std.Io.Dir.cwd();
+    var total_signatures: u32 = 0;
+    var total_rules: u32 = 0;
     for (inputs.items) |in| {
-        try cookInto(gpa, io, cwd, in, &buffer);
+        const stats = try cookInto(gpa, io, cwd, in, &buffer);
+        total_signatures += stats.distinct_signatures;
+        total_rules += stats.rules;
     }
 
     try emitProgramsTable(gpa, &buffer, inputs.items);
 
     try writeOutput(io, cwd, output.?, buffer.items);
+
+    // Stats sidecar — consumed by the bench harness for Gate 4 reporting.
+    // One line per metric, key=value (whitespace-tolerant). The path
+    // mirrors the output with a `.stats` suffix so the bench knows where
+    // to look without an extra CLI flag.
+    var stats_path_buf: [512]u8 = undefined;
+    const stats_path = try std.fmt.bufPrint(&stats_path_buf, "{s}.stats", .{output.?});
+    var stats_text: [128]u8 = undefined;
+    const stats_bytes = try std.fmt.bufPrint(&stats_text, "rules={d}\ndistinct_signatures={d}\n", .{ total_rules, total_signatures });
+    try writeOutput(io, cwd, stats_path, stats_bytes);
 }
 
 const InputSpec = struct {
@@ -106,13 +120,14 @@ fn emitConsolidatedHeader(gpa: std.mem.Allocator, buffer: *std.ArrayListUnmanage
         \\const FieldKind = weld_core.ecs.registry.FieldKind;
         \\const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
         \\const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
+        \\const comptime_query = weld_core.ecs.comptime_query;
         \\
         \\
     ;
     try buffer.appendSlice(gpa, header);
 }
 
-fn cookInto(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, in: InputSpec, buffer: *std.ArrayListUnmanaged(u8)) !void {
+fn cookInto(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, in: InputSpec, buffer: *std.ArrayListUnmanaged(u8)) !codegen.GenerateStats {
     // Read the source from disk.
     const source = readWholeFile(gpa, io, dir, in.path) catch |err| {
         std.debug.print("etch_cook: cannot read {s}: {s}\n", .{ in.path, @errorName(err) });
@@ -147,12 +162,11 @@ fn cookInto(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, in: InputSpec, 
     // Codegen body into a scratch buffer.
     var body: std.ArrayListUnmanaged(u8) = .empty;
     defer body.deinit(gpa);
-    _ = try codegen.generateToBuffer(gpa, &pr.ast, in.path, &body);
+    const stats = try codegen.generateToBuffer(gpa, &pr.ast, in.path, &body);
 
     // Strip the per-file imports — they are emitted once at the top of the
     // consolidated file. The consolidated header above declares every
-    // import the generated body relies on (`std`, `weld_core`, `World`,
-    // `ComponentId`, `FieldDesc`, `FieldKind`, `DynamicArchetype`, `Chunk`).
+    // import the generated body relies on.
     const body_no_imports = stripImports(body.items);
 
     // Wrap the program in a nested namespace named after the input.
@@ -162,6 +176,8 @@ fn cookInto(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, in: InputSpec, 
     try buffer.appendSlice(gpa, open);
     try buffer.appendSlice(gpa, body_no_imports);
     try buffer.appendSlice(gpa, "};\n\n");
+
+    return stats;
 }
 
 fn stripImports(body: []const u8) []const u8 {
@@ -187,7 +203,8 @@ fn stripImports(body: []const u8) []const u8 {
             std.mem.startsWith(u8, line, "const FieldDesc =") or
             std.mem.startsWith(u8, line, "const FieldKind =") or
             std.mem.startsWith(u8, line, "const DynamicArchetype =") or
-            std.mem.startsWith(u8, line, "const Chunk ="))
+            std.mem.startsWith(u8, line, "const Chunk =") or
+            std.mem.startsWith(u8, line, "const comptime_query ="))
         {
             pos = if (end < body.len) end + 1 else end;
             continue;

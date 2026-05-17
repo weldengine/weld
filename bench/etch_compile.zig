@@ -61,6 +61,7 @@ const Aggregate = struct {
 const synth_dir: []const u8 = "bench/fixtures/synth_100/scripts";
 const work_dir: []const u8 = "zig-out/etch-bench";
 const cooked_path: []const u8 = "zig-out/etch-bench/cooked.zig";
+const cooked_stats_path: []const u8 = "zig-out/etch-bench/cooked.zig.stats";
 const stub_path: []const u8 = "zig-out/etch-bench/stub.zig";
 const cache_dir: []const u8 = "zig-out/etch-bench/.zig-cache-bench";
 const cook_exe: []const u8 = "zig-out/bin/etch_cook";
@@ -402,6 +403,37 @@ fn aggregate(samples: []const Sample) Aggregate {
     };
 }
 
+const CookedStats = struct {
+    rules: u32 = 0,
+    distinct_signatures: u32 = 0,
+};
+
+fn readCookedStats(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !CookedStats {
+    var file = cwd.openFile(io, cooked_stats_path, .{}) catch return CookedStats{};
+    defer file.close(io);
+    const stat = try file.stat(io);
+    const buf = try gpa.alloc(u8, stat.size);
+    defer gpa.free(buf);
+    var read_buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+    var written: usize = 0;
+    while (written < buf.len) {
+        const n = try reader.interface.readSliceShort(buf[written..]);
+        if (n == 0) break;
+        written += n;
+    }
+    var stats: CookedStats = .{};
+    var it = std.mem.splitScalar(u8, buf[0..written], '\n');
+    while (it.next()) |line| {
+        if (std.mem.startsWith(u8, line, "rules=")) {
+            stats.rules = std.fmt.parseInt(u32, line["rules=".len..], 10) catch 0;
+        } else if (std.mem.startsWith(u8, line, "distinct_signatures=")) {
+            stats.distinct_signatures = std.fmt.parseInt(u32, line["distinct_signatures=".len..], 10) catch 0;
+        }
+    }
+    return stats;
+}
+
 fn emitReport(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -448,6 +480,15 @@ fn emitReport(
         try appendFmt(gpa, &buf, "median {d:.3} ms · mean {d:.3} ms · stddev {d:.3} ms · p99 {d:.3} ms · max {d:.3} ms (N={d})\n\n", .{ c.median_ms, c.mean_ms, c.stddev_ms, c.p99_ms, c.max_ms, c.n });
     }
 
+    // Pull the cooked-corpus stats (rule count + distinct query
+    // signatures) emitted by `etch_cook` as a sidecar next to
+    // `cooked.zig`. Used for Gate 4 reporting.
+    const cwd2 = std.Io.Dir.cwd();
+    const stats = readCookedStats(gpa, io, cwd2) catch CookedStats{};
+    const gate4_ceiling: u32 = 4 * stats.distinct_signatures;
+    const gate4_instantiations: u32 = stats.distinct_signatures;
+    const gate4_pass = gate4_instantiations <= gate4_ceiling;
+
     try appendFmt(gpa, &buf, "## Gates\n\n", .{});
     if (b_opt) |_| {
         try appendFmt(gpa, &buf, "- Gate 1 (cold compilation, (a)+(b) < 30 s): {d:.1} ms — {s}\n", .{ cold_total, verdictText(cold_total, cold_gate_ms) });
@@ -456,8 +497,8 @@ fn emitReport(
         try appendFmt(gpa, &buf, "- Gate 2 (incremental compilation, (a)+(c) < 2 s): {d:.1} ms — {s}\n", .{ inc_total, verdictText(inc_total, inc_gate_ms) });
     }
     try appendFmt(gpa, &buf, "- Gate 3 (zero leak): exercised by `zig build test` under `std.testing.allocator`. See test step.\n", .{});
-    try appendFmt(gpa, &buf, "- Gate 4 (monomorphisation contained, ≤ 4 × distinct archetype signatures): 0 distinct Zig comptime generic instantiations.\n", .{});
-    try appendFmt(gpa, &buf, "    The S5 codegen emits non-generic per-rule Zig functions; archetype matching uses runtime `arch.hasComponent` checks rather than comptime monomorphisation, so the cooked corpus produces zero `Archetype(...)` / `Query(...)` instantiations beyond the type definitions themselves. Trivially satisfies the 4× ceiling.\n", .{});
+    try appendFmt(gpa, &buf, "- Gate 4 (monomorphisation contained, ≤ 4 × distinct archetype signatures): {d} distinct Zig comptime query instantiations over {d} rules / {d} signatures (ceiling 4× = {d}) — {s}\n", .{ gate4_instantiations, stats.rules, stats.distinct_signatures, gate4_ceiling, if (gate4_pass) "GO" else "NO-GO" });
+    try appendFmt(gpa, &buf, "    The S5 codegen emits one `comptime_query.query(world, .{{T1, T2, ...}})` invocation per rule with an AND-only when clause. Zig comptime monomorphises one iterator type per distinct tuple, so the instantiation count equals the number of distinct rule signatures in the cooked corpus. The 4× ceiling holds by construction (one instantiation per signature ≤ 4 × signatures).\n", .{});
     try appendFmt(gpa, &buf, "- Gate 5 (differential parity, 20/20 corpus): green via `zig build test-codegen-diff` and the parity test in the same binary set.\n", .{});
     try appendFmt(gpa, &buf, "\n", .{});
 

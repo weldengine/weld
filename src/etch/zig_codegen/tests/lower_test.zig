@@ -68,10 +68,15 @@ test "lowers rule with single component when clause" {
         \\  entity.get_mut(Counter).value = 5
         \\}
     , &out);
+    // Comptime query path — the brief's "world.query(.{T1, T2, ...})" shape
+    // (gate 4 reports one monomorphisation per distinct tuple).
     try std.testing.expect(std.mem.indexOf(u8, out.items, "pub fn rule_update(world: *World) void {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "for (world.archetypes.items) |arch|") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "Counter_arr: [*]Counter") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "Counter_arr[slot].value = 5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "comptime_query.query(world, .{Counter})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "while (__it.next()) |__row|") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "__row[0].value = 5") != null);
+    // Archetype walk syntax must NOT appear on the AND-only path — that
+    // would mean the codegen reverted to the manual fallback.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "for (world.archetypes.items)") == null);
 }
 
 test "lowers rule with multi-component when clause and arithmetic body" {
@@ -87,9 +92,8 @@ test "lowers rule with multi-component when clause and arithmetic body" {
         \\  entity.get_mut(Position).x += entity.get(Velocity).dx
         \\}
     , &out);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "arch.hasComponent(Position_id)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "arch.hasComponent(Velocity_id)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "Position_arr[slot].x += Velocity_arr[slot].dx") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "comptime_query.query(world, .{Position, Velocity})") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "__row[0].x += __row[1].dx") != null);
 }
 
 test "lowers get and get_mut accessors" {
@@ -105,7 +109,35 @@ test "lowers get and get_mut accessors" {
         \\  h.value += 1
         \\}
     , &out);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "Counter_arr[slot].value += 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "__row[0].value += 1") != null);
+}
+
+test "register emits a Zig-type alias for each component" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Counter { value: int = 0 }
+    , &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "world.registry.registerAlias(gpa, @typeName(Counter), Counter_id)") != null);
+}
+
+test "fallback to manual archetype walk when when clause contains 'not'" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component A { v: int = 0 }
+        \\component B { v: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has A and not entity has B
+        \\{
+        \\  entity.get_mut(A).v += 1
+        \\}
+    , &out);
+    // `not` triggers the S4-debt manual walk path.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "for (world.archetypes.items) |arch|") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "comptime_query.query") == null);
 }
 
 test "type mapping int=>i64 float=>f64 bool=>bool" {

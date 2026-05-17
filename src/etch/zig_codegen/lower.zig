@@ -142,6 +142,7 @@ fn emitImports(w: *Writer) CodegenError!void {
     try w.line("const FieldKind = weld_core.ecs.registry.FieldKind;");
     try w.line("const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;");
     try w.line("const Chunk = weld_core.ecs.archetype_dynamic.Chunk;");
+    try w.line("const comptime_query = weld_core.ecs.comptime_query;");
     try w.blankLine();
 }
 
@@ -269,10 +270,13 @@ fn emitRegisterCall(
     try w.printLine(".fields = &fields,", .{});
     w.indentBy(-1);
     try w.line("});");
+    // Register the Zig type-name as an alias for the same id so the
+    // comptime `world.query(.{T})` (keyed on `@typeName(T)`) resolves to
+    // the same `ComponentId` as `world.registry.idOf("EtchName")`.
+    // `registerAlias` consumes the id, so no extra discard is needed.
+    try w.printLine("try world.registry.registerAlias(gpa, @typeName({s}), {s}_id);", .{ name, name });
     if (is_resource) {
         try w.printLine("try world.addResource(gpa, {s}_id, std.mem.asBytes(&default));", .{name});
-    } else {
-        try w.printLine("_ = {s}_id;", .{name});
     }
     w.indentBy(-1);
     try w.line("}");
@@ -307,6 +311,11 @@ const WhenInfo = struct {
     /// True iff the when clause contains at least one component-side
     /// predicate (i.e. the rule iterates entities).
     has_component_ref: bool,
+    /// True iff the when clause contains `or` or `not` — the codegen
+    /// falls back to the manual archetype walk in that case. Pure AND
+    /// conjunctions use the comptime `world.query(.{...})` path, which
+    /// is what gates the monomorphisation count (Gate 4).
+    has_or_or_not: bool,
 };
 
 const ResourceDep = struct {
@@ -353,37 +362,98 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) CodegenErr
         return;
     }
 
-    // Component-bound rule: walk archetypes.
-    // `info.components` holds every component named anywhere in the when
-    // clause — needed to build the archetype predicate (`arch.hasComponent`).
-    // `body_used` is the subset accessed by the body — only those need the
-    // per-slot `_arr` cast. Some components show up only in `not` clauses
-    // or as plain `has` filters without a corresponding `entity.get(T)`.
+    // Determine the body's component access set so we can size the query
+    // tuple to exactly what the body reads/writes (the same `body_used`
+    // dance the archetype-walk path needed). The field-filter component
+    // is accessed implicitly at the slot level — fold it in.
     var body_used: std.StringHashMapUnmanaged(void) = .empty;
     defer body_used.deinit(w.gpa);
     try collectBodyComponents(w.gpa, ast, rule, &body_used);
     if (info.field_filter) |ff| {
-        // The field-filter component is also accessed at the slot level
-        // (used in the per-slot continue guard).
         _ = try body_used.getOrPut(w.gpa, ff.component_name);
     }
 
+    if (info.has_or_or_not) {
+        // Path 2 — manual archetype walk. Reserved for the S4 inherited
+        // debt cases (`not has X`, `entity has A or entity has B`) that
+        // do not collapse to a single AND-conjunction tuple. The current
+        // S3 corpus exercises this in 2/20 differential programs; the
+        // synth bench corpus never hits this branch (gate 4's
+        // monomorphisation count therefore reflects only the AND path).
+        try emitRuleAsArchWalk(w, ast, rule, info, &body_used);
+    } else {
+        // Path 1 — comptime query. The cooked code emits one
+        // `comptime_query.query(world, .{T1, T2, ...})` invocation per
+        // rule signature; Zig comptime monomorphises one iterator type
+        // per distinct tuple.
+        try emitRuleAsComptimeQuery(w, ast, rule, info, &body_used);
+    }
+
+    w.indentBy(-1);
+    try w.line("}"); // fn
+    try w.blankLine();
+}
+
+/// Emit the body of a rule using the comptime `world.query(.{...})` path.
+/// `body_used` lists the component names the body actually reads/writes;
+/// those become the query tuple (in source declaration order from
+/// `info.components`). Components named in the when clause but not
+/// reached by the body are still required for archetype matching — they
+/// also appear in the tuple, otherwise the iterator would yield rows
+/// from archetypes that satisfy a strictly weaker predicate than the
+/// rule asked for.
+fn emitRuleAsComptimeQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, body_used: *const std.StringHashMapUnmanaged(void)) CodegenError!void {
+    _ = body_used;
+
+    // Query tuple = full set of `has`-conjunction components, ordered as
+    // emitted by `collectWhenInfo` (source order). Including unused-by-
+    // body components ensures the predicate stays correct — `has A and
+    // has B { f == v }` requires both `A` and `B` in the archetype even
+    // if only `B` is read.
+    try w.writeIndent();
+    try w.write("var __it = comptime_query.query(world, .{");
+    for (info.components, 0..) |cname, i| {
+        if (i > 0) try w.write(", ");
+        try w.print("{s}", .{cname});
+    }
+    try w.write("});\n");
+
+    try w.line("while (__it.next()) |__row| {");
+    w.indentBy(1);
+
+    // Field filter — emit as a continue guard, addressing the row by tuple
+    // index for the filter's component.
+    if (info.field_filter) |ff| {
+        const idx = indexOfComponent(info.components, ff.component_name) orelse return CodegenError.InternalCodegenBug;
+        try w.writeIndent();
+        try w.print("if (__row[{d}].{s} != ", .{ idx, ff.field_name });
+        try emitConstExpr(w, ast, ff.value, ff.value_zig_type);
+        try w.write(") continue;\n");
+    }
+
+    try emitRuleBodyQuery(w, ast, rule, info);
+
+    w.indentBy(-1);
+    try w.line("}"); // while it.next()
+}
+
+/// Emit the body of a rule using the manual archetype-walk fallback for
+/// when clauses containing `or` / `not`. Same shape as the pre-rewrite
+/// codegen — kept until the inherited S4 debts (`not` / `or` predicates)
+/// are addressed in Phase 0.2.
+fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, body_used: *const std.StringHashMapUnmanaged(void)) CodegenError!void {
     for (info.components) |cname| {
         try w.printLine("const {s}_id = world.registry.idOf(\"{s}\") orelse return;", .{ cname, cname });
     }
 
     try w.line("for (world.archetypes.items) |arch| {");
     w.indentBy(1);
-    // Predicate check on archetype.
     if (rule.when_root != ast_mod.RuleDecl.none_when) {
         try w.writeIndent();
         try w.write("if (!(");
         try emitArchPredicate(w, ast, rule.when_root);
         try w.write(")) continue;\n");
     }
-    // Per-component slot pointer locals — only for components accessed by
-    // the body or the field filter. Components present only in `not has`
-    // (or `has` clauses with no body reference) don't get a slot pointer.
     for (info.components) |cname| {
         if (!body_used.contains(cname)) continue;
         try w.printLine("const {s}_idx = arch.componentIndex({s}_id).?;", .{ cname, cname });
@@ -399,14 +469,12 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) CodegenErr
     try w.line("var slot: u32 = 0;");
     try w.line("while (slot < __count) : (slot += 1) {");
     w.indentBy(1);
-    // Field filter — emit as a continue guard.
     if (info.field_filter) |ff| {
         try w.writeIndent();
         try w.print("if ({s}_arr[slot].{s} != ", .{ ff.component_name, ff.field_name });
         try emitConstExpr(w, ast, ff.value, ff.value_zig_type);
         try w.write(") continue;\n");
     }
-    // Body.
     try emitRuleBody(w, ast, rule, info);
     w.indentBy(-1);
     try w.line("}"); // while slot
@@ -414,10 +482,27 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) CodegenErr
     try w.line("}"); // for chunk
     w.indentBy(-1);
     try w.line("}"); // for arch
+}
 
-    w.indentBy(-1);
-    try w.line("}"); // fn
-    try w.blankLine();
+fn indexOfComponent(comps: []const []const u8, name: []const u8) ?usize {
+    for (comps, 0..) |c, i| {
+        if (std.mem.eql(u8, c, name)) return i;
+    }
+    return null;
+}
+
+/// Emit the source-level expression that names the current slot of
+/// component `comp_name`. Inside a comptime-query iteration, that is
+/// `__row[idx]` where `idx` is the component's position in the query
+/// tuple; in the archetype-walk fallback, it is `<comp>_arr[slot]`.
+fn emitComponentSlot(w: *Writer, ctx: *LocalCtx, comp_name: []const u8) CodegenError!void {
+    if (ctx.query_components) |comps| {
+        if (indexOfComponent(comps, comp_name)) |idx| {
+            try w.print("__row[{d}]", .{idx});
+            return;
+        }
+    }
+    try w.print("{s}_arr[slot]", .{comp_name});
 }
 
 /// Walk every statement in the rule body and add the component name of
@@ -567,6 +652,30 @@ fn emitRuleBody(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: 
     }
 }
 
+/// Variant of `emitRuleBody` used inside the comptime-query iteration.
+/// Sets `ctx.query_components` so component accesses lower to
+/// `__row[idx].field` instead of `<comp>_arr[slot].field`.
+fn emitRuleBodyQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo) CodegenError!void {
+    var ctx: LocalCtx = .{
+        .query_components = info.components,
+    };
+    defer ctx.deinit(w.gpa);
+    for (info.components) |cname| {
+        try ctx.records.append(w.gpa, .{
+            .key = .{ .component_alias = cname },
+            .info = .{ .kind = .component_alias, .component_name = cname, .is_mut = true },
+        });
+    }
+    try ctx.recordParams(w.gpa, ast, rule);
+
+    var s: u32 = 0;
+    while (s < rule.body_len) : (s += 1) {
+        const stmt_raw = ast.extra.items[rule.body_start + s];
+        const stmt_id: NodeId = @bitCast(stmt_raw);
+        try emitStmt(w, ast, &ctx, stmt_id);
+    }
+}
+
 // ─── Statement / expression emitters ────────────────────────────────────────
 
 const LocalKind = enum {
@@ -602,6 +711,12 @@ const LocalCtx = struct {
     /// declaration wins. S3 forbids shadowing within a single scope so the
     /// stack stays flat for compliant programs.
     records: std.ArrayListUnmanaged(LocalRecord) = .empty,
+    /// When non-null, the body is emitted inside a `comptime_query.query`
+    /// iteration — component accesses lower to `__row[idx].field` where
+    /// `idx` is the component's index in this tuple. When null, the body
+    /// is in the manual archetype-walk fallback and component accesses
+    /// lower to `<comp>_arr[slot].field`.
+    query_components: ?[]const []const u8 = null,
 
     pub fn deinit(self: *LocalCtx, gpa: std.mem.Allocator) void {
         self.records.deinit(gpa);
@@ -757,7 +872,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             if (ctx.lookup(name_id)) |local| {
                 switch (local.kind) {
                     .value => try w.write(ast.strings.slice(name_id)),
-                    .component_alias => try w.print("{s}_arr[slot]", .{local.component_name}),
+                    .component_alias => try emitComponentSlot(w, ctx, local.component_name),
                 }
             } else {
                 // Unknown ident — type-checker should have caught this. Emit
@@ -772,7 +887,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         .method_get, .method_get_mut => {
             const mg = ast.method_gets.items[data];
             const cname = ast.strings.slice(mg.type_name);
-            try w.print("{s}_arr[slot]", .{cname});
+            try emitComponentSlot(w, ctx, cname);
         },
         .binary => {
             const b = ast.binary_exprs.items[data];
@@ -1002,9 +1117,10 @@ fn collectWhenInfo(gpa: std.mem.Allocator, ast: *const AstArena, rule: ast_mod.R
     errdefer res_deps.deinit(gpa);
     var field_filter: ?FieldFilter = null;
     var has_component_ref: bool = false;
+    var has_or_or_not: bool = false;
 
     if (rule.when_root != ast_mod.RuleDecl.none_when) {
-        try walkWhen(gpa, ast, rule.when_root, &components, &seen_components, &res_deps, &field_filter, &has_component_ref);
+        try walkWhen(gpa, ast, rule.when_root, &components, &seen_components, &res_deps, &field_filter, &has_component_ref, &has_or_or_not);
     }
 
     return .{
@@ -1012,6 +1128,7 @@ fn collectWhenInfo(gpa: std.mem.Allocator, ast: *const AstArena, rule: ast_mod.R
         .resource_deps = try res_deps.toOwnedSlice(gpa),
         .field_filter = field_filter,
         .has_component_ref = has_component_ref,
+        .has_or_or_not = has_or_or_not,
     };
 }
 
@@ -1029,15 +1146,22 @@ fn walkWhen(
     res_deps: *std.ArrayListUnmanaged(ResourceDep),
     filter: *?FieldFilter,
     has_component_ref: *bool,
+    has_or_or_not: *bool,
 ) !void {
     const node = ast.when_nodes.items[when_idx];
     switch (node.kind) {
-        .logical_and, .logical_or => {
-            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref);
-            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filter, has_component_ref);
+        .logical_and => {
+            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not);
+            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not);
+        },
+        .logical_or => {
+            has_or_or_not.* = true;
+            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not);
+            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not);
         },
         .logical_not => {
-            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref);
+            has_or_or_not.* = true;
+            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not);
         },
         .has => {
             const cname = ast.strings.slice(node.type_name);

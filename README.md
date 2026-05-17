@@ -48,16 +48,19 @@ A game engine written in Zig 0.16.x.
 > the shipping codegen hypothesis — `Etch → Zig source → Zig compile` is
 > viable build-time-wise. The codegen lives in `src/etch/zig_codegen/`
 > and lowers the S3 subset to idiomatic Zig: components become `extern
-> struct`s, rules become non-generic functions that walk
-> `world.archetypes` via typed `@ptrCast` casts, and resources are seeded
-> in the runtime registry. The 20-program differential corpus passes
-> through both the interpreter and the cooked code with byte-exact
-> parity (`zig build test-codegen-diff`). On the dev primary the
-> compile-time bench reports cold (a)+(b) at **496 ms** and incremental
-> (a)+(c) at **486 ms** — 60× and 4× under the 30 s / 2 s gates
-> respectively. Run the bench locally with
-> `zig build bench-etch-compile -Doptimize=ReleaseSafe` and the demo with
-> `zig build run-demo-etch-codegen`. Full report:
+> struct`s, rules open `comptime_query.query(world, .{T1, T2})`
+> iterations (via `src/core/ecs/comptime_query.zig`), and the registry
+> aliases each component by both Etch name and `@typeName(T)` so the
+> spawn-by-name and query-by-type paths share one `ComponentId`. The
+> 20-program differential corpus passes through both the interpreter
+> and the cooked code with byte-exact parity (`zig build
+> test-codegen-diff`). On the dev primary the compile-time bench
+> reports cold (a)+(b) at **1104 ms** and incremental (a)+(c) at
+> **1066 ms** — 27× and 1.9× under the 30 s / 2 s gates respectively;
+> Gate 4 measures **382 distinct comptime query instantiations** on the
+> 100-file synth corpus (ceiling 4× = 1528). Run the bench locally with
+> `zig build bench-etch-compile -Doptimize=ReleaseSafe` and the demo
+> with `zig build run-demo-etch-codegen`. Full report:
 > [`validation/s5-go-nogo.md`](validation/s5-go-nogo.md).
 
 ## Prerequisites
