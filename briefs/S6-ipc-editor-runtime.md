@@ -309,7 +309,8 @@ These debts are out of scope. Do not touch them in S6.
 
 *One entry per logical work sequence (objective reached, test green, refactor, blocker). Chronological. 1-3 lines per entry.*
 
-- YYYY-MM-DD HH:MM — <summary>
+- 2026-05-17 22:03 — Branche `phase-pre-0/ipc/editor-runtime-round-trip` créée depuis `main` à `99066c5` (S5 mergé, tag `v0.0.6-S5-etch-codegen-zig` posé). Brief committé verbatim. Specs lues intégralement (9 specs + 3 briefs de calibration). Status passé à ACTIVE.
+- 2026-05-17 22:25 — Fondations IPC (commit `c5a5424`) : `src/core/ipc/{protocol,messages,framing,mod}.zig` + namespace exposé dans `src/core/root.zig`. Pas de transport ni de shm encore. Inline tests verts en Debug (round-trip, 5 rejections fatales, schema_hash mismatch, payload-size mismatch, msg_type mismatch, fixed-string truncation). Observation : le scope du brief énonce trois nombres différents pour la cardinalité du catalogue (« exactly 11 message types », tableau à 13 lignes, « Total = 12 messages »). J'implémente les 13 entrées du tableau — c'est la liste exhaustive concrète et la seule numération qui correspond à du code dénombrable. Pas une déviation actée (le tableau est dans la SECTION FIGÉE et fait référence).
 
 ## Déviations actées
 
