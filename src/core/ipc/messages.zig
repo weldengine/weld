@@ -240,25 +240,20 @@ pub fn msgTypeOf(comptime T: type) MsgType {
 /// schema descriptor (`engine-ipc.md` §5.3 + brief § Notes). Call
 /// sites do not change.
 pub fn schemaHash(comptime T: type) u64 {
-    comptime {
-        var hasher = std.hash.Wyhash.init(0);
-        hasher.update(@typeName(T));
-        hasher.update("{");
+    return comptime hash: {
+        var key: []const u8 = @typeName(T) ++ "{";
         const info = @typeInfo(T);
         switch (info) {
             .@"struct" => |s| {
                 for (s.fields) |f| {
-                    hasher.update(f.name);
-                    hasher.update(":");
-                    hasher.update(@typeName(f.type));
-                    hasher.update(";");
+                    key = key ++ f.name ++ ":" ++ @typeName(f.type) ++ ";";
                 }
             },
             else => @compileError("schemaHash: expected struct, got " ++ @typeName(T)),
         }
-        hasher.update("}");
-        return hasher.final();
-    }
+        key = key ++ "}";
+        break :hash std.hash.Wyhash.hash(0, key);
+    };
 }
 
 /// Writes a NUL-terminated string into a fixed-width buffer. Truncates

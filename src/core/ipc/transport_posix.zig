@@ -61,10 +61,20 @@ const SOL_SOCKET: c_int = if (is_linux) 1 else 0xFFFF;
 const SCM_RIGHTS: c_int = 1;
 const MSG_NOSIGNAL: c_int = if (is_linux) 0x4000 else 0;
 
-const SUN_PATH_LEN: usize = 108;
+// `sockaddr_un` layout diverges between Linux glibc and BSD/macOS:
+//   - Linux: `sa_family_t sun_family` (u16) + `char sun_path[108]`.
+//   - macOS/BSD: `unsigned char sun_len` + `sa_family_t sun_family` (u8)
+//                + `char sun_path[104]`.
+// `addr_len` math below uses `@offsetOf(sockaddr_un, "sun_path")` so the
+// platform-specific header layout doesn't leak into the call sites.
+const SUN_PATH_LEN: usize = if (is_linux) 108 else 104;
 
-const sockaddr_un = extern struct {
+const sockaddr_un = if (is_linux) extern struct {
     sun_family: u16,
+    sun_path: [SUN_PATH_LEN]u8,
+} else extern struct {
+    sun_len: u8,
+    sun_family: u8,
     sun_path: [SUN_PATH_LEN]u8,
 };
 
@@ -143,19 +153,25 @@ pub const Backend = struct {
         if (fd < 0) return error.SocketCreationFailed;
         errdefer _ = sys.close(fd);
 
-        var addr = sockaddr_un{
-            .sun_family = @intCast(AF_UNIX),
-            .sun_path = std.mem.zeroes([SUN_PATH_LEN]u8),
-        };
         if (path.len >= SUN_PATH_LEN) return error.NameTooLong;
-        @memcpy(addr.sun_path[0..path.len], path);
+        var addr: sockaddr_un = std.mem.zeroes(sockaddr_un);
+        const addr_len: Socklen = blk: {
+            const path_offset = @offsetOf(sockaddr_un, "sun_path");
+            if (is_linux) {
+                addr.sun_family = AF_UNIX;
+            } else {
+                addr.sun_len = @intCast(path_offset + path.len + 1);
+                addr.sun_family = @intCast(AF_UNIX);
+            }
+            @memcpy(addr.sun_path[0..path.len], path);
+            break :blk @intCast(path_offset + path.len + 1);
+        };
 
         // Best-effort cleanup of a stale socket file from a previous
         // crashed editor with the same PID. We ignore the error —
         // ENOENT means "not there", which is the desired post-state.
         _ = sys.unlink(path_z.ptr);
 
-        const addr_len: Socklen = @intCast(@sizeOf(u16) + path.len + 1);
         if (sys.bind(fd, &addr, addr_len) != 0) return error.BindFailed;
         errdefer _ = sys.unlink(path_z.ptr);
 
@@ -173,14 +189,20 @@ pub const Backend = struct {
         if (fd < 0) return error.SocketCreationFailed;
         errdefer _ = sys.close(fd);
 
-        var addr = sockaddr_un{
-            .sun_family = @intCast(AF_UNIX),
-            .sun_path = std.mem.zeroes([SUN_PATH_LEN]u8),
-        };
         if (path.len >= SUN_PATH_LEN) return error.NameTooLong;
-        @memcpy(addr.sun_path[0..path.len], path);
+        var addr: sockaddr_un = std.mem.zeroes(sockaddr_un);
+        const addr_len: Socklen = blk: {
+            const path_offset = @offsetOf(sockaddr_un, "sun_path");
+            if (is_linux) {
+                addr.sun_family = AF_UNIX;
+            } else {
+                addr.sun_len = @intCast(path_offset + path.len + 1);
+                addr.sun_family = @intCast(AF_UNIX);
+            }
+            @memcpy(addr.sun_path[0..path.len], path);
+            break :blk @intCast(path_offset + path.len + 1);
+        };
 
-        const addr_len: Socklen = @intCast(@sizeOf(u16) + path.len + 1);
         if (sys.connect(fd, &addr, addr_len) != 0) return error.ConnectionRefused;
 
         return Backend{ .fd = fd };
@@ -309,9 +331,8 @@ test "listen + connect + accept basic round-trip" {
     const gpa = std.testing.allocator;
     _ = gpa;
 
-    var rnd = std.Random.DefaultPrng.init(@bitCast(std.time.nanoTimestamp()));
     var name_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&name_buf, "/tmp/weld-test-{x}.sock", .{rnd.random().int(u64)});
+    const path = try std.fmt.bufPrint(&name_buf, "/tmp/weld-test-{d}.sock", .{@src().line});
 
     var listener = try transport.IpcSocket.listen(path);
     defer listener.close();
@@ -334,9 +355,8 @@ test "send loops over partial writes" {
     // Large enough that the kernel may split the write on some OSes.
     const big = [_]u8{42} ** 64_000;
 
-    var rnd = std.Random.DefaultPrng.init(@bitCast(std.time.nanoTimestamp()));
     var name_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&name_buf, "/tmp/weld-test-{x}.sock", .{rnd.random().int(u64)});
+    const path = try std.fmt.bufPrint(&name_buf, "/tmp/weld-test-{d}.sock", .{@src().line});
 
     var listener = try transport.IpcSocket.listen(path);
     defer listener.close();

@@ -96,7 +96,9 @@ pub const Backend = struct {
         const name_z = try gpa.dupeZ(u8, name);
         errdefer gpa.free(name_z);
 
-        const fd = sys.shm_open(name_z.ptr, O_RDWR, 0);
+        // macOS requires a non-zero mode argument even when O_CREAT is
+        // absent — supplying 0o600 matches what the creator used.
+        const fd = sys.shm_open(name_z.ptr, O_RDWR, 0o600);
         if (fd < 0) return error.ShmOpenFailed;
         errdefer _ = sys.close(fd);
 
@@ -118,17 +120,17 @@ pub const Backend = struct {
         _ = sys.munmap(@ptrCast(self.ptr), self.size);
         if (is_owner) _ = sys.shm_unlink(self.name_z.ptr);
         self.gpa.free(self.name_z);
-        self.name_z = &[_:0]u8{};
         self.size = 0;
+        // `name_z` is left dangling — close() is single-shot, the
+        // caller must drop the Backend value after.
     }
 };
 
 // ---------------------------------------------------------------- tests --
 
 test "create + write + open + read round-trip" {
-    var rnd = std.Random.DefaultPrng.init(@bitCast(std.time.nanoTimestamp()));
     var name_buf: [32]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buf, "/weld-tshm-{x}", .{rnd.random().int(u32)});
+    const name = try std.fmt.bufPrint(&name_buf, "/weld-tshm-{d}", .{@src().line});
 
     var owner = try shm.ShmRegion.create(name, 4096);
     defer owner.close();
@@ -142,9 +144,8 @@ test "create + write + open + read round-trip" {
 }
 
 test "attacher writes are visible to owner" {
-    var rnd = std.Random.DefaultPrng.init(@bitCast(std.time.nanoTimestamp()));
     var name_buf: [32]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buf, "/weld-tshm-{x}", .{rnd.random().int(u32)});
+    const name = try std.fmt.bufPrint(&name_buf, "/weld-tshm-{d}", .{@src().line});
 
     var owner = try shm.ShmRegion.create(name, 4096);
     defer owner.close();

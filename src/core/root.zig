@@ -37,3 +37,9 @@ pub const platform = struct {
 // S6 — editor↔runtime IPC. Tier 0 endpoint per `engine-ipc.md` and the
 // S6 brief. The sub-module's public exports live in `ipc/mod.zig`.
 pub const ipc = @import("ipc/mod.zig");
+
+comptime {
+    // Force eager analysis of the ipc namespace's protocol constants
+    // — Zig 0.16's lazy analysis would otherwise skip the file.
+    _ = ipc.protocol.MAGIC;
+}
