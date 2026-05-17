@@ -33,3 +33,7 @@ pub const platform = struct {
     pub const window = @import("platform/window.zig");
     pub const vk = @import("platform/vk.zig");
 };
+
+// S6 — editor↔runtime IPC. Tier 0 endpoint per `engine-ipc.md` and the
+// S6 brief. The sub-module's public exports live in `ipc/mod.zig`.
+pub const ipc = @import("ipc/mod.zig");
