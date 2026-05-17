@@ -1,0 +1,30 @@
+resource Cfg_21 { enabled: bool = true }
+
+component Cmp_21_0 { f0: float = 0.0, f1: float = 0.0, f2: int = 0 }
+
+component Cmp_21_1 { f0: int = 0, f1: int = 0, f2: int = 0 }
+
+component Cmp_21_2 { f0: float = 0.0, f1: float = 0.0 }
+
+component Cmp_21_3 { f0: int = 0, f1: int = 0 }
+
+component Cmp_21_4 { f0: int = 0, f1: int = 0 }
+
+rule rule_21_0(entity: Entity)
+  when entity has Cmp_21_3 and resource Cfg_21
+{
+  entity.get_mut(Cmp_21_3).f0 += 1
+}
+
+rule rule_21_1(entity: Entity)
+  when entity has Cmp_21_2 and entity has Cmp_21_4 and entity has Cmp_21_0
+{
+  entity.get_mut(Cmp_21_2).f0 += 0.5
+}
+
+rule rule_21_2(entity: Entity)
+  when entity has Cmp_21_1 and entity has Cmp_21_2 and entity has Cmp_21_1 and resource Cfg_21
+{
+  entity.get_mut(Cmp_21_1).f0 += 1
+}
+

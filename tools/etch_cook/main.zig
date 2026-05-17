@@ -243,10 +243,12 @@ fn readWholeFile(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []co
 
 fn writeOutput(io: std.Io, dir: std.Io.Dir, path: []const u8, bytes: []const u8) !void {
     if (std.fs.path.dirname(path)) |sub| {
-        dir.createDirPath(io, sub) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        if (sub.len > 0) {
+            dir.createDirPath(io, sub) catch |err| switch (err) {
+                error.PathAlreadyExists, error.NotDir => {},
+                else => return err,
+            };
+        }
     }
     var file = try dir.createFile(io, path, .{});
     defer file.close(io);

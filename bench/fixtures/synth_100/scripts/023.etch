@@ -1,0 +1,44 @@
+resource Cfg_23 { enabled: bool = true }
+
+component Cmp_23_0 { f0: int = 0, f1: float = 0.0, f2: int = 0 }
+
+component Cmp_23_1 { f0: int = 0, f1: float = 0.0 }
+
+component Cmp_23_2 { f0: float = 0.0, f1: int = 0, f2: bool = true }
+
+component Cmp_23_3 { f0: int = 0, f1: float = 0.0, f2: int = 0 }
+
+component Cmp_23_4 { f0: float = 0.0, f1: int = 0 }
+
+component Cmp_23_5 { f0: float = 0.0, f1: bool = true, f2: float = 0.0 }
+
+component Cmp_23_6 { f0: float = 0.0, f1: int = 0, f2: bool = true }
+
+component Cmp_23_7 { f0: float = 0.0, f1: int = 0 }
+
+component Cmp_23_8 { f0: int = 0, f1: float = 0.0 }
+
+rule rule_23_0(entity: Entity)
+  when entity has Cmp_23_2 and resource Cfg_23
+{
+  entity.get_mut(Cmp_23_2).f0 += 0.5
+}
+
+rule rule_23_1(entity: Entity)
+  when entity has Cmp_23_4 and entity has Cmp_23_2
+{
+  entity.get_mut(Cmp_23_4).f0 += 0.5
+}
+
+rule rule_23_2(entity: Entity)
+  when entity has Cmp_23_7 and entity has Cmp_23_3 and entity has Cmp_23_0 and resource Cfg_23
+{
+  entity.get_mut(Cmp_23_7).f0 += 0.5
+}
+
+rule rule_23_3(entity: Entity)
+  when entity has Cmp_23_7 and entity has Cmp_23_4 and entity has Cmp_23_4 and resource Cfg_23
+{
+  entity.get_mut(Cmp_23_7).f0 += 0.5
+}
+

@@ -1,0 +1,46 @@
+resource Cfg_5 { enabled: bool = true }
+
+component Cmp_5_0 { f0: int = 0, f1: int = 0 }
+
+component Cmp_5_1 { f0: int = 0, f1: bool = true }
+
+component Cmp_5_2 { f0: int = 0, f1: bool = true, f2: int = 0 }
+
+component Cmp_5_3 { f0: float = 0.0, f1: bool = true, f2: bool = true }
+
+component Cmp_5_4 { f0: int = 0, f1: int = 0, f2: int = 0 }
+
+component Cmp_5_5 { f0: int = 0, f1: bool = true }
+
+component Cmp_5_6 { f0: int = 0, f1: int = 0 }
+
+rule rule_5_0(entity: Entity)
+  when entity has Cmp_5_2 and entity has Cmp_5_4 and entity has Cmp_5_4 and resource Cfg_5
+{
+  entity.get_mut(Cmp_5_2).f0 += 1
+}
+
+rule rule_5_1(entity: Entity)
+  when entity has Cmp_5_2 and entity has Cmp_5_6 and entity has Cmp_5_5
+{
+  entity.get_mut(Cmp_5_2).f0 += 1
+}
+
+rule rule_5_2(entity: Entity)
+  when entity has Cmp_5_4 and entity has Cmp_5_5 and entity has Cmp_5_1 and resource Cfg_5
+{
+  entity.get_mut(Cmp_5_4).f0 += 1
+}
+
+rule rule_5_3(entity: Entity)
+  when entity has Cmp_5_4
+{
+  entity.get_mut(Cmp_5_4).f0 += 1
+}
+
+rule rule_5_4(entity: Entity)
+  when entity has Cmp_5_1 and entity has Cmp_5_6 and entity has Cmp_5_5 and resource Cfg_5
+{
+  entity.get_mut(Cmp_5_1).f0 += 1
+}
+

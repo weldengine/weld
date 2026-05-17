@@ -1,0 +1,48 @@
+resource Cfg_76 { enabled: bool = true }
+
+component Cmp_76_0 { f0: float = 0.0, f1: bool = true, f2: float = 0.0 }
+
+component Cmp_76_1 { f0: int = 0, f1: float = 0.0, f2: bool = true }
+
+component Cmp_76_2 { f0: float = 0.0, f1: bool = true, f2: bool = true }
+
+component Cmp_76_3 { f0: int = 0, f1: int = 0, f2: bool = true }
+
+component Cmp_76_4 { f0: int = 0, f1: bool = true }
+
+component Cmp_76_5 { f0: float = 0.0, f1: float = 0.0 }
+
+component Cmp_76_6 { f0: float = 0.0, f1: int = 0 }
+
+component Cmp_76_7 { f0: float = 0.0, f1: bool = true, f2: bool = true }
+
+rule rule_76_0(entity: Entity)
+  when entity has Cmp_76_5 and entity has Cmp_76_6 and entity has Cmp_76_0
+{
+  entity.get_mut(Cmp_76_5).f0 += 0.5
+}
+
+rule rule_76_1(entity: Entity)
+  when entity has Cmp_76_0
+{
+  entity.get_mut(Cmp_76_0).f0 += 0.5
+}
+
+rule rule_76_2(entity: Entity)
+  when entity has Cmp_76_3
+{
+  entity.get_mut(Cmp_76_3).f0 += 1
+}
+
+rule rule_76_3(entity: Entity)
+  when entity has Cmp_76_1 and entity has Cmp_76_0
+{
+  entity.get_mut(Cmp_76_1).f0 += 1
+}
+
+rule rule_76_4(entity: Entity)
+  when entity has Cmp_76_5 and entity has Cmp_76_0 and entity has Cmp_76_2
+{
+  entity.get_mut(Cmp_76_5).f0 += 0.5
+}
+

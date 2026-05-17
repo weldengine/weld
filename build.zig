@@ -314,7 +314,11 @@ pub fn build(b: *std.Build) void {
     const etch_cook_module = b.createModule(.{
         .root_source_file = b.path("tools/etch_cook/main.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        // Use the user-selected optimize so `zig build bench-etch-compile
+        // -Doptimize=ReleaseSafe` builds the cook tool in the same mode
+        // as the bench harness — otherwise metric (a) is dominated by
+        // Debug-mode parser/type-checker cost and the gate is unreachable.
+        .optimize = optimize,
     });
     etch_cook_module.addImport("weld_etch", etch_module);
     etch_cook_module.addImport("weld_core", core_module);
@@ -322,6 +326,7 @@ pub fn build(b: *std.Build) void {
         .name = "etch_cook",
         .root_module = etch_cook_module,
     });
+    b.installArtifact(etch_cook_exe);
 
     // Cook the 20 differential corpus programs into a single consolidated
     // `corpus_codegen.zig`. The driver test imports it via the
@@ -386,6 +391,26 @@ pub fn build(b: *std.Build) void {
     const codegen_parity_test = b.addTest(.{ .root_module = codegen_parity_module });
     test_step.dependOn(&b.addRunArtifact(codegen_parity_test).step);
 
+    // ----------------------------------------- S5 etch_synth tool ------------
+
+    const etch_synth_module = b.createModule(.{
+        .root_source_file = b.path("tools/etch_synth/main.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const etch_synth_exe = b.addExecutable(.{
+        .name = "etch_synth",
+        .root_module = etch_synth_module,
+    });
+    const etch_synth_run = b.addRunArtifact(etch_synth_exe);
+    etch_synth_run.has_side_effects = true;
+    if (b.args) |args| etch_synth_run.addArgs(args);
+    const etch_synth_step = b.step(
+        "synth-100",
+        "Regenerate bench/fixtures/synth_100/scripts from the deterministic seed",
+    );
+    etch_synth_step.dependOn(&etch_synth_run.step);
+
     // -------------------------------- S5 demo binary (run-demo-etch-codegen) --
 
     const cook_demo_run = b.addRunArtifact(etch_cook_exe);
@@ -420,6 +445,29 @@ pub fn build(b: *std.Build) void {
         "Run the S5 codegen demo (cooks demo_5_rules_codegen.etch, runs 10 ticks)",
     );
     demo_codegen_step.dependOn(&demo_codegen_run.step);
+
+    // ----------------------------- S5 compile-time bench (3 metrics) -------
+
+    const compile_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/etch_compile.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const compile_bench_exe = b.addExecutable(.{
+        .name = "etch-compile-bench",
+        .root_module = compile_bench_module,
+    });
+    b.installArtifact(compile_bench_exe);
+    const compile_bench_run = b.addRunArtifact(compile_bench_exe);
+    // Bench needs etch_cook on disk (path: zig-out/bin/etch_cook). Drive
+    // the install step before the bench runs.
+    compile_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| compile_bench_run.addArgs(args);
+    const compile_bench_step = b.step(
+        "bench-etch-compile",
+        "Run the S5 compile-time bench (cook + cold + incremental, N=10; pass `-- --smoke` for CI)",
+    );
+    compile_bench_step.dependOn(&compile_bench_run.step);
 
     // ------------------------------------------------ vk_gen (S2 bindgen) --
     //

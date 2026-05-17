@@ -1,0 +1,46 @@
+resource Cfg_4 { enabled: bool = true }
+
+component Cmp_4_0 { f0: int = 0, f1: int = 0 }
+
+component Cmp_4_1 { f0: int = 0, f1: int = 0 }
+
+component Cmp_4_2 { f0: float = 0.0, f1: float = 0.0 }
+
+component Cmp_4_3 { f0: int = 0, f1: bool = true }
+
+component Cmp_4_4 { f0: int = 0, f1: int = 0 }
+
+component Cmp_4_5 { f0: float = 0.0, f1: int = 0 }
+
+component Cmp_4_6 { f0: int = 0, f1: int = 0, f2: int = 0 }
+
+component Cmp_4_7 { f0: int = 0, f1: float = 0.0, f2: int = 0 }
+
+component Cmp_4_8 { f0: int = 0, f1: float = 0.0, f2: int = 0 }
+
+component Cmp_4_9 { f0: int = 0, f1: float = 0.0, f2: int = 0 }
+
+rule rule_4_0(entity: Entity)
+  when entity has Cmp_4_6 and resource Cfg_4
+{
+  entity.get_mut(Cmp_4_6).f0 += 1
+}
+
+rule rule_4_1(entity: Entity)
+  when entity has Cmp_4_7 and entity has Cmp_4_9 and entity has Cmp_4_0
+{
+  entity.get_mut(Cmp_4_7).f0 += 1
+}
+
+rule rule_4_2(entity: Entity)
+  when entity has Cmp_4_6 and entity has Cmp_4_8 and entity has Cmp_4_7
+{
+  entity.get_mut(Cmp_4_6).f0 += 1
+}
+
+rule rule_4_3(entity: Entity)
+  when entity has Cmp_4_4
+{
+  entity.get_mut(Cmp_4_4).f0 += 1
+}
+

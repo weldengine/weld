@@ -1,0 +1,42 @@
+resource Cfg_48 { enabled: bool = true }
+
+component Cmp_48_0 { f0: float = 0.0, f1: int = 0 }
+
+component Cmp_48_1 { f0: float = 0.0, f1: bool = true }
+
+component Cmp_48_2 { f0: int = 0, f1: float = 0.0, f2: int = 0 }
+
+component Cmp_48_3 { f0: int = 0, f1: float = 0.0 }
+
+component Cmp_48_4 { f0: float = 0.0, f1: int = 0, f2: bool = true }
+
+component Cmp_48_5 { f0: float = 0.0, f1: int = 0, f2: bool = true }
+
+component Cmp_48_6 { f0: int = 0, f1: bool = true }
+
+component Cmp_48_7 { f0: int = 0, f1: int = 0 }
+
+rule rule_48_0(entity: Entity)
+  when entity has Cmp_48_4 and entity has Cmp_48_6 and entity has Cmp_48_7 and resource Cfg_48
+{
+  entity.get_mut(Cmp_48_4).f0 += 0.5
+}
+
+rule rule_48_1(entity: Entity)
+  when entity has Cmp_48_2 and entity has Cmp_48_5 and entity has Cmp_48_4 and resource Cfg_48
+{
+  entity.get_mut(Cmp_48_2).f0 += 1
+}
+
+rule rule_48_2(entity: Entity)
+  when entity has Cmp_48_5 and entity has Cmp_48_5 and entity has Cmp_48_6 and resource Cfg_48
+{
+  entity.get_mut(Cmp_48_5).f0 += 0.5
+}
+
+rule rule_48_3(entity: Entity)
+  when entity has Cmp_48_2 and entity has Cmp_48_5 and entity has Cmp_48_7 and resource Cfg_48
+{
+  entity.get_mut(Cmp_48_2).f0 += 1
+}
+

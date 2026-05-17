@@ -1,0 +1,44 @@
+resource Cfg_17 { enabled: bool = true }
+
+component Cmp_17_0 { f0: int = 0, f1: int = 0, f2: int = 0 }
+
+component Cmp_17_1 { f0: float = 0.0, f1: int = 0 }
+
+component Cmp_17_2 { f0: float = 0.0, f1: bool = true, f2: int = 0 }
+
+component Cmp_17_3 { f0: float = 0.0, f1: bool = true, f2: int = 0 }
+
+component Cmp_17_4 { f0: int = 0, f1: float = 0.0 }
+
+component Cmp_17_5 { f0: int = 0, f1: bool = true, f2: float = 0.0 }
+
+rule rule_17_0(entity: Entity)
+  when entity has Cmp_17_4 and entity has Cmp_17_2 and entity has Cmp_17_1 and resource Cfg_17
+{
+  entity.get_mut(Cmp_17_4).f0 += 1
+}
+
+rule rule_17_1(entity: Entity)
+  when entity has Cmp_17_1 and entity has Cmp_17_4 and entity has Cmp_17_5
+{
+  entity.get_mut(Cmp_17_1).f0 += 0.5
+}
+
+rule rule_17_2(entity: Entity)
+  when entity has Cmp_17_0
+{
+  entity.get_mut(Cmp_17_0).f0 += 1
+}
+
+rule rule_17_3(entity: Entity)
+  when entity has Cmp_17_2 and entity has Cmp_17_0 and entity has Cmp_17_3
+{
+  entity.get_mut(Cmp_17_2).f0 += 0.5
+}
+
+rule rule_17_4(entity: Entity)
+  when entity has Cmp_17_1
+{
+  entity.get_mut(Cmp_17_1).f0 += 0.5
+}
+
