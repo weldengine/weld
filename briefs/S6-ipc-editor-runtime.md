@@ -292,18 +292,18 @@ These debts are out of scope. Do not touch them in S6.
 
 *To be checked before any production code is written. Confirms full ingestion, not skim.*
 
-- [ ] `engine-spec.md` (§25.3 / S6, §25.3 / S2, §1.3, §3.5) — lu YYYY-MM-DD HH:MM
-- [ ] `engine-ipc.md` (full document) — lu YYYY-MM-DD HH:MM
-- [ ] `engine-tools-editor.md` (§2.2, §2.5, §2.6, §2.7) — lu YYYY-MM-DD HH:MM
-- [ ] `engine-platform.md` (Process, Memory, Threading, FileSystem) — lu YYYY-MM-DD HH:MM
-- [ ] `engine-zig-conventions.md` (§3, §4, §11, §13, §17) — lu YYYY-MM-DD HH:MM
-- [ ] `engine-development-workflow.md` (§2, §3, §4, §5) — lu YYYY-MM-DD HH:MM
-- [ ] `engine-directory-structure.md` — lu YYYY-MM-DD HH:MM
-- [ ] `engine-phase-0-criteria.md` (C0.4) — lu YYYY-MM-DD HH:MM
-- [ ] `engine-collaboration.md` (intro, §3.5) — lu YYYY-MM-DD HH:MM
-- [ ] `briefs/S1-mini-ecs-zig.md` — lu YYYY-MM-DD HH:MM
-- [ ] `briefs/S2-window-vulkan-triangle.md` — lu YYYY-MM-DD HH:MM
-- [ ] `briefs/S5-etch-codegen-zig.md` — lu YYYY-MM-DD HH:MM
+- [x] `engine-spec.md` (§25.3 / S6, §25.3 / S2, §1.3, §3.5) — lu 2026-05-17 22:03
+- [x] `engine-ipc.md` (full document) — lu 2026-05-17 22:03
+- [x] `engine-tools-editor.md` (§2.2, §2.5, §2.6, §2.7) — lu 2026-05-17 22:03
+- [x] `engine-platform.md` (Process, Memory, Threading, FileSystem) — lu 2026-05-17 22:03
+- [x] `engine-zig-conventions.md` (§3, §4, §11, §13, §17) — lu 2026-05-17 22:03
+- [x] `engine-development-workflow.md` (§2, §3, §4, §5) — lu 2026-05-17 22:03
+- [x] `engine-directory-structure.md` — lu 2026-05-17 22:03
+- [x] `engine-phase-0-criteria.md` (C0.4) — lu 2026-05-17 22:03
+- [x] `engine-collaboration.md` (intro, §3.5) — lu 2026-05-17 22:03
+- [x] `briefs/S1-mini-ecs-zig.md` — lu 2026-05-17 22:03 (fichier réel dans le repo : `briefs/S1-mini-ecs.md`)
+- [x] `briefs/S2-window-vulkan-triangle.md` — lu 2026-05-17 22:03
+- [x] `briefs/S5-etch-codegen-zig.md` — lu 2026-05-17 22:03
 
 ## Journal d'exécution
 
