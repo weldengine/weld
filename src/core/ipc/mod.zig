@@ -14,6 +14,7 @@ const protocol_mod = @import("protocol.zig");
 const messages_mod = @import("messages.zig");
 const framing_mod = @import("framing.zig");
 const transport_mod = @import("transport.zig");
+const shm_mod = @import("shm.zig");
 
 /// Constants and invariants (magic, protocol version, payload bound,
 /// heartbeat timing, little-endian guard).
@@ -33,3 +34,9 @@ pub const framing = framing_mod;
 /// S6 (Windows returns `error.Unimplemented` per `engine-ipc.md` §4.7
 /// + brief § Scope).
 pub const transport = transport_mod;
+
+/// `ShmRegion` interface with OS-specific backends: POSIX `shm_open`
+/// + `mmap` on Linux/macOS, `CreateFileMapping` + `MapViewOfFile` on
+/// Windows. Used to back the viewport double-buffer (cf.
+/// `viewport.zig`).
+pub const shm = shm_mod;
