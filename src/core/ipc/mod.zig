@@ -13,6 +13,7 @@
 const protocol_mod = @import("protocol.zig");
 const messages_mod = @import("messages.zig");
 const framing_mod = @import("framing.zig");
+const transport_mod = @import("transport.zig");
 
 /// Constants and invariants (magic, protocol version, payload bound,
 /// heartbeat timing, little-endian guard).
@@ -25,3 +26,10 @@ pub const messages = messages_mod;
 /// 16-byte header + `encode` / `parseHeader` / `validate` / `decode`
 /// + the `Error` set raised by all framing-layer failures.
 pub const framing = framing_mod;
+
+/// `IpcSocket` interface with OS-specific backends: AF_UNIX socket on
+/// Linux/macOS (with `SCM_RIGHTS` cmsg for fd passing), named pipe on
+/// Windows. `sendWithHandles` / `recvWithHandles` are POSIX-only in
+/// S6 (Windows returns `error.Unimplemented` per `engine-ipc.md` §4.7
+/// + brief § Scope).
+pub const transport = transport_mod;
