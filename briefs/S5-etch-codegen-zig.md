@@ -321,6 +321,12 @@ If during implementation the comptime path produces compile times that exceed th
 
 - **Addition not listed: `bench/fixtures/demo_5_rules_codegen.expected.txt`** — the brief's "Comportement observable" section requires "Output matches a committed reference at `bench/fixtures/demo_5_rules_codegen.expected.txt`". The file exists at the path the brief mandates. No technical scope extension.
 
+- **Tier 0 ECS additions for the comptime query path (post-review fix `31793e4`):**
+    - `src/core/ecs/comptime_query.zig` (new) — `ComptimeQuery(comptime tuple)` + `query(world, tuple)`. Required to satisfy the brief's `world.query(.{T1, T2, ...})` requirement on the cooked code. The brief's Tier 0 ECS extensions section listed only the S4 surface (registry, archetype_dynamic, resources, query_runtime). The S5 codegen needs a comptime-typed query layered on top of `DynamicArchetype` — there was no pre-existing Tier 0 helper that fit. Additive: the S1 single-archetype `world.query()` and the S4 `query_runtime.RuntimeQuery` are both untouched.
+    - `src/core/ecs/registry.zig` (modified) — `registerAlias(gpa, alias_name, id)` added. Additive: existing callers (interpreter, diff_runner sidecars, S1 / S4 tests) unchanged. The brief's "Removal or refactor of S4's dynamic ECS path" Out-of-scope clause forbids removing or restructuring S4 code; an additive new method on `Registry` does not violate it.
+    - `src/core/root.zig` (modified) — re-exports `comptime_query` under `weld_core.ecs.comptime_query`. One-line addition next to the existing `query_runtime` re-export. Same justification as above.
+    These additions are the coordination work the PR review identified as missing from the original brief. Recorded explicitly so the milestone history makes the scope expansion (one new file + two additive edits) traceable.
+
 ## Blocages rencontrés
 
 *Blocking points that required a return to Claude.ai (cf. `engine-development-workflow.md` §2.4). If 2+ distinct blockers: signal for re-scope.*
@@ -361,9 +367,11 @@ Aucun blocage de design ou d'architecture. Les ajustements internes (architectur
 
 *Mandatory step before opening the PR. Compares `git diff main..HEAD --name-only` against the § Fichiers à créer ou modifier list.*
 
-`git diff main..HEAD --name-only` returns 129 paths (29 hand-written files + 100 generated `synth_100/scripts/*.etch`). The non-`scripts/` subset (29 files):
+`git diff main..HEAD --name-only` returns 135 paths (35 hand-written files + 100 generated `synth_100/scripts/*.etch`). The non-`scripts/` subset (35 files, updated post-review):
 
 ```
+CLAUDE.md
+README.md
 bench/etch_compile.zig
 bench/fixtures/demo_5_rules_codegen.etch
 bench/fixtures/demo_5_rules_codegen.expected.txt
@@ -373,6 +381,9 @@ bench/fixtures/synth_100/build.zig.zon
 bench/results/S5-codegen-zig.md
 briefs/S5-etch-codegen-zig.md
 build.zig
+src/core/ecs/comptime_query.zig         (post-review addition)
+src/core/ecs/registry.zig                (post-review edit: registerAlias)
+src/core/root.zig                        (post-review edit: re-export comptime_query)
 src/demo_etch_codegen.zig
 src/etch/root.zig
 src/etch/zig_codegen/cache.zig
@@ -394,13 +405,11 @@ tools/etch_cook/main.zig
 tools/etch_synth/README.md
 tools/etch_synth/main.zig
 validation/s5-go-nogo.md
-README.md (pending — added with the closing commit)
-CLAUDE.md (pending — added with the closing commit)
 ```
 
 Plus `bench/fixtures/synth_100/scripts/000.etch … 099.etch` (100 generated corpus files).
 
 - [x] Run `git diff main..HEAD --name-only` — done (see above).
-- [x] Every file in § Fichiers à créer ou modifier appears in the diff. README.md and CLAUDE.md are updated with the closing commit (cf. Conventions / PR description Changelog section).
-- [x] Files in the diff but not in § Fichiers à créer ou modifier: `tools/etch_cook/main.zig`, `tests/etch_interp/codegen_diff_test.zig`, `tests/etch_interp/codegen_parity_test.zig`, `tests/etch_interp/runner_interp.zig` (édition), `bench/fixtures/demo_5_rules_codegen.expected.txt` — all justified under § Déviations actées above.
+- [x] Every file in § Fichiers à créer ou modifier appears in the diff. README.md and CLAUDE.md are updated.
+- [x] Files in the diff but not in § Fichiers à créer ou modifier: `tools/etch_cook/main.zig`, `tests/etch_interp/codegen_diff_test.zig`, `tests/etch_interp/codegen_parity_test.zig`, `tests/etch_interp/runner_interp.zig` (édition), `bench/fixtures/demo_5_rules_codegen.expected.txt`, **and the three Tier 0 ECS changes from the post-review fix: `src/core/ecs/comptime_query.zig`, `src/core/ecs/registry.zig`, `src/core/root.zig`** — all justified under § Déviations actées above.
 - [x] No discrepancy that escapes the « Déviations actées » section → proceed to PR.
