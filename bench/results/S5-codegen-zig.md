@@ -1,24 +1,28 @@
 # S5 — bench-etch-compile
 
 - Corpus: 100 `.etch` files at `bench/fixtures/synth_100/scripts`
-- Iterations per metric: 1 (smoke: true)
+- Iterations per metric: 10 (smoke: false)
 - Build mode: ReleaseSafe
 - Host: aarch64-macos
 
 ## Metric (a) — codegen only (`etch_cook` 100 inputs → 1 cooked.zig)
 
-median 165.135 ms · mean 165.135 ms · stddev 0.000 ms · p99 165.135 ms · max 165.135 ms (N=1)
+median 17.220 ms · mean 18.442 ms · stddev 4.766 ms · p99 31.810 ms · max 31.810 ms (N=10)
 
 ## Metric (b) — cold `zig build-exe` after `rm -rf zig-out/etch-bench/.zig-cache-bench`
 
-median 474.683 ms · mean 474.683 ms · stddev 0.000 ms · p99 474.683 ms · max 474.683 ms (N=1)
+median 478.893 ms · mean 478.783 ms · stddev 5.771 ms · p99 488.755 ms · max 488.755 ms (N=10)
 
 ## Metric (c) — incremental `zig build-exe` after one-line edit (cache intact)
 
-median 469.479 ms · mean 469.479 ms · stddev 0.000 ms · p99 469.479 ms · max 469.479 ms (N=1)
+median 468.899 ms · mean 468.193 ms · stddev 2.781 ms · p99 474.449 ms · max 474.449 ms (N=10)
 
 ## Gates
 
-- (a)+(b) cold: 639.8 ms · gate 30000.0 ms — GO
-- (a)+(c) incremental: 634.6 ms · gate 2000.0 ms — GO
+- Gate 1 (cold compilation, (a)+(b) < 30 s): 496.1 ms — GO
+- Gate 2 (incremental compilation, (a)+(c) < 2 s): 486.1 ms — GO
+- Gate 3 (zero leak): exercised by `zig build test` under `std.testing.allocator`. See test step.
+- Gate 4 (monomorphisation contained, ≤ 4 × distinct archetype signatures): 0 distinct Zig comptime generic instantiations.
+    The S5 codegen emits non-generic per-rule Zig functions; archetype matching uses runtime `arch.hasComponent` checks rather than comptime monomorphisation, so the cooked corpus produces zero `Archetype(...)` / `Query(...)` instantiations beyond the type definitions themselves. Trivially satisfies the 4× ceiling.
+- Gate 5 (differential parity, 20/20 corpus): green via `zig build test-codegen-diff` and the parity test in the same binary set.
 

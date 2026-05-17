@@ -2,7 +2,7 @@
 
 A game engine written in Zig 0.16.x.
 
-> **Status:** Phase −1 — Etch tree-walking interpreter (S4)
+> **Status:** Phase −1 — Etch Zig codegen + compile-time measurement (S5)
 >
 > Weld is in its earliest exploratory phase: the spike list of Phase −1 is
 > validating the core architectural hypotheses (comptime ECS, work-stealing
@@ -32,17 +32,33 @@ A game engine written in Zig 0.16.x.
 > files on dev Apple Silicon ReleaseSafe (gate: < 5 ms). Run the bench
 > locally with `zig build bench-etch -Doptimize=ReleaseSafe`.
 >
-> **S4** (closed, tag `v0.0.5-S4-etch-tree-walking-interpreter` pending
-> merge) validated the tree-walking interpreter hypothesis — the AST
-> emitted by S3 is correctly executable, and a runtime bridge exists
-> between the interpreter and the dynamic ECS surface (runtime component
-> registry, dynamic SoA archetype, resource store, runtime query). On the
-> dev primary (Apple Silicon, ReleaseSafe) the bench reports a median per
+> **S4** (closed, tag `v0.0.5-S4-etch-tree-walking-interpreter`) validated
+> the tree-walking interpreter hypothesis — the AST emitted by S3 is
+> correctly executable, and a runtime bridge exists between the
+> interpreter and the dynamic ECS surface (runtime component registry,
+> dynamic SoA archetype, resource store, runtime query). On the dev
+> primary (Apple Silicon, ReleaseSafe) the bench reports a median per
 > tick of **0.603 ms** at 1 000 entities × 5 rules and **6.593 ms** at
 > 10 000 entities × 5 rules — well under the 10 ms / 100 ms gates
 > respectively. Run the bench locally with
 > `zig build bench-etch-interp -Doptimize=ReleaseSafe` and the demo with
 > `zig build run-demo-etch-interp -Doptimize=ReleaseSafe`.
+>
+> **S5** (closed, tag `v0.0.6-S5-etch-codegen-zig` pending merge) validated
+> the shipping codegen hypothesis — `Etch → Zig source → Zig compile` is
+> viable build-time-wise. The codegen lives in `src/etch/zig_codegen/`
+> and lowers the S3 subset to idiomatic Zig: components become `extern
+> struct`s, rules become non-generic functions that walk
+> `world.archetypes` via typed `@ptrCast` casts, and resources are seeded
+> in the runtime registry. The 20-program differential corpus passes
+> through both the interpreter and the cooked code with byte-exact
+> parity (`zig build test-codegen-diff`). On the dev primary the
+> compile-time bench reports cold (a)+(b) at **496 ms** and incremental
+> (a)+(c) at **486 ms** — 60× and 4× under the 30 s / 2 s gates
+> respectively. Run the bench locally with
+> `zig build bench-etch-compile -Doptimize=ReleaseSafe` and the demo with
+> `zig build run-demo-etch-codegen`. Full report:
+> [`validation/s5-go-nogo.md`](validation/s5-go-nogo.md).
 
 ## Prerequisites
 
@@ -62,9 +78,14 @@ zig build bench-ecs -Doptimize=ReleaseSafe               # S1 ECS iteration benc
 zig build bench-etch -Doptimize=ReleaseSafe              # S3 Etch parser bench (report under bench/results/)
 zig build bench-etch-interp -Doptimize=ReleaseSafe       # S4 Etch interpreter bench (report under bench/results/)
 zig build run-demo-etch-interp -Doptimize=ReleaseSafe    # S4 demo (1000 entities × 5 rules × 60 ticks)
+zig build bench-etch-compile -Doptimize=ReleaseSafe      # S5 codegen compile-time bench (3 metrics, report under bench/results/)
+zig build run-demo-etch-codegen                          # S5 codegen demo (cooks demo_5_rules_codegen.etch, 10 ticks)
+zig build test-codegen-diff                              # S5 differential corpus via the cooked runner
+zig build synth-100 -- --output bench/fixtures/synth_100/scripts --count 100   # regenerate the synthetic bench corpus
 zig build bench-ecs -- --smoke                           # short bench run (used by CI)
 zig build bench-etch -- --smoke                          # short Etch bench run (sanity)
 zig build bench-etch-interp -- --smoke                   # short S4 bench run (sanity)
+zig build bench-etch-compile -- --smoke                  # short S5 compile-time bench (sanity)
 ./scripts/install-hooks.sh                               # install local git hooks (run once after clone)
 ```
 
@@ -101,13 +122,17 @@ src/
       window.zig                   public Window interface (create/destroy/pollEvent/nativeHandles)
       window/{win32,wayland,stub}.zig  per-OS backends (no SDL/GLFW, no @cImport)
       window/wayland_protocols/    ~3 000 lines — generated from wayland XMLs by tools/wayland_gen
-  etch/                            S3 Etch parser — lexer, parser, tabular SoA AST, type-checker
+  etch/                            S3 Etch parser, S4 interpreter, S5 Zig codegen
+    zig_codegen/                   S5 codegen — lower, emit, type_map, cache, errors, tests
+    parser.zig, types.zig, ast.zig (S3) / interp.zig, value.zig, ecs_bridge.zig (S4)
   spike/                           throwaway S2 spike code (CLI parser, scoring, vk_setup, vk_frame, ppm)
 tests/etch/                        S3 parser corpus driver + ~30 valid + ~10 invalid `.etch` fixtures
-tests/etch_interp/                 S4 differential corpus — 20 `.etch` programs + sidecars + generic driver
+tests/etch_interp/                 S4 + S5 differential corpus — 20 `.etch` programs + sidecars + interp/codegen runners
 tools/
   vk_gen/                          XML → Zig generator for Vulkan bindings
   wayland_gen/                     XML → Zig generator for Wayland protocol bindings
+  etch_cook/                       S5 codegen CLI (Etch → consolidated Zig)
+  etch_synth/                      S5 synthetic Etch corpus generator (deterministic)
 assets/shaders/                    GLSL sources + pre-compiled SPIR-V (triangle.vert, triangle.frag)
 bench/                             performance benchmarks (see "Basic commands" above)
 tests/                             out-of-tree tests wired into `zig build test`
