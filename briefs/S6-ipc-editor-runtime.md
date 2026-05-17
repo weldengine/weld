@@ -1,6 +1,6 @@
 # S6 — IPC editor↔runtime round-trip
 
-> **Status:** PLANNED
+> **Status:** ACTIVE
 > **Phase:** -1
 > **Branche:** `phase-pre-0/ipc/editor-runtime-round-trip`
 > **Tag prévu:** `v0.0.7-S6-ipc-round-trip`
