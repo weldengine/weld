@@ -1,0 +1,40 @@
+resource Cfg_62 { enabled: bool = true }
+
+component Cmp_62_0 { f0: int = 0, f1: int = 0 }
+
+component Cmp_62_1 { f0: float = 0.0, f1: bool = true }
+
+component Cmp_62_2 { f0: float = 0.0, f1: float = 0.0, f2: bool = true }
+
+component Cmp_62_3 { f0: int = 0, f1: int = 0, f2: bool = true }
+
+component Cmp_62_4 { f0: float = 0.0, f1: float = 0.0 }
+
+component Cmp_62_5 { f0: int = 0, f1: float = 0.0, f2: int = 0 }
+
+component Cmp_62_6 { f0: float = 0.0, f1: bool = true }
+
+rule rule_62_0(entity: Entity)
+  when entity has Cmp_62_2
+{
+  entity.get_mut(Cmp_62_2).f0 += 0.5
+}
+
+rule rule_62_1(entity: Entity)
+  when entity has Cmp_62_4 and entity has Cmp_62_5 and entity has Cmp_62_4 and resource Cfg_62
+{
+  entity.get_mut(Cmp_62_4).f0 += 0.5
+}
+
+rule rule_62_2(entity: Entity)
+  when entity has Cmp_62_3 and resource Cfg_62
+{
+  entity.get_mut(Cmp_62_3).f0 += 1
+}
+
+rule rule_62_3(entity: Entity)
+  when entity has Cmp_62_2 and entity has Cmp_62_3 and entity has Cmp_62_5 and resource Cfg_62
+{
+  entity.get_mut(Cmp_62_2).f0 += 0.5
+}
+

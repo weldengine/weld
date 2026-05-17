@@ -25,6 +25,10 @@ pub const value = @import("value.zig");
 pub const ecs_bridge = @import("ecs_bridge.zig");
 pub const interp = @import("interp.zig");
 
+// S5 Zig codegen surface. Generates idiomatic Zig source from a parsed +
+// type-checked Etch AST per `briefs/S5-etch-codegen-zig.md`.
+pub const codegen_zig = @import("zig_codegen/root.zig");
+
 pub const Lexer = lexer.Lexer;
 pub const Token = token.Token;
 pub const TokenKind = token.TokenKind;

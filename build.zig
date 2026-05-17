@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const codegen_corpus = @import("tests/etch_interp/codegen_corpus_build.zig");
+
 pub fn build(b: *std.Build) void {
     comptime {
         if (builtin.zig_version.major != 0 or builtin.zig_version.minor != 16) {
@@ -300,6 +302,172 @@ pub fn build(b: *std.Build) void {
         "Run the S3 Etch parse bench (pass `-- --smoke` for a CI sanity run)",
     );
     etch_bench_step.dependOn(&etch_bench_run.step);
+
+    // --------------------------------------- S5 Etch → Zig codegen tool ---
+    //
+    // `tools/etch_cook` is a standalone CLI that runs the S5 codegen on a
+    // list of `.etch` programs and emits a single consolidated `.zig`
+    // file. The build invokes it once per corpus (the differential test
+    // programs, the synthetic 100-file bench fixture) and exposes the
+    // result as a Zig module for downstream test / bench binaries.
+
+    const etch_cook_module = b.createModule(.{
+        .root_source_file = b.path("tools/etch_cook/main.zig"),
+        .target = b.graph.host,
+        // Use the user-selected optimize so `zig build bench-etch-compile
+        // -Doptimize=ReleaseSafe` builds the cook tool in the same mode
+        // as the bench harness — otherwise metric (a) is dominated by
+        // Debug-mode parser/type-checker cost and the gate is unreachable.
+        .optimize = optimize,
+    });
+    etch_cook_module.addImport("weld_etch", etch_module);
+    etch_cook_module.addImport("weld_core", core_module);
+    const etch_cook_exe = b.addExecutable(.{
+        .name = "etch_cook",
+        .root_module = etch_cook_module,
+    });
+    b.installArtifact(etch_cook_exe);
+
+    // Cook the 20 differential corpus programs into a single consolidated
+    // `corpus_codegen.zig`. The driver test imports it via the
+    // `corpus_codegen` module name.
+    const cook_diff_run = b.addRunArtifact(etch_cook_exe);
+    cook_diff_run.addArg("--output");
+    const diff_codegen_path = cook_diff_run.addOutputFileArg("corpus_codegen.zig");
+    for (codegen_corpus.programs) |p| {
+        cook_diff_run.addArg(b.fmt("{s}={s}", .{ p.name, p.etch_path }));
+    }
+
+    const diff_codegen_module = b.createModule(.{
+        .root_source_file = diff_codegen_path,
+        .target = target,
+        .optimize = optimize,
+    });
+    diff_codegen_module.addImport("weld_core", core_module);
+
+    // Codegen-backed runner module — used by both the codegen diff test
+    // and the synthetic bench (the latter compiles the cooked corpus
+    // through `zig build` to measure compile-time wall-clock).
+    const codegen_runner_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/runner_codegen.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    codegen_runner_module.addImport("weld_core", core_module);
+    codegen_runner_module.addImport("corpus_codegen", diff_codegen_module);
+
+    // Build step that just executes the codegen diff binary.
+    const codegen_diff_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/codegen_diff_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    codegen_diff_module.addImport("weld_core", core_module);
+    codegen_diff_module.addImport("weld_etch", etch_module);
+    codegen_diff_module.addImport("corpus_facade", etch_interp_corpus_module);
+    codegen_diff_module.addImport("diff_runner", etch_interp_driver_module);
+    codegen_diff_module.addImport("runner_codegen", codegen_runner_module);
+    const codegen_diff_test = b.addTest(.{ .root_module = codegen_diff_module });
+    const codegen_diff_run = b.addRunArtifact(codegen_diff_test);
+    test_step.dependOn(&codegen_diff_run.step);
+    const codegen_diff_step = b.step(
+        "test-codegen-diff",
+        "Run the S5 differential corpus through the Zig codegen runner",
+    );
+    codegen_diff_step.dependOn(&codegen_diff_run.step);
+
+    // Parity test: same corpus, runs interpreter + codegen back-to-back.
+    const codegen_parity_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/codegen_parity_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    codegen_parity_module.addImport("weld_core", core_module);
+    codegen_parity_module.addImport("weld_etch", etch_module);
+    codegen_parity_module.addImport("corpus_facade", etch_interp_corpus_module);
+    codegen_parity_module.addImport("diff_runner", etch_interp_driver_module);
+    codegen_parity_module.addImport("runner_interp", etch_interp_runner_module);
+    codegen_parity_module.addImport("runner_codegen", codegen_runner_module);
+    const codegen_parity_test = b.addTest(.{ .root_module = codegen_parity_module });
+    test_step.dependOn(&b.addRunArtifact(codegen_parity_test).step);
+
+    // ----------------------------------------- S5 etch_synth tool ------------
+
+    const etch_synth_module = b.createModule(.{
+        .root_source_file = b.path("tools/etch_synth/main.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const etch_synth_exe = b.addExecutable(.{
+        .name = "etch_synth",
+        .root_module = etch_synth_module,
+    });
+    const etch_synth_run = b.addRunArtifact(etch_synth_exe);
+    etch_synth_run.has_side_effects = true;
+    if (b.args) |args| etch_synth_run.addArgs(args);
+    const etch_synth_step = b.step(
+        "synth-100",
+        "Regenerate bench/fixtures/synth_100/scripts from the deterministic seed",
+    );
+    etch_synth_step.dependOn(&etch_synth_run.step);
+
+    // -------------------------------- S5 demo binary (run-demo-etch-codegen) --
+
+    const cook_demo_run = b.addRunArtifact(etch_cook_exe);
+    cook_demo_run.addArg("--output");
+    const demo_codegen_path = cook_demo_run.addOutputFileArg("cooked_demo.zig");
+    cook_demo_run.addArg("demo=bench/fixtures/demo_5_rules_codegen.etch");
+
+    const cooked_demo_module = b.createModule(.{
+        .root_source_file = demo_codegen_path,
+        .target = target,
+        .optimize = optimize,
+    });
+    cooked_demo_module.addImport("weld_core", core_module);
+
+    const demo_codegen_module = b.createModule(.{
+        .root_source_file = b.path("src/demo_etch_codegen.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    demo_codegen_module.addImport("weld_core", core_module);
+    demo_codegen_module.addImport("cooked_demo", cooked_demo_module);
+    const demo_codegen_exe = b.addExecutable(.{
+        .name = "demo-etch-codegen",
+        .root_module = demo_codegen_module,
+    });
+    b.installArtifact(demo_codegen_exe);
+    const demo_codegen_run = b.addRunArtifact(demo_codegen_exe);
+    demo_codegen_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| demo_codegen_run.addArgs(args);
+    const demo_codegen_step = b.step(
+        "run-demo-etch-codegen",
+        "Run the S5 codegen demo (cooks demo_5_rules_codegen.etch, runs 10 ticks)",
+    );
+    demo_codegen_step.dependOn(&demo_codegen_run.step);
+
+    // ----------------------------- S5 compile-time bench (3 metrics) -------
+
+    const compile_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/etch_compile.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const compile_bench_exe = b.addExecutable(.{
+        .name = "etch-compile-bench",
+        .root_module = compile_bench_module,
+    });
+    b.installArtifact(compile_bench_exe);
+    const compile_bench_run = b.addRunArtifact(compile_bench_exe);
+    // Bench needs etch_cook on disk (path: zig-out/bin/etch_cook). Drive
+    // the install step before the bench runs.
+    compile_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| compile_bench_run.addArgs(args);
+    const compile_bench_step = b.step(
+        "bench-etch-compile",
+        "Run the S5 compile-time bench (cook + cold + incremental, N=10; pass `-- --smoke` for CI)",
+    );
+    compile_bench_step.dependOn(&compile_bench_run.step);
 
     // ------------------------------------------------ vk_gen (S2 bindgen) --
     //

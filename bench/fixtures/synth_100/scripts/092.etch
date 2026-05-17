@@ -1,0 +1,36 @@
+resource Cfg_92 { enabled: bool = true }
+
+component Cmp_92_0 { f0: int = 0, f1: float = 0.0 }
+
+component Cmp_92_1 { f0: int = 0, f1: float = 0.0, f2: float = 0.0 }
+
+component Cmp_92_2 { f0: float = 0.0, f1: int = 0 }
+
+component Cmp_92_3 { f0: int = 0, f1: bool = true, f2: float = 0.0 }
+
+component Cmp_92_4 { f0: int = 0, f1: bool = true }
+
+component Cmp_92_5 { f0: float = 0.0, f1: float = 0.0 }
+
+component Cmp_92_6 { f0: int = 0, f1: bool = true }
+
+component Cmp_92_7 { f0: float = 0.0, f1: bool = true }
+
+rule rule_92_0(entity: Entity)
+  when entity has Cmp_92_6
+{
+  entity.get_mut(Cmp_92_6).f0 += 1
+}
+
+rule rule_92_1(entity: Entity)
+  when entity has Cmp_92_3 and resource Cfg_92
+{
+  entity.get_mut(Cmp_92_3).f0 += 1
+}
+
+rule rule_92_2(entity: Entity)
+  when entity has Cmp_92_4 and entity has Cmp_92_2 and resource Cfg_92
+{
+  entity.get_mut(Cmp_92_4).f0 += 1
+}
+

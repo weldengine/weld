@@ -89,9 +89,15 @@ pub const ResourceCheck = struct {
 };
 
 /// Runner interface — `Runner` must declare:
-///   pub fn setup(gpa: std.mem.Allocator, world: *World, source: []const u8) !Runner;
+///   pub fn setup(gpa: std.mem.Allocator, world: *World, name: []const u8, source: []const u8) !Runner;
 ///   pub fn step(self: *Runner, world: *World) !void;
 ///   pub fn finalize(self: *Runner, gpa: std.mem.Allocator, world: *World) void;
+///
+/// The S5 codegen runner uses `name` to dispatch into the pre-compiled
+/// `corpus_codegen` consolidated module; the S4 interpreter runner ignores
+/// it (just compiles from `source`). Passing both keeps the contract
+/// uniform across backends without forcing one to parse the other's
+/// preferred input.
 pub fn runProgram(
     gpa: std.mem.Allocator,
     comptime Runner: type,
@@ -104,7 +110,7 @@ pub fn runProgram(
     var world = World.init();
     defer world.deinit(gpa);
 
-    var runner = try Runner.setup(gpa, &world, source);
+    var runner = try Runner.setup(gpa, &world, name, source);
     defer runner.finalize(gpa, &world);
 
     try spawnEntities(gpa, &world, initial.entities);

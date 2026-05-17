@@ -1,0 +1,46 @@
+resource Cfg_67 { enabled: bool = true }
+
+component Cmp_67_0 { f0: int = 0, f1: float = 0.0, f2: bool = true }
+
+component Cmp_67_1 { f0: int = 0, f1: int = 0, f2: float = 0.0 }
+
+component Cmp_67_2 { f0: float = 0.0, f1: int = 0, f2: float = 0.0 }
+
+component Cmp_67_3 { f0: int = 0, f1: bool = true }
+
+component Cmp_67_4 { f0: float = 0.0, f1: bool = true, f2: float = 0.0 }
+
+component Cmp_67_5 { f0: int = 0, f1: float = 0.0, f2: int = 0 }
+
+component Cmp_67_6 { f0: int = 0, f1: int = 0, f2: bool = true }
+
+rule rule_67_0(entity: Entity)
+  when entity has Cmp_67_5 and entity has Cmp_67_5 and entity has Cmp_67_4 and resource Cfg_67
+{
+  entity.get_mut(Cmp_67_5).f0 += 1
+}
+
+rule rule_67_1(entity: Entity)
+  when entity has Cmp_67_0 and entity has Cmp_67_0 and entity has Cmp_67_1 and resource Cfg_67
+{
+  entity.get_mut(Cmp_67_0).f0 += 1
+}
+
+rule rule_67_2(entity: Entity)
+  when entity has Cmp_67_1 and entity has Cmp_67_6 and entity has Cmp_67_5 and resource Cfg_67
+{
+  entity.get_mut(Cmp_67_1).f0 += 1
+}
+
+rule rule_67_3(entity: Entity)
+  when entity has Cmp_67_0 and entity has Cmp_67_2 and resource Cfg_67
+{
+  entity.get_mut(Cmp_67_0).f0 += 1
+}
+
+rule rule_67_4(entity: Entity)
+  when entity has Cmp_67_0 and entity has Cmp_67_0 and entity has Cmp_67_4
+{
+  entity.get_mut(Cmp_67_0).f0 += 1
+}
+

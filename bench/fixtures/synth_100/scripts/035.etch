@@ -1,0 +1,46 @@
+resource Cfg_35 { enabled: bool = true }
+
+component Cmp_35_0 { f0: int = 0, f1: float = 0.0 }
+
+component Cmp_35_1 { f0: int = 0, f1: bool = true, f2: int = 0 }
+
+component Cmp_35_2 { f0: float = 0.0, f1: int = 0, f2: float = 0.0 }
+
+component Cmp_35_3 { f0: int = 0, f1: float = 0.0 }
+
+component Cmp_35_4 { f0: float = 0.0, f1: int = 0 }
+
+component Cmp_35_5 { f0: float = 0.0, f1: int = 0, f2: float = 0.0 }
+
+component Cmp_35_6 { f0: float = 0.0, f1: bool = true, f2: bool = true }
+
+component Cmp_35_7 { f0: int = 0, f1: int = 0, f2: int = 0 }
+
+component Cmp_35_8 { f0: float = 0.0, f1: float = 0.0, f2: int = 0 }
+
+component Cmp_35_9 { f0: float = 0.0, f1: float = 0.0, f2: bool = true }
+
+rule rule_35_0(entity: Entity)
+  when entity has Cmp_35_5
+{
+  entity.get_mut(Cmp_35_5).f0 += 0.5
+}
+
+rule rule_35_1(entity: Entity)
+  when entity has Cmp_35_4 and entity has Cmp_35_5 and entity has Cmp_35_7
+{
+  entity.get_mut(Cmp_35_4).f0 += 0.5
+}
+
+rule rule_35_2(entity: Entity)
+  when entity has Cmp_35_9 and entity has Cmp_35_0 and resource Cfg_35
+{
+  entity.get_mut(Cmp_35_9).f0 += 0.5
+}
+
+rule rule_35_3(entity: Entity)
+  when entity has Cmp_35_8 and entity has Cmp_35_2 and entity has Cmp_35_5 and resource Cfg_35
+{
+  entity.get_mut(Cmp_35_8).f0 += 0.5
+}
+

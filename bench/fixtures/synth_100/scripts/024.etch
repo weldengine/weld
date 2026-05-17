@@ -1,0 +1,34 @@
+resource Cfg_24 { enabled: bool = true }
+
+component Cmp_24_0 { f0: float = 0.0, f1: bool = true, f2: int = 0 }
+
+component Cmp_24_1 { f0: int = 0, f1: int = 0, f2: float = 0.0 }
+
+component Cmp_24_2 { f0: int = 0, f1: float = 0.0 }
+
+component Cmp_24_3 { f0: int = 0, f1: int = 0, f2: int = 0 }
+
+component Cmp_24_4 { f0: float = 0.0, f1: int = 0, f2: bool = true }
+
+component Cmp_24_5 { f0: float = 0.0, f1: int = 0, f2: int = 0 }
+
+component Cmp_24_6 { f0: int = 0, f1: bool = true }
+
+rule rule_24_0(entity: Entity)
+  when entity has Cmp_24_4 and resource Cfg_24
+{
+  entity.get_mut(Cmp_24_4).f0 += 0.5
+}
+
+rule rule_24_1(entity: Entity)
+  when entity has Cmp_24_3 and entity has Cmp_24_3 and resource Cfg_24
+{
+  entity.get_mut(Cmp_24_3).f0 += 1
+}
+
+rule rule_24_2(entity: Entity)
+  when entity has Cmp_24_3 and entity has Cmp_24_5 and resource Cfg_24
+{
+  entity.get_mut(Cmp_24_3).f0 += 1
+}
+

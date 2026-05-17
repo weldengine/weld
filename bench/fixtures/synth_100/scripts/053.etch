@@ -1,0 +1,42 @@
+resource Cfg_53 { enabled: bool = true }
+
+component Cmp_53_0 { f0: int = 0, f1: float = 0.0, f2: int = 0 }
+
+component Cmp_53_1 { f0: float = 0.0, f1: bool = true, f2: bool = true }
+
+component Cmp_53_2 { f0: float = 0.0, f1: bool = true, f2: float = 0.0 }
+
+component Cmp_53_3 { f0: float = 0.0, f1: float = 0.0 }
+
+component Cmp_53_4 { f0: int = 0, f1: bool = true }
+
+rule rule_53_0(entity: Entity)
+  when entity has Cmp_53_4 and entity has Cmp_53_2 and entity has Cmp_53_0
+{
+  entity.get_mut(Cmp_53_4).f0 += 1
+}
+
+rule rule_53_1(entity: Entity)
+  when entity has Cmp_53_0 and entity has Cmp_53_2 and entity has Cmp_53_2 and resource Cfg_53
+{
+  entity.get_mut(Cmp_53_0).f0 += 1
+}
+
+rule rule_53_2(entity: Entity)
+  when entity has Cmp_53_4 and entity has Cmp_53_2 and resource Cfg_53
+{
+  entity.get_mut(Cmp_53_4).f0 += 1
+}
+
+rule rule_53_3(entity: Entity)
+  when entity has Cmp_53_2 and resource Cfg_53
+{
+  entity.get_mut(Cmp_53_2).f0 += 0.5
+}
+
+rule rule_53_4(entity: Entity)
+  when entity has Cmp_53_3 and entity has Cmp_53_2 and entity has Cmp_53_0 and resource Cfg_53
+{
+  entity.get_mut(Cmp_53_3).f0 += 0.5
+}
+

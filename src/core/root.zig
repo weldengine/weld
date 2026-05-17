@@ -15,6 +15,8 @@ pub const ecs = struct {
     pub const archetype_dynamic = @import("ecs/archetype_dynamic.zig");
     pub const resources = @import("ecs/resources.zig");
     pub const query_runtime = @import("ecs/query_runtime.zig");
+    // S5 — comptime-typed query consumed by the Etch → Zig codegen.
+    pub const comptime_query = @import("ecs/comptime_query.zig");
 };
 
 pub const jobs = struct {

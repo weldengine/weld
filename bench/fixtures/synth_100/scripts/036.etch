@@ -1,0 +1,44 @@
+resource Cfg_36 { enabled: bool = true }
+
+component Cmp_36_0 { f0: int = 0, f1: bool = true, f2: int = 0 }
+
+component Cmp_36_1 { f0: int = 0, f1: bool = true, f2: bool = true }
+
+component Cmp_36_2 { f0: float = 0.0, f1: int = 0, f2: float = 0.0 }
+
+component Cmp_36_3 { f0: int = 0, f1: float = 0.0, f2: bool = true }
+
+component Cmp_36_4 { f0: float = 0.0, f1: int = 0 }
+
+component Cmp_36_5 { f0: int = 0, f1: bool = true, f2: int = 0 }
+
+component Cmp_36_6 { f0: float = 0.0, f1: int = 0, f2: float = 0.0 }
+
+component Cmp_36_7 { f0: float = 0.0, f1: bool = true }
+
+component Cmp_36_8 { f0: float = 0.0, f1: int = 0 }
+
+rule rule_36_0(entity: Entity)
+  when entity has Cmp_36_5 and entity has Cmp_36_4 and resource Cfg_36
+{
+  entity.get_mut(Cmp_36_5).f0 += 1
+}
+
+rule rule_36_1(entity: Entity)
+  when entity has Cmp_36_0 and entity has Cmp_36_4
+{
+  entity.get_mut(Cmp_36_0).f0 += 1
+}
+
+rule rule_36_2(entity: Entity)
+  when entity has Cmp_36_2
+{
+  entity.get_mut(Cmp_36_2).f0 += 0.5
+}
+
+rule rule_36_3(entity: Entity)
+  when entity has Cmp_36_3 and resource Cfg_36
+{
+  entity.get_mut(Cmp_36_3).f0 += 1
+}
+

@@ -1,0 +1,50 @@
+// Minimal 5-rule Etch program used by `zig build run-demo-etch-codegen`.
+// Structurally a sibling of `bench/fixtures/demo_5_rules.etch` (the S4
+// interpreter demo); the names diverge so the sidecars don't collide.
+
+component Counter {
+  value: int = 0
+}
+
+component Score {
+  total: float = 0.0
+}
+
+component Active {
+  flag: bool = true
+}
+
+resource GameMode {
+  running: bool = true
+}
+
+rule increment(entity: Entity)
+  when entity has Counter
+{
+  entity.get_mut(Counter).value += 1
+}
+
+rule accumulate(entity: Entity)
+  when entity has Counter and entity has Score
+{
+  entity.get_mut(Score).total += 0.5
+}
+
+rule double_active(entity: Entity)
+  when entity has Counter and entity has Active { flag == true }
+{
+  entity.get_mut(Counter).value += 1
+}
+
+rule gated_bump(entity: Entity)
+  when entity has Score and resource GameMode
+{
+  entity.get_mut(Score).total += 0.25
+}
+
+rule normalize(entity: Entity)
+  when entity has Counter
+{
+  let c = entity.get_mut(Counter)
+  c.value = c.value
+}

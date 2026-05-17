@@ -5,23 +5,33 @@ session and captures the operational state of the project plus the rules that
 must never be violated. The full specification lives in the claude.ai
 knowledge base — see § Quick links spec.
 
-> **Status:** Phase −1 — S4 closed (code + bench verdict GO), PR pending
+> **Status:** Phase −1 — S5 closed (code + bench verdict GO), PR pending
 >
-> S4 closed: tree-walking interpreter over the S3 AST plus the additive
-> Tier 0 ECS surface required to host it (runtime component registry,
-> dynamic SoA archetype, resource store, runtime query, world dynamic
-> spawn / tickBoundary). Public surface `Interpreter`, `Value`,
-> `RuntimeReport`, `runProgram`, `evalConst` exported through
-> `src/etch/root.zig`. 20-program differential corpus under
-> `tests/etch_interp/` parameterised by a `Runner` interface
-> (interpreter runner today, codegen runner in S5). Bench verdict on dev
-> machine (Apple Silicon, macOS, ReleaseSafe, 1 000 ticks @ 1 000
-> entities + 100 ticks @ 10 000 entities, 50 warmup ticks): median
-> 0.603 ms / tick at 1 000 × 5 (gate 10 ms), median 6.593 ms / tick at
-> 10 000 × 5 (gate 100 ms). Validation: `zig build`, `zig build test`
-> (debug + ReleaseSafe), `zig fmt --check` all green. PR
-> `Phase -1 / Etch / Tree-walking interpreter` opens next; tag
-> `v0.0.5-S4-etch-tree-walking-interpreter` posted by Guy after
+> S5 closed: Etch → Zig codegen on the S3 subset plus the compile-time
+> measurement harness. `src/etch/zig_codegen/` lowers components to
+> `extern struct`s and rules to functions that open a
+> `comptime_query.query(world, .{T1, T2})` iteration (the comptime path
+> mandated by the brief); the iterator is in `src/core/ecs/comptime_query.zig`.
+> The registry has a new `registerAlias` so a single component is
+> reachable by both Etch name (`world.spawnDynamic`) and Zig type
+> (`@typeName` keyed comptime query). `tools/etch_cook` consolidates N
+> inputs into one `.zig` for static linking; `tools/etch_synth`
+> generates a deterministic 100-file corpus at
+> `bench/fixtures/synth_100/scripts/`. The differential corpus (20
+> programs) passes through both the interpreter and the cooked runner
+> with byte-exact parity. Bench verdict on dev machine (Apple Silicon,
+> macOS, ReleaseSafe, N=10): metric (a) codegen only 17 ms median,
+> (b) cold `zig build-exe` 1087 ms median, (c) incremental
+> `zig build-exe` 1049 ms median. Gates: (a)+(b) cold 1104 ms vs 30 s
+> (27× margin), (a)+(c) incremental 1066 ms vs 2 s (1.9× margin), zero
+> leak under `std.testing.allocator`, **382 distinct comptime query
+> instantiations over 400 rules / 382 signatures (ceiling 4×=1528)**,
+> 20/20 differential corpus parity. Validation: `zig build`, `zig build
+> test` (debug + ReleaseSafe), `zig fmt --check`, `zig build
+> bench-etch-compile`, `zig build run-demo-etch-codegen`, `zig build
+> test-codegen-diff` all green. PR
+> `Phase -1 / Etch / Etch → Zig codegen and compile-time measurement`
+> opens next; tag `v0.0.6-S5-etch-codegen-zig` posted by Guy after
 > squash-merge.
 
 ## Current state
@@ -29,10 +39,10 @@ knowledge base — see § Quick links spec.
 | Field | Value |
 |---|---|
 | Phase | −1 (Spikes) |
-| Current milestone | S4 — Etch tree-walking interpreter (CLOSED, PR pending) |
-| Last released tag | `v0.0.4-S3-etch-parser-subset` |
-| Active branch | `phase-pre-0/etch/tree-walking-interpreter` |
-| Next planned milestone | S5 — Etch → Zig codegen + compile-time measurement |
+| Current milestone | S5 — Etch → Zig codegen + compile-time measurement (CLOSED, PR pending) |
+| Last released tag | `v0.0.5-S4-etch-tree-walking-interpreter` |
+| Active branch | `phase-pre-0/etch/codegen-zig` |
+| Next planned milestone | S6 — IPC editor↔runtime round-trip |
 
 ## Tags
 
@@ -42,7 +52,8 @@ knowledge base — see § Quick links spec.
 | `v0.0.2-S1-mini-ecs` | 2026-05-09 | S1 — Mini-ECS Zig | Comptime SoA archetype + Chase-Lev work-stealing scheduler. Validates the comptime + work-stealing hypothesis (100k entities iterated in 54.5 µs median ReleaseSafe on M4 Pro reference, gate 1 ms). |
 | `v0.0.3-S2-window-vulkan-triangle` | 2026-05-11 | S2 — Window + Vulkan triangle | Native Win32 + Wayland windowing, Vulkan triangle, no SDL/GLFW. Validated GO on Win11 + RTX 4080, Fedora 44 + UHD 630, Fedora 44 + GTX 1660 Ti. |
 | `v0.0.4-S3-etch-parser-subset` | 2026-05-15 | S3 — Etch parser on subset | Lexer + parser + tabular SoA AST + minimal type-checker on 5 constructs. Bench verdict GO (worst median 0.019 ms vs 5 ms target on dev machine; re-confirmation on reference machine pending). |
-| `v0.0.5-S4-etch-tree-walking-interpreter` | (planned) | S4 — Etch tree-walking interpreter | Interpreter over S3 AST + additive Tier 0 ECS (runtime registry, dynamic archetype, resource store, runtime query). 20-program differential corpus. Bench verdict GO (median 0.603 ms / tick at 1 000 entities × 5 rules, gate 10 ms; median 6.593 ms / tick at 10 000 × 5, gate 100 ms) on dev Apple Silicon ReleaseSafe. Tag posted by Guy after squash-merge of PR `Phase -1 / Etch / Tree-walking interpreter`. |
+| `v0.0.5-S4-etch-tree-walking-interpreter` | 2026-05-16 | S4 — Etch tree-walking interpreter | Interpreter over S3 AST + additive Tier 0 ECS (runtime registry, dynamic archetype, resource store, runtime query). 20-program differential corpus. Bench verdict GO (median 0.603 ms / tick at 1 000 entities × 5 rules, gate 10 ms; median 6.593 ms / tick at 10 000 × 5, gate 100 ms) on dev Apple Silicon ReleaseSafe. |
+| `v0.0.6-S5-etch-codegen-zig` | (planned) | S5 — Etch → Zig codegen and compile-time measurement | Etch → Zig codegen on the S3 subset. `extern struct` types + comptime `world.query(.{T1, T2})` iteration (via `src/core/ecs/comptime_query.zig`), with `Registry.registerAlias` letting components be keyed by both Etch name and `@typeName(T)`. `tools/etch_cook` consolidates N inputs into one `.zig`. 100-file synthetic corpus + 3-metric bench. Verdict GO on all 5 gates: (a)+(b) cold 1104 ms vs 30 s, (a)+(c) incremental 1066 ms vs 2 s, zero leak, **382 distinct comptime query instantiations on 400 rules (ceiling 4×=1528)**, 20/20 differential parity. Tag posted by Guy after squash-merge of PR `Phase -1 / Etch / Etch → Zig codegen and compile-time measurement`. |
 
 ## Hypotheses validated by spikes
 
@@ -53,7 +64,7 @@ knowledge base — see § Quick links spec.
 | S2 | Window Win32 + Wayland + Vulkan triangle, native Zig, no SDL/GLFW | validated (3/3 target machines green, validation/s2-go-nogo.md ✅ GO) |
 | S3 | Etch grammar EBNF v0.6 (S3 subset) implementable, parsing < 5 ms / file | validated (worst median 0.019 ms on dev Apple Silicon ReleaseSafe; reference-machine re-run pending) |
 | S4 | AST tree-walking interpreter executes Etch correctly with ECS bridge | validated (20-program differential corpus green; bench median 0.603 ms / tick @ 1 000 × 5 vs 10 ms gate on dev Apple Silicon ReleaseSafe) |
-| S5 | Etch → Zig codegen viable build-time-wise (incremental < 2 s) | pending |
+| S5 | Etch → Zig codegen viable build-time-wise (incremental < 2 s) | validated (5/5 gates GO; cold (a)+(b) 1104 ms vs 30 s gate, incremental (a)+(c) 1066 ms vs 2 s gate, 382 distinct comptime query instantiations on dev Apple Silicon ReleaseSafe; 100-file synth corpus + 20-program differential parity) |
 | S6 | IPC editor↔runtime stable, < 1 ms RTT, 1h fuzz, kill -9 recovery | pending |
 
 ## Open / deferred decisions
@@ -128,4 +139,4 @@ The `briefs/` directory is the source of truth for milestone state. The brief's 
 
 ---
 
-Last updated: 2026-05-16
+Last updated: 2026-05-17
