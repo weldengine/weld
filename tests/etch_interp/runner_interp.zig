@@ -23,7 +23,8 @@ pub const Runner = struct {
     interp: Interpreter,
     report: weld_etch.RuntimeReport,
 
-    pub fn setup(gpa: std.mem.Allocator, world: *World, source: []const u8) !Runner {
+    pub fn setup(gpa: std.mem.Allocator, world: *World, name: []const u8, source: []const u8) !Runner {
+        _ = name; // interpreter does not need program names — it compiles from source.
         var pr = try weld_etch.parser.parse(gpa, source);
         if (pr.diagnostic) |d| {
             var dd = d;

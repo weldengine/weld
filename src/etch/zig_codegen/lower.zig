@@ -354,6 +354,20 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) CodegenErr
     }
 
     // Component-bound rule: walk archetypes.
+    // `info.components` holds every component named anywhere in the when
+    // clause — needed to build the archetype predicate (`arch.hasComponent`).
+    // `body_used` is the subset accessed by the body — only those need the
+    // per-slot `_arr` cast. Some components show up only in `not` clauses
+    // or as plain `has` filters without a corresponding `entity.get(T)`.
+    var body_used: std.StringHashMapUnmanaged(void) = .empty;
+    defer body_used.deinit(w.gpa);
+    try collectBodyComponents(w.gpa, ast, rule, &body_used);
+    if (info.field_filter) |ff| {
+        // The field-filter component is also accessed at the slot level
+        // (used in the per-slot continue guard).
+        _ = try body_used.getOrPut(w.gpa, ff.component_name);
+    }
+
     for (info.components) |cname| {
         try w.printLine("const {s}_id = world.registry.idOf(\"{s}\") orelse return;", .{ cname, cname });
     }
@@ -367,8 +381,11 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) CodegenErr
         try emitArchPredicate(w, ast, rule.when_root);
         try w.write(")) continue;\n");
     }
-    // Per-component slot pointer locals.
+    // Per-component slot pointer locals — only for components accessed by
+    // the body or the field filter. Components present only in `not has`
+    // (or `has` clauses with no body reference) don't get a slot pointer.
     for (info.components) |cname| {
+        if (!body_used.contains(cname)) continue;
         try w.printLine("const {s}_idx = arch.componentIndex({s}_id).?;", .{ cname, cname });
         try w.printLine("const {s}_off = arch.layout.component_offsets[{s}_idx];", .{ cname, cname });
     }
@@ -376,6 +393,7 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) CodegenErr
     w.indentBy(1);
     try w.line("const __count: u32 = chunk.header().entity_count;");
     for (info.components) |cname| {
+        if (!body_used.contains(cname)) continue;
         try w.printLine("const {s}_arr: [*]{s} = @ptrCast(@alignCast(&chunk.bytes[{s}_off]));", .{ cname, cname, cname });
     }
     try w.line("var slot: u32 = 0;");
@@ -400,6 +418,81 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) CodegenErr
     w.indentBy(-1);
     try w.line("}"); // fn
     try w.blankLine();
+}
+
+/// Walk every statement in the rule body and add the component name of
+/// each `entity.get(T)` / `entity.get_mut(T)` accessor to `out`. Used by
+/// the rule emitter to decide which components need a per-slot pointer
+/// vs. only an id (the latter is enough for `arch.hasComponent` checks).
+fn collectBodyComponents(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    rule: ast_mod.RuleDecl,
+    out: *std.StringHashMapUnmanaged(void),
+) !void {
+    var s: u32 = 0;
+    while (s < rule.body_len) : (s += 1) {
+        const stmt_raw = ast.extra.items[rule.body_start + s];
+        const stmt_id: NodeId = @bitCast(stmt_raw);
+        try walkStmtForComponents(gpa, ast, stmt_id, out);
+    }
+}
+
+fn walkStmtForComponents(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    stmt_id: NodeId,
+    out: *std.StringHashMapUnmanaged(void),
+) !void {
+    const kind = ast.stmtKind(stmt_id);
+    const data = ast.stmtData(stmt_id);
+    switch (kind) {
+        .let_stmt => {
+            const let = ast.let_stmts.items[data];
+            try walkExprForComponents(gpa, ast, let.value, out);
+        },
+        .assign_stmt => {
+            const assign = ast.assign_stmts.items[data];
+            try walkExprForComponents(gpa, ast, assign.target, out);
+            try walkExprForComponents(gpa, ast, assign.value, out);
+        },
+        .expr_stmt => {
+            const eid: NodeId = @bitCast(data);
+            try walkExprForComponents(gpa, ast, eid, out);
+        },
+        else => {},
+    }
+}
+
+fn walkExprForComponents(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    expr: NodeId,
+    out: *std.StringHashMapUnmanaged(void),
+) !void {
+    const kind = ast.exprKind(expr);
+    const data = ast.exprData(expr);
+    switch (kind) {
+        .method_get, .method_get_mut => {
+            const mg = ast.method_gets.items[data];
+            const cname = ast.strings.slice(mg.type_name);
+            _ = try out.getOrPut(gpa, cname);
+        },
+        .field_access => {
+            const fa = ast.field_accesses.items[data];
+            try walkExprForComponents(gpa, ast, fa.receiver, out);
+        },
+        .binary => {
+            const b = ast.binary_exprs.items[data];
+            try walkExprForComponents(gpa, ast, b.lhs, out);
+            try walkExprForComponents(gpa, ast, b.rhs, out);
+        },
+        .unary => {
+            const u = ast.unary_exprs.items[data];
+            try walkExprForComponents(gpa, ast, u.operand, out);
+        },
+        else => {},
+    }
 }
 
 fn emitArchPredicate(w: *Writer, ast: *const AstArena, when_idx: u32) CodegenError!void {
@@ -825,7 +918,6 @@ fn fieldZigTypeOnComponent(ast: *const AstArena, comp_name: []const u8, field_na
         var f_i: u32 = 0;
         while (f_i < fields_len) : (f_i += 1) {
             const f = ast.fields.items[fields_start + f_i];
-            if (f.name == undefined) continue;
             const fname = ast.strings.slice(f.name);
             if (std.mem.eql(u8, fname, field_name)) {
                 const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];

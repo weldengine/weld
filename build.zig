@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const codegen_corpus = @import("tests/etch_interp/codegen_corpus_build.zig");
+
 pub fn build(b: *std.Build) void {
     comptime {
         if (builtin.zig_version.major != 0 or builtin.zig_version.minor != 16) {
@@ -300,6 +302,89 @@ pub fn build(b: *std.Build) void {
         "Run the S3 Etch parse bench (pass `-- --smoke` for a CI sanity run)",
     );
     etch_bench_step.dependOn(&etch_bench_run.step);
+
+    // --------------------------------------- S5 Etch → Zig codegen tool ---
+    //
+    // `tools/etch_cook` is a standalone CLI that runs the S5 codegen on a
+    // list of `.etch` programs and emits a single consolidated `.zig`
+    // file. The build invokes it once per corpus (the differential test
+    // programs, the synthetic 100-file bench fixture) and exposes the
+    // result as a Zig module for downstream test / bench binaries.
+
+    const etch_cook_module = b.createModule(.{
+        .root_source_file = b.path("tools/etch_cook/main.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    etch_cook_module.addImport("weld_etch", etch_module);
+    etch_cook_module.addImport("weld_core", core_module);
+    const etch_cook_exe = b.addExecutable(.{
+        .name = "etch_cook",
+        .root_module = etch_cook_module,
+    });
+
+    // Cook the 20 differential corpus programs into a single consolidated
+    // `corpus_codegen.zig`. The driver test imports it via the
+    // `corpus_codegen` module name.
+    const cook_diff_run = b.addRunArtifact(etch_cook_exe);
+    cook_diff_run.addArg("--output");
+    const diff_codegen_path = cook_diff_run.addOutputFileArg("corpus_codegen.zig");
+    for (codegen_corpus.programs) |p| {
+        cook_diff_run.addArg(b.fmt("{s}={s}", .{ p.name, p.etch_path }));
+    }
+
+    const diff_codegen_module = b.createModule(.{
+        .root_source_file = diff_codegen_path,
+        .target = target,
+        .optimize = optimize,
+    });
+    diff_codegen_module.addImport("weld_core", core_module);
+
+    // Codegen-backed runner module — used by both the codegen diff test
+    // and the synthetic bench (the latter compiles the cooked corpus
+    // through `zig build` to measure compile-time wall-clock).
+    const codegen_runner_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/runner_codegen.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    codegen_runner_module.addImport("weld_core", core_module);
+    codegen_runner_module.addImport("corpus_codegen", diff_codegen_module);
+
+    // Build step that just executes the codegen diff binary.
+    const codegen_diff_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/codegen_diff_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    codegen_diff_module.addImport("weld_core", core_module);
+    codegen_diff_module.addImport("weld_etch", etch_module);
+    codegen_diff_module.addImport("corpus_facade", etch_interp_corpus_module);
+    codegen_diff_module.addImport("diff_runner", etch_interp_driver_module);
+    codegen_diff_module.addImport("runner_codegen", codegen_runner_module);
+    const codegen_diff_test = b.addTest(.{ .root_module = codegen_diff_module });
+    const codegen_diff_run = b.addRunArtifact(codegen_diff_test);
+    test_step.dependOn(&codegen_diff_run.step);
+    const codegen_diff_step = b.step(
+        "test-codegen-diff",
+        "Run the S5 differential corpus through the Zig codegen runner",
+    );
+    codegen_diff_step.dependOn(&codegen_diff_run.step);
+
+    // Parity test: same corpus, runs interpreter + codegen back-to-back.
+    const codegen_parity_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/codegen_parity_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    codegen_parity_module.addImport("weld_core", core_module);
+    codegen_parity_module.addImport("weld_etch", etch_module);
+    codegen_parity_module.addImport("corpus_facade", etch_interp_corpus_module);
+    codegen_parity_module.addImport("diff_runner", etch_interp_driver_module);
+    codegen_parity_module.addImport("runner_interp", etch_interp_runner_module);
+    codegen_parity_module.addImport("runner_codegen", codegen_runner_module);
+    const codegen_parity_test = b.addTest(.{ .root_module = codegen_parity_module });
+    test_step.dependOn(&b.addRunArtifact(codegen_parity_test).step);
 
     // ------------------------------------------------ vk_gen (S2 bindgen) --
     //
