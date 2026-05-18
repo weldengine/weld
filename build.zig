@@ -197,6 +197,44 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
 
+    // ------------------------------------------------ S6 IPC tests --------
+    //
+    // Each IPC test is its own exe so a deadlock in one case (the
+    // previous session's 46-minute test-runner hang taught us this
+    // the expensive way) cannot stall the rest of `zig build test`.
+    // The `test-ipc` step runs only the IPC tests for fast iteration
+    // during S6; the main `test` step also dependsOn each of them so
+    // CI keeps a single entry point.
+    const test_ipc_step = b.step("test-ipc", "Run the S6 IPC tests");
+    const ipc_test_paths = [_][]const u8{
+        "tests/ipc/framing.zig",
+        "tests/ipc/schema_hash.zig",
+        "tests/ipc/transport.zig",
+        "tests/ipc/shm.zig",
+        "tests/ipc/shm_viewport.zig",
+        "tests/ipc/fd_passing.zig",
+        "tests/ipc/process.zig",
+    };
+    for (ipc_test_paths) |p| {
+        const t_mod = b.createModule(.{
+            .root_source_file = b.path(p),
+            .target = target,
+            .optimize = optimize,
+            // The IPC tests bind directly to libc primitives (socket,
+            // shm_open, pipe, unlink, setsockopt) alongside the
+            // `weld_core` re-exports. `weld_core` itself links libc
+            // but the test module needs the link flag too — Zig 0.16
+            // does not propagate `link_libc` across module imports
+            // for the consumer's own `extern "c"` declarations.
+            .link_libc = true,
+        });
+        t_mod.addImport("weld_core", core_module);
+        const t = b.addTest(.{ .root_module = t_mod });
+        const run_t = b.addRunArtifact(t);
+        test_step.dependOn(&run_t.step);
+        test_ipc_step.dependOn(&run_t.step);
+    }
+
     // ----------------------------------------------------- ECS bench step --
 
     const bench_module = b.createModule(.{

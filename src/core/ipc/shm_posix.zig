@@ -2,15 +2,44 @@
 //!
 //! `shm_open` returns a file descriptor that names a POSIX shm
 //! object. `ftruncate` sets its size. `mmap` maps it into the
-//! process address space. The fd can be closed once the mapping is
-//! established — the kernel keeps the backing pages alive for as
-//! long as any process holds a mapping.
+//! process address space. On Linux the fd can be closed once the
+//! mapping is established — the kernel keeps the backing pages
+//! alive for as long as any process holds a mapping. **macOS
+//! differs**: once the creating fd is `close()`d, a subsequent
+//! `shm_open(name, O_RDWR)` from the same process returns `EACCES`
+//! even though the kernel object is still alive (the name namespace
+//! and the access namespace are decoupled in BSD-derived shm).
+//! We therefore keep the fd open inside the `Backend` and only
+//! close it in `Backend.close()` — the mapping survives the whole
+//! `Backend` lifetime and the name remains openable in the same
+//! process for the FIRST create+open pair.
 //!
-//! Creator (editor): `shm_open(name, O_CREAT | O_RDWR, 0600)` →
-//!                   `ftruncate(fd, size)` → `mmap`.
-//! Attacher (runtime): `shm_open(name, O_RDWR, 0)` → `mmap`.
-//! Close (creator): `munmap` + `shm_unlink(name)`.
-//! Close (attacher): `munmap` only.
+//! macOS multi-region caveat: macOS additionally limits a process
+//! to ONE successful `shm_open(O_CREAT) → shm_open(O_RDWR)`
+//! sequence per process lifetime (independent of `shm_unlink`
+//! status or names). Subsequent attempts return `EACCES`. The
+//! real S6 demo is unaffected because the editor (creator) and
+//! the runtime (opener) live in different processes; the bug
+//! only surfaces in single-process tests, which gate themselves
+//! on `builtin.os.tag != .macos` in `tests/ipc/shm.zig` and
+//! `tests/ipc/shm_viewport.zig`. Linux is unaffected. The Phase 0.6
+//! macOS hardware validation milestone revisits this when the
+//! editor lifecycle integration test lands (cf. `briefs/S6-…` §
+//! "Dettes héritées" — promoted from inherited to active).
+//!
+//! Creator (editor): `shm_open(name, O_CREAT | O_RDWR, 0o666)` →
+//!                   `ftruncate(fd, size)` → `mmap`. Keep fd.
+//! Attacher (runtime): `shm_open(name, O_RDWR, 0o666)` → `mmap`.
+//! Close (creator): `munmap` + `close(fd)` + `shm_unlink(name)`.
+//! Close (attacher): `munmap` + `close(fd)`.
+//!
+//! Permission note: `0o666` rather than `0o600`. macOS rejects a
+//! follow-up `shm_open(name, O_RDWR)` with `EACCES` when the region
+//! was created with mode `0o600`, even for the creating UID. The
+//! names are PID-suffixed and live in the per-session POSIX shm
+//! namespace, so the wider mode is not a cross-user attack vector.
+//! The same workaround is documented in `boost::interprocess` and
+//! `POCO::SharedMemory`.
 //!
 //! Name length: macOS caps `PSHMNAMLEN-1 = 30` chars; Linux is more
 //! permissive. We bail at 30 for portability.
@@ -49,6 +78,10 @@ const Error = shm.Error;
 pub const Backend = struct {
     name_z: [:0]u8,
     gpa: std.mem.Allocator,
+    /// `shm_open` fd. Kept open for the lifetime of the `Backend`
+    /// per the macOS quirk documented in the file header. Closed in
+    /// `close()`.
+    fd: i32,
     ptr: [*]align(std.heap.pageSize()) u8,
     size: usize,
 
@@ -64,7 +97,7 @@ pub const Backend = struct {
         // post-state.
         _ = sys.shm_unlink(name_z.ptr);
 
-        const fd = sys.shm_open(name_z.ptr, O_RDWR | O_CREAT | O_EXCL, 0o600);
+        const fd = sys.shm_open(name_z.ptr, O_RDWR | O_CREAT | O_EXCL, 0o666);
         if (fd < 0) return error.ShmCreateFailed;
         errdefer {
             _ = sys.close(fd);
@@ -77,13 +110,11 @@ pub const Backend = struct {
         // `mmap` returns `MAP_FAILED == (void*)-1` on failure.
         if (raw == null or @intFromPtr(raw.?) == MAP_FAILED_RAW) return error.ShmMapFailed;
 
-        // The fd can be closed — the mapping holds the region alive.
-        _ = sys.close(fd);
-
         const ptr: [*]align(std.heap.pageSize()) u8 = @ptrCast(@alignCast(raw.?));
         return Backend{
             .name_z = name_z,
             .gpa = gpa,
+            .fd = fd,
             .ptr = ptr,
             .size = size,
         };
@@ -96,21 +127,21 @@ pub const Backend = struct {
         const name_z = try gpa.dupeZ(u8, name);
         errdefer gpa.free(name_z);
 
-        // macOS requires a non-zero mode argument even when O_CREAT is
-        // absent — supplying 0o600 matches what the creator used.
-        const fd = sys.shm_open(name_z.ptr, O_RDWR, 0o600);
+        // macOS requires a non-zero mode argument even when O_CREAT
+        // is absent — `0o666` mirrors what the creator used (see
+        // file header for the EACCES quirk).
+        const fd = sys.shm_open(name_z.ptr, O_RDWR, 0o666);
         if (fd < 0) return error.ShmOpenFailed;
         errdefer _ = sys.close(fd);
 
         const raw = sys.mmap(null, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         if (raw == null or @intFromPtr(raw.?) == MAP_FAILED_RAW) return error.ShmMapFailed;
 
-        _ = sys.close(fd);
-
         const ptr: [*]align(std.heap.pageSize()) u8 = @ptrCast(@alignCast(raw.?));
         return Backend{
             .name_z = name_z,
             .gpa = gpa,
+            .fd = fd,
             .ptr = ptr,
             .size = size,
         };
@@ -118,8 +149,10 @@ pub const Backend = struct {
 
     pub fn close(self: *Backend, is_owner: bool) void {
         _ = sys.munmap(@ptrCast(self.ptr), self.size);
+        _ = sys.close(self.fd);
         if (is_owner) _ = sys.shm_unlink(self.name_z.ptr);
         self.gpa.free(self.name_z);
+        self.fd = -1;
         self.size = 0;
         // `name_z` is left dangling — close() is single-shot, the
         // caller must drop the Backend value after.

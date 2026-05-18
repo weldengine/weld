@@ -32,6 +32,10 @@ pub const testing = struct {
 pub const platform = struct {
     pub const window = @import("platform/window.zig");
     pub const vk = @import("platform/vk.zig");
+    // S6 — minimum process control surface used by the editor stub
+    // to spawn / monitor / kill the runtime stub. Wider API lands in
+    // Phase 0.3 (cf. `engine-platform.md` §4).
+    pub const process = @import("platform/process.zig");
 };
 
 // S6 — editor↔runtime IPC. Tier 0 endpoint per `engine-ipc.md` and the

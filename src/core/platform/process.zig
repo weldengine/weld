@@ -87,9 +87,20 @@ const win = struct {
     extern "kernel32" fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) callconv(.winapi) ?*anyopaque;
 };
 
-// External symbol available on both Linux and macOS — holds the
-// process environment. Required by `posix_spawnp`.
+// `posix_spawnp` needs the parent process's `envp` pointer. The
+// underlying symbol is OS-specific: Linux/glibc exposes a real
+// `environ` global; macOS hides it behind `_NSGetEnviron()` to
+// allow the two-level namespace dyld to relocate it.
+extern "c" fn _NSGetEnviron() *[*]const ?[*:0]const u8;
 extern var environ: [*]const ?[*:0]const u8;
+
+fn currentEnvp() [*]const ?[*:0]const u8 {
+    return switch (builtin.os.tag) {
+        .macos => _NSGetEnviron().*,
+        .linux => environ,
+        else => @compileError("currentEnvp: unsupported OS"),
+    };
+}
 
 /// Spawns a child process running `path` with the supplied
 /// `argv`. The caller's environment is inherited as-is. The
@@ -126,7 +137,7 @@ pub fn spawn_process(
                 null,
                 null,
                 c_argv.ptr,
-                @ptrCast(@as([*]const ?[*:0]const u8, environ)),
+                currentEnvp(),
             );
             if (rc != 0) return error.SpawnFailed;
             return .{ .pid = pid };
