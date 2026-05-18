@@ -510,11 +510,19 @@ fn createRenderPass(r: *Renderer) !void {
     const subpass: vk.SubpassDescription = .{
         .flags = .empty,
         .pipeline_bind_point = .graphics,
+        // Non-optional `*const T` fields can stay `undefined` when
+        // their count is 0 — Vulkan never dereferences them. Optional
+        // `?*const T` fields MUST be explicit `null` so the Zig
+        // optional encodes a known nullptr value rather than stack
+        // garbage; the NVIDIA driver dereferences
+        // `p_resolve_attachments` before checking the colour count,
+        // and any non-null garbage value SIGSEGVs inside
+        // `libnvidia-eglcore.so` (verified on Fedora 41 + 595.71.05).
         .input_attachment_count = 0,
         .p_input_attachments = undefined,
         .color_attachment_count = 1,
         .p_color_attachments = @ptrCast(&color_ref),
-        .p_resolve_attachments = undefined,
+        .p_resolve_attachments = null,
         .p_depth_stencil_attachment = null,
         .preserve_attachment_count = 0,
         .p_preserve_attachments = undefined,
