@@ -21,7 +21,15 @@ const messages = ipc.messages;
 const N_WARMUP: usize = 100;
 const N_ITERS: usize = 10_000;
 
+// `unlink` is a POSIX-only no-op on Windows (named pipes are not
+// filesystem entries; the kernel reclaims them when the last handle
+// closes). The `extern` is gated so the linker doesn't drag a libc
+// `unlink` in on the Windows build.
+const can_unlink = builtin.os.tag == .linux or builtin.os.tag == .macos;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
+fn maybeUnlink(path: [*:0]const u8) void {
+    if (comptime can_unlink) _ = unlink(path);
+}
 extern "c" fn clock_gettime(clk_id: i32, tp: *timespec_t) c_int;
 const CLOCK_MONOTONIC: i32 = if (builtin.os.tag == .linux) 1 else 6;
 const timespec_t = extern struct { tv_sec: i64, tv_nsec: i64 };
@@ -53,9 +61,22 @@ pub fn main() !void {
     defer arena.deinit();
     const gpa = arena.allocator();
 
-    const path: [:0]const u8 = "/tmp/weld-bench-rtt.sock";
-    _ = unlink(path.ptr);
-    defer _ = unlink(path.ptr);
+    // Per-PID unique base name keeps concurrent bench runs +
+    // leftover pipe instances from biting each other on Windows
+    // (named pipes survive until the last handle closes; a kill -9
+    // can leave one behind for a brief window).
+    const pid: u32 = switch (builtin.os.tag) {
+        .linux, .macos => @intCast(std.c.getpid()),
+        .windows => std.os.windows.GetCurrentProcessId(),
+        else => 0,
+    };
+    var name_buf: [64]u8 = undefined;
+    const base_name = try std.fmt.bufPrint(&name_buf, "weld-bench-rtt-{d}", .{pid});
+
+    var path_buf: [128]u8 = undefined;
+    const path = try ipc.transport.buildSocketPath(&path_buf, base_name);
+    maybeUnlink(path.ptr);
+    defer maybeUnlink(path.ptr);
 
     var listener = try ipc.transport.IpcSocket.listen(path);
     defer listener.close();

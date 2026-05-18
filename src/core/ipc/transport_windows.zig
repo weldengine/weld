@@ -112,7 +112,19 @@ pub const Backend = struct {
             0,
             null,
         );
-        if (@intFromPtr(handle) == @intFromPtr(INVALID_HANDLE_VALUE)) return error.BindFailed;
+        if (@intFromPtr(handle) == @intFromPtr(INVALID_HANDLE_VALUE)) {
+            const code = sys.GetLastError();
+            // Surface the Win32 last-error so callers (bench harness,
+            // tests, the editor) can diagnose `BindFailed` without
+            // guessing. 123 = ERROR_INVALID_NAME (path is not
+            // `\\.\pipe\…`), 231 = ERROR_PIPE_BUSY, 5 =
+            // ERROR_ACCESS_DENIED, 87 = ERROR_INVALID_PARAMETER.
+            std.log.scoped(.ipc).err(
+                "CreateNamedPipeA failed: path='{s}' GetLastError={d}",
+                .{ path, code },
+            );
+            return error.BindFailed;
+        }
 
         return Backend{ .handle = handle, .is_listener = true };
     }
@@ -133,7 +145,17 @@ pub const Backend = struct {
             FILE_ATTRIBUTE_NORMAL,
             null,
         );
-        if (@intFromPtr(handle) == @intFromPtr(INVALID_HANDLE_VALUE)) return error.ConnectionRefused;
+        if (@intFromPtr(handle) == @intFromPtr(INVALID_HANDLE_VALUE)) {
+            const code = sys.GetLastError();
+            // 2 = ERROR_FILE_NOT_FOUND (listener absent), 231 =
+            // ERROR_PIPE_BUSY (all listener instances connected),
+            // 5 = ERROR_ACCESS_DENIED.
+            std.log.scoped(.ipc).err(
+                "CreateFileA failed: path='{s}' GetLastError={d}",
+                .{ path, code },
+            );
+            return error.ConnectionRefused;
+        }
 
         return Backend{ .handle = handle, .is_listener = false };
     }

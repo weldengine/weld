@@ -141,6 +141,37 @@ pub const IpcSocket = struct {
     }
 };
 
+/// Build the platform-correct path for an IPC endpoint named
+/// `name`. POSIX returns `/tmp/<name>.sock`, Windows returns
+/// `\\.\pipe\<name>`. The caller passes a writable buffer; the
+/// returned slice is a NUL-terminated `[*:0]const u8`-convertible
+/// view into that buffer.
+///
+/// Pattern from `engine-ipc.md` §2.2: Unix domain sockets on
+/// Linux/macOS, named pipes on Windows. The runtime stub takes
+/// the editor-built path verbatim via `--socket=<…>`, so the
+/// editor and the bench harness are the only call sites that need
+/// to construct one.
+pub fn buildSocketPath(buf: []u8, name: []const u8) ![:0]const u8 {
+    const prefix = switch (builtin.os.tag) {
+        .linux, .macos => "/tmp/",
+        .windows => "\\\\.\\pipe\\",
+        else => return error.UnsupportedHostPlatform,
+    };
+    const suffix = switch (builtin.os.tag) {
+        .linux, .macos => ".sock",
+        .windows => "",
+        else => "",
+    };
+    const total = prefix.len + name.len + suffix.len;
+    if (total + 1 > buf.len) return error.NameTooLong;
+    @memcpy(buf[0..prefix.len], prefix);
+    @memcpy(buf[prefix.len .. prefix.len + name.len], name);
+    @memcpy(buf[prefix.len + name.len .. total], suffix);
+    buf[total] = 0;
+    return buf[0..total :0];
+}
+
 // Sanity at compile time — the comptime dispatch above must produce
 // a backend with the expected surface. A signature drift surfaces as
 // a compile error here rather than at the first call site.
