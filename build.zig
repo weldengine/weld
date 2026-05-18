@@ -319,6 +319,19 @@ pub fn build(b: *std.Build) void {
         t_mod.addImport("weld_core", core_module);
         const t = b.addTest(.{ .root_module = t_mod });
         const run_t = b.addRunArtifact(t);
+        // `tests/ipc/crash_recovery.zig` spawns
+        // `zig-out/bin/weld-runtime` to exercise the editor↔runtime
+        // termination contract (G4 + G5). The path is relative to
+        // the project root which is the cwd when `zig build test`
+        // dispatches the test binary; the runtime exe must already
+        // be installed for `posix_spawnp` to find it. Bare
+        // `b.addRunArtifact(t).step.dependOn(b.getInstallStep())`
+        // would gate the test on every install step (including the
+        // S5 etch_cook), so we wire the dependency narrowly to the
+        // runtime install step alone.
+        if (std.mem.eql(u8, p, "tests/ipc/crash_recovery.zig")) {
+            run_t.step.dependOn(&b.addInstallArtifact(runtime_exe, .{}).step);
+        }
         test_step.dependOn(&run_t.step);
         test_ipc_step.dependOn(&run_t.step);
     }
