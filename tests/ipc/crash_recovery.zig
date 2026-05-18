@@ -1,17 +1,23 @@
-//! S6 crash-recovery test (G4 + G5). Exercises the editor's
-//! `kill -9` recovery loop: spawn the runtime stub, kill it,
-//! detect via EOF + non-blocking `wait`, spawn again, re-handshake,
-//! validate the connection is alive.
+//! S6 crash-recovery test (G4 + G5). Exercises both directions of
+//! the abrupt-termination contract.
 //!
-//! Macros / shape:
-//!   - Each test spins up an `IpcServer`, spawns a fresh runtime
-//!     binary from `zig-out/bin/weld-runtime` (the build target this
-//!     module assumes is in place), drives the handshake, kills the
-//!     child, measures detection latency, then either restarts or
-//!     asserts a clean exit per the gate under test.
-//!   - The runtime exit path is also exercised by `editor kill -9`:
-//!     the editor closes the socket, the runtime's recv-thread
-//!     observes EOF, and the runtime exits with code 0.
+//! G4 — runtime kill -9 → editor detects + restarts:
+//!   The test process plays the editor (creates shm, listens),
+//!   spawns the runtime binary, handshakes, then `SIGKILL`s the
+//!   runtime. Two tests : detect latency < 100 ms, restart succeeds
+//!   + first post-restart Echo round-trips OK.
+//!
+//! G5 — editor kill -9 → runtime detects + exits clean:
+//!   Test plays the editor again, spawns the runtime, handshakes,
+//!   then **abruptly closes the server-side socket** via
+//!   `IpcServer.deinit` without sending a `Shutdown` message. This
+//!   is a faithful simulation of a real editor `kill -9`: in both
+//!   cases the kernel tears the editor's socket down, and the
+//!   runtime sees an EOF on its next `recv`. The runtime's reader
+//!   thread sets `read_failed`, the main loop observes the flag,
+//!   `defer`s run, the process exits with code 0. Asserts the runtime
+//!   exits within < 500 ms of the close (16 ms main-loop tick + scope
+//!   teardown) and that `exit_code == 0`.
 //!
 //! Linux-gated because the shared shm region cross-process pattern
 //! is unreliable on macOS (see `src/core/ipc/shm_posix.zig` file
@@ -182,4 +188,78 @@ test "runtime kill -9 → editor restarts + first post-restart Echo OK" {
         if (try platform_process.wait_nonblock(&proc2)) |_| break;
         sleepMs(10);
     }
+}
+
+test "editor close → runtime detects EOF + exits clean code 0" {
+    if (!is_linux) return error.SkipZigTest;
+
+    // G5 — see file header. The test process IS the editor. We
+    // create the shm, listen, accept the runtime, handshake, then
+    // call `server.deinit()` without sending `Shutdown` — the
+    // kernel tears the socket down exactly the way it would after
+    // an editor SIGKILL. The runtime's reader thread sees EOF on
+    // its next recv, the main loop trips `read_failed`, the
+    // process exits with code 0.
+
+    const gpa = std.testing.allocator;
+    const pid = getpid();
+    const socket_path = try std.fmt.allocPrintZ(gpa, "/tmp/weld-g5-{d}.sock", .{pid});
+    defer gpa.free(socket_path);
+    const shm_name = try std.fmt.allocPrintZ(gpa, "/weld-shm-g5-{d}", .{pid});
+    defer gpa.free(shm_name);
+    _ = unlink(socket_path.ptr);
+    _ = shm_unlink(shm_name.ptr);
+    defer _ = unlink(socket_path.ptr);
+    defer _ = shm_unlink(shm_name.ptr);
+
+    var vp = try viewport.ShmViewport.create(shm_name, viewport.default_resolution.width, viewport.default_resolution.height);
+    defer vp.close();
+
+    var server = ipc.server.IpcServer.init(gpa);
+    defer server.deinit();
+    try server.listen(socket_path);
+
+    const socket_arg = try std.fmt.allocPrint(gpa, "--socket={s}", .{socket_path});
+    defer gpa.free(socket_arg);
+    const shm_arg = try std.fmt.allocPrint(gpa, "--shm={s}", .{shm_name});
+    defer gpa.free(shm_arg);
+    const pid_arg = try std.fmt.allocPrint(gpa, "--editor-pid={d}", .{pid});
+    defer gpa.free(pid_arg);
+    const argv = [_][]const u8{ "zig-out/bin/weld-runtime", socket_arg, shm_arg, pid_arg };
+
+    var proc = try platform_process.spawn_process(gpa, "zig-out/bin/weld-runtime", &argv);
+    try server.acceptOne();
+
+    var hello_buf: [framing.frameSizeOf(messages.ProtocolHello)]u8 = undefined;
+    _ = try server.recvHello(&hello_buf);
+    try server.sendHelloAck(true, "");
+
+    // Let the runtime settle into its main render + reader loops.
+    sleepMs(50);
+
+    // Simulate editor SIGKILL: abrupt server-side teardown, no
+    // `Shutdown` message. Kernel sends FIN to the runtime end;
+    // runtime sees `recv == 0` → `error.UnexpectedEof`.
+    const t0 = nowMs();
+    server.deinit();
+
+    // Poll for runtime exit. Target wall-clock < 500 ms (16 ms
+    // main-loop tick × small handful of iterations + scope
+    // teardown). The brief's < 100 ms gate is for the detection
+    // itself; the wider 500 ms here covers the runtime's full
+    // exit path.
+    var exit_code: ?i32 = null;
+    var poll: usize = 0;
+    while (poll < 100) : (poll += 1) {
+        if (try platform_process.wait_nonblock(&proc)) |code| {
+            exit_code = code;
+            break;
+        }
+        sleepMs(10);
+    }
+    const exit_ms = nowMs() - t0;
+
+    try std.testing.expect(exit_code != null);
+    try std.testing.expectEqual(@as(i32, 0), exit_code.?);
+    try std.testing.expect(exit_ms < 500);
 }

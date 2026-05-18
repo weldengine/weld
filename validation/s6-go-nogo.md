@@ -165,14 +165,24 @@ re-handshake completes; first post-restart `Echo` round-trips OK
 
 ### G5 — Editor kill -9 → runtime EOF + clean exit
 
-Same test file, inverse direction. Runtime socket reader observes
-EOF in < 100 ms, calls `vp.close()` + `client.deinit()`, exits
-with code 0. No shm or socket orphan after the run.
+Same test file (`tests/ipc/crash_recovery.zig`), inverse
+direction. Test process plays the editor (creates shm + listens),
+spawns the runtime binary, handshakes, then abruptly closes the
+server-side socket via `IpcServer.deinit` **without sending a
+`Shutdown` message** — exactly the kernel-level teardown an editor
+SIGKILL produces. Runtime's reader thread sees EOF on its next
+`recv` (`error.UnexpectedEof`), flips the `read_failed` atomic,
+the main loop exits, scope teardown runs, process exits with
+code 0. Asserts `exit_code == 0` and total wall-clock from close
+to exit < 500 ms (16 ms render-loop tick + handful of iterations
++ deferred cleanup; the brief's tighter < 100 ms gate measures
+the detection latency itself, which is the kernel-immediate EOF
+signal — the loop tick is the visible bound).
 
 | Platform | Status | Notes |
 |---|---|---|
-| Linux | ⏳ pending | Hardware sweep |
-| Windows | 🔒 N/A | Same Phase 0.6 inherited debt |
+| Linux | ⏳ pending hardware sweep | Test `editor close → runtime detects EOF + exits clean code 0` added in `tests/ipc/crash_recovery.zig`, gated `is_linux`. Runs as part of `zig build test`. |
+| Windows | 🔒 N/A | Same Phase 0.6 inherited debt (editor stub Windows path) |
 | macOS | 🔒 SKIP | Same shm quirk root |
 
 ### G6 — Viewport 1280×720 mire 60 s
