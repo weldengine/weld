@@ -5,44 +5,31 @@ session and captures the operational state of the project plus the rules that
 must never be violated. The full specification lives in the claude.ai
 knowledge base — see § Quick links spec.
 
-> **Status:** Phase −1 — S6 closed (code + verdict GO on CI targets), PR pending
+> **Status:** Phase −1 closed (7/7 spikes validated) — Phase 0 (Fondations) opens
 >
-> S6 closed: editor↔runtime IPC validated. `src/core/ipc/` is the
-> Tier 0 endpoint per `engine-ipc.md` — transport (AF_UNIX
-> + named pipes), 16-byte framing + comptime Wyhash `schemaHash`,
-> 13-message catalogue, shm + 2-slot viewport double-buffer, server
-> + client wrappers, and an `IpcConnection` symmetric layer.
-> `src/editor/main.zig` + `src/runtime/main.zig` are the two canonical
-> binaries; the editor opens a 1280×720 Vulkan window and presents
-> the runtime's CPU-side mire each frame through a fullscreen-triangle
-> blit pipeline (`src/editor/vk_blit.zig`, SPIR-V committed under
-> `assets/shaders/viewport_blit.{vert,frag}.spv`). Bench RTT on the
-> dev primary (Apple Silicon, ReleaseSafe, Zig 0.16.0_1): p50 6 µs,
-> p99 16 µs, max 61 µs, stddev 3 µs, mean 7 µs — G1 < 1 ms / G2
-> p99 < 5 ms + max < 50 ms cleared by ~166×. G6 visual on the Fedora
-> 44 + GTX 1660 Ti dev box: GO (60 s observation, no tearing, no
-> stale frame > 100 ms). One BSD POSIX shm cross-process quirk found
-> on macOS (`shm_open(O_RDWR)` returns EACCES for non-creator sibling
-> independent of mode bits — diagnostic matrix in
-> `validation/s6-go-nogo.md`) → migrate to SCM_RIGHTS fd-passing in
-> Phase 0.6 (cohérent `engine-ipc.md` §4.7). Linux CI + Windows CI =
-> GO ; macOS dev primary = partial (G1/G2/G7 GO ; G3/G4/G5/G6 SKIP
-> documented). Validation : `zig build`, `zig build test`,
-> `zig fmt --check`, `zig build bench-ipc-rtt`, `zig build run-ipc-demo`
-> (Linux), `zig build -Dtarget=x86_64-linux`,
-> `zig build -Dtarget=x86_64-windows` all clean. PR
-> `Phase -1 / IPC / IPC editor↔runtime round-trip` opens next ; tag
-> `v0.0.7-S6-ipc-round-trip` posted by Guy after squash-merge.
+> Phase −1 wraps with tag `v0.0.7-S6-ipc-round-trip` (2026-05-18,
+> S6 — IPC editor↔runtime round-trip). All seven engineering
+> hypotheses (S0–S6) cleared their gates: S1 18× (54.5 µs / 1 ms),
+> S3 263× (0.019 ms / 5 ms), S4 27× (0.603 ms / 10 ms tick budget),
+> S5 cold 27× / incremental 1.9× (1104 ms / 30 s, 1066 ms / 2 s),
+> S6 RTT 166× (6 µs p50 / 1 ms). Three Phase 0.6 debts carried
+> forward: SCM_RIGHTS fd-passing as primary POSIX shm attach
+> (macOS BSD shm cross-process quirk diagnosed in
+> `validation/s6-go-nogo.md`), editor Windows path wire-up
+> (`src/editor/main.zig` returns `error.Unimplemented`), and
+> `transport_windows.zig:sendWithHandles` (Phase 3, with the GPU
+> shared framebuffer). Phase 0 entry point: `engine-spec.md` §25.3
+> and `engine-phase-0-plan.md`.
 
 ## Current state
 
 | Field | Value |
 |---|---|
-| Phase | −1 (Spikes) |
-| Current milestone | S6 — IPC editor↔runtime round-trip (CLOSED, PR pending) |
-| Last released tag | `v0.0.6-S5-etch-codegen-zig` |
-| Active branch | `phase-pre-0/ipc/editor-runtime-round-trip` |
-| Next planned milestone | Phase −1 closed at S6 → Phase 0 plan |
+| Phase | 0 (Fondations) |
+| Current milestone | (none — between milestones) |
+| Last released tag | `v0.0.7-S6-ipc-round-trip` |
+| Active branch | `main` |
+| Next planned milestone | M0.0 — custom Zig linter + housekeeping |
 
 ## Tags
 
@@ -54,7 +41,7 @@ knowledge base — see § Quick links spec.
 | `v0.0.4-S3-etch-parser-subset` | 2026-05-15 | S3 — Etch parser on subset | Lexer + parser + tabular SoA AST + minimal type-checker on 5 constructs. Bench verdict GO (worst median 0.019 ms vs 5 ms target on dev machine; re-confirmation on reference machine pending). |
 | `v0.0.5-S4-etch-tree-walking-interpreter` | 2026-05-16 | S4 — Etch tree-walking interpreter | Interpreter over S3 AST + additive Tier 0 ECS (runtime registry, dynamic archetype, resource store, runtime query). 20-program differential corpus. Bench verdict GO (median 0.603 ms / tick at 1 000 entities × 5 rules, gate 10 ms; median 6.593 ms / tick at 10 000 × 5, gate 100 ms) on dev Apple Silicon ReleaseSafe. |
 | `v0.0.6-S5-etch-codegen-zig` | 2026-05-17 | S5 — Etch → Zig codegen and compile-time measurement | Etch → Zig codegen on the S3 subset. `extern struct` types + comptime `world.query(.{T1, T2})` iteration (via `src/core/ecs/comptime_query.zig`), with `Registry.registerAlias` letting components be keyed by both Etch name and `@typeName(T)`. `tools/etch_cook` consolidates N inputs into one `.zig`. 100-file synthetic corpus + 3-metric bench. Verdict GO on all 5 gates: (a)+(b) cold 1104 ms vs 30 s, (a)+(c) incremental 1066 ms vs 2 s, zero leak, **382 distinct comptime query instantiations on 400 rules (ceiling 4×=1528)**, 20/20 differential parity. |
-| `v0.0.7-S6-ipc-round-trip` | (planned) | S6 — IPC editor↔runtime round-trip | Tier 0 `src/core/ipc/` (transport, framing, shm, viewport, server, client, connection). Two binaries `weld-editor` + `weld-runtime` at canonical `src/editor/` and `src/runtime/`. Fullscreen-triangle Vulkan blit pipeline + SPIR-V committed. RTT bench Apple Silicon ReleaseSafe: p50 6 µs / p99 16 µs / max 61 µs / stddev 3 µs (G1 < 1 ms cleared by 166×, G2 cleared). G6 visual GO on Fedora 44 + GTX 1660 Ti dev box (60 s, no tearing, no stale > 100 ms). G7 fd-passing POSIX GO. Linux CI + Windows CI = GO ; macOS dev primary = partial — BSD shm cross-process quirk documented in `validation/s6-go-nogo.md` § Diagnostics, migration vers SCM_RIGHTS fd-passing tracée Phase 0.6. Tag posted by Guy after squash-merge of PR `Phase -1 / IPC / IPC editor↔runtime round-trip`. |
+| `v0.0.7-S6-ipc-round-trip` | 2026-05-18 | S6 — IPC editor↔runtime round-trip | Tier 0 `src/core/ipc/` (transport, framing, shm, viewport, server, client, connection). Two binaries `weld-editor` + `weld-runtime` at canonical `src/editor/` and `src/runtime/`. Fullscreen-triangle Vulkan blit pipeline + SPIR-V committed. RTT bench Apple Silicon ReleaseSafe: p50 6 µs / p99 16 µs / max 61 µs / stddev 3 µs (G1 < 1 ms cleared by 166×, G2 cleared). G6 visual GO on Fedora 44 + GTX 1660 Ti dev box (60 s, no tearing, no stale > 100 ms). G7 fd-passing POSIX GO. Linux CI + Windows CI = GO; macOS dev primary = partial — BSD shm cross-process quirk documented in `validation/s6-go-nogo.md` § Diagnostics, migration to SCM_RIGHTS fd-passing tracked Phase 0.6. |
 
 ## Hypotheses validated by spikes
 
@@ -66,14 +53,13 @@ knowledge base — see § Quick links spec.
 | S3 | Etch grammar EBNF v0.6 (S3 subset) implementable, parsing < 5 ms / file | validated (worst median 0.019 ms on dev Apple Silicon ReleaseSafe; reference-machine re-run pending) |
 | S4 | AST tree-walking interpreter executes Etch correctly with ECS bridge | validated (20-program differential corpus green; bench median 0.603 ms / tick @ 1 000 × 5 vs 10 ms gate on dev Apple Silicon ReleaseSafe) |
 | S5 | Etch → Zig codegen viable build-time-wise (incremental < 2 s) | validated (5/5 gates GO; cold (a)+(b) 1104 ms vs 30 s gate, incremental (a)+(c) 1066 ms vs 2 s gate, 382 distinct comptime query instantiations on dev Apple Silicon ReleaseSafe; 100-file synth corpus + 20-program differential parity) |
-| S6 | IPC editor↔runtime stable, < 1 ms RTT, 1h fuzz, kill -9 recovery | validated (GO on CI targets — Linux + Windows; Apple Silicon ReleaseSafe RTT p50 6 µs / p99 16 µs / max 61 µs, G6 visual GO on Fedora 44 + GTX 1660 Ti dev box; macOS dev primary partial — BSD shm cross-process quirk → SCM_RIGHTS fd-passing migration tracée Phase 0.6) |
+| S6 | IPC editor↔runtime stable, < 1 ms RTT, 1h fuzz, kill -9 recovery | validated (RTT p50 6 µs vs 1 ms gate — 166× margin — on dev Apple Silicon ReleaseSafe; Linux + Windows CI GO; G6 visual GO on Fedora 44 + GTX 1660 Ti dev box; macOS dev primary partial — BSD shm cross-process quirk tracked to Phase 0.6 SCM_RIGHTS fd-passing migration) |
 
 ## Open / deferred decisions
 
-- **Custom Zig linter** (`zig build lint`, `zig build lint-commit`): deferred to a dedicated Phase 0 milestone post-S1. No production code to lint at S0; the `commit-msg` hook uses a POSIX shell script (`scripts/check-commit-msg.sh`) until then.
 - **macOS in the CI matrix**: deferred, re-evaluated after Phase 0 (CI quota constraints, primary targets are Win11 + Fedora 44).
 - **Codeberg migration**: end of Phase 1 (criterion C1.10 in `engine-phase-1-criteria.md`). The repo lives on GitHub for Phase −1 / 0 / 1.
-- **`spec/` directory in the repo**: out of scope at S0 per `engine-development-workflow.md` §3.5. Spec lives in the claude.ai knowledge base; re-evaluated at the start of Phase 0 if the absence creates friction.
+- **`spec/` directory in the repo**: out of scope for Phase −1. Spec lives in the claude.ai knowledge base; re-evaluated during Phase 0 if the absence creates friction.
 - **SCM_RIGHTS fd-passing as primary POSIX shm attach (Phase 0.6)**: the S6 BSD shm cross-process diagnostic showed `shm_open(O_RDWR)` is structurally refused for non-creator siblings on macOS even with same UID. The Phase 0.6 migration ships the create fd via the existing AF_UNIX socket (`IpcSocket.sendWithHandles`, G7 GO) and has the runtime `mmap` directly on the received fd. Sidesteps the macOS quirk completely; cleaner protocol on every platform. `engine-ipc.md` §4.7 to be patched at the same time.
 - **Editor stub Windows path (Phase 0.6)**: `src/editor/main.zig` returns `error.Unimplemented` on Windows. `CreateProcessW` + named pipe + the S2 Win32 window backend already exist — wiring it up is Phase 0.6 work.
 - **`sendWithHandles` Windows (Phase 3)**: `transport_windows.zig:sendWithHandles` returns `error.Unimplemented`. The `DuplicateHandle`-based equivalent lands with the GPU shared framebuffer when an exportable Vulkan semaphore appears upstream (cf. `engine-ipc.md` §4.7).
@@ -81,12 +67,12 @@ knowledge base — see § Quick links spec.
 ## Non-negotiable rules
 
 - **Zig version**: 0.16.x strict. Patch bumps (0.16.1, 0.16.2, …) are accepted transparently; minor bumps (0.17+) require a dedicated migration milestone with audit and CI green-light. The `build.zig` version guard panics if the running compiler's minor is not 16.
-- **No `@cImport`** outside generated `*_binding.zig` files for the 8 authorized C bindings. (Not yet enforced by linter — will be enforced by the post-S1 Zig linter milestone.)
+- **No `@cImport`** outside generated `*_binding.zig` files for the 7 authorized C bindings. (Not yet enforced by linter — will be enforced by the M0.0 Zig linter milestone.)
 - **No `usingnamespace`** anywhere. Use explicit `pub const` re-exports.
 - **Never use** `git commit --no-verify` or `git push --no-verify`. If a hook fails, fix the underlying cause — do not bypass.
 - **Conventional Commits** mandatory on every commit. Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`, `breaking`. Optional scope `[a-z0-9-]+`. Optional `!` for breaking change. Description 1–72 chars, lowercase first letter, no trailing period. The `commit-msg` hook enforces this locally; CI rejects offending commits.
 - **Squash-and-merge** as the default merge strategy on `main`. One milestone = one commit on `main`.
-- **No external dependency** beyond the 8 authorized C keepers (cf. `engine-spec.md` §1.6): ONNX Runtime, Opus, Assimp, KTX/Basis Universal, libdatachannel, ACL compressor, tree-sitter, HarfBuzz. Plus the standards adapted automatically (Vulkan/Wayland/OpenXR XML) and Apple frameworks where relevant. Anything else requires a dedicated derogation in `engine-spec.md`.
+- **No external dependency** beyond the 7 authorized C keepers (cf. `engine-spec.md` §1.6): ONNX Runtime, Opus, Assimp, KTX/Basis Universal, libdatachannel, ACL compressor, HarfBuzz. Plus the standards adapted automatically (Vulkan/Wayland/OpenXR XML) and Apple frameworks where relevant. Anything else requires a dedicated derogation in `engine-spec.md`.
 
 ## Quick links spec
 
@@ -101,7 +87,7 @@ Core docs (must read first for most milestones):
 
 Module / topic docs available in the knowledge base:
 
-- Tier 0 / API : `weld-tier0-interfaces.md`, `weld-c-api.md`
+- Tier 0 / API : `engine-tier-interfaces.md`, `engine-c-api.md`
 - Modules Tier 1 : `engine-render.md`, `engine-physics-forge.md`,
   `engine-physics-forge-2d.md`, `engine-audio-pulse.md`,
   `engine-ai-cortex.md`, `engine-vfx-ember.md`,
