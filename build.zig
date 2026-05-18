@@ -197,6 +197,70 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
 
+    // ----------------------------- S6 editor + runtime stub binaries -----
+    //
+    // Two binaries at the canonical Phase 0+ locations per
+    // `engine-directory-structure.md` §9.1, not in `src/spike/`.
+    // S6 produces code that survives — these stubs grow into the
+    // real editor / runtime in Phase 0.
+
+    const runtime_module = b.createModule(.{
+        .root_source_file = b.path("src/runtime/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    runtime_module.addImport("weld_core", core_module);
+    const runtime_exe = b.addExecutable(.{
+        .name = "weld-runtime",
+        .root_module = runtime_module,
+    });
+    b.installArtifact(runtime_exe);
+    const runtime_run = b.addRunArtifact(runtime_exe);
+    runtime_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| runtime_run.addArgs(args);
+    const runtime_step = b.step(
+        "run-runtime-stub",
+        "Run the S6 runtime stub directly (requires --socket=… --shm=… argv)",
+    );
+    runtime_step.dependOn(&runtime_run.step);
+
+    const editor_module = b.createModule(.{
+        .root_source_file = b.path("src/editor/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    editor_module.addImport("weld_core", core_module);
+    const editor_exe = b.addExecutable(.{
+        .name = "weld-editor",
+        .root_module = editor_module,
+    });
+    b.installArtifact(editor_exe);
+    const editor_run = b.addRunArtifact(editor_exe);
+    editor_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| editor_run.addArgs(args);
+    const editor_step = b.step(
+        "run-editor-stub",
+        "Run the S6 editor stub alone (will spawn the runtime stub)",
+    );
+    editor_step.dependOn(&editor_run.step);
+
+    // Full demo entry point — the editor spawns the runtime,
+    // handshake, message exchange, viewport mire visible for ~5 s,
+    // graceful shutdown. Honours the brief's G6 + observable-
+    // behavior checklist for the manual demo. Defaults to a small
+    // frame budget so `zig build run-ipc-demo` is bounded.
+    const ipc_demo_run = b.addRunArtifact(editor_exe);
+    ipc_demo_run.step.dependOn(b.getInstallStep());
+    // 300 frames @ ~60 Hz = ~5 s of mire animation on the runtime side.
+    ipc_demo_run.addArg("--frames=300");
+    const ipc_demo_step = b.step(
+        "run-ipc-demo",
+        "Run the S6 editor↔runtime demo (editor spawns runtime, handshake, 5 s mire, shutdown)",
+    );
+    ipc_demo_step.dependOn(&ipc_demo_run.step);
+
     // ------------------------------------------------ S6 IPC tests --------
     //
     // Each IPC test is its own exe so a deadlock in one case (the
@@ -215,6 +279,8 @@ pub fn build(b: *std.Build) void {
         "tests/ipc/fd_passing.zig",
         "tests/ipc/process.zig",
         "tests/ipc/handshake.zig",
+        "tests/ipc/crash_recovery.zig",
+        "tests/ipc/fuzz_short.zig",
     };
     for (ipc_test_paths) |p| {
         const t_mod = b.createModule(.{
@@ -235,6 +301,51 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_t.step);
         test_ipc_step.dependOn(&run_t.step);
     }
+
+    // ----------------------------------------------- S6 IPC RTT bench -----
+
+    const ipc_rtt_module = b.createModule(.{
+        .root_source_file = b.path("bench/ipc_rtt.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    ipc_rtt_module.addImport("weld_core", core_module);
+    const ipc_rtt_exe = b.addExecutable(.{
+        .name = "ipc-rtt-bench",
+        .root_module = ipc_rtt_module,
+    });
+    b.installArtifact(ipc_rtt_exe);
+    const ipc_rtt_run = b.addRunArtifact(ipc_rtt_exe);
+    ipc_rtt_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| ipc_rtt_run.addArgs(args);
+    const ipc_rtt_step = b.step(
+        "bench-ipc-rtt",
+        "Run the S6 IPC RTT bench (N=10_000 Echo round-trips, writes bench/results/ipc_rtt.md)",
+    );
+    ipc_rtt_step.dependOn(&ipc_rtt_run.step);
+
+    // ----------------------------------------- S6 1 h fuzz harness --------
+
+    const fuzz_1h_module = b.createModule(.{
+        .root_source_file = b.path("tests/ipc/fuzz_1h.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    fuzz_1h_module.addImport("weld_core", core_module);
+    const fuzz_1h_exe = b.addExecutable(.{
+        .name = "ipc-fuzz-1h",
+        .root_module = fuzz_1h_module,
+    });
+    b.installArtifact(fuzz_1h_exe);
+    const fuzz_1h_run = b.addRunArtifact(fuzz_1h_exe);
+    fuzz_1h_run.step.dependOn(b.getInstallStep());
+    const fuzz_1h_step = b.step(
+        "test-ipc-fuzz-1h",
+        "Run the S6 1 h IPC fuzz harness (manual; output digest archived in validation/s6-go-nogo.md)",
+    );
+    fuzz_1h_step.dependOn(&fuzz_1h_run.step);
 
     // ----------------------------------------------------- ECS bench step --
 

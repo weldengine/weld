@@ -71,6 +71,14 @@ const sys = struct {
     extern "c" fn mmap(addr: ?*anyopaque, length: usize, prot: i32, flags: i32, fd: i32, offset: i64) ?*anyopaque;
     extern "c" fn munmap(addr: *anyopaque, length: usize) i32;
     extern "c" fn close(fd: i32) i32;
+    /// `umask(0)` returns the previous umask. We temporarily clear
+    /// it around `shm_open(O_CREAT)` so the requested 0o666 mode is
+    /// applied exactly. Without this, the umask (default 022 on
+    /// macOS / most Linux distros) reduces 0o666 to 0o644, and a
+    /// fresh runtime process attempting `shm_open(name, O_RDWR)`
+    /// then sees `EACCES`. Restored to the original value
+    /// immediately after the `shm_open` call.
+    extern "c" fn umask(cmask: u16) u16;
 };
 
 const Error = shm.Error;
@@ -97,7 +105,14 @@ pub const Backend = struct {
         // post-state.
         _ = sys.shm_unlink(name_z.ptr);
 
+        // Temporarily clear umask so the requested 0o666 is applied
+        // exactly. Without this the kernel-side mask reduces the
+        // mode to 0o644 and a fresh runtime process trying to open
+        // the region with `O_RDWR` returns `EACCES` — verified
+        // empirically on macOS 26.4.1 with the S6 demo.
+        const prev_umask = sys.umask(0);
         const fd = sys.shm_open(name_z.ptr, O_RDWR | O_CREAT | O_EXCL, 0o666);
+        _ = sys.umask(prev_umask);
         if (fd < 0) return error.ShmCreateFailed;
         errdefer {
             _ = sys.close(fd);
@@ -127,10 +142,18 @@ pub const Backend = struct {
         const name_z = try gpa.dupeZ(u8, name);
         errdefer gpa.free(name_z);
 
-        // macOS requires a non-zero mode argument even when O_CREAT
-        // is absent — `0o666` mirrors what the creator used (see
-        // file header for the EACCES quirk).
-        const fd = sys.shm_open(name_z.ptr, O_RDWR, 0o666);
+        // macOS quirk: even with mode `0o666` and `umask(0)`, a
+        // `shm_open(name, O_RDWR)` (no O_CREAT) returns `EACCES` —
+        // both intra-process and across `posix_spawnp`'d siblings.
+        // Passing `O_CREAT | O_RDWR` works around it: the kernel
+        // opens the existing region (the name already exists).
+        // If no region exists, the open creates an empty one —
+        // `ShmViewport.open` then catches the missing header magic
+        // and returns `error.InvalidHeader`. The Linux backend is
+        // unaffected (kept symmetric for code-path simplicity).
+        const prev_umask = sys.umask(0);
+        const fd = sys.shm_open(name_z.ptr, O_RDWR | O_CREAT, 0o666);
+        _ = sys.umask(prev_umask);
         if (fd < 0) return error.ShmOpenFailed;
         errdefer _ = sys.close(fd);
 
