@@ -6,9 +6,9 @@
 //! `validation/s6-go-nogo.md` for the G3 gate.
 //!
 //! Identical harness shape to `tests/ipc/fuzz_short.zig`, scaled
-//! to 1 hour (~36 M messages at the ~10 000 msg/s rate the brief
-//! sets as target). Counting allocator wraps `std.heap.page_allocator`
-//! so any leak fails the test immediately.
+//! to 1 hour. Counting allocator wraps `std.heap.page_allocator`
+//! so any leak fails the test immediately. Cross-platform — runs
+//! on Linux / macOS / Windows; pick whichever box is available.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -18,17 +18,39 @@ const ipc = weld_core.ipc;
 const framing = ipc.framing;
 const messages = ipc.messages;
 
-const is_linux = builtin.os.tag == .linux;
-
+const can_unlink = builtin.os.tag == .linux or builtin.os.tag == .macos;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
-extern "c" fn clock_gettime(clk_id: i32, tp: *timespec_t) c_int;
-const CLOCK_MONOTONIC: i32 = if (builtin.os.tag == .linux) 1 else 6;
+fn maybeUnlink(path: [*:0]const u8) void {
+    if (comptime can_unlink) _ = unlink(path);
+}
+
 const timespec_t = extern struct { tv_sec: i64, tv_nsec: i64 };
+const CLOCK_MONOTONIC: i32 = if (builtin.os.tag == .linux) 1 else 6;
+extern "c" fn clock_gettime(clk_id: i32, tp: *timespec_t) c_int;
+
+extern "kernel32" fn QueryPerformanceCounter(out: *i64) callconv(.winapi) i32;
+extern "kernel32" fn QueryPerformanceFrequency(out: *i64) callconv(.winapi) i32;
+
+var qpc_freq_cached: i64 = 0;
+fn qpcFreq() i64 {
+    if (qpc_freq_cached == 0) _ = QueryPerformanceFrequency(&qpc_freq_cached);
+    return qpc_freq_cached;
+}
 
 fn nowMs() i64 {
-    var ts = timespec_t{ .tv_sec = 0, .tv_nsec = 0 };
-    _ = clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000 + @divFloor(ts.tv_nsec, std.time.ns_per_ms);
+    return switch (builtin.os.tag) {
+        .windows => blk: {
+            var counter: i64 = 0;
+            _ = QueryPerformanceCounter(&counter);
+            const freq = qpcFreq();
+            break :blk @divFloor(counter * 1000, freq);
+        },
+        else => blk: {
+            var ts = timespec_t{ .tv_sec = 0, .tv_nsec = 0 };
+            _ = clock_gettime(CLOCK_MONOTONIC, &ts);
+            break :blk ts.tv_sec * 1000 + @divFloor(ts.tv_nsec, std.time.ns_per_ms);
+        },
+    };
 }
 
 const FuzzCtx = struct {
@@ -68,17 +90,14 @@ fn readerLoop(ctx: *FuzzCtx, gpa: std.mem.Allocator) void {
 }
 
 pub fn main() !void {
-    if (!is_linux) {
-        std.debug.print("fuzz_1h: Linux-only (see brief).\n", .{});
-        return;
-    }
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
 
-    const path: [:0]const u8 = "/tmp/weld-fuzz-1h.sock";
-    _ = unlink(path.ptr);
-    defer _ = unlink(path.ptr);
+    var path_buf: [128]u8 = undefined;
+    const path = try ipc.transport.buildSocketPath(&path_buf, "weld-fuzz-1h");
+    maybeUnlink(path.ptr);
+    defer maybeUnlink(path.ptr);
 
     var listener = try ipc.transport.IpcSocket.listen(path);
     defer listener.close();

@@ -144,8 +144,8 @@ investment.
 | Platform | Status | Notes |
 |---|---|---|
 | Linux Fedora 44 + GTX 1660 Ti dev box | ✅ **GO** | 2026-05-18 hardware run: **sent 1 917 890 200 msgs / recv 1 917 890 155 msgs / fault 0** over 3 600 s wall-clock. The 45-message gap (sent − recv ≈ 2.3 × 10⁻⁸) reflects messages in flight at the harness teardown when the writer flips `stop`; the reader exits its loop on the same flag without draining the kernel buffer's last few frames. No leak, no deadlock, no framing error. |
-| Windows | ⏳ pending | Same target build clean in `83046f4` |
-| macOS | 🔒 SKIP | Linux-gated harness |
+| Windows | ⏳ pending | Harness now cross-platform (commit pending) — `tests/ipc/fuzz_1h.zig` no longer prints `Linux-only`, uses `buildSocketPath` for the named-pipe path, `QueryPerformanceCounter` for the clock. Re-run `zig build test-ipc-fuzz-1h` on Win 11 25H2 to fill this cell. |
+| macOS | ✅ optional | Harness now runs on macOS too; the fuzz uses sockets only (no shm), so the macOS BSD shm quirk does not apply. Useful for dev-box smoke if a Linux box is not handy. |
 
 The reported throughput (1.92 × 10⁹ messages over 1 h = **~530 k msg/s**) far exceeds the brief's design target (~10 k msg/s) and is consistent with an in-process AF_UNIX-resident socket pair on the Fedora box — bench reports ~150-200 ns per `Echo` round-trip from this run, broadly in line with the RTT bench numbers above.
 

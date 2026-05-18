@@ -1,5 +1,6 @@
-//! S6 short fuzz harness (60 s). Runs the framing + traffic fuzz
-//! on a single in-process AF_UNIX socket pair: a writer thread
+//! S6 short fuzz harness (60 s spec'd; 3 s in CI). Runs the
+//! framing + traffic fuzz on a single in-process IPC socket pair
+//! (AF_UNIX on POSIX, Win32 named pipe on Windows). Writer thread
 //! emits a mix of valid frames and deliberately-corrupted byte
 //! streams, a reader thread on the matching socket consumes
 //! through `IpcConnection.recvFrame`. Valid frames must round-
@@ -10,7 +11,8 @@
 //!
 //! Runs unconditionally inside `zig build test-ipc` to keep the
 //! framework warm; the manual-run 1 h variant lives in
-//! `tests/ipc/fuzz_1h.zig`.
+//! `tests/ipc/fuzz_1h.zig`. Cross-platform — no shm, no platform-
+//! quirk gates.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -19,20 +21,40 @@ const weld_core = @import("weld_core");
 const ipc = weld_core.ipc;
 const framing = ipc.framing;
 const messages = ipc.messages;
-const protocol = ipc.protocol;
 
-const is_linux = builtin.os.tag == .linux;
-
+const can_unlink = builtin.os.tag == .linux or builtin.os.tag == .macos;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
-extern "c" fn nanosleep(req: *const timespec_t, rem: ?*timespec_t) c_int;
-extern "c" fn clock_gettime(clk_id: i32, tp: *timespec_t) c_int;
-const CLOCK_MONOTONIC: i32 = if (builtin.os.tag == .linux) 1 else 6;
+fn maybeUnlink(path: [*:0]const u8) void {
+    if (comptime can_unlink) _ = unlink(path);
+}
+
 const timespec_t = extern struct { tv_sec: i64, tv_nsec: i64 };
+const CLOCK_MONOTONIC: i32 = if (builtin.os.tag == .linux) 1 else 6;
+extern "c" fn clock_gettime(clk_id: i32, tp: *timespec_t) c_int;
+
+extern "kernel32" fn QueryPerformanceCounter(out: *i64) callconv(.winapi) i32;
+extern "kernel32" fn QueryPerformanceFrequency(out: *i64) callconv(.winapi) i32;
+
+var qpc_freq_cached: i64 = 0;
+fn qpcFreq() i64 {
+    if (qpc_freq_cached == 0) _ = QueryPerformanceFrequency(&qpc_freq_cached);
+    return qpc_freq_cached;
+}
 
 fn nowMs() i64 {
-    var ts = timespec_t{ .tv_sec = 0, .tv_nsec = 0 };
-    _ = clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000 + @divFloor(ts.tv_nsec, std.time.ns_per_ms);
+    return switch (builtin.os.tag) {
+        .windows => blk: {
+            var counter: i64 = 0;
+            _ = QueryPerformanceCounter(&counter);
+            const freq = qpcFreq();
+            break :blk @divFloor(counter * 1000, freq);
+        },
+        else => blk: {
+            var ts = timespec_t{ .tv_sec = 0, .tv_nsec = 0 };
+            _ = clock_gettime(CLOCK_MONOTONIC, &ts);
+            break :blk ts.tv_sec * 1000 + @divFloor(ts.tv_nsec, std.time.ns_per_ms);
+        },
+    };
 }
 
 const FuzzCtx = struct {
@@ -103,12 +125,12 @@ fn readerLoop(ctx: *FuzzCtx, gpa: std.mem.Allocator) void {
 }
 
 test "60s framing + traffic fuzz produces zero crashes and zero leaks" {
-    if (!is_linux) return error.SkipZigTest;
-
     const gpa = std.testing.allocator;
-    const path: [:0]const u8 = "/tmp/weld-test-fuzz-short.sock";
-    _ = unlink(path.ptr);
-    defer _ = unlink(path.ptr);
+
+    var path_buf: [128]u8 = undefined;
+    const path = try ipc.transport.buildSocketPath(&path_buf, "weld-test-fuzz-short");
+    maybeUnlink(path.ptr);
+    defer maybeUnlink(path.ptr);
 
     var listener = try ipc.transport.IpcSocket.listen(path);
     defer listener.close();
@@ -121,10 +143,9 @@ test "60s framing + traffic fuzz produces zero crashes and zero leaks" {
         .server_sock = &server,
         .client_sock = &client,
         // 3 s in CI to keep `zig build test` snappy. The brief's
-        // 60 s "fuzz_short" gate is exercised by a manual run
-        // (`zig build test-ipc -- --full-fuzz`) and the 1 h variant
-        // lives in `tests/ipc/fuzz_1h.zig` — both archived to
-        // `validation/s6-go-nogo.md`.
+        // 60 s "fuzz_short" gate is exercised by a manual run; the
+        // 1 h variant lives in `tests/ipc/fuzz_1h.zig`. Both
+        // archived to `validation/s6-go-nogo.md`.
         .duration_ms = 3 * 1000,
     };
     const reader = try std.Thread.spawn(.{}, readerLoop, .{ &ctx, gpa });
