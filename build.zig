@@ -197,6 +197,190 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
 
+    // ----------------------------- S6 editor + runtime stub binaries -----
+    //
+    // Two binaries at the canonical Phase 0+ locations per
+    // `engine-directory-structure.md` §9.1, not in `src/spike/`.
+    // S6 produces code that survives — these stubs grow into the
+    // real editor / runtime in Phase 0.
+
+    const runtime_module = b.createModule(.{
+        .root_source_file = b.path("src/runtime/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    runtime_module.addImport("weld_core", core_module);
+    const runtime_exe = b.addExecutable(.{
+        .name = "weld-runtime",
+        .root_module = runtime_module,
+    });
+    b.installArtifact(runtime_exe);
+    const runtime_run = b.addRunArtifact(runtime_exe);
+    runtime_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| runtime_run.addArgs(args);
+    const runtime_step = b.step(
+        "run-runtime-stub",
+        "Run the S6 runtime stub directly (requires --socket=… --shm=… argv)",
+    );
+    runtime_step.dependOn(&runtime_run.step);
+
+    const editor_module = b.createModule(.{
+        .root_source_file = b.path("src/editor/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    editor_module.addImport("weld_core", core_module);
+    // S6 viewport blit pipeline embeds pre-compiled SPIR-V via the
+    // shared `shaders` facade — the same module the S2 spike uses.
+    editor_module.addImport("shaders", shaders_module);
+    const editor_exe = b.addExecutable(.{
+        .name = "weld-editor",
+        .root_module = editor_module,
+    });
+    b.installArtifact(editor_exe);
+    const editor_run = b.addRunArtifact(editor_exe);
+    editor_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| editor_run.addArgs(args);
+    const editor_step = b.step(
+        "run-editor-stub",
+        "Run the S6 editor stub alone (will spawn the runtime stub)",
+    );
+    editor_step.dependOn(&editor_run.step);
+
+    // Full demo entry point — the editor spawns the runtime,
+    // handshake, message exchange, viewport mire visible for the
+    // brief's 60 s observable window, graceful shutdown. Honours
+    // the G6 manual-demo checklist.
+    //
+    // Pass any editor flag through `--`, e.g.
+    //   zig build run-ipc-demo -- --frames=3600
+    // for a one-minute observable session at 60 Hz. Defaults to
+    // `--frames=3600` (≈ 60 s) when the caller passes no `--` args
+    // so the canonical S6 demo matches the G6 verdict description.
+    const ipc_demo_run = b.addRunArtifact(editor_exe);
+    ipc_demo_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        ipc_demo_run.addArgs(args);
+    } else {
+        ipc_demo_run.addArg("--frames=3600");
+    }
+    const ipc_demo_step = b.step(
+        "run-ipc-demo",
+        "Run the S6 editor↔runtime demo (window + Vulkan blit, default 60 s; override with `-- --frames=N`)",
+    );
+    ipc_demo_step.dependOn(&ipc_demo_run.step);
+
+    // ------------------------------------------------ S6 IPC tests --------
+    //
+    // Each IPC test is its own exe so a deadlock in one case (the
+    // previous session's 46-minute test-runner hang taught us this
+    // the expensive way) cannot stall the rest of `zig build test`.
+    // The `test-ipc` step runs only the IPC tests for fast iteration
+    // during S6; the main `test` step also dependsOn each of them so
+    // CI keeps a single entry point.
+    const test_ipc_step = b.step("test-ipc", "Run the S6 IPC tests");
+    const ipc_test_paths = [_][]const u8{
+        "tests/ipc/framing.zig",
+        "tests/ipc/schema_hash.zig",
+        "tests/ipc/transport.zig",
+        // `shm` and `shm_viewport` are split into one-test-per-binary
+        // under `tests/ipc/{shm,viewport}_cases/` because the macOS BSD
+        // shm namespace caps a process at ONE successful
+        // `shm_open(O_CREAT) → shm_open(O_RDWR)` sequence; running two
+        // such tests in the same exe makes the second EACCES. One exe
+        // per test sidesteps the quirk and gives real macOS coverage.
+        "tests/ipc/shm.zig",
+        "tests/ipc/shm_cases/round_trip.zig",
+        "tests/ipc/shm_cases/attacher_writes.zig",
+        "tests/ipc/viewport_cases/two_slots.zig",
+        "tests/ipc/viewport_cases/wrong_width.zig",
+        "tests/ipc/viewport_cases/no_tearing_1000_frames.zig",
+        "tests/ipc/fd_passing.zig",
+        "tests/ipc/process.zig",
+        "tests/ipc/handshake.zig",
+        "tests/ipc/crash_recovery.zig",
+        "tests/ipc/fuzz_short.zig",
+    };
+    for (ipc_test_paths) |p| {
+        const t_mod = b.createModule(.{
+            .root_source_file = b.path(p),
+            .target = target,
+            .optimize = optimize,
+            // The IPC tests bind directly to libc primitives (socket,
+            // shm_open, pipe, unlink, setsockopt) alongside the
+            // `weld_core` re-exports. `weld_core` itself links libc
+            // but the test module needs the link flag too — Zig 0.16
+            // does not propagate `link_libc` across module imports
+            // for the consumer's own `extern "c"` declarations.
+            .link_libc = true,
+        });
+        t_mod.addImport("weld_core", core_module);
+        const t = b.addTest(.{ .root_module = t_mod });
+        const run_t = b.addRunArtifact(t);
+        // `tests/ipc/crash_recovery.zig` spawns
+        // `zig-out/bin/weld-runtime` to exercise the editor↔runtime
+        // termination contract (G4 + G5). The path is relative to
+        // the project root which is the cwd when `zig build test`
+        // dispatches the test binary; the runtime exe must already
+        // be installed for `posix_spawnp` to find it. Bare
+        // `b.addRunArtifact(t).step.dependOn(b.getInstallStep())`
+        // would gate the test on every install step (including the
+        // S5 etch_cook), so we wire the dependency narrowly to the
+        // runtime install step alone.
+        if (std.mem.eql(u8, p, "tests/ipc/crash_recovery.zig")) {
+            run_t.step.dependOn(&b.addInstallArtifact(runtime_exe, .{}).step);
+        }
+        test_step.dependOn(&run_t.step);
+        test_ipc_step.dependOn(&run_t.step);
+    }
+
+    // ----------------------------------------------- S6 IPC RTT bench -----
+
+    const ipc_rtt_module = b.createModule(.{
+        .root_source_file = b.path("bench/ipc_rtt.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    ipc_rtt_module.addImport("weld_core", core_module);
+    const ipc_rtt_exe = b.addExecutable(.{
+        .name = "ipc-rtt-bench",
+        .root_module = ipc_rtt_module,
+    });
+    b.installArtifact(ipc_rtt_exe);
+    const ipc_rtt_run = b.addRunArtifact(ipc_rtt_exe);
+    ipc_rtt_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| ipc_rtt_run.addArgs(args);
+    const ipc_rtt_step = b.step(
+        "bench-ipc-rtt",
+        "Run the S6 IPC RTT bench (N=10_000 Echo round-trips, writes bench/results/ipc_rtt.md)",
+    );
+    ipc_rtt_step.dependOn(&ipc_rtt_run.step);
+
+    // ----------------------------------------- S6 1 h fuzz harness --------
+
+    const fuzz_1h_module = b.createModule(.{
+        .root_source_file = b.path("tests/ipc/fuzz_1h.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    fuzz_1h_module.addImport("weld_core", core_module);
+    const fuzz_1h_exe = b.addExecutable(.{
+        .name = "ipc-fuzz-1h",
+        .root_module = fuzz_1h_module,
+    });
+    b.installArtifact(fuzz_1h_exe);
+    const fuzz_1h_run = b.addRunArtifact(fuzz_1h_exe);
+    fuzz_1h_run.step.dependOn(b.getInstallStep());
+    const fuzz_1h_step = b.step(
+        "test-ipc-fuzz-1h",
+        "Run the S6 1 h IPC fuzz harness (manual; output digest archived in validation/s6-go-nogo.md)",
+    );
+    fuzz_1h_step.dependOn(&fuzz_1h_run.step);
+
     // ----------------------------------------------------- ECS bench step --
 
     const bench_module = b.createModule(.{

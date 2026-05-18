@@ -32,4 +32,40 @@ pub const testing = struct {
 pub const platform = struct {
     pub const window = @import("platform/window.zig");
     pub const vk = @import("platform/vk.zig");
+    // S6 — minimum process control surface used by the editor stub
+    // to spawn / monitor / kill the runtime stub. Wider API lands in
+    // Phase 0.3 (cf. `engine-platform.md` §4).
+    pub const process = @import("platform/process.zig");
 };
+
+// S6 — editor↔runtime IPC. Tier 0 endpoint per `engine-ipc.md` and the
+// S6 brief. Public surface declared inline, same pattern as `ecs` and
+// `jobs` above.
+pub const ipc = struct {
+    pub const protocol = @import("ipc/protocol.zig");
+    pub const messages = @import("ipc/messages.zig");
+    pub const framing = @import("ipc/framing.zig");
+    pub const transport = @import("ipc/transport.zig");
+    pub const shm = @import("ipc/shm.zig");
+    pub const viewport = @import("ipc/viewport.zig");
+    pub const connection = @import("ipc/connection.zig");
+    pub const server = @import("ipc/server.zig");
+    pub const client = @import("ipc/client.zig");
+};
+
+comptime {
+    // Force eager analysis of every IPC sub-file so inline tests are
+    // picked up by `zig build test`. Zig 0.16's lazy semantic analysis
+    // would otherwise skip files whose declarations are not
+    // transitively referenced from the test binary's root — and
+    // `test` blocks are not "references" in that sense.
+    _ = ipc.protocol;
+    _ = ipc.messages;
+    _ = ipc.framing;
+    _ = ipc.transport;
+    _ = ipc.shm;
+    _ = ipc.viewport;
+    _ = ipc.connection;
+    _ = ipc.server;
+    _ = ipc.client;
+}
