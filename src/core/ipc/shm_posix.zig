@@ -27,19 +27,32 @@
 //! editor lifecycle integration test lands (cf. `briefs/S6-…` §
 //! "Dettes héritées" — promoted from inherited to active).
 //!
-//! Creator (editor): `shm_open(name, O_CREAT | O_RDWR, 0o666)` →
+//! Creator (editor): `shm_open(name, O_CREAT | O_RDWR, 0o600)` →
 //!                   `ftruncate(fd, size)` → `mmap`. Keep fd.
-//! Attacher (runtime): `shm_open(name, O_RDWR, 0o666)` → `mmap`.
+//! Attacher (runtime): `shm_open(name, O_RDWR | O_CREAT, 0o600)` →
+//!                     `mmap`.
 //! Close (creator): `munmap` + `close(fd)` + `shm_unlink(name)`.
 //! Close (attacher): `munmap` + `close(fd)`.
 //!
-//! Permission note: `0o666` rather than `0o600`. macOS rejects a
-//! follow-up `shm_open(name, O_RDWR)` with `EACCES` when the region
-//! was created with mode `0o600`, even for the creating UID. The
-//! names are PID-suffixed and live in the per-session POSIX shm
-//! namespace, so the wider mode is not a cross-user attack vector.
-//! The same workaround is documented in `boost::interprocess` and
-//! `POCO::SharedMemory`.
+//! Permission note: mode `0o600` (`rw-------`). Owner-only access
+//! is the tight permission that matches the editor↔runtime
+//! parent-child spawn relationship — both processes run under the
+//! same UID. We do **not** call `umask(0)` around `shm_open`:
+//! `0o600 & ~umask = 0o600` regardless of the caller's umask
+//! because the masked-out bits (group/other) are already zero in
+//! the requested mode. This avoids a process-global `umask`
+//! mutation that would race with other threads in the engine.
+//!
+//! `Backend.open` passes `O_CREAT | O_RDWR` rather than `O_RDWR`
+//! alone — that combination works around a macOS BSD shm quirk
+//! where the no-`O_CREAT` form returns `EACCES` for a
+//! `posix_spawnp`-spawned sibling of the creator, even when both
+//! processes share the same UID. The kernel returns the existing
+//! region if `name` is present; if absent (a spurious orphan run),
+//! the create path produces an empty region that
+//! `ShmViewport.open` rejects via `error.InvalidHeader`. Linux
+//! tolerates pure `O_RDWR` but we keep the platform-symmetric
+//! code path.
 //!
 //! Name length: macOS caps `PSHMNAMLEN-1 = 30` chars; Linux is more
 //! permissive. We bail at 30 for portability.
@@ -71,14 +84,6 @@ const sys = struct {
     extern "c" fn mmap(addr: ?*anyopaque, length: usize, prot: i32, flags: i32, fd: i32, offset: i64) ?*anyopaque;
     extern "c" fn munmap(addr: *anyopaque, length: usize) i32;
     extern "c" fn close(fd: i32) i32;
-    /// `umask(0)` returns the previous umask. We temporarily clear
-    /// it around `shm_open(O_CREAT)` so the requested 0o666 mode is
-    /// applied exactly. Without this, the umask (default 022 on
-    /// macOS / most Linux distros) reduces 0o666 to 0o644, and a
-    /// fresh runtime process attempting `shm_open(name, O_RDWR)`
-    /// then sees `EACCES`. Restored to the original value
-    /// immediately after the `shm_open` call.
-    extern "c" fn umask(cmask: u16) u16;
 };
 
 const Error = shm.Error;
@@ -105,14 +110,7 @@ pub const Backend = struct {
         // post-state.
         _ = sys.shm_unlink(name_z.ptr);
 
-        // Temporarily clear umask so the requested 0o666 is applied
-        // exactly. Without this the kernel-side mask reduces the
-        // mode to 0o644 and a fresh runtime process trying to open
-        // the region with `O_RDWR` returns `EACCES` — verified
-        // empirically on macOS 26.4.1 with the S6 demo.
-        const prev_umask = sys.umask(0);
-        const fd = sys.shm_open(name_z.ptr, O_RDWR | O_CREAT | O_EXCL, 0o666);
-        _ = sys.umask(prev_umask);
+        const fd = sys.shm_open(name_z.ptr, O_RDWR | O_CREAT | O_EXCL, 0o600);
         if (fd < 0) return error.ShmCreateFailed;
         errdefer {
             _ = sys.close(fd);
@@ -142,18 +140,10 @@ pub const Backend = struct {
         const name_z = try gpa.dupeZ(u8, name);
         errdefer gpa.free(name_z);
 
-        // macOS quirk: even with mode `0o666` and `umask(0)`, a
-        // `shm_open(name, O_RDWR)` (no O_CREAT) returns `EACCES` —
-        // both intra-process and across `posix_spawnp`'d siblings.
-        // Passing `O_CREAT | O_RDWR` works around it: the kernel
-        // opens the existing region (the name already exists).
-        // If no region exists, the open creates an empty one —
-        // `ShmViewport.open` then catches the missing header magic
-        // and returns `error.InvalidHeader`. The Linux backend is
-        // unaffected (kept symmetric for code-path simplicity).
-        const prev_umask = sys.umask(0);
-        const fd = sys.shm_open(name_z.ptr, O_RDWR | O_CREAT, 0o666);
-        _ = sys.umask(prev_umask);
+        // `O_CREAT | O_RDWR` — see file header for the macOS BSD
+        // shm quirk. Mode `0o600` is honored as-is (no umask hack
+        // needed: 0o600 has no group/other bits for umask to mask).
+        const fd = sys.shm_open(name_z.ptr, O_RDWR | O_CREAT, 0o600);
         if (fd < 0) return error.ShmOpenFailed;
         errdefer _ = sys.close(fd);
 

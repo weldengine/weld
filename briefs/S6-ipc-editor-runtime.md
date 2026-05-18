@@ -322,7 +322,8 @@ These debts are out of scope. Do not touch them in S6.
 
 *Modifications of the FROZEN SECTION agreed via Claude.ai round-trip. Each deviation references the commit that records it. Empty at milestone close = nominal case.*
 
-- <commit SHA> — <summary and reason>
+- *(this commit)* — **Mode shm changé de 0o666 (avec hack `umask(0)`) à 0o600.** Raison : le hack `umask(0)` était thread-global (mutation de la process-wide umask, race vs autres threads de l'éditeur) et produisait des permissions effectives `rw-rw-rw-` (lisible par tout user du système). Le nouveau mode `0o600` est plus tight : `rw-------` pour l'owner UID uniquement, ce qui correspond à la relation parent-child spawn éditeur↔runtime (même UID). Le hack `umask()` disparaît : `0o600 & ~umask = 0o600` pour tout umask raisonnable car les bits group/other sont déjà à zéro dans le mode demandé. Conséquence opérationnelle : le `zig build run-ipc-demo` sur macOS échoue désormais sur `error.ShmOpenFailed` côté runtime (le quirk macOS BSD shm cross-process s'aggrave avec 0o600 strict). La démo cible Linux pour G6 ; le runtime macOS reste un dev-only build artefact en attendant la session de validation Linux (Phase 0.6 macOS hardware milestone).
+- *(this commit)* — **Surface publique `weld_core.ipc` déplacée de `src/core/ipc/mod.zig` vers une struct inline dans `src/core/root.zig`.** Raison : la convention établie dans `src/core/root.zig` est d'exposer chaque sous-module Tier 0 (`ecs`, `jobs`, `testing`, `platform`) via une struct inline `pub const X = struct { pub const Y = @import(...); };`. Le fichier intermédiaire `ipc/mod.zig` dupliquait cette indirection sans valeur ajoutée et masquait le lieu canonique des re-exports. Le `comptime { _ = ipc.protocol; _ = ipc.messages; … }` qui force l'analyse paresseuse vit désormais directement dans `root.zig` après le `pub const ipc = struct { … };`.
 
 ## Blocages rencontrés
 
