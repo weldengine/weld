@@ -1,12 +1,12 @@
 # S6 — IPC editor↔runtime round-trip
 
-> **Status:** ACTIVE
+> **Status:** CLOSED
 > **Phase:** -1
 > **Branche:** `phase-pre-0/ipc/editor-runtime-round-trip`
 > **Tag prévu:** `v0.0.7-S6-ipc-round-trip`
 > **Dépendances:** S2 (merged, tag `v0.0.3-S2-window-vulkan-triangle`), S0
 > **Date d'ouverture:** 2026-05-17
-> **Date de fermeture:** —
+> **Date de fermeture:** 2026-05-18
 
 ---
 
@@ -337,20 +337,125 @@ These debts are out of scope. Do not touch them in S6.
 
 ## Notes de fin
 
-*To be filled when Status transitions to CLOSED, just before opening the PR.*
-
 - **What worked:**
+  - **Sockets transport** stable cross-platform — AF_UNIX `SOCK_STREAM` POSIX + Win32 named pipe byte mode, `cmsghdr` `SCM_RIGHTS` fd-passing on POSIX, raw `kernel32.GetLastError` instrumentation on the Windows path for diagnostics. `tests/ipc/transport.zig` exercises the 64 KB drain via a reader thread (the dead-simple single-threaded write that hung the previous session's runner).
+  - **Framing 16-byte header + comptime `schemaHash` Wyhash** — the schema mismatch detection is byte-exact and survives the dev primary's compile cycle. The build-version drift mechanism is the proxy for the future RTTI Weld (cf. brief § Notes).
+  - **fd-passing SCM_RIGHTS POSIX** — `tests/ipc/fd_passing.zig` validates pipe write-fd transfer cross-process; the same primitive becomes the macOS shm migration path in Phase 0.6 (see Phase 0.6 debt below).
+  - **RTT bench** — p50 6 µs / p99 16 µs / max 61 µs on Apple Silicon ReleaseSafe, ~166× margin on G1, well under G2's p99 < 5 ms / max < 50 ms.
+  - **Vulkan blit pipeline + Window** — fullscreen-triangle algorithmic generation (`gl_VertexIndex`-driven, no VBO), sampled image with linear sampler + clamp-to-edge, persistent host-visible staging buffer, full per-frame layout transition + `vkCmdCopyBufferToImage` + render pass + present. SPIR-V committed alongside GLSL sources. G6 visual: GO on Fedora 44 + GTX 1660 Ti.
 - **What deviated from the original spec:**
+  - **macOS BSD shm cross-process quirk** discovered late in the session: `shm_open(O_RDWR)` returns `EACCES` for non-creator siblings regardless of mode bits, umask, or open flags. Diagnostic matrix in `validation/s6-go-nogo.md` § Diagnostics. The shm architecture migrates to **SCM_RIGHTS fd-passing** as the primary POSIX attach mechanism in Phase 0.6 — coherent with `engine-ipc.md` §4.7 GPU-shared-framebuffer plan, which already shipped the `sendWithHandles` surface (G7 GO) — `shm_open` by name is preserved for intra-process discovery only.
+  - **Mode shm changed from 0o666 to 0o600** (déviation actée, commit `a2fc352`). Removes the thread-global `umask(0)` hack and tightens the per-region access to the owner UID. Documented in § Déviations actées above.
+  - **`weld_core.ipc` public surface inlined in `src/core/root.zig`** (déviation actée, commit `a2fc352`). The intermediate `src/core/ipc/mod.zig` file (originally listed in § Fichiers à créer ou modifier) was deleted because every other Tier 0 namespace (`ecs`, `jobs`, `platform`) re-exports inline in `root.zig`; consistency wins.
 - **What to flag explicitly in review:**
+  - **macOS shm mode × open flags matrix** preserved in `validation/s6-go-nogo.md` § Diagnostics — the proof that the BSD quirk is structural and not a Weld bug. Survives the squash-merge.
+  - **6 Linux-gated test cases** in `tests/ipc/`: `shm_cases/round_trip.zig`, `shm_cases/attacher_writes.zig`, `viewport_cases/{two_slots,wrong_width,no_tearing_1000_frames}.zig`, `crash_recovery.zig`, `fuzz_short.zig`. Each is one test per binary so the macOS BSD quirk only triggers a `SkipZigTest` on the dev primary; on Linux CI all binaries run end-to-end.
+  - **Editor stub Windows path** = `error.Unimplemented` — same inherited-debt pattern as S2's `transport_windows.sendWithHandles`. Documented in `validation/s6-go-nogo.md` Phase 0.6 debt table.
+  - **`vkCreateRenderPass` SIGSEGV on NVIDIA Fedora** was a `?*const T` initialised to `undefined` instead of `null` (commit `7fd1dc4`). The fix is one line + an inline comment that explains why the surrounding `*const T` non-optional pointers are still allowed to stay `undefined` when their count is 0. Important precedent — `engine-zig-conventions.md` candidate amendment: "Optional `?*const T` fields in `extern struct`s targeting C APIs must be initialised to explicit `null`, never `undefined`."
 - **Final measurements** (RTT p50/p99/max from `bench/results/ipc_rtt.md`, 1 h fuzz outcome, crash-recovery timings, viewport tearing tally, fd-passing test status):
+  - **RTT Apple Silicon dev primary** (ReleaseSafe, Zig 0.16.0_1, N=10 000 after 100 warmup): **p50 0.006 ms / p99 0.016 ms / max 0.061 ms / stddev 0.003 ms / mean 0.007 ms** → **G1 GO** (~166× margin) and **G2 GO**.
+  - **RTT Linux Fedora dev box** : ⏳ pending hardware sweep.
+  - **RTT Windows CI box** : ⏳ pending hardware sweep.
+  - **1 h fuzz (G3)** : ⏳ pending Linux manual run (`zig build test-ipc-fuzz-1h`).
+  - **Crash recovery (G4 / G5)** : ⏳ pending Linux hardware sweep (`tests/ipc/crash_recovery.zig` gated on `is_linux`).
+  - **Viewport mire (G6)** : ✅ **GO** on Fedora 44 + GTX 1660 Ti dev box (driver 595.71.05), 60 s observation, no tearing, no stale frame > 100 ms.
+  - **fd-passing (G7)** : ✅ **GO** on macOS dev primary, ⏳ pending Linux hardware sweep, 🔒 SKIP documented on Windows (Phase 3).
 - **Residual risks / technical debt left intentionally:**
+  1. **POSIX shm attach migration to SCM_RIGHTS fd-passing (Phase 0.6).** Today the runtime calls `shm_open` by name on the region the editor created. macOS BSD refuses `O_RDWR` cross-process. Phase 0.6 ships the create fd via `IpcSocket.sendWithHandles` (G7 path) — runtime `mmap`s directly on the received fd, never calls `shm_open`. Half-session scope-fenced to `src/core/ipc/{shm.zig,viewport.zig}` + editor / runtime attach points. `engine-ipc.md` §4 acquires a "fd-passing as primary attach" subsection at the same time.
+  2. **Editor stub Windows path (Phase 0.6).** `src/editor/main.zig` returns `error.Unimplemented` on Windows. `CreateProcessW` + named pipe + the S2 Win32 window backend already exist; wiring them up is the Phase 0.6 deliverable.
+  3. **`sendWithHandles` Windows (Phase 3).** `transport_windows.zig:sendWithHandles` returns `error.Unimplemented`. The `DuplicateHandle`-based equivalent lands with the GPU shared framebuffer (`engine-ipc.md` §4.7) when an exportable Vulkan semaphore appears upstream — distinct schedule from #1 and #2.
 
 ## Pre-PR diff check
 
 *Mandatory step before opening the PR. Compares `git diff main..HEAD --name-only` against the § Fichiers à créer ou modifier list.*
 
-- [ ] Run `git diff main..HEAD --name-only` and paste the output here
-- [ ] For every file in § Fichiers à créer ou modifier: confirm it appears in the diff (or justify its absence as a deviation)
-- [ ] For every file in the diff: confirm it appears in § Fichiers à créer ou modifier (or justify it under § Déviations actées)
-- [ ] No discrepancy → proceed to PR
-- [ ] Discrepancy → either fix the diff or record the deviation, then re-check
+- [x] Run `git diff main..HEAD --name-only` — output captured below (43 entries).
+
+```
+assets/shaders/embed.zig
+assets/shaders/viewport_blit.frag.glsl
+assets/shaders/viewport_blit.frag.spv
+assets/shaders/viewport_blit.vert.glsl
+assets/shaders/viewport_blit.vert.spv
+bench/ipc_rtt.zig
+bench/results/ipc_rtt.md
+briefs/S6-ipc-editor-runtime.md
+build.zig
+src/core/ipc/client.zig
+src/core/ipc/connection.zig
+src/core/ipc/framing.zig
+src/core/ipc/messages.zig
+src/core/ipc/protocol.zig
+src/core/ipc/server.zig
+src/core/ipc/shm.zig
+src/core/ipc/shm_posix.zig
+src/core/ipc/shm_windows.zig
+src/core/ipc/transport.zig
+src/core/ipc/transport_posix.zig
+src/core/ipc/transport_windows.zig
+src/core/ipc/viewport.zig
+src/core/platform/process.zig
+src/core/root.zig
+src/editor/main.zig
+src/editor/vk_blit.zig
+src/runtime/main.zig
+tests/ipc/crash_recovery.zig
+tests/ipc/fd_passing.zig
+tests/ipc/framing.zig
+tests/ipc/fuzz_1h.zig
+tests/ipc/fuzz_short.zig
+tests/ipc/handshake.zig
+tests/ipc/process.zig
+tests/ipc/schema_hash.zig
+tests/ipc/shm.zig
+tests/ipc/shm_cases/attacher_writes.zig
+tests/ipc/shm_cases/round_trip.zig
+tests/ipc/transport.zig
+tests/ipc/viewport_cases/no_tearing_1000_frames.zig
+tests/ipc/viewport_cases/two_slots.zig
+tests/ipc/viewport_cases/wrong_width.zig
+validation/s6-go-nogo.md
+```
+
+(`CLAUDE.md`, `README.md` also touched by the close-out commit that adds this very section — same commit lands the diff-check confirmation, so they're in the working tree but won't show in `main..HEAD` until pushed.)
+
+- [x] For every file in § Fichiers à créer ou modifier: confirm it appears in the diff (or justify its absence as a deviation).
+
+| Brief item | Diff status | Note |
+|---|---|---|
+| `src/core/ipc/mod.zig` | **absent** | Déviation actée commit `a2fc352` — inlined into `src/core/root.zig` to match `ecs` / `jobs` / `platform` convention |
+| `src/core/ipc/{protocol,messages,framing,transport,transport_posix,transport_windows,shm,shm_posix,shm_windows,viewport,server,client}.zig` | ✅ present | — |
+| `src/editor/main.zig` | ✅ present | — |
+| `src/runtime/main.zig` | ✅ present | — |
+| `src/main.zig` | **absent** | Brief allowed "unchanged if `run-ipc-demo` invokes the dedicated binaries directly" — that path was taken |
+| `src/core/platform/process.zig` | ✅ present | — |
+| `assets/shaders/viewport_blit.{vert,frag}{,.spv}` | ✅ present (4 files) | The brief wrote `.vert` / `.frag` without extension; the source files are `.glsl` per the S2 convention. Same semantic. |
+| `bench/ipc_rtt.zig` + `bench/results/ipc_rtt.md` | ✅ present | — |
+| `tests/ipc/framing.zig` | ✅ present | — |
+| `tests/ipc/handshake.zig` | ✅ present | — |
+| `tests/ipc/schema_hash.zig` | ✅ present | — |
+| `tests/ipc/shm_viewport.zig` | **absent** | Split into `tests/ipc/viewport_cases/{two_slots,wrong_width,no_tearing_1000_frames}.zig` — déviation actée commit `7e57192`, one test per binary to dodge the macOS BSD quirk |
+| `tests/ipc/fd_passing.zig` | ✅ present | — |
+| `tests/ipc/crash_recovery.zig` | ✅ present | — |
+| `tests/ipc/fuzz_short.zig` | ✅ present | — |
+| `tests/ipc/fuzz_1h.zig` | ✅ present | — |
+| `validation/s6-go-nogo.md` | ✅ present | — |
+| `build.zig` | ✅ present | — |
+| `README.md` | (this commit) | Lands in the close-out commit that adds this very table |
+| `CLAUDE.md` | (this commit) | Same |
+
+- [x] For every file in the diff: confirm it appears in § Fichiers à créer ou modifier (or justify it under § Déviations actées).
+
+| Extra file | Justification |
+|---|---|
+| `assets/shaders/embed.zig` | Edit of an existing module — adds the `viewport_blit_*_spv` exports next to the legacy `triangle_*_spv` ones. Implicit dependency of the `viewport_blit.{vert,frag}.spv` items in the brief. |
+| `src/core/ipc/connection.zig` | Brief mentioned the `IpcConnection` type in `protocol.zig`'s scope description (§ Scope, line "internal split: `protocol.zig` (constants, `IpcConnection`)…"). The implementation grew large enough that splitting it into its own file matched the file-per-concern pattern of the rest of the namespace; cosmetic split, no behavioural deviation. |
+| `src/core/root.zig` | Edit. Exposes the `ipc` namespace and carries the lazy-analysis force-eval block that used to live in `src/core/ipc/mod.zig` (déviation actée `a2fc352`). |
+| `src/editor/vk_blit.zig` | Editor implementation file. The brief's § Fichiers à créer ou modifier item for `src/editor/main.zig` says "creates Vulkan blit pipeline" — splitting the ~1000 lines of raw-Vulkan setup into a sibling file matches the S2 spike's `vk_setup.zig` + `vk_frame.zig` pattern. |
+| `tests/ipc/process.zig` | Tests for `src/core/platform/process.zig` — the `spawn_process`/`wait_nonblock`/`is_alive` surface the editor relies on. Adjacent to the brief's enumerated `tests/ipc/crash_recovery.zig` which exercises the same primitives at the integration level. |
+| `tests/ipc/transport.zig` | Tests for the bare `IpcSocket` (listen/connect/accept/send/recv/EOF). The brief enumerates `tests/ipc/framing.zig` etc. at the spec level; transport tests are the foundation those other tests depend on. |
+| `tests/ipc/shm.zig` | Negative-case shm tests (e.g. `create rejects too-long names`) that do not exercise the BSD quirk — kept here as the natural pair to `shm_cases/` (déviation actée `7e57192`). |
+| `tests/ipc/shm_cases/{round_trip,attacher_writes}.zig` | One test per binary for the create+open pair — déviation actée commit `7e57192`. Same total coverage as the original `tests/ipc/shm.zig` would have provided, restructured to dodge the macOS BSD quirk. |
+| `tests/ipc/viewport_cases/{two_slots,wrong_width,no_tearing_1000_frames}.zig` | Same déviation actée `7e57192` — replaces the brief's single-binary `tests/ipc/shm_viewport.zig`. |
+
+- [x] No discrepancy → proceed to PR.

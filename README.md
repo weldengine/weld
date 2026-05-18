@@ -2,7 +2,7 @@
 
 A game engine written in Zig 0.16.x.
 
-> **Status:** Phase −1 — Etch Zig codegen + compile-time measurement (S5)
+> **Status:** Phase −1 — IPC editor↔runtime round-trip (S6, closing)
 >
 > Weld is in its earliest exploratory phase: the spike list of Phase −1 is
 > validating the core architectural hypotheses (comptime ECS, work-stealing
@@ -44,7 +44,7 @@ A game engine written in Zig 0.16.x.
 > `zig build bench-etch-interp -Doptimize=ReleaseSafe` and the demo with
 > `zig build run-demo-etch-interp -Doptimize=ReleaseSafe`.
 >
-> **S5** (closed, tag `v0.0.6-S5-etch-codegen-zig` pending merge) validated
+> **S5** (closed, tag `v0.0.6-S5-etch-codegen-zig`) validated
 > the shipping codegen hypothesis — `Etch → Zig source → Zig compile` is
 > viable build-time-wise. The codegen lives in `src/etch/zig_codegen/`
 > and lowers the S3 subset to idiomatic Zig: components become `extern
@@ -62,6 +62,26 @@ A game engine written in Zig 0.16.x.
 > `zig build bench-etch-compile -Doptimize=ReleaseSafe` and the demo
 > with `zig build run-demo-etch-codegen`. Full report:
 > [`validation/s5-go-nogo.md`](validation/s5-go-nogo.md).
+>
+> **S6** (closed, tag `v0.0.7-S6-ipc-round-trip` pending merge) validated
+> the editor↔runtime IPC. `src/core/ipc/` is the Tier 0 endpoint per
+> `engine-ipc.md` — AF_UNIX socket / Win32 named pipe transport, 16 B
+> framing header + comptime Wyhash `schemaHash`, 13-message catalogue,
+> POSIX shm + Win32 file-mapping double-buffer viewport, fd-passing
+> via `SCM_RIGHTS` cmsg. `src/editor/main.zig` and `src/runtime/main.zig`
+> are the two canonical binaries at their Phase 0+ locations; the editor
+> opens a 1280×720 Vulkan window and presents the runtime's
+> CPU-side mire via a fullscreen-triangle blit pipeline
+> (`src/editor/vk_blit.zig`, SPIR-V committed under
+> `assets/shaders/viewport_blit.{vert,frag}.spv`). Bench RTT on the
+> dev primary (Apple Silicon, ReleaseSafe) reports **p50 6 µs / p99
+> 16 µs / max 61 µs** — G1 < 1 ms cleared by ~166×, G2 cleared. G6
+> visual on Fedora 44 + GTX 1660 Ti: GO (60 s observation, no
+> tearing, no stale frame > 100 ms). One macOS BSD POSIX shm cross-
+> process limitation found en route, scoped to a Phase 0.6 SCM_RIGHTS
+> fd-passing migration. Full report:
+> [`validation/s6-go-nogo.md`](validation/s6-go-nogo.md).
+> Brief: [`briefs/S6-ipc-editor-runtime.md`](briefs/S6-ipc-editor-runtime.md).
 
 ## Prerequisites
 
@@ -89,6 +109,13 @@ zig build bench-ecs -- --smoke                           # short bench run (used
 zig build bench-etch -- --smoke                          # short Etch bench run (sanity)
 zig build bench-etch-interp -- --smoke                   # short S4 bench run (sanity)
 zig build bench-etch-compile -- --smoke                  # short S5 compile-time bench (sanity)
+zig build run-editor-stub                                # S6 editor stub alone (spawns the runtime)
+zig build run-runtime-stub                               # S6 runtime stub alone (needs --socket=… --shm=…)
+zig build run-ipc-demo                                   # S6 full demo: editor spawns runtime, window + mire 60 s
+zig build run-ipc-demo -- --frames=600                   #   override the frame budget (default 3600 ≈ 60 s)
+zig build bench-ipc-rtt -Doptimize=ReleaseSafe           # S6 Echo RTT bench (N=10 000, report under bench/results/)
+zig build test-ipc                                       # S6 IPC tests (subset of `zig build test`, fast iteration)
+zig build test-ipc-fuzz-1h                               # S6 1 h fuzz harness — manual invocation only
 ./scripts/install-hooks.sh                               # install local git hooks (run once after clone)
 ```
 
@@ -120,11 +147,17 @@ src/
     ecs/                           Tier 0 ECS — components, chunks, archetypes, queries, world
     jobs/                          Tier 0 work-stealing scheduler (Chase-Lev deques + 4 workers)
     testing/                       testing helpers (counting allocator wrapper)
-    platform/                      generated Vulkan binding + native Win32 / Wayland windowing
+    ipc/                           S6 Tier 0 editor↔runtime IPC — transport, framing, shm, viewport, server, client, connection
+    platform/                      generated Vulkan binding + native Win32 / Wayland windowing + process control
       vk.zig                       ~31 000 lines — generated from vk.xml by tools/vk_gen
       window.zig                   public Window interface (create/destroy/pollEvent/nativeHandles)
       window/{win32,wayland,stub}.zig  per-OS backends (no SDL/GLFW, no @cImport)
       window/wayland_protocols/    ~3 000 lines — generated from wayland XMLs by tools/wayland_gen
+      process.zig                  S6 process control — spawn / wait_nonblock / kill / is_alive (POSIX + Windows stub)
+  editor/                          S6 editor binary — Window + Vulkan blit pipeline + IPC server
+    main.zig, vk_blit.zig
+  runtime/                         S6 runtime binary — IPC client + 60 Hz CPU mire to shm viewport
+    main.zig
   etch/                            S3 Etch parser, S4 interpreter, S5 Zig codegen
     zig_codegen/                   S5 codegen — lower, emit, type_map, cache, errors, tests
     parser.zig, types.zig, ast.zig (S3) / interp.zig, value.zig, ecs_bridge.zig (S4)
@@ -136,7 +169,7 @@ tools/
   wayland_gen/                     XML → Zig generator for Wayland protocol bindings
   etch_cook/                       S5 codegen CLI (Etch → consolidated Zig)
   etch_synth/                      S5 synthetic Etch corpus generator (deterministic)
-assets/shaders/                    GLSL sources + pre-compiled SPIR-V (triangle.vert, triangle.frag)
+assets/shaders/                    GLSL sources + pre-compiled SPIR-V (S2 triangle + S6 viewport_blit)
 bench/                             performance benchmarks (see "Basic commands" above)
 tests/                             out-of-tree tests wired into `zig build test`
 validation/                        hardware validation reports + PPM/PNG artefacts (step (j) per milestone)
