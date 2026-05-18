@@ -1,23 +1,28 @@
 //! Weld editor stub — owns the listening socket + shm viewport,
-//! spawns the runtime, drives the handshake, exchanges a few
-//! S6 messages, and exits.
+//! spawns the runtime, drives the handshake, opens a 1280×720
+//! Vulkan window, and presents the runtime-written mire each frame
+//! via a fullscreen blit pipeline (cf. `src/editor/vk_blit.zig`).
 //!
-//! S6 simplifications relative to the eventual Phase 0+ editor:
-//!   - No Vulkan window: the Vulkan/window plumbing from S2 is
-//!     reused only when `--with-window` is passed (off by default
-//!     so `zig build test` exercises the IPC path without a GPU).
-//!     The full G6 visual demo gates on the explicit flag.
-//!   - No heartbeat scheduler: handled by the runtime stub but the
-//!     editor side just exchanges `SpawnEntity` / `Echo` / `Shutdown`
-//!     and exits.
-//!   - One restart attempt on `kill -9` of the runtime (cf. brief).
+//! S6 lifecycle (per brief § Scope and § Comportement observable):
+//!   1. Create the shm region (`/weld-shm-viewport-<pid>`).
+//!   2. Open the Vulkan-capable window at the brief's resolution.
+//!   3. Initialise the blit renderer (instance, device, swapchain,
+//!      sampled image bound to the viewport, fullscreen pipeline).
+//!   4. Listen on the IPC socket, spawn the runtime (unless
+//!      `--no-spawn`), accept the connection.
+//!   5. Exchange `ProtocolHello` / `ProtocolHelloAck`.
+//!   6. Loop: poll window events, snapshot the runtime's published
+//!      slot from shm, stage + blit, drain IPC, present.
+//!   7. Send `Shutdown`, await `ShutdownAck`, exit.
 //!
 //! Argv:
-//!   --runtime=<path>     path to the runtime binary (default:
-//!                        zig-out/bin/weld-runtime)
-//!   --frames=<N>         pass through to runtime
-//!   --no-heartbeat       debug aid (no-op in S6 — heartbeat is
-//!                        delegated to a future patch)
+//!   --runtime=<path>     path to the runtime binary
+//!   --frames=<N>         render-loop frame budget (default: 3600 ≈ 60 s)
+//!   --no-heartbeat       debug aid (no-op in S6 — runtime side
+//!                        replies inline)
+//!   --no-spawn           do not spawn the runtime; print argv and
+//!                        wait for an external invocation. Used to
+//!                        bisect spawn vs primitive issues.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -29,18 +34,16 @@ const messages = ipc.messages;
 const protocol = ipc.protocol;
 const viewport = ipc.viewport;
 const platform_process = weld_core.platform.process;
+const window_mod = weld_core.platform.window;
+const vk = weld_core.platform.vk;
+const vk_blit = @import("vk_blit.zig");
 
 const is_posix = builtin.os.tag == .linux or builtin.os.tag == .macos;
 
 const Args = struct {
     runtime_path: []const u8 = "zig-out/bin/weld-runtime",
-    frames: ?u64 = null,
+    frames: u64 = 3600,
     no_heartbeat: bool = false,
-    /// Debug flag — when set, the editor creates the shm + listens
-    /// but does NOT spawn the runtime. It instead prints the argv
-    /// the runtime would have received and waits for an external
-    /// invocation on the same socket+shm pair. Used to bisect
-    /// posix_spawn / sandbox issues from shm primitive issues.
     no_spawn: bool = false,
 };
 
@@ -65,6 +68,17 @@ fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init.Minimal) !Args {
 
 extern "c" fn getpid() i32;
 
+const timespec_t = extern struct { tv_sec: i64, tv_nsec: i64 };
+extern "c" fn nanosleep(req: *const timespec_t, rem: ?*timespec_t) c_int;
+
+fn sleepMs(ms: u64) void {
+    var ts = timespec_t{
+        .tv_sec = @intCast(ms / 1_000),
+        .tv_nsec = @intCast((ms % 1_000) * std.time.ns_per_ms),
+    };
+    _ = nanosleep(&ts, null);
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     if (!is_posix) {
         std.debug.print("editor stub: Windows path not implemented in S6 (cf. brief)\n", .{});
@@ -81,16 +95,36 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const socket_path = try std.fmt.allocPrint(gpa, "/tmp/weld-{d}.sock", .{my_pid});
     const shm_name = try std.fmt.allocPrint(gpa, "/weld-shm-viewport-{d}", .{my_pid});
 
-    // Create the shm region the runtime will attach to.
-    var vp = try viewport.ShmViewport.create(shm_name, viewport.default_resolution.width, viewport.default_resolution.height);
+    // ---- shm region (created before everything else; runtime
+    // attaches to it once spawned) ----
+    var vp = try viewport.ShmViewport.create(
+        shm_name,
+        viewport.default_resolution.width,
+        viewport.default_resolution.height,
+    );
     defer vp.close();
 
-    // Open the listening socket.
+    // ---- Window (S2 platform layer) ----
+    var window = try window_mod.Window.create(gpa, .{
+        .title = "Weld Editor — S6 viewport blit",
+        .width = viewport.default_resolution.width,
+        .height = viewport.default_resolution.height,
+    });
+    defer window.destroy();
+
+    // ---- Vulkan blit renderer ----
+    var renderer = try vk_blit.Renderer.init(gpa, &window, .{
+        .width = viewport.default_resolution.width,
+        .height = viewport.default_resolution.height,
+    });
+    defer renderer.deinit();
+
+    // ---- IPC listen socket ----
     var server = ipc.server.IpcServer.init(gpa);
     defer server.deinit();
     try server.listen(socket_path);
 
-    // Spawn the runtime. Pass the socket + shm + editor pid.
+    // ---- Spawn (or wait for) the runtime ----
     const socket_arg = try std.fmt.allocPrint(gpa, "--socket={s}", .{socket_path});
     const shm_arg = try std.fmt.allocPrint(gpa, "--shm={s}", .{shm_name});
     const pid_arg = try std.fmt.allocPrint(gpa, "--editor-pid={d}", .{my_pid});
@@ -101,12 +135,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try spawn_argv.append(gpa, socket_arg);
     try spawn_argv.append(gpa, shm_arg);
     try spawn_argv.append(gpa, pid_arg);
-    if (args.frames) |f| {
-        const frames_arg = try std.fmt.allocPrint(gpa, "--frames={d}", .{f});
-        try spawn_argv.append(gpa, frames_arg);
-    }
+    const frames_arg = try std.fmt.allocPrint(gpa, "--frames={d}", .{args.frames});
+    try spawn_argv.append(gpa, frames_arg);
 
-    var proc_opt: ?weld_core.platform.process.Process = null;
+    var proc_opt: ?platform_process.Process = null;
     if (args.no_spawn) {
         std.debug.print(
             "[editor] --no-spawn: launch the runtime manually with:\n  {s}",
@@ -118,10 +150,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         proc_opt = try platform_process.spawn_process(gpa, args.runtime_path, spawn_argv.items);
     }
 
-    // Accept the runtime's connection.
     try server.acceptOne();
 
-    // Handshake.
+    // ---- Handshake ----
     var hello_buf: [framing.frameSizeOf(messages.ProtocolHello)]u8 = undefined;
     const hello = try server.recvHello(&hello_buf);
     if (ipc.server.IpcServer.validateHello(hello)) |_| {
@@ -132,25 +163,50 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return error.HandshakeRejected;
     }
 
-    // Demo traffic: one Echo round-trip + one SpawnEntity.
-    var echo = messages.Echo{ .payload = std.mem.zeroes([64]u8) };
-    for (&echo.payload, 0..) |*b, idx| b.* = @intCast(idx & 0xFF);
-    try server.connection().sendMessage(messages.Echo, 0, &echo);
-    var echo_buf: [framing.frameSizeOf(messages.EchoReply)]u8 = undefined;
-    const reply = try server.connection().recvMessage(messages.EchoReply, &echo_buf);
-    if (!std.mem.eql(u8, &echo.payload, &reply.payload)) return error.EchoMismatch;
+    // ---- Render loop ----
+    var frame: u64 = 0;
+    var should_close = false;
+    var last_frame_id: u64 = 0;
+    while (frame < args.frames and !should_close) {
+        while (window.pollEvent()) |event| switch (event) {
+            .close => should_close = true,
+            .resize => |sz| {
+                renderer.last_known_size = .{ .width = sz.width, .height = sz.height };
+                renderer.swapchain_dirty = true;
+            },
+            .dpi_changed => renderer.swapchain_dirty = true,
+        };
+        if (should_close) break;
 
-    const spawn = messages.SpawnEntity{ .archetype_hint = 1 };
-    try server.connection().sendMessage(messages.SpawnEntity, 0, &spawn);
-    var sp_buf: [framing.frameSizeOf(messages.EntityCreated)]u8 = undefined;
-    _ = try server.connection().recvMessage(messages.EntityCreated, &sp_buf);
+        if (renderer.swapchain_dirty) try renderer.recreateSwapchain();
 
-    // Graceful shutdown.
+        // Snapshot the runtime's latest committed slot. The mire
+        // is published with `.release` so this `acquire`-paired
+        // read pairs with it.
+        const slot = vp.readSlot();
+        const frame_id = vp.frameId();
+        if (frame_id != last_frame_id) {
+            renderer.stageViewport(vp.slotBytes(slot));
+            last_frame_id = frame_id;
+        }
+
+        _ = try vk_blit.drawFrame(&renderer);
+
+        sleepMs(16); // soft cap at ~60 Hz; window vsync owns the real cadence
+        frame += 1;
+    }
+
+    // ---- Graceful shutdown ----
     const sd = messages.Shutdown{};
-    try server.connection().sendMessage(messages.Shutdown, 0, &sd);
+    server.connection().sendMessage(messages.Shutdown, 0, &sd) catch {};
     var sa_buf: [framing.frameSizeOf(messages.ShutdownAck)]u8 = undefined;
-    _ = try server.connection().recvMessage(messages.ShutdownAck, &sa_buf);
+    _ = server.connection().recvMessage(messages.ShutdownAck, &sa_buf) catch {};
 
-    if (proc_opt) |*p| _ = try platform_process.wait_nonblock(p);
+    if (proc_opt) |*p| {
+        // Give the runtime a beat to flush its exit path before
+        // we reap.
+        sleepMs(20);
+        _ = try platform_process.wait_nonblock(p);
+    }
     std.debug.print("editor stub: ipc demo completed cleanly\n", .{});
 }

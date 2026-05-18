@@ -14,7 +14,7 @@
 | G3 1 h fuzz, 0 crash / 0 leak / 0 deadlock | ⏳ Linux-only | `zig build test-ipc-fuzz-1h` |
 | G4 Runtime kill -9 → detect < 100 ms, restart OK | ⏳ Linux-only | `tests/ipc/crash_recovery.zig` (gated `is_linux`) |
 | G5 Editor kill -9 → runtime detect + exit clean | ⏳ Linux-only | Same test file |
-| G6 Viewport 1280×720 RGBA mire 60 s, no tearing | ⏳ Linux-only | Manual demo: `zig build run-ipc-demo` |
+| G6 Viewport 1280×720 RGBA mire 60 s, no tearing | ⏳ Linux hardware | Code shipped: `src/editor/vk_blit.zig` (fullscreen-triangle blit pipeline, sampled image, staging buffer, persistent mapping) + `src/editor/main.zig` Window + render loop. Linux cross-compile clean. macOS dev-box hits `UnsupportedPlatform` on `Window.create` (Phase 2 macOS window backend dette, inherited from S2). Manual run on Fedora 44 pending. |
 | G7 fd passing POSIX | ✅ GO | `tests/ipc/fd_passing.zig` green on macOS |
 
 ## macOS POSIX shm cross-process `O_RDWR` — Phase 2 debt

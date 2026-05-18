@@ -232,6 +232,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     editor_module.addImport("weld_core", core_module);
+    // S6 viewport blit pipeline embeds pre-compiled SPIR-V via the
+    // shared `shaders` facade — the same module the S2 spike uses.
+    editor_module.addImport("shaders", shaders_module);
     const editor_exe = b.addExecutable(.{
         .name = "weld-editor",
         .root_module = editor_module,
@@ -247,17 +250,25 @@ pub fn build(b: *std.Build) void {
     editor_step.dependOn(&editor_run.step);
 
     // Full demo entry point — the editor spawns the runtime,
-    // handshake, message exchange, viewport mire visible for ~5 s,
-    // graceful shutdown. Honours the brief's G6 + observable-
-    // behavior checklist for the manual demo. Defaults to a small
-    // frame budget so `zig build run-ipc-demo` is bounded.
+    // handshake, message exchange, viewport mire visible for the
+    // brief's 60 s observable window, graceful shutdown. Honours
+    // the G6 manual-demo checklist.
+    //
+    // Pass any editor flag through `--`, e.g.
+    //   zig build run-ipc-demo -- --frames=3600
+    // for a one-minute observable session at 60 Hz. Defaults to
+    // `--frames=3600` (≈ 60 s) when the caller passes no `--` args
+    // so the canonical S6 demo matches the G6 verdict description.
     const ipc_demo_run = b.addRunArtifact(editor_exe);
     ipc_demo_run.step.dependOn(b.getInstallStep());
-    // 300 frames @ ~60 Hz = ~5 s of mire animation on the runtime side.
-    ipc_demo_run.addArg("--frames=300");
+    if (b.args) |args| {
+        ipc_demo_run.addArgs(args);
+    } else {
+        ipc_demo_run.addArg("--frames=3600");
+    }
     const ipc_demo_step = b.step(
         "run-ipc-demo",
-        "Run the S6 editor↔runtime demo (editor spawns runtime, handshake, 5 s mire, shutdown)",
+        "Run the S6 editor↔runtime demo (window + Vulkan blit, default 60 s; override with `-- --frames=N`)",
     );
     ipc_demo_step.dependOn(&ipc_demo_run.step);
 
