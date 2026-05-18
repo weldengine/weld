@@ -33,8 +33,8 @@
 
 | Gate | Linux CI (Ubuntu 24.04) | Linux dev box (Fedora 44 + GTX 1660 Ti) | Windows CI (Win 11 25H2 + RTX 4080 Super) | macOS dev primary (Apple Silicon) |
 |---|---|---|---|---|
-| G1 RTT median < 1 ms | ⏳ inherited from dev box | ✅ **GO** — 0.010 ms (~100× margin) | ⏳ pending (bench QPC fix landed, awaiting re-run) | ✅ **GO** — 0.006 ms (≈ 166× margin) |
-| G2 RTT p99 < 5 ms, max < 50 ms | ⏳ inherited from dev box | ✅ **GO** — p99 0.016 ms, max 0.094 ms | ⏳ pending re-run | ✅ **GO** — p99 0.016 ms, max 0.061 ms |
+| G1 RTT median < 1 ms | ⏳ inherited from dev box | ✅ **GO** — 0.010 ms (~100× margin) | ✅ **GO** — 0.012 ms (~83× margin) | ✅ **GO** — 0.006 ms (≈ 166× margin) |
+| G2 RTT p99 < 5 ms, max < 50 ms | ⏳ inherited from dev box | ✅ **GO** — p99 0.016 ms, max 0.094 ms | ✅ **GO** — p99 0.021 ms, max 0.117 ms | ✅ **GO** — p99 0.016 ms, max 0.061 ms |
 | G3 1 h fuzz, 0 crash / 0 leak / 0 deadlock | ⏳ hardware sweep pending | ⏳ hardware sweep pending | ⏳ hardware sweep pending | 🔒 SKIP — Linux-gated harness (cf. brief § Scope: macOS BSD shm quirk; fuzz uses no shm but the same gating policy as the rest of the macOS-deferred suite for consistency) |
 | G4 Runtime kill -9 → detect < 100 ms, restart OK | ⏳ hardware sweep pending | ⏳ hardware sweep pending | 🔒 N/A — editor stub Windows path = `error.Unimplemented` (Phase 0.6) | 🔒 SKIP — BSD shm cross-process |
 | G5 Editor kill -9 → runtime detect EOF + clean exit | ⏳ hardware sweep pending | ⏳ hardware sweep pending | 🔒 N/A — same Phase 0.6 inherited debt | 🔒 SKIP — BSD shm cross-process |
@@ -85,20 +85,31 @@ MinGW-emulated libc clock on Windows, which quantises to ~16 ms
 every sub-millisecond round-trip rounded down to zero. The bench
 flipped to `QueryPerformanceCounter` + `QueryPerformanceFrequency`
 on Windows (sub-microsecond on the validation matrix) while
-keeping `clock_gettime(CLOCK_MONOTONIC)` on POSIX. Re-run pending.
+keeping `clock_gettime(CLOCK_MONOTONIC)` on POSIX (commit
+`d63699c`). Re-run figures below.
 
 | metric | value |
 |---|---|
 | N | 10 000 (after 100 warmup) |
-| p50 | _<pending re-run with QPC bench>_ |
-| p99 | _<pending>_ |
-| max | _<pending>_ |
-| stddev | _<pending>_ |
-| mean | _<pending>_ |
+| p50 | **0.012 ms** |
+| p99 | **0.021 ms** |
+| max | **0.117 ms** |
+| stddev | 0.003 ms |
+| mean | 0.011 ms |
+| G1 verdict (p50 < 1 ms) | ✅ **GO** (~83× margin) |
+| G2 verdict (p99 < 5 ms, max < 50 ms) | ✅ **GO** |
 
 Prerequisite landed in `83046f4` (named-pipe path uses
 `buildSocketPath` + `\\.\pipe\weld-bench-rtt-<pid>`,
 `GetLastError` log on `BindFailed`/`ConnectionRefused`).
+
+**Cross-platform convergence.** All three RTT distributions land in
+the 6 – 12 µs p50 band — macOS Apple Silicon 6 µs, Linux Fedora +
+GTX 1660 Ti 10 µs, Windows + RTX 4080 Super 12 µs — independent of
+the underlying primitive (AF_UNIX on POSIX, Win32 named pipe in
+byte mode on Windows). The brief's `< 1 ms` gate (G1) is met with
+83×–166× margin on all three; the macOS box being fastest tracks
+its higher single-thread perf at this size.
 
 **Linux dev box (Fedora 44 + GTX 1660 Ti, ReleaseSafe, Zig
 0.16.0_1):**
