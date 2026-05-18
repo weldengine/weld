@@ -2,7 +2,7 @@
 
 A game engine written in Zig 0.16.x.
 
-> **Status:** Phase −1 — IPC editor↔runtime round-trip (S6, closing)
+> **Status:** Phase −1 closed — S6 merged + tagged. Phase 0 plan next.
 >
 > Weld is in its earliest exploratory phase: the spike list of Phase −1 is
 > validating the core architectural hypotheses (comptime ECS, work-stealing
@@ -63,7 +63,7 @@ A game engine written in Zig 0.16.x.
 > with `zig build run-demo-etch-codegen`. Full report:
 > [`validation/s5-go-nogo.md`](validation/s5-go-nogo.md).
 >
-> **S6** (closed, tag `v0.0.7-S6-ipc-round-trip` pending merge) validated
+> **S6** (closed, tag `v0.0.7-S6-ipc-round-trip`) validated
 > the editor↔runtime IPC. `src/core/ipc/` is the Tier 0 endpoint per
 > `engine-ipc.md` — AF_UNIX socket / Win32 named pipe transport, 16 B
 > framing header + comptime Wyhash `schemaHash`, 13-message catalogue,

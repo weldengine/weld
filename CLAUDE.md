@@ -5,9 +5,10 @@ session and captures the operational state of the project plus the rules that
 must never be violated. The full specification lives in the claude.ai
 knowledge base — see § Quick links spec.
 
-> **Status:** Phase −1 — S6 closed (code + verdict GO on CI targets), PR pending
+> **Status:** Phase −1 closed — S6 merged + tagged. Phase 0 plan next.
 >
-> S6 closed: editor↔runtime IPC validated. `src/core/ipc/` is the
+> S6 merged via squash-commit `95a8a88` (PR #9), tag
+> `v0.0.7-S6-ipc-round-trip` posted. `src/core/ipc/` is the
 > Tier 0 endpoint per `engine-ipc.md` — transport (AF_UNIX
 > + named pipes), 16-byte framing + comptime Wyhash `schemaHash`,
 > 13-message catalogue, shm + 2-slot viewport double-buffer, server
@@ -16,33 +17,29 @@ knowledge base — see § Quick links spec.
 > binaries; the editor opens a 1280×720 Vulkan window and presents
 > the runtime's CPU-side mire each frame through a fullscreen-triangle
 > blit pipeline (`src/editor/vk_blit.zig`, SPIR-V committed under
-> `assets/shaders/viewport_blit.{vert,frag}.spv`). Bench RTT on the
-> dev primary (Apple Silicon, ReleaseSafe, Zig 0.16.0_1): p50 6 µs,
-> p99 16 µs, max 61 µs, stddev 3 µs, mean 7 µs — G1 < 1 ms / G2
-> p99 < 5 ms + max < 50 ms cleared by ~166×. G6 visual on the Fedora
-> 44 + GTX 1660 Ti dev box: GO (60 s observation, no tearing, no
-> stale frame > 100 ms). One BSD POSIX shm cross-process quirk found
-> on macOS (`shm_open(O_RDWR)` returns EACCES for non-creator sibling
+> `assets/shaders/viewport_blit.{vert,frag}.spv`). Hardware
+> validation 6/7 gates on ≥ 1 platform: G1 + G2 RTT GO on the three
+> dev boxes (macOS Apple Silicon p50 6 µs, Linux Fedora 10 µs,
+> Windows 12 µs) ; G3 1 h fuzz GO on Fedora (1.9 G msgs / 0 fault) ;
+> G4 + G5 crash recovery GO on Fedora ; G6 viewport mire 60 s GO on
+> Fedora (no tearing, no stale > 100 ms) ; G7 fd-passing GO on macOS.
+> One BSD POSIX shm cross-process quirk found on macOS
+> (`shm_open(O_RDWR)` returns EACCES for non-creator sibling
 > independent of mode bits — diagnostic matrix in
 > `validation/s6-go-nogo.md`) → migrate to SCM_RIGHTS fd-passing in
 > Phase 0.6 (cohérent `engine-ipc.md` §4.7). Linux CI + Windows CI =
-> GO ; macOS dev primary = partial (G1/G2/G7 GO ; G3/G4/G5/G6 SKIP
-> documented). Validation : `zig build`, `zig build test`,
-> `zig fmt --check`, `zig build bench-ipc-rtt`, `zig build run-ipc-demo`
-> (Linux), `zig build -Dtarget=x86_64-linux`,
-> `zig build -Dtarget=x86_64-windows` all clean. PR
-> `Phase -1 / IPC / IPC editor↔runtime round-trip` opens next ; tag
-> `v0.0.7-S6-ipc-round-trip` posted by Guy after squash-merge.
+> GO. Phase −1 is complete; the next milestone is the Phase 0 plan
+> (cf. `engine-phase-0-criteria.md`).
 
 ## Current state
 
 | Field | Value |
 |---|---|
-| Phase | −1 (Spikes) |
-| Current milestone | S6 — IPC editor↔runtime round-trip (CLOSED, PR pending) |
-| Last released tag | `v0.0.6-S5-etch-codegen-zig` |
-| Active branch | `phase-pre-0/ipc/editor-runtime-round-trip` |
-| Next planned milestone | Phase −1 closed at S6 → Phase 0 plan |
+| Phase | 0 (next) — Phase −1 spikes complete |
+| Current milestone | — (between phases; awaiting Phase 0 plan) |
+| Last released tag | `v0.0.7-S6-ipc-round-trip` |
+| Active branch | `main` |
+| Next planned milestone | Phase 0 (cf. `engine-phase-0-criteria.md`) |
 
 ## Tags
 
@@ -54,7 +51,7 @@ knowledge base — see § Quick links spec.
 | `v0.0.4-S3-etch-parser-subset` | 2026-05-15 | S3 — Etch parser on subset | Lexer + parser + tabular SoA AST + minimal type-checker on 5 constructs. Bench verdict GO (worst median 0.019 ms vs 5 ms target on dev machine; re-confirmation on reference machine pending). |
 | `v0.0.5-S4-etch-tree-walking-interpreter` | 2026-05-16 | S4 — Etch tree-walking interpreter | Interpreter over S3 AST + additive Tier 0 ECS (runtime registry, dynamic archetype, resource store, runtime query). 20-program differential corpus. Bench verdict GO (median 0.603 ms / tick at 1 000 entities × 5 rules, gate 10 ms; median 6.593 ms / tick at 10 000 × 5, gate 100 ms) on dev Apple Silicon ReleaseSafe. |
 | `v0.0.6-S5-etch-codegen-zig` | 2026-05-17 | S5 — Etch → Zig codegen and compile-time measurement | Etch → Zig codegen on the S3 subset. `extern struct` types + comptime `world.query(.{T1, T2})` iteration (via `src/core/ecs/comptime_query.zig`), with `Registry.registerAlias` letting components be keyed by both Etch name and `@typeName(T)`. `tools/etch_cook` consolidates N inputs into one `.zig`. 100-file synthetic corpus + 3-metric bench. Verdict GO on all 5 gates: (a)+(b) cold 1104 ms vs 30 s, (a)+(c) incremental 1066 ms vs 2 s, zero leak, **382 distinct comptime query instantiations on 400 rules (ceiling 4×=1528)**, 20/20 differential parity. |
-| `v0.0.7-S6-ipc-round-trip` | (planned) | S6 — IPC editor↔runtime round-trip | Tier 0 `src/core/ipc/` (transport, framing, shm, viewport, server, client, connection). Two binaries `weld-editor` + `weld-runtime` at canonical `src/editor/` and `src/runtime/`. Fullscreen-triangle Vulkan blit pipeline + SPIR-V committed. RTT bench Apple Silicon ReleaseSafe: p50 6 µs / p99 16 µs / max 61 µs / stddev 3 µs (G1 < 1 ms cleared by 166×, G2 cleared). G6 visual GO on Fedora 44 + GTX 1660 Ti dev box (60 s, no tearing, no stale > 100 ms). G7 fd-passing POSIX GO. Linux CI + Windows CI = GO ; macOS dev primary = partial — BSD shm cross-process quirk documented in `validation/s6-go-nogo.md` § Diagnostics, migration vers SCM_RIGHTS fd-passing tracée Phase 0.6. Tag posted by Guy after squash-merge of PR `Phase -1 / IPC / IPC editor↔runtime round-trip`. |
+| `v0.0.7-S6-ipc-round-trip` | 2026-05-18 | S6 — IPC editor↔runtime round-trip | Tier 0 `src/core/ipc/` (transport, framing, shm, viewport, server, client, connection). Two binaries `weld-editor` + `weld-runtime` at canonical `src/editor/` and `src/runtime/`. Fullscreen-triangle Vulkan blit pipeline + SPIR-V committed. Hardware validation 6/7 gates on ≥ 1 platform: RTT G1+G2 GO across macOS / Linux / Windows (p50 6 / 10 / 12 µs), G3 1 h fuzz GO Fedora (1.9 G msgs / 0 fault), G4 + G5 crash recovery GO Fedora, G6 viewport mire 60 s GO Fedora (no tearing, no stale > 100 ms), G7 fd-passing POSIX GO macOS. macOS BSD shm cross-process quirk documented in `validation/s6-go-nogo.md` § Diagnostics, migration vers SCM_RIGHTS fd-passing tracée Phase 0.6. Squash-merge `95a8a88` (PR #9). |
 
 ## Hypotheses validated by spikes
 
