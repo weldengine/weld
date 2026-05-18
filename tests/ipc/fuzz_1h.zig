@@ -35,8 +35,13 @@ const FuzzCtx = struct {
     server_sock: *ipc.transport.IpcSocket,
     client_sock: *ipc.transport.IpcSocket,
     duration_ms: i64,
-    sent: u64 = 0,
-    recv: u64 = 0,
+    /// Outgoing `seq_id`. Matches the protocol-level `framing.Header.seq_id`
+    /// width (cf. `framing.zig`). 1 h × 10 000 msg/s ≈ 36 M, well under
+    /// `u32` max (~4.3 B), so the wraparound `+%` is theoretical here.
+    sent: u32 = 0,
+    /// Reader-side counter. Same width as `sent` for symmetry —
+    /// drives the post-run sanity check that recv == sent.
+    recv: u32 = 0,
     fault: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
     stop: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
 };

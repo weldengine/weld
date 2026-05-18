@@ -39,8 +39,13 @@ const FuzzCtx = struct {
     server_sock: *ipc.transport.IpcSocket,
     client_sock: *ipc.transport.IpcSocket,
     duration_ms: i64,
-    valid_frames_sent: u64 = 0,
-    valid_frames_recv: u64 = 0,
+    /// Outgoing `seq_id`. Matches the protocol-level
+    /// `framing.Header.seq_id` width — passing this to
+    /// `framing.encode` keeps the call-site free of explicit
+    /// truncation. The 3 s smoke run tops out at ~30 k sends, the
+    /// 1 h variant at ~36 M, both far below `u32` overflow.
+    valid_frames_sent: u32 = 0,
+    valid_frames_recv: u32 = 0,
     /// Set to 1 when the reader observes an unexpected catastrophic
     /// failure (anything other than the documented framing errors).
     reader_fault: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
