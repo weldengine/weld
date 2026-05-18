@@ -63,10 +63,10 @@ test "runtime kill -9 → editor detects EOF in <100ms" {
 
     const gpa = std.testing.allocator;
     const pid = getpid();
-    const socket_path = try std.fmt.allocPrintZ(gpa, "/tmp/weld-crashtest-{d}.sock", .{pid});
-    defer gpa.free(socket_path);
-    const shm_name = try std.fmt.allocPrintZ(gpa, "/weld-shm-crashtest-{d}", .{pid});
-    defer gpa.free(shm_name);
+    var sock_buf: [64]u8 = undefined;
+    const socket_path = try std.fmt.bufPrintZ(&sock_buf, "/tmp/weld-crashtest-{d}.sock", .{pid});
+    var shm_buf: [64]u8 = undefined;
+    const shm_name = try std.fmt.bufPrintZ(&shm_buf, "/weld-shm-crashtest-{d}", .{pid});
     _ = unlink(socket_path.ptr);
     _ = shm_unlink(shm_name.ptr);
     defer _ = unlink(socket_path.ptr);
@@ -122,10 +122,10 @@ test "runtime kill -9 → editor restarts + first post-restart Echo OK" {
     // EchoReply for an Echo we send.
     const gpa = std.testing.allocator;
     const pid = getpid();
-    const socket_path = try std.fmt.allocPrintZ(gpa, "/tmp/weld-restart-{d}.sock", .{pid});
-    defer gpa.free(socket_path);
-    const shm_name = try std.fmt.allocPrintZ(gpa, "/weld-shm-restart-{d}", .{pid});
-    defer gpa.free(shm_name);
+    var sock_buf: [64]u8 = undefined;
+    const socket_path = try std.fmt.bufPrintZ(&sock_buf, "/tmp/weld-restart-{d}.sock", .{pid});
+    var shm_buf: [64]u8 = undefined;
+    const shm_name = try std.fmt.bufPrintZ(&shm_buf, "/weld-shm-restart-{d}", .{pid});
     _ = unlink(socket_path.ptr);
     _ = shm_unlink(shm_name.ptr);
     defer _ = unlink(socket_path.ptr);
@@ -203,10 +203,10 @@ test "editor close → runtime detects EOF + exits clean code 0" {
 
     const gpa = std.testing.allocator;
     const pid = getpid();
-    const socket_path = try std.fmt.allocPrintZ(gpa, "/tmp/weld-g5-{d}.sock", .{pid});
-    defer gpa.free(socket_path);
-    const shm_name = try std.fmt.allocPrintZ(gpa, "/weld-shm-g5-{d}", .{pid});
-    defer gpa.free(shm_name);
+    var sock_buf: [64]u8 = undefined;
+    const socket_path = try std.fmt.bufPrintZ(&sock_buf, "/tmp/weld-g5-{d}.sock", .{pid});
+    var shm_buf: [64]u8 = undefined;
+    const shm_name = try std.fmt.bufPrintZ(&shm_buf, "/weld-shm-g5-{d}", .{pid});
     _ = unlink(socket_path.ptr);
     _ = shm_unlink(shm_name.ptr);
     defer _ = unlink(socket_path.ptr);
