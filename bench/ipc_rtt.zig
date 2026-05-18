@@ -30,14 +30,51 @@ extern "c" fn unlink(path: [*:0]const u8) c_int;
 fn maybeUnlink(path: [*:0]const u8) void {
     if (comptime can_unlink) _ = unlink(path);
 }
-extern "c" fn clock_gettime(clk_id: i32, tp: *timespec_t) c_int;
-const CLOCK_MONOTONIC: i32 = if (builtin.os.tag == .linux) 1 else 6;
+// Platform-native monotonic counter. The MinGW-based Windows libc
+// shipped with Zig has a `clock_gettime(CLOCK_MONOTONIC, …)` symbol
+// but its precision quantises everything down to ~16 ms on the
+// dev-box driver stack — Echo round-trips well under a millisecond
+// then all report 0.000 ms. The first hardware bench (Win 11 25H2 +
+// RTX 4080 Super) caught it. Switch to `QueryPerformanceCounter` +
+// `QueryPerformanceFrequency` on Windows (sub-microsecond on the
+// validation matrix) and keep `clock_gettime(CLOCK_MONOTONIC)` on
+// POSIX where it does the right thing.
+
 const timespec_t = extern struct { tv_sec: i64, tv_nsec: i64 };
+const CLOCK_MONOTONIC: i32 = if (builtin.os.tag == .linux) 1 else 6;
+extern "c" fn clock_gettime(clk_id: i32, tp: *timespec_t) c_int;
+
+extern "kernel32" fn QueryPerformanceCounter(out: *i64) callconv(.winapi) i32;
+extern "kernel32" fn QueryPerformanceFrequency(out: *i64) callconv(.winapi) i32;
 
 fn nowNs() i64 {
-    var ts = timespec_t{ .tv_sec = 0, .tv_nsec = 0 };
-    _ = clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * std.time.ns_per_s + ts.tv_nsec;
+    return switch (builtin.os.tag) {
+        .windows => blk: {
+            var counter: i64 = 0;
+            _ = QueryPerformanceCounter(&counter);
+            const freq = qpcFreq();
+            // Avoid `counter * 1_000_000_000` overflowing — split
+            // into seconds + remainder so the maximum representable
+            // session is bounded by `i64` seconds (~292 years), not
+            // by the `i64` nanosecond range (~292 sessions of 1 h).
+            const sec_part: i64 = @divFloor(counter, freq);
+            const rem: i64 = counter - sec_part * freq;
+            break :blk sec_part * std.time.ns_per_s + @divFloor(rem * std.time.ns_per_s, freq);
+        },
+        else => blk: {
+            var ts = timespec_t{ .tv_sec = 0, .tv_nsec = 0 };
+            _ = clock_gettime(CLOCK_MONOTONIC, &ts);
+            break :blk ts.tv_sec * std.time.ns_per_s + ts.tv_nsec;
+        },
+    };
+}
+
+var qpc_freq_cached: i64 = 0;
+fn qpcFreq() i64 {
+    if (qpc_freq_cached == 0) {
+        _ = QueryPerformanceFrequency(&qpc_freq_cached);
+    }
+    return qpc_freq_cached;
 }
 
 const ServerCtx = struct {
