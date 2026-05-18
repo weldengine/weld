@@ -214,6 +214,7 @@ pub fn build(b: *std.Build) void {
         "tests/ipc/shm_viewport.zig",
         "tests/ipc/fd_passing.zig",
         "tests/ipc/process.zig",
+        "tests/ipc/handshake.zig",
     };
     for (ipc_test_paths) |p| {
         const t_mod = b.createModule(.{

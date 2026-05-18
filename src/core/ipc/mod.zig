@@ -42,6 +42,20 @@ pub const shm = @import("shm.zig");
 /// `engine-ipc.md` §4.2 (slot count narrowed to 2 in S6).
 pub const viewport = @import("viewport.zig");
 
+/// `IpcConnection` — symmetric wrapper combining `transport.IpcSocket`,
+/// the 16-byte framing layer, and the comptime schema-hashed
+/// message catalogue. Borrowed `*IpcSocket`, encode/decode helpers,
+/// monotonic `seq_id`.
+pub const connection = @import("connection.zig");
+
+/// `IpcServer` — editor side: owns the listener, accepts one
+/// runtime, drives the handshake. Wraps `IpcConnection`.
+pub const server = @import("server.zig");
+
+/// `IpcClient` — runtime side: connects to the editor, drives the
+/// handshake. Wraps `IpcConnection`.
+pub const client = @import("client.zig");
+
 // Force eager analysis of every sub-file so inline tests are picked
 // up by `zig build test`. Lazy semantic analysis in Zig 0.16 would
 // otherwise skip files whose declarations are not transitively
@@ -54,4 +68,7 @@ comptime {
     _ = transport;
     _ = shm;
     _ = viewport;
+    _ = connection;
+    _ = server;
+    _ = client;
 }
