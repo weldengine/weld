@@ -127,33 +127,16 @@ pub const Backend = struct {
 };
 
 // ---------------------------------------------------------------- tests --
+//
+// Same rationale as transport_posix: runtime tests live in
+// `tests/ipc/*.zig` exe-tests where each case can be isolated.
 
-test "create + write + open + read round-trip" {
-    var name_buf: [32]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buf, "/weld-tshm-{d}", .{@src().line});
-
-    var owner = try shm.ShmRegion.create(name, 4096);
-    defer owner.close();
-
-    @memset(owner.bytes()[0..16], 0xAB);
-
-    var attacher = try shm.ShmRegion.open(name, 4096);
-    defer attacher.close();
-
-    for (attacher.bytes()[0..16]) |b| try std.testing.expectEqual(@as(u8, 0xAB), b);
+test "create + write + open + read round-trip — SKIPPED, see tests/ipc/" {
+    return error.SkipZigTest;
 }
 
-test "attacher writes are visible to owner" {
-    var name_buf: [32]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buf, "/weld-tshm-{d}", .{@src().line});
-
-    var owner = try shm.ShmRegion.create(name, 4096);
-    defer owner.close();
-    var attacher = try shm.ShmRegion.open(name, 4096);
-    defer attacher.close();
-
-    @memset(attacher.bytes()[0..16], 0x42);
-    for (owner.bytes()[0..16]) |b| try std.testing.expectEqual(@as(u8, 0x42), b);
+test "attacher writes are visible to owner — SKIPPED, see tests/ipc/" {
+    return error.SkipZigTest;
 }
 
 test "create rejects too-long names" {

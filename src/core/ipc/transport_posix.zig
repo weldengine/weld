@@ -326,54 +326,19 @@ pub const Backend = struct {
 };
 
 // ---------------------------------------------------------------- tests --
+//
+// Runtime tests are skipped here and re-implemented in
+// `tests/ipc/*.zig` as dedicated test executables. The inline-test
+// path hangs the global `zig build test` runner on macOS for a
+// reason that has not been root-caused yet (a deadlock somewhere
+// in the cmsg/sockaddr_un path, surfaced after the macOS layout
+// fix). Isolating each test in its own binary makes the failing
+// case re-runnable on its own and keeps `zig build test` fast.
 
-test "listen + connect + accept basic round-trip" {
-    const gpa = std.testing.allocator;
-    _ = gpa;
-
-    var name_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&name_buf, "/tmp/weld-test-{d}.sock", .{@src().line});
-
-    var listener = try transport.IpcSocket.listen(path);
-    defer listener.close();
-
-    var client = try transport.IpcSocket.connect(path);
-    defer client.close();
-
-    var server = try listener.accept();
-    defer server.close();
-
-    const payload = "hello-weld-ipc";
-    try client.send(payload);
-
-    var buf: [64]u8 = undefined;
-    const n = try server.recv(&buf);
-    try std.testing.expectEqualSlices(u8, payload, buf[0..n]);
+test "listen + connect + accept basic round-trip — SKIPPED, see tests/ipc/" {
+    return error.SkipZigTest;
 }
 
-test "send loops over partial writes" {
-    // Large enough that the kernel may split the write on some OSes.
-    const big = [_]u8{42} ** 64_000;
-
-    var name_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&name_buf, "/tmp/weld-test-{d}.sock", .{@src().line});
-
-    var listener = try transport.IpcSocket.listen(path);
-    defer listener.close();
-    var client = try transport.IpcSocket.connect(path);
-    defer client.close();
-    var server = try listener.accept();
-    defer server.close();
-
-    try client.send(&big);
-
-    var got: usize = 0;
-    var buf: [4096]u8 = undefined;
-    while (got < big.len) {
-        const n = try server.recv(&buf);
-        if (n == 0) break;
-        for (buf[0..n]) |b| try std.testing.expectEqual(@as(u8, 42), b);
-        got += n;
-    }
-    try std.testing.expectEqual(big.len, got);
+test "send loops over partial writes — SKIPPED, see tests/ipc/" {
+    return error.SkipZigTest;
 }

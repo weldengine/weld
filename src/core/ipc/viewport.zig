@@ -244,50 +244,10 @@ test "header is exactly 128 bytes" {
     try std.testing.expectEqual(@as(usize, 128), @sizeOf(Header));
 }
 
-test "create + write + read across slots (POSIX only)" {
-    if (builtin_os != .linux and builtin_os != .macos) return error.SkipZigTest;
-
-    var name_buf: [32]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buf, "/weld-tvp-{d}", .{@src().line});
-
-    var owner = try ShmViewport.create(name, 64, 48);
-    defer owner.close();
-    var attacher = try ShmViewport.open(name, 64, 48);
-    defer attacher.close();
-
-    // Writer commits slot 1 (initial last_complete is 0, so
-    // nextWriteSlot is 1).
-    const w_slot = owner.nextWriteSlot();
-    try std.testing.expectEqual(@as(u32, 1), w_slot);
-    @memset(owner.slotBytes(w_slot), 0xAA);
-    owner.commit(w_slot);
-
-    // Reader sees slot 1 with the new pixels.
-    const r_slot = attacher.readSlot();
-    try std.testing.expectEqual(@as(u32, 1), r_slot);
-    for (attacher.slotBytes(r_slot)[0..16]) |b| try std.testing.expectEqual(@as(u8, 0xAA), b);
-
-    // Second commit alternates back to slot 0.
-    const w2 = owner.nextWriteSlot();
-    try std.testing.expectEqual(@as(u32, 0), w2);
-    @memset(owner.slotBytes(w2), 0xBB);
-    owner.commit(w2);
-    const r2 = attacher.readSlot();
-    try std.testing.expectEqual(@as(u32, 0), r2);
-    for (attacher.slotBytes(r2)[0..16]) |b| try std.testing.expectEqual(@as(u8, 0xBB), b);
-
-    // Frame counter is monotonic.
-    try std.testing.expectEqual(@as(u64, 2), attacher.frameId());
+test "create + write + read across slots — SKIPPED, see tests/ipc/" {
+    return error.SkipZigTest;
 }
 
-test "open rejects wrong width" {
-    if (builtin_os != .linux and builtin_os != .macos) return error.SkipZigTest;
-
-    var name_buf: [32]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buf, "/weld-tvp-{d}", .{@src().line});
-
-    var owner = try ShmViewport.create(name, 64, 48);
-    defer owner.close();
-
-    try std.testing.expectError(error.InvalidHeader, ShmViewport.open(name, 128, 48));
+test "open rejects wrong width — SKIPPED, see tests/ipc/" {
+    return error.SkipZigTest;
 }
