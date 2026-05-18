@@ -216,18 +216,5 @@ pub fn is_alive(pid: Pid) bool {
     }
 }
 
-// ---------------------------------------------------------------- tests --
-//
-// Same rationale as src/core/ipc/transport_posix.zig: runtime
-// fork/spawn paths live in `tests/ipc/process_test.zig` exe-test in
-// the next session. Keeping the inline tests as SkipZigTest stubs
-// so the surface is discoverable from the file but no syscall fires
-// in `zig build test`.
-
-test "spawn /bin/true and reap with wait_nonblock — SKIPPED, see tests/ipc/" {
-    return error.SkipZigTest;
-}
-
-test "is_alive — SKIPPED, see tests/ipc/" {
-    return error.SkipZigTest;
-}
+// Runtime tests live in `tests/ipc/process.zig` — see that file
+// for spawn + reap + is_alive + kill coverage.

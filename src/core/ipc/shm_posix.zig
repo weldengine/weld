@@ -172,18 +172,9 @@ pub const Backend = struct {
     }
 };
 
-// ---------------------------------------------------------------- tests --
-//
-// Same rationale as transport_posix: runtime tests live in
-// `tests/ipc/*.zig` exe-tests where each case can be isolated.
-
-test "create + write + open + read round-trip — SKIPPED, see tests/ipc/" {
-    return error.SkipZigTest;
-}
-
-test "attacher writes are visible to owner — SKIPPED, see tests/ipc/" {
-    return error.SkipZigTest;
-}
+// Runtime tests live in `tests/ipc/shm.zig` (negative cases) and
+// `tests/ipc/shm_cases/*.zig` (one exe per `create + open` case to
+// avoid the macOS BSD shm intra-process quirk).
 
 test "create rejects too-long names" {
     const too_long = "/weld-this-name-is-deliberately-way-too-long-for-pshmnamlen";

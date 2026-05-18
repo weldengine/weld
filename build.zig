@@ -274,8 +274,18 @@ pub fn build(b: *std.Build) void {
         "tests/ipc/framing.zig",
         "tests/ipc/schema_hash.zig",
         "tests/ipc/transport.zig",
+        // `shm` and `shm_viewport` are split into one-test-per-binary
+        // under `tests/ipc/{shm,viewport}_cases/` because the macOS BSD
+        // shm namespace caps a process at ONE successful
+        // `shm_open(O_CREAT) → shm_open(O_RDWR)` sequence; running two
+        // such tests in the same exe makes the second EACCES. One exe
+        // per test sidesteps the quirk and gives real macOS coverage.
         "tests/ipc/shm.zig",
-        "tests/ipc/shm_viewport.zig",
+        "tests/ipc/shm_cases/round_trip.zig",
+        "tests/ipc/shm_cases/attacher_writes.zig",
+        "tests/ipc/viewport_cases/two_slots.zig",
+        "tests/ipc/viewport_cases/wrong_width.zig",
+        "tests/ipc/viewport_cases/no_tearing_1000_frames.zig",
         "tests/ipc/fd_passing.zig",
         "tests/ipc/process.zig",
         "tests/ipc/handshake.zig",

@@ -325,20 +325,6 @@ pub const Backend = struct {
     }
 };
 
-// ---------------------------------------------------------------- tests --
-//
-// Runtime tests are skipped here and re-implemented in
-// `tests/ipc/*.zig` as dedicated test executables. The inline-test
-// path hangs the global `zig build test` runner on macOS for a
-// reason that has not been root-caused yet (a deadlock somewhere
-// in the cmsg/sockaddr_un path, surfaced after the macOS layout
-// fix). Isolating each test in its own binary makes the failing
-// case re-runnable on its own and keeps `zig build test` fast.
-
-test "listen + connect + accept basic round-trip — SKIPPED, see tests/ipc/" {
-    return error.SkipZigTest;
-}
-
-test "send loops over partial writes — SKIPPED, see tests/ipc/" {
-    return error.SkipZigTest;
-}
+// Runtime tests live in `tests/ipc/transport.zig` — one exe each
+// to keep an eventual deadlock in one case from stalling the rest of
+// `zig build test`.

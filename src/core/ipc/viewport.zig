@@ -35,7 +35,6 @@
 //! atomics through the same physical pages, no locks needed.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 const shm = @import("shm.zig");
 
@@ -231,9 +230,8 @@ pub const ShmViewport = struct {
     }
 };
 
-// ---------------------------------------------------------------- tests --
-
-const builtin_os = builtin.os.tag;
+// Runtime tests live in `tests/ipc/viewport_cases/*.zig` — one exe
+// per case to dodge the macOS BSD shm intra-process quirk.
 
 test "regionSize is header + two RGBA slot blocks" {
     const expected: usize = header_size + 2 * (1280 * 720 * 4);
@@ -242,12 +240,4 @@ test "regionSize is header + two RGBA slot blocks" {
 
 test "header is exactly 128 bytes" {
     try std.testing.expectEqual(@as(usize, 128), @sizeOf(Header));
-}
-
-test "create + write + read across slots — SKIPPED, see tests/ipc/" {
-    return error.SkipZigTest;
-}
-
-test "open rejects wrong width — SKIPPED, see tests/ipc/" {
-    return error.SkipZigTest;
 }
