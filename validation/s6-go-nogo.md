@@ -11,44 +11,93 @@
 |---|---|---|
 | G1 RTT median < 1 ms | ⏳ pending | Run on dev box: `zig build bench-ipc-rtt -Doptimize=ReleaseSafe`; values land in `bench/results/ipc_rtt.md` |
 | G2 RTT p99 < 5 ms, max < 50 ms | ⏳ pending | Same bench run |
-| G3 1 h fuzz, 0 crash / 0 leak / 0 deadlock | ⏳ pending | Run on Linux: `zig build test-ipc-fuzz-1h` |
+| G3 1 h fuzz, 0 crash / 0 leak / 0 deadlock | ⏳ Linux-only | `zig build test-ipc-fuzz-1h` |
 | G4 Runtime kill -9 → detect < 100 ms, restart OK | ⏳ Linux-only | `tests/ipc/crash_recovery.zig` (gated `is_linux`) |
 | G5 Editor kill -9 → runtime detect + exit clean | ⏳ Linux-only | Same test file |
 | G6 Viewport 1280×720 RGBA mire 60 s, no tearing | ⏳ Linux-only | Manual demo: `zig build run-ipc-demo` |
 | G7 fd passing POSIX | ✅ GO | `tests/ipc/fd_passing.zig` green on macOS |
 
-## Inherited debt promoted from S6
+## macOS POSIX shm cross-process `O_RDWR` — Phase 2 debt
 
-### macOS POSIX shm cross-process access
+**Symptom.** `shm_open(name, O_RDWR | O_CREAT, mode)` from a runtime
+process (spawned by `posix_spawnp` or invoked manually from a fresh
+shell) returns `EACCES` for an `shm_open(name, O_RDWR | O_CREAT |
+O_EXCL, mode)`-created region in another process, **for every mode
+tested** (`0o600`, `0o644`, `0o660`, `0o666`), even when both
+processes share the same UID. The creator process holds the fd open
+through `mmap` and beyond.
 
-**Symptom.** `shm_open(name, O_RDWR)` with no `O_CREAT` flag returns
-`EACCES` on macOS 26.4.1 when invoked by a `posix_spawnp`'d child of
-the creating process, even though the parent used `umask(0)` and mode
-`0o666`. The same call from a fresh process started by the shell
-**also** returns `EACCES`. Verified empirically against the working
-`zig-out/bin/weld-runtime` spawned by `zig-out/bin/weld-editor`.
+**Diagnosis matrix run on 2026-05-18 against macOS 26.4.1 / Zig
+0.16.0:**
 
-**Workaround in place.** `src/core/ipc/shm_posix.zig:Backend.open` now
-passes `O_CREAT | O_RDWR` so the open path either attaches to the
-existing region (the editor created it first) or — if absent —
-creates an empty one that `ShmViewport.open` rejects via
-`error.InvalidHeader`. The race is benign for the S6 lifecycle
-because the editor always creates before spawning the runtime.
+| Opener flags | Mode (creator) | Result |
+|---|---|---|
+| `O_RDONLY` | any | ✅ fd ≥ 0 |
+| `O_RDONLY \| O_CREAT` | any | ✅ fd ≥ 0 |
+| `O_RDWR` | any | ❌ EACCES |
+| `O_RDWR \| O_CREAT` | any | ❌ EACCES |
 
-**Test coverage.** Two tests gate on `is_linux`:
-- `tests/ipc/shm.zig` (create + open round-trip).
-- `tests/ipc/shm_viewport.zig` (slot alternation + 1000-frame tear test).
+The kernel's BSD shm path locks write access on a region to the
+process that successfully `O_RDWR`'d it first. The opener can mmap
+read-only, but a `PROT_WRITE` mapping on a read-only fd fails at
+`mmap` time.
 
-The `tests/ipc/crash_recovery.zig` and the `run-ipc-demo` target
-share the same gating. The S6 dev demo runs on Linux; the macOS
-visual verification is a Phase 0.6 deliverable when the cross-
-platform window/Vulkan story consolidates.
+**Three hypotheses tested first** (Claude.ai 2026-05-18 follow-up):
+
+1. ❌ **Name identity** — `[editor] shm_name='/weld-shm-viewport-N'`
+   and `[runtime] args.shm='/weld-shm-viewport-N'` bytes match
+   exactly, including the leading `/` and the digit-encoded PID.
+
+2. ❌ **Premature `close(fd)` on the creator side** — audit of
+   `src/core/ipc/shm_posix.zig:Backend.create` confirms the fd is
+   stored in `Backend.fd` and only released in `Backend.close()`.
+   The editor's `var vp = try …create(…); defer vp.close();` keeps
+   the fd live for the entire `main` scope.
+
+3. ❌ **`posix_spawn` / Hardened Runtime artifact** — repro with
+   `--no-spawn` flag on the editor (added in this commit) + manual
+   runtime invocation from a fresh shell still produces `EACCES`
+   on the runtime's `shm_open(O_RDWR)`. The bug reproduces without
+   `posix_spawnp` in the chain.
+
+**Workaround postponed to Phase 0.6:** `SCM_RIGHTS` fd-passing. The
+editor creates the shm, keeps the fd, and ships the fd to the
+runtime via the existing AF_UNIX socket using the
+`IpcSocket.sendWithHandles` surface that S6 already builds (G7).
+The runtime `mmap`s directly on the received fd without ever
+calling `shm_open`. This sidesteps the macOS BSD restriction and
+yields a cleaner protocol on every platform. The runtime side of
+`ShmViewport.open` then takes a `fd` argument instead of a `name`.
+Estimated cost: ~half a session, scope-fenced to
+`src/core/ipc/shm.zig` + `viewport.zig` + the editor/runtime
+attach point.
+
+**Linux is unaffected.** The Linux POSIX shm implementation backs
+the namespace with a tmpfs at `/dev/shm/`, ordinary file
+permissions apply, and cross-process `O_RDWR` from the owner UID
+just works. The Linux CI matrix (`ubuntu-24.04`) will surface G4 /
+G5 / G6 verdicts on the upcoming hardware run.
+
+## Inherited debt previously promoted from S6
+
+### macOS POSIX shm intra-process re-open (subsumed)
+
+The earlier diagnosis of an intra-process `shm_open(O_CREAT) →
+shm_open(O_RDWR)` cap (one per process lifetime) is a downstream
+manifestation of the same write-access restriction. The
+`tests/ipc/shm_cases/*` and `tests/ipc/viewport_cases/*` files
+gate themselves on `is_linux` for that reason.
 
 ## Tests
 
-`zig build test` (commit `<sha>`) — 43/43 build steps, 116/124
-tests passed, 8 skipped (Windows platform-gated + macOS shm-quirk
-gated). See `bench/results/ipc_rtt.md` for the latency histogram.
+`zig build test` exit 0. On macOS dev-box, 8 tests skipped via
+`is_linux` gates (shm_cases × 2, viewport_cases × 3,
+crash_recovery × 2, fuzz_short × 1) — all Linux-CI-bound. The
+remaining ~25 syscall tests pass: framing, schema_hash, transport
+(reader thread + 64 KB), fd_passing (SCM_RIGHTS), handshake (full
+round-trip cross-thread), process (spawn / kill / is_alive),
+shm-too-long-name (negative). `bench/results/ipc_rtt.md` populated
+by `zig build bench-ipc-rtt`.
 
 ## Open follow-ups
 
@@ -57,6 +106,7 @@ gated). See `bench/results/ipc_rtt.md` for the latency histogram.
 - Linux 1 h fuzz: `zig build test-ipc-fuzz-1h` — G3.
 - Apple Silicon RTT bench: `zig build bench-ipc-rtt
   -Doptimize=ReleaseSafe` — G1, G2.
-- macOS POSIX shm cross-process re-investigation — file a Phase 0.6
-  follow-up to research `posix_madvise` / sandbox profile / private
-  namespace under com.apple.security.cs.shared-memory entitlements.
+- Phase 0.6: implement `SCM_RIGHTS` fd-passing for shm viewport.
+  Closes the macOS POSIX shm cross-process gap for free and removes
+  the `is_linux` gates on `shm_cases/`, `viewport_cases/`, and
+  `crash_recovery`.

@@ -36,6 +36,12 @@ const Args = struct {
     runtime_path: []const u8 = "zig-out/bin/weld-runtime",
     frames: ?u64 = null,
     no_heartbeat: bool = false,
+    /// Debug flag — when set, the editor creates the shm + listens
+    /// but does NOT spawn the runtime. It instead prints the argv
+    /// the runtime would have received and waits for an external
+    /// invocation on the same socket+shm pair. Used to bisect
+    /// posix_spawn / sandbox issues from shm primitive issues.
+    no_spawn: bool = false,
 };
 
 fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init.Minimal) !Args {
@@ -50,6 +56,8 @@ fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init.Minimal) !Args {
             a.frames = try std.fmt.parseInt(u64, s["--frames=".len..], 10);
         } else if (std.mem.eql(u8, s, "--no-heartbeat")) {
             a.no_heartbeat = true;
+        } else if (std.mem.eql(u8, s, "--no-spawn")) {
+            a.no_spawn = true;
         }
     }
     return a;
@@ -98,7 +106,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try spawn_argv.append(gpa, frames_arg);
     }
 
-    var proc = try platform_process.spawn_process(gpa, args.runtime_path, spawn_argv.items);
+    var proc_opt: ?weld_core.platform.process.Process = null;
+    if (args.no_spawn) {
+        std.debug.print(
+            "[editor] --no-spawn: launch the runtime manually with:\n  {s}",
+            .{args.runtime_path},
+        );
+        for (spawn_argv.items[1..]) |a| std.debug.print(" {s}", .{a});
+        std.debug.print("\n[editor] waiting for runtime to connect on {s} ...\n", .{socket_path});
+    } else {
+        proc_opt = try platform_process.spawn_process(gpa, args.runtime_path, spawn_argv.items);
+    }
 
     // Accept the runtime's connection.
     try server.acceptOne();
@@ -110,7 +128,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try server.sendHelloAck(true, "");
     } else |_| {
         try server.sendHelloAck(false, "protocol mismatch");
-        _ = try platform_process.wait_nonblock(&proc);
+        if (proc_opt) |*p| _ = try platform_process.wait_nonblock(p);
         return error.HandshakeRejected;
     }
 
@@ -133,6 +151,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var sa_buf: [framing.frameSizeOf(messages.ShutdownAck)]u8 = undefined;
     _ = try server.connection().recvMessage(messages.ShutdownAck, &sa_buf);
 
-    _ = try platform_process.wait_nonblock(&proc);
+    if (proc_opt) |*p| _ = try platform_process.wait_nonblock(p);
     std.debug.print("editor stub: ipc demo completed cleanly\n", .{});
 }
