@@ -10,15 +10,17 @@
 
 const std = @import("std");
 const registry_mod = @import("registry.zig");
+const entity_mod = @import("entity.zig");
 
 const ComponentId = registry_mod.ComponentId;
 const Registry = registry_mod.Registry;
 
-// Local handle type — the dynamic path stays self-contained instead
-// of importing `components.EntityId`. Both are `u64`; the duplicate
-// declaration keeps the runtime registry / dynamic archetype free
-// of a `components.zig` dependency.
-const EntityId = u64;
+// Canonical EntityId from the identity module. Previously aliased to
+// `u64` locally to keep the dynamic path free of a `components.zig`
+// dependency; M0.1 / E1 promotes EntityId to a generational handle
+// owned by `entity.zig`, so the dynamic path imports it directly and
+// the two spawn paths now agree on the wire format.
+const EntityId = entity_mod.EntityId;
 
 /// Chunk size — locked to 16 KiB to match S1 (cf. `core/ecs/chunk.zig`).
 pub const ChunkSize: usize = 16 * 1024;
@@ -341,8 +343,9 @@ test "spawnDefault returns a generational Entity handle" {
     var arch = try DynamicArchetype.init(gpa, &reg, 0, &[_]ComponentId{id_h});
     defer arch.deinit(gpa);
 
-    const r = try arch.spawnDefault(gpa, 7);
-    try std.testing.expectEqual(@as(EntityId, 7), r.entity_id);
+    const expected_id = EntityId{ .index = 7, .generation = 0 };
+    const r = try arch.spawnDefault(gpa, expected_id);
+    try std.testing.expectEqual(expected_id, r.entity_id);
     try std.testing.expectEqual(@as(u32, 0), r.chunk_idx);
     try std.testing.expectEqual(@as(u32, 0), r.slot);
     try std.testing.expectEqual(@as(usize, 1), arch.entityCount());
@@ -367,9 +370,9 @@ test "iteration over a 16 KiB chunk respects SoA per component" {
     defer arch.deinit(gpa);
 
     // Spawn 4 entities, write distinct values via the SoA arrays.
-    var i: EntityId = 0;
+    var i: u32 = 0;
     while (i < 4) : (i += 1) {
-        _ = try arch.spawnDefault(gpa, i);
+        _ = try arch.spawnDefault(gpa, .{ .index = i, .generation = 0 });
     }
     const chunk = arch.chunks.items[0];
     const a_idx = arch.componentIndex(id_a).?;

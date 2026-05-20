@@ -6,6 +6,10 @@
 
 /// ECS namespace — comptime SoA archetype + runtime registry surface.
 pub const ecs = struct {
+    // M0.1 / E1 — generational identity store. Sits below components.zig
+    // because the canonical `EntityId` lives here and components.zig
+    // re-exports it.
+    pub const entity = @import("ecs/entity.zig");
     pub const components = @import("ecs/components.zig");
     pub const chunk = @import("ecs/chunk.zig");
     pub const archetype = @import("ecs/archetype.zig");
@@ -73,4 +77,7 @@ comptime {
     _ = ipc.connection;
     _ = ipc.server;
     _ = ipc.client;
+    // Same guard for the M0.1 identity module — `entity.zig`'s inline
+    // tests must be reachable from the core test target's root.
+    _ = ecs.entity;
 }
