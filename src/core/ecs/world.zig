@@ -28,6 +28,7 @@ const entity_mod = @import("entity.zig");
 const archetype_mod = @import("archetype.zig");
 const query_mod = @import("query.zig");
 const chunk_mod = @import("chunk.zig");
+const tick_mod = @import("tick.zig");
 
 const registry_mod = @import("registry.zig");
 const resources_mod = @import("resources.zig");
@@ -63,6 +64,9 @@ pub const ArchetypeId = archetype_mod.ArchetypeId;
 /// Deprecated alias kept for Etch bridge / demo binaries that still
 /// import `world.DynamicLocation`.
 pub const DynamicLocation = Location;
+/// World tick counter type, re-exported for callers driving the
+/// E4 change-detection sidecars.
+pub const Tick = tick_mod.Tick;
 
 const Registry = registry_mod.Registry;
 const ComponentId = registry_mod.ComponentId;
@@ -81,6 +85,14 @@ pub const World = struct {
     /// single store guarantees that the `(index, generation)` halves of
     /// an `EntityId` stay unique world-wide.
     identity: EntityIdentityStore,
+
+    // ── Change detection (M0.1 / E4) ──
+    /// Monotonic frame counter. Incremented by `beginFrame()` at the
+    /// start of each tick; written into every spawn / migration's
+    /// `added_tick` + `changed_tick` sidecars and into every
+    /// `get_mut(T)` auto-mark. Reads happen from `Query.last_run_tick`
+    /// comparisons.
+    current_tick: Tick,
 
     // ── Component metadata + storage (M0.1 / E2) ──
     /// Runtime component / resource type registry. Assigns
@@ -105,6 +117,7 @@ pub const World = struct {
     pub fn init() World {
         return .{
             .identity = EntityIdentityStore.init(),
+            .current_tick = tick_mod.initial_tick,
             .registry = Registry.init(),
             .archetypes = .empty,
             .archetype_by_signature = .empty,
@@ -234,7 +247,7 @@ pub const World = struct {
         const eid = try self.identity.allocate(gpa);
         errdefer self.identity.release(gpa, eid) catch {};
 
-        const r = try arch.allocateSlot(gpa);
+        const r = try arch.allocateSlot(gpa, self.current_tick);
         const chunk = arch.chunks.items[r.chunk_idx];
 
         // Write the components in the archetype's sorted-id order. We
@@ -273,7 +286,7 @@ pub const World = struct {
         const eid = try self.identity.allocate(gpa);
         errdefer self.identity.release(gpa, eid) catch {};
 
-        const r = try arch.spawnDefault(gpa, eid);
+        const r = try arch.spawnDefault(gpa, eid, self.current_tick);
         self.entity_locations.putAssumeCapacity(eid, .{
             .archetype_idx = arch.archetype_id,
             .chunk_idx = r.chunk_idx,
@@ -306,6 +319,49 @@ pub const World = struct {
     /// `false` for stale handles instead of erroring.
     pub fn isLive(self: *const World, id: EntityId) bool {
         return self.identity.isLive(id);
+    }
+
+    // ─── M0.1 / E4 — frame tick + typed component access ────────────────
+
+    /// Open a new frame. Bumps `current_tick` (wrapping arithmetic — a
+    /// follow-up milestone handles the u32 wraparound per the brief)
+    /// and clears every chunk's dirty bitset so `Changed<T>` queries
+    /// only see this frame's modifications.
+    pub fn beginFrame(self: *World) void {
+        self.current_tick +%= 1;
+        for (self.archetypes.items) |arch| arch.clearAllDirtyBitsets();
+    }
+
+    /// Read-only typed access to component `T` on `entity`. Returns
+    /// `null` when the entity is stale or its archetype does not
+    /// hold `T`. Does **not** mark the slot as changed.
+    pub fn get(self: *const World, comptime T: type, entity: EntityId) ?*const T {
+        if (!self.identity.isLive(entity)) return null;
+        const loc = self.entity_locations.get(entity) orelse return null;
+        const cid = self.registry.idOf(@typeName(T)) orelse return null;
+        const arch = self.archetypes.items[loc.archetype_idx];
+        const col_idx = arch.componentIndex(cid) orelse return null;
+        const chunk = arch.chunks.items[loc.chunk_idx];
+        const bytes = arch.componentSlot(chunk, col_idx, loc.slot);
+        return @ptrCast(@alignCast(bytes.ptr));
+    }
+
+    /// Mutable typed access to component `T` on `entity`. **Auto-marks**
+    /// `changed_tick[T][slot] = current_tick` and sets the slot's dirty
+    /// bit before returning the pointer — every write through this
+    /// pointer is observable by a `Changed<T>` query whose
+    /// `last_run_tick < current_tick`. Returns `null` for stale handles
+    /// or missing components.
+    pub fn get_mut(self: *World, comptime T: type, entity: EntityId) ?*T {
+        if (!self.identity.isLive(entity)) return null;
+        const loc = self.entity_locations.get(entity) orelse return null;
+        const cid = self.registry.idOf(@typeName(T)) orelse return null;
+        const arch = self.archetypes.items[loc.archetype_idx];
+        const col_idx = arch.componentIndex(cid) orelse return null;
+        const chunk = arch.chunks.items[loc.chunk_idx];
+        arch.markChanged(chunk, col_idx, loc.slot, self.current_tick);
+        const bytes = arch.componentSlot(chunk, col_idx, loc.slot);
+        return @ptrCast(@alignCast(bytes.ptr));
     }
 
     // ─── Add / remove component (M0.1 / E2 — transition cache) ──────────
@@ -361,14 +417,22 @@ pub const World = struct {
 
         try self.entity_locations.ensureUnusedCapacity(gpa, 1);
 
-        // Allocate a slot in the destination archetype.
-        const dst_r = try dst_arch.allocateSlot(gpa);
+        // Allocate a slot in the destination archetype — the
+        // `allocateSlot` call stamps `added_tick` + `changed_tick`
+        // sidecars for **every** destination column at
+        // `self.current_tick`. We then overwrite the surviving columns'
+        // `added_tick` to preserve the original attachment tick so the
+        // semantic "added_tick = when this component was first attached
+        // to this entity" survives migration.
+        const dst_r = try dst_arch.allocateSlot(gpa, self.current_tick);
         const dst_chunk = dst_arch.chunks.items[dst_r.chunk_idx];
         const src_chunk = src_arch.chunks.items[src_loc.chunk_idx];
 
         // Copy each destination component column from either the source
         // archetype (if the component exists there) or the caller's
-        // freshly-provided value.
+        // freshly-provided value. Surviving columns also carry their
+        // pre-migration `added_tick` / `changed_tick`; the new column
+        // keeps the `current_tick` value `allocateSlot` already stamped.
         for (dst_arch.component_ids, 0..) |dst_cid, i| {
             const dst = dst_arch.componentSlot(dst_chunk, i, dst_r.slot);
             if (dst_cid == cid_new) {
@@ -377,6 +441,13 @@ pub const World = struct {
                 const src_i = src_arch.componentIndex(dst_cid).?;
                 const src = src_arch.componentSlot(src_chunk, src_i, src_loc.slot);
                 @memcpy(dst, src);
+
+                // Preserve the source's `added_tick` and
+                // `changed_tick` for this column.
+                const src_added = src_arch.addedTick(src_chunk, src_i, src_loc.slot);
+                const src_changed = src_arch.changedTick(src_chunk, src_i, src_loc.slot);
+                dst_chunk.addedTickColumn(&dst_arch.layout, i)[dst_r.slot] = src_added;
+                dst_chunk.changedTickColumn(&dst_arch.layout, i)[dst_r.slot] = src_changed;
             }
         }
         dst_arch.entityIds(dst_chunk)[dst_r.slot] = entity;
@@ -432,7 +503,7 @@ pub const World = struct {
 
         try self.entity_locations.ensureUnusedCapacity(gpa, 1);
 
-        const dst_r = try dst_arch.allocateSlot(gpa);
+        const dst_r = try dst_arch.allocateSlot(gpa, self.current_tick);
         const dst_chunk = dst_arch.chunks.items[dst_r.chunk_idx];
         const src_chunk = src_arch.chunks.items[src_loc.chunk_idx];
 
@@ -441,6 +512,12 @@ pub const World = struct {
             const dst = dst_arch.componentSlot(dst_chunk, i, dst_r.slot);
             const src = src_arch.componentSlot(src_chunk, src_i, src_loc.slot);
             @memcpy(dst, src);
+
+            // Surviving columns keep their pre-migration ticks.
+            const src_added = src_arch.addedTick(src_chunk, src_i, src_loc.slot);
+            const src_changed = src_arch.changedTick(src_chunk, src_i, src_loc.slot);
+            dst_chunk.addedTickColumn(&dst_arch.layout, i)[dst_r.slot] = src_added;
+            dst_chunk.changedTickColumn(&dst_arch.layout, i)[dst_r.slot] = src_changed;
         }
         dst_arch.entityIds(dst_chunk)[dst_r.slot] = entity;
 
