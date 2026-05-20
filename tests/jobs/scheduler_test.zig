@@ -6,7 +6,6 @@ const Transform = weld_core.ecs.world.Transform;
 const Velocity = weld_core.ecs.world.Velocity;
 const Chunk = weld_core.ecs.world.Chunk;
 const Scheduler = weld_core.jobs.scheduler.Scheduler;
-const worker_count = weld_core.jobs.scheduler.worker_count;
 
 const VisitCtx = struct {
     counter: *std.atomic.Value(u32),
@@ -38,7 +37,7 @@ test "split-over-chunks dispatch covers every chunk" {
 
     var sched = try Scheduler.init(gpa, io);
     try sched.start();
-    defer sched.deinit();
+    defer sched.deinit(gpa);
 
     var counter: std.atomic.Value(u32) = .init(0);
     var archetype_id_seen: std.atomic.Value(u32) = .init(0); // World.archetype.archetype_id
@@ -86,7 +85,7 @@ test "scheduler returns only after all work is done" {
 
     var sched = try Scheduler.init(gpa, io);
     try sched.start();
-    defer sched.deinit();
+    defer sched.deinit(gpa);
 
     var completed: std.atomic.Value(u32) = .init(0);
     var saw: std.atomic.Value(u32) = .init(0);

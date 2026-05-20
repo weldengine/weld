@@ -20,9 +20,11 @@ pub const Job = struct {
     chunk_ptr: *anyopaque,
 };
 
-// Maximum number of jobs per worker deque. 1 024 covers the S1 bench
-// (100 000 entities / 185 chunk capacity ≈ 541 chunks) with margin.
-const DequeCapacity: usize = 1024;
+/// Maximum number of jobs per worker deque. 1 024 covers the S1 bench
+/// (100 000 entities / 185 chunk capacity ≈ 541 chunks) with margin.
+/// Exposed so the M0.1 / E5a scheduler can size the dynamic
+/// `MaxChunksPerDispatch` buffer at `worker_count * DequeCapacity`.
+pub const DequeCapacity: usize = 1024;
 const WorkerDeque = deque_mod.Deque(Job, DequeCapacity);
 
 /// Type-erased trampoline signature called from `Worker.run` once
@@ -31,18 +33,27 @@ const WorkerDeque = deque_mod.Deque(Job, DequeCapacity);
 pub const TrampolineFn = *const fn (chunk_ptr: *anyopaque, ctx_ptr: *anyopaque) void;
 
 /// Atomic counters surfaced by each worker — chunks processed,
-/// steal attempts / hits, total work-thread CPU time.
+/// steal attempts / hits, total work-thread CPU time, and the
+/// number of times the worker parked on the `work_available`
+/// condvar (M0.1 / E5a, sleep/wake replacement of S1's busy-yield).
 pub const WorkerStats = struct {
     chunks_processed: std.atomic.Value(u64) = .init(0),
     steals_attempted: std.atomic.Value(u64) = .init(0),
     steals_succeeded: std.atomic.Value(u64) = .init(0),
     work_duration_ns: std.atomic.Value(u64) = .init(0),
+    /// Number of times the worker successfully completed a
+    /// `work_available.waitUncancelable` (i.e. actually slept rather
+    /// than busy-yielded). Used by the E5a "idle workers sleep"
+    /// acceptance test as the observable proof that the worker
+    /// reached the parked path.
+    parks_completed: std.atomic.Value(u64) = .init(0),
 
     pub const Snapshot = struct {
         chunks_processed: u64,
         steals_attempted: u64,
         steals_succeeded: u64,
         work_duration_ns: u64,
+        parks_completed: u64,
     };
 
     pub fn snapshot(self: *const WorkerStats) Snapshot {
@@ -51,6 +62,7 @@ pub const WorkerStats = struct {
             .steals_attempted = self.steals_attempted.load(.acquire),
             .steals_succeeded = self.steals_succeeded.load(.acquire),
             .work_duration_ns = self.work_duration_ns.load(.acquire),
+            .parks_completed = self.parks_completed.load(.acquire),
         };
     }
 
@@ -59,6 +71,7 @@ pub const WorkerStats = struct {
         self.steals_attempted.store(0, .release);
         self.steals_succeeded.store(0, .release);
         self.work_duration_ns.store(0, .release);
+        self.parks_completed.store(0, .release);
     }
 };
 
