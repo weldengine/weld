@@ -4,13 +4,13 @@ const weld_core = @import("weld_core");
 const World = weld_core.ecs.world.World;
 const Transform = weld_core.ecs.world.Transform;
 const Velocity = weld_core.ecs.world.Velocity;
-const Archetype = weld_core.ecs.world.Archetype;
+const Chunk = weld_core.ecs.world.Chunk;
 const CountingAllocator = weld_core.testing.alloc_counting.CountingAllocator;
 
-fn integrateChunk(chunk: *Archetype.ChunkT, dt: f32) void {
+fn integrateChunk(chunk: *Chunk, transforms_off: u16, velocities_off: u16, dt: f32) void {
     const count = chunk.entityCount();
-    const transforms = chunk.componentArray(0);
-    const velocities = chunk.componentArray(1);
+    const transforms: [*]Transform = @ptrCast(@alignCast(&chunk.bytes[transforms_off]));
+    const velocities: [*]Velocity = @ptrCast(@alignCast(&chunk.bytes[velocities_off]));
     var i: u32 = 0;
     while (i < count) : (i += 1) {
         velocities[i].linear[1] -= 9.81 * dt;
@@ -37,9 +37,11 @@ test "1000 query iterations allocate zero bytes after init" {
 
     const before = counting.snapshot();
     var query = world.query();
+    const transforms_off = query.componentOffset(0);
+    const velocities_off = query.componentOffset(1);
     var iter: u32 = 0;
     while (iter < 1000) : (iter += 1) {
-        query.forEachChunk(integrateChunk, .{@as(f32, 1.0 / 60.0)});
+        query.forEachChunk(integrateChunk, .{ transforms_off, velocities_off, @as(f32, 1.0 / 60.0) });
     }
     const after = counting.snapshot();
     const delta = CountingAllocator.delta(after, before);

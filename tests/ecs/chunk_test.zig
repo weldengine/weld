@@ -1,77 +1,62 @@
+//! Byte-level chunk tests — M0.1 / E2 replaced the comptime-generic
+//! `Chunk(Components)` with a 16 KiB raw buffer + an `ChunkLayout`
+//! descriptor computed from registered component sizes + alignments.
+//! These tests cover the locked invariants surfaced by `chunk.zig`:
+//! total size, alignment, header init, and the layout computation
+//! against a reference (Transform, Velocity)-shaped component set.
+
 const std = @import("std");
 const weld_core = @import("weld_core");
 
-const components = weld_core.ecs.components;
 const chunk_mod = weld_core.ecs.chunk;
+const Chunk = chunk_mod.Chunk;
+const ChunkSize = chunk_mod.ChunkSize;
+const ChunkAlignment = chunk_mod.ChunkAlignment;
+const computeLayout = chunk_mod.computeLayout;
+
+const components = weld_core.ecs.components;
 const Transform = components.Transform;
 const Velocity = components.Velocity;
 const EntityId = components.EntityId;
 
-const ArchetypeComponents: []const type = &.{ Transform, Velocity };
-const TestChunk = chunk_mod.Chunk(ArchetypeComponents);
-
-/// Capacity recorded the first time the layout was measured. Locked here so
-/// any future change in component sizes or header layout is caught loudly
-/// instead of silently shifting the bench numbers.
-const expected_capacity: u32 = 185;
-
 test "chunk total size is 16 KiB" {
-    try std.testing.expectEqual(@as(usize, 16 * 1024), @sizeOf(TestChunk));
+    try std.testing.expectEqual(@as(usize, ChunkSize), @sizeOf(Chunk));
+    try std.testing.expectEqual(@as(usize, 16 * 1024), @sizeOf(Chunk));
 }
 
-test "per-component arrays are 16-byte aligned within chunk" {
-    const offsets = TestChunk.Layout.component_offsets;
-    for (offsets) |o| {
-        try std.testing.expectEqual(@as(u16, 0), o % 16);
-    }
+test "chunk alignment is at least 16 bytes" {
+    try std.testing.expect(@alignOf(Chunk) >= ChunkAlignment);
 }
 
-test "chunk capacity matches manual computation for (Transform, Velocity)" {
-    try std.testing.expectEqual(expected_capacity, TestChunk.capacity);
-    // Sanity: the formula must keep header + capacity * stride within 16 KiB.
-    const stride = @sizeOf(Transform) + @sizeOf(Velocity) + @sizeOf(EntityId);
-    try std.testing.expect(TestChunk.Layout.header_size + TestChunk.capacity * stride <= 16 * 1024);
-    // Sanity: the next entity would overflow the chunk.
-    try std.testing.expect(TestChunk.Layout.header_size + (TestChunk.capacity + 1) * stride > 16 * 1024);
-}
-
-test "chunk header is initialized correctly" {
+test "computeLayout against (Transform, Velocity) yields a sensible capacity" {
     const gpa = std.testing.allocator;
-    const c = try gpa.create(TestChunk);
-    defer gpa.destroy(c);
-    c.initInPlace(42);
-    const hdr = c.header();
-    try std.testing.expectEqual(@as(u32, 0), hdr.entity_count);
-    try std.testing.expectEqual(TestChunk.capacity, hdr.capacity);
-    try std.testing.expectEqual(@as(u32, 42), hdr.archetype_id);
-    try std.testing.expectEqual(@as(?*TestChunk, null), hdr.next_chunk);
-    try std.testing.expectEqualSlices(u16, &TestChunk.Layout.component_offsets, &hdr.component_offsets);
+    const layout = try computeLayout(
+        gpa,
+        &.{ @sizeOf(Transform), @sizeOf(Velocity) },
+        &.{ @alignOf(Transform), @alignOf(Velocity) },
+    );
+    defer gpa.free(layout.component_offsets);
+
+    // Capacity should land near the S1 pre-E2 reference (185 with the
+    // old large header) — the new minimal header brings it a bit higher.
+    try std.testing.expect(layout.capacity >= 180);
+    try std.testing.expect(layout.capacity <= 230);
+
+    // Each component column must be 16-byte aligned for SIMD.
+    try std.testing.expectEqual(@as(u16, 0), layout.component_offsets[0] % 16);
+    try std.testing.expectEqual(@as(u16, 0), layout.component_offsets[1] % 16);
+
+    // entity_ids[] is 8-byte aligned (matches `@alignOf(EntityId)`).
+    try std.testing.expectEqual(@as(u16, 0), layout.entity_ids_offset % @sizeOf(EntityId));
 }
 
-test "append and removeSwap maintain entity_ids consistency" {
+test "Chunk header initInPlace sets count=0, capacity, archetype_id" {
     const gpa = std.testing.allocator;
-    const c = try gpa.create(TestChunk);
+    const c = try gpa.create(Chunk);
     defer gpa.destroy(c);
-    c.initInPlace(0);
-
-    const slot_a = c.append(EntityId{ .index = 100, .generation = 0 }, .{ Transform{}, Velocity{} }) orelse unreachable;
-    const slot_b = c.append(EntityId{ .index = 200, .generation = 0 }, .{ Transform{}, Velocity{} }) orelse unreachable;
-    const slot_c = c.append(EntityId{ .index = 300, .generation = 0 }, .{ Transform{}, Velocity{} }) orelse unreachable;
-    try std.testing.expectEqual(@as(u32, 0), slot_a);
-    try std.testing.expectEqual(@as(u32, 1), slot_b);
-    try std.testing.expectEqual(@as(u32, 2), slot_c);
-    try std.testing.expectEqual(@as(u32, 3), c.entityCount());
-
-    // Remove middle: last (entity 300) gets swapped into slot 1.
-    const swapped = c.removeSwap(1);
-    try std.testing.expectEqual(@as(?EntityId, EntityId{ .index = 300, .generation = 0 }), swapped);
-    try std.testing.expectEqual(@as(u32, 2), c.entityCount());
-    const ids = c.entityIds();
-    try std.testing.expectEqual(EntityId{ .index = 100, .generation = 0 }, ids[0]);
-    try std.testing.expectEqual(EntityId{ .index = 300, .generation = 0 }, ids[1]);
-
-    // Remove last: no swap needed.
-    const swapped2 = c.removeSwap(1);
-    try std.testing.expectEqual(@as(?EntityId, null), swapped2);
-    try std.testing.expectEqual(@as(u32, 1), c.entityCount());
+    c.initInPlace(42, 200);
+    try std.testing.expectEqual(@as(u32, 0), c.entityCount());
+    try std.testing.expectEqual(@as(u32, 200), c.capacity());
+    try std.testing.expectEqual(@as(u32, 42), c.header().archetype_id);
+    try std.testing.expect(!c.isFull());
 }

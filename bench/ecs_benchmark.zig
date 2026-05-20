@@ -33,7 +33,7 @@ const weld_core = @import("weld_core");
 const World = weld_core.ecs.world.World;
 const Transform = weld_core.ecs.world.Transform;
 const Velocity = weld_core.ecs.world.Velocity;
-const Archetype = weld_core.ecs.world.Archetype;
+const Chunk = weld_core.ecs.world.Chunk;
 const Scheduler = weld_core.jobs.scheduler.Scheduler;
 const worker_count = weld_core.jobs.scheduler.worker_count;
 
@@ -46,10 +46,15 @@ const PrimaryGateNs: u64 = 1_000_000; // 1.0 ms — primary GO/NO-GO gate
 const SecondaryTargetNs: u64 = 500_000; // 0.5 ms — recorded only
 const ImbalanceGate: f64 = 0.15;
 
-fn integrateChunk(chunk: *Archetype.ChunkT, dt: f32) void {
+/// Locked iteration body. Reads the byte offsets of the Transform and
+/// Velocity columns from the dispatch args (resolved once per dispatch
+/// by `componentOffset` on the query view) and casts the chunk bytes
+/// to the typed SoA pointers. Mirrors the pre-E2 inner loop verbatim
+/// — only the way the typed pointers are recovered changed.
+fn integrateChunk(chunk: *Chunk, transforms_off: u16, velocities_off: u16, dt: f32) void {
     const count = chunk.entityCount();
-    const transforms = chunk.componentArray(0);
-    const velocities = chunk.componentArray(1);
+    const transforms: [*]Transform = @ptrCast(@alignCast(&chunk.bytes[transforms_off]));
+    const velocities: [*]Velocity = @ptrCast(@alignCast(&chunk.bytes[velocities_off]));
     var i: u32 = 0;
     while (i < count) : (i += 1) {
         velocities[i].linear[1] -= 9.81 * dt;
@@ -281,9 +286,14 @@ pub fn main(init: std.process.Init) !void {
 
     var query = world.query();
     const dt: f32 = 1.0 / 60.0;
+    // The byte offsets of Transform / Velocity in the (Transform,
+    // Velocity) archetype are stable for the world's lifetime — resolve
+    // them once and pass through the dispatch args.
+    const transforms_off = query.componentOffset(0);
+    const velocities_off = query.componentOffset(1);
 
     if (smoke) {
-        sched.dispatch(&query, integrateChunk, .{dt});
+        sched.dispatch(&query, integrateChunk, .{ transforms_off, velocities_off, dt });
         try writeSmokeReport(init.io);
         return;
     }
@@ -291,7 +301,7 @@ pub fn main(init: std.process.Init) !void {
     // Warm-up.
     var i: u32 = 0;
     while (i < WarmupIterations) : (i += 1) {
-        sched.dispatch(&query, integrateChunk, .{dt});
+        sched.dispatch(&query, integrateChunk, .{ transforms_off, velocities_off, dt });
     }
 
     sched.resetStats();
@@ -302,7 +312,7 @@ pub fn main(init: std.process.Init) !void {
     i = 0;
     while (i < MeasuredIterations) : (i += 1) {
         const t0 = std.Io.Clock.now(.awake, init.io);
-        sched.dispatch(&query, integrateChunk, .{dt});
+        sched.dispatch(&query, integrateChunk, .{ transforms_off, velocities_off, dt });
         const t1 = std.Io.Clock.now(.awake, init.io);
         const elapsed = t0.durationTo(t1).nanoseconds;
         samples[i] = @intCast(@max(@as(i96, 0), elapsed));
