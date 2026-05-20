@@ -11,6 +11,9 @@ pub const ecs = struct {
     // re-exports it.
     pub const entity = @import("ecs/entity.zig");
     pub const components = @import("ecs/components.zig");
+    // M0.1 / E4 — world tick + change-detection sidecars.
+    pub const tick = @import("ecs/tick.zig");
+    pub const change_detection = @import("ecs/change_detection.zig");
     pub const chunk = @import("ecs/chunk.zig");
     pub const archetype = @import("ecs/archetype.zig");
     pub const query = @import("ecs/query.zig");
@@ -80,4 +83,8 @@ comptime {
     // Same guard for the M0.1 identity module — `entity.zig`'s inline
     // tests must be reachable from the core test target's root.
     _ = ecs.entity;
+    // M0.1 / E4 — pin the change-detection helpers + the tick module
+    // so their inline tests are picked up by `zig build test`.
+    _ = ecs.tick;
+    _ = ecs.change_detection;
 }
