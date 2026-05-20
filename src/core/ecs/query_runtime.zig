@@ -11,20 +11,24 @@ const std = @import("std");
 const registry_mod = @import("registry.zig");
 const arch_mod = @import("archetype_dynamic.zig");
 
-pub const ComponentId = registry_mod.ComponentId;
-pub const DynamicArchetype = arch_mod.DynamicArchetype;
-pub const Chunk = arch_mod.Chunk;
+const ComponentId = registry_mod.ComponentId;
+const DynamicArchetype = arch_mod.DynamicArchetype;
+const Chunk = arch_mod.Chunk;
 
 /// Filter callback for the `has T { field == value }` form. Returns
 /// `true` to keep a slot. Compare against `RuntimeQuery.filter` —
 /// `filter.fn_ptr == null` means "no filter, keep every slot".
 pub const FilterFn = *const fn (ctx: *const anyopaque, archetype: *const DynamicArchetype, chunk: *Chunk, slot: u32) bool;
 
+/// Optional filter predicate evaluated per slot — `fn_ptr == null`
+/// means "keep every slot".
 pub const Filter = struct {
     fn_ptr: ?FilterFn = null,
     ctx: *const anyopaque = undefined,
 };
 
+/// Dynamic-side query: include / exclude component id lists, optional
+/// per-slot filter, and the archetype bag to scan.
 pub const RuntimeQuery = struct {
     includes: []const ComponentId,
     excludes: []const ComponentId,

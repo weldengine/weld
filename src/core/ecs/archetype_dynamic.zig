@@ -11,14 +11,20 @@
 const std = @import("std");
 const registry_mod = @import("registry.zig");
 
-pub const ComponentId = registry_mod.ComponentId;
-pub const Registry = registry_mod.Registry;
+const ComponentId = registry_mod.ComponentId;
+const Registry = registry_mod.Registry;
 
-pub const EntityId = u64;
-pub const invalid_entity: EntityId = std.math.maxInt(EntityId);
+// Local handle type — the dynamic path stays self-contained instead
+// of importing `components.EntityId`. Both are `u64`; the duplicate
+// declaration keeps the runtime registry / dynamic archetype free
+// of a `components.zig` dependency.
+const EntityId = u64;
 
 /// Chunk size — locked to 16 KiB to match S1 (cf. `core/ecs/chunk.zig`).
 pub const ChunkSize: usize = 16 * 1024;
+/// Chunk header alignment — keeps the leading bytes of every chunk
+/// aligned to 16, matching the SIMD-friendly layout used by the
+/// comptime SoA archetype.
 pub const ChunkAlignment: usize = 16;
 
 /// Tight header — `entity_count` is the only field mutated during normal
@@ -32,12 +38,17 @@ pub const ChunkHeader = extern struct {
     _pad: u32 = 0,
 };
 
+/// Surfaced by `DynamicArchetype.init`, `spawnDefault`, `allocChunk`
+/// and the standalone `chunkLayout` factory; the variants line up
+/// 1:1 with the failure modes each of those routines can hit.
 pub const ArchetypeError = error{
     EmptyComponentList,
     LayoutTooLarge,
     OutOfMemory,
 };
 
+/// Per-archetype layout descriptor — byte offsets of each SoA column
+/// inside a chunk plus the chunk's entity capacity.
 pub const ChunkLayout = struct {
     /// Offset (in bytes from chunk start) of each component's SoA array.
     /// Length equals the archetype's `component_ids.len`.

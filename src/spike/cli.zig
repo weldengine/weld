@@ -4,6 +4,8 @@
 
 const std = @import("std");
 
+/// `--gpu-prefer=<…>` value — overrides the spike's default device
+/// scoring policy.
 pub const GpuPrefer = union(enum) {
     discrete,
     integrated,
@@ -11,6 +13,7 @@ pub const GpuPrefer = union(enum) {
     index: u32,
 };
 
+/// Parsed CLI argument set for the S2 spike binary.
 pub const Args = struct {
     /// `--gpu-prefer=<discrete|integrated|index:N>` — overrides the default
     /// `scoreDevice` policy. `null` = use default scoring.
@@ -28,6 +31,7 @@ pub const Args = struct {
     verbose: bool = false,
 };
 
+/// Error set surfaced by `parse`.
 pub const ParseError = error{
     UnknownFlag,
     InvalidGpuPrefer,
@@ -35,6 +39,9 @@ pub const ParseError = error{
     InvalidMeasureFrameTime,
 };
 
+/// Parse the S2 spike CLI flags out of `args` (which excludes
+/// `argv[0]`). Returns a populated `Args` on success or a typed
+/// `ParseError` on unrecognised flags / malformed values.
 pub fn parse(args: []const []const u8) ParseError!Args {
     var out: Args = .{};
     for (args) |arg| {

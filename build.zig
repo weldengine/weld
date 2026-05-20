@@ -708,4 +708,59 @@ pub fn build(b: *std.Build) void {
         "Regenerate src/core/platform/window/wayland_protocols/*.zig from wayland-protocols XMLs",
     );
     wayland_gen_step.dependOn(&wayland_gen_fmt.step);
+
+    // -------------------------------------- weld_lint (M0.0 custom linter) --
+    //
+    // In-tree Zig linter enforcing the four patterns from M0.0:
+    //  - no `@cImport`
+    //  - no `usingnamespace`
+    //  - `///` doc comments on every root-level `pub` declaration
+    //  - `*_c` module imports only from files with a generated-file header
+    //
+    // The same binary also validates Conventional Commits via the
+    // `commit-msg` subcommand. Both subcommands run on the host target
+    // because they are pure-Zig text/AST tools with no platform deps.
+
+    const weld_lint_module = b.createModule(.{
+        .root_source_file = b.path("tools/weld_lint/main.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const weld_lint_exe = b.addExecutable(.{
+        .name = "weld_lint",
+        .root_module = weld_lint_module,
+    });
+    b.installArtifact(weld_lint_exe);
+
+    const lint_run = b.addRunArtifact(weld_lint_exe);
+    lint_run.addArg("lint");
+    if (b.args) |args| lint_run.addArgs(args);
+    const lint_step = b.step(
+        "lint",
+        "Run weld_lint on the production tree (no @cImport / no usingnamespace / doc comments / *_c isolation)",
+    );
+    lint_step.dependOn(&lint_run.step);
+
+    const lint_commit_run = b.addRunArtifact(weld_lint_exe);
+    lint_commit_run.addArg("commit-msg");
+    if (b.args) |args| lint_commit_run.addArgs(args);
+    const lint_commit_step = b.step(
+        "lint-commit",
+        "Validate a Conventional Commits message file (zig build lint-commit -- <file>)",
+    );
+    lint_commit_step.dependOn(&lint_commit_run.step);
+
+    // M0.0 — runner_test for the linter fixture corpus. The test spawns
+    // the installed `weld_lint` binary, so wire the install step in as
+    // an explicit dependency just like `tests/ipc/crash_recovery.zig`
+    // wires the runtime binary.
+    const lint_runner_module = b.createModule(.{
+        .root_source_file = b.path("tests/lint/runner_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const lint_runner_test = b.addTest(.{ .root_module = lint_runner_module });
+    const lint_runner_run = b.addRunArtifact(lint_runner_test);
+    lint_runner_run.step.dependOn(&b.addInstallArtifact(weld_lint_exe, .{}).step);
+    test_step.dependOn(&lint_runner_run.step);
 }

@@ -44,6 +44,10 @@ const shaders = @import("shaders");
 const triangle_vert_spv = shaders.triangle_vert_spv;
 const triangle_frag_spv = shaders.triangle_frag_spv;
 
+/// Surfaced by `Renderer.init` (which composes the spike's whole
+/// Vulkan initialisation pipeline). The variants map 1:1 to the
+/// init substeps in order: loader → instance → device → queue →
+/// surface → swapchain → pipeline.
 pub const SetupError = error{
     LoaderUnavailable,
     InstanceUnavailable,
@@ -58,6 +62,8 @@ pub const SetupError = error{
     UnsupportedHostPlatform,
 } || vk.Error || std.mem.Allocator.Error;
 
+/// S2 spike Vulkan renderer — instance, device, swapchain, pipeline,
+/// per-frame sync. Throwaway alongside the rest of `src/spike/`.
 pub const Renderer = struct {
     gpa: std.mem.Allocator,
 

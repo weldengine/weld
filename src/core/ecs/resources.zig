@@ -12,8 +12,11 @@
 const std = @import("std");
 const registry_mod = @import("registry.zig");
 
-pub const ComponentId = registry_mod.ComponentId;
+const ComponentId = registry_mod.ComponentId;
 
+/// Surfaced by `ResourceStore.addResource` and `removeResource`;
+/// the read paths (`getResource` / `getMutResource`) return `?[]u8`
+/// rather than failing through this set.
 pub const ResourceError = error{
     DuplicateResource,
     UnknownResource,
@@ -27,6 +30,9 @@ const Entry = struct {
     dirty: bool,
 };
 
+/// Per-world store of singleton resources, keyed by `ComponentId`.
+/// Owns the raw byte buffer for each resource plus a per-entry dirty
+/// flag flipped on `getMutResource` and cleared on `tickBoundary`.
 pub const ResourceStore = struct {
     entries: std.AutoHashMapUnmanaged(ComponentId, Entry) = .empty,
 

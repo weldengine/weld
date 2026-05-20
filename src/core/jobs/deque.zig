@@ -25,6 +25,10 @@
 
 const std = @import("std");
 
+/// Generic Chase-Lev work-stealing deque factory. Returns a struct
+/// holding `CAPACITY` slots of `T` plus the `top`/`bottom` atomics
+/// used by the worker (owner) and the thieves (stealers). `CAPACITY`
+/// must be a power of two.
 pub fn Deque(comptime T: type, comptime CAPACITY: usize) type {
     comptime {
         if (CAPACITY == 0 or (CAPACITY & (CAPACITY - 1)) != 0) {

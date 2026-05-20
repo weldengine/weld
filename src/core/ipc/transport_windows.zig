@@ -80,11 +80,19 @@ const sys = struct {
     extern "kernel32" fn DisconnectNamedPipe(hNamedPipe: Handle) callconv(.winapi) Bool;
 };
 
+/// Picked up by `transport.zig`'s comptime backend dispatch — must
+/// keep matching shape with `transport_posix.OsHandle` so call sites
+/// can treat the alias as opaque.
 pub const OsHandle = std.os.windows.HANDLE;
+/// Sentinel for a closed / never-opened pipe; paired with the POSIX
+/// `-1` equivalent through `transport.zig`'s `invalid_handle`
+/// re-export.
 pub const invalid_handle: OsHandle = INVALID_HANDLE_VALUE;
 
 const Error = transport.Error;
 
+/// Win32 named-pipe backend for `IpcSocket`. Embedded inside
+/// `IpcSocket.impl` on Windows.
 pub const Backend = struct {
     handle: Handle,
     /// Listener vs accepted-client distinction — only the listener

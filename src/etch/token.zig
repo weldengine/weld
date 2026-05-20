@@ -21,6 +21,9 @@ pub const SourceSpan = struct {
     }
 };
 
+/// Closed enum of Etch token kinds produced by the lexer. The
+/// S3 subset is implemented; future kinds are added as the grammar
+/// expands.
 pub const TokenKind = enum {
     // ── Literals ──
     ident, // any identifier starting with [a-z_]
@@ -95,6 +98,9 @@ pub const TokenKind = enum {
     error_unknown_keyword,
 };
 
+/// `span` is a byte range *into the original source buffer*, not an
+/// owned slice. Callers must keep the source alive for as long as
+/// any `Token` referencing it stays in use.
 pub const Token = struct {
     kind: TokenKind,
     span: SourceSpan,
@@ -105,6 +111,10 @@ pub const Token = struct {
 /// per file, every identifier hit is amortised by the parser's main work).
 pub const KeywordEntry = struct { lexeme: []const u8, kind: TokenKind };
 
+/// S3 keyword table — the lexer scans identifiers against this slice
+/// to promote them to `KeywordEntry.kind`. Each entry is `(lexeme,
+/// kind)`; entries are matched in order, so the table doubles as the
+/// canonical S3 keyword set.
 pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "let", .kind = .kw_let },
     .{ .lexeme = "mut", .kind = .kw_mut },

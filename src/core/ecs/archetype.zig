@@ -15,7 +15,7 @@ const std = @import("std");
 const components = @import("components.zig");
 const chunk_mod = @import("chunk.zig");
 
-pub const EntityId = components.EntityId;
+const EntityId = components.EntityId;
 
 /// Location of an entity within an archetype: chunk index in the archetype's
 /// chunk list, plus slot index within that chunk.
@@ -24,6 +24,9 @@ pub const Location = struct {
     slot: u32,
 };
 
+/// Generic comptime SoA archetype factory: returns a struct whose
+/// chunks store one column per `Components` entry. The returned type
+/// owns the chunk list and exposes entity insertion / removal / lookup.
 pub fn Archetype(comptime Components: []const type) type {
     return struct {
         const Self = @This();

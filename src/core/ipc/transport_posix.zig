@@ -131,7 +131,13 @@ fn cmsgLen(len: usize) usize {
 
 // -------------------------------------------------- public types ------
 
+/// Picked up by `transport.zig`'s comptime backend dispatch — must
+/// keep matching shape with `transport_windows.OsHandle` so call
+/// sites can treat the alias as opaque.
 pub const OsHandle = std.posix.fd_t;
+/// Sentinel for a closed / never-opened socket; paired with the
+/// Win32 `INVALID_HANDLE_VALUE` equivalent through `transport.zig`'s
+/// `invalid_handle` re-export.
 pub const invalid_handle: OsHandle = -1;
 
 const Error = transport.Error;

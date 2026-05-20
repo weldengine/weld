@@ -40,8 +40,12 @@ const shaders = @import("shaders");
 const blit_vert_spv = shaders.viewport_blit_vert_spv;
 const blit_frag_spv = shaders.viewport_blit_frag_spv;
 
+/// Number of frames the blit pipeline can have in flight at once.
+/// Two is the canonical double-buffering value matched by the S6
+/// viewport ring layout (`engine-ipc.md` §6).
 pub const max_frames_in_flight: u32 = 2;
 
+/// Error set surfaced by `Renderer.init` and `Renderer.render`.
 pub const SetupError = error{
     LoaderUnavailable,
     InstanceUnavailable,
@@ -58,6 +62,9 @@ pub const SetupError = error{
     UnsupportedHostPlatform,
 } || vk.Error || std.mem.Allocator.Error;
 
+/// S6 editor blit renderer — full-screen triangle pipeline that
+/// samples the runtime's shm-backed viewport texture onto the
+/// swapchain. Owns all per-frame Vulkan objects.
 pub const Renderer = struct {
     gpa: std.mem.Allocator,
 

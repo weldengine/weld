@@ -10,6 +10,8 @@
 
 const driver = @import("diff_runner");
 
+/// One differential corpus program — Etch source plus the sidecar's
+/// `(config, initial, expected)` triplet consumed by `diff_runner`.
 pub const Program = struct {
     name: []const u8,
     source: []const u8,
@@ -39,6 +41,8 @@ const p18 = @import("programs/18_resource_changed_clean.expected.zig");
 const p19 = @import("programs/19_rule_order_sees_mutation.expected.zig");
 const p20 = @import("programs/20_rule_order_sees_previous.expected.zig");
 
+/// Embedded list of the 20 differential corpus programs consumed by
+/// the S4 interpreter test and the S5 codegen parity test.
 pub const programs = [_]Program{
     .{ .name = "01_arith_int_let", .source = @embedFile("programs/01_arith_int_let.etch"), .config = p01.config, .initial = p01.initial, .expected = p01.expected },
     .{ .name = "02_arith_float_compound", .source = @embedFile("programs/02_arith_float_compound.etch"), .config = p02.config, .initial = p02.initial, .expected = p02.expected },

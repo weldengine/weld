@@ -13,50 +13,60 @@
 
 const std = @import("std");
 
-pub const lexer = @import("lexer.zig");
+const lexer = @import("lexer.zig");
+/// Exposed at the module surface so callers can drive the parser
+/// incrementally (LSP, future Phase 0.2 hybrid LR(1)+Pratt). The
+/// recursive-descent entry `parser.parse` is the canonical batch path.
 pub const parser = @import("parser.zig");
-pub const ast = @import("ast.zig");
+const ast = @import("ast.zig");
+/// Exposed at the module surface so the S5 codegen and Phase 0.2
+/// passes can iterate the AST through the type-checker's pass 2
+/// without re-importing the internals.
 pub const types = @import("types.zig");
+/// Exposed at the module surface so callers can construct / inspect
+/// `Diagnostic` values (build a tooling test harness, assert
+/// `DiagnosticCode`s) without pulling the internals directly.
 pub const diagnostics = @import("diagnostics.zig");
-pub const token = @import("token.zig");
 
 // S4 interpreter surface.
-pub const value = @import("value.zig");
-pub const ecs_bridge = @import("ecs_bridge.zig");
-pub const interp = @import("interp.zig");
+const value = @import("value.zig");
+const ecs_bridge = @import("ecs_bridge.zig");
+const interp = @import("interp.zig");
 
-// S5 Zig codegen surface. Generates idiomatic Zig source from a parsed +
-// type-checked Etch AST per `briefs/S5-etch-codegen-zig.md`.
+/// S5 Zig codegen surface — exposed at the module surface so
+/// `tools/etch_cook` and downstream consumers can drive the codegen
+/// without depending on the internal path layout.
 pub const codegen_zig = @import("zig_codegen/root.zig");
 
+/// Exposed at the module surface so out-of-tree spike tests that
+/// drive the lexer alone (without a full parser run) can construct
+/// one without depending on the internal path.
 pub const Lexer = lexer.Lexer;
-pub const Token = token.Token;
-pub const TokenKind = token.TokenKind;
-pub const SourceSpan = token.SourceSpan;
-pub const Parser = parser.Parser;
-pub const ParseResult = parser.ParseResult;
+/// Exposed at the module surface so the corpus driver and the
+/// codegen / interpreter runners can declare `*Ast` parameters
+/// without pulling the internal path.
 pub const Ast = ast.AstArena;
-pub const NodeId = ast.NodeId;
-pub const NodeCategory = ast.NodeCategory;
-pub const StringId = ast.StringId;
+/// Public entry point of the type-checker. Consumers drive pass 1 +
+/// pass 2 through this single struct; the internal pass functions
+/// remain hidden.
 pub const TypeChecker = types.TypeChecker;
+/// Public diagnostic type — consumers store, format, and propagate
+/// `Diagnostic` values across the parser / type-checker boundary.
 pub const Diagnostic = diagnostics.Diagnostic;
-pub const DiagnosticCode = diagnostics.DiagnosticCode;
-pub const Severity = diagnostics.Severity;
-pub const LineIndex = diagnostics.LineIndex;
 
-pub const Value = value.Value;
-pub const RuntimeError = value.RuntimeError;
+/// Public entry point of the S4 tree-walking interpreter. Consumers
+/// instantiate one per Etch program and drive ticks through it.
 pub const Interpreter = interp.Interpreter;
+/// Public tick-level report — exposed at the surface so bench
+/// harnesses and the corpus driver can assert against
+/// `entities_iterated` / `rules_matched` without reaching into the
+/// interpreter internals.
 pub const RuntimeReport = interp.RuntimeReport;
-pub const runProgram = interp.Interpreter.runProgram;
-pub const runWithAst = interp.Interpreter.run;
-pub const evalConst = interp.evalConst;
 
 /// Parse a full Etch source file. The returned `ParseResult` owns its
 /// `AstArena` — call `result.ast.deinit(gpa)` when done. The diagnostic
 /// (if any) owns its `primary_message` slice — call `diag.deinit(gpa)`.
-pub fn parseSource(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
+pub fn parseSource(gpa: std.mem.Allocator, source: []const u8) !parser.ParseResult {
     return try parser.parse(gpa, source);
 }
 

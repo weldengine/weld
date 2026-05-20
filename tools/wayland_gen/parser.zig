@@ -10,9 +10,9 @@ const std = @import("std");
 
 // ============================================================== XML core =
 
-pub const Attr = struct { name: []const u8, value: []const u8 };
+const Attr = struct { name: []const u8, value: []const u8 };
 
-pub const Element = struct {
+const Element = struct {
     tag: []const u8,
     attrs: []const Attr,
     children: []const Child,
@@ -31,8 +31,12 @@ pub const Element = struct {
     }
 };
 
-pub const Child = union(enum) { elem: Element, text: []const u8 };
+const Child = union(enum) { elem: Element, text: []const u8 };
 
+/// XML tree produced by `parse` and consumed by `extractProtocol`.
+/// Owns an arena that backs every string slice — `tree.deinit()`
+/// frees everything reachable through the tree and through any
+/// `Protocol` extracted from it.
 pub const Tree = struct {
     arena: std.heap.ArenaAllocator,
     root: Element,
@@ -41,8 +45,12 @@ pub const Tree = struct {
     }
 };
 
-pub const ParseError = error{ UnexpectedEof, UnexpectedChar, BadAttribute, UnterminatedTag, UnterminatedString, MismatchedClose, UnknownEntity } || std.mem.Allocator.Error;
+const ParseError = error{ UnexpectedEof, UnexpectedChar, BadAttribute, UnterminatedTag, UnterminatedString, MismatchedClose, UnknownEntity } || std.mem.Allocator.Error;
 
+/// First stage of the wayland_gen pipeline: scan a protocol `.xml`
+/// file into a `Tree` of `Element`s. Pure XML lexer + recursive
+/// descent — no Wayland-specific knowledge yet (that lives in
+/// `extractProtocol`).
 pub fn parse(gpa: std.mem.Allocator, source: []const u8) ParseError!Tree {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
@@ -226,12 +234,18 @@ const Parser = struct {
 
 // =================================================== Wayland protocol model =
 
+/// Top-level Wayland protocol entry consumed by `emit.zig`. Holds
+/// the protocol name plus its full interface list, all string slices
+/// borrowing the parent `Tree`'s arena.
 pub const Protocol = struct {
     /// `<protocol name="X">`
     name: []const u8,
     interfaces: []const Interface,
 };
 
+/// One Wayland interface — requests, events, and locally-scoped
+/// enums. Consumed by `emit.zig` to render the proxy struct, the
+/// request methods, and the event listener vtable.
 pub const Interface = struct {
     name: []const u8,
     version: u32,
@@ -240,8 +254,12 @@ pub const Interface = struct {
     enums: []const Enum,
 };
 
-pub const MessageKind = enum { request, event };
+const MessageKind = enum { request, event };
 
+/// One request or event entry. `opcode` is the position inside the
+/// owning interface's `requests` / `events` list (wire-protocol
+/// dispatch index). `destructor=true` marks requests that finalise
+/// the proxy — `emit.zig` ties them to the wrapper's deinit.
 pub const Message = struct {
     name: []const u8,
     /// 0-based opcode within its kind (request or event).
@@ -252,6 +270,9 @@ pub const Message = struct {
     since: u32 = 1,
 };
 
+/// One message argument. The `enum_ref` field links back to a
+/// scoped `Enum` so `emit.zig` can render typed parameters instead
+/// of raw `u32`s where the protocol declares an enum.
 pub const Arg = struct {
     name: []const u8,
     type: ArgType,
@@ -264,7 +285,7 @@ pub const Arg = struct {
     enum_ref: ?[]const u8 = null,
 };
 
-pub const ArgType = enum {
+const ArgType = enum {
     int,
     uint,
     fixed,
@@ -275,17 +296,20 @@ pub const ArgType = enum {
     fd,
 };
 
-pub const Enum = struct {
+const Enum = struct {
     name: []const u8,
     bitfield: bool = false,
     entries: []const EnumEntry,
 };
 
-pub const EnumEntry = struct {
+const EnumEntry = struct {
     name: []const u8,
     value: u32,
 };
 
+/// Second stage of the wayland_gen pipeline: lift the raw XML `Tree`
+/// into a typed `Protocol`. The returned slices reuse `tree.arena`
+/// — the protocol must not outlive its source `Tree`.
 pub fn extractProtocol(gpa: std.mem.Allocator, tree: *Tree) !Protocol {
     const A = tree.arena.allocator();
     _ = gpa;

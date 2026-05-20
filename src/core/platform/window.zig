@@ -25,12 +25,14 @@ const backend = switch (builtin.os.tag) {
     else => @import("window/stub.zig"),
 };
 
+/// Creation descriptor for a `Window` — title and initial dimensions.
 pub const Desc = struct {
     title: [:0]const u8 = "Weld S2",
     width: u32 = 800,
     height: u32 = 600,
 };
 
+/// Closed enum of window events surfaced by `pollEvent`.
 pub const Event = union(enum) {
     /// User requested the window be closed (X button, Alt-F4, …).
     close,
@@ -43,6 +45,7 @@ pub const Event = union(enum) {
     dpi_changed: f32,
 };
 
+/// Error set for `Window.create` / `Window.destroy`.
 pub const Error = error{
     UnsupportedPlatform,
     BackendInitFailed,
@@ -59,6 +62,9 @@ pub const Error = error{
 /// spike binary, which is the only consumer.
 pub const NativeHandles = backend.NativeHandles;
 
+/// Public Window handle — five-method front-end above the per-OS
+/// backend (`create`, `destroy`, `pollEvent`, `nativeHandles`,
+/// `getDimensions`).
 pub const Window = struct {
     impl: backend.Backend,
 

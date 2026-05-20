@@ -27,6 +27,8 @@ const backend = switch (builtin.os.tag) {
     else => @compileError("Weld IPC shm: unsupported OS"),
 };
 
+/// Error set for shared-memory segment operations (create, open,
+/// resize, unlink). Backends translate native errors into this set.
 pub const Error = error{
     NameTooLong,
     InvalidName,

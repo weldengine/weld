@@ -21,6 +21,7 @@ const DiagnosticCode = diag_mod.DiagnosticCode;
 const SourceSpan = token_mod.SourceSpan;
 const StringId = ast_mod.StringId;
 
+/// Closed enum of Etch primitive types known to the S3 type-checker.
 pub const BuiltinType = enum {
     int_,
     float_,
@@ -95,12 +96,15 @@ pub const ResolvedType = union(enum) {
 /// Symbol entry in the file-local symbol table built by pass 1.
 pub const SymbolKind = enum { component, resource, rule };
 
-pub const Symbol = struct {
+const Symbol = struct {
     kind: SymbolKind,
     name: StringId,
     item_id: NodeId,
 };
 
+/// S3 type-checker — runs pass 1 (symbol collection) then pass 2
+/// (type resolution + body validation) against an `AstArena`,
+/// accumulating diagnostics in a caller-owned list.
 pub const TypeChecker = struct {
     gpa: std.mem.Allocator,
     arena: *AstArena,
@@ -634,6 +638,10 @@ pub const TypeChecker = struct {
 
 // ─── Helpers reachable from tests ───────────────────────────────────────
 
+/// Return `true` if the expression at `id` can be folded to a value
+/// at type-check time (literals + arithmetic/comparison/logic on
+/// const-evaluable operands). Drives the `component` default-value
+/// admissibility check in the S3 type-checker.
 pub fn isConstEvaluable(arena: *const AstArena, id: NodeId) bool {
     const kind = arena.exprKind(id);
     return switch (kind) {
@@ -680,6 +688,9 @@ fn isAssignTargetReachable(arena: *const AstArena, ctx: *TypeChecker.RuleCtx, id
 
 const parser_mod = @import("parser.zig");
 
+/// Bundle returned by the convenience `parseAndCheck` test helper —
+/// owns the arena, the optional parse diagnostic, and the type-check
+/// diagnostics list.
 pub const CheckOutcome = struct {
     ast: AstArena,
     parse_diag: ?Diagnostic,

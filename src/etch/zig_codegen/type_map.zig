@@ -14,8 +14,12 @@
 
 const std = @import("std");
 
+/// Error variant returned when an Etch type identifier has no Zig
+/// equivalent in the codegen's mapping table.
 pub const MapError = error{UnsupportedEtchType};
 
+/// Alias for "the string the codegen will print as a Zig type" —
+/// emitted verbatim into the cooked `.zig` output, no quoting.
 pub const ZigTypeName = []const u8;
 
 /// Return the Zig type name to emit for an Etch type identifier. The Etch
@@ -46,6 +50,9 @@ pub fn isFloatLikeZigType(name: []const u8) bool {
         std.mem.eql(u8, name, "float");
 }
 
+/// Return `true` when the canonical Zig type name in `name` denotes
+/// one of the integer primitives the codegen knows about — used when
+/// emitting numeric literal defaults to pick the right cast / suffix.
 pub fn isIntLikeZigType(name: []const u8) bool {
     return std.mem.eql(u8, name, "i32") or
         std.mem.eql(u8, name, "u32") or

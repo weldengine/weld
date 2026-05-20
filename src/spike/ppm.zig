@@ -15,6 +15,7 @@ const weld_core = @import("weld_core");
 const vk = weld_core.platform.vk;
 const setup = @import("vk_setup.zig");
 
+/// Error set for `capturePpm` — composed with `setup.SetupError`.
 pub const Error = error{
     NoPresentedImage,
     NoCompatibleMemory,

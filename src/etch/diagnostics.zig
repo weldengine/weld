@@ -10,7 +10,7 @@
 const std = @import("std");
 const token = @import("token.zig");
 
-pub const SourceSpan = token.SourceSpan;
+const SourceSpan = token.SourceSpan;
 
 /// Severity classes recognised by the S3 type-checker. The brief carves
 /// `error_` and `warning`; the wider catalogue (`note`, `hint`) is

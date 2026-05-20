@@ -20,10 +20,15 @@ const parser_mod = @import("../parser.zig");
 const types_mod = @import("../types.zig");
 const diag_mod = @import("../diagnostics.zig");
 
+/// AST → cooked Zig lowering step (the main codegen body).
 pub const lower = @import("lower.zig");
+/// xxHash-based per-file cache that lets unchanged sources skip emission.
 pub const cache = @import("cache.zig");
+/// Codegen error set + diagnostic helpers.
 pub const errors = @import("errors.zig");
+/// Etch type → Zig type mapping table.
 pub const type_map = @import("type_map.zig");
+/// Low-level Zig output writer used by `lower`.
 pub const emit = @import("emit.zig");
 
 // Pull the dedicated `tests/` files into the module's import graph so
@@ -36,10 +41,15 @@ comptime {
     _ = @import("tests/errors_test.zig");
 }
 
-pub const CodegenError = errors.CodegenError;
+const CodegenError = errors.CodegenError;
+/// Returned by `generateToBuffer` and `generateToPath`. Surfaced at
+/// the module root so `tools/etch_cook` can declare it in function
+/// signatures without depending on the `lower.zig` internal path.
 pub const GenerateStats = lower.GenerateStats;
-pub const Hash = cache.Hash;
+const Hash = cache.Hash;
 
+/// Result of `generateToPath` — stats, whether the cache hit, and the
+/// source hash so callers can persist it independently.
 pub const Outcome = struct {
     stats: GenerateStats,
     /// `true` if the file was regenerated; `false` if the cache hit and
@@ -49,6 +59,8 @@ pub const Outcome = struct {
     source_hash: Hash,
 };
 
+/// Errors that the end-to-end pipeline (`generateToPath` / `cookTree`)
+/// can surface — composed with `CodegenError` and `Allocator.Error`.
 pub const PipelineError = error{
     ParseFailed,
     TypeCheckFailed,
@@ -143,6 +155,7 @@ fn writeFileAndCache(
     try cache.writeHash(gpa, cache_dir, source_path, hash);
 }
 
+/// One input entry for `cookTree` — relative path + source bytes.
 pub const InputSpec = struct {
     path: []const u8,
     source: []const u8,
@@ -175,6 +188,8 @@ pub fn cookTree(
     }
 }
 
+/// Per-entry result of `cookTree` — either a successful `Outcome` or
+/// a `PipelineError`, tagged by the original `path`.
 pub const NamedOutcome = struct {
     path: []const u8,
     outcome: ?Outcome,

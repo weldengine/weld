@@ -39,19 +39,14 @@ const RuntimeErrorKind = value_mod.RuntimeErrorKind;
 const EntityId = value_mod.EntityId;
 const Bridge = bridge_mod.Bridge;
 
+/// Counters surfaced by `Interpreter.run` per tick — informational
+/// only, used by tests + bench harnesses to assert hot-path coverage.
 pub const RuntimeReport = struct {
     entities_iterated: u64 = 0,
     rules_evaluated: u64 = 0,
     rules_matched: u64 = 0,
     runtime_errors: u64 = 0,
     last_error: ?RuntimeError = null,
-};
-
-pub const InterpError = error{
-    UnsupportedConstruct,
-    InvalidProgram,
-    OutOfMemory,
-    DiagnosticsPresent,
 };
 
 const ResourceDep = struct {
@@ -137,6 +132,8 @@ const Locals = struct {
 
 const StmtError = error{ OutOfMemory, RuntimeFailure };
 
+/// S4 tree-walking interpreter — owns the bridge state, evaluates
+/// the type-checked AST against a `World` once per tick.
 pub const Interpreter = struct {
     gpa: std.mem.Allocator,
     ast: *const AstArena,
@@ -552,6 +549,9 @@ fn binaryCompare(op: ast_mod.BinaryOp, a: Value, b: Value) !Value {
 
 // ── Const evaluator ──
 
+/// Pure constant-folding evaluator over an Etch AST subtree. Used
+/// by the type-checker for `const` resolution and by `codegen` to
+/// pre-evaluate literal expressions during lowering.
 pub fn evalConst(ast: *const AstArena, node: NodeId) !Value {
     const kind = ast.exprKind(node);
     const data = ast.exprData(node);

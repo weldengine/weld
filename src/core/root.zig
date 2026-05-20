@@ -4,6 +4,7 @@
 //! for now; Phase 0 will expand the surface (resources, events, RTTI,
 //! plugin loader, IPC, platform layer) as those land.
 
+/// ECS namespace — comptime SoA archetype + runtime registry surface.
 pub const ecs = struct {
     pub const components = @import("ecs/components.zig");
     pub const chunk = @import("ecs/chunk.zig");
@@ -19,16 +20,19 @@ pub const ecs = struct {
     pub const comptime_query = @import("ecs/comptime_query.zig");
 };
 
+/// Jobs namespace — Chase-Lev deque + work-stealing scheduler.
 pub const jobs = struct {
     pub const deque = @import("jobs/deque.zig");
     pub const worker = @import("jobs/worker.zig");
     pub const scheduler = @import("jobs/scheduler.zig");
 };
 
+/// Testing helpers namespace — counting allocator wrapper, etc.
 pub const testing = struct {
     pub const alloc_counting = @import("testing/alloc_counting.zig");
 };
 
+/// Platform namespace — window, Vulkan, process control.
 pub const platform = struct {
     pub const window = @import("platform/window.zig");
     pub const vk = @import("platform/vk.zig");
@@ -41,6 +45,7 @@ pub const platform = struct {
 // S6 — editor↔runtime IPC. Tier 0 endpoint per `engine-ipc.md` and the
 // S6 brief. Public surface declared inline, same pattern as `ecs` and
 // `jobs` above.
+/// IPC namespace — editor↔runtime transport, framing, shm, viewport.
 pub const ipc = struct {
     pub const protocol = @import("ipc/protocol.zig");
     pub const messages = @import("ipc/messages.zig");

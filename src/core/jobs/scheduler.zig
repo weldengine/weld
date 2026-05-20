@@ -35,17 +35,22 @@ const std = @import("std");
 const archetype_mod = @import("../ecs/archetype.zig");
 const worker_mod = @import("worker.zig");
 
-pub const Job = worker_mod.Job;
-pub const TrampolineFn = worker_mod.TrampolineFn;
-pub const Worker = worker_mod.Worker;
-pub const WorkerStats = worker_mod.WorkerStats;
+const Job = worker_mod.Job;
+const TrampolineFn = worker_mod.TrampolineFn;
+const Worker = worker_mod.Worker;
+const WorkerStats = worker_mod.WorkerStats;
 
+/// Number of worker threads in the S1 work-stealing pool. Hardcoded
+/// at 4 for the Phase −1 spike; CPU-topology detection lands in M0.1
+/// (debt D-S1, cf. `engine-phase-0-plan.md`).
 pub const worker_count: usize = 4;
 
 /// Maximum number of chunks a single dispatch can carry. 1024 covers the S1
 /// bench (100 000 entities / 185 chunk capacity ≈ 541 chunks) with margin.
 pub const MaxChunksPerDispatch: usize = 1024;
 
+/// Top-level work-stealing scheduler — owns the worker pool, dispatches
+/// chunked work via `runChunkAt`, and shuts the pool down on `deinit`.
 pub const Scheduler = struct {
     /// Shared `io` instance — needed by workers for `Clock.now` so they can
     /// record their per-job duration. Stored per `engine-zig-conventions.md`

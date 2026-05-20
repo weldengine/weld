@@ -25,13 +25,22 @@ const Diagnostic = diag_mod.Diagnostic;
 const DiagnosticCode = diag_mod.DiagnosticCode;
 const Lexer = lexer_mod.Lexer;
 
+/// Returned by `parse` — `ParseError` is the recoverable variant
+/// (the diagnostic is on the result struct), `OutOfMemory` is fatal
+/// for the caller's arena.
 pub const ParseError = error{ ParseError, OutOfMemory };
 
+/// Container returned by `parse` — the populated arena plus at most
+/// one `Diagnostic` (the first error encountered, or `null` on success).
 pub const ParseResult = struct {
     ast: AstArena,
     diagnostic: ?Diagnostic,
 };
 
+/// Entry point for the Etch parser. Lexes `source`, builds the
+/// tabular SoA `AstArena`, and returns it together with an optional
+/// first-error `Diagnostic`. Caller owns the arena and must call
+/// `result.ast.deinit(gpa)`.
 pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
     var lexer = Lexer.init(source);
     // Without this `errdefer`, an OOM coming from `lexer.next` or
@@ -70,6 +79,9 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
     return .{ .ast = arena, .diagnostic = parser.diagnostic };
 }
 
+/// Explicit parser state — exposed for callers that want to drive the
+/// parse incrementally (Phase 0.2 / language-server use case).
+/// `parse(gpa, source)` is the canonical batch entry point.
 pub const Parser = struct {
     gpa: std.mem.Allocator,
     source: []const u8,

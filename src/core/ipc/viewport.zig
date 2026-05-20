@@ -46,6 +46,7 @@ pub const PixelFormat = enum(u32) {
     rgba8_unorm = 0,
 };
 
+/// Pixel-grid dimensions of a viewport frame in shared memory.
 pub const Resolution = struct {
     width: u32,
     height: u32,
@@ -119,6 +120,9 @@ pub fn regionSize(width: u32, height: u32) usize {
     return header_size + slot_bytes * slot_count;
 }
 
+/// Surfaced by `ShmViewport.attach`; `InvalidHeader` covers the
+/// magic / version / size mismatch cases when a reader maps a shm
+/// segment that was not created as a viewport.
 pub const Error = error{
     InvalidHeader,
 } || shm.Error;

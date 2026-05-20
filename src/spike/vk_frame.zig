@@ -11,6 +11,9 @@ const weld_core = @import("weld_core");
 const vk = weld_core.platform.vk;
 const setup = @import("vk_setup.zig");
 
+/// Submit one frame through the S2 spike's swapchain: wait the
+/// fence, acquire, record commands, submit, present. Returns `false`
+/// when the swapchain is out-of-date (caller should rebuild it).
 pub fn drawFrame(r: *setup.Renderer) vk.Error!bool {
     const frame = r.current_frame;
 

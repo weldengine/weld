@@ -18,7 +18,7 @@
 const std = @import("std");
 const components = @import("components.zig");
 
-pub const EntityId = components.EntityId;
+const EntityId = components.EntityId;
 
 /// Total chunk size — locked to 16 KiB to fit comfortably in L1D on modern
 /// x86-64, Apple Silicon, and ARM Cortex CPUs (cf. `engine-spec.md` §2.3).

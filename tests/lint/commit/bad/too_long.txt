@@ -1,0 +1,1 @@
+feat(ecs): this description is intentionally crafted to exceed the seventy-two character maximum imposed by the convention

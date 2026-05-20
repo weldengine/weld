@@ -17,6 +17,7 @@ pub const DeviceType = enum(u32) {
     cpu = 4,
 };
 
+/// Per-physical-device data fed into `scoreDevice`.
 pub const DeviceInfo = struct {
     device_type: DeviceType,
 };

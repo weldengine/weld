@@ -1,0 +1,4 @@
+chore(build): bump Zig to 0.16.0 patch release
+
+Body lines after a blank separator are ignored by the title-only
+validator — only the first non-empty, non-comment line is checked.

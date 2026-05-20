@@ -2,12 +2,11 @@
 
 A game engine written in Zig 0.16.x.
 
-> **Status:** Phase −1 — IPC editor↔runtime round-trip (S6, closing)
+> **Status:** Phase 0 — M0.0 closed
 >
-> Weld is in its earliest exploratory phase: the spike list of Phase −1 is
-> validating the core architectural hypotheses (comptime ECS, work-stealing
-> scheduler, Etch language, native Vulkan/Wayland, IPC editor↔runtime). No
-> public release yet. The repo is internal until end of Phase 1.
+> Phase −1 closed 2026-05-18 with all seven engineering hypotheses (S0–S6)
+> validated — Phase 0 (Fondations) is now underway. The repo is internal
+> until end of Phase 1.
 >
 > **S1** (closed, tag `v0.0.2-S1-mini-ecs`) validated the comptime ECS +
 > Chase-Lev work-stealing hypothesis on a single `(Transform, Velocity)`
@@ -63,8 +62,8 @@ A game engine written in Zig 0.16.x.
 > with `zig build run-demo-etch-codegen`. Full report:
 > [`validation/s5-go-nogo.md`](validation/s5-go-nogo.md).
 >
-> **S6** (closed, tag `v0.0.7-S6-ipc-round-trip` pending merge) validated
-> the editor↔runtime IPC. `src/core/ipc/` is the Tier 0 endpoint per
+> **S6** (closed, tag `v0.0.7-S6-ipc-round-trip` on `main` since 2026-05-18)
+> validated the editor↔runtime IPC. `src/core/ipc/` is the Tier 0 endpoint per
 > `engine-ipc.md` — AF_UNIX socket / Win32 named pipe transport, 16 B
 > framing header + comptime Wyhash `schemaHash`, 13-message catalogue,
 > POSIX shm + Win32 file-mapping double-buffer viewport, fd-passing
@@ -82,6 +81,17 @@ A game engine written in Zig 0.16.x.
 > fd-passing migration. Full report:
 > [`validation/s6-go-nogo.md`](validation/s6-go-nogo.md).
 > Brief: [`briefs/S6-ipc-editor-runtime.md`](briefs/S6-ipc-editor-runtime.md).
+>
+> **M0.0** (closed, tag `v0.0.8-M0.0-lint-custom` on `main` since
+> 2026-05-20) — first Phase 0 milestone. Ships an in-tree Zig linter
+> (`tools/weld_lint/`) enforcing four patterns (no `@cImport`, no
+> `usingnamespace`, `///` doc comments on every root-level `pub`, `*_c`
+> module imports only from generated files) and Conventional Commits
+> validation via `zig build lint-commit`. Lefthook now drives both passes
+> in the local hooks. The default scan covers `src/ bench/ tests/
+> tools/` — `tools/` was added in-review so the linter sweeps its own
+> sources and the throwaway `vk_gen` / `wayland_gen` generators on every
+> run. Brief: [`briefs/M0.0-lint-custom.md`](briefs/M0.0-lint-custom.md).
 
 ## Prerequisites
 
@@ -116,6 +126,8 @@ zig build run-ipc-demo -- --frames=600                   #   override the frame 
 zig build bench-ipc-rtt -Doptimize=ReleaseSafe           # S6 Echo RTT bench (N=10 000, report under bench/results/)
 zig build test-ipc                                       # S6 IPC tests (subset of `zig build test`, fast iteration)
 zig build test-ipc-fuzz-1h                               # S6 1 h fuzz harness — manual invocation only
+zig build lint                                           # M0.0 custom linter on src/ bench/ tests/ tools/
+zig build lint-commit -- <file>                          # M0.0 Conventional Commits validation (used by commit-msg hook)
 ./scripts/install-hooks.sh                               # install local git hooks (run once after clone)
 ```
 

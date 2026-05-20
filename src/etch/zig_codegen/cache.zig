@@ -16,6 +16,9 @@
 
 const std = @import("std");
 
+/// xxHash-style 64-bit content digest written next to each generated
+/// `.zig` file so the codegen can skip emission when the source is
+/// unchanged.
 pub const Hash = u64;
 
 /// xxHash64 of the source content. The brief specifies xxHash explicitly,

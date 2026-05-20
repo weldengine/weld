@@ -22,10 +22,17 @@ const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
 const RuntimeQuery = weld_core.ecs.query_runtime.RuntimeQuery;
 const ResourceStore = weld_core.ecs.resources.ResourceStore;
 
-pub const EntityId = value_mod.EntityId;
-pub const Value = value_mod.Value;
-pub const ComponentRef = value_mod.ComponentRef;
+// Module-private aliases shadowing the value module — `EntityId`,
+// `Value`, `ComponentRef` are not exported because no external caller
+// drives the bridge by hand; they enter the rule body through
+// `interp.zig` which already has its own re-exports.
+const EntityId = value_mod.EntityId;
+const Value = value_mod.Value;
+const ComponentRef = value_mod.ComponentRef;
 
+/// Surfaced so callers of `Bridge.dispatchEntityGet` /
+/// `dispatchResourceGet` can map a name-resolution failure into a
+/// typed E-code without depending on `Registry`'s raw lookup return.
 pub const BridgeError = error{
     UnknownEntity,
     UnknownComponent,
@@ -34,6 +41,9 @@ pub const BridgeError = error{
     OutOfMemory,
 };
 
+/// One bridge instance per Etch program run. Lives for the same
+/// duration as the `Interpreter` that owns it; the registry it
+/// targets is borrowed (not owned) — the bridge never frees it.
 pub const Bridge = struct {
     /// Etch component name → registry id (for components). Owns the keys
     /// (strings dup'd at registration time so the lifetime survives the
@@ -169,6 +179,10 @@ pub const Bridge = struct {
 
 // ─── Byte ↔ Value conversion ─────────────────────────────────────────────
 
+/// Decode the on-storage byte representation of a field into the
+/// interpreter's tagged `Value`. The width to read is dictated by
+/// `kind` — the slice must already be sized to the field's column
+/// stride.
 pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
     return switch (kind) {
         .int_ => blk: {
@@ -205,6 +219,11 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
     };
 }
 
+/// Encode an interpreter `Value` into the on-storage byte
+/// representation of a field. `bytes` must already be sized to the
+/// field's column stride; the function panics on type mismatch (the
+/// S4 closing-debt `D-S4-ecs-bridge-panic` will swap this for a
+/// typed `TypeMismatch` variant in M0.7).
 pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) void {
     switch (kind) {
         .int_ => {

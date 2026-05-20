@@ -14,11 +14,13 @@
 const std = @import("std");
 const token = @import("token.zig");
 
-pub const SourceSpan = token.SourceSpan;
+const SourceSpan = token.SourceSpan;
 
 /// Strongly typed entity handle. Mirrors `core/ecs/components.zig`'s
 /// `EntityId` (u64) but adds a sentinel for "absent" used by the bridge.
 pub const EntityId = u64;
+/// Sentinel `EntityId` reserved for "absent" — used by the Etch
+/// bridge to distinguish a missing handle from any valid entity.
 pub const invalid_entity: EntityId = std.math.maxInt(EntityId);
 
 /// A handle into a component slot inside a dynamic archetype chunk. The
@@ -87,6 +89,7 @@ pub const RuntimeError = struct {
     span: SourceSpan,
 };
 
+/// Closed enum of runtime failure causes surfaced by the interpreter.
 pub const RuntimeErrorKind = enum {
     DivisionByZero,
     IntegerOverflow,
@@ -104,20 +107,27 @@ pub fn intDiv(lhs: i64, rhs: i64) ?i64 {
     return @divTrunc(lhs, rhs);
 }
 
+/// Integer remainder with division-by-zero and `i64.min % -1`
+/// guards. Returns `null` on divide-by-zero; the caller turns the
+/// `null` into a `RuntimeError`.
 pub fn intRem(lhs: i64, rhs: i64) ?i64 {
     if (rhs == 0) return null;
     if (lhs == std.math.minInt(i64) and rhs == -1) return 0;
     return @rem(lhs, rhs);
 }
 
+/// Wrapping-checked integer addition — returns `null` on overflow so
+/// the interpreter can surface `IntegerOverflow` cleanly.
 pub fn intAddChecked(lhs: i64, rhs: i64) ?i64 {
     return std.math.add(i64, lhs, rhs) catch null;
 }
 
+/// Wrapping-checked integer subtraction — returns `null` on overflow.
 pub fn intSubChecked(lhs: i64, rhs: i64) ?i64 {
     return std.math.sub(i64, lhs, rhs) catch null;
 }
 
+/// Wrapping-checked integer multiplication — returns `null` on overflow.
 pub fn intMulChecked(lhs: i64, rhs: i64) ?i64 {
     return std.math.mul(i64, lhs, rhs) catch null;
 }

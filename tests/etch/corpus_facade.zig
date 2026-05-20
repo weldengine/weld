@@ -6,11 +6,16 @@
 //! of the importing root, so this facade — sitting beside the corpus
 //! tree — is the only module allowed to bake the fixtures in.
 
+/// One row of the valid-corpus table. `name` is the relative path
+/// under `corpus/valid/`; `source` is the `@embedFile`'d bytes
+/// already bound at build time so the test target needs no I/O.
 pub const Entry = struct {
     name: []const u8,
     source: []const u8,
 };
 
+/// Embedded entry for an invalid S3 corpus fixture — adds the expected
+/// diagnostic code parsed from the filename prefix.
 pub const InvalidEntry = struct {
     name: []const u8,
     /// Canonical short code (e.g. "E0001", "E1210") parsed from the
@@ -20,6 +25,9 @@ pub const InvalidEntry = struct {
     source: []const u8,
 };
 
+/// Embedded list of the valid S3 corpus fixtures consumed by
+/// `tests/etch/corpus_test.zig`. Each entry pins one `.etch` file
+/// the parser + type-checker must accept without diagnostics.
 pub const valid = [_]Entry{
     .{ .name = "components/health.etch", .source = @embedFile("corpus/valid/components/health.etch") },
     .{ .name = "components/transform.etch", .source = @embedFile("corpus/valid/components/transform.etch") },
@@ -57,6 +65,9 @@ pub const valid = [_]Entry{
     .{ .name = "exprs/literals.etch", .source = @embedFile("corpus/valid/exprs/literals.etch") },
 };
 
+/// Embedded list of the invalid S3 corpus fixtures. Each entry pins
+/// an `.etch` file plus the diagnostic code (`E0xxx`) the corpus
+/// driver expects the parser / type-checker to emit.
 pub const invalid = [_]InvalidEntry{
     .{ .name = "E0001_unsupported_fn.etch", .expected_code = "E0001", .source = @embedFile("corpus/invalid/E0001_unsupported_fn.etch") },
     .{ .name = "E0001_unexpected_top_level.etch", .expected_code = "E0001", .source = @embedFile("corpus/invalid/E0001_unexpected_top_level.etch") },

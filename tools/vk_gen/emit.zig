@@ -57,6 +57,10 @@ const Ctx = struct {
     }
 };
 
+/// Fourth stage of the vk_gen pipeline: render `model` (already
+/// whitelist-trimmed) into idiomatic Zig source appended to `out`.
+/// The output is the complete `src/core/platform/vk.zig` body — the
+/// caller writes it to disk and pipes it through `zig fmt`.
 pub fn emit(gpa: std.mem.Allocator, model: parser.FilteredModel, out: *std.ArrayList(u8)) !void {
     var ctx: Ctx = .{
         .gpa = gpa,
