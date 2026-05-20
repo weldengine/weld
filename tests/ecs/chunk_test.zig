@@ -54,9 +54,9 @@ test "append and removeSwap maintain entity_ids consistency" {
     defer gpa.destroy(c);
     c.initInPlace(0);
 
-    const slot_a = c.append(@as(EntityId, 100), .{ Transform{}, Velocity{} }) orelse unreachable;
-    const slot_b = c.append(@as(EntityId, 200), .{ Transform{}, Velocity{} }) orelse unreachable;
-    const slot_c = c.append(@as(EntityId, 300), .{ Transform{}, Velocity{} }) orelse unreachable;
+    const slot_a = c.append(EntityId{ .index = 100, .generation = 0 }, .{ Transform{}, Velocity{} }) orelse unreachable;
+    const slot_b = c.append(EntityId{ .index = 200, .generation = 0 }, .{ Transform{}, Velocity{} }) orelse unreachable;
+    const slot_c = c.append(EntityId{ .index = 300, .generation = 0 }, .{ Transform{}, Velocity{} }) orelse unreachable;
     try std.testing.expectEqual(@as(u32, 0), slot_a);
     try std.testing.expectEqual(@as(u32, 1), slot_b);
     try std.testing.expectEqual(@as(u32, 2), slot_c);
@@ -64,11 +64,11 @@ test "append and removeSwap maintain entity_ids consistency" {
 
     // Remove middle: last (entity 300) gets swapped into slot 1.
     const swapped = c.removeSwap(1);
-    try std.testing.expectEqual(@as(?EntityId, 300), swapped);
+    try std.testing.expectEqual(@as(?EntityId, EntityId{ .index = 300, .generation = 0 }), swapped);
     try std.testing.expectEqual(@as(u32, 2), c.entityCount());
     const ids = c.entityIds();
-    try std.testing.expectEqual(@as(EntityId, 100), ids[0]);
-    try std.testing.expectEqual(@as(EntityId, 300), ids[1]);
+    try std.testing.expectEqual(EntityId{ .index = 100, .generation = 0 }, ids[0]);
+    try std.testing.expectEqual(EntityId{ .index = 300, .generation = 0 }, ids[1]);
 
     // Remove last: no swap needed.
     const swapped2 = c.removeSwap(1);
