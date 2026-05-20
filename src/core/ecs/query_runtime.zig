@@ -10,10 +10,12 @@
 const std = @import("std");
 const registry_mod = @import("registry.zig");
 const arch_mod = @import("archetype_dynamic.zig");
+const entity_mod = @import("entity.zig");
 
 const ComponentId = registry_mod.ComponentId;
 const DynamicArchetype = arch_mod.DynamicArchetype;
 const Chunk = arch_mod.Chunk;
+const EntityId = entity_mod.EntityId;
 
 /// Filter callback for the `has T { field == value }` form. Returns
 /// `true` to keep a slot. Compare against `RuntimeQuery.filter` —
@@ -123,8 +125,8 @@ test "Query.new on includes only matches" {
     var arch_a = try DynamicArchetype.init(gpa, &reg, 1, &[_]ComponentId{id_a});
     defer arch_a.deinit(gpa);
 
-    _ = try arch_ab.spawnDefault(gpa, 0);
-    _ = try arch_a.spawnDefault(gpa, 1);
+    _ = try arch_ab.spawnDefault(gpa, EntityId{ .index = 0, .generation = 0 });
+    _ = try arch_a.spawnDefault(gpa, EntityId{ .index = 1, .generation = 0 });
 
     const archs = [_]*DynamicArchetype{ &arch_ab, &arch_a };
     const q: RuntimeQuery = .{
@@ -154,8 +156,8 @@ test "Query.new on includes + excludes matches" {
     var arch_a = try DynamicArchetype.init(gpa, &reg, 1, &[_]ComponentId{id_a});
     defer arch_a.deinit(gpa);
 
-    _ = try arch_ab.spawnDefault(gpa, 0);
-    _ = try arch_a.spawnDefault(gpa, 1);
+    _ = try arch_ab.spawnDefault(gpa, EntityId{ .index = 0, .generation = 0 });
+    _ = try arch_a.spawnDefault(gpa, EntityId{ .index = 1, .generation = 0 });
 
     const archs = [_]*DynamicArchetype{ &arch_ab, &arch_a };
     const q: RuntimeQuery = .{
@@ -185,8 +187,8 @@ test "Query iteration yields chunks in archetype order" {
     var arch2 = try DynamicArchetype.init(gpa, &reg, 1, &[_]ComponentId{id_a});
     defer arch2.deinit(gpa);
 
-    _ = try arch1.spawnDefault(gpa, 0);
-    _ = try arch2.spawnDefault(gpa, 1);
+    _ = try arch1.spawnDefault(gpa, EntityId{ .index = 0, .generation = 0 });
+    _ = try arch2.spawnDefault(gpa, EntityId{ .index = 1, .generation = 0 });
 
     const archs = [_]*DynamicArchetype{ &arch1, &arch2 };
     const q: RuntimeQuery = .{
