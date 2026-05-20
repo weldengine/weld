@@ -35,9 +35,13 @@ const std = @import("std");
 const archetype_mod = @import("../ecs/archetype.zig");
 const worker_mod = @import("worker.zig");
 
+/// Re-exports `worker.Job` — type-erased work unit pushed onto a worker deque.
 pub const Job = worker_mod.Job;
+/// Re-exports `worker.TrampolineFn` — typed trampoline signature called per job.
 pub const TrampolineFn = worker_mod.TrampolineFn;
+/// Re-exports `worker.Worker` — one work-stealing thread of the pool.
 pub const Worker = worker_mod.Worker;
+/// Re-exports `worker.WorkerStats` — atomic counters surfaced by each worker.
 pub const WorkerStats = worker_mod.WorkerStats;
 
 /// Number of worker threads in the S1 work-stealing pool. Hardcoded
@@ -49,6 +53,8 @@ pub const worker_count: usize = 4;
 /// bench (100 000 entities / 185 chunk capacity ≈ 541 chunks) with margin.
 pub const MaxChunksPerDispatch: usize = 1024;
 
+/// Top-level work-stealing scheduler — owns the worker pool, dispatches
+/// chunked work via `runChunkAt`, and shuts the pool down on `deinit`.
 pub const Scheduler = struct {
     /// Shared `io` instance — needed by workers for `Clock.now` so they can
     /// record their per-job duration. Stored per `engine-zig-conventions.md`

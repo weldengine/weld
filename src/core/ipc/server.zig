@@ -28,8 +28,11 @@ const messages = @import("messages.zig");
 const protocol = @import("protocol.zig");
 const transport = @import("transport.zig");
 
+/// Re-exports `connection.Error` — closed set of IPC connection errors.
 pub const Error = conn_mod.Error;
 
+/// Runtime-side IPC server — owns the listening socket, the accepted
+/// client socket once present, and the versioned connection state.
 pub const IpcServer = struct {
     gpa: std.mem.Allocator,
     listener: ?transport.IpcSocket = null,

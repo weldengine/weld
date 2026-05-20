@@ -203,11 +203,14 @@ const State = struct {
     last_dpi: u32 = 96,
 };
 
+/// Native Win32 handles needed by Vulkan to create a `VkSurfaceKHR`.
 pub const NativeHandles = struct {
     hinstance: *anyopaque,
     hwnd: *anyopaque,
 };
 
+/// Win32 implementation of the public `Window` interface. Owns the
+/// `HWND` plus the registered window-class atom and event pump state.
 pub const Backend = struct {
     state: *State,
 

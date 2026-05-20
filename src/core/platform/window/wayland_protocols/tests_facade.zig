@@ -6,6 +6,9 @@
 //! file). This facade owns the wayland_protocols subdir and re-exports
 //! the three pieces tests need.
 
+/// Re-exports the generated core `wayland.xml` bindings.
 pub const core = @import("core.zig");
+/// Re-exports the generated `xdg-shell.xml` bindings.
 pub const xdg_shell = @import("xdg_shell.zig");
+/// Re-exports the generated `xdg-decoration-unstable-v1.xml` bindings.
 pub const xdg_decoration = @import("xdg_decoration.zig");

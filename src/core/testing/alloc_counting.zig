@@ -11,6 +11,9 @@
 
 const std = @import("std");
 
+/// Allocator wrapper that counts every alloc / free / resize call.
+/// Used by `no_alloc_in_simulation_test` to assert zero-allocation
+/// steady state on the ECS hot path.
 pub const CountingAllocator = struct {
     backing: std.mem.Allocator,
     alloc_count: std.atomic.Value(u64) = .init(0),

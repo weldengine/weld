@@ -88,6 +88,8 @@ const sys = struct {
 
 const Error = shm.Error;
 
+/// POSIX `shm_open` + `mmap` backend for the IPC viewport shared
+/// memory segment. Embedded inside `shm.Segment.impl` on Linux/macOS.
 pub const Backend = struct {
     name_z: [:0]u8,
     gpa: std.mem.Allocator,

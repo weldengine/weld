@@ -12,6 +12,8 @@
 const std = @import("std");
 const deque_mod = @import("deque.zig");
 
+/// Type-erased work unit stored on each worker's Chase-Lev deque.
+/// Carries an opaque chunk pointer; the trampoline knows its type.
 pub const Job = struct {
     /// Type-erased pointer to a chunk. The trampoline knows the concrete
     /// chunk type at the dispatch call site.
@@ -29,6 +31,8 @@ pub const WorkerDeque = deque_mod.Deque(Job, DequeCapacity);
 /// recovered to their concrete types inside the trampoline.
 pub const TrampolineFn = *const fn (chunk_ptr: *anyopaque, ctx_ptr: *anyopaque) void;
 
+/// Atomic counters surfaced by each worker — chunks processed,
+/// steal attempts / hits, total work-thread CPU time.
 pub const WorkerStats = struct {
     chunks_processed: std.atomic.Value(u64) = .init(0),
     steals_attempted: std.atomic.Value(u64) = .init(0),
@@ -59,6 +63,9 @@ pub const WorkerStats = struct {
     }
 };
 
+/// One work-stealing thread in the scheduler pool. Owns its
+/// `WorkerDeque`, holds atomic stats, and runs until `shutdown` is
+/// flipped by the scheduler.
 pub const Worker = struct {
     id: u32,
     deque: WorkerDeque align(64) = .init(),

@@ -57,6 +57,9 @@ const sys = struct {
 
 const Error = shm.Error;
 
+/// Win32 `CreateFileMapping` + `MapViewOfFile` backend for the IPC
+/// viewport shared memory segment. Embedded inside `shm.Segment.impl`
+/// on Windows.
 pub const Backend = struct {
     mapping: Handle,
     ptr: [*]align(std.heap.pageSize()) u8,

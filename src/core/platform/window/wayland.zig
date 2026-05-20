@@ -54,11 +54,14 @@ const State = struct {
     xdg_toplevel_listener: xdg_shell.xdg_toplevel_listener,
 };
 
+/// Native Wayland handles needed by Vulkan to create a `VkSurfaceKHR`.
 pub const NativeHandles = struct {
     display: *anyopaque,
     surface: *anyopaque,
 };
 
+/// Wayland implementation of the public `Window` interface. Owns the
+/// connected `wl_display`, `wl_surface`, `xdg_surface`, `xdg_toplevel`.
 pub const Backend = struct {
     state: *State,
 

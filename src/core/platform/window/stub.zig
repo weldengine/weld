@@ -7,8 +7,11 @@
 const std = @import("std");
 const window = @import("../window.zig");
 
+/// Empty native-handle shape — the stub backend has no Vulkan surface.
 pub const NativeHandles = struct {};
 
+/// Stub window backend used on unsupported OSes; every method returns
+/// `error.UnsupportedPlatform`.
 pub const Backend = struct {
     pub fn create(gpa: std.mem.Allocator, desc: window.Desc) window.Error!Backend {
         _ = gpa;

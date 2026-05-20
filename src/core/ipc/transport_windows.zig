@@ -87,6 +87,8 @@ pub const invalid_handle: OsHandle = INVALID_HANDLE_VALUE;
 
 const Error = transport.Error;
 
+/// Win32 named-pipe backend for `IpcSocket`. Embedded inside
+/// `IpcSocket.impl` on Windows.
 pub const Backend = struct {
     handle: Handle,
     /// Listener vs accepted-client distinction — only the listener

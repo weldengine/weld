@@ -20,6 +20,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// Error set surfaced by `spawn` / `wait_nonblock` / `kill`.
 pub const Error = error{
     SpawnFailed,
     WaitFailed,
