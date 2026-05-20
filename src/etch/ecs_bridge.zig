@@ -21,11 +21,15 @@ const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
 const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
 const RuntimeQuery = weld_core.ecs.query_runtime.RuntimeQuery;
 const ResourceStore = weld_core.ecs.resources.ResourceStore;
+const CoreEntityId = weld_core.ecs.entity.EntityId;
 
 // Module-private aliases shadowing the value module — `EntityId`,
 // `Value`, `ComponentRef` are not exported because no external caller
 // drives the bridge by hand; they enter the rule body through
-// `interp.zig` which already has its own re-exports.
+// `interp.zig` which already has its own re-exports. `EntityId` here
+// is the u64 wire form stored in `Value.entity_id`; the bridge bitcasts
+// it back to the core `(index, generation)` struct when reaching into
+// the world.
 const EntityId = value_mod.EntityId;
 const Value = value_mod.Value;
 const ComponentRef = value_mod.ComponentRef;
@@ -96,7 +100,8 @@ pub const Bridge = struct {
         component_id: ComponentId,
         mutable: bool,
     ) BridgeError!ComponentRef {
-        const loc = world.dynamicLocation(entity) orelse return BridgeError.UnknownEntity;
+        const core_id: CoreEntityId = @bitCast(entity);
+        const loc = world.dynamicLocation(core_id) orelse return BridgeError.UnknownEntity;
         const arch = world.dynamicArchetype(loc.archetype_idx);
         if (arch.componentIndex(component_id) == null) return BridgeError.UnknownComponent;
         const chunk = arch.chunks.items[loc.chunk_idx];
