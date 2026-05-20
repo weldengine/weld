@@ -6,11 +6,27 @@
 //! component column lives inside the buffer; typed access flows through a
 //! comptime view defined in `query.zig`.
 //!
-//! Layout matches the S4 `archetype_dynamic.Chunk` byte-for-byte so the
-//! Etch interpreter / bridge keep working through the
-//! `archetype_dynamic.zig` re-export. Same 16 KiB size, same 16-byte
-//! alignment, same `(component_offsets[], entity_ids_offset, capacity)`
-//! triple computed from registered component sizes + alignments.
+//! M0.1 / E4 extends the layout with three change-detection sidecars
+//! that live inside the same 16 KiB buffer:
+//!
+//! - `added_tick[N][capacity]u32` — per-component, per-slot tick of
+//!   first attachment to the entity.
+//! - `changed_tick[N][capacity]u32` — per-component, per-slot tick of
+//!   last modification (set by `World.get_mut(T)`).
+//! - `dirty_bitset[ceil(capacity/64)]u64` — single per-chunk bitset,
+//!   reset by `World.beginFrame`; lets queries skip whole chunks
+//!   without per-slot inspection.
+//!
+//! The sidecars reduce the effective per-slot budget, so the
+//! capacity drops slightly versus the pre-E4 layout (~16 % for the
+//! (Transform, Velocity) S1 archetype) — the trade-off is documented
+//! in `briefs/M0.1-ecs-full.md` E4 scope.
+//!
+//! Layout matches the S4 `archetype_dynamic.Chunk` byte-for-byte for
+//! the component columns + entity_ids; the new sidecars trail at the
+//! end of the chunk. The Etch interpreter / bridge keep working
+//! through the `archetype_dynamic.zig` re-export because they only
+//! consume `component_offsets[]` and `entity_ids_offset`.
 //!
 //! Locked invariants (per `engine-ecs-internals.md` §2):
 //!
@@ -21,13 +37,20 @@
 //!   `max(ChunkAlignment, alignOf(component))`.
 //! - `entity_ids[]` (a `[*]EntityId` of `capacity` slots) trails the
 //!   component columns, 8-byte aligned.
+//! - `added_tick[N]` / `changed_tick[N]` columns follow, each
+//!   4-byte aligned, sized `capacity * sizeof(Tick)`.
+//! - `dirty_bitset[]` is 8-byte aligned, sized
+//!   `ceil(capacity / 64) * 8` bytes.
 //! - Slots are filled in order via swap-and-pop on remove — only
 //!   `slots[0 .. entity_count)` are ever read.
 
 const std = @import("std");
 const entity_mod = @import("entity.zig");
+const tick_mod = @import("tick.zig");
+const change_detection = @import("change_detection.zig");
 
 const EntityId = entity_mod.EntityId;
+const Tick = tick_mod.Tick;
 
 /// Total chunk size — locked to 16 KiB to fit comfortably in L1D on modern
 /// x86-64, Apple Silicon, and ARM Cortex CPUs (cf. `engine-spec.md` §2.3).
@@ -59,6 +82,19 @@ pub const ChunkLayout = struct {
     component_offsets: []u16,
     /// Byte offset of the `entity_ids[]` array. 8-byte aligned.
     entity_ids_offset: u16,
+    /// Byte offset of each per-component `added_tick[capacity]u32`
+    /// column. Same length and ordering as `component_offsets`. M0.1
+    /// / E4 sidecar.
+    added_tick_offsets: []u16,
+    /// Byte offset of each per-component `changed_tick[capacity]u32`
+    /// column. Same length and ordering as `component_offsets`. M0.1
+    /// / E4 sidecar.
+    changed_tick_offsets: []u16,
+    /// Byte offset of the per-chunk `dirty_bitset[ceil(capacity/64)]u64`.
+    /// 8-byte aligned. M0.1 / E4 sidecar.
+    dirty_bitset_offset: u16,
+    /// Number of `u64` words in the dirty bitset = `ceil(capacity / 64)`.
+    dirty_bitset_word_count: u16,
     /// Maximum entities per chunk for this archetype.
     capacity: u32,
 };
@@ -114,16 +150,59 @@ pub const Chunk = struct {
             .archetype_id = archetype_id,
         };
     }
+
+    // ─── M0.1 / E4 sidecar accessors ────────────────────────────────────
+
+    /// Pointer to the `added_tick[capacity]u32` column for component
+    /// index `comp_idx`. Length is the chunk's `capacity` (every slot
+    /// has a tick, including unused trailing slots — the sidecar
+    /// is sized to the layout, not the live entity count).
+    pub fn addedTickColumn(self: *Chunk, layout: *const ChunkLayout, comp_idx: usize) [*]Tick {
+        const off = layout.added_tick_offsets[comp_idx];
+        return @ptrCast(@alignCast(&self.bytes[off]));
+    }
+
+    /// `*const` counterpart for read-only paths.
+    pub fn addedTickColumnConst(self: *const Chunk, layout: *const ChunkLayout, comp_idx: usize) [*]const Tick {
+        const off = layout.added_tick_offsets[comp_idx];
+        return @ptrCast(@alignCast(&self.bytes[off]));
+    }
+
+    /// Pointer to the `changed_tick[capacity]u32` column for component
+    /// index `comp_idx`.
+    pub fn changedTickColumn(self: *Chunk, layout: *const ChunkLayout, comp_idx: usize) [*]Tick {
+        const off = layout.changed_tick_offsets[comp_idx];
+        return @ptrCast(@alignCast(&self.bytes[off]));
+    }
+
+    pub fn changedTickColumnConst(self: *const Chunk, layout: *const ChunkLayout, comp_idx: usize) [*]const Tick {
+        const off = layout.changed_tick_offsets[comp_idx];
+        return @ptrCast(@alignCast(&self.bytes[off]));
+    }
+
+    /// Mutable slice of the per-chunk dirty bitset. Length is
+    /// `layout.dirty_bitset_word_count` (= `ceil(capacity / 64)`).
+    pub fn dirtyBitset(self: *Chunk, layout: *const ChunkLayout) change_detection.DirtyBitset {
+        const off = layout.dirty_bitset_offset;
+        const ptr: [*]u64 = @ptrCast(@alignCast(&self.bytes[off]));
+        return ptr[0..layout.dirty_bitset_word_count];
+    }
+
+    pub fn dirtyBitsetConst(self: *const Chunk, layout: *const ChunkLayout) []const u64 {
+        const off = layout.dirty_bitset_offset;
+        const ptr: [*]const u64 = @ptrCast(@alignCast(&self.bytes[off]));
+        return ptr[0..layout.dirty_bitset_word_count];
+    }
 };
 
 /// Compute a `ChunkLayout` for the given column sizes + alignments. The
-/// algorithm picks the largest capacity `N` such that
-/// `header + Σ aligned_column_size(i, N) + entity_ids[N] ≤ ChunkSize`,
-/// then writes the resulting offsets into a freshly-allocated slice owned
-/// by the caller.
+/// algorithm picks the largest capacity `N` such that the full layout
+/// — header + component columns + entity_ids + added_tick + changed_tick
+/// + dirty_bitset — fits within `ChunkSize`. Offsets land in
+/// freshly-allocated slices owned by the caller.
 ///
-/// Errors: `EmptyComponentList` if `sizes.len == 0`, `LayoutTooLarge` if no
-/// capacity fits, `OutOfMemory` from the slice allocation.
+/// Errors: `EmptyComponentList` if `sizes.len == 0`, `LayoutTooLarge` if
+/// no capacity fits, `OutOfMemory` from the slice allocations.
 pub fn computeLayout(
     gpa: std.mem.Allocator,
     sizes: []const u16,
@@ -133,10 +212,13 @@ pub fn computeLayout(
 
     const header_size: usize = std.mem.alignForward(usize, @sizeOf(ChunkHeader), ChunkAlignment);
 
-    // Per-slot byte cost: components + entity id. Used only to seed the
-    // capacity search loop with a reasonable upper bound.
+    // Per-slot byte cost: components + entity id + 2 × `Tick` per
+    // component (added + changed) + ~1 bit for the dirty bitset. Used
+    // only to seed the capacity search loop with a reasonable upper
+    // bound — the precise check happens in `fits` below.
     var per_slot: usize = @sizeOf(EntityId);
     for (sizes) |s| per_slot += s;
+    per_slot += 2 * @sizeOf(Tick) * sizes.len;
     if (per_slot == 0) return ArchetypeError.LayoutTooLarge;
 
     var n: usize = (ChunkSize - header_size) / per_slot;
@@ -147,19 +229,50 @@ pub fn computeLayout(
 
     const offsets = try gpa.alloc(u16, sizes.len);
     errdefer gpa.free(offsets);
+    const added_offsets = try gpa.alloc(u16, sizes.len);
+    errdefer gpa.free(added_offsets);
+    const changed_offsets = try gpa.alloc(u16, sizes.len);
+    errdefer gpa.free(changed_offsets);
 
     var off: usize = header_size;
+    // Component columns.
     for (sizes, aligns, 0..) |sz, al, i| {
         off = std.mem.alignForward(usize, off, @max(ChunkAlignment, @as(usize, al)));
         offsets[i] = @intCast(off);
         off += @as(usize, sz) * n;
     }
+    // entity_ids[capacity].
     off = std.mem.alignForward(usize, off, @alignOf(EntityId));
     const entity_ids_offset: u16 = @intCast(off);
+    off += @sizeOf(EntityId) * n;
+    // added_tick[N][capacity].
+    for (added_offsets, 0..) |*slot, i| {
+        _ = i;
+        off = std.mem.alignForward(usize, off, @alignOf(Tick));
+        slot.* = @intCast(off);
+        off += @sizeOf(Tick) * n;
+    }
+    // changed_tick[N][capacity].
+    for (changed_offsets, 0..) |*slot, i| {
+        _ = i;
+        off = std.mem.alignForward(usize, off, @alignOf(Tick));
+        slot.* = @intCast(off);
+        off += @sizeOf(Tick) * n;
+    }
+    // dirty_bitset[ceil(capacity/64)]u64.
+    off = std.mem.alignForward(usize, off, @alignOf(u64));
+    const dirty_bitset_offset: u16 = @intCast(off);
+    const word_count: usize = (n + 63) / 64;
+    off += word_count * @sizeOf(u64);
+    std.debug.assert(off <= ChunkSize);
 
     return .{
         .component_offsets = offsets,
         .entity_ids_offset = entity_ids_offset,
+        .added_tick_offsets = added_offsets,
+        .changed_tick_offsets = changed_offsets,
+        .dirty_bitset_offset = dirty_bitset_offset,
+        .dirty_bitset_word_count = @intCast(word_count),
         .capacity = @intCast(n),
     };
 }
@@ -172,6 +285,20 @@ fn fits(sizes: []const u16, aligns: []const u16, n: usize, header_size: usize) b
     }
     off = std.mem.alignForward(usize, off, @alignOf(EntityId));
     off += @sizeOf(EntityId) * n;
+    // added_tick + changed_tick — N columns each, capacity slots each.
+    var i: usize = 0;
+    while (i < sizes.len) : (i += 1) {
+        off = std.mem.alignForward(usize, off, @alignOf(Tick));
+        off += @sizeOf(Tick) * n;
+    }
+    i = 0;
+    while (i < sizes.len) : (i += 1) {
+        off = std.mem.alignForward(usize, off, @alignOf(Tick));
+        off += @sizeOf(Tick) * n;
+    }
+    // dirty bitset — ceil(n/64) u64 words.
+    off = std.mem.alignForward(usize, off, @alignOf(u64));
+    off += ((n + 63) / 64) * @sizeOf(u64);
     return off <= ChunkSize;
 }
 
@@ -193,20 +320,32 @@ test "computeLayout rejects empty component list" {
     );
 }
 
-test "computeLayout for (Transform-like 48b/16a, Velocity-like 32b/16a) matches S1 capacity reference" {
-    // The S1 chunk for `(Transform, Velocity)` had capacity 185 (cf.
-    // `briefs/S1-mini-ecs.md` journal + the legacy chunk_test capacity
-    // constant). The runtime layout aligns each column to max(16, alignof) = 16
-    // with a 16-byte header — capacity should land in the same ballpark.
+test "computeLayout for (Transform-like 48b/16a, Velocity-like 32b/16a) carries E4 sidecars" {
+    // Post-E4 the layout reserves added_tick + changed_tick columns
+    // + a dirty bitset, so the capacity drops below the S1 reference
+    // (185) but stays comfortably above 140. The capacity check is a
+    // sanity bound, not a precise lock — the precise value is
+    // observable via the bench harness.
     const gpa = std.testing.allocator;
     const layout = try computeLayout(gpa, &.{ 48, 32 }, &.{ 16, 16 });
     defer gpa.free(layout.component_offsets);
+    defer gpa.free(layout.added_tick_offsets);
+    defer gpa.free(layout.changed_tick_offsets);
 
-    try std.testing.expect(layout.capacity >= 180);
-    try std.testing.expect(layout.capacity <= 210);
-    // Both columns must be 16-byte aligned for SIMD.
+    try std.testing.expect(layout.capacity >= 140);
+    try std.testing.expect(layout.capacity <= 180);
+
+    // Component columns 16-byte aligned for SIMD.
     try std.testing.expectEqual(@as(u16, 0), layout.component_offsets[0] % 16);
     try std.testing.expectEqual(@as(u16, 0), layout.component_offsets[1] % 16);
+
+    // Sidecar columns 4-byte aligned (size of Tick).
+    try std.testing.expectEqual(@as(u16, 0), layout.added_tick_offsets[0] % @sizeOf(Tick));
+    try std.testing.expectEqual(@as(u16, 0), layout.changed_tick_offsets[0] % @sizeOf(Tick));
+
+    // Bitset 8-byte aligned, sized to ceil(capacity/64).
+    try std.testing.expectEqual(@as(u16, 0), layout.dirty_bitset_offset % @alignOf(u64));
+    try std.testing.expectEqual(@as(u16, @intCast((layout.capacity + 63) / 64)), layout.dirty_bitset_word_count);
 }
 
 test "Chunk header init writes the expected zero/capacity/id triple" {

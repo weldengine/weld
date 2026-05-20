@@ -36,11 +36,15 @@ test "computeLayout against (Transform, Velocity) yields a sensible capacity" {
         &.{ @alignOf(Transform), @alignOf(Velocity) },
     );
     defer gpa.free(layout.component_offsets);
+    defer gpa.free(layout.added_tick_offsets);
+    defer gpa.free(layout.changed_tick_offsets);
 
-    // Capacity should land near the S1 pre-E2 reference (185 with the
-    // old large header) — the new minimal header brings it a bit higher.
-    try std.testing.expect(layout.capacity >= 180);
-    try std.testing.expect(layout.capacity <= 230);
+    // Post-E4 the layout reserves sidecars (added_tick + changed_tick
+    // + dirty bitset) inside the same 16 KiB budget, dropping the
+    // capacity below the pre-E4 ~185 reference. The bound below is a
+    // sanity check, not a precise lock.
+    try std.testing.expect(layout.capacity >= 140);
+    try std.testing.expect(layout.capacity <= 200);
 
     // Each component column must be 16-byte aligned for SIMD.
     try std.testing.expectEqual(@as(u16, 0), layout.component_offsets[0] % 16);
