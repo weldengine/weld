@@ -23,8 +23,15 @@
 //! transforms[i].pos[2] += velocities[i].linear[2] * dt;
 //! ```
 //!
-//! `--smoke`: short-circuit run (single dispatch, ~1k entities). Used by the
-//! `bench-ecs-smoke` CI job to gate compilation only.
+//! CLI flags:
+//!
+//! - `--smoke` — short-circuit run (single dispatch, ~1 k entities).
+//!   Used by the `bench-ecs-smoke` CI job to gate compilation only.
+//! - `--workers=N` — force the job system's worker count instead of
+//!   `std.Thread.getCpuCount`. Added by M0.1 / E5a as the isolation
+//!   knob for the bench-regression breakdown — the S1 baseline
+//!   (54.5 µs) was measured at 4 workers, so `--workers=4` on any
+//!   host produces a directly comparable median.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -302,8 +309,21 @@ pub fn main(init: std.process.Init) !void {
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     var smoke = false;
+    // `--workers=N` forces the job system's worker count instead of
+    // the auto-detected `std.Thread.getCpuCount`. Added by M0.1 / E5a
+    // as the isolation knob for the bench-regression breakdown — the
+    // S1 baseline (54.5 µs) was measured at 4 workers, so running the
+    // bench at `--workers=4` on any host produces a directly
+    // comparable median. `null` means "use the default
+    // (`std.Thread.getCpuCount`)".
+    var worker_count_override: ?usize = null;
     for (args[1..]) |a| {
-        if (std.mem.eql(u8, a, "--smoke")) smoke = true;
+        if (std.mem.eql(u8, a, "--smoke")) {
+            smoke = true;
+        } else if (std.mem.startsWith(u8, a, "--workers=")) {
+            const value_str = a["--workers=".len..];
+            worker_count_override = try std.fmt.parseInt(usize, value_str, 10);
+        }
     }
 
     var world = World.init();
@@ -312,7 +332,10 @@ pub fn main(init: std.process.Init) !void {
     const n_entities: u32 = if (smoke) SmokeEntities else NumEntities;
     try spawnEntities(&world, gpa, n_entities);
 
-    var sched = try Scheduler.init(gpa, init.io);
+    var sched = if (worker_count_override) |n|
+        try Scheduler.initWithWorkerCount(gpa, init.io, n)
+    else
+        try Scheduler.init(gpa, init.io);
     try sched.start();
     defer sched.deinit(gpa);
 
