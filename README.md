@@ -2,7 +2,7 @@
 
 A game engine written in Zig 0.16.x.
 
-> **Status:** Phase 0 — M0.0 in progress (custom linter + housekeeping)
+> **Status:** Phase 0 — M0.0 closed
 >
 > Phase −1 closed 2026-05-18 with all seven engineering hypotheses (S0–S6)
 > validated — Phase 0 (Fondations) is now underway. The repo is internal
@@ -82,13 +82,16 @@ A game engine written in Zig 0.16.x.
 > [`validation/s6-go-nogo.md`](validation/s6-go-nogo.md).
 > Brief: [`briefs/S6-ipc-editor-runtime.md`](briefs/S6-ipc-editor-runtime.md).
 >
-> **M0.0** (in progress) — first Phase 0 milestone. Ships an in-tree Zig
-> linter (`tools/weld_lint/`) enforcing four patterns (no `@cImport`, no
+> **M0.0** (closed, tag `v0.0.8-M0.0-lint-custom` on `main` since
+> 2026-05-20) — first Phase 0 milestone. Ships an in-tree Zig linter
+> (`tools/weld_lint/`) enforcing four patterns (no `@cImport`, no
 > `usingnamespace`, `///` doc comments on every root-level `pub`, `*_c`
 > module imports only from generated files) and Conventional Commits
 > validation via `zig build lint-commit`. Lefthook now drives both passes
-> in the local hooks. Brief:
-> [`briefs/M0.0-lint-custom.md`](briefs/M0.0-lint-custom.md).
+> in the local hooks. The default scan covers `src/ bench/ tests/
+> tools/` — `tools/` was added in-review so the linter sweeps its own
+> sources and the throwaway `vk_gen` / `wayland_gen` generators on every
+> run. Brief: [`briefs/M0.0-lint-custom.md`](briefs/M0.0-lint-custom.md).
 
 ## Prerequisites
 
