@@ -3,6 +3,16 @@
 # subset enforced by Weld. See briefs/S0-bootstrap.md, section
 # "scripts/check-commit-msg.sh specification" for the canonical rules.
 #
+# FALLBACK ONLY — since M0.0 the canonical commit-msg hook invokes the Zig
+# linter (`zig build lint-commit -- <file>` in lefthook.yml), which carries the
+# same regex enforced inside `tools/weld_lint/rules/conventional_commit.zig`.
+# This shell script remains in the repo for two reasons:
+#   1. It is executable documentation of the regex, readable without Zig.
+#   2. It is the emergency fallback when the Zig toolchain is unavailable on a
+#      contributor machine.
+# Do not invoke it from lefthook.yml in the default path; wire it manually only
+# when the Zig linter cannot be built.
+#
 # Usage: check-commit-msg.sh <path-to-commit-message-file>
 #
 # POSIX strict — must run under dash (Debian/Ubuntu /bin/sh) and Git Bash on

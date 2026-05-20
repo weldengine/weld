@@ -1,6 +1,9 @@
 # Lefthook configuration for the Weld engine.
 # See https://lefthook.dev/configuration/ for the reference.
 # Spec: briefs/S0-bootstrap.md, "lefthook.yml specification".
+# M0.0: `commit-msg` now invokes the Zig linter (`zig build lint-commit`)
+# instead of the shell-script fallback, and `pre-commit` adds a
+# `zig build lint` pass alongside `zig fmt --check`.
 
 pre-commit:
   parallel: true
@@ -8,11 +11,13 @@ pre-commit:
     zig-fmt:
       glob: "*.zig"
       run: zig fmt --check {staged_files}
+    weld-lint:
+      run: zig build lint
 
 commit-msg:
   commands:
     conventional-commits:
-      run: bash scripts/check-commit-msg.sh {1}
+      run: zig build lint-commit -- {1}
 
 pre-push:
   piped: true
