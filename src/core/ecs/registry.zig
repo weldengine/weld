@@ -93,6 +93,7 @@ pub const ComponentDesc = struct {
     fields: []const FieldDesc,
 };
 
+/// Error set for `Registry` mutations (registration paths).
 pub const RegistryError = error{
     DuplicateComponent,
     OutOfMemory,
@@ -104,6 +105,9 @@ const Entry = struct {
     desc: ComponentDesc,
 };
 
+/// Runtime registry of component (and resource) type descriptions.
+/// Resolves Etch type names to `ComponentId`s and back, owns the
+/// type metadata across the world's lifetime.
 pub const Registry = struct {
     entries: std.ArrayListUnmanaged(Entry) = .empty,
     /// Inverse map for lookup by name. Used by the Etch bridge to resolve

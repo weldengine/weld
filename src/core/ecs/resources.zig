@@ -12,8 +12,11 @@
 const std = @import("std");
 const registry_mod = @import("registry.zig");
 
+/// Re-exports `registry.ComponentId` — the registry shares its id
+/// space between components and resources.
 pub const ComponentId = registry_mod.ComponentId;
 
+/// Error set for `ResourceStore` mutations.
 pub const ResourceError = error{
     DuplicateResource,
     UnknownResource,
@@ -27,6 +30,9 @@ const Entry = struct {
     dirty: bool,
 };
 
+/// Per-world store of singleton resources, keyed by `ComponentId`.
+/// Owns the raw byte buffer for each resource plus a per-entry dirty
+/// flag flipped on `getMutResource` and cleared on `tickBoundary`.
 pub const ResourceStore = struct {
     entries: std.AutoHashMapUnmanaged(ComponentId, Entry) = .empty,
 

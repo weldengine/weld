@@ -23,6 +23,7 @@ const World = weld_core.ecs.world.World;
 const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
 const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
 
+/// Tagged value of a single ECS field, as declared inside a sidecar.
 pub const FieldValue = union(enum) {
     int_: i64,
     float_: f64,
@@ -42,16 +43,19 @@ fn approxEqAbs(a: f64, b: f64, eps: f64) bool {
     return @abs(a - b) <= eps;
 }
 
+/// Sidecar declaration of one component field value.
 pub const FieldSpec = struct {
     name: []const u8,
     value: FieldValue,
 };
 
+/// Sidecar declaration of one component instance (name + fields).
 pub const ComponentSpec = struct {
     name: []const u8,
     fields: []const FieldSpec = &.{},
 };
 
+/// Sidecar declaration of one entity (set of components → archetype).
 pub const EntitySpec = struct {
     /// Components present on this entity. Default values fill any field
     /// not explicitly listed. The set of component names also determines
@@ -59,6 +63,7 @@ pub const EntitySpec = struct {
     components: []const ComponentSpec,
 };
 
+/// Sidecar declaration of one resource's initial state.
 pub const ResourceInit = struct {
     name: []const u8,
     fields: []const FieldSpec = &.{},
@@ -68,21 +73,25 @@ pub const ResourceInit = struct {
     dirty: bool = false,
 };
 
+/// Sidecar driver configuration — number of ticks to run.
 pub const Config = struct {
     ticks: u32,
 };
 
+/// Sidecar declaration of the world's starting state.
 pub const WorldSpec = struct {
     entities: []const EntitySpec = &.{},
     resources: []const ResourceInit = &.{},
 };
 
+/// Sidecar declaration of the world's expected state after the run.
 pub const ExpectedWorld = struct {
     entities: []const EntitySpec = &.{},
     /// Resource state to verify after the run.
     resources: []const ResourceCheck = &.{},
 };
 
+/// Per-resource expected-value record consumed by `verifyResources`.
 pub const ResourceCheck = struct {
     name: []const u8,
     fields: []const FieldSpec = &.{},
@@ -98,6 +107,10 @@ pub const ResourceCheck = struct {
 /// it (just compiles from `source`). Passing both keeps the contract
 /// uniform across backends without forcing one to parse the other's
 /// preferred input.
+/// Generic differential driver: spawns the sidecar's initial world,
+/// runs `config.ticks` ticks through `Runner`, then asserts the world
+/// matches `expected`. Used by both the S4 interpreter and the S5
+/// codegen runners.
 pub fn runProgram(
     gpa: std.mem.Allocator,
     comptime Runner: type,

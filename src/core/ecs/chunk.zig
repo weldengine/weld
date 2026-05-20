@@ -18,6 +18,7 @@
 const std = @import("std");
 const components = @import("components.zig");
 
+/// Re-exports `components.EntityId` — `u64` entity handle.
 pub const EntityId = components.EntityId;
 
 /// Total chunk size — locked to 16 KiB to fit comfortably in L1D on modern

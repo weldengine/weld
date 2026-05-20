@@ -24,8 +24,11 @@ const arch_dyn_mod = @import("archetype_dynamic.zig");
 const resources_mod = @import("resources.zig");
 const query_runtime_mod = @import("query_runtime.zig");
 
+/// Re-exports `components.Transform` — position component of the S1 archetype.
 pub const Transform = components.Transform;
+/// Re-exports `components.Velocity` — velocity component of the S1 archetype.
 pub const Velocity = components.Velocity;
+/// Re-exports `components.EntityId` — `u64` entity handle.
 pub const EntityId = components.EntityId;
 
 /// Comptime list of the static-side archetype's component types.
@@ -35,15 +38,25 @@ pub const archetype_components: []const type = &.{ Transform, Velocity };
 pub const Archetype = archetype_mod.Archetype(archetype_components);
 /// Comptime query over the static archetype's component columns.
 pub const Query = query_mod.Query(archetype_components);
+/// Re-exports `archetype.Location` — `(chunk_idx, slot)` handle inside
+/// the static archetype.
 pub const Location = archetype_mod.Location;
 
+/// Re-exports `registry.Registry` — runtime component / resource type registry.
 pub const Registry = registry_mod.Registry;
+/// Re-exports `registry.ComponentId` — opaque runtime component type handle.
 pub const ComponentId = registry_mod.ComponentId;
+/// Re-exports `registry.ComponentDesc` — runtime description of a component type.
 pub const ComponentDesc = registry_mod.ComponentDesc;
+/// Re-exports `registry.FieldDesc` — runtime description of one component field.
 pub const FieldDesc = registry_mod.FieldDesc;
+/// Re-exports `registry.FieldKind` — closed enum of supported field primitive types.
 pub const FieldKind = registry_mod.FieldKind;
+/// Re-exports `archetype_dynamic.DynamicArchetype` — dynamic-side SoA archetype.
 pub const DynamicArchetype = arch_dyn_mod.DynamicArchetype;
+/// Re-exports `resources.ResourceStore` — runtime resource singleton store.
 pub const ResourceStore = resources_mod.ResourceStore;
+/// Re-exports `query_runtime.RuntimeQuery` — dynamic-side query handle.
 pub const RuntimeQuery = query_runtime_mod.RuntimeQuery;
 
 /// Location inside the dynamic side of the world: which dynamic archetype,
@@ -56,6 +69,10 @@ pub const DynamicLocation = struct {
     slot: u32,
 };
 
+/// Top-level ECS world — holds the static S1 archetype, the dynamic
+/// S4 archetypes, the runtime component registry, and the resource
+/// store. Owns all entity storage and resolves both comptime and
+/// runtime queries.
 pub const World = struct {
     // ── S1 comptime path (unchanged) ──
     archetype: Archetype,

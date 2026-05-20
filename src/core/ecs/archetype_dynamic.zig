@@ -11,9 +11,13 @@
 const std = @import("std");
 const registry_mod = @import("registry.zig");
 
+/// Re-exports `registry.ComponentId` — opaque runtime component type handle.
 pub const ComponentId = registry_mod.ComponentId;
+/// Re-exports `registry.Registry` — runtime component / resource type registry.
 pub const Registry = registry_mod.Registry;
 
+/// `u64` entity handle on the dynamic side. Independent of the S1
+/// `EntityId` re-export to keep the runtime path self-contained.
 pub const EntityId = u64;
 /// Sentinel `EntityId` that no live entity ever takes; used by the
 /// resource store and runtime queries to mark dead/empty slots.
@@ -37,12 +41,15 @@ pub const ChunkHeader = extern struct {
     _pad: u32 = 0,
 };
 
+/// Error set for `DynamicArchetype` construction and chunk operations.
 pub const ArchetypeError = error{
     EmptyComponentList,
     LayoutTooLarge,
     OutOfMemory,
 };
 
+/// Per-archetype layout descriptor — byte offsets of each SoA column
+/// inside a chunk plus the chunk's entity capacity.
 pub const ChunkLayout = struct {
     /// Offset (in bytes from chunk start) of each component's SoA array.
     /// Length equals the archetype's `component_ids.len`.

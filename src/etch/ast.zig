@@ -26,6 +26,7 @@
 const std = @import("std");
 const token_mod = @import("token.zig");
 
+/// Re-exports `token.SourceSpan` — byte-range location inside an Etch source.
 pub const SourceSpan = token_mod.SourceSpan;
 
 // ─────────────────────────────── NodeId ─────────────────────────────────
@@ -40,6 +41,8 @@ pub const NodeCategory = enum(u4) {
     _,
 };
 
+/// Compact 32-bit handle into the `AstArena`: 4-bit `NodeCategory` +
+/// 28-bit index. Used as the universal pointer between AST nodes.
 pub const NodeId = packed struct(u32) {
     category: NodeCategory,
     index: u28,
@@ -57,6 +60,8 @@ pub const NodeId = packed struct(u32) {
 
 // ─────────────────────────────── StringPool ─────────────────────────────
 
+/// Interned-string handle inside the `AstArena`'s `StringPool`. Id 0
+/// is reserved for the empty string ("absent").
 pub const StringId = u32;
 
 /// Deduplicating interner. Identifier names and string literal contents
@@ -152,6 +157,9 @@ pub const ItemKind = enum {
     override_decl,
 };
 
+/// Closed enum of statement kinds reachable from an Etch rule body.
+/// `// S3` variants are implemented; the others are reserved for
+/// later milestones and rejected at parse-time in S3.
 pub const StmtKind = enum {
     // S3
     let_stmt,
@@ -182,6 +190,8 @@ pub const StmtKind = enum {
     tag_mutation_stmt,
 };
 
+/// Closed enum of expression kinds. `// S3` variants are implemented;
+/// the others are reserved for later milestones.
 pub const ExprKind = enum {
     // S3
     int_lit,
@@ -221,6 +231,7 @@ pub const ExprKind = enum {
     throw_expr,
 };
 
+/// Closed enum of type-node kinds the parser can produce.
 pub const TypeNodeKind = enum {
     // S3
     named,
@@ -240,6 +251,9 @@ pub const TypeNodeKind = enum {
 
 // ─────────────────────────────── Binary / Unary opcodes ─────────────────
 
+/// Closed enum of the S3 binary operators. `add`/`sub`/`mul`/`div`/`rem`
+/// for arithmetic, `eq`/`neq`/`lt`/`gt`/`le`/`ge` for comparison, plus
+/// short-circuit `logical_and`/`logical_or`.
 pub const BinaryOp = enum {
     add,
     sub,
@@ -256,11 +270,13 @@ pub const BinaryOp = enum {
     logical_or,
 };
 
+/// Closed enum of the S3 prefix unary operators.
 pub const UnaryOp = enum {
     neg, // -x
     logical_not, // not x
 };
 
+/// Closed enum of assignment-style operators inside an `AssignStmt`.
 pub const AssignOp = enum {
     assign, // =
     add_assign, // +=
@@ -283,6 +299,8 @@ pub const Field = struct {
     annotations_len: u32,
 };
 
+/// Side-slab entry for a `component` declaration: name + range into
+/// `arena.fields` + annotation range.
 pub const ComponentDecl = struct {
     name: StringId,
     fields_start: u32, // index into `arena.fields`
@@ -291,6 +309,8 @@ pub const ComponentDecl = struct {
     annotations_len: u32,
 };
 
+/// Side-slab entry for a `resource` declaration. Same shape as
+/// `ComponentDecl`; kept separate to preserve the AST-level distinction.
 pub const ResourceDecl = struct {
     name: StringId,
     fields_start: u32,
@@ -299,11 +319,14 @@ pub const ResourceDecl = struct {
     annotations_len: u32,
 };
 
+/// Side-slab entry for one parameter of a `rule` declaration.
 pub const RuleParam = struct {
     name: StringId,
     type_node: NodeId,
 };
 
+/// Side-slab entry for a `rule` declaration: params, optional `when`
+/// clause, body statement range, and annotation range.
 pub const RuleDecl = struct {
     name: StringId,
     params_start: u32, // index into `arena.rule_params`
@@ -331,6 +354,9 @@ pub const WhenNodeKind = enum {
     resource_changed, // resource T changed
 };
 
+/// Side-slab entry for one node of the `when` boolean tree. Composite
+/// nodes (`and`/`or`/`not`) link to child indices; leaf nodes carry
+/// the entity/type/filter triplet.
 pub const WhenNode = struct {
     kind: WhenNodeKind,
     /// Leaf: identifier (`entity` name) for entity-based; unused for
@@ -351,6 +377,7 @@ pub const WhenNode = struct {
     pub const no_child: u32 = std.math.maxInt(u32);
 };
 
+/// Side-slab entry for a `let`/`mut` statement.
 pub const LetStmt = struct {
     name: StringId,
     is_mut: bool,
@@ -358,33 +385,39 @@ pub const LetStmt = struct {
     value: NodeId, // expr
 };
 
+/// Side-slab entry for an assignment statement (`=`/`+=`/`-=`/...).
 pub const AssignStmt = struct {
     target: NodeId, // expr — must be ident or field_access chain
     op: AssignOp,
     value: NodeId, // expr
 };
 
+/// Side-slab entry for a binary expression.
 pub const BinaryExpr = struct {
     op: BinaryOp,
     lhs: NodeId,
     rhs: NodeId,
 };
 
+/// Side-slab entry for a prefix-unary expression.
 pub const UnaryExpr = struct {
     op: UnaryOp,
     operand: NodeId,
 };
 
+/// Side-slab entry for a `receiver.field` access expression.
 pub const FieldAccessExpr = struct {
     receiver: NodeId,
     field_name: StringId,
 };
 
+/// Side-slab entry for `entity.get(T)` / `entity.get_mut(T)`.
 pub const MethodGetExpr = struct {
     receiver: NodeId,
     type_name: StringId,
 };
 
+/// Side-slab entry for a named type reference (`int`, `Health`, etc.).
 pub const NamedTypeNode = struct {
     name: StringId,
 };
@@ -403,6 +436,8 @@ pub const Annotation = struct {
     span: SourceSpan,
 };
 
+/// One argument of an `Annotation`. Positional args have `name = 0`;
+/// named args carry the identifier. Value is always an expression node.
 pub const AnnotationArg = struct {
     /// 0 for positional args; otherwise the named argument's identifier.
     name: StringId,
@@ -461,24 +496,28 @@ pub const AnnotationKind = enum {
 
 // ─────────────────────────────── MultiArrayList entries ─────────────────
 
+/// MultiArrayList row for an item node (top-level declaration).
 pub const Item = struct {
     kind: ItemKind,
     data: u32,
     span: SourceSpan,
 };
 
+/// MultiArrayList row for a statement node.
 pub const Stmt = struct {
     kind: StmtKind,
     data: u32,
     span: SourceSpan,
 };
 
+/// MultiArrayList row for an expression node.
 pub const Expr = struct {
     kind: ExprKind,
     data: u32,
     span: SourceSpan,
 };
 
+/// MultiArrayList row for a type node.
 pub const TypeNode = struct {
     kind: TypeNodeKind,
     data: u32,
@@ -487,6 +526,9 @@ pub const TypeNode = struct {
 
 // ─────────────────────────────── AstArena ───────────────────────────────
 
+/// Tabular SoA arena holding the whole Etch AST in column form.
+/// Allocated once per parse; freed via `deinit` after consumers have
+/// finished. All `NodeId`s in the API refer into this arena.
 pub const AstArena = struct {
     items: std.MultiArrayList(Item) = .empty,
     stmts: std.MultiArrayList(Stmt) = .empty,

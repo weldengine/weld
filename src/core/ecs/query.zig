@@ -14,6 +14,9 @@
 const std = @import("std");
 const archetype_mod = @import("archetype.zig");
 
+/// Generic comptime query factory: returns a struct that iterates the
+/// chunks of the matching archetype yielding `(EntityId, *Components[0],
+/// *Components[1], …)` per slot. Zero dispatch overhead at runtime.
 pub fn Query(comptime Components: []const type) type {
     return struct {
         const Self = @This();
