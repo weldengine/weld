@@ -123,7 +123,7 @@ zig build run-ipc-demo -- --frames=600                   #   override the frame 
 zig build bench-ipc-rtt -Doptimize=ReleaseSafe           # S6 Echo RTT bench (N=10 000, report under bench/results/)
 zig build test-ipc                                       # S6 IPC tests (subset of `zig build test`, fast iteration)
 zig build test-ipc-fuzz-1h                               # S6 1 h fuzz harness — manual invocation only
-zig build lint                                           # M0.0 custom linter on src/ bench/ tests/
+zig build lint                                           # M0.0 custom linter on src/ bench/ tests/ tools/
 zig build lint-commit -- <file>                          # M0.0 Conventional Commits validation (used by commit-msg hook)
 ./scripts/install-hooks.sh                               # install local git hooks (run once after clone)
 ```
