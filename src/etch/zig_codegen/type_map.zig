@@ -14,6 +14,8 @@
 
 const std = @import("std");
 
+/// Error variant returned when an Etch type identifier has no Zig
+/// equivalent in the codegen's mapping table.
 pub const MapError = error{UnsupportedEtchType};
 
 /// Alias for "the string the codegen will print as a Zig type" —

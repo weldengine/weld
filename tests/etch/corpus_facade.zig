@@ -6,11 +6,14 @@
 //! of the importing root, so this facade — sitting beside the corpus
 //! tree — is the only module allowed to bake the fixtures in.
 
+/// Embedded entry for a valid S3 corpus fixture — name + source bytes.
 pub const Entry = struct {
     name: []const u8,
     source: []const u8,
 };
 
+/// Embedded entry for an invalid S3 corpus fixture — adds the expected
+/// diagnostic code parsed from the filename prefix.
 pub const InvalidEntry = struct {
     name: []const u8,
     /// Canonical short code (e.g. "E0001", "E1210") parsed from the

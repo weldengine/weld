@@ -10,6 +10,8 @@
 
 const std = @import("std");
 
+/// Closed error set surfaced by the Etch → Zig codegen. Each variant
+/// names a precise failure mode reachable from the lowering pass.
 pub const CodegenError = error{
     /// A construct outside the S5 subset (`component`, `resource`, `rule`,
     /// `when`, arithmetic expressions, `get`/`get_mut`/`has` accessors)

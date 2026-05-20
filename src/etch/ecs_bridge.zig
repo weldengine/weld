@@ -22,10 +22,14 @@ const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
 const RuntimeQuery = weld_core.ecs.query_runtime.RuntimeQuery;
 const ResourceStore = weld_core.ecs.resources.ResourceStore;
 
+/// Re-exports `value.EntityId` — interpreter's `u64` entity handle.
 pub const EntityId = value_mod.EntityId;
+/// Re-exports `value.Value` — interpreter tagged value union.
 pub const Value = value_mod.Value;
+/// Re-exports `value.ComponentRef` — typed handle to a chunk slot.
 pub const ComponentRef = value_mod.ComponentRef;
 
+/// Error set surfaced by the Etch ↔ ECS bridge.
 pub const BridgeError = error{
     UnknownEntity,
     UnknownComponent,
@@ -34,6 +38,8 @@ pub const BridgeError = error{
     OutOfMemory,
 };
 
+/// Per-world bridge holding Etch name → registry id maps and the
+/// shared runtime query reused across rule evaluations.
 pub const Bridge = struct {
     /// Etch component name → registry id (for components). Owns the keys
     /// (strings dup'd at registration time so the lifetime survives the

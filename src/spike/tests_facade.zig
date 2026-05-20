@@ -9,5 +9,7 @@
 //! Lives next to the rest of `src/spike/` so it is automatically scoped
 //! to the same throwaway-code blast radius as the other spike files.
 
+/// Re-exports `src/spike/cli.zig` for tests living under `tests/spike/`.
 pub const cli = @import("cli.zig");
+/// Re-exports `src/spike/scoring.zig` for tests living under `tests/spike/`.
 pub const scoring = @import("scoring.zig");

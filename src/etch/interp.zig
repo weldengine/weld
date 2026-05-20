@@ -39,6 +39,8 @@ const RuntimeErrorKind = value_mod.RuntimeErrorKind;
 const EntityId = value_mod.EntityId;
 const Bridge = bridge_mod.Bridge;
 
+/// Counters surfaced by `Interpreter.run` per tick — informational
+/// only, used by tests + bench harnesses to assert hot-path coverage.
 pub const RuntimeReport = struct {
     entities_iterated: u64 = 0,
     rules_evaluated: u64 = 0,
@@ -47,6 +49,7 @@ pub const RuntimeReport = struct {
     last_error: ?RuntimeError = null,
 };
 
+/// Error set surfaced by the interpreter.
 pub const InterpError = error{
     UnsupportedConstruct,
     InvalidProgram,
@@ -137,6 +140,8 @@ const Locals = struct {
 
 const StmtError = error{ OutOfMemory, RuntimeFailure };
 
+/// S4 tree-walking interpreter — owns the bridge state, evaluates
+/// the type-checked AST against a `World` once per tick.
 pub const Interpreter = struct {
     gpa: std.mem.Allocator,
     ast: *const AstArena,

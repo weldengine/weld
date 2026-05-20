@@ -17,6 +17,9 @@ const corpus_codegen = @import("corpus_codegen");
 
 const World = weld_core.ecs.world.World;
 
+/// S5 codegen-backed runner — drives `diff_runner.runProgram` by
+/// dispatching into the consolidated `corpus_codegen` namespace
+/// produced at build time by `tools/etch_cook`.
 pub const Runner = struct {
     program: corpus_codegen.Program,
 

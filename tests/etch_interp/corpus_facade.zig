@@ -10,6 +10,8 @@
 
 const driver = @import("diff_runner");
 
+/// One differential corpus program — Etch source plus the sidecar's
+/// `(config, initial, expected)` triplet consumed by `diff_runner`.
 pub const Program = struct {
     name: []const u8,
     source: []const u8,

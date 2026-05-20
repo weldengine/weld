@@ -18,6 +18,9 @@ const Token = token.Token;
 const TokenKind = token.TokenKind;
 const SourceSpan = token.SourceSpan;
 
+/// Etch lexer — produces a stream of `Token`s and accumulates a
+/// parallel slab of comment spans for the future `TriviaMap`
+/// (Phase 0.2). Owns no heap memory beyond `comment_spans`.
 pub const Lexer = struct {
     source: []const u8,
     pos: u32 = 0,

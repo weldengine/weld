@@ -14,6 +14,9 @@ const World = weld_core.ecs.world.World;
 const Diagnostic = weld_etch.Diagnostic;
 const Ast = weld_etch.Ast;
 
+/// S4 interpreter-backed runner — drives `diff_runner.runProgram` by
+/// parsing + type-checking + running the Etch source through the
+/// tree-walking interpreter.
 pub const Runner = struct {
     /// Heap-allocated so the `*const Ast` pointer stored on the
     /// `Interpreter` remains valid after the Runner is moved/returned.

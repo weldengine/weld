@@ -21,6 +21,9 @@ pub const SourceSpan = struct {
     }
 };
 
+/// Closed enum of Etch token kinds produced by the lexer. The
+/// S3 subset is implemented; future kinds are added as the grammar
+/// expands.
 pub const TokenKind = enum {
     // ── Literals ──
     ident, // any identifier starting with [a-z_]
@@ -95,6 +98,7 @@ pub const TokenKind = enum {
     error_unknown_keyword,
 };
 
+/// One lexed token — `kind` plus the byte span it covers in the source.
 pub const Token = struct {
     kind: TokenKind,
     span: SourceSpan,

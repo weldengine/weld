@@ -6,6 +6,9 @@
 
 const std = @import("std");
 
+/// Low-level Zig source writer with built-in indentation tracking.
+/// Used by `lower.zig` to emit the cooked `.zig` output for each Etch
+/// program.
 pub const Writer = struct {
     buffer: *std.ArrayListUnmanaged(u8),
     gpa: std.mem.Allocator,
