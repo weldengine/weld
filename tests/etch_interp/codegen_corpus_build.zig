@@ -14,6 +14,8 @@ pub const CodegenProgram = struct {
     etch_path: []const u8,
 };
 
+/// Pinned list of the 20 differential programs that `tools/etch_cook`
+/// cooks into the consolidated `corpus_codegen.zig` during `zig build`.
 pub const programs = [_]CodegenProgram{
     .{ .name = "p01_arith_int_let", .etch_path = "tests/etch_interp/programs/01_arith_int_let.etch" },
     .{ .name = "p02_arith_float_compound", .etch_path = "tests/etch_interp/programs/02_arith_float_compound.etch" },

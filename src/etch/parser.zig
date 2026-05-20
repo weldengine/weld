@@ -32,6 +32,10 @@ pub const ParseResult = struct {
     diagnostic: ?Diagnostic,
 };
 
+/// Entry point for the Etch parser. Lexes `source`, builds the
+/// tabular SoA `AstArena`, and returns it together with an optional
+/// first-error `Diagnostic`. Caller owns the arena and must call
+/// `result.ast.deinit(gpa)`.
 pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
     var lexer = Lexer.init(source);
     // Without this `errdefer`, an OOM coming from `lexer.next` or

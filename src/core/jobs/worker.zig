@@ -18,9 +18,15 @@ pub const Job = struct {
     chunk_ptr: *anyopaque,
 };
 
+/// Maximum number of jobs per worker deque. Sized at 1 024 to cover
+/// the S1 bench's chunk count with margin.
 pub const DequeCapacity: usize = 1024;
+/// Chase-Lev deque instantiated for `Job` values, sized to `DequeCapacity`.
 pub const WorkerDeque = deque_mod.Deque(Job, DequeCapacity);
 
+/// Type-erased trampoline signature called from `Worker.run` once
+/// per stolen / popped job. The chunk and context pointers are
+/// recovered to their concrete types inside the trampoline.
 pub const TrampolineFn = *const fn (chunk_ptr: *anyopaque, ctx_ptr: *anyopaque) void;
 
 pub const WorkerStats = struct {

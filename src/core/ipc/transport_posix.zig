@@ -131,7 +131,9 @@ fn cmsgLen(len: usize) usize {
 
 // -------------------------------------------------- public types ------
 
+/// Native OS file-descriptor type for the POSIX transport backend.
 pub const OsHandle = std.posix.fd_t;
+/// Sentinel `OsHandle` used to mark a closed / never-opened socket.
 pub const invalid_handle: OsHandle = -1;
 
 const Error = transport.Error;

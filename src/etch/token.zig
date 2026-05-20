@@ -105,6 +105,10 @@ pub const Token = struct {
 /// per file, every identifier hit is amortised by the parser's main work).
 pub const KeywordEntry = struct { lexeme: []const u8, kind: TokenKind };
 
+/// S3 keyword table — the lexer scans identifiers against this slice
+/// to promote them to `KeywordEntry.kind`. Each entry is `(lexeme,
+/// kind)`; entries are matched in order, so the table doubles as the
+/// canonical S3 keyword set.
 pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "let", .kind = .kw_let },
     .{ .lexeme = "mut", .kind = .kw_mut },

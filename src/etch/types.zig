@@ -634,6 +634,10 @@ pub const TypeChecker = struct {
 
 // ─── Helpers reachable from tests ───────────────────────────────────────
 
+/// Return `true` if the expression at `id` can be folded to a value
+/// at type-check time (literals + arithmetic/comparison/logic on
+/// const-evaluable operands). Drives the `component` default-value
+/// admissibility check in the S3 type-checker.
 pub fn isConstEvaluable(arena: *const AstArena, id: NodeId) bool {
     const kind = arena.exprKind(id);
     return switch (kind) {

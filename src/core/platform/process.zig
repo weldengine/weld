@@ -27,6 +27,9 @@ pub const Error = error{
     InvalidArgument,
 } || std.mem.Allocator.Error;
 
+/// OS-native process identifier — signed on POSIX, unsigned on
+/// Windows. Used by `spawn` / `wait_nonblock` / `kill` to track a
+/// child runtime process.
 pub const Pid = switch (builtin.os.tag) {
     .linux, .macos => i32,
     .windows => u32,

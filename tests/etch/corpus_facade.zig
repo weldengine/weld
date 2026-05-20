@@ -20,6 +20,9 @@ pub const InvalidEntry = struct {
     source: []const u8,
 };
 
+/// Embedded list of the valid S3 corpus fixtures consumed by
+/// `tests/etch/corpus_test.zig`. Each entry pins one `.etch` file
+/// the parser + type-checker must accept without diagnostics.
 pub const valid = [_]Entry{
     .{ .name = "components/health.etch", .source = @embedFile("corpus/valid/components/health.etch") },
     .{ .name = "components/transform.etch", .source = @embedFile("corpus/valid/components/transform.etch") },
@@ -57,6 +60,9 @@ pub const valid = [_]Entry{
     .{ .name = "exprs/literals.etch", .source = @embedFile("corpus/valid/exprs/literals.etch") },
 };
 
+/// Embedded list of the invalid S3 corpus fixtures. Each entry pins
+/// an `.etch` file plus the diagnostic code (`E0xxx`) the corpus
+/// driver expects the parser / type-checker to emit.
 pub const invalid = [_]InvalidEntry{
     .{ .name = "E0001_unsupported_fn.etch", .expected_code = "E0001", .source = @embedFile("corpus/invalid/E0001_unsupported_fn.etch") },
     .{ .name = "E0001_unexpected_top_level.etch", .expected_code = "E0001", .source = @embedFile("corpus/invalid/E0001_unexpected_top_level.etch") },

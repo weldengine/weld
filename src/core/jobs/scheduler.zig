@@ -40,6 +40,9 @@ pub const TrampolineFn = worker_mod.TrampolineFn;
 pub const Worker = worker_mod.Worker;
 pub const WorkerStats = worker_mod.WorkerStats;
 
+/// Number of worker threads in the S1 work-stealing pool. Hardcoded
+/// at 4 for the Phase −1 spike; CPU-topology detection lands in M0.1
+/// (debt D-S1, cf. `engine-phase-0-plan.md`).
 pub const worker_count: usize = 4;
 
 /// Maximum number of chunks a single dispatch can carry. 1024 covers the S1

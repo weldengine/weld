@@ -552,6 +552,9 @@ fn binaryCompare(op: ast_mod.BinaryOp, a: Value, b: Value) !Value {
 
 // ── Const evaluator ──
 
+/// Pure constant-folding evaluator over an Etch AST subtree. Used
+/// by the type-checker for `const` resolution and by `codegen` to
+/// pre-evaluate literal expressions during lowering.
 pub fn evalConst(ast: *const AstArena, node: NodeId) !Value {
     const kind = ast.exprKind(node);
     const data = ast.exprData(node);

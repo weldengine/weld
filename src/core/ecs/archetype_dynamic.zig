@@ -15,10 +15,15 @@ pub const ComponentId = registry_mod.ComponentId;
 pub const Registry = registry_mod.Registry;
 
 pub const EntityId = u64;
+/// Sentinel `EntityId` that no live entity ever takes; used by the
+/// resource store and runtime queries to mark dead/empty slots.
 pub const invalid_entity: EntityId = std.math.maxInt(EntityId);
 
 /// Chunk size — locked to 16 KiB to match S1 (cf. `core/ecs/chunk.zig`).
 pub const ChunkSize: usize = 16 * 1024;
+/// Chunk header alignment — keeps the leading bytes of every chunk
+/// aligned to 16, matching the SIMD-friendly layout used by the
+/// comptime SoA archetype.
 pub const ChunkAlignment: usize = 16;
 
 /// Tight header — `entity_count` is the only field mutated during normal

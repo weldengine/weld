@@ -35,6 +35,9 @@ pub const ParseError = error{
     InvalidMeasureFrameTime,
 };
 
+/// Parse the S2 spike CLI flags out of `args` (which excludes
+/// `argv[0]`). Returns a populated `Args` on success or a typed
+/// `ParseError` on unrecognised flags / malformed values.
 pub fn parse(args: []const []const u8) ParseError!Args {
     var out: Args = .{};
     for (args) |arg| {

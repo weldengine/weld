@@ -169,6 +169,10 @@ pub const Bridge = struct {
 
 // ─── Byte ↔ Value conversion ─────────────────────────────────────────────
 
+/// Decode the on-storage byte representation of a field into the
+/// interpreter's tagged `Value`. The width to read is dictated by
+/// `kind` — the slice must already be sized to the field's column
+/// stride.
 pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
     return switch (kind) {
         .int_ => blk: {
@@ -205,6 +209,11 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
     };
 }
 
+/// Encode an interpreter `Value` into the on-storage byte
+/// representation of a field. `bytes` must already be sized to the
+/// field's column stride; the function panics on type mismatch (the
+/// S4 closing-debt `D-S4-ecs-bridge-panic` will swap this for a
+/// typed `TypeMismatch` variant in M0.7).
 pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) void {
     switch (kind) {
         .int_ => {

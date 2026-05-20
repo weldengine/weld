@@ -40,6 +40,9 @@ const shaders = @import("shaders");
 const blit_vert_spv = shaders.viewport_blit_vert_spv;
 const blit_frag_spv = shaders.viewport_blit_frag_spv;
 
+/// Number of frames the blit pipeline can have in flight at once.
+/// Two is the canonical double-buffering value matched by the S6
+/// viewport ring layout (`engine-ipc.md` §6).
 pub const max_frames_in_flight: u32 = 2;
 
 pub const SetupError = error{

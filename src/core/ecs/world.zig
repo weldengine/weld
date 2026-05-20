@@ -28,8 +28,12 @@ pub const Transform = components.Transform;
 pub const Velocity = components.Velocity;
 pub const EntityId = components.EntityId;
 
+/// Comptime list of the static-side archetype's component types.
+/// Drives the SoA layout of `Archetype` and `Query` below.
 pub const archetype_components: []const type = &.{ Transform, Velocity };
+/// Comptime SoA archetype instantiation for `archetype_components`.
 pub const Archetype = archetype_mod.Archetype(archetype_components);
+/// Comptime query over the static archetype's component columns.
 pub const Query = query_mod.Query(archetype_components);
 pub const Location = archetype_mod.Location;
 

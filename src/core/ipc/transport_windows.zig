@@ -80,7 +80,9 @@ const sys = struct {
     extern "kernel32" fn DisconnectNamedPipe(hNamedPipe: Handle) callconv(.winapi) Bool;
 };
 
+/// Native Windows pipe handle type for the named-pipe transport backend.
 pub const OsHandle = std.os.windows.HANDLE;
+/// Sentinel handle returned by Win32 when a pipe is closed or never opened.
 pub const invalid_handle: OsHandle = INVALID_HANDLE_VALUE;
 
 const Error = transport.Error;
