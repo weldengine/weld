@@ -33,10 +33,12 @@ const std = @import("std");
 const archetype_mod = @import("archetype.zig");
 const chunk_mod = @import("chunk.zig");
 const registry_mod = @import("registry.zig");
+const tick_mod = @import("tick.zig");
 
 const Archetype = archetype_mod.Archetype;
 const Chunk = chunk_mod.Chunk;
 const ComponentId = registry_mod.ComponentId;
+const Tick = tick_mod.Tick;
 
 /// Predicate signature used by the `Predicate(fn)` filter. The
 /// predicate runs against a single slot in a matched archetype's
@@ -49,9 +51,9 @@ pub const PredicateFn = *const fn (
     slot: u32,
 ) bool;
 
-/// Comptime tag distinguishing the three filter spec kinds. Used by
-/// `Query`'s internal `parseFilters` to bucket the filters tuple.
-pub const FilterKind = enum { with, without, predicate };
+/// Comptime tag distinguishing the four filter spec kinds. Used by
+/// `Query`'s internal parser to bucket the filters tuple.
+pub const FilterKind = enum { with, without, predicate, changed };
 
 /// Filter spec: matching archetype must contain `T`.
 pub fn With(comptime T: type) type {
@@ -79,6 +81,18 @@ pub fn Predicate(comptime f: PredicateFn) type {
     };
 }
 
+/// Filter spec: matches slots where `T`'s `changed_tick` is strictly
+/// greater than the query's runtime `last_run_tick`. `T` must appear
+/// in `Components` — the parser asserts that and records the matching
+/// index inside the components tuple. Evaluated by `query.slotPasses`
+/// (M0.1 / E4).
+pub fn Changed(comptime T: type) type {
+    return struct {
+        pub const filter_kind: FilterKind = .changed;
+        pub const component_type: type = T;
+    };
+}
+
 /// Comptime-typed query factory.
 ///
 /// - `Components` — the tuple of types the body reads / writes. Every
@@ -97,11 +111,13 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
     // Pass 1 — count each filter bucket and surface the predicate.
     comptime var w_count: usize = 0;
     comptime var wo_count: usize = 0;
+    comptime var ch_count: usize = 0;
     comptime var predicate: ?PredicateFn = null;
     inline for (filters) |F| {
         switch (F.filter_kind) {
             .with => w_count += 1,
             .without => wo_count += 1,
+            .changed => ch_count += 1,
             .predicate => {
                 if (predicate != null) {
                     @compileError("Query supports at most one Predicate filter in M0.1 / E3");
@@ -112,6 +128,7 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
     }
     const WCOUNT = w_count;
     const WOCOUNT = wo_count;
+    const CHCOUNT = ch_count;
     const PRED = predicate;
 
     // Pass 2 — populate fixed-size arrays inside `comptime` blocks so
@@ -138,6 +155,35 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         }
         break :blk arr;
     };
+    // Changed<T> must reference a component already in `Components`
+    // so the per-match column_indices map points at the right
+    // archetype column. Record T's index inside the tuple for each
+    // Changed filter — slotPasses then reads
+    // `match.column_indices[changed_components_index]`.
+    const CH_COMPONENT_INDICES: [CHCOUNT]usize = comptime blk: {
+        var arr: [CHCOUNT]usize = undefined;
+        var i: usize = 0;
+        for (filters) |F| {
+            if (F.filter_kind == .changed) {
+                var found: ?usize = null;
+                for (Components, 0..) |C, ci| {
+                    if (C == F.component_type) {
+                        found = ci;
+                        break;
+                    }
+                }
+                if (found == null) {
+                    @compileError(
+                        "Changed(" ++ @typeName(F.component_type) ++
+                            ") requires the same component in the Components tuple of the Query",
+                    );
+                }
+                arr[i] = found.?;
+                i += 1;
+            }
+        }
+        break :blk arr;
+    };
 
     return struct {
         const Self = @This();
@@ -145,6 +191,11 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         pub const with_types: [WCOUNT]type = W_TYPES;
         pub const without_types: [WOCOUNT]type = WO_TYPES;
         pub const predicate_fn: ?PredicateFn = PRED;
+        /// Per-Changed<T> filter, the index of T inside the
+        /// `Components` tuple. Empty for queries that do not use the
+        /// `Changed` filter. Resolved at comptime so the inner-loop
+        /// inspection stays branchless on this side.
+        pub const changed_component_indices: [CHCOUNT]usize = CH_COMPONENT_INDICES;
         pub const ChunkT = Chunk;
 
         /// One entry per matched archetype. `column_indices[i]` is the
@@ -156,6 +207,13 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         };
 
         matches: std.ArrayListUnmanaged(Match) = .empty,
+
+        /// Tick of the last run of this query. `Changed<T>` filters
+        /// compare `changed_tick[T][slot] > last_run_tick` to decide
+        /// per-slot inclusion. Callers update this between dispatches
+        /// (manual convention until the E5a scheduler introduces
+        /// system-level tracking).
+        last_run_tick: Tick = tick_mod.initial_tick,
 
         /// Construct an empty query — used as the no-allocation seed
         /// the world populates via `World.query` / `World.queryFiltered`.
@@ -250,13 +308,29 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
             return @ptrCast(@alignCast(&chunk.bytes[off]));
         }
 
-        /// Evaluate the optional per-slot predicate. Returns `true`
-        /// when no predicate was configured. Bodies that want
-        /// per-entity filtering call this inside their inner loop so
-        /// the comptime-known predicate can be inlined alongside the
-        /// hot-path work.
-        pub fn slotPasses(_: *const Self, archetype: *const Archetype, chunk: *Chunk, slot: u32) bool {
-            if (Self.predicate_fn) |f| return f(archetype, chunk, slot);
+        /// Evaluate the per-slot filters — the optional `Predicate(fn)`
+        /// from E3 and every `Changed<T>` filter from E4. Returns
+        /// `true` when no filters disqualify the slot. Bodies call
+        /// this inside their inner loop so the comptime-known filter
+        /// set inlines alongside the hot-path work.
+        ///
+        /// Caller must guarantee `archetype` owns `chunk` — typically
+        /// via `query.matchFor(chunk)` upstream of the slot loop.
+        pub fn slotPasses(self: *const Self, archetype: *const Archetype, chunk: *Chunk, slot: u32) bool {
+            if (Self.predicate_fn) |f| {
+                if (!f(archetype, chunk, slot)) return false;
+            }
+            if (Self.changed_component_indices.len > 0) {
+                // The match is needed to recover the archetype's
+                // column index for each Changed<T> filter.
+                const match = self.matchFor(chunk) orelse return false;
+                inline for (Self.changed_component_indices) |ci| {
+                    const col = match.column_indices[ci];
+                    if (archetype.changedTick(chunk, col, slot) <= self.last_run_tick) {
+                        return false;
+                    }
+                }
+            }
             return true;
         }
 
