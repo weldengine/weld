@@ -1,11 +1,17 @@
-//! S1 ECS iteration benchmark.
+//! ECS benchmark — Phase 0 entry point.
 //!
-//! Drives 100 000 entities × 1000 measured iterations after 100 warm-up
-//! iterations through the comptime-generated `(*Transform, *Velocity)` query
-//! and the 4-worker Chase-Lev scheduler. Output is a single Markdown report
-//! at `zig-out/bench/ecs_iteration.md` containing machine config, build mode,
+//! Currently hosts the **S1 non-regression case** inherited from
+//! `bench/ecs_iteration.zig` (renamed in M0.1 / E1 per
+//! `briefs/M0.1-ecs-full.md`): 100 000 entities × 1 archetype × 1000
+//! measured iterations after 100 warm-up iterations through the
+//! comptime-generated `(*Transform, *Velocity)` query and the work-stealing
+//! scheduler. Output is a single Markdown report at
+//! `zig-out/bench/ecs_benchmark.md` containing machine config, build mode,
 //! per-mode timing distribution, per-worker stats, load imbalance, and a
 //! GO/NO-GO verdict against the 1.0 ms median ReleaseSafe gate.
+//!
+//! M0.1 / E7 will extend this file with the C0.1 1 M × 4 archetypes × 10
+//! systems case alongside the S1 non-regression baseline.
 //!
 //! ## Locked iteration body (re-used by every measurement and by the smoke
 //! ## paths in `src/main.zig` and `tests/ecs/no_alloc_in_simulation_test.zig`)
@@ -117,7 +123,7 @@ fn writeReport(io: std.Io, ctx: ReportContext) !void {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    var file = try dir.createFile(io, "zig-out/bench/ecs_iteration.md", .{});
+    var file = try dir.createFile(io, "zig-out/bench/ecs_benchmark.md", .{});
     defer file.close(io);
 
     var buf: [8192]u8 = undefined;
@@ -239,7 +245,7 @@ fn writeSmokeReport(io: std.Io) !void {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    var file = try dir.createFile(io, "zig-out/bench/ecs_iteration.md", .{});
+    var file = try dir.createFile(io, "zig-out/bench/ecs_benchmark.md", .{});
     defer file.close(io);
 
     var buf: [256]u8 = undefined;

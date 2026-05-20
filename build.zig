@@ -382,15 +382,19 @@ pub fn build(b: *std.Build) void {
     fuzz_1h_step.dependOn(&fuzz_1h_run.step);
 
     // ----------------------------------------------------- ECS bench step --
+    //
+    // M0.1 / E1 renamed `bench/ecs_iteration.zig` → `bench/ecs_benchmark.zig`
+    // (file rename only — content stays the S1 non-regression case until
+    // E7 extends it with the C0.1 1 M × 4 archetypes × 10 systems case).
 
     const bench_module = b.createModule(.{
-        .root_source_file = b.path("bench/ecs_iteration.zig"),
+        .root_source_file = b.path("bench/ecs_benchmark.zig"),
         .target = target,
         .optimize = optimize,
     });
     bench_module.addImport("weld_core", core_module);
     const bench_exe = b.addExecutable(.{
-        .name = "ecs-iteration-bench",
+        .name = "ecs-benchmark",
         .root_module = bench_module,
     });
     b.installArtifact(bench_exe);
@@ -400,7 +404,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| bench_run.addArgs(args);
     const bench_step = b.step(
         "bench-ecs",
-        "Run the S1 ECS iteration bench (pass `-- --smoke` for a CI sanity run)",
+        "Run the ECS benchmark (S1 non-regression case; pass `-- --smoke` for a CI sanity run)",
     );
     bench_step.dependOn(&bench_run.step);
 
