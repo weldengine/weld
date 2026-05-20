@@ -30,10 +30,13 @@ const std = @import("std");
 const chunk_mod = @import("chunk.zig");
 const registry_mod = @import("registry.zig");
 const entity_mod = @import("entity.zig");
+const tick_mod = @import("tick.zig");
+const change_detection = @import("change_detection.zig");
 
 const ComponentId = registry_mod.ComponentId;
 const Registry = registry_mod.Registry;
 const EntityId = entity_mod.EntityId;
+const Tick = tick_mod.Tick;
 
 /// Re-export of `chunk.ChunkSize` — 16 KiB locked per S1.
 pub const ChunkSize = chunk_mod.ChunkSize;
@@ -188,6 +191,8 @@ pub const Archetype = struct {
         gpa.free(self.sizes);
         gpa.free(self.aligns);
         gpa.free(self.layout.component_offsets);
+        gpa.free(self.layout.added_tick_offsets);
+        gpa.free(self.layout.changed_tick_offsets);
         self.transitions.deinit(gpa);
         self.* = undefined;
     }
@@ -228,8 +233,11 @@ pub const Archetype = struct {
     /// Reserve a slot in the trailing chunk (allocating a new chunk when
     /// the current one is full) without writing any component data. The
     /// caller is responsible for filling the slot's component columns
-    /// and the entity-id slot before any iteration touches them.
-    pub fn allocateSlot(self: *Archetype, gpa: std.mem.Allocator) ArchetypeError!SpawnResult {
+    /// and the entity-id slot before any iteration touches them. The
+    /// per-component `added_tick[col][slot]` and `changed_tick[col][slot]`
+    /// sidecars are initialised to `tick`, and the slot's dirty bit is
+    /// set — the entity is "fresh" for the current frame.
+    pub fn allocateSlot(self: *Archetype, gpa: std.mem.Allocator, tick: Tick) ArchetypeError!SpawnResult {
         const chunk = blk: {
             if (self.chunks.items.len > 0) {
                 const last = self.chunks.items[self.chunks.items.len - 1];
@@ -240,6 +248,19 @@ pub const Archetype = struct {
         const hdr = chunk.header();
         const slot = hdr.entity_count;
         hdr.entity_count = slot + 1;
+
+        // Stamp every component's sidecars at the new slot.
+        for (self.component_ids, 0..) |_, i| {
+            const added = chunk.addedTickColumn(&self.layout, i);
+            const changed = chunk.changedTickColumn(&self.layout, i);
+            added[slot] = tick;
+            changed[slot] = tick;
+        }
+        // A freshly appended slot is considered dirty for the current
+        // frame so first-frame `Changed<T>` queries pick it up before
+        // any write occurs.
+        change_detection.setDirty(chunk.dirtyBitset(&self.layout), slot);
+
         return .{
             .chunk_idx = @intCast(self.chunks.items.len - 1),
             .slot = slot,
@@ -247,16 +268,19 @@ pub const Archetype = struct {
     }
 
     /// Append a fresh entity initialised from the registry's default
-    /// bytes for every component. Returns the assigned location.
-    /// Mirrors the original `archetype_dynamic.DynamicArchetype.spawnDefault`
-    /// 1:1 so the S4 Etch path and the runtime-query tests keep working
-    /// through the `archetype_dynamic.zig` re-export.
+    /// bytes for every component. The `tick` parameter stamps both
+    /// `added_tick` and `changed_tick` sidecars and is propagated by
+    /// callers from `World.current_tick`. Mirrors the pre-E4
+    /// `spawnDefault` shape with one extra `Tick` argument — the S4
+    /// Etch path and the runtime-query tests pass through via the
+    /// `archetype_dynamic.zig` re-export.
     pub fn spawnDefault(
         self: *Archetype,
         gpa: std.mem.Allocator,
         entity_id: EntityId,
+        tick: Tick,
     ) ArchetypeError!SpawnResult {
-        const r = try self.allocateSlot(gpa);
+        const r = try self.allocateSlot(gpa, tick);
         const chunk = self.chunks.items[r.chunk_idx];
 
         for (self.component_ids, 0..) |id, i| {
@@ -270,15 +294,17 @@ pub const Archetype = struct {
     /// Append a fresh entity initialised from caller-provided byte
     /// slices. `bytes_per_component[i]` must be exactly `sizes[i]` bytes
     /// long and corresponds to `component_ids[i]` (caller orders the
-    /// slices using `componentIndex`).
+    /// slices using `componentIndex`). The `tick` parameter stamps the
+    /// per-component sidecars.
     pub fn appendRowFromBytes(
         self: *Archetype,
         gpa: std.mem.Allocator,
         entity_id: EntityId,
         bytes_per_component: []const []const u8,
+        tick: Tick,
     ) ArchetypeError!SpawnResult {
         std.debug.assert(bytes_per_component.len == self.component_ids.len);
-        const r = try self.allocateSlot(gpa);
+        const r = try self.allocateSlot(gpa, tick);
         const chunk = self.chunks.items[r.chunk_idx];
 
         for (self.component_ids, 0..) |_, i| {
@@ -294,7 +320,10 @@ pub const Archetype = struct {
     /// `EntityId` of the trailing entity that moved into the freed slot,
     /// or `null` when the freed slot was already the trailing slot of
     /// its chunk. Caller updates the swapped entity's location entry
-    /// against `(self.archetype_id, chunk_idx, slot)`.
+    /// against `(self.archetype_id, chunk_idx, slot)`. The per-component
+    /// `added_tick` / `changed_tick` sidecars travel with the entity,
+    /// and the dirty bit at `slot` inherits the trailing slot's bit so
+    /// the change-detection semantics survive the swap.
     pub fn removeSwap(self: *Archetype, chunk_idx: u32, slot: u32) ?EntityId {
         const chunk = self.chunks.items[chunk_idx];
         const hdr = chunk.header();
@@ -304,12 +333,31 @@ pub const Archetype = struct {
             hdr.entity_count = last;
             return null;
         }
-        // Copy each component column's `last` byte slot into `slot`.
+        // Copy each component column's `last` byte slot into `slot`,
+        // plus the matching `added_tick` / `changed_tick` entries.
         for (self.component_ids, 0..) |_, i| {
             const dst = self.componentSlot(chunk, i, slot);
             const src = self.componentSlot(chunk, i, last);
             @memcpy(dst, src);
+
+            const added = chunk.addedTickColumn(&self.layout, i);
+            added[slot] = added[last];
+            const changed = chunk.changedTickColumn(&self.layout, i);
+            changed[slot] = changed[last];
         }
+        // Carry the dirty bit so a `Changed<T>` query that was about
+        // to inspect the trailing slot still treats the relocated
+        // entity as dirty.
+        const bitset = chunk.dirtyBitset(&self.layout);
+        if (change_detection.isDirty(bitset, last)) {
+            change_detection.setDirty(bitset, slot);
+        } else {
+            // Clear the destination bit so we don't carry stale state.
+            const word_idx: usize = @intCast(slot / 64);
+            const bit_idx: u6 = @intCast(slot % 64);
+            bitset[word_idx] &= ~(@as(u64, 1) << bit_idx);
+        }
+
         const ids = self.entityIds(chunk);
         const moved_id = ids[last];
         ids[slot] = moved_id;
@@ -350,6 +398,47 @@ pub const Archetype = struct {
 
     pub fn entityIdsConst(self: *const Archetype, chunk: *const Chunk) [*]const EntityId {
         return @ptrCast(@alignCast(&chunk.bytes[self.layout.entity_ids_offset]));
+    }
+
+    // ─── M0.1 / E4 change-detection helpers ─────────────────────────────
+
+    /// Mark `(comp_idx, slot)` as modified at `tick`. Writes the
+    /// `changed_tick` sidecar and sets the slot's dirty bit so chunk-
+    /// granularity skip checks pick it up. `added_tick` is left alone.
+    pub fn markChanged(self: *const Archetype, chunk: *Chunk, comp_idx: usize, slot: u32, tick: Tick) void {
+        const changed = chunk.changedTickColumn(&self.layout, comp_idx);
+        changed[slot] = tick;
+        change_detection.setDirty(chunk.dirtyBitset(&self.layout), slot);
+    }
+
+    /// Read the `added_tick[comp_idx][slot]` value — the tick at which
+    /// the component was first attached to its current owner entity.
+    pub fn addedTick(self: *const Archetype, chunk: *const Chunk, comp_idx: usize, slot: u32) Tick {
+        const col = chunk.addedTickColumnConst(&self.layout, comp_idx);
+        return col[slot];
+    }
+
+    /// Read the `changed_tick[comp_idx][slot]` value — the tick of
+    /// the most recent write via `World.get_mut(T)` (or `markChanged`).
+    pub fn changedTick(self: *const Archetype, chunk: *const Chunk, comp_idx: usize, slot: u32) Tick {
+        const col = chunk.changedTickColumnConst(&self.layout, comp_idx);
+        return col[slot];
+    }
+
+    /// `true` iff every slot in `chunk` has a zero dirty bit. Used by
+    /// `Changed<T>`-filtered queries to skip an entire chunk before
+    /// inspecting any slot.
+    pub fn isChunkClean(self: *const Archetype, chunk: *const Chunk) bool {
+        return change_detection.isAllZero(chunk.dirtyBitsetConst(&self.layout));
+    }
+
+    /// Reset every chunk's dirty bitset to all-zero. Called by
+    /// `World.beginFrame` once per frame so the bit only carries
+    /// "modified since the start of the current frame" semantics.
+    pub fn clearAllDirtyBitsets(self: *Archetype) void {
+        for (self.chunks.items) |chunk| {
+            change_detection.clearAll(chunk.dirtyBitset(&self.layout));
+        }
     }
 };
 
@@ -394,9 +483,9 @@ test "removeSwap returns the swapped entity id and leaves the chunk consistent" 
     const b_pos: Pos = .{ .x = 2, .y = 0 };
     const c_pos: Pos = .{ .x = 3, .y = 0 };
 
-    _ = try arch.appendRowFromBytes(gpa, a_id, &.{std.mem.asBytes(&a_pos)});
-    _ = try arch.appendRowFromBytes(gpa, b_id, &.{std.mem.asBytes(&b_pos)});
-    _ = try arch.appendRowFromBytes(gpa, c_id, &.{std.mem.asBytes(&c_pos)});
+    _ = try arch.appendRowFromBytes(gpa, a_id, &.{std.mem.asBytes(&a_pos)}, 0);
+    _ = try arch.appendRowFromBytes(gpa, b_id, &.{std.mem.asBytes(&b_pos)}, 0);
+    _ = try arch.appendRowFromBytes(gpa, c_id, &.{std.mem.asBytes(&c_pos)}, 0);
 
     // Remove the middle — `c` migrates into slot 1.
     const swapped = arch.removeSwap(0, 1);
