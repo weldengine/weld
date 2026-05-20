@@ -1,21 +1,29 @@
-//! S1 root `World` — owns the single `(Transform, Velocity)` archetype and
-//! exposes `spawn` / `despawn` / `query`. S4 extends the same struct with
-//! a runtime `Registry`, a `ResourceStore`, and a list of dynamic
-//! archetypes, plus the methods enumerated in
-//! `briefs/S4-etch-tree-walking-interpreter.md` Tier 0 ECS extensions —
-//! all additive; the S1 comptime path is untouched.
+//! Tier 0 root `World` — owns the S1 `(Transform, Velocity)` archetype, the
+//! S4 dynamic archetypes, the runtime `Registry`, and the `ResourceStore`,
+//! and the M0.1 / E1 generational `EntityIdentityStore` that gives all of
+//! the above a coherent, leak-detecting identity.
 //!
-//! The world keeps a flat `AutoHashMapUnmanaged(EntityId, Location)` so that
-//! despawn can locate any entity in O(1) and update the mapping for the
-//! entity that swap-and-pop moves into the freed slot. No generational
-//! indices, no FreeList — both are explicitly out-of-scope for S1.
-//! Phase 0.1 will generalise this to multi-archetype storage with proper
-//! generational indices; the current shape is the minimum needed to spawn
-//! 100 000 entities, iterate them once per frame, and despawn them without
-//! leaks (cf. `briefs/S1-mini-ecs.md` Out-of-scope).
+//! Identity vs storage. The `identity` store owns the per-slot
+//! `(generation, alive)` table plus the free-index stack shared by both
+//! spawn paths. The two location maps (`entity_locations` for the S1
+//! comptime archetype, `dynamic_locations` for the S4 dynamic archetypes)
+//! remain `AutoHashMapUnmanaged(EntityId, Location)` keyed by the new
+//! packed `EntityId` — generation now travels with the key, so the maps
+//! reject stale handles for free.
+//!
+//! Despawn is the only structural mutation routed through the identity
+//! store. It validates the handle's generation, removes the entity from
+//! its archetype via swap-and-pop, updates the location of the entity that
+//! moved into the freed chunk slot, then releases the identity slot (which
+//! bumps the generation and pushes the index onto the free list). The S4
+//! dynamic-side despawn is wired separately in E2 (generalised storage);
+//! the E1 surface only handles the S1 path because the bench non-regression
+//! workload (100 k entities × 1 archetype) and the new
+//! `tests/ecs/generational_indices.zig` only exercise the static path.
 
 const std = @import("std");
 const components = @import("components.zig");
+const entity_mod = @import("entity.zig");
 const archetype_mod = @import("archetype.zig");
 const query_mod = @import("query.zig");
 
@@ -31,8 +39,12 @@ pub const Transform = components.Transform;
 /// Public surface mirror of `Transform`, same rationale.
 pub const Velocity = components.Velocity;
 /// Public alias so consumers can declare `EntityId` parameters
-/// without taking a dependency on `components.zig`.
+/// without taking a dependency on `components.zig`. Same packed
+/// `(index, generation)` shape as the canonical type in `entity.zig`.
 pub const EntityId = components.EntityId;
+/// Errors surfaced by `World.despawn` and friends. Re-exported here so
+/// consumers do not need to reach into `entity.zig` directly.
+pub const WorldError = entity_mod.WorldError;
 
 // Comptime list of the static-side archetype's component types.
 // Private because the comptime instantiation it drives (`Archetype`,
@@ -53,6 +65,7 @@ const FieldKind = registry_mod.FieldKind;
 const DynamicArchetype = arch_dyn_mod.DynamicArchetype;
 const ResourceStore = resources_mod.ResourceStore;
 const RuntimeQuery = query_runtime_mod.RuntimeQuery;
+const EntityIdentityStore = entity_mod.EntityIdentityStore;
 
 /// Location inside the dynamic side of the world: which dynamic archetype,
 /// which chunk inside it, which slot inside the chunk. Distinct from the
@@ -65,14 +78,19 @@ pub const DynamicLocation = struct {
 };
 
 /// Top-level ECS world — holds the static S1 archetype, the dynamic
-/// S4 archetypes, the runtime component registry, and the resource
-/// store. Owns all entity storage and resolves both comptime and
-/// runtime queries.
+/// S4 archetypes, the runtime component registry, the resource store,
+/// and the M0.1 / E1 generational identity store.
 pub const World = struct {
-    // ── S1 comptime path (unchanged) ──
+    // ── Shared identity (M0.1 / E1) ──
+    /// Generational identity store driving every spawn / despawn across
+    /// both the S1 comptime path and the S4 dynamic path. A single store
+    /// guarantees that the `(index, generation)` halves of an `EntityId`
+    /// stay unique world-wide.
+    identity: EntityIdentityStore,
+
+    // ── S1 comptime path ──
     archetype: Archetype,
     entity_locations: std.AutoHashMapUnmanaged(EntityId, Location),
-    next_entity_id: u64,
 
     // ── S4 dynamic path ──
     /// Runtime component / resource type registry. Initialised lazily on
@@ -84,17 +102,17 @@ pub const World = struct {
     /// stable pointers survive `archetypes.append`.
     archetypes: std.ArrayListUnmanaged(*DynamicArchetype),
     /// Per-entity location map for entities spawned via `spawnDynamic`.
-    /// Kept separate from `entity_locations` so the two paths cannot
-    /// accidentally collide; ids still share `next_entity_id`.
+    /// Kept separate from `entity_locations` so the two storage paths
+    /// remain easy to distinguish; identity is shared via `identity`.
     dynamic_locations: std.AutoHashMapUnmanaged(EntityId, DynamicLocation),
     /// Resource store keyed by `ComponentId`.
     resources: ResourceStore,
 
     pub fn init() World {
         return .{
+            .identity = EntityIdentityStore.init(),
             .archetype = Archetype.init(0),
             .entity_locations = .empty,
-            .next_entity_id = 0,
             .registry = Registry.init(),
             .archetypes = .empty,
             .dynamic_locations = .empty,
@@ -114,41 +132,63 @@ pub const World = struct {
         self.dynamic_locations.deinit(gpa);
         self.resources.deinit(gpa);
         self.registry.deinit(gpa);
+        self.identity.deinit(gpa);
         self.* = undefined;
     }
 
-    // ─── S1 comptime API (unchanged) ──────────────────────────────────────
+    // ─── S1 comptime API ─────────────────────────────────────────────────
 
-    /// Spawn an entity with the given component values. Returns its id.
+    /// Spawn an entity with the given component values. The entity id is
+    /// drawn from the generational identity store — recycled slots reuse a
+    /// previously-freed index with an incremented generation.
     pub fn spawn(
         self: *World,
         gpa: std.mem.Allocator,
         transform: Transform,
         velocity: Velocity,
     ) !EntityId {
-        const id: EntityId = self.next_entity_id;
-        self.next_entity_id += 1;
+        // Ensure the location map can absorb one more entry before we
+        // reserve identity, so a put failure can't leave a live slot
+        // without a backing location entry.
+        try self.entity_locations.ensureUnusedCapacity(gpa, 1);
+        const id = try self.identity.allocate(gpa);
+        errdefer self.identity.release(gpa, id) catch {};
         const location = try self.archetype.append(gpa, id, .{ transform, velocity });
-        try self.entity_locations.put(gpa, id, location);
+        // `ensureUnusedCapacity` above guarantees this never allocates.
+        self.entity_locations.putAssumeCapacity(id, location);
         return id;
     }
 
-    /// Despawn an entity. The entity must have been spawned and not yet
-    /// despawned (S1 has no generational checks — the caller is responsible).
-    /// Despawning an unknown id is a programmer error and panics in every
-    /// build mode (Phase 0.1 will replace this with a generational-index
-    /// check that returns a dedicated error).
-    pub fn despawn(self: *World, id: EntityId) void {
-        const location = self.entity_locations.get(id) orelse @panic("despawn of unknown entity id");
+    /// Despawn an entity by handle. Returns `error.StaleEntityHandle`
+    /// when the handle's index is unknown, the slot is already freed, or
+    /// the generation does not match — the caller can distinguish a
+    /// genuine bug from a benign late despawn that way. The corresponding
+    /// chunk slot is swap-and-popped; if another entity moves into the
+    /// freed slot, its location map entry is updated atomically. The
+    /// identity slot is bumped and pushed onto the free list last so any
+    /// outstanding handle to the despawned entity becomes stale.
+    pub fn despawn(self: *World, gpa: std.mem.Allocator, id: EntityId) WorldError!void {
+        try self.identity.validate(id);
+        const location = self.entity_locations.get(id) orelse return error.StaleEntityHandle;
         if (self.archetype.removeSwap(location)) |swapped_id| {
-            // The entity that was at the last slot has been moved to `location.slot`.
+            // The entity that was at the last slot has been moved to
+            // `location.slot`; rewrite its mapping so future lookups
+            // resolve to the new chunk slot.
             self.entity_locations.getPtr(swapped_id).?.* = location;
         }
         _ = self.entity_locations.remove(id);
+        try self.identity.release(gpa, id);
     }
 
     pub fn entityCount(self: *const World) usize {
         return self.entity_locations.count();
+    }
+
+    /// `true` if `id` refers to a live entity in this world (either spawn
+    /// path). Returns `false` for stale handles instead of erroring —
+    /// the caller picks the policy.
+    pub fn isLive(self: *const World, id: EntityId) bool {
+        return self.identity.isLive(id);
     }
 
     pub fn chunkCount(self: *const World) usize {
@@ -199,13 +239,19 @@ pub const World = struct {
 
     /// Spawn an entity in the dynamic side of the world. The slot is
     /// initialised from the registry's default bytes for every component
-    /// of the archetype. Returns the assigned id.
+    /// of the archetype. The entity id is drawn from the same generational
+    /// identity store as the S1 path, so the two never collide and slot
+    /// reuse on either side stays coherent.
     pub fn spawnDynamic(self: *World, gpa: std.mem.Allocator, component_ids: []const ComponentId) !EntityId {
-        const id: EntityId = self.next_entity_id;
-        self.next_entity_id += 1;
+        // Reserve the location-map slot first so a put failure can't strand
+        // a live identity slot without a backing location entry.
+        try self.dynamic_locations.ensureUnusedCapacity(gpa, 1);
+        const id = try self.identity.allocate(gpa);
+        errdefer self.identity.release(gpa, id) catch {};
         const arch = try self.getOrCreateDynamicArchetype(gpa, component_ids);
         const r = try arch.spawnDefault(gpa, id);
-        try self.dynamic_locations.put(gpa, id, .{
+        // `ensureUnusedCapacity` above guarantees this never allocates.
+        self.dynamic_locations.putAssumeCapacity(id, .{
             .archetype_idx = arch.archetype_id,
             .chunk_idx = r.chunk_idx,
             .slot = r.slot,
