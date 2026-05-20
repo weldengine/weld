@@ -6,7 +6,9 @@
 //! of the importing root, so this facade — sitting beside the corpus
 //! tree — is the only module allowed to bake the fixtures in.
 
-/// Embedded entry for a valid S3 corpus fixture — name + source bytes.
+/// One row of the valid-corpus table. `name` is the relative path
+/// under `corpus/valid/`; `source` is the `@embedFile`'d bytes
+/// already bound at build time so the test target needs no I/O.
 pub const Entry = struct {
     name: []const u8,
     source: []const u8,

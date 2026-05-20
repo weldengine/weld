@@ -24,40 +24,35 @@ const arch_dyn_mod = @import("archetype_dynamic.zig");
 const resources_mod = @import("resources.zig");
 const query_runtime_mod = @import("query_runtime.zig");
 
-/// Re-exports `components.Transform` — position component of the S1 archetype.
+/// Public surface for consumers that spawn `(Transform, Velocity)`
+/// entities without depending on `components.zig` directly — the
+/// canonical write path for the S1 archetype.
 pub const Transform = components.Transform;
-/// Re-exports `components.Velocity` — velocity component of the S1 archetype.
+/// Public surface mirror of `Transform`, same rationale.
 pub const Velocity = components.Velocity;
-/// Re-exports `components.EntityId` — `u64` entity handle.
+/// Public alias so consumers can declare `EntityId` parameters
+/// without taking a dependency on `components.zig`.
 pub const EntityId = components.EntityId;
 
-/// Comptime list of the static-side archetype's component types.
-/// Drives the SoA layout of `Archetype` and `Query` below.
-pub const archetype_components: []const type = &.{ Transform, Velocity };
-/// Comptime SoA archetype instantiation for `archetype_components`.
+// Comptime list of the static-side archetype's component types.
+// Private because the comptime instantiation it drives (`Archetype`,
+// `Query`) is the only surface anyone consumes.
+const archetype_components: []const type = &.{ Transform, Velocity };
+/// Public archetype handle for the S1 static path — consumers that
+/// drive the comptime SoA storage (bench harness, smoke test) need
+/// the instantiated type at their call sites, not the factory.
 pub const Archetype = archetype_mod.Archetype(archetype_components);
-/// Comptime query over the static archetype's component columns.
-pub const Query = query_mod.Query(archetype_components);
-/// Re-exports `archetype.Location` — `(chunk_idx, slot)` handle inside
-/// the static archetype.
-pub const Location = archetype_mod.Location;
+const Query = query_mod.Query(archetype_components);
+const Location = archetype_mod.Location;
 
-/// Re-exports `registry.Registry` — runtime component / resource type registry.
-pub const Registry = registry_mod.Registry;
-/// Re-exports `registry.ComponentId` — opaque runtime component type handle.
-pub const ComponentId = registry_mod.ComponentId;
-/// Re-exports `registry.ComponentDesc` — runtime description of a component type.
-pub const ComponentDesc = registry_mod.ComponentDesc;
-/// Re-exports `registry.FieldDesc` — runtime description of one component field.
-pub const FieldDesc = registry_mod.FieldDesc;
-/// Re-exports `registry.FieldKind` — closed enum of supported field primitive types.
-pub const FieldKind = registry_mod.FieldKind;
-/// Re-exports `archetype_dynamic.DynamicArchetype` — dynamic-side SoA archetype.
-pub const DynamicArchetype = arch_dyn_mod.DynamicArchetype;
-/// Re-exports `resources.ResourceStore` — runtime resource singleton store.
-pub const ResourceStore = resources_mod.ResourceStore;
-/// Re-exports `query_runtime.RuntimeQuery` — dynamic-side query handle.
-pub const RuntimeQuery = query_runtime_mod.RuntimeQuery;
+const Registry = registry_mod.Registry;
+const ComponentId = registry_mod.ComponentId;
+const ComponentDesc = registry_mod.ComponentDesc;
+const FieldDesc = registry_mod.FieldDesc;
+const FieldKind = registry_mod.FieldKind;
+const DynamicArchetype = arch_dyn_mod.DynamicArchetype;
+const ResourceStore = resources_mod.ResourceStore;
+const RuntimeQuery = query_runtime_mod.RuntimeQuery;
 
 /// Location inside the dynamic side of the world: which dynamic archetype,
 /// which chunk inside it, which slot inside the chunk. Distinct from the

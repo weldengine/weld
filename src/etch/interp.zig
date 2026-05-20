@@ -49,14 +49,6 @@ pub const RuntimeReport = struct {
     last_error: ?RuntimeError = null,
 };
 
-/// Error set surfaced by the interpreter.
-pub const InterpError = error{
-    UnsupportedConstruct,
-    InvalidProgram,
-    OutOfMemory,
-    DiagnosticsPresent,
-};
-
 const ResourceDep = struct {
     resource_id: ComponentId,
     must_be_changed: bool,

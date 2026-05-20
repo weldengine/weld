@@ -14,8 +14,7 @@
 const std = @import("std");
 const token = @import("token.zig");
 
-/// Re-exports `token.SourceSpan` — byte-range location inside an Etch source.
-pub const SourceSpan = token.SourceSpan;
+const SourceSpan = token.SourceSpan;
 
 /// Strongly typed entity handle. Mirrors `core/ecs/components.zig`'s
 /// `EntityId` (u64) but adds a sentinel for "absent" used by the bridge.

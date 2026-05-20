@@ -35,9 +35,7 @@ const emit_mod = @import("emit.zig");
 const type_map = @import("type_map.zig");
 const errors_mod = @import("errors.zig");
 
-/// Re-exports `errors.CodegenError` so call sites don't need to
-/// double-import the errors module alongside `lower`.
-pub const CodegenError = errors_mod.CodegenError;
+const CodegenError = errors_mod.CodegenError;
 const Writer = emit_mod.Writer;
 const AstArena = ast_mod.AstArena;
 const NodeId = ast_mod.NodeId;

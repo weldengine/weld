@@ -96,8 +96,7 @@ pub const ResolvedType = union(enum) {
 /// Symbol entry in the file-local symbol table built by pass 1.
 pub const SymbolKind = enum { component, resource, rule };
 
-/// One entry in the file-local symbol table — `(kind, name, item_id)`.
-pub const Symbol = struct {
+const Symbol = struct {
     kind: SymbolKind,
     name: StringId,
     item_id: NodeId,

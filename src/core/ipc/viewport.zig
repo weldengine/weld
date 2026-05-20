@@ -120,7 +120,9 @@ pub fn regionSize(width: u32, height: u32) usize {
     return header_size + slot_bytes * slot_count;
 }
 
-/// Error set for `ShmViewport` operations — composed with `shm.Error`.
+/// Surfaced by `ShmViewport.attach`; `InvalidHeader` covers the
+/// magic / version / size mismatch cases when a reader maps a shm
+/// segment that was not created as a viewport.
 pub const Error = error{
     InvalidHeader,
 } || shm.Error;

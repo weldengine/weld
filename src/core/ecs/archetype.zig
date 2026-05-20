@@ -15,8 +15,7 @@ const std = @import("std");
 const components = @import("components.zig");
 const chunk_mod = @import("chunk.zig");
 
-/// Re-exports `components.EntityId` — `u64` entity handle.
-pub const EntityId = components.EntityId;
+const EntityId = components.EntityId;
 
 /// Location of an entity within an archetype: chunk index in the archetype's
 /// chunk list, plus slot index within that chunk.

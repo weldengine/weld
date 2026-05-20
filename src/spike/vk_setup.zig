@@ -44,7 +44,10 @@ const shaders = @import("shaders");
 const triangle_vert_spv = shaders.triangle_vert_spv;
 const triangle_frag_spv = shaders.triangle_frag_spv;
 
-/// Error set surfaced by the S2 spike's Vulkan setup path.
+/// Surfaced by `Renderer.init` (which composes the spike's whole
+/// Vulkan initialisation pipeline). The variants map 1:1 to the
+/// init substeps in order: loader → instance → device → queue →
+/// surface → swapchain → pipeline.
 pub const SetupError = error{
     LoaderUnavailable,
     InstanceUnavailable,

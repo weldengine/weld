@@ -35,14 +35,10 @@ const std = @import("std");
 const archetype_mod = @import("../ecs/archetype.zig");
 const worker_mod = @import("worker.zig");
 
-/// Re-exports `worker.Job` — type-erased work unit pushed onto a worker deque.
-pub const Job = worker_mod.Job;
-/// Re-exports `worker.TrampolineFn` — typed trampoline signature called per job.
-pub const TrampolineFn = worker_mod.TrampolineFn;
-/// Re-exports `worker.Worker` — one work-stealing thread of the pool.
-pub const Worker = worker_mod.Worker;
-/// Re-exports `worker.WorkerStats` — atomic counters surfaced by each worker.
-pub const WorkerStats = worker_mod.WorkerStats;
+const Job = worker_mod.Job;
+const TrampolineFn = worker_mod.TrampolineFn;
+const Worker = worker_mod.Worker;
+const WorkerStats = worker_mod.WorkerStats;
 
 /// Number of worker threads in the S1 work-stealing pool. Hardcoded
 /// at 4 for the Phase −1 spike; CPU-topology detection lands in M0.1

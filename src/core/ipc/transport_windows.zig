@@ -80,9 +80,13 @@ const sys = struct {
     extern "kernel32" fn DisconnectNamedPipe(hNamedPipe: Handle) callconv(.winapi) Bool;
 };
 
-/// Native Windows pipe handle type for the named-pipe transport backend.
+/// Picked up by `transport.zig`'s comptime backend dispatch — must
+/// keep matching shape with `transport_posix.OsHandle` so call sites
+/// can treat the alias as opaque.
 pub const OsHandle = std.os.windows.HANDLE;
-/// Sentinel handle returned by Win32 when a pipe is closed or never opened.
+/// Sentinel for a closed / never-opened pipe; paired with the POSIX
+/// `-1` equivalent through `transport.zig`'s `invalid_handle`
+/// re-export.
 pub const invalid_handle: OsHandle = INVALID_HANDLE_VALUE;
 
 const Error = transport.Error;

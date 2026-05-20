@@ -11,12 +11,9 @@ const std = @import("std");
 const registry_mod = @import("registry.zig");
 const arch_mod = @import("archetype_dynamic.zig");
 
-/// Re-exports `registry.ComponentId` — opaque runtime component type handle.
-pub const ComponentId = registry_mod.ComponentId;
-/// Re-exports `archetype_dynamic.DynamicArchetype` — dynamic-side SoA archetype.
-pub const DynamicArchetype = arch_mod.DynamicArchetype;
-/// Re-exports `archetype_dynamic.Chunk` — 16 KiB aligned raw chunk buffer.
-pub const Chunk = arch_mod.Chunk;
+const ComponentId = registry_mod.ComponentId;
+const DynamicArchetype = arch_mod.DynamicArchetype;
+const Chunk = arch_mod.Chunk;
 
 /// Filter callback for the `has T { field == value }` form. Returns
 /// `true` to keep a slot. Compare against `RuntimeQuery.filter` —

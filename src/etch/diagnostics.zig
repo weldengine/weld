@@ -10,8 +10,7 @@
 const std = @import("std");
 const token = @import("token.zig");
 
-/// Re-exports `token.SourceSpan` — byte-range location inside an Etch source.
-pub const SourceSpan = token.SourceSpan;
+const SourceSpan = token.SourceSpan;
 
 /// Severity classes recognised by the S3 type-checker. The brief carves
 /// `error_` and `warning`; the wider catalogue (`note`, `hint`) is

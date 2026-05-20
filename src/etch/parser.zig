@@ -25,7 +25,9 @@ const Diagnostic = diag_mod.Diagnostic;
 const DiagnosticCode = diag_mod.DiagnosticCode;
 const Lexer = lexer_mod.Lexer;
 
-/// Error set for the Etch parser — first-error `ParseError` plus OOM.
+/// Returned by `parse` — `ParseError` is the recoverable variant
+/// (the diagnostic is on the result struct), `OutOfMemory` is fatal
+/// for the caller's arena.
 pub const ParseError = error{ ParseError, OutOfMemory };
 
 /// Container returned by `parse` — the populated arena plus at most

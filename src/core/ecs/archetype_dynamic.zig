@@ -11,17 +11,14 @@
 const std = @import("std");
 const registry_mod = @import("registry.zig");
 
-/// Re-exports `registry.ComponentId` — opaque runtime component type handle.
-pub const ComponentId = registry_mod.ComponentId;
-/// Re-exports `registry.Registry` — runtime component / resource type registry.
-pub const Registry = registry_mod.Registry;
+const ComponentId = registry_mod.ComponentId;
+const Registry = registry_mod.Registry;
 
-/// `u64` entity handle on the dynamic side. Independent of the S1
-/// `EntityId` re-export to keep the runtime path self-contained.
-pub const EntityId = u64;
-/// Sentinel `EntityId` that no live entity ever takes; used by the
-/// resource store and runtime queries to mark dead/empty slots.
-pub const invalid_entity: EntityId = std.math.maxInt(EntityId);
+// Local handle type — the dynamic path stays self-contained instead
+// of importing `components.EntityId`. Both are `u64`; the duplicate
+// declaration keeps the runtime registry / dynamic archetype free
+// of a `components.zig` dependency.
+const EntityId = u64;
 
 /// Chunk size — locked to 16 KiB to match S1 (cf. `core/ecs/chunk.zig`).
 pub const ChunkSize: usize = 16 * 1024;
@@ -41,7 +38,9 @@ pub const ChunkHeader = extern struct {
     _pad: u32 = 0,
 };
 
-/// Error set for `DynamicArchetype` construction and chunk operations.
+/// Surfaced by `DynamicArchetype.init`, `spawnDefault`, `allocChunk`
+/// and the standalone `chunkLayout` factory; the variants line up
+/// 1:1 with the failure modes each of those routines can hit.
 pub const ArchetypeError = error{
     EmptyComponentList,
     LayoutTooLarge,

@@ -41,12 +41,12 @@ comptime {
     _ = @import("tests/errors_test.zig");
 }
 
-/// Re-exports `errors.CodegenError` — closed set of codegen failures.
-pub const CodegenError = errors.CodegenError;
-/// Re-exports `lower.GenerateStats` — counters returned by the codegen.
+const CodegenError = errors.CodegenError;
+/// Returned by `generateToBuffer` and `generateToPath`. Surfaced at
+/// the module root so `tools/etch_cook` can declare it in function
+/// signatures without depending on the `lower.zig` internal path.
 pub const GenerateStats = lower.GenerateStats;
-/// Re-exports `cache.Hash` — xxHash digest used by the per-file cache.
-pub const Hash = cache.Hash;
+const Hash = cache.Hash;
 
 /// Result of `generateToPath` — stats, whether the cache hit, and the
 /// source hash so callers can persist it independently.

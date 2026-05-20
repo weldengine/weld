@@ -98,7 +98,9 @@ pub const TokenKind = enum {
     error_unknown_keyword,
 };
 
-/// One lexed token — `kind` plus the byte span it covers in the source.
+/// `span` is a byte range *into the original source buffer*, not an
+/// owned slice. Callers must keep the source alive for as long as
+/// any `Token` referencing it stays in use.
 pub const Token = struct {
     kind: TokenKind,
     span: SourceSpan,

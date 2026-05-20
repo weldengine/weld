@@ -93,7 +93,8 @@ pub const ComponentDesc = struct {
     fields: []const FieldDesc,
 };
 
-/// Error set for `Registry` mutations (registration paths).
+/// Surfaced by `Registry.registerComponent`, `registerComponentRaw`,
+/// and `registerAlias`; lookup paths never fail (return `?T`).
 pub const RegistryError = error{
     DuplicateComponent,
     OutOfMemory,

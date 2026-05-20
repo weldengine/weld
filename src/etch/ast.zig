@@ -26,8 +26,7 @@
 const std = @import("std");
 const token_mod = @import("token.zig");
 
-/// Re-exports `token.SourceSpan` — byte-range location inside an Etch source.
-pub const SourceSpan = token_mod.SourceSpan;
+const SourceSpan = token_mod.SourceSpan;
 
 // ─────────────────────────────── NodeId ─────────────────────────────────
 
@@ -319,8 +318,7 @@ pub const ResourceDecl = struct {
     annotations_len: u32,
 };
 
-/// Side-slab entry for one parameter of a `rule` declaration.
-pub const RuleParam = struct {
+const RuleParam = struct {
     name: StringId,
     type_node: NodeId,
 };
@@ -392,15 +390,13 @@ pub const AssignStmt = struct {
     value: NodeId, // expr
 };
 
-/// Side-slab entry for a binary expression.
-pub const BinaryExpr = struct {
+const BinaryExpr = struct {
     op: BinaryOp,
     lhs: NodeId,
     rhs: NodeId,
 };
 
-/// Side-slab entry for a prefix-unary expression.
-pub const UnaryExpr = struct {
+const UnaryExpr = struct {
     op: UnaryOp,
     operand: NodeId,
 };
@@ -411,14 +407,12 @@ pub const FieldAccessExpr = struct {
     field_name: StringId,
 };
 
-/// Side-slab entry for `entity.get(T)` / `entity.get_mut(T)`.
-pub const MethodGetExpr = struct {
+const MethodGetExpr = struct {
     receiver: NodeId,
     type_name: StringId,
 };
 
-/// Side-slab entry for a named type reference (`int`, `Health`, etc.).
-pub const NamedTypeNode = struct {
+const NamedTypeNode = struct {
     name: StringId,
 };
 
@@ -496,29 +490,25 @@ pub const AnnotationKind = enum {
 
 // ─────────────────────────────── MultiArrayList entries ─────────────────
 
-/// MultiArrayList row for an item node (top-level declaration).
-pub const Item = struct {
+const Item = struct {
     kind: ItemKind,
     data: u32,
     span: SourceSpan,
 };
 
-/// MultiArrayList row for a statement node.
-pub const Stmt = struct {
+const Stmt = struct {
     kind: StmtKind,
     data: u32,
     span: SourceSpan,
 };
 
-/// MultiArrayList row for an expression node.
-pub const Expr = struct {
+const Expr = struct {
     kind: ExprKind,
     data: u32,
     span: SourceSpan,
 };
 
-/// MultiArrayList row for a type node.
-pub const TypeNode = struct {
+const TypeNode = struct {
     kind: TypeNodeKind,
     data: u32,
     span: SourceSpan,

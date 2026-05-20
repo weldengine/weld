@@ -12,11 +12,11 @@
 const std = @import("std");
 const registry_mod = @import("registry.zig");
 
-/// Re-exports `registry.ComponentId` — the registry shares its id
-/// space between components and resources.
-pub const ComponentId = registry_mod.ComponentId;
+const ComponentId = registry_mod.ComponentId;
 
-/// Error set for `ResourceStore` mutations.
+/// Surfaced by `ResourceStore.addResource` and `removeResource`;
+/// the read paths (`getResource` / `getMutResource`) return `?[]u8`
+/// rather than failing through this set.
 pub const ResourceError = error{
     DuplicateResource,
     UnknownResource,
