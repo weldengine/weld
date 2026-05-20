@@ -18,6 +18,8 @@ pub const ecs = struct {
     pub const archetype = @import("ecs/archetype.zig");
     pub const query = @import("ecs/query.zig");
     pub const world = @import("ecs/world.zig");
+    // M0.1 / E5a — system scheduler (phase pipeline, mono-job).
+    pub const scheduler = @import("ecs/scheduler.zig");
     // S4 — runtime side: registry, dynamic archetype, resources, runtime query.
     pub const registry = @import("ecs/registry.zig");
     pub const archetype_dynamic = @import("ecs/archetype_dynamic.zig");
@@ -87,4 +89,6 @@ comptime {
     // so their inline tests are picked up by `zig build test`.
     _ = ecs.tick;
     _ = ecs.change_detection;
+    // M0.1 / E5a — pin the system scheduler.
+    _ = ecs.scheduler;
 }
