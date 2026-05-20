@@ -35,7 +35,9 @@ const Transform = weld_core.ecs.world.Transform;
 const Velocity = weld_core.ecs.world.Velocity;
 const Chunk = weld_core.ecs.world.Chunk;
 const Scheduler = weld_core.jobs.scheduler.Scheduler;
-const worker_count = weld_core.jobs.scheduler.worker_count;
+const SystemScheduler = weld_core.ecs.scheduler.SystemScheduler;
+const SystemContext = weld_core.ecs.scheduler.SystemContext;
+const Query = weld_core.ecs.world.Query;
 
 const NumEntities: u32 = 100_000;
 const WarmupIterations: u32 = 100;
@@ -47,10 +49,11 @@ const SecondaryTargetNs: u64 = 500_000; // 0.5 ms — recorded only
 const ImbalanceGate: f64 = 0.15;
 
 /// Locked iteration body. Reads the byte offsets of the Transform and
-/// Velocity columns from the dispatch args (resolved once per dispatch
-/// by `componentOffset` on the query view) and casts the chunk bytes
-/// to the typed SoA pointers. Mirrors the pre-E2 inner loop verbatim
-/// — only the way the typed pointers are recovered changed.
+/// Velocity columns from the dispatch args (resolved once at query
+/// construction by `componentOffset` on the query view) and casts the
+/// chunk bytes to the typed SoA pointers. Mirrors the pre-E2 inner
+/// loop verbatim — only the way the typed pointers are recovered
+/// changed.
 fn integrateChunk(chunk: *Chunk, transforms_off: u16, velocities_off: u16, dt: f32) void {
     const count = chunk.entityCount();
     const transforms: [*]Transform = @ptrCast(@alignCast(&chunk.bytes[transforms_off]));
@@ -62,6 +65,31 @@ fn integrateChunk(chunk: *Chunk, transforms_off: u16, velocities_off: u16, dt: f
         transforms[i].pos[1] += velocities[i].linear[1] * dt;
         transforms[i].pos[2] += velocities[i].linear[2] * dt;
     }
+}
+
+/// Cross-frame state shared by the M0.1 / E5a `integrateSystem` —
+/// stashes the query (built once, reused every dispatch) and the
+/// pre-resolved Transform / Velocity column offsets. Lives on the
+/// bench main stack frame and is forwarded to each `dispatchFrame`
+/// through `FrameContext.user`.
+const BenchState = struct {
+    query: *Query,
+    transforms_off: u16,
+    velocities_off: u16,
+};
+
+/// E5a system registered in the `.update` phase. Pulls its cached
+/// query + offsets from `ctx.frame.user`, hands the chunked work
+/// off to `ctx.jobs.dispatch`. The `dt` value comes from
+/// `ctx.frame.dt` so the bench's `1.0 / 60.0` constant flows
+/// through the system scheduler instead of being captured directly.
+fn integrateSystem(ctx: SystemContext) anyerror!void {
+    const state: *BenchState = @ptrCast(@alignCast(ctx.frame.user.?));
+    ctx.jobs.dispatch(state.query, integrateChunk, .{
+        state.transforms_off,
+        state.velocities_off,
+        ctx.frame.dt,
+    });
 }
 
 fn spawnEntities(world: *World, gpa: std.mem.Allocator, n: u32) !void {
@@ -115,9 +143,13 @@ fn computeImbalance(snapshots: []const weld_core.jobs.worker.WorkerStats.Snapsho
 
 const ReportContext = struct {
     distribution: Distribution,
-    worker_stats: [worker_count]weld_core.jobs.worker.WorkerStats.Snapshot,
+    /// Per-worker stats — M0.1 / E5a makes the worker count
+    /// runtime-derived, so this is a slice instead of a fixed-size
+    /// `[worker_count]` array. Caller owns the slice.
+    worker_stats: []const weld_core.jobs.worker.WorkerStats.Snapshot,
     imbalance: f64,
     total_chunks: usize,
+    worker_count: usize,
     cpu_count: usize,
     total_ram_bytes: u64,
 };
@@ -188,7 +220,7 @@ fn writeReport(io: std.Io, ctx: ReportContext) !void {
             @tagName(builtin.mode),
             NumEntities,
             ctx.total_chunks,
-            worker_count,
+            ctx.worker_count,
             WarmupIterations,
             MeasuredIterations,
             ctx.distribution.min,
@@ -282,7 +314,7 @@ pub fn main(init: std.process.Init) !void {
 
     var sched = try Scheduler.init(gpa, init.io);
     try sched.start();
-    defer sched.deinit();
+    defer sched.deinit(gpa);
 
     // The E3 query owns a heap-allocated matches list — `defer` frees
     // it once the bench loop returns. Bench builds the query once and
@@ -290,14 +322,26 @@ pub fn main(init: std.process.Init) !void {
     var query = try world.query(gpa);
     defer query.deinit(gpa);
     const dt: f32 = 1.0 / 60.0;
-    // The byte offsets of Transform / Velocity in the (Transform,
-    // Velocity) archetype are stable for the world's lifetime — resolve
-    // them once and pass through the dispatch args.
-    const transforms_off = query.componentOffset(0);
-    const velocities_off = query.componentOffset(1);
+    // M0.1 / E5a — drive the dispatch through the new SystemScheduler.
+    // The integrateSystem reads its cached query + column offsets from
+    // `ctx.frame.user`, dispatched once per `dispatchFrame` in the
+    // `.update` phase. World.beginFrame runs inside each
+    // `dispatchFrame` call.
+    var bench_state = BenchState{
+        .query = &query,
+        .transforms_off = query.componentOffset(0),
+        .velocities_off = query.componentOffset(1),
+    };
+    var sys_sched = SystemScheduler.init();
+    defer sys_sched.deinit(gpa);
+    try sys_sched.registerSystem(gpa, .{
+        .phase = .update,
+        .name = "bench_integrate",
+        .run = integrateSystem,
+    });
 
     if (smoke) {
-        sched.dispatch(&query, integrateChunk, .{ transforms_off, velocities_off, dt });
+        try sys_sched.dispatchFrame(&world, gpa, init.io, &sched, dt, &bench_state);
         try writeSmokeReport(init.io);
         return;
     }
@@ -305,7 +349,7 @@ pub fn main(init: std.process.Init) !void {
     // Warm-up.
     var i: u32 = 0;
     while (i < WarmupIterations) : (i += 1) {
-        sched.dispatch(&query, integrateChunk, .{ transforms_off, velocities_off, dt });
+        try sys_sched.dispatchFrame(&world, gpa, init.io, &sched, dt, &bench_state);
     }
 
     sched.resetStats();
@@ -316,15 +360,16 @@ pub fn main(init: std.process.Init) !void {
     i = 0;
     while (i < MeasuredIterations) : (i += 1) {
         const t0 = std.Io.Clock.now(.awake, init.io);
-        sched.dispatch(&query, integrateChunk, .{ transforms_off, velocities_off, dt });
+        try sys_sched.dispatchFrame(&world, gpa, init.io, &sched, dt, &bench_state);
         const t1 = std.Io.Clock.now(.awake, init.io);
         const elapsed = t0.durationTo(t1).nanoseconds;
         samples[i] = @intCast(@max(@as(i96, 0), elapsed));
     }
 
     const distribution = computeDistribution(samples);
-    const worker_stats = sched.snapshotStats();
-    const imbalance = computeImbalance(&worker_stats);
+    const worker_stats = try sched.snapshotStats(gpa);
+    defer gpa.free(worker_stats);
+    const imbalance = computeImbalance(worker_stats);
 
     const cpu_count = std.Thread.getCpuCount() catch 0;
     const ram_bytes = std.process.totalSystemMemory() catch 0;
@@ -334,6 +379,7 @@ pub fn main(init: std.process.Init) !void {
         .worker_stats = worker_stats,
         .imbalance = imbalance,
         .total_chunks = world.chunkCount(),
+        .worker_count = sched.workerCount(),
         .cpu_count = cpu_count,
         .total_ram_bytes = ram_bytes,
     });
