@@ -86,8 +86,51 @@ pub fn collectZigFiles(
 }
 
 fn isIgnoredPath(path: []const u8) bool {
+    // The ignore list is written with forward slashes for readability;
+    // Zig's `std.fs.path.sep` is `\` on Windows, so a raw substring
+    // match would miss `tests\lint\bad\...`. Compare segment-by-segment
+    // instead, which works on both POSIX and Win32 walker output.
     for (ignored_path_substrings) |needle| {
-        if (std.mem.indexOf(u8, path, needle)) |_| return true;
+        if (pathContainsSegments(path, needle)) return true;
+    }
+    return false;
+}
+
+/// True iff `haystack`, split on `std.fs.path.sep`, contains the
+/// `/`-separated segments of `needle` as a contiguous subsequence.
+fn pathContainsSegments(haystack: []const u8, needle: []const u8) bool {
+    var needle_segs_buf: [8][]const u8 = undefined;
+    var needle_segs: [][]const u8 = needle_segs_buf[0..0];
+    var needle_it = std.mem.splitScalar(u8, needle, '/');
+    while (needle_it.next()) |seg| {
+        if (seg.len == 0) continue;
+        if (needle_segs.len >= needle_segs_buf.len) return false;
+        needle_segs_buf[needle_segs.len] = seg;
+        needle_segs = needle_segs_buf[0 .. needle_segs.len + 1];
+    }
+    if (needle_segs.len == 0) return false;
+
+    var hay_segs_buf: [32][]const u8 = undefined;
+    var hay_segs: [][]const u8 = hay_segs_buf[0..0];
+    var hay_it = std.mem.splitScalar(u8, haystack, std.fs.path.sep);
+    while (hay_it.next()) |seg| {
+        if (seg.len == 0) continue;
+        if (hay_segs.len >= hay_segs_buf.len) break;
+        hay_segs_buf[hay_segs.len] = seg;
+        hay_segs = hay_segs_buf[0 .. hay_segs.len + 1];
+    }
+
+    if (hay_segs.len < needle_segs.len) return false;
+    var start: usize = 0;
+    while (start + needle_segs.len <= hay_segs.len) : (start += 1) {
+        var ok = true;
+        for (needle_segs, 0..) |ns, j| {
+            if (!std.mem.eql(u8, ns, hay_segs[start + j])) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) return true;
     }
     return false;
 }
