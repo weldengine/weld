@@ -49,7 +49,8 @@ test "split-over-chunks dispatch covers every chunk" {
         .archetype_id_mismatch = &archetype_id_mismatch,
     };
 
-    var query = world.query();
+    var query = try world.query(gpa);
+    defer query.deinit(gpa);
     sched.dispatch(&query, recordVisit, .{&ctx});
 
     try std.testing.expectEqual(@as(u32, @intCast(chunk_count)), counter.load(.acquire));
@@ -91,7 +92,8 @@ test "scheduler returns only after all work is done" {
     var saw: std.atomic.Value(u32) = .init(0);
     var ctx: SlowCtx = .{ .completed = &completed, .saw_value = &saw };
 
-    var query = world.query();
+    var query = try world.query(gpa);
+    defer query.deinit(gpa);
     const expected: u32 = @intCast(query.chunkCount());
     sched.dispatch(&query, slowJob, .{&ctx});
 

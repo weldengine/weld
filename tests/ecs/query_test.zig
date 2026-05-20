@@ -22,7 +22,8 @@ test "query visits every spawned entity exactly once" {
     }
 
     var counter: u32 = 0;
-    var query = world.query();
+    var query = try world.query(gpa);
+    defer query.deinit(gpa);
     query.forEachChunk(countChunk, .{&counter});
     try std.testing.expectEqual(N, counter);
 }
@@ -56,7 +57,8 @@ test "writes through query persist across iterations" {
         _ = try world.spawn(gpa, Transform{}, Velocity{});
     }
 
-    var query = world.query();
+    var query = try world.query(gpa);
+    defer query.deinit(gpa);
     const transforms_off = query.componentOffset(0);
     query.forEachChunk(writeKnown, .{ transforms_off, @as(f32, 7.5) });
 

@@ -35,10 +35,16 @@ test "1000 query iterations allocate zero bytes after init" {
         _ = try world.spawn(gpa, Transform{}, Velocity{});
     }
 
-    const before = counting.snapshot();
-    var query = world.query();
+    // E3 queries own a heap-allocated matches list — build the query
+    // BEFORE the snapshot window so its construction allocation does
+    // not count as steady-state. The dispatch loop itself stays
+    // allocation-free.
+    var query = try world.query(gpa);
+    defer query.deinit(gpa);
     const transforms_off = query.componentOffset(0);
     const velocities_off = query.componentOffset(1);
+
+    const before = counting.snapshot();
     var iter: u32 = 0;
     while (iter < 1000) : (iter += 1) {
         query.forEachChunk(integrateChunk, .{ transforms_off, velocities_off, @as(f32, 1.0 / 60.0) });

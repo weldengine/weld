@@ -46,9 +46,11 @@ pub const EntityId = components.EntityId;
 /// Errors surfaced by `World.despawn` and friends. Re-exported here so
 /// consumers do not need to reach into `entity.zig` directly.
 pub const WorldError = entity_mod.WorldError;
-/// Canonical S1 query type — `Query(.{Transform, Velocity})`. Exposed
-/// as `world.Archetype.ChunkT` etc. consumers reach via this alias.
-pub const Query = query_mod.Query(&.{ Transform, Velocity });
+/// Canonical S1 query type — `Query(.{Transform, Velocity}, .{})` with
+/// no E3 filters. Exposed so `bench/ecs_benchmark.zig` and the
+/// scheduler tests can declare typed `*Chunk` bodies without spelling
+/// out the comptime filter tuple.
+pub const Query = query_mod.Query(&.{ Transform, Velocity }, .{});
 /// Public alias for the byte-level archetype so the bench / tests do
 /// not need to know about the deprecated `archetype_dynamic` shim.
 pub const Archetype = archetype_mod.Archetype;
@@ -454,21 +456,63 @@ pub const World = struct {
 
     // ─── Queries ─────────────────────────────────────────────────────────
 
-    /// Build the S1 single-archetype query — `Query(.{Transform,
-    /// Velocity})` over the `(Transform, Velocity)` archetype. Returns
-    /// an empty query when no entity has been spawned yet (the
-    /// archetype has not been materialised).
-    pub fn query(self: *World) Query {
-        const id_t = self.registry.idOf(@typeName(Transform)) orelse return Query.empty();
-        const id_v = self.registry.idOf(@typeName(Velocity)) orelse return Query.empty();
-        var ids = [_]ComponentId{ id_t, id_v };
-        archetype_mod.sortComponentIds(&ids);
-        const arch = self.findArchetype(&ids) orelse return Query.empty();
-        // Pass the component ids in the order matching `Components` in
-        // `Query(.{Transform, Velocity})` so the comptime column map
-        // resolves Transform → index 0, Velocity → index 1 inside the
-        // archetype.
-        return Query.fromArchetype(arch, .{ id_t, id_v });
+    /// S1 sugar — `world.query(gpa)` returns the no-filter
+    /// `Query(.{Transform, Velocity}, .{})` over every materialised
+    /// (Transform, Velocity)-containing archetype. The bench, the
+    /// no-alloc test, and the scheduler tests use this entry point;
+    /// callers exercising the E3 filters (`With` / `Without` /
+    /// `Predicate`) go through `queryFiltered` directly.
+    pub fn query(self: *World, gpa: std.mem.Allocator) !Query {
+        return try self.queryFiltered(gpa, &.{ Transform, Velocity }, .{});
+    }
+
+    /// Build a comptime-typed multi-archetype query against the
+    /// world. `Components` is the read/write set; `filters` is a
+    /// tuple of `With(T)`, `Without(T)`, `Predicate(fn)` filter
+    /// specs. Auto-registers every type appearing in either set so
+    /// callers never have to call `registerComponent` by hand. The
+    /// returned query owns a heap-allocated matches list — callers
+    /// `defer q.deinit(gpa)`.
+    pub fn queryFiltered(
+        self: *World,
+        gpa: std.mem.Allocator,
+        comptime Components: []const type,
+        comptime filters: anytype,
+    ) !query_mod.Query(Components, filters) {
+        const QueryT = query_mod.Query(Components, filters);
+        var q = QueryT.empty();
+        errdefer q.deinit(gpa);
+
+        // Resolve every type in the required + with + without sets to
+        // a `ComponentId`. `ensureRegistered` is idempotent so calling
+        // it on already-registered types just returns the cached id.
+        var required_ids: [Components.len]ComponentId = undefined;
+        inline for (Components, 0..) |T, i| {
+            required_ids[i] = try self.ensureRegistered(gpa, T);
+        }
+        var with_ids: [QueryT.with_types.len]ComponentId = undefined;
+        inline for (QueryT.with_types, 0..) |T, i| {
+            with_ids[i] = try self.ensureRegistered(gpa, T);
+        }
+        var without_ids: [QueryT.without_types.len]ComponentId = undefined;
+        inline for (QueryT.without_types, 0..) |T, i| {
+            without_ids[i] = try self.ensureRegistered(gpa, T);
+        }
+
+        // Walk archetypes in creation order so the resulting matches
+        // list (and therefore the iteration order surfaced through
+        // `chunkAt`) is deterministic and reproducible.
+        for (self.archetypes.items) |arch| {
+            if (!query_mod.archetypeMatches(arch, &required_ids, &with_ids, &without_ids)) {
+                continue;
+            }
+            var indices: [Components.len]u32 = undefined;
+            for (required_ids, 0..) |cid, i| {
+                indices[i] = @intCast(arch.componentIndex(cid).?);
+            }
+            try q.matches.append(gpa, .{ .archetype = arch, .column_indices = indices });
+        }
+        return q;
     }
 
     /// Build a runtime query against this world's archetypes. Mirrors

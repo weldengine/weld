@@ -284,7 +284,11 @@ pub fn main(init: std.process.Init) !void {
     try sched.start();
     defer sched.deinit();
 
-    var query = world.query();
+    // The E3 query owns a heap-allocated matches list — `defer` frees
+    // it once the bench loop returns. Bench builds the query once and
+    // dispatches it across every warm-up + measured iteration.
+    var query = try world.query(gpa);
+    defer query.deinit(gpa);
     const dt: f32 = 1.0 / 60.0;
     // The byte offsets of Transform / Velocity in the (Transform,
     // Velocity) archetype are stable for the world's lifetime — resolve
