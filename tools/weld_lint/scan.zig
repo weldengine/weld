@@ -3,7 +3,9 @@
 //! Walks a list of input paths (files or directories) and yields the
 //! `.zig` files that the rules should inspect. Skips vendored build
 //! caches, the fixture corpus of intentionally bad files, and a small
-//! hard-coded ignore list.
+//! hard-coded ignore list. The default scan list (`src bench tests
+//! tools`) deliberately covers `tools/` so the linter sweeps its own
+//! sources on every run.
 
 const std = @import("std");
 

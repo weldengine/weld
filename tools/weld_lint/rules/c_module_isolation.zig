@@ -18,8 +18,13 @@
 const std = @import("std");
 const diag = @import("../diagnostic.zig");
 
-pub const name = "c_module_isolation";
+const name = "c_module_isolation";
 
+/// Hook called by `main.runLint` once per `.zig` file. Bails out
+/// immediately on files marked AUTO-GENERATED (the canonical
+/// generated-binding marker — same convention as `doc_comments`);
+/// otherwise tokenizes the source and surfaces every
+/// `@import("…_c")` occurrence outside that marker.
 pub fn check(
     arena: std.mem.Allocator,
     file: []const u8,

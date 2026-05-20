@@ -12,8 +12,12 @@
 const std = @import("std");
 const diag = @import("../diagnostic.zig");
 
-pub const name = "no_cimport";
+const name = "no_cimport";
 
+/// Hook called by `main.runLint` once per `.zig` file. Tokenizes
+/// `source` and appends one `Diagnostic` per `@cImport` builtin
+/// encountered. Never short-circuits — every occurrence surfaces so
+/// reviewers see the full bad spread, not just the first hit.
 pub fn check(
     arena: std.mem.Allocator,
     file: []const u8,

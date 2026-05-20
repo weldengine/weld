@@ -15,8 +15,12 @@
 const std = @import("std");
 const diag = @import("../diagnostic.zig");
 
-pub const name = "no_usingnamespace";
+const name = "no_usingnamespace";
 
+/// Hook called by `main.runLint` once per `.zig` file. Tokenizes the
+/// source and surfaces every token whose text equals
+/// `"usingnamespace"`, regardless of the tokenizer tag (works on the
+/// historical keyword tag and on the post-0.15 identifier fallback).
 pub fn check(
     arena: std.mem.Allocator,
     file: []const u8,

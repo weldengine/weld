@@ -19,6 +19,10 @@
 const std = @import("std");
 const parser = @import("parser.zig");
 
+/// One entry of the wayland_gen driver's job list — pairs a parsed
+/// protocol with the destination module name + on-disk path the
+/// emitter should write to. Consumed by `main.zig` to enumerate the
+/// emit pass over all protocols in one process.
 pub const ProtocolDecl = struct {
     /// Output module name (`core`, `xdg_shell`, `xdg_decoration`).
     module_name: []const u8,
@@ -28,7 +32,7 @@ pub const ProtocolDecl = struct {
     protocol: parser.Protocol,
 };
 
-pub const InterfaceCatalog = struct {
+const InterfaceCatalog = struct {
     entries: []const Entry,
 
     pub const Entry = struct {
@@ -42,6 +46,10 @@ pub const InterfaceCatalog = struct {
     }
 };
 
+/// Build the cross-protocol `interface name → owning module` map.
+/// Used by `emitProtocol` to emit `@import("core").wl_X` references
+/// whenever a request / event argument names an interface defined in
+/// a sibling protocol module.
 pub fn buildCatalog(gpa: std.mem.Allocator, decls: []const ProtocolDecl) !InterfaceCatalog {
     var out: std.ArrayList(InterfaceCatalog.Entry) = .empty;
     for (decls) |d| {
@@ -52,6 +60,11 @@ pub fn buildCatalog(gpa: std.mem.Allocator, decls: []const ProtocolDecl) !Interf
     return .{ .entries = try out.toOwnedSlice(gpa) };
 }
 
+/// Third stage of the wayland_gen pipeline: render `decl.protocol`
+/// into idiomatic Zig source appended to `out`. `is_core` selects
+/// whether the file also emits the shared `wl_proxy_*` C extern
+/// declarations and the `loadLibWayland()` dlopen helper (only the
+/// `core` module hosts those).
 pub fn emitProtocol(
     gpa: std.mem.Allocator,
     decl: ProtocolDecl,

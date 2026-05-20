@@ -19,7 +19,7 @@
 const std = @import("std");
 const diag = @import("../diagnostic.zig");
 
-pub const name = "conventional_commit";
+const name = "conventional_commit";
 
 const allowed_types = [_][]const u8{
     "feat",
@@ -32,6 +32,11 @@ const allowed_types = [_][]const u8{
     "breaking",
 };
 
+/// Hook called by `main.runCommitMsg` from the lefthook `commit-msg`
+/// path. Reads the file at `path` (the staged commit-message file
+/// git points us at), extracts the title line, and appends one
+/// diagnostic per violation. Opening / reading errors surface as
+/// diagnostics too so the hook never aborts on transient I/O.
 pub fn validateFile(
     arena: std.mem.Allocator,
     io: std.Io,
@@ -76,25 +81,6 @@ pub fn validateFile(
         return;
     };
 
-    try validateTitle(arena, path, title, out);
-}
-
-pub fn validateMessage(
-    arena: std.mem.Allocator,
-    path: []const u8,
-    source: []const u8,
-    out: *std.ArrayList(diag.Diagnostic),
-) !void {
-    const title = firstTitleLine(source) orelse {
-        try out.append(arena, .{
-            .file = path,
-            .line = 1,
-            .col = 1,
-            .rule = name,
-            .message = "empty commit message",
-        });
-        return;
-    };
     try validateTitle(arena, path, title, out);
 }
 

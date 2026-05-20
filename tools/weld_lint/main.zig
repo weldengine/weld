@@ -2,8 +2,9 @@
 //!
 //! Two subcommands wire into `build.zig`:
 //!   - `lint [path]...`         — walk the given paths (default
-//!     `src/ bench/ tests/`) and apply rules 1–4. Exits non-zero if
-//!     any rule fires.
+//!     `src/ bench/ tests/ tools/`, including the linter's own
+//!     sources so it stays exemplary) and apply rules 1–4. Exits
+//!     non-zero if any rule fires.
 //!   - `commit-msg <file>`      — validate the title of the commit
 //!     message at `file` against the Conventional Commits subset
 //!     enforced by Weld. Exits non-zero on the first violation.
@@ -20,7 +21,7 @@ const doc_comments = @import("rules/doc_comments.zig");
 const c_module_isolation = @import("rules/c_module_isolation.zig");
 const conventional_commit = @import("rules/conventional_commit.zig");
 
-const default_lint_paths = [_][]const u8{ "src", "bench", "tests" };
+const default_lint_paths = [_][]const u8{ "src", "bench", "tests", "tools" };
 
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
@@ -102,8 +103,8 @@ fn runCommitMsg(arena: std.mem.Allocator, io: std.Io, args: []const [:0]const u8
 const usage_text =
     \\usage:
     \\  weld_lint lint [path]...
-    \\      Walk the given paths (default `src bench tests`) and apply
-    \\      rules: no_cimport, no_usingnamespace, doc_comments,
+    \\      Walk the given paths (default `src bench tests tools`) and
+    \\      apply rules: no_cimport, no_usingnamespace, doc_comments,
     \\      c_module_isolation. Exits 0 if clean, 1 if any rule fires.
     \\
     \\  weld_lint commit-msg <file>

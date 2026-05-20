@@ -11,12 +11,12 @@
 
 const std = @import("std");
 
-pub const Attr = struct {
+const Attr = struct {
     name: []const u8,
     value: []const u8,
 };
 
-pub const Element = struct {
+const Element = struct {
     tag: []const u8,
     attrs: []const Attr,
     children: []const Child,
@@ -47,12 +47,12 @@ pub const Element = struct {
     }
 };
 
-pub const Child = union(enum) {
+const Child = union(enum) {
     elem: Element,
     text: []const u8,
 };
 
-pub const Tree = struct {
+const Tree = struct {
     arena: std.heap.ArenaAllocator,
     root: Element,
 
@@ -61,7 +61,7 @@ pub const Tree = struct {
     }
 };
 
-pub const ParseError = error{
+const ParseError = error{
     UnexpectedEof,
     UnexpectedChar,
     BadAttribute,
@@ -71,6 +71,10 @@ pub const ParseError = error{
     UnknownEntity,
 } || std.mem.Allocator.Error;
 
+/// First stage of the vk_gen pipeline: scan the raw `vk.xml` bytes
+/// into a `Tree` of `Element`s. The returned `Tree` owns an arena
+/// holding every string slice — `tree.deinit()` reclaims everything
+/// the model / filter / emit passes might still reference.
 pub fn parse(gpa: std.mem.Allocator, source: []const u8) ParseError!Tree {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
@@ -338,7 +342,7 @@ const Parser = struct {
 // the S2 emitter cares about. Variadic functions, video codec entries,
 // and most pragmas are skipped on purpose.
 
-pub const Model = struct {
+const Model = struct {
     arena: std.heap.ArenaAllocator,
     /// Header file → category → C built-in basetypes / aliases (e.g. `VkBool32 = uint32_t`).
     basetypes: []const Basetype,
@@ -365,7 +369,7 @@ pub const Model = struct {
     }
 };
 
-pub const Basetype = struct {
+const Basetype = struct {
     /// Vulkan name (e.g. `VkBool32`, `VkDeviceSize`).
     name: []const u8,
     /// C declaration body so the emitter can decide the Zig mapping.
@@ -381,6 +385,9 @@ pub const PlatformType = struct {
     requires: []const u8,
 };
 
+/// Opaque Vulkan handle entry (`VkInstance`, `VkBuffer`, etc.).
+/// Consumed by `emit.zig` to decide whether to emit a dispatchable
+/// `*opaque{}` (real C pointer) or a non-dispatchable `u64`.
 pub const Handle = struct {
     name: []const u8,
     /// `true` for `VK_DEFINE_HANDLE` (dispatchable, real C pointer),
@@ -391,6 +398,10 @@ pub const Handle = struct {
     parent: ?[]const u8,
 };
 
+/// Bundle of enum variants resolved from the registry's `<enums>`
+/// elements + per-feature / per-extension extras. The emitter looks
+/// up groups by name when emitting struct field defaults, function
+/// argument types, and `Result` mappings.
 pub const EnumGroup = struct {
     name: []const u8,
     kind: Kind,
@@ -400,7 +411,7 @@ pub const EnumGroup = struct {
     pub const Kind = enum { @"enum", bitmask, api_constants };
 };
 
-pub const EnumValue = struct {
+const EnumValue = struct {
     name: []const u8,
     /// Raw value as text (`"0"`, `"-1"`, `"0x10000000"`) when the registry
     /// uses `value=`. Mutually exclusive with `bitpos` and `alias`.
@@ -412,7 +423,7 @@ pub const EnumValue = struct {
     source: []const u8 = "",
 };
 
-pub const Bitmask = struct {
+const Bitmask = struct {
     /// Flag-typedef name (`VkBufferUsageFlags`).
     name: []const u8,
     /// Bits enum it points at (`VkBufferUsageFlagBits`), or null if the
@@ -423,6 +434,8 @@ pub const Bitmask = struct {
     width: u32 = 32,
 };
 
+/// Resolved Vulkan struct/union entry consumed by `emit.zig` to
+/// render `extern struct` declarations and their `sType` defaults.
 pub const Struct = struct {
     name: []const u8,
     members: []const Member,
@@ -434,7 +447,7 @@ pub const Struct = struct {
     returned_only: bool = false,
 };
 
-pub const FuncPointer = struct {
+const FuncPointer = struct {
     name: []const u8,
     /// Full C declaration text (e.g. `typedef void (VKAPI_PTR *PFN_vkVoidFunction)(void);`).
     /// Parsed by the emitter — keeping the raw form avoids reinventing a
@@ -442,11 +455,15 @@ pub const FuncPointer = struct {
     c_decl: []const u8,
 };
 
-pub const Alias = struct {
+const Alias = struct {
     name: []const u8,
     target: []const u8,
 };
 
+/// Registry `<enums name="API Constants">` entry — a single named
+/// macro the emitter renders as a `pub const`. Surfaced to
+/// `emit.zig` (which resolves the `(~0U)`-style values) and
+/// otherwise opaque to callers.
 pub const ApiConstant = struct {
     name: []const u8,
     /// Raw value text. May be a numeric literal, hex, float, or `(~0U)`
@@ -459,6 +476,9 @@ pub const ApiConstant = struct {
     c_type: ?[]const u8 = null,
 };
 
+/// Resolved Vulkan command entry. Consumed by `emit.zig` to render
+/// the Zig wrapper, decide its dispatch table membership (instance
+/// vs device vs loader), and pull the return / error code lists.
 pub const Command = struct {
     name: []const u8,
     /// Resolved at extraction time when `<command alias="…">` is used.
@@ -472,6 +492,9 @@ pub const Command = struct {
     api: []const u8 = "",
 };
 
+/// Resolved struct field / command parameter. Carries the original
+/// nullability and length-expression attributes so `emit.zig` can
+/// build slice wrappers and optional types correctly.
 pub const Member = struct {
     name: []const u8,
     c_type: CType,
@@ -483,6 +506,9 @@ pub const Member = struct {
     values: ?[]const u8 = null,
 };
 
+/// Resolved C-type triplet (`base`, pointer depth, qualifiers).
+/// Surfaced so `emit.zig` can map raw C declarators into Zig types
+/// (`?*const T`, `[]T`, etc.) without re-parsing the registry XML.
 pub const CType = struct {
     /// Base C identifier (`VkBuffer`, `uint32_t`, `void`, `char`).
     base: []const u8,
@@ -500,7 +526,7 @@ pub const CType = struct {
     array_size: ?[]const u8 = null,
 };
 
-pub const Extension = struct {
+const Extension = struct {
     name: []const u8,
     type: []const u8, // "instance" or "device" or ""
     platform: ?[]const u8 = null,
@@ -510,7 +536,7 @@ pub const Extension = struct {
     enum_extensions: []const EnumExtension,
 };
 
-pub const EnumExtension = struct {
+const EnumExtension = struct {
     extends: []const u8,
     name: []const u8,
     value: ?[]const u8 = null,
@@ -524,6 +550,10 @@ pub const EnumExtension = struct {
 
 // ---------- Extractor -----------------------------------------------------
 
+/// Second stage of the vk_gen pipeline: lift the raw XML `Tree` into
+/// the typed `Model` consumed by the filter / emit stages. `tree` is
+/// borrowed (it stays alive across calls); the returned `Model` owns
+/// its own arena so the caller can free `tree` before emitting.
 pub fn extractModel(gpa: std.mem.Allocator, tree: Tree) !Model {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
@@ -1027,6 +1057,9 @@ fn splitCsv(A: std.mem.Allocator, src: []const u8) ![][]const u8 {
 // Whitelist application
 // =====================================================================
 
+/// Caller-supplied scope of the S2 spike's Vulkan surface. Drives
+/// `applyWhitelist` to drop every feature / extension outside that
+/// scope plus the transitive closure of their types.
 pub const Whitelist = struct {
     /// Feature names that are kept (e.g. `VK_BASE_VERSION_1_0`,
     /// `VK_GRAPHICS_VERSION_1_3`).
@@ -1038,6 +1071,10 @@ pub const Whitelist = struct {
     platforms: []const []const u8,
 };
 
+/// Whitelist-trimmed projection of `Model`. Same shape as `Model`
+/// but only the kept entities plus the closure they pull in. Owns
+/// its own arena so the input `Model` can be freed once the filter
+/// returns.
 pub const FilteredModel = struct {
     arena: std.heap.ArenaAllocator,
 
@@ -1072,6 +1109,10 @@ pub const FilteredModel = struct {
     }
 };
 
+/// Third stage of the vk_gen pipeline: trim `Model` down to the
+/// `Whitelist` scope plus the transitive closure of types each kept
+/// command / struct depends on. Skipping the closure would leave
+/// `Command` parameters referencing types that were filtered out.
 pub fn applyWhitelist(
     gpa: std.mem.Allocator,
     model: Model,

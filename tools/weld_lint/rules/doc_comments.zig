@@ -42,8 +42,13 @@ const std = @import("std");
 const Ast = std.zig.Ast;
 const diag = @import("../diagnostic.zig");
 
-pub const name = "doc_comments";
+const name = "doc_comments";
 
+/// Hook called by `main.runLint` once per `.zig` file. Parses with
+/// `std.zig.Ast`, walks `rootDecls()`, and flags every `pub` decl
+/// whose immediately-preceding token is not a `.doc_comment` — modulo
+/// the AUTO-GENERATED header bail-out at the top and the entry-point
+/// structural exemption noted in the module header.
 pub fn check(
     arena: std.mem.Allocator,
     file: []const u8,
