@@ -328,3 +328,53 @@ test "query iteration order is archetype then chunk then slot" {
         prev_chunk = v.chunk_idx_in_archetype;
     }
 }
+
+// ─── M0.1 / E6 — lazy archetype re-scan ──────────────────────────────────
+
+const command_buffer_mod = weld_core.ecs.command_buffer;
+const CommandBuffer = command_buffer_mod.CommandBuffer;
+
+// E6 dette acceptance — validates the lazy re-scan absorbed during
+// E6. Scenario: build a query, then materialise a new archetype via
+// a command-buffer flush. The next iteration entry on the query
+// must observe the new archetype without an explicit rebuild.
+test "new archetype created during command buffer flush is visible to existing queries on next dispatch" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Initial state — one (Transform, Velocity) entity. Marker is
+    // not yet attached, so the (T, V, Marker) archetype does not
+    // exist at query construction time.
+    _ = try world.spawn(gpa, Transform{}, Velocity{});
+
+    var q = try world.queryFiltered(gpa, &.{Transform}, .{With(Marker)});
+    defer q.deinit(gpa);
+
+    // No matching archetype yet — Marker has no live carrier.
+    try std.testing.expectEqual(@as(usize, 0), q.matchCount());
+    try std.testing.expectEqual(@as(usize, 0), q.chunkCount());
+
+    // Stage a spawn that materialises a new (Transform, Velocity,
+    // Marker) archetype via a deferred command. The world's entity
+    // count stays unchanged until `cmd.flush()`.
+    var cmd = CommandBuffer.init(gpa, &world);
+    defer cmd.deinit();
+    try cmd.spawn(.{
+        Transform{},
+        Velocity{},
+        Marker{ .kind = 42 },
+    });
+
+    const before = world.archetypeCount();
+    try std.testing.expectEqual(@as(usize, 0), q.chunkCount());
+
+    try cmd.flush();
+    try std.testing.expect(world.archetypeCount() > before);
+
+    // Now the next iteration entry on `q` must see the new archetype
+    // even though the query was constructed BEFORE the flush
+    // materialised it. This is the lazy re-scan contract.
+    try std.testing.expectEqual(@as(usize, 1), q.matchCount());
+    try std.testing.expectEqual(@as(usize, 1), q.chunkCount());
+}
