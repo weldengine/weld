@@ -168,6 +168,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/ecs/no_alloc_scheduler_dispatch.zig" },
         .{ .path = "tests/ecs/command_buffer.zig" },
         .{ .path = "tests/ecs/observers.zig" },
+        .{ .path = "tests/ecs/no_alloc_steady_state.zig" },
+        .{ .path = "tests/ecs/integration_scenario.zig" },
         .{ .path = "tests/jobs/deque_test.zig" },
         .{ .path = "tests/jobs/scheduler_test.zig" },
         .{ .path = "tests/window/win32_open_close_test.zig" },
