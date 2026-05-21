@@ -159,6 +159,14 @@ pub const World = struct {
         return self.registry.idOf(name);
     }
 
+    /// Public alias of the internal `ensureRegistered` path so the
+    /// E5b `SystemScheduler` can resolve `Reads(T)` / `Writes(T)`
+    /// access descriptors against the world's registry without
+    /// reaching into a private symbol. Idempotent.
+    pub fn ensureComponentRegistered(self: *World, gpa: std.mem.Allocator, comptime T: type) !ComponentId {
+        return try self.ensureRegistered(gpa, T);
+    }
+
     /// Ensure `T` is registered with the world's `Registry` and return
     /// its `ComponentId`. Idempotent — the second call returns the
     /// cached id without re-registering.

@@ -88,11 +88,11 @@ test "phases dispatch sequentially with end-of-phase barrier" {
     // then one each in `update`, `post_update`, `pre_render`. Skip
     // `fixed_update` and `late_update` to verify empty phases are
     // skipped cleanly without breaking ordering.
-    try sys.registerSystem(gpa, .{ .phase = .pre_update, .name = "pre_a", .run = logPreUpdateA });
-    try sys.registerSystem(gpa, .{ .phase = .pre_update, .name = "pre_b", .run = logPreUpdateB });
-    try sys.registerSystem(gpa, .{ .phase = .update, .name = "update_a", .run = logUpdateA });
-    try sys.registerSystem(gpa, .{ .phase = .post_update, .name = "post", .run = logPostUpdate });
-    try sys.registerSystem(gpa, .{ .phase = .pre_render, .name = "render", .run = logPreRender });
+    try sys.registerSystem(gpa, &world, .{ .phase = .pre_update, .name = "pre_a", .run = logPreUpdateA });
+    try sys.registerSystem(gpa, &world, .{ .phase = .pre_update, .name = "pre_b", .run = logPreUpdateB });
+    try sys.registerSystem(gpa, &world, .{ .phase = .update, .name = "update_a", .run = logUpdateA });
+    try sys.registerSystem(gpa, &world, .{ .phase = .post_update, .name = "post", .run = logPostUpdate });
+    try sys.registerSystem(gpa, &world, .{ .phase = .pre_render, .name = "render", .run = logPreRender });
 
     var log: PhaseLog = .{};
     defer log.deinit(gpa);
