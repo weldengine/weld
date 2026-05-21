@@ -4,9 +4,8 @@ const weld_core = @import("weld_core");
 const World = weld_core.ecs.world.World;
 const Transform = weld_core.ecs.world.Transform;
 const Velocity = weld_core.ecs.world.Velocity;
-const Archetype = weld_core.ecs.world.Archetype;
+const Chunk = weld_core.ecs.world.Chunk;
 const Scheduler = weld_core.jobs.scheduler.Scheduler;
-const worker_count = weld_core.jobs.scheduler.worker_count;
 
 const VisitCtx = struct {
     counter: *std.atomic.Value(u32),
@@ -14,7 +13,7 @@ const VisitCtx = struct {
     archetype_id_mismatch: *std.atomic.Value(bool),
 };
 
-fn recordVisit(chunk: *Archetype.ChunkT, ctx: *VisitCtx) void {
+fn recordVisit(chunk: *Chunk, ctx: *VisitCtx) void {
     _ = ctx.counter.fetchAdd(1, .acq_rel);
     const arch_id = chunk.headerConst().archetype_id;
     const expected = ctx.archetype_id_seen.load(.acquire);
@@ -38,7 +37,7 @@ test "split-over-chunks dispatch covers every chunk" {
 
     var sched = try Scheduler.init(gpa, io);
     try sched.start();
-    defer sched.deinit();
+    defer sched.deinit(gpa);
 
     var counter: std.atomic.Value(u32) = .init(0);
     var archetype_id_seen: std.atomic.Value(u32) = .init(0); // World.archetype.archetype_id
@@ -49,7 +48,8 @@ test "split-over-chunks dispatch covers every chunk" {
         .archetype_id_mismatch = &archetype_id_mismatch,
     };
 
-    var query = world.query();
+    var query = try world.query(gpa);
+    defer query.deinit(gpa);
     sched.dispatch(&query, recordVisit, .{&ctx});
 
     try std.testing.expectEqual(@as(u32, @intCast(chunk_count)), counter.load(.acquire));
@@ -61,7 +61,7 @@ const SlowCtx = struct {
     saw_value: *std.atomic.Value(u32),
 };
 
-fn slowJob(chunk: *Archetype.ChunkT, ctx: *SlowCtx) void {
+fn slowJob(chunk: *Chunk, ctx: *SlowCtx) void {
     _ = chunk;
     // Simulate work — short busy-loop so this test doesn't hang on weak
     // hardware. The point is to ensure dispatch waits for completion.
@@ -85,13 +85,14 @@ test "scheduler returns only after all work is done" {
 
     var sched = try Scheduler.init(gpa, io);
     try sched.start();
-    defer sched.deinit();
+    defer sched.deinit(gpa);
 
     var completed: std.atomic.Value(u32) = .init(0);
     var saw: std.atomic.Value(u32) = .init(0);
     var ctx: SlowCtx = .{ .completed = &completed, .saw_value = &saw };
 
-    var query = world.query();
+    var query = try world.query(gpa);
+    defer query.deinit(gpa);
     const expected: u32 = @intCast(query.chunkCount());
     sched.dispatch(&query, slowJob, .{&ctx});
 

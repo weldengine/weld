@@ -9,6 +9,7 @@ const cooked = @import("cooked_demo");
 
 const World = weld_core.ecs.world.World;
 const ComponentId = weld_core.ecs.registry.ComponentId;
+const EntityId = weld_core.ecs.entity.EntityId;
 
 const Ticks: u32 = 10;
 
@@ -52,7 +53,7 @@ fn printEntity(
     out: anytype,
     world: *World,
     idx: u32,
-    eid: u64,
+    eid: EntityId,
     counter_id: ComponentId,
     score_id_opt: ?ComponentId,
     active_id_opt: ?ComponentId,

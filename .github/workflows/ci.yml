@@ -21,7 +21,15 @@ jobs:
         os: [ubuntu-24.04, windows-2025]
         mode: [Debug, ReleaseSafe]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # M0.1 hotfix — bumped from 10 to 20 min: Windows ReleaseSafe on the
+    # 2-vCPU runner spends ~3 min on `zig build` then ~7 min on
+    # `zig build test`, totalling ~10 min and tripping the 10-min budget
+    # right at the edge. The +10 min headroom absorbs growth from
+    # additional M0.x test specs without surprise CI failures. Proper
+    # CI restructuring (job split / bench separation / Windows cache
+    # investigation) is queued for M0.2 — cf. brief journal entry
+    # 2026-05-21 18:00 « Dette CI à instruire sérieusement en M0.2 ».
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
 

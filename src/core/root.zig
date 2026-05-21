@@ -4,21 +4,22 @@
 //! for now; Phase 0 will expand the surface (resources, events, RTTI,
 //! plugin loader, IPC, platform layer) as those land.
 
-/// ECS namespace — comptime SoA archetype + runtime registry surface.
-pub const ecs = struct {
-    pub const components = @import("ecs/components.zig");
-    pub const chunk = @import("ecs/chunk.zig");
-    pub const archetype = @import("ecs/archetype.zig");
-    pub const query = @import("ecs/query.zig");
-    pub const world = @import("ecs/world.zig");
-    // S4 — runtime side: registry, dynamic archetype, resources, runtime query.
-    pub const registry = @import("ecs/registry.zig");
-    pub const archetype_dynamic = @import("ecs/archetype_dynamic.zig");
-    pub const resources = @import("ecs/resources.zig");
-    pub const query_runtime = @import("ecs/query_runtime.zig");
-    // S5 — comptime-typed query consumed by the Etch → Zig codegen.
-    pub const comptime_query = @import("ecs/comptime_query.zig");
-};
+/// ECS namespace — single canonical entry point at
+/// `src/core/ecs/root.zig` (M0.1 / E7). The root provides both:
+///   * Flat public types : `ecs.World`, `ecs.EntityId`, `ecs.Query`,
+///     `ecs.CommandBuffer`, `ecs.SystemScheduler`, etc. — the M0.1
+///     stable contract listed in the milestone brief.
+///   * Sub-module aliases: `ecs.world`, `ecs.scheduler`,
+///     `ecs.query`, `ecs.command_buffer`, … — kept reachable for
+///     tests and the bench so they can address internal symbols
+///     without going through the flat surface.
+///
+/// Consumers writing new code should prefer the flat surface
+/// (`ecs.World` over `ecs.world.World`). The sub-module aliases are
+/// stable for the lifetime of M0.1 but may be pruned at M0.2 once
+/// the RTTI rework cleans up the deprecated `archetype_dynamic`
+/// shim and the S4 surface.
+pub const ecs = @import("ecs/root.zig");
 
 /// Jobs namespace — Chase-Lev deque + work-stealing scheduler.
 pub const jobs = struct {
@@ -73,4 +74,26 @@ comptime {
     _ = ipc.connection;
     _ = ipc.server;
     _ = ipc.client;
+    // Same guard for the M0.1 identity module — `entity.zig`'s inline
+    // tests must be reachable from the core test target's root.
+    _ = ecs.entity;
+    // M0.1 / E4 — pin the change-detection helpers + the tick module
+    // so their inline tests are picked up by `zig build test`.
+    _ = ecs.tick;
+    _ = ecs.change_detection;
+    // M0.1 / E5a — pin the system scheduler.
+    _ = ecs.scheduler;
+    // M0.1 / E5b — pin archetype + world so their inline tests run.
+    // The pre-E5b `core_tests` build target silently skipped them
+    // because no consumer in the analysis frontier referenced the
+    // pub aliases (lazy analysis guard, `engine-zig-conventions.md`
+    // §13). Latent regression caught when the E5b SystemScheduler
+    // added a new reference path; pinning closes the test coverage
+    // gap going forward.
+    _ = ecs.archetype;
+    _ = ecs.world;
+    // M0.1 / E6 — pin the command buffer + observer modules so their
+    // inline tests run alongside the rest of the ECS surface.
+    _ = ecs.command_buffer;
+    _ = ecs.observers;
 }

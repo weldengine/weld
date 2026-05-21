@@ -267,7 +267,12 @@ pub const Interpreter = struct {
                     }
                     report.entities_iterated += 1;
                     rule_matched = true;
-                    const entity_id: EntityId = ids[slot];
+                    // The chunk array stores the core `EntityId` packed
+                    // struct; Etch's local `EntityId` is the raw u64 wire
+                    // form that lives inside `Value.entity_id`. The two
+                    // share the same 8-byte layout — `@bitCast` does the
+                    // conversion without touching bits.
+                    const entity_id: EntityId = @bitCast(ids[slot]);
                     try self.execBody(world, rd, entity_id, report);
                 }
             }

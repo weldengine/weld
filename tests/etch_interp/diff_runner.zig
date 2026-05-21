@@ -200,12 +200,14 @@ fn setResources(gpa: std.mem.Allocator, world: *World, resources: []const Resour
 }
 
 fn verifyEntities(name: []const u8, world: *World, entities: []const EntitySpec) !void {
-    // Iterate matching entities in spawn order: entity ids start at 0 and
-    // increase monotonically by one per spawn, so we just walk by id.
+    // Iterate matching entities in spawn order: entity ids start at index 0
+    // generation 0 and the index increases monotonically by one per spawn
+    // (no despawn happens in the corpus programs, so generation stays 0).
     for (entities, 0..) |espec, i| {
-        const eid: u64 = @intCast(i);
+        const entity_index: u32 = @intCast(i);
+        const eid = weld_core.ecs.entity.EntityId{ .index = entity_index, .generation = 0 };
         const loc = world.dynamicLocation(eid) orelse {
-            std.debug.print("[{s}] entity {d} is missing from the world\n", .{ name, eid });
+            std.debug.print("[{s}] entity {d} is missing from the world\n", .{ name, entity_index });
             return error.EntityMissing;
         };
         const arch = world.dynamicArchetype(loc.archetype_idx);
@@ -216,7 +218,7 @@ fn verifyEntities(name: []const u8, world: *World, entities: []const EntitySpec)
                 return error.UnknownComponent;
             };
             const idx = arch.componentIndex(cid) orelse {
-                std.debug.print("[{s}] entity {d} archetype lacks component '{s}'\n", .{ name, eid, c.name });
+                std.debug.print("[{s}] entity {d} archetype lacks component '{s}'\n", .{ name, entity_index, c.name });
                 return error.ComponentMissing;
             };
             const slot_bytes = arch.componentSlot(chunk, idx, loc.slot);
@@ -224,7 +226,7 @@ fn verifyEntities(name: []const u8, world: *World, entities: []const EntitySpec)
                 const fd = world.registry.findField(cid, f.name) orelse return error.UnknownField;
                 const got = readFieldValue(fd.kind, slot_bytes[fd.offset .. fd.offset + @as(u16, @intCast(fd.kind.sizeBytes()))]);
                 if (!got.eql(f.value)) {
-                    std.debug.print("[{s}] entity {d} {s}.{s} mismatch: got {any}, expected {any}\n", .{ name, eid, c.name, f.name, got, f.value });
+                    std.debug.print("[{s}] entity {d} {s}.{s} mismatch: got {any}, expected {any}\n", .{ name, entity_index, c.name, f.name, got, f.value });
                     return error.FieldMismatch;
                 }
             }

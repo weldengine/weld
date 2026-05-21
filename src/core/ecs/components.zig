@@ -9,12 +9,16 @@
 //! every field. The trailing `_pad*` slots round each lane to 16 bytes.
 
 const std = @import("std");
+const entity_mod = @import("entity.zig");
 
-/// 64-bit entity identifier. S1 uses a flat monotonic counter without a
-/// generational tag — `briefs/S1-mini-ecs.md` Out-of-scope explicitly defers
-/// generational indices and FreeList sophistication beyond what spawning and
-/// despawning 100 000 entities requires.
-pub const EntityId = u64;
+/// Canonical generational entity identifier (`packed struct(u64)`,
+/// `(index, generation)` low-to-high). The 8-byte size assertion below
+/// pins the wire layout S1 committed to; the generational halves are an
+/// M0.1 / E1 addition (cf. `briefs/M0.1-ecs-full.md` E1 — Identity
+/// foundations) that closes the S1 debts D-S1-1 (slot reuse) and D-S1-2
+/// (generational indices). See `entity.zig` for the type definition and
+/// the matching `EntityIdentityStore`.
+pub const EntityId = entity_mod.EntityId;
 
 /// Position, rotation (quaternion), and scale of an entity in world space.
 pub const Transform = extern struct {
