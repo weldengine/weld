@@ -12,12 +12,26 @@
 const std = @import("std");
 const deque_mod = @import("deque.zig");
 
+/// Type-erased trampoline signature called from `Worker.run` once
+/// per stolen / popped job. The chunk and context pointers are
+/// recovered to their concrete types inside the trampoline.
+pub const TrampolineFn = *const fn (chunk_ptr: *anyopaque, ctx_ptr: *anyopaque) void;
+
 /// Type-erased work unit stored on each worker's Chase-Lev deque.
-/// Carries an opaque chunk pointer; the trampoline knows its type.
+/// M0.1 / E5b each job carries its own `trampoline` + `ctx_ptr` so
+/// a single dispatch can run heterogeneous bodies — required by the
+/// E5b multi-job concurrent intra-phase scheduler which interleaves
+/// chunks from different systems on the same workers.
 pub const Job = struct {
     /// Type-erased pointer to a chunk. The trampoline knows the concrete
     /// chunk type at the dispatch call site.
     chunk_ptr: *anyopaque,
+    /// Per-job trampoline. Workers call `trampoline(chunk_ptr, ctx_ptr)`
+    /// rather than pulling a global trampoline from the scheduler.
+    trampoline: TrampolineFn,
+    /// Per-job context pointer (args storage owned by the dispatcher's
+    /// stack frame or by the system scheduler's job arena).
+    ctx_ptr: *anyopaque,
 };
 
 /// Maximum number of jobs per worker deque. 1 024 covers the S1 bench
@@ -26,11 +40,6 @@ pub const Job = struct {
 /// `MaxChunksPerDispatch` buffer at `worker_count * DequeCapacity`.
 pub const DequeCapacity: usize = 1024;
 const WorkerDeque = deque_mod.Deque(Job, DequeCapacity);
-
-/// Type-erased trampoline signature called from `Worker.run` once
-/// per stolen / popped job. The chunk and context pointers are
-/// recovered to their concrete types inside the trampoline.
-pub const TrampolineFn = *const fn (chunk_ptr: *anyopaque, ctx_ptr: *anyopaque) void;
 
 /// Atomic counters surfaced by each worker — chunks processed,
 /// steal attempts / hits, total work-thread CPU time, and the

@@ -75,20 +75,17 @@ pub const Scheduler = struct {
     /// Heap-allocated worker pool, sized at `init` from
     /// `std.Thread.getCpuCount() catch default_worker_count`.
     workers: []Worker,
-    /// Heap-allocated chunk-pointer buffer for the in-flight dispatch.
-    /// Sized `workers.len * per_worker_capacity` so the per-worker
-    /// stride never overflows the local deque.
-    chunks: []*anyopaque,
-    /// Number of chunks actually in the current dispatch — read by
+    /// Heap-allocated job buffer for the in-flight dispatch. Sized
+    /// `workers.len * per_worker_capacity` so the per-worker stride
+    /// never overflows the local deque. M0.1 / E5b each job carries
+    /// its own `(trampoline, ctx_ptr)` inline so a single dispatch
+    /// can run heterogeneous bodies (multi-job concurrent intra-
+    /// phase via `dispatchBatch`).
+    jobs: []Job,
+    /// Number of jobs actually in the current dispatch — read by
     /// workers after the generation bump (release-acquire pair on
     /// `generation`).
     chunk_count: u32 = 0,
-
-    /// Trampoline + ctx pointers exposed to workers via atomics. `0`
-    /// means "no dispatch in flight". Lifetime tied to the dispatch
-    /// call.
-    current_fn: std.atomic.Value(usize) align(64) = .init(0),
-    current_ctx: std.atomic.Value(usize) align(64) = .init(0),
 
     /// Bumped by `dispatch` to mark a new wave of work. Workers
     /// compare against their private `last_generation` to know they
@@ -132,13 +129,13 @@ pub const Scheduler = struct {
         errdefer gpa.free(workers);
         for (workers, 0..) |*w, i| w.* = .{ .id = @intCast(i) };
 
-        const chunks = try gpa.alloc(*anyopaque, worker_count * per_worker_capacity);
-        errdefer gpa.free(chunks);
+        const jobs = try gpa.alloc(Job, worker_count * per_worker_capacity);
+        errdefer gpa.free(jobs);
 
         return .{
             .io = io,
             .workers = workers,
-            .chunks = chunks,
+            .jobs = jobs,
         };
     }
 
@@ -163,7 +160,7 @@ pub const Scheduler = struct {
             }
         }
         gpa.free(self.workers);
-        gpa.free(self.chunks);
+        gpa.free(self.jobs);
         self.* = undefined;
     }
 
@@ -174,8 +171,10 @@ pub const Scheduler = struct {
     }
 
     /// Distribute the chunks of `query` across worker deques and wait
-    /// for completion. `Body` is a comptime function with signature
-    /// `fn (chunk: @TypeOf(query.chunkAt(0)), ...args) void`.
+    /// for completion. Sugar over `dispatchBatch` for the common
+    /// single-body case (one trampoline, one args tuple) — used by
+    /// the bench, the scheduler tests, and by `JobBuilder.addJob`
+    /// when a system has nothing else to bundle into the same level.
     ///
     /// Panics when `query.chunkCount() > workers.len * per_worker_capacity`
     /// — the caller is expected to size queries against the
@@ -202,21 +201,45 @@ pub const Scheduler = struct {
         var ctx_storage = args;
 
         const n = query.chunkCount();
-        std.debug.assert(n <= self.chunks.len);
-
-        // Fill the shared chunk-pointer array. Plain stores — the
-        // following generation bump publishes them.
-        for (0..n) |i| self.chunks[i] = @ptrCast(query.chunkAt(i));
+        std.debug.assert(n <= self.jobs.len);
 
         const trampoline_fn: TrampolineFn = &Trampoline.call;
-        self.current_fn.store(@intFromPtr(trampoline_fn), .release);
-        self.current_ctx.store(@intFromPtr(&ctx_storage), .release);
+        for (0..n) |i| {
+            self.jobs[i] = .{
+                .chunk_ptr = @ptrCast(query.chunkAt(i)),
+                .trampoline = trampoline_fn,
+                .ctx_ptr = @ptrCast(&ctx_storage),
+            };
+        }
 
+        self.publishWaveAndWait(@intCast(n));
+    }
+
+    /// Dispatch a caller-provided slice of pre-built jobs and wait
+    /// for completion. Each job carries its own
+    /// `(trampoline, ctx_ptr)` so a single dispatch can run
+    /// heterogeneous bodies — the M0.1 / E5b multi-job concurrent
+    /// intra-phase scheduler interleaves chunks from multiple
+    /// systems on the same workers via this entry point.
+    ///
+    /// `incoming` is copied into the scheduler's internal `jobs`
+    /// slice before the wave is published, so the caller's slice can
+    /// be freed or reused as soon as `dispatchBatch` returns.
+    pub fn dispatchBatch(self: *Scheduler, incoming: []const Job) void {
+        std.debug.assert(incoming.len <= self.jobs.len);
+        @memcpy(self.jobs[0..incoming.len], incoming);
+        self.publishWaveAndWait(@intCast(incoming.len));
+    }
+
+    /// Internal: publish a wave of `n` jobs already sitting in
+    /// `self.jobs[0..n]`, wake parked workers, busy-yield on
+    /// completion.
+    fn publishWaveAndWait(self: *Scheduler, n: u32) void {
         // Publish the new wave + wake every parked worker. The
         // mutex is taken briefly only to coordinate with workers
         // that may be entering / leaving the parked path.
         self.mu.lockUncancelable(self.io);
-        self.chunk_count = @intCast(n);
+        self.chunk_count = n;
         self.pending_count.store(n, .release);
         _ = self.generation.fetchAdd(1, .acq_rel);
         self.work_available.broadcast(self.io);
@@ -225,20 +248,11 @@ pub const Scheduler = struct {
         // Busy-yield on completion. The dispatcher is the only main
         // thread, so spinning here keeps the dispatch's per-frame
         // overhead near the S1 baseline — the brief's E5a sleep/wake
-        // requirement applies to the **workers**' idle path (they do
-        // park on `work_available` after the spin window). Waiting
-        // on `work_completed` via the condvar adds futex wake-up
-        // latency to every dispatch, which the bench could not
-        // absorb (measured +50 µs / dispatch on the M-class Apple
-        // CPU). Documented in the brief journal.
+        // requirement applies to the **workers**' idle path (they
+        // do park on `work_available` after the spin window).
         while (self.pending_count.load(.acquire) > 0) {
             std.Thread.yield() catch {};
         }
-
-        // Clear the trampoline pointers so a use-after-dispatch read
-        // from a sleeping worker can't reuse stale data.
-        self.current_fn.store(0, .release);
-        self.current_ctx.store(0, .release);
     }
 
     pub fn snapshotStats(self: *const Scheduler, gpa: std.mem.Allocator) SchedulerError![]WorkerStats.Snapshot {
@@ -299,15 +313,12 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
         };
 
         if (maybe_job) |job| {
-            // Found work — execute (still lock-free).
-            const fn_int = sched.current_fn.load(.acquire);
-            const ctx_int = sched.current_ctx.load(.acquire);
-            std.debug.assert(fn_int != 0 and ctx_int != 0);
-            const fn_ptr: TrampolineFn = @ptrFromInt(fn_int);
-            const ctx_ptr: *anyopaque = @ptrFromInt(ctx_int);
-
+            // Found work — execute (still lock-free). M0.1 / E5b
+            // each job carries its own trampoline + ctx, so workers
+            // can interleave chunks from heterogeneous bodies
+            // (multi-job concurrent intra-phase dispatch).
             const t0 = std.Io.Clock.now(.awake, sched.io);
-            fn_ptr(job.chunk_ptr, ctx_ptr);
+            job.trampoline(job.chunk_ptr, job.ctx_ptr);
             const t1 = std.Io.Clock.now(.awake, sched.io);
 
             _ = self.stats.chunks_processed.fetchAdd(1, .acq_rel);
@@ -375,16 +386,18 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
     }
 }
 
-/// Push this worker's strided share of `sched.chunks[0..chunk_count]`
+/// Push this worker's strided share of `sched.jobs[0..chunk_count]`
 /// into its own deque. Lock-free — the deque's Chase-Lev push has the
-/// single-owner invariant, and the chunks array has already been
-/// published by the generation bump that woke us.
+/// single-owner invariant, and the jobs array has already been
+/// published by the generation bump that woke us. Each `Job` carries
+/// its own `(trampoline, ctx_ptr)` so the worker can run it without
+/// pulling any scheduler-global state.
 fn pushShare(sched: *Scheduler, self: *Worker, worker_idx: u32) void {
     const n = sched.chunk_count;
     const worker_count = sched.workers.len;
     var i: u32 = worker_idx;
     while (i < n) : (i += @intCast(worker_count)) {
-        while (!self.deque.push(.{ .chunk_ptr = sched.chunks[i] })) {
+        while (!self.deque.push(sched.jobs[i])) {
             std.Thread.yield() catch {};
         }
     }
