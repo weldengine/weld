@@ -20,6 +20,9 @@ pub const ecs = struct {
     pub const world = @import("ecs/world.zig");
     // M0.1 / E5a — system scheduler (phase pipeline, mono-job).
     pub const scheduler = @import("ecs/scheduler.zig");
+    // M0.1 / E6 — per-system command buffer + observer registry.
+    pub const command_buffer = @import("ecs/command_buffer.zig");
+    pub const observers = @import("ecs/observers.zig");
     // S4 — runtime side: registry, dynamic archetype, resources, runtime query.
     pub const registry = @import("ecs/registry.zig");
     pub const archetype_dynamic = @import("ecs/archetype_dynamic.zig");
@@ -100,4 +103,8 @@ comptime {
     // gap going forward.
     _ = ecs.archetype;
     _ = ecs.world;
+    // M0.1 / E6 — pin the command buffer + observer modules so their
+    // inline tests run alongside the rest of the ECS surface.
+    _ = ecs.command_buffer;
+    _ = ecs.observers;
 }

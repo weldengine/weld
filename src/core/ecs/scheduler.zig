@@ -68,11 +68,14 @@ const world_mod = @import("world.zig");
 const jobs_sched_mod = @import("../jobs/scheduler.zig");
 const worker_mod = @import("../jobs/worker.zig");
 const registry_mod = @import("registry.zig");
+const command_buffer_mod = @import("command_buffer.zig");
+const observers_mod = @import("observers.zig");
 
 const World = world_mod.World;
 const Job = worker_mod.Job;
 const TrampolineFn = worker_mod.TrampolineFn;
 const ComponentId = registry_mod.ComponentId;
+const CommandBuffer = command_buffer_mod.CommandBuffer;
 
 // ─── Phase pipeline ────────────────────────────────────────────────────────
 
@@ -200,8 +203,9 @@ pub const FrameContext = struct {
 /// Argument bundle passed to every `SystemFn`. Holds the borrowed
 /// `World`, the per-frame allocator, the io handle, the job
 /// scheduler for chunked dispatch, the `FrameContext` shared
-/// across systems, and the `JobBuilder` the system stages its
-/// chunked work into.
+/// across systems, the `JobBuilder` the system stages its chunked
+/// work into, and the per-system `CommandBuffer` for deferred
+/// structural mutations (M0.1 / E6).
 pub const SystemContext = struct {
     world: *World,
     gpa: std.mem.Allocator,
@@ -209,6 +213,11 @@ pub const SystemContext = struct {
     jobs: *jobs_sched_mod.Scheduler,
     frame: *FrameContext,
     builder: *JobBuilder,
+    /// Per-system command buffer. Owned by `SystemScheduler`; reset
+    /// between flushes (at the end of every phase). Recording is
+    /// single-threaded — only the `SystemFn` body (main thread)
+    /// records; worker trampolines do not receive a cmd buffer.
+    cmd: *CommandBuffer,
 };
 
 /// Type-erased system entry point. The function stages chunked
@@ -339,6 +348,11 @@ const Level = struct {
 
 const PhaseState = struct {
     systems: std.ArrayListUnmanaged(SystemDescriptor) = .empty,
+    /// Per-system command buffer, parallel to `systems`. Indexed by
+    /// the same `u32` index used in `edges` / `tracker` / `levels`.
+    /// Lifetime tied to the phase — created on `registerSystem`,
+    /// deinit'd on the phase's own `deinit`.
+    command_buffers: std.ArrayListUnmanaged(CommandBuffer) = .empty,
     /// `edges[i]` lists the system indices that must run AFTER
     /// system `i` (i.e. depend on `i`). Used by Kahn's algorithm
     /// to compute topological levels.
@@ -350,6 +364,8 @@ const PhaseState = struct {
 
     fn deinit(self: *PhaseState, gpa: std.mem.Allocator) void {
         self.systems.deinit(gpa);
+        for (self.command_buffers.items) |*cb| cb.deinit();
+        self.command_buffers.deinit(gpa);
         for (self.edges.items) |*adj| adj.deinit(gpa);
         self.edges.deinit(gpa);
         self.tracker.deinit(gpa);
@@ -473,6 +489,15 @@ pub const SystemScheduler = struct {
         try phase.systems.append(gpa, desc);
         errdefer _ = phase.systems.pop();
 
+        // E6 — allocate the per-system command buffer alongside the
+        // descriptor. The cmd buffer borrows `world` for type
+        // resolution and uses `gpa` as its backing allocator.
+        try phase.command_buffers.append(gpa, CommandBuffer.init(gpa, world));
+        errdefer {
+            var popped_cb = phase.command_buffers.pop();
+            if (popped_cb) |*cb| cb.deinit();
+        }
+
         try phase.edges.append(gpa, .empty);
         errdefer {
             var popped = phase.edges.pop();
@@ -583,11 +608,12 @@ pub const SystemScheduler = struct {
         builder: *JobBuilder,
         phase_idx: usize,
     ) !void {
-        const levels = self.phases[phase_idx].levels.?.items;
+        const phase = &self.phases[phase_idx];
+        const levels = phase.levels.?.items;
         for (levels) |lvl| {
             builder.reset();
             for (lvl.system_indices.items) |sys_idx| {
-                const sys = self.phases[phase_idx].systems.items[sys_idx];
+                const sys = phase.systems.items[sys_idx];
                 const ctx = SystemContext{
                     .world = world,
                     .gpa = gpa,
@@ -595,6 +621,7 @@ pub const SystemScheduler = struct {
                     .jobs = jobs,
                     .frame = frame,
                     .builder = builder,
+                    .cmd = &phase.command_buffers.items[sys_idx],
                 };
                 try sys.run(ctx);
             }
@@ -604,6 +631,25 @@ pub const SystemScheduler = struct {
             // End-of-level barrier is implicit — `dispatchBatch`
             // blocks until pending_count reaches zero.
         }
+
+        // M0.1 / E6 — phase-boundary command buffer flush. Iterate
+        // systems in **submission order** (the natural order of
+        // `phase.systems`), NOT in topological-level order — the
+        // contract guarantees deterministic application across
+        // re-orderable level layouts. Each per-system flush also
+        // drains the previous flush's observer-issued cmds (queued
+        // in `world.observer_registry.deferred`) so observers see
+        // their effects with one flush-point of latency, never
+        // re-entrantly.
+        for (phase.command_buffers.items) |*cb| {
+            if (cb.commandCount() == 0 and !hasPendingDeferred(&world.observer_registry)) continue;
+            try observers_mod.flushWithObservers(cb, &world.observer_registry);
+        }
+    }
+
+    fn hasPendingDeferred(reg: *observers_mod.ObserverRegistry) bool {
+        const d = reg.deferred orelse return false;
+        return d.commandCount() > 0;
     }
 
     /// Kahn's algorithm — compute topological levels for one phase

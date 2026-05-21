@@ -33,6 +33,7 @@ const tick_mod = @import("tick.zig");
 const registry_mod = @import("registry.zig");
 const resources_mod = @import("resources.zig");
 const query_runtime_mod = @import("query_runtime.zig");
+const observers_mod = @import("observers.zig");
 
 /// Public surface for consumers that spawn `(Transform, Velocity)`
 /// entities without depending on `components.zig` directly — the
@@ -114,6 +115,12 @@ pub const World = struct {
     /// Resource store keyed by `ComponentId`.
     resources: ResourceStore,
 
+    /// M0.1 / E6 — observer registry. Carries per-event callback
+    /// lists + a shared deferred command buffer for observer-issued
+    /// mutations. Lazy-init'd by the first `registerOn*` call; tests
+    /// that don't exercise observers never pay the alloc cost.
+    observer_registry: observers_mod.ObserverRegistry = .{},
+
     pub fn init() World {
         return .{
             .identity = EntityIdentityStore.init(),
@@ -123,6 +130,7 @@ pub const World = struct {
             .archetype_by_signature = .empty,
             .entity_locations = .empty,
             .resources = ResourceStore.init(),
+            .observer_registry = observers_mod.ObserverRegistry.init(),
         };
     }
 
@@ -137,7 +145,50 @@ pub const World = struct {
         self.resources.deinit(gpa);
         self.registry.deinit(gpa);
         self.identity.deinit(gpa);
+        self.observer_registry.deinit(gpa);
         self.* = undefined;
+    }
+
+    // ─── Observer registration (M0.1 / E6) ───────────────────────────────
+
+    /// Register an `on_spawned` observer.
+    pub fn registerOnSpawned(
+        self: *World,
+        gpa: std.mem.Allocator,
+        callback: observers_mod.ObserverFn,
+    ) !void {
+        try self.observer_registry.registerOnSpawned(gpa, self, callback);
+    }
+
+    /// Register an `on_despawned` observer.
+    pub fn registerOnDespawned(
+        self: *World,
+        gpa: std.mem.Allocator,
+        callback: observers_mod.ObserverFn,
+    ) !void {
+        try self.observer_registry.registerOnDespawned(gpa, self, callback);
+    }
+
+    /// Register an `on_add` observer for component `T`.
+    pub fn registerOnAdd(
+        self: *World,
+        gpa: std.mem.Allocator,
+        comptime T: type,
+        callback: observers_mod.ObserverFn,
+    ) !void {
+        const cid = try self.ensureRegistered(gpa, T);
+        try self.observer_registry.registerOnAdd(gpa, self, cid, callback);
+    }
+
+    /// Register an `on_remove` observer for component `T`.
+    pub fn registerOnRemove(
+        self: *World,
+        gpa: std.mem.Allocator,
+        comptime T: type,
+        callback: observers_mod.ObserverFn,
+    ) !void {
+        const cid = try self.ensureRegistered(gpa, T);
+        try self.observer_registry.registerOnRemove(gpa, self, cid, callback);
     }
 
     // ─── Component registration helpers ──────────────────────────────────
@@ -295,6 +346,64 @@ pub const World = struct {
         errdefer self.identity.release(gpa, eid) catch {};
 
         const r = try arch.spawnDefault(gpa, eid, self.current_tick);
+        self.entity_locations.putAssumeCapacity(eid, .{
+            .archetype_idx = arch.archetype_id,
+            .chunk_idx = r.chunk_idx,
+            .slot = r.slot,
+        });
+        return eid;
+    }
+
+    /// M0.1 / E6 — dynamic spawn with payload bytes per component.
+    /// Variant of `spawnDynamic` used by the command-buffer flush path
+    /// so deferred spawn commands can carry the caller-provided values
+    /// instead of falling back to the registry's default bytes.
+    /// `payloads[i]` must match the size of the component whose id is
+    /// `component_ids[i]`; the caller is responsible for that pairing.
+    pub fn spawnDynamicWithValues(
+        self: *World,
+        gpa: std.mem.Allocator,
+        component_ids: []const ComponentId,
+        payloads: []const []const u8,
+    ) !EntityId {
+        std.debug.assert(component_ids.len == payloads.len);
+
+        // Build the sorted-id arch key while preserving the original
+        // (id, payload) pairing so we can resolve each payload to its
+        // sorted column index at write time.
+        const sorted = try gpa.dupe(ComponentId, component_ids);
+        defer gpa.free(sorted);
+        archetype_mod.sortComponentIds(sorted);
+
+        try self.entity_locations.ensureUnusedCapacity(gpa, 1);
+        const arch = try self.getOrCreateArchetype(gpa, sorted);
+        const eid = try self.identity.allocate(gpa);
+        errdefer self.identity.release(gpa, eid) catch {};
+
+        const r = try arch.allocateSlot(gpa, self.current_tick);
+        const chunk = arch.chunks.items[r.chunk_idx];
+
+        // For each archetype column, find the matching payload by
+        // ComponentId (linear scan — `component_ids.len` is small).
+        for (arch.component_ids, 0..) |arch_cid, col| {
+            var found: ?usize = null;
+            for (component_ids, 0..) |req_cid, k| {
+                if (req_cid == arch_cid) {
+                    found = k;
+                    break;
+                }
+            }
+            const dst = arch.componentSlot(chunk, col, r.slot);
+            if (found) |k| {
+                @memcpy(dst, payloads[k]);
+            } else {
+                // Should never happen — sorted is derived from
+                // component_ids by `dupe`, so every column has a payload.
+                unreachable;
+            }
+        }
+        arch.entityIds(chunk)[r.slot] = eid;
+
         self.entity_locations.putAssumeCapacity(eid, .{
             .archetype_idx = arch.archetype_id,
             .chunk_idx = r.chunk_idx,
@@ -472,6 +581,138 @@ pub const World = struct {
         });
     }
 
+    /// M0.1 / E6 — dynamic addComponent used by the command-buffer
+    /// flush path. Same migration logic as `addComponent` but the
+    /// component's identity is given directly (already resolved at
+    /// record time) and the new column's bytes come from the caller's
+    /// payload slice.
+    pub fn addComponentDynamic(
+        self: *World,
+        gpa: std.mem.Allocator,
+        entity: EntityId,
+        cid_new: ComponentId,
+        value_bytes: []const u8,
+    ) !void {
+        try self.identity.validate(entity);
+        const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
+
+        const src_arch = self.archetypes.items[src_loc.archetype_idx];
+        std.debug.assert(!src_arch.hasComponent(cid_new));
+
+        const dst_arch = blk: {
+            if (src_arch.transitions.add.get(cid_new)) |target_idx| {
+                break :blk self.archetypes.items[target_idx];
+            }
+            const target_ids = try gpa.alloc(ComponentId, src_arch.component_ids.len + 1);
+            defer gpa.free(target_ids);
+            @memcpy(target_ids[0..src_arch.component_ids.len], src_arch.component_ids);
+            target_ids[src_arch.component_ids.len] = cid_new;
+            archetype_mod.sortComponentIds(target_ids);
+
+            const target = try self.getOrCreateArchetype(gpa, target_ids);
+            const src_arch_after = self.archetypes.items[src_loc.archetype_idx];
+            try src_arch_after.transitions.add.put(gpa, cid_new, target.archetype_id);
+            break :blk target;
+        };
+
+        try self.entity_locations.ensureUnusedCapacity(gpa, 1);
+
+        const dst_r = try dst_arch.allocateSlot(gpa, self.current_tick);
+        const dst_chunk = dst_arch.chunks.items[dst_r.chunk_idx];
+        const src_chunk = src_arch.chunks.items[src_loc.chunk_idx];
+
+        for (dst_arch.component_ids, 0..) |dst_cid, i| {
+            const dst = dst_arch.componentSlot(dst_chunk, i, dst_r.slot);
+            if (dst_cid == cid_new) {
+                @memcpy(dst, value_bytes);
+            } else {
+                const src_i = src_arch.componentIndex(dst_cid).?;
+                const src = src_arch.componentSlot(src_chunk, src_i, src_loc.slot);
+                @memcpy(dst, src);
+
+                const src_added = src_arch.addedTick(src_chunk, src_i, src_loc.slot);
+                const src_changed = src_arch.changedTick(src_chunk, src_i, src_loc.slot);
+                dst_chunk.addedTickColumn(&dst_arch.layout, i)[dst_r.slot] = src_added;
+                dst_chunk.changedTickColumn(&dst_arch.layout, i)[dst_r.slot] = src_changed;
+            }
+        }
+        dst_arch.entityIds(dst_chunk)[dst_r.slot] = entity;
+
+        if (src_arch.removeSwap(src_loc.chunk_idx, src_loc.slot)) |swapped_id| {
+            self.entity_locations.getPtr(swapped_id).?.* = src_loc;
+        }
+        self.entity_locations.putAssumeCapacity(entity, .{
+            .archetype_idx = dst_arch.archetype_id,
+            .chunk_idx = dst_r.chunk_idx,
+            .slot = dst_r.slot,
+        });
+    }
+
+    /// M0.1 / E6 — dynamic removeComponent used by the command-buffer
+    /// flush path. Same migration logic as `removeComponent` but the
+    /// component identity is given as a `ComponentId` (already resolved
+    /// at record time).
+    pub fn removeComponentDynamic(
+        self: *World,
+        gpa: std.mem.Allocator,
+        entity: EntityId,
+        cid_drop: ComponentId,
+    ) !void {
+        try self.identity.validate(entity);
+        const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
+
+        const src_arch = self.archetypes.items[src_loc.archetype_idx];
+        std.debug.assert(src_arch.hasComponent(cid_drop));
+
+        const dst_arch = blk: {
+            if (src_arch.transitions.remove.get(cid_drop)) |target_idx| {
+                break :blk self.archetypes.items[target_idx];
+            }
+            std.debug.assert(src_arch.component_ids.len >= 2);
+            const target_ids = try gpa.alloc(ComponentId, src_arch.component_ids.len - 1);
+            defer gpa.free(target_ids);
+            var di: usize = 0;
+            for (src_arch.component_ids) |cid| {
+                if (cid == cid_drop) continue;
+                target_ids[di] = cid;
+                di += 1;
+            }
+
+            const target = try self.getOrCreateArchetype(gpa, target_ids);
+            const src_arch_after = self.archetypes.items[src_loc.archetype_idx];
+            try src_arch_after.transitions.remove.put(gpa, cid_drop, target.archetype_id);
+            break :blk target;
+        };
+
+        try self.entity_locations.ensureUnusedCapacity(gpa, 1);
+
+        const dst_r = try dst_arch.allocateSlot(gpa, self.current_tick);
+        const dst_chunk = dst_arch.chunks.items[dst_r.chunk_idx];
+        const src_chunk = src_arch.chunks.items[src_loc.chunk_idx];
+
+        for (dst_arch.component_ids, 0..) |dst_cid, i| {
+            const src_i = src_arch.componentIndex(dst_cid).?;
+            const dst = dst_arch.componentSlot(dst_chunk, i, dst_r.slot);
+            const src = src_arch.componentSlot(src_chunk, src_i, src_loc.slot);
+            @memcpy(dst, src);
+
+            const src_added = src_arch.addedTick(src_chunk, src_i, src_loc.slot);
+            const src_changed = src_arch.changedTick(src_chunk, src_i, src_loc.slot);
+            dst_chunk.addedTickColumn(&dst_arch.layout, i)[dst_r.slot] = src_added;
+            dst_chunk.changedTickColumn(&dst_arch.layout, i)[dst_r.slot] = src_changed;
+        }
+        dst_arch.entityIds(dst_chunk)[dst_r.slot] = entity;
+
+        if (src_arch.removeSwap(src_loc.chunk_idx, src_loc.slot)) |swapped_id| {
+            self.entity_locations.getPtr(swapped_id).?.* = src_loc;
+        }
+        self.entity_locations.putAssumeCapacity(entity, .{
+            .archetype_idx = dst_arch.archetype_id,
+            .chunk_idx = dst_r.chunk_idx,
+            .slot = dst_r.slot,
+        });
+    }
+
     /// Remove component `T` from `entity`. Routes through the source
     /// archetype's `TransitionCache.remove`. The destination archetype
     /// is the source's signature minus `cid`. Component data for the
@@ -571,33 +812,55 @@ pub const World = struct {
         // Resolve every type in the required + with + without sets to
         // a `ComponentId`. `ensureRegistered` is idempotent so calling
         // it on already-registered types just returns the cached id.
-        var required_ids: [Components.len]ComponentId = undefined;
+        // Store the resolved ids on the Query so the E6 lazy re-scan
+        // path can reuse them without re-resolving on every iteration.
         inline for (Components, 0..) |T, i| {
-            required_ids[i] = try self.ensureRegistered(gpa, T);
+            q.required_ids[i] = try self.ensureRegistered(gpa, T);
         }
-        var with_ids: [QueryT.with_types.len]ComponentId = undefined;
         inline for (QueryT.with_types, 0..) |T, i| {
-            with_ids[i] = try self.ensureRegistered(gpa, T);
+            q.with_ids[i] = try self.ensureRegistered(gpa, T);
         }
-        var without_ids: [QueryT.without_types.len]ComponentId = undefined;
         inline for (QueryT.without_types, 0..) |T, i| {
-            without_ids[i] = try self.ensureRegistered(gpa, T);
+            q.without_ids[i] = try self.ensureRegistered(gpa, T);
         }
 
         // Walk archetypes in creation order so the resulting matches
         // list (and therefore the iteration order surfaced through
         // `chunkAt`) is deterministic and reproducible.
         for (self.archetypes.items) |arch| {
-            if (!query_mod.archetypeMatches(arch, &required_ids, &with_ids, &without_ids)) {
+            if (!query_mod.archetypeMatches(arch, &q.required_ids, &q.with_ids, &q.without_ids)) {
                 continue;
             }
             var indices: [Components.len]u32 = undefined;
-            for (required_ids, 0..) |cid, i| {
+            for (q.required_ids, 0..) |cid, i| {
                 indices[i] = @intCast(arch.componentIndex(cid).?);
             }
             try q.matches.append(gpa, .{ .archetype = arch, .column_indices = indices });
         }
+
+        // E6 — wire the lazy re-scan view. After this point, every
+        // iteration entry (`chunkCount` / `chunkAt` / `forEachChunk`)
+        // first compares `archetypes.items.len` against
+        // `last_seen_archetype_count` and re-scans the tail slice on
+        // mismatch.
+        q.archetype_view = .{
+            .ctx = @ptrCast(self),
+            .archetypes_slice = &worldArchetypesSlice,
+        };
+        q.rescan_gpa = gpa;
+        q.last_seen_archetype_count = self.archetypes.items.len;
+
         return q;
+    }
+
+    /// Type-erased accessor used by Query's lazy re-scan path —
+    /// recovers the `*World` pointer and returns the current
+    /// archetype slice. The slice is recomputed on every call so the
+    /// rescan loop always sees the up-to-date `items` pointer (which
+    /// can move when the ArrayList reallocates).
+    fn worldArchetypesSlice(ctx: *anyopaque) []const *Archetype {
+        const w: *World = @ptrCast(@alignCast(ctx));
+        return w.archetypes.items;
     }
 
     /// Build a runtime query against this world's archetypes. Mirrors

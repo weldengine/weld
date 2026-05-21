@@ -28,6 +28,20 @@
 //! E5b. The S1 job system (one job in flight at a time, via
 //! `Scheduler.dispatch`) still consumes the query through the same
 //! `chunkAt(i)` protocol.
+//!
+//! M0.1 / E6 adds **lazy archetype re-scan**. After construction the
+//! query caches `last_seen_archetype_count` plus the resolved
+//! `required_ids` / `with_ids` / `without_ids` lists plus an opaque
+//! accessor to the world's archetype slice. Every external iteration
+//! entry point (`chunkCount`, `chunkAt`, `forEachChunk`,
+//! `runChunkAt`) compares `world.archetypes.items.len` against
+//! `last_seen_archetype_count` and, if different, scans only the new
+//! slice `world.archetypes.items[last_seen_archetype_count..]`,
+//! applies the same filter set as construction, and appends new
+//! matches. Cost in steady-state: `usize == usize` per entry.
+//! No registry side, no notification mechanism on the world — pure
+//! polling at iteration time. Closes the E3 dette explicitly accepted
+//! when command buffers (E6) made mid-frame archetype creation real.
 
 const std = @import("std");
 const archetype_mod = @import("archetype.zig");
@@ -50,6 +64,20 @@ pub const PredicateFn = *const fn (
     chunk: *Chunk,
     slot: u32,
 ) bool;
+
+/// Opaque accessor to the world's archetype slice — lets the query's
+/// lazy re-scan path read the up-to-date archetype list without
+/// taking a hard dependency on `world.zig` (which would create a
+/// cyclic import since `world.zig` already depends on `query.zig`).
+///
+/// `ctx` points at the owning `*World`; `archetypes_slice` casts back
+/// and returns `world.archetypes.items`. The slice is recomputed on
+/// every call — safe because callers do not retain the result past
+/// the rescan loop.
+pub const ArchetypeView = struct {
+    ctx: *anyopaque,
+    archetypes_slice: *const fn (ctx: *anyopaque) []const *Archetype,
+};
 
 /// Comptime tag distinguishing the four filter spec kinds. Used by
 /// `Query`'s internal parser to bucket the filters tuple.
@@ -215,6 +243,25 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         /// system-level tracking).
         last_run_tick: Tick = tick_mod.initial_tick,
 
+        /// M0.1 / E6 — lazy re-scan state. `archetype_view` is null
+        /// for queries built outside `World.queryFiltered` (e.g.
+        /// tests constructing a Query directly via `empty()`); those
+        /// queries skip the rescan and behave like pre-E6.
+        archetype_view: ?ArchetypeView = null,
+        /// Allocator captured at construction so `maybeRescan` can
+        /// extend the matches list without threading a gpa through
+        /// every iteration entry point.
+        rescan_gpa: std.mem.Allocator = undefined,
+        /// Number of archetypes seen by the most recent rescan (or
+        /// by the initial scan in `queryFiltered`). Compared against
+        /// `world.archetypes.items.len` on every iteration entry.
+        last_seen_archetype_count: usize = 0,
+        /// Resolved required / with / without ComponentIds, captured
+        /// at construction so the rescan loop reuses the same set.
+        required_ids: [Components.len]ComponentId = undefined,
+        with_ids: [WCOUNT]ComponentId = undefined,
+        without_ids: [WOCOUNT]ComponentId = undefined,
+
         /// Construct an empty query — used as the no-allocation seed
         /// the world populates via `World.query` / `World.queryFiltered`.
         pub fn empty() Self {
@@ -226,16 +273,67 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
             self.* = undefined;
         }
 
+        /// Compare `world.archetypes.items.len` against the cached
+        /// `last_seen_archetype_count`. If the world has gained
+        /// archetypes since the last scan (typically via a command
+        /// buffer flush that materialised a new shape), re-apply the
+        /// filter set to the tail slice and append new matches.
+        ///
+        /// Cheap in the steady state: one usize equality compared,
+        /// no heap traffic. The rescan loop itself is `O(new)` over
+        /// archetype count.
+        ///
+        /// Called automatically from every iteration entry point —
+        /// callers do not need to invoke it explicitly. No-op when
+        /// `archetype_view` is null (test queries built via
+        /// `Self.empty()` directly).
+        pub fn maybeRescan(self: *Self) void {
+            const view = self.archetype_view orelse return;
+            const all = view.archetypes_slice(view.ctx);
+            if (all.len == self.last_seen_archetype_count) return;
+            // Scan only the tail — existing matches remain valid
+            // (archetype pointers are stable for the world's lifetime).
+            const tail = all[self.last_seen_archetype_count..];
+            for (tail) |arch| {
+                if (!archetypeMatches(
+                    arch,
+                    &self.required_ids,
+                    &self.with_ids,
+                    &self.without_ids,
+                )) continue;
+                var indices: [Components.len]u32 = undefined;
+                for (self.required_ids, 0..) |cid, i| {
+                    indices[i] = @intCast(arch.componentIndex(cid).?);
+                }
+                // `appendBounded` would error on OOM — but a Query
+                // built via queryFiltered always carries a heap gpa,
+                // and the matches list only grows by O(world
+                // archetype delta). On OOM we panic — losing a match
+                // silently is a worse failure mode than crashing
+                // (would corrupt the iteration's chunkCount/chunkAt
+                // contract).
+                self.matches.append(self.rescan_gpa, .{
+                    .archetype = arch,
+                    .column_indices = indices,
+                }) catch @panic("Query.maybeRescan: out of memory appending new match");
+            }
+            self.last_seen_archetype_count = all.len;
+        }
+
         /// Number of matched archetypes. Mostly useful for tests and
         /// debugging — the dispatch protocol cares about `chunkCount`.
-        pub fn matchCount(self: *const Self) usize {
+        /// Triggers a lazy re-scan against the world's archetype
+        /// slice if it has grown since the last entry.
+        pub fn matchCount(self: *Self) usize {
+            self.maybeRescan();
             return self.matches.items.len;
         }
 
         /// Aggregate chunk count across every matched archetype.
         /// Defines the dispatch's `[0, chunkCount)` index range that
-        /// `chunkAt` resolves.
-        pub fn chunkCount(self: *const Self) usize {
+        /// `chunkAt` resolves. Triggers a lazy re-scan first.
+        pub fn chunkCount(self: *Self) usize {
+            self.maybeRescan();
             var total: usize = 0;
             for (self.matches.items) |m| total += m.archetype.chunks.items.len;
             return total;
@@ -245,6 +343,15 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         /// chunk index walks matches in archetype-creation order
         /// (matches are appended in `world.archetypes` order) then
         /// chunks in `archetype.chunks.items` order.
+        ///
+        /// **Does NOT** trigger a lazy re-scan — the caller is
+        /// expected to have invoked `chunkCount` first (which does
+        /// the rescan and stabilises the index space for the rest
+        /// of the dispatch). The dispatch protocol in `JobBuilder`
+        /// follows this contract: one `chunkCount` followed by N
+        /// `chunkAt(i)` calls. Skipping the rescan on the hot path
+        /// is a perf optimisation — staging 640 chunks × the rescan
+        /// overhead added ~10 µs to the S1 bench at E6.
         pub fn chunkAt(self: *const Self, i: usize) *Chunk {
             var idx = i;
             for (self.matches.items) |m| {
@@ -338,8 +445,11 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         /// must accept `(*Chunk, ...args)`. Iteration order is
         /// archetype-creation order then chunk order — the predicate
         /// is **not** applied automatically; bodies call `slotPasses`
-        /// on individual slots when they want filtering.
+        /// on individual slots when they want filtering. Triggers a
+        /// lazy re-scan first so newly-materialised archetypes appear
+        /// on the next iteration.
         pub fn forEachChunk(self: *Self, comptime Body: anytype, args: anytype) void {
+            self.maybeRescan();
             for (self.matches.items) |m| {
                 for (m.archetype.chunks.items) |chunk| {
                     @call(.auto, Body, .{chunk} ++ args);
@@ -349,7 +459,9 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
 
         /// Run `Body` on the chunk at global index `idx`. Used by the
         /// scheduler to dispatch chunks across workers via the same
-        /// `chunkAt(i)` protocol.
+        /// `chunkAt(i)` protocol. The caller is expected to have
+        /// invoked `chunkCount` first, which triggers the rescan and
+        /// stabilises the index space for the rest of the dispatch.
         pub fn runChunkAt(self: *Self, idx: usize, comptime Body: anytype, args: anytype) void {
             const chunk = self.chunkAt(idx);
             @call(.auto, Body, .{chunk} ++ args);
