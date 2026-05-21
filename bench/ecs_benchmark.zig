@@ -85,14 +85,16 @@ const BenchState = struct {
     velocities_off: u16,
 };
 
-/// E5a system registered in the `.update` phase. Pulls its cached
-/// query + offsets from `ctx.frame.user`, hands the chunked work
-/// off to `ctx.jobs.dispatch`. The `dt` value comes from
-/// `ctx.frame.dt` so the bench's `1.0 / 60.0` constant flows
-/// through the system scheduler instead of being captured directly.
+/// E5b system registered in the `.update` phase. Pulls its cached
+/// query + offsets from `ctx.frame.user`, stages the chunked work
+/// into `ctx.builder` so the SystemScheduler can batch it with any
+/// other compatible system in the same topological level. The `dt`
+/// value comes from `ctx.frame.dt` so the bench's `1.0 / 60.0`
+/// constant flows through the system scheduler instead of being
+/// captured directly.
 fn integrateSystem(ctx: SystemContext) anyerror!void {
     const state: *BenchState = @ptrCast(@alignCast(ctx.frame.user.?));
-    ctx.jobs.dispatch(state.query, integrateChunk, .{
+    try ctx.builder.addJob(state.query, integrateChunk, .{
         state.transforms_off,
         state.velocities_off,
         ctx.frame.dt,
@@ -357,10 +359,17 @@ pub fn main(init: std.process.Init) !void {
     };
     var sys_sched = SystemScheduler.init();
     defer sys_sched.deinit(gpa);
-    try sys_sched.registerSystem(gpa, .{
+    try sys_sched.registerSystem(gpa, &world, .{
         .phase = .update,
         .name = "bench_integrate",
         .run = integrateSystem,
+        // No `accesses` — the bench is a single-system workload so
+        // the DAG resolves to a single topological level with one
+        // entry. The Writes(Transform)/Reads(Velocity) declaration
+        // is omitted on purpose: it would not change the bench's
+        // dispatch shape but would force the registry path through
+        // the FieldKind-bypassed component registration (M0.2
+        // territory).
     });
 
     if (smoke) {
