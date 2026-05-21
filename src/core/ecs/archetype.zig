@@ -450,7 +450,11 @@ test "Archetype init pins sorted component_ids and registry-driven sizes/aligns"
     defer reg.deinit(gpa);
 
     const Health = extern struct { current: f32 = 0, max: f32 = 100 };
-    const Tag = extern struct { v: u8 = 0 };
+    // M0.1 / E5b note: Tag uses `u32` rather than `u8` because the
+    // E4 `FieldKind` registry whitelist does not include `u8`
+    // (RTTI cleanup is M0.2). The test only cares that two
+    // components with distinct sizes/aligns sort correctly.
+    const Tag = extern struct { v: u32 = 0 };
 
     const id_h = try reg.registerComponent(gpa, Health);
     const id_t = try reg.registerComponent(gpa, Tag);

@@ -91,4 +91,13 @@ comptime {
     _ = ecs.change_detection;
     // M0.1 / E5a — pin the system scheduler.
     _ = ecs.scheduler;
+    // M0.1 / E5b — pin archetype + world so their inline tests run.
+    // The pre-E5b `core_tests` build target silently skipped them
+    // because no consumer in the analysis frontier referenced the
+    // pub aliases (lazy analysis guard, `engine-zig-conventions.md`
+    // §13). Latent regression caught when the E5b SystemScheduler
+    // added a new reference path; pinning closes the test coverage
+    // gap going forward.
+    _ = ecs.archetype;
+    _ = ecs.world;
 }
