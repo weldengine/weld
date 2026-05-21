@@ -41,8 +41,10 @@ test "1000 query iterations allocate zero bytes after init" {
     // allocation-free.
     var query = try world.query(gpa);
     defer query.deinit(gpa);
-    const transforms_off = query.componentOffset(0);
-    const velocities_off = query.componentOffset(1);
+    // M0.1 / E7 — single-archetype lookup via the fused multi-archetype API.
+    const first_chunk = query.chunkAt(0);
+    const transforms_off = query.componentOffsetFor(first_chunk, 0);
+    const velocities_off = query.componentOffsetFor(first_chunk, 1);
 
     const before = counting.snapshot();
     var iter: u32 = 0;

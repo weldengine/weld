@@ -415,10 +415,15 @@ fn runS1(
     defer query.deinit(gpa);
     const dt: f32 = 1.0 / 60.0;
 
+    // Resolve column offsets once at setup — single-archetype
+    // query, so `componentOffsetFor` on any chunk returns the same
+    // value. The hot loop reads `bench_state.transforms_off /
+    // velocities_off` instead of paying the per-chunk lookup.
+    const first_chunk = query.chunkAt(0);
     var bench_state = S1BenchState{
         .query = &query,
-        .transforms_off = query.componentOffset(0),
-        .velocities_off = query.componentOffset(1),
+        .transforms_off = query.componentOffsetFor(first_chunk, 0),
+        .velocities_off = query.componentOffsetFor(first_chunk, 1),
     };
     var sys_sched = SystemScheduler.init();
     defer sys_sched.deinit(gpa);

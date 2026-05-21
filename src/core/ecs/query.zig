@@ -374,21 +374,30 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         }
 
         /// Byte offset of `Components[i]`'s SoA column inside the
-        /// **single matched archetype**. Asserts `matchCount() == 1` —
-        /// kept for the bench / no_alloc paths that resolve the offset
-        /// once before the dispatch loop. Multi-archetype callers use
-        /// `componentOffsetFor` instead.
-        pub fn componentOffset(self: *const Self, comptime i: usize) u16 {
-            std.debug.assert(self.matches.items.len == 1);
-            const m = self.matches.items[0];
-            return m.archetype.layout.component_offsets[m.column_indices[i]];
-        }
-
-        /// Byte offset of `Components[i]` in the archetype owning
-        /// `chunk`. The multi-archetype counterpart to
-        /// `componentOffset`. Panics if the chunk is not part of any
-        /// match — only a programmer error since `forEachChunk` only
-        /// hands out chunks from matched archetypes.
+        /// archetype owning `chunk`. The body recovers the chunk's
+        /// archetype via the chunk's header and looks up the matching
+        /// `column_indices` entry — handles both single- and
+        /// multi-archetype queries through a uniform API.
+        ///
+        /// Single-archetype callers (the S1 bench, the
+        /// `no_alloc_in_simulation_test` path) resolve the offset once
+        /// at query construction by calling
+        /// `query.componentOffsetFor(query.chunkAt(0), i)` and stash
+        /// the result in their state struct — the lookup cost (a
+        /// linear scan of `matches`, O(matchCount)) is paid once, not
+        /// once per chunk.
+        ///
+        /// Multi-archetype callers (the C0.1 bench's 10 systems) call
+        /// `componentOffsetFor(chunk, i)` inside the chunk body itself
+        /// because the offset varies between matched archetypes.
+        ///
+        /// Panics if the chunk is not part of any match — only a
+        /// programmer error since `forEachChunk` and `chunkAt` only
+        /// hand out chunks from matched archetypes.
+        ///
+        /// M0.1 / E7 — replaces the older single-archetype-only
+        /// `componentOffset(comptime i)` helper. Fusion decision
+        /// recorded in the brief journal.
         pub fn componentOffsetFor(self: *const Self, chunk: *Chunk, comptime i: usize) u16 {
             const m = self.matchFor(chunk) orelse @panic("componentOffsetFor on a non-match chunk");
             return m.archetype.layout.component_offsets[m.column_indices[i]];

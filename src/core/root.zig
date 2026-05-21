@@ -4,33 +4,22 @@
 //! for now; Phase 0 will expand the surface (resources, events, RTTI,
 //! plugin loader, IPC, platform layer) as those land.
 
-/// ECS namespace — comptime SoA archetype + runtime registry surface.
-pub const ecs = struct {
-    // M0.1 / E1 — generational identity store. Sits below components.zig
-    // because the canonical `EntityId` lives here and components.zig
-    // re-exports it.
-    pub const entity = @import("ecs/entity.zig");
-    pub const components = @import("ecs/components.zig");
-    // M0.1 / E4 — world tick + change-detection sidecars.
-    pub const tick = @import("ecs/tick.zig");
-    pub const change_detection = @import("ecs/change_detection.zig");
-    pub const chunk = @import("ecs/chunk.zig");
-    pub const archetype = @import("ecs/archetype.zig");
-    pub const query = @import("ecs/query.zig");
-    pub const world = @import("ecs/world.zig");
-    // M0.1 / E5a — system scheduler (phase pipeline, mono-job).
-    pub const scheduler = @import("ecs/scheduler.zig");
-    // M0.1 / E6 — per-system command buffer + observer registry.
-    pub const command_buffer = @import("ecs/command_buffer.zig");
-    pub const observers = @import("ecs/observers.zig");
-    // S4 — runtime side: registry, dynamic archetype, resources, runtime query.
-    pub const registry = @import("ecs/registry.zig");
-    pub const archetype_dynamic = @import("ecs/archetype_dynamic.zig");
-    pub const resources = @import("ecs/resources.zig");
-    pub const query_runtime = @import("ecs/query_runtime.zig");
-    // S5 — comptime-typed query consumed by the Etch → Zig codegen.
-    pub const comptime_query = @import("ecs/comptime_query.zig");
-};
+/// ECS namespace — single canonical entry point at
+/// `src/core/ecs/root.zig` (M0.1 / E7). The root provides both:
+///   * Flat public types : `ecs.World`, `ecs.EntityId`, `ecs.Query`,
+///     `ecs.CommandBuffer`, `ecs.SystemScheduler`, etc. — the M0.1
+///     stable contract listed in the milestone brief.
+///   * Sub-module aliases: `ecs.world`, `ecs.scheduler`,
+///     `ecs.query`, `ecs.command_buffer`, … — kept reachable for
+///     tests and the bench so they can address internal symbols
+///     without going through the flat surface.
+///
+/// Consumers writing new code should prefer the flat surface
+/// (`ecs.World` over `ecs.world.World`). The sub-module aliases are
+/// stable for the lifetime of M0.1 but may be pruned at M0.2 once
+/// the RTTI rework cleans up the deprecated `archetype_dynamic`
+/// shim and the S4 surface.
+pub const ecs = @import("ecs/root.zig");
 
 /// Jobs namespace — Chase-Lev deque + work-stealing scheduler.
 pub const jobs = struct {

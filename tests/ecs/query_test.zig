@@ -59,7 +59,8 @@ test "writes through query persist across iterations" {
 
     var query = try world.query(gpa);
     defer query.deinit(gpa);
-    const transforms_off = query.componentOffset(0);
+    // M0.1 / E7 — single-archetype lookup via the fused multi-archetype API.
+    const transforms_off = query.componentOffsetFor(query.chunkAt(0), 0);
     query.forEachChunk(writeKnown, .{ transforms_off, @as(f32, 7.5) });
 
     var all_equal: bool = true;
