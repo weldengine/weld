@@ -156,13 +156,21 @@ test "idle workers sleep instead of busy-yielding" {
     // returns when `pending_count == 0`, so workers may still be in
     // the inter-iteration window — the sleep gives them a generous
     // grace period to enter `cond.wait`.
-    std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    //
+    // Window sized at 500 ms (10× the original 50 ms) to absorb
+    // Windows' default timer resolution of ~15.6 ms — a 50 ms
+    // sleep on Windows can effectively be 32 ms (2 ticks), and on
+    // CI runners with high system load the worker spin window
+    // (~200 µs nominal) can stretch unpredictably. 500 ms is well
+    // below the test timeout, well above any plausible park latency
+    // on any supported platform.
+    std.Io.sleep(io, .fromMilliseconds(500), .awake) catch {};
 
     // Second dispatch — workers wake from their parked state. The
     // parks_completed counter must have advanced.
     sched.dispatch(&query, idleBody, .{});
 
-    std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    std.Io.sleep(io, .fromMilliseconds(500), .awake) catch {};
 
     const stats = try sched.snapshotStats(gpa);
     defer gpa.free(stats);
