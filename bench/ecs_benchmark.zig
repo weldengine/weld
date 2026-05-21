@@ -1,20 +1,54 @@
 //! ECS benchmark — Phase 0 entry point.
 //!
-//! Currently hosts the **S1 non-regression case** inherited from
-//! `bench/ecs_iteration.zig` (renamed in M0.1 / E1 per
-//! `briefs/M0.1-ecs-full.md`): 100 000 entities × 1 archetype × 1000
-//! measured iterations after 100 warm-up iterations through the
-//! comptime-generated `(*Transform, *Velocity)` query and the work-stealing
-//! scheduler. Output is a single Markdown report at
-//! `zig-out/bench/ecs_benchmark.md` containing machine config, build mode,
-//! per-mode timing distribution, per-worker stats, load imbalance, and a
-//! GO/NO-GO verdict against the 1.0 ms median ReleaseSafe gate.
+//! Hosts two cases, selectable via `--case=<name>`:
 //!
-//! M0.1 / E7 will extend this file with the C0.1 1 M × 4 archetypes × 10
-//! systems case alongside the S1 non-regression baseline.
+//! 1. **S1 non-regression** (`--case=s1`, default): 100 000 entities ×
+//!    1 archetype × 1000 measured iterations after 100 warm-up
+//!    iterations through the comptime-generated
+//!    `(*Transform, *Velocity)` query and the work-stealing scheduler.
+//!    Mode requirement: ReleaseSafe (CI gate, comparable across hosts).
+//!    Gate: median ≤ 62 µs (M0.1/E7 recalibrated from the 57.2 µs
+//!    E5b gate by +5 µs to account for the dispatchFrame overhead
+//!    inherent to the generalised scheduler — see brief journal).
 //!
-//! ## Locked iteration body (re-used by every measurement and by the smoke
-//! ## paths in `src/main.zig` and `tests/ecs/no_alloc_in_simulation_test.zig`)
+//! 2. **C0.1 production target** (`--case=c01`): 1 000 000 entities ×
+//!    4 archetypes × 10 systems × tick loop. Mode requirement:
+//!    ReleaseFast (spec C0.1 of the engine plan).
+//!    Gate: median ≤ 16.6 ms (60 FPS), p99 ≤ 25 ms, imbalance ≤ 15 %.
+//!
+//! Output is a Markdown report at `zig-out/bench/ecs_benchmark.md`
+//! containing machine config, build mode, per-mode timing
+//! distribution, per-worker stats, load imbalance, and a GO/NO-GO
+//! verdict against the case's gate.
+//!
+//! ## CLI flags
+//!
+//! - `--help`            — print this list and exit.
+//! - `--case=s1|c01`     — pick the case. Default: `s1`.
+//! - `--workers=N`       — force the job system's worker count instead of
+//!                         `std.Thread.getCpuCount`. The S1 baseline is
+//!                         calibrated at 4 workers (`--workers=4`) so the
+//!                         CI gate is comparable across host topologies.
+//!                         The C0.1 case uses the default (= one worker
+//!                         per CPU) unless overridden.
+//! - `--smoke`           — short-circuit run (single dispatch on a small
+//!                         entity set). Used by the `bench-ecs-smoke` CI
+//!                         job to gate compilation only. Applies to both
+//!                         cases.
+//! - `--cold-runs=N`     — number of full cold-isolated process invocations
+//!                         the wrapper should expect. Affects the report
+//!                         header only — the bench itself runs once.
+//!
+//! ## Build-mode guard
+//!
+//! `bench-ecs` REJECTS Debug builds (the inner gate would falsely
+//! report GO at Debug speeds, hiding regressions — cf. brief E1
+//! journal entry 2026-05-20 18:44). Compile with
+//! `-Doptimize=ReleaseSafe` (S1) or `-Doptimize=ReleaseFast` (C0.1).
+//!
+//! ## Locked iteration body (S1 case — re-used by every measurement
+//! ## and by the smoke paths in `src/main.zig` and
+//! ## `tests/ecs/no_alloc_in_simulation_test.zig`)
 //!
 //! ```zig
 //! velocities[i].linear[1] -= 9.81 * dt;
@@ -22,16 +56,6 @@
 //! transforms[i].pos[1] += velocities[i].linear[1] * dt;
 //! transforms[i].pos[2] += velocities[i].linear[2] * dt;
 //! ```
-//!
-//! CLI flags:
-//!
-//! - `--smoke` — short-circuit run (single dispatch, ~1 k entities).
-//!   Used by the `bench-ecs-smoke` CI job to gate compilation only.
-//! - `--workers=N` — force the job system's worker count instead of
-//!   `std.Thread.getCpuCount`. Added by M0.1 / E5a as the isolation
-//!   knob for the bench-regression breakdown — the S1 baseline
-//!   (54.5 µs) was measured at 4 workers, so `--workers=4` on any
-//!   host produces a directly comparable median.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -46,14 +70,29 @@ const SystemScheduler = weld_core.ecs.scheduler.SystemScheduler;
 const SystemContext = weld_core.ecs.scheduler.SystemContext;
 const Query = weld_core.ecs.world.Query;
 
-const NumEntities: u32 = 100_000;
-const WarmupIterations: u32 = 100;
-const MeasuredIterations: u32 = 1000;
-const SmokeEntities: u32 = 1024;
+// ─── S1 constants ─────────────────────────────────────────────────────────
 
-const PrimaryGateNs: u64 = 1_000_000; // 1.0 ms — primary GO/NO-GO gate
+const S1NumEntities: u32 = 100_000;
+const S1WarmupIterations: u32 = 100;
+const S1MeasuredIterations: u32 = 1000;
+const S1SmokeEntities: u32 = 1024;
+
+const S1LegacyPrimaryGateNs: u64 = 1_000_000; // 1.0 ms — historic S1 ceiling
+const S1RegressionGateNs: u64 = 62_000; // 62 µs — E7 recalibrated gate
 const SecondaryTargetNs: u64 = 500_000; // 0.5 ms — recorded only
 const ImbalanceGate: f64 = 0.15;
+
+// ─── Case selector ────────────────────────────────────────────────────────
+
+const Case = enum { s1, c01 };
+
+fn parseCase(s: []const u8) ?Case {
+    if (std.mem.eql(u8, s, "s1")) return .s1;
+    if (std.mem.eql(u8, s, "c01")) return .c01;
+    return null;
+}
+
+// ─── S1 — Locked iteration body + system ──────────────────────────────────
 
 /// Locked iteration body. Reads the byte offsets of the Transform and
 /// Velocity columns from the dispatch args (resolved once at query
@@ -74,26 +113,19 @@ fn integrateChunk(chunk: *Chunk, transforms_off: u16, velocities_off: u16, dt: f
     }
 }
 
-/// Cross-frame state shared by the M0.1 / E5a `integrateSystem` —
+/// Cross-frame state shared by the S1 `integrateSystem` —
 /// stashes the query (built once, reused every dispatch) and the
 /// pre-resolved Transform / Velocity column offsets. Lives on the
 /// bench main stack frame and is forwarded to each `dispatchFrame`
 /// through `FrameContext.user`.
-const BenchState = struct {
+const S1BenchState = struct {
     query: *Query,
     transforms_off: u16,
     velocities_off: u16,
 };
 
-/// E5b system registered in the `.update` phase. Pulls its cached
-/// query + offsets from `ctx.frame.user`, stages the chunked work
-/// into `ctx.builder` so the SystemScheduler can batch it with any
-/// other compatible system in the same topological level. The `dt`
-/// value comes from `ctx.frame.dt` so the bench's `1.0 / 60.0`
-/// constant flows through the system scheduler instead of being
-/// captured directly.
 fn integrateSystem(ctx: SystemContext) anyerror!void {
-    const state: *BenchState = @ptrCast(@alignCast(ctx.frame.user.?));
+    const state: *S1BenchState = @ptrCast(@alignCast(ctx.frame.user.?));
     try ctx.builder.addJob(state.query, integrateChunk, .{
         state.transforms_off,
         state.velocities_off,
@@ -101,7 +133,7 @@ fn integrateSystem(ctx: SystemContext) anyerror!void {
     });
 }
 
-fn spawnEntities(world: *World, gpa: std.mem.Allocator, n: u32) !void {
+fn spawnS1Entities(world: *World, gpa: std.mem.Allocator, n: u32) !void {
     var i: u32 = 0;
     while (i < n) : (i += 1) {
         const fi: f32 = @floatFromInt(i);
@@ -113,11 +145,14 @@ fn spawnEntities(world: *World, gpa: std.mem.Allocator, n: u32) !void {
     }
 }
 
+// ─── Distribution helpers ─────────────────────────────────────────────────
+
 const Distribution = struct {
     min: u64,
     median: u64,
     mean: u64,
     p95: u64,
+    p99: u64,
     max: u64,
 };
 
@@ -131,6 +166,7 @@ fn computeDistribution(samples: []u64) Distribution {
         .median = samples[samples.len / 2],
         .mean = mean,
         .p95 = samples[(samples.len * 95) / 100],
+        .p99 = samples[(samples.len * 99) / 100],
         .max = samples[samples.len - 1],
     };
 }
@@ -151,13 +187,13 @@ fn computeImbalance(snapshots: []const weld_core.jobs.worker.WorkerStats.Snapsho
 }
 
 const ReportContext = struct {
+    case: Case,
     distribution: Distribution,
-    /// Per-worker stats — M0.1 / E5a makes the worker count
-    /// runtime-derived, so this is a slice instead of a fixed-size
-    /// `[worker_count]` array. Caller owns the slice.
+    /// Per-worker stats. Caller owns the slice.
     worker_stats: []const weld_core.jobs.worker.WorkerStats.Snapshot,
     imbalance: f64,
     total_chunks: usize,
+    total_entities: u32,
     worker_count: usize,
     cpu_count: usize,
     total_ram_bytes: u64,
@@ -177,12 +213,21 @@ fn writeReport(io: std.Io, ctx: ReportContext) !void {
     const out = &w.interface;
 
     const ram_gib: f64 = @as(f64, @floatFromInt(ctx.total_ram_bytes)) / (1024.0 * 1024.0 * 1024.0);
-    const verdict = if (ctx.distribution.median <= PrimaryGateNs) "GO" else "NO-GO";
-    const secondary_hit = ctx.distribution.median <= SecondaryTargetNs;
     const imbalance_pct = ctx.imbalance * 100.0;
 
+    const case_name: []const u8 = switch (ctx.case) {
+        .s1 => "S1 — ECS iteration bench",
+        .c01 => "C0.1 — ECS production target bench",
+    };
+    const primary_gate_ns: u64 = switch (ctx.case) {
+        .s1 => S1RegressionGateNs,
+        .c01 => 16_600_000,
+    };
+    const verdict = if (ctx.distribution.median <= primary_gate_ns) "GO" else "NO-GO";
+    const secondary_hit = ctx.case == .s1 and ctx.distribution.median <= SecondaryTargetNs;
+
     try out.print(
-        \\# S1 — ECS iteration bench
+        \\# {s}
         \\
         \\## Machine config
         \\
@@ -190,7 +235,6 @@ fn writeReport(io: std.Io, ctx: ReportContext) !void {
         \\|---|---|
         \\| OS | {s} |
         \\| Arch | {s} |
-        \\| CPU model | {s} |
         \\| CPU count | {d} |
         \\| Total RAM | {d:.2} GiB |
         \\| Zig version | {f} |
@@ -201,91 +245,89 @@ fn writeReport(io: std.Io, ctx: ReportContext) !void {
         \\| Field | Value |
         \\|---|---|
         \\| Entities | {d} |
-        \\| Archetype | (Transform, Velocity) |
-        \\| Chunks | {d} |
-        \\| Workers | {d} |
-        \\| Warm-up iterations | {d} |
-        \\| Measured iterations | {d} |
+        \\| Total chunks | {d} |
+        \\| Worker count | {d} |
         \\
-        \\## Iteration time distribution (nanoseconds)
+        \\## Timing distribution (ns)
         \\
-        \\| min | median | mean | p95 | max |
-        \\|---|---|---|---|---|
-        \\| {d} | {d} | {d} | {d} | {d} |
-        \\
-        \\## Per-worker stats (over the measured window)
-        \\
-        \\| Worker | Chunks processed | Steals attempted | Steals succeeded | Work duration (ns) |
-        \\|---|---|---|---|---|
-        \\
-    ,
-        .{
-            @tagName(builtin.target.os.tag),
-            @tagName(builtin.target.cpu.arch),
-            builtin.target.cpu.model.name,
-            ctx.cpu_count,
-            ram_gib,
-            builtin.zig_version,
-            @tagName(builtin.mode),
-            NumEntities,
-            ctx.total_chunks,
-            ctx.worker_count,
-            WarmupIterations,
-            MeasuredIterations,
-            ctx.distribution.min,
-            ctx.distribution.median,
-            ctx.distribution.mean,
-            ctx.distribution.p95,
-            ctx.distribution.max,
-        },
-    );
-
-    for (ctx.worker_stats, 0..) |s, i| {
-        try out.print(
-            "| {d} | {d} | {d} | {d} | {d} |\n",
-            .{ i, s.chunks_processed, s.steals_attempted, s.steals_succeeded, s.work_duration_ns },
-        );
-    }
-
-    try out.print(
+        \\| min | median | mean | p95 | p99 | max |
+        \\|---|---|---|---|---|---|
+        \\| {d} | {d} | {d} | {d} | {d} | {d} |
         \\
         \\## Load imbalance
         \\
-        \\`(max_worker_duration - min_worker_duration) / mean_worker_duration` over the measured window:
+        \\| Worker | Chunks | Steal attempts | Steal hits | Parks done | Work duration (ns) |
+        \\|---|---|---|---|---|---|
         \\
-        \\**{d:.2}%** (gate: ≤ {d:.2}%)
+    , .{
+        case_name,
+        @tagName(builtin.os.tag),
+        @tagName(builtin.cpu.arch),
+        ctx.cpu_count,
+        ram_gib,
+        builtin.zig_version,
+        @tagName(builtin.mode),
+        ctx.total_entities,
+        ctx.total_chunks,
+        ctx.worker_count,
+        ctx.distribution.min,
+        ctx.distribution.median,
+        ctx.distribution.mean,
+        ctx.distribution.p95,
+        ctx.distribution.p99,
+        ctx.distribution.max,
+    });
+    for (ctx.worker_stats, 0..) |s, idx| {
+        try out.print(
+            "| {d} | {d} | {d} | {d} | {d} | {d} |\n",
+            .{
+                idx,
+                s.chunks_processed,
+                s.steals_attempted,
+                s.steals_succeeded,
+                s.parks_completed,
+                s.work_duration_ns,
+            },
+        );
+    }
+    try out.print(
+        \\
+        \\Span / mean = **{d:.2}%** (gate {d:.0}%).
         \\
         \\## Verdict
         \\
-        \\| Gate | Threshold | Result |
-        \\|---|---|---|
-        \\| Primary (median ReleaseSafe) | ≤ {d} ns | **{s}** ({d} ns) |
-        \\| Secondary (recorded only) | ≤ {d} ns | {s} ({d} ns) |
-        \\| Load imbalance | ≤ {d:.2}% | {s} ({d:.2}%) |
+        \\Primary gate: median ≤ {d} ns — **{s}**
         \\
-        \\**{s}**
+    , .{
+        imbalance_pct,
+        ImbalanceGate * 100.0,
+        primary_gate_ns,
+        verdict,
+    });
+    if (ctx.case == .s1) {
+        try out.print(
+            "\nSecondary (record only): median ≤ {d} ns — {s} ({d} ns)\n",
+            .{ SecondaryTargetNs, if (secondary_hit) "hit" else "miss", ctx.distribution.median },
+        );
+    }
+    try out.print(
         \\
-    ,
-        .{
-            imbalance_pct,
-            ImbalanceGate * 100.0,
-            PrimaryGateNs,
-            verdict,
-            ctx.distribution.median,
-            SecondaryTargetNs,
-            if (secondary_hit) "hit" else "miss",
-            ctx.distribution.median,
-            ImbalanceGate * 100.0,
-            if (ctx.imbalance <= ImbalanceGate) "OK" else "OVER",
-            imbalance_pct,
-            verdict,
-        },
-    );
+        \\Imbalance gate: ≤ {d:.0}% — **{s}** ({d:.2}%)
+        \\
+        \\Result: median = {d} ns, verdict = **{s}**.
+        \\
+    , .{
+        ImbalanceGate * 100.0,
+        if (ctx.imbalance <= ImbalanceGate) "OK" else "OVER",
+        imbalance_pct,
+        ctx.distribution.median,
+        verdict,
+    });
 
     try out.flush();
 }
 
-fn writeSmokeReport(io: std.Io) !void {
+fn writeSmokeReport(io: std.Io, case: Case) !void {
     var dir = std.Io.Dir.cwd();
     dir.createDirPath(io, "zig-out/bench") catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -297,62 +339,83 @@ fn writeSmokeReport(io: std.Io) !void {
     var buf: [256]u8 = undefined;
     var w = file.writer(io, &buf);
     const out = &w.interface;
+    const case_name: []const u8 = switch (case) {
+        .s1 => "S1",
+        .c01 => "C0.1",
+    };
     try out.print(
-        "# S1 — ECS iteration bench (smoke)\n\nCompilation gate only — no measurements taken.\n",
-        .{},
+        "# {s} — ECS bench (smoke)\n\nCompilation gate only — no measurements taken.\n",
+        .{case_name},
     );
     try out.flush();
 }
 
-pub fn main(init: std.process.Init) !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = debug_allocator.deinit();
-    const gpa = debug_allocator.allocator();
+// ─── Help text ────────────────────────────────────────────────────────────
 
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
-    var smoke = false;
-    // `--workers=N` forces the job system's worker count instead of
-    // the auto-detected `std.Thread.getCpuCount`. Added by M0.1 / E5a
-    // as the isolation knob for the bench-regression breakdown — the
-    // S1 baseline (54.5 µs) was measured at 4 workers, so running the
-    // bench at `--workers=4` on any host produces a directly
-    // comparable median. `null` means "use the default
-    // (`std.Thread.getCpuCount`)".
-    var worker_count_override: ?usize = null;
-    for (args[1..]) |a| {
-        if (std.mem.eql(u8, a, "--smoke")) {
-            smoke = true;
-        } else if (std.mem.startsWith(u8, a, "--workers=")) {
-            const value_str = a["--workers=".len..];
-            worker_count_override = try std.fmt.parseInt(usize, value_str, 10);
-        }
+const help_text =
+    \\ecs-benchmark — Weld ECS micro and macro benchmarks
+    \\
+    \\Usage: ecs-benchmark [options]
+    \\
+    \\Options:
+    \\  --help             Print this help and exit.
+    \\  --case=s1|c01      Pick the case. Default: s1.
+    \\                       s1  — 100k entities × 1 archetype × 1000 iter.
+    \\                              Mode: ReleaseSafe. Gate: median ≤ 62 µs.
+    \\                       c01 — 1M entities × 4 archetypes × 10 systems.
+    \\                              Mode: ReleaseFast. Gate: median ≤ 16.6 ms,
+    \\                              p99 ≤ 25 ms, imbalance ≤ 15 %.
+    \\  --workers=N        Force the job-system worker count.
+    \\                       S1 baseline calibrated at --workers=4.
+    \\  --smoke            Single-dispatch sanity run on a small set.
+    \\                       Used by the bench-ecs-smoke CI step.
+    \\  --cold-runs=N      Informational — number of full cold-isolated
+    \\                       process invocations the wrapper expects.
+    \\                       The bench itself runs once per invocation.
+    \\
+    \\Build-mode guard: Debug builds are rejected.
+    \\
+;
+
+// ─── Build-mode guard ─────────────────────────────────────────────────────
+
+fn assertReleaseMode() void {
+    if (builtin.mode == .Debug or builtin.mode == .ReleaseSmall) {
+        std.debug.print(
+            "ERROR: ecs-benchmark refuses build mode .{s}. Compile with " ++
+                "-Doptimize=ReleaseSafe (S1) or -Doptimize=ReleaseFast (C0.1).\n",
+            .{@tagName(builtin.mode)},
+        );
+        std.process.exit(2);
     }
+}
 
+// ─── S1 case ──────────────────────────────────────────────────────────────
+
+fn runS1(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    smoke: bool,
+    worker_count_override: ?usize,
+) !void {
     var world = World.init();
     defer world.deinit(gpa);
 
-    const n_entities: u32 = if (smoke) SmokeEntities else NumEntities;
-    try spawnEntities(&world, gpa, n_entities);
+    const n_entities: u32 = if (smoke) S1SmokeEntities else S1NumEntities;
+    try spawnS1Entities(&world, gpa, n_entities);
 
     var sched = if (worker_count_override) |n|
-        try Scheduler.initWithWorkerCount(gpa, init.io, n)
+        try Scheduler.initWithWorkerCount(gpa, io, n)
     else
-        try Scheduler.init(gpa, init.io);
+        try Scheduler.init(gpa, io);
     try sched.start();
     defer sched.deinit(gpa);
 
-    // The E3 query owns a heap-allocated matches list — `defer` frees
-    // it once the bench loop returns. Bench builds the query once and
-    // dispatches it across every warm-up + measured iteration.
     var query = try world.query(gpa);
     defer query.deinit(gpa);
     const dt: f32 = 1.0 / 60.0;
-    // M0.1 / E5a — drive the dispatch through the new SystemScheduler.
-    // The integrateSystem reads its cached query + column offsets from
-    // `ctx.frame.user`, dispatched once per `dispatchFrame` in the
-    // `.update` phase. World.beginFrame runs inside each
-    // `dispatchFrame` call.
-    var bench_state = BenchState{
+
+    var bench_state = S1BenchState{
         .query = &query,
         .transforms_off = query.componentOffset(0),
         .velocities_off = query.componentOffset(1),
@@ -363,37 +426,30 @@ pub fn main(init: std.process.Init) !void {
         .phase = .update,
         .name = "bench_integrate",
         .run = integrateSystem,
-        // No `accesses` — the bench is a single-system workload so
-        // the DAG resolves to a single topological level with one
-        // entry. The Writes(Transform)/Reads(Velocity) declaration
-        // is omitted on purpose: it would not change the bench's
-        // dispatch shape but would force the registry path through
-        // the FieldKind-bypassed component registration (M0.2
-        // territory).
     });
 
     if (smoke) {
-        try sys_sched.dispatchFrame(&world, gpa, init.io, &sched, dt, &bench_state);
-        try writeSmokeReport(init.io);
+        try sys_sched.dispatchFrame(&world, gpa, io, &sched, dt, &bench_state);
+        try writeSmokeReport(io, .s1);
         return;
     }
 
     // Warm-up.
     var i: u32 = 0;
-    while (i < WarmupIterations) : (i += 1) {
-        try sys_sched.dispatchFrame(&world, gpa, init.io, &sched, dt, &bench_state);
+    while (i < S1WarmupIterations) : (i += 1) {
+        try sys_sched.dispatchFrame(&world, gpa, io, &sched, dt, &bench_state);
     }
 
     sched.resetStats();
 
-    const samples = try gpa.alloc(u64, MeasuredIterations);
+    const samples = try gpa.alloc(u64, S1MeasuredIterations);
     defer gpa.free(samples);
 
     i = 0;
-    while (i < MeasuredIterations) : (i += 1) {
-        const t0 = std.Io.Clock.now(.awake, init.io);
-        try sys_sched.dispatchFrame(&world, gpa, init.io, &sched, dt, &bench_state);
-        const t1 = std.Io.Clock.now(.awake, init.io);
+    while (i < S1MeasuredIterations) : (i += 1) {
+        const t0 = std.Io.Clock.now(.awake, io);
+        try sys_sched.dispatchFrame(&world, gpa, io, &sched, dt, &bench_state);
+        const t1 = std.Io.Clock.now(.awake, io);
         const elapsed = t0.durationTo(t1).nanoseconds;
         samples[i] = @intCast(@max(@as(i96, 0), elapsed));
     }
@@ -406,22 +462,93 @@ pub fn main(init: std.process.Init) !void {
     const cpu_count = std.Thread.getCpuCount() catch 0;
     const ram_bytes = std.process.totalSystemMemory() catch 0;
 
-    try writeReport(init.io, .{
+    try writeReport(io, .{
+        .case = .s1,
         .distribution = distribution,
         .worker_stats = worker_stats,
         .imbalance = imbalance,
         .total_chunks = world.chunkCount(),
+        .total_entities = n_entities,
         .worker_count = sched.workerCount(),
         .cpu_count = cpu_count,
         .total_ram_bytes = ram_bytes,
     });
 
     var stdout_buf: [256]u8 = undefined;
-    var stdout_w = std.Io.File.stdout().writer(init.io, &stdout_buf);
-    const verdict = if (distribution.median <= PrimaryGateNs) "GO" else "NO-GO";
+    var stdout_w = std.Io.File.stdout().writer(io, &stdout_buf);
+    const verdict = if (distribution.median <= S1RegressionGateNs) "GO" else "NO-GO";
     try stdout_w.interface.print(
         "ECS bench median = {d} ns, imbalance = {d:.2}% — {s}\n",
         .{ distribution.median, imbalance * 100.0, verdict },
     );
     try stdout_w.interface.flush();
+}
+
+// ─── C0.1 case — placeholder until E7.2 ───────────────────────────────────
+
+fn runC01(
+    _: std.mem.Allocator,
+    io: std.Io,
+    smoke: bool,
+    _: ?usize,
+) !void {
+    if (smoke) {
+        try writeSmokeReport(io, .c01);
+        return;
+    }
+    std.debug.print(
+        "ERROR: --case=c01 is not yet implemented (M0.1 / E7.2).\n",
+        .{},
+    );
+    std.process.exit(3);
+}
+
+// ─── main ─────────────────────────────────────────────────────────────────
+
+pub fn main(init: std.process.Init) !void {
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = debug_allocator.deinit();
+    const gpa = debug_allocator.allocator();
+
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+
+    var case: Case = .s1;
+    var smoke = false;
+    var worker_count_override: ?usize = null;
+
+    for (args[1..]) |a| {
+        if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
+            std.debug.print("{s}", .{help_text});
+            return;
+        } else if (std.mem.eql(u8, a, "--smoke")) {
+            smoke = true;
+        } else if (std.mem.startsWith(u8, a, "--workers=")) {
+            const value_str = a["--workers=".len..];
+            worker_count_override = try std.fmt.parseInt(usize, value_str, 10);
+        } else if (std.mem.startsWith(u8, a, "--case=")) {
+            const value_str = a["--case=".len..];
+            case = parseCase(value_str) orelse {
+                std.debug.print(
+                    "ERROR: unknown --case={s}. Valid: s1, c01.\n",
+                    .{value_str},
+                );
+                std.process.exit(2);
+            };
+        } else if (std.mem.startsWith(u8, a, "--cold-runs=")) {
+            // Informational only — affects nothing in this binary.
+        } else {
+            std.debug.print(
+                "WARNING: unknown bench arg '{s}' (run with --help).\n",
+                .{a},
+            );
+        }
+    }
+
+    // Build-mode guard — skip for smoke (CI compile-only path).
+    if (!smoke) assertReleaseMode();
+
+    switch (case) {
+        .s1 => try runS1(gpa, init.io, smoke, worker_count_override),
+        .c01 => try runC01(gpa, init.io, smoke, worker_count_override),
+    }
 }
