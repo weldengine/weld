@@ -34,11 +34,23 @@ pub const Job = struct {
     ctx_ptr: *anyopaque,
 };
 
-/// Maximum number of jobs per worker deque. 1 024 covers the S1 bench
-/// (100 000 entities / 185 chunk capacity ≈ 541 chunks) with margin.
+/// Maximum number of jobs per worker deque. Sized at 8192 to cover
+/// the M0.1 / E7 C0.1 bench worst case: 1 000 000 entities across 4
+/// archetypes ≈ 6 800 chunks per wave on the widest query (every
+/// archetype matched). At `--workers=1` the single worker must hold
+/// the full wave in its deque — 8192 leaves margin. Lower worker
+/// counts (the S1 baseline at 4 workers handles ~640 chunks per
+/// worker; well below the ceiling) and higher worker counts (14
+/// workers per CPU handle ~500 chunks each — also well below)
+/// inherit the same per-worker cap.
+///
+/// Each Job is 24 bytes (chunk_ptr + trampoline + ctx_ptr) so the
+/// per-worker deque footprint is 8192 × 24 = 192 KiB. On a 14-worker
+/// machine the cross-scheduler footprint is ~2.7 MiB — negligible.
+///
 /// Exposed so the M0.1 / E5a scheduler can size the dynamic
 /// `MaxChunksPerDispatch` buffer at `worker_count * DequeCapacity`.
-pub const DequeCapacity: usize = 1024;
+pub const DequeCapacity: usize = 8192;
 const WorkerDeque = deque_mod.Deque(Job, DequeCapacity);
 
 /// Atomic counters surfaced by each worker — chunks processed,
