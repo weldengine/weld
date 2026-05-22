@@ -10,10 +10,10 @@
 //! aliases (`rtti.type_info`, `rtti.hash`, …) for tests and internal
 //! consumers that need to address private symbols.
 
-const type_info_mod = @import("rtti/type_info.zig");
-const hash_mod = @import("rtti/hash.zig");
-const builder_mod = @import("rtti/comptime_builder.zig");
-const registry_mod = @import("rtti/registry.zig");
+const type_info_mod = @import("type_info.zig");
+const hash_mod = @import("hash.zig");
+const builder_mod = @import("comptime_builder.zig");
+const registry_mod = @import("registry.zig");
 
 // -- Sub-module aliases ------------------------------------------------
 

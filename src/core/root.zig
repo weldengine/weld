@@ -62,8 +62,8 @@ pub const ipc = struct {
 /// RTTI namespace — Tier 0 reflection runtime (M0.2 / E1). Comptime
 /// builder, type metadata, deterministic identity + schema hashes,
 /// runtime registry. Single canonical entry point at
-/// `src/core/rtti.zig`.
-pub const rtti = @import("rtti.zig");
+/// `src/core/rtti/root.zig` (cohérent avec le pattern `ecs/root.zig`).
+pub const rtti = @import("rtti/root.zig");
 
 comptime {
     // Force eager analysis of every IPC sub-file so inline tests are
