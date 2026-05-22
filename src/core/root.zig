@@ -72,6 +72,14 @@ pub const rtti = @import("rtti/root.zig");
 /// `src/core/resources/root.zig`.
 pub const resources = @import("resources/root.zig");
 
+/// Events namespace — Tier 0 MPMC event bus (M0.2 / E4). `EventBus`
+/// is a field on `World` (decision technique E4) and holds the
+/// typed `EventQueue(T)` instances. Producers `emit(T, e)`,
+/// consumers `subscribe(T)` → cursor → `poll(T, &cursor)`. The
+/// scheduler drives lifetime drains at phase / tick / frame
+/// boundaries.
+pub const events = @import("events/root.zig");
+
 comptime {
     // Force eager analysis of every IPC sub-file so inline tests are
     // picked up by `zig build test`. Zig 0.16's lazy semantic analysis
@@ -117,4 +125,10 @@ comptime {
     // M0.2 / E3 — pin the resources sub-files.
     _ = resources.registry;
     _ = resources.api;
+    // M0.2 / E4 — pin the events sub-files so their inline tests
+    // run alongside the rest of the surface.
+    _ = events.lifetime;
+    _ = events.cursor;
+    _ = events.queue;
+    _ = events.bus;
 }
