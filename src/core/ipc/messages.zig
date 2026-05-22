@@ -25,6 +25,7 @@
 //! bytes that the receiver stops at the first NUL.
 
 const std = @import("std");
+const rtti = @import("../rtti/root.zig");
 
 /// Message-type discriminator written in the framing header
 /// (`framing.zig` `Header.msg_type: u16`). Values are stable across
@@ -231,29 +232,20 @@ pub fn msgTypeOf(comptime T: type) MsgType {
     };
 }
 
-/// Comptime schema hash for a message type. Hashes `@typeName(T)`
-/// concatenated with `"name:Type;"` for each field. Stable across
-/// builds because `Wyhash` is deterministic and the inputs are
-/// build-independent (no source positions, no addresses).
+/// Comptime schema hash for a message type. Delegates to the Tier 0
+/// RTTI subsystem (`rtti.computeSchemaHash`) — the swap of the
+/// dette D-S6-RTTI (M0.2 / E2). Call sites are unchanged.
 ///
-/// Phase 0.2 will swap the Wyhash implementation for the RTTI-Weld
-/// schema descriptor (`engine-ipc.md` §5.3 + brief § Notes). Call
-/// sites do not change.
+/// Pre-swap, the body inlined `std.hash.Wyhash.hash(0, key)` on a
+/// stringified `(typeName, fields)` key. The RTTI subsystem hashes
+/// `(typeName, [(field.name, kind, count, offset) for each field])`
+/// with `XxHash64(seed=0)` — a structurally different algorithm.
+/// Byte-for-byte equivalence is enforced by
+/// `tests/core/rtti/ipc_compat_test.zig`, which guards the 5
+/// reference S6 messages (`ProtocolHello`, `SpawnEntity`,
+/// `ModifyComponent`, `Heartbeat`, `LogMessage`).
 pub fn schemaHash(comptime T: type) u64 {
-    return comptime hash: {
-        var key: []const u8 = @typeName(T) ++ "{";
-        const info = @typeInfo(T);
-        switch (info) {
-            .@"struct" => |s| {
-                for (s.fields) |f| {
-                    key = key ++ f.name ++ ":" ++ @typeName(f.type) ++ ";";
-                }
-            },
-            else => @compileError("schemaHash: expected struct, got " ++ @typeName(T)),
-        }
-        key = key ++ "}";
-        break :hash std.hash.Wyhash.hash(0, key);
-    };
+    return rtti.computeSchemaHash(T);
 }
 
 /// Writes a NUL-terminated string into a fixed-width buffer. Truncates

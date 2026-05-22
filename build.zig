@@ -173,6 +173,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/core/rtti/comptime_builder_test.zig" },
         .{ .path = "tests/core/rtti/hash_test.zig" },
         .{ .path = "tests/core/rtti/registry_test.zig" },
+        .{ .path = "tests/core/rtti/ipc_compat_test.zig" },
         .{ .path = "tests/jobs/deque_test.zig" },
         .{ .path = "tests/jobs/scheduler_test.zig" },
         .{ .path = "tests/window/win32_open_close_test.zig" },
