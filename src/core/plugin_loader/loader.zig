@@ -5,14 +5,15 @@
 //! plugin, vérifie la version d'API, et appelle (optionnellement)
 //! la callback `on_load` avec la table `WeldAPI` stub.
 //!
-//! Wraps `std.DynLib` (qui couvre dlopen/LoadLibrary cross-platform
-//! sur Zig 0.16). Le brief E6 mentionne `platform.dynamic_loader`
-//! comme dépendance hypothétique S2/M0.3 ; ce fichier n'existe pas
-//! encore dans le repo, donc le squelette E6 consomme directement
-//! `std.DynLib`. Le wrapper `platform.dynamic_loader` sera introduit
-//! en M0.3 (extension platform layer) sans changement de surface
-//! pour ce loader — il restera consommateur de la même API
-//! cross-platform.
+//! `std.DynLib` est `@compileError("unsupported platform")` sur
+//! Windows dans la stdlib Zig 0.16 (cf. `lib/std/dynamic_library.zig`
+//! ligne 21). Le squelette E6 hand-roll donc directement une mince
+//! abstraction `dlopen` / `LoadLibraryA` (POSIX / Windows), exactement
+//! le pattern utilisé par `src/core/platform/vk.zig`. Le brief E6
+//! mentionne `platform.dynamic_loader` comme dépendance hypothétique
+//! M0.3 ; ce fichier n'existe pas encore. Lorsque le wrapper sera
+//! introduit en M0.3 (extension platform layer), il remplacera ce
+//! bloc local sans changement de la surface publique du loader.
 //!
 //! AUCUN câblage réel des 7 sous-APIs — le loader passe l'instance
 //! `api.stub_api` aux plugins. Toutes les callbacks renvoient
@@ -24,14 +25,52 @@
 //! check inline.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const desc = @import("desc.zig");
 const api_mod = @import("api.zig");
 
 const WeldPluginDesc = desc.WeldPluginDesc;
 const WeldPluginEntryFn = desc.WeldPluginEntryFn;
-const WeldAPI = api_mod.WeldAPI;
 
 const log = std.log.scoped(.plugin_loader);
+
+// `std.DynLib` is `@compileError("unsupported platform")` on Windows
+// in Zig 0.16's stdlib (cf. `lib/std/dynamic_library.zig` line 21).
+// We hand-roll a tiny dlopen/LoadLibrary abstraction here, mirroring
+// the pattern used by `src/core/platform/vk.zig`. The wrapper around
+// `platform.dynamic_loader` arrives in M0.3 — drop-in substitution
+// without any change to the loader's public surface.
+const _dl = if (builtin.os.tag == .windows) struct {
+    extern "kernel32" fn LoadLibraryA(name: [*:0]const u8) callconv(.c) ?*anyopaque;
+    extern "kernel32" fn GetProcAddress(module: *anyopaque, name: [*:0]const u8) callconv(.c) ?*anyopaque;
+    extern "kernel32" fn FreeLibrary(module: *anyopaque) callconv(.c) c_int;
+} else struct {
+    extern "c" fn dlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque;
+    extern "c" fn dlsym(handle: ?*anyopaque, symbol: [*:0]const u8) ?*anyopaque;
+    extern "c" fn dlclose(handle: ?*anyopaque) c_int;
+};
+
+fn _dlOpen(path_z: [*:0]const u8) ?*anyopaque {
+    return if (comptime builtin.os.tag == .windows)
+        _dl.LoadLibraryA(path_z)
+    else
+        _dl.dlopen(path_z, 2); // RTLD_NOW
+}
+
+fn _dlLookup(handle: *anyopaque, name_z: [*:0]const u8) ?*anyopaque {
+    return if (comptime builtin.os.tag == .windows)
+        _dl.GetProcAddress(handle, name_z)
+    else
+        _dl.dlsym(handle, name_z);
+}
+
+fn _dlClose(handle: *anyopaque) void {
+    if (comptime builtin.os.tag == .windows) {
+        _ = _dl.FreeLibrary(handle);
+    } else {
+        _ = _dl.dlclose(handle);
+    }
+}
 
 /// Erreurs surfacées par `loadPlugin`.
 pub const LoaderError = error{
@@ -67,9 +106,10 @@ pub const PluginHandle = struct {
     /// Chemin d'origine du `.so` / `.dll` (utile pour les logs
     /// et le rejeu après hot-reload Phase 3+).
     path: []const u8,
-    /// Wrapper sur dlopen/LoadLibrary, libéré par `unloadPlugin`.
+    /// Handle opaque retourné par `dlopen` (POSIX) ou
+    /// `LoadLibraryA` (Windows). Libéré par `unloadPlugin`.
     /// `null` une fois unloadé.
-    dyn_lib: ?std.DynLib,
+    dyn_handle: ?*anyopaque,
     /// Descripteur retourné par `weld_plugin_entry`. Pointeur vers
     /// les données statiques du `.so` — valide tant que le `.so`
     /// est chargé.
@@ -80,7 +120,7 @@ pub const PluginHandle = struct {
 
 /// Registry des plugins chargés. Owns le storage du `path`
 /// dupliqué + l'array list. Pas les `.so` eux-mêmes (gérés par
-/// `std.DynLib`).
+/// dlopen/LoadLibraryA via `_dlOpen`/`_dlClose`).
 pub const Loader = struct {
     gpa: std.mem.Allocator,
     plugins: std.ArrayListUnmanaged(PluginHandle) = .empty,
@@ -95,8 +135,8 @@ pub const Loader = struct {
                 if (handle.desc.callbacks.on_shutdown) |cb| {
                     cb(@ptrCast(&api_mod.stub_api));
                 }
-                if (handle.dyn_lib) |*lib| {
-                    lib.close();
+                if (handle.dyn_handle) |lib| {
+                    _dlClose(lib);
                 }
             }
             self.gpa.free(handle.path);
@@ -110,21 +150,28 @@ pub const Loader = struct {
     /// exporte `weld_plugin_entry`. Le loader log les capabilities
     /// déclarées par le plugin sans les enforcement (Phase 3).
     pub fn loadPlugin(self: *Loader, path: []const u8) LoaderError!*PluginHandle {
-        var dyn_lib = std.DynLib.open(path) catch |err| {
+        // dlopen/LoadLibraryA need a NUL-terminated path. Allocate
+        // a temporary buffer with the sentinel, then release after
+        // the call.
+        const path_z = self.gpa.dupeZ(u8, path) catch return error.OutOfMemory;
+        defer self.gpa.free(path_z);
+
+        const dyn_handle = _dlOpen(path_z.ptr) orelse {
             // log.warn (not .err) — the failure mode is surfaced
             // through the error union return, the log is purely
             // diagnostic. Avoids polluting the test runner's
             // "errors logged" counter for the negative-path tests.
-            log.warn("plugin load failed: '{s}' ({s})", .{ path, @errorName(err) });
+            log.warn("plugin load failed: '{s}'", .{path});
             return error.LibraryLoadFailed;
         };
-        errdefer dyn_lib.close();
+        errdefer _dlClose(dyn_handle);
 
         // Resolve `weld_plugin_entry`. Absent → MissingEntryPoint.
-        const entry_fn = dyn_lib.lookup(WeldPluginEntryFn, "weld_plugin_entry") orelse {
+        const entry_sym = _dlLookup(dyn_handle, "weld_plugin_entry") orelse {
             log.warn("plugin missing 'weld_plugin_entry' symbol: '{s}'", .{path});
             return error.MissingEntryPoint;
         };
+        const entry_fn: WeldPluginEntryFn = @ptrCast(@alignCast(entry_sym));
 
         // Call the entry to get the descriptor. The plugin
         // returns a pointer to static data inside its `.so`,
@@ -172,7 +219,7 @@ pub const Loader = struct {
         errdefer self.gpa.free(owned_path);
         try self.plugins.append(self.gpa, .{
             .path = owned_path,
-            .dyn_lib = dyn_lib,
+            .dyn_handle = dyn_handle,
             .desc = plugin_desc,
             .state = .loaded,
         });
@@ -201,20 +248,23 @@ pub const Loader = struct {
         if (handle.desc.callbacks.on_shutdown) |cb| {
             cb(@ptrCast(&api_mod.stub_api));
         }
-        if (handle.dyn_lib) |*lib| {
-            lib.close();
-            handle.dyn_lib = null;
+        if (handle.dyn_handle) |lib| {
+            _dlClose(lib);
+            handle.dyn_handle = null;
         }
         handle.state = .unloaded;
     }
 
     /// Utilitaire debug — lookup d'un symbole arbitraire dans le
     /// `.so` chargé. Non utilisé par le loader lui-même ; exposé
-    /// pour les tests et les outils de diagnostic.
-    pub fn lookupSymbol(handle: *PluginHandle, comptime T: type, name: [:0]const u8) ?T {
+    /// pour les tests et les outils de diagnostic. Cast côté caller
+    /// du `*anyopaque` retourné vers le type cible (le wrapper de
+    /// type-safe lookup arrivera quand `platform.dynamic_loader`
+    /// sera extrait en M0.3).
+    pub fn lookupSymbol(handle: *PluginHandle, name: [:0]const u8) ?*anyopaque {
         if (handle.state != .loaded) return null;
-        if (handle.dyn_lib) |*lib| {
-            return lib.lookup(T, name);
+        if (handle.dyn_handle) |lib| {
+            return _dlLookup(lib, name);
         }
         return null;
     }
