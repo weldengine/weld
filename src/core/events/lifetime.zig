@@ -10,6 +10,7 @@
 //! still kept distinct so the wiring is ready to diverge in Phase
 //! 0.4+ (when render hands off to its own pipeline).
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Drain cadence for an event queue.
 pub const Lifetime = enum(u8) {
     /// Drained at the end of a fixed-tick boundary.

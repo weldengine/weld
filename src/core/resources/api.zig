@@ -32,6 +32,7 @@ const EntityId = registry_mod.EntityId;
 const ResourceMarker = registry_mod.ResourceMarker;
 const World = world_mod.World;
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Errors surfaced by `setResource` / `removeResource`. Read paths
 /// return `null` instead of failing through this set.
 pub const ResourceError = error{
@@ -46,6 +47,7 @@ pub const ResourceError = error{
     EcsError,
 };
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Insert or update the singleton resource of type `T`. On the
 /// first call for `T`, spawns a dedicated entity holding
 /// `[T, ResourceMarker]` and marks its archetype singleton. On
@@ -92,6 +94,7 @@ pub fn setResource(
     try world.singleton_resources.register(gpa, tid, eid);
 }
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Immutable view of resource `T`. Returns `null` if the resource
 /// has not been set or has been removed.
 pub fn getResource(world: *const World, comptime T: type) ?*const T {
@@ -100,6 +103,7 @@ pub fn getResource(world: *const World, comptime T: type) ?*const T {
     return world.get(T, eid);
 }
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Mutable view of resource `T`. Auto-marks `changed_tick` on the
 /// resource's component slot — the next call to
 /// `resourceChanged(T, since)` will see the bump. Returns `null` if
@@ -110,12 +114,14 @@ pub fn getResourceMut(world: *World, comptime T: type) ?*T {
     return world.get_mut(T, eid);
 }
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Returns `true` iff a resource of type `T` is currently set.
 pub fn hasResource(world: *const World, comptime T: type) bool {
     const tid: TypeId = comptime rtti.computeTypeId(T);
     return world.singleton_resources.lookup(tid) != null;
 }
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Drop the resource of type `T`. Despawns the singleton entity
 /// and clears the `(TypeId → EntityId)` binding. No-op when the
 /// resource has not been set.
@@ -126,6 +132,7 @@ pub fn removeResource(world: *World, gpa: std.mem.Allocator, comptime T: type) !
     world.singleton_resources.unregister(tid);
 }
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Returns `true` iff resource `T`'s `changed_tick` is strictly
 /// greater than `since_tick`. Combined with `World.current_tick`
 /// progress, lets a consumer detect mutations across frame

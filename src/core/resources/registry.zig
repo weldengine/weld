@@ -26,6 +26,7 @@ pub const TypeId = rtti.TypeId;
 /// resource module without reaching into ECS internals.
 pub const EntityId = entity_mod.EntityId;
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Per-world registry of singleton-entity resources. Owns the
 /// `(TypeId → EntityId)` map; the underlying component storage lives
 /// in the world's archetypes. Lazy — the map only allocates on the
@@ -78,6 +79,7 @@ pub const ResourceRegistry = struct {
     }
 };
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// 1-byte marker component added to every singleton-resource
 /// entity. Keeps the resource archetype distinct from any user
 /// archetype that happens to contain only the resource type `T` —

@@ -27,12 +27,14 @@ const FieldDesc = type_info.FieldDesc;
 const FieldKind = type_info.FieldKind;
 const builder = @import("comptime_builder.zig");
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Comptime-deterministic 32-bit identity for `T`. Wraps
 /// `computeTypeIdFromName(@typeName(T))`.
 pub fn computeTypeId(comptime T: type) TypeId {
     return computeTypeIdFromName(@typeName(T));
 }
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Comptime-deterministic 32-bit identity for an arbitrary name.
 /// Exposed for tests and for use cases (cross-language tools, IPC
 /// debugging) that need to compute a `TypeId` without holding the Zig
@@ -41,6 +43,7 @@ pub fn computeTypeIdFromName(name: []const u8) TypeId {
     return std.hash.XxHash32.hash(0, name);
 }
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Comptime-deterministic 64-bit schema digest for `T`. The fields are
 /// derived from `builder.buildFields(T)`; the hash mixes the type
 /// name with the `(name, kind, count, offset)` tuple of each field in
@@ -51,6 +54,7 @@ pub fn computeSchemaHash(comptime T: type) SchemaHash {
     return computeSchemaHashFromParts(@typeName(T), fields);
 }
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Direct hash entry point used by `computeSchemaHash` and the
 /// E1 registry tests. Hashes the tuple `(type_name,
 /// [(field.name, kind, count, offset) for each field])` with

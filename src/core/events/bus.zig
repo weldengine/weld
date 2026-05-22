@@ -34,6 +34,7 @@ pub const EventCursor = cursor_mod.EventCursor;
 /// convenience.
 pub const EventQueue = queue_mod.EventQueue;
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Errors surfaced by the bus's user-facing entry points.
 pub const BusError = error{
     /// `emit` / `subscribe` / `poll` called on a type that was
@@ -109,6 +110,7 @@ const QueueEntry = struct {
     vtable: *const QueueVTable,
 };
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Drain-warning threshold — `drains_since_last_drain` above this
 /// value at drain time emits a `log.warn`. Set per the brief
 /// (`drops/sec > 10`); the threshold is evaluated per drain rather
@@ -116,6 +118,7 @@ const QueueEntry = struct {
 /// upper bound on the per-second rate.
 pub const DROPS_WARN_THRESHOLD: u64 = 10;
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Per-world heterogeneous event bus.
 pub const EventBus = struct {
     queues: std.AutoHashMapUnmanaged(rtti.TypeId, QueueEntry) = .empty,

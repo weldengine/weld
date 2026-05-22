@@ -19,6 +19,7 @@ const rtti = @import("../rtti/root.zig");
 /// cross-type misuse.
 pub const TypeId = rtti.TypeId;
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Independent reader handle on a typed event queue. POD by
 /// design — copy-by-value is the canonical pattern. The bus
 /// stamps `type_id` and `epoch` at subscribe; the holder advances

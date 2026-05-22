@@ -33,10 +33,12 @@ const Lifetime = @import("lifetime.zig").Lifetime;
 const cursor_mod = @import("cursor.zig");
 const EventCursor = cursor_mod.EventCursor;
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Surfaced by `poll` when the cursor's `epoch` no longer matches
 /// the queue's current epoch (drain happened in the interim).
 pub const PollError = error{CursorInvalidated};
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Returns the typed `EventQueue` for `T`. POD `T` only —
 /// `enqueue` copies the value into the slot and `poll` returns
 /// a value by copy, no allocation involved.

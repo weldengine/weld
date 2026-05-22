@@ -17,6 +17,7 @@
 
 const std = @import("std");
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Stable identity for a registered type, derived deterministically
 /// from `@typeName(T)` at comptime via `hash.computeTypeId`. Two Zig
 /// types with different fully-qualified names have distinct `TypeId`s.
@@ -24,12 +25,14 @@ const std = @import("std");
 /// under 65 K registered types).
 pub const TypeId = u32;
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Schema digest — captures the per-field layout (name + kind + count
 /// + offset) plus the parent `@typeName`. Identical schemas produce
 /// the same hash (idempotent register); a mismatch is reported as
 /// `error.SchemaMismatch` by the registry.
 pub const SchemaHash = u64;
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Category of a registered type. Drives which Tier 0 subsystem
 /// (storage layer, query engine, event bus, IPC framing) consumes the
 /// metadata at runtime.
@@ -40,6 +43,7 @@ pub const Category = enum(u8) {
     message,
 };
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Lifecycle hint for resources. Drives the serialization /
 /// replication policy (cf. `engine-spec.md` §2.9 table). Only carries
 /// meaning when `TypeInfo.category == .resource`; `null` for the other
@@ -54,6 +58,7 @@ pub const Lifecycle = enum(u8) {
     transient,
 };
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Field kind — discriminates between primitive scalars, fixed-size
 /// arrays, nested structs, optionals, and engine-canonical composite
 /// types (`Vec*`, `Quat`, `Mat*`, `Color`, `Entity`, `AssetHandle`).
@@ -88,6 +93,7 @@ pub const FieldKind = enum(u8) {
     string_inline,
 };
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Per-field metadata. The combination of `kind`, `count`, `offset`,
 /// and `size` is sufficient for the round-trip encode/decode path
 /// exercised by the E1 registry test — runtime consumers never reach
@@ -119,6 +125,7 @@ pub const FieldDesc = struct {
     unit: []const u8,
 };
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Complete metadata record for a registered type. Stored by value in
 /// `Registry.types` once `register` accepts it.
 pub const TypeInfo = struct {
@@ -144,28 +151,36 @@ pub const TypeInfo = struct {
 // using raw `[N]f32 align(16)` arrays per S1 — they are untouched by
 // E1 (no consumer wiring per the milestone scope).
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// 2-component float vector. Matches `WeldVec2` in
 /// `engine-c-api.md` §2.2.
 pub const Vec2 = extern struct { x: f32 = 0, y: f32 = 0 };
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// 3-component float vector. Matches `WeldVec3` in
 /// `engine-c-api.md` §2.2.
 pub const Vec3 = extern struct { x: f32 = 0, y: f32 = 0, z: f32 = 0 };
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// 4-component float vector. Matches `WeldVec4` in
 /// `engine-c-api.md` §2.2.
 pub const Vec4 = extern struct { x: f32 = 0, y: f32 = 0, z: f32 = 0, w: f32 = 0 };
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Unit quaternion (x, y, z, w). Identity defaults to (0, 0, 0, 1).
 /// Matches `WeldQuat` in `engine-c-api.md` §2.2.
 pub const Quat = extern struct { x: f32 = 0, y: f32 = 0, z: f32 = 0, w: f32 = 1 };
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// 3×3 column-major float matrix. Matches `WeldMat3` in
 /// `engine-c-api.md` §2.2.
 pub const Mat3 = extern struct { m: [9]f32 = .{ 1, 0, 0, 0, 1, 0, 0, 0, 1 } };
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// 4×4 column-major float matrix. Matches `WeldMat4` in
 /// `engine-c-api.md` §2.2.
 pub const Mat4 = extern struct { m: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 } };
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// RGBA float color in linear space. Matches `WeldColor` in
 /// `engine-c-api.md` §2.2.
 pub const Color = extern struct { r: f32 = 0, g: f32 = 0, b: f32 = 0, a: f32 = 1 };
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Opaque entity handle, ABI-equivalent to `u64` (matches the
 /// `WeldEntity` typedef of `engine-c-api.md` §2.1). Non-exhaustive
 /// enum gives a distinct type identity vs raw `u64` so the comptime
@@ -173,6 +188,7 @@ pub const Color = extern struct { r: f32 = 0, g: f32 = 0, b: f32 = 0, a: f32 = 1
 /// scalars.
 pub const Entity = enum(u64) { _ };
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Opaque asset handle, ABI-equivalent to `u64` (matches
 /// `WeldAssetHandle` in `engine-c-api.md` §2.1). Distinct type
 /// identity via non-exhaustive enum, same rationale as `Entity`.

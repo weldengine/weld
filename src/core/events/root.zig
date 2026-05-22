@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+//!
 //! Public surface of the M0.2 / E4 event subsystem.
 //!
 //! Heterogeneous bus of typed MPMC ring-buffer queues. Producers

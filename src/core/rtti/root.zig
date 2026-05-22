@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
+//!
 //! Public surface of the M0.2 RTTI subsystem.
 //!
 //! The Tier 0 reflection runtime — comptime builder, type metadata,
