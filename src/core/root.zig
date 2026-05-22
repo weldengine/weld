@@ -59,6 +59,12 @@ pub const ipc = struct {
     pub const client = @import("ipc/client.zig");
 };
 
+/// RTTI namespace — Tier 0 reflection runtime (M0.2 / E1). Comptime
+/// builder, type metadata, deterministic identity + schema hashes,
+/// runtime registry. Single canonical entry point at
+/// `src/core/rtti.zig`.
+pub const rtti = @import("rtti.zig");
+
 comptime {
     // Force eager analysis of every IPC sub-file so inline tests are
     // picked up by `zig build test`. Zig 0.16's lazy semantic analysis
@@ -96,4 +102,9 @@ comptime {
     // inline tests run alongside the rest of the ECS surface.
     _ = ecs.command_buffer;
     _ = ecs.observers;
+    // M0.2 / E1 — pin the RTTI sub-files so their inline tests run.
+    _ = rtti.type_info;
+    _ = rtti.hash;
+    _ = rtti.comptime_builder;
+    _ = rtti.registry;
 }
