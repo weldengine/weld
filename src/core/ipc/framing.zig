@@ -193,7 +193,7 @@ test "encode then parseHeader round-trips for ProtocolHello" {
 
     const h = try parseHeader(buf);
     try std.testing.expectEqual(@as(u32, protocol.MAGIC), h.magic);
-    try std.testing.expectEqual(@as(u16, 1), h.version);
+    try std.testing.expectEqual(@as(u16, protocol.WELD_IPC_PROTOCOL_VERSION), h.version);
     try std.testing.expectEqual(@as(u16, @intFromEnum(messages.MsgType.protocol_hello)), h.msg_type);
     try std.testing.expectEqual(@as(u32, 42), h.seq_id);
     try std.testing.expectEqual(@as(u32, SCHEMA_HASH_SIZE + @sizeOf(messages.ProtocolHello)), h.payload_len);
