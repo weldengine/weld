@@ -51,6 +51,12 @@ const AssetHandle = type_info.AssetHandle;
 /// value's `fields` slice points to a static comptime-promoted array;
 /// callers can store the `TypeInfo` by value and the slice remains
 /// valid for the lifetime of the binary.
+///
+/// When `category == .resource`, the `lifecycle` field is populated by
+/// `inferLifecycle(T)` — reads the `pub const lifecycle: Lifecycle`
+/// declaration if present, otherwise defaults to `.transient` (M0.2 /
+/// E3 decision, cf. brief § Notes). For other categories,
+/// `lifecycle` is `null`.
 pub fn buildTypeInfo(comptime T: type, comptime category: Category) TypeInfo {
     comptime {
         if (!isPOD(T)) {
@@ -65,8 +71,30 @@ pub fn buildTypeInfo(comptime T: type, comptime category: Category) TypeInfo {
             .schema_hash = hash.computeSchemaHashFromParts(@typeName(T), fields),
             .fields = fields,
             .category = category,
-            .lifecycle = null,
+            .lifecycle = inferLifecycle(T, category),
         };
+    }
+}
+
+/// Reads the resource lifecycle for `T` at comptime. Returns `null`
+/// for categories other than `.resource`. For resources, returns the
+/// `T.lifecycle` declaration when present, otherwise `.transient` as
+/// the safe default (least-durable lifecycle).
+pub fn inferLifecycle(comptime T: type, comptime category: Category) ?Lifecycle {
+    comptime {
+        if (category != .resource) return null;
+        if (@hasDecl(T, "lifecycle")) {
+            const declared = T.lifecycle;
+            if (@TypeOf(declared) != Lifecycle) {
+                @compileError(
+                    "inferLifecycle: '" ++ @typeName(T) ++
+                        ".lifecycle' must be of type Lifecycle, got " ++
+                        @typeName(@TypeOf(declared)),
+                );
+            }
+            return declared;
+        }
+        return .transient;
     }
 }
 

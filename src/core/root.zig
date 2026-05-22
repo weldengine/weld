@@ -65,6 +65,13 @@ pub const ipc = struct {
 /// `src/core/rtti/root.zig` (cohérent avec le pattern `ecs/root.zig`).
 pub const rtti = @import("rtti/root.zig");
 
+/// Resources namespace — Tier 0 singleton-entity resource subsystem
+/// (M0.2 / E3). Public API for `setResource` / `getResource` /
+/// `getResourceMut` / `hasResource` / `removeResource` /
+/// `resourceChanged`. Single canonical entry point at
+/// `src/core/resources/root.zig`.
+pub const resources = @import("resources/root.zig");
+
 comptime {
     // Force eager analysis of every IPC sub-file so inline tests are
     // picked up by `zig build test`. Zig 0.16's lazy semantic analysis
@@ -107,4 +114,7 @@ comptime {
     _ = rtti.hash;
     _ = rtti.comptime_builder;
     _ = rtti.registry;
+    // M0.2 / E3 — pin the resources sub-files.
+    _ = resources.registry;
+    _ = resources.api;
 }

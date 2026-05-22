@@ -160,11 +160,18 @@ test "isPOD rejects pointer-bearing structs (would @compileError via buildTypeIn
     try std.testing.expect(rtti.isPOD(Good));
 }
 
-test "lifecycle is null for components and unset by default for resources" {
+test "lifecycle defaults to .transient for resources, null otherwise" {
+    // Contract updated by M0.2 / E3 (cf. brief § Notes — décision
+    // technique E3 / lifecycle inference). `buildTypeInfo` reads
+    // `T.lifecycle` if declared, otherwise defaults to `.transient`
+    // for the `.resource` category and leaves the field null for
+    // every other category.
     const Res = extern struct { tick: u64 = 0 };
-    const info = comptime rtti.buildTypeInfo(Res, .resource);
-    try std.testing.expectEqual(Category.resource, info.category);
-    // The E1 builder does not infer a lifecycle — that wiring lands in
-    // E3 with the resource API. Default null is contractually stable.
-    try std.testing.expect(info.lifecycle == null);
+    const info_res = comptime rtti.buildTypeInfo(Res, .resource);
+    try std.testing.expectEqual(rtti.Category.resource, info_res.category);
+    try std.testing.expect(info_res.lifecycle != null);
+    try std.testing.expectEqual(rtti.Lifecycle.transient, info_res.lifecycle.?);
+
+    const info_comp = comptime rtti.buildTypeInfo(Res, .component);
+    try std.testing.expect(info_comp.lifecycle == null);
 }

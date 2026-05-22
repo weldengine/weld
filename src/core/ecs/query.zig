@@ -295,6 +295,10 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
             // (archetype pointers are stable for the world's lifetime).
             const tail = all[self.last_seen_archetype_count..];
             for (tail) |arch| {
+                // M0.2 / E3 — singleton-entity resources are invisible
+                // to user queries. Skip the archetype before the cheaper
+                // signature match runs.
+                if (arch.is_singleton) continue;
                 if (!archetypeMatches(
                     arch,
                     &self.required_ids,

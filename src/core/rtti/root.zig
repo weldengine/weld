@@ -74,6 +74,11 @@ pub const buildFields = builder_mod.buildFields;
 pub const classifyField = builder_mod.classifyField;
 /// POD predicate gating `buildTypeInfo`'s `@compileError`.
 pub const isPOD = builder_mod.isPOD;
+/// Reads the resource lifecycle from a struct's `pub const lifecycle`
+/// declaration. Returns `null` for non-resource categories;
+/// `.transient` is the default for resources without an explicit
+/// declaration (M0.2 / E3).
+pub const inferLifecycle = builder_mod.inferLifecycle;
 
 /// Comptime-deterministic 32-bit identity for `T`.
 pub const computeTypeId = hash_mod.computeTypeId;

@@ -145,6 +145,11 @@ pub const Archetype = struct {
     layout: ChunkLayout,
     chunks: std.ArrayListUnmanaged(*Chunk) = .empty,
     transitions: TransitionCache = .{},
+    /// M0.2 / E3 — `true` iff this archetype hosts a singleton-entity
+    /// resource. Set by `resources.setResource` after spawning the
+    /// resource's entity. `Query.maybeRescan` skips singleton
+    /// archetypes so user queries never see resource entities.
+    is_singleton: bool = false,
 
     /// Initialise the archetype with the given sorted component list.
     /// Asserts the list is non-empty (an empty archetype is the
