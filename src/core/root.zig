@@ -80,6 +80,14 @@ pub const resources = @import("resources/root.zig");
 /// boundaries.
 pub const events = @import("events/root.zig");
 
+/// Plugin loader namespace — Tier 0 squelette M0.2 / E6.
+/// `Loader` charge des `.so` / `.dll` / `.dylib`, lit le
+/// `WeldPluginDesc` exporté, et expose la table `WeldAPI`
+/// avec 7 sous-APIs (signatures finales, implémentations stub
+/// retournant `WELD_ERR_NOT_IMPLEMENTED`). Câblage runtime
+/// Phase 3.
+pub const plugin_loader = @import("plugin_loader/root.zig");
+
 comptime {
     // Force eager analysis of every IPC sub-file so inline tests are
     // picked up by `zig build test`. Zig 0.16's lazy semantic analysis
@@ -131,4 +139,8 @@ comptime {
     _ = events.cursor;
     _ = events.queue;
     _ = events.bus;
+    // M0.2 / E6 — pin the plugin loader sub-files.
+    _ = plugin_loader.desc;
+    _ = plugin_loader.api;
+    _ = plugin_loader.loader;
 }

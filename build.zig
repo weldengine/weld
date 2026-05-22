@@ -42,6 +42,54 @@ pub fn build(b: *std.Build) void {
     });
     etch_module.addImport("weld_core", core_module);
 
+    // M0.2 / E6 — plugin loader ABI module shared with the stub
+    // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
+    // Exposes the C ABI types from `desc.zig` (no `WeldAPI` itself,
+    // just the declarations the stubs need: `WeldPluginDesc`,
+    // `WeldStr`, etc.). Decision Cas 3 — import croisé via module
+    // shared rather than duplicating the types in each stub.
+    const plugin_loader_abi_module = b.createModule(.{
+        .root_source_file = b.path("src/core/plugin_loader/desc.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // M0.2 / E6 — stub plugin libraries, dynamic linkage. Each
+    // produces `lib<name>.so` (Linux), `lib<name>.dylib` (macOS),
+    // or `<name>.dll` (Windows). Installed under `zig-out/lib/`
+    // (POSIX) or `zig-out/bin/` (Windows) so the load_unload_test
+    // can find them at known paths.
+    const StubSpec = struct {
+        name: []const u8,
+        root: []const u8,
+    };
+    const stub_specs = [_]StubSpec{
+        .{ .name = "weld_stub_plugin_happy", .root = "tests/core/plugin_loader/stub_plugin/plugin.zig" },
+        .{ .name = "weld_stub_plugin_future", .root = "tests/core/plugin_loader/stub_plugin/plugin_future_api.zig" },
+        .{ .name = "weld_stub_plugin_no_entry", .root = "tests/core/plugin_loader/stub_plugin/plugin_no_entry.zig" },
+    };
+    var stub_install_steps: [stub_specs.len]*std.Build.Step = undefined;
+    for (stub_specs, 0..) |spec, i| {
+        const stub_module = b.createModule(.{
+            .root_source_file = b.path(spec.root),
+            .target = target,
+            .optimize = optimize,
+        });
+        stub_module.addImport("weld_plugin_abi", plugin_loader_abi_module);
+        const stub_lib = b.addLibrary(.{
+            .name = spec.name,
+            .linkage = .dynamic,
+            .root_module = stub_module,
+        });
+        const stub_install = b.addInstallArtifact(stub_lib, .{});
+        stub_install_steps[i] = &stub_install.step;
+    }
+    const stub_plugins_step = b.step(
+        "stub-plugins",
+        "Build the three M0.2 / E6 stub plugin libraries used by the plugin_loader tests",
+    );
+    for (stub_install_steps) |s| stub_plugins_step.dependOn(s);
+
     // Main executable.
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -152,6 +200,10 @@ pub fn build(b: *std.Build) void {
         wl_protocols: bool = false,
         etch: bool = false,
         etch_interp: bool = false,
+        /// M0.2 / E6 — when set, the test step depends on
+        /// `stub_install_steps[]` so the three stub libraries are
+        /// built before the test runs.
+        needs_stub_plugins: bool = false,
     };
     const test_specs = [_]TestSpec{
         .{ .path = "tests/smoke_test.zig" },
@@ -183,6 +235,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/core/events/lifetime_test.zig" },
         .{ .path = "tests/core/events/scheduler_integration_test.zig" },
         .{ .path = "tests/bindgen/roundtrip_test.zig" },
+        .{ .path = "tests/core/plugin_loader/api_stub_test.zig" },
+        .{ .path = "tests/core/plugin_loader/load_unload_test.zig", .needs_stub_plugins = true },
         .{ .path = "tests/jobs/deque_test.zig" },
         .{ .path = "tests/jobs/scheduler_test.zig" },
         .{ .path = "tests/window/win32_open_close_test.zig" },
@@ -218,7 +272,11 @@ pub fn build(b: *std.Build) void {
             t_mod.addImport("runner_interp", etch_interp_runner_module);
         }
         const t = b.addTest(.{ .root_module = t_mod });
-        test_step.dependOn(&b.addRunArtifact(t).step);
+        const t_run = b.addRunArtifact(t);
+        if (spec.needs_stub_plugins) {
+            for (stub_install_steps) |s| t_run.step.dependOn(s);
+        }
+        test_step.dependOn(&t_run.step);
     }
 
     // ----------------------------- S6 editor + runtime stub binaries -----
