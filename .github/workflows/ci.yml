@@ -53,6 +53,14 @@ jobs:
       - name: zig build test
         run: zig build test -Doptimize=${{ matrix.mode }}
 
+      # M0.2 / E5 — bindgen-verify gate. Regenerates the Vulkan +
+      # Wayland bindings and asserts `git diff --quiet` on
+      # `bindings/generated/` + `src/core/platform/`. Any drift
+      # between the committed bindings and what the regen produces
+      # blocks the merge.
+      - name: zig build bindgen-verify
+        run: zig build bindgen-verify
+
   bench-ecs-smoke:
     strategy:
       fail-fast: false

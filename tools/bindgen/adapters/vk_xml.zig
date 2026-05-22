@@ -1,5 +1,7 @@
-//! Vulkan binding generator for the S2 spike. Throwaway: a unified
-//! `bindgen` system replaces this in S3 (cf. `engine-c-bindings.md` §10.1).
+//! Vulkan binding adapter for the unified bindgen pipeline (M0.2 /
+//! E5). Port 1:1 of the legacy `tools/vk_gen/` — same parser, same
+//! whitelist, same emitter. Lives under `tools/bindgen/adapters/`
+//! per `engine-c-bindings.md` §2.1.
 //!
 //! Pipeline:
 //!     bindings/upstream/vulkan/vk.xml
@@ -11,12 +13,12 @@
 //!
 //! Usage:
 //!     zig build bindgen-vk
-//! or:
-//!     zig run tools/vk_gen/main.zig
+//! or (via the unified dispatcher):
+//!     zig build bindgen -- --target vulkan
 
 const std = @import("std");
-const parser = @import("parser.zig");
-const emit = @import("emit.zig");
+const parser = @import("vk_xml/parser.zig");
+const emit = @import("vk_xml/emit.zig");
 
 /// Whitelist for the S2 spike. Stored as data (not magic) per the brief.
 /// Includes the four feature blocks per Vulkan version (BASE / GRAPHICS /

@@ -182,6 +182,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/core/events/saturation_test.zig" },
         .{ .path = "tests/core/events/lifetime_test.zig" },
         .{ .path = "tests/core/events/scheduler_integration_test.zig" },
+        .{ .path = "tests/bindgen/roundtrip_test.zig" },
         .{ .path = "tests/jobs/deque_test.zig" },
         .{ .path = "tests/jobs/scheduler_test.zig" },
         .{ .path = "tests/window/win32_open_close_test.zig" },
@@ -680,15 +681,20 @@ pub fn build(b: *std.Build) void {
     );
     compile_bench_step.dependOn(&compile_bench_run.step);
 
-    // ------------------------------------------------ vk_gen (S2 bindgen) --
+    // -------------------------------------------- bindgen (M0.2 unified) --
     //
-    // Throwaway generator that re-emits `src/core/platform/vk.zig` from the
-    // vendored `bindings/upstream/vulkan/vk.xml`. Replaced in S3 by the
-    // unified bindgen system. Run explicitly via `zig build bindgen-vk`,
-    // never as part of the default `zig build`.
+    // Unified bindgen system per `engine-c-bindings.md` §1. The two
+    // M0.2 adapters (`vk_xml`, `wayland_xml`) port the legacy S2
+    // generators 1:1. Run explicitly via:
+    //   - `zig build bindgen`                — regenerate every adapter
+    //   - `zig build bindgen -- --target vulkan`  — only Vulkan
+    //   - `zig build bindgen -- --target wayland` — only Wayland
+    //   - `zig build bindgen-vk`             — back-compat single adapter
+    //   - `zig build bindgen-wayland`        — back-compat single adapter
+    //   - `zig build bindgen-verify`         — regenerate + diff vide gate
 
     const vk_gen_module = b.createModule(.{
-        .root_source_file = b.path("tools/vk_gen/main.zig"),
+        .root_source_file = b.path("tools/bindgen/adapters/vk_xml.zig"),
         .target = b.graph.host,
         .optimize = .Debug,
     });
@@ -708,10 +714,10 @@ pub fn build(b: *std.Build) void {
     const vk_gen_step = b.step("bindgen-vk", "Regenerate src/core/platform/vk.zig from vk.xml");
     vk_gen_step.dependOn(&vk_gen_fmt.step);
 
-    // ----------------------------------------- wayland_gen (S2 bindgen) --
+    // ----------------------------------------- wayland_gen (unified) --
 
     const wayland_gen_module = b.createModule(.{
-        .root_source_file = b.path("tools/wayland_gen/main.zig"),
+        .root_source_file = b.path("tools/bindgen/adapters/wayland_xml.zig"),
         .target = b.graph.host,
         .optimize = .Debug,
     });
@@ -735,6 +741,36 @@ pub fn build(b: *std.Build) void {
         "Regenerate src/core/platform/window/wayland_protocols/*.zig from wayland-protocols XMLs",
     );
     wayland_gen_step.dependOn(&wayland_gen_fmt.step);
+
+    // -------------------------------------------- bindgen unified dispatcher --
+    //
+    // Aggregates the per-adapter targets. `zig build bindgen` runs
+    // every adapter sequentially (vk_gen + wayland_gen + fmt).
+    const bindgen_step = b.step("bindgen", "Regenerate every bindgen adapter (Vulkan + Wayland)");
+    bindgen_step.dependOn(&vk_gen_fmt.step);
+    bindgen_step.dependOn(&wayland_gen_fmt.step);
+
+    // -------------------------------------------- bindgen-verify gate --
+    //
+    // M0.2 / E5 critère mécanique non-négociable : regenerate then
+    // `git diff --quiet bindings/generated/ src/core/platform/`. Exit
+    // 0 if the regen matches the committed output bit-for-bit; non-zero
+    // (visible diff) signals a divergence and blocks the merge.
+    const bindgen_verify_diff = b.addSystemCommand(&.{
+        "git",
+        "diff",
+        "--quiet",
+        "--exit-code",
+        "bindings/generated/",
+        "src/core/platform/",
+    });
+    bindgen_verify_diff.step.dependOn(&vk_gen_fmt.step);
+    bindgen_verify_diff.step.dependOn(&wayland_gen_fmt.step);
+    const bindgen_verify_step = b.step(
+        "bindgen-verify",
+        "Regenerate bindings + assert `git diff --quiet` on bindings/generated + src/core/platform",
+    );
+    bindgen_verify_step.dependOn(&bindgen_verify_diff.step);
 
     // -------------------------------------- weld_lint (M0.0 custom linter) --
     //

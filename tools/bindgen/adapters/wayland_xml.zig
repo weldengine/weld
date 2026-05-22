@@ -1,15 +1,19 @@
-//! Wayland binding generator entry point.
+//! Wayland binding adapter for the unified bindgen pipeline (M0.2 /
+//! E5). Port 1:1 of the legacy `tools/wayland_gen/` — same parser,
+//! same emitter, same jobs list. Lives under
+//! `tools/bindgen/adapters/` per `engine-c-bindings.md` §2.1.
 //!
 //! Reads the three vendored protocol XMLs and emits one Zig file per
 //! protocol under `src/core/platform/window/wayland_protocols/`.
-//! Throwaway in S3 (cf. `engine-c-bindings.md` §10.1).
 //!
 //! Usage:
 //!     zig build bindgen-wayland
+//! or (via the unified dispatcher):
+//!     zig build bindgen -- --target wayland
 
 const std = @import("std");
-const parser = @import("parser.zig");
-const emit = @import("emit.zig");
+const parser = @import("wayland_xml/parser.zig");
+const emit = @import("wayland_xml/emit.zig");
 
 const Job = struct {
     input: []const u8,
