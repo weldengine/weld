@@ -5,11 +5,14 @@
 //! wraps it with synthetic concurrent noise that mimics the pre-push
 //! hook's overall load profile:
 //!
-//!   - **CPU noise threads** — `noise_cpu_thread_count = CPU count`
-//!     threads spinning on tight ALU loops. Drains CPU bandwidth so
-//!     the scheduler's workers compete for cores against background
-//!     work — equivalent to the parallel `zig build` + `zig build
-//!     test` processes that run during the pre-push hook.
+//!   - **CPU noise threads** — `noise_cpu_thread_count = 2 × CPU count`
+//!     threads spinning on tight ALU loops (M0.2.1 / E2bis ajout #1 —
+//!     oversubscription pour reproduire la contention CPU réelle du
+//!     pre-push où plusieurs `zig build`/`zig test` parallèles
+//!     dépassent largement la cardinalité physique). Drains CPU
+//!     bandwidth so the scheduler's workers compete for cores against
+//!     background work — equivalent to the parallel `zig build` +
+//!     `zig build test` processes that run during the pre-push hook.
 //!
 //!   - **Allocator pressure threads** — 4 threads doing rapid
 //!     malloc / free cycles on a separate page allocator. Drives
@@ -251,7 +254,11 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
     // ── Spin up noise threads BEFORE world setup so they're hot
     //    by the time the scheduler dispatch begins. ────────────────────
     var stop_flag = std.atomic.Value(bool).init(false);
-    const cpu_count = std.Thread.getCpuCount() catch 4;
+    // M0.2.1 / E2bis ajout #1 — oversubscription CPU (2× cardinalité
+    // physique) pour reproduire la contention pre-push, où plusieurs
+    // `zig build`/`zig test` parallèles dépassent largement le nombre
+    // de cœurs logiques.
+    const cpu_count = (std.Thread.getCpuCount() catch 4) * 2;
     const alloc_thread_count: usize = 4;
     var cpu_threads = try std.testing.allocator.alloc(std.Thread, cpu_count);
     defer std.testing.allocator.free(cpu_threads);
