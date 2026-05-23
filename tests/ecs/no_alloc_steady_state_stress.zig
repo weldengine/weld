@@ -26,6 +26,13 @@
 //!     pre-push hook fans out parallel `zig build` subcompilers — this
 //!     ajout reproduces that fork churn synthetically.
 //!
+//!   - **FS I/O threads** (M0.2.1 / E2bis ajout #3) — 4 threads each
+//!     looping `create + writeAll(1MB) + flush + sync + close +
+//!     reopen + readAll(1MB) + close` on a per-thread temporary file
+//!     in cwd. Drives page cache pressure, dirty-page writeback, and
+//!     fsync syscalls — the I/O footprint of `zig build` writing
+//!     intermediate objects.
+//!
 //! Together these reproduce the H1bis → H2 amplification chain
 //! documented in the brief § Notes : the noise extends every
 //! `std.Thread.yield()` and `dispatchPhase` inter-step gap past
@@ -201,6 +208,51 @@ fn processForkThread(stop: *std.atomic.Value(bool), io: std.Io) void {
     }
 }
 
+/// M0.2.1 / E2bis ajout #3 — FS I/O churn. Each thread maintains a
+/// per-tid temporary file in cwd (typically `.zig-cache/o/.../`) and
+/// loops the full write + fsync + read cycle on 1 MB to drive page
+/// cache and writeback contention — the I/O footprint of the pre-push
+/// hook's `zig build` intermediate object writes.
+fn fsIOThread(stop: *std.atomic.Value(bool), io: std.Io, tid: u32) void {
+    const gpa = std.heap.page_allocator;
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(
+        &path_buf,
+        ".m0_2_1_stress_{d}.dat",
+        .{tid},
+    ) catch return;
+
+    const data = gpa.alloc(u8, 1024 * 1024) catch return;
+    defer gpa.free(data);
+    @memset(data, 0xAB);
+
+    const read_buf = gpa.alloc(u8, 1024 * 1024) catch return;
+    defer gpa.free(read_buf);
+
+    const cwd = std.Io.Dir.cwd();
+    while (!stop.load(.monotonic)) {
+        // Write phase: create + writeAll + flush + sync + close.
+        const w_file = cwd.createFile(io, path, .{}) catch continue;
+        var w_io_buf: [16 * 1024]u8 = undefined;
+        var w = w_file.writer(io, &w_io_buf);
+        w.interface.writeAll(data) catch {};
+        w.interface.flush() catch {};
+        w_file.sync(io) catch {};
+        w_file.close(io);
+
+        // Read phase: open + readAll(1MB) + close. Drains page cache
+        // back through the read path.
+        const r_file = cwd.openFile(io, path, .{}) catch continue;
+        var r_io_buf: [16 * 1024]u8 = undefined;
+        var r = r_file.reader(io, &r_io_buf);
+        _ = r.interface.readSliceAll(read_buf) catch {};
+        r_file.close(io);
+    }
+
+    // Best-effort cleanup. exit(2) from the watchdog bypasses this.
+    cwd.deleteFile(io, path) catch {};
+}
+
 // ── Watchdog harness (mirrors no_alloc_steady_state.zig) ─────────────────
 
 const DispatchArgs = struct {
@@ -285,15 +337,21 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
     // M0.2.1 / E2bis ajout #2 — fork churn (8 threads de spawn
     // répété pour mimer les subcompilers parallèles du pre-push).
     const proc_thread_count: usize = 8;
+    // M0.2.1 / E2bis ajout #3 — FS I/O churn (4 threads write+fsync+read
+    // 1 MB en boucle pour la pression page cache + writeback).
+    const fsio_thread_count: usize = 4;
     var cpu_threads = try std.testing.allocator.alloc(std.Thread, cpu_count);
     defer std.testing.allocator.free(cpu_threads);
     var alloc_threads = try std.testing.allocator.alloc(std.Thread, alloc_thread_count);
     defer std.testing.allocator.free(alloc_threads);
     var proc_threads = try std.testing.allocator.alloc(std.Thread, proc_thread_count);
     defer std.testing.allocator.free(proc_threads);
+    var fsio_threads = try std.testing.allocator.alloc(std.Thread, fsio_thread_count);
+    defer std.testing.allocator.free(fsio_threads);
     var n_cpu_started: usize = 0;
     var n_alloc_started: usize = 0;
     var n_proc_started: usize = 0;
+    var n_fsio_started: usize = 0;
     defer {
         // Stop all started noise threads at scope exit. Done in
         // `defer` so it runs even if watchdog `exit(2)`s — well,
@@ -303,6 +361,7 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
         for (cpu_threads[0..n_cpu_started]) |t| t.join();
         for (alloc_threads[0..n_alloc_started]) |t| t.join();
         for (proc_threads[0..n_proc_started]) |t| t.join();
+        for (fsio_threads[0..n_fsio_started]) |t| t.join();
     }
     while (n_cpu_started < cpu_count) : (n_cpu_started += 1) {
         cpu_threads[n_cpu_started] = try std.Thread.spawn(.{}, cpuNoiseThread, .{&stop_flag});
@@ -312,6 +371,9 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
     }
     while (n_proc_started < proc_thread_count) : (n_proc_started += 1) {
         proc_threads[n_proc_started] = try std.Thread.spawn(.{}, processForkThread, .{ &stop_flag, io });
+    }
+    while (n_fsio_started < fsio_thread_count) : (n_fsio_started += 1) {
+        fsio_threads[n_fsio_started] = try std.Thread.spawn(.{}, fsIOThread, .{ &stop_flag, io, @as(u32, @intCast(n_fsio_started)) });
     }
 
     // ── World + scheduler setup. ─────────────────────────────────────
