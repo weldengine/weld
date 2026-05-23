@@ -82,6 +82,11 @@ inline fn unpack(packed_value: u64) GenAndN {
     };
 }
 
+/// M0.2.1 / E5 — cache line size assumed on the targets we run
+/// (Apple Silicon ARM64, x86_64). Used for the comptime layout
+/// assertions on `Scheduler` below.
+const cache_line: usize = 64;
+
 /// Top-level work-stealing scheduler. Owns its dynamic worker pool,
 /// the chunk-pointer buffer, and the synchronisation primitives that
 /// drive sleep / wake / barrier.
@@ -302,6 +307,21 @@ pub const Scheduler = struct {
             }
             std.Thread.yield() catch {};
         }
+    }
+
+    // M0.2.1 / E5 — comptime layout guard against false sharing
+    // between `gen_and_n` (dispatcher-written each wave) and
+    // `pending_count` (worker-written each chunk). Both fields carry
+    // `align(64)`, so each lands on its own cache line; this guard
+    // proves it at compile time and catches any future layout change
+    // that would silently regress the bench by re-introducing
+    // cache-line ping-pong between dispatcher and workers.
+    comptime {
+        const gen_off = @offsetOf(Scheduler, "gen_and_n");
+        const pc_off = @offsetOf(Scheduler, "pending_count");
+        std.debug.assert(gen_off % cache_line == 0);
+        std.debug.assert(pc_off % cache_line == 0);
+        std.debug.assert(pc_off - gen_off >= cache_line);
     }
 
     pub fn snapshotStats(self: *const Scheduler, gpa: std.mem.Allocator) SchedulerError![]WorkerStats.Snapshot {
