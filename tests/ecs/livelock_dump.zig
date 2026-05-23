@@ -32,45 +32,12 @@ const Scheduler = weld_core.jobs.scheduler.Scheduler;
 const World = weld_core.ecs.World;
 
 /// Print a snapshot of the job scheduler's runtime state to `writer`.
-/// The dump groups scheduler-wide atomics first, then per-worker
-/// stats, then aggregate totals. Read with acquire ordering so the
-/// numbers are coherent with respect to any worker that has
-/// completed its last fetchSub on `pending_count`.
+/// Delegates to `Scheduler.dumpStateTo` — the implementation lives in
+/// production code so the over-decrement assertion panic path
+/// (`src/core/jobs/scheduler.zig:overDecrementPanic`) reuses the same
+/// output format. Keeps test diagnostics and runtime panic in sync.
 pub fn dumpJobScheduler(sched: *const Scheduler, writer: *std.Io.Writer) !void {
-    try writer.print("=== Job scheduler ===\n", .{});
-    try writer.print("  pending_count : {d}\n", .{sched.pending_count.load(.acquire)});
-    try writer.print("  generation    : {d}\n", .{sched.generation.load(.acquire)});
-    try writer.print("  chunk_count   : {d}\n", .{sched.chunk_count});
-    try writer.print("  shutdown      : {any}\n", .{sched.shutdown});
-    try writer.print("  worker_count  : {d}\n", .{sched.workers.len});
-
-    var sum_chunks: u64 = 0;
-    var sum_parks: u64 = 0;
-    var sum_steals_a: u64 = 0;
-    var sum_steals_s: u64 = 0;
-    for (sched.workers, 0..) |*w, i| {
-        const snap = w.stats.snapshot();
-        sum_chunks += snap.chunks_processed;
-        sum_parks += snap.parks_completed;
-        sum_steals_a += snap.steals_attempted;
-        sum_steals_s += snap.steals_succeeded;
-        try writer.print(
-            "  worker[{d:>2}] id={d:>2} chunks={d:>8} parks={d:>6} steals_a={d:>8} steals_s={d:>8} work_ns={d}\n",
-            .{
-                i,
-                w.id,
-                snap.chunks_processed,
-                snap.parks_completed,
-                snap.steals_attempted,
-                snap.steals_succeeded,
-                snap.work_duration_ns,
-            },
-        );
-    }
-    try writer.print(
-        "  totals: chunks={d} parks={d} steals_a={d} steals_s={d}\n",
-        .{ sum_chunks, sum_parks, sum_steals_a, sum_steals_s },
-    );
+    try sched.dumpStateTo(writer);
 }
 
 /// Print a snapshot of the event bus state to `writer`. Iterates

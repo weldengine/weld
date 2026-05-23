@@ -264,6 +264,50 @@ pub const Scheduler = struct {
     pub fn resetStats(self: *Scheduler) void {
         for (self.workers) |*w| w.stats.reset();
     }
+
+    /// M0.2.1 / E2ter — diagnostic dump of the scheduler state.
+    /// Read-only (`.acquire` loads + per-worker `WorkerStats.snapshot`),
+    /// safe to call from any thread including a worker about to panic.
+    /// Used by:
+    ///   - the test-side watchdog in `tests/ecs/livelock_dump.zig`,
+    ///   - the over-decrement assertion in `workerMain` (cf.
+    ///     `overDecrementPanic` below).
+    pub fn dumpStateTo(self: *const Scheduler, writer: *std.Io.Writer) !void {
+        try writer.print("=== Job scheduler ===\n", .{});
+        try writer.print("  pending_count : {d}\n", .{self.pending_count.load(.acquire)});
+        try writer.print("  generation    : {d}\n", .{self.generation.load(.acquire)});
+        try writer.print("  chunk_count   : {d}\n", .{self.chunk_count});
+        try writer.print("  shutdown      : {any}\n", .{self.shutdown});
+        try writer.print("  worker_count  : {d}\n", .{self.workers.len});
+
+        var sum_chunks: u64 = 0;
+        var sum_parks: u64 = 0;
+        var sum_steals_a: u64 = 0;
+        var sum_steals_s: u64 = 0;
+        for (self.workers, 0..) |*w, i| {
+            const snap = w.stats.snapshot();
+            sum_chunks += snap.chunks_processed;
+            sum_parks += snap.parks_completed;
+            sum_steals_a += snap.steals_attempted;
+            sum_steals_s += snap.steals_succeeded;
+            try writer.print(
+                "  worker[{d:>2}] id={d:>2} chunks={d:>8} parks={d:>6} steals_a={d:>8} steals_s={d:>8} work_ns={d}\n",
+                .{
+                    i,
+                    w.id,
+                    snap.chunks_processed,
+                    snap.parks_completed,
+                    snap.steals_attempted,
+                    snap.steals_succeeded,
+                    snap.work_duration_ns,
+                },
+            );
+        }
+        try writer.print(
+            "  totals: chunks={d} parks={d} steals_a={d} steals_s={d}\n",
+            .{ sum_chunks, sum_parks, sum_steals_a, sum_steals_s },
+        );
+    }
 };
 
 /// Number of yield-spin rounds a worker does after running out of
@@ -330,7 +374,17 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
             // dispatcher busy-yields on `pending_count`, so no
             // condvar signal is needed when the wave drains — the
             // dispatcher observes the zero on its next yield round.
-            _ = sched.pending_count.fetchSub(1, .acq_rel);
+            //
+            // M0.2.1 / E2ter — debug assertion at the unique
+            // over-decrement site (siège localisé par E3 analyse
+            // statique). Captures full scheduler state at the panic
+            // for diagnosis (discriminate R1/R2/R3 from
+            // brief § Notes). Active in Debug + ReleaseSafe via
+            // `std.debug.runtime_safety`, stripped in ReleaseFast.
+            const prev = sched.pending_count.fetchSub(1, .acq_rel);
+            if (std.debug.runtime_safety and prev == 0) {
+                overDecrementPanic(sched, worker_idx);
+            }
             idle_spin_count = 0;
             continue;
         }
@@ -384,6 +438,35 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
             pushShare(sched, self, worker_idx);
         }
     }
+}
+
+/// M0.2.1 / E2ter — assertion debug panic path for the over-decrement
+/// at `workerMain`'s fetchSub site. Dumps the full scheduler state via
+/// `Scheduler.dumpStateTo` then `std.debug.panic`s with a stable
+/// parseable message (grep-able if multiple panics happen across
+/// runs). `noreturn` — the process aborts after the panic handler.
+fn overDecrementPanic(sched: *Scheduler, worker_idx: u32) noreturn {
+    var stderr_buf: [8192]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(sched.io, &stderr_buf);
+    const stderr = &stderr_writer.interface;
+    stderr.print(
+        "\n=== M0.2.1 / E2ter — scheduler over-decrement (worker_idx={d}) ===\n",
+        .{worker_idx},
+    ) catch {};
+    sched.dumpStateTo(stderr) catch {};
+    stderr.flush() catch {};
+
+    const w = &sched.workers[worker_idx];
+    const stats = w.stats.snapshot();
+    std.debug.panic(
+        "scheduler over-decrement at jobs/scheduler.zig:333 — worker_id={d} generation={d} chunks_processed={d} steals_s={d}",
+        .{
+            w.id,
+            sched.generation.load(.acquire),
+            stats.chunks_processed,
+            stats.steals_succeeded,
+        },
+    );
 }
 
 /// Push this worker's strided share of `sched.jobs[0..chunk_count]`
