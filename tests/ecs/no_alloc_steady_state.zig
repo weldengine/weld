@@ -27,9 +27,21 @@
 //! `no_alloc_scheduler_dispatch.zig` test (jobs-only dispatch).
 //! Together the three tests pin the alloc-free contract across the
 //! full M0.1 surface.
+//!
+//! M0.2.1 / E2 — watchdog harness. The dispatchFrame measurement
+//! loop runs on a worker thread; the test thread polls a `done`
+//! atomic with a 5 s wall-clock budget (esprit de
+//! `engine-zig-conventions.md §13` « Tests avec ressources externes —
+//! timeout interne obligatoire »). On timeout, the test dumps the
+//! job scheduler + event bus state via `livelock_dump.zig` and
+//! aborts the test process with exit code 2 — that becomes the
+//! signal the stress loop harness uses to count hangs vs healthy
+//! runs. The dump targets the brief's E3 discriminant (H2 wake-lost
+//! vs H4 job-lost vs H1bis isolated).
 
 const std = @import("std");
 const weld_core = @import("weld_core");
+const dump = @import("livelock_dump.zig");
 
 const ecs = weld_core.ecs;
 const CountingAllocator = weld_core.testing.alloc_counting.CountingAllocator;
@@ -138,6 +150,82 @@ fn onDespawnedNoop(
     _: *ecs.CommandBuffer,
 ) anyerror!void {
     DESPAWN_OBSERVER_FIRED +%= 1;
+}
+
+/// M0.2.1 / E2 — argument bundle for the dispatch-loop worker
+/// thread. The thread runs the full dispatchFrame loop, signalling
+/// completion via `done` so the watchdog can observe it.
+const DispatchArgs = struct {
+    sys: *ecs.SystemScheduler,
+    world: *ecs.World,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    jobs: *weld_core.jobs.scheduler.Scheduler,
+    state: *SteadyState,
+    iter_total: u32,
+    iter_done: *std.atomic.Value(u32),
+    done: *std.atomic.Value(bool),
+    err_slot: *anyerror!void,
+};
+
+fn dispatchLoop(args: *DispatchArgs) void {
+    var i: u32 = 0;
+    while (i < args.iter_total) : (i += 1) {
+        args.sys.dispatchFrame(
+            args.world,
+            args.gpa,
+            args.io,
+            args.jobs,
+            1.0 / 60.0,
+            args.state,
+        ) catch |e| {
+            args.err_slot.* = e;
+            args.done.store(true, .release);
+            return;
+        };
+        args.iter_done.store(i + 1, .release);
+    }
+    args.done.store(true, .release);
+}
+
+/// M0.2.1 / E2 — watchdog wrapper. Spawns `dispatchLoop` on a worker
+/// thread, polls `done` every 50 ms up to a 5 s wall-clock budget.
+/// On timeout, dumps the scheduler + event bus state to stderr and
+/// aborts the test process with exit code 2 (= SchedulerLivelock).
+fn runWithWatchdog(args: *DispatchArgs) !void {
+    const thread = try std.Thread.spawn(.{}, dispatchLoop, .{args});
+
+    const start = std.Io.Clock.now(.awake, args.io);
+    const timeout_ns: i96 = 5 * std.time.ns_per_s;
+
+    while (!args.done.load(.acquire)) {
+        const now = std.Io.Clock.now(.awake, args.io);
+        const elapsed_ns: i96 = start.durationTo(now).nanoseconds;
+        if (elapsed_ns > timeout_ns) {
+            // Timeout — dump state and abort.
+            var stderr_buf: [8192]u8 = undefined;
+            var stderr_writer = std.Io.File.stderr().writer(args.io, &stderr_buf);
+            const stderr = &stderr_writer.interface;
+            const elapsed_ms: u64 = @intCast(@divTrunc(elapsed_ns, std.time.ns_per_ms));
+            dump.dumpLivelockState(
+                args.jobs,
+                args.world,
+                stderr,
+                args.iter_done.load(.acquire),
+                elapsed_ms,
+            ) catch {};
+            stderr.flush() catch {};
+            // Workers are stuck on the scheduler; we cannot safely
+            // `thread.join()`. Abort the process — the harness reads
+            // exit code 2 as the SchedulerLivelock signal.
+            std.process.exit(2);
+        }
+        const poll_dur: std.Io.Duration = .{ .nanoseconds = 50 * std.time.ns_per_ms };
+        std.Io.sleep(args.io, poll_dur, .awake) catch {};
+    }
+
+    thread.join();
+    try args.err_slot.*;
 }
 
 test "composite steady-state — queries + change detection + cmd + observers do not allocate post-warmup" {
@@ -267,19 +355,43 @@ test "composite steady-state — queries + change detection + cmd + observers do
     // arena reaches its working-set size, the per-system cmd
     // buffer arenas allocate their initial chunk, etc. Anything
     // that grows on first use lands during warm-up.
-    var w: u32 = 0;
-    while (w < 10) : (w += 1) {
-        try sys.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &state);
-    }
+    var iter_done_warmup = std.atomic.Value(u32).init(0);
+    var done_warmup = std.atomic.Value(bool).init(false);
+    var err_warmup: anyerror!void = {};
+    var args_warmup = DispatchArgs{
+        .sys = &sys,
+        .world = &world,
+        .gpa = gpa,
+        .io = io,
+        .jobs = &jobs_sched,
+        .state = &state,
+        .iter_total = 10,
+        .iter_done = &iter_done_warmup,
+        .done = &done_warmup,
+        .err_slot = &err_warmup,
+    };
+    try runWithWatchdog(&args_warmup);
 
     // Snapshot AFTER warm-up. Every alloc-related counter must
     // stay flat across the 100-iter measurement window.
     const before = counting.snapshot();
 
-    var iter: u32 = 0;
-    while (iter < 100) : (iter += 1) {
-        try sys.dispatchFrame(&world, gpa, io, &jobs_sched, 1.0 / 60.0, &state);
-    }
+    var iter_done_measure = std.atomic.Value(u32).init(0);
+    var done_measure = std.atomic.Value(bool).init(false);
+    var err_measure: anyerror!void = {};
+    var args_measure = DispatchArgs{
+        .sys = &sys,
+        .world = &world,
+        .gpa = gpa,
+        .io = io,
+        .jobs = &jobs_sched,
+        .state = &state,
+        .iter_total = 100,
+        .iter_done = &iter_done_measure,
+        .done = &done_measure,
+        .err_slot = &err_measure,
+    };
+    try runWithWatchdog(&args_measure);
 
     const after = counting.snapshot();
     const delta = CountingAllocator.delta(after, before);
