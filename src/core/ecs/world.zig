@@ -34,6 +34,16 @@ const registry_mod = @import("registry.zig");
 const resources_mod = @import("resources.zig");
 const query_runtime_mod = @import("query_runtime.zig");
 const observers_mod = @import("observers.zig");
+// M0.2 / E3 — singleton-entity resource registry, distinct from the
+// M0.1 / S4 byte-keyed `ResourceStore` above (which the Etch
+// interpreter still consumes).
+const singleton_resources_mod = @import("../resources/registry.zig");
+// M0.2 / E4 — heterogeneous event bus. Direct field on World per
+// the décision technique E4 in the brief § Notes (alternative was
+// scheduler-injected via ModuleContext; field-on-World aligns with
+// E3's singleton_resources and with `engine-tier-interfaces.md`
+// §0 which lists `event_bus` among Tier 0 services).
+const events_bus_mod = @import("../events/bus.zig");
 
 /// Public surface for consumers that spawn `(Transform, Velocity)`
 /// entities without depending on `components.zig` directly — the
@@ -115,6 +125,20 @@ pub const World = struct {
     /// Resource store keyed by `ComponentId`.
     resources: ResourceStore,
 
+    /// M0.2 / E3 — singleton-entity resource registry. Maps
+    /// `rtti.TypeId → EntityId` for the resources spawned via
+    /// `src/core/resources/`. Lives alongside the M0.1 / S4
+    /// `resources: ResourceStore` byte map (still consumed by the
+    /// Etch interpreter) — the two stores are independent until a
+    /// later milestone unifies them.
+    singleton_resources: singleton_resources_mod.ResourceRegistry = .{},
+
+    /// M0.2 / E4 — heterogeneous event bus. Owns the per-event-type
+    /// MPMC queues registered via `events.register(world, gpa, T,
+    /// cap, lifetime)`. Drained by the scheduler at phase / tick
+    /// / frame boundaries.
+    event_bus: events_bus_mod.EventBus = .{},
+
     /// M0.1 / E6 — observer registry. Carries per-event callback
     /// lists + a shared deferred command buffer for observer-issued
     /// mutations. Lazy-init'd by the first `registerOn*` call; tests
@@ -130,6 +154,8 @@ pub const World = struct {
             .archetype_by_signature = .empty,
             .entity_locations = .empty,
             .resources = ResourceStore.init(),
+            .singleton_resources = singleton_resources_mod.ResourceRegistry.init(),
+            .event_bus = events_bus_mod.EventBus.init(),
             .observer_registry = observers_mod.ObserverRegistry.init(),
         };
     }
@@ -143,6 +169,8 @@ pub const World = struct {
         self.archetype_by_signature.deinit(gpa);
         self.entity_locations.deinit(gpa);
         self.resources.deinit(gpa);
+        self.singleton_resources.deinit(gpa);
+        self.event_bus.deinit(gpa);
         self.registry.deinit(gpa);
         self.identity.deinit(gpa);
         self.observer_registry.deinit(gpa);

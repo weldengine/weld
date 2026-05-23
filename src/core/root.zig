@@ -59,6 +59,35 @@ pub const ipc = struct {
     pub const client = @import("ipc/client.zig");
 };
 
+/// RTTI namespace — Tier 0 reflection runtime (M0.2 / E1). Comptime
+/// builder, type metadata, deterministic identity + schema hashes,
+/// runtime registry. Single canonical entry point at
+/// `src/core/rtti/root.zig` (cohérent avec le pattern `ecs/root.zig`).
+pub const rtti = @import("rtti/root.zig");
+
+/// Resources namespace — Tier 0 singleton-entity resource subsystem
+/// (M0.2 / E3). Public API for `setResource` / `getResource` /
+/// `getResourceMut` / `hasResource` / `removeResource` /
+/// `resourceChanged`. Single canonical entry point at
+/// `src/core/resources/root.zig`.
+pub const resources = @import("resources/root.zig");
+
+/// Events namespace — Tier 0 MPMC event bus (M0.2 / E4). `EventBus`
+/// is a field on `World` (decision technique E4) and holds the
+/// typed `EventQueue(T)` instances. Producers `emit(T, e)`,
+/// consumers `subscribe(T)` → cursor → `poll(T, &cursor)`. The
+/// scheduler drives lifetime drains at phase / tick / frame
+/// boundaries.
+pub const events = @import("events/root.zig");
+
+/// Plugin loader namespace — Tier 0 squelette M0.2 / E6.
+/// `Loader` charge des `.so` / `.dll` / `.dylib`, lit le
+/// `WeldPluginDesc` exporté, et expose la table `WeldAPI`
+/// avec 7 sous-APIs (signatures finales, implémentations stub
+/// retournant `WELD_ERR_NOT_IMPLEMENTED`). Câblage runtime
+/// Phase 3.
+pub const plugin_loader = @import("plugin_loader/root.zig");
+
 comptime {
     // Force eager analysis of every IPC sub-file so inline tests are
     // picked up by `zig build test`. Zig 0.16's lazy semantic analysis
@@ -96,4 +125,22 @@ comptime {
     // inline tests run alongside the rest of the ECS surface.
     _ = ecs.command_buffer;
     _ = ecs.observers;
+    // M0.2 / E1 — pin the RTTI sub-files so their inline tests run.
+    _ = rtti.type_info;
+    _ = rtti.hash;
+    _ = rtti.comptime_builder;
+    _ = rtti.registry;
+    // M0.2 / E3 — pin the resources sub-files.
+    _ = resources.registry;
+    _ = resources.api;
+    // M0.2 / E4 — pin the events sub-files so their inline tests
+    // run alongside the rest of the surface.
+    _ = events.lifetime;
+    _ = events.cursor;
+    _ = events.queue;
+    _ = events.bus;
+    // M0.2 / E6 — pin the plugin loader sub-files.
+    _ = plugin_loader.desc;
+    _ = plugin_loader.api;
+    _ = plugin_loader.loader;
 }

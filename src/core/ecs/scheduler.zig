@@ -595,7 +595,18 @@ pub const SystemScheduler = struct {
                 }
                 try dispatchPhase(self, world, gpa, io, jobs, &frame, builder, phase_idx);
             }
+            // M0.2 / E4 — drain `.phase`-lifetime event queues at
+            // every phase transition (after every phase, including
+            // empty ones, so the cadence is invariant to the
+            // registered system topology).
+            world.event_bus.drainAtBoundary(.phase);
         }
+        // M0.2 / E4 — end-of-frame drains. Phase 0 collapses
+        // fixed-tick and render into a single dispatch, so `.tick`
+        // and `.frame` fire together. Kept distinct so the call
+        // sites can diverge in Phase 0.4+.
+        world.event_bus.drainAtBoundary(.tick);
+        world.event_bus.drainAtBoundary(.frame);
     }
 
     fn dispatchPhase(

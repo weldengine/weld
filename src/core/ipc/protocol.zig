@@ -27,7 +27,15 @@ pub const MAGIC: u32 = 0x57454C44;
 
 /// Current protocol version. Bumped on any breaking change of the wire
 /// format or message catalogue. Editor and runtime must agree exactly.
-pub const WELD_IPC_PROTOCOL_VERSION: u16 = 1;
+///
+/// Bumped M0.2 (1 → 2) — schema_hash algorithm switched from Wyhash
+/// (S6 legacy, hash over a concatenated `<typeName>{field:Type;…}`
+/// key) to RTTI xxHash64 (hash over a structured
+/// `(typeName, [(field.name, kind, count, offset)])` tuple). The two
+/// algorithms produce different bytes on the wire and
+/// `engine-ipc.md` §5.2 forbids negotiation, hence the version bump.
+/// Cf. `briefs/M0.2-rtti-resources-events-bindgen.md` E2.
+pub const WELD_IPC_PROTOCOL_VERSION: u16 = 2;
 
 /// Maximum payload size in bytes (`payload_len` ceiling per
 /// `engine-ipc.md` §3.1). Frames with `payload_len > MAX_PAYLOAD_LEN`
