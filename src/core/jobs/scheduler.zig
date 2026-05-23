@@ -64,6 +64,24 @@ pub const SchedulerError = error{
     Unexpected,
 };
 
+/// M0.2.1 / E5 — packed snapshot of (generation, chunk_count) loaded
+/// atomically by workers. Two helpers and a wrapper struct guarantee
+/// that a worker observing a given generation sees the matching
+/// chunk_count by construction (single 64-bit atomic load) — fixes
+/// the wave-lifecycle race confirmed by E2ter dumps (R1 in § Notes).
+pub const GenAndN = struct { gen: u32, n: u32 };
+
+inline fn pack(gen: u32, n: u32) u64 {
+    return (@as(u64, gen) << 32) | @as(u64, n);
+}
+
+inline fn unpack(packed_value: u64) GenAndN {
+    return .{
+        .gen = @intCast(packed_value >> 32),
+        .n = @truncate(packed_value),
+    };
+}
+
 /// Top-level work-stealing scheduler. Owns its dynamic worker pool,
 /// the chunk-pointer buffer, and the synchronisation primitives that
 /// drive sleep / wake / barrier.
@@ -82,15 +100,23 @@ pub const Scheduler = struct {
     /// can run heterogeneous bodies (multi-job concurrent intra-
     /// phase via `dispatchBatch`).
     jobs: []Job,
-    /// Number of jobs actually in the current dispatch — read by
-    /// workers after the generation bump (release-acquire pair on
-    /// `generation`).
-    chunk_count: u32 = 0,
 
-    /// Bumped by `dispatch` to mark a new wave of work. Workers
-    /// compare against their private `last_generation` to know they
-    /// must push their share into their deque.
-    generation: std.atomic.Value(u64) align(64) = .init(0),
+    /// M0.2.1 / E5 — single atomic snapshot of `(generation: u32,
+    /// chunk_count: u32)`. Replaces the pre-M0.2.1 split `chunk_count:
+    /// u32` + `generation: std.atomic.Value(u64)`. The split version
+    /// allowed a wave-lifecycle race where a worker observing the
+    /// older generation could read the newer chunk_count after a
+    /// preemption between the two field accesses, causing a double
+    /// `pushShare` and an over-decrement on `pending_count` (R1
+    /// confirmed by E2ter dumps — cf. brief § Notes « Hypothèses
+    /// résiduelles E3 »). Packed atomic guarantees `(gen, n)` is
+    /// observed as a single snapshot by construction. `gen` is u32
+    /// (wraps at 2^32 dispatches ≈ 33 years at 3600 dispatches/s,
+    /// outside any product lifecycle). Workers compare `gen` against
+    /// their private `last_generation` to know they must push their
+    /// share; `n` provides the wave's chunk count without a second
+    /// load.
+    gen_and_n: std.atomic.Value(u64) align(64) = .init(0),
 
     /// Number of chunks still in flight in the current dispatch.
     /// Atomic so each worker can decrement without contending on
@@ -239,9 +265,17 @@ pub const Scheduler = struct {
         // mutex is taken briefly only to coordinate with workers
         // that may be entering / leaving the parked path.
         self.mu.lockUncancelable(self.io);
-        self.chunk_count = n;
         self.pending_count.store(n, .release);
-        _ = self.generation.fetchAdd(1, .acq_rel);
+        // M0.2.1 / E5 — atomic publish of `(gen, n)` as a single
+        // 64-bit store. Replaces the pre-fix split
+        // `chunk_count = n` + `generation.fetchAdd(1)` which left a
+        // window where workers could see the new generation with
+        // stale chunk_count (or vice versa) — the R1 race confirmed
+        // by E2ter dumps. Read-modify-write of `gen_and_n` is safe
+        // here because the dispatcher holds `mu` (sole writer in this
+        // critical section).
+        const prev = unpack(self.gen_and_n.load(.acquire));
+        self.gen_and_n.store(pack(prev.gen +% 1, n), .release);
         self.work_available.broadcast(self.io);
         self.mu.unlock(self.io);
 
@@ -273,10 +307,13 @@ pub const Scheduler = struct {
     ///   - the over-decrement assertion in `workerMain` (cf.
     ///     `overDecrementPanic` below).
     pub fn dumpStateTo(self: *const Scheduler, writer: *std.Io.Writer) !void {
+        // M0.2.1 / E5 — single atomic load + unpack so the dump reads
+        // a consistent (gen, n) snapshot rather than torn fields.
+        const snapshot = unpack(self.gen_and_n.load(.acquire));
         try writer.print("=== Job scheduler ===\n", .{});
         try writer.print("  pending_count : {d}\n", .{self.pending_count.load(.acquire)});
-        try writer.print("  generation    : {d}\n", .{self.generation.load(.acquire)});
-        try writer.print("  chunk_count   : {d}\n", .{self.chunk_count});
+        try writer.print("  generation    : {d}\n", .{snapshot.gen});
+        try writer.print("  chunk_count   : {d}\n", .{snapshot.n});
         try writer.print("  shutdown      : {any}\n", .{self.shutdown});
         try writer.print("  worker_count  : {d}\n", .{self.workers.len});
 
@@ -331,7 +368,11 @@ const idle_spin_rounds: u32 = 1024;
 
 fn workerMain(sched: *Scheduler, worker_idx: u32) void {
     const self = &sched.workers[worker_idx];
-    var last_generation: u64 = 0;
+    // M0.2.1 / E5 — last_generation now u32 to match packed gen_and_n's
+    // generation half. Initial 0 matches `gen_and_n: .init(0)` which
+    // unpacks to gen=0, n=0; first dispatch publishes gen=1 → workers
+    // observe `snapshot.gen != last_generation` and push share.
+    var last_generation: u32 = 0;
     var idle_spin_count: u32 = 0;
 
     while (true) {
@@ -396,13 +437,16 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
         // catches it without paying the futex wake cost.
         if (idle_spin_count < idle_spin_rounds) {
             idle_spin_count += 1;
-            const cur_gen_quick = sched.generation.load(.acquire);
-            if (cur_gen_quick != last_generation or sched.shutdown) {
+            // M0.2.1 / E5 — single atomic load + unpack. Replaces
+            // the split `generation.load` + later `chunk_count` read
+            // in pushShare which left a race window (R1).
+            const snapshot = unpack(sched.gen_and_n.load(.acquire));
+            if (snapshot.gen != last_generation or sched.shutdown) {
                 // Take the fast-path back to wave dispatch — the
                 // park path also handles this but at higher cost.
                 if (sched.shutdown) return;
-                last_generation = cur_gen_quick;
-                pushShare(sched, self, worker_idx);
+                last_generation = snapshot.gen;
+                pushShare(sched, self, worker_idx, snapshot.n);
                 idle_spin_count = 0;
                 continue;
             }
@@ -413,29 +457,29 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
         // ── Idle path: park until a new generation appears ────────
         idle_spin_count = 0;
         sched.mu.lockUncancelable(sched.io);
-        const cur_gen = sched.generation.load(.acquire);
+        const snapshot = unpack(sched.gen_and_n.load(.acquire));
         if (sched.shutdown) {
             sched.mu.unlock(sched.io);
             return;
         }
-        if (cur_gen != last_generation) {
+        if (snapshot.gen != last_generation) {
             // A new wave came in while we were spinning to here.
             sched.mu.unlock(sched.io);
-            last_generation = cur_gen;
-            pushShare(sched, self, worker_idx);
+            last_generation = snapshot.gen;
+            pushShare(sched, self, worker_idx, snapshot.n);
             continue;
         }
         // Truly idle — park on the wake-up condvar.
         sched.work_available.waitUncancelable(sched.io, &sched.mu);
         _ = self.stats.parks_completed.fetchAdd(1, .acq_rel);
-        const wake_gen = sched.generation.load(.acquire);
+        const wake_snapshot = unpack(sched.gen_and_n.load(.acquire));
         const wake_shutdown = sched.shutdown;
         sched.mu.unlock(sched.io);
 
         if (wake_shutdown) return;
-        if (wake_gen != last_generation) {
-            last_generation = wake_gen;
-            pushShare(sched, self, worker_idx);
+        if (wake_snapshot.gen != last_generation) {
+            last_generation = wake_snapshot.gen;
+            pushShare(sched, self, worker_idx, wake_snapshot.n);
         }
     }
 }
@@ -458,25 +502,32 @@ fn overDecrementPanic(sched: *Scheduler, worker_idx: u32) noreturn {
 
     const w = &sched.workers[worker_idx];
     const stats = w.stats.snapshot();
+    const snapshot = unpack(sched.gen_and_n.load(.acquire));
     std.debug.panic(
         "scheduler over-decrement at jobs/scheduler.zig:333 — worker_id={d} generation={d} chunks_processed={d} steals_s={d}",
         .{
             w.id,
-            sched.generation.load(.acquire),
+            snapshot.gen,
             stats.chunks_processed,
             stats.steals_succeeded,
         },
     );
 }
 
-/// Push this worker's strided share of `sched.jobs[0..chunk_count]`
-/// into its own deque. Lock-free — the deque's Chase-Lev push has the
+/// Push this worker's strided share of `sched.jobs[0..n]` into its
+/// own deque. Lock-free — the deque's Chase-Lev push has the
 /// single-owner invariant, and the jobs array has already been
-/// published by the generation bump that woke us. Each `Job` carries
-/// its own `(trampoline, ctx_ptr)` so the worker can run it without
-/// pulling any scheduler-global state.
-fn pushShare(sched: *Scheduler, self: *Worker, worker_idx: u32) void {
-    const n = sched.chunk_count;
+/// published by the matching `gen_and_n` store that woke us. Each
+/// `Job` carries its own `(trampoline, ctx_ptr)` so the worker can
+/// run it without pulling any scheduler-global state.
+///
+/// M0.2.1 / E5 — `n` is now passed as an explicit parameter (was a
+/// non-atomic read of `sched.chunk_count` pre-fix). The caller is
+/// responsible for ensuring `n` matches the generation that triggered
+/// this push, by reading both halves of `gen_and_n` in a single
+/// atomic load. This closes the wave-lifecycle race (R1) by
+/// construction.
+fn pushShare(sched: *Scheduler, self: *Worker, worker_idx: u32, n: u32) void {
     const worker_count = sched.workers.len;
     var i: u32 = worker_idx;
     while (i < n) : (i += @intCast(worker_count)) {
