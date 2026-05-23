@@ -221,6 +221,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/ecs/command_buffer.zig" },
         .{ .path = "tests/ecs/observers.zig" },
         .{ .path = "tests/ecs/no_alloc_steady_state.zig" },
+        .{ .path = "tests/ecs/no_alloc_steady_state_stress.zig" },
         .{ .path = "tests/ecs/integration_scenario.zig" },
         .{ .path = "tests/core/rtti/comptime_builder_test.zig" },
         .{ .path = "tests/core/rtti/hash_test.zig" },
@@ -248,6 +249,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/etch/corpus_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
     };
+    // M0.2.1 / E2 — captured run for the stress test so the
+    // `test-stress` step can drive only this test (loop harness).
+    var stress_test_run: ?*std.Build.Step.Run = null;
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
             .root_source_file = b.path(spec.path),
@@ -277,6 +281,23 @@ pub fn build(b: *std.Build) void {
             for (stub_install_steps) |s| t_run.step.dependOn(s);
         }
         test_step.dependOn(&t_run.step);
+        if (std.mem.endsWith(u8, spec.path, "no_alloc_steady_state_stress.zig")) {
+            stress_test_run = t_run;
+        }
+    }
+
+    // M0.2.1 / E2 — `zig build test-stress` runs only the scheduler-
+    // livelock stress test, used by the local loop harness to drive
+    // 50× / 100× repro cycles without paying the cost of the full
+    // test suite. Exit code 2 from the test process = SchedulerLivelock
+    // watchdog fired (5 s timeout). The step is omitted in CI; this
+    // is a local diagnostic.
+    if (stress_test_run) |r| {
+        const stress_step = b.step(
+            "test-stress",
+            "Run only the M0.2.1/E2 scheduler-livelock stress test",
+        );
+        stress_step.dependOn(&r.step);
     }
 
     // ----------------------------- S6 editor + runtime stub binaries -----
