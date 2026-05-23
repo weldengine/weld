@@ -285,6 +285,21 @@ pub const Scheduler = struct {
         // requirement applies to the **workers**' idle path (they
         // do park on `work_available` after the spin window).
         while (self.pending_count.load(.acquire) > 0) {
+            // M0.2.1 / E5 — belt-and-suspenders invariant assertion
+            // at the dispatcher spin site. `pending_count` should
+            // monotonically decrease from `n` to 0 across this wave.
+            // If it ever exceeds `n`, a worker has done an
+            // over-decrement (R1 race signature with `u64::MAX`).
+            // Defends against any future regression of the job
+            // system that reintroduces over-decrement — complements
+            // the E2ter assertion at the siège (`scheduler.zig:333`)
+            // by catching the same invariant at the symptom site.
+            // Active in Debug + ReleaseSafe via
+            // `std.debug.runtime_safety`.
+            if (std.debug.runtime_safety) {
+                const cur = self.pending_count.load(.acquire);
+                std.debug.assert(cur <= n);
+            }
             std.Thread.yield() catch {};
         }
     }
