@@ -20,6 +20,12 @@
 //!     up the kernel's VM subsystem and adds latency to syscalls
 //!     used by the job scheduler's mutex / condvar primitives.
 //!
+//!   - **Process fork threads** (M0.2.1 / E2bis ajout #2) — 8 threads
+//!     each looping `spawnAndWait` on `zig version` (~10-30 ms per
+//!     spawn) to drive the kernel's fork/clone/exec/wait paths. The
+//!     pre-push hook fans out parallel `zig build` subcompilers — this
+//!     ajout reproduces that fork churn synthetically.
+//!
 //! Together these reproduce the H1bis → H2 amplification chain
 //! documented in the brief § Notes : the noise extends every
 //! `std.Thread.yield()` and `dispatchPhase` inter-step gap past
@@ -179,6 +185,22 @@ fn allocPressureThread(stop: *std.atomic.Value(bool)) void {
     }
 }
 
+/// M0.2.1 / E2bis ajout #2 — Process fork churn. Repeatedly spawns
+/// `zig version` (a fast print-and-exit subprocess) so the kernel's
+/// fork / clone / exec / wait paths and the page-table / fd / signal
+/// machinery stay hot — mimics the pre-push hook's parallel `zig
+/// build` subcompilers without doing real compilation work.
+fn processForkThread(stop: *std.atomic.Value(bool), io: std.Io) void {
+    while (!stop.load(.monotonic)) {
+        var child = std.process.spawn(io, .{
+            .argv = &.{ "zig", "version" },
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }) catch continue;
+        _ = child.wait(io) catch continue;
+    }
+}
+
 // ── Watchdog harness (mirrors no_alloc_steady_state.zig) ─────────────────
 
 const DispatchArgs = struct {
@@ -260,12 +282,18 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
     // de cœurs logiques.
     const cpu_count = (std.Thread.getCpuCount() catch 4) * 2;
     const alloc_thread_count: usize = 4;
+    // M0.2.1 / E2bis ajout #2 — fork churn (8 threads de spawn
+    // répété pour mimer les subcompilers parallèles du pre-push).
+    const proc_thread_count: usize = 8;
     var cpu_threads = try std.testing.allocator.alloc(std.Thread, cpu_count);
     defer std.testing.allocator.free(cpu_threads);
     var alloc_threads = try std.testing.allocator.alloc(std.Thread, alloc_thread_count);
     defer std.testing.allocator.free(alloc_threads);
+    var proc_threads = try std.testing.allocator.alloc(std.Thread, proc_thread_count);
+    defer std.testing.allocator.free(proc_threads);
     var n_cpu_started: usize = 0;
     var n_alloc_started: usize = 0;
+    var n_proc_started: usize = 0;
     defer {
         // Stop all started noise threads at scope exit. Done in
         // `defer` so it runs even if watchdog `exit(2)`s — well,
@@ -274,12 +302,16 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
         stop_flag.store(true, .release);
         for (cpu_threads[0..n_cpu_started]) |t| t.join();
         for (alloc_threads[0..n_alloc_started]) |t| t.join();
+        for (proc_threads[0..n_proc_started]) |t| t.join();
     }
     while (n_cpu_started < cpu_count) : (n_cpu_started += 1) {
         cpu_threads[n_cpu_started] = try std.Thread.spawn(.{}, cpuNoiseThread, .{&stop_flag});
     }
     while (n_alloc_started < alloc_thread_count) : (n_alloc_started += 1) {
         alloc_threads[n_alloc_started] = try std.Thread.spawn(.{}, allocPressureThread, .{&stop_flag});
+    }
+    while (n_proc_started < proc_thread_count) : (n_proc_started += 1) {
+        proc_threads[n_proc_started] = try std.Thread.spawn(.{}, processForkThread, .{ &stop_flag, io });
     }
 
     // ── World + scheduler setup. ─────────────────────────────────────
