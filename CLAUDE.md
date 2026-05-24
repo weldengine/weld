@@ -127,6 +127,67 @@ If blocked by a point not covered by the brief or its referenced specs: stop, lo
 
 The `briefs/` directory is the source of truth for milestone state. The brief's FROZEN SECTION is editable only via a Claude.ai round-trip (tracked under "Acted deviations").
 
+## Apprentissages — patterns et garde-fous
+
+### [Workflow — thermal-aware bench MBP M-series]
+
+- `caffeinate -i` est obligatoire pour toute boucle de validation longue
+  (E7 stress, bench multi-run) sur MBP. Sans lui, macOS endort la machine
+  sur les fenêtres d'idle protocolaires et produit de faux positifs de
+  hang. À acter dans `engine-phase-0-criteria.md` § Méthodologie bench.
+
+### [Workflow — milestone hotfix à cause root inconnue]
+
+- Format M0.2.1 reproductible : décomposition E1..En avec stop systématique
+  entre étapes + N décisions interdites en autonomie listées en § Notes du
+  brief. Les retours Claude.ai fréquents sont du protocole, pas du re-scope.
+  La règle workflow §2.4 « 2+ blocages = re-scope » vise les défaillances
+  de cadrage, pas les décisions structurelles prévues par le brief.
+- Pattern de validation tiers cumulatifs : Tier 1 synthétique rapide
+  (faux positif statistiquement faible mais qualitativement incomplet) +
+  Tier 2 authentique slow (couverture qualitative). Inversion du raisonnement
+  vs « plus de runs synthétiques = meilleure validation » qui rate les
+  charges de travail VM/cache non-répliquables synthétiquement.
+
+### [Anti-hallucination — discipline E1 analyse statique]
+
+- En E1 d'un milestone de diagnostic, confirmer chaque symbole nommé dans
+  le brief par lecture directe du code. Le brief M0.2.1 mentionnait
+  `helpUntilDone` comme hypothèse — qui n'existait pas dans le code.
+  Sans cette vérification, le diagnostic se serait déroulé autour d'un
+  fantôme. À appliquer systématiquement dans les briefs de diagnostic
+  futurs : les noms de symboles dans la SECTION FIGÉE sont des candidats
+  à vérifier, pas des affirmations.
+
+### [Pattern — atomic packing pour racing snapshots]
+
+- Quand deux champs `(a: u32, b: u32)` doivent être lus comme un snapshot
+  cohérent depuis un thread non-writer, packer en un seul
+  `std.atomic.Value(u64) align(64)` avec helpers `pack`/`unpack` est
+  préférable à un pattern double-check + retry. Coût perf nul (load 64-bit
+  aligné = load 32-bit aligné sur Apple Silicon et x86_64), robustesse
+  préservée face aux refactors (impossible de casser silencieusement).
+  Réutilisable au-delà du job system — n'importe quel scheduler
+  (frame state, generation counters, version+epoch) suit ce pattern.
+
+### [Pattern — comptime layout guards]
+
+- Pour les invariants de layout cache-line entre champs `align(64)`
+  écrits par des threads différents, ajouter un `comptime {
+  std.debug.assert(@offsetOf(...) ...); }` proche de la déclaration de la
+  struct. Pin l'invariant à la compilation, résiste aux refactors
+  silencieux qui réorganisent les champs. Voir M0.2.1 fix scheduler.zig.
+
+### [Garde-fou — interprétation prudente des baselines bench héritées]
+
+- Le commit squash M0.1 listait C0.1 à 14.2 ms ; M0.2.1 mesure 3.74 ms en
+  thermal-aware ReleaseFast. Ratio 3.8× cohérent avec un écart
+  ReleaseSafe → ReleaseFast. Avant d'opposer une baseline héritée, vérifier
+  qu'elle a été mesurée selon le protocole opposable courant
+  (`engine-phase-0-criteria.md` § Méthodologie bench). Pour les baselines
+  Phase 0 ancien protocole, la première mesure conforme au protocole
+  thermal-aware est une candidate plus robuste que la valeur héritée.
+
 ---
 
-Last updated: 2026-05-18
+Last updated: 2026-05-24
