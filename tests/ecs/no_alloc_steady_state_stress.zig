@@ -1,43 +1,53 @@
-//! M0.1 / E7 — composite steady-state no-allocation test.
+//! M0.2.1 / E2 — stress variant of `no_alloc_steady_state.zig`.
 //!
-//! Drives a scaled-down C0.1-like scenario (4 archetypes × 4 systems
-//! × 1000 entities total) over 100 dispatchFrame calls and asserts
-//! that no allocation happens after the warm-up + setup window
-//! closes. Exercises every M0.1 surface a real game tick touches:
+//! Runs the exact same composite steady-state scenario (4 archetypes
+//! × 4 systems × 1000 entities × 100 dispatchFrame iterations) but
+//! wraps it with synthetic concurrent noise that mimics the pre-push
+//! hook's overall load profile:
 //!
-//! - **Queries** with mixed filters (no-filter, `With(T)`,
-//!   `Changed(T)`) — proves `forEachChunk` + the lazy re-scan path
-//!   stays alloc-free in steady state.
-//! - **Change detection** — one system reads `Changed(Health)` so
-//!   the per-slot evaluation runs every frame against the dirty
-//!   bitset + `changed_tick` columns.
-//! - **Command buffer** — one system records the deferred-mutation
-//!   path but never actually issues a command (the `health <= 0`
-//!   branch never fires because the bench keeps health > 0). This
-//!   exercises the `commandCount == 0` fast-path in
-//!   `dispatchPhase`'s flush loop.
-//! - **Observer registry** — one `on_despawned` observer is
-//!   registered. Since no entity is despawned during the steady-
-//!   state loop, the registry's dispatch path runs at zero cost
-//!   per frame (`hasPendingDeferred` returns false, the inner loop
-//!   is skipped).
+//!   - **CPU noise threads** — `noise_cpu_thread_count = 2 × CPU count`
+//!     threads spinning on tight ALU loops (M0.2.1 / E2bis ajout #1 —
+//!     oversubscription pour reproduire la contention CPU réelle du
+//!     pre-push où plusieurs `zig build`/`zig test` parallèles
+//!     dépassent largement la cardinalité physique). Drains CPU
+//!     bandwidth so the scheduler's workers compete for cores against
+//!     background work — equivalent to the parallel `zig build` +
+//!     `zig build test` processes that run during the pre-push hook.
 //!
-//! Tighter than the existing `no_alloc_in_simulation_test.zig`
-//! (single archetype, query-only iteration). Wider than the
-//! `no_alloc_scheduler_dispatch.zig` test (jobs-only dispatch).
-//! Together the three tests pin the alloc-free contract across the
-//! full M0.1 surface.
+//!   - **Allocator pressure threads** — 4 threads doing rapid
+//!     malloc / free cycles on a separate page allocator. Drives
+//!     memory-allocator contention which (on macOS at least) wakes
+//!     up the kernel's VM subsystem and adds latency to syscalls
+//!     used by the job scheduler's mutex / condvar primitives.
 //!
-//! M0.2.1 / E2 — watchdog harness. The dispatchFrame measurement
-//! loop runs on a worker thread; the test thread polls a `done`
-//! atomic with a 5 s wall-clock budget (esprit de
-//! `engine-zig-conventions.md §13` « Tests avec ressources externes —
-//! timeout interne obligatoire »). On timeout, the test dumps the
-//! job scheduler + event bus state via `livelock_dump.zig` and
-//! aborts the test process with exit code 2 — that becomes the
-//! signal the stress loop harness uses to count hangs vs healthy
-//! runs. The dump targets the brief's E3 discriminant (H2 wake-lost
-//! vs H4 job-lost vs H1bis isolated).
+//!   - **Process fork threads** (M0.2.1 / E2bis ajout #2) — 8 threads
+//!     each looping `spawnAndWait` on `zig version` (~10-30 ms per
+//!     spawn) to drive the kernel's fork/clone/exec/wait paths. The
+//!     pre-push hook fans out parallel `zig build` subcompilers — this
+//!     ajout reproduces that fork churn synthetically.
+//!
+//!   - **FS I/O threads** (M0.2.1 / E2bis ajout #3) — 4 threads each
+//!     looping `create + writeAll(1MB) + flush + sync + close +
+//!     reopen + readAll(1MB) + close` on a per-thread temporary file
+//!     in cwd. Drives page cache pressure, dirty-page writeback, and
+//!     fsync syscalls — the I/O footprint of `zig build` writing
+//!     intermediate objects.
+//!
+//! Together these reproduce the H1bis → H2 amplification chain
+//! documented in the brief § Notes : the noise extends every
+//! `std.Thread.yield()` and `dispatchPhase` inter-step gap past
+//! the worker spin window, forcing more `work_available` parks,
+//! and (suspected) exposing the latent wake-lost race in
+//! `std.Io.Condition.waitUncancelable`.
+//!
+//! Critère stop E2 (cf. brief § Décomposition en étapes) :
+//! reproduction > 90 % sur 50 runs locaux. If reproduction stays
+//! below this threshold, the brief mandates Cas 2 — return to
+//! Claude.ai (no autonomous decision to widen the noise).
+//!
+//! Watchdog : identical to `no_alloc_steady_state.zig` — 5 s budget
+//! per dispatchFrame loop (warm-up + measurement), dump state and
+//! exit(2) on timeout.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -99,11 +109,6 @@ var CHANGED_FLAG_TOUCHED: u64 align(64) = 0;
 fn changedReaderChunk(chunk: *ecs.Chunk, query: *QChangedHealth, _: f32) void {
     const h_off = query.componentOffsetFor(chunk, 0);
     const count = chunk.entityCount();
-    // The Changed(Health) filter is evaluated per-slot through
-    // `query.slotPasses` — but `forEachChunk` itself does NOT
-    // apply per-slot filters automatically (cf. query.zig doc).
-    // We just touch the column so the alloc-free property is
-    // measured even when the body would normally do filter work.
     const healths: [*]const Health = @ptrCast(@alignCast(&chunk.bytes[h_off]));
     var local: u64 = 0;
     var i: u32 = 0;
@@ -124,13 +129,7 @@ fn cleanupChunk(chunk: *ecs.Chunk, query: *QCleanup, _: f32) void {
     const healths: [*]const Health = @ptrCast(@alignCast(&chunk.bytes[h_off]));
     var i: u32 = 0;
     while (i < count) : (i += 1) {
-        // The branch never fires in steady state — health > 0
-        // throughout the 100-iter test window. The branch existence
-        // alone, combined with the cmd buffer field on SystemContext,
-        // exercises the alloc-free path through dispatchPhase's
-        // per-system flush loop (commandCount == 0 → continue).
         if (healths[i].current <= 0.0) {
-            // Unreachable in this test.
             @branchHint(.cold);
         }
     }
@@ -152,9 +151,110 @@ fn onDespawnedNoop(
     DESPAWN_OBSERVER_FIRED +%= 1;
 }
 
-/// M0.2.1 / E2 — argument bundle for the dispatch-loop worker
-/// thread. The thread runs the full dispatchFrame loop, signalling
-/// completion via `done` so the watchdog can observe it.
+// ── Noise threads ─────────────────────────────────────────────────────────
+
+/// CPU noise — tight ALU loop. Volatile read/write through `sink`
+/// prevents the optimizer from eliminating the loop body.
+var CPU_NOISE_SINK: u64 align(64) = 0;
+
+fn cpuNoiseThread(stop: *std.atomic.Value(bool)) void {
+    var seed: u64 = 0x9E3779B97F4A7C15;
+    while (!stop.load(.monotonic)) {
+        // Mix the seed with a Wyhash-like step a few hundred times,
+        // then publish to `CPU_NOISE_SINK` so the work is observable.
+        var i: u32 = 0;
+        while (i < 512) : (i += 1) {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+        }
+        _ = @atomicRmw(u64, &CPU_NOISE_SINK, .Xor, seed, .monotonic);
+    }
+}
+
+/// Allocator pressure — repeatedly malloc / free buffers of varying
+/// sizes. Uses the page allocator directly so it doesn't share state
+/// with the test's CountingAllocator. The varying sizes drive the
+/// system allocator's bin / arena management code paths, exercising
+/// kernel VM syscalls under contention.
+fn allocPressureThread(stop: *std.atomic.Value(bool)) void {
+    const allocator = std.heap.page_allocator;
+    var seed: u64 = 0xDEADBEEFCAFEBABE;
+    while (!stop.load(.monotonic)) {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        const size: usize = 64 + @as(usize, @intCast(seed & 0x3FFF));
+        const buf = allocator.alloc(u8, size) catch continue;
+        defer allocator.free(buf);
+        // Touch the buffer so the kernel actually backs the pages.
+        @memset(buf, @as(u8, @truncate(seed)));
+    }
+}
+
+/// M0.2.1 / E2bis ajout #2 — Process fork churn. Repeatedly spawns
+/// `zig version` (a fast print-and-exit subprocess) so the kernel's
+/// fork / clone / exec / wait paths and the page-table / fd / signal
+/// machinery stay hot — mimics the pre-push hook's parallel `zig
+/// build` subcompilers without doing real compilation work.
+fn processForkThread(stop: *std.atomic.Value(bool), io: std.Io) void {
+    while (!stop.load(.monotonic)) {
+        var child = std.process.spawn(io, .{
+            .argv = &.{ "zig", "version" },
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }) catch continue;
+        _ = child.wait(io) catch continue;
+    }
+}
+
+/// M0.2.1 / E2bis ajout #3 — FS I/O churn. Each thread maintains a
+/// per-tid temporary file in cwd (typically `.zig-cache/o/.../`) and
+/// loops the full write + fsync + read cycle on 1 MB to drive page
+/// cache and writeback contention — the I/O footprint of the pre-push
+/// hook's `zig build` intermediate object writes.
+fn fsIOThread(stop: *std.atomic.Value(bool), io: std.Io, tid: u32) void {
+    const gpa = std.heap.page_allocator;
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(
+        &path_buf,
+        ".m0_2_1_stress_{d}.dat",
+        .{tid},
+    ) catch return;
+
+    const data = gpa.alloc(u8, 1024 * 1024) catch return;
+    defer gpa.free(data);
+    @memset(data, 0xAB);
+
+    const read_buf = gpa.alloc(u8, 1024 * 1024) catch return;
+    defer gpa.free(read_buf);
+
+    const cwd = std.Io.Dir.cwd();
+    while (!stop.load(.monotonic)) {
+        // Write phase: create + writeAll + flush + sync + close.
+        const w_file = cwd.createFile(io, path, .{}) catch continue;
+        var w_io_buf: [16 * 1024]u8 = undefined;
+        var w = w_file.writer(io, &w_io_buf);
+        w.interface.writeAll(data) catch {};
+        w.interface.flush() catch {};
+        w_file.sync(io) catch {};
+        w_file.close(io);
+
+        // Read phase: open + readAll(1MB) + close. Drains page cache
+        // back through the read path.
+        const r_file = cwd.openFile(io, path, .{}) catch continue;
+        var r_io_buf: [16 * 1024]u8 = undefined;
+        var r = r_file.reader(io, &r_io_buf);
+        _ = r.interface.readSliceAll(read_buf) catch {};
+        r_file.close(io);
+    }
+
+    // Best-effort cleanup. exit(2) from the watchdog bypasses this.
+    cwd.deleteFile(io, path) catch {};
+}
+
+// ── Watchdog harness (mirrors no_alloc_steady_state.zig) ─────────────────
+
 const DispatchArgs = struct {
     sys: *ecs.SystemScheduler,
     world: *ecs.World,
@@ -188,10 +288,6 @@ fn dispatchLoop(args: *DispatchArgs) void {
     args.done.store(true, .release);
 }
 
-/// M0.2.1 / E2 — watchdog wrapper. Spawns `dispatchLoop` on a worker
-/// thread, polls `done` every 50 ms up to a 5 s wall-clock budget.
-/// On timeout, dumps the scheduler + event bus state to stderr and
-/// aborts the test process with exit code 2 (= SchedulerLivelock).
 fn runWithWatchdog(args: *DispatchArgs) !void {
     const thread = try std.Thread.spawn(.{}, dispatchLoop, .{args});
 
@@ -202,7 +298,6 @@ fn runWithWatchdog(args: *DispatchArgs) !void {
         const now = std.Io.Clock.now(.awake, args.io);
         const elapsed_ns: i96 = start.durationTo(now).nanoseconds;
         if (elapsed_ns > timeout_ns) {
-            // Timeout — dump state and abort.
             var stderr_buf: [8192]u8 = undefined;
             var stderr_writer = std.Io.File.stderr().writer(args.io, &stderr_buf);
             const stderr = &stderr_writer.interface;
@@ -215,9 +310,6 @@ fn runWithWatchdog(args: *DispatchArgs) !void {
                 elapsed_ms,
             ) catch {};
             stderr.flush() catch {};
-            // Workers are stuck on the scheduler; we cannot safely
-            // `thread.join()`. Abort the process — the harness reads
-            // exit code 2 as the SchedulerLivelock signal.
             std.process.exit(2);
         }
         const poll_dur: std.Io.Duration = .{ .nanoseconds = 50 * std.time.ns_per_ms };
@@ -228,11 +320,63 @@ fn runWithWatchdog(args: *DispatchArgs) !void {
     try args.err_slot.*;
 }
 
-test "composite steady-state — queries + change detection + cmd + observers do not allocate post-warmup" {
+test "stress steady-state — composite scenario under concurrent CPU and allocator noise" {
     var counting = CountingAllocator.init(std.testing.allocator);
     const gpa = counting.allocator();
     const io = std.testing.io;
 
+    // ── Spin up noise threads BEFORE world setup so they're hot
+    //    by the time the scheduler dispatch begins. ────────────────────
+    var stop_flag = std.atomic.Value(bool).init(false);
+    // M0.2.1 / E2bis ajout #1 — oversubscription CPU (2× cardinalité
+    // physique) pour reproduire la contention pre-push, où plusieurs
+    // `zig build`/`zig test` parallèles dépassent largement le nombre
+    // de cœurs logiques.
+    const cpu_count = (std.Thread.getCpuCount() catch 4) * 2;
+    const alloc_thread_count: usize = 4;
+    // M0.2.1 / E2bis ajout #2 — fork churn (8 threads de spawn
+    // répété pour mimer les subcompilers parallèles du pre-push).
+    const proc_thread_count: usize = 8;
+    // M0.2.1 / E2bis ajout #3 — FS I/O churn (4 threads write+fsync+read
+    // 1 MB en boucle pour la pression page cache + writeback).
+    const fsio_thread_count: usize = 4;
+    var cpu_threads = try std.testing.allocator.alloc(std.Thread, cpu_count);
+    defer std.testing.allocator.free(cpu_threads);
+    var alloc_threads = try std.testing.allocator.alloc(std.Thread, alloc_thread_count);
+    defer std.testing.allocator.free(alloc_threads);
+    var proc_threads = try std.testing.allocator.alloc(std.Thread, proc_thread_count);
+    defer std.testing.allocator.free(proc_threads);
+    var fsio_threads = try std.testing.allocator.alloc(std.Thread, fsio_thread_count);
+    defer std.testing.allocator.free(fsio_threads);
+    var n_cpu_started: usize = 0;
+    var n_alloc_started: usize = 0;
+    var n_proc_started: usize = 0;
+    var n_fsio_started: usize = 0;
+    defer {
+        // Stop all started noise threads at scope exit. Done in
+        // `defer` so it runs even if watchdog `exit(2)`s — well,
+        // exit(2) bypasses defers; but on the healthy-completion
+        // path this cleanup is required for the leak detector.
+        stop_flag.store(true, .release);
+        for (cpu_threads[0..n_cpu_started]) |t| t.join();
+        for (alloc_threads[0..n_alloc_started]) |t| t.join();
+        for (proc_threads[0..n_proc_started]) |t| t.join();
+        for (fsio_threads[0..n_fsio_started]) |t| t.join();
+    }
+    while (n_cpu_started < cpu_count) : (n_cpu_started += 1) {
+        cpu_threads[n_cpu_started] = try std.Thread.spawn(.{}, cpuNoiseThread, .{&stop_flag});
+    }
+    while (n_alloc_started < alloc_thread_count) : (n_alloc_started += 1) {
+        alloc_threads[n_alloc_started] = try std.Thread.spawn(.{}, allocPressureThread, .{&stop_flag});
+    }
+    while (n_proc_started < proc_thread_count) : (n_proc_started += 1) {
+        proc_threads[n_proc_started] = try std.Thread.spawn(.{}, processForkThread, .{ &stop_flag, io });
+    }
+    while (n_fsio_started < fsio_thread_count) : (n_fsio_started += 1) {
+        fsio_threads[n_fsio_started] = try std.Thread.spawn(.{}, fsIOThread, .{ &stop_flag, io, @as(u32, @intCast(n_fsio_started)) });
+    }
+
+    // ── World + scheduler setup. ─────────────────────────────────────
     var world = ecs.World.init();
     defer world.deinit(gpa);
 
@@ -240,10 +384,6 @@ test "composite steady-state — queries + change detection + cmd + observers do
     try jobs_sched.start();
     defer jobs_sched.deinit(gpa);
 
-    // Spawn ~1000 entities across the 4 archetypes — small enough
-    // that the entire test runs in well under a second even in
-    // Debug mode, large enough that multiple chunks per archetype
-    // get materialised.
     const t_id = try world.ensureComponentRegistered(gpa, ecs.Transform);
     const v_id = try world.ensureComponentRegistered(gpa, ecs.Velocity);
     const m_id = try world.ensureComponentRegistered(gpa, Mass);
@@ -301,9 +441,6 @@ test "composite steady-state — queries + change detection + cmd + observers do
         while (i < 100) : (i += 1) _ = try world.spawnDynamicWithValues(gpa, &ids, &pl);
     }
 
-    // Build queries before the snapshot — their matches list is
-    // heap-allocated (E3) so construction must NOT count against
-    // steady-state delta.
     var q_integrate = try world.queryFiltered(gpa, &.{ ecs.Transform, ecs.Velocity }, .{});
     defer q_integrate.deinit(gpa);
     var q_damage = try world.queryFiltered(gpa, &.{Health}, .{});
@@ -320,7 +457,6 @@ test "composite steady-state — queries + change detection + cmd + observers do
         .q_cleanup = &q_cleanup,
     };
 
-    // Register observer (allocates on first call).
     try world.registerOnDespawned(gpa, &onDespawnedNoop);
 
     var sys = ecs.SystemScheduler.init();
@@ -351,10 +487,8 @@ test "composite steady-state — queries + change detection + cmd + observers do
         .accesses = &.{ecs.Reads(Health)},
     });
 
-    // Warm-up window: 10 dispatchFrame calls so the JobBuilder
-    // arena reaches its working-set size, the per-system cmd
-    // buffer arenas allocate their initial chunk, etc. Anything
-    // that grows on first use lands during warm-up.
+    // Warm-up window — same 10 dispatchFrame as the non-stress test
+    // so the alloc-free contract carries over.
     var iter_done_warmup = std.atomic.Value(u32).init(0);
     var done_warmup = std.atomic.Value(bool).init(false);
     var err_warmup: anyerror!void = {};
@@ -372,8 +506,6 @@ test "composite steady-state — queries + change detection + cmd + observers do
     };
     try runWithWatchdog(&args_warmup);
 
-    // Snapshot AFTER warm-up. Every alloc-related counter must
-    // stay flat across the 100-iter measurement window.
     const before = counting.snapshot();
 
     var iter_done_measure = std.atomic.Value(u32).init(0);
@@ -401,6 +533,5 @@ test "composite steady-state — queries + change detection + cmd + observers do
     try std.testing.expectEqual(@as(u64, 0), delta.bytes_allocated);
     try std.testing.expectEqual(@as(u64, 0), delta.bytes_freed);
 
-    // Observer must NOT have fired — no despawn happened.
     try std.testing.expectEqual(@as(u64, 0), DESPAWN_OBSERVER_FIRED);
 }

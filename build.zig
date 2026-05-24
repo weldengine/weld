@@ -279,6 +279,29 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&t_run.step);
     }
 
+    // M0.2.1 / E2 — `zig build test-stress` builds and runs ONLY the
+    // scheduler-livelock stress test. Kept out of `test_step` per
+    // brief § Notes (« Pas d'ajout de `test_stress` à `zig build
+    // test` par défaut. La boucle 100× du signal stress est un outil
+    // de validation locale, pas un test de routine CI. »). Local
+    // diagnostic only — exit code 2 from the test process signals
+    // SchedulerLivelock watchdog fired (5 s timeout).
+    {
+        const stress_mod = b.createModule(.{
+            .root_source_file = b.path("tests/ecs/no_alloc_steady_state_stress.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        stress_mod.addImport("weld_core", core_module);
+        const stress_test = b.addTest(.{ .root_module = stress_mod });
+        const stress_test_run = b.addRunArtifact(stress_test);
+        const stress_step = b.step(
+            "test-stress",
+            "Run only the M0.2.1/E2 scheduler-livelock stress test",
+        );
+        stress_step.dependOn(&stress_test_run.step);
+    }
+
     // ----------------------------- S6 editor + runtime stub binaries -----
     //
     // Two binaries at the canonical Phase 0+ locations per
