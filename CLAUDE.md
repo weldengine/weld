@@ -127,16 +127,16 @@ If blocked by a point not covered by the brief or its referenced specs: stop, lo
 
 The `briefs/` directory is the source of truth for milestone state. The brief's FROZEN SECTION is editable only via a Claude.ai round-trip (tracked under "Acted deviations").
 
-## Apprentissages — patterns et garde-fous
+## Workflow
 
-### [Workflow — thermal-aware bench MBP M-series]
+### Thermal-aware bench MBP M-series
 
 - `caffeinate -i` est obligatoire pour toute boucle de validation longue
   (E7 stress, bench multi-run) sur MBP. Sans lui, macOS endort la machine
   sur les fenêtres d'idle protocolaires et produit de faux positifs de
   hang. À acter dans `engine-phase-0-criteria.md` § Méthodologie bench.
 
-### [Workflow — milestone hotfix à cause root inconnue]
+### Milestone hotfix à cause root inconnue
 
 - Format M0.2.1 reproductible : décomposition E1..En avec stop systématique
   entre étapes + N décisions interdites en autonomie listées en § Notes du
@@ -149,7 +149,9 @@ The `briefs/` directory is the source of truth for milestone state. The brief's 
   vs « plus de runs synthétiques = meilleure validation » qui rate les
   charges de travail VM/cache non-répliquables synthétiquement.
 
-### [Anti-hallucination — discipline E1 analyse statique]
+## Anti-hallucination
+
+### Discipline E1 analyse statique
 
 - En E1 d'un milestone de diagnostic, confirmer chaque symbole nommé dans
   le brief par lecture directe du code. Le brief M0.2.1 mentionnait
@@ -159,7 +161,9 @@ The `briefs/` directory is the source of truth for milestone state. The brief's 
   futurs : les noms de symboles dans la SECTION FIGÉE sont des candidats
   à vérifier, pas des affirmations.
 
-### [Pattern — atomic packing pour racing snapshots]
+## Patterns
+
+### Atomic packing pour racing snapshots
 
 - Quand deux champs `(a: u32, b: u32)` doivent être lus comme un snapshot
   cohérent depuis un thread non-writer, packer en un seul
@@ -170,7 +174,7 @@ The `briefs/` directory is the source of truth for milestone state. The brief's 
   Réutilisable au-delà du job system — n'importe quel scheduler
   (frame state, generation counters, version+epoch) suit ce pattern.
 
-### [Pattern — comptime layout guards]
+### Comptime layout guards
 
 - Pour les invariants de layout cache-line entre champs `align(64)`
   écrits par des threads différents, ajouter un `comptime {
@@ -178,7 +182,9 @@ The `briefs/` directory is the source of truth for milestone state. The brief's 
   struct. Pin l'invariant à la compilation, résiste aux refactors
   silencieux qui réorganisent les champs. Voir M0.2.1 fix scheduler.zig.
 
-### [Garde-fou — interprétation prudente des baselines bench héritées]
+## Garde-fous
+
+### Interprétation prudente des baselines bench héritées
 
 - Le commit squash M0.1 listait C0.1 à 14.2 ms ; M0.2.1 mesure 3.74 ms en
   thermal-aware ReleaseFast. Ratio 3.8× cohérent avec un écart
