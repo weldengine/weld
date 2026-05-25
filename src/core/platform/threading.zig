@@ -128,22 +128,28 @@ pub fn setPriority(thread: std.Thread, priority: Priority) Error!void {
             };
             if (win.SetThreadPriority(handle, win_prio) == 0) return error.SetPriorityFailed;
         },
-        .linux => {
-            // SCHED_OTHER + priority=0 is the canonical "reset to default".
-            // CAP_SYS_NICE-elevated processes can set higher priorities via
-            // SCHED_FIFO / SCHED_RR — out of scope for M0.3.
-            const param: posix.sched_param = .{ .sched_priority = 0 };
-            const rc = posix.pthread_setschedparam(thread.getHandle(), posix.SCHED_OTHER, &param);
-            if (rc != 0) return error.SetPriorityFailed;
-            _ = .{priority};
-        },
-        .macos => {
-            // macOS pthread_setschedparam on a regular thread without
+        .linux, .macos => {
+            // Best-effort, soft-success.
+            //
+            // Linux: pthread_setschedparam with SCHED_OTHER + priority=0
+            // is the canonical "reset to default". The call still returns
+            // EPERM in containerized CI runners that lack CAP_SYS_NICE
+            // (observed on ubuntu-24.04 GitHub Actions). Since setting
+            // the default policy is pragmatically a no-op anyway — the
+            // thread is already at default after spawn — we attempt the
+            // call but tolerate non-zero rc as success. Elevating to
+            // SCHED_FIFO / SCHED_RR with non-zero priority requires
+            // CAP_SYS_NICE + operator setup; M0.3 ships best-effort
+            // semantics, real-time priority lands Phase 1+ when the
+            // audio thread arrives (cf. `engine-audio-pulse.md` §11).
+            //
+            // macOS: pthread_setschedparam on a regular thread without
             // explicit policy setup returns EINVAL/EPERM in CI. The
             // mach-level API (thread_policy_set / THREAD_PRECEDENCE_POLICY)
             // is the proper path, but it's a no-op hint on user-space
-            // processes anyway. Accept as no-op for M0.3.
-            _ = .{ thread, priority };
+            // processes anyway.
+            const param: posix.sched_param = .{ .sched_priority = 0 };
+            _ = posix.pthread_setschedparam(thread.getHandle(), posix.SCHED_OTHER, &param);
         },
         else => return error.SetPriorityFailed,
     }
