@@ -63,7 +63,18 @@ test "concurrent createWindow + destroyWindow" {
     var ctxs: [NUM_THREADS]Ctx = undefined;
     var threads: [NUM_THREADS]std.Thread = undefined;
 
+    // Warm-up: trigger the class once-init before reading atom_before.
+    // Without this warm-up, atom_before would be 0 (no class yet) and
+    // the stability check (atom_before == atom_after) would trivially
+    // fail. The brief gate is 'class atom stable across the 8×N
+    // concurrent create/destroy cycles' — not 'class atom equals 0
+    // at test start'.
+    {
+        var warmup = try window_api.Window.create(gpa, .{});
+        warmup.destroy();
+    }
     const atom_before = window_api.classAtom();
+    try std.testing.expect(atom_before != 0);
 
     var i: u32 = 0;
     while (i < NUM_THREADS) : (i += 1) {
