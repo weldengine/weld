@@ -428,27 +428,44 @@ const Ctx = struct {
     }
 
     /// Emit a per-message `<iface>_<msg>_types: [_]?*const WlInterface` array
-    /// that mirrors the arg order of `m`. Each slot is `&<iface>_interface`
-    /// for `object`/`new_id` args carrying an XML `interface` attribute, and
-    /// `null` for all other args (primitives, `array`, `object`/`new_id` with
-    /// runtime interface like `wl_registry.bind`).
+    /// indexed by wire-signature character position (NOT by XML arg index).
+    /// Each slot is `&<iface>_interface` for `object`/`new_id` args carrying
+    /// an XML `interface` attribute, and `null` otherwise.
+    ///
+    /// Wire signature note: a `new_id` arg WITHOUT an XML `interface=` attr
+    /// (the `wl_registry.bind` pattern) expands to three signature characters
+    /// `s` `u` `n` — one XML arg → three wire args → three null slots in the
+    /// types array. Mirrors `wayland-scanner private-code` C output exactly.
+    /// Verified against the bind sig `"usun"` which gets a 4-slot null array.
     ///
     /// Skipped entirely for messages with only primitive args — the caller
     /// then leaves `.types = null` on the WlMessage entry (diff minimal).
     ///
-    /// Mirrors what `wayland-scanner private-code` emits in C; required so
-    /// libwayland-client's WAYLAND_DEBUG=1 trace formatter and certain
-    /// drivers' WSI marshaling can walk the types table without
-    /// dereferencing a null pointer.
+    /// Required because libwayland-client's WAYLAND_DEBUG=1 trace formatter
+    /// and certain drivers' WSI marshaling walk the types table by
+    /// signature-char position; a missing or short types array dereferences
+    /// past its end (or null) → SEGFAULT.
     fn writeMessageTypesArray(self: *Ctx, iface_name: []const u8, m: parser.Message) !void {
         if (!self.messageNeedsTypes(m)) return;
         try self.print("const {s}_{s}_types = [_]?*const WlInterface{{\n", .{ iface_name, m.name });
         for (m.args) |a| {
             switch (a.type) {
-                .object, .new_id => {
+                .object => {
                     if (a.interface) |iface_ref| {
                         try self.print("    &{s}_interface,\n", .{iface_ref});
                     } else {
+                        try self.append("    null,\n");
+                    }
+                },
+                .new_id => {
+                    if (a.interface) |iface_ref| {
+                        // Single wire arg 'n' for typed new_id.
+                        try self.print("    &{s}_interface,\n", .{iface_ref});
+                    } else {
+                        // Wire expansion 's' 'u' 'n' for untyped new_id
+                        // (wl_registry.bind pattern) — three null slots.
+                        try self.append("    null,\n");
+                        try self.append("    null,\n");
                         try self.append("    null,\n");
                     }
                 },
