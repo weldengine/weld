@@ -573,7 +573,9 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.c) L
 const MonitorEnumCtx = struct {
     gpa: std.mem.Allocator,
     list: *std.ArrayList(window.MonitorInfo),
-    err: ?anyerror = null,
+    /// Constrained to `std.mem.Allocator.Error` so the inferred error
+    /// set of `enumerateMonitors` matches `window.QueryError` exactly.
+    err: ?std.mem.Allocator.Error = null,
 };
 
 fn enumMonitorCallback(hMonitor: *anyopaque, hdc: ?*anyopaque, lprcMonitor: *const RECT, dwData: LPARAM) callconv(.c) BOOL {
@@ -617,7 +619,7 @@ fn enumMonitorCallback(hMonitor: *anyopaque, hdc: ?*anyopaque, lprcMonitor: *con
 }
 
 /// Win32 implementation of `enumerateMonitors` — delegates to `EnumDisplayMonitors`.
-pub fn enumerateMonitors(gpa: std.mem.Allocator) ![]window.MonitorInfo {
+pub fn enumerateMonitors(gpa: std.mem.Allocator) std.mem.Allocator.Error![]window.MonitorInfo {
     var list: std.ArrayList(window.MonitorInfo) = .empty;
     errdefer list.deinit(gpa);
 

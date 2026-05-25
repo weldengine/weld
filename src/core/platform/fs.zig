@@ -98,10 +98,17 @@ fn parseScheme(vfs_path: []const u8) ?[]const u8 {
 /// Read an env var via `getenv` (POSIX) or `GetEnvironmentVariableW`
 /// (Win32). Returns null if absent. The returned slice is owned by the
 /// caller and freed via `gpa.free`.
-fn readEnv(gpa: std.mem.Allocator, name: []const u8) !?[]u8 {
+///
+/// Constrained to `error{OutOfMemory}` — utf8/utf16 conversion failures
+/// surface as null (env var treated as unreadable). This keeps the
+/// public `Vfs.resolve` error set tight (subset of `Error`).
+fn readEnv(gpa: std.mem.Allocator, name: []const u8) error{OutOfMemory}!?[]u8 {
     switch (builtin.os.tag) {
         .windows => {
-            const wide_name = std.unicode.utf8ToUtf16LeAllocZ(gpa, name) catch return null;
+            const wide_name = std.unicode.utf8ToUtf16LeAllocZ(gpa, name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return null,
+            };
             defer gpa.free(wide_name);
 
             // Probe the required buffer size, then allocate + read.
@@ -111,7 +118,10 @@ fn readEnv(gpa: std.mem.Allocator, name: []const u8) !?[]u8 {
             defer gpa.free(wide_buf);
             const got = win_env.GetEnvironmentVariableW(wide_name.ptr, wide_buf.ptr, @intCast(wide_buf.len));
             if (got == 0 or got >= wide_buf.len) return null;
-            return try std.unicode.utf16LeToUtf8Alloc(gpa, wide_buf[0..got]);
+            return std.unicode.utf16LeToUtf8Alloc(gpa, wide_buf[0..got]) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return null,
+            };
         },
         .linux, .macos => {
             const name_z = try gpa.dupeZ(u8, name);

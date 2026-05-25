@@ -889,7 +889,7 @@ fn onOutputDescription(data: ?*anyopaque, proxy: *core.wl_output, description: [
 
 /// Wayland implementation of `enumerateMonitors`. Returns a snapshot of
 /// the cached `wl_output` table. Caller owns the slice.
-pub fn enumerateMonitors(gpa: std.mem.Allocator) ![]window.MonitorInfo {
+pub fn enumerateMonitors(gpa: std.mem.Allocator) std.mem.Allocator.Error![]window.MonitorInfo {
     // The Wayland backend keeps the State on the heap; we need a way to
     // reach it from a free function. Phase 0.3 limitation: only the
     // most-recently-created window's State is queried (single-window
