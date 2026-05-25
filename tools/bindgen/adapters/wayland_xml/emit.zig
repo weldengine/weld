@@ -452,7 +452,8 @@ const Ctx = struct {
             switch (a.type) {
                 .object => {
                     if (a.interface) |iface_ref| {
-                        try self.print("    &{s}_interface,\n", .{iface_ref});
+                        const prefix = try self.crossProtoPrefix(iface_ref);
+                        try self.print("    &{s}{s}_interface,\n", .{ prefix, iface_ref });
                     } else {
                         try self.append("    null,\n");
                     }
@@ -460,7 +461,8 @@ const Ctx = struct {
                 .new_id => {
                     if (a.interface) |iface_ref| {
                         // Single wire arg 'n' for typed new_id.
-                        try self.print("    &{s}_interface,\n", .{iface_ref});
+                        const prefix = try self.crossProtoPrefix(iface_ref);
+                        try self.print("    &{s}{s}_interface,\n", .{ prefix, iface_ref });
                     } else {
                         // Wire expansion 's' 'u' 'n' for untyped new_id
                         // (wl_registry.bind pattern) — three null slots.
