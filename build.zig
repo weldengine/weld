@@ -266,6 +266,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/platform/dynamic_lib_test.zig" },
         // M0.3 — Win32 thread safety stress (Windows runner only).
         .{ .path = "tests/platform/win32_thread_safety_test.zig" },
+        // M0.3 — Input Tier 0 (event-driven path, runs on all OSes).
+        .{ .path = "tests/platform/input_raw_state_test.zig" },
+        .{ .path = "tests/platform/input_gamepad_test.zig" },
         // M0.3 — Audio Dummy stub test.
         .{ .path = "tests/audio/dummy_stub_test.zig", .audio = true },
     };

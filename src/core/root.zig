@@ -53,6 +53,9 @@ pub const platform = struct {
     // M0.3 — Input Tier 0 namespace (raw_state, keycode, OS-specific).
     pub const input = struct {
         pub const keycode = @import("platform/input/keycode.zig");
+        pub const raw_state = @import("platform/input/raw_state.zig");
+        pub const win32_xinput = @import("platform/input/win32_xinput.zig");
+        pub const linux_evdev = @import("platform/input/linux_evdev.zig");
     };
 };
 
@@ -163,4 +166,7 @@ comptime {
     _ = platform.dynamic_lib;
     _ = platform.fs;
     _ = platform.input.keycode;
+    _ = platform.input.raw_state;
+    _ = platform.input.win32_xinput;
+    _ = platform.input.linux_evdev;
 }
