@@ -141,54 +141,99 @@ extern "user32" fn SetProcessDpiAwarenessContext(value: DPI_AWARENESS_CONTEXT) c
 
 // =============================================================== Backend =
 
-/// Class registration is process-wide. We register lazily on first create
-/// and unregister on the last destroy (refcounted) so 50× open/close
-/// cycles do not accumulate stale class atoms.
+// M0.3 — Win32 thread safety patch (dette D-S2-win32-globals).
+//
+// Phase 0 Win32 backend used three plain `var` globals (class_atom,
+// class_open_count, dpi_awareness_set) that were race-condition prone
+// under concurrent createWindow/destroyWindow. M0.3 migrates them to:
+//
+//   - `class_once` (Once)      — registers the window class exactly once
+//                                 per process lifetime. Class atom value
+//                                 is stored next to it.
+//   - `class_open_count`       — atomic refcount via fetchAdd/fetchSub
+//                                 (acq_rel). The class is NOT
+//                                 unregistered on count=0 — a single
+//                                 class atom per process is the standard
+//                                 Win32 pattern and avoids the TOCTOU
+//                                 between "decrement → check 0 →
+//                                 unregister" that the previous code had.
+//   - `dpi_awareness_once`     — Once-protected SetProcessDpiAwarenessContext.
+//
+// Tested by `tests/platform/win32_thread_safety_test.zig` (8 threads ×
+// 1000 iter; skipped on non-Windows runners).
+
+const once_mod = @import("../once.zig");
+
+/// Class registration once-init. After successful init, `class_atom`
+/// is populated and `class_once.isDone() == true`. The class is kept
+/// registered for the lifetime of the process — the Win32 kernel
+/// recycles atoms automatically, so 50× open/close cycles cost a single
+/// atom slot, not N.
+var class_once: once_mod.Once = .{};
 var class_atom: ATOM = 0;
-var class_open_count: u32 = 0;
 const class_name_w = std.unicode.utf8ToUtf16LeStringLiteral("WeldS2WindowClass");
 
-/// `SetProcessDpiAwarenessContext` is called once per process. Failures are
-/// non-fatal — a Windows version that does not support per-monitor v2
-/// simply does not deliver `WM_DPICHANGED`, which is acceptable for S2.
-var dpi_awareness_set: bool = false;
+/// Live-window refcount. Incremented on `createWindow` after the class
+/// is registered, decremented on `destroyWindow`. Used by tests to
+/// confirm balanced create/destroy across threads.
+var class_open_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+/// `SetProcessDpiAwarenessContext` is called once per process. Failures
+/// are non-fatal — a Windows version that does not support per-monitor
+/// v2 simply does not deliver `WM_DPICHANGED`, which is acceptable.
+var dpi_awareness_once: once_mod.Once = .{};
+
+fn dpiAwarenessInit() anyerror!void {
+    _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    // Failures here are tolerable — we do not propagate the error so
+    // the Once transitions to DONE permanently.
+}
 
 fn ensureDpiAwareness() void {
-    if (dpi_awareness_set) return;
-    _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    dpi_awareness_set = true;
+    // Busy-yield variant — avoids threading an `io` parameter through
+    // the public `Window.create` API. Contention window is microseconds.
+    dpi_awareness_once.callBusyYield(dpiAwarenessInit) catch {};
+}
+
+fn classInit() anyerror!void {
+    const wc = WNDCLASSEXW{
+        .cb_size = @sizeOf(WNDCLASSEXW),
+        .style = CS_HREDRAW | CS_VREDRAW,
+        .lpfn_wnd_proc = wndProc,
+        .cb_cls_extra = 0,
+        .cb_wnd_extra = 0,
+        .h_instance = GetModuleHandleW(null),
+        .h_icon = null,
+        .h_cursor = LoadCursorW(null, IDC_ARROW),
+        .hbr_background = null,
+        .lpsz_menu_name = null,
+        .lpsz_class_name = class_name_w,
+        .h_icon_sm = null,
+    };
+    const atom = RegisterClassExW(&wc);
+    if (atom == 0) return error.BackendInitFailed;
+    class_atom = atom;
 }
 
 fn ensureClassRegistered() window.Error!void {
-    if (class_open_count == 0) {
-        const wc = WNDCLASSEXW{
-            .cb_size = @sizeOf(WNDCLASSEXW),
-            .style = CS_HREDRAW | CS_VREDRAW,
-            .lpfn_wnd_proc = wndProc,
-            .cb_cls_extra = 0,
-            .cb_wnd_extra = 0,
-            .h_instance = GetModuleHandleW(null),
-            .h_icon = null,
-            .h_cursor = LoadCursorW(null, IDC_ARROW),
-            .hbr_background = null,
-            .lpsz_menu_name = null,
-            .lpsz_class_name = class_name_w,
-            .h_icon_sm = null,
-        };
-        const atom = RegisterClassExW(&wc);
-        if (atom == 0) return error.BackendInitFailed;
-        class_atom = atom;
-    }
-    class_open_count += 1;
+    class_once.callBusyYield(classInit) catch return error.BackendInitFailed;
+    _ = class_open_count.fetchAdd(1, .acq_rel);
 }
 
 fn releaseClass() void {
-    if (class_open_count == 0) return;
-    class_open_count -= 1;
-    if (class_open_count == 0) {
-        _ = UnregisterClassW(class_name_w, GetModuleHandleW(null));
-        class_atom = 0;
-    }
+    _ = class_open_count.fetchSub(1, .acq_rel);
+    // The class atom intentionally stays registered for the lifetime of
+    // the process. See top-of-file comment for rationale.
+}
+
+/// Read the live window count. Used by tests.
+pub fn classOpenCount() u32 {
+    return class_open_count.load(.acquire);
+}
+
+/// Read the class atom. Used by tests to verify stability across threads.
+pub fn classAtom() ATOM {
+    return class_atom;
 }
 
 /// Heap-allocated state. The `*State` pointer goes into `GWLP_USERDATA` so

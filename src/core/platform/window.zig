@@ -93,3 +93,23 @@ pub const Window = struct {
         return self.impl.nativeHandles();
     }
 };
+
+// M0.3 — diagnostics surfaced for the Win32 thread safety stress test
+// (`tests/platform/win32_thread_safety_test.zig`). On non-Windows
+// backends both accessors return 0 — the test skips with
+// `error.SkipZigTest` so the values are never observed there.
+
+/// Returns the live class atom registered with the Win32 window manager.
+/// On non-Windows builds, returns 0 (no class atom concept). Used by
+/// the thread-safety stress test to confirm stability across 8×1000 cycles.
+pub fn classAtom() u16 {
+    return if (@hasDecl(backend, "classAtom")) backend.classAtom() else 0;
+}
+
+/// Returns the current live-window refcount. Phase 0.3 Win32 backend
+/// keeps the class registered for process lifetime; `class_open_count`
+/// goes back to 0 once all windows have been destroyed. Used by the
+/// thread-safety stress test to assert balanced create/destroy.
+pub fn classOpenCount() u32 {
+    return if (@hasDecl(backend, "classOpenCount")) backend.classOpenCount() else 0;
+}

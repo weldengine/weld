@@ -85,6 +85,39 @@ pub const Once = struct {
         }
     }
 
+    /// Same semantics as `call` but uses a bounded busy-yield loop on the
+    /// IN_PROGRESS path instead of `futexWaitUncancelable`. Trade-off: no
+    /// `io` parameter required, at the cost of a few hundred nanoseconds
+    /// of CPU spin per concurrent loser of the CAS. Acceptable for paths
+    /// whose contention window is bounded (window-class registration,
+    /// SetProcessDpiAwarenessContext) — both complete in microseconds.
+    ///
+    /// The yield is implemented as `std.Thread.yield()` with a fallback
+    /// `std.atomic.spinLoopHint()` if the OS scheduler doesn't honor
+    /// yield (e.g. single-core boxes).
+    pub fn callBusyYield(self: *Once, init_fn: *const fn () anyerror!void) anyerror!void {
+        while (true) {
+            const cur = self.state.load(.acquire);
+            if (cur == DONE) return;
+            if (cur == IN_PROGRESS) {
+                std.Thread.yield() catch {
+                    var k: u32 = 0;
+                    while (k < 64) : (k += 1) std.atomic.spinLoopHint();
+                };
+                continue;
+            }
+            if (self.state.cmpxchgStrong(NOT_STARTED, IN_PROGRESS, .acquire, .acquire)) |_| {
+                continue;
+            }
+            init_fn() catch |err| {
+                self.state.store(NOT_STARTED, .release);
+                return err;
+            };
+            self.state.store(DONE, .release);
+            return;
+        }
+    }
+
     /// Reset to `not_started`. Caller MUST ensure no concurrent `call` is
     /// in flight. Intended for tests only.
     pub fn reset(self: *Once) void {
