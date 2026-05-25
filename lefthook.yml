@@ -4,6 +4,8 @@
 # M0.0: `commit-msg` now invokes the Zig linter (`zig build lint-commit`)
 # instead of the shell-script fallback, and `pre-commit` adds a
 # `zig build lint` pass alongside `zig fmt --check`.
+# M0.3: `pre-push` adds a TSan rerun of the Wayland stress test
+# (Linux-only compensation for the absent TSan path in the CI matrix).
 
 pre-commit:
   parallel: true
@@ -28,3 +30,12 @@ pre-push:
       run: zig build test
     test-release:
       run: zig build test -Doptimize=ReleaseSafe
+    # M0.3 — local-only thread-safety rerun on the Wayland stress test
+    # with ThreadSanitizer (TSan). The Linux CI matrix does not ship
+    # TSan toolchains for the runner image we target, so this hook acts
+    # as the M0.3 garde-fou. The test is `error.SkipZigTest` outside
+    # Linux, which surfaces as exit-0, so the gate stays green on
+    # macOS / Windows developer machines while still firing on Fedora
+    # dev boxes (Guy's primary Linux machine).
+    test-tsan-wayland:
+      run: zig test tests/platform/wayland_thread_safety_test.zig -fsanitize=thread --dep weld_core -Mroot=tests/platform/wayland_thread_safety_test.zig -Mweld_core=src/core/root.zig -lc

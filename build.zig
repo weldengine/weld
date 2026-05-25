@@ -266,6 +266,12 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/platform/dynamic_lib_test.zig" },
         // M0.3 — Win32 thread safety stress (Windows runner only).
         .{ .path = "tests/platform/win32_thread_safety_test.zig" },
+        // M0.3 — Wayland thread safety stress (Linux runner only).
+        .{ .path = "tests/platform/wayland_thread_safety_test.zig" },
+        // M0.3 — Multi-monitor enumeration + current monitor + per-monitor DPI.
+        .{ .path = "tests/platform/multi_monitor_test.zig" },
+        // M0.3 — WindowEvent union surface validation.
+        .{ .path = "tests/platform/window_events_test.zig" },
         // M0.3 — Input Tier 0 (event-driven path, runs on all OSes).
         .{ .path = "tests/platform/input_raw_state_test.zig" },
         .{ .path = "tests/platform/input_gamepad_test.zig" },
