@@ -240,11 +240,15 @@ const posix_mmap = struct {
     extern "c" fn close(fd: c_int) c_int;
     extern "c" fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, offset: i64) ?*anyopaque;
     extern "c" fn munmap(addr: *anyopaque, len: usize) c_int;
-    extern "c" fn fstat(fd: c_int, buf: *anyopaque) c_int;
+    // lseek used as a portable file-size probe — avoids the per-OS
+    // struct stat layout (Linux glibc vs musl vs macOS BSD differ).
+    extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
     const O_RDONLY: c_int = 0;
     const PROT_READ: c_int = 1;
     const MAP_PRIVATE: c_int = 2;
     const MAP_FAILED: usize = std.math.maxInt(usize);
+    const SEEK_SET: c_int = 0;
+    const SEEK_END: c_int = 2;
 };
 
 /// Memory-map a file read-only. The returned `Mmap.bytes` is a slice over
@@ -307,13 +311,16 @@ pub fn mmapFile(gpa: std.mem.Allocator, path: []const u8) Error!Mmap {
             if (fd < 0) return error.OpenFailed;
             errdefer _ = posix_mmap.close(fd);
 
-            // Use std.posix to get the file size — it's portable and avoids
-            // writing a stat struct layout for each libc.
-            const stat = std.posix.fstat(fd) catch return error.OpenFailed;
-            const size: usize = @intCast(stat.size);
+            // Probe file size via lseek-to-end (portable — avoids the
+            // per-libc struct stat layout). Rewind afterwards so the
+            // mmap offset is consistent.
+            const size_i = posix_mmap.lseek(fd, 0, posix_mmap.SEEK_END);
+            if (size_i < 0) return error.OpenFailed;
+            _ = posix_mmap.lseek(fd, 0, posix_mmap.SEEK_SET);
+            const size: usize = @intCast(size_i);
             if (size == 0) {
                 // Empty file — mmap returns EINVAL. Return a zero-length
-                // valid mapping by allocating a sentinel buffer.
+                // valid mapping.
                 _ = posix_mmap.close(fd);
                 return .{
                     .bytes = &.{},

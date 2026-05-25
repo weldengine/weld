@@ -42,6 +42,16 @@ pub fn build(b: *std.Build) void {
     });
     etch_module.addImport("weld_core", core_module);
 
+    // M0.3 — `weld_audio` module exposes the Tier 1 audio module entry
+    // (Dummy backend Phase 0, real backends Phase 1). Consumed by the
+    // audio tests and, later, by the runtime once the audio strategy
+    // selection wires in.
+    const audio_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/audio/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // M0.2 / E6 — plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
     // Exposes the C ABI types from `desc.zig` (no `WeldAPI` itself,
@@ -204,6 +214,8 @@ pub fn build(b: *std.Build) void {
         /// `stub_install_steps[]` so the three stub libraries are
         /// built before the test runs.
         needs_stub_plugins: bool = false,
+        /// M0.3 — when set, imports the `weld_audio` module.
+        audio: bool = false,
     };
     const test_specs = [_]TestSpec{
         .{ .path = "tests/smoke_test.zig" },
@@ -247,6 +259,13 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/bindings/wayland_abi_test.zig", .wl_protocols = true },
         .{ .path = "tests/etch/corpus_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
+        // M0.3 — platform commun layer tests.
+        .{ .path = "tests/platform/fs_vfs_test.zig" },
+        .{ .path = "tests/platform/time_test.zig" },
+        .{ .path = "tests/platform/threading_test.zig" },
+        .{ .path = "tests/platform/dynamic_lib_test.zig" },
+        // M0.3 — Audio Dummy stub test.
+        .{ .path = "tests/audio/dummy_stub_test.zig", .audio = true },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
@@ -270,6 +289,9 @@ pub fn build(b: *std.Build) void {
             t_mod.addImport("corpus_facade", etch_interp_corpus_module);
             t_mod.addImport("diff_runner", etch_interp_driver_module);
             t_mod.addImport("runner_interp", etch_interp_runner_module);
+        }
+        if (spec.audio) {
+            t_mod.addImport("weld_audio", audio_module);
         }
         const t = b.addTest(.{ .root_module = t_mod });
         const t_run = b.addRunArtifact(t);
