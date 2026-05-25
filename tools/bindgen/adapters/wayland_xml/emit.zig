@@ -371,14 +371,22 @@ const Ctx = struct {
         }
 
         // WlMessage arrays + WlInterface metadata.
+        //
+        // Per-message types arrays (M0.3+ fix). Each message that has at
+        // least one object/new_id/array arg needs a `wl_interface*`-array
+        // sibling so libwayland-client can route protocol type info — see
+        // `writeMessageTypesArray` below for the layout rules. Messages
+        // with only primitive args keep `.types = null` (diff minimal).
         if (iface.requests.len > 0) {
+            for (iface.requests) |r| try self.writeMessageTypesArray(iface.name, r);
             try self.print("const {s}_requests = [_]WlMessage{{\n", .{iface.name});
-            for (iface.requests) |r| try self.writeMessageEntry(r);
+            for (iface.requests) |r| try self.writeMessageEntry(iface.name, r);
             try self.append("};\n\n");
         }
         if (iface.events.len > 0) {
+            for (iface.events) |e| try self.writeMessageTypesArray(iface.name, e);
             try self.print("const {s}_events = [_]WlMessage{{\n", .{iface.name});
-            for (iface.events) |e| try self.writeMessageEntry(e);
+            for (iface.events) |e| try self.writeMessageEntry(iface.name, e);
             try self.append("};\n\n");
         }
         try self.print("pub const {s}_interface = WlInterface{{\n", .{iface.name});
@@ -409,8 +417,51 @@ const Ctx = struct {
         try self.append("};\n\n");
     }
 
-    /// Build the wire-format signature string for `WlMessage`.
-    fn writeMessageEntry(self: *Ctx, m: parser.Message) !void {
+    /// Returns true if any arg of the message is `object`, `new_id`, or
+    /// `array` — i.e., needs a non-null `WlMessage.types` slot.
+    fn messageNeedsTypes(_: *Ctx, m: parser.Message) bool {
+        for (m.args) |a| switch (a.type) {
+            .object, .new_id, .array => return true,
+            else => {},
+        };
+        return false;
+    }
+
+    /// Emit a per-message `<iface>_<msg>_types: [_]?*const WlInterface` array
+    /// that mirrors the arg order of `m`. Each slot is `&<iface>_interface`
+    /// for `object`/`new_id` args carrying an XML `interface` attribute, and
+    /// `null` for all other args (primitives, `array`, `object`/`new_id` with
+    /// runtime interface like `wl_registry.bind`).
+    ///
+    /// Skipped entirely for messages with only primitive args — the caller
+    /// then leaves `.types = null` on the WlMessage entry (diff minimal).
+    ///
+    /// Mirrors what `wayland-scanner private-code` emits in C; required so
+    /// libwayland-client's WAYLAND_DEBUG=1 trace formatter and certain
+    /// drivers' WSI marshaling can walk the types table without
+    /// dereferencing a null pointer.
+    fn writeMessageTypesArray(self: *Ctx, iface_name: []const u8, m: parser.Message) !void {
+        if (!self.messageNeedsTypes(m)) return;
+        try self.print("const {s}_{s}_types = [_]?*const WlInterface{{\n", .{ iface_name, m.name });
+        for (m.args) |a| {
+            switch (a.type) {
+                .object, .new_id => {
+                    if (a.interface) |iface_ref| {
+                        try self.print("    &{s}_interface,\n", .{iface_ref});
+                    } else {
+                        try self.append("    null,\n");
+                    }
+                },
+                else => try self.append("    null,\n"),
+            }
+        }
+        try self.append("};\n\n");
+    }
+
+    /// Build the wire-format signature string for `WlMessage` and reference
+    /// the per-message types array iff the message needs one
+    /// (`messageNeedsTypes`).
+    fn writeMessageEntry(self: *Ctx, iface_name: []const u8, m: parser.Message) !void {
         var sig: std.ArrayList(u8) = .empty;
         for (m.args) |a| {
             if (a.allow_null) try sig.append(self.A, '?');
@@ -432,7 +483,11 @@ const Ctx = struct {
             }
         }
         const sig_str = try sig.toOwnedSlice(self.A);
-        try self.print("    .{{ .name = \"{s}\", .signature = \"{s}\", .types = null }},\n", .{ m.name, sig_str });
+        if (self.messageNeedsTypes(m)) {
+            try self.print("    .{{ .name = \"{s}\", .signature = \"{s}\", .types = &{s}_{s}_types }},\n", .{ m.name, sig_str, iface_name, m.name });
+        } else {
+            try self.print("    .{{ .name = \"{s}\", .signature = \"{s}\", .types = null }},\n", .{ m.name, sig_str });
+        }
     }
 
     /// Idiomatic Zig type for a parameter of a request method (caller-provided).
