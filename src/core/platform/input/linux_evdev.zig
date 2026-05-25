@@ -24,6 +24,16 @@
 //! the main loop. udev monitoring is documented as "Phase 1+ if
 //! polling proves insufficient" per the brief.
 
+// PHASE 1+ TRANSFER NOTE — ce module est un stub Phase 0. `pollAllSlots`
+// est no-op, `scanDevices` ouvre-puis-ferme les fd sans extraire les
+// capabilities. Conséquence observable : un gamepad branché sous Linux
+// Phase 0 reste invisible (la souris/clavier passent par
+// wl_pointer/wl_keyboard qui couvrent le common case desktop). Phase 1
+// doit livrer le parsing EV_KEY/EV_ABS via EVIOCGBIT + un event loop
+// intégré au mainloop Wayland (`std.posix.poll` sur les fd evdev). Si un
+// studio externe Phase 1 a besoin de gamepad Linux avant que le module
+// Input Tier 1 arrive, c'est ici que ça arrive — pas dans Tier 1.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const raw_state = @import("raw_state.zig");

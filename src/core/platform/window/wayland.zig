@@ -925,5 +925,15 @@ pub fn currentMonitor(backend_ptr: *const Backend) ?u32 {
 // Best-effort live-state pointer for the free-function `enumerateMonitors`
 // dispatched from `window.zig`. Set in `create` after State allocation,
 // cleared in `destroy`. Single-window model — Phase 0+ multi-window
-// support will replace this with a proper module-level registry.
+// upgrade requis.
+//
+// PHASE 0+ TRANSFER NOTE — variable globale mutable non-atomique en
+// tension avec la règle "pas d'état global caché" héritée du scheduler
+// ECS M0.1. Acceptable Phase 0 car init et destroy sont sérialisés par
+// construction (1 Backend par process). À remplacer par un module-level
+// registry indexé par display+surface dès que multi-window est livré
+// (éditeur Islandz multi-fenêtre, debug tools). Le pattern de remplacement
+// existe dans la stdlib : `std.AutoHashMap(*wl_display, *State)` derrière
+// un `std.Thread.Mutex` (lock court — registry est touché 2 fois par
+// window lifetime). Voir aussi `engine-platform.md` §2 Windowing.
 var live_state: ?*State = null;

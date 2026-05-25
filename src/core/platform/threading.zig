@@ -148,6 +148,16 @@ pub fn setPriority(thread: std.Thread, priority: Priority) Error!void {
             // mach-level API (thread_policy_set / THREAD_PRECEDENCE_POLICY)
             // is the proper path, but it's a no-op hint on user-space
             // processes anyway.
+            //
+            // PHASE 1+ TRANSFER NOTE — quand l'audio thread Phase 1 arrivera avec
+            // besoin réel de priorité SCHED_FIFO/SCHED_RR (cf. engine-audio-pulse.md
+            // §11), ce code best-effort soft-success ne doit PAS être réutilisé tel
+            // quel. Le silencieux ignore EPERM masquerait un échec critique de
+            // configuration realtime. Ajouter alors une fonction dédiée
+            // `setRealtimePriority(thread, policy) !void` qui retourne
+            // `error.NoCapability` explicitement sur EPERM, et conserver `setPriority`
+            // courant uniquement pour les paths best-effort (background threads,
+            // job workers non-critiques).
             const param: posix.sched_param = .{ .sched_priority = 0 };
             _ = posix.pthread_setschedparam(thread.getHandle(), posix.SCHED_OTHER, &param);
         },
