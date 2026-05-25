@@ -36,11 +36,11 @@ pub const xdg_wm_base_listener = extern struct {
     ping: *const fn (data: ?*anyopaque, proxy: *xdg_wm_base, serial: u32) callconv(.c) void,
 };
 
-const xdg_wm_base_create_positioner_types = [_]?*const WlInterface{
+const xdg_wm_base_create_positioner_types: [1]?*const WlInterface = .{
     &xdg_positioner_interface,
 };
 
-const xdg_wm_base_get_xdg_surface_types = [_]?*const WlInterface{
+const xdg_wm_base_get_xdg_surface_types: [2]?*const WlInterface = .{
     &xdg_surface_interface,
     &core.wl_surface_interface,
 };
@@ -269,11 +269,11 @@ pub const xdg_surface_listener = extern struct {
     configure: *const fn (data: ?*anyopaque, proxy: *xdg_surface, serial: u32) callconv(.c) void,
 };
 
-const xdg_surface_get_toplevel_types = [_]?*const WlInterface{
+const xdg_surface_get_toplevel_types: [1]?*const WlInterface = .{
     &xdg_toplevel_interface,
 };
 
-const xdg_surface_get_popup_types = [_]?*const WlInterface{
+const xdg_surface_get_popup_types: [3]?*const WlInterface = .{
     &xdg_popup_interface,
     &xdg_surface_interface,
     &xdg_positioner_interface,
@@ -421,29 +421,29 @@ pub const xdg_toplevel_listener = extern struct {
     wm_capabilities: *const fn (data: ?*anyopaque, proxy: *xdg_toplevel, capabilities: *core.WlArray) callconv(.c) void,
 };
 
-const xdg_toplevel_set_parent_types = [_]?*const WlInterface{
+const xdg_toplevel_set_parent_types: [1]?*const WlInterface = .{
     &xdg_toplevel_interface,
 };
 
-const xdg_toplevel_show_window_menu_types = [_]?*const WlInterface{
+const xdg_toplevel_show_window_menu_types: [4]?*const WlInterface = .{
     &core.wl_seat_interface,
     null,
     null,
     null,
 };
 
-const xdg_toplevel_move_types = [_]?*const WlInterface{
+const xdg_toplevel_move_types: [2]?*const WlInterface = .{
     &core.wl_seat_interface,
     null,
 };
 
-const xdg_toplevel_resize_types = [_]?*const WlInterface{
+const xdg_toplevel_resize_types: [3]?*const WlInterface = .{
     &core.wl_seat_interface,
     null,
     null,
 };
 
-const xdg_toplevel_set_fullscreen_types = [_]?*const WlInterface{
+const xdg_toplevel_set_fullscreen_types: [1]?*const WlInterface = .{
     &core.wl_output_interface,
 };
 
@@ -464,13 +464,13 @@ const xdg_toplevel_requests = [_]WlMessage{
     .{ .name = "set_minimized", .signature = "", .types = null },
 };
 
-const xdg_toplevel_configure_types = [_]?*const WlInterface{
+const xdg_toplevel_configure_types: [3]?*const WlInterface = .{
     null,
     null,
     null,
 };
 
-const xdg_toplevel_wm_capabilities_types = [_]?*const WlInterface{
+const xdg_toplevel_wm_capabilities_types: [1]?*const WlInterface = .{
     null,
 };
 
@@ -605,12 +605,12 @@ pub const xdg_popup_listener = extern struct {
     repositioned: *const fn (data: ?*anyopaque, proxy: *xdg_popup, token: u32) callconv(.c) void,
 };
 
-const xdg_popup_grab_types = [_]?*const WlInterface{
+const xdg_popup_grab_types: [2]?*const WlInterface = .{
     &core.wl_seat_interface,
     null,
 };
 
-const xdg_popup_reposition_types = [_]?*const WlInterface{
+const xdg_popup_reposition_types: [2]?*const WlInterface = .{
     &xdg_positioner_interface,
     null,
 };

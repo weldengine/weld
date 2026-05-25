@@ -186,11 +186,11 @@ pub const wl_display_listener = extern struct {
     delete_id: *const fn (data: ?*anyopaque, proxy: *wl_display, id: u32) callconv(.c) void,
 };
 
-const wl_display_sync_types = [_]?*const WlInterface{
+const wl_display_sync_types: [1]?*const WlInterface = .{
     &wl_callback_interface,
 };
 
-const wl_display_get_registry_types = [_]?*const WlInterface{
+const wl_display_get_registry_types: [1]?*const WlInterface = .{
     &wl_registry_interface,
 };
 
@@ -199,7 +199,7 @@ const wl_display_requests = [_]WlMessage{
     .{ .name = "get_registry", .signature = "n", .types = &wl_display_get_registry_types },
 };
 
-const wl_display_error_types = [_]?*const WlInterface{
+const wl_display_error_types: [3]?*const WlInterface = .{
     null,
     null,
     null,
@@ -257,7 +257,7 @@ pub const wl_registry_listener = extern struct {
     global_remove: *const fn (data: ?*anyopaque, proxy: *wl_registry, name: u32) callconv(.c) void,
 };
 
-const wl_registry_bind_types = [_]?*const WlInterface{
+const wl_registry_bind_types: [4]?*const WlInterface = .{
     null,
     null,
     null,
@@ -339,11 +339,11 @@ pub const wl_compositor_request = struct {
     pub const release: u32 = 2;
 };
 
-const wl_compositor_create_surface_types = [_]?*const WlInterface{
+const wl_compositor_create_surface_types: [1]?*const WlInterface = .{
     &wl_surface_interface,
 };
 
-const wl_compositor_create_region_types = [_]?*const WlInterface{
+const wl_compositor_create_region_types: [1]?*const WlInterface = .{
     &wl_region_interface,
 };
 
@@ -390,7 +390,7 @@ pub const wl_shm_pool_request = struct {
     pub const resize: u32 = 2;
 };
 
-const wl_shm_pool_create_buffer_types = [_]?*const WlInterface{
+const wl_shm_pool_create_buffer_types: [6]?*const WlInterface = .{
     &wl_buffer_interface,
     null,
     null,
@@ -607,7 +607,7 @@ pub const wl_shm_listener = extern struct {
     format: *const fn (data: ?*anyopaque, proxy: *wl_shm, format: u32) callconv(.c) void,
 };
 
-const wl_shm_create_pool_types = [_]?*const WlInterface{
+const wl_shm_create_pool_types: [3]?*const WlInterface = .{
     &wl_shm_pool_interface,
     null,
     null,
@@ -897,14 +897,14 @@ pub const wl_data_device_listener = extern struct {
     selection: *const fn (data: ?*anyopaque, proxy: *wl_data_device, id: ?*wl_data_offer) callconv(.c) void,
 };
 
-const wl_data_device_start_drag_types = [_]?*const WlInterface{
+const wl_data_device_start_drag_types: [4]?*const WlInterface = .{
     &wl_data_source_interface,
     &wl_surface_interface,
     &wl_surface_interface,
     null,
 };
 
-const wl_data_device_set_selection_types = [_]?*const WlInterface{
+const wl_data_device_set_selection_types: [2]?*const WlInterface = .{
     &wl_data_source_interface,
     null,
 };
@@ -915,11 +915,11 @@ const wl_data_device_requests = [_]WlMessage{
     .{ .name = "release", .signature = "", .types = null },
 };
 
-const wl_data_device_data_offer_types = [_]?*const WlInterface{
+const wl_data_device_data_offer_types: [1]?*const WlInterface = .{
     &wl_data_offer_interface,
 };
 
-const wl_data_device_enter_types = [_]?*const WlInterface{
+const wl_data_device_enter_types: [5]?*const WlInterface = .{
     null,
     &wl_surface_interface,
     null,
@@ -927,7 +927,7 @@ const wl_data_device_enter_types = [_]?*const WlInterface{
     &wl_data_offer_interface,
 };
 
-const wl_data_device_selection_types = [_]?*const WlInterface{
+const wl_data_device_selection_types: [1]?*const WlInterface = .{
     &wl_data_offer_interface,
 };
 
@@ -993,11 +993,11 @@ pub const wl_data_device_manager_request = struct {
     pub const release: u32 = 2;
 };
 
-const wl_data_device_manager_create_data_source_types = [_]?*const WlInterface{
+const wl_data_device_manager_create_data_source_types: [1]?*const WlInterface = .{
     &wl_data_source_interface,
 };
 
-const wl_data_device_manager_get_data_device_types = [_]?*const WlInterface{
+const wl_data_device_manager_get_data_device_types: [2]?*const WlInterface = .{
     &wl_data_device_interface,
     &wl_seat_interface,
 };
@@ -1049,7 +1049,7 @@ pub const wl_shell_request = struct {
     pub const get_shell_surface: u32 = 0;
 };
 
-const wl_shell_get_shell_surface_types = [_]?*const WlInterface{
+const wl_shell_get_shell_surface_types: [2]?*const WlInterface = .{
     &wl_shell_surface_interface,
     &wl_surface_interface,
 };
@@ -1130,31 +1130,31 @@ pub const wl_shell_surface_listener = extern struct {
     popup_done: *const fn (data: ?*anyopaque, proxy: *wl_shell_surface) callconv(.c) void,
 };
 
-const wl_shell_surface_move_types = [_]?*const WlInterface{
+const wl_shell_surface_move_types: [2]?*const WlInterface = .{
     &wl_seat_interface,
     null,
 };
 
-const wl_shell_surface_resize_types = [_]?*const WlInterface{
+const wl_shell_surface_resize_types: [3]?*const WlInterface = .{
     &wl_seat_interface,
     null,
     null,
 };
 
-const wl_shell_surface_set_transient_types = [_]?*const WlInterface{
+const wl_shell_surface_set_transient_types: [4]?*const WlInterface = .{
     &wl_surface_interface,
     null,
     null,
     null,
 };
 
-const wl_shell_surface_set_fullscreen_types = [_]?*const WlInterface{
+const wl_shell_surface_set_fullscreen_types: [3]?*const WlInterface = .{
     null,
     null,
     &wl_output_interface,
 };
 
-const wl_shell_surface_set_popup_types = [_]?*const WlInterface{
+const wl_shell_surface_set_popup_types: [6]?*const WlInterface = .{
     &wl_seat_interface,
     null,
     &wl_surface_interface,
@@ -1163,7 +1163,7 @@ const wl_shell_surface_set_popup_types = [_]?*const WlInterface{
     null,
 };
 
-const wl_shell_surface_set_maximized_types = [_]?*const WlInterface{
+const wl_shell_surface_set_maximized_types: [1]?*const WlInterface = .{
     &wl_output_interface,
 };
 
@@ -1315,25 +1315,25 @@ pub const wl_surface_listener = extern struct {
     preferred_buffer_transform: *const fn (data: ?*anyopaque, proxy: *wl_surface, transform: u32) callconv(.c) void,
 };
 
-const wl_surface_attach_types = [_]?*const WlInterface{
+const wl_surface_attach_types: [3]?*const WlInterface = .{
     &wl_buffer_interface,
     null,
     null,
 };
 
-const wl_surface_frame_types = [_]?*const WlInterface{
+const wl_surface_frame_types: [1]?*const WlInterface = .{
     &wl_callback_interface,
 };
 
-const wl_surface_set_opaque_region_types = [_]?*const WlInterface{
+const wl_surface_set_opaque_region_types: [1]?*const WlInterface = .{
     &wl_region_interface,
 };
 
-const wl_surface_set_input_region_types = [_]?*const WlInterface{
+const wl_surface_set_input_region_types: [1]?*const WlInterface = .{
     &wl_region_interface,
 };
 
-const wl_surface_get_release_types = [_]?*const WlInterface{
+const wl_surface_get_release_types: [1]?*const WlInterface = .{
     &wl_callback_interface,
 };
 
@@ -1352,11 +1352,11 @@ const wl_surface_requests = [_]WlMessage{
     .{ .name = "get_release", .signature = "n", .types = &wl_surface_get_release_types },
 };
 
-const wl_surface_enter_types = [_]?*const WlInterface{
+const wl_surface_enter_types: [1]?*const WlInterface = .{
     &wl_output_interface,
 };
 
-const wl_surface_leave_types = [_]?*const WlInterface{
+const wl_surface_leave_types: [1]?*const WlInterface = .{
     &wl_output_interface,
 };
 
@@ -1494,15 +1494,15 @@ pub const wl_seat_listener = extern struct {
     name: *const fn (data: ?*anyopaque, proxy: *wl_seat, name: [*:0]const u8) callconv(.c) void,
 };
 
-const wl_seat_get_pointer_types = [_]?*const WlInterface{
+const wl_seat_get_pointer_types: [1]?*const WlInterface = .{
     &wl_pointer_interface,
 };
 
-const wl_seat_get_keyboard_types = [_]?*const WlInterface{
+const wl_seat_get_keyboard_types: [1]?*const WlInterface = .{
     &wl_keyboard_interface,
 };
 
-const wl_seat_get_touch_types = [_]?*const WlInterface{
+const wl_seat_get_touch_types: [1]?*const WlInterface = .{
     &wl_touch_interface,
 };
 
@@ -1626,7 +1626,7 @@ pub const wl_pointer_listener = extern struct {
     axis_relative_direction: *const fn (data: ?*anyopaque, proxy: *wl_pointer, axis: u32, direction: u32) callconv(.c) void,
 };
 
-const wl_pointer_set_cursor_types = [_]?*const WlInterface{
+const wl_pointer_set_cursor_types: [4]?*const WlInterface = .{
     null,
     &wl_surface_interface,
     null,
@@ -1638,14 +1638,14 @@ const wl_pointer_requests = [_]WlMessage{
     .{ .name = "release", .signature = "", .types = null },
 };
 
-const wl_pointer_enter_types = [_]?*const WlInterface{
+const wl_pointer_enter_types: [4]?*const WlInterface = .{
     null,
     &wl_surface_interface,
     null,
     null,
 };
 
-const wl_pointer_leave_types = [_]?*const WlInterface{
+const wl_pointer_leave_types: [2]?*const WlInterface = .{
     null,
     &wl_surface_interface,
 };
@@ -1735,13 +1735,13 @@ const wl_keyboard_requests = [_]WlMessage{
     .{ .name = "release", .signature = "", .types = null },
 };
 
-const wl_keyboard_enter_types = [_]?*const WlInterface{
+const wl_keyboard_enter_types: [3]?*const WlInterface = .{
     null,
     &wl_surface_interface,
     null,
 };
 
-const wl_keyboard_leave_types = [_]?*const WlInterface{
+const wl_keyboard_leave_types: [2]?*const WlInterface = .{
     null,
     &wl_surface_interface,
 };
@@ -1806,7 +1806,7 @@ const wl_touch_requests = [_]WlMessage{
     .{ .name = "release", .signature = "", .types = null },
 };
 
-const wl_touch_down_types = [_]?*const WlInterface{
+const wl_touch_down_types: [6]?*const WlInterface = .{
     null,
     null,
     &wl_surface_interface,
@@ -1992,7 +1992,7 @@ pub const wl_subcompositor_request = struct {
     pub const get_subsurface: u32 = 1;
 };
 
-const wl_subcompositor_get_subsurface_types = [_]?*const WlInterface{
+const wl_subcompositor_get_subsurface_types: [3]?*const WlInterface = .{
     &wl_subsurface_interface,
     &wl_surface_interface,
     &wl_surface_interface,
@@ -2043,11 +2043,11 @@ pub const wl_subsurface_request = struct {
     pub const set_desync: u32 = 5;
 };
 
-const wl_subsurface_place_above_types = [_]?*const WlInterface{
+const wl_subsurface_place_above_types: [1]?*const WlInterface = .{
     &wl_surface_interface,
 };
 
-const wl_subsurface_place_below_types = [_]?*const WlInterface{
+const wl_subsurface_place_below_types: [1]?*const WlInterface = .{
     &wl_surface_interface,
 };
 
@@ -2109,7 +2109,7 @@ pub const wl_fixes_request = struct {
     pub const destroy_registry: u32 = 1;
 };
 
-const wl_fixes_destroy_registry_types = [_]?*const WlInterface{
+const wl_fixes_destroy_registry_types: [1]?*const WlInterface = .{
     &wl_registry_interface,
 };
 
