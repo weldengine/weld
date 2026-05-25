@@ -45,9 +45,11 @@ test "mmapFile reads cooked asset zero-copy" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
-    // Create a small test file with known content using raw POSIX so we
-    // don't depend on std.Io.Dir layout assumptions.
-    const test_path = "/tmp/weld_m03_mmap_test.bin";
+    // Use a name in the test's current working directory — `/tmp/...` is
+    // POSIX-only and trips OBJECT_PATH_NOT_FOUND on Windows. The CWD is
+    // writable on every CI runner (Linux, macOS, Windows) and the file
+    // is deleted after the assertion.
+    const test_path = "weld_m03_mmap_test.bin";
     const expected_content: []const u8 = "MMAP_TEST_PAYLOAD_0123456789";
 
     const root = std.Io.Dir.cwd();
@@ -65,6 +67,6 @@ test "mmapFile reads cooked asset zero-copy" {
 
 test "mmapFile: missing file returns OpenFailed" {
     const gpa = std.testing.allocator;
-    const result = fs.mmapFile(gpa, "/tmp/weld_m03_definitely_missing_file_xyz.bin");
+    const result = fs.mmapFile(gpa, "weld_m03_definitely_missing_file_xyz.bin");
     try std.testing.expectError(error.OpenFailed, result);
 }
