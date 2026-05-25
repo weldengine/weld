@@ -209,6 +209,12 @@ pub const Backend = struct {
             state.outputs.deinit(gpa);
         }
 
+        // M0.3 — publish the active state so `enumerateMonitors` can
+        // reach it without a backend-pointer parameter. Single-window
+        // model — Phase 0+ multi-window upgrade tracked separately.
+        live_state = state;
+        errdefer live_state = null;
+
         state.registry = display.getRegistry() catch return error.BackendInitFailed;
         state.registry.addListener(&state.registry_listener, state) catch return error.BackendInitFailed;
 
@@ -264,6 +270,23 @@ pub const Backend = struct {
     pub fn destroy(self: *Backend) void {
         const s = self.state;
         const lib = &core.lib_wayland;
+
+        // M0.3 — clear the live_state pointer before tearing down.
+        if (live_state == s) live_state = null;
+
+        // Release input device proxies (release request added in
+        // wl_seat v5 + wl_keyboard / wl_pointer; safe to call on all
+        // versions we bind, ≤ 7).
+        if (s.keyboard) |kb| kb.release();
+        if (s.pointer) |ptr| ptr.release();
+        if (s.seat) |seat| seat.release();
+
+        // Free output entries (each was heap-allocated in onRegistryGlobal).
+        for (s.outputs.items) |entry| {
+            entry.proxy.release();
+            s.gpa.destroy(entry);
+        }
+        s.outputs.deinit(s.gpa);
 
         if (s.decoration) |dec| dec.destroy();
         s.xdg_toplevel_p.destroy();
