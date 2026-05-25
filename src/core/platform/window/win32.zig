@@ -52,9 +52,40 @@ const GWLP_USERDATA: i32 = -21;
 
 const WM_DESTROY: u32 = 0x0002;
 const WM_SIZE: u32 = 0x0005;
+const WM_SETFOCUS: u32 = 0x0007;
+const WM_KILLFOCUS: u32 = 0x0008;
 const WM_CLOSE: u32 = 0x0010;
 const WM_NCCREATE: u32 = 0x0081;
+// Keyboard
+const WM_KEYDOWN: u32 = 0x0100;
+const WM_KEYUP: u32 = 0x0101;
+const WM_SYSKEYDOWN: u32 = 0x0104;
+const WM_SYSKEYUP: u32 = 0x0105;
+// Mouse
+const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
+const WM_RBUTTONDOWN: u32 = 0x0204;
+const WM_RBUTTONUP: u32 = 0x0205;
+const WM_MBUTTONDOWN: u32 = 0x0207;
+const WM_MBUTTONUP: u32 = 0x0208;
+const WM_MOUSEWHEEL: u32 = 0x020A;
+const WM_XBUTTONDOWN: u32 = 0x020B;
+const WM_XBUTTONUP: u32 = 0x020C;
+const WM_MOUSEHWHEEL: u32 = 0x020E;
+// Multi-monitor / DPI
 const WM_DPICHANGED: u32 = 0x02E0;
+
+// SIZE_* wParam values for WM_SIZE.
+const SIZE_RESTORED: u32 = 0;
+const SIZE_MINIMIZED: u32 = 1;
+const SIZE_MAXIMIZED: u32 = 2;
+
+// MONITOR_DEFAULT* for MonitorFromWindow.
+const MONITOR_DEFAULTTONEAREST: u32 = 2;
+
+// Mouse wheel delta — 120 == one "notch" per Win32 convention.
+const WHEEL_DELTA: f32 = 120.0;
 
 const PM_REMOVE: u32 = 0x0001;
 
@@ -139,6 +170,25 @@ extern "user32" fn GetWindowLongPtrW(hwnd: HWND, n_index: INT) callconv(.c) ULON
 extern "user32" fn GetDpiForWindow(hwnd: HWND) callconv(.c) UINT;
 extern "user32" fn SetProcessDpiAwarenessContext(value: DPI_AWARENESS_CONTEXT) callconv(.c) BOOL;
 
+// M0.3 multi-monitor surface.
+extern "user32" fn MonitorFromWindow(hwnd: HWND, dwFlags: DWORD) callconv(.c) ?*anyopaque;
+extern "user32" fn GetMonitorInfoW(hMonitor: *anyopaque, lpmi: *MONITORINFOEXW) callconv(.c) BOOL;
+extern "shcore" fn GetDpiForMonitor(hMonitor: *anyopaque, dpiType: UINT, dpiX: *UINT, dpiY: *UINT) callconv(.c) i32;
+extern "user32" fn EnumDisplayMonitors(
+    hdc: ?*anyopaque,
+    lprcClip: ?*const RECT,
+    lpfnEnum: *const fn (hMonitor: *anyopaque, hdc: ?*anyopaque, lprcMonitor: *const RECT, dwData: LPARAM) callconv(.c) BOOL,
+    dwData: LPARAM,
+) callconv(.c) BOOL;
+
+const MONITORINFOEXW = extern struct {
+    cbSize: DWORD,
+    rcMonitor: RECT,
+    rcWork: RECT,
+    dwFlags: DWORD,
+    szDevice: [32]u16,
+};
+
 // =============================================================== Backend =
 
 // M0.3 — Win32 thread safety patch (dette D-S2-win32-globals).
@@ -163,6 +213,7 @@ extern "user32" fn SetProcessDpiAwarenessContext(value: DPI_AWARENESS_CONTEXT) c
 // 1000 iter; skipped on non-Windows runners).
 
 const once_mod = @import("../once.zig");
+const keycode_mod = @import("../input/keycode.zig");
 
 /// Class registration once-init. After successful init, `class_atom`
 /// is populated and `class_once.isDone() == true`. The class is kept
@@ -246,6 +297,12 @@ const State = struct {
     title_w: [:0]u16,
     /// Last delivered DPI scale, so `WM_DPICHANGED` skips no-op ticks.
     last_dpi: u32 = 96,
+    // M0.3 — mouse state tracking for delta computation.
+    last_mouse_x: i32 = 0,
+    last_mouse_y: i32 = 0,
+    mouse_in_window: bool = false,
+    // M0.3 — multi-monitor: last known HMONITOR for change detection.
+    last_monitor: ?*anyopaque = null,
 };
 
 /// Native Win32 handles needed by Vulkan to create a `VkSurfaceKHR`.
@@ -380,9 +437,15 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.c) L
             return 0;
         },
         WM_SIZE => {
+            // wparam = SIZE_*; lparam low/high = client width/height.
             const w: u32 = @intCast(@as(u32, @bitCast(@as(i32, @truncate(lparam)))) & 0xFFFF);
             const h: u32 = @intCast((@as(u32, @bitCast(@as(i32, @truncate(lparam)))) >> 16) & 0xFFFF);
             state.events.append(state.gpa, .{ .resize = .{ .width = w, .height = h } }) catch {};
+            switch (@as(u32, @intCast(wparam))) {
+                SIZE_MINIMIZED => state.events.append(state.gpa, .minimize) catch {},
+                SIZE_RESTORED, SIZE_MAXIMIZED => state.events.append(state.gpa, .restore) catch {},
+                else => {},
+            }
             return 0;
         },
         WM_DPICHANGED => {
@@ -391,12 +454,184 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.c) L
                 state.last_dpi = new_dpi;
                 const scale: f32 = @as(f32, @floatFromInt(new_dpi)) / 96.0;
                 state.events.append(state.gpa, .{ .dpi_changed = scale }) catch {};
+                // Also report per-monitor: the window may have moved to a
+                // different monitor — re-resolve and surface that explicitly.
+                if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)) |mon| {
+                    const mon_id: u32 = @truncate(@intFromPtr(mon));
+                    state.events.append(state.gpa, .{ .dpi_changed_per_monitor = .{ .monitor = mon_id, .scale = scale } }) catch {};
+                    if (state.last_monitor != mon) {
+                        state.last_monitor = mon;
+                        state.events.append(state.gpa, .{ .monitor_changed = mon_id }) catch {};
+                    }
+                }
             }
             return 0;
         },
+
+        // ============================== M0.3 — Keyboard events
+        WM_KEYDOWN, WM_SYSKEYDOWN => {
+            // LParam bits 16-23: scan code. Bit 24: extended key flag.
+            // Bit 30: previous key state (1 = was down → repeat).
+            const lp: u32 = @bitCast(@as(i32, @truncate(lparam)));
+            const scancode: u8 = @intCast((lp >> 16) & 0xFF);
+            const extended: bool = (lp & (1 << 24)) != 0;
+            const repeat: bool = (lp & (1 << 30)) != 0;
+            const packed_sc: u32 = @as(u32, scancode) | (if (extended) @as(u32, 0x100) else 0);
+            const code = keycode_mod.mapFromWin32Scancode(packed_sc);
+            state.events.append(state.gpa, .{ .key_down = .{ .code = code, .scancode = @intCast(scancode), .repeat = repeat } }) catch {};
+            return 0;
+        },
+        WM_KEYUP, WM_SYSKEYUP => {
+            const lp: u32 = @bitCast(@as(i32, @truncate(lparam)));
+            const scancode: u8 = @intCast((lp >> 16) & 0xFF);
+            const extended: bool = (lp & (1 << 24)) != 0;
+            const packed_sc: u32 = @as(u32, scancode) | (if (extended) @as(u32, 0x100) else 0);
+            const code = keycode_mod.mapFromWin32Scancode(packed_sc);
+            state.events.append(state.gpa, .{ .key_up = .{ .code = code, .scancode = @intCast(scancode) } }) catch {};
+            return 0;
+        },
+
+        // ============================== M0.3 — Mouse events
+        WM_MOUSEMOVE => {
+            const lp: u32 = @bitCast(@as(i32, @truncate(lparam)));
+            const x: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate(lp)))));
+            const y: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate(lp >> 16)))));
+            const dx: i32 = if (state.mouse_in_window) x - state.last_mouse_x else 0;
+            const dy: i32 = if (state.mouse_in_window) y - state.last_mouse_y else 0;
+            state.last_mouse_x = x;
+            state.last_mouse_y = y;
+            state.mouse_in_window = true;
+            state.events.append(state.gpa, .{ .mouse_motion = .{
+                .x = @floatFromInt(x),
+                .y = @floatFromInt(y),
+                .dx = @floatFromInt(dx),
+                .dy = @floatFromInt(dy),
+            } }) catch {};
+            return 0;
+        },
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP => {
+            const lp: u32 = @bitCast(@as(i32, @truncate(lparam)));
+            const x: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate(lp)))));
+            const y: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate(lp >> 16)))));
+            const button: window.MouseButton = switch (msg) {
+                WM_LBUTTONDOWN, WM_LBUTTONUP => .left,
+                WM_RBUTTONDOWN, WM_RBUTTONUP => .right,
+                WM_MBUTTONDOWN, WM_MBUTTONUP => .middle,
+                WM_XBUTTONDOWN, WM_XBUTTONUP => blk: {
+                    // High word of wparam encodes XBUTTON1 (1) or XBUTTON2 (2).
+                    const xb = (wparam >> 16) & 0xFFFF;
+                    break :blk if (xb == 1) .x1 else .x2;
+                },
+                else => unreachable,
+            };
+            const pressed: bool = switch (msg) {
+                WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, WM_XBUTTONDOWN => true,
+                else => false,
+            };
+            state.events.append(state.gpa, .{ .mouse_button = .{
+                .button = button,
+                .pressed = pressed,
+                .x = @floatFromInt(x),
+                .y = @floatFromInt(y),
+            } }) catch {};
+            // XBUTTON* messages expect a return of TRUE.
+            return if (msg == WM_XBUTTONDOWN or msg == WM_XBUTTONUP) 1 else 0;
+        },
+        WM_MOUSEWHEEL => {
+            // High word of wparam is the wheel delta (signed).
+            const raw: i16 = @bitCast(@as(u16, @truncate((wparam >> 16) & 0xFFFF)));
+            const dy: f32 = @as(f32, @floatFromInt(raw)) / WHEEL_DELTA;
+            state.events.append(state.gpa, .{ .mouse_wheel = .{ .dx = 0, .dy = dy } }) catch {};
+            return 0;
+        },
+        WM_MOUSEHWHEEL => {
+            const raw: i16 = @bitCast(@as(u16, @truncate((wparam >> 16) & 0xFFFF)));
+            const dx: f32 = @as(f32, @floatFromInt(raw)) / WHEEL_DELTA;
+            state.events.append(state.gpa, .{ .mouse_wheel = .{ .dx = dx, .dy = 0 } }) catch {};
+            return 0;
+        },
+
+        // ============================== M0.3 — Focus events
+        WM_SETFOCUS => {
+            state.events.append(state.gpa, .focus_gained) catch {};
+            return 0;
+        },
+        WM_KILLFOCUS => {
+            state.events.append(state.gpa, .focus_lost) catch {};
+            return 0;
+        },
+
         WM_DESTROY => {
             return 0;
         },
         else => return DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+// =============================================================== Multi-monitor
+
+const MonitorEnumCtx = struct {
+    gpa: std.mem.Allocator,
+    list: *std.ArrayList(window.MonitorInfo),
+    err: ?anyerror = null,
+};
+
+fn enumMonitorCallback(hMonitor: *anyopaque, hdc: ?*anyopaque, lprcMonitor: *const RECT, dwData: LPARAM) callconv(.c) BOOL {
+    _ = hdc;
+    const ctx: *MonitorEnumCtx = @ptrFromInt(@as(usize, @bitCast(dwData)));
+
+    var info: MONITORINFOEXW = undefined;
+    info.cbSize = @sizeOf(MONITORINFOEXW);
+    if (GetMonitorInfoW(hMonitor, &info) == 0) {
+        // Failed to query — skip but continue enumeration.
+        return 1;
+    }
+
+    var dpi_x: UINT = 96;
+    var dpi_y: UINT = 96;
+    _ = GetDpiForMonitor(hMonitor, 0, &dpi_x, &dpi_y); // MDT_EFFECTIVE_DPI = 0
+
+    var mi: window.MonitorInfo = .{
+        .id = @truncate(@intFromPtr(hMonitor)),
+        .x = lprcMonitor.left,
+        .y = lprcMonitor.top,
+        .width = @intCast(lprcMonitor.right - lprcMonitor.left),
+        .height = @intCast(lprcMonitor.bottom - lprcMonitor.top),
+        .dpi_scale = @as(f32, @floatFromInt(dpi_x)) / 96.0,
+    };
+    // Copy device name (UTF-16) → UTF-8 name buffer, truncating to 63 chars + NUL.
+    var k: usize = 0;
+    while (k < info.szDevice.len and info.szDevice[k] != 0 and k + 1 < mi.name.len) : (k += 1) {
+        // Naïve ASCII truncation — Win32 device names are ASCII-safe
+        // (\\.\DISPLAY1 etc.).
+        const c = info.szDevice[k];
+        mi.name[k] = if (c < 0x80) @intCast(c) else '?';
+    }
+    mi.name[k] = 0;
+
+    ctx.list.append(ctx.gpa, mi) catch |err| {
+        ctx.err = err;
+        return 0; // stop enumeration
+    };
+    return 1;
+}
+
+/// Win32 implementation of `enumerateMonitors` — delegates to `EnumDisplayMonitors`.
+pub fn enumerateMonitors(gpa: std.mem.Allocator) ![]window.MonitorInfo {
+    var list: std.ArrayList(window.MonitorInfo) = .empty;
+    errdefer list.deinit(gpa);
+
+    var ctx: MonitorEnumCtx = .{ .gpa = gpa, .list = &list };
+    _ = EnumDisplayMonitors(null, null, enumMonitorCallback, @bitCast(@as(usize, @intFromPtr(&ctx))));
+    if (ctx.err) |e| return e;
+
+    return list.toOwnedSlice(gpa);
+}
+
+/// Win32 implementation of `currentMonitor` — `MonitorFromWindow` with
+/// `MONITOR_DEFAULTTONEAREST`.
+pub fn currentMonitor(backend_ptr: *const Backend) ?u32 {
+    const hwnd = backend_ptr.state.hwnd;
+    const mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) orelse return null;
+    return @truncate(@intFromPtr(mon));
 }
