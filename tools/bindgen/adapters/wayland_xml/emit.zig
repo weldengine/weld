@@ -447,7 +447,19 @@ const Ctx = struct {
     /// past its end (or null) → SEGFAULT.
     fn writeMessageTypesArray(self: *Ctx, iface_name: []const u8, m: parser.Message) !void {
         if (!self.messageNeedsTypes(m)) return;
-        try self.print("const {s}_{s}_types = [_]?*const WlInterface{{\n", .{ iface_name, m.name });
+        // Count wire-signature slots — same expansion logic as the array body
+        // below. Required because Zig comptime evaluation of `[_]?*const
+        // WlInterface{...}` would create a self-referential cycle when a
+        // types array references the interface that owns it (e.g.
+        // xdg_toplevel.set_parent → xdg_toplevel_interface →
+        // xdg_toplevel_requests → xdg_toplevel_set_parent_types).
+        // Pinning the size via `[N]?*const WlInterface` breaks the cycle.
+        var slots: usize = 0;
+        for (m.args) |a| switch (a.type) {
+            .new_id => slots += if (a.interface == null) @as(usize, 3) else @as(usize, 1),
+            else => slots += 1,
+        };
+        try self.print("const {s}_{s}_types: [{d}]?*const WlInterface = .{{\n", .{ iface_name, m.name, slots });
         for (m.args) |a| {
             switch (a.type) {
                 .object => {
