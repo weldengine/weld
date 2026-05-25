@@ -33,9 +33,16 @@ pre-push:
     # M0.3 — local-only thread-safety rerun on the Wayland stress test
     # with ThreadSanitizer (TSan). The Linux CI matrix does not ship
     # TSan toolchains for the runner image we target, so this hook acts
-    # as the M0.3 garde-fou. The test is `error.SkipZigTest` outside
-    # Linux, which surfaces as exit-0, so the gate stays green on
-    # macOS / Windows developer machines while still firing on Fedora
-    # dev boxes (Guy's primary Linux machine).
+    # as the M0.3 garde-fou. Wrapped in a Linux-only guard because the
+    # `-fsanitize=thread` CLI flag isn't recognized as a standalone
+    # `zig test` argument on macOS / Windows hosts (Zig's flag set is
+    # frontend-target-dependent). On macOS / Windows dev boxes this
+    # entire command short-circuits to `true`, keeping the pre-push
+    # green; on Linux it runs the TSan-instrumented test.
     test-tsan-wayland:
-      run: zig test tests/platform/wayland_thread_safety_test.zig -fsanitize=thread --dep weld_core -Mroot=tests/platform/wayland_thread_safety_test.zig -Mweld_core=src/core/root.zig -lc
+      run: |
+        if [ "$(uname -s)" = "Linux" ]; then
+          zig test tests/platform/wayland_thread_safety_test.zig -fsanitize=thread --dep weld_core -Mroot=tests/platform/wayland_thread_safety_test.zig -Mweld_core=src/core/root.zig -lc
+        else
+          true
+        fi
