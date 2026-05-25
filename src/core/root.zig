@@ -50,6 +50,10 @@ pub const platform = struct {
     pub const dynamic_lib = @import("platform/dynamic_lib.zig");
     // M0.3 — VFS resolver (assets:// / cache:// / user://) + mmapFile.
     pub const fs = @import("platform/fs.zig");
+    // M0.3 — Input Tier 0 namespace (raw_state, keycode, OS-specific).
+    pub const input = struct {
+        pub const keycode = @import("platform/input/keycode.zig");
+    };
 };
 
 // S6 — editor↔runtime IPC. Tier 0 endpoint per `engine-ipc.md` and the
@@ -158,4 +162,5 @@ comptime {
     _ = platform.threading;
     _ = platform.dynamic_lib;
     _ = platform.fs;
+    _ = platform.input.keycode;
 }

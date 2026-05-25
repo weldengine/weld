@@ -175,6 +175,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 renderer.swapchain_dirty = true;
             },
             .dpi_changed => renderer.swapchain_dirty = true,
+            // M0.3 — new Event variants ignored by the S6 editor stub.
+            else => {},
         };
         if (should_close) break;
 
