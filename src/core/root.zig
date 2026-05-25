@@ -33,14 +33,23 @@ pub const testing = struct {
     pub const alloc_counting = @import("testing/alloc_counting.zig");
 };
 
-/// Platform namespace — window, Vulkan, process control.
+/// Platform namespace — window, Vulkan, process control, plus the M0.3
+/// commun layer (fs, time, threading, dynamic_lib, once).
 pub const platform = struct {
     pub const window = @import("platform/window.zig");
     pub const vk = @import("platform/vk.zig");
-    // S6 — minimum process control surface used by the editor stub
-    // to spawn / monitor / kill the runtime stub. Wider API lands in
-    // Phase 0.3 (cf. `engine-platform.md` §4).
     pub const process = @import("platform/process.zig");
+    // M0.3 — once-init primitive (CAS tri-state on std.atomic.Value(u32)).
+    // Used by win32 thread-safety patches and by time.sleepPrecise.
+    pub const once = @import("platform/once.zig");
+    // M0.3 — sleepPrecise wrapper with Win32 timeBeginPeriod(1) once-init.
+    pub const time = @import("platform/time.zig");
+    // M0.3 — setAffinity / setPriority OS-specific helpers.
+    pub const threading = @import("platform/threading.zig");
+    // M0.3 — DynamicLib { open, lookup, close } over LoadLibraryW / dlopen.
+    pub const dynamic_lib = @import("platform/dynamic_lib.zig");
+    // M0.3 — VFS resolver (assets:// / cache:// / user://) + mmapFile.
+    pub const fs = @import("platform/fs.zig");
 };
 
 // S6 — editor↔runtime IPC. Tier 0 endpoint per `engine-ipc.md` and the
@@ -143,4 +152,10 @@ comptime {
     _ = plugin_loader.desc;
     _ = plugin_loader.api;
     _ = plugin_loader.loader;
+    // M0.3 — pin the new platform sub-files so their inline tests run.
+    _ = platform.once;
+    _ = platform.time;
+    _ = platform.threading;
+    _ = platform.dynamic_lib;
+    _ = platform.fs;
 }
