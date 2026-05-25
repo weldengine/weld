@@ -42,7 +42,7 @@ const xdg_wm_base_create_positioner_types = [_]?*const WlInterface{
 
 const xdg_wm_base_get_xdg_surface_types = [_]?*const WlInterface{
     &xdg_surface_interface,
-    &wl_surface_interface,
+    &core.wl_surface_interface,
 };
 
 const xdg_wm_base_requests = [_]WlMessage{
@@ -426,25 +426,25 @@ const xdg_toplevel_set_parent_types = [_]?*const WlInterface{
 };
 
 const xdg_toplevel_show_window_menu_types = [_]?*const WlInterface{
-    &wl_seat_interface,
+    &core.wl_seat_interface,
     null,
     null,
     null,
 };
 
 const xdg_toplevel_move_types = [_]?*const WlInterface{
-    &wl_seat_interface,
+    &core.wl_seat_interface,
     null,
 };
 
 const xdg_toplevel_resize_types = [_]?*const WlInterface{
-    &wl_seat_interface,
+    &core.wl_seat_interface,
     null,
     null,
 };
 
 const xdg_toplevel_set_fullscreen_types = [_]?*const WlInterface{
-    &wl_output_interface,
+    &core.wl_output_interface,
 };
 
 const xdg_toplevel_requests = [_]WlMessage{
@@ -606,7 +606,7 @@ pub const xdg_popup_listener = extern struct {
 };
 
 const xdg_popup_grab_types = [_]?*const WlInterface{
-    &wl_seat_interface,
+    &core.wl_seat_interface,
     null,
 };
 

@@ -18,7 +18,7 @@ pub const zxdg_decoration_manager_v1_request = struct {
 
 const zxdg_decoration_manager_v1_get_toplevel_decoration_types = [_]?*const WlInterface{
     &zxdg_toplevel_decoration_v1_interface,
-    &xdg_toplevel_interface,
+    &xdg_shell.xdg_toplevel_interface,
 };
 
 const zxdg_decoration_manager_v1_requests = [_]WlMessage{
