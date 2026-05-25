@@ -36,10 +36,19 @@ pub const xdg_wm_base_listener = extern struct {
     ping: *const fn (data: ?*anyopaque, proxy: *xdg_wm_base, serial: u32) callconv(.c) void,
 };
 
+const xdg_wm_base_create_positioner_types = [_]?*const WlInterface{
+    &xdg_positioner_interface,
+};
+
+const xdg_wm_base_get_xdg_surface_types = [_]?*const WlInterface{
+    &xdg_surface_interface,
+    &wl_surface_interface,
+};
+
 const xdg_wm_base_requests = [_]WlMessage{
     .{ .name = "destroy", .signature = "", .types = null },
-    .{ .name = "create_positioner", .signature = "n", .types = null },
-    .{ .name = "get_xdg_surface", .signature = "no", .types = null },
+    .{ .name = "create_positioner", .signature = "n", .types = &xdg_wm_base_create_positioner_types },
+    .{ .name = "get_xdg_surface", .signature = "no", .types = &xdg_wm_base_get_xdg_surface_types },
     .{ .name = "pong", .signature = "u", .types = null },
 };
 
@@ -260,10 +269,20 @@ pub const xdg_surface_listener = extern struct {
     configure: *const fn (data: ?*anyopaque, proxy: *xdg_surface, serial: u32) callconv(.c) void,
 };
 
+const xdg_surface_get_toplevel_types = [_]?*const WlInterface{
+    &xdg_toplevel_interface,
+};
+
+const xdg_surface_get_popup_types = [_]?*const WlInterface{
+    &xdg_popup_interface,
+    &xdg_surface_interface,
+    &xdg_positioner_interface,
+};
+
 const xdg_surface_requests = [_]WlMessage{
     .{ .name = "destroy", .signature = "", .types = null },
-    .{ .name = "get_toplevel", .signature = "n", .types = null },
-    .{ .name = "get_popup", .signature = "n?oo", .types = null },
+    .{ .name = "get_toplevel", .signature = "n", .types = &xdg_surface_get_toplevel_types },
+    .{ .name = "get_popup", .signature = "n?oo", .types = &xdg_surface_get_popup_types },
     .{ .name = "set_window_geometry", .signature = "iiii", .types = null },
     .{ .name = "ack_configure", .signature = "u", .types = null },
 };
@@ -402,28 +421,64 @@ pub const xdg_toplevel_listener = extern struct {
     wm_capabilities: *const fn (data: ?*anyopaque, proxy: *xdg_toplevel, capabilities: *core.WlArray) callconv(.c) void,
 };
 
+const xdg_toplevel_set_parent_types = [_]?*const WlInterface{
+    &xdg_toplevel_interface,
+};
+
+const xdg_toplevel_show_window_menu_types = [_]?*const WlInterface{
+    &wl_seat_interface,
+    null,
+    null,
+    null,
+};
+
+const xdg_toplevel_move_types = [_]?*const WlInterface{
+    &wl_seat_interface,
+    null,
+};
+
+const xdg_toplevel_resize_types = [_]?*const WlInterface{
+    &wl_seat_interface,
+    null,
+    null,
+};
+
+const xdg_toplevel_set_fullscreen_types = [_]?*const WlInterface{
+    &wl_output_interface,
+};
+
 const xdg_toplevel_requests = [_]WlMessage{
     .{ .name = "destroy", .signature = "", .types = null },
-    .{ .name = "set_parent", .signature = "?o", .types = null },
+    .{ .name = "set_parent", .signature = "?o", .types = &xdg_toplevel_set_parent_types },
     .{ .name = "set_title", .signature = "s", .types = null },
     .{ .name = "set_app_id", .signature = "s", .types = null },
-    .{ .name = "show_window_menu", .signature = "ouii", .types = null },
-    .{ .name = "move", .signature = "ou", .types = null },
-    .{ .name = "resize", .signature = "ouu", .types = null },
+    .{ .name = "show_window_menu", .signature = "ouii", .types = &xdg_toplevel_show_window_menu_types },
+    .{ .name = "move", .signature = "ou", .types = &xdg_toplevel_move_types },
+    .{ .name = "resize", .signature = "ouu", .types = &xdg_toplevel_resize_types },
     .{ .name = "set_max_size", .signature = "ii", .types = null },
     .{ .name = "set_min_size", .signature = "ii", .types = null },
     .{ .name = "set_maximized", .signature = "", .types = null },
     .{ .name = "unset_maximized", .signature = "", .types = null },
-    .{ .name = "set_fullscreen", .signature = "?o", .types = null },
+    .{ .name = "set_fullscreen", .signature = "?o", .types = &xdg_toplevel_set_fullscreen_types },
     .{ .name = "unset_fullscreen", .signature = "", .types = null },
     .{ .name = "set_minimized", .signature = "", .types = null },
 };
 
+const xdg_toplevel_configure_types = [_]?*const WlInterface{
+    null,
+    null,
+    null,
+};
+
+const xdg_toplevel_wm_capabilities_types = [_]?*const WlInterface{
+    null,
+};
+
 const xdg_toplevel_events = [_]WlMessage{
-    .{ .name = "configure", .signature = "iia", .types = null },
+    .{ .name = "configure", .signature = "iia", .types = &xdg_toplevel_configure_types },
     .{ .name = "close", .signature = "", .types = null },
     .{ .name = "configure_bounds", .signature = "ii", .types = null },
-    .{ .name = "wm_capabilities", .signature = "a", .types = null },
+    .{ .name = "wm_capabilities", .signature = "a", .types = &xdg_toplevel_wm_capabilities_types },
 };
 
 pub const xdg_toplevel_interface = WlInterface{
@@ -550,10 +605,20 @@ pub const xdg_popup_listener = extern struct {
     repositioned: *const fn (data: ?*anyopaque, proxy: *xdg_popup, token: u32) callconv(.c) void,
 };
 
+const xdg_popup_grab_types = [_]?*const WlInterface{
+    &wl_seat_interface,
+    null,
+};
+
+const xdg_popup_reposition_types = [_]?*const WlInterface{
+    &xdg_positioner_interface,
+    null,
+};
+
 const xdg_popup_requests = [_]WlMessage{
     .{ .name = "destroy", .signature = "", .types = null },
-    .{ .name = "grab", .signature = "ou", .types = null },
-    .{ .name = "reposition", .signature = "ou", .types = null },
+    .{ .name = "grab", .signature = "ou", .types = &xdg_popup_grab_types },
+    .{ .name = "reposition", .signature = "ou", .types = &xdg_popup_reposition_types },
 };
 
 const xdg_popup_events = [_]WlMessage{
