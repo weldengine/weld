@@ -16,9 +16,14 @@ pub const zxdg_decoration_manager_v1_request = struct {
     pub const get_toplevel_decoration: u32 = 1;
 };
 
+const zxdg_decoration_manager_v1_get_toplevel_decoration_types: [2]?*const WlInterface = .{
+    &zxdg_toplevel_decoration_v1_interface,
+    &xdg_shell.xdg_toplevel_interface,
+};
+
 const zxdg_decoration_manager_v1_requests = [_]WlMessage{
     .{ .name = "destroy", .signature = "", .types = null },
-    .{ .name = "get_toplevel_decoration", .signature = "no", .types = null },
+    .{ .name = "get_toplevel_decoration", .signature = "no", .types = &zxdg_decoration_manager_v1_get_toplevel_decoration_types },
 };
 
 pub const zxdg_decoration_manager_v1_interface = WlInterface{

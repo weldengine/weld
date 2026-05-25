@@ -186,13 +186,27 @@ pub const wl_display_listener = extern struct {
     delete_id: *const fn (data: ?*anyopaque, proxy: *wl_display, id: u32) callconv(.c) void,
 };
 
+const wl_display_sync_types: [1]?*const WlInterface = .{
+    &wl_callback_interface,
+};
+
+const wl_display_get_registry_types: [1]?*const WlInterface = .{
+    &wl_registry_interface,
+};
+
 const wl_display_requests = [_]WlMessage{
-    .{ .name = "sync", .signature = "n", .types = null },
-    .{ .name = "get_registry", .signature = "n", .types = null },
+    .{ .name = "sync", .signature = "n", .types = &wl_display_sync_types },
+    .{ .name = "get_registry", .signature = "n", .types = &wl_display_get_registry_types },
+};
+
+const wl_display_error_types: [3]?*const WlInterface = .{
+    null,
+    null,
+    null,
 };
 
 const wl_display_events = [_]WlMessage{
-    .{ .name = "error", .signature = "ous", .types = null },
+    .{ .name = "error", .signature = "ous", .types = &wl_display_error_types },
     .{ .name = "delete_id", .signature = "u", .types = null },
 };
 
@@ -243,8 +257,15 @@ pub const wl_registry_listener = extern struct {
     global_remove: *const fn (data: ?*anyopaque, proxy: *wl_registry, name: u32) callconv(.c) void,
 };
 
+const wl_registry_bind_types: [4]?*const WlInterface = .{
+    null,
+    null,
+    null,
+    null,
+};
+
 const wl_registry_requests = [_]WlMessage{
-    .{ .name = "bind", .signature = "usun", .types = null },
+    .{ .name = "bind", .signature = "usun", .types = &wl_registry_bind_types },
 };
 
 const wl_registry_events = [_]WlMessage{
@@ -318,9 +339,17 @@ pub const wl_compositor_request = struct {
     pub const release: u32 = 2;
 };
 
+const wl_compositor_create_surface_types: [1]?*const WlInterface = .{
+    &wl_surface_interface,
+};
+
+const wl_compositor_create_region_types: [1]?*const WlInterface = .{
+    &wl_region_interface,
+};
+
 const wl_compositor_requests = [_]WlMessage{
-    .{ .name = "create_surface", .signature = "n", .types = null },
-    .{ .name = "create_region", .signature = "n", .types = null },
+    .{ .name = "create_surface", .signature = "n", .types = &wl_compositor_create_surface_types },
+    .{ .name = "create_region", .signature = "n", .types = &wl_compositor_create_region_types },
     .{ .name = "release", .signature = "", .types = null },
 };
 
@@ -361,8 +390,17 @@ pub const wl_shm_pool_request = struct {
     pub const resize: u32 = 2;
 };
 
+const wl_shm_pool_create_buffer_types: [6]?*const WlInterface = .{
+    &wl_buffer_interface,
+    null,
+    null,
+    null,
+    null,
+    null,
+};
+
 const wl_shm_pool_requests = [_]WlMessage{
-    .{ .name = "create_buffer", .signature = "niiiiu", .types = null },
+    .{ .name = "create_buffer", .signature = "niiiiu", .types = &wl_shm_pool_create_buffer_types },
     .{ .name = "destroy", .signature = "", .types = null },
     .{ .name = "resize", .signature = "i", .types = null },
 };
@@ -569,8 +607,14 @@ pub const wl_shm_listener = extern struct {
     format: *const fn (data: ?*anyopaque, proxy: *wl_shm, format: u32) callconv(.c) void,
 };
 
+const wl_shm_create_pool_types: [3]?*const WlInterface = .{
+    &wl_shm_pool_interface,
+    null,
+    null,
+};
+
 const wl_shm_requests = [_]WlMessage{
-    .{ .name = "create_pool", .signature = "nhi", .types = null },
+    .{ .name = "create_pool", .signature = "nhi", .types = &wl_shm_create_pool_types },
     .{ .name = "release", .signature = "", .types = null },
 };
 
@@ -853,19 +897,47 @@ pub const wl_data_device_listener = extern struct {
     selection: *const fn (data: ?*anyopaque, proxy: *wl_data_device, id: ?*wl_data_offer) callconv(.c) void,
 };
 
+const wl_data_device_start_drag_types: [4]?*const WlInterface = .{
+    &wl_data_source_interface,
+    &wl_surface_interface,
+    &wl_surface_interface,
+    null,
+};
+
+const wl_data_device_set_selection_types: [2]?*const WlInterface = .{
+    &wl_data_source_interface,
+    null,
+};
+
 const wl_data_device_requests = [_]WlMessage{
-    .{ .name = "start_drag", .signature = "?oo?ou", .types = null },
-    .{ .name = "set_selection", .signature = "?ou", .types = null },
+    .{ .name = "start_drag", .signature = "?oo?ou", .types = &wl_data_device_start_drag_types },
+    .{ .name = "set_selection", .signature = "?ou", .types = &wl_data_device_set_selection_types },
     .{ .name = "release", .signature = "", .types = null },
 };
 
+const wl_data_device_data_offer_types: [1]?*const WlInterface = .{
+    &wl_data_offer_interface,
+};
+
+const wl_data_device_enter_types: [5]?*const WlInterface = .{
+    null,
+    &wl_surface_interface,
+    null,
+    null,
+    &wl_data_offer_interface,
+};
+
+const wl_data_device_selection_types: [1]?*const WlInterface = .{
+    &wl_data_offer_interface,
+};
+
 const wl_data_device_events = [_]WlMessage{
-    .{ .name = "data_offer", .signature = "n", .types = null },
-    .{ .name = "enter", .signature = "uoff?o", .types = null },
+    .{ .name = "data_offer", .signature = "n", .types = &wl_data_device_data_offer_types },
+    .{ .name = "enter", .signature = "uoff?o", .types = &wl_data_device_enter_types },
     .{ .name = "leave", .signature = "", .types = null },
     .{ .name = "motion", .signature = "uff", .types = null },
     .{ .name = "drop", .signature = "", .types = null },
-    .{ .name = "selection", .signature = "?o", .types = null },
+    .{ .name = "selection", .signature = "?o", .types = &wl_data_device_selection_types },
 };
 
 pub const wl_data_device_interface = WlInterface{
@@ -921,9 +993,18 @@ pub const wl_data_device_manager_request = struct {
     pub const release: u32 = 2;
 };
 
+const wl_data_device_manager_create_data_source_types: [1]?*const WlInterface = .{
+    &wl_data_source_interface,
+};
+
+const wl_data_device_manager_get_data_device_types: [2]?*const WlInterface = .{
+    &wl_data_device_interface,
+    &wl_seat_interface,
+};
+
 const wl_data_device_manager_requests = [_]WlMessage{
-    .{ .name = "create_data_source", .signature = "n", .types = null },
-    .{ .name = "get_data_device", .signature = "no", .types = null },
+    .{ .name = "create_data_source", .signature = "n", .types = &wl_data_device_manager_create_data_source_types },
+    .{ .name = "get_data_device", .signature = "no", .types = &wl_data_device_manager_get_data_device_types },
     .{ .name = "release", .signature = "", .types = null },
 };
 
@@ -968,8 +1049,13 @@ pub const wl_shell_request = struct {
     pub const get_shell_surface: u32 = 0;
 };
 
+const wl_shell_get_shell_surface_types: [2]?*const WlInterface = .{
+    &wl_shell_surface_interface,
+    &wl_surface_interface,
+};
+
 const wl_shell_requests = [_]WlMessage{
-    .{ .name = "get_shell_surface", .signature = "no", .types = null },
+    .{ .name = "get_shell_surface", .signature = "no", .types = &wl_shell_get_shell_surface_types },
 };
 
 pub const wl_shell_interface = WlInterface{
@@ -1044,15 +1130,52 @@ pub const wl_shell_surface_listener = extern struct {
     popup_done: *const fn (data: ?*anyopaque, proxy: *wl_shell_surface) callconv(.c) void,
 };
 
+const wl_shell_surface_move_types: [2]?*const WlInterface = .{
+    &wl_seat_interface,
+    null,
+};
+
+const wl_shell_surface_resize_types: [3]?*const WlInterface = .{
+    &wl_seat_interface,
+    null,
+    null,
+};
+
+const wl_shell_surface_set_transient_types: [4]?*const WlInterface = .{
+    &wl_surface_interface,
+    null,
+    null,
+    null,
+};
+
+const wl_shell_surface_set_fullscreen_types: [3]?*const WlInterface = .{
+    null,
+    null,
+    &wl_output_interface,
+};
+
+const wl_shell_surface_set_popup_types: [6]?*const WlInterface = .{
+    &wl_seat_interface,
+    null,
+    &wl_surface_interface,
+    null,
+    null,
+    null,
+};
+
+const wl_shell_surface_set_maximized_types: [1]?*const WlInterface = .{
+    &wl_output_interface,
+};
+
 const wl_shell_surface_requests = [_]WlMessage{
     .{ .name = "pong", .signature = "u", .types = null },
-    .{ .name = "move", .signature = "ou", .types = null },
-    .{ .name = "resize", .signature = "ouu", .types = null },
+    .{ .name = "move", .signature = "ou", .types = &wl_shell_surface_move_types },
+    .{ .name = "resize", .signature = "ouu", .types = &wl_shell_surface_resize_types },
     .{ .name = "set_toplevel", .signature = "", .types = null },
-    .{ .name = "set_transient", .signature = "oiiu", .types = null },
-    .{ .name = "set_fullscreen", .signature = "uu?o", .types = null },
-    .{ .name = "set_popup", .signature = "ouoiiu", .types = null },
-    .{ .name = "set_maximized", .signature = "?o", .types = null },
+    .{ .name = "set_transient", .signature = "oiiu", .types = &wl_shell_surface_set_transient_types },
+    .{ .name = "set_fullscreen", .signature = "uu?o", .types = &wl_shell_surface_set_fullscreen_types },
+    .{ .name = "set_popup", .signature = "ouoiiu", .types = &wl_shell_surface_set_popup_types },
+    .{ .name = "set_maximized", .signature = "?o", .types = &wl_shell_surface_set_maximized_types },
     .{ .name = "set_title", .signature = "s", .types = null },
     .{ .name = "set_class", .signature = "s", .types = null },
 };
@@ -1192,24 +1315,54 @@ pub const wl_surface_listener = extern struct {
     preferred_buffer_transform: *const fn (data: ?*anyopaque, proxy: *wl_surface, transform: u32) callconv(.c) void,
 };
 
+const wl_surface_attach_types: [3]?*const WlInterface = .{
+    &wl_buffer_interface,
+    null,
+    null,
+};
+
+const wl_surface_frame_types: [1]?*const WlInterface = .{
+    &wl_callback_interface,
+};
+
+const wl_surface_set_opaque_region_types: [1]?*const WlInterface = .{
+    &wl_region_interface,
+};
+
+const wl_surface_set_input_region_types: [1]?*const WlInterface = .{
+    &wl_region_interface,
+};
+
+const wl_surface_get_release_types: [1]?*const WlInterface = .{
+    &wl_callback_interface,
+};
+
 const wl_surface_requests = [_]WlMessage{
     .{ .name = "destroy", .signature = "", .types = null },
-    .{ .name = "attach", .signature = "?oii", .types = null },
+    .{ .name = "attach", .signature = "?oii", .types = &wl_surface_attach_types },
     .{ .name = "damage", .signature = "iiii", .types = null },
-    .{ .name = "frame", .signature = "n", .types = null },
-    .{ .name = "set_opaque_region", .signature = "?o", .types = null },
-    .{ .name = "set_input_region", .signature = "?o", .types = null },
+    .{ .name = "frame", .signature = "n", .types = &wl_surface_frame_types },
+    .{ .name = "set_opaque_region", .signature = "?o", .types = &wl_surface_set_opaque_region_types },
+    .{ .name = "set_input_region", .signature = "?o", .types = &wl_surface_set_input_region_types },
     .{ .name = "commit", .signature = "", .types = null },
     .{ .name = "set_buffer_transform", .signature = "i", .types = null },
     .{ .name = "set_buffer_scale", .signature = "i", .types = null },
     .{ .name = "damage_buffer", .signature = "iiii", .types = null },
     .{ .name = "offset", .signature = "ii", .types = null },
-    .{ .name = "get_release", .signature = "n", .types = null },
+    .{ .name = "get_release", .signature = "n", .types = &wl_surface_get_release_types },
+};
+
+const wl_surface_enter_types: [1]?*const WlInterface = .{
+    &wl_output_interface,
+};
+
+const wl_surface_leave_types: [1]?*const WlInterface = .{
+    &wl_output_interface,
 };
 
 const wl_surface_events = [_]WlMessage{
-    .{ .name = "enter", .signature = "o", .types = null },
-    .{ .name = "leave", .signature = "o", .types = null },
+    .{ .name = "enter", .signature = "o", .types = &wl_surface_enter_types },
+    .{ .name = "leave", .signature = "o", .types = &wl_surface_leave_types },
     .{ .name = "preferred_buffer_scale", .signature = "i", .types = null },
     .{ .name = "preferred_buffer_transform", .signature = "u", .types = null },
 };
@@ -1341,10 +1494,22 @@ pub const wl_seat_listener = extern struct {
     name: *const fn (data: ?*anyopaque, proxy: *wl_seat, name: [*:0]const u8) callconv(.c) void,
 };
 
+const wl_seat_get_pointer_types: [1]?*const WlInterface = .{
+    &wl_pointer_interface,
+};
+
+const wl_seat_get_keyboard_types: [1]?*const WlInterface = .{
+    &wl_keyboard_interface,
+};
+
+const wl_seat_get_touch_types: [1]?*const WlInterface = .{
+    &wl_touch_interface,
+};
+
 const wl_seat_requests = [_]WlMessage{
-    .{ .name = "get_pointer", .signature = "n", .types = null },
-    .{ .name = "get_keyboard", .signature = "n", .types = null },
-    .{ .name = "get_touch", .signature = "n", .types = null },
+    .{ .name = "get_pointer", .signature = "n", .types = &wl_seat_get_pointer_types },
+    .{ .name = "get_keyboard", .signature = "n", .types = &wl_seat_get_keyboard_types },
+    .{ .name = "get_touch", .signature = "n", .types = &wl_seat_get_touch_types },
     .{ .name = "release", .signature = "", .types = null },
 };
 
@@ -1461,14 +1626,33 @@ pub const wl_pointer_listener = extern struct {
     axis_relative_direction: *const fn (data: ?*anyopaque, proxy: *wl_pointer, axis: u32, direction: u32) callconv(.c) void,
 };
 
+const wl_pointer_set_cursor_types: [4]?*const WlInterface = .{
+    null,
+    &wl_surface_interface,
+    null,
+    null,
+};
+
 const wl_pointer_requests = [_]WlMessage{
-    .{ .name = "set_cursor", .signature = "u?oii", .types = null },
+    .{ .name = "set_cursor", .signature = "u?oii", .types = &wl_pointer_set_cursor_types },
     .{ .name = "release", .signature = "", .types = null },
 };
 
+const wl_pointer_enter_types: [4]?*const WlInterface = .{
+    null,
+    &wl_surface_interface,
+    null,
+    null,
+};
+
+const wl_pointer_leave_types: [2]?*const WlInterface = .{
+    null,
+    &wl_surface_interface,
+};
+
 const wl_pointer_events = [_]WlMessage{
-    .{ .name = "enter", .signature = "uoff", .types = null },
-    .{ .name = "leave", .signature = "uo", .types = null },
+    .{ .name = "enter", .signature = "uoff", .types = &wl_pointer_enter_types },
+    .{ .name = "leave", .signature = "uo", .types = &wl_pointer_leave_types },
     .{ .name = "motion", .signature = "uff", .types = null },
     .{ .name = "button", .signature = "uuuu", .types = null },
     .{ .name = "axis", .signature = "uuf", .types = null },
@@ -1551,10 +1735,21 @@ const wl_keyboard_requests = [_]WlMessage{
     .{ .name = "release", .signature = "", .types = null },
 };
 
+const wl_keyboard_enter_types: [3]?*const WlInterface = .{
+    null,
+    &wl_surface_interface,
+    null,
+};
+
+const wl_keyboard_leave_types: [2]?*const WlInterface = .{
+    null,
+    &wl_surface_interface,
+};
+
 const wl_keyboard_events = [_]WlMessage{
     .{ .name = "keymap", .signature = "uhu", .types = null },
-    .{ .name = "enter", .signature = "uoa", .types = null },
-    .{ .name = "leave", .signature = "uo", .types = null },
+    .{ .name = "enter", .signature = "uoa", .types = &wl_keyboard_enter_types },
+    .{ .name = "leave", .signature = "uo", .types = &wl_keyboard_leave_types },
     .{ .name = "key", .signature = "uuuu", .types = null },
     .{ .name = "modifiers", .signature = "uuuuu", .types = null },
     .{ .name = "repeat_info", .signature = "ii", .types = null },
@@ -1611,8 +1806,17 @@ const wl_touch_requests = [_]WlMessage{
     .{ .name = "release", .signature = "", .types = null },
 };
 
+const wl_touch_down_types: [6]?*const WlInterface = .{
+    null,
+    null,
+    &wl_surface_interface,
+    null,
+    null,
+    null,
+};
+
 const wl_touch_events = [_]WlMessage{
-    .{ .name = "down", .signature = "uuoiff", .types = null },
+    .{ .name = "down", .signature = "uuoiff", .types = &wl_touch_down_types },
     .{ .name = "up", .signature = "uui", .types = null },
     .{ .name = "motion", .signature = "uiff", .types = null },
     .{ .name = "frame", .signature = "", .types = null },
@@ -1788,9 +1992,15 @@ pub const wl_subcompositor_request = struct {
     pub const get_subsurface: u32 = 1;
 };
 
+const wl_subcompositor_get_subsurface_types: [3]?*const WlInterface = .{
+    &wl_subsurface_interface,
+    &wl_surface_interface,
+    &wl_surface_interface,
+};
+
 const wl_subcompositor_requests = [_]WlMessage{
     .{ .name = "destroy", .signature = "", .types = null },
-    .{ .name = "get_subsurface", .signature = "noo", .types = null },
+    .{ .name = "get_subsurface", .signature = "noo", .types = &wl_subcompositor_get_subsurface_types },
 };
 
 pub const wl_subcompositor_interface = WlInterface{
@@ -1833,11 +2043,19 @@ pub const wl_subsurface_request = struct {
     pub const set_desync: u32 = 5;
 };
 
+const wl_subsurface_place_above_types: [1]?*const WlInterface = .{
+    &wl_surface_interface,
+};
+
+const wl_subsurface_place_below_types: [1]?*const WlInterface = .{
+    &wl_surface_interface,
+};
+
 const wl_subsurface_requests = [_]WlMessage{
     .{ .name = "destroy", .signature = "", .types = null },
     .{ .name = "set_position", .signature = "ii", .types = null },
-    .{ .name = "place_above", .signature = "o", .types = null },
-    .{ .name = "place_below", .signature = "o", .types = null },
+    .{ .name = "place_above", .signature = "o", .types = &wl_subsurface_place_above_types },
+    .{ .name = "place_below", .signature = "o", .types = &wl_subsurface_place_below_types },
     .{ .name = "set_sync", .signature = "", .types = null },
     .{ .name = "set_desync", .signature = "", .types = null },
 };
@@ -1891,9 +2109,13 @@ pub const wl_fixes_request = struct {
     pub const destroy_registry: u32 = 1;
 };
 
+const wl_fixes_destroy_registry_types: [1]?*const WlInterface = .{
+    &wl_registry_interface,
+};
+
 const wl_fixes_requests = [_]WlMessage{
     .{ .name = "destroy", .signature = "", .types = null },
-    .{ .name = "destroy_registry", .signature = "o", .types = null },
+    .{ .name = "destroy_registry", .signature = "o", .types = &wl_fixes_destroy_registry_types },
 };
 
 pub const wl_fixes_interface = WlInterface{

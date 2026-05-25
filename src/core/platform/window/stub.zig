@@ -1,8 +1,16 @@
-//! Stub `Window` backend for platforms outside the S2 scope (macOS, etc.).
+//! Stub `Window` backend for platforms outside the Phase 0 scope.
 //!
-//! Compiles so the rest of the engine is still buildable on macOS while
-//! S2 is in progress; every entry point returns `error.UnsupportedPlatform`
-//! at runtime. Phase 4+ replaces this with a real Cocoa backend.
+//! Phase 0.3 / M0.3 acts the abandoned X11 backend definitively — Weld
+//! Linux = Wayland natif uniquement Phase 0+ (cf. `engine-phase-0-plan.md`
+//! M0.3, debt D-S2-x11 closed as abandoned; `engine-phase-0-criteria.md`
+//! §C0.7 patched). Fedora 44 + Ubuntu 26.04 ship Wayland-only sessions
+//! by default; XWayland covers legacy X11 clients but Weld has a native
+//! Wayland backend since S2. No X11 backend will be implemented unless
+//! Phase 2/3 surfaces a concrete external requirement.
+//!
+//! Darwin / macOS lands in Phase 2 via Cocoa + Metal. Until then, this
+//! stub returns `error.UnsupportedPlatform` on macOS so the rest of the
+//! engine remains buildable for tools/headless CI passes.
 
 const std = @import("std");
 const window = @import("../window.zig");

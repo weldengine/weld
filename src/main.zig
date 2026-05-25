@@ -179,6 +179,10 @@ pub fn main(init: std.process.Init) !u8 {
                 renderer.swapchain_dirty = true;
                 if (args.verbose) try stdout.print("[event] dpi_changed {d:.2}\n", .{scale});
             },
+            // M0.3 — new Event variants (input + lifecycle + multi-monitor).
+            // The S2 spike binary doesn't consume them; gameplay code Phase 0.4+
+            // (and the editor input router Phase 1) will subscribe explicitly.
+            else => {},
         };
 
         if (renderer.swapchain_dirty) {
