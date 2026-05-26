@@ -90,7 +90,11 @@ pub fn hashKey(key: LookupKey) [40]u8 {
     var digest: [20]u8 = undefined;
     sha1.final(&digest);
     var hex: [40]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex, "{x}", .{std.fmt.fmtSliceHexLower(&digest)}) catch unreachable;
+    const hex_alphabet = "0123456789abcdef";
+    for (digest, 0..) |b, i| {
+        hex[i * 2] = hex_alphabet[b >> 4];
+        hex[i * 2 + 1] = hex_alphabet[b & 0x0F];
+    }
     return hex;
 }
 
@@ -122,7 +126,7 @@ pub fn lookup(allocator: std.mem.Allocator, io: std.Io, key: LookupKey) Error!Lo
 pub fn insert(allocator: std.mem.Allocator, io: std.Io, key: LookupKey, spv: []const u8) Error!void {
     _ = allocator;
     const hash = hashKey(key);
-    std.Io.Dir.cwd().makePath(io, CACHE_ROOT) catch |e| switch (e) {
+    std.Io.Dir.cwd().createDirPath(io, CACHE_ROOT) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return error.AccessDenied,
     };

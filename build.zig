@@ -341,6 +341,15 @@ pub fn build(b: *std.Build) void {
         // M0.4 — Instancing batcher (bucketing mesh+material, drawcalls
         // ≤ 100 pour 100 k entités).
         .{ .path = "tests/render/instancing_batcher.zig", .render = true },
+        // M0.4 — Shader cache disque round-trip (hit/miss source modif /
+        // miss glslc version change).
+        .{ .path = "tests/render/shader_cache.zig", .render = true },
+        // M0.4 — vk_gen whitelist closure (variant filtering + closure
+        // convergence under 20 iterations).
+        .{ .path = "tests/vk_gen/whitelist_closure.zig" },
+        // M0.4 — vk_gen *Raw variants emission (3 targets émis, autres
+        // non émis).
+        .{ .path = "tests/vk_gen/raw_variants.zig" },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
