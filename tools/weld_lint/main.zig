@@ -20,6 +20,7 @@ const no_usingnamespace = @import("rules/no_usingnamespace.zig");
 const doc_comments = @import("rules/doc_comments.zig");
 const c_module_isolation = @import("rules/c_module_isolation.zig");
 const conventional_commit = @import("rules/conventional_commit.zig");
+const no_device_dispatch_outside_gal = @import("rules/no_device_dispatch_outside_gal.zig");
 
 const default_lint_paths = [_][]const u8{ "src", "bench", "tests", "tools" };
 
@@ -73,6 +74,7 @@ fn runLint(arena: std.mem.Allocator, io: std.Io, paths: []const [:0]const u8, ou
         try no_usingnamespace.check(arena, file, source, &diags);
         try doc_comments.check(arena, file, source, &diags);
         try c_module_isolation.check(arena, file, source, &diags);
+        try no_device_dispatch_outside_gal.check(arena, file, source, &diags);
     }
 
     std.mem.sort(diag.Diagnostic, diags.items, {}, diag.Diagnostic.lessThan);
@@ -105,7 +107,8 @@ const usage_text =
     \\  weld_lint lint [path]...
     \\      Walk the given paths (default `src bench tests tools`) and
     \\      apply rules: no_cimport, no_usingnamespace, doc_comments,
-    \\      c_module_isolation. Exits 0 if clean, 1 if any rule fires.
+    \\      c_module_isolation, no_device_dispatch_outside_gal. Exits 0
+    \\      if clean, 1 if any rule fires.
     \\
     \\  weld_lint commit-msg <file>
     \\      Validate the title of the commit message at <file> against
