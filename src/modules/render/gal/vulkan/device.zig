@@ -106,7 +106,10 @@ pub const Device = struct {
 
         try pickPhysicalDevice(&device, allocator, descriptor);
 
-        try createLogicalDevice(&device);
+        createLogicalDevice(&device) catch |e| {
+            log.err("vk: createLogicalDevice failed: {t}", .{e});
+            return error.NotInitialized;
+        };
         errdefer device.vk_device.destroyDevice(null);
         vk.loadDevice(device.vk_device) catch return error.NotInitialized;
 

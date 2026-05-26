@@ -27,10 +27,12 @@ const VulkanAvailable = enum { yes, no };
 /// skip avec warn (le runner CI doit pouvoir tourner sans Vulkan sur le
 /// runner Ubuntu GitHub Actions par défaut).
 fn detectVulkan() VulkanAvailable {
-    if (std.process.hasEnvVarConstant("LAVAPIPE_AVAILABLE")) {
-        // Mode opt-in CI — l'env var n'est définie que sur le runner
-        // configuré avec lavapipe. Si elle n'est pas définie, on skip.
-        return .yes;
+    // Mode opt-in CI : `LAVAPIPE_AVAILABLE` env var définie sur le runner
+    // configuré avec lavapipe. `std.posix.getenv` retourne `?[]const u8` ;
+    // sur Windows on saute directement à l'heuristique loader (la fonction
+    // existe sur tous les targets via std.process).
+    if (builtin.os.tag != .windows) {
+        if (std.posix.getenv("LAVAPIPE_AVAILABLE") != null) return .yes;
     }
     // Heuristique : si Vulkan ne load pas, on skip.
     vk.loadLoader() catch return .no;
