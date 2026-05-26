@@ -32,6 +32,14 @@ pub const render_graph = struct {
     };
 };
 
+/// Namespace shader pipeline — compiler GLSL→SPIR-V (glslc CLI spawn),
+/// cache disque hashé, hot-reload via filewatch.
+pub const shader_pipeline = struct {
+    pub const compiler = @import("shader_pipeline/compiler.zig");
+    pub const cache = @import("shader_pipeline/cache.zig");
+    pub const hot_reload = @import("shader_pipeline/hot_reload.zig");
+};
+
 // Pins pour l'analyse des inline tests (engine-zig-conventions.md §13).
 comptime {
     _ = gal;
@@ -40,6 +48,9 @@ comptime {
     _ = render_graph.passes.depth_prepass;
     _ = render_graph.passes.forward;
     _ = render_graph.passes.capture;
+    _ = shader_pipeline.compiler;
+    _ = shader_pipeline.cache;
+    _ = shader_pipeline.hot_reload;
 }
 
 // Anciens accès directs préservés pour rétrocompatibilité avec
