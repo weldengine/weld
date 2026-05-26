@@ -96,45 +96,48 @@ pub fn hashKey(key: LookupKey) [40]u8 {
 
 /// Lookup dans le cache disque. Retourne `.hit` avec les bytes SPIR-V
 /// (owned by caller) ou `.miss`. Allocation via `allocator`.
-pub fn lookup(allocator: std.mem.Allocator, key: LookupKey) Error!LookupResult {
+///
+/// API Zig 0.16 : utilise `std.Io.Dir.cwd()` qui requiert `io: std.Io`.
+pub fn lookup(allocator: std.mem.Allocator, io: std.Io, key: LookupKey) Error!LookupResult {
     const hash = hashKey(key);
     var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}.spv", .{ CACHE_ROOT, hash }) catch return error.OutOfMemory;
 
-    const file = std.fs.cwd().openFile(path, .{}) catch return .miss;
-    defer file.close();
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return .miss;
+    defer file.close(io);
 
-    const stat = file.stat() catch return .miss;
+    const stat = file.stat(io) catch return .miss;
     const size: usize = @intCast(stat.size);
     if (size == 0) return .miss;
 
     const buf = allocator.alloc(u8, size) catch return error.OutOfMemory;
     errdefer allocator.free(buf);
-    const n = file.readAll(buf) catch return error.InputOutput;
-    if (n != size) return .miss;
+    var read_buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+    reader.interface.readSliceAll(buf) catch return error.InputOutput;
     return .{ .hit = buf };
 }
 
 /// Insert dans le cache disque. Crée `.weld-cache/shaders/` si nécessaire.
-pub fn insert(allocator: std.mem.Allocator, key: LookupKey, spv: []const u8) Error!void {
+pub fn insert(allocator: std.mem.Allocator, io: std.Io, key: LookupKey, spv: []const u8) Error!void {
     _ = allocator;
     const hash = hashKey(key);
-    std.fs.cwd().makePath(CACHE_ROOT) catch |e| switch (e) {
+    std.Io.Dir.cwd().makePath(io, CACHE_ROOT) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return error.AccessDenied,
     };
     var path_buf: [256]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}.spv", .{ CACHE_ROOT, hash }) catch return error.OutOfMemory;
 
-    var file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch return error.AccessDenied;
-    defer file.close();
-    file.writeAll(spv) catch return error.InputOutput;
+    var file = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch return error.AccessDenied;
+    defer file.close(io);
+    file.writeStreamingAll(io, spv) catch return error.InputOutput;
 }
 
 /// Supprime tout le cache (debug / clean build). Pas exposé en CLI Phase 0.
-pub fn clear(allocator: std.mem.Allocator) Error!void {
+pub fn clear(allocator: std.mem.Allocator, io: std.Io) Error!void {
     _ = allocator;
-    std.fs.cwd().deleteTree(CACHE_ROOT) catch |e| switch (e) {
+    std.Io.Dir.cwd().deleteTree(io, CACHE_ROOT) catch |e| switch (e) {
         error.FileNotFound => {},
         else => return error.AccessDenied,
     };

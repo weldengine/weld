@@ -25,6 +25,8 @@ pub const OnRecompile = *const fn (ctx: ?*anyopaque, path: []const u8, spv: ?[]c
 
 /// Configuration du watcher.
 pub const Config = struct {
+    /// Instance Io propagée pour les ops fs + spawn (Zig 0.16).
+    io: std.Io,
     /// Dossier racine à surveiller (typiquement `assets/shaders/`).
     root: []const u8 = "assets/shaders",
     /// Intervalle de poll en millisecondes Phase 0. Trade-off latence vs CPU.
@@ -46,7 +48,7 @@ pub const Watcher = struct {
     /// Démarre le watcher. Retourne immédiatement après spawn du thread.
     /// Si glslc absent → log warn et retourne sans démarrer.
     pub fn start(self: *Watcher) !void {
-        if (!compiler.isAvailable(self.allocator)) {
+        if (!compiler.isAvailable(self.allocator, self.config.io)) {
             log.warn("glslc not found, hot-reload disabled, runtime continues with cached .spv", .{});
             return;
         }
@@ -92,22 +94,20 @@ fn threadMain(watcher: *Watcher) void {
 }
 
 fn scanDir(watcher: *Watcher, mtime_map: *std.StringHashMapUnmanaged(i128)) !void {
-    var dir = std.fs.cwd().openDir(watcher.config.root, .{ .iterate = true }) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(watcher.config.io, watcher.config.root, .{ .iterate = true }) catch return;
+    defer dir.close(watcher.config.io);
 
     var it = dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(watcher.config.io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".glsl")) continue;
 
-        const stat = dir.statFile(entry.name) catch continue;
+        const stat = dir.statFile(watcher.config.io, entry.name) catch continue;
         const mtime = stat.mtime;
 
         const gop = mtime_map.getOrPut(watcher.allocator, entry.name) catch continue;
         if (!gop.found_existing) {
-            // Nouveau fichier : duplique le nom pour le storage.
             const owned = watcher.allocator.dupe(u8, entry.name) catch continue;
-            // Remplacer la clé éphémère.
             _ = mtime_map.remove(entry.name);
             mtime_map.put(watcher.allocator, owned, mtime) catch {
                 watcher.allocator.free(owned);
@@ -127,8 +127,14 @@ fn recompile(watcher: *Watcher, name: []const u8) !void {
     const path = try std.fmt.allocPrint(watcher.allocator, "{s}/{s}", .{ watcher.config.root, name });
     defer watcher.allocator.free(path);
 
-    const source = std.fs.cwd().readFileAlloc(watcher.allocator, path, 1024 * 1024) catch return;
+    var file = std.Io.Dir.cwd().openFile(watcher.config.io, path, .{}) catch return;
+    defer file.close(watcher.config.io);
+    const stat = file.stat(watcher.config.io) catch return;
+    const source = watcher.allocator.alloc(u8, @intCast(stat.size)) catch return;
     defer watcher.allocator.free(source);
+    var read_buf: [4096]u8 = undefined;
+    var reader = file.reader(watcher.config.io, &read_buf);
+    reader.interface.readSliceAll(source) catch return;
 
     const stage: compiler.Stage = if (std.mem.indexOf(u8, name, ".vert") != null)
         .vertex
@@ -139,7 +145,7 @@ fn recompile(watcher: *Watcher, name: []const u8) !void {
     else
         return;
 
-    var result = compiler.compile(watcher.allocator, source, stage, null) catch |e| {
+    var result = compiler.compile(watcher.allocator, watcher.config.io, source, stage, null) catch |e| {
         const msg = std.fmt.allocPrint(watcher.allocator, "compile failed: {t}", .{e}) catch return;
         defer watcher.allocator.free(msg);
         watcher.config.on_recompile(watcher.config.callback_ctx, path, null, msg);
@@ -152,9 +158,8 @@ fn recompile(watcher: *Watcher, name: []const u8) !void {
         return;
     }
 
-    // Met en cache + callback.
     const key: cache.LookupKey = .{ .source = source, .glslc_version = watcher.glslc_version };
-    cache.insert(watcher.allocator, key, result.spv) catch {};
+    cache.insert(watcher.allocator, watcher.config.io, key, result.spv) catch {};
     watcher.config.on_recompile(watcher.config.callback_ctx, path, result.spv, result.diagnostics);
 }
 
@@ -162,7 +167,6 @@ test "hot_reload: Watcher init / deinit cycle without start" {
     const cb = struct {
         fn cb(_: ?*anyopaque, _: []const u8, _: ?[]const u8, _: ?[]const u8) void {}
     }.cb;
-    var w = init(std.testing.allocator, .{ .on_recompile = cb });
+    var w = init(std.testing.allocator, .{ .io = std.testing.io, .on_recompile = cb });
     defer w.deinit();
-    // Pas de start — la thread n'est jamais spawned, deinit doit pas hang.
 }

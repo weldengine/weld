@@ -150,6 +150,43 @@ pub fn build(b: *std.Build) void {
     const ex_step = b.step("run-example-triangle", "Build & run the triangle example sub-project");
     ex_step.dependOn(&ex_run.step);
 
+    // M0.4 — Shader compiler tool : `zig build shaders` regénère les
+    // `.spv` depuis les `.glsl`. `zig build shaders-check` diff vs
+    // les commités (brief §Fichiers + §CI).
+    const shader_compiler_module = b.createModule(.{
+        .root_source_file = b.path("tools/shader_compiler/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const sp_compiler_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/render/shader_pipeline/compiler.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    shader_compiler_module.addImport("shader_pipeline_compiler", sp_compiler_module);
+    const shader_compiler_exe = b.addExecutable(.{
+        .name = "shader_compiler",
+        .root_module = shader_compiler_module,
+    });
+    const shaders_run = b.addRunArtifact(shader_compiler_exe);
+    const shaders_step = b.step("shaders", "Regenerate .spv files from .glsl sources via glslc");
+    shaders_step.dependOn(&shaders_run.step);
+
+    const shaders_check_run = b.addRunArtifact(shader_compiler_exe);
+    shaders_check_run.addArg("--check");
+    const shaders_check_step = b.step("shaders-check", "Verify .spv on disk matches a fresh glslc regen");
+    shaders_check_step.dependOn(&shaders_check_run.step);
+
+    // M0.4 — `zig build vk-gen-check` : régénère vk.zig et vérifie que
+    // le diff vs le commit est vide. Délégué à l'existant `bindgen-verify`
+    // qui couvre tous les bindings générés.
+    const vk_gen_check_step = b.step("vk-gen-check", "Verify vk.zig matches a fresh bindgen regen (delegates to bindgen-verify)");
+    if (b.top_level_steps.get("bindgen-verify")) |bv| {
+        vk_gen_check_step.dependOn(&bv.step);
+    }
+
     // -------------------------------------------------------------- Tests --
 
     const test_step = b.step("test", "Run all tests");
