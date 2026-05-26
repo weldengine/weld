@@ -15,7 +15,13 @@ const std = @import("std");
 const diag = @import("../diagnostic.zig");
 
 const name = "no_device_dispatch_outside_gal";
-const allowed_prefix = "src/modules/render/gal/vulkan/";
+/// Path forms acceptés pour le préfixe « légitime ». `scan.zig` joint les
+/// chemins via `std.fs.path.join`, qui produit `/` sous POSIX et `\` sous
+/// Win32 — d'où les deux variantes. Sans la version backslash, la règle
+/// déclencherait sur le backend Vulkan lui-même quand `weld_lint` tourne
+/// sous Windows (cf. bug Windows-Debug du run 26473017061).
+const allowed_prefix_posix = "src/modules/render/gal/vulkan/";
+const allowed_prefix_win = "src\\modules\\render\\gal\\vulkan\\";
 
 /// Marker opt-in pour les fichiers legacy S6 qui appellent `device_dispatch`
 /// avant la migration GAL Phase 1+. Présent en tête du fichier sous la
@@ -35,8 +41,10 @@ pub fn check(
     out: *std.ArrayList(diag.Diagnostic),
 ) !void {
     // Path normalization : le runner peut passer des paths absolus ou
-    // relatifs. On accepte les deux en cherchant le préfixe en suffix.
-    if (std.mem.indexOf(u8, file, allowed_prefix) != null) return;
+    // relatifs. On accepte les deux en cherchant le préfixe en suffix,
+    // sur les deux séparateurs (POSIX `/`, Win32 `\`).
+    if (std.mem.indexOf(u8, file, allowed_prefix_posix) != null) return;
+    if (std.mem.indexOf(u8, file, allowed_prefix_win) != null) return;
     if (hasLegacyMarker(source)) return;
 
     var tokenizer = std.zig.Tokenizer.init(source);
