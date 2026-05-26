@@ -60,7 +60,11 @@ pub fn build(b: *std.Build) void {
     //
     // Importe `weld_core` parce que le backend Vulkan utilise
     // `weld_core.platform.vk` (binding généré par `tools/bindgen`).
-    const render_module = b.createModule(.{
+    // `b.addModule` (au lieu de `b.createModule`) enregistre le module
+    // dans `b.modules` et le rend consommable par les dépendants via
+    // `b.dependency("weld", ...).module("weld_render")` — pré-requis du
+    // sous-projet `examples/triangle/` (brief §Scope).
+    const render_module = b.addModule("weld_render", .{
         .root_source_file = b.path("src/modules/render/main.zig"),
         .target = target,
         .optimize = optimize,
@@ -144,6 +148,23 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run the weld executable");
     run_step.dependOn(&run_cmd.step);
+
+    // M0.4 — `zig build run-example-triangle` invoque le sous-projet
+    // standalone `examples/triangle/` via un subprocess `zig build run`.
+    // C'est le test architectural vivant de la consommabilité externe
+    // (brief §Notes décision 12 + §Comportement observable).
+    const ex_run = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build",
+        "run",
+    });
+    ex_run.setCwd(b.path("examples/triangle"));
+    if (b.args) |args| {
+        ex_run.addArg("--");
+        ex_run.addArgs(args);
+    }
+    const ex_step = b.step("run-example-triangle", "Build & run the triangle example sub-project");
+    ex_step.dependOn(&ex_run.step);
 
     // -------------------------------------------------------------- Tests --
 
