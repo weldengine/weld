@@ -33,6 +33,8 @@ pub const interface = @import("interface.zig");
 pub const barriers = @import("barriers.zig");
 /// Backend Null — no-op, utilisé en CI headless et pour la discipline d'API.
 pub const null_backend = @import("null/device.zig");
+/// Backend Vulkan — implémentation Phase 0+ (cf. brief §Scope).
+pub const vulkan_backend = @import("vulkan/device.zig");
 
 // Re-exports lisibles côté caller (évite l'imbrication `gal.types.*`).
 
@@ -83,7 +85,7 @@ pub const BackendChoice = enum {
 pub fn Device(comptime choice: BackendChoice) type {
     return switch (choice) {
         .null_backend => null_backend.Device,
-        .vulkan => @compileError("Vulkan backend not yet wired in M0.4 scaffolding — see brief §Scope (suite immediate)"),
+        .vulkan => vulkan_backend.Device,
         .metal => @compileError("Metal backend is Phase 2+ (declared day 1, not implemented in M0.4)"),
         .d3d12 => @compileError("D3D12 backend is Phase 2+ (declared day 1, not implemented in M0.4)"),
         .webgpu => @compileError("WebGPU backend is Phase 3+ (declared day 1, not implemented in M0.4)"),
@@ -104,6 +106,7 @@ pub fn defaultBackend() BackendChoice {
 
 comptime {
     interface.checkBackend(null_backend.Device);
+    interface.checkBackend(vulkan_backend.Device);
 }
 
 test "main: BackendChoice exposes all 5 entries" {

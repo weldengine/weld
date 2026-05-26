@@ -54,14 +54,18 @@ pub fn build(b: *std.Build) void {
 
     // M0.4 — `weld_render` module exposes the Render Tier 1 module entry,
     // starting with the GAL (GPU Abstraction Layer) public surface and
-    // the `Null` backend. The `Vulkan` backend wires into this module
-    // later in M0.4. Consumed by `tests/render/*.zig` and, eventually,
-    // by the runtime + `examples/triangle/` standalone sub-project.
+    // the `Null` + `Vulkan` backends. Consumed by `tests/render/*.zig`
+    // and, eventually, by the runtime + `examples/triangle/` standalone
+    // sub-project.
+    //
+    // Importe `weld_core` parce que le backend Vulkan utilise
+    // `weld_core.platform.vk` (binding généré par `tools/bindgen`).
     const render_module = b.createModule(.{
         .root_source_file = b.path("src/modules/render/gal/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    render_module.addImport("weld_core", core_module);
 
     // M0.2 / E6 — plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
@@ -293,6 +297,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/audio/dummy_stub_test.zig", .audio = true },
         // M0.4 — GAL Null backend smoke + interface check (CI headless).
         .{ .path = "tests/render/gal_null_smoke.zig", .render = true },
+        // M0.4 — GAL Vulkan backend offline init test (skip si Vulkan absent).
+        .{ .path = "tests/render/gal_vulkan_offline.zig", .render = true },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{

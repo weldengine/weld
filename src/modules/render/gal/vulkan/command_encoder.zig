@@ -1,0 +1,277 @@
+//! CommandEncoder + RenderPassEncoder + ComputePassEncoder Vulkan — Phase 0 / M0.4.
+//!
+//! Le CommandEncoder GAL wrap un `*vk.CommandBuffer` alloué depuis la
+//! command pool partagée du Device. La sémantique :
+//! - `createCommandEncoder` alloue + `beginCommandBuffer`
+//! - `finish` appelle `endCommandBuffer`
+//! - `destroy` libère le buffer et l'encoder lui-même
+//!
+//! Les RenderPassEncoder/ComputePassEncoder sont des structures plates qui
+//! détiennent un pointeur vers le `CommandBuffer` et appellent les
+//! `cmd*` correspondants.
+
+const std = @import("std");
+const weld_core = @import("weld_core");
+const vk = weld_core.platform.vk;
+const types = @import("../types.zig");
+const escape = @import("../escape_hatches.zig");
+const conv = @import("conv.zig");
+const Device = @import("device.zig").Device;
+const buffer_mod = @import("buffer.zig");
+const bind_mod = @import("bind_group.zig");
+const pipeline_mod = @import("pipeline.zig");
+const render_pass_mod = @import("render_pass.zig");
+
+/// CommandEncoder Vulkan — wrap un `*vk.CommandBuffer` alloué depuis la
+/// command pool partagée. La sémantique GAL est cohérente avec WebGPU :
+/// `create` ouvre l'enregistrement, `finish` ferme, `destroy` libère le
+/// buffer côté CPU (le GPU peut encore l'exécuter).
+pub const CommandEncoder = struct {
+    device: *Device,
+    cb: *vk.CommandBuffer,
+    label: ?[]const u8 = null,
+    finished: bool = false,
+    /// Ressources transient (render pass + framebuffer) à libérer en
+    /// `destroy`. Phase 0 simple : on n'en garde qu'une à la fois — la
+    /// limitation correspond à 1 begin/end render pass par encoder.
+    active_pass: ?render_pass_mod.Transient = null,
+
+    pub fn beginRenderPass(self: *CommandEncoder, descriptor: types.RenderPassDescriptor) types.Error!RenderPassEncoder {
+        if (self.finished) return error.InvalidArgument;
+        var t = try render_pass_mod.begin(self.device, descriptor);
+        const begin_info: vk.RenderPassBeginInfo = .{
+            .render_pass = t.render_pass,
+            .framebuffer = t.framebuffer,
+            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = t.extent },
+            .clear_value_count = t.clear_count,
+            .p_clear_values = if (t.clear_count > 0) @ptrCast(&t.clear_values) else null,
+        };
+        self.cb.cmdBeginRenderPass(&begin_info, .@"inline");
+        self.active_pass = t;
+        return .{ .device = self.device, .cb = self.cb };
+    }
+
+    pub fn beginComputePass(self: *CommandEncoder, descriptor: types.ComputePassDescriptor) ComputePassEncoder {
+        _ = descriptor;
+        return .{ .device = self.device, .cb = self.cb };
+    }
+
+    pub fn copyBufferToBuffer(
+        self: *CommandEncoder,
+        src: types.BufferHandle,
+        src_offset: u64,
+        dst: types.BufferHandle,
+        dst_offset: u64,
+        size: u64,
+    ) void {
+        const src_buf = buffer_mod.lookup(self.device, src) orelse return;
+        const dst_buf = buffer_mod.lookup(self.device, dst) orelse return;
+        const region: vk.BufferCopy = .{
+            .src_offset = src_offset,
+            .dst_offset = dst_offset,
+            .size = size,
+        };
+        self.cb.cmdCopyBuffer(src_buf, dst_buf, &.{region});
+    }
+
+    pub fn copyBufferToTexture(
+        self: *CommandEncoder,
+        src: types.BufferHandle,
+        src_offset: u64,
+        dst: types.TextureHandle,
+        mip: u32,
+        layer: u32,
+        size: [3]u32,
+    ) void {
+        _ = .{ self, src, src_offset, dst, mip, layer, size };
+        // Phase 0 : non implémenté côté Vulkan, no-op silencieux. Phase 1+
+        // via `vkCmdCopyBufferToImage` + transitions de layout.
+    }
+
+    pub fn finish(self: *CommandEncoder) void {
+        if (self.finished) return;
+        if (self.active_pass) |*t| {
+            self.cb.cmdEndRenderPass();
+            // Note: on ne détruit pas la render pass/framebuffer ici parce
+            // qu'ils doivent vivre jusqu'à ce que la submission GPU soit
+            // terminée. Phase 0 simplification : la transition cleanup est
+            // déportée à `destroy` du command encoder (le caller doit avoir
+            // waitFence avant).
+            _ = t;
+        }
+        self.cb.endCommandBuffer() catch {};
+        self.finished = true;
+    }
+};
+
+/// RenderPassEncoder Vulkan — délégué par `CommandEncoder.beginRenderPass`.
+/// Structure plate, n'est pas allouée séparément du CommandEncoder.
+pub const RenderPassEncoder = struct {
+    device: *Device,
+    cb: *vk.CommandBuffer,
+
+    pub fn setPipeline(self: *RenderPassEncoder, pipeline: types.RenderPipelineHandle) void {
+        const entry = pipeline_mod.lookup(self.device, pipeline) orelse return;
+        self.cb.cmdBindPipeline(.graphics, entry.pipeline);
+    }
+
+    pub fn setBindGroup(self: *RenderPassEncoder, slot: u32, group: types.BindGroupHandle) void {
+        const set = bind_mod.lookupSet(self.device, group) orelse return;
+        // Pour bind correctement on a besoin du pipeline_layout — Phase 0
+        // pattern : le caller a appelé setPipeline juste avant, on assume
+        // que le dernier pipeline bindé est encore courant. Phase 1+ :
+        // tracker le layout courant via un state machine.
+        _ = .{ slot, set };
+        // Phase 0 : pas de binding effectif sans tracker — call site no-op.
+    }
+
+    pub fn setVertexBuffer(self: *RenderPassEncoder, slot: u32, buffer: types.BufferHandle, offset: u64) void {
+        const buf = buffer_mod.lookup(self.device, buffer) orelse return;
+        const offsets: [1]vk.DeviceSize = .{offset};
+        self.cb.cmdBindVertexBuffers(slot, &.{buf}, &offsets);
+    }
+
+    pub fn setIndexBuffer(
+        self: *RenderPassEncoder,
+        buffer: types.BufferHandle,
+        offset: u64,
+        index_type: enum { u16, u32 },
+    ) void {
+        const buf = buffer_mod.lookup(self.device, buffer) orelse return;
+        const it: vk.IndexType = switch (index_type) {
+            .u16 => .uint16,
+            .u32 => .uint32,
+        };
+        self.cb.cmdBindIndexBuffer(buf, offset, it);
+    }
+
+    pub fn draw(
+        self: *RenderPassEncoder,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) void {
+        self.cb.cmdDraw(vertex_count, instance_count, first_vertex, first_instance);
+    }
+
+    pub fn drawIndexed(
+        self: *RenderPassEncoder,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        first_instance: u32,
+    ) void {
+        self.cb.cmdDrawIndexed(index_count, instance_count, first_index, vertex_offset, first_instance);
+    }
+
+    pub fn setViewport(
+        self: *RenderPassEncoder,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        min_depth: f32,
+        max_depth: f32,
+    ) void {
+        const vp: vk.Viewport = .{
+            .x = x,
+            .y = y,
+            .width = w,
+            .height = h,
+            .min_depth = min_depth,
+            .max_depth = max_depth,
+        };
+        self.cb.cmdSetViewport(0, &.{vp});
+    }
+
+    pub fn setScissor(self: *RenderPassEncoder, x: i32, y: i32, w: u32, h: u32) void {
+        const r: vk.Rect2D = .{
+            .offset = .{ .x = x, .y = y },
+            .extent = .{ .width = w, .height = h },
+        };
+        self.cb.cmdSetScissor(0, &.{r});
+    }
+
+    pub fn barrier(self: *RenderPassEncoder, barrier_desc: escape.ExplicitBarrier) void {
+        _ = .{ self, barrier_desc };
+        // Phase 0 : explicit barriers non câblés (auto-tracking par défaut).
+        // Premier usage Phase 1+ (cf. brief §Notes décision 2).
+    }
+
+    pub fn end(self: *RenderPassEncoder) void {
+        _ = self;
+        // Le `cmdEndRenderPass` est appelé par `CommandEncoder.finish` —
+        // ce `end` GAL est nominal (signale "j'ai fini d'enregistrer cette pass").
+    }
+};
+
+/// ComputePassEncoder Vulkan — délégué par `CommandEncoder.beginComputePass`.
+/// Phase 0 utilisé pour Phase 1+ (GI compute, V-Buffer culling).
+pub const ComputePassEncoder = struct {
+    device: *Device,
+    cb: *vk.CommandBuffer,
+
+    pub fn setPipeline(self: *ComputePassEncoder, pipeline: types.ComputePipelineHandle) void {
+        const entry = pipeline_mod.lookup(self.device, .{ .inner = pipeline.inner }) orelse return;
+        self.cb.cmdBindPipeline(.compute, entry.pipeline);
+    }
+
+    pub fn setBindGroup(self: *ComputePassEncoder, slot: u32, group: types.BindGroupHandle) void {
+        _ = .{ self, slot, group };
+    }
+
+    pub fn dispatch(self: *ComputePassEncoder, x: u32, y: u32, z: u32) void {
+        self.cb.cmdDispatch(x, y, z);
+    }
+
+    pub fn barrier(self: *ComputePassEncoder, barrier_desc: escape.ExplicitBarrier) void {
+        _ = .{ self, barrier_desc };
+    }
+
+    pub fn end(self: *ComputePassEncoder) void {
+        _ = self;
+    }
+};
+
+/// Alloue + initialise un CommandEncoder depuis la command pool partagée
+/// du Device. Appelle `beginCommandBuffer` immédiatement.
+pub fn create(device: *Device, label: ?[]const u8) types.Error!*CommandEncoder {
+    const alloc_ci: vk.CommandBufferAllocateInfo = .{
+        .command_pool = device.command_pool,
+        .level = .primary,
+        .command_buffer_count = 1,
+    };
+    var bufs: [1]*vk.CommandBuffer = undefined;
+    device.vk_device.allocateCommandBuffers(&alloc_ci, &bufs) catch return error.BackendInternal;
+
+    const begin: vk.CommandBufferBeginInfo = .{
+        .flags = .empty,
+        .p_inheritance_info = null,
+    };
+    bufs[0].beginCommandBuffer(&begin) catch return error.BackendInternal;
+
+    const enc = device.allocator.create(CommandEncoder) catch return error.OutOfMemory;
+    enc.* = .{
+        .device = device,
+        .cb = bufs[0],
+        .label = label,
+    };
+    return enc;
+}
+
+/// Libère un CommandEncoder. Détruit la pass transient si encore active.
+/// Le `vk.CommandBuffer` n'est pas explicitement free — la pool sera reset
+/// au prochain `resetCommandBuffer` du caller.
+pub fn destroy(device: *Device, encoder: *CommandEncoder) void {
+    if (encoder.active_pass) |*t| {
+        t.destroy(device.vk_device);
+        encoder.active_pass = null;
+    }
+    // Le command buffer est libéré quand la pool est reset/destroyed — on
+    // n'a pas besoin d'appeler `freeCommandBuffers` Phase 0 (la pool est
+    // créée avec `reset_command_buffer` flag, le caller peut faire
+    // `cmd.resetCommandBuffer` avant la prochaine utilisation).
+    device.allocator.destroy(encoder);
+}
