@@ -52,6 +52,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // M0.4 — `weld_render` module exposes the Render Tier 1 module entry,
+    // starting with the GAL (GPU Abstraction Layer) public surface and
+    // the `Null` backend. The `Vulkan` backend wires into this module
+    // later in M0.4. Consumed by `tests/render/*.zig` and, eventually,
+    // by the runtime + `examples/triangle/` standalone sub-project.
+    const render_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/render/gal/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // M0.2 / E6 — plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
     // Exposes the C ABI types from `desc.zig` (no `WeldAPI` itself,
@@ -216,6 +227,9 @@ pub fn build(b: *std.Build) void {
         needs_stub_plugins: bool = false,
         /// M0.3 — when set, imports the `weld_audio` module.
         audio: bool = false,
+        /// M0.4 — when set, imports the `weld_render` module (GAL public
+        /// surface + Null backend, Vulkan backend wires in later).
+        render: bool = false,
     };
     const test_specs = [_]TestSpec{
         .{ .path = "tests/smoke_test.zig" },
@@ -277,6 +291,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/platform/input_gamepad_test.zig" },
         // M0.3 — Audio Dummy stub test.
         .{ .path = "tests/audio/dummy_stub_test.zig", .audio = true },
+        // M0.4 — GAL Null backend smoke + interface check (CI headless).
+        .{ .path = "tests/render/gal_null_smoke.zig", .render = true },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
@@ -303,6 +319,9 @@ pub fn build(b: *std.Build) void {
         }
         if (spec.audio) {
             t_mod.addImport("weld_audio", audio_module);
+        }
+        if (spec.render) {
+            t_mod.addImport("weld_render", render_module);
         }
         const t = b.addTest(.{ .root_module = t_mod });
         const t_run = b.addRunArtifact(t);
