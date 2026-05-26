@@ -61,7 +61,7 @@ pub fn build(b: *std.Build) void {
     // Importe `weld_core` parce que le backend Vulkan utilise
     // `weld_core.platform.vk` (binding généré par `tools/bindgen`).
     const render_module = b.createModule(.{
-        .root_source_file = b.path("src/modules/render/gal/main.zig"),
+        .root_source_file = b.path("src/modules/render/main.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -299,6 +299,11 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/render/gal_null_smoke.zig", .render = true },
         // M0.4 — GAL Vulkan backend offline init test (skip si Vulkan absent).
         .{ .path = "tests/render/gal_vulkan_offline.zig", .render = true },
+        // M0.4 — Render graph topological sort + cycle detection.
+        .{ .path = "tests/render/render_graph_topo.zig", .render = true },
+        // M0.4 — Render graph auto-tracking barriers (write-after-read,
+        // explicit mode skip).
+        .{ .path = "tests/render/render_graph_barriers.zig", .render = true },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
