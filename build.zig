@@ -119,35 +119,19 @@ pub fn build(b: *std.Build) void {
     );
     for (stub_install_steps) |s| stub_plugins_step.dependOn(s);
 
-    // Main executable.
-    const exe_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    exe_module.addImport("weld_core", core_module);
+    // M0.4 — `src/main.zig` supprimé (cf. brief §Suppressions). Le moteur
+    // Weld est consommé comme lib + outils, pas comme binaire racine. La
+    // démonstration vit dans `examples/triangle/`. Toute la logique CLI
+    // parsing du binaire spike S2 (--smoke-test, --gpu-prefer, --capture-frame)
+    // est migrée dans `examples/triangle/src/main.zig`.
 
-    // Shaders embedding — the SPIR-V files live under `assets/shaders/`,
-    // outside the spike binary's source root. `@embedFile` cannot escape
-    // the package directory, so we wrap the embeds in a tiny module
-    // rooted at `assets/shaders/embed.zig` and import it as `shaders`.
+    // Shaders embedding — partagé par les binaires éditeur + runtime pour
+    // le viewport blit S6. Les `.spv` vivent sous `assets/shaders/`.
     const shaders_module = b.createModule(.{
         .root_source_file = b.path("assets/shaders/embed.zig"),
         .target = target,
         .optimize = optimize,
     });
-    exe_module.addImport("shaders", shaders_module);
-    const exe = b.addExecutable(.{
-        .name = "weld",
-        .root_module = exe_module,
-    });
-    b.installArtifact(exe);
-
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run the weld executable");
-    run_step.dependOn(&run_cmd.step);
 
     // M0.4 — `zig build run-example-triangle` invoque le sous-projet
     // standalone `examples/triangle/` via un subprocess `zig build run`.
@@ -174,27 +158,17 @@ pub fn build(b: *std.Build) void {
     const core_tests = b.addTest(.{ .root_module = core_module });
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
 
-    // Inline tests in src/main.zig.
-    const main_tests = b.addTest(.{ .root_module = exe_module });
-    test_step.dependOn(&b.addRunArtifact(main_tests).step);
-
     // Same-file tests inside src/etch/*.zig.
     const etch_tests = b.addTest(.{ .root_module = etch_module });
     test_step.dependOn(&b.addRunArtifact(etch_tests).step);
 
     // Out-of-tree tests. Each file is its own root_module and imports
     // `weld_core` to reach the engine internals.
-    // Out-of-tree spike + bindings tests need to reach files that live
-    // outside `weld_core`'s module tree. Each group is exposed via a
-    // thin facade module — Zig 0.16 forbids a single file from belonging
-    // to two module trees, so we can't expose siblings as separate
-    // modules when they `@import` each other. The facades sit next to
-    // the code they shepherd so the throwaway-blast-radius is preserved.
-    const spike_test_module = b.createModule(.{
-        .root_source_file = b.path("src/spike/tests_facade.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    // Out-of-tree bindings tests need to reach files that live outside
+    // `weld_core`'s module tree. Each group is exposed via a thin facade
+    // module — Zig 0.16 forbids a single file from belonging to two module
+    // trees, so we can't expose siblings as separate modules when they
+    // `@import` each other.
     const wl_protocols_test_module = b.createModule(.{
         .root_source_file = b.path("src/core/platform/window/wayland_protocols/tests_facade.zig"),
         .target = target,
@@ -242,7 +216,7 @@ pub fn build(b: *std.Build) void {
 
     const TestSpec = struct {
         path: []const u8,
-        spike: bool = false,
+        // M0.4 — `spike` champ retiré, plus aucune entrée n'en a besoin.
         wl_protocols: bool = false,
         etch: bool = false,
         etch_interp: bool = false,
@@ -292,8 +266,10 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/jobs/scheduler_test.zig" },
         .{ .path = "tests/window/win32_open_close_test.zig" },
         .{ .path = "tests/window/wayland_open_close_test.zig" },
-        .{ .path = "tests/spike/scoring_test.zig", .spike = true },
-        .{ .path = "tests/spike/cli_test.zig", .spike = true },
+        // M0.4 — tests/spike/ supprimés avec le reste du dossier
+        // (cf. brief §Suppressions). Le scoring multi-GPU est porté dans
+        // gal/vulkan/device.zig, le CLI parse vit dans
+        // examples/triangle/src/main.zig.
         .{ .path = "tests/bindings/vk_abi_test.zig" },
         .{ .path = "tests/bindings/wayland_abi_test.zig", .wl_protocols = true },
         .{ .path = "tests/etch/corpus_test.zig", .etch = true },
@@ -336,9 +312,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         t_mod.addImport("weld_core", core_module);
-        if (spec.spike) {
-            t_mod.addImport("spike", spike_test_module);
-        }
         if (spec.wl_protocols) {
             t_mod.addImport("wl_protocols", wl_protocols_test_module);
         }
