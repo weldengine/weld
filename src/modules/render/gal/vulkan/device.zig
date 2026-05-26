@@ -27,10 +27,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 const weld_core = @import("weld_core");
 const vk = weld_core.platform.vk;
+const window_mod = weld_core.platform.window;
 const types = @import("../types.zig");
 const escape = @import("../escape_hatches.zig");
 const conv = @import("conv.zig");
 const swap = @import("swapchain.zig");
+const surface_mod = @import("surface.zig");
 const buffer_mod = @import("buffer.zig");
 const texture_mod = @import("texture.zig");
 const pipeline_mod = @import("pipeline.zig");
@@ -181,6 +183,27 @@ pub const Device = struct {
         const id = self.next_handle_id;
         self.next_handle_id += 1;
         return id;
+    }
+
+    // ====================================================================
+    // Surface (M0.4 § Scope — Complément Post-Review)
+    // ====================================================================
+
+    /// Build a `SurfaceHandle` from an already-open Tier 0 window. The
+    /// resulting `vk.SurfaceKHR` is owned by the device and destroyed
+    /// by `deinit`. Calling twice on the same device returns the
+    /// existing handle as a courtesy rather than leaking the first
+    /// surface.
+    pub fn createSurfaceFromWindow(
+        self: *Device,
+        window: *const window_mod.Window,
+    ) types.Error!types.SurfaceHandle {
+        if (self.surface != .null) {
+            return .{ .inner = @intFromEnum(self.surface) };
+        }
+        const native = try surface_mod.createFromWindow(self.vk_instance, window);
+        self.surface = native;
+        return .{ .inner = @intFromEnum(native) };
     }
 
     // ====================================================================

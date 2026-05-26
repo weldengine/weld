@@ -77,3 +77,15 @@ test "Vulkan backend Device struct keeps allocator + selection" {
     };
     try std.testing.expect(has_content);
 }
+
+test "Vulkan backend exposes createSurfaceFromWindow on every target" {
+    // Comptime pin: regardless of platform, the method must compile and
+    // accept a Tier 0 window pointer. The runtime body is platform-
+    // gated (Windows / Linux real surfaces, others → error.Unsupported).
+    const window_mod = @import("weld_core").platform.window;
+    const Method = @TypeOf(gal.vulkan_backend.Device.createSurfaceFromWindow);
+    const fn_info = @typeInfo(Method).@"fn";
+    try std.testing.expectEqual(@as(usize, 2), fn_info.params.len);
+    try std.testing.expectEqual(*gal.vulkan_backend.Device, fn_info.params[0].type.?);
+    try std.testing.expectEqual(*const window_mod.Window, fn_info.params[1].type.?);
+}
