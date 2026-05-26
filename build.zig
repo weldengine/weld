@@ -304,6 +304,9 @@ pub fn build(b: *std.Build) void {
         // M0.4 — Render graph auto-tracking barriers (write-after-read,
         // explicit mode skip).
         .{ .path = "tests/render/render_graph_barriers.zig", .render = true },
+        // M0.4 — Instancing batcher (bucketing mesh+material, drawcalls
+        // ≤ 100 pour 100 k entités).
+        .{ .path = "tests/render/instancing_batcher.zig", .render = true },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{

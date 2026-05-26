@@ -40,6 +40,12 @@ pub const shader_pipeline = struct {
     pub const hot_reload = @import("shader_pipeline/hot_reload.zig");
 };
 
+/// Namespace instancing batcher — bucketing ECS CPU-side par
+/// `(mesh_id, material_id)`, tri front-to-back par centroïde.
+pub const instancing = struct {
+    pub const batcher = @import("instancing/batcher.zig");
+};
+
 // Pins pour l'analyse des inline tests (engine-zig-conventions.md §13).
 comptime {
     _ = gal;
@@ -51,6 +57,7 @@ comptime {
     _ = shader_pipeline.compiler;
     _ = shader_pipeline.cache;
     _ = shader_pipeline.hot_reload;
+    _ = instancing.batcher;
 }
 
 // Anciens accès directs préservés pour rétrocompatibilité avec
