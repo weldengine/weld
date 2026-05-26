@@ -38,20 +38,17 @@ fn detectVulkan() VulkanAvailable {
 
 test "Vulkan backend init and teardown over headless device" {
     if (builtin.os.tag == .macos) return error.SkipZigTest;
-    if (detectVulkan() == .no) {
-        std.log.scoped(.test_gal_vk).warn("Vulkan loader not available — skipping (set LAVAPIPE_AVAILABLE=1 to force run)", .{});
-        return error.SkipZigTest;
-    }
+    if (detectVulkan() == .no) return error.SkipZigTest;
 
+    // Le CI Linux a souvent le loader installé mais pas de GPU. On skip
+    // silencieusement en cas d'échec init (pas de log.warn — Zig 0.16
+    // considère certains niveaux de log comme des test failures).
     var device = gal.vulkan_backend.Device.init(std.testing.allocator, .{
         .label = "offline_test",
         .vulkan_driver = .auto,
         .gpu_preference = .auto,
         .enable_validation = false,
-    }) catch |e| {
-        std.log.scoped(.test_gal_vk).warn("Vulkan device init failed ({t}) — skipping", .{e});
-        return error.SkipZigTest;
-    };
+    }) catch return error.SkipZigTest;
     defer device.deinit();
 
     // Sanity : feature query sans crash, getQueue retourne un handle non-null.

@@ -94,7 +94,11 @@ pub const Device = struct {
         };
 
         device.vk_instance = createInstance(allocator, descriptor) catch |e| {
-            log.err("vk: createInstance failed: {t}", .{e});
+            // log.debug : ce path est exercé en CI Linux qui n'a pas de
+            // device Vulkan utilisable — le caller (typiquement un test)
+            // catch l'erreur et skip. log.err déclencherait un faux
+            // positif de test failure en Zig 0.16.
+            log.debug("vk: createInstance failed: {t}", .{e});
             return error.NotInitialized;
         };
         errdefer device.vk_instance.destroyInstance(null);
@@ -107,7 +111,7 @@ pub const Device = struct {
         try pickPhysicalDevice(&device, allocator, descriptor);
 
         createLogicalDevice(&device) catch |e| {
-            log.err("vk: createLogicalDevice failed: {t}", .{e});
+            log.debug("vk: createLogicalDevice failed: {t}", .{e});
             return error.NotInitialized;
         };
         errdefer device.vk_device.destroyDevice(null);
