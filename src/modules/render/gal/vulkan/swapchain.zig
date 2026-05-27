@@ -159,8 +159,9 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
         var i: usize = 0;
         while (i < registered) : (i += 1) _ = device.texture_views.remove(view_handles[i].inner);
     }
+    const swap_format = conv.textureFormatFromVk(fmt.format);
     for (views, 0..) |v, i| {
-        view_handles[i] = try texture_mod.adoptSwapchainView(device, v, extent.width, extent.height);
+        view_handles[i] = try texture_mod.adoptSwapchainView(device, v, extent.width, extent.height, swap_format);
         registered = i + 1;
     }
 

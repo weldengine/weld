@@ -55,11 +55,8 @@ pub fn begin(device: *Device, descriptor: types.RenderPassDescriptor) types.Erro
     for (descriptor.color_attachments) |c| {
         if (n_attach >= max_attachments) return error.Unsupported;
         const view = texture_mod.lookupView(device, c.view) orelse return error.InvalidArgument;
-        // TODO(phase-1): back-pointer ViewEntry → texture.format. Currently hardcoded
-        // to BGRA8_UNORM matching the swapchain. Offscreen RGBA8_UNORM captures rely
-        // on the PSNR vs golden test to catch any mismatch. See engine-render.md §3.6
-        // (Phase 1+ debt reception — to be added in the KB via roundtrip).
-        const format = vk.Format.b8g8r8a8_unorm;
+        const view_format = lookupViewFormat(device, c.view) orelse return error.InvalidArgument;
+        const format = conv.textureFormat(view_format);
         const final_layout: vk.ImageLayout = switch (c.final_layout) {
             .present => .present_src_khr,
             .transfer_src => .transfer_src_optimal,
@@ -184,4 +181,13 @@ fn lookupViewExtent(device: *Device, view: types.TextureViewHandle) ?vk.Extent2D
     if (view.inner == 0) return null;
     const entry = device.texture_views.get(view.inner) orelse return null;
     return .{ .width = entry.width, .height = entry.height };
+}
+
+/// Helper: read the format stored on the `ViewEntry`. Same provenance as
+/// the extent (Bug 2 fix — removes the previous hardcode to BGRA8_UNORM
+/// which mismatched RGBA8_UNORM offscreen captures).
+fn lookupViewFormat(device: *Device, view: types.TextureViewHandle) ?types.TextureFormat {
+    if (view.inner == 0) return null;
+    const entry = device.texture_views.get(view.inner) orelse return null;
+    return entry.format;
 }

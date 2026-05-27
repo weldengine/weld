@@ -57,6 +57,13 @@ pub const ViewEntry = struct {
     vk_view: vk.ImageView,
     width: u32,
     height: u32,
+    /// Texture format the view exposes. Inherited from the source
+    /// `TextureEntry` at view creation (or from the swapchain-negotiated
+    /// format for swapchain-owned views). Read by `render_pass.zig` to
+    /// build the attachment description — without the per-view copy the
+    /// render pass would hardcode BGRA8_UNORM and mismatch RGBA8_UNORM
+    /// offscreen captures.
+    format: types.TextureFormat,
     swapchain_owned: bool = false,
 
     pub fn destroy(self: *ViewEntry, device: *vk.Device) void {
@@ -165,6 +172,7 @@ pub fn createView(
         .vk_view = view,
         .width = tex.width,
         .height = tex.height,
+        .format = format,
     });
     return .{ .inner = id };
 }
@@ -181,20 +189,25 @@ pub fn destroyView(device: *Device, handle: types.TextureViewHandle) void {
 /// Enregistre une `vk.ImageView` swapchain-owned dans le registry et
 /// retourne le `TextureViewHandle` GAL stable. La view est détruite par
 /// `swap.Entry.destroy` (le registry skip via `swapchain_owned`).
-/// `width` / `height` are the swapchain extent — required by the
-/// framebuffer creation downstream (Bug 1 fix — without these the
-/// framebuffer width is zero and the render pass produces a black frame).
+/// `width` / `height` / `format` are the swapchain extent + negotiated
+/// format — required by the framebuffer + render pass attachment
+/// creation downstream (Bugs 1 & 2 fixes — without the per-view metadata
+/// the render pass would hardcode dimensions to (0, 0) and the format
+/// to BGRA8_UNORM, mismatching swapchain-negotiated SRGB variants and
+/// any offscreen RGBA8_UNORM captures).
 pub fn adoptSwapchainView(
     device: *Device,
     view: vk.ImageView,
     width: u32,
     height: u32,
+    format: types.TextureFormat,
 ) types.Error!types.TextureViewHandle {
     const id = device.nextHandle();
     try device.texture_views.put(device.allocator, id, .{
         .vk_view = view,
         .width = width,
         .height = height,
+        .format = format,
         .swapchain_owned = true,
     });
     return .{ .inner = id };
