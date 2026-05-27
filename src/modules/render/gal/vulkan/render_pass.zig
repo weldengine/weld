@@ -176,20 +176,12 @@ pub fn begin(device: *Device, descriptor: types.RenderPassDescriptor) types.Erro
     return t;
 }
 
-/// Helper : récupère la taille (extent2d) d'une view en remontant à la
-/// texture parente. Phase 0 stocke ces métadonnées dans `TextureEntry`,
-/// pas dans `ViewEntry` — donc on cherche la texture qui contient cette
-/// `vk.ImageView` (O(n) linear scan). Phase 1+ : back-pointer view → tex.
+/// Helper: read the extent stored on the `ViewEntry`. Populated at view
+/// creation time from the source `TextureEntry` (or from the swapchain
+/// extent for swapchain-owned views). Returns null only if the handle is
+/// invalid or absent from the registry.
 fn lookupViewExtent(device: *Device, view: types.TextureViewHandle) ?vk.Extent2D {
-    const v = texture_mod.lookupView(device, view) orelse return null;
-    var it = device.textures.iterator();
-    while (it.next()) |kv| {
-        _ = kv;
-        // Phase 0 : on n'a pas de back-pointer, on retourne le premier
-        // entry des textures. C'est faux pour les multi-textures mais
-        // marche pour le smoke test single-texture. À corriger Phase 1.
-        return .{ .width = 0, .height = 0 };
-    }
-    _ = v;
-    return null;
+    if (view.inner == 0) return null;
+    const entry = device.texture_views.get(view.inner) orelse return null;
+    return .{ .width = entry.width, .height = entry.height };
 }

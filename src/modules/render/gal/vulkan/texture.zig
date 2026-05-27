@@ -44,8 +44,19 @@ pub const TextureEntry = struct {
 /// Si `swapchain_owned = true`, le destroy du registry skip le
 /// `destroyImageView` natif : la swapchain Vulkan détient la view et la
 /// libère elle-même dans `swap.Entry.destroy`.
+///
+/// `width` / `height` are populated at view creation time from the source
+/// `TextureEntry` (or from the swapchain extent for swapchain-owned views).
+/// They feed `render_pass.zig:begin` which needs the framebuffer dimensions
+/// — without these fields the framebuffer is created with width=0 height=0
+/// and the render pass executes on a zero-sized surface (black frame).
+/// S2 reference: `/tmp/s2-ref/src/spike/vk_setup.zig:createFramebuffers`
+/// uses `r.swapchain_extent.{width,height}` directly; the GAL needs the
+/// per-view copy because views are independent of any single source.
 pub const ViewEntry = struct {
     vk_view: vk.ImageView,
+    width: u32,
+    height: u32,
     swapchain_owned: bool = false,
 
     pub fn destroy(self: *ViewEntry, device: *vk.Device) void {
@@ -150,7 +161,11 @@ pub fn createView(
     };
     const view = device.vk_device.createImageView(&ci, null) catch return error.BackendInternal;
     const id = device.nextHandle();
-    try device.texture_views.put(device.allocator, id, .{ .vk_view = view });
+    try device.texture_views.put(device.allocator, id, .{
+        .vk_view = view,
+        .width = tex.width,
+        .height = tex.height,
+    });
     return .{ .inner = id };
 }
 
@@ -166,13 +181,20 @@ pub fn destroyView(device: *Device, handle: types.TextureViewHandle) void {
 /// Enregistre une `vk.ImageView` swapchain-owned dans le registry et
 /// retourne le `TextureViewHandle` GAL stable. La view est détruite par
 /// `swap.Entry.destroy` (le registry skip via `swapchain_owned`).
+/// `width` / `height` are the swapchain extent — required by the
+/// framebuffer creation downstream (Bug 1 fix — without these the
+/// framebuffer width is zero and the render pass produces a black frame).
 pub fn adoptSwapchainView(
     device: *Device,
     view: vk.ImageView,
+    width: u32,
+    height: u32,
 ) types.Error!types.TextureViewHandle {
     const id = device.nextHandle();
     try device.texture_views.put(device.allocator, id, .{
         .vk_view = view,
+        .width = width,
+        .height = height,
         .swapchain_owned = true,
     });
     return .{ .inner = id };

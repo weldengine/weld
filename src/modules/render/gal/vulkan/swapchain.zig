@@ -160,7 +160,7 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
         while (i < registered) : (i += 1) _ = device.texture_views.remove(view_handles[i].inner);
     }
     for (views, 0..) |v, i| {
-        view_handles[i] = try texture_mod.adoptSwapchainView(device, v);
+        view_handles[i] = try texture_mod.adoptSwapchainView(device, v, extent.width, extent.height);
         registered = i + 1;
     }
 
