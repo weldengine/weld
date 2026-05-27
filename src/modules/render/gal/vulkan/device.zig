@@ -341,7 +341,13 @@ pub const Device = struct {
         var owned_buf: ?[]align(4) u8 = null;
         defer if (owned_buf) |b| self.allocator.free(b);
 
-        const code_ptr: [*]const u32 = blk: {
+        // Vulkan's `pCode` field is typed `*const u32` (a single
+        // pointer used as the array base, with `code_size` providing
+        // the element count). `@ptrCast(@alignCast(...))` casts a
+        // `[*]const u8` many-pointer to that single-pointer form —
+        // matching the S2 pattern in
+        // /tmp/s2-ref/src/spike/vk_setup.zig.
+        const code_ptr: *const u32 = blk: {
             if (std.mem.isAligned(@intFromPtr(descriptor.code.ptr), 4)) {
                 break :blk @ptrCast(@alignCast(descriptor.code.ptr));
             }
