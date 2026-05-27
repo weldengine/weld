@@ -182,6 +182,19 @@ pub const Device = struct {
         _ = .{ self, handle };
     }
 
+    /// Null stub mirror of `Device.getSwapchainImageView` — returns a
+    /// monotonic dummy handle. The Null backend does not track per-image
+    /// views; each call yields a fresh inner ID, sufficient for the
+    /// comptime interface check and headless smoke tests.
+    pub fn getSwapchainImageView(
+        self: *Device,
+        handle: types.SwapchainHandle,
+        image_index: u32,
+    ) types.TextureViewHandle {
+        _ = .{ handle, image_index };
+        return .{ .inner = self.handles.next_id() };
+    }
+
     pub fn acquireNextImage(
         self: *Device,
         handle: types.SwapchainHandle,

@@ -107,6 +107,12 @@ test "Null backend completes a frame without panic" {
     const image_index = try device.acquireNextImage(swap, image_ready, std.math.maxInt(u64));
     try std.testing.expectEqual(@as(u32, 0), image_index);
 
+    // M0.4 § Scope Post-Review extension : the swapchain image view
+    // accessor returns a non-zero handle (Null stub uses a monotonic
+    // counter — content is opaque, just `isValid()` matters).
+    const swap_view = device.getSwapchainImageView(swap, image_index);
+    try std.testing.expect(swap_view.isValid());
+
     const queue = try device.getQueue(.graphics);
     try std.testing.expect(@intFromPtr(queue) != 0);
 
@@ -152,6 +158,23 @@ test "Null backend completes a frame without panic" {
     pass.setScissor(0, 0, 1280, 720);
     pass.draw(3, 1, 0, 0);
     pass.end();
+
+    // M0.4 § Scope Post-Review extension : copyTextureToBuffer is part of
+    // the public CommandEncoder surface. The Null backend no-ops, but the
+    // call must compile and accept the WebGPU-canonical struct triple.
+    const staging = try device.createBuffer(.{
+        .label = "smoke_staging",
+        .size = 1280 * 720 * 4,
+        .usage = .{ .copy_dst = true },
+        .host_visible = true,
+    });
+    defer device.destroyBuffer(staging);
+    enc.copyTextureToBuffer(
+        .{ .texture = color, .aspect = .color },
+        .{ .buffer = staging, .bytes_per_row = 1280 * 4 },
+        .{ .width = 1280, .height = 720 },
+    );
+
     enc.finish();
 
     try device.present(swap, image_index, &.{present_ready});

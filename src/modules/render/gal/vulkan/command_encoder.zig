@@ -18,6 +18,7 @@ const escape = @import("../escape_hatches.zig");
 const conv = @import("conv.zig");
 const Device = @import("device.zig").Device;
 const buffer_mod = @import("buffer.zig");
+const texture_mod = @import("texture.zig");
 const bind_mod = @import("bind_group.zig");
 const pipeline_mod = @import("pipeline.zig");
 const render_pass_mod = @import("render_pass.zig");
@@ -86,6 +87,63 @@ pub const CommandEncoder = struct {
         _ = .{ self, src, src_offset, dst, mip, layer, size };
         // Phase 0 : non implémenté côté Vulkan, no-op silencieux. Phase 1+
         // via `vkCmdCopyBufferToImage` + transitions de layout.
+    }
+
+    /// Copy a texture region into a host-visible buffer. WebGPU canonical
+    /// shape (source/dest/copy_size triple). Phase 0 contract: the source
+    /// texture is assumed to already be in `.transfer_src_optimal` layout
+    /// when the GPU executes the copy — render-pass `finalLayout` or a
+    /// caller-emitted barrier must put it there. `dest.bytes_per_row` is
+    /// honored when non-zero; otherwise Vulkan tight-packs the row stride
+    /// from the image extent.
+    pub fn copyTextureToBuffer(
+        self: *CommandEncoder,
+        source: types.ImageCopyTexture,
+        dest: types.ImageCopyBuffer,
+        copy_size: types.Extent3D,
+    ) void {
+        const src_img = texture_mod.lookupImage(self.device, source.texture) orelse return;
+        const dst_buf = buffer_mod.lookup(self.device, dest.buffer) orelse return;
+
+        const aspect_mask: vk.ImageAspectFlags = switch (source.aspect) {
+            .all, .color => .{ .color = true },
+            .depth => .{ .depth = true },
+            .stencil => .{ .stencil = true },
+        };
+
+        // WebGPU `bytesPerRow` is bytes; Vulkan `buffer_row_length` is
+        // pixels. Phase 0 assumes RGBA8 (4 bpp) for the capture path; if
+        // the caller passes 0 we let Vulkan tight-pack.
+        const row_length: u32 = if (dest.bytes_per_row == 0) 0 else dest.bytes_per_row / 4;
+
+        const region: vk.BufferImageCopy = .{
+            .buffer_offset = dest.offset,
+            .buffer_row_length = row_length,
+            .buffer_image_height = dest.rows_per_image,
+            .image_subresource = .{
+                .aspect_mask = aspect_mask,
+                .mip_level = source.mip_level,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+            .image_offset = .{
+                .x = @intCast(source.origin.x),
+                .y = @intCast(source.origin.y),
+                .z = @intCast(source.origin.z),
+            },
+            .image_extent = .{
+                .width = copy_size.width,
+                .height = copy_size.height,
+                .depth = copy_size.depth_or_array_layers,
+            },
+        };
+
+        self.cb.cmdCopyImageToBuffer(
+            src_img,
+            .transfer_src_optimal,
+            dst_buf,
+            &.{region},
+        );
     }
 
     pub fn finish(self: *CommandEncoder) void {

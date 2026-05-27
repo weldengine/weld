@@ -70,6 +70,7 @@ pub const required_methods = [_]RequiredMethod{
     .{ .name = "createSwapchain", .purpose = "Crée la swapchain pour une surface" },
     .{ .name = "destroySwapchain", .purpose = "Libère la swapchain" },
     .{ .name = "acquireNextImage", .purpose = "Acquiert le prochain image index de la swapchain" },
+    .{ .name = "getSwapchainImageView", .purpose = "Retourne la TextureViewHandle stable pour une image du swapchain (pré-allouée à l'init)" },
     .{ .name = "present", .purpose = "Présente l'image courante" },
 
     // Queue & command recording
@@ -214,6 +215,10 @@ const TestShape = struct {
     pub fn acquireNextImage(self: *TestShape, h: types.SwapchainHandle, signal_semaphore: ?types.SemaphoreHandle, timeout_ns: u64) types.Error!u32 {
         _ = .{ self, h, signal_semaphore, timeout_ns };
         return 0;
+    }
+    pub fn getSwapchainImageView(self: *TestShape, h: types.SwapchainHandle, image_index: u32) types.TextureViewHandle {
+        _ = .{ self, h, image_index };
+        return .{};
     }
     pub fn present(self: *TestShape, h: types.SwapchainHandle, image_index: u32, wait_semaphores: []const types.SemaphoreHandle) types.Error!void {
         _ = .{ self, h, image_index, wait_semaphores };

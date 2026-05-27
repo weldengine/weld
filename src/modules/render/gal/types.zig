@@ -246,6 +246,51 @@ pub const TextureDimension = enum(u8) {
     cube,
 };
 
+/// Origine 3D pour les copies texture/buffer (WebGPU canonical).
+pub const Origin3D = extern struct {
+    x: u32 = 0,
+    y: u32 = 0,
+    z: u32 = 0,
+};
+
+/// Extent 3D pour les copies texture/buffer (WebGPU canonical). Le champ
+/// `depth_or_array_layers` couvre les textures 3D (profondeur) comme les
+/// 2D arrays (nombre de couches) selon la dimension de la texture cible.
+pub const Extent3D = extern struct {
+    width: u32,
+    height: u32,
+    depth_or_array_layers: u32 = 1,
+};
+
+/// Aspect d'une vue/copie de texture (color | depth | stencil | all).
+/// Phase 0 : `color` suffit pour la capture PPM ; `depth` exposé pour le
+/// depth prepass futur ; `stencil` non utilisé.
+pub const TextureAspect = enum(u8) {
+    all,
+    color,
+    depth,
+    stencil,
+};
+
+/// Source d'une copie texture → buffer (WebGPU canonical).
+pub const ImageCopyTexture = struct {
+    texture: TextureHandle,
+    mip_level: u32 = 0,
+    origin: Origin3D = .{},
+    aspect: TextureAspect = .color,
+};
+
+/// Destination d'une copie texture → buffer (WebGPU canonical).
+/// `bytes_per_row` doit être aligné selon les contraintes du backend
+/// (Vulkan : 256 bytes typique). `rows_per_image` ne s'applique qu'aux
+/// textures 3D / arrays ; ignoré pour les 2D simples.
+pub const ImageCopyBuffer = struct {
+    buffer: BufferHandle,
+    offset: u64 = 0,
+    bytes_per_row: u32,
+    rows_per_image: u32 = 0,
+};
+
 /// Type de bind dans un BindGroupLayout.
 pub const BindingType = enum(u8) {
     uniform_buffer,

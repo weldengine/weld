@@ -72,6 +72,15 @@ pub const CommandEncoder = struct {
         _ = .{ self, src, src_offset, dst, mip, layer, size };
     }
 
+    pub fn copyTextureToBuffer(
+        self: *CommandEncoder,
+        source: types.ImageCopyTexture,
+        dest: types.ImageCopyBuffer,
+        copy_size: types.Extent3D,
+    ) void {
+        _ = .{ self, source, dest, copy_size };
+    }
+
     pub fn finish(self: *CommandEncoder) void {
         self.finished = true;
     }

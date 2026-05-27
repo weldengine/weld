@@ -41,11 +41,17 @@ pub const TextureEntry = struct {
 
 /// Slot interne d'une TextureView — wrap `vk.ImageView`. Indexé séparément
 /// de `TextureEntry` parce qu'une view a son propre lifecycle.
+/// Si `swapchain_owned = true`, le destroy du registry skip le
+/// `destroyImageView` natif : la swapchain Vulkan détient la view et la
+/// libère elle-même dans `swap.Entry.destroy`.
 pub const ViewEntry = struct {
     vk_view: vk.ImageView,
+    swapchain_owned: bool = false,
 
     pub fn destroy(self: *ViewEntry, device: *vk.Device) void {
-        if (self.vk_view != .null) device.destroyImageView(self.vk_view, null);
+        if (!self.swapchain_owned and self.vk_view != .null) {
+            device.destroyImageView(self.vk_view, null);
+        }
         self.* = undefined;
     }
 };
@@ -155,6 +161,21 @@ pub fn destroyView(device: *Device, handle: types.TextureViewHandle) void {
         var entry = kv.value;
         entry.destroy(device.vk_device);
     }
+}
+
+/// Enregistre une `vk.ImageView` swapchain-owned dans le registry et
+/// retourne le `TextureViewHandle` GAL stable. La view est détruite par
+/// `swap.Entry.destroy` (le registry skip via `swapchain_owned`).
+pub fn adoptSwapchainView(
+    device: *Device,
+    view: vk.ImageView,
+) types.Error!types.TextureViewHandle {
+    const id = device.nextHandle();
+    try device.texture_views.put(device.allocator, id, .{
+        .vk_view = view,
+        .swapchain_owned = true,
+    });
+    return .{ .inner = id };
 }
 
 /// Helper interne — pour swapchain.zig qui adopte les `vk.Image` issues

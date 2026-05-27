@@ -410,6 +410,18 @@ pub const Device = struct {
         swap.destroy(self, handle);
     }
 
+    /// Return the pre-allocated `TextureViewHandle` for image `image_index`
+    /// of the swapchain (cf. `swap.getImageView`). `image_index` must be a
+    /// value previously returned by `acquireNextImage` — out of range is a
+    /// caller bug and trips an assertion in debug builds.
+    pub fn getSwapchainImageView(
+        self: *Device,
+        handle: types.SwapchainHandle,
+        image_index: u32,
+    ) types.TextureViewHandle {
+        return swap.getImageView(self, handle, image_index);
+    }
+
     pub fn acquireNextImage(
         self: *Device,
         handle: types.SwapchainHandle,

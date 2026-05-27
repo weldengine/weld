@@ -21,8 +21,14 @@ const conv = @import("conv.zig");
 const Device = @import("device.zig").Device;
 const texture_mod = @import("texture.zig");
 
+const log = std.log.scoped(.gal_vk_swap);
+
 /// Slot interne d'une Swapchain — bundle VkSwapchainKHR + images + views.
 /// Les images sont owned par la swapchain (pas par notre allocateur).
+/// `view_handles` est pré-alloué à `create()` : un `TextureViewHandle` GAL
+/// stable par image du swapchain. Le caller appelle
+/// `Device.getSwapchainImageView(handle, image_index)` qui lit ce slot
+/// sans alloc par frame.
 pub const Entry = struct {
     vk_swapchain: vk.SwapchainKHR,
     surface: vk.SurfaceKHR,
@@ -30,6 +36,7 @@ pub const Entry = struct {
     extent: vk.Extent2D,
     images: []vk.Image,
     image_views: []vk.ImageView,
+    view_handles: []types.TextureViewHandle,
     /// Image index courant (mis à jour par `acquireNextImage`).
     current_image: u32 = 0,
 
@@ -38,6 +45,7 @@ pub const Entry = struct {
             if (v != .null) device.destroyImageView(v, null);
         }
         allocator.free(self.image_views);
+        allocator.free(self.view_handles);
         allocator.free(self.images);
         if (self.vk_swapchain != .null) device.destroySwapchainKHR(self.vk_swapchain, null);
         self.* = undefined;
@@ -141,6 +149,21 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
         views[i] = device.vk_device.createImageView(&vci, null) catch return error.BackendInternal;
     }
 
+    // Pre-allocate one stable GAL TextureViewHandle per swapchain image.
+    // Lookup in the device's texture_views registry happens via these
+    // handles in `getImageView` — zero alloc per frame on the hot path.
+    const view_handles = try device.allocator.alloc(types.TextureViewHandle, images.len);
+    errdefer device.allocator.free(view_handles);
+    var registered: usize = 0;
+    errdefer {
+        var i: usize = 0;
+        while (i < registered) : (i += 1) _ = device.texture_views.remove(view_handles[i].inner);
+    }
+    for (views, 0..) |v, i| {
+        view_handles[i] = try texture_mod.adoptSwapchainView(device, v);
+        registered = i + 1;
+    }
+
     const id = device.nextHandle();
     try device.swapchains.put(device.allocator, id, .{
         .vk_swapchain = sc,
@@ -149,15 +172,38 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
         .extent = extent,
         .images = images,
         .image_views = views,
+        .view_handles = view_handles,
     });
     return .{ .inner = id };
 }
 
+/// Lookup the pre-allocated `TextureViewHandle` for an image of the
+/// swapchain. `image_index` must come from `acquireNextImage` — out of
+/// range is a caller bug, hence `unreachable` in debug.
+pub fn getImageView(
+    device: *Device,
+    handle: types.SwapchainHandle,
+    image_index: u32,
+) types.TextureViewHandle {
+    const entry = device.swapchains.get(handle.inner) orelse {
+        log.debug("getImageView: unknown swapchain handle {x}", .{handle.inner});
+        unreachable;
+    };
+    std.debug.assert(image_index < entry.view_handles.len);
+    return entry.view_handles[image_index];
+}
+
 /// Libère la swapchain + ses vues + le tableau d'images. No-op si invalide.
+/// Retire d'abord les `view_handles` du registry `texture_views` du device
+/// avant que la swapchain ne libère les `vk.ImageView` sous-jacents — sans
+/// ça, les entrées deviendraient zombies (handles pointant vers des views
+/// freed). À `device.deinit` cet effet est neutre puisque le registry est
+/// drainé avant les swapchains ; le code reste correct dans les deux flots.
 pub fn destroy(device: *Device, handle: types.SwapchainHandle) void {
     if (handle.inner == 0) return;
     if (device.swapchains.fetchRemove(handle.inner)) |kv| {
         var entry = kv.value;
+        for (entry.view_handles) |vh| _ = device.texture_views.remove(vh.inner);
         entry.destroy(device.vk_device, device.allocator);
     }
 }
