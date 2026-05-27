@@ -54,13 +54,11 @@ pub fn begin(device: *Device, descriptor: types.RenderPassDescriptor) types.Erro
 
     for (descriptor.color_attachments) |c| {
         if (n_attach >= max_attachments) return error.Unsupported;
-        // Format extrait du parent de la view — pour Phase 0 on suppose que
-        // c'est encodé dans la registry texture_views (mais on n'a pas le
-        // backlink). On lit donc le format depuis l'image associée.
         const view = texture_mod.lookupView(device, c.view) orelse return error.InvalidArgument;
-        // Format unknown depuis la view seule — Phase 0 : on prend
-        // bgra8_unorm comme défaut swapchain. Phase 1+ : extension du
-        // ViewEntry pour mémoriser le format.
+        // TODO(phase-1): back-pointer ViewEntry → texture.format. Currently hardcoded
+        // to BGRA8_UNORM matching the swapchain. Offscreen RGBA8_UNORM captures rely
+        // on the PSNR vs golden test to catch any mismatch. See engine-render.md §3.6
+        // (Phase 1+ debt reception — to be added in the KB via roundtrip).
         const format = vk.Format.b8g8r8a8_unorm;
         const final_layout: vk.ImageLayout = switch (c.final_layout) {
             .present => .present_src_khr,

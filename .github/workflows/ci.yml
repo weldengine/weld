@@ -101,6 +101,7 @@ jobs:
 
       - name: Install weston + Mesa Vulkan software drivers
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             weston \
@@ -110,10 +111,13 @@ jobs:
             libwayland-cursor0
 
       - name: zig build (ReleaseSafe)
-        run: zig build -Doptimize=ReleaseSafe
+        run: |
+          set -euo pipefail
+          zig build -Doptimize=ReleaseSafe
 
       - name: Launch weston headless backend
         run: |
+          set -euo pipefail
           mkdir -p /tmp/runtime-dir
           chmod 700 /tmp/runtime-dir
           XDG_RUNTIME_DIR=/tmp/runtime-dir WAYLAND_DISPLAY=wayland-1 \
@@ -129,11 +133,13 @@ jobs:
           # Force lavapipe (Mesa software Vulkan ICD) on the runner.
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: |
+          set -euo pipefail
           zig build run-example-triangle -- \
             --smoke-test --vulkan-driver=software --capture-frame=10
 
       - name: Verify PSNR vs golden
         run: |
+          set -euo pipefail
           if [ ! -f tests/golden/smoke_test_software.ppm ]; then
             echo "Golden PPM not yet committed — capture written to out/smoke_test.ppm." >&2
             echo "First-run procedure: download out/smoke_test.ppm from this job, validate visually," >&2
@@ -141,7 +147,7 @@ jobs:
             exit 0
           fi
           zig build test -Doptimize=ReleaseSafe --summary all 2>&1 | tee test-output.txt
-          grep -E "(capture pass produces PPM matching golden|PSNR)" test-output.txt || true
+          grep -E "(capture pass produces PPM matching golden|PSNR)" test-output.txt
 
       - name: Upload capture artifact
         if: always()

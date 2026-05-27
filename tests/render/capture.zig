@@ -111,14 +111,46 @@ test "capture pass produces PPM matching golden within PSNR 40 dB" {
         "--vulkan-driver=software",
         capture_arg,
     };
+    // Spawn failure (subprocess could not even start) is a setup
+    // condition — skip. Once the subprocess has launched, any non-zero
+    // exit or abnormal termination is a real regression and is surfaced
+    // via `error.TriangleCaptureFailed`.
     const result = std.process.run(allocator, io, .{
         .argv = &argv,
     }) catch return error.SkipZigTest;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     switch (result.term) {
-        .exited => |code| if (code != 0) return error.SkipZigTest,
-        else => return error.SkipZigTest,
+        .exited => |code| {
+            if (code != 0) {
+                std.log.err(
+                    "triangle binary exited with code {d}, stderr:\n{s}",
+                    .{ code, result.stderr },
+                );
+                return error.TriangleCaptureFailed;
+            }
+        },
+        .signal => |sig| {
+            std.log.err(
+                "triangle binary terminated by signal {any}, stderr:\n{s}",
+                .{ sig, result.stderr },
+            );
+            return error.TriangleCaptureFailed;
+        },
+        .stopped => |sig| {
+            std.log.err(
+                "triangle binary stopped by signal {any}, stderr:\n{s}",
+                .{ sig, result.stderr },
+            );
+            return error.TriangleCaptureFailed;
+        },
+        .unknown => |code| {
+            std.log.err(
+                "triangle binary terminated abnormally (raw code {any}), stderr:\n{s}",
+                .{ code, result.stderr },
+            );
+            return error.TriangleCaptureFailed;
+        },
     }
 
     const captured = readPpm(allocator, io, CAPTURED_PATH) catch |e| {
