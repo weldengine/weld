@@ -355,6 +355,9 @@ pub fn build(b: *std.Build) void {
         // Skip si plateforme sans Vulkan window backend ou si le golden
         // n'a pas encore été commité.
         .{ .path = "tests/render/capture.zig", .render = true },
+        // M0.4 § Scope Post-Review — hot-reload filewatch latency < 200 ms.
+        // Skip si glslc absent du PATH.
+        .{ .path = "tests/render/shader_hot_reload.zig", .render = true },
         // M0.4 — vk_gen whitelist closure (variant filtering + closure
         // convergence under 20 iterations).
         .{ .path = "tests/vk_gen/whitelist_closure.zig" },

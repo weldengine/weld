@@ -78,22 +78,28 @@ pub fn init(allocator: std.mem.Allocator, config: Config) Watcher {
 
 /// Thread body — boucle de poll → diff → recompile.
 fn threadMain(watcher: *Watcher) void {
-    var mtime_map = std.StringHashMapUnmanaged(i128).empty;
+    // i96 mirrors `std.Io.Timestamp.nanoseconds` width so the map value
+    // round-trips losslessly. Zig 0.16's `Stat.mtime` shifted from i128
+    // to a `Io.Timestamp` struct; we store the inner nanoseconds.
+    var mtime_map = std.StringHashMapUnmanaged(i96).empty;
     defer {
         var it = mtime_map.iterator();
         while (it.next()) |kv| watcher.allocator.free(kv.key_ptr.*);
         mtime_map.deinit(watcher.allocator);
     }
 
+    const weld_core = @import("weld_core");
+    const time_mod = weld_core.platform.time;
     while (!watcher.stop_flag.load(.acquire)) {
         scanDir(watcher, &mtime_map) catch |e| {
             log.warn("watcher scan failed: {t}", .{e});
         };
-        std.Thread.sleep(@as(u64, watcher.config.poll_interval_ms) * std.time.ns_per_ms);
+        const sleep_ns: u64 = @as(u64, watcher.config.poll_interval_ms) * std.time.ns_per_ms;
+        time_mod.sleepPrecise(watcher.config.io, sleep_ns) catch {};
     }
 }
 
-fn scanDir(watcher: *Watcher, mtime_map: *std.StringHashMapUnmanaged(i128)) !void {
+fn scanDir(watcher: *Watcher, mtime_map: *std.StringHashMapUnmanaged(i96)) !void {
     var dir = std.Io.Dir.cwd().openDir(watcher.config.io, watcher.config.root, .{ .iterate = true }) catch return;
     defer dir.close(watcher.config.io);
 
@@ -102,8 +108,8 @@ fn scanDir(watcher: *Watcher, mtime_map: *std.StringHashMapUnmanaged(i128)) !voi
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".glsl")) continue;
 
-        const stat = dir.statFile(watcher.config.io, entry.name) catch continue;
-        const mtime = stat.mtime;
+        const stat = dir.statFile(watcher.config.io, entry.name, .{}) catch continue;
+        const mtime: i96 = stat.mtime.nanoseconds;
 
         const gop = mtime_map.getOrPut(watcher.allocator, entry.name) catch continue;
         if (!gop.found_existing) {
