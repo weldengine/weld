@@ -227,6 +227,17 @@ pub const Device = struct {
         return enc;
     }
 
+    /// Null stub mirror of `Device.submit` — no-op. Honors the contract
+    /// shape so portable callers can submit on the Null backend without
+    /// platform-specific guards.
+    pub fn submit(
+        self: *Device,
+        encoder: *stubs.CommandEncoder,
+        descriptor: types.SubmitDescriptor,
+    ) types.Error!void {
+        _ = .{ self, encoder, descriptor };
+    }
+
     /// Helper Null-spécifique pour libérer un CommandEncoder alloué par
     /// `createCommandEncoder`. N'est pas dans l'interface formelle Phase 0
     /// — le caller la connaît parce qu'il a passé l'allocateur au Device.

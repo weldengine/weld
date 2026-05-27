@@ -291,6 +291,23 @@ pub const ImageCopyBuffer = struct {
     rows_per_image: u32 = 0,
 };
 
+/// Submit a CommandEncoder to a queue. WebGPU-aligned shape extended
+/// with the explicit Vulkan-style sync triple — Phase 1+ the wait/signal
+/// pair may move behind an automatic frame manager and this descriptor
+/// will collapse to the WebGPU `submit(commandBuffers)` form.
+pub const SubmitDescriptor = struct {
+    /// Semaphore to wait on before the GPU starts executing the
+    /// submitted command buffer (typically the `image_ready` from
+    /// `acquireNextImage`).
+    wait_semaphore: ?SemaphoreHandle = null,
+    /// Semaphore to signal when the GPU finishes the submitted command
+    /// buffer (typically the `render_done` passed to `present`).
+    signal_semaphore: ?SemaphoreHandle = null,
+    /// Fence signaled when the GPU finishes; pair with `waitFence` to
+    /// gate CPU-side work that depends on the GPU completing.
+    fence: ?FenceHandle = null,
+};
+
 /// Type de bind dans un BindGroupLayout.
 pub const BindingType = enum(u8) {
     uniform_buffer,

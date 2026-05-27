@@ -40,6 +40,7 @@ const bind_mod = @import("bind_group.zig");
 const cmd_mod = @import("command_encoder.zig");
 const sync_mod = @import("sync.zig");
 const queue_mod = @import("queue.zig");
+const frame_mod = @import("frame.zig");
 
 const log = std.log.scoped(.gal_vk);
 
@@ -455,6 +456,25 @@ pub const Device = struct {
     /// Helper Vulkan-spécifique pour libérer un CommandEncoder.
     pub fn destroyCommandEncoder(self: *Device, encoder: *cmd_mod.CommandEncoder) void {
         cmd_mod.destroy(self, encoder);
+    }
+
+    /// Submit a finished CommandEncoder to the graphics queue. Mirrors
+    /// the WebGPU `queue.submit` shape (extended with the explicit
+    /// wait/signal/fence triple WebGPU hides behind its async runtime).
+    /// The encoder must have had `finish()` called. Returns when the
+    /// submission is recorded (not when the GPU completes) — pair with
+    /// `waitFence` or `acquireNextImage(... wait_semaphore)` to gate
+    /// downstream work.
+    pub fn submit(
+        self: *Device,
+        encoder: *cmd_mod.CommandEncoder,
+        descriptor: types.SubmitDescriptor,
+    ) types.Error!void {
+        return frame_mod.submit(self, encoder, .{
+            .wait_semaphore = descriptor.wait_semaphore,
+            .signal_semaphore = descriptor.signal_semaphore,
+            .fence = descriptor.fence,
+        });
     }
 };
 

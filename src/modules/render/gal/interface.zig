@@ -76,6 +76,7 @@ pub const required_methods = [_]RequiredMethod{
     // Queue & command recording
     .{ .name = "getQueue", .purpose = "Obtient une Queue (graphics/compute/transfer)" },
     .{ .name = "createCommandEncoder", .purpose = "Démarre l'enregistrement d'un command buffer" },
+    .{ .name = "submit", .purpose = "Submit un CommandEncoder finalisé à la graphics queue (cf. SubmitDescriptor)" },
 };
 
 /// Vérification comptime que `Backend` déclare toutes les méthodes requises.
@@ -230,6 +231,9 @@ const TestShape = struct {
     pub fn createCommandEncoder(self: *TestShape, label: ?[]const u8) types.Error!*CommandEncoderStub {
         _ = .{ self, label };
         return undefined;
+    }
+    pub fn submit(self: *TestShape, encoder: *CommandEncoderStub, descriptor: types.SubmitDescriptor) types.Error!void {
+        _ = .{ self, encoder, descriptor };
     }
 };
 
