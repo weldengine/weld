@@ -108,10 +108,15 @@ pub const Batcher = struct {
         self.* = undefined;
     }
 
-    /// Reset entre frames (préserve la capacity).
+    /// Reset entre frames. Libère les transforms heap-allocated de chaque
+    /// bucket avant de vider la map — sans cette deinit, les slices
+    /// orphaned par `clearRetainingCapacity` du hashmap fuient (le
+    /// DebugAllocator les signale en fin de process). La capacity du
+    /// hashmap lui-même reste préservée pour amortir la `getOrPut` des
+    /// frames suivantes.
     pub fn reset(self: *Batcher) void {
         var it = self.buckets.valueIterator();
-        while (it.next()) |b| b.transforms.clearRetainingCapacity();
+        while (it.next()) |b| b.transforms.deinit(self.allocator);
         self.buckets.clearRetainingCapacity();
         self.sorted_keys.clearRetainingCapacity();
         self.stats = .{};

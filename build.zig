@@ -626,6 +626,34 @@ pub fn build(b: *std.Build) void {
     );
     bench_step.dependOn(&bench_run.step);
 
+    // ------------------------------------- M0.4 render instancing bench ------
+    //
+    // CPU-side batcher harness for the brief Benchmarks targets
+    // (100k entities × 100 (mesh, material) distinct -> drawcall gate
+    // <= 100). GPU-side metrics live in the runtime-smoke-test CI step.
+    const render_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/render_instancing.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    render_bench_module.addImport("weld_core", core_module);
+    render_bench_module.addImport("weld_render", render_module);
+    const render_bench_exe = b.addExecutable(.{
+        .name = "render-instancing-bench",
+        .root_module = render_bench_module,
+    });
+    b.installArtifact(render_bench_exe);
+
+    const render_bench_run = b.addRunArtifact(render_bench_exe);
+    render_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| render_bench_run.addArgs(args);
+    const render_bench_step = b.step(
+        "bench-render-instancing",
+        "Run the M0.4 render instancing bench (writes bench/out/render_instancing_<os>.md)",
+    );
+    render_bench_step.dependOn(&render_bench_run.step);
+
     // -------------------------------------------- Fixture facade (S4 demo) --
 
     // `@embedFile` cannot escape the package root of the module that
