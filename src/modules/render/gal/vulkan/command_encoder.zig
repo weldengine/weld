@@ -342,8 +342,22 @@ pub fn create(device: *Device, label: ?[]const u8) types.Error!*CommandEncoder {
 /// Libère un CommandEncoder. Détruit la pass transient si encore active.
 /// Le `vk.CommandBuffer` n'est pas explicitement free — la pool sera reset
 /// au prochain `resetCommandBuffer` du caller.
+///
+/// Phase 0 safety net: when destroying a CommandEncoder that owned an
+/// `active_pass` (= a render pass + framebuffer Transient), we wait on
+/// `vkDeviceWaitIdle` before tearing the GPU resources down. Without
+/// the wait, callers who `defer destroyCommandEncoder` immediately
+/// after `device.submit` (the common pattern) trigger Vulkan's
+/// `Framebuffer is currently in use by VkCommandBuffer` warning
+/// because the GPU may still be executing the pass. The wait is
+/// over-cautious — Phase 1+ a per-encoder fence + retire queue will
+/// scope this more tightly — but it matches the S2 pattern
+/// (`/tmp/s2-ref/src/spike/vk_setup.zig:recreateSwapchain` calls
+/// `waitIdle` before destroying its framebuffers) and keeps Phase 0
+/// callers honest by default.
 pub fn destroy(device: *Device, encoder: *CommandEncoder) void {
     if (encoder.active_pass) |*t| {
+        device.vk_device.waitIdle() catch {};
         t.destroy(device.vk_device);
         encoder.active_pass = null;
     }
