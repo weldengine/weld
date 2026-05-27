@@ -685,10 +685,14 @@ fn createLogicalDevice(device: *Device) !void {
         .queue_count = 1,
         .p_queue_priorities = @ptrCast(&priorities),
     };
-    // Phase 0 : seul VK_KHR_swapchain est demandé (et uniquement si surface).
-    const exts_with_swap = [_][*:0]const u8{"VK_KHR_swapchain"};
-    const exts_headless = [_][*:0]const u8{};
-    const enabled_exts: []const [*:0]const u8 = if (device.descriptor.surface != null) exts_with_swap[0..] else exts_headless[0..];
+    // VK_KHR_swapchain is requested unconditionally on platforms that
+    // support a windowing backend. The GAL `createSurfaceFromWindow` +
+    // `createSwapchain` flow creates the surface after the device, so
+    // gating activation on `descriptor.surface != null` at device init
+    // time produces a NULL `vkCreateSwapchainKHR` pointer and a SIGSEGV
+    // on first use. The extension is harmless on a device that never
+    // creates a swapchain (compute-only paths, future).
+    const enabled_exts = [_][*:0]const u8{"VK_KHR_swapchain"};
 
     const features: vk.PhysicalDeviceFeatures = std.mem.zeroes(vk.PhysicalDeviceFeatures);
     const ci: vk.DeviceCreateInfo = .{
@@ -698,7 +702,7 @@ fn createLogicalDevice(device: *Device) !void {
         .enabled_layer_count = 0,
         .pp_enabled_layer_names = undefined,
         .enabled_extension_count = @intCast(enabled_exts.len),
-        .pp_enabled_extension_names = if (enabled_exts.len > 0) enabled_exts.ptr else undefined,
+        .pp_enabled_extension_names = &enabled_exts,
         .p_enabled_features = &features,
     };
     device.vk_device = try device.physical_device.createDevice(&ci, null);
