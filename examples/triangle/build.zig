@@ -23,9 +23,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    // Seule la surface publique du module `weld_render` est consommable.
-    // Aucun import d'internals (brief §Notes pièges connus).
+    // Surface publique du module `weld_render` (GAL Phase 0 surface) +
+    // Tier 0 `platform.window` via `weld_core` (canonical Tier 0 public
+    // API per engine-platform.md §4). Aucun import d'internals au-delà
+    // (brief §Notes pièges connus).
     main_module.addImport("weld_render", weld.module("weld_render"));
+    main_module.addImport("weld_core", weld.module("weld_core"));
 
     const exe = b.addExecutable(.{
         .name = "triangle",

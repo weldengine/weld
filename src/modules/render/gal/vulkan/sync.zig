@@ -31,12 +31,7 @@ pub fn destroyFence(device: *Device, handle: types.FenceHandle) void {
 pub fn waitFence(device: *Device, handle: types.FenceHandle, timeout_ns: u64) types.Error!void {
     if (handle.inner == 0) return error.InvalidArgument;
     const f: vk.Fence = @enumFromInt(handle.inner);
-    device.vk_device.waitForFences(&.{f}, 1, timeout_ns) catch |e| {
-        return switch (e) {
-            error.Timeout => error.BackendInternal,
-            else => error.BackendInternal,
-        };
-    };
+    device.vk_device.waitForFences(&.{f}, 1, timeout_ns) catch return error.BackendInternal;
 }
 
 /// Reset une Fence (état unsignaled) pour réutilisation à la frame suivante.

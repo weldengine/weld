@@ -260,7 +260,7 @@ pub fn present(
     const sc = entry.vk_swapchain;
     const info: vk.PresentInfoKHR = .{
         .wait_semaphore_count = @intCast(wait_vk.items.len),
-        .p_wait_semaphores = if (wait_vk.items.len > 0) wait_vk.items.ptr else undefined,
+        .p_wait_semaphores = if (wait_vk.items.len > 0) @ptrCast(wait_vk.items.ptr) else undefined,
         .swapchain_count = 1,
         .p_swapchains = @ptrCast(&sc),
         .p_image_indices = @ptrCast(&image_index),

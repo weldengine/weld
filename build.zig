@@ -18,7 +18,14 @@ pub fn build(b: *std.Build) void {
 
     // Shared `weld_core` module — Tier 0 internals consumed by the runtime,
     // the bench harness, and every test executable.
-    const core_module = b.createModule(.{
+    //
+    // `b.addModule` (instead of `b.createModule`) so the module is reachable
+    // by the standalone `examples/triangle/` sub-project via
+    // `b.dependency("weld", ...).module("weld_core")`. Tier 0
+    // `platform.window` is the public window API the triangle binary
+    // consumes to open its Vulkan-ready window — same rationale as
+    // `weld_render` exposed below.
+    const core_module = b.addModule("weld_core", .{
         .root_source_file = b.path("src/core/root.zig"),
         .target = target,
         .optimize = optimize,

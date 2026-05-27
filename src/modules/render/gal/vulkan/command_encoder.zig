@@ -45,7 +45,7 @@ pub const CommandEncoder = struct {
             .framebuffer = t.framebuffer,
             .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = t.extent },
             .clear_value_count = t.clear_count,
-            .p_clear_values = if (t.clear_count > 0) @ptrCast(&t.clear_values) else null,
+            .p_clear_values = if (t.clear_count > 0) @ptrCast(&t.clear_values) else undefined,
         };
         self.cb.cmdBeginRenderPass(&begin_info, .@"inline");
         self.active_pass = t;
