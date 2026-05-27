@@ -327,11 +327,34 @@ pub const Device = struct {
     pub fn createShaderModule(self: *Device, descriptor: types.ShaderModuleDescriptor) types.Error!types.ShaderModuleHandle {
         if (descriptor.code.len == 0) return error.InvalidArgument;
         if (descriptor.code.len % 4 != 0) return error.InvalidArgument;
-        if (!std.mem.isAligned(@intFromPtr(descriptor.code.ptr), 4)) return error.InvalidArgument;
+
+        // Vulkan requires `pCode` to be `*const u32` — i.e. the SPIR-V
+        // bytes must live at a u32-aligned address. `@embedFile` does
+        // not guarantee alignment of the embedded slice, so callers that
+        // pass an embedded `.spv` directly would otherwise fail
+        // `InvalidArgument` here (observed on Fedora 44 + Intel UHD 630
+        // during the M0.4 stabilization run). When the caller-provided
+        // slice is misaligned we copy into a temporary aligned buffer;
+        // Vulkan's spec lets us free the source after `vkCreateShaderModule`
+        // returns since the driver owns its internal copy from that
+        // point. The aligned path stays zero-copy.
+        var owned_buf: ?[]align(4) u8 = null;
+        defer if (owned_buf) |b| self.allocator.free(b);
+
+        const code_ptr: [*]const u32 = blk: {
+            if (std.mem.isAligned(@intFromPtr(descriptor.code.ptr), 4)) {
+                break :blk @ptrCast(@alignCast(descriptor.code.ptr));
+            }
+            const buf = try self.allocator.alignedAlloc(u8, .@"4", descriptor.code.len);
+            @memcpy(buf, descriptor.code);
+            owned_buf = buf;
+            break :blk @ptrCast(@alignCast(buf.ptr));
+        };
+
         const ci: vk.ShaderModuleCreateInfo = .{
             .flags = .empty,
             .code_size = descriptor.code.len,
-            .p_code = @ptrCast(@alignCast(descriptor.code.ptr)),
+            .p_code = code_ptr,
         };
         const m = self.vk_device.createShaderModule(&ci, null) catch return error.ShaderCompilationFailed;
         return .{ .inner = @intFromEnum(m) };
