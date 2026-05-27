@@ -351,6 +351,10 @@ pub fn build(b: *std.Build) void {
         // M0.4 — Shader cache disque round-trip (hit/miss source modif /
         // miss glslc version change).
         .{ .path = "tests/render/shader_cache.zig", .render = true },
+        // M0.4 § Scope Post-Review — smoke-test capture PSNR vs golden.
+        // Skip si plateforme sans Vulkan window backend ou si le golden
+        // n'a pas encore été commité.
+        .{ .path = "tests/render/capture.zig", .render = true },
         // M0.4 — vk_gen whitelist closure (variant filtering + closure
         // convergence under 20 iterations).
         .{ .path = "tests/vk_gen/whitelist_closure.zig" },

@@ -50,6 +50,7 @@ const Args = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
+    const io = init.io;
     const raw_args = try init.minimal.args.toSlice(init.arena.allocator());
     const args = try Args.parse(allocator, raw_args);
 
@@ -58,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
     });
 
     if (supportsVulkanWindow()) {
-        runVulkan(allocator, args) catch |e| {
+        runVulkan(allocator, io, args) catch |e| {
             log.warn("vulkan path failed ({t}), falling back to null backend", .{e});
             try runNullBackend(allocator, args);
         };
@@ -77,7 +78,126 @@ fn supportsVulkanWindow() bool {
 const FRAME_WIDTH: u32 = 1280;
 const FRAME_HEIGHT: u32 = 720;
 
-fn runVulkan(allocator: std.mem.Allocator, args: Args) !void {
+const CAPTURE_PATH_DEFAULT: []const u8 = "out/smoke_test.ppm";
+
+fn frameClearColor(frame: u32) gal.types.ColorClear {
+    const t_norm: f32 = @as(f32, @floatFromInt(frame % 180)) / 180.0;
+    const two_pi: f32 = 6.2831853;
+    return .{
+        .r = 0.5 + 0.5 * @sin(t_norm * two_pi),
+        .g = 0.5 + 0.5 * @sin(t_norm * two_pi + 2.094),
+        .b = 0.5 + 0.5 * @sin(t_norm * two_pi + 4.188),
+        .a = 1.0,
+    };
+}
+
+/// Render frame `frame_idx` into an offscreen R8G8B8A8_UNORM texture,
+/// copy it through a staging buffer, and write the result as a binary
+/// PPM (P6) to `path`. Used by the smoke-test capture path consumed by
+/// `tests/render/capture.zig`.
+fn captureFrame(
+    device: *gal.vulkan_backend.Device,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    frame_idx: u32,
+    path: []const u8,
+) !void {
+    const offscreen = try device.createTexture(.{
+        .format = .rgba8_unorm,
+        .width = FRAME_WIDTH,
+        .height = FRAME_HEIGHT,
+        .usage = .{ .color_attachment = true, .copy_src = true },
+    });
+    defer device.destroyTexture(offscreen);
+
+    const offscreen_view = try device.createTextureView(offscreen, .{ .label = "capture.view" });
+    defer device.destroyTextureView(offscreen_view);
+
+    const staging_bytes: u64 = @as(u64, FRAME_WIDTH) * FRAME_HEIGHT * 4;
+    const staging = try device.createBuffer(.{
+        .label = "capture.staging",
+        .size = staging_bytes,
+        .usage = .{ .copy_dst = true },
+        .host_visible = true,
+    });
+    defer device.destroyBuffer(staging);
+
+    const fence = try device.createFence(false);
+    defer device.destroyFence(fence);
+
+    const enc = try device.createCommandEncoder("capture");
+    defer device.destroyCommandEncoder(enc);
+
+    var pass = try enc.beginRenderPass(.{
+        .label = "capture.clear",
+        .color_attachments = &.{.{
+            .view = offscreen_view,
+            .load_op = .clear,
+            .store_op = .store,
+            .clear_color = frameClearColor(frame_idx),
+            .final_layout = .transfer_src,
+        }},
+    });
+    pass.setViewport(0, 0, @floatFromInt(FRAME_WIDTH), @floatFromInt(FRAME_HEIGHT), 0, 1);
+    pass.setScissor(0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+    pass.end();
+
+    enc.copyTextureToBuffer(
+        .{ .texture = offscreen, .aspect = .color },
+        .{ .buffer = staging, .bytes_per_row = FRAME_WIDTH * 4 },
+        .{ .width = FRAME_WIDTH, .height = FRAME_HEIGHT },
+    );
+    enc.finish();
+
+    try device.submit(enc, .{ .fence = fence });
+    try device.waitFence(fence, std.math.maxInt(u64));
+
+    const rgba = try device.mapBuffer(staging);
+    defer device.unmapBuffer(staging);
+
+    try writePPM(allocator, io, path, rgba);
+    log.info("captured frame {d} -> {s}", .{ frame_idx, path });
+}
+
+/// PPM P6 writer. Strips alpha from the RGBA8 source (drops every fourth
+/// byte). `path`'s parent directory is created if missing. Binary P6 format:
+/// "P6\n<W> <H>\n255\n" followed by W*H*3 bytes of RGB.
+fn writePPM(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    rgba: []const u8,
+) !void {
+    if (std.fs.path.dirname(path)) |dir| {
+        std.Io.Dir.cwd().createDirPath(io, dir) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return e,
+        };
+    }
+
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer file.close(io);
+
+    var buf: [4096]u8 = undefined;
+    var writer = file.writer(io, &buf);
+    const w = &writer.interface;
+
+    try w.print("P6\n{d} {d}\n255\n", .{ FRAME_WIDTH, FRAME_HEIGHT });
+
+    const pixel_count = @as(usize, FRAME_WIDTH) * FRAME_HEIGHT;
+    var rgb = try allocator.alloc(u8, pixel_count * 3);
+    defer allocator.free(rgb);
+    var i: usize = 0;
+    while (i < pixel_count) : (i += 1) {
+        rgb[i * 3 + 0] = rgba[i * 4 + 0];
+        rgb[i * 3 + 1] = rgba[i * 4 + 1];
+        rgb[i * 3 + 2] = rgba[i * 4 + 2];
+    }
+    try w.writeAll(rgb);
+    try w.flush();
+}
+
+fn runVulkan(allocator: std.mem.Allocator, io: std.Io, args: Args) !void {
     var window = try window_mod.Window.create(allocator, .{
         .title = "Weld Triangle (M0.4)",
         .width = FRAME_WIDTH,
@@ -142,22 +262,13 @@ fn runVulkan(allocator: std.mem.Allocator, args: Args) !void {
         const enc = try device.createCommandEncoder("frame");
         defer device.destroyCommandEncoder(enc);
 
-        const t_norm: f32 = @as(f32, @floatFromInt(frame % 180)) / 180.0;
-        const two_pi: f32 = 6.2831853;
-        const clear_color: gal.types.ColorClear = .{
-            .r = 0.5 + 0.5 * @sin(t_norm * two_pi),
-            .g = 0.5 + 0.5 * @sin(t_norm * two_pi + 2.094),
-            .b = 0.5 + 0.5 * @sin(t_norm * two_pi + 4.188),
-            .a = 1.0,
-        };
-
         var pass = try enc.beginRenderPass(.{
             .label = "frame.clear",
             .color_attachments = &.{.{
                 .view = color_view,
                 .load_op = .clear,
                 .store_op = .store,
-                .clear_color = clear_color,
+                .clear_color = frameClearColor(frame),
             }},
         });
         pass.setViewport(0, 0, @floatFromInt(FRAME_WIDTH), @floatFromInt(FRAME_HEIGHT), 0, 1);
@@ -173,6 +284,10 @@ fn runVulkan(allocator: std.mem.Allocator, args: Args) !void {
         device.present(swap, image_index, &.{render_done}) catch |e| switch (e) {
             error.SwapchainOutOfDate => log.warn("present hit out-of-date, continuing", .{}),
             else => return e,
+        };
+
+        if (args.capture_frame) |target| if (frame == target) {
+            try captureFrame(&device, allocator, io, frame, CAPTURE_PATH_DEFAULT);
         };
 
         if (args.smoke_test and frame + 1 >= smoke_budget) break;

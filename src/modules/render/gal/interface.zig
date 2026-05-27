@@ -35,6 +35,8 @@ pub const required_methods = [_]RequiredMethod{
     // Buffer ops
     .{ .name = "createBuffer", .purpose = "Alloue un Buffer GPU" },
     .{ .name = "destroyBuffer", .purpose = "Libère un Buffer GPU" },
+    .{ .name = "mapBuffer", .purpose = "Map un host-visible Buffer pour CPU read/write" },
+    .{ .name = "unmapBuffer", .purpose = "Unmap un Buffer mappé via mapBuffer" },
 
     // Texture ops
     .{ .name = "createTexture", .purpose = "Alloue une Texture GPU" },
@@ -128,6 +130,13 @@ const TestShape = struct {
         return .{};
     }
     pub fn destroyBuffer(self: *TestShape, h: types.BufferHandle) void {
+        _ = .{ self, h };
+    }
+    pub fn mapBuffer(self: *TestShape, h: types.BufferHandle) types.Error![]u8 {
+        _ = .{ self, h };
+        return &[_]u8{};
+    }
+    pub fn unmapBuffer(self: *TestShape, h: types.BufferHandle) void {
         _ = .{ self, h };
     }
     pub fn createTexture(self: *TestShape, d: types.TextureDescriptor) types.Error!types.TextureHandle {

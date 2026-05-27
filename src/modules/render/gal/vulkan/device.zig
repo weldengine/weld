@@ -219,6 +219,18 @@ pub const Device = struct {
         buffer_mod.destroy(self, handle);
     }
 
+    /// Map a host-visible buffer for CPU read/write. The returned slice is
+    /// invalidated by `unmapBuffer`. Returns `error.Unsupported` if the
+    /// buffer was created with `host_visible = false`.
+    pub fn mapBuffer(self: *Device, handle: types.BufferHandle) types.Error![]u8 {
+        return buffer_mod.map(self, handle);
+    }
+
+    /// Unmap a buffer previously mapped via `mapBuffer`. No-op if not mapped.
+    pub fn unmapBuffer(self: *Device, handle: types.BufferHandle) void {
+        buffer_mod.unmap(self, handle);
+    }
+
     // ====================================================================
     // Texture / TextureView
     // ====================================================================

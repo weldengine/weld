@@ -62,6 +62,12 @@ pub fn begin(device: *Device, descriptor: types.RenderPassDescriptor) types.Erro
         // bgra8_unorm comme défaut swapchain. Phase 1+ : extension du
         // ViewEntry pour mémoriser le format.
         const format = vk.Format.b8g8r8a8_unorm;
+        const final_layout: vk.ImageLayout = switch (c.final_layout) {
+            .present => .present_src_khr,
+            .transfer_src => .transfer_src_optimal,
+            .shader_read => .shader_read_only_optimal,
+            .color_attachment => .color_attachment_optimal,
+        };
         attachments[n_attach] = .{
             .flags = .empty,
             .format = format,
@@ -71,7 +77,7 @@ pub fn begin(device: *Device, descriptor: types.RenderPassDescriptor) types.Erro
             .stencil_load_op = .dont_care,
             .stencil_store_op = .dont_care,
             .initial_layout = .undefined,
-            .final_layout = .present_src_khr,
+            .final_layout = final_layout,
         };
         color_refs[n_color] = .{
             .attachment = n_attach,

@@ -502,6 +502,21 @@ pub const ColorClear = extern struct {
     a: f32 = 1,
 };
 
+/// Layout final attendu par une attachment à la fin de la render pass.
+/// Le backend transitionne l'image vers ce layout automatiquement (en
+/// barrier implicite à la fin du subpass). Le caller choisit selon
+/// l'usage downstream : `.present` pour une swapchain image à présenter,
+/// `.transfer_src` pour un texture qu'on va copier vers un buffer (capture
+/// PPM, blit), `.shader_read` pour une texture lue par un shader (input
+/// d'une pass suivante), `.color_attachment` pour rester rebindable comme
+/// color attachment d'une pass aval.
+pub const AttachmentFinalLayout = enum(u8) {
+    present,
+    transfer_src,
+    shader_read,
+    color_attachment,
+};
+
 /// Attachement color pour une render pass.
 pub const ColorAttachment = struct {
     view: TextureViewHandle,
@@ -510,6 +525,7 @@ pub const ColorAttachment = struct {
     load_op: LoadOp = .clear,
     store_op: StoreOp = .store,
     clear_color: ColorClear = .{},
+    final_layout: AttachmentFinalLayout = .present,
 };
 
 /// Attachement depth/stencil pour une render pass.

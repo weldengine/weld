@@ -61,6 +61,17 @@ pub const Device = struct {
         _ = .{ self, handle };
     }
 
+    /// Null backend has no real buffer storage — return Unsupported so
+    /// portable callers can skip the capture path on the Null backend.
+    pub fn mapBuffer(self: *Device, handle: types.BufferHandle) types.Error![]u8 {
+        _ = .{ self, handle };
+        return error.Unsupported;
+    }
+
+    pub fn unmapBuffer(self: *Device, handle: types.BufferHandle) void {
+        _ = .{ self, handle };
+    }
+
     pub fn createTexture(self: *Device, descriptor: types.TextureDescriptor) types.Error!types.TextureHandle {
         // Phase 0 : sample_count > 1 non supporté (cohérent avec brief
         // §Out-of-scope MSAA).
