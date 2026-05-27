@@ -36,6 +36,13 @@ pub const CommandEncoder = struct {
     /// `destroy`. Phase 0 simple : on n'en garde qu'une à la fois — la
     /// limitation correspond à 1 begin/end render pass par encoder.
     active_pass: ?render_pass_mod.Transient = null,
+    /// Tracks whether `vkCmdBeginRenderPass` has been issued without a
+    /// matching `vkCmdEndRenderPass`. Separate from `active_pass` (which
+    /// owns the render pass + framebuffer resources for cleanup) — once
+    /// `RenderPassEncoder.end()` fires the Vulkan side closes
+    /// immediately so cmdCopy* / blit / barrier after the pass do not
+    /// land inside an active render pass (Bug 4 of the stabilization).
+    pass_active: bool = false,
 
     pub fn beginRenderPass(self: *CommandEncoder, descriptor: types.RenderPassDescriptor) types.Error!RenderPassEncoder {
         if (self.finished) return error.InvalidArgument;
@@ -49,7 +56,8 @@ pub const CommandEncoder = struct {
         };
         self.cb.cmdBeginRenderPass(&begin_info, .@"inline");
         self.active_pass = t;
-        return .{ .device = self.device, .cb = self.cb };
+        self.pass_active = true;
+        return .{ .parent = self, .device = self.device, .cb = self.cb };
     }
 
     pub fn beginComputePass(self: *CommandEncoder, descriptor: types.ComputePassDescriptor) ComputePassEncoder {
@@ -148,14 +156,13 @@ pub const CommandEncoder = struct {
 
     pub fn finish(self: *CommandEncoder) void {
         if (self.finished) return;
-        if (self.active_pass) |*t| {
+        // Safety net: if the caller forgot `pass.end()`, close the
+        // render pass here. The recommended call site is
+        // `RenderPassEncoder.end()` which fires immediately so subsequent
+        // copy / blit commands stay outside the pass scope.
+        if (self.pass_active) {
             self.cb.cmdEndRenderPass();
-            // Note: on ne détruit pas la render pass/framebuffer ici parce
-            // qu'ils doivent vivre jusqu'à ce que la submission GPU soit
-            // terminée. Phase 0 simplification : la transition cleanup est
-            // déportée à `destroy` du command encoder (le caller doit avoir
-            // waitFence avant).
-            _ = t;
+            self.pass_active = false;
         }
         self.cb.endCommandBuffer() catch {};
         self.finished = true;
@@ -163,8 +170,13 @@ pub const CommandEncoder = struct {
 };
 
 /// RenderPassEncoder Vulkan — délégué par `CommandEncoder.beginRenderPass`.
-/// Structure plate, n'est pas allouée séparément du CommandEncoder.
+/// Structure plate, n'est pas allouée séparément du CommandEncoder. Carries
+/// a back-pointer to the parent so `end()` can mark the encoder's render
+/// pass slot as closed — without this, callers issuing `cmdCopy*` after a
+/// nominal `pass.end()` would fall inside the still-active Vulkan render
+/// pass (Bug 4 of the M0.4 stabilization session).
 pub const RenderPassEncoder = struct {
+    parent: *CommandEncoder,
     device: *Device,
     cb: *vk.CommandBuffer,
 
@@ -259,9 +271,17 @@ pub const RenderPassEncoder = struct {
     }
 
     pub fn end(self: *RenderPassEncoder) void {
-        _ = self;
-        // Le `cmdEndRenderPass` est appelé par `CommandEncoder.finish` —
-        // ce `end` GAL est nominal (signale "j'ai fini d'enregistrer cette pass").
+        // Close the Vulkan render pass immediately so the caller can
+        // issue post-pass commands (cmdCopyImageToBuffer, blits, …) on
+        // the same encoder. `CommandEncoder.finish` keys off
+        // `pass_active` to avoid a double `cmdEndRenderPass`. The
+        // `active_pass` Transient itself stays populated so the
+        // CommandEncoder destroy can free the render pass + framebuffer
+        // GPU resources after the submission completes.
+        if (self.parent.pass_active) {
+            self.cb.cmdEndRenderPass();
+            self.parent.pass_active = false;
+        }
     }
 };
 
