@@ -96,7 +96,7 @@ pub const Device = struct {
             .selection = std.mem.zeroes(DeviceSelection),
         };
 
-        device.vk_instance = createInstance(allocator, descriptor) catch |e| {
+        const instance_result = createInstance(allocator, descriptor) catch |e| {
             // log.debug : ce path est exercé en CI Linux qui n'a pas de
             // device Vulkan utilisable — le caller (typiquement un test)
             // catch l'erreur et skip. log.err déclencherait un faux
@@ -104,12 +104,20 @@ pub const Device = struct {
             log.debug("vk: createInstance failed: {t}", .{e});
             return error.NotInitialized;
         };
+        device.vk_instance = instance_result.instance;
         errdefer device.vk_instance.destroyInstance(null);
         vk.loadInstance(device.vk_instance) catch return error.NotInitialized;
 
-        if (descriptor.enable_validation and builtin.mode != .ReleaseFast) {
-            device.debug_messenger = createDebugMessenger(device.vk_instance) catch null;
-        }
+        // VK_EXT_debug_utils activation is conditional to the validation
+        // layer being present at vkCreateInstance time. If the layer is
+        // absent (e.g. Fedora 44 without vulkan-validation-layers), the
+        // extension is not activated, the function pointer is NULL, and
+        // a raw call would SIGSEGV. `catch null` does not catch hardware
+        // faults. We gate on the bool tracked by createInstance.
+        device.debug_messenger = if (instance_result.debug_utils_enabled)
+            createDebugMessenger(device.vk_instance) catch null
+        else
+            null;
 
         try pickPhysicalDevice(&device, allocator, descriptor);
 
@@ -494,7 +502,20 @@ pub const Device = struct {
 // Sélection multi-GPU + multi-driver (helpers internes)
 // ============================================================================
 
-fn createInstance(allocator: std.mem.Allocator, descriptor: types.DeviceDescriptor) !*vk.Instance {
+/// Result of `createInstance`. `debug_utils_enabled` reflects whether
+/// `VK_EXT_debug_utils` was effectively appended to the enabled
+/// extension list at `vkCreateInstance` time — it is `true` only when
+/// the validation layer was both requested and present on the system.
+/// The caller must gate any `vkCreateDebugUtilsMessengerEXT` dispatch
+/// on this flag: when the extension is absent the function pointer is
+/// NULL and a raw call SIGSEGVs (cf. fix journal — Fedora 44 without
+/// `vulkan-validation-layers` installed).
+const InstanceResult = struct {
+    instance: *vk.Instance,
+    debug_utils_enabled: bool,
+};
+
+fn createInstance(allocator: std.mem.Allocator, descriptor: types.DeviceDescriptor) !InstanceResult {
     var ext_buf: std.ArrayList([*:0]const u8) = .empty;
     defer ext_buf.deinit(allocator);
     try ext_buf.append(allocator, "VK_KHR_surface");
@@ -506,6 +527,7 @@ fn createInstance(allocator: std.mem.Allocator, descriptor: types.DeviceDescript
 
     var layer_buf: std.ArrayList([*:0]const u8) = .empty;
     defer layer_buf.deinit(allocator);
+    var debug_utils_enabled = false;
     if (descriptor.enable_validation and builtin.mode != .ReleaseFast) {
         const available = vk.enumerateInstanceLayerProperties(allocator) catch &[_]vk.LayerProperties{};
         defer allocator.free(available);
@@ -513,6 +535,7 @@ fn createInstance(allocator: std.mem.Allocator, descriptor: types.DeviceDescript
             if (std.mem.startsWith(u8, &lp.layer_name, "VK_LAYER_KHRONOS_validation")) {
                 try layer_buf.append(allocator, "VK_LAYER_KHRONOS_validation");
                 try ext_buf.append(allocator, "VK_EXT_debug_utils");
+                debug_utils_enabled = true;
                 break;
             }
         }
@@ -533,7 +556,8 @@ fn createInstance(allocator: std.mem.Allocator, descriptor: types.DeviceDescript
         .enabled_extension_count = @intCast(ext_buf.items.len),
         .pp_enabled_extension_names = ext_buf.items.ptr,
     };
-    return vk.createInstance(&ci, null);
+    const instance = try vk.createInstance(&ci, null);
+    return .{ .instance = instance, .debug_utils_enabled = debug_utils_enabled };
 }
 
 fn createDebugMessenger(instance: *vk.Instance) !vk.DebugUtilsMessengerEXT {
