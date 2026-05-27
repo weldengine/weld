@@ -133,8 +133,11 @@ pub fn build(b: *std.Build) void {
     // est migrée dans `examples/triangle/src/main.zig`.
 
     // Shaders embedding — partagé par les binaires éditeur + runtime pour
-    // le viewport blit S6. Les `.spv` vivent sous `assets/shaders/`.
-    const shaders_module = b.createModule(.{
+    // le viewport blit S6, et par `examples/triangle/` pour les SPIR-V
+    // triangle.vert/frag. Les `.spv` vivent sous `assets/shaders/`.
+    // `b.addModule` (au lieu de `b.createModule`) pour que le sous-projet
+    // standalone le consomme via `b.dependency("weld", ...).module("shaders")`.
+    const shaders_module = b.addModule("shaders", .{
         .root_source_file = b.path("assets/shaders/embed.zig"),
         .target = target,
         .optimize = optimize,

@@ -56,7 +56,7 @@ pub fn createRender(
     const layout_ci: vk.PipelineLayoutCreateInfo = .{
         .flags = .empty,
         .set_layout_count = @intCast(set_layouts.items.len),
-        .p_set_layouts = if (set_layouts.items.len > 0) set_layouts.items.ptr else undefined,
+        .p_set_layouts = if (set_layouts.items.len > 0) @ptrCast(set_layouts.items.ptr) else undefined,
         .push_constant_range_count = 0,
         .p_push_constant_ranges = undefined,
     };
@@ -108,7 +108,7 @@ pub fn createRender(
         .input_attachment_count = 0,
         .p_input_attachments = undefined,
         .color_attachment_count = n_color,
-        .p_color_attachments = if (n_color > 0) @ptrCast(&color_refs) else null,
+        .p_color_attachments = if (n_color > 0) @ptrCast(&color_refs) else undefined,
         .p_resolve_attachments = null,
         .p_depth_stencil_attachment = if (has_depth) &depth_ref else null,
         .preserve_attachment_count = 0,
@@ -117,7 +117,7 @@ pub fn createRender(
     const rp_ci: vk.RenderPassCreateInfo = .{
         .flags = .empty,
         .attachment_count = n_attach,
-        .p_attachments = if (n_attach > 0) @ptrCast(&attachments) else null,
+        .p_attachments = if (n_attach > 0) @ptrCast(&attachments) else undefined,
         .subpass_count = 1,
         .p_subpasses = @ptrCast(&subpass),
         .dependency_count = 0,
@@ -170,9 +170,9 @@ pub fn createRender(
     const vi: vk.PipelineVertexInputStateCreateInfo = .{
         .flags = .empty,
         .vertex_binding_description_count = @intCast(bindings.items.len),
-        .p_vertex_binding_descriptions = if (bindings.items.len > 0) bindings.items.ptr else undefined,
+        .p_vertex_binding_descriptions = if (bindings.items.len > 0) @ptrCast(bindings.items.ptr) else undefined,
         .vertex_attribute_description_count = @intCast(attrs.items.len),
-        .p_vertex_attribute_descriptions = if (attrs.items.len > 0) attrs.items.ptr else undefined,
+        .p_vertex_attribute_descriptions = if (attrs.items.len > 0) @ptrCast(attrs.items.ptr) else undefined,
     };
     const ia: vk.PipelineInputAssemblyStateCreateInfo = .{
         .flags = .empty,
@@ -248,7 +248,7 @@ pub fn createRender(
         .logic_op_enable = 0,
         .logic_op = .copy,
         .attachment_count = @intCast(blend_states.items.len),
-        .p_attachments = if (blend_states.items.len > 0) blend_states.items.ptr else undefined,
+        .p_attachments = if (blend_states.items.len > 0) @ptrCast(blend_states.items.ptr) else undefined,
         .blend_constants = .{ 0, 0, 0, 0 },
     };
 
@@ -309,7 +309,7 @@ pub fn createCompute(
     const layout_ci: vk.PipelineLayoutCreateInfo = .{
         .flags = .empty,
         .set_layout_count = @intCast(set_layouts.items.len),
-        .p_set_layouts = if (set_layouts.items.len > 0) set_layouts.items.ptr else undefined,
+        .p_set_layouts = if (set_layouts.items.len > 0) @ptrCast(set_layouts.items.ptr) else undefined,
         .push_constant_range_count = 0,
         .p_push_constant_ranges = undefined,
     };

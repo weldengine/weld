@@ -33,6 +33,7 @@ pub fn textureFormat(fmt: types.TextureFormat) vk.Format {
         .rgba16_sfloat => .r16g16b16a16_sfloat,
         .r32_sfloat => .r32_sfloat,
         .rg32_sfloat => .r32g32_sfloat,
+        .rgb32_sfloat => .r32g32b32_sfloat,
         .rgba32_sfloat => .r32g32b32a32_sfloat,
     };
 }
@@ -54,6 +55,7 @@ pub fn textureFormatFromVk(fmt: vk.Format) types.TextureFormat {
         .r16g16b16a16_sfloat => .rgba16_sfloat,
         .r32_sfloat => .r32_sfloat,
         .r32g32_sfloat => .rg32_sfloat,
+        .r32g32b32_sfloat => .rgb32_sfloat,
         .r32g32b32a32_sfloat => .rgba32_sfloat,
         else => .undef,
     };
@@ -232,10 +234,10 @@ pub fn checkResult(r: vk.Result) types.Error!void {
 test "conv: textureFormat round-trip on Phase 0 formats" {
     const t = std.testing;
     inline for ([_]types.TextureFormat{
-        .r8_unorm,    .rg8_unorm,     .rgba8_unorm,   .rgba8_srgb,
-        .bgra8_unorm, .bgra8_srgb,    .d32_sfloat,    .d24_unorm_s8_uint,
-        .r16_sfloat,  .rg16_sfloat,   .rgba16_sfloat, .r32_sfloat,
-        .rg32_sfloat, .rgba32_sfloat,
+        .r8_unorm,    .rg8_unorm,    .rgba8_unorm,   .rgba8_srgb,
+        .bgra8_unorm, .bgra8_srgb,   .d32_sfloat,    .d24_unorm_s8_uint,
+        .r16_sfloat,  .rg16_sfloat,  .rgba16_sfloat, .r32_sfloat,
+        .rg32_sfloat, .rgb32_sfloat, .rgba32_sfloat,
     }) |fmt| {
         const native = textureFormat(fmt);
         const back = textureFormatFromVk(native);

@@ -62,7 +62,7 @@ pub fn createLayout(
     const ci: vk.DescriptorSetLayoutCreateInfo = .{
         .flags = .empty,
         .binding_count = @intCast(vk_bindings.items.len),
-        .p_bindings = vk_bindings.items.ptr,
+        .p_bindings = if (vk_bindings.items.len > 0) @ptrCast(vk_bindings.items.ptr) else undefined,
     };
     const l = device.vk_device.createDescriptorSetLayout(&ci, null) catch return error.BackendInternal;
     return .{ .inner = @intFromEnum(l) };

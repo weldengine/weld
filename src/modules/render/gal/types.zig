@@ -153,6 +153,7 @@ pub const TextureFormat = enum(u32) {
     rgba16_sfloat,
     r32_sfloat,
     rg32_sfloat,
+    rgb32_sfloat,
     rgba32_sfloat,
 };
 

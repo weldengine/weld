@@ -29,6 +29,10 @@ pub fn build(b: *std.Build) void {
     // (brief §Notes pièges connus).
     main_module.addImport("weld_render", weld.module("weld_render"));
     main_module.addImport("weld_core", weld.module("weld_core"));
+    // Pre-compiled SPIR-V (triangle.vert/frag + viewport_blit) — shared
+    // facade exposed by the engine so callers do not have to escape their
+    // own package root with `@embedFile`.
+    main_module.addImport("shaders", weld.module("shaders"));
 
     const exe = b.addExecutable(.{
         .name = "triangle",

@@ -17,6 +17,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const gal = @import("weld_render").gal;
 const window_mod = @import("weld_core").platform.window;
+const shaders = @import("shaders");
 
 const log = std.log.scoped(.triangle);
 
@@ -80,6 +81,116 @@ const FRAME_HEIGHT: u32 = 720;
 
 const CAPTURE_PATH_DEFAULT: []const u8 = "out/smoke_test.ppm";
 
+/// Triangle vertex layout: vec2 position (NDC) + vec3 color (RGB).
+/// Matches `assets/shaders/triangle.vert.glsl` `in vec2 inPosition`
+/// (location 0) + `in vec3 inColor` (location 1). Layed out as a packed
+/// extern struct so the GAL vertex input descriptor reads the right
+/// strides + offsets.
+const TriangleVertex = extern struct {
+    pos: [2]f32,
+    color: [3]f32,
+};
+
+/// RGB triangle in NDC clip space — bottom-left red, bottom-right green,
+/// top blue. Patterns from S2 (`/tmp/s2-ref/src/spike/vk_setup.zig:triangle`).
+const TRIANGLE_VERTICES = [_]TriangleVertex{
+    .{ .pos = .{ -0.5, 0.5 }, .color = .{ 1.0, 0.0, 0.0 } },
+    .{ .pos = .{ 0.5, 0.5 }, .color = .{ 0.0, 1.0, 0.0 } },
+    .{ .pos = .{ 0.0, -0.5 }, .color = .{ 0.0, 0.0, 1.0 } },
+};
+
+/// Bundle of GPU resources needed to draw the triangle. Created once at
+/// init, reused across all frames + the capture pass, destroyed at
+/// teardown. The clear color cycling lives on the render pass itself —
+/// not on the pipeline — so the same pipeline draws the triangle on a
+/// changing background.
+const TrianglePipeline = struct {
+    vert_module: gal.types.ShaderModuleHandle,
+    frag_module: gal.types.ShaderModuleHandle,
+    bgl: gal.types.BindGroupLayoutHandle,
+    pipeline: gal.types.RenderPipelineHandle,
+    vertex_buffer: gal.types.BufferHandle,
+
+    fn init(device: *gal.vulkan_backend.Device, color_format: gal.types.TextureFormat) !TrianglePipeline {
+        const vsm = try device.createShaderModule(.{
+            .code = shaders.triangle_vert_spv,
+            .label = "triangle.vs",
+        });
+        errdefer device.destroyShaderModule(vsm);
+        const fsm = try device.createShaderModule(.{
+            .code = shaders.triangle_frag_spv,
+            .label = "triangle.fs",
+        });
+        errdefer device.destroyShaderModule(fsm);
+
+        const bgl = try device.createBindGroupLayout(.{ .entries = &.{} });
+        errdefer device.destroyBindGroupLayout(bgl);
+
+        const pipeline = try device.createRenderPipeline(.{
+            .label = "triangle.pso",
+            .layout = &.{bgl},
+            .vertex_module = vsm,
+            .fragment_module = fsm,
+            .color_targets = &.{.{ .format = color_format }},
+            .vertex_buffers = &.{.{
+                .stride = @sizeOf(TriangleVertex),
+                .step_mode = .vertex,
+                .attributes = &.{
+                    .{ .location = 0, .format = .rg32_sfloat, .offset = @offsetOf(TriangleVertex, "pos") },
+                    .{ .location = 1, .format = .rgb32_sfloat, .offset = @offsetOf(TriangleVertex, "color") },
+                },
+            }},
+            .cull_mode = .none,
+        });
+        errdefer device.destroyRenderPipeline(pipeline);
+
+        const vb = try device.createBuffer(.{
+            .label = "triangle.vb",
+            .size = @sizeOf(@TypeOf(TRIANGLE_VERTICES)),
+            .usage = .{ .vertex = true, .copy_dst = true },
+            // Phase 0 simplification: host-visible vertex buffer + map.
+            // S2 uses a device-local buffer + staging upload; the GAL
+            // path will gain a `device.writeBuffer` helper Phase 1+
+            // that hides the staging dance. For now host-visible is
+            // sufficient for 3 vertices.
+            .host_visible = true,
+        });
+        errdefer device.destroyBuffer(vb);
+
+        const mapped = try device.mapBuffer(vb);
+        @memcpy(mapped[0..@sizeOf(@TypeOf(TRIANGLE_VERTICES))], std.mem.asBytes(&TRIANGLE_VERTICES));
+        device.unmapBuffer(vb);
+
+        return .{
+            .vert_module = vsm,
+            .frag_module = fsm,
+            .bgl = bgl,
+            .pipeline = pipeline,
+            .vertex_buffer = vb,
+        };
+    }
+
+    fn deinit(self: *TrianglePipeline, device: *gal.vulkan_backend.Device) void {
+        device.destroyBuffer(self.vertex_buffer);
+        device.destroyRenderPipeline(self.pipeline);
+        device.destroyBindGroupLayout(self.bgl);
+        device.destroyShaderModule(self.frag_module);
+        device.destroyShaderModule(self.vert_module);
+    }
+
+    /// Bind pipeline + vertex buffer and draw 3 vertices. Caller owns
+    /// the render pass scope. `pass` is duck-typed via `anytype` so the
+    /// example does not depend on the backend-internal
+    /// `RenderPassEncoder` type — the GAL public surface only exposes
+    /// the methods we call here (`setPipeline`, `setVertexBuffer`,
+    /// `draw`).
+    fn draw(self: *const TrianglePipeline, pass: anytype) void {
+        pass.setPipeline(self.pipeline);
+        pass.setVertexBuffer(0, self.vertex_buffer, 0);
+        pass.draw(3, 1, 0, 0);
+    }
+};
+
 fn frameClearColor(frame: u32) gal.types.ColorClear {
     const t_norm: f32 = @as(f32, @floatFromInt(frame % 180)) / 180.0;
     const two_pi: f32 = 6.2831853;
@@ -94,9 +205,14 @@ fn frameClearColor(frame: u32) gal.types.ColorClear {
 /// Render frame `frame_idx` into an offscreen R8G8B8A8_UNORM texture,
 /// copy it through a staging buffer, and write the result as a binary
 /// PPM (P6) to `path`. Used by the smoke-test capture path consumed by
-/// `tests/render/capture.zig`.
+/// `tests/render/capture.zig`. The `pipeline` argument is the same
+/// triangle pipeline used in the interactive loop — drawn over the
+/// clear-color background so the captured PPM exercises the full
+/// forward path (vertex → rasterizer → fragment → blend), not just
+/// a clear.
 fn captureFrame(
     device: *gal.vulkan_backend.Device,
+    pipeline: *const TrianglePipeline,
     allocator: std.mem.Allocator,
     io: std.Io,
     frame_idx: u32,
@@ -140,6 +256,7 @@ fn captureFrame(
     });
     pass.setViewport(0, 0, @floatFromInt(FRAME_WIDTH), @floatFromInt(FRAME_HEIGHT), 0, 1);
     pass.setScissor(0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+    pipeline.draw(&pass);
     pass.end();
 
     enc.copyTextureToBuffer(
@@ -223,6 +340,19 @@ fn runVulkan(allocator: std.mem.Allocator, io: std.Io, args: Args) !void {
     });
     defer device.destroySwapchain(swap);
 
+    // Two triangle pipelines — Vulkan requires the pipeline's color
+    // attachment format to match the render pass's, and our interactive
+    // loop renders into a BGRA8_UNORM swapchain image while the capture
+    // pass renders into an RGBA8_UNORM offscreen. Same shader modules
+    // under the hood; the GAL rebuilds the pipeline state object per
+    // descriptor. Pattern is cheap (3 vertices total, fixed pipeline)
+    // and avoids the layout shenanigans of a single-pipeline / two-
+    // format-coercion path.
+    var triangle_swap = try TrianglePipeline.init(&device, .bgra8_unorm);
+    defer triangle_swap.deinit(&device);
+    var triangle_capture = try TrianglePipeline.init(&device, .rgba8_unorm);
+    defer triangle_capture.deinit(&device);
+
     const image_ready = try device.createSemaphore();
     defer device.destroySemaphore(image_ready);
     const render_done = try device.createSemaphore();
@@ -263,7 +393,7 @@ fn runVulkan(allocator: std.mem.Allocator, io: std.Io, args: Args) !void {
         defer device.destroyCommandEncoder(enc);
 
         var pass = try enc.beginRenderPass(.{
-            .label = "frame.clear",
+            .label = "frame",
             .color_attachments = &.{.{
                 .view = color_view,
                 .load_op = .clear,
@@ -273,6 +403,7 @@ fn runVulkan(allocator: std.mem.Allocator, io: std.Io, args: Args) !void {
         });
         pass.setViewport(0, 0, @floatFromInt(FRAME_WIDTH), @floatFromInt(FRAME_HEIGHT), 0, 1);
         pass.setScissor(0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+        triangle_swap.draw(&pass);
         pass.end();
         enc.finish();
 
@@ -287,7 +418,7 @@ fn runVulkan(allocator: std.mem.Allocator, io: std.Io, args: Args) !void {
         };
 
         if (args.capture_frame) |target| if (frame == target) {
-            try captureFrame(&device, allocator, io, frame, CAPTURE_PATH_DEFAULT);
+            try captureFrame(&device, &triangle_capture, allocator, io, frame, CAPTURE_PATH_DEFAULT);
         };
 
         if (args.smoke_test and frame + 1 >= smoke_budget) break;
