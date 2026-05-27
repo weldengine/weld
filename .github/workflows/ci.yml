@@ -80,3 +80,75 @@ jobs:
       # locally on Guy's machine, not in CI — see briefs/S1-mini-ecs.md.
       - name: zig build bench-ecs -- --smoke
         run: zig build bench-ecs -Doptimize=ReleaseSafe -- --smoke
+
+  runtime-smoke-test:
+    # M0.4 § Scope Post-Review — first application of the runtime
+    # semantic CI rule (cf. engine-development-workflow.md §4.5.1).
+    # Linux-only: weston + lavapipe provide a fully software path that
+    # exercises Vulkan init + Wayland surface + render pass + present +
+    # copyTextureToBuffer end-to-end. Windows CI sits behind manual
+    # GPU §4.5.1 validation since the runners do not ship a Vulkan
+    # software driver.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install weston + Mesa Vulkan software drivers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            weston \
+            mesa-vulkan-drivers \
+            libvulkan1 \
+            libwayland-client0 \
+            libwayland-cursor0
+
+      - name: zig build (ReleaseSafe)
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Launch weston headless backend
+        run: |
+          mkdir -p /tmp/runtime-dir
+          chmod 700 /tmp/runtime-dir
+          XDG_RUNTIME_DIR=/tmp/runtime-dir WAYLAND_DISPLAY=wayland-1 \
+            weston --backend=headless --width=1280 --height=720 &
+          # Give weston a beat to bind the wayland socket before the
+          # example connects.
+          sleep 2
+          echo "WAYLAND_DISPLAY=wayland-1" >> "$GITHUB_ENV"
+          echo "XDG_RUNTIME_DIR=/tmp/runtime-dir" >> "$GITHUB_ENV"
+
+      - name: zig build run-example-triangle (smoke + capture)
+        env:
+          # Force lavapipe (Mesa software Vulkan ICD) on the runner.
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: |
+          zig build run-example-triangle -- \
+            --smoke-test --vulkan-driver=software --capture-frame=10
+
+      - name: Verify PSNR vs golden
+        run: |
+          if [ ! -f tests/golden/smoke_test_software.ppm ]; then
+            echo "Golden PPM not yet committed — capture written to out/smoke_test.ppm." >&2
+            echo "First-run procedure: download out/smoke_test.ppm from this job, validate visually," >&2
+            echo "commit it as tests/golden/smoke_test_software.ppm, then re-run." >&2
+            exit 0
+          fi
+          zig build test -Doptimize=ReleaseSafe --summary all 2>&1 | tee test-output.txt
+          grep -E "(capture pass produces PPM matching golden|PSNR)" test-output.txt || true
+
+      - name: Upload capture artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-smoke-test-capture
+          path: |
+            out/smoke_test.ppm
+            test-output.txt
+          retention-days: 30
