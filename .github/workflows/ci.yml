@@ -150,7 +150,7 @@ jobs:
           # Force lavapipe (Mesa software Vulkan ICD) on the runner.
           # Path validated by the `Locate lavapipe ICD` diagnostic step
           # above — adjust here if the runner reports a different path.
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
         run: |
           set -euo pipefail
           zig build run-example-triangle -- \
@@ -169,9 +169,12 @@ jobs:
           # bypasses the generic `zig build test` which pulls in every
           # test in the repo (some have unrelated ReleaseSafe issues
           # tracked as M0.7 housekeeping debt). Scope: PSNR regression
-          # gate, nothing else.
+          # gate, nothing else. The test itself raises a typed error
+          # when PSNR < 40 dB, so a non-zero exit propagates through
+          # pipefail — no separate grep needed (the previous grep on
+          # "PSNR" matched the test's success log line that does not
+          # exist, tripping exit 1 under pipefail on every passing run).
           zig build test-render-capture -Doptimize=ReleaseSafe --summary all 2>&1 | tee test-output.txt
-          grep -E "(capture pass produces PPM matching golden|PSNR)" test-output.txt
 
       - name: Upload capture artifact
         if: always()
