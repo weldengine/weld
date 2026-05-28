@@ -90,7 +90,7 @@ jobs:
     # GPU §4.5.1 validation since the runners do not ship a Vulkan
     # software driver.
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     needs: build-and-test
     steps:
       - uses: actions/checkout@v6
