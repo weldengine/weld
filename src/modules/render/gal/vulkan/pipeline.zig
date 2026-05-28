@@ -267,7 +267,7 @@ pub fn createRender(
         .{
             .flags = .empty,
             .stage_count = stage_count,
-            .p_stages = @ptrCast(&stages[0..stage_count]),
+            .p_stages = @ptrCast(&stages),
             .p_vertex_input_state = &vi,
             .p_input_assembly_state = &ia,
             .p_tessellation_state = null,
