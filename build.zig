@@ -18,7 +18,14 @@ pub fn build(b: *std.Build) void {
 
     // Shared `weld_core` module — Tier 0 internals consumed by the runtime,
     // the bench harness, and every test executable.
-    const core_module = b.createModule(.{
+    //
+    // `b.addModule` (instead of `b.createModule`) so the module is reachable
+    // by the standalone `examples/triangle/` sub-project via
+    // `b.dependency("weld", ...).module("weld_core")`. Tier 0
+    // `platform.window` is the public window API the triangle binary
+    // consumes to open its Vulkan-ready window — same rationale as
+    // `weld_render` exposed below.
+    const core_module = b.addModule("weld_core", .{
         .root_source_file = b.path("src/core/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -51,6 +58,25 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // M0.4 — `weld_render` module exposes the Render Tier 1 module entry,
+    // starting with the GAL (GPU Abstraction Layer) public surface and
+    // the `Null` + `Vulkan` backends. Consumed by `tests/render/*.zig`
+    // and, eventually, by the runtime + `examples/triangle/` standalone
+    // sub-project.
+    //
+    // Importe `weld_core` parce que le backend Vulkan utilise
+    // `weld_core.platform.vk` (binding généré par `tools/bindgen`).
+    // `b.addModule` (au lieu de `b.createModule`) enregistre le module
+    // dans `b.modules` et le rend consommable par les dépendants via
+    // `b.dependency("weld", ...).module("weld_render")` — pré-requis du
+    // sous-projet `examples/triangle/` (brief §Scope).
+    const render_module = b.addModule("weld_render", .{
+        .root_source_file = b.path("src/modules/render/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    render_module.addImport("weld_core", core_module);
 
     // M0.2 / E6 — plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
@@ -100,35 +126,76 @@ pub fn build(b: *std.Build) void {
     );
     for (stub_install_steps) |s| stub_plugins_step.dependOn(s);
 
-    // Main executable.
-    const exe_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    exe_module.addImport("weld_core", core_module);
+    // M0.4 — `src/main.zig` supprimé (cf. brief §Suppressions). Le moteur
+    // Weld est consommé comme lib + outils, pas comme binaire racine. La
+    // démonstration vit dans `examples/triangle/`. Toute la logique CLI
+    // parsing du binaire spike S2 (--smoke-test, --gpu-prefer, --capture-frame)
+    // est migrée dans `examples/triangle/src/main.zig`.
 
-    // Shaders embedding — the SPIR-V files live under `assets/shaders/`,
-    // outside the spike binary's source root. `@embedFile` cannot escape
-    // the package directory, so we wrap the embeds in a tiny module
-    // rooted at `assets/shaders/embed.zig` and import it as `shaders`.
-    const shaders_module = b.createModule(.{
+    // Shaders embedding — partagé par les binaires éditeur + runtime pour
+    // le viewport blit S6, et par `examples/triangle/` pour les SPIR-V
+    // triangle.vert/frag. Les `.spv` vivent sous `assets/shaders/`.
+    // `b.addModule` (au lieu de `b.createModule`) pour que le sous-projet
+    // standalone le consomme via `b.dependency("weld", ...).module("shaders")`.
+    const shaders_module = b.addModule("shaders", .{
         .root_source_file = b.path("assets/shaders/embed.zig"),
         .target = target,
         .optimize = optimize,
     });
-    exe_module.addImport("shaders", shaders_module);
-    const exe = b.addExecutable(.{
-        .name = "weld",
-        .root_module = exe_module,
-    });
-    b.installArtifact(exe);
 
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run the weld executable");
-    run_step.dependOn(&run_cmd.step);
+    // M0.4 — `zig build run-example-triangle` invoque le sous-projet
+    // standalone `examples/triangle/` via un subprocess `zig build run`.
+    // C'est le test architectural vivant de la consommabilité externe
+    // (brief §Notes décision 12 + §Comportement observable).
+    const ex_run = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build",
+        "run",
+    });
+    ex_run.setCwd(b.path("examples/triangle"));
+    if (b.args) |args| {
+        ex_run.addArg("--");
+        ex_run.addArgs(args);
+    }
+    const ex_step = b.step("run-example-triangle", "Build & run the triangle example sub-project");
+    ex_step.dependOn(&ex_run.step);
+
+    // M0.4 — Shader compiler tool : `zig build shaders` regénère les
+    // `.spv` depuis les `.glsl`. `zig build shaders-check` diff vs
+    // les commités (brief §Fichiers + §CI).
+    const shader_compiler_module = b.createModule(.{
+        .root_source_file = b.path("tools/shader_compiler/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const sp_compiler_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/render/shader_pipeline/compiler.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    shader_compiler_module.addImport("shader_pipeline_compiler", sp_compiler_module);
+    const shader_compiler_exe = b.addExecutable(.{
+        .name = "shader_compiler",
+        .root_module = shader_compiler_module,
+    });
+    const shaders_run = b.addRunArtifact(shader_compiler_exe);
+    const shaders_step = b.step("shaders", "Regenerate .spv files from .glsl sources via glslc");
+    shaders_step.dependOn(&shaders_run.step);
+
+    const shaders_check_run = b.addRunArtifact(shader_compiler_exe);
+    shaders_check_run.addArg("--check");
+    const shaders_check_step = b.step("shaders-check", "Verify .spv on disk matches a fresh glslc regen");
+    shaders_check_step.dependOn(&shaders_check_run.step);
+
+    // M0.4 — `zig build vk-gen-check` : régénère vk.zig et vérifie que
+    // le diff vs le commit est vide. Délégué à l'existant `bindgen-verify`
+    // qui couvre tous les bindings générés.
+    const vk_gen_check_step = b.step("vk-gen-check", "Verify vk.zig matches a fresh bindgen regen (delegates to bindgen-verify)");
+    if (b.top_level_steps.get("bindgen-verify")) |bv| {
+        vk_gen_check_step.dependOn(&bv.step);
+    }
 
     // -------------------------------------------------------------- Tests --
 
@@ -138,27 +205,17 @@ pub fn build(b: *std.Build) void {
     const core_tests = b.addTest(.{ .root_module = core_module });
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
 
-    // Inline tests in src/main.zig.
-    const main_tests = b.addTest(.{ .root_module = exe_module });
-    test_step.dependOn(&b.addRunArtifact(main_tests).step);
-
     // Same-file tests inside src/etch/*.zig.
     const etch_tests = b.addTest(.{ .root_module = etch_module });
     test_step.dependOn(&b.addRunArtifact(etch_tests).step);
 
     // Out-of-tree tests. Each file is its own root_module and imports
     // `weld_core` to reach the engine internals.
-    // Out-of-tree spike + bindings tests need to reach files that live
-    // outside `weld_core`'s module tree. Each group is exposed via a
-    // thin facade module — Zig 0.16 forbids a single file from belonging
-    // to two module trees, so we can't expose siblings as separate
-    // modules when they `@import` each other. The facades sit next to
-    // the code they shepherd so the throwaway-blast-radius is preserved.
-    const spike_test_module = b.createModule(.{
-        .root_source_file = b.path("src/spike/tests_facade.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    // Out-of-tree bindings tests need to reach files that live outside
+    // `weld_core`'s module tree. Each group is exposed via a thin facade
+    // module — Zig 0.16 forbids a single file from belonging to two module
+    // trees, so we can't expose siblings as separate modules when they
+    // `@import` each other.
     const wl_protocols_test_module = b.createModule(.{
         .root_source_file = b.path("src/core/platform/window/wayland_protocols/tests_facade.zig"),
         .target = target,
@@ -206,7 +263,7 @@ pub fn build(b: *std.Build) void {
 
     const TestSpec = struct {
         path: []const u8,
-        spike: bool = false,
+        // M0.4 — `spike` champ retiré, plus aucune entrée n'en a besoin.
         wl_protocols: bool = false,
         etch: bool = false,
         etch_interp: bool = false,
@@ -216,6 +273,16 @@ pub fn build(b: *std.Build) void {
         needs_stub_plugins: bool = false,
         /// M0.3 — when set, imports the `weld_audio` module.
         audio: bool = false,
+        /// M0.4 — when set, imports the `weld_render` module (GAL public
+        /// surface + Null backend, Vulkan backend wires in later).
+        render: bool = false,
+        /// M0.4 stabilization — when set, create a dedicated `zig build
+        /// <name>` step that runs ONLY this test. Used by the CI
+        /// runtime-smoke-test job to gate strictly on the capture PSNR
+        /// without re-running every other test in the repo (some of
+        /// which have unrelated ReleaseSafe issues tracked as
+        /// out-of-scope M0.4 debt).
+        dedicated_step: ?[]const u8 = null,
     };
     const test_specs = [_]TestSpec{
         .{ .path = "tests/smoke_test.zig" },
@@ -253,8 +320,10 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/jobs/scheduler_test.zig" },
         .{ .path = "tests/window/win32_open_close_test.zig" },
         .{ .path = "tests/window/wayland_open_close_test.zig" },
-        .{ .path = "tests/spike/scoring_test.zig", .spike = true },
-        .{ .path = "tests/spike/cli_test.zig", .spike = true },
+        // M0.4 — tests/spike/ supprimés avec le reste du dossier
+        // (cf. brief §Suppressions). Le scoring multi-GPU est porté dans
+        // gal/vulkan/device.zig, le CLI parse vit dans
+        // examples/triangle/src/main.zig.
         .{ .path = "tests/bindings/vk_abi_test.zig" },
         .{ .path = "tests/bindings/wayland_abi_test.zig", .wl_protocols = true },
         .{ .path = "tests/etch/corpus_test.zig", .etch = true },
@@ -277,6 +346,39 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/platform/input_gamepad_test.zig" },
         // M0.3 — Audio Dummy stub test.
         .{ .path = "tests/audio/dummy_stub_test.zig", .audio = true },
+        // M0.4 — GAL Null backend smoke + interface check (CI headless).
+        .{ .path = "tests/render/gal_null_smoke.zig", .render = true },
+        // M0.4 — GAL Vulkan backend offline init test (skip si Vulkan absent).
+        .{ .path = "tests/render/gal_vulkan_offline.zig", .render = true },
+        // M0.4 — Render graph topological sort + cycle detection.
+        .{ .path = "tests/render/render_graph_topo.zig", .render = true },
+        // M0.4 — Render graph auto-tracking barriers (write-after-read,
+        // explicit mode skip).
+        .{ .path = "tests/render/render_graph_barriers.zig", .render = true },
+        // M0.4 — Instancing batcher (bucketing mesh+material, drawcalls
+        // ≤ 100 pour 100 k entités).
+        .{ .path = "tests/render/instancing_batcher.zig", .render = true },
+        // M0.4 — Shader cache disque round-trip (hit/miss source modif /
+        // miss glslc version change).
+        .{ .path = "tests/render/shader_cache.zig", .render = true },
+        // M0.4 § Scope Post-Review — smoke-test capture PSNR vs golden.
+        // Skip si plateforme sans Vulkan window backend ou si le golden
+        // n'a pas encore été commité.
+        // `dedicated_step` exposes `zig build test-render-capture` so
+        // the CI runtime-smoke-test job can run only this test (the
+        // generic `zig build test` pulls in the whole repo, including
+        // unrelated tests with current ReleaseSafe issues — tracked as
+        // M0.7 housekeeping debt).
+        .{ .path = "tests/render/capture.zig", .render = true, .dedicated_step = "test-render-capture" },
+        // M0.4 § Scope Post-Review — hot-reload filewatch latency < 200 ms.
+        // Skip si glslc absent du PATH.
+        .{ .path = "tests/render/shader_hot_reload.zig", .render = true },
+        // M0.4 — vk_gen whitelist closure (variant filtering + closure
+        // convergence under 20 iterations).
+        .{ .path = "tests/vk_gen/whitelist_closure.zig" },
+        // M0.4 — vk_gen *Raw variants emission (3 targets émis, autres
+        // non émis).
+        .{ .path = "tests/vk_gen/raw_variants.zig" },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
@@ -285,9 +387,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         t_mod.addImport("weld_core", core_module);
-        if (spec.spike) {
-            t_mod.addImport("spike", spike_test_module);
-        }
         if (spec.wl_protocols) {
             t_mod.addImport("wl_protocols", wl_protocols_test_module);
         }
@@ -304,12 +403,19 @@ pub fn build(b: *std.Build) void {
         if (spec.audio) {
             t_mod.addImport("weld_audio", audio_module);
         }
+        if (spec.render) {
+            t_mod.addImport("weld_render", render_module);
+        }
         const t = b.addTest(.{ .root_module = t_mod });
         const t_run = b.addRunArtifact(t);
         if (spec.needs_stub_plugins) {
             for (stub_install_steps) |s| t_run.step.dependOn(s);
         }
         test_step.dependOn(&t_run.step);
+        if (spec.dedicated_step) |name| {
+            const dedicated = b.step(name, "Run only this test (used by targeted CI gates)");
+            dedicated.dependOn(&t_run.step);
+        }
     }
 
     // M0.2.1 / E2 — `zig build test-stress` builds and runs ONLY the
@@ -545,6 +651,34 @@ pub fn build(b: *std.Build) void {
         "Run the ECS benchmark (S1 non-regression case; pass `-- --smoke` for a CI sanity run)",
     );
     bench_step.dependOn(&bench_run.step);
+
+    // ------------------------------------- M0.4 render instancing bench ------
+    //
+    // CPU-side batcher harness for the brief Benchmarks targets
+    // (100k entities × 100 (mesh, material) distinct -> drawcall gate
+    // <= 100). GPU-side metrics live in the runtime-smoke-test CI step.
+    const render_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/render_instancing.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    render_bench_module.addImport("weld_core", core_module);
+    render_bench_module.addImport("weld_render", render_module);
+    const render_bench_exe = b.addExecutable(.{
+        .name = "render-instancing-bench",
+        .root_module = render_bench_module,
+    });
+    b.installArtifact(render_bench_exe);
+
+    const render_bench_run = b.addRunArtifact(render_bench_exe);
+    render_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| render_bench_run.addArgs(args);
+    const render_bench_step = b.step(
+        "bench-render-instancing",
+        "Run the M0.4 render instancing bench (writes bench/out/render_instancing_<os>.md)",
+    );
+    render_bench_step.dependOn(&render_bench_run.step);
 
     // -------------------------------------------- Fixture facade (S4 demo) --
 

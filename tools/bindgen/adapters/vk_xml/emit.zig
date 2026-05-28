@@ -579,31 +579,99 @@ fn writeErrorSet(ctx: *Ctx) !void {
         \\
         \\pub fn checkResult(r: Result) Error!void {
         \\    return switch (r) {
-        \\        .success, .not_ready, .timeout, .event_set, .event_reset, .incomplete, .suboptimal_khr => {},
-        \\        .error_out_of_host_memory => error.OutOfHostMemory,
-        \\        .error_out_of_device_memory => error.OutOfDeviceMemory,
-        \\        .error_initialization_failed => error.InitializationFailed,
-        \\        .error_device_lost => error.DeviceLost,
-        \\        .error_memory_map_failed => error.MemoryMapFailed,
-        \\        .error_layer_not_present => error.LayerNotPresent,
-        \\        .error_extension_not_present => error.ExtensionNotPresent,
-        \\        .error_feature_not_present => error.FeatureNotPresent,
-        \\        .error_incompatible_driver => error.IncompatibleDriver,
-        \\        .error_too_many_objects => error.TooManyObjects,
-        \\        .error_format_not_supported => error.FormatNotSupported,
-        \\        .error_fragmented_pool => error.FragmentedPool,
-        \\        .error_surface_lost_khr => error.SurfaceLost,
-        \\        .error_native_window_in_use_khr => error.NativeWindowInUse,
-        \\        .error_out_of_date_khr => error.OutOfDate,
-        \\        .error_incompatible_display_khr => error.IncompatibleDisplay,
-        \\        .error_validation_failed => error.ValidationFailed,
-        \\        .error_invalid_shader_nv => error.InvalidShader,
+        \\
+    );
+
+    // M0.4 — émission dynamique du switch checkResult : seuls les arms
+    // dont le variant existe dans l'enum Result post-closure sont émis
+    // (cf. brief §Scope D-S2-vk-whitelist).
+    const result_group = findEnumGroup(ctx.model.enum_groups, "VkResult");
+    const success_arms = [_]struct { variant: []const u8 }{
+        .{ .variant = "success" },        .{ .variant = "not_ready" },   .{ .variant = "timeout" },
+        .{ .variant = "event_set" },      .{ .variant = "event_reset" }, .{ .variant = "incomplete" },
+        .{ .variant = "suboptimal_khr" },
+    };
+    // 1ère ligne : arms qui retournent void (success-equivalents).
+    try ctx.append("        ");
+    var sep_void = false;
+    if (result_group) |g| {
+        for (success_arms) |a| {
+            if (variantExists(g.*, a.variant)) {
+                if (sep_void) try ctx.append(", ");
+                try ctx.print(".{s}", .{a.variant});
+                sep_void = true;
+            }
+        }
+    }
+    try ctx.append(" => {},\n");
+
+    // 2nde batch : arms error_X → error.Y.
+    const error_arms = [_]struct { variant: []const u8, err: []const u8 }{
+        .{ .variant = "error_out_of_host_memory", .err = "OutOfHostMemory" },
+        .{ .variant = "error_out_of_device_memory", .err = "OutOfDeviceMemory" },
+        .{ .variant = "error_initialization_failed", .err = "InitializationFailed" },
+        .{ .variant = "error_device_lost", .err = "DeviceLost" },
+        .{ .variant = "error_memory_map_failed", .err = "MemoryMapFailed" },
+        .{ .variant = "error_layer_not_present", .err = "LayerNotPresent" },
+        .{ .variant = "error_extension_not_present", .err = "ExtensionNotPresent" },
+        .{ .variant = "error_feature_not_present", .err = "FeatureNotPresent" },
+        .{ .variant = "error_incompatible_driver", .err = "IncompatibleDriver" },
+        .{ .variant = "error_too_many_objects", .err = "TooManyObjects" },
+        .{ .variant = "error_format_not_supported", .err = "FormatNotSupported" },
+        .{ .variant = "error_fragmented_pool", .err = "FragmentedPool" },
+        .{ .variant = "error_surface_lost_khr", .err = "SurfaceLost" },
+        .{ .variant = "error_native_window_in_use_khr", .err = "NativeWindowInUse" },
+        .{ .variant = "error_out_of_date_khr", .err = "OutOfDate" },
+        .{ .variant = "error_incompatible_display_khr", .err = "IncompatibleDisplay" },
+        .{ .variant = "error_validation_failed", .err = "ValidationFailed" },
+        .{ .variant = "error_invalid_shader_nv", .err = "InvalidShader" },
+    };
+    if (result_group) |g| {
+        for (error_arms) |a| {
+            if (variantExists(g.*, a.variant)) {
+                try ctx.print("        .{s} => error.{s},\n", .{ a.variant, a.err });
+            }
+        }
+    }
+    try ctx.append(
         \\        else => if (@intFromEnum(r) < 0) error.Unknown else {},
         \\    };
         \\}
         \\
         \\
     );
+}
+
+/// Helper : vérifie qu'un variant (camel_case Zig) existe dans un EnumGroup
+/// post-closure. Le nom du variant côté model est `VK_ERROR_FOO_BAR` ; le
+/// nom émis est `error_foo_bar`. On retient ici la forme Zig pour matcher
+/// les call sites.
+fn variantExists(g: parser.EnumGroup, zig_name: []const u8) bool {
+    for (g.values) |v| {
+        if (v.alias != null) continue;
+        // Le emit strippe le préfixe et passe en snake_case ; ici, on
+        // compare lazy : suffix-match `zig_name` à la fin de `v.name`
+        // après stripVkPrefix + snake. Pratique : on match sur le hash
+        // intuitif "VK_ERROR_OUT_OF_HOST_MEMORY" → "error_out_of_host_memory".
+        var matches = true;
+        var i: usize = 0;
+        var j: usize = 3; // skip "VK_"
+        if (v.name.len < 3) continue;
+        while (i < zig_name.len and j < v.name.len) : ({
+            i += 1;
+            j += 1;
+        }) {
+            const ci = zig_name[i];
+            const cj = std.ascii.toLower(v.name[j]);
+            const cj_norm: u8 = if (cj == '_') '_' else cj;
+            if (ci != cj_norm) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches and i == zig_name.len and j == v.name.len) return true;
+    }
+    return false;
 }
 
 // =========================================================== PFN_* types =
@@ -1020,6 +1088,16 @@ fn emitWrapper(ctx: *Ctx, c: parser.Command, dispatch: Dispatch, _self: ?parser.
     const has_self = _self != null;
 
     const plan = try buildPlan(ctx, c, has_self);
+
+    // M0.4 — émet aussi un `*Raw` variant pour les fonctions whitelistées
+    // dont le wrapper idiomatique masque des paramètres (brief §Scope
+    // D-S2-dispatch-bypass). Cible explicite : vkAcquireNextImageKHR,
+    // vkQueuePresentKHR, vkAcquireNextImage2KHR. Ces fonctions ont besoin
+    // d'être appelées en mode raw côté swapchain.zig pour observer les
+    // codes `.suboptimal_khr` / `.error_out_of_date_khr` séparément.
+    if (shouldEmitRaw(c.name)) {
+        try emitRawVariant(ctx, c, dispatch_var, _self);
+    }
 
     // --- Signature ----------------------------------------------------
     try ctx.print("{s}pub fn {s}(", .{ indent, method_name });
@@ -1494,4 +1572,67 @@ fn stripBitSuffix(A: std.mem.Allocator, s: []const u8) ![]const u8 {
     }
     const dup = try A.dupe(u8, t);
     return try escapeKeyword(A, dup);
+}
+
+// =============================================================== *Raw =====
+
+/// Liste explicite des commandes pour lesquelles émettre un variant `*Raw`.
+/// Brief §Scope D-S2-dispatch-bypass : ces fonctions sont appelées en mode
+/// raw côté `gal/vulkan/swapchain.zig` (acquire/present) pour observer
+/// les codes intermédiaires `.suboptimal_khr` / `.error_out_of_date_khr`
+/// sans que `checkResult` les replie en error.
+const raw_targets = [_][]const u8{
+    "vkAcquireNextImageKHR",
+    "vkQueuePresentKHR",
+    "vkAcquireNextImage2KHR",
+};
+
+/// True si la commande doit avoir un variant `*Raw` émis en plus du wrapper.
+fn shouldEmitRaw(name: []const u8) bool {
+    for (raw_targets) |t| if (std.mem.eql(u8, t, name)) return true;
+    return false;
+}
+
+/// Émet le variant `*Raw` d'une commande. Signature et corps exposent
+/// tous les paramètres bruts, retournent `Result` directement (pas
+/// d'unwrap via checkResult). Le caller peut switcher sur le code Vulkan
+/// natif.
+fn emitRawVariant(ctx: *Ctx, c: parser.Command, dispatch_var: []const u8, _self: ?parser.Handle) !void {
+    const base_name = try methodName(ctx.A, c.name, _self);
+    const raw_name = try std.fmt.allocPrint(ctx.A, "{s}Raw", .{base_name});
+    const indent: []const u8 = if (_self != null) "    " else "";
+    const has_self = _self != null;
+
+    // --- Signature ---------------------------------------------------------
+    try ctx.print("{s}pub fn {s}(", .{ indent, raw_name });
+    var first = true;
+    for (c.params, 0..) |p, i| {
+        if (!first) try ctx.append(", ");
+        first = false;
+        if (has_self and i == 0) {
+            try ctx.print("self: *{s}", .{stripVkPrefix(_self.?.name)});
+            continue;
+        }
+        const pname_raw = try snakeCase(ctx.A, p.name);
+        const pname = stripParamPrefix(pname_raw);
+        // Tous les params en mode raw : aucun mapping slice/optional/out.
+        const ptype = try mapCType(ctx, p.c_type, p.optional, p.len, .api_param);
+        try ctx.print("{s}: {s}", .{ pname, ptype });
+    }
+    try ctx.append(") Result {\n");
+
+    // --- Body --------------------------------------------------------------
+    try ctx.print("{s}    return {s}.{s}(", .{ indent, dispatch_var, c.name });
+    for (c.params, 0..) |p, i| {
+        if (i > 0) try ctx.append(", ");
+        if (has_self and i == 0) {
+            try ctx.append("self");
+            continue;
+        }
+        const pname_raw = try snakeCase(ctx.A, p.name);
+        const pname = stripParamPrefix(pname_raw);
+        try ctx.print("{s}", .{pname});
+    }
+    try ctx.append(");\n");
+    try ctx.print("{s}}}\n\n", .{indent});
 }

@@ -80,3 +80,108 @@ jobs:
       # locally on Guy's machine, not in CI — see briefs/S1-mini-ecs.md.
       - name: zig build bench-ecs -- --smoke
         run: zig build bench-ecs -Doptimize=ReleaseSafe -- --smoke
+
+  runtime-smoke-test:
+    # M0.4 § Scope Post-Review — first application of the runtime
+    # semantic CI rule (cf. engine-development-workflow.md §4.5.1).
+    # Linux-only: weston + lavapipe provide a fully software path that
+    # exercises Vulkan init + Wayland surface + render pass + present +
+    # copyTextureToBuffer end-to-end. Windows CI sits behind manual
+    # GPU §4.5.1 validation since the runners do not ship a Vulkan
+    # software driver.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install weston + Mesa Vulkan software drivers
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            weston \
+            mesa-vulkan-drivers \
+            libvulkan1 \
+            libwayland-client0 \
+            libwayland-cursor0
+
+      - name: Locate lavapipe ICD on the runner
+        # Diagnostic step — does not fail the job. The previous run showed
+        # `createInstance failed: IncompatibleDriver`, which means
+        # `VK_ICD_FILENAMES` was pointing at a path the runner does not
+        # actually have. This step prints every candidate location so the
+        # follow-up step's env var can be set to the real path.
+        run: |
+          set -euo pipefail
+          echo "--- find /usr/share/vulkan ---"
+          find /usr/share/vulkan -name "*lvp*" -o -name "*lavapipe*" 2>/dev/null || echo "no lavapipe ICD found"
+          echo "--- ls /usr/share/vulkan/icd.d/ ---"
+          ls -la /usr/share/vulkan/icd.d/ 2>/dev/null || echo "no icd.d directory"
+          echo "--- dpkg -L mesa-vulkan-drivers | grep icd ---"
+          dpkg -L mesa-vulkan-drivers | grep -i icd 2>/dev/null || echo "no icd in mesa-vulkan-drivers"
+          echo "--- vulkaninfo --summary (if available) ---"
+          (command -v vulkaninfo >/dev/null && vulkaninfo --summary 2>&1 | head -40) || echo "vulkaninfo not installed"
+
+      - name: zig build (ReleaseSafe)
+        run: |
+          set -euo pipefail
+          zig build -Doptimize=ReleaseSafe
+
+      - name: Launch weston headless backend
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/runtime-dir
+          chmod 700 /tmp/runtime-dir
+          XDG_RUNTIME_DIR=/tmp/runtime-dir WAYLAND_DISPLAY=wayland-1 \
+            weston --backend=headless --width=1280 --height=720 &
+          # Give weston a beat to bind the wayland socket before the
+          # example connects.
+          sleep 2
+          echo "WAYLAND_DISPLAY=wayland-1" >> "$GITHUB_ENV"
+          echo "XDG_RUNTIME_DIR=/tmp/runtime-dir" >> "$GITHUB_ENV"
+
+      - name: zig build run-example-triangle (smoke + capture)
+        env:
+          # Force lavapipe (Mesa software Vulkan ICD) on the runner.
+          # Path validated by the `Locate lavapipe ICD` diagnostic step
+          # above — adjust here if the runner reports a different path.
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          set -euo pipefail
+          zig build run-example-triangle -- \
+            --smoke-test --vulkan-driver=software --capture-frame=10
+
+      - name: Verify PSNR vs golden
+        run: |
+          set -euo pipefail
+          if [ ! -f tests/golden/smoke_test_software.ppm ]; then
+            echo "Golden PPM not yet committed — capture written to out/smoke_test.ppm." >&2
+            echo "First-run procedure: download out/smoke_test.ppm from this job, validate visually," >&2
+            echo "commit it as tests/golden/smoke_test_software.ppm, then re-run." >&2
+            exit 0
+          fi
+          # `test-render-capture` runs ONLY tests/render/capture.zig — it
+          # bypasses the generic `zig build test` which pulls in every
+          # test in the repo (some have unrelated ReleaseSafe issues
+          # tracked as M0.7 housekeeping debt). Scope: PSNR regression
+          # gate, nothing else. The test itself raises a typed error
+          # when PSNR < 40 dB, so a non-zero exit propagates through
+          # pipefail — no separate grep needed (the previous grep on
+          # "PSNR" matched the test's success log line that does not
+          # exist, tripping exit 1 under pipefail on every passing run).
+          zig build test-render-capture -Doptimize=ReleaseSafe --summary all 2>&1 | tee test-output.txt
+
+      - name: Upload capture artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-smoke-test-capture
+          path: |
+            out/smoke_test.ppm
+            test-output.txt
+          retention-days: 30
