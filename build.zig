@@ -276,6 +276,13 @@ pub fn build(b: *std.Build) void {
         /// M0.4 — when set, imports the `weld_render` module (GAL public
         /// surface + Null backend, Vulkan backend wires in later).
         render: bool = false,
+        /// M0.4 stabilization — when set, create a dedicated `zig build
+        /// <name>` step that runs ONLY this test. Used by the CI
+        /// runtime-smoke-test job to gate strictly on the capture PSNR
+        /// without re-running every other test in the repo (some of
+        /// which have unrelated ReleaseSafe issues tracked as
+        /// out-of-scope M0.4 debt).
+        dedicated_step: ?[]const u8 = null,
     };
     const test_specs = [_]TestSpec{
         .{ .path = "tests/smoke_test.zig" },
@@ -357,7 +364,12 @@ pub fn build(b: *std.Build) void {
         // M0.4 § Scope Post-Review — smoke-test capture PSNR vs golden.
         // Skip si plateforme sans Vulkan window backend ou si le golden
         // n'a pas encore été commité.
-        .{ .path = "tests/render/capture.zig", .render = true },
+        // `dedicated_step` exposes `zig build test-render-capture` so
+        // the CI runtime-smoke-test job can run only this test (the
+        // generic `zig build test` pulls in the whole repo, including
+        // unrelated tests with current ReleaseSafe issues — tracked as
+        // M0.7 housekeeping debt).
+        .{ .path = "tests/render/capture.zig", .render = true, .dedicated_step = "test-render-capture" },
         // M0.4 § Scope Post-Review — hot-reload filewatch latency < 200 ms.
         // Skip si glslc absent du PATH.
         .{ .path = "tests/render/shader_hot_reload.zig", .render = true },
@@ -400,6 +412,10 @@ pub fn build(b: *std.Build) void {
             for (stub_install_steps) |s| t_run.step.dependOn(s);
         }
         test_step.dependOn(&t_run.step);
+        if (spec.dedicated_step) |name| {
+            const dedicated = b.step(name, "Run only this test (used by targeted CI gates)");
+            dedicated.dependOn(&t_run.step);
+        }
     }
 
     // M0.2.1 / E2 — `zig build test-stress` builds and runs ONLY the

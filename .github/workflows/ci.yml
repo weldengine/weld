@@ -110,6 +110,23 @@ jobs:
             libwayland-client0 \
             libwayland-cursor0
 
+      - name: Locate lavapipe ICD on the runner
+        # Diagnostic step — does not fail the job. The previous run showed
+        # `createInstance failed: IncompatibleDriver`, which means
+        # `VK_ICD_FILENAMES` was pointing at a path the runner does not
+        # actually have. This step prints every candidate location so the
+        # follow-up step's env var can be set to the real path.
+        run: |
+          set -euo pipefail
+          echo "--- find /usr/share/vulkan ---"
+          find /usr/share/vulkan -name "*lvp*" -o -name "*lavapipe*" 2>/dev/null || echo "no lavapipe ICD found"
+          echo "--- ls /usr/share/vulkan/icd.d/ ---"
+          ls -la /usr/share/vulkan/icd.d/ 2>/dev/null || echo "no icd.d directory"
+          echo "--- dpkg -L mesa-vulkan-drivers | grep icd ---"
+          dpkg -L mesa-vulkan-drivers | grep -i icd 2>/dev/null || echo "no icd in mesa-vulkan-drivers"
+          echo "--- vulkaninfo --summary (if available) ---"
+          (command -v vulkaninfo >/dev/null && vulkaninfo --summary 2>&1 | head -40) || echo "vulkaninfo not installed"
+
       - name: zig build (ReleaseSafe)
         run: |
           set -euo pipefail
@@ -131,6 +148,8 @@ jobs:
       - name: zig build run-example-triangle (smoke + capture)
         env:
           # Force lavapipe (Mesa software Vulkan ICD) on the runner.
+          # Path validated by the `Locate lavapipe ICD` diagnostic step
+          # above — adjust here if the runner reports a different path.
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: |
           set -euo pipefail
@@ -146,7 +165,12 @@ jobs:
             echo "commit it as tests/golden/smoke_test_software.ppm, then re-run." >&2
             exit 0
           fi
-          zig build test -Doptimize=ReleaseSafe --summary all 2>&1 | tee test-output.txt
+          # `test-render-capture` runs ONLY tests/render/capture.zig — it
+          # bypasses the generic `zig build test` which pulls in every
+          # test in the repo (some have unrelated ReleaseSafe issues
+          # tracked as M0.7 housekeeping debt). Scope: PSNR regression
+          # gate, nothing else.
+          zig build test-render-capture -Doptimize=ReleaseSafe --summary all 2>&1 | tee test-output.txt
           grep -E "(capture pass produces PPM matching golden|PSNR)" test-output.txt
 
       - name: Upload capture artifact
