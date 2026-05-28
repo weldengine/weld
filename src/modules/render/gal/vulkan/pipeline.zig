@@ -127,25 +127,36 @@ pub fn createRender(
     errdefer device.vk_device.destroyRenderPass(rp, null);
 
     // Shader stages
-    var stages: [2]vk.PipelineShaderStageCreateInfo = undefined;
-    var stage_count: u32 = 1;
-    stages[0] = .{
-        .flags = .empty,
-        .stage = .vertex_bit,
-        .module = @enumFromInt(descriptor.vertex_module.inner),
-        .p_name = descriptor.vertex_entry_point.ptr,
-        .p_specialization_info = null,
-    };
-    if (descriptor.fragment_module) |fs| {
-        stages[1] = .{
+    // Build both stages as a single array literal so the bindgen-emitted
+    // `s_type = .pipeline_shader_stage_create_info` default is applied
+    // to every element. The previous `var stages = undefined;` followed
+    // by per-element `stages[N] = .{ ... }` assignment left `s_type` at
+    // an indeterminate value on Linux (Fedora 44 + Intel UHD 630
+    // surfaced a `pStages[N].sType must be ...` validation warning
+    // followed by a SIGSEGV inside the validation layer's logging
+    // path). S2 reference (/tmp/s2-ref/src/spike/vk_setup.zig
+    // createGraphicsPipeline) uses the same array-literal pattern.
+    //
+    // The fragment slot is always populated so the array literal stays
+    // canonical; when `descriptor.fragment_module` is null the slot is
+    // ignored downstream via `stage_count = 1`.
+    const stages = [_]vk.PipelineShaderStageCreateInfo{
+        .{
+            .flags = .empty,
+            .stage = .vertex_bit,
+            .module = @enumFromInt(descriptor.vertex_module.inner),
+            .p_name = descriptor.vertex_entry_point.ptr,
+            .p_specialization_info = null,
+        },
+        .{
             .flags = .empty,
             .stage = .fragment_bit,
-            .module = @enumFromInt(fs.inner),
+            .module = if (descriptor.fragment_module) |fs| @enumFromInt(fs.inner) else .null,
             .p_name = descriptor.fragment_entry_point.ptr,
             .p_specialization_info = null,
-        };
-        stage_count = 2;
-    }
+        },
+    };
+    const stage_count: u32 = if (descriptor.fragment_module != null) 2 else 1;
 
     // Vertex input
     var bindings: std.ArrayList(vk.VertexInputBindingDescription) = .empty;
