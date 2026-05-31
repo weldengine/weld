@@ -101,6 +101,15 @@ Rationale for the split: render (E2) is the largest and riskiest paquet (GPU-adj
 - **Out of scope, confirmed: `etch/lexer.zig:371` `"café"`** — intentional UTF-8
   test input, not a message. Left untouched; flagged as an English/test-data
   false positive for the E6 grep.
+- **E4 GO (Guy) — reference rule + guillemets ban.** (a) References to a KB spec
+  doc (`engine-*.md`, `etch-*.md`, which stay French) use the **§number only**,
+  optionally with an English *descriptive* label — never reproduce a spec section
+  title (neither French verbatim nor an English title in citation quotes). (b)
+  References to a repo brief (translated to English in E4) use the **English title
+  verbatim** per the canonical list below. (c) French guillemets `«` `»`
+  (U+00AB/U+00BB) are banned in code and translated briefs and are added to the E6
+  acceptance grep; 3 pre-existing cases fixed (`no_alloc_steady_state.zig`,
+  `scheduler.zig`, `scheduler_dag.zig`).
 
 ## Execution notes
 
