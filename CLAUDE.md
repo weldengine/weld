@@ -95,7 +95,7 @@ Module / topic docs available in the knowledge base:
   `engine-ui.md`, `engine-tools-editor.md`, `engine-sequencer.md`,
   `engine-sprite.md`, `engine-input-system.md`, `engine-debug.md`,
   `engine-media.md`, `engine-asset-pipeline.md`
-- Sous-systèmes : `engine-c-bindings.md`, `engine-ipc.md`,
+- Subsystems: `engine-c-bindings.md`, `engine-ipc.md`,
   `engine-ecs-internals.md`, `engine-coordinate-system.md`,
   `engine-units.md`, `engine-color-picker.md`,
   `engine-collaboration.md`, `engine-platform.md`, `engine-vr-ar.md`,
@@ -131,68 +131,68 @@ The `briefs/` directory is the source of truth for milestone state. The brief's 
 
 ### Thermal-aware bench MBP M-series
 
-- `caffeinate -i` est obligatoire pour toute boucle de validation longue
-  (E7 stress, bench multi-run) sur MBP. Sans lui, macOS endort la machine
-  sur les fenêtres d'idle protocolaires et produit de faux positifs de
-  hang. À acter dans `engine-phase-0-criteria.md` § Méthodologie bench.
+- `caffeinate -i` is mandatory for any long validation loop
+  (E7 stress, multi-run bench) on the MBP. Without it, macOS puts the machine
+  to sleep during the protocol idle windows and produces false positives of
+  hang. To record in `engine-phase-0-criteria.md` § bench methodology.
 
-### Milestone hotfix à cause root inconnue
+### Milestone hotfix with unknown root cause
 
-- Format M0.2.1 reproductible : décomposition E1..En avec stop systématique
-  entre étapes + N décisions interdites en autonomie listées en § Notes du
-  brief. Les retours Claude.ai fréquents sont du protocole, pas du re-scope.
-  La règle workflow §2.4 « 2+ blocages = re-scope » vise les défaillances
-  de cadrage, pas les décisions structurelles prévues par le brief.
-- Pattern de validation tiers cumulatifs : Tier 1 synthétique rapide
-  (faux positif statistiquement faible mais qualitativement incomplet) +
-  Tier 2 authentique slow (couverture qualitative). Inversion du raisonnement
-  vs « plus de runs synthétiques = meilleure validation » qui rate les
-  charges de travail VM/cache non-répliquables synthétiquement.
+- Reproducible M0.2.1 format: decomposition E1..En with a systematic stop
+  between steps + N forbidden-in-autonomy decisions listed in § Notes of the
+  brief. Frequent Claude.ai round-trips are protocol, not re-scope.
+  The workflow rule §2.4 "2+ blockers = re-scope" targets framing
+  failures, not the structural decisions planned by the brief.
+- Cumulative-tier validation pattern: Tier 1 fast synthetic
+  (statistically low false-positive but qualitatively incomplete) +
+  Tier 2 authentic slow (qualitative coverage). Inversion of the reasoning
+  vs "more synthetic runs = better validation", which misses the
+  VM/cache workloads not synthetically replicable.
 
 ## Anti-hallucination
 
-### Discipline E1 analyse statique
+### E1 static-analysis discipline
 
-- En E1 d'un milestone de diagnostic, confirmer chaque symbole nommé dans
-  le brief par lecture directe du code. Le brief M0.2.1 mentionnait
-  `helpUntilDone` comme hypothèse — qui n'existait pas dans le code.
-  Sans cette vérification, le diagnostic se serait déroulé autour d'un
-  fantôme. À appliquer systématiquement dans les briefs de diagnostic
-  futurs : les noms de symboles dans la SECTION FIGÉE sont des candidats
-  à vérifier, pas des affirmations.
+- In E1 of a diagnostic milestone, confirm every symbol named in
+  the brief by reading the code directly. The M0.2.1 brief mentioned
+  `helpUntilDone` as a hypothesis — which did not exist in the code.
+  Without this verification, the diagnosis would have unfolded around a
+  ghost. To apply systematically in future diagnostic briefs:
+  the symbol names in the FROZEN SECTION are candidates
+  to verify, not assertions.
 
 ## Patterns
 
-### Atomic packing pour racing snapshots
+### Atomic packing for racing snapshots
 
-- Quand deux champs `(a: u32, b: u32)` doivent être lus comme un snapshot
-  cohérent depuis un thread non-writer, packer en un seul
-  `std.atomic.Value(u64) align(64)` avec helpers `pack`/`unpack` est
-  préférable à un pattern double-check + retry. Coût perf nul (load 64-bit
-  aligné = load 32-bit aligné sur Apple Silicon et x86_64), robustesse
-  préservée face aux refactors (impossible de casser silencieusement).
-  Réutilisable au-delà du job system — n'importe quel scheduler
-  (frame state, generation counters, version+epoch) suit ce pattern.
+- When two fields `(a: u32, b: u32)` must be read as a consistent
+  snapshot from a non-writer thread, packing into a single
+  `std.atomic.Value(u64) align(64)` with `pack`/`unpack` helpers is
+  preferable to a double-check + retry pattern. Zero perf cost (an aligned
+  64-bit load = an aligned 32-bit load on Apple Silicon and x86_64), robustness
+  preserved against refactors (impossible to break silently).
+  Reusable beyond the job system — any scheduler
+  (frame state, generation counters, version+epoch) follows this pattern.
 
 ### Comptime layout guards
 
-- Pour les invariants de layout cache-line entre champs `align(64)`
-  écrits par des threads différents, ajouter un `comptime {
-  std.debug.assert(@offsetOf(...) ...); }` proche de la déclaration de la
-  struct. Pin l'invariant à la compilation, résiste aux refactors
-  silencieux qui réorganisent les champs. Voir M0.2.1 fix scheduler.zig.
+- For cache-line layout invariants between `align(64)` fields
+  written by different threads, add a `comptime {
+  std.debug.assert(@offsetOf(...) ...); }` near the struct
+  declaration. Pins the invariant at compile time, resists silent
+  refactors that reorder the fields. See the M0.2.1 scheduler.zig fix.
 
-## Garde-fous
+## Safeguards
 
-### Interprétation prudente des baselines bench héritées
+### Cautious interpretation of inherited bench baselines
 
-- Le commit squash M0.1 listait C0.1 à 14.2 ms ; M0.2.1 mesure 3.74 ms en
-  thermal-aware ReleaseFast. Ratio 3.8× cohérent avec un écart
-  ReleaseSafe → ReleaseFast. Avant d'opposer une baseline héritée, vérifier
-  qu'elle a été mesurée selon le protocole opposable courant
-  (`engine-phase-0-criteria.md` § Méthodologie bench). Pour les baselines
-  Phase 0 ancien protocole, la première mesure conforme au protocole
-  thermal-aware est une candidate plus robuste que la valeur héritée.
+- The M0.1 squash commit listed C0.1 at 14.2 ms; M0.2.1 measures 3.74 ms in
+  thermal-aware ReleaseFast. A 3.8× ratio consistent with a
+  ReleaseSafe → ReleaseFast gap. Before opposing an inherited baseline, verify
+  that it was measured per the current opposable protocol
+  (`engine-phase-0-criteria.md` § bench methodology). For Phase 0
+  old-protocol baselines, the first measurement compliant with the
+  thermal-aware protocol is a more robust candidate than the inherited value.
 
 ---
 
