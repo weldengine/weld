@@ -116,7 +116,7 @@ Paths are relative to the repo root. The listing distinguishes creation from edi
 
 ### Bench
 
-- `bench/etch_interp.zig` — **creation** — harness measuring 1000 entities × 5 rules over 1000 ticks in `ReleaseSafe`, plus a 10 000 entities × 5 rules scaling sweep.
+- `bench/etch_interp.zig` — **creation** — harness measuring 1000 entities × 5 rules over 1000 ticks in `ReleaseSafe`, plus a 10,000 entities × 5 rules scaling sweep.
 - `bench/fixtures/demo_5_rules.etch` — **creation** — fixed 5-rule program used by both the bench and the demo binary.
 - `bench/results/.gitkeep` — already present from S1.
 
