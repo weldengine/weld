@@ -1,27 +1,27 @@
-//! No-op stubs partagés par le backend Null GAL — Phase 0 / M0.4.
+//! No-op stubs shared by the Null GAL backend — Phase 0 / M0.4.
 //!
-//! Le backend Null sert deux objectifs :
+//! The Null backend serves two purposes:
 //!
-//! 1. **CI headless** — `tests/render/gal_null_smoke.zig` peut faire tourner
-//!    Device + Queue + BindGroup + RenderPipeline + 1 frame sans GPU réel.
-//! 2. **Discipline d'API** — force le contrat GAL à se matérialiser jour 1.
-//!    L'existence du Null backend rend impossible la dérive "j'implémente
-//!    le Vulkan d'abord, j'abstrairai après" qui est l'anti-pattern explicite
-//!    listé dans le brief §Notes pièges connus.
+//! 1. **Headless CI** — `tests/render/gal_null_smoke.zig` can run
+//!    Device + Queue + BindGroup + RenderPipeline + 1 frame without a real GPU.
+//! 2. **API discipline** — forces the GAL contract to materialize day 1.
+//!    The Null backend's existence makes impossible the drift "I implement
+//!    Vulkan first, I'll abstract later" which is the explicit anti-pattern
+//!    listed in the brief §Notes known pitfalls.
 //!
-//! Les méthodes no-op retournent des handles dont l'`inner` est un compteur
-//! monotone simple (incrémenté à chaque allocation). Pas de tracking
-//! d'ownership côté Null — le caller peut détruire un handle non-existant
-//! sans crash. Cette laxité est volontaire : le Null backend valide la
-//! cohérence d'API, pas la rigueur de gestion d'objets.
+//! The no-op methods return handles whose `inner` is a simple monotonic
+//! counter (incremented on each allocation). No ownership tracking on the
+//! Null side — the caller can destroy a non-existent handle without a
+//! crash. This laxity is intentional: the Null backend validates API
+//! coherence, not object-management rigor.
 
 const std = @import("std");
 const types = @import("../types.zig");
 const escape = @import("../escape_hatches.zig");
 
-/// Compteur monotone de handles. Partagé par tous les types de resources
-/// (un seul espace numérique suffit Phase 0 ; chaque type a son propre tag
-/// via le wrapping `extern struct`).
+/// Monotonic handle counter. Shared by all resource types (a single
+/// numeric space suffices in Phase 0; each type has its own tag via the
+/// `extern struct` wrapping).
 pub const HandleCounter = struct {
     next: u64 = 1,
 
@@ -32,9 +32,9 @@ pub const HandleCounter = struct {
     }
 };
 
-/// Stub de CommandEncoder pour le backend Null. Toutes les méthodes sont
-/// no-op. Conservé comme structure plate pour matcher la signature
-/// `*CommandEncoder` côté caller.
+/// CommandEncoder stub for the Null backend. All methods are no-ops.
+/// Kept as a flat struct to match the `*CommandEncoder` signature on the
+/// caller side.
 pub const CommandEncoder = struct {
     label: ?[]const u8 = null,
     finished: bool = false,
@@ -86,7 +86,7 @@ pub const CommandEncoder = struct {
     }
 };
 
-/// Stub de RenderPassEncoder pour le backend Null.
+/// RenderPassEncoder stub for the Null backend.
 pub const RenderPassEncoder = struct {
     pub fn setPipeline(self: *RenderPassEncoder, pipeline: types.RenderPipelineHandle) void {
         _ = .{ self, pipeline };
@@ -120,7 +120,7 @@ pub const RenderPassEncoder = struct {
     }
 };
 
-/// Stub de ComputePassEncoder pour le backend Null.
+/// ComputePassEncoder stub for the Null backend.
 pub const ComputePassEncoder = struct {
     pub fn setPipeline(self: *ComputePassEncoder, pipeline: types.ComputePipelineHandle) void {
         _ = .{ self, pipeline };

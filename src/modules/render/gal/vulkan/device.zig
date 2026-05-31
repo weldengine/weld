@@ -1,27 +1,27 @@
 //! Vulkan backend Device — Phase 0 / M0.4.
 //!
-//! Root du backend Vulkan GAL. Implémente les 33 méthodes requises par
-//! `interface.checkBackend` (cf. `gal/interface.zig`). Port progressif du
-//! code spike S2 (`src/spike/vk_setup.zig` + `src/spike/vk_frame.zig`)
-//! vers la surface GAL.
+//! Root of the Vulkan GAL backend. Implements the 33 methods required by
+//! `interface.checkBackend` (cf. `gal/interface.zig`). Progressive port of the
+//! S2 spike code (`src/spike/vk_setup.zig` + `src/spike/vk_frame.zig`)
+//! to the GAL surface.
 //!
-//! **Sélection multi-GPU + multi-driver** (brief §Scope + §Notes décision 11) :
-//! - `--gpu-prefer=<discrete|integrated|index:N>` inchangé vs S2.
-//! - `--vulkan-driver=<auto|hardware|software>` nouveau M0.4 : `auto` =
-//!   énumère tous les devices et applique `--gpu-prefer` ; `hardware` =
-//!   filtre les `device_type = CPU` avant `--gpu-prefer` ; `software` =
-//!   force lavapipe (filtre sur `device_type = CPU`), ignore `--gpu-prefer`.
-//! - Combinaison conflictuelle `software + gpu-prefer=discrete` : log warn,
-//!   driver gagne, continue.
+//! **Multi-GPU + multi-driver selection** (brief §Scope + §Notes decision 11):
+//! - `--gpu-prefer=<discrete|integrated|index:N>` unchanged vs S2.
+//! - `--vulkan-driver=<auto|hardware|software>` new in M0.4: `auto` =
+//!   enumerates all devices and applies `--gpu-prefer`; `hardware` =
+//!   filters out `device_type = CPU` before `--gpu-prefer`; `software` =
+//!   forces lavapipe (filters on `device_type = CPU`), ignores `--gpu-prefer`.
+//! - Conflicting combination `software + gpu-prefer=discrete`: log warn,
+//!   driver wins, continue.
 //!
-//! **Mapping handles GAL → Vulkan natif** :
-//! - Handles simples (Sampler, ShaderModule, Fence, Semaphore, RenderPass,
+//! **GAL handle → native Vulkan mapping**:
+//! - Simple handles (Sampler, ShaderModule, Fence, Semaphore, RenderPass,
 //!   Pipeline, PipelineLayout, DescriptorSetLayout, DescriptorSet,
-//!   SwapchainKHR) : `inner = @intFromEnum(vk_handle)`. Pas de stockage
-//!   interne. La destruction utilise `@enumFromInt(handle.inner)`.
-//! - Handles avec state additionnel (Buffer, Texture, TextureView,
-//!   BindGroup, RenderPipeline) : registry interne `std.AutoHashMapUnmanaged`
-//!   indexé par un compteur monotone.
+//!   SwapchainKHR): `inner = @intFromEnum(vk_handle)`. No internal
+//!   storage. Destruction uses `@enumFromInt(handle.inner)`.
+//! - Handles with additional state (Buffer, Texture, TextureView,
+//!   BindGroup, RenderPipeline): internal `std.AutoHashMapUnmanaged` registry
+//!   indexed by a monotonic counter.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -44,19 +44,19 @@ const frame_mod = @import("frame.zig");
 
 const log = std.log.scoped(.gal_vk);
 
-/// Statistiques de sélection device — exposées pour debug.
+/// Device-selection statistics — exposed for debug.
 pub const DeviceSelection = struct {
     physical_device_name: [vk.MAX_PHYSICAL_DEVICE_NAME_SIZE]u8,
     device_type: enum { other, integrated, discrete, virtual, cpu },
     queue_family_index: u32,
 };
 
-/// Device Vulkan — implémente l'interface GAL.
+/// Vulkan Device — implements the GAL interface.
 pub const Device = struct {
     allocator: std.mem.Allocator,
     descriptor: types.DeviceDescriptor,
 
-    // Vulkan natif.
+    // Native Vulkan.
     vk_instance: *vk.Instance,
     debug_messenger: ?vk.DebugUtilsMessengerEXT = null,
     physical_device: *vk.PhysicalDevice,
@@ -67,10 +67,10 @@ pub const Device = struct {
 
     selection: DeviceSelection,
 
-    // Compteur monotone pour les handles GAL qui ont besoin d'un registry.
+    // Monotonic counter for the GAL handles that need a registry.
     next_handle_id: u64 = 1,
 
-    // Registries internes (resources avec state additionnel).
+    // Internal registries (resources with additional state).
     buffers: std.AutoHashMapUnmanaged(u64, buffer_mod.Entry) = .empty,
     textures: std.AutoHashMapUnmanaged(u64, texture_mod.TextureEntry) = .empty,
     texture_views: std.AutoHashMapUnmanaged(u64, texture_mod.ViewEntry) = .empty,
@@ -78,8 +78,8 @@ pub const Device = struct {
     render_pipelines: std.AutoHashMapUnmanaged(u64, pipeline_mod.RenderEntry) = .empty,
     swapchains: std.AutoHashMapUnmanaged(u64, swap.Entry) = .empty,
 
-    // Command pool partagée — créée à l'init, sert à allouer les
-    // CommandBuffers pour les encoders.
+    // Shared command pool — created at init, used to allocate the
+    // CommandBuffers for the encoders.
     command_pool: vk.CommandPool = .null,
 
     pub fn init(allocator: std.mem.Allocator, descriptor: types.DeviceDescriptor) types.Error!Device {
@@ -97,10 +97,10 @@ pub const Device = struct {
         };
 
         const instance_result = createInstance(allocator, descriptor) catch |e| {
-            // log.debug : ce path est exercé en CI Linux qui n'a pas de
-            // device Vulkan utilisable — le caller (typiquement un test)
-            // catch l'erreur et skip. log.err déclencherait un faux
-            // positif de test failure en Zig 0.16.
+            // log.debug: this path is exercised in Linux CI which has no
+            // usable Vulkan device — the caller (typically a test)
+            // catches the error and skips. log.err would trigger a false
+            // test-failure positive in Zig 0.16.
             log.debug("vk: createInstance failed: {t}", .{e});
             return error.NotInitialized;
         };
@@ -130,7 +130,7 @@ pub const Device = struct {
 
         device.vk_queue = device.vk_device.getDeviceQueue(device.queue_family_index, 0);
 
-        // Command pool partagée.
+        // Shared command pool.
         const pool_ci: vk.CommandPoolCreateInfo = .{
             .flags = .{ .reset_command_buffer = true },
             .queue_family_index = device.queue_family_index,
@@ -143,7 +143,7 @@ pub const Device = struct {
     pub fn deinit(self: *Device) void {
         self.vk_device.waitIdle() catch {};
 
-        // Vide les registries (libère les vk handles).
+        // Drain the registries (frees the vk handles).
         var bit = self.buffers.valueIterator();
         while (bit.next()) |entry| entry.destroy(self.vk_device);
         self.buffers.deinit(self.allocator);
@@ -180,14 +180,14 @@ pub const Device = struct {
 
     pub fn supports(self: *Device, feature: escape.Feature) bool {
         _ = self;
-        // Phase 0 : aucune feature optionnelle exposée par défaut côté Vulkan.
-        // Phase 1+ : query au load et expose `timeline_semaphore`, etc.
+        // Phase 0: no optional feature exposed by default on the Vulkan side.
+        // Phase 1+: query at load and expose `timeline_semaphore`, etc.
         return switch (feature) {
             else => false,
         };
     }
 
-    /// Helper interne — alloue un nouveau handle id monotone.
+    /// Internal helper — allocates a new monotonic handle id.
     pub fn nextHandle(self: *Device) u64 {
         const id = self.next_handle_id;
         self.next_handle_id += 1;
@@ -195,7 +195,7 @@ pub const Device = struct {
     }
 
     // ====================================================================
-    // Surface (M0.4 § Scope — Complément Post-Review)
+    // Surface (M0.4 § Scope — Post-Review Complement)
     // ====================================================================
 
     /// Build a `SurfaceHandle` from an already-open Tier 0 window. The
@@ -264,7 +264,7 @@ pub const Device = struct {
     }
 
     // ====================================================================
-    // Sampler (mapping direct via @intFromEnum)
+    // Sampler (direct mapping via @intFromEnum)
     // ====================================================================
 
     pub fn createSampler(self: *Device, descriptor: types.SamplerDescriptor) types.Error!types.SamplerHandle {
@@ -321,7 +321,7 @@ pub const Device = struct {
     }
 
     // ====================================================================
-    // ShaderModule (mapping direct)
+    // ShaderModule (direct mapping)
     // ====================================================================
 
     pub fn createShaderModule(self: *Device, descriptor: types.ShaderModuleDescriptor) types.Error!types.ShaderModuleHandle {
@@ -421,7 +421,7 @@ pub const Device = struct {
     }
 
     // ====================================================================
-    // Sync (Fence, Semaphore) — mapping direct
+    // Sync (Fence, Semaphore) — direct mapping
     // ====================================================================
 
     pub fn createFence(self: *Device, signaled: bool) types.Error!types.FenceHandle {
@@ -502,7 +502,7 @@ pub const Device = struct {
         return cmd_mod.create(self, label);
     }
 
-    /// Helper Vulkan-spécifique pour libérer un CommandEncoder.
+    /// Vulkan-specific helper to free a CommandEncoder.
     pub fn destroyCommandEncoder(self: *Device, encoder: *cmd_mod.CommandEncoder) void {
         cmd_mod.destroy(self, encoder);
     }
@@ -528,7 +528,7 @@ pub const Device = struct {
 };
 
 // ============================================================================
-// Sélection multi-GPU + multi-driver (helpers internes)
+// Multi-GPU + multi-driver selection (internal helpers)
 // ============================================================================
 
 /// Result of `createInstance`. `debug_utils_enabled` reflects whether
@@ -620,14 +620,14 @@ fn pickPhysicalDevice(
     defer allocator.free(devices);
     if (devices.len == 0) return error.NotInitialized;
 
-    // Détecte les combinaisons conflictuelles.
+    // Detect conflicting combinations.
     if (descriptor.vulkan_driver == .software and descriptor.gpu_preference != .auto) {
         log.warn("--gpu-prefer ignored when --vulkan-driver=software", .{});
     }
 
-    // `software` : ne garde que les devices de type CPU (lavapipe).
-    // `hardware` : exclut les devices de type CPU.
-    // `auto`     : tous.
+    // `software`: keeps only CPU-type devices (lavapipe).
+    // `hardware`: excludes CPU-type devices.
+    // `auto`    : all.
     var filtered: std.ArrayList(*vk.PhysicalDevice) = .empty;
     defer filtered.deinit(allocator);
     for (devices) |pd| {
@@ -643,15 +643,15 @@ fn pickPhysicalDevice(
     }
     if (filtered.items.len == 0) return error.NotInitialized;
 
-    // Override par index direct ?
+    // Direct index override?
     switch (descriptor.gpu_preference) {
         .index => |i| {
             if (i >= filtered.items.len) return error.NotInitialized;
             device.physical_device = filtered.items[i];
         },
         else => {
-            // Score : préfère discrete > integrated > virtual > cpu > other,
-            // sauf si --gpu-prefer infléchit.
+            // Score: prefers discrete > integrated > virtual > cpu > other,
+            // unless --gpu-prefer skews it.
             var best: ?*vk.PhysicalDevice = null;
             var best_score: i32 = -1;
             for (filtered.items) |pd| {
@@ -675,7 +675,7 @@ fn pickPhysicalDevice(
         else => .other,
     };
 
-    // Trouve une queue family graphics (Phase 0 : une seule queue, fused
+    // Find a graphics queue family (Phase 0: a single queue, fused
     // graphics + compute + transfer + present).
     const families = device.physical_device.getPhysicalDeviceQueueFamilyProperties(allocator) catch return error.NotInitialized;
     defer allocator.free(families);
@@ -702,7 +702,7 @@ fn scoreDevice(pd: *vk.PhysicalDevice, pref: types.GpuPreference) i32 {
         },
         .discrete => if (dt == 2) 100 else if (dt == 1) 50 else 1,
         .integrated => if (dt == 1) 100 else if (dt == 2) 50 else 1,
-        .index => 0, // déjà géré au-dessus
+        .index => 0, // already handled above
     };
 }
 
@@ -738,12 +738,12 @@ fn createLogicalDevice(device: *Device) !void {
 }
 
 // ============================================================================
-// Tests (sans Vulkan réel — vérifient juste la shape struct)
+// Tests (without real Vulkan — just check the struct shape)
 // ============================================================================
 
 test "device: struct shape compiles with all GAL methods" {
-    // Le test compile-only ; vérifie que Device a bien toutes les méthodes
-    // requises par interface.checkBackend. Vérification réelle déclenchée
-    // par gal/main.zig.
+    // The test is compile-only; checks that Device has all the methods
+    // required by interface.checkBackend. The real check is triggered
+    // by gal/main.zig.
     _ = Device;
 }

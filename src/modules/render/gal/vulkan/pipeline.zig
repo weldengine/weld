@@ -1,14 +1,14 @@
 //! RenderPipeline + ComputePipeline Vulkan — Phase 0 / M0.4.
 //!
-//! Phase 0 :
-//! - Un PipelineLayout par pipeline (pas de partage). Phase 1+ : layout cache.
-//! - Pas de PipelineCache disque (chargement/sauvegarde inter-runs). Phase 1+ :
-//!   sérialisation dans `.weld-cache/pipelines/`.
-//! - Dynamic states forcés : viewport + scissor (cf. spike S2).
-//! - Render pass éphémère créée juste-à-temps lors du draw — pour la
-//!   compatibilité PipelineCreateInfo qui demande un VkRenderPass, on
-//!   crée une render pass "modèle" depuis les color/depth targets du
-//!   descriptor et on la garde dans l'entry pour la durée de vie du pipeline.
+//! Phase 0:
+//! - One PipelineLayout per pipeline (no sharing). Phase 1+: layout cache.
+//! - No disk PipelineCache (inter-run load/save). Phase 1+:
+//!   serialization in `.weld-cache/pipelines/`.
+//! - Forced dynamic states: viewport + scissor (cf. S2 spike).
+//! - Ephemeral render pass created just-in-time at draw — for
+//!   PipelineCreateInfo compatibility which requires a VkRenderPass, we
+//!   create a "template" render pass from the descriptor's color/depth
+//!   targets and keep it in the entry for the pipeline's lifetime.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -17,15 +17,15 @@ const types = @import("../types.zig");
 const conv = @import("conv.zig");
 const Device = @import("device.zig").Device;
 
-/// Slot interne d'un RenderPipeline — bundle Pipeline + PipelineLayout +
-/// la RenderPass modèle (Vulkan exige une VkRenderPass à la création
-/// d'une PSO graphics, on garde celle-ci pour la durée de vie du pipeline).
+/// Internal slot of a RenderPipeline — bundles Pipeline + PipelineLayout +
+/// the template RenderPass (Vulkan requires a VkRenderPass when creating
+/// a graphics PSO, we keep this one for the pipeline's lifetime).
 pub const RenderEntry = struct {
     pipeline: vk.Pipeline,
     pipeline_layout: vk.PipelineLayout,
-    /// Render pass modèle créée à partir des color/depth targets du descriptor.
-    /// Vulkan exige un VkRenderPass à la PSO graphics ; on garde celle-ci
-    /// pour la durée de vie de la PSO.
+    /// Template render pass created from the descriptor's color/depth targets.
+    /// Vulkan requires a VkRenderPass for the graphics PSO; we keep this one
+    /// for the PSO's lifetime.
     render_pass: vk.RenderPass,
 
     pub fn destroy(self: *RenderEntry, device: *vk.Device) void {
@@ -36,9 +36,9 @@ pub const RenderEntry = struct {
     }
 };
 
-/// Crée un RenderPipeline (PSO graphics) — pipeline layout + render pass
-/// modèle + graphics pipeline. Phase 0 : viewport/scissor dynamiques,
-/// pas de tessellation, pas de MSAA.
+/// Creates a RenderPipeline (graphics PSO) — pipeline layout + template
+/// render pass + graphics pipeline. Phase 0: dynamic viewport/scissor,
+/// no tessellation, no MSAA.
 pub fn createRender(
     device: *Device,
     descriptor: types.RenderPipelineDescriptor,
@@ -63,7 +63,7 @@ pub fn createRender(
     const pl_layout = device.vk_device.createPipelineLayout(&layout_ci, null) catch return error.PipelineCreationFailed;
     errdefer device.vk_device.destroyPipelineLayout(pl_layout, null);
 
-    // RenderPass modèle (color attachments + optional depth).
+    // Template render pass (color attachments + optional depth).
     var attachments: [9]vk.AttachmentDescription = undefined;
     var color_refs: [9]vk.AttachmentReference = undefined;
     var depth_ref: vk.AttachmentReference = .{ .attachment = 0, .layout = .undefined };
@@ -296,7 +296,7 @@ pub fn createRender(
     return .{ .inner = id };
 }
 
-/// Libère un RenderPipeline + son layout + sa render pass modèle.
+/// Frees a RenderPipeline + its layout + its template render pass.
 pub fn destroyRender(device: *Device, handle: types.RenderPipelineHandle) void {
     if (handle.inner == 0) return;
     if (device.render_pipelines.fetchRemove(handle.inner)) |kv| {
@@ -305,8 +305,8 @@ pub fn destroyRender(device: *Device, handle: types.RenderPipelineHandle) void {
     }
 }
 
-/// Phase 0 : ComputePipeline est dans la GAL day-1 (escape hatch Phase 1+
-/// V-Buffer / GI compute). Non utilisé Phase 0, mais doit pouvoir se créer.
+/// Phase 0: ComputePipeline is in the GAL day-1 (escape hatch Phase 1+
+/// V-Buffer / GI compute). Unused in Phase 0, but must be creatable.
 pub fn createCompute(
     device: *Device,
     descriptor: types.ComputePipelineDescriptor,
@@ -344,9 +344,9 @@ pub fn createCompute(
     var pipelines: [1]vk.Pipeline = .{.null};
     device.vk_device.createComputePipelines(.null, &ci, null, &pipelines) catch return error.PipelineCreationFailed;
 
-    // Phase 0 : on stocke dans render_pipelines pour simplifier — Phase 1+
-    // un registry compute_pipelines dédié. Le `render_pass` est `.null`
-    // pour les compute pipelines.
+    // Phase 0: we store in render_pipelines for simplicity — Phase 1+
+    // a dedicated compute_pipelines registry. The `render_pass` is `.null`
+    // for compute pipelines.
     const id = device.nextHandle();
     try device.render_pipelines.put(device.allocator, id, .{
         .pipeline = pipelines[0],
@@ -356,8 +356,8 @@ pub fn createCompute(
     return .{ .inner = id };
 }
 
-/// Libère un ComputePipeline + son layout. Phase 0 partage la map
-/// `render_pipelines` avec les RenderPipelines (registry unifié).
+/// Frees a ComputePipeline + its layout. Phase 0 shares the
+/// `render_pipelines` map with the RenderPipelines (unified registry).
 pub fn destroyCompute(device: *Device, handle: types.ComputePipelineHandle) void {
     if (handle.inner == 0) return;
     if (device.render_pipelines.fetchRemove(handle.inner)) |kv| {
@@ -366,7 +366,7 @@ pub fn destroyCompute(device: *Device, handle: types.ComputePipelineHandle) void
     }
 }
 
-/// Helper : récupère `(pipeline, layout, render_pass)` natifs depuis un handle.
+/// Helper: retrieves the native `(pipeline, layout, render_pass)` from a handle.
 pub fn lookup(device: *Device, handle: types.RenderPipelineHandle) ?RenderEntry {
     if (handle.inner == 0) return null;
     return device.render_pipelines.get(handle.inner);

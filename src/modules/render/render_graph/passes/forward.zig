@@ -1,36 +1,36 @@
 //! Forward Opaque Pass — Phase 0 / M0.4.
 //!
-//! Deuxième passe du render graph Phase 0 (cf. brief §Scope). Render
-//! l'ensemble des entités opaques avec depth test on + depth write on.
-//! Tri front-to-back par bucket `(mesh_id, material_id)` — alimenté par
-//! l'instancing batcher (cf. `src/modules/render/instancing/batcher.zig`).
+//! Second pass of the Phase 0 render graph (cf. brief §Scope). Renders
+//! all opaque entities with depth test on + depth write on.
+//! Front-to-back sorting by `(mesh_id, material_id)` bucket — fed by
+//! the instancing batcher (cf. `src/modules/render/instancing/batcher.zig`).
 //!
-//! Phase 0 : pas de transparent pass (brief §Out-of-scope) ; pas de
-//! MSAA ; pas de post-process. La sortie color est directement présentée
-//! par le swapchain (ou capturée par la pass `capture` en mode
-//! `--smoke-test`).
+//! Phase 0: no transparent pass (brief §Out-of-scope); no
+//! MSAA; no post-process. The color output is presented directly
+//! by the swapchain (or captured by the `capture` pass in
+//! `--smoke-test` mode).
 
 const std = @import("std");
 const gal = @import("../../gal/main.zig");
 const pass_mod = @import("../pass.zig");
 
-/// Configuration de la forward opaque pass.
+/// Configuration of the forward opaque pass.
 pub const Config = struct {
-    /// Cible color (typiquement l'image courante de la swapchain).
+    /// Color target (typically the current swapchain image).
     color_target: gal.types.TextureHandle,
-    /// Depth buffer hérité du depth prepass.
+    /// Depth buffer inherited from the depth prepass.
     depth_target: gal.types.TextureHandle,
-    /// Couleur de clear du color attachment.
+    /// Clear color of the color attachment.
     clear_color: gal.types.ColorClear = .{ .r = 0.05, .g = 0.05, .b = 0.08, .a = 1.0 },
 };
 
-/// Construit une Pass forward opaque prête à être ajoutée à un Graph.
+/// Builds a forward opaque Pass ready to be added to a Graph.
 pub fn buildPass(config: *const Config) pass_mod.Pass {
     return .{
         .name = "forward_opaque",
         .barrier_mode = .auto,
         .reads = &.{.{
-            // Le depth est en read-only (depth test, pas write).
+            // The depth is read-only (depth test, not write).
             .resource = .{ .texture = config.depth_target },
             .stage = .{ .fragment = true },
             .access = .{ .read = true },
@@ -49,10 +49,10 @@ pub fn buildPass(config: *const Config) pass_mod.Pass {
 
 fn body(encoder: ?*anyopaque, ctx: ?*anyopaque) anyerror!void {
     _ = .{ encoder, ctx };
-    // Phase 0 : la pass forward est exercée par `examples/triangle/` et
-    // `bench/render_instancing.zig` (suite immédiate du milestone). Le
-    // body effectif sera câblé via l'instancing batcher (drawIndexed
-    // batchés par bucket).
+    // Phase 0: the forward pass is exercised by `examples/triangle/` and
+    // `bench/render_instancing.zig` (immediate follow-up to the milestone). The
+    // actual body will be wired via the instancing batcher (drawIndexed
+    // batched by bucket).
 }
 
 test "forward: buildPass declares depth read + color write" {

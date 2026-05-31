@@ -1,31 +1,31 @@
-//! Vérification comptime du contrat GAL — Phase 0 / M0.4.
+//! Comptime check of the GAL contract — Phase 0 / M0.4.
 //!
-//! Pattern inspiré sysgpu Mach (`engine-mach-reference.md` §2) : aucune
-//! vtable runtime, le backend est résolu à la compilation et l'interface
-//! est vérifiée par `comptime`. Toute classe de backend (`Null`, `Vulkan`,
-//! futur `Metal`, `D3D12`, `WebGPU`) passe `checkBackend(Backend)` au
-//! `comptime` — si une méthode manque, le build casse avec un message clair.
+//! Pattern inspired by Mach sysgpu (`engine-mach-reference.md` §2): no
+//! runtime vtable, the backend is resolved at compile time and the interface
+//! is checked by `comptime`. Every backend class (`Null`, `Vulkan`,
+//! future `Metal`, `D3D12`, `WebGPU`) passes `checkBackend(Backend)` at
+//! `comptime` — if a method is missing, the build breaks with a clear message.
 //!
-//! Phase 0 : vérification de présence + signature de premier paramètre
-//! (`*Backend`). Phase 1+ : extension vers la vérification de signature
-//! complète (paramètres + types de retour) sur le modèle sysgpu (~2 700
-//! lignes d'assertions). Phase 0 reste pragmatique pour ne pas bloquer
-//! l'avancement du Vulkan backend.
+//! Phase 0: presence check + first-parameter signature
+//! (`*Backend`). Phase 1+: extension to full signature checking
+//! (parameters + return types) on the sysgpu model (~2,700
+//! lines of assertions). Phase 0 stays pragmatic so as not to block
+//! the Vulkan backend's progress.
 
 const std = @import("std");
 const types = @import("types.zig");
 
-/// Méthode requise sur un backend. La présence est vérifiée au comptime ;
-/// la signature complète restera à étendre Phase 1+.
+/// Required method on a backend. Presence is checked at comptime;
+/// the full signature remains to be extended Phase 1+.
 const RequiredMethod = struct {
     name: []const u8,
-    /// Message de doc affiché en cas d'erreur — guide le lecteur vers la
-    /// section de spec correspondante.
+    /// Doc message shown on error — guides the reader toward the
+    /// corresponding spec section.
     purpose: []const u8,
 };
 
-/// Liste des méthodes requises pour tout backend GAL Phase 0. Ordre logique
-/// (cycle de vie d'un device → resources → pipeline → frame).
+/// List of methods required for any Phase 0 GAL backend. Logical order
+/// (device lifecycle → resources → pipeline → frame).
 pub const required_methods = [_]RequiredMethod{
     // Lifecycle
     .{ .name = "init", .purpose = "Construit le Device depuis un DeviceDescriptor" },
@@ -81,10 +81,10 @@ pub const required_methods = [_]RequiredMethod{
     .{ .name = "submit", .purpose = "Submit un CommandEncoder finalisé à la graphics queue (cf. SubmitDescriptor)" },
 };
 
-/// Vérification comptime que `Backend` déclare toutes les méthodes requises.
-/// Appelée comme `comptime interface.checkBackend(Backend)` lors de
-/// l'instanciation du wrapper `gal.main.Device`. Retourne `void` en cas
-/// de succès, déclenche un `@compileError` en cas de manque.
+/// Comptime check that `Backend` declares all the required methods.
+/// Called as `comptime interface.checkBackend(Backend)` during the
+/// instantiation of the `gal.main.Device` wrapper. Returns `void` on
+/// success, triggers a `@compileError` on a missing method.
 pub fn checkBackend(comptime Backend: type) void {
     comptime {
         for (required_methods) |m| {
@@ -99,7 +99,7 @@ pub fn checkBackend(comptime Backend: type) void {
     }
 }
 
-/// Liste les méthodes requises sous forme texte (debug / docgen).
+/// Lists the required methods as text (debug / docgen).
 pub fn listRequiredMethods(writer: anytype) !void {
     inline for (required_methods) |m| {
         try writer.print("- {s}: {s}\n", .{ m.name, m.purpose });
@@ -110,9 +110,9 @@ pub fn listRequiredMethods(writer: anytype) !void {
 // Tests
 // ============================================================================
 
-/// Backend "shape" minimal pour les tests — déclare toutes les méthodes
-/// requises avec des stubs sans corps (jamais appelés). Ne pas utiliser
-/// hors tests d'interface.
+/// Minimal backend "shape" for the tests — declares all the required
+/// methods with bodyless stubs (never called). Do not use outside
+/// interface tests.
 const TestShape = struct {
     pub fn init(allocator: std.mem.Allocator, descriptor: types.DeviceDescriptor) types.Error!TestShape {
         _ = .{ allocator, descriptor };

@@ -1,16 +1,16 @@
 //! Shader hot-reload — Phase 0 / M0.4.
 //!
-//! Filewatch sur `assets/shaders/` + recompile dans un thread dédié +
-//! pipeline recreate via GAL. Cible latence < 200 ms (brief §Scope).
+//! Filewatch on `assets/shaders/` + recompile in a dedicated thread +
+//! pipeline recreate via GAL. Target latency < 200 ms (brief §Scope).
 //!
-//! Phase 0 : polling-based watcher (stat every N ms). Phase 1+ : passer
-//! à inotify/FSEvents/ReadDirectoryChangesW selon OS via `std.fs.Watch`
-//! quand la stdlib le stabilisera.
+//! Phase 0: polling-based watcher (stat every N ms). Phase 1+: switch
+//! to inotify/FSEvents/ReadDirectoryChangesW depending on OS via `std.fs.Watch`
+//! once the stdlib stabilizes it.
 //!
-//! Si `glslc` est absent du PATH au démarrage du watcher, on log un warn
+//! If `glslc` is absent from PATH when the watcher starts, we log a warn
 //! (`glslc not found, hot-reload disabled, runtime continues with cached
-//! .spv`) et `start` retourne sans démarrer le thread (cf. brief §Comportement
-//! observable + §Notes décision 7).
+//! .spv`) and `start` returns without starting the thread (cf. brief §Observable
+//! behavior + §Notes decision 7).
 
 const std = @import("std");
 const compiler = @import("compiler.zig");
@@ -18,26 +18,26 @@ const cache = @import("cache.zig");
 
 const log = std.log.scoped(.shader_hot_reload);
 
-/// Callback appelé quand un shader est re-compilé (ou échoue).
-/// Phase 0 : reçoit le path + nouveau SPIR-V (ou diagnostic). Phase 1+ :
-/// reçoit aussi un handle GAL.ShaderModule pour recréation pipeline.
+/// Callback invoked when a shader is re-compiled (or fails).
+/// Phase 0: receives the path + new SPIR-V (or diagnostic). Phase 1+:
+/// also receives a GAL.ShaderModule handle for pipeline recreation.
 pub const OnRecompile = *const fn (ctx: ?*anyopaque, path: []const u8, spv: ?[]const u8, diag: ?[]const u8) void;
 
-/// Configuration du watcher.
+/// Watcher configuration.
 pub const Config = struct {
-    /// Instance Io propagée pour les ops fs + spawn (Zig 0.16).
+    /// Io instance propagated for fs ops + spawn (Zig 0.16).
     io: std.Io,
-    /// Dossier racine à surveiller (typiquement `assets/shaders/`).
+    /// Root directory to watch (typically `assets/shaders/`).
     root: []const u8 = "assets/shaders",
-    /// Intervalle de poll en millisecondes Phase 0. Trade-off latence vs CPU.
+    /// Poll interval in milliseconds Phase 0. Trade-off latency vs CPU.
     poll_interval_ms: u32 = 50,
-    /// Callback de recompile (ou échec).
+    /// Recompile (or failure) callback.
     on_recompile: OnRecompile,
-    /// Context utilisateur opaque passé au callback.
+    /// Opaque user context passed to the callback.
     callback_ctx: ?*anyopaque = null,
 };
 
-/// Watcher de shaders — porte le thread de polling + l'état des mtimes.
+/// Shader watcher — holds the polling thread + the mtime state.
 pub const Watcher = struct {
     allocator: std.mem.Allocator,
     config: Config,
@@ -45,8 +45,8 @@ pub const Watcher = struct {
     stop_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     glslc_version: []const u8 = "0.0.0",
 
-    /// Démarre le watcher. Retourne immédiatement après spawn du thread.
-    /// Si glslc absent → log warn et retourne sans démarrer.
+    /// Starts the watcher. Returns immediately after spawning the thread.
+    /// If glslc absent → log warn and return without starting.
     pub fn start(self: *Watcher) !void {
         if (!compiler.isAvailable(self.allocator, self.config.io)) {
             log.warn("glslc not found, hot-reload disabled, runtime continues with cached .spv", .{});
@@ -56,7 +56,7 @@ pub const Watcher = struct {
         self.thread = try std.Thread.spawn(.{}, threadMain, .{self});
     }
 
-    /// Demande l'arrêt + join. Bloque jusqu'à la fin du thread.
+    /// Requests stop + join. Blocks until the thread finishes.
     pub fn stop(self: *Watcher) void {
         self.stop_flag.store(true, .release);
         if (self.thread) |t| {
@@ -71,12 +71,12 @@ pub const Watcher = struct {
     }
 };
 
-/// Init du watcher. `start()` doit être appelé séparément.
+/// Watcher init. `start()` must be called separately.
 pub fn init(allocator: std.mem.Allocator, config: Config) Watcher {
     return .{ .allocator = allocator, .config = config };
 }
 
-/// Thread body — boucle de poll → diff → recompile.
+/// Thread body — poll → diff → recompile loop.
 fn threadMain(watcher: *Watcher) void {
     // i96 mirrors `std.Io.Timestamp.nanoseconds` width so the map value
     // round-trips losslessly. Zig 0.16's `Stat.mtime` shifted from i128

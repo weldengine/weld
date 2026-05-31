@@ -1,15 +1,15 @@
-//! GPU Abstraction Layer (GAL) — entrée publique du module Render Phase 0 / M0.4.
+//! GPU Abstraction Layer (GAL) — public entry point of the Render module, Phase 0 / M0.4.
 //!
-//! Surface inspirée WebGPU (cf. `engine-render.md` §3) avec escape hatches
-//! pré-câblés jour 1 pour `TimelineSemaphore`, `BarrierExplicit`,
+//! Surface inspired by WebGPU (cf. `engine-render.md` §3) with escape hatches
+//! pre-wired day 1 for `TimelineSemaphore`, `BarrierExplicit`,
 //! `DescriptorIndexing` (cf. `escape_hatches.zig`).
 //!
-//! **Sélection backend par comptime selon `BackendChoice`.** Phase 0 expose
-//! `Null` (CI headless) et `Vulkan` (à venir dans la suite de M0.4). Phase 2
-//! ajoute `Metal` + `D3D12`, Phase 3 `WebGPU`. La surface publique reste
-//! identique cross-backend — seul le type concret derrière `Device` change.
+//! **Comptime backend selection via `BackendChoice`.** Phase 0 exposes
+//! `Null` (headless CI) and `Vulkan` (coming later in M0.4). Phase 2
+//! adds `Metal` + `D3D12`, Phase 3 `WebGPU`. The public surface stays
+//! identical cross-backend — only the concrete type behind `Device` changes.
 //!
-//! Pattern d'utilisation :
+//! Usage pattern:
 //!
 //! ```zig
 //! const gal = @import("gal");
@@ -17,62 +17,62 @@
 //! defer device.deinit();
 //! ```
 //!
-//! Le wrapper `Device(choice)` vérifie le contrat au comptime via
-//! `interface.checkBackend(Backend)`. Aucun dispatch dynamique.
+//! The `Device(choice)` wrapper checks the contract at comptime via
+//! `interface.checkBackend(Backend)`. No dynamic dispatch.
 
 const std = @import("std");
 
-/// Types publics GAL (handles, formats, descripteurs).
+/// Public GAL types (handles, formats, descriptors).
 pub const types = @import("types.zig");
-/// Escape hatches pré-câblés jour 1 (`TimelineSemaphore`, `BarrierExplicit`,
+/// Escape hatches pre-wired day 1 (`TimelineSemaphore`, `BarrierExplicit`,
 /// `DescriptorIndexing`, `Feature` query).
 pub const escape_hatches = @import("escape_hatches.zig");
-/// Vérification comptime du contrat backend (cf. `checkBackend`).
+/// Comptime check of the backend contract (cf. `checkBackend`).
 pub const interface = @import("interface.zig");
-/// Auto-tracking de barriers entre passes du render graph.
+/// Barrier auto-tracking between render graph passes.
 pub const barriers = @import("barriers.zig");
-/// Backend Null — no-op, utilisé en CI headless et pour la discipline d'API.
+/// Null backend — no-op, used in headless CI and for API discipline.
 pub const null_backend = @import("null/device.zig");
-/// Backend Vulkan — implémentation Phase 0+ (cf. brief §Scope).
+/// Vulkan backend — Phase 0+ implementation (cf. brief §Scope).
 pub const vulkan_backend = @import("vulkan/device.zig");
 
-// Re-exports lisibles côté caller (évite l'imbrication `gal.types.*`).
+// Caller-friendly re-exports (avoids the `gal.types.*` nesting).
 
-/// Re-export pratique : descripteur d'init de Device.
+/// Convenience re-export: Device init descriptor.
 pub const DeviceDescriptor = types.DeviceDescriptor;
-/// Re-export pratique : descripteur de Buffer.
+/// Convenience re-export: Buffer descriptor.
 pub const BufferDescriptor = types.BufferDescriptor;
-/// Re-export pratique : descripteur de Texture.
+/// Convenience re-export: Texture descriptor.
 pub const TextureDescriptor = types.TextureDescriptor;
-/// Re-export pratique : descripteur de TextureView.
+/// Convenience re-export: TextureView descriptor.
 pub const TextureViewDescriptor = types.TextureViewDescriptor;
-/// Re-export pratique : descripteur de Sampler.
+/// Convenience re-export: Sampler descriptor.
 pub const SamplerDescriptor = types.SamplerDescriptor;
-/// Re-export pratique : descripteur de ShaderModule (SPIR-V).
+/// Convenience re-export: ShaderModule descriptor (SPIR-V).
 pub const ShaderModuleDescriptor = types.ShaderModuleDescriptor;
-/// Re-export pratique : descripteur de BindGroupLayout.
+/// Convenience re-export: BindGroupLayout descriptor.
 pub const BindGroupLayoutDescriptor = types.BindGroupLayoutDescriptor;
-/// Re-export pratique : descripteur de BindGroup.
+/// Convenience re-export: BindGroup descriptor.
 pub const BindGroupDescriptor = types.BindGroupDescriptor;
-/// Re-export pratique : descripteur de RenderPipeline (PSO graphics).
+/// Convenience re-export: RenderPipeline descriptor (graphics PSO).
 pub const RenderPipelineDescriptor = types.RenderPipelineDescriptor;
-/// Re-export pratique : descripteur de ComputePipeline.
+/// Convenience re-export: ComputePipeline descriptor.
 pub const ComputePipelineDescriptor = types.ComputePipelineDescriptor;
-/// Re-export pratique : descripteur de Swapchain.
+/// Convenience re-export: Swapchain descriptor.
 pub const SwapchainDescriptor = types.SwapchainDescriptor;
-/// Re-export pratique : descripteur de Render pass (passé à `beginRenderPass`).
+/// Convenience re-export: Render pass descriptor (passed to `beginRenderPass`).
 pub const RenderPassDescriptor = types.RenderPassDescriptor;
-/// Re-export pratique : descripteur de Compute pass.
+/// Convenience re-export: Compute pass descriptor.
 pub const ComputePassDescriptor = types.ComputePassDescriptor;
-/// Re-export pratique : set d'erreurs GAL unifié cross-backend.
+/// Convenience re-export: unified cross-backend GAL error set.
 pub const Error = types.Error;
-/// Re-export pratique : énumération des features optionnelles query-ables.
+/// Convenience re-export: enumeration of optional query-able features.
 pub const Feature = escape_hatches.Feature;
 
-/// Choix de backend résolu à la compilation. Phase 0 supporte explicitement
-/// `null_backend`. `vulkan` arrive dans la suite de M0.4. Les autres entrées
-/// sont déclarées jour 1 pour figer la surface mais retournent
-/// `@compileError` jusqu'à leur livraison Phase 2-3.
+/// Backend choice resolved at compile time. Phase 0 explicitly supports
+/// `null_backend`. `vulkan` comes later in M0.4. The other entries are
+/// declared day 1 to freeze the surface but return `@compileError` until
+/// their Phase 2-3 delivery.
 pub const BackendChoice = enum {
     null_backend,
     vulkan,
@@ -81,7 +81,7 @@ pub const BackendChoice = enum {
     webgpu,
 };
 
-/// Wrapper comptime qui résout `BackendChoice` vers le type concret.
+/// Comptime wrapper that resolves `BackendChoice` to the concrete type.
 pub fn Device(comptime choice: BackendChoice) type {
     return switch (choice) {
         .null_backend => null_backend.Device,
@@ -92,16 +92,16 @@ pub fn Device(comptime choice: BackendChoice) type {
     };
 }
 
-/// Sélection par défaut basée sur `builtin.os.tag`. Phase 0 : `null_backend`
-/// puisque Vulkan n'est pas encore wiré dans M0.4 scaffolding. Mis à jour
-/// vers `.vulkan` une fois le backend Vulkan livré dans la suite immédiate
-/// du milestone.
+/// Default selection based on `builtin.os.tag`. Phase 0: `null_backend`
+/// since Vulkan is not yet wired in the M0.4 scaffolding. Updated to
+/// `.vulkan` once the Vulkan backend is delivered in the immediate
+/// follow-up of the milestone.
 pub fn defaultBackend() BackendChoice {
     return .null_backend;
 }
 
 // ============================================================================
-// Sanity comptime — Null backend satisfait l'interface
+// Comptime sanity — Null backend satisfies the interface
 // ============================================================================
 
 comptime {

@@ -1,14 +1,14 @@
 //! RenderPass Vulkan — Phase 0 / M0.4.
 //!
-//! Phase 0 : les RenderPass Vulkan sont créées **à la demande** lors de
-//! `CommandEncoder.beginRenderPass` à partir d'un `RenderPassDescriptor`
-//! GAL. C'est inefficace par rapport à un cache par signature
-//! (color_targets + depth_format + load/store ops), mais suffisant pour
-//! la triangle Phase 0. Phase 1+ : cache hashé `(formats + ops)` →
-//! réutilisation.
+//! Phase 0: the Vulkan RenderPasses are created **on demand** during
+//! `CommandEncoder.beginRenderPass` from a GAL `RenderPassDescriptor`.
+//! This is inefficient compared to a by-signature cache
+//! (color_targets + depth_format + load/store ops), but sufficient for
+//! the Phase 0 triangle. Phase 1+: hashed `(formats + ops)` cache →
+//! reuse.
 //!
-//! Les framebuffers correspondants sont créés transient pour la durée
-//! de la pass (sauf si le caller passe directement par VK_KHR_dynamic_rendering
+//! The corresponding framebuffers are created transient for the duration
+//! of the pass (unless the caller goes directly through VK_KHR_dynamic_rendering
 //! — Phase 1+).
 
 const std = @import("std");
@@ -19,8 +19,8 @@ const conv = @import("conv.zig");
 const texture_mod = @import("texture.zig");
 const Device = @import("device.zig").Device;
 
-/// Bundle render pass + framebuffer transients pour une pass donnée. Crés
-/// par `begin`, libérés par `end`.
+/// Bundles render pass + framebuffer transients for a given pass. Created
+/// by `begin`, freed by `end`.
 pub const Transient = struct {
     render_pass: vk.RenderPass,
     framebuffer: vk.Framebuffer,
@@ -35,7 +35,7 @@ pub const Transient = struct {
     }
 };
 
-/// Crée la RenderPass + Framebuffer correspondant à un `RenderPassDescriptor`.
+/// Creates the RenderPass + Framebuffer corresponding to a `RenderPassDescriptor`.
 pub fn begin(device: *Device, descriptor: types.RenderPassDescriptor) types.Error!Transient {
     const max_attachments = 9;
     if (descriptor.color_attachments.len + @as(usize, if (descriptor.depth_stencil_attachment != null) 1 else 0) > max_attachments) {
@@ -90,7 +90,7 @@ pub fn begin(device: *Device, descriptor: types.RenderPassDescriptor) types.Erro
     if (descriptor.depth_stencil_attachment) |d| {
         if (n_attach >= max_attachments) return error.Unsupported;
         const view = texture_mod.lookupView(device, d.view) orelse return error.InvalidArgument;
-        // Phase 0 : format depth attendu D32_SFLOAT (cf. brief §Notes décision 5).
+        // Phase 0: expected depth format D32_SFLOAT (cf. brief §Notes decision 5).
         const format = vk.Format.d32_sfloat;
         attachments[n_attach] = .{
             .flags = .empty,
@@ -141,8 +141,8 @@ pub fn begin(device: *Device, descriptor: types.RenderPassDescriptor) types.Erro
     const rp = device.vk_device.createRenderPass(&rp_ci, null) catch return error.BackendInternal;
     errdefer device.vk_device.destroyRenderPass(rp, null);
 
-    // Extent — on prend la dimension de la première texture color attachment
-    // (toutes les attachments doivent matcher Phase 0).
+    // Extent — we take the dimension of the first color attachment texture
+    // (all attachments must match in Phase 0).
     if (descriptor.color_attachments.len > 0) {
         const first_view = descriptor.color_attachments[0].view;
         if (lookupViewExtent(device, first_view)) |e| extent = e;

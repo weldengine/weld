@@ -1,24 +1,24 @@
 //! Shader compiler — Phase 0 / M0.4.
 //!
-//! Compile des shaders GLSL en SPIR-V via spawn du CLI `glslc` (cohérent
-//! brief §Notes décision 7 : pas de binding shaderc/glslang, le keeper count
-//! reste à 7).
+//! Compiles GLSL shaders into SPIR-V by spawning the `glslc` CLI (consistent
+//! with brief §Notes decision 7: no shaderc/glslang binding, the keeper count
+//! stays at 7).
 //!
-//! Cohérent avec brief §Notes (« glslc est une peer dependency uniquement
-//! pour `zig build shaders` (régénération) ou pour le hot-reload runtime
-//! dev. Le build standard `zig build` ne dépend pas de `glslc`. »). Si
-//! `glslc` est absent du PATH, `compile` retourne `error.GlslcNotFound`.
+//! Consistent with brief §Notes ("glslc is a peer dependency only
+//! for `zig build shaders` (regeneration) or for the dev runtime hot-reload.
+//! The standard `zig build` build does not depend on `glslc`."). If
+//! `glslc` is absent from PATH, `compile` returns `error.GlslcNotFound`.
 //!
-//! API Zig 0.16 : `std.process.run` (qui prend `io: Io`) — pas
-//! `std.process.Child.init` qui n'existe plus.
+//! Zig 0.16 API: `std.process.run` (which takes `io: Io`) — not
+//! `std.process.Child.init` which no longer exists.
 
 const std = @import("std");
 
-/// Compteur global pour générer des noms de fichiers temp uniques.
+/// Global counter to generate unique temp file names.
 var unique_id: std.atomic.Value(u64) = .init(0);
 
-/// Stage shader supporté Phase 0. Phase 1+ étend (geometry, tessellation,
-/// raygen/closesthit/miss pour RT).
+/// Shader stage supported in Phase 0. Phase 1+ extends it (geometry, tessellation,
+/// raygen/closesthit/miss for RT).
 pub const Stage = enum {
     vertex,
     fragment,
@@ -33,8 +33,8 @@ pub const Stage = enum {
     }
 };
 
-/// Erreurs de compilation. `GlslcNotFound` est l'erreur attendue quand
-/// l'outil n'est pas installé (cf. brief §Comportement observable).
+/// Compilation errors. `GlslcNotFound` is the expected error when
+/// the tool is not installed (cf. brief §Observable behavior).
 pub const CompileError = error{
     GlslcNotFound,
     GlslcCrashed,
@@ -44,13 +44,13 @@ pub const CompileError = error{
     ProcessSpawnFailed,
 };
 
-/// Résultat d'une compilation.
+/// Result of a compilation.
 pub const Result = struct {
-    /// Bytes SPIR-V (4-byte aligned). Owned by le caller — à libérer via
+    /// SPIR-V bytes (4-byte aligned). Owned by the caller — to be freed via
     /// `allocator.free`.
     spv: []u8,
-    /// Diagnostics retournés par glslc (stdout + stderr concaténés).
-    /// Vide si la compilation a réussi sans warning.
+    /// Diagnostics returned by glslc (stdout + stderr concatenated).
+    /// Empty if the compilation succeeded without warning.
     diagnostics: []u8,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
@@ -60,15 +60,15 @@ pub const Result = struct {
     }
 };
 
-/// Compile `source` (texte GLSL) vers SPIR-V via glslc. Le caller doit
-/// passer le bon `stage` (le glslc en a besoin pour la sélection du shader
-/// model). `entry_point` est par défaut "main".
+/// Compiles `source` (GLSL text) to SPIR-V via glslc. The caller must
+/// pass the correct `stage` (glslc needs it for shader model
+/// selection). `entry_point` defaults to "main".
 ///
-/// Retourne `error.GlslcNotFound` si glslc n'est pas trouvable dans le
-/// PATH — utilisable comme heuristique pour désactiver le hot-reload.
+/// Returns `error.GlslcNotFound` if glslc is not findable in
+/// PATH — usable as a heuristic to disable hot-reload.
 ///
-/// Phase 0 : utilise `std.process.run` (Zig 0.16 API). Le caller fournit
-/// l'instance `io: std.Io` requise.
+/// Phase 0: uses `std.process.run` (Zig 0.16 API). The caller provides
+/// the required `io: std.Io` instance.
 pub fn compile(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -76,9 +76,9 @@ pub fn compile(
     stage: Stage,
     entry_point: ?[]const u8,
 ) CompileError!Result {
-    // Écrit le source dans un fichier temp. Nom unique via un compteur
-    // atomique (évite la dépendance à `std.time.nanoTimestamp` qui
-    // n'existe plus en Zig 0.16).
+    // Writes the source to a temp file. Unique name via an atomic
+    // counter (avoids the dependency on `std.time.nanoTimestamp` which
+    // no longer exists in Zig 0.16).
     const id = unique_id.fetchAdd(1, .monotonic);
     var tmp_buf: [128]u8 = undefined;
     const tmp_name = std.fmt.bufPrint(&tmp_buf, "/tmp/weld_shader_{d}.glsl", .{id}) catch return error.OutOfMemory;
@@ -92,7 +92,7 @@ pub fn compile(
         std.Io.Dir.cwd().deleteFile(io, tmp_name) catch {};
     }
 
-    // Construit argv.
+    // Builds argv.
     var argv: std.ArrayListUnmanaged([]const u8) = .empty;
     defer argv.deinit(allocator);
     argv.append(allocator, "glslc") catch return error.OutOfMemory;
@@ -128,15 +128,15 @@ pub fn compile(
         else => return error.GlslcCrashed,
     }
 
-    // SPIR-V dans stdout. Validation basique : ≥ 4 octets.
+    // SPIR-V in stdout. Basic validation: ≥ 4 bytes.
     if (run_result.stdout.len < 4) return error.GlslSyntaxError;
     const spv = allocator.dupe(u8, run_result.stdout) catch return error.OutOfMemory;
     const diag = allocator.dupe(u8, run_result.stderr) catch return error.OutOfMemory;
     return Result{ .spv = spv, .diagnostics = diag };
 }
 
-/// Vérifie si `glslc` est trouvable sur le PATH. Utile pour gater le
-/// hot-reload. Retourne `false` plutôt qu'une erreur — heuristique.
+/// Checks whether `glslc` is findable on PATH. Useful to gate
+/// hot-reload. Returns `false` rather than an error — heuristic.
 pub fn isAvailable(allocator: std.mem.Allocator, io: std.Io) bool {
     const result = std.process.run(allocator, io, .{
         .argv = &.{ "glslc", "--version" },
@@ -159,7 +159,7 @@ test "compiler: Stage.glslcArg covers all stages" {
 }
 
 test "compiler: isAvailable does not crash" {
-    // Test purement structural — appelle la fn et vérifie qu'elle retourne
-    // un bool sans crash, indépendamment de la présence effective de glslc.
+    // Purely structural test — calls the fn and verifies it returns
+    // a bool without crashing, regardless of the actual presence of glslc.
     _ = isAvailable(std.testing.allocator, std.testing.io);
 }

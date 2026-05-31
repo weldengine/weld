@@ -1,12 +1,12 @@
 //! BindGroupLayout + BindGroup Vulkan — Phase 0 / M0.4.
 //!
-//! Mapping :
-//! - `BindGroupLayoutHandle` ↔ `vk.DescriptorSetLayout` (mapping direct, pas de registry)
-//! - `BindGroupHandle` ↔ `vk.DescriptorSet` (registry interne pour
-//!   conserver la `vk.DescriptorPool` parente lors de la destruction)
+//! Mapping:
+//! - `BindGroupLayoutHandle` ↔ `vk.DescriptorSetLayout` (direct mapping, no registry)
+//! - `BindGroupHandle` ↔ `vk.DescriptorSet` (internal registry to
+//!   keep the parent `vk.DescriptorPool` at destruction time)
 //!
-//! Phase 0 : un descriptor pool par BindGroup (overkill mais simple).
-//! Phase 1+ : pool partagé multi-frames + reset à la frame boundary.
+//! Phase 0: one descriptor pool per BindGroup (overkill but simple).
+//! Phase 1+: shared multi-frame pool + reset at the frame boundary.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -17,27 +17,27 @@ const Device = @import("device.zig").Device;
 const buffer_mod = @import("buffer.zig");
 const texture_mod = @import("texture.zig");
 
-/// Slot interne d'un BindGroup — bundle DescriptorPool + DescriptorSet.
-/// Phase 0 : un pool par bind group (cf. doc en tête de fichier).
+/// Internal slot of a BindGroup — bundles DescriptorPool + DescriptorSet.
+/// Phase 0: one pool per bind group (cf. the doc at the top of the file).
 pub const Entry = struct {
     descriptor_pool: vk.DescriptorPool,
     descriptor_set: vk.DescriptorSet,
 
     pub fn destroy(self: *Entry, device: *vk.Device) void {
-        // Détruire le pool libère implicitement les sets alloués dedans.
+        // Destroying the pool implicitly frees the sets allocated in it.
         if (self.descriptor_pool != .null) device.destroyDescriptorPool(self.descriptor_pool, null);
         self.* = undefined;
     }
 };
 
-/// Crée un `vk.DescriptorSetLayout` depuis un descripteur GAL. Mapping
-/// direct : handle.inner = @intFromEnum(layout).
+/// Creates a `vk.DescriptorSetLayout` from a GAL descriptor. Direct
+/// mapping: handle.inner = @intFromEnum(layout).
 pub fn createLayout(
     device: *Device,
     descriptor: types.BindGroupLayoutDescriptor,
 ) types.Error!types.BindGroupLayoutHandle {
     if (descriptor.entries.len == 0) {
-        // Layout vide accepté — équivalent à un empty descriptor set.
+        // Empty layout accepted — equivalent to an empty descriptor set.
         const ci: vk.DescriptorSetLayoutCreateInfo = .{
             .flags = .empty,
             .binding_count = 0,
@@ -68,27 +68,27 @@ pub fn createLayout(
     return .{ .inner = @intFromEnum(l) };
 }
 
-/// Libère un `vk.DescriptorSetLayout`. No-op si handle invalide.
+/// Frees a `vk.DescriptorSetLayout`. No-op if handle invalid.
 pub fn destroyLayout(device: *Device, handle: types.BindGroupLayoutHandle) void {
     if (handle.inner == 0) return;
     device.vk_device.destroyDescriptorSetLayout(@enumFromInt(handle.inner), null);
 }
 
-/// Crée un BindGroup — alloue un DescriptorPool dédié, alloue un
-/// DescriptorSet depuis le pool, écrit les bindings via
-/// `vkUpdateDescriptorSets`. Phase 0 : un pool par groupe (cf. doc).
+/// Creates a BindGroup — allocates a dedicated DescriptorPool, allocates a
+/// DescriptorSet from the pool, writes the bindings via
+/// `vkUpdateDescriptorSets`. Phase 0: one pool per group (cf. doc).
 pub fn createGroup(
     device: *Device,
     descriptor: types.BindGroupDescriptor,
 ) types.Error!types.BindGroupHandle {
     if (!descriptor.layout.isValid()) return error.InvalidArgument;
 
-    // 1. Construit les pool sizes en comptant les types présents dans entries.
+    // 1. Build the pool sizes by counting the types present in entries.
     var counts = std.AutoHashMap(vk.DescriptorType, u32).init(device.allocator);
     defer counts.deinit();
     for (descriptor.entries) |e| {
         const t: vk.DescriptorType = switch (e.resource) {
-            .buffer => .uniform_buffer, // Phase 0 : par défaut uniform. storage si flag, à étendre Phase 1.
+            .buffer => .uniform_buffer, // Phase 0: uniform by default. storage if flag, to extend Phase 1.
             .texture_view => .sampled_image,
             .sampler => .sampler,
         };
@@ -106,7 +106,7 @@ pub fn createGroup(
             .descriptor_count = kv.value_ptr.*,
         });
     }
-    // Fallback minimal pour les layouts vides.
+    // Minimal fallback for empty layouts.
     if (pool_sizes.items.len == 0) {
         try pool_sizes.append(device.allocator, .{ .type = .uniform_buffer, .descriptor_count = 1 });
     }
@@ -130,7 +130,7 @@ pub fn createGroup(
     device.vk_device.allocateDescriptorSets(&alloc_ci, &sets) catch return error.BackendInternal;
     const set = sets[0];
 
-    // 2. Écrit les bindings effectifs.
+    // 2. Write the effective bindings.
     if (descriptor.entries.len > 0) {
         var writes = std.ArrayList(vk.WriteDescriptorSet).empty;
         defer writes.deinit(device.allocator);
@@ -218,8 +218,8 @@ pub fn createGroup(
     return .{ .inner = id };
 }
 
-/// Libère un BindGroup (et son pool dédié, ce qui libère implicitement
-/// le set). No-op si handle invalide.
+/// Frees a BindGroup (and its dedicated pool, which implicitly frees
+/// the set). No-op if handle invalid.
 pub fn destroyGroup(device: *Device, handle: types.BindGroupHandle) void {
     if (handle.inner == 0) return;
     if (device.bind_groups.fetchRemove(handle.inner)) |kv| {
@@ -228,7 +228,7 @@ pub fn destroyGroup(device: *Device, handle: types.BindGroupHandle) void {
     }
 }
 
-/// Helper — récupère le `vk.DescriptorSet` natif (pour le bind).
+/// Helper — retrieves the native `vk.DescriptorSet` (for the bind).
 pub fn lookupSet(device: *Device, handle: types.BindGroupHandle) ?vk.DescriptorSet {
     if (handle.inner == 0) return null;
     return if (device.bind_groups.get(handle.inner)) |e| e.descriptor_set else null;

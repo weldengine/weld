@@ -1,36 +1,36 @@
 //! Capture Pass — Phase 0 / M0.4.
 //!
-//! Troisième passe (conditionnelle) du render graph Phase 0 (cf. brief
-//! §Scope). Activée par le flag `--smoke-test` du caller (cf.
-//! `examples/triangle/`). Blit la color target post-forward dans un buffer
-//! readback CPU-visible, qui est ensuite converti en PPM RGB côté CPU.
+//! Third (conditional) pass of the Phase 0 render graph (cf. brief
+//! §Scope). Activated by the caller's `--smoke-test` flag (cf.
+//! `examples/triangle/`). Blits the post-forward color target into a
+//! CPU-visible readback buffer, which is then converted to PPM RGB on the CPU.
 //!
-//! Cohérent avec brief §Notes décision 6 : format R8G8B8A8_UNORM (pas
-//! BGRA) — conversion CPU vers PPM RGB triviale (drop alpha, écrire RGB
-//! octet par octet).
+//! Consistent with brief §Notes decision 6: R8G8B8A8_UNORM format (not
+//! BGRA) — trivial CPU-to-PPM RGB conversion (drop alpha, write RGB
+//! byte by byte).
 //!
-//! Phase 0 : la pass est conditionnellement ajoutée au graph par le caller.
-//! Phase 1+ : intégration native dans le render graph avec un drapeau
-//! `transient.captured` côté resource déclaration.
+//! Phase 0: the pass is conditionally added to the graph by the caller.
+//! Phase 1+: native integration into the render graph with a
+//! `transient.captured` flag on the resource declaration side.
 
 const std = @import("std");
 const gal = @import("../../gal/main.zig");
 const pass_mod = @import("../pass.zig");
 
-/// Configuration de la capture pass.
+/// Configuration of the capture pass.
 pub const Config = struct {
-    /// Cible color à capturer (typiquement l'image courante de la swapchain
-    /// ou un offscreen RT R8G8B8A8_UNORM dédié au smoke test).
+    /// Color target to capture (typically the current swapchain image
+    /// or an offscreen RT R8G8B8A8_UNORM dedicated to the smoke test).
     color_source: gal.types.TextureHandle,
-    /// Buffer host-visible (`host_visible = true`) destinataire du blit.
-    /// Le caller alloue, map en CPU pour l'export PPM.
+    /// Host-visible buffer (`host_visible = true`) destination of the blit.
+    /// The caller allocates it, maps it on the CPU for the PPM export.
     capture_buffer: gal.types.BufferHandle,
-    /// Dimensions de l'image (pour le blit + le header PPM).
+    /// Image dimensions (for the blit + the PPM header).
     width: u32,
     height: u32,
 };
 
-/// Construit une Pass capture prête à être ajoutée à un Graph.
+/// Builds a capture Pass ready to be added to a Graph.
 pub fn buildPass(config: *const Config) pass_mod.Pass {
     return .{
         .name = "capture_to_buffer",
@@ -54,10 +54,10 @@ pub fn buildPass(config: *const Config) pass_mod.Pass {
 
 fn body(encoder: ?*anyopaque, ctx: ?*anyopaque) anyerror!void {
     _ = .{ encoder, ctx };
-    // Phase 0 : le blit effectif (`vkCmdCopyImageToBuffer`) est câblé par
-    // `examples/triangle/` qui ouvre + map + écrit le PPM. Le body du
-    // pass est no-op au niveau du render graph — les commandes natives
-    // sont enregistrées hors render pass via le CommandEncoder.
+    // Phase 0: the actual blit (`vkCmdCopyImageToBuffer`) is wired by
+    // `examples/triangle/` which opens + maps + writes the PPM. The pass
+    // body is a no-op at the render graph level — the native commands
+    // are recorded outside the render pass via the CommandEncoder.
 }
 
 test "capture: buildPass declares texture read + buffer write" {

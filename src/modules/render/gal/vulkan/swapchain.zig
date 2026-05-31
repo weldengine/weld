@@ -1,17 +1,17 @@
 //! Swapchain Vulkan — Phase 0 / M0.4.
 //!
-//! Absorbe le rôle de `src/spike/vk_frame.zig` (suppression brief §Suppressions).
-//! Crée la VkSwapchainKHR + les vues image associées, expose `acquireNextImage`
-//! et `present` côté GAL.
+//! Absorbs the role of `src/spike/vk_frame.zig` (removed, brief §Removals).
+//! Creates the VkSwapchainKHR + the associated image views, exposes
+//! `acquireNextImage` and `present` on the GAL side.
 //!
-//! Phase 0 : 2 images (double buffer FIFO), format BGRA8_UNORM, présent mode
-//! FIFO. Recréation à `OUT_OF_DATE_KHR` non automatique (le caller doit
-//! détecter `error.SwapchainOutOfDate` et recréer manuellement). Phase 1+ :
-//! transparent recreate côté GAL.
+//! Phase 0: 2 images (double buffer FIFO), BGRA8_UNORM format, FIFO present
+//! mode. Recreation on `OUT_OF_DATE_KHR` is not automatic (the caller must
+//! detect `error.SwapchainOutOfDate` and recreate manually). Phase 1+:
+//! transparent recreate on the GAL side.
 //!
-//! La sélection de surface est faite via le `surface` du DeviceDescriptor —
-//! Phase 0 attend que le caller (e.g., `examples/triangle/`) ait créé la
-//! surface VK_KHR_xxx_surface en amont et l'ait passée au Device.
+//! Surface selection is done via the `surface` of the DeviceDescriptor —
+//! Phase 0 expects the caller (e.g., `examples/triangle/`) to have created the
+//! VK_KHR_xxx_surface upstream and passed it to the Device.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -23,12 +23,12 @@ const texture_mod = @import("texture.zig");
 
 const log = std.log.scoped(.gal_vk_swap);
 
-/// Slot interne d'une Swapchain — bundle VkSwapchainKHR + images + views.
-/// Les images sont owned par la swapchain (pas par notre allocateur).
-/// `view_handles` est pré-alloué à `create()` : un `TextureViewHandle` GAL
-/// stable par image du swapchain. Le caller appelle
-/// `Device.getSwapchainImageView(handle, image_index)` qui lit ce slot
-/// sans alloc par frame.
+/// Internal slot of a Swapchain — bundles VkSwapchainKHR + images + views.
+/// The images are owned by the swapchain (not by our allocator).
+/// `view_handles` is pre-allocated at `create()`: one stable GAL
+/// `TextureViewHandle` per swapchain image. The caller calls
+/// `Device.getSwapchainImageView(handle, image_index)` which reads this slot
+/// without per-frame alloc.
 pub const Entry = struct {
     vk_swapchain: vk.SwapchainKHR,
     surface: vk.SurfaceKHR,
@@ -37,7 +37,7 @@ pub const Entry = struct {
     images: []vk.Image,
     image_views: []vk.ImageView,
     view_handles: []types.TextureViewHandle,
-    /// Image index courant (mis à jour par `acquireNextImage`).
+    /// Current image index (updated by `acquireNextImage`).
     current_image: u32 = 0,
 
     pub fn destroy(self: *Entry, device: *vk.Device, allocator: std.mem.Allocator) void {
@@ -52,8 +52,8 @@ pub const Entry = struct {
     }
 };
 
-/// Crée la swapchain Vulkan sur la surface du Device. Échoue avec
-/// `error.SurfaceLost` si le Device a été initialisé sans surface.
+/// Creates the Vulkan swapchain on the Device's surface. Fails with
+/// `error.SurfaceLost` if the Device was initialized without a surface.
 pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Error!types.SwapchainHandle {
     if (descriptor.width == 0 or descriptor.height == 0) return error.InvalidArgument;
     if (device.surface == .null) return error.SurfaceLost;
@@ -62,7 +62,7 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
     const formats = device.physical_device.getPhysicalDeviceSurfaceFormatsKHR(device.surface, device.allocator) catch return error.SurfaceLost;
     defer device.allocator.free(formats);
 
-    // Sélection format préférable (request match si possible).
+    // Preferable format selection (request match if possible).
     var chosen: ?vk.SurfaceFormatKHR = null;
     const want = conv.textureFormat(descriptor.format);
     for (formats) |f| {
@@ -72,7 +72,7 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
         }
     }
     if (chosen == null) {
-        // Fallback : premier BGRA8 disponible.
+        // Fallback: first available BGRA8.
         for (formats) |f| {
             if (f.format == .b8g8r8a8_unorm) {
                 chosen = f;
@@ -103,7 +103,7 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
 
     var image_usage: vk.ImageUsageFlags = .empty;
     image_usage.color_attachment = true;
-    image_usage.transfer_src = true; // pour capture PPM (brief §Notes décision 6)
+    image_usage.transfer_src = true; // for PPM capture (brief §Notes decision 6)
 
     const ci: vk.SwapchainCreateInfoKHR = .{
         .flags = .empty,
@@ -194,12 +194,12 @@ pub fn getImageView(
     return entry.view_handles[image_index];
 }
 
-/// Libère la swapchain + ses vues + le tableau d'images. No-op si invalide.
-/// Retire d'abord les `view_handles` du registry `texture_views` du device
-/// avant que la swapchain ne libère les `vk.ImageView` sous-jacents — sans
-/// ça, les entrées deviendraient zombies (handles pointant vers des views
-/// freed). À `device.deinit` cet effet est neutre puisque le registry est
-/// drainé avant les swapchains ; le code reste correct dans les deux flots.
+/// Frees the swapchain + its views + the image array. No-op if invalid.
+/// First removes the `view_handles` from the device's `texture_views`
+/// registry before the swapchain frees the underlying `vk.ImageView` — without
+/// that, the entries would become zombies (handles pointing to freed views).
+/// At `device.deinit` this effect is neutral since the registry is drained
+/// before the swapchains; the code stays correct in both flows.
 pub fn destroy(device: *Device, handle: types.SwapchainHandle) void {
     if (handle.inner == 0) return;
     if (device.swapchains.fetchRemove(handle.inner)) |kv| {
@@ -209,9 +209,9 @@ pub fn destroy(device: *Device, handle: types.SwapchainHandle) void {
     }
 }
 
-/// Acquiert le prochain image index de la swapchain. `signal_semaphore`
-/// est signalé quand l'image est disponible côté GPU. Retourne
-/// `error.SwapchainOutOfDate` si le caller doit recréer la swapchain.
+/// Acquires the swapchain's next image index. `signal_semaphore` is
+/// signaled when the image is available on the GPU side. Returns
+/// `error.SwapchainOutOfDate` if the caller must recreate the swapchain.
 pub fn acquireNextImage(
     device: *Device,
     handle: types.SwapchainHandle,
@@ -240,8 +240,8 @@ pub fn acquireNextImage(
     }
 }
 
-/// Présente l'image `image_index`. Attend les semaphores `wait_semaphores`
-/// avant la présentation effective.
+/// Presents image `image_index`. Waits on the `wait_semaphores` semaphores
+/// before the actual presentation.
 pub fn present(
     device: *Device,
     handle: types.SwapchainHandle,
