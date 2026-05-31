@@ -80,6 +80,36 @@ Rationale for the split: render (E2) is the largest and riskiest paquet (GPU-adj
 - The M0.5 housekeeping items (separate milestone).
 - Tagging.
 
+## Acted deviations
+
+- **E2 GO (Guy) — scope widened: comments + test-name strings.** The chore now
+  also covers French `test "..."` descriptive strings, not just comments. E3
+  translates French test names to English and updates every comment that
+  references them (both sides kept consistent). Precautions when renaming a
+  test: (a) grep the repo for `--test-filter` / CI / hardcoded references to the
+  old name and update them too; (b) touch only the `test` descriptive string,
+  never a function/decl identifier. The E6 acceptance grep is extended to cover
+  French `test "..."` strings, not only comments.
+- **Production string literals (logs / panics / labels): survey only, not yet in
+  scope.** During E2/E3, French strings in production code (e.g. `log.err("…")`,
+  `@panic("…")`, formatted error returns) are *listed, not modified*, and
+  presented at a STOP point for a separate decision (some may be matched by
+  tests).
+
+## Execution notes
+
+- **Canonical English titles for closed-brief sections** (E1 code references
+  already use these verbatim; E4 must title the corresponding brief sections
+  identically so the code cross-references stay valid):
+  - M0.3 — "std.once verification for Zig 0.16"
+  - M0.2.1 — "E3 residual hypotheses"
+  - S6 — "Inherited debts"
+  - M0.2 / E1 — "Deliverable"
+  - M0.3 — "minimal Tier 0 input system" (the input excerpts). NOTE: E1 left the
+    `linux_evdev.zig` / `win32_xinput.zig` references reading
+    "§ Input system Tier 0 minimal"; E4 aligns both those code references and the
+    M0.3 brief section title to "minimal Tier 0 input system".
+
 ## Closing notes
 
 *(filled at CLOSED, before opening the PR)*
