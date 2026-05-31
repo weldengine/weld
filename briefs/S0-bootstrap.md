@@ -301,7 +301,7 @@ None. Benchmark infrastructure is deferred to S1+.
 *To be filled at the Status → CLOSED transition, just before opening the PR.*
 
 - **What worked**:
-  - The full Étape 0 → Étape 4 protocol ran cleanly: brief committed verbatim as the first commit, specs read, status transitioned through PLANNED → ACTIVE → CLOSED, granular Conventional Commits with appropriate scopes (`docs(brief)`, `chore(repo)`, `chore(vscode)`, `feat(build)`, `chore(hooks)`, `ci`, `docs(claude-md)`, `fix(ci)`, `docs(readme)`).
+  - The full Step 0 → Step 4 protocol ran cleanly: brief committed verbatim as the first commit, specs read, status transitioned through PLANNED → ACTIVE → CLOSED, granular Conventional Commits with appropriate scopes (`docs(brief)`, `chore(repo)`, `chore(vscode)`, `feat(build)`, `chore(hooks)`, `ci`, `docs(claude-md)`, `fix(ci)`, `docs(readme)`).
   - `zig fmt`, `zig build` (Debug + ReleaseSafe), `zig build test` (Debug + ReleaseSafe), `zig build run` all green locally on Zig 0.16.0 (darwin-arm64).
   - Lefthook flow validated end-to-end: `./scripts/install-hooks.sh` populates the three hooks, `commit-msg` rejects "Add stuff" with an explicit error citing the rule, accepts conformant titles. Hooks fired on every commit + push of this milestone.
   - `scripts/check-commit-msg.sh` is POSIX-strict (validated under `/bin/sh` and `/bin/dash`).

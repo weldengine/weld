@@ -2,15 +2,15 @@
 
 > **Status:** CLOSED — step (j) hardware validation green on all three target machines. PR ready to open.
 > **Phase:** −1
-> **Branche:** `phase-pre-0/platform/window-vulkan-triangle`
-> **Tag prévu:** `v0.0.3-S2-window-vulkan-triangle`
-> **Dépendances:** `v0.0.2-S1-mini-ecs`
-> **Date d'ouverture:** 2026-05-10
-> **Date de fermeture:** 2026-05-11 — tag posted by Guy after squash-merge of the PR.
+> **Branch:** `phase-pre-0/platform/window-vulkan-triangle`
+> **Planned tag:** `v0.0.3-S2-window-vulkan-triangle`
+> **Dependencies:** `v0.0.2-S1-mini-ecs`
+> **Opening date:** 2026-05-10
+> **Closing date:** 2026-05-11 — tag posted by Guy after squash-merge of the PR.
 
 ---
 
-# SECTION FIGÉE
+# FROZEN SECTION
 
 *Produced by Claude.ai. Not modifiable by Claude Code outside a Claude.ai round-trip (cf. § Acted deviations).*
 
@@ -62,7 +62,7 @@ Third spike of Phase −1. Validates the hypothesis that a Win32 window, a Wayla
 - Custom logging framework. `std.log` with scope `s2` is used.
 - Benchmark file under `bench/`. Frame time measurement is in-binary and reported in the validation file, not as a sweep.
 
-## Documents de spec à lire en premier
+## Spec documents to read first
 
 1. `engine-spec.md` — §22.3 Phase −1 / S2 (full canonical definition including post-conversation refinements), §1 (overview), §3.5 (in-tree vs separable libs criterion), §1.6 (8 keepers list — none added in S2).
 2. `engine-c-bindings.md` — §1.1 to §1.4 (rationale registry-driven and S2 carve-out), §4.2 (idiomatic mapping rules — these are the conformance target for the S2 generators), §10.1 (S2→S3 sequencing).
@@ -73,72 +73,72 @@ Third spike of Phase −1. Validates the hypothesis that a Win32 window, a Wayla
 7. `engine-development-workflow.md` — §3 (brief format), §4.3 (Conventional Commits scopes), §4.5 (lefthook), §4.6 (squash-and-merge), §5 (review cycle).
 8. `engine-directory-structure.md` — confirm paths for `bindings/upstream/`, `tools/`, `assets/`, `src/core/platform/`.
 
-## Fichiers à créer ou modifier
+## Files to create or modify
 
 ### Tooling (binding generators)
 
-- `tools/vk_gen/main.zig` — création — entry point of the Vulkan binding generator. Reads `bindings/upstream/vulkan/vk.xml`, emits `src/core/platform/vk.zig`. Whitelist of versions/extensions enabled in S2: Vulkan 1.3 core, `VK_KHR_surface`, `VK_KHR_swapchain`, `VK_KHR_wayland_surface` on Linux, `VK_KHR_win32_surface` on Windows, `VK_EXT_debug_utils` (Debug build only). The whitelist is data, declared inside the generator, not magic.
-- `tools/vk_gen/parser.zig` — création — XML parser specialized for `vk.xml`. Custom, ad-hoc, throwaway. No external XML dependency.
-- `tools/vk_gen/emit.zig` — création — emits idiomatic Zig from the parsed structures, conforming to `engine-c-bindings.md` §4.2.
-- `tools/wayland_gen/main.zig` — création — entry point of the Wayland binding generator. Reads `bindings/upstream/wayland/protocols/*.xml`, emits `src/core/platform/window/wayland_protocols/{core,xdg_shell,xdg_decoration}.zig`.
-- `tools/wayland_gen/parser.zig` — création — XML parser for Wayland protocol files. Format is simpler than `vk.xml`; the parser does not need to reuse code from `tools/vk_gen/`.
-- `tools/wayland_gen/emit.zig` — création — emits idiomatic Zig protocol bindings. Each interface produces methods for requests and a listener struct for events.
+- `tools/vk_gen/main.zig` — create — entry point of the Vulkan binding generator. Reads `bindings/upstream/vulkan/vk.xml`, emits `src/core/platform/vk.zig`. Whitelist of versions/extensions enabled in S2: Vulkan 1.3 core, `VK_KHR_surface`, `VK_KHR_swapchain`, `VK_KHR_wayland_surface` on Linux, `VK_KHR_win32_surface` on Windows, `VK_EXT_debug_utils` (Debug build only). The whitelist is data, declared inside the generator, not magic.
+- `tools/vk_gen/parser.zig` — create — XML parser specialized for `vk.xml`. Custom, ad-hoc, throwaway. No external XML dependency.
+- `tools/vk_gen/emit.zig` — create — emits idiomatic Zig from the parsed structures, conforming to `engine-c-bindings.md` §4.2.
+- `tools/wayland_gen/main.zig` — create — entry point of the Wayland binding generator. Reads `bindings/upstream/wayland/protocols/*.xml`, emits `src/core/platform/window/wayland_protocols/{core,xdg_shell,xdg_decoration}.zig`.
+- `tools/wayland_gen/parser.zig` — create — XML parser for Wayland protocol files. Format is simpler than `vk.xml`; the parser does not need to reuse code from `tools/vk_gen/`.
+- `tools/wayland_gen/emit.zig` — create — emits idiomatic Zig protocol bindings. Each interface produces methods for requests and a listener struct for events.
 
 ### Vendored upstream sources
 
-- `bindings/upstream/vulkan/vk.xml` — création — Khronos Vulkan registry, current Vulkan release. Apache-2.0.
-- `bindings/upstream/vulkan/LICENSE` — création — Apache-2.0 notice.
-- `bindings/upstream/wayland/wayland.xml` — création — Wayland core protocol from `freedesktop.org/wayland/wayland`.
-- `bindings/upstream/wayland/protocols/xdg-shell.xml` — création — from `freedesktop.org/wayland-protocols`.
-- `bindings/upstream/wayland/protocols/xdg-decoration-unstable-v1.xml` — création — same source.
-- `bindings/upstream/wayland/LICENSE` — création — MIT notice (Wayland and the listed protocol files).
+- `bindings/upstream/vulkan/vk.xml` — create — Khronos Vulkan registry, current Vulkan release. Apache-2.0.
+- `bindings/upstream/vulkan/LICENSE` — create — Apache-2.0 notice.
+- `bindings/upstream/wayland/wayland.xml` — create — Wayland core protocol from `freedesktop.org/wayland/wayland`.
+- `bindings/upstream/wayland/protocols/xdg-shell.xml` — create — from `freedesktop.org/wayland-protocols`.
+- `bindings/upstream/wayland/protocols/xdg-decoration-unstable-v1.xml` — create — same source.
+- `bindings/upstream/wayland/LICENSE` — create — MIT notice (Wayland and the listed protocol files).
 
 ### Generated bindings (committed)
 
-- `src/core/platform/vk.zig` — création — emitted by `tools/vk_gen/`. Header comment marks the file as `// AUTO-GENERATED — do not edit. Regenerate via 'zig build bindgen-vk'.`
-- `src/core/platform/window/wayland_protocols/core.zig` — création — emitted by `tools/wayland_gen/`. Same header.
-- `src/core/platform/window/wayland_protocols/xdg_shell.zig` — création — same.
-- `src/core/platform/window/wayland_protocols/xdg_decoration.zig` — création — same.
+- `src/core/platform/vk.zig` — create — emitted by `tools/vk_gen/`. Header comment marks the file as `// AUTO-GENERATED — do not edit. Regenerate via 'zig build bindgen-vk'.`
+- `src/core/platform/window/wayland_protocols/core.zig` — create — emitted by `tools/wayland_gen/`. Same header.
+- `src/core/platform/window/wayland_protocols/xdg_shell.zig` — create — same.
+- `src/core/platform/window/wayland_protocols/xdg_decoration.zig` — create — same.
 
 ### Platform layer (Tier 0, stable from S2)
 
-- `src/core/platform/window.zig` — création — public `Window` interface and event types. Comptime dispatch to the appropriate backend. The exposed surface is exactly: `create`, `destroy`, `close`, `resize` event, `dpi_changed` event. Nothing else.
-- `src/core/platform/window/win32.zig` — création — Win32 backend. Hand-written `extern fn` declarations for the Win32 functions needed by the public interface. Static linkage via Zig import libs.
-- `src/core/platform/window/wayland.zig` — création — Wayland backend. Loads `libwayland-client.so.0` via `dlopen`. Uses the generated `wayland_protocols` modules. Event callbacks declared `callconv(.c)`. If the `callconv(.c)` hypothesis fails, see § Notes for the documented fallback.
+- `src/core/platform/window.zig` — create — public `Window` interface and event types. Comptime dispatch to the appropriate backend. The exposed surface is exactly: `create`, `destroy`, `close`, `resize` event, `dpi_changed` event. Nothing else.
+- `src/core/platform/window/win32.zig` — create — Win32 backend. Hand-written `extern fn` declarations for the Win32 functions needed by the public interface. Static linkage via Zig import libs.
+- `src/core/platform/window/wayland.zig` — create — Wayland backend. Loads `libwayland-client.so.0` via `dlopen`. Uses the generated `wayland_protocols` modules. Event callbacks declared `callconv(.c)`. If the `callconv(.c)` hypothesis fails, see § Notes for the documented fallback.
 
 ### Spike binary (Tier ⊘, throwaway, refactored in Phase 0.4)
 
-- `src/main.zig` — création — entry point. Parses CLI flags (`--smoke-test`, `--measure-frame-time=N`, `--gpu-prefer=...`, `--verbose`). Drives the render loop. Owns the Vulkan instance/device/swapchain.
-- `src/spike/vk_setup.zig` — création — creates VkInstance, picks the physical device per the `--gpu-prefer` policy, creates VkDevice, creates the surface using the platform-specific extension, creates the swapchain, allocates the vertex buffer + staging upload, builds the render pass, pipeline, framebuffers, command buffers, semaphores and fences.
-- `src/spike/vk_frame.zig` — création — per-frame logic: acquire image, record commands, submit, present, handle out-of-date or suboptimal swapchain by recreating it.
-- `src/spike/scoring.zig` — création — pure function `scoreDevice` that scores a `VkPhysicalDevice` by type (discrete > integrated > other > CPU). Tested in isolation.
-- `src/spike/cli.zig` — création — pure CLI parser. Tested in isolation.
+- `src/main.zig` — create — entry point. Parses CLI flags (`--smoke-test`, `--measure-frame-time=N`, `--gpu-prefer=...`, `--verbose`). Drives the render loop. Owns the Vulkan instance/device/swapchain.
+- `src/spike/vk_setup.zig` — create — creates VkInstance, picks the physical device per the `--gpu-prefer` policy, creates VkDevice, creates the surface using the platform-specific extension, creates the swapchain, allocates the vertex buffer + staging upload, builds the render pass, pipeline, framebuffers, command buffers, semaphores and fences.
+- `src/spike/vk_frame.zig` — create — per-frame logic: acquire image, record commands, submit, present, handle out-of-date or suboptimal swapchain by recreating it.
+- `src/spike/scoring.zig` — create — pure function `scoreDevice` that scores a `VkPhysicalDevice` by type (discrete > integrated > other > CPU). Tested in isolation.
+- `src/spike/cli.zig` — create — pure CLI parser. Tested in isolation.
 
 ### Build and assets
 
-- `build.zig` — édition — adds the spike binary target, the `bindgen-vk` and `bindgen-wayland` build steps, the test runner additions, and OS-specific link options (system libs `user32`/`gdi32`/`kernel32` on Windows; nothing system-linked on Linux since Wayland and Vulkan are dlopen-ed). Conditionally compiles the Wayland C fallback file when an opt-in build flag is set (see § Notes).
-- `build.zig.zon` — édition — no new dependencies; this milestone introduces zero Zig packages and zero C bindings.
-- `assets/shaders/triangle.vert.glsl` — création — vertex shader, GLSL 4.50, emits `gl_Position` and `vColor`.
-- `assets/shaders/triangle.frag.glsl` — création — fragment shader, outputs the interpolated `vColor`.
-- `assets/shaders/triangle.vert.spv` — création — pre-compiled SPIR-V committed.
-- `assets/shaders/triangle.frag.spv` — création — same.
-- `scripts/compile-shaders.sh` — création — POSIX shell script invoking `glslc`. Not invoked by `zig build`.
+- `build.zig` — edit — adds the spike binary target, the `bindgen-vk` and `bindgen-wayland` build steps, the test runner additions, and OS-specific link options (system libs `user32`/`gdi32`/`kernel32` on Windows; nothing system-linked on Linux since Wayland and Vulkan are dlopen-ed). Conditionally compiles the Wayland C fallback file when an opt-in build flag is set (see § Notes).
+- `build.zig.zon` — edit — no new dependencies; this milestone introduces zero Zig packages and zero C bindings.
+- `assets/shaders/triangle.vert.glsl` — create — vertex shader, GLSL 4.50, emits `gl_Position` and `vColor`.
+- `assets/shaders/triangle.frag.glsl` — create — fragment shader, outputs the interpolated `vColor`.
+- `assets/shaders/triangle.vert.spv` — create — pre-compiled SPIR-V committed.
+- `assets/shaders/triangle.frag.spv` — create — same.
+- `scripts/compile-shaders.sh` — create — POSIX shell script invoking `glslc`. Not invoked by `zig build`.
 
 ### CI
 
-- `.github/workflows/ci.yml` — édition — no matrix change. Possibly an extra cache key for the vendored `bindings/upstream/` sources.
+- `.github/workflows/ci.yml` — edit — no matrix change. Possibly an extra cache key for the vendored `bindings/upstream/` sources.
 
 ### Documentation
 
-- `briefs/S2-window-vulkan-triangle.md` — création — verbatim copy of this brief, committed as the first commit of the branch.
-- `validation/s2-go-nogo.md` — création — manual validation report (filled in late in the milestone, by Guy, after running on the three target hardware configurations).
-- `validation/s2-windows-rtx4080.ppm` — création — smoke-test capture, Windows + RTX 4080 Super.
-- `validation/s2-windows-rtx4080.png` — création — PNG conversion for GitHub preview.
-- `validation/s2-fedora-uhd630.ppm` + `.png` — création — Fedora + Intel UHD 630 (Mesa ANV).
-- `validation/s2-fedora-gtx1660ti.ppm` + `.png` — création — Fedora + GTX 1660 Ti (NVIDIA proprietary).
-- `CLAUDE.md` — édition — update at end of milestone per `engine-development-workflow.md` §3.4: tag table, current state, hypotheses table (S2 marked validated), open decisions if any.
+- `briefs/S2-window-vulkan-triangle.md` — create — verbatim copy of this brief, committed as the first commit of the branch.
+- `validation/s2-go-nogo.md` — create — manual validation report (filled in late in the milestone, by Guy, after running on the three target hardware configurations).
+- `validation/s2-windows-rtx4080.ppm` — create — smoke-test capture, Windows + RTX 4080 Super.
+- `validation/s2-windows-rtx4080.png` — create — PNG conversion for GitHub preview.
+- `validation/s2-fedora-uhd630.ppm` + `.png` — create — Fedora + Intel UHD 630 (Mesa ANV).
+- `validation/s2-fedora-gtx1660ti.ppm` + `.png` — create — Fedora + GTX 1660 Ti (NVIDIA proprietary).
+- `CLAUDE.md` — edit — update at end of milestone per `engine-development-workflow.md` §3.4: tag table, current state, hypotheses table (S2 marked validated), open decisions if any.
 
-## Critères d'acceptation
+## Acceptance criteria
 
 ### Tests
 
@@ -185,11 +185,11 @@ None. S2 has no formal benchmark file. Frame time is measured in-binary by `--me
 
 ## Conventions
 
-- **Branche**: `phase-pre-0/platform/window-vulkan-triangle`
-- **Tag final**: `v0.0.3-S2-window-vulkan-triangle`
-- **Titre de PR**: `Phase -1 / Platform / Native Window + Vulkan Triangle`
-- **Convention de commits**: Conventional Commits (cf. `engine-development-workflow.md` §4.3). Suggested scopes: `bindgen`, `platform`, `spike`, `build`, `ci`, `docs`.
-- **Stratégie de merge**: squash-and-merge (cf. `engine-development-workflow.md` §4.6).
+- **Branch**: `phase-pre-0/platform/window-vulkan-triangle`
+- **Final tag**: `v0.0.3-S2-window-vulkan-triangle`
+- **PR title**: `Phase -1 / Platform / Native Window + Vulkan Triangle`
+- **Commit convention**: Conventional Commits (cf. `engine-development-workflow.md` §4.3). Suggested scopes: `bindgen`, `platform`, `spike`, `build`, `ci`, `docs`.
+- **Merge strategy**: squash-and-merge (cf. `engine-development-workflow.md` §4.6).
 
 ## Notes
 
@@ -251,7 +251,7 @@ Read `engine-spec.md` §22.3 / S2 in full first — the post-conversation precis
 - [x] `engine-development-workflow.md` (§3, §4.3, §4.5, §4.6, §5) — read 2026-05-10 01:29
 - [x] `engine-directory-structure.md` — read 2026-05-10 01:29
 
-## Journal d'exécution
+## Execution log
 
 *One entry per logical work sequence (typically: a goal reached, a green test, a blocker). Chronological order. Short — 1 to 3 lines per entry.*
 
@@ -283,7 +283,7 @@ Read `engine-spec.md` §22.3 / S2 in full first — the post-conversation precis
     1. `Event.dpi_changed` doc-comment reworded — the previous "integer scale factor (1.0, 1.25, 1.5, …)" was misleading (those are not integers). Now: "Scale factor changed (1.0 = 100%, 1.5 = 150%, 2.0 = 200%). Derived from per-monitor DPI on Win32; Wayland S2 only delivers integer values."
     2. `wndProc` cast bug: `@intCast(usize, lparam)` would panic on a negative `isize` even though Win64 user-mode addresses are always positive in practice. Replaced with `@as(usize, @bitCast(lparam))` which preserves the bit pattern unconditionally and drops the redundant `@ptrCast`/`@alignCast` chain.
     3. **Acknowledged debt — Win32 thread safety.** `class_atom`, `class_open_count`, and `dpi_awareness_set` are plain globals (no atomics, no mutex). Acceptable for S2 because the spike is single-threaded (main thread only); flagged for Phase 1 review when the ECS job system goes wide and multiple windows from worker threads becomes possible. Likely fix: wrap the registration counter behind `std.Thread.Mutex` (or use `std.atomic.Value(u32)` for the counter and a once-init for the class atom).
-- 2026-05-10 07:00 — Step (e): Wayland backend in `src/core/platform/window/wayland.zig`. Implements the canonical xdg-shell boot sequence per the brief's § Notes: `connect → getRegistry → addListener → roundtrip (collect globals: wl_compositor, xdg_wm_base, optional zxdg_decoration_manager_v1) → createSurface → getXdgSurface → getToplevel → setTitle → optional decoration setMode(server_side) → commit → roundtrip until first xdg_surface.configure ack'd`. All event callbacks are pure Zig functions with `callconv(.c)` per the brief — the design hypothesis holds at compile time (signatures match the wayland_gen-emitted `*_listener` extern struct fields exactly); runtime validation lives in the smoke-test on the two Fedora target machines, deferred to step (f). Listener structs live inside the heap-allocated `State` so their addresses outlive the `Backend` value moves Wayland holds raw pointers to. Non-blocking event pump uses the canonical `wl_display_prepare_read` + `wl_display_read_events` + `wl_display_dispatch_pending` sequence with a `std.posix.poll` 0-timeout probe — required for the brief's «resize × 100 without crash» criterion since `wl_display_dispatch` would otherwise block. Cleanup in `destroy` walks the proxy chain in reverse construction order (decoration → toplevel → xdg_surface → wl_surface → decoration_manager → xdg_wm_base → compositor → registry → display); `wl_compositor` v4 has no destructor request so we use `wl_proxy_destroy` directly. `tools/wayland_gen/emit.zig` was extended in passing to add `wl_display_dispatch_pending` / `prepare_read` / `read_events` / `cancel_read` to `LibWaylandDispatch` (the brief's review of (c) listed a baseline; these are required for the non-blocking pattern), and `loadLibWayland` is now idempotent (early-return if `lib_handle != null`). Test `tests/window/wayland_open_close_test.zig` mirrors the Win32 50× gate with a graceful skip when no compositor is reachable (CI's headless Ubuntu has none — the actual hardware validation runs from a developer Wayland session). Verified: `zig build` + `zig build test` green natively on macOS (stub backend); `zig build -Dtarget=x86_64-linux-gnu` produces a valid x86-64 ELF binary; `zig build -Dtarget=x86_64-linux-gnu test` builds the test executables. Runtime smoke-test on real hardware lands with step (f).
+- 2026-05-10 07:00 — Step (e): Wayland backend in `src/core/platform/window/wayland.zig`. Implements the canonical xdg-shell boot sequence per the brief's § Notes: `connect → getRegistry → addListener → roundtrip (collect globals: wl_compositor, xdg_wm_base, optional zxdg_decoration_manager_v1) → createSurface → getXdgSurface → getToplevel → setTitle → optional decoration setMode(server_side) → commit → roundtrip until first xdg_surface.configure ack'd`. All event callbacks are pure Zig functions with `callconv(.c)` per the brief — the design hypothesis holds at compile time (signatures match the wayland_gen-emitted `*_listener` extern struct fields exactly); runtime validation lives in the smoke-test on the two Fedora target machines, deferred to step (f). Listener structs live inside the heap-allocated `State` so their addresses outlive the `Backend` value moves Wayland holds raw pointers to. Non-blocking event pump uses the canonical `wl_display_prepare_read` + `wl_display_read_events` + `wl_display_dispatch_pending` sequence with a `std.posix.poll` 0-timeout probe — required for the brief's "resize × 100 without crash" criterion since `wl_display_dispatch` would otherwise block. Cleanup in `destroy` walks the proxy chain in reverse construction order (decoration → toplevel → xdg_surface → wl_surface → decoration_manager → xdg_wm_base → compositor → registry → display); `wl_compositor` v4 has no destructor request so we use `wl_proxy_destroy` directly. `tools/wayland_gen/emit.zig` was extended in passing to add `wl_display_dispatch_pending` / `prepare_read` / `read_events` / `cancel_read` to `LibWaylandDispatch` (the brief's review of (c) listed a baseline; these are required for the non-blocking pattern), and `loadLibWayland` is now idempotent (early-return if `lib_handle != null`). Test `tests/window/wayland_open_close_test.zig` mirrors the Win32 50× gate with a graceful skip when no compositor is reachable (CI's headless Ubuntu has none — the actual hardware validation runs from a developer Wayland session). Verified: `zig build` + `zig build test` green natively on macOS (stub backend); `zig build -Dtarget=x86_64-linux-gnu` produces a valid x86-64 ELF binary; `zig build -Dtarget=x86_64-linux-gnu test` builds the test executables. Runtime smoke-test on real hardware lands with step (f).
 - 2026-05-10 07:30 — Round 2 review fixes on (e), all in `src/core/platform/window/wayland.zig` (no edits to generated `core.zig`):
     1. **PFNs verified generator-emitted, not hand-edited.** `wl_display_dispatch_pending` / `prepare_read` / `read_events` / `cancel_read` come from `tools/wayland_gen/emit.zig`; rerunning `zig build bindgen-wayland` produces a zero-diff against the committed `core.zig`. The `// AUTO-GENERATED` header is intact.
     2. **`wl_surface.set_buffer_scale` wired.** Without this the compositor upscales our buffer on a HiDPI monitor (blurry output). At boot, after `addListener`, the surface is pinned to scale 1.0 explicitly; `onSurfacePreferredScale` then calls `proxy.setBufferScale(factor)` + `proxy.commit()` whenever the compositor advertises a different scale, in addition to enqueueing `dpi_changed`.
@@ -326,33 +326,33 @@ Read `engine-spec.md` §22.3 / S2 in full first — the post-conversation precis
     * `tests/bindings/wayland_abi_test.zig` — 13 tests pinning the `wayland_gen` output for the four interfaces the spike wires (`wl_surface`, `xdg_surface`, `xdg_toplevel`, `zxdg_toplevel_decoration_v1`): request opcodes match XML order, listener struct field order matches event XML order, `WlInterface.method_count` / `event_count` consistent with the request / event constant counts, every listener slot uses `callconv(.c)` and starts with `(data: ?*anyopaque, proxy, …)` arguments. Synthetic — no dlopen.
     * `tests/bindings/vk_abi_test.zig` — 8 tests pinning the `vk_gen` output for the 8 brief-listed Vulkan structs (`VkApplicationInfo`, `VkInstanceCreateInfo`, `VkDeviceCreateInfo`, `VkSwapchainCreateInfoKHR`, `VkSubmitInfo`, `VkPresentInfoKHR`, `VkPhysicalDeviceProperties`, `VkPhysicalDeviceFeatures`). The brief asks for "a translate-c reference compiled at test time"; CLAUDE.md forbids `@cImport` outside generated `*_binding.zig` files (test code included). Compromise: a hand-rolled `Ref` namespace declares `extern struct`s that match the Vulkan 1.3 C ABI exactly (taken from Khronos `vulkan_core.h` for SDK 1.4.341.0 — same upstream as the vendored vk.xml). Pointer fields collapse to `?*const anyopaque` (8 bytes on 64-bit), enums to `i32` (C `enum` = `int`), bitmasks to `u32` (`VkFlags = uint32_t`). The `assertLayout(Generated, Reference)` helper iterates the reference's fields and checks `@offsetOf` by name in the generated struct — field renames in the generator surface as compile-time errors. The reference locks in two known generator quirks for `PhysicalDeviceFeatures`: `texture_compression_astc__ldr` (double underscore from `ASTC_LDR`) and `sparse_residency_image2_d` / `sparse_residency_image3_d` (digit / 'D' word boundary). For `PhysicalDeviceProperties` the nested `VkPhysicalDeviceLimits` (504 bytes) and `VkPhysicalDeviceSparseProperties` (20 bytes) are locked in via fixed-size `[N]u8` arrays — any drift in their size would shift the top-level offsets and trip `@offsetOf`. Two facade modules (`src/spike/tests_facade.zig`, `src/core/platform/window/wayland_protocols/tests_facade.zig`) bridge the out-of-tree tests to the module trees they need — Zig 0.16 forbids a single file from belonging to two modules, so each subdir is exposed as a thin re-exporting umbrella rather than as one module per file. `build.zig` adds the two facades plus a `TestSpec` struct so each test file declares whether it needs `spike` and/or `wl_protocols`. Verified: `zig build test` green natively on macOS host (34 tests pass, 2 skipped — the platform-gated Win32 / Wayland open/close gates); `zig build -Dtarget=x86_64-linux-gnu` and `zig build -Dtarget=x86_64-windows-gnu` both compile cleanly. The two ABI tests will run on the Ubuntu / Windows CI legs and the three target-machine validation runs.
 
-- 2026-05-11 17:00 — Post-validation follow-up applied: `--measure-frame-time=N` now skips the first 10 frames before sampling, mirroring the brief's "no frame above 33 ms **after the first 10 frames (post-warmup)**" criterion literally. The sampling code in `main.zig` gates the buffer write on `frames_presented >= measure_warmup_frames` (defaulted to 10); the stdout banner now reads `over <N> post-warmup frames (skipped first 10)` for clarity. Rationale: surfaced by Row 1 (Win11 60 Hz) and Row 2 (Mesa ANV) which both had a `max` slightly above 33 ms — Row 2's 39.99 ms was very likely a one-shot Mesa ANV PSO compile on the first real frame, and Row 1's 33.59 ms was the first single-cycle vsync miss soon after startup. Stripping the warmup samples brings the measurement in line with the criterion semantics; future re-runs on the three target machines will show cleaner `max` numbers (Rows 2/3 keep the same median/p95 since those are bulk-statistics-stable; Row 1's `p95 > 17.0` is structural to 60 Hz FIFO and unaffected). Documented but the current `validation/s2-go-nogo.md` numbers (which were measured *without* the skip) are kept as-is — they remain valid representations of the run, with the documented seuil/scope deviations already covering the cases the warmup skip would have improved. No re-validation required for S2 merge.
+- 2026-05-11 17:00 — Post-validation follow-up applied: `--measure-frame-time=N` now skips the first 10 frames before sampling, mirroring the brief's "no frame above 33 ms **after the first 10 frames (post-warmup)**" criterion literally. The sampling code in `main.zig` gates the buffer write on `frames_presented >= measure_warmup_frames` (defaulted to 10); the stdout banner now reads `over <N> post-warmup frames (skipped first 10)` for clarity. Rationale: surfaced by Row 1 (Win11 60 Hz) and Row 2 (Mesa ANV) which both had a `max` slightly above 33 ms — Row 2's 39.99 ms was very likely a one-shot Mesa ANV PSO compile on the first real frame, and Row 1's 33.59 ms was the first single-cycle vsync miss soon after startup. Stripping the warmup samples brings the measurement in line with the criterion semantics; future re-runs on the three target machines will show cleaner `max` numbers (Rows 2/3 keep the same median/p95 since those are bulk-statistics-stable; Row 1's `p95 > 17.0` is structural to 60 Hz FIFO and unaffected). Documented but the current `validation/s2-go-nogo.md` numbers (which were measured *without* the skip) are kept as-is — they remain valid representations of the run, with the documented threshold/scope deviations already covering the cases the warmup skip would have improved. No re-validation required for S2 merge.
 
-- 2026-05-11 16:00 — Step (j) complete. All three target machines green; `validation/s2-go-nogo.md` filled. Two real bugs uncovered and fixed by the hardware validation that the CI matrix would never have caught: (a) `loadInstance` strict on NULL for platform/extension-conditional symbols (commit `8a377f6`); (b) `recreateSwapchain` not threading the old swapchain handle into `VkSwapchainCreateInfoKHR.oldSwapchain` (commit `7c2fe91`). Also one build-system gap surfaced and fixed: `bindgen-vk` / `bindgen-wayland` did not pipe through `zig fmt` (commit `8282d0f`), so the brief's "empty diff" criterion only held when the local pre-commit hook ran fmt — invisible on Mac dev, visible on every other invocation. Two documented deviations on the perf seuils side: GNOME Wayland's missing decorations make "resize × 100 à la souris" non-testable on Rows 2/3 (validated on Row 1 + DWM instead); the 17.0 ms p95 and 33 ms max seuils have zero headroom against the 60 Hz vsync floor (Row 1's 60 Hz display brushes against them — Rows 2/3 at 144 Hz pass with massive margin). PR-ready.
+- 2026-05-11 16:00 — Step (j) complete. All three target machines green; `validation/s2-go-nogo.md` filled. Two real bugs uncovered and fixed by the hardware validation that the CI matrix would never have caught: (a) `loadInstance` strict on NULL for platform/extension-conditional symbols (commit `8a377f6`); (b) `recreateSwapchain` not threading the old swapchain handle into `VkSwapchainCreateInfoKHR.oldSwapchain` (commit `7c2fe91`). Also one build-system gap surfaced and fixed: `bindgen-vk` / `bindgen-wayland` did not pipe through `zig fmt` (commit `8282d0f`), so the brief's "empty diff" criterion only held when the local pre-commit hook ran fmt — invisible on Mac dev, visible on every other invocation. Two documented deviations on the perf thresholds side: GNOME Wayland's missing decorations make "resize × 100 with the mouse" non-testable on Rows 2/3 (validated on Row 1 + DWM instead); the 17.0 ms p95 and 33 ms max thresholds have zero headroom against the 60 Hz vsync floor (Row 1's 60 Hz display brushes against them — Rows 2/3 at 144 Hz pass with massive margin). PR-ready.
 
 - 2026-05-11 14:00 — Step (j) shake-down on Fedora 44 caught a real bug in the generator-emitted Vulkan loader. `loadInstance` (and `loadDevice` by symmetry) iterated `InstanceDispatch` fields and threw `error.SymbolNotFound` on the first NULL returned by `vkGetInstanceProcAddr`. The dispatch table mixes universal entry points with **platform- and extension-conditional** ones: `vkCreateWin32SurfaceKHR` is always NULL on Linux, `vkCreateWaylandSurfaceKHR` is always NULL on Windows, and the `VK_EXT_debug_utils` entries (`vkCreate/Destroy/SubmitDebugUtilsMessengerEXT`) are NULL whenever the extension is not enabled in `InstanceCreateInfo` — which is the case in ReleaseSafe by design per the brief. On the Fedora 44 + NVIDIA proprietary box running `zig build run -Doptimize=ReleaseSafe -- --smoke-test`, the first NULL killed init before a single frame rendered. Fix: `tools/vk_gen/emit.zig` now emits `loadInstance` / `loadDevice` that skip NULL silently (the slot stays at its default `= undefined`); callers are responsible for only invoking entry points whose precondition holds. The calling code in `src/spike/vk_setup.zig:303-325` already routes through `builtin.os.tag` for surface creation, so the platform-conditional slots are never touched on the wrong OS. `BaseDispatch` (5 universal symbols loaded via `dlsym` from libvulkan.so.1 directly) keeps its strict check — a NULL there is a legitimately fatal "wrong loader installed" condition. Regenerated `src/core/platform/vk.zig` via `zig build bindgen-vk`. Verified: `zig build`, `zig build test` (34 pass, 2 skipped), and the two cross-compile targets stay clean.
 
 - 2026-05-11 12:00 — Post-CLOSED follow-up: two review fixes I had missed before flipping Status. (1) `vk_frame.zig`: `last_presented_image` is now set only inside the `.success, .suboptimal_khr` case of the present-result switch, not after it — prevents the field from indexing into an old swapchain after an `.error_out_of_date_khr` triggers a rebuild. (2) `ppm.zig`: added `UnsupportedSwapchainFormat` to the Error set and a defensive switch on `r.swapchain_format` at the top of `capture()` — fails loud if `pickSwapchainFormat` ever picks anything other than `B8G8R8A8_{UNORM,SRGB}`, instead of silently writing a PPM with swapped R/B channels. Verified: `zig build test` green (34 pass, 2 skipped), cross-compile clean on `x86_64-linux-gnu` and `x86_64-windows-gnu`.
 
-## Déviations actées
+## Acted deviations
 
 *Modifications to the FROZEN SECTION that occurred mid-milestone after a Claude.ai round-trip. Each deviation references the commit that enacts it. Empty at end of milestone is the nominal case.*
 
-- **Rows 2 & 3 (Fedora + GNOME Wayland) — "resize 100× sans crash" not testable on this configuration.** GNOME Shell ignores our `zxdg_toplevel_decoration_v1.set_mode(server_side)` request and the spike does not implement client-side decorations (out-of-scope per § Out-of-scope). The window opens without a titlebar / borders / resize handles, so mouse-driven resize is unreachable. The underlying `recreateSwapchain` code path that the criterion is meant to exercise is verified on Row 1 (Win11 + DWM, which always supplies its own decorations and immediately triggers a resize event via per-monitor DPI scaling — this is what surfaced the `oldSwapchain` bug fixed in commit `7c2fe91`). No commit — documented limitation, captured in `validation/s2-go-nogo.md` Rows 2/3.
+- **Rows 2 & 3 (Fedora + GNOME Wayland) — "resize 100× without crash" not testable on this configuration.** GNOME Shell ignores our `zxdg_toplevel_decoration_v1.set_mode(server_side)` request and the spike does not implement client-side decorations (out-of-scope per § Out-of-scope). The window opens without a titlebar / borders / resize handles, so mouse-driven resize is unreachable. The underlying `recreateSwapchain` code path that the criterion is meant to exercise is verified on Row 1 (Win11 + DWM, which always supplies its own decorations and immediately triggers a resize event via per-monitor DPI scaling — this is what surfaced the `oldSwapchain` bug fixed in commit `7c2fe91`). No commit — documented limitation, captured in `validation/s2-go-nogo.md` Rows 2/3.
 
-- **Row 1 (Windows 11 + 60 Hz display) — perf seuils calibrated for > 60 Hz screens; on 60 Hz FIFO the `median` is mathematically floored at 16.67 ms and any single vsync miss in 5 % of frames pushes `p95` over 17.0 ms.** The brief's criteria
+- **Row 1 (Windows 11 + 60 Hz display) — perf thresholds calibrated for > 60 Hz screens; on 60 Hz FIFO the `median` is mathematically floored at 16.67 ms and any single vsync miss in 5 % of frames pushes `p95` over 17.0 ms.** The brief's criteria
   - `median < 16.7 ms`
   - `p95 < 17.0 ms`
   - `no frame > 33 ms after frame 10`
-  are tight against the 60 Hz floor with zero margin: a perfect 60 Hz vsync hit rate gives exactly 16.667 ms median (just under), but the first single-cycle miss in the upper 5 % of frames overshoots 17 ms by exactly one cycle, and the first double-cycle miss overshoots 33 ms by exactly one cycle. Row 1 measured `16.663 / 17.606 / 33.590` ms — consistent with a healthy DWM-composed 60 Hz system hitting vsync ≈ 95 % of the time with occasional single-cycle hiccups. Rows 2 & 3 (both 144 Hz screens) clear every seuil with massive margin. Decision for S2: counted as PASS with explicit interpretation note. Post-S2 brief revisions should either tighten the assumption (require > 60 Hz benchmark screens) or relax the seuils (e.g. `median ≤ 16.67 ms + 5 %`, `p95 ≤ refresh_period * 1.5`). No commit — documented seuil calibration, captured in `validation/s2-go-nogo.md` Row 1 footnote.
+  are tight against the 60 Hz floor with zero margin: a perfect 60 Hz vsync hit rate gives exactly 16.667 ms median (just under), but the first single-cycle miss in the upper 5 % of frames overshoots 17 ms by exactly one cycle, and the first double-cycle miss overshoots 33 ms by exactly one cycle. Row 1 measured `16.663 / 17.606 / 33.590` ms — consistent with a healthy DWM-composed 60 Hz system hitting vsync ≈ 95 % of the time with occasional single-cycle hiccups. Rows 2 & 3 (both 144 Hz screens) clear every threshold with massive margin. Decision for S2: counted as PASS with explicit interpretation note. Post-S2 brief revisions should either tighten the assumption (require > 60 Hz benchmark screens) or relax the thresholds (e.g. `median ≤ 16.67 ms + 5 %`, `p95 ≤ refresh_period * 1.5`). No commit — documented threshold calibration, captured in `validation/s2-go-nogo.md` Row 1 footnote.
 
-## Blocages rencontrés
+## Blockers encountered
 
 *Blocker points that required a return to Claude.ai (cf. `engine-development-workflow.md` §2.4). 2+ distinct blockers signals re-scoping.*
 
 - <blocker summary> — resolved by <commit SHA> or <Claude.ai conversation reference>
 
-## Notes de fin
+## Closing notes
 
 *Filled in at Status → CLOSED transition, just before opening the PR.*
 
@@ -385,7 +385,7 @@ Read `engine-spec.md` §22.3 / S2 in full first — the post-conversation precis
   | Fedora 44 + Intel UHD 630 (Mesa ANV) + GNOME Wayland | 144 Hz | 6.939 ms | 7.358 ms | 39.996 ms | 1.44 MB (800×600) |
   | Fedora 44 + GTX 1660 Ti (NVIDIA prop. 595.71.05) + GNOME Wayland | 144 Hz | 6.934 ms | 7.252 ms | 21.008 ms | 1.44 MB (800×600) |
 
-  All three rows green; full details and footnote interpretation in `validation/s2-go-nogo.md`. Binary size and build time not measured (out of scope per the brief's § Critères d'acceptation).
+  All three rows green; full details and footnote interpretation in `validation/s2-go-nogo.md`. Binary size and build time not measured (out of scope per the brief's § Acceptance criteria).
 
 - **Residual risks / technical debt left intentionally**:
     1. **D1 — `vk_gen` whitelist closure on enum types only, not values.** The 5 whitelisted extensions extend canonical enum groups with their variants, so `vk.zig` carries ~7 000 enum-variant lines beyond what's strictly needed for Vulkan 1.3 core + the 5 extensions. S3 emitter should filter to whitelisted source extensions; expected reduction to ~3 500 total enum lines.

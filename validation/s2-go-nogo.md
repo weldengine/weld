@@ -26,9 +26,9 @@ criteria.
 | 2 | Fedora 44 | Intel UHD 630 (Mesa ANV) | `<mesa-version>` | ✅ GO ‡ | **6.939** / **7.358** / **39.996** |
 | 3 | Fedora 44 | NVIDIA GTX 1660 Ti | 595.71.05 (proprietary) | ✅ GO | **6.934** / **7.252** / **21.008** |
 
-**Go decision:** ✅ GO — all three rows green (with two documented seuil/scope deviations, see § footnotes below and § Déviations actées in the S2 brief). PR ready to be opened; `v0.0.3-S2-window-vulkan-triangle` tagged after squash-merge.
+**Go decision:** ✅ GO — all three rows green (with two documented threshold/scope deviations, see § footnotes below and § Acted deviations in the S2 brief). PR ready to be opened; `v0.0.3-S2-window-vulkan-triangle` tagged after squash-merge.
 
-> † **Row 1** : 60 Hz display in FIFO mode. The brief's perf seuils were calibrated for > 60 Hz screens — on a 60 Hz screen `median < 16.7 ms` is at the mathematical floor and `p95 < 17.0 ms` requires never missing a single vsync in 5% of frames. The 16.66 / 17.6 / 33.6 numbers represent a healthy 60 Hz system at the vsync floor with occasional single-cycle misses (normal under DWM). See § Déviations actées in the S2 brief.
+> † **Row 1** : 60 Hz display in FIFO mode. The brief's perf thresholds were calibrated for > 60 Hz screens — on a 60 Hz screen `median < 16.7 ms` is at the mathematical floor and `p95 < 17.0 ms` requires never missing a single vsync in 5% of frames. The 16.66 / 17.6 / 33.6 numbers represent a healthy 60 Hz system at the vsync floor with occasional single-cycle misses (normal under DWM). See § Acted deviations in the S2 brief.
 >
 > ‡ **Row 2** : `max` slightly above the 33 ms threshold (39.996 ms). Single outlier on 300 frames (0.33 %), p95 well below threshold at 7.36 ms — consistent with a one-shot Mesa ANV PSO compilation warmup on the first real frame. The brief criterion is `< 33 ms after the first 10 frames`; our sampler captures all 300 frames so we cannot strictly verify the outlier is in the warmup window. Pragmatic call: counted as PASS given the steady-state numbers.
 
@@ -64,10 +64,10 @@ criteria.
 | Metric | Threshold | Measured | Interpretation |
 |---|---|---|---|
 | median frame time | < 16.7 ms | **16.663 ms** | ✅ at the 60 Hz vsync floor (`1000/60 ≈ 16.667 ms`); cannot be strictly below without missing vsync. |
-| p95 frame time | < 17.0 ms | **17.606 ms** | ⚠️ 5% of frames miss exactly one vsync cycle — normal under DWM. The brief's 17.0 ms seuil implicitly assumes > 60 Hz refresh. |
+| p95 frame time | < 17.0 ms | **17.606 ms** | ⚠️ 5% of frames miss exactly one vsync cycle — normal under DWM. The brief's 17.0 ms threshold implicitly assumes > 60 Hz refresh. |
 | max post-warmup (after frame 10) | < 33 ms | **33.590 ms** | ⚠️ single double-cycle miss across 300 frames; ≈ 2 × 16.67 ms. Same > 60 Hz assumption applies. |
 
-**Verdict** : 60 Hz vsync hit rate ≈ 95 %; system is functioning correctly. Two seuil failures stem from the brief's calibration for > 60 Hz screens. See § Déviations actées in the S2 brief.
+**Verdict** : 60 Hz vsync hit rate ≈ 95 %; system is functioning correctly. Two threshold failures stem from the brief's calibration for > 60 Hz screens. See § Acted deviations in the S2 brief.
 
 ### `Selected GPU:` / `Swapchain:` lines from stdout
 
@@ -84,7 +84,7 @@ wrote zig-out/smoke\windows-nvidia_geforce_rtx_4080_super.ppm
 ### Notes / anomalies
 
 - **First-run crash, fixed mid-session**: the first attempt failed with `recreateSwapchain failed: NativeWindowInUse`. The `Win32SurfaceCreateInfoKHR.old_swapchain` field was hardcoded to `.null` in `createSwapchainAndViews`, so the spec-mandated handoff between old and new swapchain never happened. Path of the bug: never exercised on Mac (stub backend) or Fedora (GNOME honoured the 800×600 request exactly, no resize event); Win11's per-monitor DPI sends a `WM_DPICHANGED + resize` at create time (800×600 → 784×561) which triggers `recreateSwapchain` on the very first frame. Fix in commit `7c2fe91` threads the old handle through. Re-run on this machine after the fix is what produced the stdout block above.
-- **60 Hz screen** detected (median 16.663 ms ≈ 1/60). Brief's perf seuils were calibrated assuming > 60 Hz; documented as a deviation rather than a re-run with `--measure-frame-time=300` on a different display. Same code on Row 2/3 (144 Hz) clears every seuil with massive headroom.
+- **60 Hz screen** detected (median 16.663 ms ≈ 1/60). Brief's perf thresholds were calibrated assuming > 60 Hz; documented as a deviation rather than a re-run with `--measure-frame-time=300` on a different display. Same code on Row 2/3 (144 Hz) clears every threshold with massive headroom.
 - **Console encoding cosmetic** : stdout shows `ÔÇö` instead of `—` (em-dash) because the default Windows console code page is CP-1252 / Windows-1252 rather than UTF-8. Cosmetic only; the binary writes UTF-8 correctly.
 
 ---
@@ -114,7 +114,7 @@ picks Mesa ANV over NVIDIA proprietary.
 - [x] `--smoke-test --gpu-prefer=integrated` writes a non-empty PPM at `zig-out/smoke/linux-intel_r_uhd_graphics_630_cfl_gt2.ppm`.
 - [x] PPM header verified: `P6 800 600 255`, first pixel `(13, 13, 20)` — matches the clear color `(0.05, 0.05, 0.08)` byte-for-byte. BGRA → RGB swizzle confirmed correct on this GPU/driver too.
 - [x] `--measure-frame-time=300 --smoke-test --gpu-prefer=integrated` prints `frame-time-ms: median=6.939 p95=7.358 max=39.996 over 300 frames`. See § Notes for the `max` interpretation.
-- [ ] **Resize 100×** — N/A (same GNOME Wayland no-decorations limitation as Row 3; see § Déviations actées). recreateSwapchain code path verified on Row 1 (Win11 + DWM).
+- [ ] **Resize 100×** — N/A (same GNOME Wayland no-decorations limitation as Row 3; see § Acted deviations). recreateSwapchain code path verified on Row 1 (Win11 + DWM).
 - [x] `--gpu-prefer=integrated` selects the Intel UHD 630; stdout confirms `Selected GPU: Intel(R) UHD Graphics 630 (CFL GT2)`. The scorer correctly routes around the discrete NVIDIA GPU also present on the machine.
 - [x] `zig build bindgen-vk` and `bindgen-wayland` produce empty diffs (confirmed on Row 3 same machine; commit `8282d0f` chained `zig fmt` into the targets).
 
@@ -168,7 +168,7 @@ integrated GPU also present on the machine.
 - [x] `zig build run -- --smoke-test --gpu-prefer=discrete` writes a non-empty PPM (1.44 MB at 800×600) and exits code 0 within 5 s.
 - [x] PPM opened in an image viewer shows the triangle at the correct 800×600 dimensions; first pixel `(13, 13, 20)` matches the brief's clear color `(0.05, 0.05, 0.08)` byte-for-byte, confirming the BGRA → RGB swizzle in `ppm.zig` is correct.
 - [x] `--measure-frame-time=300 --smoke-test --gpu-prefer=discrete` prints the stats line `frame-time-ms: median=6.934 p95=7.252 max=21.008 over 300 frames` and writes the PPM.
-- [ ] **Resize 100×** — **N/A on GNOME Wayland.** The compositor accepts the surface but ignores our `zxdg_toplevel_decoration_v1.set_mode(server_side)` request, and the spike does not implement client-side decorations (out-of-scope per § Out-of-scope). The window opens without a titlebar / borders / resize handles, so mouse-driven resize is not reachable on this configuration. The underlying `recreateSwapchain` code path that this test exercises is verified on Row 1 (Win11 + DWM, which always supplies its own decorations). See § Déviations actées in the S2 brief.
+- [ ] **Resize 100×** — **N/A on GNOME Wayland.** The compositor accepts the surface but ignores our `zxdg_toplevel_decoration_v1.set_mode(server_side)` request, and the spike does not implement client-side decorations (out-of-scope per § Out-of-scope). The window opens without a titlebar / borders / resize handles, so mouse-driven resize is not reachable on this configuration. The underlying `recreateSwapchain` code path that this test exercises is verified on Row 1 (Win11 + DWM, which always supplies its own decorations). See § Acted deviations in the S2 brief.
 - [x] `--gpu-prefer=discrete` selects the NVIDIA GTX 1660 Ti; stdout's `Selected GPU: NVIDIA GeForce GTX 1660 Ti` line confirms.
 - [ ] `--gpu-prefer=integrated` — **N/A on this machine** (single GPU). Will be verified on Row 2 if a multi-GPU configuration is available there.
 - [x] `zig build bindgen-vk` and `bindgen-wayland` both produce empty diffs (after commit `8282d0f` chained `zig fmt` into the bindgen targets).
