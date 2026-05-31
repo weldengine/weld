@@ -109,6 +109,14 @@ Rationale for the split: render (E2) is the largest and riskiest paquet (GPU-adj
     `linux_evdev.zig` / `win32_xinput.zig` references reading
     "§ Input system Tier 0 minimal"; E4 aligns both those code references and the
     M0.3 brief section title to "minimal Tier 0 input system".
+- **Canonical English brief-SECTION names** (generic section headers cited by code
+  cross-references; E2 standardized these, E4 must title the closed-brief sections
+  identically):
+  - "Critères d'acceptation" → "Acceptance criteria" (e.g. `instancing/batcher.zig`)
+  - "Comportement observable" → "Observable behavior" (e.g. `shader_pipeline/compiler.zig`, `hot_reload.zig`)
+  - "Suppressions" → "Removals" (e.g. `gal/vulkan/frame.zig`, `swapchain.zig`)
+  - "Fichiers" → "Files" (e.g. `gal/vulkan/sampler.zig`)
+  - "Notes" / "Scope" / "Out-of-scope" / "CI" — already English-identical, unchanged.
 
 ## Closing notes
 
