@@ -13,8 +13,8 @@
 //!
 //! Decision taken — `schema_hash` is **sensitive to `@typeName`**:
 //! two structs with the same layout but different names
-//! produce distinct `schema_hash` values. The
-//! `"schema_hash sensible au type_name"` test documents the decision.
+//! produce distinct `schema_hash` values. The hash_test.zig
+//! "schema_hash is sensitive to the type name" test documents the decision.
 //! The algorithm follows `briefs/M0.2-rtti-resources-events-bindgen.md`
 //! E1 §Deliverable.
 

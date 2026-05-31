@@ -1,13 +1,13 @@
 //! Instancing batcher tests — Phase 0 / M0.4.
 //!
-//! Couvre brief §Critères d'acceptation > Tests :
+//! Covers brief §Acceptance criteria > Tests:
 //! - `batcher groups entities by mesh and material` — 1000 entities, 10
-//!   (mesh, material) distincts → 10 buckets exactement
+//!   distinct (mesh, material) → exactly 10 buckets
 //! - `batcher produces under 100 drawcalls for 100k entities on 100 distinct
-//!   mesh-material pairs` — assertion stricte sur le compteur drawcalls
+//!   mesh-material pairs` — strict assertion on the drawcalls counter
 //!
-//! Les inline tests dans `batcher.zig` couvrent les mêmes cas. Ce fichier
-//! existe pour matcher la check-list brief et exposer le test via
+//! The inline tests in `batcher.zig` cover the same cases. This file
+//! exists to match the brief check-list and expose the test via
 //! `tests/render/`.
 
 const std = @import("std");
@@ -20,7 +20,7 @@ test "batcher groups entities by mesh and material" {
     var b = Batcher.init(std.testing.allocator);
     defer b.deinit();
 
-    // 1000 entités, 10 (mesh, material) distincts.
+    // 1000 entities, 10 distinct (mesh, material).
     var i: u32 = 0;
     while (i < 1000) : (i += 1) {
         const mesh: MeshId = i % 5;

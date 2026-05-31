@@ -1,41 +1,41 @@
 //! vk_gen whitelist closure tests — Phase 0 / M0.4.
 //!
-//! Couvre brief §Critères d'acceptation > Tests :
-//! - `reachability fixed-point converges under 20 iterations` — sur XML
-//!   Vulkan SDK 1.4.341.0 avec whitelist Phase 0, itérations < 20.
+//! Covers brief §Acceptance criteria > Tests:
+//! - `reachability fixed-point converges under 20 iterations` — on XML
+//!   Vulkan SDK 1.4.341.0 with the Phase 0 whitelist, iterations < 20.
 //! - `non-whitelisted enum variants are filtered` — `VkAccessFlagBits2`
-//!   ne doit pas inclure les bits d'extensions hors whitelist.
+//!   must not include the bits of extensions outside the whitelist.
 //!
-//! Phase 0 : ces tests s'exécutent indirectement via le gate
-//! `bindgen-verify` (qui régénère + diff). Le fichier ici exerce des
-//! propriétés mesurables sur la sortie `src/core/platform/vk.zig` :
-//! - VkResult ne contient pas les variants d'extensions filtrées
-//! - VkStructureType a un nombre raisonnable de variants (< 500
-//!   post-closure vs ~1700 pré-closure)
+//! Phase 0: these tests run indirectly via the `bindgen-verify` gate
+//! (which regenerates + diffs). The file here exercises measurable
+//! properties on the `src/core/platform/vk.zig` output:
+//! - VkResult does not contain the filtered extension variants
+//! - VkStructureType has a reasonable number of variants (< 500
+//!   post-closure vs ~1700 pre-closure)
 //!
-//! Le `parser.applyWhitelist` lui-même boucle sur les types via Kahn's
-//! algorithm fixed-point dans `closeOverTypes` (cf. parser.zig line ~1247).
-//! L'itération est bornée à 32 par `var iterations: u32 = 0; while
-//! (changed and iterations < 32)` — la fixed-point converge en pratique
-//! sous 10 itérations sur le XML Vulkan SDK 1.4.341.
+//! The `parser.applyWhitelist` itself loops over the types via Kahn's
+//! algorithm fixed-point in `closeOverTypes` (cf. parser.zig line ~1247).
+//! The iteration is bounded to 32 by `var iterations: u32 = 0; while
+//! (changed and iterations < 32)` — the fixed-point converges in practice
+//! under 10 iterations on the Vulkan SDK 1.4.341 XML.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
 const vk = weld_core.platform.vk;
 
 test "non-whitelisted enum variants are filtered" {
-    // Phase 0 : VkResult après closure ne contient PAS error_incompatible_display_khr
-    // (du VK_KHR_display non-whitelisted) ni error_invalid_shader_nv (du
-    // VK_NV_glsl_shader non-whitelisted).
+    // Phase 0: VkResult after closure does NOT contain error_incompatible_display_khr
+    // (from the non-whitelisted VK_KHR_display) nor error_invalid_shader_nv (from
+    // the non-whitelisted VK_NV_glsl_shader).
     //
-    // On utilise std.meta.fields pour énumérer les variants effectivement
-    // présents et vérifier l'absence des cibles filtrées.
+    // We use std.meta.fields to enumerate the variants actually
+    // present and verify the absence of the filtered targets.
     const t = std.testing;
 
-    // Phase 0 : VkResult est un enum non-exhaustif `enum(i32) { ... , _ }`.
-    // Les variants filtrés ne sont pas accessibles via `@hasField` ni
-    // via une référence statique. On utilise comptime iteration sur
-    // std.meta.fields qui retourne un slice comptime-known.
+    // Phase 0: VkResult is a non-exhaustive enum `enum(i32) { ... , _ }`.
+    // The filtered variants are not accessible via `@hasField` nor
+    // via a static reference. We use comptime iteration over
+    // std.meta.fields which returns a comptime-known slice.
 
     comptime var has_incompatible_display = false;
     comptime var has_invalid_shader = false;
@@ -58,24 +58,24 @@ test "non-whitelisted enum variants are filtered" {
 }
 
 test "StructureType is bounded post-closure" {
-    // Pré-closure : VkStructureType avait 1700+ variants (la moitié venait
-    // d'extensions inutilisées). Post-closure brief D-S2-vk-whitelist :
-    // attendu < 500 variants. Mesure courante (commit 1aa181c) : 293.
+    // Pre-closure: VkStructureType had 1700+ variants (half came
+    // from unused extensions). Post-closure brief D-S2-vk-whitelist:
+    // expected < 500 variants. Current measurement (commit 1aa181c): 293.
     const fields = std.meta.fields(vk.StructureType);
-    try std.testing.expect(fields.len > 50); // sanity : core 1.0-1.3 + 5 ext
-    try std.testing.expect(fields.len < 500); // borne supérieure post-closure
+    try std.testing.expect(fields.len > 50); // sanity: core 1.0-1.3 + 5 ext
+    try std.testing.expect(fields.len < 500); // upper bound post-closure
 }
 
 test "reachability fixed-point converges under 20 iterations" {
-    // Note : la convergence stricte est validée indirectement par le fait
-    // que `bindgen-verify` regénère le binding sans hang/timeout. Le code
-    // `parser.closeOverTypes` (parser.zig ~ligne 1247) borne explicitement
-    // à 32 itérations et set `changed = false` en fin de pass — sortie
-    // garantie.
+    // Note: strict convergence is validated indirectly by the fact
+    // that `bindgen-verify` regenerates the binding without hang/timeout. The
+    // `parser.closeOverTypes` code (parser.zig ~line 1247) explicitly bounds
+    // to 32 iterations and sets `changed = false` at the end of the pass — exit
+    // guaranteed.
     //
-    // Cette assertion est documentaire : si la closure ne convergeait pas
-    // en < 20 itérations, le générateur produirait un vk.zig non-déterministe
-    // et `bindgen-verify` échouerait sur le diff. La présence verte du test
-    // bindgen-verify en CI suffit comme preuve.
+    // This assertion is documentary: if the closure did not converge
+    // in < 20 iterations, the generator would produce a non-deterministic vk.zig
+    // and `bindgen-verify` would fail on the diff. The green presence of the
+    // bindgen-verify test in CI suffices as proof.
     try std.testing.expect(true);
 }

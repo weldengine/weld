@@ -1,15 +1,15 @@
 //! Shader cache tests — Phase 0 / M0.4.
 //!
-//! Couvre brief §Critères d'acceptation > Tests :
-//! - `cache hit on unchanged source` — compile, compile à nouveau →
-//!   seconde compilation prend < 5 ms (cache lookup uniquement)
-//! - `cache miss on modified source` — compile, modifier 1 octet du source,
-//!   compile à nouveau → recompilation effective
-//! - `cache miss on glslc version change` — simule un changement de version
+//! Covers brief §Acceptance criteria > Tests:
+//! - `cache hit on unchanged source` — compile, compile again →
+//!   second compilation takes < 5 ms (cache lookup only)
+//! - `cache miss on modified source` — compile, modify 1 byte of the source,
+//!   compile again → effective recompilation
+//! - `cache miss on glslc version change` — simulates a version change
 //!
-//! Les inline tests dans `cache.zig` couvrent les invariants hashing. Ce
-//! fichier exerce le round-trip disque (lookup + insert + lookup hit) qui
-//! ne se prête pas à un inline test (nécessite filesystem cleanup).
+//! The inline tests in `cache.zig` cover the hashing invariants. This
+//! file exercises the disk round-trip (lookup + insert + lookup hit) which
+//! does not lend itself to an inline test (requires filesystem cleanup).
 
 const std = @import("std");
 const render = @import("weld_render");
@@ -60,7 +60,7 @@ test "cache miss on modified source" {
     const spv1 = [_]u8{ 0x03, 0x02, 0x23, 0x07 } ** 8;
     try cache.insert(allocator, io, k1, &spv1);
 
-    // Source modifié → hash différent → miss.
+    // Modified source → different hash → miss.
     const result = try cache.lookup(allocator, io, k2);
     try t.expect(result == .miss);
 }

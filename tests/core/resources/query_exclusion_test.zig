@@ -2,7 +2,7 @@
 //! queries.
 //!
 //! The exclusion is implemented via the `Archetype.is_singleton`
-//! flag (cf. brief § Notes — décision technique E3) and read by
+//! flag (cf. brief § Notes — technical decision E3) and read by
 //! both `Query.maybeRescan` (typed S1 path) and
 //! `ComptimeQuery.next` (dynamic Etch path).
 

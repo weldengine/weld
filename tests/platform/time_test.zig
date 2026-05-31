@@ -28,7 +28,7 @@ test "sleepPrecise ms accuracy" {
     // CI tolerance: brief gate is 2 ms (Win32) / 1 ms (Linux). We allow
     // 50 ms here because GitHub Actions macOS / Linux runners can stall
     // arbitrarily under contention. The bench harness (Phase 1+) will
-    // enforce the tight gate on the reference machine cold-isolé.
+    // enforce the tight gate on the reference machine cold-isolated.
     try std.testing.expect(elapsed < 50_000_000);
 }
 

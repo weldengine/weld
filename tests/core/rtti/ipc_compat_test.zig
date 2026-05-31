@@ -13,7 +13,7 @@
 //! E2 §1 originally asked for byte-for-byte equivalence with the
 //! Wyhash legacy bytes; voie 2 (protocol version bump,
 //! `WELD_IPC_PROTOCOL_VERSION` 1 → 2) was retained — see brief
-//! § Déviations actées E2. The legacy compat check has been retired
+//! § Acted deviations E2. The legacy compat check has been retired
 //! in favour of stable golden values that lock the new algorithm.
 //!
 //! Any change to one of the following surfaces will fail this file:

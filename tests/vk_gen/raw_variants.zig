@@ -1,17 +1,17 @@
 //! vk_gen Raw variants tests — Phase 0 / M0.4.
 //!
-//! Couvre brief §Critères d'acceptation > Tests :
-//! - `vkAcquireNextImageKHR emits Raw variant` — vérifie présence dans
-//!   la sortie générée
-//! - `vkCreateBuffer does not emit Raw variant` — vérifie absence (cas
-//!   négatif — la fonction est dans raw_targets liste, vkCreateBuffer
-//!   ne l'est pas)
+//! Covers brief §Acceptance criteria > Tests:
+//! - `vkAcquireNextImageKHR emits Raw variant` — checks presence in
+//!   the generated output
+//! - `vkCreateBuffer does not emit Raw variant` — checks absence (negative
+//!   case — the function is in the raw_targets list, vkCreateBuffer
+//!   is not)
 //!
-//! Strategy : grep sur le `src/core/platform/vk.zig` post-bindgen, vérifie
-//! la présence de `acquireNextImageKHRRaw` (sur Device) et l'absence de
-//! `createBufferRaw`. Le test compile au niveau Zig type system —
-//! @hasDecl ne suffit pas car les wrappers sont des méthodes sur Device
-//! (opaque), pas des declarations au scope module.
+//! Strategy: grep on the post-bindgen `src/core/platform/vk.zig`, checks
+//! the presence of `acquireNextImageKHRRaw` (on Device) and the absence of
+//! `createBufferRaw`. The test compiles at the Zig type system level —
+//! @hasDecl is not enough because the wrappers are methods on Device
+//! (opaque), not declarations at the module scope.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -20,9 +20,9 @@ const vk = weld_core.platform.vk;
 test "vkAcquireNextImageKHR emits Raw variant" {
     const t = std.testing;
 
-    // Le wrapper Raw est une méthode sur Device : on vérifie son type
-    // via @TypeOf — si la méthode n'existait pas, ce test ne compilerait
-    // pas (Zig type-check les références à des fns).
+    // The Raw wrapper is a method on Device: we check its type
+    // via @TypeOf — if the method did not exist, this test would not
+    // compile (Zig type-checks references to fns).
     const fn_type = @TypeOf(vk.Device.acquireNextImageKHRRaw);
     const info = @typeInfo(fn_type);
     try t.expectEqual(@typeInfo(@TypeOf(vk.Device.acquireNextImageKHRRaw)).@"fn".return_type.?, vk.Result);
@@ -42,8 +42,8 @@ test "vkAcquireNextImage2KHR emits Raw variant" {
 }
 
 test "vkCreateBuffer does not emit Raw variant" {
-    // Si Device.createBufferRaw existait, @hasDecl le rapporterait. La
-    // liste raw_targets de l'emitter ne contient que les 3 cibles brief.
+    // If Device.createBufferRaw existed, @hasDecl would report it. The
+    // emitter's raw_targets list contains only the 3 brief targets.
     try std.testing.expect(!@hasDecl(vk.Device, "createBufferRaw"));
 }
 

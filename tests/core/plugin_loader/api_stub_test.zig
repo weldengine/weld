@@ -1,29 +1,29 @@
 //! M0.2 / E6 — stub API surface freeze test.
 //!
-//! Enumère exhaustivement chaque callback des 7 sous-APIs
+//! Exhaustively enumerates each callback of the 7 sub-APIs
 //! (`WeldEcsAPI`, `WeldResourceAPI`, `WeldEventAPI`,
 //! `WeldServiceAPI`, `WeldMemoryAPI`, `WeldEditorAPI`,
-//! `WeldPlatformAPI`) et vérifie le code de retour stub. Ce test
-//! **fige la surface** : tout ajout / retrait / renommage
-//! silencieux d'une callback casse le test. Toute callback qui
-//! ne retourne pas le défaut stub (i.e. qui se met à câbler
-//! réellement le Tier 0) le détecte aussi — le câblage runtime
-//! des 7 sous-APIs est Phase 3 (brief § Out-of-scope).
+//! `WeldPlatformAPI`) and checks the stub return code. This test
+//! **freezes the surface**: any silent addition / removal / rename
+//! of a callback breaks the test. Any callback that does not
+//! return the stub default (i.e. that starts actually wiring
+//! the Tier 0) is detected too — the runtime wiring of the
+//! 7 sub-APIs is Phase 3 (brief § Out-of-scope).
 //!
-//! Convention de vérification :
-//!   - Fonctions retournant `WeldResult` : doivent renvoyer
+//! Verification convention:
+//!   - Functions returning `WeldResult`: must return
 //!     `.WELD_ERR_NOT_IMPLEMENTED`.
-//!   - Fonctions retournant un pointeur opaque (`?*const
+//!   - Functions returning an opaque pointer (`?*const
 //!     anyopaque`, `WeldQueryHandle`, `WeldAllocatorHandle`,
-//!     etc.) : doivent renvoyer `null`.
-//!   - Fonctions retournant un `bool` : doivent renvoyer
+//!     etc.): must return `null`.
+//!   - Functions returning a `bool`: must return
 //!     `false`.
-//!   - Fonctions retournant un `u32` / `u64` ID : doivent
-//!     renvoyer `0`.
-//!   - Fonctions retournant `void` : appelées pour smoke (must
+//!   - Functions returning a `u32` / `u64` ID: must
+//!     return `0`.
+//!   - Functions returning `void`: called for smoke (must
 //!     not crash).
-//!   - Fonctions retournant un type spécifique (e.g.
-//!     `WeldSlice`) : zero-initialisé.
+//!   - Functions returning a specific type (e.g.
+//!     `WeldSlice`): zero-initialized.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -31,10 +31,9 @@ const weld_core = @import("weld_core");
 const pl = weld_core.plugin_loader;
 const WeldResult = pl.WeldResult;
 
-// Constantes triviales utilisées pour appeler les stubs avec
-// des args bidon. Aucune sémantique attendue — c'est de
-// l'agitation de pointeur pour vérifier que les callbacks ne
-// font rien.
+// Trivial constants used to call the stubs with dummy args.
+// No semantics expected — pointer-wiggling to verify that the
+// callbacks do nothing.
 const world: pl.desc.WeldWorldHandle = null;
 const dummy_str: pl.desc.WeldStr = .{};
 const dummy_entity: pl.desc.WeldEntity = 0;
@@ -46,12 +45,12 @@ const dummy_tag: pl.desc.WeldTagId = 0;
 const dummy_allocator: pl.desc.WeldAllocatorHandle = null;
 const dummy_ctx: pl.desc.WeldEditorCtxHandle = null;
 
-// `*const anyopaque` cible pour les fonctions qui prennent un
-// pointeur opaque en argument. Pointe sur une zone valide
-// (variable locale) pour ne pas déclencher d'UB hypothétique.
+// `*const anyopaque` target for functions that take an opaque
+// pointer as argument. Points to a valid region (local
+// variable) so as not to trigger hypothetical UB.
 var dummy_blob: u64 = 0;
 
-test "stub_api WeldEcsAPI: entités stubbed" {
+test "stub_api WeldEcsAPI: entities stubbed" {
     const a = pl.stub_api.ecs;
     try std.testing.expectEqual(@as(u64, 0), a.entity_spawn(world));
     a.entity_destroy(world, dummy_entity);
@@ -59,7 +58,7 @@ test "stub_api WeldEcsAPI: entités stubbed" {
     try std.testing.expectEqual(@as(u32, 0), a.entity_count(world));
 }
 
-test "stub_api WeldEcsAPI: composants stubbed (WELD_ERR_NOT_IMPLEMENTED sur Result-returning)" {
+test "stub_api WeldEcsAPI: components stubbed (WELD_ERR_NOT_IMPLEMENTED on Result-returning)" {
     const a = pl.stub_api.ecs;
     try std.testing.expectEqual(@as(u32, 0), a.component_register(world, dummy_str, 0, 0, null, 0));
     try std.testing.expectEqual(@as(u32, 0), a.component_find(world, dummy_str));
@@ -83,7 +82,7 @@ fn dummyQueryCallback(chunk: *const pl.api.WeldQueryChunk, user_data: ?*anyopaqu
     _ = user_data;
 }
 
-test "stub_api WeldEcsAPI: systèmes stubbed" {
+test "stub_api WeldEcsAPI: systems stubbed" {
     const a = pl.stub_api.ecs;
     const sid = a.system_register(world, dummy_str, .WELD_PHASE_UPDATE, 0, &dummyQueryCallback, null, null, 0, null, 0);
     try std.testing.expectEqual(@as(u32, 0), sid);
@@ -101,7 +100,7 @@ test "stub_api WeldEcsAPI: tags stubbed" {
     try std.testing.expect(!a.tag_has_all(world, dummy_entity, null, 0));
 }
 
-test "stub_api WeldResourceAPI: tous stubbed" {
+test "stub_api WeldResourceAPI: all stubbed" {
     const a = pl.stub_api.resource;
     try std.testing.expectEqual(@as(u32, 0), a.resource_register(world, dummy_str, 0, 0, .WELD_RESOURCE_TRANSIENT, null, 0));
     try std.testing.expectEqual(@as(u32, 0), a.resource_find(world, dummy_str));
@@ -113,7 +112,7 @@ test "stub_api WeldResourceAPI: tous stubbed" {
     try std.testing.expect(!a.resource_changed(world, dummy_resource, 0));
 }
 
-test "stub_api WeldEventAPI: tous stubbed" {
+test "stub_api WeldEventAPI: all stubbed" {
     const a = pl.stub_api.event;
     try std.testing.expectEqual(@as(u32, 0), a.event_register(world, dummy_str, 0, 0, null, 0));
     try std.testing.expectEqual(@as(u32, 0), a.event_find(world, dummy_str));
@@ -130,13 +129,13 @@ fn dummyEventCallback(event_id: pl.desc.WeldEventId, payload: *const anyopaque, 
     _ = user_data;
 }
 
-test "stub_api WeldServiceAPI: tous stubbed" {
+test "stub_api WeldServiceAPI: all stubbed" {
     const a = pl.stub_api.service;
     try std.testing.expect(a.service_get(world, dummy_str) == null);
     try std.testing.expect(!a.service_available(world, dummy_str));
 }
 
-test "stub_api WeldMemoryAPI: tous stubbed" {
+test "stub_api WeldMemoryAPI: all stubbed" {
     const a = pl.stub_api.memory;
     try std.testing.expect(a.get_frame_allocator() == null);
     try std.testing.expect(a.get_persistent_allocator() == null);
@@ -148,7 +147,7 @@ test "stub_api WeldMemoryAPI: tous stubbed" {
     a.destroy_pool(dummy_allocator);
 }
 
-test "stub_api WeldEditorAPI: tous stubbed" {
+test "stub_api WeldEditorAPI: all stubbed" {
     const a = pl.stub_api.editor.?;
     try std.testing.expectEqual(WeldResult.WELD_ERR_NOT_IMPLEMENTED, a.panel_register(dummy_str, dummy_str, &dummyPanelDraw, null));
     try std.testing.expectEqual(WeldResult.WELD_ERR_NOT_IMPLEMENTED, a.inspector_register(dummy_component, &dummyInspectorDraw, null));
@@ -196,7 +195,7 @@ fn dummyMenuAction(user_data: ?*anyopaque) callconv(.c) void {
     _ = user_data;
 }
 
-test "stub_api WeldPlatformAPI: tous stubbed" {
+test "stub_api WeldPlatformAPI: all stubbed" {
     const a = pl.stub_api.platform;
     var out_data: ?*anyopaque = undefined;
     var out_size: u32 = 0;
@@ -227,9 +226,9 @@ fn dummyJobFn(user_data: ?*anyopaque) callconv(.c) void {
 }
 
 test "stub_api WeldAPI table is wired" {
-    // Smoke check : la table principale référence chaque
-    // sous-API non-null (sauf `editor` qui peut être null en
-    // shipping ; en M0.2 le stub editor est exposé).
+    // Smoke check: the main table references each non-null
+    // sub-API (except `editor` which may be null in shipping;
+    // in M0.2 the stub editor is exposed).
     const a = pl.stub_api;
     _ = a.ecs;
     _ = a.resource;

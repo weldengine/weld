@@ -1,11 +1,11 @@
 //! Render Graph auto-tracking barriers tests — Phase 0 / M0.4.
 //!
-//! Couvre brief §Critères d'acceptation > Tests :
+//! Covers brief §Acceptance criteria > Tests:
 //! - `auto-tracking inserts read-after-write barrier` — 2 passes, pass A
-//!   écrit Texture T, pass B lit T → barrier image layout transition +
-//!   access mask inséré entre A et B
-//! - `explicit mode skips auto-tracking` — pass marqué BarrierExplicit
-//!   → aucune barrier auto-insérée
+//!   writes Texture T, pass B reads T → barrier image layout transition +
+//!   access mask inserted between A and B
+//! - `explicit mode skips auto-tracking` — pass marked BarrierExplicit
+//!   → no barrier auto-inserted
 
 const std = @import("std");
 const render = @import("weld_render");
@@ -54,7 +54,7 @@ test "auto-tracking inserts read-after-write barrier" {
     const barriers_emitted = g.barriers.consumeRecorded();
     try std.testing.expect(barriers_emitted.len >= 1);
 
-    // La dernière barrière doit transitionner color_attachment → shader_read_only.
+    // The last barrier must transition color_attachment → shader_read_only.
     const last = barriers_emitted[barriers_emitted.len - 1];
     try std.testing.expectEqual(@as(?render.gal.escape_hatches.TextureLayout, .color_attachment), last.old_layout);
     try std.testing.expectEqual(@as(?render.gal.escape_hatches.TextureLayout, .shader_read_only), last.new_layout);

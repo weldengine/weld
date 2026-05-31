@@ -44,18 +44,19 @@ fn workerStress(ctx: *Ctx) void {
     ctx.done.store(1, .release);
 }
 
-// Test stress-pattern : 8 threads × N iter de create/destroy Backend
-// séquentiel. Allocator page_allocator (pas testing.allocator) car timeout
-// bail sans join produit un faux positif leak ~512 B/thread (State alloué
-// par thread mid-iter). Le steady-state create/destroy reste couvert par
-// les inline tests de wayland.zig + TSAN actif via lefthook pre-push.
+// Stress-pattern test: 8 threads × N iter of create/destroy sequential
+// Backend. page_allocator allocator (not testing.allocator) because a
+// timeout bail without join produces a false-positive leak ~512 B/thread
+// (State allocated per thread mid-iter). The steady-state create/destroy
+// stays covered by the inline tests of wayland.zig + TSAN active via
+// lefthook pre-push.
 //
-// NOTE INVARIANT — ce test valide la non-corruption mémoire en stress
-// backend-create, PAS la cohérence multi-backend qui reste hors invariant
-// Phase 0 ("1 Backend par process"). Le var live_state global non-atomique
-// est racé entre threads ici, sans conséquence sur le pattern testé.
-// Phase 0+ multi-window cleanup (cf. wayland.zig commentaire live_state)
-// adressera cette tension.
+// INVARIANT NOTE — this test validates memory non-corruption under
+// backend-create stress, NOT multi-backend coherence which stays outside
+// the Phase 0 invariant ("1 Backend per process"). The global non-atomic
+// live_state var is raced between threads here, with no consequence on the
+// tested pattern. Phase 0+ multi-window cleanup (cf. wayland.zig live_state
+// comment) will address this tension.
 test "concurrent createWindow + destroyWindow" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 

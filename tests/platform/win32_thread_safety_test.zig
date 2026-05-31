@@ -3,7 +3,7 @@
 //! Covers the acceptance test called out in the M0.3 brief:
 //!   - "concurrent createWindow + destroyWindow" — 8 threads × 1000
 //!     iterations, timeout 5 s, class_atom stable, class_open_count
-//!     retombe à 0, no deadlock.
+//!     returns to 0, no deadlock.
 //!
 //! Skipped on non-Windows runners (the test exercises the live Win32 API).
 //! The file compiles on all platforms but the `win32_backend` import only
@@ -108,7 +108,7 @@ test "concurrent createWindow + destroyWindow" {
     try std.testing.expectEqual(@as(u32, 0), window_api.classOpenCount());
 
     // Brief gate is "no deadlock, class_atom stable, class_open_count
-    // retombe à 0" — the three assertions above. The brief does NOT
+    // returns to 0" — the three assertions above. The brief does NOT
     // gate "every create succeeded". On the GitHub Actions windows-2025
     // runner, a small fraction of the 800 CreateWindowExW calls under
     // 8-way concurrent stress return NULL (transient — most likely a

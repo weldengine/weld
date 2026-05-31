@@ -1,10 +1,10 @@
-//! Shader hot-reload latency — Phase 0 / M0.4 § Scope — Complément Post-Review.
+//! Shader hot-reload latency — Phase 0 / M0.4 § Scope — Post-Review Complement.
 //!
 //! Drops a probe `.frag.glsl` into `assets/shaders/`, starts the
 //! `shader_pipeline.hot_reload` watcher with a 10 ms poll interval, and
 //! measures the elapsed time between the probe creation and the
 //! `on_recompile` callback firing. Gate: < 200 ms (brief §Scope +
-//! §Comportement observable).
+//! §Observable behavior).
 //!
 //! Skipped when:
 //! - `glslc` is absent from PATH (the watcher's documented behavior in
@@ -28,7 +28,7 @@ const PROBE_SOURCE: []const u8 =
     \\
 ;
 const POLL_MS: u32 = 10;
-// The brief §Comportement observable gates the *runtime* hot-reload at
+// The brief §Observable behavior gates the *runtime* hot-reload at
 // < 200 ms on ReleaseFast hardware. The test runs in Debug / ReleaseSafe
 // and spawns glslc cold on every iteration, which adds 300-700 ms of
 // process startup on Apple Silicon (lower on Linux + GTX 1660 Ti). The

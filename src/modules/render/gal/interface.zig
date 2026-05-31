@@ -28,57 +28,57 @@ const RequiredMethod = struct {
 /// (device lifecycle → resources → pipeline → frame).
 pub const required_methods = [_]RequiredMethod{
     // Lifecycle
-    .{ .name = "init", .purpose = "Construit le Device depuis un DeviceDescriptor" },
-    .{ .name = "deinit", .purpose = "Libère toutes les resources GPU du Device" },
-    .{ .name = "supports", .purpose = "Query d'une Feature optionnelle (cf. escape_hatches.Feature)" },
+    .{ .name = "init", .purpose = "Builds the Device from a DeviceDescriptor" },
+    .{ .name = "deinit", .purpose = "Frees all the Device's GPU resources" },
+    .{ .name = "supports", .purpose = "Query of an optional Feature (cf. escape_hatches.Feature)" },
 
     // Buffer ops
-    .{ .name = "createBuffer", .purpose = "Alloue un Buffer GPU" },
-    .{ .name = "destroyBuffer", .purpose = "Libère un Buffer GPU" },
-    .{ .name = "mapBuffer", .purpose = "Map un host-visible Buffer pour CPU read/write" },
-    .{ .name = "unmapBuffer", .purpose = "Unmap un Buffer mappé via mapBuffer" },
+    .{ .name = "createBuffer", .purpose = "Allocates a GPU Buffer" },
+    .{ .name = "destroyBuffer", .purpose = "Frees a GPU Buffer" },
+    .{ .name = "mapBuffer", .purpose = "Maps a host-visible Buffer for CPU read/write" },
+    .{ .name = "unmapBuffer", .purpose = "Unmaps a Buffer mapped via mapBuffer" },
 
     // Texture ops
-    .{ .name = "createTexture", .purpose = "Alloue une Texture GPU" },
-    .{ .name = "destroyTexture", .purpose = "Libère une Texture GPU" },
-    .{ .name = "createTextureView", .purpose = "Crée une vue sur une Texture" },
-    .{ .name = "destroyTextureView", .purpose = "Libère une TextureView" },
+    .{ .name = "createTexture", .purpose = "Allocates a GPU Texture" },
+    .{ .name = "destroyTexture", .purpose = "Frees a GPU Texture" },
+    .{ .name = "createTextureView", .purpose = "Creates a view on a Texture" },
+    .{ .name = "destroyTextureView", .purpose = "Frees a TextureView" },
 
     // Sampler
-    .{ .name = "createSampler", .purpose = "Crée un Sampler" },
-    .{ .name = "destroySampler", .purpose = "Libère un Sampler" },
+    .{ .name = "createSampler", .purpose = "Creates a Sampler" },
+    .{ .name = "destroySampler", .purpose = "Frees a Sampler" },
 
     // Shader / pipeline
-    .{ .name = "createShaderModule", .purpose = "Charge un module SPIR-V sur le device" },
-    .{ .name = "destroyShaderModule", .purpose = "Libère un ShaderModule" },
-    .{ .name = "createBindGroupLayout", .purpose = "Crée un BindGroupLayout" },
-    .{ .name = "destroyBindGroupLayout", .purpose = "Libère un BindGroupLayout" },
-    .{ .name = "createBindGroup", .purpose = "Crée un BindGroup à partir d'un layout + entries" },
-    .{ .name = "destroyBindGroup", .purpose = "Libère un BindGroup" },
-    .{ .name = "createRenderPipeline", .purpose = "Crée un RenderPipeline (PSO graphics)" },
-    .{ .name = "destroyRenderPipeline", .purpose = "Libère un RenderPipeline" },
-    .{ .name = "createComputePipeline", .purpose = "Crée un ComputePipeline" },
-    .{ .name = "destroyComputePipeline", .purpose = "Libère un ComputePipeline" },
+    .{ .name = "createShaderModule", .purpose = "Loads a SPIR-V module on the device" },
+    .{ .name = "destroyShaderModule", .purpose = "Frees a ShaderModule" },
+    .{ .name = "createBindGroupLayout", .purpose = "Creates a BindGroupLayout" },
+    .{ .name = "destroyBindGroupLayout", .purpose = "Frees a BindGroupLayout" },
+    .{ .name = "createBindGroup", .purpose = "Creates a BindGroup from a layout + entries" },
+    .{ .name = "destroyBindGroup", .purpose = "Frees a BindGroup" },
+    .{ .name = "createRenderPipeline", .purpose = "Creates a RenderPipeline (graphics PSO)" },
+    .{ .name = "destroyRenderPipeline", .purpose = "Frees a RenderPipeline" },
+    .{ .name = "createComputePipeline", .purpose = "Creates a ComputePipeline" },
+    .{ .name = "destroyComputePipeline", .purpose = "Frees a ComputePipeline" },
 
     // Sync primitives
-    .{ .name = "createFence", .purpose = "Crée une Fence (sync CPU↔GPU)" },
-    .{ .name = "destroyFence", .purpose = "Libère une Fence" },
-    .{ .name = "waitFence", .purpose = "Bloque jusqu'à signalement d'une Fence (timeout ns)" },
-    .{ .name = "resetFence", .purpose = "Reset une Fence pour réutilisation" },
-    .{ .name = "createSemaphore", .purpose = "Crée un Semaphore binaire (sync GPU↔GPU)" },
-    .{ .name = "destroySemaphore", .purpose = "Libère un Semaphore" },
+    .{ .name = "createFence", .purpose = "Creates a Fence (CPU↔GPU sync)" },
+    .{ .name = "destroyFence", .purpose = "Frees a Fence" },
+    .{ .name = "waitFence", .purpose = "Blocks until a Fence is signaled (timeout ns)" },
+    .{ .name = "resetFence", .purpose = "Resets a Fence for reuse" },
+    .{ .name = "createSemaphore", .purpose = "Creates a binary Semaphore (GPU↔GPU sync)" },
+    .{ .name = "destroySemaphore", .purpose = "Frees a Semaphore" },
 
     // Swapchain
-    .{ .name = "createSwapchain", .purpose = "Crée la swapchain pour une surface" },
-    .{ .name = "destroySwapchain", .purpose = "Libère la swapchain" },
-    .{ .name = "acquireNextImage", .purpose = "Acquiert le prochain image index de la swapchain" },
-    .{ .name = "getSwapchainImageView", .purpose = "Retourne la TextureViewHandle stable pour une image du swapchain (pré-allouée à l'init)" },
-    .{ .name = "present", .purpose = "Présente l'image courante" },
+    .{ .name = "createSwapchain", .purpose = "Creates the swapchain for a surface" },
+    .{ .name = "destroySwapchain", .purpose = "Frees the swapchain" },
+    .{ .name = "acquireNextImage", .purpose = "Acquires the swapchain's next image index" },
+    .{ .name = "getSwapchainImageView", .purpose = "Returns the stable TextureViewHandle for a swapchain image (pre-allocated at init)" },
+    .{ .name = "present", .purpose = "Presents the current image" },
 
     // Queue & command recording
-    .{ .name = "getQueue", .purpose = "Obtient une Queue (graphics/compute/transfer)" },
-    .{ .name = "createCommandEncoder", .purpose = "Démarre l'enregistrement d'un command buffer" },
-    .{ .name = "submit", .purpose = "Submit un CommandEncoder finalisé à la graphics queue (cf. SubmitDescriptor)" },
+    .{ .name = "getQueue", .purpose = "Gets a Queue (graphics/compute/transfer)" },
+    .{ .name = "createCommandEncoder", .purpose = "Starts recording a command buffer" },
+    .{ .name = "submit", .purpose = "Submits a finished CommandEncoder to the graphics queue (cf. SubmitDescriptor)" },
 };
 
 /// Comptime check that `Backend` declares all the required methods.

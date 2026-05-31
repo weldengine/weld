@@ -1,12 +1,12 @@
 //! Render Graph topological sort tests — Phase 0 / M0.4.
 //!
-//! Couvre brief §Critères d'acceptation > Tests :
+//! Covers brief §Acceptance criteria > Tests:
 //! - `graph produces correct topological order on known DAG`
 //! - `graph detects cycle and returns error`
 //!
-//! Ces tests sont déjà présents en inline dans `graph.zig` mais le brief
-//! demande un fichier dédié — on les duplique ici pour matcher exactement
-//! la check-list.
+//! These tests are already present inline in `graph.zig` but the brief
+//! requires a dedicated file — we duplicate them here to match the
+//! check-list exactly.
 
 const std = @import("std");
 const render = @import("weld_render");
@@ -21,7 +21,7 @@ test "graph produces correct topological order on known DAG" {
     var g = Graph.init(std.testing.allocator);
     defer g.deinit();
 
-    // DAG : A → B → C, et D indépendant. Doit donner A < B < C ordering.
+    // DAG : A → B → C, and D independent. Must give A < B < C ordering.
     const t1 = TextureHandle{ .inner = 100 };
     const t2 = TextureHandle{ .inner = 200 };
 
@@ -66,7 +66,7 @@ test "graph produces correct topological order on known DAG" {
     try g.compile();
     try std.testing.expectEqual(@as(usize, 4), g.execution_order.items.len);
 
-    // Vérifier A < B < C.
+    // Verify A < B < C.
     var pos: [4]?usize = .{ null, null, null, null };
     for (g.execution_order.items, 0..) |pi, i| {
         if (pi == idx_a) pos[0] = i;
