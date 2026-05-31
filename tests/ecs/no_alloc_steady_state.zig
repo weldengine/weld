@@ -31,8 +31,8 @@
 //! M0.2.1 / E2 — watchdog harness. The dispatchFrame measurement
 //! loop runs on a worker thread; the test thread polls a `done`
 //! atomic with a 5 s wall-clock budget (in the spirit of
-//! `engine-zig-conventions.md §13` « Tests with external resources —
-//! mandatory internal timeout »). On timeout, the test dumps the
+//! `engine-zig-conventions.md §13` on external-resource test
+//! timeouts). On timeout, the test dumps the
 //! job scheduler + event bus state via `livelock_dump.zig` and
 //! aborts the test process with exit code 2 — that becomes the
 //! signal the stress loop harness uses to count hangs vs healthy

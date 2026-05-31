@@ -142,8 +142,8 @@ pub const Scheduler = struct {
     /// `pending_count` instead (the brief's sleep/wake requirement
     /// applies to the workers' idle path; making the dispatcher
     /// also block on a condvar added measurable wake-up latency
-    /// without the CPU savings, see journal entry « bench S5a
-    /// regression breakdown »).
+    /// without the CPU savings, see journal entry "bench S5a
+    /// regression breakdown").
     work_available: std.Io.Condition = .init,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io) SchedulerError!Scheduler {
