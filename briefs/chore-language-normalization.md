@@ -110,6 +110,25 @@ Rationale for the split: render (E2) is the largest and riskiest paquet (GPU-adj
   (U+00AB/U+00BB) are banned in code and translated briefs and are added to the E6
   acceptance grep; 3 pre-existing cases fixed (`no_alloc_steady_state.zig`,
   `scheduler.zig`, `scheduler_dag.zig`).
+- **E4 complement GO (Guy) — scope correction: +S4 +M0.0.** The E4 closed-brief
+  list was `{S3, S5, S6, M0.1, M0.2, M0.2.1, M0.3, M0.4}` (8). It omitted two
+  closed briefs: `S4-etch-tree-walking-interpreter.md` (closed spike, peer of
+  S3/S5/S6) and `M0.0-lint-custom.md` (closed and tagged `v0.0.8-M0.0-lint-custom`
+  — not a future milestone). Corrected to **10 closed briefs**; both translated in
+  the E4 complement.
+- **E5 GO (Guy) — scope extended to `.sh` scripts.** Bench reports are regenerated
+  by shell scripts; if those scripts keep French labels, the regenerated reports
+  regress. So `scripts/m0_2_1_bench_e6.sh` (which emits `## Médiane des médianes`,
+  `Verdict`, `par run`, `cumul`, `Pressure = Nominal sur 100 %`) and any other `.sh`
+  under `scripts/` containing French are anglicized in E5 — scripts are repo
+  artefacts. The bench-output fenced blocks already translated in the closed briefs
+  must match the anglicized script output (cross-checked in E5).
+- **Git-history French commit — separate debt, no rewrite (Guy, reco: leave).**
+  Commit `7db5c86` (the M0.2 squash) carries French in its message
+  (`bindgen unifié + plugin loader squelette`). History is **not** rewritten:
+  rewriting is destructive and would force re-tagging M0.2→M0.4 for a single line.
+  The M0.2 brief is English; the brief↔git wording mismatch is accepted and
+  documented. Tracked as a separate debt outside this chore.
 
 ## Execution notes
 
