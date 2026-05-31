@@ -2,8 +2,8 @@
 # M0.2.1 / E6 — thermal-aware bench orchestrator (MBP M-series protocol).
 #
 # Drives one bench session (3 runs of a single case) per the strict protocol
-# defined in `engine-phase-0-criteria.md` § Méthodologie bench / sous-section
-# « Protocole thermal-aware MBP M-series » :
+# defined in `engine-phase-0-criteria.md` § bench methodology / sub-section
+# "thermal-aware MBP M-series protocol":
 #
 #   - 30 min idle minimum before run #1 (counted from the END of pre-build).
 #   - 15 min idle minimum between successive runs.
@@ -237,7 +237,7 @@ mkdir -p "$(dirname "${REPORT}")"
     echo "**Machine** : ${MACHINE}"
     echo "**Build mode** : ${OPTIMIZE}"
     echo "**Workers** : ${WORKERS_DESC}"
-    echo "**Protocol** : thermal-aware MBP M-series, cold-isolé conforme."
+    echo "**Protocol** : thermal-aware MBP M-series, cold-isolated, compliant."
     echo "**Gate** : ${GATE_DESC} (${GATE_NS} ns)"
     echo "**Initial idle** : ${INITIAL_IDLE_SEC} s ($((INITIAL_IDLE_SEC/60)) min)"
     echo "**Inter-run idle** : ${INTER_RUN_IDLE_SEC} s ($((INTER_RUN_IDLE_SEC/60)) min)"
@@ -250,7 +250,7 @@ mkdir -p "$(dirname "${REPORT}")"
         echo "| $((i+1)) | ${medians[$i]} | ${total_samples[$i]} | ${non_nominal_counts[$i]} |"
     done
     echo ""
-    echo "## Médiane des médianes"
+    echo "## Median of medians"
     echo ""
     echo "**${MEDIAN_OF_MEDIANS} ns**"
     echo ""
@@ -260,42 +260,42 @@ mkdir -p "$(dirname "${REPORT}")"
         echo "Verdict : **NO-GO** (> gate ${GATE_NS} ns)."
     fi
     echo ""
-    echo "## Conformité thermal-aware"
+    echo "## Thermal-aware compliance"
     echo ""
     total_non_nominal=0
     for nn in "${non_nominal_counts[@]}"; do
         total_non_nominal=$((total_non_nominal + nn))
     done
     if [ "${total_non_nominal}" -eq 0 ]; then
-        echo "Pressure = Nominal sur **100 %** des samples (${total_samples[*]} samples cumul). **Protocole conforme.**"
+        echo "Pressure = Nominal on **100 %** of samples (${total_samples[*]} cumulative samples). **Protocol compliant.**"
     else
-        echo "ATTENTION : ${total_non_nominal} samples non-Nominal détectés. Protocole VIOLÉ."
+        echo "WARNING: ${total_non_nominal} non-Nominal samples detected. Protocol VIOLATED."
     fi
     echo ""
-    echo "## Inspection false sharing (M0.2.1 / E6 note 2)"
+    echo "## False-sharing inspection (M0.2.1 / E6 note 2)"
     echo ""
-    echo "Le comptime layout guard dans \`src/core/jobs/scheduler.zig\` (post-E5)"
-    echo "valide à compile time que \`gen_and_n\` et \`pending_count\` sont chacun"
-    echo "aligné sur sa propre cache line (offsets multiples de 64, delta ≥ 64)."
-    echo "Build passe ⇒ assertion validée. **Aucun false sharing entre dispatcher"
-    echo "et workers sur ces atomics.**"
+    echo "The comptime layout guard in \`src/core/jobs/scheduler.zig\` (post-E5)"
+    echo "validates at compile time that \`gen_and_n\` and \`pending_count\` are each"
+    echo "aligned on their own cache line (offsets multiples of 64, delta ≥ 64)."
+    echo "Build passes ⇒ assertion validated. **No false sharing between dispatcher"
+    echo "and workers on these atomics.**"
     echo ""
-    echo "## Logs archivés"
+    echo "## Archived logs"
     echo ""
-    echo "Sous \`${OUT_DIR}/\` :"
+    echo "Under \`${OUT_DIR}/\`:"
     for i in 1 2 3; do
-        echo "- \`bench_report_run${i}.md\` — sortie Markdown du bench."
-        echo "- \`bench_stdout_run${i}.log\` — stdout/stderr de l'invocation."
-        echo "- \`powermetrics_run${i}.log\` — trace thermique (11 samples par run).";
+        echo "- \`bench_report_run${i}.md\` — bench Markdown output."
+        echo "- \`bench_stdout_run${i}.log\` — stdout/stderr of the invocation."
+        echo "- \`powermetrics_run${i}.log\` — thermal trace (11 samples per run).";
     done
     echo ""
-    echo "## Protocole respecté"
+    echo "## Protocol followed"
     echo ""
-    echo "- ≥ ${INITIAL_IDLE_SEC} s ($((INITIAL_IDLE_SEC/60)) min) idle après pre-build avant run #1 — enforced par sleep."
-    echo "- ≥ ${INTER_RUN_IDLE_SEC} s ($((INTER_RUN_IDLE_SEC/60)) min) idle entre runs — enforced par sleep."
-    echo "- 3 runs par session — limite la chaîne thermal cumulée."
-    echo "- \`powermetrics --samplers thermal,cpu_power -i 100\` capturé en parallèle de chaque run."
-    echo "- Vérification programmatique \`Current pressure level: Nominal\` sur 100 % des samples."
+    echo "- ≥ ${INITIAL_IDLE_SEC} s ($((INITIAL_IDLE_SEC/60)) min) idle after pre-build before run #1 — enforced by sleep."
+    echo "- ≥ ${INTER_RUN_IDLE_SEC} s ($((INTER_RUN_IDLE_SEC/60)) min) idle between runs — enforced by sleep."
+    echo "- 3 runs per session — limits the cumulative thermal chain."
+    echo "- \`powermetrics --samplers thermal,cpu_power -i 100\` captured in parallel with each run."
+    echo "- Programmatic verification \`Current pressure level: Nominal\` on 100 % of samples."
 } > "${REPORT}"
 
 echo ""
