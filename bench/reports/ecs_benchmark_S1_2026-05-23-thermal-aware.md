@@ -5,7 +5,7 @@
 **Machine** : Apple M4 Pro
 **Build mode** : ReleaseSafe
 **Workers** : --workers=4 (forced — S1 baseline calibration)
-**Protocol** : thermal-aware MBP M-series, cold-isolé conforme.
+**Protocol** : thermal-aware MBP M-series, cold-isolated, compliant.
 **Gate** : 62 µs (62000 ns)
 **Initial idle** : 1800 s (30 min)
 **Inter-run idle** : 900 s (15 min)
@@ -18,41 +18,41 @@
 | 2 | 61875 | 12 | 0 |
 | 3 | 61042 | 12 | 0 |
 
-## Médiane des médianes
+## Median of medians
 
 **61042 ns**
 
 Verdict : **GO** (≤ gate 62000 ns).
 
-## Conformité thermal-aware
+## Thermal-aware compliance
 
-Pressure = Nominal sur **100 %** des samples (12 12 12 samples cumul). **Protocole conforme.**
+Pressure = Nominal on **100 %** of samples (12 12 12 cumulative samples). **Protocol compliant.**
 
-## Inspection false sharing (M0.2.1 / E6 note 2)
+## False-sharing inspection (M0.2.1 / E6 note 2)
 
-Le comptime layout guard dans `src/core/jobs/scheduler.zig` (post-E5)
-valide à compile time que `gen_and_n` et `pending_count` sont chacun
-aligné sur sa propre cache line (offsets multiples de 64, delta ≥ 64).
-Build passe ⇒ assertion validée. **Aucun false sharing entre dispatcher
-et workers sur ces atomics.**
+The comptime layout guard in `src/core/jobs/scheduler.zig` (post-E5)
+validates at compile time that `gen_and_n` and `pending_count` are each
+aligned on their own cache line (offsets multiples of 64, delta ≥ 64).
+Build passes ⇒ assertion validated. **No false sharing between dispatcher
+and workers on these atomics.**
 
-## Logs archivés
+## Archived logs
 
-Sous `/tmp/m0_2_1_bench_e6_s1_2026-05-23_78889/` :
-- `bench_report_run1.md` — sortie Markdown du bench.
-- `bench_stdout_run1.log` — stdout/stderr de l'invocation.
-- `powermetrics_run1.log` — trace thermique (11 samples par run).
-- `bench_report_run2.md` — sortie Markdown du bench.
-- `bench_stdout_run2.log` — stdout/stderr de l'invocation.
-- `powermetrics_run2.log` — trace thermique (11 samples par run).
-- `bench_report_run3.md` — sortie Markdown du bench.
-- `bench_stdout_run3.log` — stdout/stderr de l'invocation.
-- `powermetrics_run3.log` — trace thermique (11 samples par run).
+Under `/tmp/m0_2_1_bench_e6_s1_2026-05-23_78889/`:
+- `bench_report_run1.md` — bench Markdown output.
+- `bench_stdout_run1.log` — stdout/stderr of the invocation.
+- `powermetrics_run1.log` — thermal trace (11 samples per run).
+- `bench_report_run2.md` — bench Markdown output.
+- `bench_stdout_run2.log` — stdout/stderr of the invocation.
+- `powermetrics_run2.log` — thermal trace (11 samples per run).
+- `bench_report_run3.md` — bench Markdown output.
+- `bench_stdout_run3.log` — stdout/stderr of the invocation.
+- `powermetrics_run3.log` — thermal trace (11 samples per run).
 
-## Protocole respecté
+## Protocol followed
 
-- ≥ 1800 s (30 min) idle après pre-build avant run #1 — enforced par sleep.
-- ≥ 900 s (15 min) idle entre runs — enforced par sleep.
-- 3 runs par session — limite la chaîne thermal cumulée.
-- `powermetrics --samplers thermal,cpu_power -i 100` capturé en parallèle de chaque run.
-- Vérification programmatique `Current pressure level: Nominal` sur 100 % des samples.
+- ≥ 1800 s (30 min) idle after pre-build before run #1 — enforced by sleep.
+- ≥ 900 s (15 min) idle between runs — enforced by sleep.
+- 3 runs per session — limits the cumulative thermal chain.
+- `powermetrics --samplers thermal,cpu_power -i 100` captured in parallel with each run.
+- Programmatic verification `Current pressure level: Nominal` on 100 % of samples.

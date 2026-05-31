@@ -1,21 +1,21 @@
 # S1 ECS bench — M0.2 / E6 cold-isolated re-bench (v2, strict protocol)
 
-> **Date :** 2026-05-22
-> **Commit :** `4de00f6` (HEAD `phase-0/core/rtti-resources-events-bindgen` pré-tag M0.2)
-> **Branche :** `phase-0/core/rtti-resources-events-bindgen`
-> **Bench :** `zig-out/bin/ecs-benchmark --case=s1 --workers=4`
-> **Source :** `bench/ecs_benchmark.zig` (S1 non-regression : 100 000 entités × 1 archetype × 1 système, `--workers=4`)
-> **Machine :** dev primaire Apple M4 Pro (même hardware que la baseline 62 µs post-recalibration M0.1/E6)
-> **Build mode :** ReleaseSafe (cible canonique du target `bench-ecs`, Debug rejeté par le bench)
-> **Mode protocole :** **cold-isolé strict spec-conforme** (5 min cool-down initial + 2 min pause inter-run, machine pré-confirmée par Guy en état isolé — DND/Focus actif, toutes apps non-système fermées, pas de Time Machine / Spotlight / sync iCloud)
-> **Baseline :** S1 cold-isolé Apple M4 Pro ReleaseSafe (gate canonique post-recalibration M0.1/E6) — médiane 62 µs / gate strict 65 µs (gate +5 %)
-> **Predecessor :** v1 `bench/reports/ecs_benchmark_S1_2026-05-22-coldisolated.md` (cool-down 60 s + inter-run 30 s — protocole non spec-conforme, conservé pour traçabilité méthodologique)
+> **Date:** 2026-05-22
+> **Commit:** `4de00f6` (HEAD `phase-0/core/rtti-resources-events-bindgen` pre-M0.2-tag)
+> **Branch:** `phase-0/core/rtti-resources-events-bindgen`
+> **Bench:** `zig-out/bin/ecs-benchmark --case=s1 --workers=4`
+> **Source:** `bench/ecs_benchmark.zig` (S1 non-regression: 100 000 entities × 1 archetype × 1 system, `--workers=4`)
+> **Machine:** primary dev Apple M4 Pro (same hardware as the 62 µs post-recalibration M0.1/E6 baseline)
+> **Build mode:** ReleaseSafe (canonical target of `bench-ecs`, Debug rejected by the bench)
+> **Protocol mode:** **strict spec-compliant cold-isolated** (5 min initial cool-down + 2 min inter-run pause, machine pre-confirmed by Guy in an isolated state — DND/Focus active, all non-system apps closed, no Time Machine / Spotlight / iCloud sync)
+> **Baseline:** S1 cold-isolated Apple M4 Pro ReleaseSafe (canonical gate post-recalibration M0.1/E6) — median 62 µs / strict gate 65 µs (gate +5 %)
+> **Predecessor:** v1 `bench/reports/ecs_benchmark_S1_2026-05-22-coldisolated.md` (60 s cool-down + 30 s inter-run — non-spec-compliant protocol, kept for methodological traceability)
 
-## Protocole respecté (preuve timestamps)
+## Protocol followed (timestamp proof)
 
-| Phase | Début | Fin | Durée | Seuil spec |
+| Phase | Start | End | Duration | Spec threshold |
 |---|---|---|---|---|
-| Cool-down initial | 22:44:48 | 22:52:52 | 8 min 04 s | ≥ 5 min ✓ |
+| Initial cool-down | 22:44:48 | 22:52:52 | 8 min 04 s | ≥ 5 min ✓ |
 | Pause 1→2 | 22:52:52 | 22:54:52 | 2 min 00 s | ≥ 2 min ✓ |
 | Pause 2→3 | 22:54:52 | 22:56:52 | 2 min 00 s | ≥ 2 min ✓ |
 | Pause 3→4 | 22:56:52 | 22:58:52 | 2 min 00 s | ≥ 2 min ✓ |
@@ -23,13 +23,13 @@
 | Pause 5→6 | 23:00:53 | 23:02:53 | 2 min 00 s | ≥ 2 min ✓ |
 | Pause 6→7 | 23:02:53 | 23:04:53 | 2 min 00 s | ≥ 2 min ✓ |
 
-Cool-down initial mesuré à 484 s (8 min 04) vs seuil 300 s — la surcharge ~184 s vient du delta entre le `sleep 300` du script et la latence harness/scheduling, donc dans le sens conservatif (machine au repos plus longtemps que strict). Aucun raccourci ; aucune interruption ; aucun retry.
+Initial cool-down measured at 484 s (8 min 04) vs the 300 s threshold — the ~184 s overage comes from the delta between the script's `sleep 300` and harness/scheduling latency, so in the conservative direction (machine at rest longer than strict). No shortcut; no interruption; no retry.
 
-Log brut des timestamps disponible dans `/tmp/s1_strict_runs/log.txt` (généré au tour, non commité car éphémère).
+Raw timestamp log available in `/tmp/s1_strict_runs/log.txt` (generated on the fly, not committed because ephemeral).
 
-## Mesures (7 runs successifs, ns)
+## Measurements (7 successive runs, ns)
 
-| Run | Timestamp | Min | Médiane | Mean | p95 | p99 | Max | Imbalance | Statut local |
+| Run | Timestamp | Min | Median | Mean | p95 | p99 | Max | Imbalance | Local status |
 |---|---|---|---|---|---|---|---|---|---|
 | 1 | 22:52:52 | 51 459 | **75 166** | 77 876 | 107 333 | 122 750 | 128 375 | 8.40 % | NO-GO |
 | 2 | 22:54:52 | 50 708 | **72 125** | 74 213 | 107 125 | 125 625 | 146 125 | 6.76 % | NO-GO |
@@ -39,56 +39,56 @@ Log brut des timestamps disponible dans `/tmp/s1_strict_runs/log.txt` (généré
 | 6 | 23:02:53 | 51 291 | **76 708** | 78 747 | 108 917 | 132 167 | 151 667 | 7.28 % | NO-GO |
 | 7 | 23:04:53 | 51 125 | **60 000** | 61 882 | 78 208 | 86 583 | 91 083 | 1.60 % | GO |
 
-**Médianes triées ascendantes (ns) :** 60 000 ; 72 125 ; 74 583 ; **75 166** ; 76 708 ; 77 000 ; 79 958.
+**Sorted ascending medians (ns):** 60 000 ; 72 125 ; 74 583 ; **75 166** ; 76 708 ; 77 000 ; 79 958.
 
-**Médiane des médianes (position 4 sur 7) :** **75 166 ns ≈ 75.2 µs.**
+**Median of medians (position 4 of 7):** **75 166 ns ≈ 75.2 µs.**
 
-## Analyse
+## Analysis
 
-- **Distribution dominante dans la zone NO-GO** : 6 runs sur 7 mesurent dans la fourchette 72-80 µs. Le 7e run (run 7) sort à 60 µs avec une imbalance de 1.60 % (vs 6.76-8.40 % sur les 6 autres). L'écart entre les deux régimes est sec : il n'y a pas de transition continue, c'est un saut net entre runs 1-6 et run 7.
-- **Imbalance corrélée à la médiane** : les runs 1-6 ont une imbalance moyenne ~7.4 %, le run 7 a une imbalance de 1.60 %. La répartition des tâches sur les 4 workers est sensiblement meilleure pour le run rapide. Le coefficient de corrélation visible est élevé : faible imbalance → faible médiane.
-- **Aucun motif temporel** : la pause de 2 min entre chaque run est respectée. Le run 7 n'est ni le premier (post-cool-down long) ni un cas particulier de cache cold — il intervient après 6 runs précédents, dans le même régime de pause. Le retour à un régime « rapide » au run 7 n'est pas explicable par la chronologie seule.
-- **p99 et max suivent le même clivage** : runs 1-6 ont p99 ∈ [122-144] µs et max ∈ [128-189] µs (queues dégradées). Run 7 a p99 = 86.6 µs et max = 91.1 µs (queue propre, dans les bornes baseline historique).
-- **Imbalance dans le gate sur tous les runs** (max 8.40 %, gate 15 %). La répartition workload-vs-worker n'est pas catastrophique sur les runs lents — c'est une dérive de ~5-7 points vs le run 7 qui mesure dans les conditions « historiques ».
+- **Distribution dominated by the NO-GO zone**: 6 of 7 runs measure in the 72-80 µs range. The 7th run (run 7) comes out at 60 µs with an imbalance of 1.60 % (vs 6.76-8.40 % on the other 6). The gap between the two regimes is sharp: there is no continuous transition, it is a clean jump between runs 1-6 and run 7.
+- **Imbalance correlated with the median**: runs 1-6 have an average imbalance ~7.4 %, run 7 has an imbalance of 1.60 %. Task distribution across the 4 workers is markedly better for the fast run. The visible correlation coefficient is high: low imbalance → low median.
+- **No temporal pattern**: the 2 min pause between each run is respected. Run 7 is neither the first (post-long-cool-down) nor a special cold-cache case — it occurs after 6 previous runs, in the same pause regime. The return to a "fast" regime at run 7 is not explainable by chronology alone.
+- **p99 and max follow the same split**: runs 1-6 have p99 ∈ [122-144] µs and max ∈ [128-189] µs (degraded tails). Run 7 has p99 = 86.6 µs and max = 91.1 µs (clean tail, within the historical baseline bounds).
+- **Imbalance within the gate on all runs** (max 8.40 %, gate 15 %). The workload-vs-worker distribution is not catastrophic on the slow runs — it is a ~5-7 point drift vs run 7, which measures under "historical" conditions.
 
-Le diagnostic n'est PAS livré comme justification — c'est une observation factuelle pour le retour Claude.ai. Aucune hypothèse sur la cause (RTTI registry init, singleton_resources lookup, event_bus drain, scheduler dispatch overhead, etc.) n'est avancée ici. C'est ton travail.
+The diagnosis is NOT delivered as a justification — it is a factual observation for the Claude.ai feedback. No hypothesis on the cause (RTTI registry init, singleton_resources lookup, event_bus drain, scheduler dispatch overhead, etc.) is advanced here. That is your job.
 
 ## Gate
 
-**Lecture stricte des seuils :**
+**Strict reading of the thresholds:**
 
-- Gate strict : médiane des médianes ≤ 65 µs (gate +5 % vs baseline S1 cold-isolé Apple M4 Pro ReleaseSafe post-recalibration M0.1/E6 = 62 µs).
-- Mesurée : médiane des médianes = **75.2 µs**.
-- Excès vs gate : **+10.2 µs (+15.7 %)** au-dessus de la limite.
-- Excès vs baseline canonique 62 µs : **+13.2 µs (+21 %)**.
-- Excès vs baseline historique S1 v0.0.2 (54.5 µs) : **+20.7 µs (+38 %)**.
+- Strict gate: median of medians ≤ 65 µs (gate +5 % vs the S1 cold-isolated Apple M4 Pro ReleaseSafe baseline post-recalibration M0.1/E6 = 62 µs).
+- Measured: median of medians = **75.2 µs**.
+- Excess vs gate: **+10.2 µs (+15.7 %)** above the limit.
+- Excess vs the canonical 62 µs baseline: **+13.2 µs (+21 %)**.
+- Excess vs the historical S1 v0.0.2 baseline (54.5 µs): **+20.7 µs (+38 %)**.
 
-**Verdict : NO-GO (FAIL strict en protocole spec-conforme).**
+**Verdict: NO-GO (strict FAIL under spec-compliant protocol).**
 
 ## Conclusion
 
-Le bench S1 ne passe pas le gate strict 65 µs au commit `4de00f6` de la branche `phase-0/core/rtti-resources-events-bindgen`, avec protocole cold-isolé strict spec-conforme (5 min cool-down + 2 min inter-run respectés et tracés timestamps).
+The S1 bench does not pass the strict 65 µs gate at commit `4de00f6` of branch `phase-0/core/rtti-resources-events-bindgen`, with a strict spec-compliant cold-isolated protocol (5 min cool-down + 2 min inter-run respected and timestamp-traced).
 
-Le verdict v1 (NO-GO au protocole non spec-conforme) est confirmé en protocole strict. Le pattern observé est différent (v1 : bimodal sec runs 1-2 vs runs 3-7 ; v2 : 6 runs lents + 1 run rapide outlier) mais la conclusion arithmétique est identique : médiane des médianes > 65 µs.
+The v1 verdict (NO-GO under non-spec-compliant protocol) is confirmed under strict protocol. The observed pattern is different (v1: sharp bimodal runs 1-2 vs runs 3-7; v2: 6 slow runs + 1 fast outlier run) but the arithmetic conclusion is identical: median of medians > 65 µs.
 
-Conformément à la procédure de bench opposable, aucune mitigation unilatérale n'est proposée — pas de re-run cherry-pick, pas de re-tune de paramètres, pas d'ajustement du gate. Aucune hypothèse de cause de régression n'est avancée. Le verdict FAIL est archivé tel quel pour analyse Claude.ai.
+Per the opposable bench procedure, no unilateral mitigation is proposed — no cherry-pick re-run, no parameter re-tune, no gate adjustment. No regression-cause hypothesis is advanced. The FAIL verdict is archived as-is for Claude.ai analysis.
 
-**Blocage Cas 2 — régression structurelle suspectée. Retour Claude.ai requis avant tag M0.2.**
+**Case 2 blocker — structural regression suspected. Claude.ai round-trip required before the M0.2 tag.**
 
-## Référence baseline pour l'audit retour
+## Baseline reference for the feedback audit
 
-- Baseline S1 v0.0.2 (Apple Silicon M4 Pro ReleaseSafe, mini-ECS minimal) : médiane 54.5 µs.
-- Baseline canonique post-recalibration M0.1/E6 (même machine, ECS Tier 0 complet) : médiane 62 µs.
-- Gate strict M0.2 (engine-phase-0-criteria.md C0.1 sub-gate S1) : 65 µs (baseline 62 µs + 5 %).
-- Mesure v1 cold-isolé non spec-conforme : médiane-of-médianes 74.7 µs.
-- Mesure v2 cold-isolé STRICT spec-conforme : **médiane-of-médianes 75.2 µs (NO-GO confirmé)**.
+- S1 v0.0.2 baseline (Apple Silicon M4 Pro ReleaseSafe, minimal mini-ECS): median 54.5 µs.
+- Canonical baseline post-recalibration M0.1/E6 (same machine, full Tier 0 ECS): median 62 µs.
+- Strict M0.2 gate (engine-phase-0-criteria.md C0.1 sub-gate S1): 65 µs (62 µs baseline + 5 %).
+- v1 non-spec-compliant cold-isolated measurement: median-of-medians 74.7 µs.
+- v2 STRICT spec-compliant cold-isolated measurement: **median-of-medians 75.2 µs (NO-GO confirmed)**.
 
-Surface modifiée entre `v0.1.0-M0.1-ecs-full` (gate 62 µs) et HEAD `4de00f6` :
-- E1 RTTI (`src/core/rtti/`) — sub-system additif, pas de wiring ECS hot-path déclaré
-- E2 IPC `messages.zig` swap Wyhash → xxHash64 (comptime, pas runtime ECS)
-- E3 Resources (`src/core/resources/`) — `singleton_resources: ResourceRegistry` ajouté à `World`, flag `is_singleton: bool` sur `Archetype`, check `if (arch.is_singleton) continue` dans `Query.maybeRescan` + `ComptimeQuery.next`
-- E4 Events (`src/core/events/`) — `event_bus: EventBus` ajouté à `World`, appels `drainAtBoundary` aux 3 boundaries du scheduler (`.phase` × 6 + `.tick` + `.frame`)
-- E5 Bindgen — refactor tooling pure, aucune touche à `src/core/`
-- E6 Plugin loader — `src/core/plugin_loader/`, additif, pas de wiring ECS
+Surface modified between `v0.1.0-M0.1-ecs-full` (gate 62 µs) and HEAD `4de00f6`:
+- E1 RTTI (`src/core/rtti/`) — additive sub-system, no declared ECS hot-path wiring
+- E2 IPC `messages.zig` swap Wyhash → xxHash64 (comptime, not runtime ECS)
+- E3 Resources (`src/core/resources/`) — `singleton_resources: ResourceRegistry` added to `World`, `is_singleton: bool` flag on `Archetype`, `if (arch.is_singleton) continue` check in `Query.maybeRescan` + `ComptimeQuery.next`
+- E4 Events (`src/core/events/`) — `event_bus: EventBus` added to `World`, `drainAtBoundary` calls at the scheduler's 3 boundaries (`.phase` × 6 + `.tick` + `.frame`)
+- E5 Bindgen — pure tooling refactor, no touch to `src/core/`
+- E6 Plugin loader — `src/core/plugin_loader/`, additive, no ECS wiring
 
-Les candidats prima facie pour explorer la régression sont E3 et E4 — les seuls qui touchent la boucle scheduler et la rescan-path des queries. C'est une liste de candidats, pas un diagnostic.
+The prima facie candidates for exploring the regression are E3 and E4 — the only ones touching the scheduler loop and the queries' rescan-path. This is a candidate list, not a diagnosis.

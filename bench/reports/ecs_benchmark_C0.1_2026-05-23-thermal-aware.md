@@ -5,7 +5,7 @@
 **Machine** : Apple M4 Pro
 **Build mode** : ReleaseFast
 **Workers** : default (CPU-topology-driven)
-**Protocol** : thermal-aware MBP M-series, cold-isolé conforme.
+**Protocol** : thermal-aware MBP M-series, cold-isolated, compliant.
 **Gate** : 16.6 ms (16600000 ns)
 **Initial idle** : 1800 s (30 min)
 **Inter-run idle** : 900 s (15 min)
@@ -18,69 +18,69 @@
 | 2 | 3779000 | 96 | 0 |
 | 3 | 3729667 | 65 | 0 |
 
-## Médiane des médianes
+## Median of medians
 
 **3742958 ns**
 
 Verdict : **GO** (≤ gate 16600000 ns).
 
-## Conformité thermal-aware
+## Thermal-aware compliance
 
-Pressure = Nominal sur **100 %** des samples (68 96 65 samples cumul). **Protocole conforme.**
+Pressure = Nominal on **100 %** of samples (68 96 65 cumulative samples). **Protocol compliant.**
 
-## Question — delta vs baseline M0.1 14.2 ms (M0.2.1 / E6 review)
+## Question — delta vs M0.1 baseline 14.2 ms (M0.2.1 / E6 review)
 
-Mesure 3.74 ms vs baseline M0.1 14.2 ms documentée dans le squash commit
-M0.1 et reproduite dans `engine-phase-0-criteria.md`. Investiguer :
+Measurement 3.74 ms vs the M0.1 baseline 14.2 ms documented in the M0.1
+squash commit and reproduced in `engine-phase-0-criteria.md`. To investigate:
 
-- (a) Le bench C0.1 a-t-il changé de paramètres entre M0.1 et HEAD M0.2.1 ?
-  **Non** — `git log v0.1.0-M0.1-ecs-full..HEAD -- bench/ecs_benchmark.zig`
-  retourne vide. Les constantes C0.1 (1M entités sur 4 archetypes 700k/200k/60k/40k,
-  10 systèmes, warmup 100 + measured 1000) sont identiques.
+- (a) Did the C0.1 bench change parameters between M0.1 and HEAD M0.2.1?
+  **No** — `git log v0.1.0-M0.1-ecs-full..HEAD -- bench/ecs_benchmark.zig`
+  returns empty. The C0.1 constants (1M entities over 4 archetypes 700k/200k/60k/40k,
+  10 systems, warmup 100 + measured 1000) are identical.
 
-- (b) Compile mode discrepancy ? **Probable cause.** Le squash commit M0.1
-  affiche un header `Measures (..., ReleaseSafe, --workers=4 pour S1)` qui
-  englobe la ligne C0.1 14.2 ms. Or le protocole `engine-phase-0-criteria.md`
-  § Méthodologie bench exige **ReleaseFast pour C0.1**. ReleaseSafe ajoute
-  bounds checks + overflow checks + autres safety runtime — typiquement
-  2-4× plus lent. Ratio observé : 14.2 / 3.74 ≈ 3.8× — cohérent avec un
-  écart ReleaseSafe → ReleaseFast.
+- (b) Compile mode discrepancy? **Probable cause.** The M0.1 squash commit
+  shows a `Measures (..., ReleaseSafe, --workers=4 for S1)` header that
+  encompasses the C0.1 14.2 ms line. But the `engine-phase-0-criteria.md`
+  § bench methodology protocol requires **ReleaseFast for C0.1**. ReleaseSafe adds
+  bounds checks + overflow checks + other runtime safety — typically
+  2-4× slower. Observed ratio: 14.2 / 3.74 ≈ 3.8× — consistent with a
+  ReleaseSafe → ReleaseFast gap.
 
-- (c) La baseline M0.1 14.2 ms reste-t-elle opposable ? **Non, vraisemblablement
-  pas** — non-protocol-compliant si effectivement mesurée en ReleaseSafe. La
-  valeur 3.74 ms thermal-aware ReleaseFast est la première mesure protocol-
-  compliant archivée pour C0.1.
+- (c) Does the M0.1 14.2 ms baseline remain comparable? **Probably not** —
+  non-protocol-compliant if actually measured in ReleaseSafe. The 3.74 ms
+  thermal-aware ReleaseFast value is the first protocol-compliant measurement
+  archived for C0.1.
 
-- (d) Nouvelle baseline ? **À acter par milestone Phase 0.1+ dédié.** Pas en
-  scope M0.2.1. Pour ce milestone, le gate 16.6 ms est respecté (3.74 ms ≤
-  16.6 ms ✓, headroom ~4.4×). M0.2.1 conclut GO sur le gate, et la question
-  baseline est tracée comme dette `D-M0.2.1-c01-baseline-investigation`.
+- (d) New baseline? **To be recorded by a dedicated Phase 0.1+ milestone.** Not in
+  M0.2.1 scope. For this milestone, the 16.6 ms gate is met (3.74 ms ≤
+  16.6 ms ✓, headroom ~4.4×). M0.2.1 concludes GO on the gate, and the baseline
+  question is tracked as debt `D-M0.2.1-c01-baseline-investigation`.
 
-## Inspection false sharing (M0.2.1 / E6 note 2)
+## False-sharing inspection (M0.2.1 / E6 note 2)
 
-Le comptime layout guard dans `src/core/jobs/scheduler.zig` (post-E5)
-valide à compile time que `gen_and_n` et `pending_count` sont chacun
-aligné sur sa propre cache line (offsets multiples de 64, delta ≥ 64).
-Build passe ⇒ assertion validée. **Aucun false sharing entre dispatcher
-et workers sur ces atomics.**
+The comptime layout guard in `src/core/jobs/scheduler.zig` (post-E5)
+validates at compile time that `gen_and_n` and `pending_count` are each
+aligned on their own cache line (offsets multiples of 64, delta ≥ 64).
+Build passes ⇒ assertion validated. **No false sharing between dispatcher
+and workers on these atomics.**
 
-## Logs archivés
+## Archived logs
 
-Sous `/tmp/m0_2_1_bench_e6_c01_2026-05-23_11537/` :
-- `bench_report_run1.md` — sortie Markdown du bench.
-- `bench_stdout_run1.log` — stdout/stderr de l'invocation.
-- `powermetrics_run1.log` — trace thermique (11 samples par run).
-- `bench_report_run2.md` — sortie Markdown du bench.
-- `bench_stdout_run2.log` — stdout/stderr de l'invocation.
-- `powermetrics_run2.log` — trace thermique (11 samples par run).
-- `bench_report_run3.md` — sortie Markdown du bench.
-- `bench_stdout_run3.log` — stdout/stderr de l'invocation.
-- `powermetrics_run3.log` — trace thermique (11 samples par run).
+Under `/tmp/m0_2_1_bench_e6_c01_2026-05-23_11537/`:
+- `bench_report_run1.md` — bench Markdown output.
+- `bench_stdout_run1.log` — stdout/stderr of the invocation.
+- `powermetrics_run1.log` — thermal trace (11 samples per run).
+- `bench_report_run2.md` — bench Markdown output.
+- `bench_stdout_run2.log` — stdout/stderr of the invocation.
+- `powermetrics_run2.log` — thermal trace (11 samples per run).
+- `bench_report_run3.md` — bench Markdown output.
+- `bench_stdout_run3.log` — stdout/stderr of the invocation.
+- `powermetrics_run3.log` — thermal trace (11 samples per run).
 
-## Protocole respecté
+## Protocol followed
 
-- ≥ 1800 s (30 min) idle après pre-build avant run #1 — enforced par sleep.
-- ≥ 900 s (15 min) idle entre runs — enforced par sleep.
-- 3 runs par session — limite la chaîne thermal cumulée.
-- `powermetrics --samplers thermal,cpu_power -i 100` capturé en parallèle de chaque run.
-- Vérification programmatique `Current pressure level: Nominal` sur 100 % des samples.
+- ≥ 1800 s (30 min) idle after pre-build before run #1 — enforced by sleep.
+- ≥ 900 s (15 min) idle between runs — enforced by sleep.
+- 3 runs per session — limits the cumulative thermal chain.
+- `powermetrics --samplers thermal,cpu_power -i 100` captured in parallel with each run.
+- Programmatic verification `Current pressure level: Nominal` on 100 % of samples.
