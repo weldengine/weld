@@ -1,7 +1,7 @@
 //! Audio Dummy backend — no-op implementation of the Tier 0 `AudioModule`
 //! interface (`engine-tier-interfaces.md` §2).
 //!
-//! Phase 0.3 / M0.3 deliverable. Cohérent avec `engine-audio-pulse.md`
+//! Phase 0.3 / M0.3 deliverable. Consistent with `engine-audio-pulse.md`
 //! §1.1 — Dummy = backend #1 in the implementation order, ~50 lines. The
 //! real backends (WASAPI / PipeWire / PulseAudio / ALSA / CoreAudio) land
 //! in Phase 1 (cf. `engine-phase-1-criteria.md` C1.3).

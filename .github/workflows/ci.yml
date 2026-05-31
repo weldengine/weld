@@ -28,7 +28,7 @@ jobs:
     # additional M0.x test specs without surprise CI failures. Proper
     # CI restructuring (job split / bench separation / Windows cache
     # investigation) is queued for M0.2 — cf. brief journal entry
-    # 2026-05-21 18:00 « Dette CI à instruire sérieusement en M0.2 ».
+    # 2026-05-21 18:00 "CI debt to investigate seriously in M0.2".
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6

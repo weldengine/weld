@@ -1,9 +1,9 @@
 //! S6 editor Vulkan blit renderer.
 //!
-//! WELD_LEGACY_VK_DISPATCH — pre-M0.4 code, migration vers la GAL Vulkan
-//! (cf. `src/modules/render/gal/vulkan/`) tracée comme dette Phase 1+.
-//! La règle linter `no_device_dispatch_outside_gal` est suspendue pour
-//! ce fichier via le marker ci-dessus.
+//! WELD_LEGACY_VK_DISPATCH — pre-M0.4 code, migration to the Vulkan GAL
+//! (cf. `src/modules/render/gal/vulkan/`) tracked as Phase 1+ debt.
+//! The `no_device_dispatch_outside_gal` linter rule is suspended for
+//! this file via the marker above.
 //!
 //! Opens a window-sized swapchain and a fullscreen-quad pipeline that
 //! samples the runtime-written viewport shm framebuffer (1280×720

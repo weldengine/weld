@@ -582,8 +582,8 @@ fn writeErrorSet(ctx: *Ctx) !void {
         \\
     );
 
-    // M0.4 — émission dynamique du switch checkResult : seuls les arms
-    // dont le variant existe dans l'enum Result post-closure sont émis
+    // M0.4 — dynamic emission of the checkResult switch: only the arms
+    // whose variant exists in the post-closure Result enum are emitted
     // (cf. brief §Scope D-S2-vk-whitelist).
     const result_group = findEnumGroup(ctx.model.enum_groups, "VkResult");
     const success_arms = [_]struct { variant: []const u8 }{
@@ -591,7 +591,7 @@ fn writeErrorSet(ctx: *Ctx) !void {
         .{ .variant = "event_set" },      .{ .variant = "event_reset" }, .{ .variant = "incomplete" },
         .{ .variant = "suboptimal_khr" },
     };
-    // 1ère ligne : arms qui retournent void (success-equivalents).
+    // 1st line: arms that return void (success-equivalents).
     try ctx.append("        ");
     var sep_void = false;
     if (result_group) |g| {
@@ -642,17 +642,17 @@ fn writeErrorSet(ctx: *Ctx) !void {
     );
 }
 
-/// Helper : vérifie qu'un variant (camel_case Zig) existe dans un EnumGroup
-/// post-closure. Le nom du variant côté model est `VK_ERROR_FOO_BAR` ; le
-/// nom émis est `error_foo_bar`. On retient ici la forme Zig pour matcher
-/// les call sites.
+/// Helper: checks that a variant (camel_case Zig) exists in a post-closure
+/// EnumGroup. The variant's name on the model side is `VK_ERROR_FOO_BAR`; the
+/// emitted name is `error_foo_bar`. We keep the Zig form here to match
+/// the call sites.
 fn variantExists(g: parser.EnumGroup, zig_name: []const u8) bool {
     for (g.values) |v| {
         if (v.alias != null) continue;
-        // Le emit strippe le préfixe et passe en snake_case ; ici, on
-        // compare lazy : suffix-match `zig_name` à la fin de `v.name`
-        // après stripVkPrefix + snake. Pratique : on match sur le hash
-        // intuitif "VK_ERROR_OUT_OF_HOST_MEMORY" → "error_out_of_host_memory".
+        // The emit strips the prefix and switches to snake_case; here, we
+        // compare lazily: suffix-match `zig_name` at the end of `v.name`
+        // after stripVkPrefix + snake. In practice: we match on the
+        // intuitive mapping "VK_ERROR_OUT_OF_HOST_MEMORY" → "error_out_of_host_memory".
         var matches = true;
         var i: usize = 0;
         var j: usize = 3; // skip "VK_"
@@ -1089,12 +1089,12 @@ fn emitWrapper(ctx: *Ctx, c: parser.Command, dispatch: Dispatch, _self: ?parser.
 
     const plan = try buildPlan(ctx, c, has_self);
 
-    // M0.4 — émet aussi un `*Raw` variant pour les fonctions whitelistées
-    // dont le wrapper idiomatique masque des paramètres (brief §Scope
-    // D-S2-dispatch-bypass). Cible explicite : vkAcquireNextImageKHR,
-    // vkQueuePresentKHR, vkAcquireNextImage2KHR. Ces fonctions ont besoin
-    // d'être appelées en mode raw côté swapchain.zig pour observer les
-    // codes `.suboptimal_khr` / `.error_out_of_date_khr` séparément.
+    // M0.4 — also emits a `*Raw` variant for the whitelisted functions
+    // whose idiomatic wrapper hides parameters (brief §Scope
+    // D-S2-dispatch-bypass). Explicit target: vkAcquireNextImageKHR,
+    // vkQueuePresentKHR, vkAcquireNextImage2KHR. These functions need
+    // to be called in raw mode on the swapchain.zig side to observe the
+    // `.suboptimal_khr` / `.error_out_of_date_khr` codes separately.
     if (shouldEmitRaw(c.name)) {
         try emitRawVariant(ctx, c, dispatch_var, _self);
     }
@@ -1576,27 +1576,27 @@ fn stripBitSuffix(A: std.mem.Allocator, s: []const u8) ![]const u8 {
 
 // =============================================================== *Raw =====
 
-/// Liste explicite des commandes pour lesquelles émettre un variant `*Raw`.
-/// Brief §Scope D-S2-dispatch-bypass : ces fonctions sont appelées en mode
-/// raw côté `gal/vulkan/swapchain.zig` (acquire/present) pour observer
-/// les codes intermédiaires `.suboptimal_khr` / `.error_out_of_date_khr`
-/// sans que `checkResult` les replie en error.
+/// Explicit list of the commands for which to emit a `*Raw` variant.
+/// Brief §Scope D-S2-dispatch-bypass: these functions are called in raw
+/// mode on the `gal/vulkan/swapchain.zig` side (acquire/present) to observe
+/// the intermediate codes `.suboptimal_khr` / `.error_out_of_date_khr`
+/// without `checkResult` folding them into an error.
 const raw_targets = [_][]const u8{
     "vkAcquireNextImageKHR",
     "vkQueuePresentKHR",
     "vkAcquireNextImage2KHR",
 };
 
-/// True si la commande doit avoir un variant `*Raw` émis en plus du wrapper.
+/// True if the command must have a `*Raw` variant emitted in addition to the wrapper.
 fn shouldEmitRaw(name: []const u8) bool {
     for (raw_targets) |t| if (std.mem.eql(u8, t, name)) return true;
     return false;
 }
 
-/// Émet le variant `*Raw` d'une commande. Signature et corps exposent
-/// tous les paramètres bruts, retournent `Result` directement (pas
-/// d'unwrap via checkResult). Le caller peut switcher sur le code Vulkan
-/// natif.
+/// Emits the `*Raw` variant of a command. Signature and body expose
+/// all the raw parameters, return `Result` directly (no
+/// unwrap via checkResult). The caller can switch on the native Vulkan
+/// code.
 fn emitRawVariant(ctx: *Ctx, c: parser.Command, dispatch_var: []const u8, _self: ?parser.Handle) !void {
     const base_name = try methodName(ctx.A, c.name, _self);
     const raw_name = try std.fmt.allocPrint(ctx.A, "{s}Raw", .{base_name});

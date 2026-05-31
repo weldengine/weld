@@ -1,40 +1,40 @@
-//! Émetteur Zig idiomatique commun (squelette M0.2 / E5).
+//! Common idiomatic Zig emitter (M0.2 / E5 skeleton).
 //!
-//! Consomme une `ApiDescription` (déjà validée + résolue) et
-//! produit le wrapper Zig `<name>_binding.zig` au format
-//! `engine-c-bindings.md` §4. Émet le code dlopen pour les 4
-//! stratégies (`dlopen`, `dlopen_loader_pattern`, `framework`,
+//! Consumes an `ApiDescription` (already validated + resolved) and
+//! produces the Zig wrapper `<name>_binding.zig` in the
+//! `engine-c-bindings.md` §4 format. Emits the dlopen code for the 4
+//! strategies (`dlopen`, `dlopen_loader_pattern`, `framework`,
 //! `static_link`, cf. `engine-c-bindings.md` §4.6).
 //!
-//! Statut M0.2 : **squelette structurel**. Les adapters
-//! `vk_xml` et `wayland_xml` portent leurs propres pipelines
-//! d'émission 1:1 depuis `tools/vk_gen/` / `tools/wayland_gen/`
-//! et écrivent directement le Zig idiomatique sans passer par
-//! cet émetteur commun (décision technique E5 (i) du brief —
-//! préservation du critère « diff vide » non-négociable).
+//! M0.2 status: **structural skeleton**. The adapters
+//! `vk_xml` and `wayland_xml` carry their own 1:1 emission
+//! pipelines from `tools/vk_gen/` / `tools/wayland_gen/`
+//! and write the idiomatic Zig directly without going through
+//! this common emitter (E5 (i) technical decision of the brief —
+//! preservation of the non-negotiable "empty diff" criterion).
 //!
-//! Cet émetteur sera exercé par les premiers keepers Phase 1+
-//! (Opus, Assimp, KTX/Basis, libdatachannel, ACL compresseur,
-//! HarfBuzz, ONNX) qui décrivent leur surface dans
-//! `bindings/manual/*.api.zig` et n'ont aucune contrainte de
-//! `diff vide` rétroactive.
+//! This emitter will be exercised by the first Phase 1+ keepers
+//! (Opus, Assimp, KTX/Basis, libdatachannel, ACL compressor,
+//! HarfBuzz, ONNX) which describe their surface in
+//! `bindings/manual/*.api.zig` and have no retroactive `empty diff`
+//! constraint.
 
 const std = @import("std");
 const api = @import("api_description.zig");
 
-/// Erreurs surfacées par `emit`. Squelette M0.2.
+/// Errors surfaced by `emit`. M0.2 skeleton.
 pub const EmitError = error{
     UnsupportedStrategy,
     UnsupportedTypeKind,
     OutOfMemory,
 };
 
-/// Émet le wrapper Zig idiomatique pour `desc` dans `out`.
-/// Squelette M0.2 : écrit un placeholder commenté précisant que
-/// l'émission réelle est court-circuitée par les adapters
-/// `vk_xml` et `wayland_xml` ; les premiers adapters Phase 1+
-/// remplaceront ce corps par l'émission complète des 4
-/// stratégies dlopen.
+/// Emits the idiomatic Zig wrapper for `desc` into `out`.
+/// M0.2 skeleton: writes a commented placeholder stating that
+/// the real emission is short-circuited by the adapters
+/// `vk_xml` and `wayland_xml`; the first Phase 1+ adapters
+/// will replace this body with the full emission of the 4
+/// dlopen strategies.
 pub fn emit(
     desc: api.ApiDescription,
     out: *std.Io.Writer,

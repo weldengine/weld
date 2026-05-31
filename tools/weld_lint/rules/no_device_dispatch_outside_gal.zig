@@ -1,38 +1,38 @@
 //! Rule `no_device_dispatch_outside_gal` — `vk.device_dispatch.*`
 //! accesses are only allowed from files inside `src/modules/render/gal/vulkan/`.
 //!
-//! Discipline architecturale brief §CI : aucun call site GAL ne référence
-//! `device_dispatch` directement — tout passe par les wrappers idiomatiques
-//! ou les `*Raw` variants (cf. brief §Scope D-S2-dispatch-bypass).
-//! Le backend Vulkan lui-même est le seul site légitime puisqu'il
-//! implémente la GAL au-dessus du dispatch dynamique.
+//! Architectural discipline, brief §CI: no GAL call site references
+//! `device_dispatch` directly — everything goes through the idiomatic wrappers
+//! or the `*Raw` variants (cf. brief §Scope D-S2-dispatch-bypass).
+//! The Vulkan backend itself is the only legitimate site since it
+//! implements the GAL on top of the dynamic dispatch.
 //!
-//! Strategy : tokenize la source et cherche le motif identifier `vk` suivi
-//! de `.` puis `device_dispatch`. Skip si le fichier vit sous
+//! Strategy: tokenize the source and look for the identifier `vk` followed
+//! by `.` then `device_dispatch`. Skip if the file lives under
 //! `src/modules/render/gal/vulkan/`.
 
 const std = @import("std");
 const diag = @import("../diagnostic.zig");
 
 const name = "no_device_dispatch_outside_gal";
-/// Path forms acceptés pour le préfixe « légitime ». `scan.zig` joint les
-/// chemins via `std.fs.path.join`, qui produit `/` sous POSIX et `\` sous
-/// Win32 — d'où les deux variantes. Sans la version backslash, la règle
-/// déclencherait sur le backend Vulkan lui-même quand `weld_lint` tourne
-/// sous Windows (cf. bug Windows-Debug du run 26473017061).
+/// Accepted path forms for the "legitimate" prefix. `scan.zig` joins the
+/// paths via `std.fs.path.join`, which produces `/` on POSIX and `\` on
+/// Win32 — hence the two variants. Without the backslash version, the rule
+/// would trigger on the Vulkan backend itself when `weld_lint` runs
+/// under Windows (cf. the Windows-Debug bug of run 26473017061).
 const allowed_prefix_posix = "src/modules/render/gal/vulkan/";
 const allowed_prefix_win = "src\\modules\\render\\gal\\vulkan\\";
 
-/// Marker opt-in pour les fichiers legacy S6 qui appellent `device_dispatch`
-/// avant la migration GAL Phase 1+. Présent en tête du fichier sous la
-/// forme :
-///     //! WELD_LEGACY_VK_DISPATCH — pre-M0.4 code, migration tracée Phase 1+
+/// Opt-in marker for the legacy S6 files that call `device_dispatch`
+/// before the GAL Phase 1+ migration. Present at the head of the file in
+/// the form:
+///     //! WELD_LEGACY_VK_DISPATCH — pre-M0.4 code, migration tracked Phase 1+
 const legacy_marker = "WELD_LEGACY_VK_DISPATCH";
 
 /// Hook called by `main.runLint` once per `.zig` file. Skip immediately
-/// si le fichier vit sous `gal/vulkan/` (cas légitime) ou s'il porte le
-/// marker `WELD_LEGACY_VK_DISPATCH` (cas grandfather S6). Sinon, scan le
-/// source pour le pattern `vk.device_dispatch` et émet un diagnostic par
+/// if the file lives under `gal/vulkan/` (legitimate case) or carries the
+/// `WELD_LEGACY_VK_DISPATCH` marker (S6 grandfather case). Otherwise, scan the
+/// source for the `vk.device_dispatch` pattern and emit one diagnostic per
 /// occurrence.
 pub fn check(
     arena: std.mem.Allocator,
@@ -40,9 +40,9 @@ pub fn check(
     source: [:0]const u8,
     out: *std.ArrayList(diag.Diagnostic),
 ) !void {
-    // Path normalization : le runner peut passer des paths absolus ou
-    // relatifs. On accepte les deux en cherchant le préfixe en suffix,
-    // sur les deux séparateurs (POSIX `/`, Win32 `\`).
+    // Path normalization: the runner may pass absolute or relative
+    // paths. We accept both by searching for the prefix as a substring,
+    // on both separators (POSIX `/`, Win32 `\`).
     if (std.mem.indexOf(u8, file, allowed_prefix_posix) != null) return;
     if (std.mem.indexOf(u8, file, allowed_prefix_win) != null) return;
     if (hasLegacyMarker(source)) return;
@@ -80,8 +80,8 @@ pub fn check(
     }
 }
 
-/// Vérifie si la source porte le marker legacy en tête (scan des 8
-/// premières lignes pour tolérer un commentaire-bloc d'introduction).
+/// Checks whether the source carries the legacy marker at the head (scans the
+/// first 8 lines to tolerate an introductory block comment).
 fn hasLegacyMarker(source: []const u8) bool {
     var line_count: u32 = 0;
     var start: usize = 0;

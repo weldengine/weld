@@ -1,9 +1,9 @@
 //! Rule `doc_comments` — every root-level `pub` declaration must
 //! carry a `///` doc comment.
 //!
-//! Canonical formulation in `engine-zig-conventions.md §19` (Résumé
-//! des règles, line "Doc comment `///` sur toute API `pub` — CI —
-//! linter custom"). Strategy: parse the file with `std.zig.Ast`,
+//! Canonical formulation in `engine-zig-conventions.md §19` (rules
+//! summary, line "Doc comment `///` on every `pub` API — CI —
+//! custom linter"). Strategy: parse the file with `std.zig.Ast`,
 //! iterate `rootDecls()`, and for each declaration whose first token
 //! is `keyword_pub`, verify that the immediately preceding token is a
 //! `.doc_comment`.
@@ -27,7 +27,7 @@
 //! No other exemption is auto-applied. The brief lists categories of
 //! likely false positives (re-exports, type aliases, generic
 //! functions returning types, anonymous struct fields) — but the
-//! directive is *start strict; iterate via Déviations actées + a
+//! directive is *start strict; iterate via Acted deviations + a
 //! Claude.ai roundtrip if real false positives surface*. Encoding
 //! those categories as structural exemptions here would replicate the
 //! opt-out annotation the brief explicitly lists *Out-of-scope* — it
