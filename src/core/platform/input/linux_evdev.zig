@@ -3,11 +3,11 @@
 //! Phase 0.3 / M0.3 deliverable — minimal implementation. Documented
 //! in the M0.3 brief § Input system Tier 0 minimal :
 //!
-//!   > Wayland : ... lecture non bloquante `/dev/input/eventN` pour
-//!   > gamepad (intégrée au mainloop via `std.posix.poll` sur les fd
-//!   > Wayland + evdev). Hot-plug gamepad via polling périodique de
-//!   > `/dev/input/` toutes les N secondes (udev monitoring repoussé
-//!   > Phase 1+ si polling suffit).
+//!   > Wayland: ... non-blocking read of `/dev/input/eventN` for
+//!   > gamepad (integrated into the mainloop via `std.posix.poll` on
+//!   > the Wayland + evdev fds). Gamepad hot-plug via periodic polling
+//!   > of `/dev/input/` every N seconds (udev monitoring deferred to
+//!   > Phase 1+ if polling suffices).
 //!
 //! ## Phase 0 scope
 //!
@@ -24,15 +24,15 @@
 //! the main loop. udev monitoring is documented as "Phase 1+ if
 //! polling proves insufficient" per the brief.
 
-// PHASE 1+ TRANSFER NOTE — ce module est un stub Phase 0. `pollAllSlots`
-// est no-op, `scanDevices` ouvre-puis-ferme les fd sans extraire les
-// capabilities. Conséquence observable : un gamepad branché sous Linux
-// Phase 0 reste invisible (la souris/clavier passent par
-// wl_pointer/wl_keyboard qui couvrent le common case desktop). Phase 1
-// doit livrer le parsing EV_KEY/EV_ABS via EVIOCGBIT + un event loop
-// intégré au mainloop Wayland (`std.posix.poll` sur les fd evdev). Si un
-// studio externe Phase 1 a besoin de gamepad Linux avant que le module
-// Input Tier 1 arrive, c'est ici que ça arrive — pas dans Tier 1.
+// PHASE 1+ TRANSFER NOTE — this module is a Phase 0 stub. `pollAllSlots`
+// is a no-op, `scanDevices` opens-then-closes the fds without extracting
+// capabilities. Observable consequence: a gamepad plugged in under Linux
+// Phase 0 stays invisible (mouse/keyboard go through
+// wl_pointer/wl_keyboard, which cover the desktop common case). Phase 1
+// must deliver EV_KEY/EV_ABS parsing via EVIOCGBIT + an event loop
+// integrated into the Wayland mainloop (`std.posix.poll` on the evdev fds).
+// If an external Phase 1 studio needs Linux gamepad support before the
+// Input Tier 1 module arrives, this is where it happens — not in Tier 1.
 
 const std = @import("std");
 const builtin = @import("builtin");

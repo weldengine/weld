@@ -1,28 +1,28 @@
-//! M0.2 / E6 — squelette du plugin loader Tier 0.
+//! M0.2 / E6 — Tier 0 plugin loader skeleton.
 //!
-//! Charge un `.so` / `.dll` / `.dylib`, résout le symbole
-//! `weld_plugin_entry`, lit le `WeldPluginDesc` produit par le
-//! plugin, vérifie la version d'API, et appelle (optionnellement)
-//! la callback `on_load` avec la table `WeldAPI` stub.
+//! Loads a `.so` / `.dll` / `.dylib`, resolves the
+//! `weld_plugin_entry` symbol, reads the `WeldPluginDesc` produced
+//! by the plugin, checks the API version, and (optionally) calls
+//! the `on_load` callback with the stub `WeldAPI` table.
 //!
-//! `std.DynLib` est `@compileError("unsupported platform")` sur
-//! Windows dans la stdlib Zig 0.16 (cf. `lib/std/dynamic_library.zig`
-//! ligne 21). Le squelette E6 hand-roll donc directement une mince
-//! abstraction `dlopen` / `LoadLibraryA` (POSIX / Windows), exactement
-//! le pattern utilisé par `src/core/platform/vk.zig`. Le brief E6
-//! mentionne `platform.dynamic_loader` comme dépendance hypothétique
-//! M0.3 ; ce fichier n'existe pas encore. Lorsque le wrapper sera
-//! introduit en M0.3 (extension platform layer), il remplacera ce
-//! bloc local sans changement de la surface publique du loader.
+//! `std.DynLib` is `@compileError("unsupported platform")` on
+//! Windows in Zig 0.16's stdlib (cf. `lib/std/dynamic_library.zig`
+//! line 21). The E6 skeleton therefore hand-rolls a thin
+//! `dlopen` / `LoadLibraryA` (POSIX / Windows) abstraction directly,
+//! exactly the pattern used by `src/core/platform/vk.zig`. The E6
+//! brief mentions `platform.dynamic_loader` as a hypothetical M0.3
+//! dependency; that file does not exist yet. When the wrapper is
+//! introduced in M0.3 (platform layer extension), it will replace
+//! this local block without changing the loader's public surface.
 //!
-//! AUCUN câblage réel des 7 sous-APIs — le loader passe l'instance
-//! `api.stub_api` aux plugins. Toutes les callbacks renvoient
+//! NO real wiring of the 7 sub-APIs — the loader passes the
+//! `api.stub_api` instance to plugins. All callbacks return
 //! `WELD_ERR_NOT_IMPLEMENTED` (cf. `api.zig`).
 //!
-//! Capability enforcement runtime (refuser un `component_get` si
-//! non déclaré dans `reads_components`) est Phase 3 (brief
-//! § Out-of-scope). M0.2 LIT les capabilities et les logue, sans
-//! check inline.
+//! Runtime capability enforcement (refusing a `component_get` if
+//! not declared in `reads_components`) is Phase 3 (brief
+//! § Out-of-scope). M0.2 READS the capabilities and logs them,
+//! without inline checks.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -72,54 +72,54 @@ fn _dlClose(handle: *anyopaque) void {
     }
 }
 
-/// Erreurs surfacées par `loadPlugin`.
+/// Errors surfaced by `loadPlugin`.
 pub const LoaderError = error{
-    /// Le fichier dynamique n'a pas pu être ouvert (chemin
-    /// inexistant, permissions, format invalide).
+    /// The dynamic file could not be opened (nonexistent path,
+    /// permissions, invalid format).
     LibraryLoadFailed,
-    /// Le symbole `weld_plugin_entry` est absent du binaire.
-    /// Vérification stricte — l'absence signale soit un plugin
-    /// mal compilé soit un binaire non-plugin chargé par
-    /// erreur.
+    /// The `weld_plugin_entry` symbol is absent from the binary.
+    /// Strict check — its absence signals either a badly
+    /// compiled plugin or a non-plugin binary loaded by
+    /// mistake.
     MissingEntryPoint,
-    /// `desc.api_version_min > WELD_API_VERSION_MAJOR` du runtime
-    /// courant. Le plugin demande une version d'API plus récente
-    /// que celle compilée dans Weld.
+    /// `desc.api_version_min > WELD_API_VERSION_MAJOR` of the
+    /// current runtime. The plugin requests a more recent API
+    /// version than the one compiled into Weld.
     ApiVersionTooNew,
-    /// Échec d'allocation lors de l'append du handle.
+    /// Allocation failure while appending the handle.
     OutOfMemory,
 };
 
-/// État d'un plugin dans le registry du loader.
+/// State of a plugin in the loader's registry.
 pub const PluginState = enum {
-    /// Chargé et fonctionnel.
+    /// Loaded and functional.
     loaded,
-    /// `unloadPlugin` a été appelé — handle conservé pour
-    /// historique debug, mais le `.so` est fermé.
+    /// `unloadPlugin` was called — handle kept for debug
+    /// history, but the `.so` is closed.
     unloaded,
 };
 
-/// Handle vers un plugin chargé. Le caller le reçoit de
-/// `loadPlugin` et le passe à `unloadPlugin`. Stable pour la
-/// durée de vie du `Loader`.
+/// Handle to a loaded plugin. The caller receives it from
+/// `loadPlugin` and passes it to `unloadPlugin`. Stable for the
+/// lifetime of the `Loader`.
 pub const PluginHandle = struct {
-    /// Chemin d'origine du `.so` / `.dll` (utile pour les logs
-    /// et le rejeu après hot-reload Phase 3+).
+    /// Original path of the `.so` / `.dll` (useful for logs
+    /// and replay after hot-reload Phase 3+).
     path: []const u8,
-    /// Handle opaque retourné par `dlopen` (POSIX) ou
-    /// `LoadLibraryA` (Windows). Libéré par `unloadPlugin`.
-    /// `null` une fois unloadé.
+    /// Opaque handle returned by `dlopen` (POSIX) or
+    /// `LoadLibraryA` (Windows). Freed by `unloadPlugin`.
+    /// `null` once unloaded.
     dyn_handle: ?*anyopaque,
-    /// Descripteur retourné par `weld_plugin_entry`. Pointeur vers
-    /// les données statiques du `.so` — valide tant que le `.so`
-    /// est chargé.
+    /// Descriptor returned by `weld_plugin_entry`. Pointer to
+    /// the static data of the `.so` — valid as long as the `.so`
+    /// is loaded.
     desc: *const WeldPluginDesc,
-    /// État courant.
+    /// Current state.
     state: PluginState,
 };
 
-/// Registry des plugins chargés. Owns le storage du `path`
-/// dupliqué + l'array list. Pas les `.so` eux-mêmes (gérés par
+/// Registry of loaded plugins. Owns the storage of the duplicated
+/// `path` + the array list. Not the `.so` themselves (managed by
 /// dlopen/LoadLibraryA via `_dlOpen`/`_dlClose`).
 pub const Loader = struct {
     gpa: std.mem.Allocator,
@@ -145,10 +145,10 @@ pub const Loader = struct {
         self.* = undefined;
     }
 
-    /// Charge `path` en tant que plugin. Le chemin doit pointer
-    /// vers un binaire dynamique (`.so` / `.dll` / `.dylib`) qui
-    /// exporte `weld_plugin_entry`. Le loader log les capabilities
-    /// déclarées par le plugin sans les enforcement (Phase 3).
+    /// Loads `path` as a plugin. The path must point to a
+    /// dynamic binary (`.so` / `.dll` / `.dylib`) that exports
+    /// `weld_plugin_entry`. The loader logs the capabilities
+    /// declared by the plugin without enforcing them (Phase 3).
     pub fn loadPlugin(self: *Loader, path: []const u8) LoaderError!*PluginHandle {
         // dlopen/LoadLibraryA need a NUL-terminated path. Allocate
         // a temporary buffer with the sentinel, then release after
@@ -238,10 +238,9 @@ pub const Loader = struct {
         return &self.plugins.items[self.plugins.items.len - 1];
     }
 
-    /// Décharge un plugin précédemment chargé. Appelle
-    /// `on_shutdown`, ferme le `.so`, et marque l'entrée comme
-    /// `.unloaded`. L'entrée est conservée dans le registry pour
-    /// historique debug.
+    /// Unloads a previously loaded plugin. Calls `on_shutdown`,
+    /// closes the `.so`, and marks the entry as `.unloaded`.
+    /// The entry is kept in the registry for debug history.
     pub fn unloadPlugin(self: *Loader, handle: *PluginHandle) void {
         _ = self;
         if (handle.state != .loaded) return;
@@ -255,12 +254,12 @@ pub const Loader = struct {
         handle.state = .unloaded;
     }
 
-    /// Utilitaire debug — lookup d'un symbole arbitraire dans le
-    /// `.so` chargé. Non utilisé par le loader lui-même ; exposé
-    /// pour les tests et les outils de diagnostic. Cast côté caller
-    /// du `*anyopaque` retourné vers le type cible (le wrapper de
-    /// type-safe lookup arrivera quand `platform.dynamic_loader`
-    /// sera extrait en M0.3).
+    /// Debug utility — lookup of an arbitrary symbol in the
+    /// loaded `.so`. Not used by the loader itself; exposed for
+    /// tests and diagnostic tools. The caller casts the returned
+    /// `*anyopaque` to the target type (the type-safe lookup
+    /// wrapper will arrive when `platform.dynamic_loader` is
+    /// extracted in M0.3).
     pub fn lookupSymbol(handle: *PluginHandle, name: [:0]const u8) ?*anyopaque {
         if (handle.state != .loaded) return null;
         if (handle.dyn_handle) |lib| {
@@ -269,7 +268,7 @@ pub const Loader = struct {
         return null;
     }
 
-    /// Nombre de plugins chargés (loaded + unloaded historique).
+    /// Number of loaded plugins (loaded + unloaded history).
     pub fn count(self: *const Loader) u32 {
         return @intCast(self.plugins.items.len);
     }

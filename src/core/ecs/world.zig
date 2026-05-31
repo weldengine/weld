@@ -39,7 +39,7 @@ const observers_mod = @import("observers.zig");
 // interpreter still consumes).
 const singleton_resources_mod = @import("../resources/registry.zig");
 // M0.2 / E4 — heterogeneous event bus. Direct field on World per
-// the décision technique E4 in the brief § Notes (alternative was
+// the technical decision E4 in the brief § Notes (alternative was
 // scheduler-injected via ModuleContext; field-on-World aligns with
 // E3's singleton_resources and with `engine-tier-interfaces.md`
 // §0 which lists `event_bus` among Tier 0 services).

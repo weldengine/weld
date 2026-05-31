@@ -11,12 +11,12 @@
 //! deterministic, the inputs are build-independent: type name +
 //! comptime-resolved field layout).
 //!
-//! Decision actée — `schema_hash` est **sensible au `@typeName`** :
-//! deux structs avec le même layout mais des noms différents
-//! produisent des `schema_hash` distincts. Le test
-//! `"schema_hash sensible au type_name"` documente la décision.
-//! L'algorithme suit `briefs/M0.2-rtti-resources-events-bindgen.md`
-//! E1 §Livrable.
+//! Decision taken — `schema_hash` is **sensitive to `@typeName`**:
+//! two structs with the same layout but different names
+//! produce distinct `schema_hash` values. The
+//! `"schema_hash sensible au type_name"` test documents the decision.
+//! The algorithm follows `briefs/M0.2-rtti-resources-events-bindgen.md`
+//! E1 §Deliverable.
 
 const std = @import("std");
 const type_info = @import("type_info.zig");

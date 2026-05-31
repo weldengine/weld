@@ -78,7 +78,7 @@ pub const ipc = struct {
 /// RTTI namespace — Tier 0 reflection runtime (M0.2 / E1). Comptime
 /// builder, type metadata, deterministic identity + schema hashes,
 /// runtime registry. Single canonical entry point at
-/// `src/core/rtti/root.zig` (cohérent avec le pattern `ecs/root.zig`).
+/// `src/core/rtti/root.zig` (consistent with the `ecs/root.zig` pattern).
 pub const rtti = @import("rtti/root.zig");
 
 /// Resources namespace — Tier 0 singleton-entity resource subsystem
@@ -89,18 +89,18 @@ pub const rtti = @import("rtti/root.zig");
 pub const resources = @import("resources/root.zig");
 
 /// Events namespace — Tier 0 MPMC event bus (M0.2 / E4). `EventBus`
-/// is a field on `World` (decision technique E4) and holds the
+/// is a field on `World` (technical decision E4) and holds the
 /// typed `EventQueue(T)` instances. Producers `emit(T, e)`,
 /// consumers `subscribe(T)` → cursor → `poll(T, &cursor)`. The
 /// scheduler drives lifetime drains at phase / tick / frame
 /// boundaries.
 pub const events = @import("events/root.zig");
 
-/// Plugin loader namespace — Tier 0 squelette M0.2 / E6.
-/// `Loader` charge des `.so` / `.dll` / `.dylib`, lit le
-/// `WeldPluginDesc` exporté, et expose la table `WeldAPI`
-/// avec 7 sous-APIs (signatures finales, implémentations stub
-/// retournant `WELD_ERR_NOT_IMPLEMENTED`). Câblage runtime
+/// Plugin loader namespace — Tier 0 skeleton M0.2 / E6.
+/// `Loader` loads `.so` / `.dll` / `.dylib` files, reads the
+/// exported `WeldPluginDesc`, and exposes the `WeldAPI` table
+/// with 7 sub-APIs (final signatures, stub implementations
+/// returning `WELD_ERR_NOT_IMPLEMENTED`). Runtime wiring
 /// Phase 3.
 pub const plugin_loader = @import("plugin_loader/root.zig");
 

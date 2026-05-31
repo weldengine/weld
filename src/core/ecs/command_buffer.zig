@@ -14,7 +14,7 @@
 //!   `World.spawn` / `World.despawn` / `World.addComponent` /
 //!   `World.removeComponent` directly during a dispatch is a
 //!   programmer error and breaks query / chunk pointer stability.
-//! - Outside a dispatch (init, teardown, replay, hors-phase paths)
+//! - Outside a dispatch (init, teardown, replay, out-of-phase paths)
 //!   the direct `World.*` mutation surface stays available — the
 //!   command buffer is a phase-time concession, not a permanent
 //!   façade.

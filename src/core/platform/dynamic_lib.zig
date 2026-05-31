@@ -3,11 +3,11 @@
 //! Phase 0.3 / M0.3 deliverable. Documented in `engine-platform.md` §4
 //! (Dynamic loader section) and the M0.3 brief.
 //!
-//! Cohérent avec `engine-c-bindings.md` §4.6 (pattern dlopen par stratégie)
-//! et `engine-c-bindings.md` §4.6.5 (lifecycle de chargement par module).
-//! Le générateur bindgen produira les Symbols structs au-dessus de cette
-//! couche basse — `DynamicLib` est l'API portable utilisée par les
-//! bindings générés Phase 1+.
+//! Consistent with `engine-c-bindings.md` §4.6 (dlopen-by-strategy pattern)
+//! and `engine-c-bindings.md` §4.6.5 (per-module load lifecycle).
+//! The bindgen generator will produce the Symbols structs on top of this
+//! low-level layer — `DynamicLib` is the portable API used by the
+//! generated bindings Phase 1+.
 //!
 //! Backends:
 //!   - Win32  : `LoadLibraryW` + `GetProcAddress` + `FreeLibrary`

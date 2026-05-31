@@ -113,8 +113,8 @@ pub const Scheduler = struct {
     /// older generation could read the newer chunk_count after a
     /// preemption between the two field accesses, causing a double
     /// `pushShare` and an over-decrement on `pending_count` (R1
-    /// confirmed by E2ter dumps — cf. brief § Notes « Hypothèses
-    /// résiduelles E3 »). Packed atomic guarantees `(gen, n)` is
+    /// confirmed by E2ter dumps — cf. brief § Notes "E3 residual
+    /// hypotheses"). Packed atomic guarantees `(gen, n)` is
     /// observed as a single snapshot by construction. `gen` is u32
     /// (wraps at 2^32 dispatches ≈ 33 years at 3600 dispatches/s,
     /// outside any product lifecycle). Workers compare `gen` against
@@ -297,7 +297,7 @@ pub const Scheduler = struct {
             // over-decrement (R1 race signature with `u64::MAX`).
             // Defends against any future regression of the job
             // system that reintroduces over-decrement — complements
-            // the E2ter assertion at the siège (`scheduler.zig:333`)
+            // the E2ter assertion at the site (`scheduler.zig:333`)
             // by catching the same invariant at the symptom site.
             // Active in Debug + ReleaseSafe via
             // `std.debug.runtime_safety`.
@@ -452,8 +452,8 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
             // dispatcher observes the zero on its next yield round.
             //
             // M0.2.1 / E2ter — debug assertion at the unique
-            // over-decrement site (siège localisé par E3 analyse
-            // statique). Captures full scheduler state at the panic
+            // over-decrement site (located by E3 static
+            // analysis). Captures full scheduler state at the panic
             // for diagnosis (discriminate R1/R2/R3 from
             // brief § Notes). Active in Debug + ReleaseSafe via
             // `std.debug.runtime_safety`, stripped in ReleaseFast.

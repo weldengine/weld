@@ -28,8 +28,8 @@ const builtin = @import("builtin");
 const once_mod = @import("once.zig");
 
 /// Win32 multimedia timer minimum period activation. Lazy — runs at most
-/// once per process. Cohérent avec le pattern documenté dans le brief
-/// M0.3 § "Vérification `std.once` Zig 0.16".
+/// once per process. Consistent with the pattern documented in the
+/// M0.3 brief § "std.once verification for Zig 0.16".
 var win32_period_once: once_mod.Once = .{};
 
 const winmm = struct {

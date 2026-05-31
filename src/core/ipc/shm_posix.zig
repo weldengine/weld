@@ -25,7 +25,7 @@
 //! `tests/ipc/shm_viewport.zig`. Linux is unaffected. The Phase 0.6
 //! macOS hardware validation milestone revisits this when the
 //! editor lifecycle integration test lands (cf. `briefs/S6-…` §
-//! "Dettes héritées" — promoted from inherited to active).
+//! "Inherited debts" — promoted from inherited to active).
 //!
 //! Creator (editor): `shm_open(name, O_CREAT | O_RDWR, 0o600)` →
 //!                   `ftruncate(fd, size)` → `mmap`. Keep fd.

@@ -3,8 +3,8 @@
 //! Phase 0.3 / M0.3 deliverable — minimal implementation. Documented
 //! in the M0.3 brief § Input system Tier 0 minimal :
 //!
-//!   > Win32 : `XInputGetState` polled chaque frame pour les 4 slots
-//!   > gamepad.
+//!   > Win32: `XInputGetState` polled every frame for the 4 gamepad
+//!   > slots.
 //!
 //! XInput is the Microsoft-Xbox controller API; it exposes up to 4
 //! slots and is the most reliable Windows gamepad API for the common
