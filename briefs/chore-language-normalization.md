@@ -90,11 +90,17 @@ Rationale for the split: render (E2) is the largest and riskiest paquet (GPU-adj
   old name and update them too; (b) touch only the `test` descriptive string,
   never a function/decl identifier. The E6 acceptance grep is extended to cover
   French `test "..."` strings, not only comments.
-- **Production string literals (logs / panics / labels): survey only, not yet in
-  scope.** During E2/E3, French strings in production code (e.g. `log.err("…")`,
-  `@panic("…")`, formatted error returns) are *listed, not modified*, and
-  presented at a STOP point for a separate decision (some may be matched by
-  tests).
+- **E3 GO (Guy) — scope widened again: dev-message string literals.** The chore
+  now also covers French developer-facing string literals — specifically the
+  `gal/interface.zig` `.purpose = "..."` table (surfaced via `@compileError` +
+  `listRequiredMethods`). Translated in E3 *before* test names. Integrity: touch
+  only the `.purpose` value, never a key/type/table logic. Mandatory precaution
+  (done, clean): grep the FR text in `tests/` + repo for golden/snapshot/test
+  matches; none found. `log.*` / `@panic` messages are already English. The E6
+  acceptance grep is extended to cover dev-message strings too.
+- **Out of scope, confirmed: `etch/lexer.zig:371` `"café"`** — intentional UTF-8
+  test input, not a message. Left untouched; flagged as an English/test-data
+  false positive for the E6 grep.
 
 ## Execution notes
 
@@ -117,6 +123,10 @@ Rationale for the split: render (E2) is the largest and riskiest paquet (GPU-adj
   - "Suppressions" → "Removals" (e.g. `gal/vulkan/frame.zig`, `swapchain.zig`)
   - "Fichiers" → "Files" (e.g. `gal/vulkan/sampler.zig`)
   - "Notes" / "Scope" / "Out-of-scope" / "CI" — already English-identical, unchanged.
+  - "Décomposition en étapes" → "Step decomposition" (M0.2.1; cited by
+    `tests/ecs/no_alloc_steady_state_stress.zig`)
+  - "Cas N" decision-branch labels → "Case N" (M0.2.1; cited by the stress test +
+    `tests/core/plugin_loader/stub_plugin/plugin.zig`)
 
 ## Closing notes
 
