@@ -165,16 +165,16 @@ jobs:
             echo "commit it as tests/golden/smoke_test_software.ppm, then re-run." >&2
             exit 0
           fi
-          # `test-render-capture` runs ONLY tests/render/capture.zig — it
-          # bypasses the generic `zig build test` which pulls in every
-          # test in the repo (some have unrelated ReleaseSafe issues
-          # tracked as M0.7 housekeeping debt). Scope: PSNR regression
-          # gate, nothing else. The test itself raises a typed error
-          # when PSNR < 40 dB, so a non-zero exit propagates through
-          # pipefail — no separate grep needed (the previous grep on
-          # "PSNR" matched the test's success log line that does not
-          # exist, tripping exit 1 under pipefail on every passing run).
-          zig build test-render-capture -Doptimize=ReleaseSafe --summary all 2>&1 | tee test-output.txt
+          # M0.5 item 1: direct PSNR comparison of the PPM already produced
+          # by the previous step against the golden. `test-ppm-psnr` runs
+          # ONLY tests/render/ppm_psnr_compare.zig, which imports just `std`
+          # (no `weld_render`): it compiles in seconds and does NOT rebuild
+          # the render stack or re-spawn the triangle (the prior step already
+          # wrote out/smoke_test.ppm). Replaces the rebuild-heavy
+          # `test-render-capture` invocation (~3-5 min/run). The test raises a
+          # typed error when PSNR < 40 dB, so a non-zero exit propagates
+          # through pipefail.
+          zig build test-ppm-psnr -Doptimize=ReleaseSafe --summary all 2>&1 | tee test-output.txt
 
       - name: Upload capture artifact
         if: always()
