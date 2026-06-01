@@ -3,7 +3,7 @@
 //! Vulkan window, and presents the runtime-written mire each frame
 //! via a fullscreen blit pipeline (cf. `src/editor/vk_blit.zig`).
 //!
-//! S6 lifecycle (per brief § Scope and § Comportement observable):
+//! S6 lifecycle (per brief § Scope and § Observable behavior):
 //!   1. Create the shm region (`/weld-shm-viewport-<pid>`).
 //!   2. Open the Vulkan-capable window at the brief's resolution.
 //!   3. Initialise the blit renderer (instance, device, swapchain,

@@ -162,7 +162,7 @@ None. S2 has no formal benchmark file. Frame time is measured in-binary by `--me
 - p95 frame time below 17.0 ms on each configuration.
 - No frame time above 33 ms after the first 10 frames (post-warmup).
 
-### Comportement observable
+### Observable behavior
 
 - `zig build run` opens an 800×600 (or scaled HiDPI equivalent) window titled `Weld S2`, displays a smoothly shaded triangle (red top, green bottom-left, blue bottom-right or any consistent variant), accepts a close gesture (window X / Cmd-W / xdg close button) and exits cleanly with code 0.
 - `zig build run -- --smoke-test` produces a non-empty `zig-out/smoke/<os>-<gpu_name>.ppm` file and exits with code 0 within 5 seconds.

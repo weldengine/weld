@@ -1615,7 +1615,7 @@ fn emitRawVariant(ctx: *Ctx, c: parser.Command, dispatch_var: []const u8, _self:
         }
         const pname_raw = try snakeCase(ctx.A, p.name);
         const pname = stripParamPrefix(pname_raw);
-        // Tous les params en mode raw : aucun mapping slice/optional/out.
+        // All params in raw mode: no slice/optional/out mapping.
         const ptype = try mapCType(ctx, p.c_type, p.optional, p.len, .api_param);
         try ctx.print("{s}: {s}", .{ pname, ptype });
     }

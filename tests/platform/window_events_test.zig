@@ -10,7 +10,7 @@
 //! specific and only meaningful on the target runner. These tests
 //! verify the union surface compiles and constructs correctly on every
 //! platform — the wave 5 / wave 6 commits add the actual emission paths,
-//! verified manually on Win11 + Fedora 44 in the comportement-observable
+//! verified manually on Win11 + Fedora 44 in the observable-behavior
 //! section of the brief.
 
 const std = @import("std");
