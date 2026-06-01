@@ -37,12 +37,13 @@ test "etch idents that are zig keywords codegen to parseable zig" {
     // `var` is a Zig keyword but a valid Etch field name. (Component / type
     // names must be capitalized TYPE_IDENTs, so they can never be Zig
     // keywords; only lowercase value-idents — fields, bindings, params — can
-    // collide.) The codegen must escape the field name in both its struct
-    // declaration and its field-access site.
+    // collide.) The codegen must escape the field name at every site it
+    // emits as a Zig identifier: the struct field declaration, the when-clause
+    // field filter, and the field-access expression.
     const src =
         \\component Counter { var: int = 0 }
         \\rule bump(entity: Entity)
-        \\  when entity has Counter
+        \\  when entity has Counter { var == 0 }
         \\{
         \\  entity.get_mut(Counter).var += 1
         \\}

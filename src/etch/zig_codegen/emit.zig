@@ -28,6 +28,23 @@ pub const Writer = struct {
         try self.buffer.appendSlice(self.gpa, s);
     }
 
+    /// Write a user-chosen identifier, escaping it as `@"name"` when it
+    /// collides with a Zig keyword or primitive type so the generated source
+    /// stays compilable. Etch identifiers are otherwise valid Zig identifiers
+    /// (ASCII, no leading digit) — escaping is needed only for that collision,
+    /// which can arise for lowercase value-idents (field, binding, param
+    /// names); Etch type/component names are capitalized and never collide.
+    /// Cf. M0.5 item 8.
+    pub fn ident(self: *Writer, name: []const u8) !void {
+        if (std.zig.Token.keywords.has(name) or std.zig.primitives.isPrimitive(name)) {
+            try self.write("@\"");
+            try self.write(name);
+            try self.write("\"");
+        } else {
+            try self.write(name);
+        }
+    }
+
     pub fn writeIndent(self: *Writer) !void {
         var i: u32 = 0;
         while (i < self.indent) : (i += 1) {

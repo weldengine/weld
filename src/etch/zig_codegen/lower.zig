@@ -176,12 +176,15 @@ fn emitComponentLikeStruct(w: *Writer, ast: *const AstArena, data: u32, kind: De
         const zig_type = type_map.mapBuiltin(etch_type) orelse return CodegenError.NonPodComponent;
         const fname = ast.strings.slice(f.name);
         if (f.default_value.isNone()) {
-            try w.printLine("{s}: {s} = {s},", .{ fname, zig_type, zeroDefault(zig_type) });
+            try w.writeIndent();
+            try w.ident(fname);
+            try w.print(": {s} = {s},\n", .{ zig_type, zeroDefault(zig_type) });
         } else {
             // Emit the default expression. The S3 type-checker has already
             // verified it is const-evaluable on the field type.
             try w.writeIndent();
-            try w.print("{s}: {s} = ", .{ fname, zig_type });
+            try w.ident(fname);
+            try w.print(": {s} = ", .{zig_type});
             try emitConstExpr(w, ast, f.default_value, zig_type);
             try w.write(",\n");
         }
@@ -426,7 +429,9 @@ fn emitRuleAsComptimeQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleD
     if (info.field_filter) |ff| {
         const idx = indexOfComponent(info.components, ff.component_name) orelse return CodegenError.InternalCodegenBug;
         try w.writeIndent();
-        try w.print("if (__row[{d}].{s} != ", .{ idx, ff.field_name });
+        try w.print("if (__row[{d}].", .{idx});
+        try w.ident(ff.field_name);
+        try w.write(" != ");
         try emitConstExpr(w, ast, ff.value, ff.value_zig_type);
         try w.write(") continue;\n");
     }
@@ -471,7 +476,9 @@ fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, 
     w.indentBy(1);
     if (info.field_filter) |ff| {
         try w.writeIndent();
-        try w.print("if ({s}_arr[slot].{s} != ", .{ ff.component_name, ff.field_name });
+        try w.print("if ({s}_arr[slot].", .{ff.component_name});
+        try w.ident(ff.field_name);
+        try w.write(" != ");
         try emitConstExpr(w, ast, ff.value, ff.value_zig_type);
         try w.write(") continue;\n");
     }
@@ -822,7 +829,9 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
 
     const keyword = if (let.is_mut) "var" else "const";
     try w.writeIndent();
-    try w.print("{s} {s}: {s} = ", .{ keyword, ast.strings.slice(let.name), zig_t });
+    try w.print("{s} ", .{keyword});
+    try w.ident(ast.strings.slice(let.name));
+    try w.print(": {s} = ", .{zig_t});
     try emitExpr(w, ast, ctx, let.value);
     try w.write(";\n");
 
@@ -871,13 +880,13 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             const name_id: StringId = data;
             if (ctx.lookup(name_id)) |local| {
                 switch (local.kind) {
-                    .value => try w.write(ast.strings.slice(name_id)),
+                    .value => try w.ident(ast.strings.slice(name_id)),
                     .component_alias => try emitComponentSlot(w, ctx, local.component_name),
                 }
             } else {
                 // Unknown ident — type-checker should have caught this. Emit
                 // the raw name and let `zig build` complain.
-                try w.write(ast.strings.slice(name_id));
+                try w.ident(ast.strings.slice(name_id));
             }
         },
         .field_access => {
@@ -936,7 +945,8 @@ fn binaryOpText(op: ast_mod.BinaryOp) []const u8 {
 
 fn emitFieldAccessExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, fa: ast_mod.FieldAccessExpr) CodegenError!void {
     try emitExpr(w, ast, ctx, fa.receiver);
-    try w.print(".{s}", .{ast.strings.slice(fa.field_name)});
+    try w.write(".");
+    try w.ident(ast.strings.slice(fa.field_name));
 }
 
 fn inferZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId, annotation: NodeId) []const u8 {
