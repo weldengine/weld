@@ -1,25 +1,25 @@
-//! Escape hatches GAL pré-câblés jour 1 (brief §Scope + §Notes décision 1).
+//! GAL escape hatches pre-wired day 1 (brief §Scope + §Notes decision 1).
 //!
-//! Trois concepts dont l'absence Phase 0 forcerait un refactor Phase 1+ :
+//! Three concepts whose absence in Phase 0 would force a Phase 1+ refactor:
 //!
-//! 1. **`TimelineSemaphore`** — sémaphore timeline (Vulkan `VK_KHR_timeline_semaphore`,
-//!    Metal events, D3D12 fences avec valeur). Phase 0 : type présent, fonctionnel
-//!    minimal côté Vulkan, no-op Null. Premier usage Phase 1+ (render graph
-//!    avec async compute multi-queue).
+//! 1. **`TimelineSemaphore`** — timeline semaphore (Vulkan `VK_KHR_timeline_semaphore`,
+//!    Metal events, D3D12 fences with value). Phase 0: type present, minimally
+//!    functional on the Vulkan side, no-op on Null. First use Phase 1+ (render
+//!    graph with multi-queue async compute).
 //!
-//! 2. **`BarrierExplicit`** — opt-in flag par pass qui désactive l'auto-tracking
-//!    de barriers (cf. `gal/barriers.zig`). Phase 0 : drapeau présent, code
-//!    de tracking ignore la pass, le body se débrouille. Premier usage Phase 1+
-//!    (pass merging du render graph + resource aliasing).
+//! 2. **`BarrierExplicit`** — per-pass opt-in flag that disables barrier
+//!    auto-tracking (cf. `gal/barriers.zig`). Phase 0: flag present, the
+//!    tracking code skips the pass, the body fends for itself. First use Phase 1+
+//!    (render graph pass merging + resource aliasing).
 //!
 //! 3. **`DescriptorIndexing`** — bindless descriptors (Vulkan `VK_EXT_descriptor_indexing`,
-//!    Metal argument buffers, D3D12 ResourceDescriptorHeap). Phase 0 : structures
-//!    déclarées, capacité query-able via `Device.supports`, mais bind groups fixes
-//!    uniquement (cf. brief §Out-of-scope). Premier usage Phase 1+ (V-Buffer
-//!    material eval data-driven).
+//!    Metal argument buffers, D3D12 ResourceDescriptorHeap). Phase 0: structures
+//!    declared, capability query-able via `Device.supports`, but fixed bind groups
+//!    only (cf. brief §Out-of-scope). First use Phase 1+ (data-driven V-Buffer
+//!    material eval).
 //!
-//! Le pré-câblage évite que l'ajout Phase 1+ force un refactor de toute la
-//! surface GAL (principe directeur "concevoir au jour 1").
+//! Pre-wiring avoids a Phase 1+ addition forcing a refactor of the whole
+//! GAL surface (the "design at day 1" guiding principle).
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -28,7 +28,7 @@ const types = @import("types.zig");
 // TimelineSemaphore
 // ============================================================================
 
-/// Handle opaque de TimelineSemaphore.
+/// Opaque TimelineSemaphore handle.
 pub const TimelineSemaphoreHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: TimelineSemaphoreHandle) bool {
@@ -36,14 +36,14 @@ pub const TimelineSemaphoreHandle = extern struct {
     }
 };
 
-/// Descripteur de TimelineSemaphore.
+/// TimelineSemaphore descriptor.
 pub const TimelineSemaphoreDescriptor = struct {
     label: ?[]const u8 = null,
-    /// Valeur initiale du compteur. La valeur est monotone croissante.
+    /// Initial counter value. The value is monotonically increasing.
     initial_value: u64 = 0,
 };
 
-/// Snapshot d'un wait/signal sur une valeur donnée.
+/// Snapshot of a wait/signal on a given value.
 pub const TimelineWait = struct {
     semaphore: TimelineSemaphoreHandle,
     value: u64,
@@ -53,33 +53,33 @@ pub const TimelineWait = struct {
 // BarrierExplicit
 // ============================================================================
 
-/// Mode de tracking des barriers pour une pass. Posé par le caller dans le
-/// descriptor de la pass (cf. `render_graph/pass.zig`).
+/// Barrier tracking mode for a pass. Set by the caller in the pass
+/// descriptor (cf. `render_graph/pass.zig`).
 pub const BarrierMode = enum {
-    /// Auto-tracking par le render graph (défaut Phase 0).
+    /// Auto-tracking by the render graph (Phase 0 default).
     auto,
-    /// Aucun tracking — le body de la pass insère ses barriers via
+    /// No tracking — the pass body inserts its barriers via
     /// `RenderPassEncoder.barrier(...)` / `ComputePassEncoder.barrier(...)`.
-    /// Premier usage Phase 1+ (pass merging, resource aliasing).
+    /// First use Phase 1+ (pass merging, resource aliasing).
     explicit,
 };
 
-/// Descripteur de barrier explicite (utilisé dans le mode `BarrierMode.explicit`).
+/// Explicit barrier descriptor (used in `BarrierMode.explicit` mode).
 pub const ExplicitBarrier = struct {
-    /// Resource cible (Buffer ou Texture).
+    /// Target resource (Buffer or Texture).
     resource: union(enum) {
         buffer: types.BufferHandle,
         texture: types.TextureHandle,
     },
-    /// Stage producer (qui produit la donnée avant la barrière).
+    /// Producer stage (produces the data before the barrier).
     src_stage: types.ShaderStage,
-    /// Stage consumer (qui lit la donnée après la barrière).
+    /// Consumer stage (reads the data after the barrier).
     dst_stage: types.ShaderStage,
-    /// Layout de texture après la transition (uniquement si `resource = .texture`).
+    /// Texture layout after the transition (only if `resource = .texture`).
     new_layout: ?TextureLayout = null,
 };
 
-/// Layout possible d'une texture. Cf. Vulkan `VkImageLayout`. Sous-set Phase 0.
+/// Possible layout of a texture. Cf. Vulkan `VkImageLayout`. Phase 0 subset.
 pub const TextureLayout = enum(u8) {
     undefined,
     general,
@@ -95,20 +95,20 @@ pub const TextureLayout = enum(u8) {
 // DescriptorIndexing
 // ============================================================================
 
-/// Configuration du bindless descriptor heap. Phase 0 : type présent, instanciation
-/// retourne `error.Unsupported` si `Device.supports(.descriptor_indexing) == false`.
+/// Bindless descriptor heap configuration. Phase 0: type present, instantiation
+/// returns `error.Unsupported` if `Device.supports(.descriptor_indexing) == false`.
 pub const DescriptorIndexingDescriptor = struct {
     label: ?[]const u8 = null,
-    /// Capacité du heap par type de resource. Phase 0 : valeurs ignorées (heap
-    /// non créé), Phase 1+ : limite hardware-aware (typique 500k textures sur
-    /// GPUs récents).
+    /// Heap capacity per resource type. Phase 0: values ignored (heap not
+    /// created), Phase 1+: hardware-aware limit (typically 500k textures on
+    /// recent GPUs).
     max_sampled_textures: u32 = 0,
     max_storage_textures: u32 = 0,
     max_samplers: u32 = 0,
     max_storage_buffers: u32 = 0,
 };
 
-/// Handle opaque vers un heap bindless. Phase 0 : `inner = 0` toujours.
+/// Opaque handle to a bindless heap. Phase 0: `inner = 0` always.
 pub const DescriptorHeapHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: DescriptorHeapHandle) bool {
@@ -117,10 +117,10 @@ pub const DescriptorHeapHandle = extern struct {
 };
 
 // ============================================================================
-// Feature query (cohérent avec les escape hatches)
+// Feature query (consistent with the escape hatches)
 // ============================================================================
 
-/// Features optionnelles query-ables via `Device.supports`.
+/// Optional features query-able via `Device.supports`.
 pub const Feature = enum {
     timeline_semaphore,
     barrier_explicit,

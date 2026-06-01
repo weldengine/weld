@@ -1,21 +1,21 @@
 //! Shader compiler tool — Phase 0 / M0.4.
 //!
-//! Outil standalone invoqué par `build.zig` via `zig build shaders` /
-//! `zig build shaders-check` (cf. brief §Fichiers + §Comportement
-//! observable).
+//! Standalone tool invoked by `build.zig` via `zig build shaders` /
+//! `zig build shaders-check` (cf. brief §Files + §Observable
+//! behavior).
 //!
-//! Mode `shaders` :
-//! - Découvre tous les `.glsl` sous `assets/shaders/`.
-//! - Pour chaque fichier, dérive le stage depuis le nom (`*.vert.glsl` →
+//! `shaders` mode:
+//! - Discovers all `.glsl` under `assets/shaders/`.
+//! - For each file, derives the stage from the name (`*.vert.glsl` →
 //!   vertex, `*.frag.glsl` → fragment, `*.comp.glsl` → compute).
-//! - Compile via `glslc` CLI spawn (cf. `src/modules/render/shader_pipeline/compiler.zig`).
-//! - Écrit le `.spv` à côté du `.glsl`. Cohérent avec le pattern artefacts
-//!   générés commités (brief §Notes).
+//! - Compiles via a `glslc` CLI spawn (cf. `src/modules/render/shader_pipeline/compiler.zig`).
+//! - Writes the `.spv` next to the `.glsl`. Consistent with the committed
+//!   generated-artifact pattern (brief §Notes).
 //!
-//! Mode `shaders-check` :
-//! - Compile dans un dossier temp.
-//! - Diff vs le `.spv` commité. Exit code 0 si diff vide, non-zéro sinon.
-//! - Le step CI `shaders-check` (brief §CI) bloque le merge sur diff.
+//! `shaders-check` mode:
+//! - Compiles into a temp folder.
+//! - Diff vs the committed `.spv`. Exit code 0 if diff empty, non-zero otherwise.
+//! - The CI step `shaders-check` (brief §CI) blocks the merge on a diff.
 
 const std = @import("std");
 const shader = @import("shader_pipeline_compiler");
@@ -47,9 +47,9 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print("shader_compiler: glslc not in PATH — skipping ({s} mode)\n", .{
             if (args.check) "check" else "build",
         });
-        // En mode check, l'absence de glslc n'est pas bloquante : on
-        // assume que les .spv commités sont valides (le CI Linux qui a
-        // glslc est l'autorité).
+        // In check mode, the absence of glslc is not blocking: we
+        // assume the committed .spv are valid (the Linux CI that has
+        // glslc is the authority).
         return;
     }
 
@@ -103,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
 
-        // Construit le path .spv attendu.
+        // Builds the expected .spv path.
         const spv_name = try std.mem.concat(gpa, u8, &.{
             entry.name[0 .. entry.name.len - 5], // strip ".glsl"
             ".spv",

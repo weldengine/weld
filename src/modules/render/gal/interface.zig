@@ -1,90 +1,90 @@
-//! Vérification comptime du contrat GAL — Phase 0 / M0.4.
+//! Comptime check of the GAL contract — Phase 0 / M0.4.
 //!
-//! Pattern inspiré sysgpu Mach (`engine-mach-reference.md` §2) : aucune
-//! vtable runtime, le backend est résolu à la compilation et l'interface
-//! est vérifiée par `comptime`. Toute classe de backend (`Null`, `Vulkan`,
-//! futur `Metal`, `D3D12`, `WebGPU`) passe `checkBackend(Backend)` au
-//! `comptime` — si une méthode manque, le build casse avec un message clair.
+//! Pattern inspired by Mach sysgpu (`engine-mach-reference.md` §2): no
+//! runtime vtable, the backend is resolved at compile time and the interface
+//! is checked by `comptime`. Every backend class (`Null`, `Vulkan`,
+//! future `Metal`, `D3D12`, `WebGPU`) passes `checkBackend(Backend)` at
+//! `comptime` — if a method is missing, the build breaks with a clear message.
 //!
-//! Phase 0 : vérification de présence + signature de premier paramètre
-//! (`*Backend`). Phase 1+ : extension vers la vérification de signature
-//! complète (paramètres + types de retour) sur le modèle sysgpu (~2 700
-//! lignes d'assertions). Phase 0 reste pragmatique pour ne pas bloquer
-//! l'avancement du Vulkan backend.
+//! Phase 0: presence check + first-parameter signature
+//! (`*Backend`). Phase 1+: extension to full signature checking
+//! (parameters + return types) on the sysgpu model (~2,700
+//! lines of assertions). Phase 0 stays pragmatic so as not to block
+//! the Vulkan backend's progress.
 
 const std = @import("std");
 const types = @import("types.zig");
 
-/// Méthode requise sur un backend. La présence est vérifiée au comptime ;
-/// la signature complète restera à étendre Phase 1+.
+/// Required method on a backend. Presence is checked at comptime;
+/// the full signature remains to be extended Phase 1+.
 const RequiredMethod = struct {
     name: []const u8,
-    /// Message de doc affiché en cas d'erreur — guide le lecteur vers la
-    /// section de spec correspondante.
+    /// Doc message shown on error — guides the reader toward the
+    /// corresponding spec section.
     purpose: []const u8,
 };
 
-/// Liste des méthodes requises pour tout backend GAL Phase 0. Ordre logique
-/// (cycle de vie d'un device → resources → pipeline → frame).
+/// List of methods required for any Phase 0 GAL backend. Logical order
+/// (device lifecycle → resources → pipeline → frame).
 pub const required_methods = [_]RequiredMethod{
     // Lifecycle
-    .{ .name = "init", .purpose = "Construit le Device depuis un DeviceDescriptor" },
-    .{ .name = "deinit", .purpose = "Libère toutes les resources GPU du Device" },
-    .{ .name = "supports", .purpose = "Query d'une Feature optionnelle (cf. escape_hatches.Feature)" },
+    .{ .name = "init", .purpose = "Builds the Device from a DeviceDescriptor" },
+    .{ .name = "deinit", .purpose = "Frees all the Device's GPU resources" },
+    .{ .name = "supports", .purpose = "Query of an optional Feature (cf. escape_hatches.Feature)" },
 
     // Buffer ops
-    .{ .name = "createBuffer", .purpose = "Alloue un Buffer GPU" },
-    .{ .name = "destroyBuffer", .purpose = "Libère un Buffer GPU" },
-    .{ .name = "mapBuffer", .purpose = "Map un host-visible Buffer pour CPU read/write" },
-    .{ .name = "unmapBuffer", .purpose = "Unmap un Buffer mappé via mapBuffer" },
+    .{ .name = "createBuffer", .purpose = "Allocates a GPU Buffer" },
+    .{ .name = "destroyBuffer", .purpose = "Frees a GPU Buffer" },
+    .{ .name = "mapBuffer", .purpose = "Maps a host-visible Buffer for CPU read/write" },
+    .{ .name = "unmapBuffer", .purpose = "Unmaps a Buffer mapped via mapBuffer" },
 
     // Texture ops
-    .{ .name = "createTexture", .purpose = "Alloue une Texture GPU" },
-    .{ .name = "destroyTexture", .purpose = "Libère une Texture GPU" },
-    .{ .name = "createTextureView", .purpose = "Crée une vue sur une Texture" },
-    .{ .name = "destroyTextureView", .purpose = "Libère une TextureView" },
+    .{ .name = "createTexture", .purpose = "Allocates a GPU Texture" },
+    .{ .name = "destroyTexture", .purpose = "Frees a GPU Texture" },
+    .{ .name = "createTextureView", .purpose = "Creates a view on a Texture" },
+    .{ .name = "destroyTextureView", .purpose = "Frees a TextureView" },
 
     // Sampler
-    .{ .name = "createSampler", .purpose = "Crée un Sampler" },
-    .{ .name = "destroySampler", .purpose = "Libère un Sampler" },
+    .{ .name = "createSampler", .purpose = "Creates a Sampler" },
+    .{ .name = "destroySampler", .purpose = "Frees a Sampler" },
 
     // Shader / pipeline
-    .{ .name = "createShaderModule", .purpose = "Charge un module SPIR-V sur le device" },
-    .{ .name = "destroyShaderModule", .purpose = "Libère un ShaderModule" },
-    .{ .name = "createBindGroupLayout", .purpose = "Crée un BindGroupLayout" },
-    .{ .name = "destroyBindGroupLayout", .purpose = "Libère un BindGroupLayout" },
-    .{ .name = "createBindGroup", .purpose = "Crée un BindGroup à partir d'un layout + entries" },
-    .{ .name = "destroyBindGroup", .purpose = "Libère un BindGroup" },
-    .{ .name = "createRenderPipeline", .purpose = "Crée un RenderPipeline (PSO graphics)" },
-    .{ .name = "destroyRenderPipeline", .purpose = "Libère un RenderPipeline" },
-    .{ .name = "createComputePipeline", .purpose = "Crée un ComputePipeline" },
-    .{ .name = "destroyComputePipeline", .purpose = "Libère un ComputePipeline" },
+    .{ .name = "createShaderModule", .purpose = "Loads a SPIR-V module on the device" },
+    .{ .name = "destroyShaderModule", .purpose = "Frees a ShaderModule" },
+    .{ .name = "createBindGroupLayout", .purpose = "Creates a BindGroupLayout" },
+    .{ .name = "destroyBindGroupLayout", .purpose = "Frees a BindGroupLayout" },
+    .{ .name = "createBindGroup", .purpose = "Creates a BindGroup from a layout + entries" },
+    .{ .name = "destroyBindGroup", .purpose = "Frees a BindGroup" },
+    .{ .name = "createRenderPipeline", .purpose = "Creates a RenderPipeline (graphics PSO)" },
+    .{ .name = "destroyRenderPipeline", .purpose = "Frees a RenderPipeline" },
+    .{ .name = "createComputePipeline", .purpose = "Creates a ComputePipeline" },
+    .{ .name = "destroyComputePipeline", .purpose = "Frees a ComputePipeline" },
 
     // Sync primitives
-    .{ .name = "createFence", .purpose = "Crée une Fence (sync CPU↔GPU)" },
-    .{ .name = "destroyFence", .purpose = "Libère une Fence" },
-    .{ .name = "waitFence", .purpose = "Bloque jusqu'à signalement d'une Fence (timeout ns)" },
-    .{ .name = "resetFence", .purpose = "Reset une Fence pour réutilisation" },
-    .{ .name = "createSemaphore", .purpose = "Crée un Semaphore binaire (sync GPU↔GPU)" },
-    .{ .name = "destroySemaphore", .purpose = "Libère un Semaphore" },
+    .{ .name = "createFence", .purpose = "Creates a Fence (CPU↔GPU sync)" },
+    .{ .name = "destroyFence", .purpose = "Frees a Fence" },
+    .{ .name = "waitFence", .purpose = "Blocks until a Fence is signaled (timeout ns)" },
+    .{ .name = "resetFence", .purpose = "Resets a Fence for reuse" },
+    .{ .name = "createSemaphore", .purpose = "Creates a binary Semaphore (GPU↔GPU sync)" },
+    .{ .name = "destroySemaphore", .purpose = "Frees a Semaphore" },
 
     // Swapchain
-    .{ .name = "createSwapchain", .purpose = "Crée la swapchain pour une surface" },
-    .{ .name = "destroySwapchain", .purpose = "Libère la swapchain" },
-    .{ .name = "acquireNextImage", .purpose = "Acquiert le prochain image index de la swapchain" },
-    .{ .name = "getSwapchainImageView", .purpose = "Retourne la TextureViewHandle stable pour une image du swapchain (pré-allouée à l'init)" },
-    .{ .name = "present", .purpose = "Présente l'image courante" },
+    .{ .name = "createSwapchain", .purpose = "Creates the swapchain for a surface" },
+    .{ .name = "destroySwapchain", .purpose = "Frees the swapchain" },
+    .{ .name = "acquireNextImage", .purpose = "Acquires the swapchain's next image index" },
+    .{ .name = "getSwapchainImageView", .purpose = "Returns the stable TextureViewHandle for a swapchain image (pre-allocated at init)" },
+    .{ .name = "present", .purpose = "Presents the current image" },
 
     // Queue & command recording
-    .{ .name = "getQueue", .purpose = "Obtient une Queue (graphics/compute/transfer)" },
-    .{ .name = "createCommandEncoder", .purpose = "Démarre l'enregistrement d'un command buffer" },
-    .{ .name = "submit", .purpose = "Submit un CommandEncoder finalisé à la graphics queue (cf. SubmitDescriptor)" },
+    .{ .name = "getQueue", .purpose = "Gets a Queue (graphics/compute/transfer)" },
+    .{ .name = "createCommandEncoder", .purpose = "Starts recording a command buffer" },
+    .{ .name = "submit", .purpose = "Submits a finished CommandEncoder to the graphics queue (cf. SubmitDescriptor)" },
 };
 
-/// Vérification comptime que `Backend` déclare toutes les méthodes requises.
-/// Appelée comme `comptime interface.checkBackend(Backend)` lors de
-/// l'instanciation du wrapper `gal.main.Device`. Retourne `void` en cas
-/// de succès, déclenche un `@compileError` en cas de manque.
+/// Comptime check that `Backend` declares all the required methods.
+/// Called as `comptime interface.checkBackend(Backend)` during the
+/// instantiation of the `gal.main.Device` wrapper. Returns `void` on
+/// success, triggers a `@compileError` on a missing method.
 pub fn checkBackend(comptime Backend: type) void {
     comptime {
         for (required_methods) |m| {
@@ -99,7 +99,7 @@ pub fn checkBackend(comptime Backend: type) void {
     }
 }
 
-/// Liste les méthodes requises sous forme texte (debug / docgen).
+/// Lists the required methods as text (debug / docgen).
 pub fn listRequiredMethods(writer: anytype) !void {
     inline for (required_methods) |m| {
         try writer.print("- {s}: {s}\n", .{ m.name, m.purpose });
@@ -110,9 +110,9 @@ pub fn listRequiredMethods(writer: anytype) !void {
 // Tests
 // ============================================================================
 
-/// Backend "shape" minimal pour les tests — déclare toutes les méthodes
-/// requises avec des stubs sans corps (jamais appelés). Ne pas utiliser
-/// hors tests d'interface.
+/// Minimal backend "shape" for the tests — declares all the required
+/// methods with bodyless stubs (never called). Do not use outside
+/// interface tests.
 const TestShape = struct {
     pub fn init(allocator: std.mem.Allocator, descriptor: types.DeviceDescriptor) types.Error!TestShape {
         _ = .{ allocator, descriptor };

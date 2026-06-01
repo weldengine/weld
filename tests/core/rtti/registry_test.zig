@@ -1,7 +1,7 @@
 //! M0.2 / E1 — registry tests.
 //!
 //! Coverage per `briefs/M0.2-rtti-resources-events-bindgen.md` E1
-//! § Critères d'acceptation locaux:
+//! § Local acceptance criteria:
 //!
 //! - `register` then `lookup` returns an identical `TypeInfo`.
 //! - `lookupByName` indexes by `type_name`.
@@ -23,7 +23,7 @@ const Registry = rtti.Registry;
 //
 // Position / Velocity here are local to the test — they do NOT consume
 // or shadow the live ECS types from `src/core/ecs/components.zig`. E1
-// is standalone: no metier wiring (S6 IPC swap is E2, resources are
+// is standalone: no domain wiring (S6 IPC swap is E2, resources are
 // E3, events are E4).
 
 const Position = extern struct {

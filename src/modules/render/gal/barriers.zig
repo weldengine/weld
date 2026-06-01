@@ -1,37 +1,37 @@
 //! Barrier tracker — Phase 0 / M0.4.
 //!
-//! Maintient l'état de layout/access mask de chaque texture/buffer pour
-//! insérer automatiquement les barriers Vulkan/Metal/D3D12 entre passes
-//! qui partagent une resource. Cohérent avec le brief §Notes décision 2 :
-//! auto-tracking par défaut, `BarrierMode.explicit` opt-in.
+//! Maintains the layout/access-mask state of each texture/buffer to
+//! automatically insert Vulkan/Metal/D3D12 barriers between passes that
+//! share a resource. Consistent with brief §Notes decision 2:
+//! auto-tracking by default, `BarrierMode.explicit` opt-in.
 //!
-//! Phase 0 : implémentation minimaliste — un `std.AutoHashMap` par type de
-//! resource qui mappe handle → dernier (layout, stage, access). À chaque
-//! déclaration d'usage par une pass, le tracker compare l'état courant à
-//! l'état requis et émet une `RecordedBarrier` si transition nécessaire.
+//! Phase 0: minimalist implementation — one `std.AutoHashMap` per resource
+//! type mapping handle → last (layout, stage, access). On each usage
+//! declaration by a pass, the tracker compares the current state to the
+//! required state and emits a `RecordedBarrier` if a transition is needed.
 //!
-//! Phase 1+ : enrichi pour le pass merging (fusion de passes compatibles
-//! qui partagent une même barrière), le resource aliasing (réutilisation
-//! d'une transient texture par plusieurs passes non-overlapping), et le
-//! support multi-queue (barriers cross-queue avec timeline semaphores).
+//! Phase 1+: enriched for pass merging (merging compatible passes that
+//! share a barrier), resource aliasing (reuse of a transient texture by
+//! several non-overlapping passes), and multi-queue support (cross-queue
+//! barriers with timeline semaphores).
 //!
-//! Le tracker est interne au render graph — pas exporté côté caller. Le
-//! caller consomme uniquement le `BarrierMode` via le descripteur de pass
+//! The tracker is internal to the render graph — not exported on the caller
+//! side. The caller consumes only the `BarrierMode` via the pass descriptor
 //! (cf. `escape_hatches.BarrierMode`).
 
 const std = @import("std");
 const types = @import("types.zig");
 const escape = @import("escape_hatches.zig");
 
-/// Direction d'accès à une resource par une pass.
+/// Access direction to a resource by a pass.
 pub const Access = packed struct(u32) {
     read: bool = false,
     write: bool = false,
-    /// Si la pass écrit dans cette texture comme color attachment.
+    /// If the pass writes to this texture as a color attachment.
     color_attachment: bool = false,
-    /// Si la pass écrit dans cette texture comme depth attachment.
+    /// If the pass writes to this texture as a depth attachment.
     depth_attachment: bool = false,
-    /// Si la pass lit cette texture comme sampled input.
+    /// If the pass reads this texture as a sampled input.
     sampled: bool = false,
     _padding: u27 = 0,
 
@@ -40,29 +40,29 @@ pub const Access = packed struct(u32) {
     }
 };
 
-/// Usage d'une resource par une pass donnée.
+/// Usage of a resource by a given pass.
 pub const ResourceUsage = struct {
     stage: types.ShaderStage,
     access: Access,
-    /// Layout requis (uniquement pour les textures). Null pour les buffers.
+    /// Required layout (textures only). Null for buffers.
     layout: ?escape.TextureLayout = null,
 };
 
-/// État courant d'une texture dans le tracker.
+/// Current state of a texture in the tracker.
 const TextureState = struct {
     layout: escape.TextureLayout,
     last_stage: types.ShaderStage,
     last_access: Access,
 };
 
-/// État courant d'un buffer dans le tracker.
+/// Current state of a buffer in the tracker.
 const BufferState = struct {
     last_stage: types.ShaderStage,
     last_access: Access,
 };
 
-/// Barrière à insérer entre deux passes (produite par le tracker, consommée
-/// par le backend lors de l'enregistrement des command buffers).
+/// Barrier to insert between two passes (produced by the tracker, consumed
+/// by the backend when recording the command buffers).
 pub const RecordedBarrier = struct {
     resource: union(enum) {
         buffer: types.BufferHandle,
@@ -72,19 +72,19 @@ pub const RecordedBarrier = struct {
     dst_stage: types.ShaderStage,
     src_access: Access,
     dst_access: Access,
-    /// Transition de layout (uniquement pour les textures).
+    /// Layout transition (textures only).
     old_layout: ?escape.TextureLayout = null,
     new_layout: ?escape.TextureLayout = null,
 };
 
-/// Tracker per-frame des transitions de resources. Reset au début de chaque
-/// frame (les transient resources du render graph naissent et meurent dans
-/// la frame).
+/// Per-frame tracker of resource transitions. Reset at the start of each
+/// frame (the render graph's transient resources are born and die within
+/// the frame).
 pub const BarrierTracker = struct {
     allocator: std.mem.Allocator,
     textures: std.AutoHashMapUnmanaged(u64, TextureState) = .empty,
     buffers: std.AutoHashMapUnmanaged(u64, BufferState) = .empty,
-    /// Barriers accumulées dans l'ordre d'insertion, consommées par le backend.
+    /// Barriers accumulated in insertion order, consumed by the backend.
     recorded: std.ArrayListUnmanaged(RecordedBarrier) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) BarrierTracker {
@@ -98,21 +98,21 @@ pub const BarrierTracker = struct {
         self.* = undefined;
     }
 
-    /// Reset le tracker pour une nouvelle frame. Préserve les buckets
-    /// alloués (capacity) pour éviter les réallocations frame-à-frame.
+    /// Reset the tracker for a new frame. Preserves the allocated buckets
+    /// (capacity) to avoid frame-to-frame reallocations.
     pub fn reset(self: *BarrierTracker) void {
         self.textures.clearRetainingCapacity();
         self.buffers.clearRetainingCapacity();
         self.recorded.clearRetainingCapacity();
     }
 
-    /// Déclare l'usage d'une texture par la pass courante. Si une transition
-    /// est nécessaire vs l'état précédent, une `RecordedBarrier` est ajoutée
-    /// à `self.recorded`. Le state de la texture est mis à jour vers le
-    /// nouvel état post-pass.
+    /// Declares the usage of a texture by the current pass. If a transition
+    /// is needed vs the previous state, a `RecordedBarrier` is added to
+    /// `self.recorded`. The texture's state is updated to the new
+    /// post-pass state.
     ///
-    /// `initial_layout` est utilisé uniquement la première fois qu'une
-    /// texture apparaît (typiquement `.undefined` pour les transients).
+    /// `initial_layout` is used only the first time a texture appears
+    /// (typically `.undefined` for transients).
     pub fn trackTexture(
         self: *BarrierTracker,
         texture: types.TextureHandle,
@@ -129,7 +129,7 @@ pub const BarrierTracker = struct {
             };
         }
         const prev = gop.value_ptr.*;
-        // Insertion de barrier si transition nécessaire.
+        // Insert a barrier if a transition is needed.
         const needs_barrier = needsBarrierForTransition(
             prev.last_access,
             prev.last_stage,
@@ -156,7 +156,7 @@ pub const BarrierTracker = struct {
         };
     }
 
-    /// Idem pour un buffer (pas de layout).
+    /// Same for a buffer (no layout).
     pub fn trackBuffer(
         self: *BarrierTracker,
         buffer: types.BufferHandle,
@@ -193,21 +193,21 @@ pub const BarrierTracker = struct {
         };
     }
 
-    /// Snapshot des barriers accumulées depuis le dernier `reset` ou `consumeRecorded`.
+    /// Snapshot of the barriers accumulated since the last `reset` or `consumeRecorded`.
     pub fn consumeRecorded(self: *BarrierTracker) []const RecordedBarrier {
         return self.recorded.items;
     }
 };
 
-/// Détermine si une barrière est nécessaire entre deux usages successifs
-/// d'une resource. Règle Phase 0 (simplifiée mais correcte) :
-///   - première occurrence (last_access vide) → pas de barrière mais transition
-///     de layout si needed (handled par le caller via le state initial)
-///   - write → read = barrière obligatoire (read-after-write)
-///   - read → write = barrière obligatoire (write-after-read)
-///   - write → write = barrière obligatoire (write-after-write)
-///   - read → read = pas de barrière (lectures concurrentes OK)
-///   - changement de layout = barrière obligatoire indépendamment des access masks
+/// Determines whether a barrier is needed between two successive usages
+/// of a resource. Phase 0 rule (simplified but correct):
+///   - first occurrence (last_access empty) → no barrier, but a layout
+///     transition if needed (handled by the caller via the initial state)
+///   - write → read = mandatory barrier (read-after-write)
+///   - read → write = mandatory barrier (write-after-read)
+///   - write → write = mandatory barrier (write-after-write)
+///   - read → read = no barrier (concurrent reads OK)
+///   - layout change = mandatory barrier regardless of the access masks
 fn needsBarrierForTransition(
     prev_access: Access,
     prev_stage: types.ShaderStage,
@@ -220,15 +220,15 @@ fn needsBarrierForTransition(
     _ = new_stage;
     const prev_is_init = !prev_access.read and !prev_access.isWrite();
     if (prev_is_init) {
-        // Premier usage : pas de barrière hazard, mais transition layout possible.
+        // First usage: no hazard barrier, but a layout transition is possible.
         if (old_layout != null and new_layout != null) {
             return @intFromEnum(old_layout.?) != @intFromEnum(new_layout.?);
         }
         return false;
     }
-    if (prev_access.isWrite()) return true; // WAW ou RAW
+    if (prev_access.isWrite()) return true; // WAW or RAW
     if (new_access.isWrite()) return true; // WAR
-    // R→R : seule une transition de layout justifie une barrière.
+    // R→R: only a layout transition justifies a barrier.
     if (old_layout != null and new_layout != null) {
         return @intFromEnum(old_layout.?) != @intFromEnum(new_layout.?);
     }
@@ -253,13 +253,13 @@ test "barriers: write then read inserts barrier" {
     var tracker = BarrierTracker.init(std.testing.allocator);
     defer tracker.deinit();
     const tex = types.TextureHandle{ .inner = 2 };
-    // Pass A : color attachment write
+    // Pass A: color attachment write
     try tracker.trackTexture(tex, .{
         .stage = .{ .fragment = true },
         .access = .{ .write = true, .color_attachment = true },
         .layout = .color_attachment,
     }, .undefined);
-    // Pass B : sampled read
+    // Pass B: sampled read
     try tracker.trackTexture(tex, .{
         .stage = .{ .fragment = true },
         .access = .{ .read = true, .sampled = true },
@@ -281,14 +281,14 @@ test "barriers: read after read does not insert barrier when layout stable" {
         .access = .{ .read = true, .sampled = true },
         .layout = .shader_read_only,
     }, .shader_read_only);
-    // Premier passage produit 0 barrier.
+    // First pass produces 0 barriers.
     try t.expectEqual(@as(usize, 0), tracker.recorded.items.len);
     try tracker.trackTexture(tex, .{
         .stage = .{ .fragment = true },
         .access = .{ .read = true, .sampled = true },
         .layout = .shader_read_only,
     }, .shader_read_only);
-    // R→R même layout : toujours 0 barrier.
+    // R→R same layout: still 0 barriers.
     try t.expectEqual(@as(usize, 0), tracker.recorded.items.len);
 }
 

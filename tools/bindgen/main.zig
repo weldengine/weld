@@ -1,22 +1,22 @@
-//! CLI unifié du système de bindings Weld (M0.2 / E5).
+//! Unified CLI of the Weld bindings system (M0.2 / E5).
 //!
-//! Dispatcher minimaliste qui invoque le bon adapter selon
-//! `--target`. Sans `--target`, régénère tous les adapters
-//! configurés (Vulkan + Wayland en M0.2).
+//! Minimalist dispatcher that invokes the right adapter based on
+//! `--target`. Without `--target`, regenerates all configured
+//! adapters (Vulkan + Wayland in M0.2).
 //!
-//! Architecture (cf. `engine-c-bindings.md` §1) :
-//!   adapters/*.zig (XML / headers C → output)
+//! Architecture (cf. `engine-c-bindings.md` §1):
+//!   adapters/*.zig (XML / C headers → output)
 //!     → bindings/generated/*.api.zig (description sidecar)
-//!     → core/emitter.zig (Zig idiomatique avec dlopen)
+//!     → core/emitter.zig (idiomatic Zig with dlopen)
 //!     → src/.../<binding>.zig + tests
 //!
-//! Statut M0.2 : les adapters `vk_xml` et `wayland_xml` portent
-//! le pipeline 1:1 depuis l'ancien `tools/vk_gen/` /
-//! `tools/wayland_gen/` et émettent directement le Zig
-//! idiomatique sans passer par `core/emitter.zig` (décision
-//! technique E5 (i), cf. brief § Notes). Le squelette
-//! `core/{api_description, validator, resolver, emitter}.zig` est
-//! posé pour les premiers keepers Phase 1+.
+//! M0.2 status: the adapters `vk_xml` and `wayland_xml` carry
+//! the 1:1 pipeline from the old `tools/vk_gen/` /
+//! `tools/wayland_gen/` and emit the idiomatic Zig
+//! directly without going through `core/emitter.zig` (E5 (i)
+//! technical decision, cf. brief § Notes). The skeleton
+//! `core/{api_description, validator, resolver, emitter}.zig` is
+//! laid down for the first Phase 1+ keepers.
 
 const std = @import("std");
 

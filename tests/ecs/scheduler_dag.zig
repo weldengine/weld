@@ -191,7 +191,7 @@ test "systems with disjoint write sets run concurrently in the same phase" {
     // method (c) structural assertion above is the platform-
     // independent gate; the timing was always meant as a sanity
     // check and is dropped here per the M0.1 hotfix journal entry
-    // (« Hotfix CI Windows post-E7 »).
+    // ("Hotfix CI Windows post-E7").
     //
     // Lesson recorded in the brief: when a test ships a method (b)
     // timing assertion, ALWAYS pair it with a method (c) structural

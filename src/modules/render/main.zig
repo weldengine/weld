@@ -1,23 +1,23 @@
-//! Module Render — Phase 0 / M0.4.
+//! Render module — Phase 0 / M0.4.
 //!
-//! Entrée publique du module Render (Tier 1). Re-expose les deux
-//! sous-systèmes Phase 0 :
+//! Public entry point of the Render module (Tier 1). Re-exposes the two
+//! Phase 0 subsystems:
 //! - `gal` — GPU Abstraction Layer (Device, Buffer, Texture, ...)
-//! - `render_graph` — DAG déclaratif de passes + 3 passes Phase 0
+//! - `render_graph` — declarative DAG of passes + 3 Phase 0 passes
 //!
-//! Phase 1+ : ajoute V-Buffer, Radiance GI, post-process, etc. La surface
-//! publique reste stable — c'est le contrat figé jour 1 (brief
-//! §Notes décision 1).
+//! Phase 1+: adds V-Buffer, Radiance GI, post-process, etc. The public
+//! surface stays stable — it is the contract frozen on day 1 (brief
+//! §Notes decision 1).
 
-// Re-export du sous-module GAL.
+// Re-export of the GAL submodule.
 
-/// Namespace GAL — types publics, interface comptime, backends Null + Vulkan,
+/// GAL namespace — public types, comptime interface, Null + Vulkan backends,
 /// barriers tracker, escape hatches.
 pub const gal = @import("gal/main.zig");
 
-// Re-export du sous-module render_graph.
+// Re-export of the render_graph submodule.
 
-/// Namespace render graph — DAG, Pass, et 3 passes Phase 0 (depth_prepass,
+/// Render graph namespace — DAG, Pass, and 3 Phase 0 passes (depth_prepass,
 /// forward, capture).
 pub const render_graph = struct {
     pub const Graph = @import("render_graph/graph.zig").Graph;
@@ -32,21 +32,21 @@ pub const render_graph = struct {
     };
 };
 
-/// Namespace shader pipeline — compiler GLSL→SPIR-V (glslc CLI spawn),
-/// cache disque hashé, hot-reload via filewatch.
+/// Shader pipeline namespace — GLSL→SPIR-V compiler (glslc CLI spawn),
+/// hashed disk cache, hot-reload via filewatch.
 pub const shader_pipeline = struct {
     pub const compiler = @import("shader_pipeline/compiler.zig");
     pub const cache = @import("shader_pipeline/cache.zig");
     pub const hot_reload = @import("shader_pipeline/hot_reload.zig");
 };
 
-/// Namespace instancing batcher — bucketing ECS CPU-side par
-/// `(mesh_id, material_id)`, tri front-to-back par centroïde.
+/// Instancing batcher namespace — CPU-side ECS bucketing by
+/// `(mesh_id, material_id)`, front-to-back sorting by centroid.
 pub const instancing = struct {
     pub const batcher = @import("instancing/batcher.zig");
 };
 
-// Pins pour l'analyse des inline tests (engine-zig-conventions.md §13).
+// Pins for the analysis of inline tests (engine-zig-conventions.md §13).
 comptime {
     _ = gal;
     _ = render_graph.Graph;
@@ -60,20 +60,20 @@ comptime {
     _ = instancing.batcher;
 }
 
-// Anciens accès directs préservés pour rétrocompatibilité avec
-// `tests/render/gal_null_smoke.zig` (qui importe `weld_render` et accède à
-// `.types`, `.interface`, etc.). Ces re-exports sont les mêmes types que
-// `gal.X`, juste un raccourci.
+// Former direct accesses preserved for backward compatibility with
+// `tests/render/gal_null_smoke.zig` (which imports `weld_render` and accesses
+// `.types`, `.interface`, etc.). These re-exports are the same types as
+// `gal.X`, just a shortcut.
 
-/// Re-export pratique des types GAL.
+/// Convenience re-export of the GAL types.
 pub const types = gal.types;
-/// Re-export pratique de l'interface GAL.
+/// Convenience re-export of the GAL interface.
 pub const interface = gal.interface;
-/// Re-export pratique du tracker de barriers.
+/// Convenience re-export of the barriers tracker.
 pub const barriers = gal.barriers;
-/// Re-export pratique des escape hatches GAL.
+/// Convenience re-export of the GAL escape hatches.
 pub const escape_hatches = gal.escape_hatches;
-/// Re-export pratique du backend Null.
+/// Convenience re-export of the Null backend.
 pub const null_backend = gal.null_backend;
-/// Re-export pratique du backend Vulkan.
+/// Convenience re-export of the Vulkan backend.
 pub const vulkan_backend = gal.vulkan_backend;

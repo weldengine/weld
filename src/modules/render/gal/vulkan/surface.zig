@@ -1,4 +1,4 @@
-//! Window → `vk.SurfaceKHR` helper — M0.4 § Scope — Complément Post-Review.
+//! Window → `vk.SurfaceKHR` helper — M0.4 § Scope — Post-Review Complement.
 //!
 //! Bridges the Tier 0 `platform.window.Window` (M0.3) to a Vulkan
 //! `SurfaceKHR`. Lives under `gal/vulkan/` so the lint rule

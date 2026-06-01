@@ -1,26 +1,26 @@
 //! Depth Prepass — Phase 0 / M0.4.
 //!
-//! Première passe du render graph Phase 0 (cf. brief §Scope).
-//! Écrit uniquement le D32_SFLOAT depth buffer (pas de stencil). Le
-//! forward opaque qui suit lit ce depth buffer via depth test on +
+//! First pass of the Phase 0 render graph (cf. brief §Scope).
+//! Writes only the D32_SFLOAT depth buffer (no stencil). The
+//! forward opaque that follows reads this depth buffer via depth test on +
 //! depth write off (early-Z).
 //!
-//! Phase 1+ : remplacé par le V-Buffer pass (cf. `engine-render.md` §4).
-//! Le slot reste pour la compatibilité tests / scènes legacy.
+//! Phase 1+: replaced by the V-Buffer pass (cf. `engine-render.md` §4).
+//! The slot remains for tests / legacy scenes compatibility.
 
 const std = @import("std");
 const gal = @import("../../gal/main.zig");
 const pass_mod = @import("../pass.zig");
 
-/// Configuration de la depth prepass.
+/// Configuration of the depth prepass.
 pub const Config = struct {
-    /// Texture du depth buffer (format D32_SFLOAT attendu, cf. brief).
+    /// Depth buffer texture (D32_SFLOAT format expected, cf. brief).
     depth_target: gal.types.TextureHandle,
-    /// Valeur de clear depth (1.0 par défaut — reverse-Z = 0.0 Phase 1+).
+    /// Depth clear value (1.0 by default — reverse-Z = 0.0 Phase 1+).
     depth_clear: f32 = 1.0,
 };
 
-/// Construit une Pass depth-prepass prête à être ajoutée à un Graph.
+/// Builds a depth-prepass Pass ready to be added to a Graph.
 pub fn buildPass(config: *const Config) pass_mod.Pass {
     return .{
         .name = "depth_prepass",
@@ -37,15 +37,15 @@ pub fn buildPass(config: *const Config) pass_mod.Pass {
     };
 }
 
-/// Body de la pass — Phase 0 : no-op (le brief stipule que le rendering
-/// effectif des objets se fait Phase 1+ via le V-Buffer). La pass existe
-/// pour câbler le depth buffer dans le graph et exercer le barrier insertion.
+/// Pass body — Phase 0: no-op (the brief states that the actual
+/// rendering of objects happens Phase 1+ via the V-Buffer). The pass exists
+/// to wire the depth buffer into the graph and exercise barrier insertion.
 fn body(encoder: ?*anyopaque, ctx: ?*anyopaque) anyerror!void {
     _ = .{ encoder, ctx };
-    // Phase 0 : pas de drawcalls — le depth buffer est juste cleared par
-    // la load op de la render pass. Le bench instancing Phase 0 utilise
-    // directement le forward (sans prepass) — cette passe est exercée par
-    // les tests de barrier insertion.
+    // Phase 0: no drawcalls — the depth buffer is just cleared by
+    // the render pass load op. The Phase 0 instancing bench uses
+    // the forward directly (without prepass) — this pass is exercised by
+    // the barrier insertion tests.
 }
 
 test "depth_prepass: buildPass populates writes" {

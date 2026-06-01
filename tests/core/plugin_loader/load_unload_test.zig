@@ -18,13 +18,13 @@ const weld_core = @import("weld_core");
 
 const Loader = weld_core.plugin_loader.Loader;
 
-// Note : le loader émet `log.warn` (pas `log.err`) sur ses
-// chemins d'erreur (`MissingEntryPoint`, `ApiVersionTooNew`,
-// `LibraryLoadFailed`). L'erreur est portée par le retour
-// `LoaderError`, le log est purement diagnostique. Ce choix
-// évite que le test runner Zig 0.16 ne compte les logs comme
-// échecs alors que les tests vérifient justement les chemins
-// d'erreur.
+// Note: the loader emits `log.warn` (not `log.err`) on its
+// error paths (`MissingEntryPoint`, `ApiVersionTooNew`,
+// `LibraryLoadFailed`). The error is carried by the
+// `LoaderError` return, the log is purely diagnostic. This
+// choice avoids the Zig 0.16 test runner counting the logs as
+// failures when the tests are precisely exercising the error
+// paths.
 
 const lib_prefix = switch (builtin.os.tag) {
     .windows => "",
@@ -48,7 +48,7 @@ const happy_path = stubPath("weld_stub_plugin_happy");
 const future_path = stubPath("weld_stub_plugin_future");
 const no_entry_path = stubPath("weld_stub_plugin_no_entry");
 
-test "Loader charges le stub plugin sans erreur" {
+test "Loader loads the stub plugin without error" {
     const gpa = std.testing.allocator;
     var loader = Loader.init(gpa);
     defer loader.deinit();
@@ -61,7 +61,7 @@ test "Loader charges le stub plugin sans erreur" {
     try std.testing.expect(handle.state == .unloaded);
 }
 
-test "Loader lit WeldPluginDesc correctement" {
+test "Loader reads WeldPluginDesc correctly" {
     const gpa = std.testing.allocator;
     var loader = Loader.init(gpa);
     defer loader.deinit();
@@ -74,7 +74,7 @@ test "Loader lit WeldPluginDesc correctement" {
     try std.testing.expectEqual(@as(u32, 0), handle.desc.api_version_min);
 }
 
-test "unloadPlugin propre sans leak" {
+test "unloadPlugin clean, no leak" {
     const gpa = std.testing.allocator;
     var loader = Loader.init(gpa);
     defer loader.deinit();
@@ -89,7 +89,7 @@ test "unloadPlugin propre sans leak" {
     try std.testing.expectEqual(@as(u32, 3), loader.count());
 }
 
-test "load d'un binaire sans weld_plugin_entry retourne MissingEntryPoint" {
+test "load of a binary without weld_plugin_entry returns MissingEntryPoint" {
     const gpa = std.testing.allocator;
     var loader = Loader.init(gpa);
     defer loader.deinit();
@@ -101,7 +101,7 @@ test "load d'un binaire sans weld_plugin_entry retourne MissingEntryPoint" {
     try std.testing.expectEqual(@as(u32, 0), loader.count());
 }
 
-test "load d'un plugin avec api_version_min > current retourne ApiVersionTooNew" {
+test "load of a plugin with api_version_min > current returns ApiVersionTooNew" {
     const gpa = std.testing.allocator;
     var loader = Loader.init(gpa);
     defer loader.deinit();
@@ -113,7 +113,7 @@ test "load d'un plugin avec api_version_min > current retourne ApiVersionTooNew"
     try std.testing.expectEqual(@as(u32, 0), loader.count());
 }
 
-test "loadPlugin sur un chemin invalide retourne LibraryLoadFailed" {
+test "loadPlugin on an invalid path returns LibraryLoadFailed" {
     const gpa = std.testing.allocator;
     var loader = Loader.init(gpa);
     defer loader.deinit();

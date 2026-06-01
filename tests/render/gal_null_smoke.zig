@@ -1,26 +1,26 @@
 //! GAL Null backend smoke — Phase 0 / M0.4.
 //!
-//! Exerce le pattern brief §Critères d'acceptation > Tests :
-//! - `Null backend completes a frame without panic` — cycle Device + Queue +
-//!   BindGroup + RenderPipeline + 1 frame sans crash.
-//! - `Null backend satisfies comptime interface check` — vérification que
+//! Exercises the brief §Acceptance criteria > Tests pattern:
+//! - `Null backend completes a frame without panic` — Device + Queue +
+//!   BindGroup + RenderPipeline + 1 frame cycle without crash.
+//! - `Null backend satisfies comptime interface check` — verification that
 //!   `interface.checkBackend(Null) == void`.
 //!
-//! Tient lieu de **root file** pour exécuter aussi tous les inline tests
-//! des fichiers `src/modules/render/gal/**/*.zig` (cf. `engine-zig-conventions.md`
-//! §13 — lazy analysis guard / module rooting obligatoire). Sans le pin
-//! explicite via `comptime { _ = gal.X; }`, Zig 0.16 skip silencieusement
-//! les blocs `test` des modules non-référencés depuis le root.
+//! Acts as the **root file** to also run all the inline tests of the
+//! `src/modules/render/gal/**/*.zig` files (cf. `engine-zig-conventions.md`
+//! §13 — lazy analysis guard / mandatory module rooting). Without the
+//! explicit pin via `comptime { _ = gal.X; }`, Zig 0.16 silently skips
+//! the `test` blocks of modules not referenced from the root.
 
 const std = @import("std");
 const gal = @import("weld_render");
 
 // ---------------------------------------------------------------------- Pins --
 //
-// Garantissent l'analyse des inline tests sous `src/modules/render/gal/`. Le
-// module `gal/main.zig` re-exporte déjà ses sous-fichiers via `pub const`,
-// mais on pin aussi explicitement pour résister à un futur refactor qui
-// passerait certains re-exports en private.
+// Guarantee the analysis of the inline tests under `src/modules/render/gal/`.
+// The `gal/main.zig` module already re-exports its sub-files via `pub const`,
+// but we also pin explicitly to withstand a future refactor that would
+// turn some re-exports private.
 
 comptime {
     _ = gal.types;
@@ -33,8 +33,8 @@ comptime {
 // ---------------------------------------------------------------------- Tests --
 
 test "Null backend satisfies comptime interface check" {
-    // Si une méthode requise par l'interface manque côté Null, ce test ne
-    // compile même pas (cf. `gal/interface.zig`). Le runtime est trivial.
+    // If a method required by the interface is missing on the Null side, this
+    // test does not even compile (cf. `gal/interface.zig`). The runtime is trivial.
     comptime gal.interface.checkBackend(gal.null_backend.Device);
     try std.testing.expect(true);
 }
@@ -70,7 +70,7 @@ test "Null backend completes a frame without panic" {
     });
     defer device.destroyBindGroup(group);
 
-    // ShaderModule (4-byte aligned SPIR-V stub — Null ne le déréférence pas)
+    // ShaderModule (4-byte aligned SPIR-V stub — Null does not dereference it)
     const spv: [16]u8 align(4) = [_]u8{ 0x03, 0x02, 0x23, 0x07 } ** 4;
     const vsm = try device.createShaderModule(.{ .label = "tri_vs", .code = &spv });
     defer device.destroyShaderModule(vsm);
@@ -119,7 +119,7 @@ test "Null backend completes a frame without panic" {
     const enc = try device.createCommandEncoder("frame");
     defer device.destroyCommandEncoder(enc);
 
-    // Texture cible + view (Null backend, jamais résolue côté GPU).
+    // Target texture + view (Null backend, never resolved on the GPU side).
     const color = try device.createTexture(.{
         .format = .bgra8_unorm,
         .width = 1280,
@@ -185,7 +185,7 @@ test "Null backend reports no Phase 0 optional features" {
     const allocator = std.testing.allocator;
     var device = try gal.null_backend.Device.init(allocator, .{});
     defer device.deinit();
-    // Phase 0 : aucune escape hatch n'est marquée supportée par le Null.
+    // Phase 0 : no escape hatch is marked as supported by the Null.
     try std.testing.expect(!device.supports(.timeline_semaphore));
     try std.testing.expect(!device.supports(.descriptor_indexing));
     try std.testing.expect(!device.supports(.ray_tracing));
@@ -197,14 +197,14 @@ test "BarrierTracker integrates with GAL public types" {
 
     const tex = gal.types.TextureHandle{ .inner = 42 };
 
-    // Pass A : depth prepass écrit la texture comme depth attachment.
+    // Pass A : depth prepass writes the texture as depth attachment.
     try tracker.trackTexture(tex, .{
         .stage = .{ .vertex = true, .fragment = true },
         .access = .{ .write = true, .depth_attachment = true },
         .layout = .depth_stencil_attachment,
     }, .undefined);
 
-    // Pass B : forward pass lit la depth en sampled (depth test).
+    // Pass B : forward pass reads the depth as sampled (depth test).
     try tracker.trackTexture(tex, .{
         .stage = .{ .fragment = true },
         .access = .{ .read = true, .sampled = true },

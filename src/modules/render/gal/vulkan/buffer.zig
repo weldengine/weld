@@ -1,14 +1,14 @@
 //! Buffer Vulkan — Phase 0 / M0.4.
 //!
-//! Buffer GPU = `vk.Buffer` + `vk.DeviceMemory` liés. La GAL ne sépare
-//! pas les deux (la sémantique WebGPU-like considère un Buffer comme une
-//! unité indissociable mémoire + handle). On stocke les deux dans une
-//! `Entry` indexée par un compteur monotone côté Device.
+//! GPU Buffer = `vk.Buffer` + `vk.DeviceMemory` bound together. The GAL does
+//! not separate the two (the WebGPU-like semantics treat a Buffer as an
+//! indivisible memory + handle unit). We store both in an `Entry` indexed
+//! by a monotonic counter on the Device side.
 //!
-//! Allocation Phase 0 : un allocateur par buffer (`vkAllocateMemory` /
-//! `vkFreeMemory` directs). Sub-allocation + pooling = Phase 1+ (cf.
-//! brief §Notes). Inefficace pour des milliers de buffers, suffisant pour
-//! le triangle Phase 0 + les instance buffers du benchmark.
+//! Phase 0 allocation: one allocator per buffer (direct `vkAllocateMemory` /
+//! `vkFreeMemory`). Sub-allocation + pooling = Phase 1+ (cf. brief §Notes).
+//! Inefficient for thousands of buffers, sufficient for the Phase 0
+//! triangle + the benchmark's instance buffers.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -17,8 +17,8 @@ const types = @import("../types.zig");
 const conv = @import("conv.zig");
 const Device = @import("device.zig").Device;
 
-/// Slot interne associé à un GAL `BufferHandle`. Stocké dans le registry
-/// `Device.buffers` keyé par un u64 monotone.
+/// Internal slot associated with a GAL `BufferHandle`. Stored in the
+/// `Device.buffers` registry keyed by a monotonic u64.
 pub const Entry = struct {
     vk_buffer: vk.Buffer,
     vk_memory: vk.DeviceMemory,
@@ -37,8 +37,8 @@ pub const Entry = struct {
     }
 };
 
-/// Alloue un buffer Vulkan + sa DeviceMemory backing, enregistre le couple
-/// dans le registry `device.buffers`. Retourne un `BufferHandle` GAL.
+/// Allocates a Vulkan buffer + its backing DeviceMemory, registers the pair
+/// in the `device.buffers` registry. Returns a GAL `BufferHandle`.
 pub fn create(device: *Device, descriptor: types.BufferDescriptor) types.Error!types.BufferHandle {
     if (descriptor.size == 0) return error.InvalidArgument;
 
@@ -85,7 +85,7 @@ pub fn create(device: *Device, descriptor: types.BufferDescriptor) types.Error!t
     return .{ .inner = id };
 }
 
-/// Libère un buffer + sa memory. No-op si handle invalide.
+/// Frees a buffer + its memory. No-op if handle invalid.
 pub fn destroy(device: *Device, handle: types.BufferHandle) void {
     if (handle.inner == 0) return;
     if (device.buffers.fetchRemove(handle.inner)) |kv| {
@@ -94,15 +94,15 @@ pub fn destroy(device: *Device, handle: types.BufferHandle) void {
     }
 }
 
-/// Helper interne — récupère le `vk.Buffer` associé à un GAL handle.
-/// Utilisé par `command_encoder.zig` lors de l'enregistrement des draws.
+/// Internal helper — retrieves the `vk.Buffer` associated with a GAL handle.
+/// Used by `command_encoder.zig` when recording draws.
 pub fn lookup(device: *Device, handle: types.BufferHandle) ?vk.Buffer {
     if (handle.inner == 0) return null;
     return if (device.buffers.get(handle.inner)) |e| e.vk_buffer else null;
 }
 
-/// Helper — map / unmap pour les buffers `host_visible`. Phase 0 : simple
-/// passthrough. Phase 1+ : intégration avec persistent mapping.
+/// Helper — map / unmap for `host_visible` buffers. Phase 0: simple
+/// passthrough. Phase 1+: integration with persistent mapping.
 pub fn map(device: *Device, handle: types.BufferHandle) types.Error![]u8 {
     if (handle.inner == 0) return error.InvalidArgument;
     const entry_ptr = device.buffers.getPtr(handle.inner) orelse return error.InvalidArgument;
@@ -116,7 +116,7 @@ pub fn map(device: *Device, handle: types.BufferHandle) types.Error![]u8 {
     return @as([*]u8, @ptrCast(non_null))[0..entry_ptr.size];
 }
 
-/// Démappe un buffer (l'inverse de `map`). No-op si non mappé.
+/// Unmaps a buffer (the inverse of `map`). No-op if not mapped.
 pub fn unmap(device: *Device, handle: types.BufferHandle) void {
     if (handle.inner == 0) return;
     const entry_ptr = device.buffers.getPtr(handle.inner) orelse return;

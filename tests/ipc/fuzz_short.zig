@@ -7,7 +7,7 @@
 //! trip; corrupted frames must surface as a framing-layer error
 //! (no silent drops, no segfaults, no leaks). Replaces the
 //! historic "60-second smoke fuzz" the brief calls for under
-//! `Critères d'acceptation > Tests`.
+//! `Acceptance criteria > Tests`.
 //!
 //! Runs unconditionally inside `zig build test-ipc` to keep the
 //! framework warm; the manual-run 1 h variant lives in

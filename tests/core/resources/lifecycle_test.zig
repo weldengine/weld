@@ -4,7 +4,7 @@
 //! Lifecycle = .{config | state | transient};` in the struct
 //! itself. `rtti.buildTypeInfo(T, .resource)` reads this
 //! declaration at comptime; absent declaration defaults to
-//! `.transient` (cf. brief § Notes — décision technique E3 /
+//! `.transient` (cf. brief § Notes — technical decision E3 /
 //! lifecycle inference).
 
 const std = @import("std");

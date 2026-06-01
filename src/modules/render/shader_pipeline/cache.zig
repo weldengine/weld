@@ -1,31 +1,31 @@
-//! Shader cache disque — Phase 0 / M0.4.
+//! Disk shader cache — Phase 0 / M0.4.
 //!
-//! Hash sur `(source + defines + glslc_version)` (brief §Scope). Phase 0 :
-//! cache stocké sous `.weld-cache/shaders/<hash>.spv`. Lookup → `LoadResult.hit`
-//! avec les bytes SPIR-V ; miss → caller compile + insert.
+//! Hash over `(source + defines + glslc_version)` (brief §Scope). Phase 0:
+//! cache stored under `.weld-cache/shaders/<hash>.spv`. Lookup → `LoadResult.hit`
+//! with the SPIR-V bytes; miss → caller compiles + inserts.
 //!
-//! Format hash : SHA-1 hex (160 bits → 40 char). Phase 1+ : passer à
-//! blake3 si profilo justifie (le hash n'est pas critique perf — quelques
-//! ms par shader).
+//! Hash format: SHA-1 hex (160 bits → 40 char). Phase 1+: switch to
+//! blake3 if profiling justifies it (the hash is not perf-critical — a few
+//! ms per shader).
 
 const std = @import("std");
 
 const CACHE_ROOT = ".weld-cache/shaders";
 
-/// Clé de lookup dans le cache — hash sur (source + defines + glslc_version).
+/// Lookup key in the cache — hash over (source + defines + glslc_version).
 pub const LookupKey = struct {
     source: []const u8,
     defines: []const u8 = "",
     glslc_version: []const u8 = "unknown",
 };
 
-/// Résultat d'un lookup — hit avec bytes SPIR-V owned par le caller, ou miss.
+/// Result of a lookup — hit with SPIR-V bytes owned by the caller, or miss.
 pub const LookupResult = union(enum) {
     hit: []u8,
     miss,
 };
 
-/// Set d'erreurs du cache (alias des erreurs std.fs + alloc + custom).
+/// Cache error set (alias of std.fs errors + alloc + custom).
 pub const Error = error{
     OutOfMemory,
     AccessDenied,
@@ -79,7 +79,7 @@ pub const Error = error{
     NoSuchProcess,
 };
 
-/// Calcule le hash d'une clé de lookup.
+/// Computes the hash of a lookup key.
 pub fn hashKey(key: LookupKey) [40]u8 {
     var sha1 = std.crypto.hash.Sha1.init(.{});
     sha1.update(key.source);
@@ -98,10 +98,10 @@ pub fn hashKey(key: LookupKey) [40]u8 {
     return hex;
 }
 
-/// Lookup dans le cache disque. Retourne `.hit` avec les bytes SPIR-V
-/// (owned by caller) ou `.miss`. Allocation via `allocator`.
+/// Lookup in the disk cache. Returns `.hit` with the SPIR-V bytes
+/// (owned by caller) or `.miss`. Allocation via `allocator`.
 ///
-/// API Zig 0.16 : utilise `std.Io.Dir.cwd()` qui requiert `io: std.Io`.
+/// Zig 0.16 API: uses `std.Io.Dir.cwd()` which requires `io: std.Io`.
 pub fn lookup(allocator: std.mem.Allocator, io: std.Io, key: LookupKey) Error!LookupResult {
     const hash = hashKey(key);
     var path_buf: [256]u8 = undefined;
@@ -122,7 +122,7 @@ pub fn lookup(allocator: std.mem.Allocator, io: std.Io, key: LookupKey) Error!Lo
     return .{ .hit = buf };
 }
 
-/// Insert dans le cache disque. Crée `.weld-cache/shaders/` si nécessaire.
+/// Insert into the disk cache. Creates `.weld-cache/shaders/` if necessary.
 pub fn insert(allocator: std.mem.Allocator, io: std.Io, key: LookupKey, spv: []const u8) Error!void {
     _ = allocator;
     const hash = hashKey(key);
@@ -138,7 +138,7 @@ pub fn insert(allocator: std.mem.Allocator, io: std.Io, key: LookupKey, spv: []c
     file.writeStreamingAll(io, spv) catch return error.InputOutput;
 }
 
-/// Supprime tout le cache (debug / clean build). Pas exposé en CLI Phase 0.
+/// Removes the entire cache (debug / clean build). Not exposed in CLI Phase 0.
 pub fn clear(allocator: std.mem.Allocator, io: std.Io) Error!void {
     _ = allocator;
     std.Io.Dir.cwd().deleteTree(io, CACHE_ROOT) catch |e| switch (e) {

@@ -7,11 +7,11 @@
 //! a Tier 0 windowing backend (macOS Phase 2+, stubs) the Null backend
 //! path keeps the CI scaffold working.
 //!
-//! Flags supportés (brief §Comportement observable) :
-//! - `--smoke-test`                — non-interactif, exit après 1 frame
-//! - `--capture-frame=N`           — exit après la frame N (smoke-test only)
-//! - `--gpu-prefer=<discrete|integrated|index:N>` — sélection hardware
-//! - `--vulkan-driver=<auto|hardware|software>`   — sélection driver
+//! Supported flags (brief §Observable behavior):
+//! - `--smoke-test`                — non-interactive, exit after 1 frame
+//! - `--capture-frame=N`           — exit after frame N (smoke-test only)
+//! - `--gpu-prefer=<discrete|integrated|index:N>` — hardware selection
+//! - `--vulkan-driver=<auto|hardware|software>`   — driver selection
 
 const std = @import("std");
 const builtin = @import("builtin");

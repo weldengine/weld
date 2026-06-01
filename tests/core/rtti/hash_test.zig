@@ -1,7 +1,7 @@
 //! M0.2 / E1 — hash determinism + sensitivity tests.
 //!
 //! Coverage per `briefs/M0.2-rtti-resources-events-bindgen.md` E1
-//! § Critères d'acceptation locaux:
+//! § Local acceptance criteria:
 //!
 //! - `type_id` is comptime-deterministic (two invocations on the same
 //!   type produce the same value).
@@ -55,10 +55,10 @@ test "schema_hash is sensitive to field order" {
 }
 
 test "schema_hash is sensitive to the type name (layout-equivalent types differ)" {
-    // Decision actée dans `hash.zig`: l'algorithme inclut le
-    // `@typeName(T)` dans le digest. Deux structs dont le layout est
-    // identique mais le nom différent produisent donc des
-    // `schema_hash` distincts.
+    // Decision recorded in `hash.zig`: the algorithm includes the
+    // `@typeName(T)` in the digest. Two structs whose layout is
+    // identical but whose name differs therefore produce distinct
+    // `schema_hash` values.
     const Alpha = struct { x: f32, y: f32 };
     const Beta = struct { x: f32, y: f32 };
     const ha = comptime rtti.computeSchemaHash(Alpha);

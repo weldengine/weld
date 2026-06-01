@@ -1,32 +1,32 @@
-//! Backend Null GAL — Phase 0 / M0.4.
+//! Null GAL backend — Phase 0 / M0.4.
 //!
-//! Implémentation no-op des concepts GAL Phase 0 — utilisée pour les tests
-//! headless en CI et pour valider que le contrat d'interface est satisfait
-//! au comptime (cf. `interface.checkBackend`).
+//! No-op implementation of the Phase 0 GAL concepts — used for headless
+//! tests in CI and to validate that the interface contract is satisfied
+//! at comptime (cf. `interface.checkBackend`).
 //!
-//! Tous les `create*` retournent un handle valide avec un `inner` issu d'un
-//! compteur monotone. Tous les `destroy*` sont no-op. `acquireNextImage`
-//! retourne 0 ; `present` est no-op ; `waitFence` retourne immédiatement.
+//! All `create*` return a valid handle with an `inner` from a monotonic
+//! counter. All `destroy*` are no-ops. `acquireNextImage` returns 0;
+//! `present` is a no-op; `waitFence` returns immediately.
 //!
-//! Le backend ne touche jamais le hardware GPU. Aucune dépendance sur
-//! Vulkan, Metal, D3D12. Compile sur toute plateforme cible Zig 0.16.x.
+//! The backend never touches the GPU hardware. No dependency on
+//! Vulkan, Metal, D3D12. Compiles on every Zig 0.16.x target platform.
 
 const std = @import("std");
 const types = @import("../types.zig");
 const escape = @import("../escape_hatches.zig");
 const stubs = @import("stubs.zig");
 
-/// Device Null. Stocke uniquement l'allocateur, un compteur de handles et
-/// une queue unique (graphics+compute+transfer fused). Ne fait aucune
-/// allocation système sauf au `init` (struct lui-même) et pour les command
-/// encoders alloués via l'allocateur passé.
+/// Null Device. Stores only the allocator, a handle counter, and
+/// a single queue (graphics+compute+transfer fused). Makes no system
+/// allocation except at `init` (the struct itself) and for the command
+/// encoders allocated via the passed allocator.
 pub const Device = struct {
     allocator: std.mem.Allocator,
     descriptor: types.DeviceDescriptor,
     handles: stubs.HandleCounter = .{},
-    /// Slot fictif pour la queue unique (graphics). `getQueue` retourne ce
-    /// pointeur cast en `QueueHandle`. Inoffensif puisque Null ne déréférence
-    /// jamais le QueueHandle.
+    /// Dummy slot for the single queue (graphics). `getQueue` returns this
+    /// pointer cast to `QueueHandle`. Harmless since Null never dereferences
+    /// the QueueHandle.
     queue_slot: u8 = 0,
 
     pub fn init(allocator: std.mem.Allocator, descriptor: types.DeviceDescriptor) types.Error!Device {
@@ -42,9 +42,9 @@ pub const Device = struct {
 
     pub fn supports(self: *Device, feature: escape.Feature) bool {
         _ = self;
-        // Aucune feature optionnelle déclarée par le Null backend Phase 0.
-        // Phase 1+ on pourrait simuler `timeline_semaphore = true` pour valider
-        // les tests d'escape hatches sans Vulkan.
+        // No optional feature declared by the Null backend in Phase 0.
+        // Phase 1+ we could simulate `timeline_semaphore = true` to validate
+        // the escape-hatch tests without Vulkan.
         return switch (feature) {
             else => false,
         };
@@ -73,7 +73,7 @@ pub const Device = struct {
     }
 
     pub fn createTexture(self: *Device, descriptor: types.TextureDescriptor) types.Error!types.TextureHandle {
-        // Phase 0 : sample_count > 1 non supporté (cohérent avec brief
+        // Phase 0: sample_count > 1 unsupported (consistent with brief
         // §Out-of-scope MSAA).
         if (descriptor.sample_count > 1) return error.Unsupported;
         return .{ .inner = self.handles.next_id() };
@@ -167,7 +167,7 @@ pub const Device = struct {
 
     pub fn waitFence(self: *Device, handle: types.FenceHandle, timeout_ns: u64) types.Error!void {
         _ = .{ self, handle, timeout_ns };
-        // Null = jamais d'attente, signalement instantané.
+        // Null = never waits, instant signaling.
     }
 
     pub fn resetFence(self: *Device, handle: types.FenceHandle) types.Error!void {
@@ -249,9 +249,9 @@ pub const Device = struct {
         _ = .{ self, encoder, descriptor };
     }
 
-    /// Helper Null-spécifique pour libérer un CommandEncoder alloué par
-    /// `createCommandEncoder`. N'est pas dans l'interface formelle Phase 0
-    /// — le caller la connaît parce qu'il a passé l'allocateur au Device.
+    /// Null-specific helper to free a CommandEncoder allocated by
+    /// `createCommandEncoder`. Not in the formal Phase 0 interface
+    /// — the caller knows it because it passed the allocator to the Device.
     pub fn destroyCommandEncoder(self: *Device, encoder: *stubs.CommandEncoder) void {
         self.allocator.destroy(encoder);
     }

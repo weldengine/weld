@@ -1,4 +1,4 @@
-//! S6 schema_hash tests (per brief § Critères d'acceptation › Tests).
+//! S6 schema_hash tests (per brief § Acceptance criteria › Tests).
 //!
 //! Two acceptance criteria:
 //!   - "schema_hash is comptime-stable" — recomputing the hash of the

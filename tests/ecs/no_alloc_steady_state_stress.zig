@@ -6,10 +6,10 @@
 //! hook's overall load profile:
 //!
 //!   - **CPU noise threads** — `noise_cpu_thread_count = 2 × CPU count`
-//!     threads spinning on tight ALU loops (M0.2.1 / E2bis ajout #1 —
-//!     oversubscription pour reproduire la contention CPU réelle du
-//!     pre-push où plusieurs `zig build`/`zig test` parallèles
-//!     dépassent largement la cardinalité physique). Drains CPU
+//!     threads spinning on tight ALU loops (M0.2.1 / E2bis addition #1 —
+//!     oversubscription to reproduce the real CPU contention of the
+//!     pre-push where several parallel `zig build`/`zig test`
+//!     far exceed the physical cardinality). Drains CPU
 //!     bandwidth so the scheduler's workers compete for cores against
 //!     background work — equivalent to the parallel `zig build` +
 //!     `zig build test` processes that run during the pre-push hook.
@@ -20,13 +20,13 @@
 //!     up the kernel's VM subsystem and adds latency to syscalls
 //!     used by the job scheduler's mutex / condvar primitives.
 //!
-//!   - **Process fork threads** (M0.2.1 / E2bis ajout #2) — 8 threads
+//!   - **Process fork threads** (M0.2.1 / E2bis addition #2) — 8 threads
 //!     each looping `spawnAndWait` on `zig version` (~10-30 ms per
 //!     spawn) to drive the kernel's fork/clone/exec/wait paths. The
 //!     pre-push hook fans out parallel `zig build` subcompilers — this
-//!     ajout reproduces that fork churn synthetically.
+//!     addition reproduces that fork churn synthetically.
 //!
-//!   - **FS I/O threads** (M0.2.1 / E2bis ajout #3) — 4 threads each
+//!   - **FS I/O threads** (M0.2.1 / E2bis addition #3) — 4 threads each
 //!     looping `create + writeAll(1MB) + flush + sync + close +
 //!     reopen + readAll(1MB) + close` on a per-thread temporary file
 //!     in cwd. Drives page cache pressure, dirty-page writeback, and
@@ -40,9 +40,9 @@
 //! and (suspected) exposing the latent wake-lost race in
 //! `std.Io.Condition.waitUncancelable`.
 //!
-//! Critère stop E2 (cf. brief § Décomposition en étapes) :
-//! reproduction > 90 % sur 50 runs locaux. If reproduction stays
-//! below this threshold, the brief mandates Cas 2 — return to
+//! Stop criterion E2 (cf. brief § Step decomposition):
+//! reproduction > 90 % over 50 local runs. If reproduction stays
+//! below this threshold, the brief mandates Case 2 — return to
 //! Claude.ai (no autonomous decision to widen the noise).
 //!
 //! Watchdog : identical to `no_alloc_steady_state.zig` — 5 s budget
@@ -192,7 +192,7 @@ fn allocPressureThread(stop: *std.atomic.Value(bool)) void {
     }
 }
 
-/// M0.2.1 / E2bis ajout #2 — Process fork churn. Repeatedly spawns
+/// M0.2.1 / E2bis addition #2 — Process fork churn. Repeatedly spawns
 /// `zig version` (a fast print-and-exit subprocess) so the kernel's
 /// fork / clone / exec / wait paths and the page-table / fd / signal
 /// machinery stay hot — mimics the pre-push hook's parallel `zig
@@ -208,7 +208,7 @@ fn processForkThread(stop: *std.atomic.Value(bool), io: std.Io) void {
     }
 }
 
-/// M0.2.1 / E2bis ajout #3 — FS I/O churn. Each thread maintains a
+/// M0.2.1 / E2bis addition #3 — FS I/O churn. Each thread maintains a
 /// per-tid temporary file in cwd (typically `.zig-cache/o/.../`) and
 /// loops the full write + fsync + read cycle on 1 MB to drive page
 /// cache and writeback contention — the I/O footprint of the pre-push
@@ -328,17 +328,17 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
     // ── Spin up noise threads BEFORE world setup so they're hot
     //    by the time the scheduler dispatch begins. ────────────────────
     var stop_flag = std.atomic.Value(bool).init(false);
-    // M0.2.1 / E2bis ajout #1 — oversubscription CPU (2× cardinalité
-    // physique) pour reproduire la contention pre-push, où plusieurs
-    // `zig build`/`zig test` parallèles dépassent largement le nombre
-    // de cœurs logiques.
+    // M0.2.1 / E2bis addition #1 — CPU oversubscription (2× physical
+    // cardinality) to reproduce the pre-push contention, where several
+    // parallel `zig build`/`zig test` far exceed the number of logical
+    // cores.
     const cpu_count = (std.Thread.getCpuCount() catch 4) * 2;
     const alloc_thread_count: usize = 4;
-    // M0.2.1 / E2bis ajout #2 — fork churn (8 threads de spawn
-    // répété pour mimer les subcompilers parallèles du pre-push).
+    // M0.2.1 / E2bis addition #2 — fork churn (8 threads of repeated
+    // spawn to mimic the parallel subcompilers of the pre-push).
     const proc_thread_count: usize = 8;
-    // M0.2.1 / E2bis ajout #3 — FS I/O churn (4 threads write+fsync+read
-    // 1 MB en boucle pour la pression page cache + writeback).
+    // M0.2.1 / E2bis addition #3 — FS I/O churn (4 threads write+fsync+read
+    // 1 MB in a loop for page cache pressure + writeback).
     const fsio_thread_count: usize = 4;
     var cpu_threads = try std.testing.allocator.alloc(std.Thread, cpu_count);
     defer std.testing.allocator.free(cpu_threads);

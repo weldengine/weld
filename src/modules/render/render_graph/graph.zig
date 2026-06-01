@@ -1,22 +1,22 @@
 //! Render Graph — Phase 0 / M0.4.
 //!
-//! DAG (Directed Acyclic Graph) déclaratif. Chaque pass déclare ses
-//! reads/writes ; le graph calcule l'ordre topologique d'exécution et
-//! insère les barriers automatiquement via le `BarrierTracker`.
+//! Declarative DAG (Directed Acyclic Graph). Each pass declares its
+//! reads/writes; the graph computes the topological execution order and
+//! inserts the barriers automatically via the `BarrierTracker`.
 //!
-//! Phase 0 :
-//! - 3 passes max attendues (depth prepass / forward / capture
-//!   conditionnelle), structure compacte sans optimisation.
-//! - Tri topologique en `O(V + E)` (Kahn's algorithm).
-//! - Détection de cycle → `error.RenderGraphCycle`.
-//! - Pass merging et resource aliasing reportés Phase 1+ (cf. brief
-//!   §Notes décision 2).
+//! Phase 0:
+//! - 3 passes max expected (depth prepass / forward / conditional
+//!   capture), compact structure without optimization.
+//! - Topological sort in `O(V + E)` (Kahn's algorithm).
+//! - Cycle detection → `error.RenderGraphCycle`.
+//! - Pass merging and resource aliasing deferred to Phase 1+ (cf. brief
+//!   §Notes decision 2).
 
 const std = @import("std");
 const gal = @import("../gal/main.zig");
 const pass_mod = @import("pass.zig");
 
-/// Set d'erreurs du render graph.
+/// Error set of the render graph.
 pub const Error = error{
     RenderGraphCycle,
     PassNotFound,
@@ -24,16 +24,16 @@ pub const Error = error{
     BackendError,
 };
 
-/// Index typé d'une pass dans `Graph.passes`.
+/// Typed index of a pass in `Graph.passes`.
 pub const PassIndex = u32;
 
-/// Container du DAG.
+/// DAG container.
 pub const Graph = struct {
     allocator: std.mem.Allocator,
     passes: std.ArrayListUnmanaged(pass_mod.Pass) = .empty,
-    /// Ordre topologique calculé par `compile`. Indices vers `passes`.
+    /// Topological order computed by `compile`. Indices into `passes`.
     execution_order: std.ArrayListUnmanaged(PassIndex) = .empty,
-    /// Tracker des barriers pour la frame courante (auto-tracking).
+    /// Barrier tracker for the current frame (auto-tracking).
     barriers: gal.barriers.BarrierTracker,
 
     pub fn init(allocator: std.mem.Allocator) Graph {
@@ -50,18 +50,18 @@ pub const Graph = struct {
         self.* = undefined;
     }
 
-    /// Ajoute une pass au graph. L'ordre d'ajout n'est pas l'ordre
-    /// d'exécution — le tri topologique recalcule l'ordre selon les
-    /// dépendances `reads`/`writes`.
+    /// Adds a pass to the graph. The insertion order is not the
+    /// execution order — the topological sort recomputes the order from
+    /// the `reads`/`writes` dependencies.
     pub fn addPass(self: *Graph, pass: pass_mod.Pass) Error!PassIndex {
         const idx: PassIndex = @intCast(self.passes.items.len);
         self.passes.append(self.allocator, pass) catch return error.OutOfMemory;
         return idx;
     }
 
-    /// Calcule l'ordre topologique d'exécution. Doit être appelé après
-    /// tous les `addPass` et avant `execute`. Détecte les cycles et
-    /// retourne `error.RenderGraphCycle` dans ce cas.
+    /// Computes the topological execution order. Must be called after
+    /// all `addPass` and before `execute`. Detects cycles and returns
+    /// `error.RenderGraphCycle` in that case.
     pub fn compile(self: *Graph) Error!void {
         self.execution_order.clearRetainingCapacity();
         try self.execution_order.ensureTotalCapacity(self.allocator, self.passes.items.len);
@@ -69,15 +69,15 @@ pub const Graph = struct {
         const n = self.passes.items.len;
         if (n == 0) return;
 
-        // Construit la liste d'adjacence : edge (a → b) si pass a écrit
-        // une resource lue par pass b, ou si pass a et b écrivent la
-        // même resource (WAW dépendance — pass a précède pass b par
-        // ordre d'ajout).
+        // Builds the adjacency list: edge (a → b) if pass a writes
+        // a resource read by pass b, or if pass a and b write the
+        // same resource (WAW dependency — pass a precedes pass b by
+        // insertion order).
         var in_degree = try self.allocator.alloc(u32, n);
         defer self.allocator.free(in_degree);
         @memset(in_degree, 0);
 
-        // adj[i] = liste des passes qui dépendent de la pass i.
+        // adj[i] = list of passes that depend on pass i.
         var adj = try self.allocator.alloc(std.ArrayListUnmanaged(PassIndex), n);
         defer {
             for (adj) |*a| a.deinit(self.allocator);
@@ -85,10 +85,10 @@ pub const Graph = struct {
         }
         for (adj) |*a| a.* = .empty;
 
-        // Pour chaque pair (i, j) avec i != j, vérifier la dépendance.
-        // L'ordre dans `passes` ne dicte pas l'ordre topologique — c'est le
-        // résultat. On checke donc les deux directions ; un cycle apparaît
-        // si pass A dépend de pass B *et* pass B dépend de pass A.
+        // For each pair (i, j) with i != j, check the dependency.
+        // The order in `passes` does not dictate the topological order — it is the
+        // result. So we check both directions; a cycle appears
+        // if pass A depends on pass B *and* pass B depends on pass A.
         var i: usize = 0;
         while (i < n) : (i += 1) {
             var j: usize = 0;
@@ -101,8 +101,8 @@ pub const Graph = struct {
             }
         }
 
-        // Kahn's algorithm : enqueue les noeuds sans dépendance, puis
-        // visite + décrémente les degrés des voisins.
+        // Kahn's algorithm: enqueue the nodes without dependency, then
+        // visit + decrement the degrees of the neighbors.
         var queue: std.ArrayListUnmanaged(PassIndex) = .empty;
         defer queue.deinit(self.allocator);
         for (in_degree, 0..) |d, k| {
@@ -121,8 +121,8 @@ pub const Graph = struct {
         if (visited != n) return error.RenderGraphCycle;
     }
 
-    /// Calcule les barriers requises entre passes (pour `compile`-d graph).
-    /// À appeler avant `execute`. Le résultat est consommable via
+    /// Computes the barriers required between passes (for a `compile`-d graph).
+    /// To be called before `execute`. The result is consumable via
     /// `Graph.barriers.consumeRecorded()`.
     pub fn trackBarriers(self: *Graph) Error!void {
         self.barriers.reset();
@@ -153,13 +153,13 @@ pub const Graph = struct {
         }
     }
 
-    /// Exécute le graph compilé. Appelle le body de chaque pass dans
-    /// l'ordre topologique. Le caller fournit un context opaque
-    /// optionnel passé à chaque pass.body.
+    /// Executes the compiled graph. Calls the body of each pass in
+    /// topological order. The caller provides an optional opaque context
+    /// passed to each pass.body.
     ///
-    /// Phase 0 : ne câble pas encore les barriers entre passes (laissé
-    /// au backend Vulkan via les render pass dependencies natives —
-    /// PR follow-up câble `trackBarriers` aux barriers émises).
+    /// Phase 0: does not yet wire the barriers between passes (left
+    /// to the Vulkan backend via the native render pass dependencies —
+    /// PR follow-up wires `trackBarriers` to the emitted barriers).
     pub fn execute(self: *Graph, encoder: ?*anyopaque) Error!void {
         for (self.execution_order.items) |idx| {
             const p = &self.passes.items[idx];
@@ -168,30 +168,30 @@ pub const Graph = struct {
     }
 };
 
-/// Détermine si `b` dépend topologiquement de `a` (i.e. si `a` doit
-/// s'exécuter avant `b` dans le DAG).
+/// Determines whether `b` topologically depends on `a` (i.e. whether `a`
+/// must execute before `b` in the DAG).
 ///
-/// Phase 0 : seuls RAW et WAW créent une dépendance topologique pour
-/// l'ordre d'exécution.
-/// - **RAW** (Read-After-Write) : `a` produit une resource que `b` consomme
-///   → producer/consumer, `b` doit attendre `a`.
-/// - **WAW** (Write-After-Write) : les deux écrivent la même resource →
-///   sérialisation requise pour cohérence.
+/// Phase 0: only RAW and WAW create a topological dependency for
+/// the execution order.
+/// - **RAW** (Read-After-Write): `a` produces a resource that `b` consumes
+///   → producer/consumer, `b` must wait for `a`.
+/// - **WAW** (Write-After-Write): both write the same resource →
+///   serialization required for coherence.
 ///
-/// **WAR n'est PAS une dépendance topologique** : c'est une hazard
-/// mémoire pure (le writer doit pas clobber pendant que le reader lit),
-/// gérée par le `BarrierTracker` (cf. `gal/barriers.zig`) qui insère la
-/// barrière sans imposer d'ordre topologique. Cohérent avec WebGPU et
-/// les render graphs Frostbite/Bevy/Mach.
+/// **WAR is NOT a topological dependency**: it is a pure memory
+/// hazard (the writer must not clobber while the reader reads),
+/// handled by the `BarrierTracker` (cf. `gal/barriers.zig`) which inserts the
+/// barrier without imposing a topological order. Consistent with WebGPU and
+/// the Frostbite/Bevy/Mach render graphs.
 ///
-/// Cycle = deux passes qui produisent mutuellement les inputs l'une de
-/// l'autre (un RAW dans les deux sens, ou un WAW circulaire).
+/// Cycle = two passes that mutually produce each other's inputs
+/// (a RAW in both directions, or a circular WAW).
 fn passDependsOn(b: *const pass_mod.Pass, a: *const pass_mod.Pass) bool {
-    // RAW : a.writes ∩ b.reads
+    // RAW: a.writes ∩ b.reads
     for (a.writes) |aw| {
         for (b.reads) |br| if (sameResource(aw.resource, br.resource)) return true;
     }
-    // WAW : a.writes ∩ b.writes
+    // WAW: a.writes ∩ b.writes
     for (a.writes) |aw| {
         for (b.writes) |bw| if (sameResource(aw.resource, bw.resource)) return true;
     }
@@ -236,7 +236,7 @@ test "graph: single pass" {
 }
 
 test "graph: produces correct topological order on known DAG" {
-    // Trois passes : A writes T, B reads T (→ A precedes B), C indep
+    // Three passes: A writes T, B reads T (→ A precedes B), C indep
     var g = Graph.init(std.testing.allocator);
     defer g.deinit();
     const t = gal.types.TextureHandle{ .inner = 1 };
@@ -263,7 +263,7 @@ test "graph: produces correct topological order on known DAG" {
     const idx_c = try g.addPass(.{ .name = "C", .body = noopBody });
     try g.compile();
 
-    // L'ordre doit avoir A avant B (RAW dep). C peut être n'importe où.
+    // The order must have A before B (RAW dep). C can be anywhere.
     var pos_a: ?usize = null;
     var pos_b: ?usize = null;
     var pos_c: ?usize = null;
@@ -277,8 +277,8 @@ test "graph: produces correct topological order on known DAG" {
 }
 
 test "graph: detects cycle and returns error" {
-    // Construire un cycle : pass A écrit T1, lit T2. Pass B écrit T2, lit T1.
-    // → A dépend de B (RAW sur T2), et B dépend de A (RAW sur T1).
+    // Build a cycle: pass A writes T1, reads T2. Pass B writes T2, reads T1.
+    // → A depends on B (RAW on T2), and B depends on A (RAW on T1).
     var g = Graph.init(std.testing.allocator);
     defer g.deinit();
     const t1 = gal.types.TextureHandle{ .inner = 1 };

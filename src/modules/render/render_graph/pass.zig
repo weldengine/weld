@@ -1,59 +1,59 @@
 //! Pass — Phase 0 / M0.4.
 //!
-//! Abstraction d'une passe du render graph. Une Pass déclare ses
-//! resources lues + écrites (Buffers et Textures) et fournit une
-//! fonction `body` qui enregistre les commandes effectives sur un
-//! `RenderPassEncoder` GAL.
+//! Abstraction of a render graph pass. A Pass declares its
+//! read + written resources (Buffers and Textures) and provides a
+//! `body` function that records the actual commands on a
+//! GAL `RenderPassEncoder`.
 //!
-//! Le graph utilise les déclarations reads/writes pour :
-//! 1. Calculer l'ordre topologique d'exécution
-//! 2. Insérer les barriers automatiquement via le `BarrierTracker`
-//!    (cf. `gal/barriers.zig`), sauf si `barrier_mode = .explicit`
+//! The graph uses the reads/writes declarations to:
+//! 1. Compute the topological execution order
+//! 2. Insert the barriers automatically via the `BarrierTracker`
+//!    (cf. `gal/barriers.zig`), unless `barrier_mode = .explicit`
 
 const std = @import("std");
 const gal = @import("../gal/main.zig");
 const escape = gal.escape_hatches;
 
-/// Référence à une resource lue ou écrite par une pass.
+/// Reference to a resource read or written by a pass.
 pub const ResourceRef = union(enum) {
     buffer: gal.types.BufferHandle,
     texture: gal.types.TextureHandle,
 };
 
-/// Usage déclaré d'une resource par une pass — alimente le BarrierTracker.
+/// Declared usage of a resource by a pass — feeds the BarrierTracker.
 pub const ResourceUsage = struct {
     resource: ResourceRef,
-    /// Stage shader où la resource est consommée/produite.
+    /// Shader stage where the resource is consumed/produced.
     stage: gal.types.ShaderStage,
-    /// Accès (write, read, color_attachment, depth_attachment, sampled).
-    /// Le tracker insère des barriers entre passes selon ces masks.
+    /// Access (write, read, color_attachment, depth_attachment, sampled).
+    /// The tracker inserts barriers between passes according to these masks.
     access: gal.barriers.Access,
-    /// Layout requis pour cette pass (uniquement pour les textures).
+    /// Layout required for this pass (textures only).
     layout: ?escape.TextureLayout = null,
 };
 
-/// Signature de la fonction body d'une pass. Phase 0 : encoder
-/// `RenderPassEncoder` GAL + context utilisateur opaque.
+/// Signature of a pass's body function. Phase 0: GAL
+/// `RenderPassEncoder` encoder + opaque user context.
 pub const PassBody = *const fn (encoder: ?*anyopaque, ctx: ?*anyopaque) anyerror!void;
 
-/// Définition d'une pass dans le graph.
+/// Definition of a pass in the graph.
 pub const Pass = struct {
-    /// Nom debug pour l'inspector + logs.
+    /// Debug name for the inspector + logs.
     name: []const u8,
-    /// Mode de tracking des barriers (cf. `escape_hatches.BarrierMode`).
+    /// Barrier tracking mode (cf. `escape_hatches.BarrierMode`).
     barrier_mode: escape.BarrierMode = .auto,
-    /// Resources lues par la pass.
+    /// Resources read by the pass.
     reads: []const ResourceUsage = &.{},
-    /// Resources écrites par la pass.
+    /// Resources written by the pass.
     writes: []const ResourceUsage = &.{},
-    /// Fonction body — exécutée à l'enregistrement du command buffer.
+    /// Body function — executed when recording the command buffer.
     body: PassBody,
-    /// Context utilisateur passé à `body`. Phase 0 : opaque, le caller
-    /// caste à son type concret. Phase 1+ : RTTI-typed.
+    /// User context passed to `body`. Phase 0: opaque, the caller
+    /// casts to its concrete type. Phase 1+: RTTI-typed.
     ctx: ?*anyopaque = null,
-    /// Profondeur ordering hint (utilisé pour le tri front-to-back par
-    /// le forward pass — passes inférieures s'exécutent en premier).
-    /// Phase 0 : non utilisé par le tri topologique strict.
+    /// Depth ordering hint (used for front-to-back sorting by
+    /// the forward pass — lower passes execute first).
+    /// Phase 0: not used by the strict topological sort.
     depth_hint: f32 = 0,
 };
 

@@ -1,7 +1,7 @@
 //! M0.2 / E3 — Resources API tests.
 //!
 //! Coverage per `briefs/M0.2-rtti-resources-events-bindgen.md` E3
-//! § Critères d'acceptation locaux:
+//! § Local acceptance criteria:
 //!
 //! - `setResource` + `getResource` round-trip.
 //! - `setResource` on a pre-existing type overwrites the value.

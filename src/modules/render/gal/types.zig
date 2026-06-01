@@ -1,35 +1,35 @@
 //! GAL public types — Phase 0 / M0.4.
 //!
-//! Surface publique de la GPU Abstraction Layer (cf. `engine-render.md` §3).
-//! Inspirée WebGPU / sysgpu Mach, adaptée Weld (right-handed Y-up, escape
-//! hatches pré-câblés jour 1 pour `TimelineSemaphore`, `BarrierExplicit`,
+//! Public surface of the GPU Abstraction Layer (cf. `engine-render.md` §3).
+//! Inspired by WebGPU / Mach sysgpu, adapted for Weld (right-handed Y-up,
+//! escape hatches pre-wired day 1 for `TimelineSemaphore`, `BarrierExplicit`,
 //! `DescriptorIndexing`).
 //!
-//! **Règle d'isolation absolue (brief §Notes pièges connus)** : aucun type
-//! Vulkan natif (`vk.VkBuffer`, etc.) ne doit apparaître ici. Les types
-//! GAL sont opaques côté caller — chaque backend mappe vers ses types
-//! natifs via son propre `conv.zig` (cf. `gal/vulkan/conv.zig`).
+//! **Absolute isolation rule (brief §Notes known pitfalls)**: no native
+//! Vulkan type (`vk.VkBuffer`, etc.) must appear here. The GAL types are
+//! opaque on the caller side — each backend maps to its native types via
+//! its own `conv.zig` (cf. `gal/vulkan/conv.zig`).
 //!
-//! Les handles GPU sont des structs `extern struct` avec un seul champ
-//! `inner: u64` pour garantir un layout stable cross-backend et faciliter
-//! la sérialisation future (asset pipeline cooké).
+//! The GPU handles are `extern struct` structs with a single `inner: u64`
+//! field to guarantee a stable cross-backend layout and to ease future
+//! serialization (cooked asset pipeline).
 
 const std = @import("std");
 
 // ============================================================================
-// Identités & handles opaques
+// Identities & opaque handles
 // ============================================================================
 
-/// Handle opaque de Device. Chaque backend stocke son state dans son propre
-/// type concret (`gal/vulkan/device.zig:Device`, `gal/null/device.zig:Device`).
-/// Le caller ne voit qu'un pointeur opaque ; les méthodes vivent sur le type
-/// concret du backend résolu à comptime via `gal.main.Device`.
+/// Opaque Device handle. Each backend stores its state in its own concrete
+/// type (`gal/vulkan/device.zig:Device`, `gal/null/device.zig:Device`).
+/// The caller only sees an opaque pointer; the methods live on the backend's
+/// concrete type, resolved at comptime via `gal.main.Device`.
 pub const DeviceHandle = *opaque {};
 
-/// Handle opaque de Queue (graphics, compute, transfer). Issued par `Device.getQueue`.
+/// Opaque Queue handle (graphics, compute, transfer). Issued by `Device.getQueue`.
 pub const QueueHandle = *opaque {};
 
-/// Handle opaque de Buffer GPU.
+/// Opaque GPU Buffer handle.
 pub const BufferHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: BufferHandle) bool {
@@ -37,7 +37,7 @@ pub const BufferHandle = extern struct {
     }
 };
 
-/// Handle opaque de Texture GPU.
+/// Opaque GPU Texture handle.
 pub const TextureHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: TextureHandle) bool {
@@ -45,7 +45,7 @@ pub const TextureHandle = extern struct {
     }
 };
 
-/// Handle opaque de TextureView (vue sur une Texture + format + range mip/array).
+/// Opaque TextureView handle (view over a Texture + format + mip/array range).
 pub const TextureViewHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: TextureViewHandle) bool {
@@ -53,7 +53,7 @@ pub const TextureViewHandle = extern struct {
     }
 };
 
-/// Handle opaque de Sampler (filtrage, wrapping, anisotropie).
+/// Opaque Sampler handle (filtering, wrapping, anisotropy).
 pub const SamplerHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: SamplerHandle) bool {
@@ -61,7 +61,7 @@ pub const SamplerHandle = extern struct {
     }
 };
 
-/// Handle opaque de ShaderModule (SPIR-V chargé sur le device).
+/// Opaque ShaderModule handle (SPIR-V loaded on the device).
 pub const ShaderModuleHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: ShaderModuleHandle) bool {
@@ -69,7 +69,7 @@ pub const ShaderModuleHandle = extern struct {
     }
 };
 
-/// Handle opaque de BindGroupLayout.
+/// Opaque BindGroupLayout handle.
 pub const BindGroupLayoutHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: BindGroupLayoutHandle) bool {
@@ -77,7 +77,7 @@ pub const BindGroupLayoutHandle = extern struct {
     }
 };
 
-/// Handle opaque de BindGroup (descriptor set bindé).
+/// Opaque BindGroup handle (bound descriptor set).
 pub const BindGroupHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: BindGroupHandle) bool {
@@ -85,7 +85,7 @@ pub const BindGroupHandle = extern struct {
     }
 };
 
-/// Handle opaque de RenderPipeline (PSO graphics).
+/// Opaque RenderPipeline handle (graphics PSO).
 pub const RenderPipelineHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: RenderPipelineHandle) bool {
@@ -93,7 +93,7 @@ pub const RenderPipelineHandle = extern struct {
     }
 };
 
-/// Handle opaque de ComputePipeline (PSO compute).
+/// Opaque ComputePipeline handle (compute PSO).
 pub const ComputePipelineHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: ComputePipelineHandle) bool {
@@ -101,7 +101,7 @@ pub const ComputePipelineHandle = extern struct {
     }
 };
 
-/// Handle opaque de Fence (sync CPU↔GPU).
+/// Opaque Fence handle (CPU↔GPU sync).
 pub const FenceHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: FenceHandle) bool {
@@ -109,8 +109,8 @@ pub const FenceHandle = extern struct {
     }
 };
 
-/// Handle opaque de Semaphore binaire (sync GPU↔GPU).
-/// Pour timeline semaphores, voir `escape_hatches.TimelineSemaphoreHandle`.
+/// Opaque binary Semaphore handle (GPU↔GPU sync).
+/// For timeline semaphores, see `escape_hatches.TimelineSemaphoreHandle`.
 pub const SemaphoreHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: SemaphoreHandle) bool {
@@ -118,7 +118,7 @@ pub const SemaphoreHandle = extern struct {
     }
 };
 
-/// Handle opaque de Swapchain (chain de framebuffers présentables).
+/// Opaque Swapchain handle (chain of presentable framebuffers).
 pub const SwapchainHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: SwapchainHandle) bool {
@@ -130,8 +130,8 @@ pub const SwapchainHandle = extern struct {
 // Formats & enums
 // ============================================================================
 
-/// Formats Phase 0 (cf. brief §Scope GAL — formats limités). Phase 1+
-/// étend la liste (BC compressed, ASTC, BC7, etc.).
+/// Phase 0 formats (cf. brief §Scope GAL — limited formats). Phase 1+
+/// extends the list (BC compressed, ASTC, BC7, etc.).
 pub const TextureFormat = enum(u32) {
     undef = 0,
 
@@ -157,17 +157,17 @@ pub const TextureFormat = enum(u32) {
     rgba32_sfloat,
 };
 
-/// Type de queue. Phase 0 : Vulkan présente typiquement une queue unique
-/// graphics+present sur les GPUs cible. Compute + transfer dédiés sont
-/// query-able mais non requis.
+/// Queue type. Phase 0: Vulkan typically exposes a single graphics+present
+/// queue on the target GPUs. Dedicated compute + transfer are query-able
+/// but not required.
 pub const QueueType = enum(u8) {
     graphics,
     compute,
     transfer,
 };
 
-/// Mode de présentation swapchain. Phase 0 : `fifo` (vsync) garanti, autres
-/// best-effort (négociation à l'init du swapchain).
+/// Swapchain present mode. Phase 0: `fifo` (vsync) guaranteed, others
+/// best-effort (negotiated at swapchain init).
 pub const PresentMode = enum(u8) {
     fifo,
     fifo_relaxed,
@@ -175,7 +175,7 @@ pub const PresentMode = enum(u8) {
     mailbox,
 };
 
-/// Topologie de primitive (triangle list par défaut Phase 0).
+/// Primitive topology (triangle list by default in Phase 0).
 pub const PrimitiveTopology = enum(u8) {
     point_list,
     line_list,
@@ -184,15 +184,15 @@ pub const PrimitiveTopology = enum(u8) {
     triangle_strip,
 };
 
-/// Face culling. Right-handed Y-up + counter-clockwise winding = la
-/// convention Weld (cohérent glTF). Phase 0 : `back` par défaut.
+/// Face culling. Right-handed Y-up + counter-clockwise winding = the
+/// Weld convention (consistent with glTF). Phase 0: `back` by default.
 pub const CullMode = enum(u8) {
     none,
     front,
     back,
 };
 
-/// Comparaison de depth/stencil.
+/// Depth/stencil comparison.
 pub const CompareOp = enum(u8) {
     never,
     less,
@@ -204,7 +204,7 @@ pub const CompareOp = enum(u8) {
     always,
 };
 
-/// Stage shader (utilisé pour les bind groups et les visibility masks).
+/// Shader stage (used for bind groups and visibility masks).
 pub const ShaderStage = packed struct(u32) {
     vertex: bool = false,
     fragment: bool = false,
@@ -215,7 +215,7 @@ pub const ShaderStage = packed struct(u32) {
     pub const all: ShaderStage = .{ .vertex = true, .fragment = true, .compute = true };
 };
 
-/// Usage flags pour Buffer.
+/// Usage flags for Buffer.
 pub const BufferUsage = packed struct(u32) {
     vertex: bool = false,
     index: bool = false,
@@ -227,7 +227,7 @@ pub const BufferUsage = packed struct(u32) {
     _padding: u25 = 0,
 };
 
-/// Usage flags pour Texture.
+/// Usage flags for Texture.
 pub const TextureUsage = packed struct(u32) {
     sampled: bool = false,
     storage: bool = false,
@@ -239,7 +239,7 @@ pub const TextureUsage = packed struct(u32) {
     _padding: u25 = 0,
 };
 
-/// Dimension de Texture.
+/// Texture dimension.
 pub const TextureDimension = enum(u8) {
     @"1d",
     @"2d",
@@ -247,25 +247,25 @@ pub const TextureDimension = enum(u8) {
     cube,
 };
 
-/// Origine 3D pour les copies texture/buffer (WebGPU canonical).
+/// 3D origin for texture/buffer copies (WebGPU canonical).
 pub const Origin3D = extern struct {
     x: u32 = 0,
     y: u32 = 0,
     z: u32 = 0,
 };
 
-/// Extent 3D pour les copies texture/buffer (WebGPU canonical). Le champ
-/// `depth_or_array_layers` couvre les textures 3D (profondeur) comme les
-/// 2D arrays (nombre de couches) selon la dimension de la texture cible.
+/// 3D extent for texture/buffer copies (WebGPU canonical). The
+/// `depth_or_array_layers` field covers 3D textures (depth) as well as
+/// 2D arrays (layer count) depending on the target texture's dimension.
 pub const Extent3D = extern struct {
     width: u32,
     height: u32,
     depth_or_array_layers: u32 = 1,
 };
 
-/// Aspect d'une vue/copie de texture (color | depth | stencil | all).
-/// Phase 0 : `color` suffit pour la capture PPM ; `depth` exposé pour le
-/// depth prepass futur ; `stencil` non utilisé.
+/// Aspect of a texture view/copy (color | depth | stencil | all).
+/// Phase 0: `color` suffices for the PPM capture; `depth` exposed for the
+/// future depth prepass; `stencil` unused.
 pub const TextureAspect = enum(u8) {
     all,
     color,
@@ -273,7 +273,7 @@ pub const TextureAspect = enum(u8) {
     stencil,
 };
 
-/// Source d'une copie texture → buffer (WebGPU canonical).
+/// Source of a texture → buffer copy (WebGPU canonical).
 pub const ImageCopyTexture = struct {
     texture: TextureHandle,
     mip_level: u32 = 0,
@@ -281,10 +281,10 @@ pub const ImageCopyTexture = struct {
     aspect: TextureAspect = .color,
 };
 
-/// Destination d'une copie texture → buffer (WebGPU canonical).
-/// `bytes_per_row` doit être aligné selon les contraintes du backend
-/// (Vulkan : 256 bytes typique). `rows_per_image` ne s'applique qu'aux
-/// textures 3D / arrays ; ignoré pour les 2D simples.
+/// Destination of a texture → buffer copy (WebGPU canonical).
+/// `bytes_per_row` must be aligned per the backend's constraints
+/// (Vulkan: 256 bytes typical). `rows_per_image` only applies to
+/// 3D / array textures; ignored for simple 2D ones.
 pub const ImageCopyBuffer = struct {
     buffer: BufferHandle,
     offset: u64 = 0,
@@ -309,7 +309,7 @@ pub const SubmitDescriptor = struct {
     fence: ?FenceHandle = null,
 };
 
-/// Type de bind dans un BindGroupLayout.
+/// Binding type in a BindGroupLayout.
 pub const BindingType = enum(u8) {
     uniform_buffer,
     storage_buffer,
@@ -318,34 +318,34 @@ pub const BindingType = enum(u8) {
     sampler,
 };
 
-/// Type d'attachement de pass.
+/// Pass attachment load type.
 pub const LoadOp = enum(u8) {
     load,
     clear,
     dont_care,
 };
 
-/// Stratégie de sauvegarde d'attachement en fin de pass.
+/// Attachment store strategy at end of pass.
 pub const StoreOp = enum(u8) {
     store,
     dont_care,
 };
 
 // ============================================================================
-// Descripteurs (par valeur, POD, passés à `Device.create*`)
+// Descriptors (by value, POD, passed to `Device.create*`)
 // ============================================================================
 
-/// Descripteur de Buffer.
+/// Buffer descriptor.
 pub const BufferDescriptor = struct {
     label: ?[]const u8 = null,
     size: u64,
     usage: BufferUsage,
-    /// Si true, le buffer est CPU-visible (host-mappable). Phase 0 limité à
-    /// staging + uniform — la majorité des Buffers GPU restent device-local.
+    /// If true, the buffer is CPU-visible (host-mappable). Phase 0 limited to
+    /// staging + uniform — most GPU Buffers stay device-local.
     host_visible: bool = false,
 };
 
-/// Descripteur de Texture.
+/// Texture descriptor.
 pub const TextureDescriptor = struct {
     label: ?[]const u8 = null,
     dimension: TextureDimension = .@"2d",
@@ -354,13 +354,13 @@ pub const TextureDescriptor = struct {
     height: u32,
     depth_or_array_layers: u32 = 1,
     mip_levels: u32 = 1,
-    /// Phase 0 : `sample_count` > 1 retourne `error.Unsupported`
+    /// Phase 0: `sample_count` > 1 returns `error.Unsupported`
     /// (cf. brief §Out-of-scope MSAA).
     sample_count: u32 = 1,
     usage: TextureUsage,
 };
 
-/// Descripteur de TextureView (sous-vue d'une Texture).
+/// TextureView descriptor (sub-view of a Texture).
 pub const TextureViewDescriptor = struct {
     label: ?[]const u8 = null,
     format: ?TextureFormat = null,
@@ -371,7 +371,7 @@ pub const TextureViewDescriptor = struct {
     layer_count: u32 = 1,
 };
 
-/// Descripteur de Sampler.
+/// Sampler descriptor.
 pub const SamplerDescriptor = struct {
     label: ?[]const u8 = null,
     mag_filter: enum { nearest, linear } = .linear,
@@ -383,20 +383,20 @@ pub const SamplerDescriptor = struct {
     anisotropy: u8 = 1,
 };
 
-/// Descripteur d'entrée de BindGroupLayout.
+/// BindGroupLayout entry descriptor.
 pub const BindGroupLayoutEntry = struct {
     binding: u32,
     visibility: ShaderStage,
     binding_type: BindingType,
 };
 
-/// Descripteur de BindGroupLayout.
+/// BindGroupLayout descriptor.
 pub const BindGroupLayoutDescriptor = struct {
     label: ?[]const u8 = null,
     entries: []const BindGroupLayoutEntry,
 };
 
-/// Descripteur d'entrée de BindGroup.
+/// BindGroup entry descriptor.
 pub const BindGroupEntry = struct {
     binding: u32,
     resource: union(enum) {
@@ -406,36 +406,36 @@ pub const BindGroupEntry = struct {
     },
 };
 
-/// Descripteur de BindGroup.
+/// BindGroup descriptor.
 pub const BindGroupDescriptor = struct {
     label: ?[]const u8 = null,
     layout: BindGroupLayoutHandle,
     entries: []const BindGroupEntry,
 };
 
-/// Descripteur de ShaderModule (SPIR-V uniquement Phase 0, cf. brief §Notes
-/// décision 3 : pas de source HLSL/WGSL, pas de reflection runtime).
+/// ShaderModule descriptor (SPIR-V only in Phase 0, cf. brief §Notes
+/// decision 3: no HLSL/WGSL source, no runtime reflection).
 pub const ShaderModuleDescriptor = struct {
     label: ?[]const u8 = null,
-    /// Bytes SPIR-V. Doit être aligné sur 4 octets.
+    /// SPIR-V bytes. Must be aligned to 4 bytes.
     code: []const u8,
 };
 
-/// Layout d'un attribut de vertex.
+/// Layout of a vertex attribute.
 pub const VertexAttribute = struct {
     location: u32,
     format: TextureFormat,
     offset: u32,
 };
 
-/// Layout d'un vertex buffer.
+/// Layout of a vertex buffer.
 pub const VertexBufferLayout = struct {
     stride: u32,
     step_mode: enum { vertex, instance } = .vertex,
     attributes: []const VertexAttribute,
 };
 
-/// Descripteur de RenderPipeline (PSO graphics).
+/// RenderPipeline descriptor (graphics PSO).
 pub const RenderPipelineDescriptor = struct {
     label: ?[]const u8 = null,
     layout: []const BindGroupLayoutHandle = &.{},
@@ -451,18 +451,18 @@ pub const RenderPipelineDescriptor = struct {
     depth_write_enabled: bool = false,
     depth_compare: CompareOp = .less,
     color_targets: []const ColorTargetState = &.{},
-    /// Phase 0 : > 1 retourne `error.Unsupported`.
+    /// Phase 0: > 1 returns `error.Unsupported`.
     sample_count: u32 = 1,
 };
 
-/// État d'une cible color attachment (format + blend).
+/// State of a color attachment target (format + blend).
 pub const ColorTargetState = struct {
     format: TextureFormat,
     blend: ?BlendState = null,
 };
 
-/// État de blending. Phase 0 : forward opaque uniquement (pas de blend),
-/// préservé pour Phase 1 (transparents).
+/// Blending state. Phase 0: opaque forward only (no blend), preserved
+/// for Phase 1 (transparents).
 pub const BlendState = struct {
     color_op: enum { add, subtract, min, max } = .add,
     color_src: enum { zero, one, src_alpha, one_minus_src_alpha } = .one,
@@ -472,7 +472,7 @@ pub const BlendState = struct {
     alpha_dst: enum { zero, one, src_alpha, one_minus_src_alpha } = .zero,
 };
 
-/// Descripteur de ComputePipeline.
+/// ComputePipeline descriptor.
 pub const ComputePipelineDescriptor = struct {
     label: ?[]const u8 = null,
     layout: []const BindGroupLayoutHandle = &.{},
@@ -480,22 +480,22 @@ pub const ComputePipelineDescriptor = struct {
     entry_point: [:0]const u8 = "main",
 };
 
-/// Descripteur de Swapchain.
+/// Swapchain descriptor.
 pub const SwapchainDescriptor = struct {
     width: u32,
     height: u32,
     format: TextureFormat = .bgra8_unorm,
     present_mode: PresentMode = .fifo,
-    /// Phase 0 : 2 (double-buffer) ou 3 (triple-buffer). Le backend choisit
-    /// la valeur la plus proche supportée.
+    /// Phase 0: 2 (double-buffer) or 3 (triple-buffer). The backend picks
+    /// the closest supported value.
     min_image_count: u32 = 2,
 };
 
 // ============================================================================
-// Attachements de render pass (passés à `CommandEncoder.beginRenderPass`)
+// Render pass attachments (passed to `CommandEncoder.beginRenderPass`)
 // ============================================================================
 
-/// Couleur de clear.
+/// Clear color.
 pub const ColorClear = extern struct {
     r: f32 = 0,
     g: f32 = 0,
@@ -503,14 +503,14 @@ pub const ColorClear = extern struct {
     a: f32 = 1,
 };
 
-/// Layout final attendu par une attachment à la fin de la render pass.
-/// Le backend transitionne l'image vers ce layout automatiquement (en
-/// barrier implicite à la fin du subpass). Le caller choisit selon
-/// l'usage downstream : `.present` pour une swapchain image à présenter,
-/// `.transfer_src` pour un texture qu'on va copier vers un buffer (capture
-/// PPM, blit), `.shader_read` pour une texture lue par un shader (input
-/// d'une pass suivante), `.color_attachment` pour rester rebindable comme
-/// color attachment d'une pass aval.
+/// Final layout expected for an attachment at the end of the render pass.
+/// The backend transitions the image to this layout automatically (as an
+/// implicit barrier at the end of the subpass). The caller chooses based on
+/// the downstream usage: `.present` for a swapchain image to present,
+/// `.transfer_src` for a texture about to be copied to a buffer (PPM
+/// capture, blit), `.shader_read` for a texture read by a shader (input
+/// of a following pass), `.color_attachment` to stay rebindable as a
+/// color attachment of a downstream pass.
 pub const AttachmentFinalLayout = enum(u8) {
     present,
     transfer_src,
@@ -518,10 +518,10 @@ pub const AttachmentFinalLayout = enum(u8) {
     color_attachment,
 };
 
-/// Attachement color pour une render pass.
+/// Color attachment for a render pass.
 pub const ColorAttachment = struct {
     view: TextureViewHandle,
-    /// Si présent, résoudre vers cette view en fin de pass (MSAA Phase 1+).
+    /// If present, resolve to this view at end of pass (MSAA Phase 1+).
     resolve_view: ?TextureViewHandle = null,
     load_op: LoadOp = .clear,
     store_op: StoreOp = .store,
@@ -529,7 +529,7 @@ pub const ColorAttachment = struct {
     final_layout: AttachmentFinalLayout = .present,
 };
 
-/// Attachement depth/stencil pour une render pass.
+/// Depth/stencil attachment for a render pass.
 pub const DepthStencilAttachment = struct {
     view: TextureViewHandle,
     depth_load_op: LoadOp = .clear,
@@ -540,23 +540,23 @@ pub const DepthStencilAttachment = struct {
     stencil_clear: u32 = 0,
 };
 
-/// Descripteur de render pass (commencée via `CommandEncoder.beginRenderPass`).
+/// Render pass descriptor (begun via `CommandEncoder.beginRenderPass`).
 pub const RenderPassDescriptor = struct {
     label: ?[]const u8 = null,
     color_attachments: []const ColorAttachment = &.{},
     depth_stencil_attachment: ?DepthStencilAttachment = null,
 };
 
-/// Descripteur de compute pass.
+/// Compute pass descriptor.
 pub const ComputePassDescriptor = struct {
     label: ?[]const u8 = null,
 };
 
 // ============================================================================
-// Sélection de device (cohérent --gpu-prefer / --vulkan-driver, brief §Scope)
+// Device selection (consistent with --gpu-prefer / --vulkan-driver, brief §Scope)
 // ============================================================================
 
-/// Préférence de sélection hardware. Préserve la sémantique S2.
+/// Hardware selection preference. Preserves the S2 semantics.
 pub const GpuPreference = union(enum) {
     auto,
     discrete,
@@ -564,31 +564,31 @@ pub const GpuPreference = union(enum) {
     index: u32,
 };
 
-/// Sélecteur d'implémentation Vulkan (nouveau M0.4, cf. brief §Notes décision 11).
-/// Orthogonal à `GpuPreference`.
+/// Vulkan implementation selector (new in M0.4, cf. brief §Notes decision 11).
+/// Orthogonal to `GpuPreference`.
 pub const VulkanDriver = enum {
-    /// Énumère tous les devices et applique `--gpu-prefer`.
+    /// Enumerates all devices and applies `--gpu-prefer`.
     auto,
-    /// Filtre les devices `CPU` avant d'appliquer `--gpu-prefer`.
+    /// Filters out `CPU` devices before applying `--gpu-prefer`.
     hardware,
-    /// Force lavapipe ou équivalent, ignore `--gpu-prefer`.
+    /// Forces lavapipe or equivalent, ignores `--gpu-prefer`.
     software,
 };
 
-/// Descripteur d'init de Device.
+/// Device init descriptor.
 pub const DeviceDescriptor = struct {
     label: ?[]const u8 = null,
     gpu_preference: GpuPreference = .auto,
     vulkan_driver: VulkanDriver = .auto,
-    /// Active les validation layers (Vulkan) ou équivalent côté autres backends.
+    /// Enables validation layers (Vulkan) or the equivalent on other backends.
     enable_validation: bool = false,
-    /// Surface OS (handle window) à laquelle attacher le device. `null` =
-    /// headless / offscreen (Null backend, CI runtime-smoke-test sans window).
+    /// OS surface (window handle) to attach the device to. `null` =
+    /// headless / offscreen (Null backend, CI runtime-smoke-test without a window).
     surface: ?SurfaceHandle = null,
 };
 
-/// Handle opaque de surface (créé depuis une `*platform.window.Window`
-/// — la conversion vit côté backend, pas exposée ici).
+/// Opaque surface handle (created from a `*platform.window.Window`
+/// — the conversion lives on the backend side, not exposed here).
 pub const SurfaceHandle = extern struct {
     inner: u64 = 0,
     pub fn isValid(self: SurfaceHandle) bool {
@@ -597,12 +597,12 @@ pub const SurfaceHandle = extern struct {
 };
 
 // ============================================================================
-// Erreurs unifiées
+// Unified errors
 // ============================================================================
 
-/// Set d'erreurs GAL. Chaque backend mappe ses codes natifs vers ce set
-/// (cf. `gal/vulkan/conv.zig`). Les call sites consomment cet error set
-/// uniformément.
+/// GAL error set. Each backend maps its native codes to this set
+/// (cf. `gal/vulkan/conv.zig`). The call sites consume this error set
+/// uniformly.
 pub const Error = error{
     OutOfMemory,
     DeviceLost,

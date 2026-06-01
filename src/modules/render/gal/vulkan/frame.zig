@@ -1,19 +1,19 @@
-//! Cycle frame Vulkan — Phase 0 / M0.4.
+//! Vulkan frame cycle — Phase 0 / M0.4.
 //!
-//! Absorbe le rôle du spike `vk_frame.zig` (suppression brief §Suppressions).
-//! Phase 0 expose un helper de submission (`submit`) qui prend un
-//! CommandEncoder finalisé et une sync pair (wait/signal semaphore + fence)
-//! et soumet à la queue graphics.
+//! Absorbs the role of the `vk_frame.zig` spike (removed, brief §Removals).
+//! Phase 0 exposes a submission helper (`submit`) that takes a finished
+//! CommandEncoder and a sync pair (wait/signal semaphore + fence) and
+//! submits to the graphics queue.
 //!
-//! Le render loop côté caller compose les briques :
+//! The render loop on the caller side composes the building blocks:
 //! 1. `acquireNextImage(swapchain, image_ready)` → image_index
 //! 2. `createCommandEncoder()` → record
 //! 3. `submit(encoder, .{ wait = image_ready, signal = render_done, fence = inflight })`
 //! 4. `present(swapchain, image_index, &.{ render_done })`
-//! 5. `waitFence(inflight)` (sur la frame suivante, pour pipeline 2-deep)
+//! 5. `waitFence(inflight)` (on the next frame, for a 2-deep pipeline)
 //!
-//! Phase 1+ : helper haut-niveau `drawFrame(graph: *RenderGraph)` qui orchestre
-//! l'ensemble depuis le render graph.
+//! Phase 1+: high-level `drawFrame(graph: *RenderGraph)` helper that orchestrates
+//! the whole thing from the render graph.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -23,21 +23,21 @@ const conv = @import("conv.zig");
 const Device = @import("device.zig").Device;
 const cmd_mod = @import("command_encoder.zig");
 
-/// Sync pair pour la submission d'une frame.
+/// Sync pair for a frame submission.
 pub const SubmitSync = struct {
-    /// Sémaphore à attendre avant exécution (typiquement `image_ready` depuis
+    /// Semaphore to wait on before execution (typically `image_ready` from
     /// `acquireNextImage`).
     wait_semaphore: ?types.SemaphoreHandle = null,
-    /// Stage(s) auxquels le wait s'applique (par défaut color attachment).
+    /// Stage(s) the wait applies to (color attachment by default).
     wait_stage: vk.PipelineStageFlags = .{ .color_attachment_output = true },
-    /// Sémaphore à signaler en fin d'exécution (typiquement `render_done` à
-    /// passer à `present`).
+    /// Semaphore to signal at end of execution (typically `render_done` to
+    /// pass to `present`).
     signal_semaphore: ?types.SemaphoreHandle = null,
-    /// Fence signalée quand la GPU a fini cette submission.
+    /// Fence signaled when the GPU has finished this submission.
     fence: ?types.FenceHandle = null,
 };
 
-/// Soumet un CommandEncoder finalisé à la queue graphics.
+/// Submits a finished CommandEncoder to the graphics queue.
 pub fn submit(
     device: *Device,
     encoder: *cmd_mod.CommandEncoder,
@@ -75,9 +75,9 @@ pub fn submit(
     device.vk_queue.submit(&.{submit_info}, fence_vk) catch return error.BackendInternal;
 }
 
-/// Helper one-shot : alloue un command buffer, le body est appelé pour
-/// enregistrer dedans, soumet et attend la fin. Phase 0 utile pour les
-/// transferts de staging (e.g. upload de vertex buffer).
+/// One-shot helper: allocates a command buffer, the body is called to
+/// record into it, submits and waits for completion. Phase 0 useful for
+/// staging transfers (e.g. vertex buffer upload).
 pub fn oneShot(
     device: *Device,
     body: anytype,

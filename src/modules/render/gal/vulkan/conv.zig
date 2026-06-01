@@ -1,14 +1,14 @@
-//! Conversions GAL → Vulkan natif — Phase 0 / M0.4.
+//! GAL → native Vulkan conversions — Phase 0 / M0.4.
 //!
-//! Pattern sysgpu (`engine-mach-reference.md` §2) : un fichier dédié par
-//! backend qui traduit les types publics GAL (`gal/types.zig`,
-//! `gal/escape_hatches.zig`) vers les types Vulkan natifs du binding
-//! `weld_core.platform.vk`.
+//! sysgpu pattern (`engine-mach-reference.md` §2): one dedicated file per
+//! backend that translates the public GAL types (`gal/types.zig`,
+//! `gal/escape_hatches.zig`) into the native Vulkan types of the
+//! `weld_core.platform.vk` binding.
 //!
-//! Aucun call site GAL ne référence directement un type `vk.*` —
-//! tout passe par les helpers de ce fichier. Cette discipline est
-//! enforcée par la règle linter brief §CI : pas d'accès `vk.device_dispatch`
-//! hors du module `gal/vulkan/`.
+//! No GAL call site references a `vk.*` type directly — everything goes
+//! through the helpers in this file. This discipline is enforced by the
+//! linter rule brief §CI: no `vk.device_dispatch` access outside the
+//! `gal/vulkan/` module.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -38,8 +38,8 @@ pub fn textureFormat(fmt: types.TextureFormat) vk.Format {
     };
 }
 
-/// Map Vulkan `Format` → GAL `TextureFormat` (best-effort, retourne `.undef`
-/// pour les formats non couverts par la sous-liste Phase 0).
+/// Map Vulkan `Format` → GAL `TextureFormat` (best-effort, returns `.undef`
+/// for formats not covered by the Phase 0 sub-list).
 pub fn textureFormatFromVk(fmt: vk.Format) types.TextureFormat {
     return switch (fmt) {
         .r8_unorm => .r8_unorm,
@@ -159,7 +159,7 @@ pub fn imageViewType(dim: types.TextureDimension) vk.ImageViewType {
     };
 }
 
-/// Choisit l'aspect mask Vulkan en fonction du format (color vs depth/stencil).
+/// Picks the Vulkan aspect mask based on the format (color vs depth/stencil).
 pub fn imageAspect(fmt: types.TextureFormat) vk.ImageAspectFlags {
     return switch (fmt) {
         .d32_sfloat => .{ .depth = true },
@@ -210,7 +210,7 @@ pub fn imageLayout(layout: escape.TextureLayout) vk.ImageLayout {
     };
 }
 
-/// Map Vulkan `Result` → GAL `Error`. Les codes hors set retournent
+/// Map Vulkan `Result` → GAL `Error`. Codes outside the set return
 /// `error.BackendInternal`.
 pub fn errorFromResult(r: vk.Result) types.Error {
     return switch (r) {
@@ -224,8 +224,8 @@ pub fn errorFromResult(r: vk.Result) types.Error {
     };
 }
 
-/// Pratique : wrap `vk.checkResult` en retournant un `types.Error` au lieu
-/// du `vk.Error` natif. Les call sites GAL utilisent uniquement `types.Error`.
+/// Convenience: wraps `vk.checkResult` returning a `types.Error` instead
+/// of the native `vk.Error`. GAL call sites use only `types.Error`.
 pub fn checkResult(r: vk.Result) types.Error!void {
     if (r == .success) return;
     return errorFromResult(r);
@@ -264,5 +264,5 @@ test "conv: errorFromResult maps OOM" {
     try t.expectError(error.OutOfMemory, checkResult(.error_out_of_host_memory));
     try t.expectError(error.OutOfMemory, checkResult(.error_out_of_device_memory));
     try t.expectError(error.SwapchainOutOfDate, checkResult(.error_out_of_date_khr));
-    try checkResult(.success); // pas d'erreur
+    try checkResult(.success); // no error
 }

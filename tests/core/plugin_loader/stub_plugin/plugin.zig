@@ -9,7 +9,7 @@
 //!
 //! Types are imported from `src/core/plugin_loader/desc.zig` via
 //! the `weld_plugin_abi` module declared in the main `build.zig`
-//! (decision Cas 3 — import croisé, cf. brief § Notes).
+//! (decision Case 3 — cross-import, cf. brief § Notes).
 
 const std = @import("std");
 const abi = @import("weld_plugin_abi");

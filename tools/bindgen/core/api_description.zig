@@ -1,93 +1,93 @@
-//! Format canonique `.api.zig` consommé par le générateur unifié
-//! Weld bindgen (cf. `engine-c-bindings.md` §3).
+//! Canonical `.api.zig` format consumed by the unified Weld bindgen
+//! generator (cf. `engine-c-bindings.md` §3).
 //!
-//! Statut M0.2 / E5 : **squelette structurel**. Le format est posé
-//! et figé pour les adapters Phase 1+ (Opus, Assimp, KTX/Basis,
-//! libdatachannel, ACL compresseur, HarfBuzz, ONNX). En M0.2, les
-//! deux adapters effectifs — `vk_xml` et `wayland_xml` — portent
-//! le pipeline 1:1 depuis l'ancien `tools/vk_gen/` /
-//! `tools/wayland_gen/` et écrivent directement le Zig idiomatique
-//! sans passer par cette `ApiDescription` intermédiaire. La
-//! décision technique E5 (i) trace ce contournement pragmatique
-//! pour préserver le critère « diff vide » non-négociable.
+//! M0.2 / E5 status: **structural skeleton**. The format is laid down
+//! and frozen for the Phase 1+ adapters (Opus, Assimp, KTX/Basis,
+//! libdatachannel, ACL compressor, HarfBuzz, ONNX). In M0.2, the
+//! two effective adapters — `vk_xml` and `wayland_xml` — carry
+//! the 1:1 pipeline from the old `tools/vk_gen/` /
+//! `tools/wayland_gen/` and write the idiomatic Zig directly
+//! without going through this intermediate `ApiDescription`. The
+//! E5 (i) technical decision records this pragmatic workaround
+//! to preserve the non-negotiable "empty diff" criterion.
 //!
-//! Le format défini ici est destiné à devenir l'**input
-//! canonique** de `core/emitter.zig` pour les futurs adapters et
-//! les bindings manuels (`bindings/manual/*.api.zig`). Les
-//! `bindings/generated/*.api.zig` produits par les adapters M0.2
-//! contiennent une `ApiDescription` minimale renseignant `name` /
-//! `version` / `source` — assez pour distinguer une description
-//! manuelle d'une description générée et préserver l'auditabilité
-//! du pipeline. Le contrat complet (types, fonctions, ownership,
-//! stratégies de chargement) sera exercé par les premiers keepers
-//! Phase 1.
+//! The format defined here is meant to become the **canonical
+//! input** of `core/emitter.zig` for future adapters and
+//! manual bindings (`bindings/manual/*.api.zig`). The
+//! `bindings/generated/*.api.zig` produced by the M0.2 adapters
+//! contain a minimal `ApiDescription` filling in `name` /
+//! `version` / `source` — enough to distinguish a manual
+//! description from a generated one and preserve the pipeline's
+//! auditability. The full contract (types, functions, ownership,
+//! loading strategies) will be exercised by the first Phase 1
+//! keepers.
 
 const std = @import("std");
 
-/// Versioning sémantique d'une API. Informational — utilisé pour
-/// les diff de description et les warnings de migration.
+/// Semantic versioning of an API. Informational — used for
+/// description diffs and migration warnings.
 pub const Version = struct {
     major: u16,
     minor: u16,
     patch: u16,
 };
 
-/// Origine des définitions C / Objective-C / XML d'une description.
+/// Origin of the C / Objective-C / XML definitions of a description.
 pub const Source = union(enum) {
-    /// Headers C consommés via `addTranslateC` (keepers via
-    /// `.api.zig` manuel).
+    /// C headers consumed via `addTranslateC` (keepers via
+    /// manual `.api.zig`).
     c_headers: []const []const u8,
-    /// XML Khronos consommé par un adapter dédié (vk.xml, xr.xml).
+    /// Khronos XML consumed by a dedicated adapter (vk.xml, xr.xml).
     xml_khronos: []const u8,
-    /// XML Wayland / freedesktop.
+    /// Wayland / freedesktop XML.
     xml_wayland: []const u8,
-    /// Bridge Objective-C runtime (libobjc + frameworks Apple).
+    /// Objective-C runtime bridge (libobjc + Apple frameworks).
     objc_runtime: struct {
         framework: []const u8,
         platform_filter: PlatformFilter,
     },
-    /// Pas de source — sortie pure (export Tier 3 C API Weld).
+    /// No source — pure output (Weld Tier 3 C API export).
     output_only,
-    /// Description rédigée manuellement (keepers Phase 1+ via
+    /// Manually written description (Phase 1+ keepers via
     /// `bindings/manual/*.api.zig`).
     manual,
 };
 
-/// Filtre plateforme pour les sources `objc_runtime`. `both` =
-/// macOS + iOS, mêmes selectors et même framework.
+/// Platform filter for `objc_runtime` sources. `both` =
+/// macOS + iOS, same selectors and same framework.
 pub const PlatformFilter = enum { macos, ios, both };
 
-/// Stratégie de chargement d'une lib. 4 variantes exposées en
-/// M0.2 (cf. `engine-c-bindings.md` §4.6) ; seule
-/// `dlopen_loader_pattern` est effectivement exercée par les
-/// adapters M0.2 (Vulkan + Wayland).
+/// Loading strategy of a lib. 4 variants exposed in
+/// M0.2 (cf. `engine-c-bindings.md` §4.6); only
+/// `dlopen_loader_pattern` is effectively exercised by the
+/// M0.2 adapters (Vulkan + Wayland).
 pub const Strategy = enum {
-    /// dlopen + dlsym par fonction. Défaut des keepers C.
+    /// dlopen + dlsym per function. Default of the C keepers.
     dlopen,
-    /// Pattern Khronos : dlopen du loader, puis getProcAddr par
-    /// fonction. Imposé par l'architecture du standard (Vulkan,
+    /// Khronos pattern: dlopen the loader, then getProcAddr per
+    /// function. Imposed by the standard's architecture (Vulkan,
     /// OpenGL, OpenXR, Wayland).
     dlopen_loader_pattern,
-    /// Framework Apple — link build-time via `-framework`,
-    /// résolution rpath au runtime.
+    /// Apple framework — build-time link via `-framework`,
+    /// rpath resolution at runtime.
     framework,
-    /// Linkage statique build-time (consoles PS5/Xbox/Switch,
-    /// iOS si exigé par App Store).
+    /// Build-time static linkage (PS5/Xbox/Switch consoles,
+    /// iOS if required by the App Store).
     static_link,
 };
 
-/// Comportement de l'init du module si la lib est absente.
+/// Behavior of the module's init if the lib is absent.
 pub const Requirement = enum {
-    /// Échec à l'init = échec du module qui consomme le binding.
+    /// Init failure = failure of the module that consumes the binding.
     hard,
-    /// Échec à l'init = la feature est désactivée, le moteur
-    /// continue avec un `isAvailable() == false`.
+    /// Init failure = the feature is disabled, the engine
+    /// continues with an `isAvailable() == false`.
     soft,
 };
 
-/// Nom de la lib par plateforme. Variants couvrent les chemins
-/// dlopen et les overrides build-time (console static archive,
-/// framework Apple).
+/// Lib name per platform. Variants cover the dlopen paths
+/// and the build-time overrides (console static archive,
+/// Apple framework).
 pub const LibName = union(enum) {
     runtime: struct {
         linux: []const u8,
@@ -98,8 +98,8 @@ pub const LibName = union(enum) {
     framework: []const u8,
 };
 
-/// Bloc de chargement complet d'une lib. Combine nom +
-/// stratégie + requirement + versions ABI cibles.
+/// Full loading block of a lib. Combines name +
+/// strategy + requirement + target ABI versions.
 pub const Link = struct {
     name: LibName,
     strategy: Strategy = .dlopen,
@@ -107,7 +107,7 @@ pub const Link = struct {
     soname_versions: []const []const u8 = &.{},
 };
 
-/// Catégorie d'une déclaration de type émise par l'adapter.
+/// Category of a type declaration emitted by the adapter.
 pub const TypeKind = enum {
     opaque_handle,
     extern_struct,
@@ -117,37 +117,37 @@ pub const TypeKind = enum {
     tagged_union,
 };
 
-/// Déclaration de type minimaliste — détails seront étoffés
-/// quand un premier adapter consommera l'`ApiDescription` comme
-/// input réel.
+/// Minimalist type declaration — details will be fleshed out
+/// when a first adapter consumes the `ApiDescription` as a
+/// real input.
 pub const TypeDecl = struct {
     name: []const u8,
     c_name: ?[]const u8 = null,
     kind: TypeKind,
 };
 
-/// Déclaration de fonction minimaliste — squelette pour
-/// adapters Phase 1+.
+/// Minimalist function declaration — skeleton for
+/// Phase 1+ adapters.
 pub const FunctionDecl = struct {
     zig_name: []const u8,
     c_name: []const u8,
 };
 
-/// Annotations de génération (overrides, hints) — squelette.
+/// Generation annotations (overrides, hints) — skeleton.
 pub const Pragmas = struct {
     rename: []const RenameRule = &.{},
     skip: []const []const u8 = &.{},
     force_inline: []const []const u8 = &.{},
 };
 
-/// Règle de renommage d'un identifiant.
+/// Renaming rule for an identifier.
 pub const RenameRule = struct {
     from: []const u8,
     to: []const u8,
 };
 
-/// Racine du format `.api.zig`. Une description complète d'une
-/// surface C / Objective-C / XML consommée par Weld.
+/// Root of the `.api.zig` format. A complete description of a
+/// C / Objective-C / XML surface consumed by Weld.
 pub const ApiDescription = struct {
     name: []const u8,
     version: Version,

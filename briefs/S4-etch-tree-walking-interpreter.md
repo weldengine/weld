@@ -54,7 +54,7 @@ The following are explicitly **not** to be touched, added, or extended in S4. Ea
 - Resource field access from rule bodies (`get(T).field`, `get_mut(T).field` without a receiver). Inherited S3 debt: the parser does not produce these nodes. Resources are observable from rules only through the `when resource T [changed]` filter; their fields cannot be read or written from rule bodies in S4.
 - Structural mutations: `spawn`, `despawn`, `entity.add(T)`, `entity.remove(T)`. The S3 subset is mutation-in-place only.
 - Command buffers, deferred mutation queues.
-- Generic queries (`Changed<T>`, `With<T>`, `Without<T>` typed wrappers à la Bevy). The runtime query is plain `(includes, excludes)`.
+- Generic queries (`Changed<T>`, `With<T>`, `Without<T>` Bevy-like typed wrappers). The runtime query is plain `(includes, excludes)`.
 - `ExprKind.path` and `ExprKind.tag_path` evaluation. Both are produced by the S3 parser out of brief scope and remain unsupported in S4. The interpreter detects them and returns `RuntimeError.UnsupportedExpr` with the node's span; the differential corpus never exercises them.
 - `tag_path` const-evaluability soundness gap (S3 debt). `evalConst` returns `RuntimeError.UnsupportedExpr` on `tag_path` and does not attempt to fix it.
 - Annotation argument resolution. Annotations are captured by S3 but their applicability is not validated and their args are not evaluated. The interpreter ignores annotations entirely at execution time.
@@ -78,7 +78,7 @@ In the listed order. Mandatory before writing any production code — Claude Cod
 3. `etch-reference-part1.md` — §3 (type system: polymorphic literal defaulting, int/float defaulting rules already applied by S3), §4 (variables, mutability, shadowing), §5 (memory model: surface invariants — S4 does not need the deeper internals), §6 (expressions: arithmetic semantics, division by zero, integer overflow, compound assignments, comparison, logical operators).
 4. `etch-resolver-types.md` — §11 (const evaluation: contexts where const is required, defaulting rules), §12 (ECS rule validations: when clause compilation to archetype set, archetype matching), §19 (phasing — confirms S4 is Phase 0.5 boundary, AST-direct execution).
 5. `etch-ast-ir.md` — §3.2 (AstArena tabular SoA layout produced by S3), §3.3 (NodeId vs StableId — StableId stays at 0 in S4, NodeId is the only identity), §3.4 (catalogue of kinds per category — for the subset reached by S3).
-6. `etch-memory-model.md` — surface invariants only: refs ECS are scope-bornées (lifetime = rule invocation), no GC pauses, no cycles. S4 does not implement the three-zone arena model; the tree-walker uses standard allocators with `std.testing.allocator` discipline.
+6. `etch-memory-model.md` — surface invariants only: ECS refs are scope-bounded (lifetime = rule invocation), no GC pauses, no cycles. S4 does not implement the three-zone arena model; the tree-walker uses standard allocators with `std.testing.allocator` discipline.
 7. `engine-ecs-internals.md` — §1 (architecture overview), §2 (chunk SoA layout — already implemented by S1), §4 (query compilation — the spec describes comptime compilation; S4 builds the runtime equivalent), §5 (change detection — tick-based; S4 implements a degenerate per-resource dirty bit, full tick-based detection is Phase 0.5).
 8. `briefs/S1-mini-ecs-zig.md` — exact signatures of the `weld_core.ecs` and `weld_core.jobs` public surfaces delivered by S1, counting allocator wrapper in `weld_core.testing`.
 9. `briefs/S3-etch-parser-subset.md` — exact public surface of `weld_etch` (`parseSource`, `typeCheck`, `Ast`, `NodeId`, `TypeChecker`, `Diagnostic`, `DiagnosticCode`, `SourceSpan`, `LineIndex`, `ParseResult`), final scope and 6 acknowledged debts (all out-of-scope for S4 except where re-listed above).
@@ -116,7 +116,7 @@ Paths are relative to the repo root. The listing distinguishes creation from edi
 
 ### Bench
 
-- `bench/etch_interp.zig` — **creation** — harness measuring 1000 entities × 5 rules over 1000 ticks in `ReleaseSafe`, plus a 10 000 entities × 5 rules scaling sweep.
+- `bench/etch_interp.zig` — **creation** — harness measuring 1000 entities × 5 rules over 1000 ticks in `ReleaseSafe`, plus a 10,000 entities × 5 rules scaling sweep.
 - `bench/fixtures/demo_5_rules.etch` — **creation** — fixed 5-rule program used by both the bench and the demo binary.
 - `bench/results/.gitkeep` — already present from S1.
 
@@ -177,7 +177,7 @@ The S3 bench methodology bug (lexer double-count) does not affect S4: this bench
 
 ### Diff-list discipline (closure step)
 
-Before opening the PR, run `git diff main..HEAD --name-only` and compare item-by-item with the « Files to create or modify » section above:
+Before opening the PR, run `git diff main..HEAD --name-only` and compare item-by-item with the "Files to create or modify" section above:
 
 - Every file listed in the brief but absent from the diff → blocker, do not open the PR.
 - Every file present in the diff but not listed in the brief → must be justified under "Acknowledged deviations" in the LIVING SECTION, with a one-line rationale per file.
@@ -191,7 +191,7 @@ The PR description (cf. Conventions below) must list the documentation files mod
 - **PR title:** `Phase -1 / Etch / Tree-walking interpreter`
 - **Commit convention:** Conventional Commits (cf. `engine-development-workflow.md` §4.3). Allowed scopes: `etch`, `ecs`, `core`, `bench`, `brief`, `docs`, `build`, `ci`, `test`.
 - **Merge strategy:** squash-and-merge (cf. `engine-development-workflow.md` §4.6). Squash message follows the format documented in §4.6, with a body of 2-3 lines summarising the S4 verdict and citing the bench median.
-- **PR description structure:** as mandated by `engine-development-workflow.md` §4.4 (Brief, Résumé, Critères d'acceptation, Notes de review, `## Changelog`). The Changelog section explicitly lists modified documentation files (README, CLAUDE.md, brief) alongside the code summary.
+- **PR description structure:** as mandated by `engine-development-workflow.md` §4.4 (Brief, Summary, Acceptance criteria, Review notes, `## Changelog`). The Changelog section explicitly lists modified documentation files (README, CLAUDE.md, brief) alongside the code summary.
 
 ## Notes
 

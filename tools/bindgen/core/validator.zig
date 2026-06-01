@@ -1,25 +1,25 @@
-//! Validateur d'`ApiDescription` (squelette M0.2 / E5).
+//! `ApiDescription` validator (M0.2 / E5 skeleton).
 //!
-//! Vérifie la cohérence interne d'une description avant émission :
-//! refs de types résolues, pas de cycles non gérés, annotations
-//! cohérentes (cf. `engine-c-bindings.md` §9.2). Exécuté par
-//! `tools/bindgen/main.zig` après chaque adapter et avant
+//! Checks the internal consistency of a description before emission:
+//! resolved type refs, no unhandled cycles, consistent
+//! annotations (cf. `engine-c-bindings.md` §9.2). Run by
+//! `tools/bindgen/main.zig` after each adapter and before
 //! `emitter`.
 //!
-//! Statut M0.2 : **squelette**. Les adapters `vk_xml` et
-//! `wayland_xml` court-circuitent le pipeline `.api.zig` →
-//! `emitter` en M0.2 (décision technique E5 (i)), donc le
-//! validateur n'a pas de description complète à vérifier sur ce
-//! milestone. Le squelette est en place pour les adapters Phase
-//! 1+ qui consommeront `ApiDescription` comme input canonique.
+//! M0.2 status: **skeleton**. The adapters `vk_xml` and
+//! `wayland_xml` short-circuit the `.api.zig` →
+//! `emitter` pipeline in M0.2 (E5 (i) technical decision), so the
+//! validator has no complete description to check in this
+//! milestone. The skeleton is in place for the Phase 1+ adapters
+//! that will consume `ApiDescription` as the canonical input.
 
 const std = @import("std");
 const api = @import("api_description.zig");
 
-/// Erreurs surfacées par `validate`. Encadrées au niveau du
-/// squelette M0.2 ; le contenu réel sera étoffé quand un premier
-/// adapter Phase 1 produit une `ApiDescription` exerçant les
-/// règles.
+/// Errors surfaced by `validate`. Bounded at the M0.2
+/// skeleton level; the real content will be fleshed out when a first
+/// Phase 1 adapter produces an `ApiDescription` exercising the
+/// rules.
 pub const ValidationError = error{
     UnresolvedTypeRef,
     UnsupportedCycle,
@@ -27,16 +27,16 @@ pub const ValidationError = error{
     NameCollision,
 };
 
-/// Vérifie la cohérence interne d'une `ApiDescription`. Squelette
-/// M0.2 — `Ok` systématique. Les vérifications réelles
-/// (résolution de refs, détection de cycles, cohérence ownership)
-/// sont introduites par les premiers adapters Phase 1+ qui
-/// consomment `ApiDescription`.
+/// Checks the internal consistency of an `ApiDescription`. M0.2
+/// skeleton — always `Ok`. The real checks
+/// (ref resolution, cycle detection, ownership consistency)
+/// are introduced by the first Phase 1+ adapters that
+/// consume `ApiDescription`.
 pub fn validate(desc: api.ApiDescription) ValidationError!void {
-    // Garde-fou minimaliste : un nom vide est un signal qu'on
-    // n'utilise pas le format. Préfère lever explicitement plutôt
-    // que de laisser une description incohérente filer vers
-    // l'emitter.
+    // Minimalist safeguard: an empty name is a signal that we
+    // are not using the format. Prefer to raise explicitly rather
+    // than let an inconsistent description slip through to
+    // the emitter.
     if (desc.name.len == 0) return error.NameCollision;
 }
 

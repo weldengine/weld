@@ -1,4 +1,4 @@
-//! Bench: render instancing — Phase 0 / M0.4 § Scope — Complément Post-Review.
+//! Bench: render instancing — Phase 0 / M0.4 § Scope — Post-Review addendum.
 //!
 //! Measures the CPU-side batcher throughput on the 100k entities / 100
 //! distinct (mesh, material) target from the brief Benchmarks targets.

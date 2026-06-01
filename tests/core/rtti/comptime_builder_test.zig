@@ -1,7 +1,7 @@
 //! M0.2 / E1 — comptime builder tests.
 //!
 //! Coverage per `briefs/M0.2-rtti-resources-events-bindgen.md` E1
-//! § Critères d'acceptation locaux:
+//! § Local acceptance criteria:
 //!
 //! 1. primitives map to the correct `FieldKind`
 //! 2. nested struct resolves to `.nested_struct` + `nested_type_id`
@@ -140,8 +140,8 @@ test "enum is encoded as kind = .enum_tag" {
 }
 
 test "isPOD rejects pointer-bearing structs (would @compileError via buildTypeInfo)" {
-    // Brief E1 §critère 6: "champ pointeur produit compileError
-    // (vérifié via @compileError détecté en build de test)". We test
+    // Brief E1 §criterion 6: "pointer field produces compileError
+    // (verified via @compileError detected at test build)". We test
     // the underlying `isPOD` predicate that gates the compile error,
     // so the negative path can be exercised without breaking the test
     // target's own compilation. The compile-error path itself is
@@ -161,8 +161,8 @@ test "isPOD rejects pointer-bearing structs (would @compileError via buildTypeIn
 }
 
 test "lifecycle defaults to .transient for resources, null otherwise" {
-    // Contract updated by M0.2 / E3 (cf. brief § Notes — décision
-    // technique E3 / lifecycle inference). `buildTypeInfo` reads
+    // Contract updated by M0.2 / E3 (cf. brief § Notes — technical
+    // decision E3 / lifecycle inference). `buildTypeInfo` reads
     // `T.lifecycle` if declared, otherwise defaults to `.transient`
     // for the `.resource` category and leaves the field null for
     // every other category.

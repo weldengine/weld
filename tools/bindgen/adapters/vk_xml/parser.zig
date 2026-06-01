@@ -1163,15 +1163,15 @@ pub fn applyWhitelist(
     var platform_types: std.ArrayList(PlatformType) = .empty;
     for (model.platform_types) |pt| if (needed_types.contains(pt.name)) try platform_types.append(A, pt);
 
-    // M0.4 — whitelist closure étendue aux variants d'enum (brief
-    // §Scope D-S2-vk-whitelist). Filtre `EnumGroup.values` par
-    // `source` : on garde les variants du base enum (`source == ""`),
-    // ceux ajoutés par les features core (`source == "core"`, on ne
-    // distingue pas les minor versions Phase 0), et ceux ajoutés par
-    // les extensions whitelistées. Les variants des extensions hors
-    // whitelist (centaines de bits pour VkStructureType, VkFormat,
-    // VkAccessFlagBits2, etc.) sont droppés — c'est le principal levier
-    // de réduction de lignes.
+    // M0.4 — whitelist closure extended to enum variants (brief
+    // §Scope D-S2-vk-whitelist). Filters `EnumGroup.values` by
+    // `source`: we keep the base enum's variants (`source == ""`),
+    // those added by the core features (`source == "core"`, we do not
+    // distinguish the Phase 0 minor versions), and those added by
+    // the whitelisted extensions. The variants of the non-whitelisted
+    // extensions (hundreds of bits for VkStructureType, VkFormat,
+    // VkAccessFlagBits2, etc.) are dropped — that is the main lever
+    // for line reduction.
     var enum_groups: std.ArrayList(EnumGroup) = .empty;
     for (model.enum_groups) |g| {
         if (!needed_types.contains(g.name)) continue;
@@ -1241,14 +1241,14 @@ fn stringInList(s: []const u8, list: []const []const u8) bool {
     return false;
 }
 
-/// M0.4 — détermine si un variant d'enum doit être gardé par le filtre
-/// whitelist. Règles (cf. brief §Scope D-S2-vk-whitelist) :
-/// - `source == ""` : variant du base enum (pas via feature/extension) → keep
-/// - `source == "core"` : variant ajouté par une feature core (1.0-1.3) → keep
-///   (on ne discrimine pas par minor Phase 0 — toutes les versions core sont
-///   dans la whitelist Phase 0).
-/// - autre : variant ajouté par une extension nommée → keep iff l'extension
-///   est dans `whitelist.extensions`.
+/// M0.4 — determines whether an enum variant must be kept by the whitelist
+/// filter. Rules (cf. brief §Scope D-S2-vk-whitelist):
+/// - `source == ""`: base enum variant (not via a feature/extension) → keep
+/// - `source == "core"`: variant added by a core feature (1.0-1.3) → keep
+///   (we do not discriminate by Phase 0 minor — all core versions are
+///   in the Phase 0 whitelist).
+/// - other: variant added by a named extension → keep iff the extension
+///   is in `whitelist.extensions`.
 fn variantInWhitelist(source: []const u8, whitelist: Whitelist) bool {
     if (source.len == 0) return true;
     if (std.mem.eql(u8, source, "core")) return true;

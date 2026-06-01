@@ -1,18 +1,18 @@
-//! M0.2 / E6 — table `WeldAPI` + 7 sous-APIs avec implémentations
-//! stub.
+//! M0.2 / E6 — `WeldAPI` table + 7 sub-APIs with stub
+//! implementations.
 //!
-//! Toutes les signatures sont **finales gelées** au sens du
-//! freeze partiel C0.5 (cf. brief § Scope). Aucune callback ne
-//! câble réellement le Tier 0 Zig — chaque fonction qui retourne
-//! `WeldResult` retourne `WELD_ERR_NOT_IMPLEMENTED`, les fonctions
-//! `void` sont des no-ops, et les fonctions retournant un
-//! pointeur / int retournent `null` / `0`. Le câblage runtime est
+//! All signatures are **frozen final** in the sense of the
+//! C0.5 partial freeze (cf. brief § Scope). No callback actually
+//! wires the Zig Tier 0 — every function that returns
+//! `WeldResult` returns `WELD_ERR_NOT_IMPLEMENTED`, `void`
+//! functions are no-ops, and functions returning a
+//! pointer / int return `null` / `0`. The runtime wiring is
 //! Phase 3 (cf. brief § Out-of-scope).
 //!
-//! Layout cohérent `engine-c-api.md` §4 (table principale) +
-//! §5 à §11 (sous-APIs). Le test `api_stub_test.zig` énumère
-//! chaque callback et vérifie le code de retour — toute callback
-//! qui ne respecte pas le contrat stub est détectée.
+//! Layout consistent with `engine-c-api.md` §4 (main table) +
+//! §5 to §11 (sub-APIs). The `api_stub_test.zig` test enumerates
+//! each callback and checks the return code — any callback
+//! that does not honor the stub contract is detected.
 
 const std = @import("std");
 const desc = @import("desc.zig");
@@ -37,9 +37,9 @@ const WeldAllocatorHandle = desc.WeldAllocatorHandle;
 const WeldEditorCtxHandle = desc.WeldEditorCtxHandle;
 
 // =============================================================
-// FieldDesc (cf. engine-c-api.md §5.3) — métadonnée de champ
-// passée à `component_register` / `resource_register` /
-// `event_register`. Mirror de la `FieldDesc` RTTI (E1).
+// FieldDesc (cf. engine-c-api.md §5.3) — per-field metadata
+// passed to `component_register` / `resource_register` /
+// `event_register`. Mirror of the RTTI `FieldDesc` (E1).
 // =============================================================
 
 /// Discriminant tag of a `WeldFieldDesc`. Mirrors `rtti.FieldKind`
@@ -87,7 +87,7 @@ pub const WeldFieldDesc = extern struct {
 };
 
 // =============================================================
-// Resource lifecycle (cf. engine-c-api.md §6) — mirror de
+// Resource lifecycle (cf. engine-c-api.md §6) — mirror of
 // rtti.Lifecycle (E1).
 // =============================================================
 
@@ -181,8 +181,8 @@ pub const WeldNodePort = extern struct {
 };
 
 // =============================================================
-// Stub bodies — chacune retourne le défaut « non câblé ».
-// Factorisé par type de retour pour minimiser le bruit.
+// Stub bodies — each returns the "not wired" default.
+// Factored by return type to minimize noise.
 // =============================================================
 
 fn stubResult() callconv(.c) WeldResult {
@@ -199,13 +199,13 @@ fn stubVoid() callconv(.c) void {}
 /// currently a stub returning `WELD_ERR_NOT_IMPLEMENTED` / null / 0
 /// / false — the real wiring is Phase 3 (cf. brief §Out-of-scope).
 pub const WeldEcsAPI = extern struct {
-    // --- Entités ---
+    // --- Entities ---
     entity_spawn: *const fn (world: WeldWorldHandle) callconv(.c) WeldEntity = stub_entity_spawn,
     entity_destroy: *const fn (world: WeldWorldHandle, entity: WeldEntity) callconv(.c) void = stub_entity_destroy,
     entity_is_alive: *const fn (world: WeldWorldHandle, entity: WeldEntity) callconv(.c) bool = stub_entity_is_alive,
     entity_count: *const fn (world: WeldWorldHandle) callconv(.c) u32 = stub_entity_count,
 
-    // --- Composants ---
+    // --- Components ---
     component_register: *const fn (
         world: WeldWorldHandle,
         name: WeldStr,
@@ -233,7 +233,7 @@ pub const WeldEcsAPI = extern struct {
     query_each: *const fn (query: WeldQueryHandle, callback: WeldQueryCallback, user_data: ?*anyopaque) callconv(.c) void = stub_query_each,
     query_count: *const fn (query: WeldQueryHandle) callconv(.c) u32 = stub_query_count,
 
-    // --- Systèmes ---
+    // --- Systems ---
     system_register: *const fn (
         world: WeldWorldHandle,
         name: WeldStr,
@@ -616,7 +616,7 @@ fn stub_destroy_pool(pool: WeldAllocatorHandle) callconv(.c) void {
 /// Editor sub-API table (cf. `engine-c-api.md §10`) — only callable
 /// from the editor process. Stubbed in M0.2.
 pub const WeldEditorAPI = extern struct {
-    // --- Panneaux custom ---
+    // --- Custom panels ---
     panel_register: *const fn (name: WeldStr, category: WeldStr, draw_fn: WeldPanelDrawFn, user_data: ?*anyopaque) callconv(.c) WeldResult = stub_panel_register,
     inspector_register: *const fn (comp: WeldComponentId, draw_fn: WeldInspectorDrawFn, user_data: ?*anyopaque) callconv(.c) WeldResult = stub_inspector_register,
     gizmo_register: *const fn (comp: WeldComponentId, draw_fn: WeldGizmoDrawFn, user_data: ?*anyopaque) callconv(.c) WeldResult = stub_gizmo_register,
@@ -632,7 +632,7 @@ pub const WeldEditorAPI = extern struct {
     ) callconv(.c) WeldResult = stub_graph_node_register,
     menu_register: *const fn (path: WeldStr, action_fn: WeldMenuActionFn, user_data: ?*anyopaque) callconv(.c) WeldResult = stub_menu_register,
 
-    // --- Primitives de dessin éditeur ---
+    // --- Editor draw primitives ---
     draw_text: *const fn (ctx: WeldEditorCtxHandle, text: WeldStr) callconv(.c) void = stub_draw_text,
     draw_label: *const fn (ctx: WeldEditorCtxHandle, label: WeldStr, value: WeldStr) callconv(.c) void = stub_draw_label,
     draw_button: *const fn (ctx: WeldEditorCtxHandle, label: WeldStr) callconv(.c) bool = stub_draw_button,
@@ -834,24 +834,24 @@ fn stub_total_memory_bytes() callconv(.c) u64 {
 /// `frame`). Stubbed in M0.2 — every sub-API callback returns
 /// `WELD_ERR_NOT_IMPLEMENTED`.
 pub const WeldAPI = extern struct {
-    /// Sous-API ECS.
+    /// ECS sub-API.
     ecs: *const WeldEcsAPI,
-    /// Sous-API Resources.
+    /// Resources sub-API.
     resource: *const WeldResourceAPI,
-    /// Sous-API Events.
+    /// Events sub-API.
     event: *const WeldEventAPI,
-    /// Sous-API Memory.
+    /// Memory sub-API.
     memory: *const WeldMemoryAPI,
-    /// Sous-API Services.
+    /// Services sub-API.
     service: *const WeldServiceAPI,
-    /// Sous-API Editor — `null` quand le runtime tourne sans
-    /// éditeur (mode shipping). Plugins doivent tester
-    /// `api.editor != null` avant d'appeler.
+    /// Editor sub-API — `null` when the runtime runs without an
+    /// editor (shipping mode). Plugins must test
+    /// `api.editor != null` before calling.
     editor: ?*const WeldEditorAPI = null,
-    /// Sous-API Platform.
+    /// Platform sub-API.
     platform: *const WeldPlatformAPI,
 
-    // Métadonnées per-frame
+    // Per-frame metadata
     api_version: u32 = desc.WELD_API_VERSION_MAJOR,
     world: WeldWorldHandle = null,
     dt: f32 = 0,
@@ -859,31 +859,31 @@ pub const WeldAPI = extern struct {
 };
 
 // =============================================================
-// Instances stub statiques — pré-construites avec les fonctions
-// stub par défaut. Le `Loader` passe `&stub_api` aux plugins en
-// M0.2 (le câblage runtime réel est Phase 3).
+// Static stub instances — pre-built with the default stub
+// functions. The `Loader` passes `&stub_api` to plugins in
+// M0.2 (the real runtime wiring is Phase 3).
 // =============================================================
 
-/// Sous-API ECS pré-construite avec les stubs.
+/// ECS sub-API pre-built with the stubs.
 pub const stub_ecs_api: WeldEcsAPI = .{};
-/// Sous-API Resources pré-construite.
+/// Resources sub-API pre-built.
 pub const stub_resource_api: WeldResourceAPI = .{};
-/// Sous-API Events pré-construite.
+/// Events sub-API pre-built.
 pub const stub_event_api: WeldEventAPI = .{};
-/// Sous-API Memory pré-construite.
+/// Memory sub-API pre-built.
 pub const stub_memory_api: WeldMemoryAPI = .{};
-/// Sous-API Services pré-construite.
+/// Services sub-API pre-built.
 pub const stub_service_api: WeldServiceAPI = .{};
-/// Sous-API Editor pré-construite.
+/// Editor sub-API pre-built.
 pub const stub_editor_api: WeldEditorAPI = .{};
-/// Sous-API Platform pré-construite.
+/// Platform sub-API pre-built.
 pub const stub_platform_api: WeldPlatformAPI = .{};
 
-/// Table API stub utilisée par `Loader.loadPlugin` en M0.2.
-/// Toutes les callbacks renvoient `WELD_ERR_NOT_IMPLEMENTED`,
-/// `null`, `0`, `false` ou sont des no-ops selon leur type de
-/// retour. Le câblage runtime des 7 sous-APIs vers le Tier 0
-/// Zig est Phase 3 (brief § Out-of-scope).
+/// Stub API table used by `Loader.loadPlugin` in M0.2.
+/// All callbacks return `WELD_ERR_NOT_IMPLEMENTED`,
+/// `null`, `0`, `false` or are no-ops depending on their return
+/// type. The runtime wiring of the 7 sub-APIs to the Zig
+/// Tier 0 is Phase 3 (brief § Out-of-scope).
 pub const stub_api: WeldAPI = .{
     .ecs = &stub_ecs_api,
     .resource = &stub_resource_api,
