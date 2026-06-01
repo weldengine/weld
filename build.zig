@@ -370,6 +370,14 @@ pub fn build(b: *std.Build) void {
         // unrelated tests with current ReleaseSafe issues — tracked as
         // M0.7 housekeeping debt).
         .{ .path = "tests/render/capture.zig", .render = true, .dedicated_step = "test-render-capture" },
+        // M0.5 item 2 — GAL capture helper surface coverage (encodePpm +
+        // Device.captureFrameToPPM); §13 consumer test, runs on every platform.
+        .{ .path = "tests/render/capture_helper.zig", .render = true },
+        // M0.5 item 1 — direct PSNR gate reading the pre-produced
+        // out/smoke_test.ppm with no rebuild and no triangle re-spawn.
+        // std-only (no .render), so `zig build test-ppm-psnr` compiles in
+        // seconds and replaces the rebuild-heavy `test-render-capture` in CI.
+        .{ .path = "tests/render/ppm_psnr_compare.zig", .dedicated_step = "test-ppm-psnr" },
         // M0.4 § Scope Post-Review — hot-reload filewatch latency < 200 ms.
         // Skip if glslc absent from PATH.
         .{ .path = "tests/render/shader_hot_reload.zig", .render = true },
