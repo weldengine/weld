@@ -79,6 +79,9 @@ pub const required_methods = [_]RequiredMethod{
     .{ .name = "getQueue", .purpose = "Gets a Queue (graphics/compute/transfer)" },
     .{ .name = "createCommandEncoder", .purpose = "Starts recording a command buffer" },
     .{ .name = "submit", .purpose = "Submits a finished CommandEncoder to the graphics queue (cf. SubmitDescriptor)" },
+
+    // Capture (M0.5 item 2)
+    .{ .name = "captureFrameToPPM", .purpose = "Reads back a rendered texture and writes it as a PPM file (cf. gal/capture.zig)" },
 };
 
 /// Comptime check that `Backend` declares all the required methods.
@@ -243,6 +246,9 @@ const TestShape = struct {
     }
     pub fn submit(self: *TestShape, encoder: *CommandEncoderStub, descriptor: types.SubmitDescriptor) types.Error!void {
         _ = .{ self, encoder, descriptor };
+    }
+    pub fn captureFrameToPPM(self: *TestShape, gpa: std.mem.Allocator, io: std.Io, texture: types.TextureHandle, width: u32, height: u32, path: []const u8) types.Error!void {
+        _ = .{ self, gpa, io, texture, width, height, path };
     }
 };
 

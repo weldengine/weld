@@ -202,10 +202,10 @@ fn frameClearColor(frame: u32) gal.types.ColorClear {
     };
 }
 
-/// Render frame `frame_idx` into an offscreen R8G8B8A8_UNORM texture,
-/// copy it through a staging buffer, and write the result as a binary
-/// PPM (P6) to `path`. Used by the smoke-test capture path consumed by
-/// `tests/render/capture.zig`. The `pipeline` argument is the same
+/// Render frame `frame_idx` into an offscreen R8G8B8A8_UNORM texture, then
+/// delegate the GPU readback + PPM write to the public GAL helper
+/// `Device.captureFrameToPPM` (M0.5 item 2; cf. `gal/capture.zig`). The
+/// render leaves the texture in `transfer_src` layout. The `pipeline` argument is the same
 /// triangle pipeline used in the interactive loop — drawn over the
 /// clear-color background so the captured PPM exercises the full
 /// forward path (vertex → rasterizer → fragment → blend), not just
@@ -229,19 +229,10 @@ fn captureFrame(
     const offscreen_view = try device.createTextureView(offscreen, .{ .label = "capture.view" });
     defer device.destroyTextureView(offscreen_view);
 
-    const staging_bytes: u64 = @as(u64, FRAME_WIDTH) * FRAME_HEIGHT * 4;
-    const staging = try device.createBuffer(.{
-        .label = "capture.staging",
-        .size = staging_bytes,
-        .usage = .{ .copy_dst = true },
-        .host_visible = true,
-    });
-    defer device.destroyBuffer(staging);
-
     const fence = try device.createFence(false);
     defer device.destroyFence(fence);
 
-    const enc = try device.createCommandEncoder("capture");
+    const enc = try device.createCommandEncoder("capture.render");
     defer device.destroyCommandEncoder(enc);
 
     var pass = try enc.beginRenderPass(.{
@@ -258,60 +249,17 @@ fn captureFrame(
     pass.setScissor(0, 0, FRAME_WIDTH, FRAME_HEIGHT);
     pipeline.draw(&pass);
     pass.end();
-
-    enc.copyTextureToBuffer(
-        .{ .texture = offscreen, .aspect = .color },
-        .{ .buffer = staging, .bytes_per_row = FRAME_WIDTH * 4 },
-        .{ .width = FRAME_WIDTH, .height = FRAME_HEIGHT },
-    );
     enc.finish();
 
     try device.submit(enc, .{ .fence = fence });
     try device.waitFence(fence, std.math.maxInt(u64));
 
-    const rgba = try device.mapBuffer(staging);
-    defer device.unmapBuffer(staging);
-
-    try writePPM(allocator, io, path, rgba);
+    // Readback + PPM encode/write now live on the public GAL surface
+    // (`Device.captureFrameToPPM`, M0.5 item 2). The render above left the
+    // offscreen texture in `transfer_src` layout, the contract the helper
+    // expects (cf. `gal/capture.zig`).
+    try device.captureFrameToPPM(allocator, io, offscreen, FRAME_WIDTH, FRAME_HEIGHT, path);
     log.info("captured frame {d} -> {s}", .{ frame_idx, path });
-}
-
-/// PPM P6 writer. Strips alpha from the RGBA8 source (drops every fourth
-/// byte). `path`'s parent directory is created if missing. Binary P6 format:
-/// "P6\n<W> <H>\n255\n" followed by W*H*3 bytes of RGB.
-fn writePPM(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    path: []const u8,
-    rgba: []const u8,
-) !void {
-    if (std.fs.path.dirname(path)) |dir| {
-        std.Io.Dir.cwd().createDirPath(io, dir) catch |e| switch (e) {
-            error.PathAlreadyExists => {},
-            else => return e,
-        };
-    }
-
-    var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
-    defer file.close(io);
-
-    var buf: [4096]u8 = undefined;
-    var writer = file.writer(io, &buf);
-    const w = &writer.interface;
-
-    try w.print("P6\n{d} {d}\n255\n", .{ FRAME_WIDTH, FRAME_HEIGHT });
-
-    const pixel_count = @as(usize, FRAME_WIDTH) * FRAME_HEIGHT;
-    var rgb = try allocator.alloc(u8, pixel_count * 3);
-    defer allocator.free(rgb);
-    var i: usize = 0;
-    while (i < pixel_count) : (i += 1) {
-        rgb[i * 3 + 0] = rgba[i * 4 + 0];
-        rgb[i * 3 + 1] = rgba[i * 4 + 1];
-        rgb[i * 3 + 2] = rgba[i * 4 + 2];
-    }
-    try w.writeAll(rgb);
-    try w.flush();
 }
 
 fn runVulkan(allocator: std.mem.Allocator, io: std.Io, args: Args) !void {

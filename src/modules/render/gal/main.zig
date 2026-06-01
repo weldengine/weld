@@ -35,6 +35,10 @@ pub const barriers = @import("barriers.zig");
 pub const null_backend = @import("null/device.zig");
 /// Vulkan backend — Phase 0+ implementation (cf. brief §Scope).
 pub const vulkan_backend = @import("vulkan/device.zig");
+/// Frame-capture helper (texture → PPM readback), M0.5 item 2. Backend-
+/// agnostic; each backend `Device` also exposes it as a `captureFrameToPPM`
+/// method (cf. `gal/capture.zig`).
+pub const capture = @import("capture.zig");
 
 // Caller-friendly re-exports (avoids the `gal.types.*` nesting).
 
