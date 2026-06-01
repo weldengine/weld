@@ -34,8 +34,6 @@ const NodeId = ast_mod.NodeId;
 const StringId = ast_mod.StringId;
 const Diagnostic = diag_mod.Diagnostic;
 const Value = value_mod.Value;
-const RuntimeError = value_mod.RuntimeError;
-const RuntimeErrorKind = value_mod.RuntimeErrorKind;
 const EntityId = value_mod.EntityId;
 const Bridge = bridge_mod.Bridge;
 
@@ -46,7 +44,6 @@ pub const RuntimeReport = struct {
     rules_evaluated: u64 = 0,
     rules_matched: u64 = 0,
     runtime_errors: u64 = 0,
-    last_error: ?RuntimeError = null,
 };
 
 const ResourceDep = struct {
@@ -664,7 +661,7 @@ fn compileTypeDecl(
         const v = evalConst(ast, f.default_value) catch continue;
         const fd = fields.items[f_i];
         const slot = default_buf[fd.offset .. fd.offset + @as(u16, @intCast(fd.kind.sizeBytes()))];
-        bridge_mod.writeValueAsBytes(fd.kind, slot, v);
+        try bridge_mod.writeValueAsBytes(fd.kind, slot, v);
     }
 
     const id = try world.registry.registerComponentRaw(gpa, .{
