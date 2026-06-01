@@ -129,6 +129,31 @@ Rationale for the split: render (E2) is the largest and riskiest paquet (GPU-adj
   rewriting is destructive and would force re-tagging M0.2→M0.4 for a single line.
   The M0.2 brief is English; the brief↔git wording mismatch is accepted and
   documented. Tracked as a separate debt outside this chore.
+- **E7 GO (Guy) — scope correction: the initial scope under-covered the repo.**
+  The E6 whole-repo grep surfaced French outside the original E1–E5 plan
+  (`Scope — IN` enumerated `src/`, `tests/`, briefs, `CLAUDE.md`, bench reports;
+  the exit grep was scoped to `src tests`). Scope extended to: `tools/` (bindgen,
+  weld_lint, shader_compiler), `build.zig`, `examples/triangle/`,
+  `src/editor/{main,vk_blit}.zig`, `src/modules/audio/dummy.zig`,
+  `bench/render_instancing.zig`, `.github/workflows/ci.yml`, the closed spike briefs
+  **S0/S2** (the chore had assumed S0/S1/S2 ≈ 0 % FR — disproven, S2 carried real FR),
+  and `validation/s2-go-nogo.md` — corrected via an exhaustive repo-wide grep with an
+  expanded wordlist (`comportement`, `tous/toutes les`, `aucun(e)`, `en mode`, `génér*`,
+  `étape`, `fenêtre`, `noyau`, `données`, `gestion`, `fichier`, `chaque`, `squelette`,
+  `unifié`, `sortie`, `ressources`, …) after a cross-check caught residuals the narrower
+  wordlist missed (notably the recurring template term "Comportement observable").
+  `bindgen-verify` stays byte-identical, confirming the generator's translated comments
+  do not change generated output.
+- **Documented false positives** (intentionally preserved; excluded from the exit grep
+  by inspection): `Lê` (researcher name, deque.zig + M0.2.1) · `café` + its UTF-8
+  codepoint comment (lexer.zig test data) · `façade` / `Naïve` (English loanwords) ·
+  the `ÔÇö` mojibake in `validation/s2-go-nogo.md` (encoding-bug evidence) · the
+  `.le` / `-le` operator, the `-la` flag, and the `la`/`lb`/`lc`/`ld` variables (code
+  identifiers) · space-before-`:` typography (accepted) · the space thousands-separator
+  inside bench data tables (numeric values preserved verbatim) · `params` (English).
+  This brief itself is the **meta file** — it documents the French to hunt, so its own
+  FR (the wordlist, `café` example, `« »` example, FR→EN canonical mappings) is
+  excluded from the exit grep by construction.
 
 ## Execution notes
 
