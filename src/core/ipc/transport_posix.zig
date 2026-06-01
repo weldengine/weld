@@ -224,16 +224,28 @@ pub const Backend = struct {
         var offset: usize = 0;
         while (offset < bytes.len) {
             const n = sys.write(self.fd, bytes.ptr + offset, bytes.len - offset);
-            if (n < 0) return error.BrokenPipe;
+            if (n < 0) switch (std.c.errno(n)) {
+                // A signal interrupted the write before any byte moved —
+                // retry the same chunk rather than mis-report a broken
+                // pipe (mirrors std.posix's own `.INTR => continue`).
+                .INTR => continue,
+                else => return error.BrokenPipe,
+            };
             if (n == 0) return error.BrokenPipe;
             offset += @intCast(n);
         }
     }
 
     pub fn recv(self: *Backend, buffer: []u8) Error!usize {
-        const n = sys.read(self.fd, buffer.ptr, buffer.len);
-        if (n < 0) return error.BrokenPipe;
-        return @intCast(n);
+        while (true) {
+            const n = sys.read(self.fd, buffer.ptr, buffer.len);
+            if (n < 0) switch (std.c.errno(n)) {
+                // Interrupted by a signal with nothing read yet — retry.
+                .INTR => continue,
+                else => return error.BrokenPipe,
+            };
+            return @intCast(n);
+        }
     }
 
     pub fn sendWithHandles(
