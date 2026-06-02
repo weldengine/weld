@@ -285,8 +285,17 @@ pub const Backend = struct {
             .msg_flags = 0,
         };
 
-        const n = sys.sendmsg(self.fd, &msg, MSG_NOSIGNAL);
-        if (n < 0) return error.BrokenPipe;
+        while (true) {
+            const n = sys.sendmsg(self.fd, &msg, MSG_NOSIGNAL);
+            if (n < 0) switch (std.c.errno(n)) {
+                // Interrupted before any byte/ancillary left the socket —
+                // retry the whole message. Nothing was sent, so the passed
+                // fds are not duplicated. (Same EINTR contract as `send`.)
+                .INTR => continue,
+                else => return error.BrokenPipe,
+            };
+            break;
+        }
     }
 
     pub fn recvWithHandles(
@@ -313,8 +322,16 @@ pub const Backend = struct {
             .msg_flags = 0,
         };
 
-        const n = sys.recvmsg(self.fd, &msg, 0);
-        if (n < 0) return error.BrokenPipe;
+        var n: isize = undefined;
+        while (true) {
+            n = sys.recvmsg(self.fd, &msg, 0);
+            if (n < 0) switch (std.c.errno(n)) {
+                // Interrupted with nothing received yet — retry.
+                .INTR => continue,
+                else => return error.BrokenPipe,
+            };
+            break;
+        }
 
         var handle_count: usize = 0;
         if (msg.msg_controllen >= @sizeOf(CmsgHdr) and handles_out.len > 0) {
