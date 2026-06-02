@@ -13,7 +13,7 @@
 
 /// GAL namespace — public types, comptime interface, Null + Vulkan backends,
 /// barriers tracker, escape hatches.
-pub const gal = @import("gal/main.zig");
+pub const gal = @import("gal/root.zig");
 
 // Re-export of the render_graph submodule.
 

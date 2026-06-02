@@ -11,7 +11,7 @@
 //!    (cf. `gal/barriers.zig`), unless `barrier_mode = .explicit`
 
 const std = @import("std");
-const gal = @import("../gal/main.zig");
+const gal = @import("../gal/root.zig");
 const escape = gal.escape_hatches;
 
 /// Reference to a resource read or written by a pass.

@@ -54,7 +54,7 @@ pub fn build(b: *std.Build) void {
     // audio tests and, later, by the runtime once the audio strategy
     // selection wires in.
     const audio_module = b.createModule(.{
-        .root_source_file = b.path("src/modules/audio/main.zig"),
+        .root_source_file = b.path("src/modules/audio/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -72,7 +72,7 @@ pub fn build(b: *std.Build) void {
     // `b.dependency("weld", ...).module("weld_render")` — a prerequisite of
     // the `examples/triangle/` sub-project (brief §Scope).
     const render_module = b.addModule("weld_render", .{
-        .root_source_file = b.path("src/modules/render/main.zig"),
+        .root_source_file = b.path("src/modules/render/root.zig"),
         .target = target,
         .optimize = optimize,
     });

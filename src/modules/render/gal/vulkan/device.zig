@@ -761,6 +761,6 @@ fn createLogicalDevice(device: *Device) !void {
 test "device: struct shape compiles with all GAL methods" {
     // The test is compile-only; checks that Device has all the methods
     // required by interface.checkBackend. The real check is triggered
-    // by gal/main.zig.
+    // by gal/root.zig.
     _ = Device;
 }

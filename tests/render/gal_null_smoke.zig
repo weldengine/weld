@@ -18,7 +18,7 @@ const gal = @import("weld_render");
 // ---------------------------------------------------------------------- Pins --
 //
 // Guarantee the analysis of the inline tests under `src/modules/render/gal/`.
-// The `gal/main.zig` module already re-exports its sub-files via `pub const`,
+// The `gal/root.zig` module already re-exports its sub-files via `pub const`,
 // but we also pin explicitly to withstand a future refactor that would
 // turn some re-exports private.
 

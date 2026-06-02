@@ -13,7 +13,7 @@
 //!   §Notes decision 2).
 
 const std = @import("std");
-const gal = @import("../gal/main.zig");
+const gal = @import("../gal/root.zig");
 const pass_mod = @import("pass.zig");
 
 /// Error set of the render graph.
