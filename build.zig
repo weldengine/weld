@@ -443,6 +443,8 @@ pub fn build(b: *std.Build) void {
         // M0.6 / E2 — adler32 kernel known vectors + cross-variant correctness.
         .{ .path = "src/foundation/simd/tests/adler32_test.zig", .foundation = true },
         .{ .path = "src/foundation/simd/tests/correctness.zig", .foundation = true },
+        // M0.6 / E3 — paeth_filter_decode kernel portable == reference.
+        .{ .path = "src/foundation/simd/tests/paeth_test.zig", .foundation = true },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
@@ -773,6 +775,29 @@ pub fn build(b: *std.Build) void {
         "Run the M0.6 adler32 throughput baseline (pass `-- --smoke` for a CI sanity run)",
     );
     adler32_bench_step.dependOn(&adler32_bench_run.step);
+
+    // ------------------------------------------- M0.6 paeth baseline bench ----
+    //
+    // Second foundation/simd kernel throughput baseline. No parity target.
+    const paeth_bench_module = b.createModule(.{
+        .root_source_file = b.path("src/foundation/simd/bench/paeth_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    paeth_bench_module.addImport("foundation", foundation_module);
+    const paeth_bench_exe = b.addExecutable(.{
+        .name = "paeth-bench",
+        .root_module = paeth_bench_module,
+    });
+    b.installArtifact(paeth_bench_exe);
+    const paeth_bench_run = b.addRunArtifact(paeth_bench_exe);
+    paeth_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| paeth_bench_run.addArgs(args);
+    const paeth_bench_step = b.step(
+        "bench-paeth",
+        "Run the M0.6 paeth_filter_decode throughput baseline (pass `-- --smoke` for a CI sanity run)",
+    );
+    paeth_bench_step.dependOn(&paeth_bench_run.step);
 
     // -------------------------------------------- Fixture facade (S4 demo) --
 

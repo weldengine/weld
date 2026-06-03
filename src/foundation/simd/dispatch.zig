@@ -19,3 +19,11 @@ fn selectAdler32() fn (data: []const u8) u32 {
     //   if (traits.current.has_neon) return @import("arch_aarch64/neon.zig").adler32;
     return portable.adler32;
 }
+
+/// PNG Paeth-filter decode entry point selected for the build target.
+pub const paeth_filter_decode = selectPaeth();
+
+fn selectPaeth() fn (prev: []const u8, curr: []u8, bpp: u8) void {
+    // Portable-only in M0.6; arch variants slot in here later.
+    return portable.paeth_filter_decode;
+}

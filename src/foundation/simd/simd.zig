@@ -14,6 +14,9 @@ const dispatch = @import("dispatch.zig");
 /// ADLER32 checksum of `data` (the dispatched best variant for the target).
 pub const adler32 = dispatch.adler32;
 
+/// PNG Paeth-filter decode of one scanline in place (dispatched variant).
+pub const paeth_filter_decode = dispatch.paeth_filter_decode;
+
 /// CPU capability bitflags + comptime detection.
 pub const traits = @import("traits.zig");
 
@@ -28,6 +31,8 @@ pub const dispatch_table = dispatch;
 pub const kernels = struct {
     /// ADLER32 kernel (`reference` scalar oracle + `vectorized` `@Vector`).
     pub const adler32 = @import("kernels/adler32.zig");
+    /// PNG Paeth-filter-decode kernel (`reference` + `vectorized`).
+    pub const paeth = @import("kernels/paeth.zig");
 };
 
 // Pins so inline tests in the kernel + traits files are analysed when this
@@ -37,4 +42,5 @@ comptime {
     _ = portable;
     _ = dispatch;
     _ = kernels.adler32;
+    _ = kernels.paeth;
 }
