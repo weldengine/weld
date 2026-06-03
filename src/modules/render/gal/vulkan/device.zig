@@ -41,6 +41,7 @@ const cmd_mod = @import("command_encoder.zig");
 const sync_mod = @import("sync.zig");
 const queue_mod = @import("queue.zig");
 const frame_mod = @import("frame.zig");
+const capture = @import("../capture.zig");
 
 const log = std.log.scoped(.gal_vk);
 
@@ -525,6 +526,22 @@ pub const Device = struct {
             .fence = descriptor.fence,
         });
     }
+
+    /// Read back a rendered color texture and write it as a binary PPM
+    /// file. Thin delegation to the backend-agnostic `gal.capture` helper
+    /// (M0.5 item 2); see `gal/capture.zig` for the caller contract
+    /// (texture in transfer-source layout, rendering already complete).
+    pub fn captureFrameToPPM(
+        self: *Device,
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        texture: types.TextureHandle,
+        width: u32,
+        height: u32,
+        path: []const u8,
+    ) !void {
+        return capture.captureFrameToPPM(self, gpa, io, texture, width, height, path);
+    }
 };
 
 // ============================================================================
@@ -744,6 +761,6 @@ fn createLogicalDevice(device: *Device) !void {
 test "device: struct shape compiles with all GAL methods" {
     // The test is compile-only; checks that Device has all the methods
     // required by interface.checkBackend. The real check is triggered
-    // by gal/main.zig.
+    // by gal/root.zig.
     _ = Device;
 }

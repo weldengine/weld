@@ -9,7 +9,7 @@
 //! The slot remains for tests / legacy scenes compatibility.
 
 const std = @import("std");
-const gal = @import("../../gal/main.zig");
+const gal = @import("../../gal/root.zig");
 const pass_mod = @import("../pass.zig");
 
 /// Configuration of the depth prepass.

@@ -21,10 +21,12 @@ const Loader = weld_core.plugin_loader.Loader;
 // Note: the loader emits `log.warn` (not `log.err`) on its
 // error paths (`MissingEntryPoint`, `ApiVersionTooNew`,
 // `LibraryLoadFailed`). The error is carried by the
-// `LoaderError` return, the log is purely diagnostic. This
-// choice avoids the Zig 0.16 test runner counting the logs as
-// failures when the tests are precisely exercising the error
-// paths.
+// `LoaderError` return, the log is purely diagnostic. Using
+// warn (not err) keeps the Zig 0.16 test runner from counting
+// these intentional logs as failures. The warn text still
+// reaches stderr, which `zig build test` surfaces as a benign
+// "failed command: …--listen=-" line — the build exits 0 and
+// the tests pass; that line is not a failure.
 
 const lib_prefix = switch (builtin.os.tag) {
     .windows => "",

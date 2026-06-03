@@ -1,7 +1,7 @@
 //! S4 Etch ↔ ECS adapter — translates the interpreter's name-based view of
 //! the world (`entity.get(Health).current`, `when resource Score changed`)
 //! onto the Tier 0 byte-oriented surface (`Registry`, `DynamicArchetype`,
-//! `ResourceStore`, `RuntimeQuery`).
+//! `ResourceStore`).
 //!
 //! The bridge owns the mapping `Etch component / resource name → ComponentId`
 //! built once at program load. It does not own the registry or the world —
@@ -19,7 +19,6 @@ const FieldDesc = RegistryNS.FieldDesc;
 const World = weld_core.ecs.world.World;
 const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
 const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
-const RuntimeQuery = weld_core.ecs.query_runtime.RuntimeQuery;
 const ResourceStore = weld_core.ecs.resources.ResourceStore;
 const CoreEntityId = weld_core.ecs.entity.EntityId;
 
@@ -42,6 +41,7 @@ pub const BridgeError = error{
     UnknownComponent,
     UnknownResource,
     UnknownField,
+    TypeMismatch,
     OutOfMemory,
 };
 
@@ -151,7 +151,7 @@ pub const Bridge = struct {
         const idx = arch.componentIndex(ref.component_id) orelse return BridgeError.UnknownComponent;
         const slot_bytes = arch.componentSlot(chunk, idx, ref.slot);
         const field_bytes = slot_bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
-        writeValueAsBytes(field.kind, field_bytes, v);
+        try writeValueAsBytes(field.kind, field_bytes, v);
     }
 
     // ─── Resource access ─────────────────────────────────────────────────
@@ -178,7 +178,7 @@ pub const Bridge = struct {
         const field = registry.findField(resource_id, field_name) orelse return BridgeError.UnknownField;
         const bytes = store.getMutResource(resource_id) orelse return BridgeError.UnknownResource;
         const slice = bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
-        writeValueAsBytes(field.kind, slice, v);
+        try writeValueAsBytes(field.kind, slice, v);
     }
 };
 
@@ -224,17 +224,19 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
     };
 }
 
-/// Encode an interpreter `Value` into the on-storage byte
-/// representation of a field. `bytes` must already be sized to the
-/// field's column stride; the function panics on type mismatch (the
-/// S4 closing-debt `D-S4-ecs-bridge-panic` will swap this for a
-/// typed `TypeMismatch` variant in M0.7).
-pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) void {
+/// Encode an interpreter `Value` into the on-storage byte representation of a
+/// field. `bytes` must already be sized to the field's column stride.
+///
+/// Returns `error.TypeMismatch` when `v`'s tag is incompatible with the
+/// field's `kind` (M0.5 item 10 — resolves the S4 closing-debt
+/// `D-S4-ecs-bridge-panic`: a type incoherence is now a recoverable typed
+/// error propagated to the caller instead of a runtime `@panic`).
+pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) BridgeError!void {
     switch (kind) {
         .int_ => {
             const x: i64 = switch (v) {
                 .int_ => |a| a,
-                else => @panic("type mismatch on writeValueAsBytes (int_)"),
+                else => return error.TypeMismatch,
             };
             @memcpy(bytes[0..@sizeOf(i64)], std.mem.asBytes(&x));
         },
@@ -242,25 +244,28 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) void {
             const x: f64 = switch (v) {
                 .float_ => |a| a,
                 .int_ => |a| @floatFromInt(a),
-                else => @panic("type mismatch on writeValueAsBytes (float_)"),
+                else => return error.TypeMismatch,
             };
             @memcpy(bytes[0..@sizeOf(f64)], std.mem.asBytes(&x));
         },
         .bool_ => {
-            const x: u8 = if (v.bool_) 1 else 0;
-            bytes[0] = x;
+            const b: bool = switch (v) {
+                .bool_ => |a| a,
+                else => return error.TypeMismatch,
+            };
+            bytes[0] = if (b) 1 else 0;
         },
         .i32_ => {
             const x: i32 = switch (v) {
                 .int_ => |a| @intCast(a),
-                else => @panic("type mismatch on writeValueAsBytes (i32_)"),
+                else => return error.TypeMismatch,
             };
             @memcpy(bytes[0..@sizeOf(i32)], std.mem.asBytes(&x));
         },
         .u32_ => {
             const x: u32 = switch (v) {
                 .int_ => |a| @intCast(a),
-                else => @panic("type mismatch on writeValueAsBytes (u32_)"),
+                else => return error.TypeMismatch,
             };
             @memcpy(bytes[0..@sizeOf(u32)], std.mem.asBytes(&x));
         },
@@ -268,7 +273,7 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) void {
             const x: f32 = switch (v) {
                 .float_ => |a| @floatCast(a),
                 .int_ => |a| @floatFromInt(a),
-                else => @panic("type mismatch on writeValueAsBytes (f32_)"),
+                else => return error.TypeMismatch,
             };
             @memcpy(bytes[0..@sizeOf(f32)], std.mem.asBytes(&x));
         },
@@ -279,21 +284,28 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) void {
 
 test "readBytesAsValue / writeValueAsBytes roundtrip on int" {
     var buf: [8]u8 = undefined;
-    writeValueAsBytes(.int_, &buf, .{ .int_ = -42 });
+    try writeValueAsBytes(.int_, &buf, .{ .int_ = -42 });
     const v = readBytesAsValue(.int_, &buf);
     try std.testing.expectEqual(@as(i64, -42), v.int_);
 }
 
 test "readBytesAsValue / writeValueAsBytes roundtrip on float" {
     var buf: [8]u8 = undefined;
-    writeValueAsBytes(.float_, &buf, .{ .float_ = 3.14 });
+    try writeValueAsBytes(.float_, &buf, .{ .float_ = 3.14 });
     const v = readBytesAsValue(.float_, &buf);
     try std.testing.expectEqual(@as(f64, 3.14), v.float_);
 }
 
 test "readBytesAsValue / writeValueAsBytes roundtrip on bool" {
     var buf: [1]u8 = undefined;
-    writeValueAsBytes(.bool_, &buf, .{ .bool_ = true });
+    try writeValueAsBytes(.bool_, &buf, .{ .bool_ = true });
     const v = readBytesAsValue(.bool_, &buf);
     try std.testing.expect(v.bool_);
+}
+
+test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
+    var buf: [8]u8 = undefined;
+    try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.int_, &buf, .{ .bool_ = true }));
+    try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.bool_, &buf, .{ .int_ = 1 }));
+    try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.f32_, &buf, .{ .bool_ = false }));
 }

@@ -54,7 +54,7 @@ pub fn build(b: *std.Build) void {
     // audio tests and, later, by the runtime once the audio strategy
     // selection wires in.
     const audio_module = b.createModule(.{
-        .root_source_file = b.path("src/modules/audio/main.zig"),
+        .root_source_file = b.path("src/modules/audio/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -72,7 +72,7 @@ pub fn build(b: *std.Build) void {
     // `b.dependency("weld", ...).module("weld_render")` — a prerequisite of
     // the `examples/triangle/` sub-project (brief §Scope).
     const render_module = b.addModule("weld_render", .{
-        .root_source_file = b.path("src/modules/render/main.zig"),
+        .root_source_file = b.path("src/modules/render/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -327,6 +327,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/bindings/vk_abi_test.zig" },
         .{ .path = "tests/bindings/wayland_abi_test.zig", .wl_protocols = true },
         .{ .path = "tests/etch/corpus_test.zig", .etch = true },
+        // M0.5 item 8 — Etch idents that collide with Zig keywords must
+        // codegen to parseable (escaped) Zig. RED before the lower.zig fix.
+        .{ .path = "tests/etch/keyword_ident_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
         // M0.3 — common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },
@@ -370,6 +373,14 @@ pub fn build(b: *std.Build) void {
         // unrelated tests with current ReleaseSafe issues — tracked as
         // M0.7 housekeeping debt).
         .{ .path = "tests/render/capture.zig", .render = true, .dedicated_step = "test-render-capture" },
+        // M0.5 item 2 — GAL capture helper surface coverage (encodePpm +
+        // Device.captureFrameToPPM); §13 consumer test, runs on every platform.
+        .{ .path = "tests/render/capture_helper.zig", .render = true },
+        // M0.5 item 1 — direct PSNR gate reading the pre-produced
+        // out/smoke_test.ppm with no rebuild and no triangle re-spawn.
+        // std-only (no .render), so `zig build test-ppm-psnr` compiles in
+        // seconds and replaces the rebuild-heavy `test-render-capture` in CI.
+        .{ .path = "tests/render/ppm_psnr_compare.zig", .dedicated_step = "test-ppm-psnr" },
         // M0.4 § Scope Post-Review — hot-reload filewatch latency < 200 ms.
         // Skip if glslc absent from PATH.
         .{ .path = "tests/render/shader_hot_reload.zig", .render = true },

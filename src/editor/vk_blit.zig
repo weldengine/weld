@@ -1,9 +1,10 @@
 //! S6 editor Vulkan blit renderer.
 //!
-//! WELD_LEGACY_VK_DISPATCH — pre-M0.4 code, migration to the Vulkan GAL
-//! (cf. `src/modules/render/gal/vulkan/`) tracked as Phase 1+ debt.
-//! The `no_device_dispatch_outside_gal` linter rule is suspended for
-//! this file via the marker above.
+//! Uses the idiomatic `vk.Device`/`vk.Queue` wrappers throughout, including
+//! the `*Raw` acquire/present variants (`acquireNextImageKHRRaw`,
+//! `presentKHRRaw`) where the raw `Result` is needed for swapchain-resize
+//! handling — no `vk.device_dispatch.*` access remains, so the
+//! `no_device_dispatch_outside_gal` rule holds with no grandfather marker.
 //!
 //! Opens a window-sized swapchain and a fullscreen-quad pipeline that
 //! samples the runtime-written viewport shm framebuffer (1280×720
@@ -952,12 +953,11 @@ pub fn drawFrame(r: *Renderer) vk.Error!bool {
     const cur = r.current_frame;
     try r.device.waitForFences(&.{r.in_flight[cur]}, 1, std.math.maxInt(u64));
 
-    // Use the raw dispatch for `vkAcquireNextImageKHR` so we can
+    // Use the `*Raw` acquire wrapper (`acquireNextImageKHRRaw`) so we can
     // see `suboptimal_khr` and `error_out_of_date_khr` directly
     // — the wrapped Device method folds suboptimal into success.
     var img_index: u32 = 0;
-    const acquire_result = vk.device_dispatch.vkAcquireNextImageKHR(
-        r.device,
+    const acquire_result = r.device.acquireNextImageKHRRaw(
         r.swapchain,
         std.math.maxInt(u64),
         r.image_available[cur],
@@ -1117,7 +1117,7 @@ pub fn drawFrame(r: *Renderer) vk.Error!bool {
         .p_image_indices = @ptrCast(&img_index),
         .p_results = @ptrCast(&per_swapchain_result),
     };
-    const present_call = vk.device_dispatch.vkQueuePresentKHR(r.queue, &present);
+    const present_call = r.queue.presentKHRRaw(&present);
     switch (present_call) {
         .success => {},
         .suboptimal_khr => r.swapchain_dirty = true,

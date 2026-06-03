@@ -15,6 +15,7 @@ const std = @import("std");
 const types = @import("../types.zig");
 const escape = @import("../escape_hatches.zig");
 const stubs = @import("stubs.zig");
+const capture = @import("../capture.zig");
 
 /// Null Device. Stores only the allocator, a handle counter, and
 /// a single queue (graphics+compute+transfer fused). Makes no system
@@ -254,6 +255,23 @@ pub const Device = struct {
     /// — the caller knows it because it passed the allocator to the Device.
     pub fn destroyCommandEncoder(self: *Device, encoder: *stubs.CommandEncoder) void {
         self.allocator.destroy(encoder);
+    }
+
+    /// Read back a rendered color texture and write it as a binary PPM
+    /// file. Thin delegation to the backend-agnostic `gal.capture` helper
+    /// (M0.5 item 2). The Null backend has no real buffer storage, so the
+    /// readback surfaces `error.Unsupported` at `mapBuffer` — portable
+    /// callers can skip capture on the Null backend.
+    pub fn captureFrameToPPM(
+        self: *Device,
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        texture: types.TextureHandle,
+        width: u32,
+        height: u32,
+        path: []const u8,
+    ) !void {
+        return capture.captureFrameToPPM(self, gpa, io, texture, width, height, path);
     }
 };
 

@@ -135,6 +135,11 @@ test "rule c_module_isolation flags bad fixtures" {
     try forEachZigFile(ctx.gpa, ctx.io, "tests/lint/bad/c_module_isolation", &ctx, &assertBadFixture);
 }
 
+test "rule no_device_dispatch_outside_gal flags raw dispatch and forbidden marker" {
+    var ctx: Context = .{ .gpa = std.testing.allocator, .io = std.testing.io };
+    try forEachZigFile(ctx.gpa, ctx.io, "tests/lint/bad/device_dispatch", &ctx, &assertBadFixture);
+}
+
 test "good fixtures pass clean" {
     var ctx: Context = .{ .gpa = std.testing.allocator, .io = std.testing.io };
     try forEachZigFile(ctx.gpa, ctx.io, "tests/lint/good", &ctx, &assertGoodFile);

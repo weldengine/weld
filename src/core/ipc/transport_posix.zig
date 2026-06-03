@@ -224,16 +224,28 @@ pub const Backend = struct {
         var offset: usize = 0;
         while (offset < bytes.len) {
             const n = sys.write(self.fd, bytes.ptr + offset, bytes.len - offset);
-            if (n < 0) return error.BrokenPipe;
+            if (n < 0) switch (std.c.errno(n)) {
+                // A signal interrupted the write before any byte moved —
+                // retry the same chunk rather than mis-report a broken
+                // pipe (mirrors std.posix's own `.INTR => continue`).
+                .INTR => continue,
+                else => return error.BrokenPipe,
+            };
             if (n == 0) return error.BrokenPipe;
             offset += @intCast(n);
         }
     }
 
     pub fn recv(self: *Backend, buffer: []u8) Error!usize {
-        const n = sys.read(self.fd, buffer.ptr, buffer.len);
-        if (n < 0) return error.BrokenPipe;
-        return @intCast(n);
+        while (true) {
+            const n = sys.read(self.fd, buffer.ptr, buffer.len);
+            if (n < 0) switch (std.c.errno(n)) {
+                // Interrupted by a signal with nothing read yet — retry.
+                .INTR => continue,
+                else => return error.BrokenPipe,
+            };
+            return @intCast(n);
+        }
     }
 
     pub fn sendWithHandles(
@@ -273,8 +285,17 @@ pub const Backend = struct {
             .msg_flags = 0,
         };
 
-        const n = sys.sendmsg(self.fd, &msg, MSG_NOSIGNAL);
-        if (n < 0) return error.BrokenPipe;
+        while (true) {
+            const n = sys.sendmsg(self.fd, &msg, MSG_NOSIGNAL);
+            if (n < 0) switch (std.c.errno(n)) {
+                // Interrupted before any byte/ancillary left the socket —
+                // retry the whole message. Nothing was sent, so the passed
+                // fds are not duplicated. (Same EINTR contract as `send`.)
+                .INTR => continue,
+                else => return error.BrokenPipe,
+            };
+            break;
+        }
     }
 
     pub fn recvWithHandles(
@@ -301,8 +322,22 @@ pub const Backend = struct {
             .msg_flags = 0,
         };
 
-        const n = sys.recvmsg(self.fd, &msg, 0);
-        if (n < 0) return error.BrokenPipe;
+        var n: isize = undefined;
+        while (true) {
+            // `msg_controllen` and `msg_flags` are in/out for recvmsg; rearm
+            // them to the ancillary-buffer capacity each attempt so an EINTR
+            // retry never relies on msghdr state POSIX leaves unspecified on
+            // error. The ancillary buffer itself is not rebuilt.
+            msg.msg_controllen = ctrl_size;
+            msg.msg_flags = 0;
+            n = sys.recvmsg(self.fd, &msg, 0);
+            if (n < 0) switch (std.c.errno(n)) {
+                // Interrupted with nothing received yet — retry.
+                .INTR => continue,
+                else => return error.BrokenPipe,
+            };
+            break;
+        }
 
         var handle_count: usize = 0;
         if (msg.msg_controllen >= @sizeOf(CmsgHdr) and handles_out.len > 0) {

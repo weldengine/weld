@@ -14,7 +14,7 @@
 //! `transient.captured` flag on the resource declaration side.
 
 const std = @import("std");
-const gal = @import("../../gal/main.zig");
+const gal = @import("../../gal/root.zig");
 const pass_mod = @import("../pass.zig");
 
 /// Configuration of the capture pass.

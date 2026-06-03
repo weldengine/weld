@@ -58,24 +58,16 @@ test "drops counter is reset after drainAtBoundary" {
 }
 
 test "drops above warning threshold emits a warn log on drain" {
-    // Capture the test scope's log output via a thread-local
-    // override is brittle; instead, this test exercises the
-    // threshold semantics by checking that:
-    //   - Below threshold, no log is emitted (proxied by the
-    //     fact that the threshold constant is preserved across
-    //     drain cycles and the drops counter resets cleanly).
-    //   - Above threshold, the bus drains without crashing
-    //     (the log macro is `std.log.scoped(.events).warn`,
-    //     a runtime no-op when stripped in release; correctness
-    //     is "does not crash + drops still reset").
-    //
-    // A capture-based check would require a custom std.log
-    // sink installed in test main(), which the project's test
-    // target does not currently configure. The threshold
-    // constant `DROPS_WARN_THRESHOLD = 10` is part of the
-    // public surface; tests assert the value so changes are
-    // deliberate.
-
+    // This test deliberately drives the queue past DROPS_WARN_THRESHOLD, so
+    // the drain emits `std.log.scoped(.events).warn`. That warn is EXPECTED
+    // output, not a failure: `zig build test` surfaces it as a benign
+    // "failed command: …--listen=-" line while the build still exits 0 and
+    // the test passes. A capture-based assertion would need a custom std.log
+    // sink on the test runner — `std_options` declared in a test file is
+    // ignored because the runner, not the test file, is the compilation root
+    // — which is out of scope here. Correctness is therefore checked by
+    // "drops exceed threshold, drain does not crash, drops reset". The
+    // threshold is public surface, so the test pins its value.
     try std.testing.expectEqual(@as(u64, 10), events.DROPS_WARN_THRESHOLD);
 
     const gpa = std.testing.allocator;

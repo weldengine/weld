@@ -13,7 +13,7 @@
 //!   §Notes decision 2).
 
 const std = @import("std");
-const gal = @import("../gal/main.zig");
+const gal = @import("../gal/root.zig");
 const pass_mod = @import("pass.zig");
 
 /// Error set of the render graph.
@@ -94,7 +94,17 @@ pub const Graph = struct {
             var j: usize = 0;
             while (j < n) : (j += 1) {
                 if (i == j) continue;
-                if (passDependsOn(&self.passes.items[j], &self.passes.items[i])) {
+                // RAW (data-directional): pass i writes a resource pass j reads,
+                // so j must run after i. Checked in both orderings, so a mutual
+                // RAW (a true data cycle) still surfaces as error.RenderGraphCycle.
+                var has_edge = passDependsOn(&self.passes.items[j], &self.passes.items[i]);
+                // WAW insertion-order tiebreak: two passes writing the same
+                // resource are serialized lower-index-first. Only the i < j edge
+                // is emitted, so WAW is acyclic by construction (no reverse edge).
+                if (i < j and writesSameResource(&self.passes.items[i], &self.passes.items[j])) {
+                    has_edge = true;
+                }
+                if (has_edge) {
                     try adj[i].append(self.allocator, @intCast(j));
                     in_degree[j] += 1;
                 }
@@ -168,30 +178,37 @@ pub const Graph = struct {
     }
 };
 
-/// Determines whether `b` topologically depends on `a` (i.e. whether `a`
-/// must execute before `b` in the DAG).
+/// Determines whether `b` has a RAW (Read-After-Write) data dependency on
+/// `a`: `a` writes a resource that `b` reads, so `a` must execute before `b`.
+/// This is a pure, direction-by-data query — it does not consult insertion
+/// order, and it deliberately does NOT cover WAW.
 ///
-/// Phase 0: only RAW and WAW create a topological dependency for
-/// the execution order.
-/// - **RAW** (Read-After-Write): `a` produces a resource that `b` consumes
-///   → producer/consumer, `b` must wait for `a`.
-/// - **WAW** (Write-After-Write): both write the same resource →
-///   serialization required for coherence.
+/// - **RAW** (Read-After-Write): `a` produces a resource that `b` consumes,
+///   so `b` must wait for `a`. The direction is fixed by the data flow.
+/// - **WAW** (Write-After-Write) is handled in `compile`, not here: two passes
+///   writing the same resource are serialized by insertion order (lower index
+///   first) via `writesSameResource` + the `i < j` tiebreak. Keeping it out of
+///   this query is what makes WAW acyclic (M0.5 item 7 — the old symmetric WAW
+///   check here emitted edges both ways and a false `RenderGraphCycle`).
+/// - **WAR is NOT a topological dependency**: it is a pure memory hazard,
+///   handled by the `BarrierTracker` (cf. `gal/barriers.zig`) which inserts the
+///   barrier without imposing a topological order. Consistent with WebGPU and
+///   the Frostbite/Bevy/Mach render graphs.
 ///
-/// **WAR is NOT a topological dependency**: it is a pure memory
-/// hazard (the writer must not clobber while the reader reads),
-/// handled by the `BarrierTracker` (cf. `gal/barriers.zig`) which inserts the
-/// barrier without imposing a topological order. Consistent with WebGPU and
-/// the Frostbite/Bevy/Mach render graphs.
-///
-/// Cycle = two passes that mutually produce each other's inputs
-/// (a RAW in both directions, or a circular WAW).
+/// A real cycle is therefore only a mutual RAW — two passes each producing the
+/// other's input — surfaced by `compile` as `error.RenderGraphCycle`.
 fn passDependsOn(b: *const pass_mod.Pass, a: *const pass_mod.Pass) bool {
     // RAW: a.writes ∩ b.reads
     for (a.writes) |aw| {
         for (b.reads) |br| if (sameResource(aw.resource, br.resource)) return true;
     }
-    // WAW: a.writes ∩ b.writes
+    return false;
+}
+
+/// True if `a` and `b` write at least one resource in common (a WAW hazard).
+/// The ordering of the two writers is the `compile` insertion-order tiebreak,
+/// decided there rather than here so WAW never forms a cycle.
+fn writesSameResource(a: *const pass_mod.Pass, b: *const pass_mod.Pass) bool {
     for (a.writes) |aw| {
         for (b.writes) |bw| if (sameResource(aw.resource, bw.resource)) return true;
     }
