@@ -78,6 +78,21 @@ pub fn build(b: *std.Build) void {
     });
     render_module.addImport("weld_core", core_module);
 
+    // M0.6 — `weld_asset_pipeline` module: the Tier 1 Asset Pipeline. E1
+    // ships the day-1-frozen on-disk surfaces (intermediate
+    // `<type>.asset.etch` schema + runtime `.<type>.bin` 40-byte header),
+    // the `AssetHandle`, and the slot registry (refcount + generation
+    // invalidation). Depends on `weld_core` (the E5 async loader consumes the
+    // Tier 0 job system); the `foundation` (SIMD) import wires in at E2 when
+    // the `adler32` / `paeth` kernels land. No `weld_etch` dependency
+    // (brief §Out-of-scope).
+    const asset_pipeline_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/asset_pipeline/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    asset_pipeline_module.addImport("weld_core", core_module);
+
     // M0.2 / E6 — plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
     // Exposes the C ABI types from `desc.zig` (no `WeldAPI` itself,
@@ -209,6 +224,12 @@ pub fn build(b: *std.Build) void {
     const etch_tests = b.addTest(.{ .root_module = etch_module });
     test_step.dependOn(&b.addRunArtifact(etch_tests).step);
 
+    // M0.6 — inline tests inside src/modules/asset_pipeline/**. The module
+    // root re-exports format/ and registry/, so every sub-file is reachable
+    // and its inline tests run (engine-zig-conventions.md §13).
+    const asset_pipeline_tests = b.addTest(.{ .root_module = asset_pipeline_module });
+    test_step.dependOn(&b.addRunArtifact(asset_pipeline_tests).step);
+
     // Out-of-tree tests. Each file is its own root_module and imports
     // `weld_core` to reach the engine internals.
     // Out-of-tree bindings tests need to reach files that live outside
@@ -276,6 +297,8 @@ pub fn build(b: *std.Build) void {
         /// M0.4 — when set, imports the `weld_render` module (GAL public
         /// surface + Null backend, Vulkan backend wires in later).
         render: bool = false,
+        /// M0.6 — when set, imports the `weld_asset_pipeline` module.
+        asset_pipeline: bool = false,
         /// M0.4 stabilization — when set, create a dedicated `zig build
         /// <name>` step that runs ONLY this test. Used by the CI
         /// runtime-smoke-test job to gate strictly on the capture PSNR
@@ -390,6 +413,8 @@ pub fn build(b: *std.Build) void {
         // M0.4 — vk_gen *Raw variants emission (3 targets emitted, others
         // not emitted).
         .{ .path = "tests/vk_gen/raw_variants.zig" },
+        // M0.6 / E1 — asset registry stale-handle (generation) acceptance.
+        .{ .path = "tests/assets/handle_generation.zig", .asset_pipeline = true },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
@@ -416,6 +441,9 @@ pub fn build(b: *std.Build) void {
         }
         if (spec.render) {
             t_mod.addImport("weld_render", render_module);
+        }
+        if (spec.asset_pipeline) {
+            t_mod.addImport("weld_asset_pipeline", asset_pipeline_module);
         }
         const t = b.addTest(.{ .root_module = t_mod });
         const t_run = b.addRunArtifact(t);
