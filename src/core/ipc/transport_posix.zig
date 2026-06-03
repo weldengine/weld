@@ -324,6 +324,12 @@ pub const Backend = struct {
 
         var n: isize = undefined;
         while (true) {
+            // `msg_controllen` and `msg_flags` are in/out for recvmsg; rearm
+            // them to the ancillary-buffer capacity each attempt so an EINTR
+            // retry never relies on msghdr state POSIX leaves unspecified on
+            // error. The ancillary buffer itself is not rebuilt.
+            msg.msg_controllen = ctrl_size;
+            msg.msg_flags = 0;
             n = sys.recvmsg(self.fd, &msg, 0);
             if (n < 0) switch (std.c.errno(n)) {
                 // Interrupted with nothing received yet — retry.
