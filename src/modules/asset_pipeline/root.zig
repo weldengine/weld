@@ -22,8 +22,11 @@ pub const format = @import("format/root.zig");
 /// Asset identity: `AssetHandle` + the slot `Registry`.
 pub const registry = @import("registry/root.zig");
 
-/// Low-level codecs (E2: DEFLATE/zlib; E3 adds PNG + glTF static).
+/// Low-level codecs (E2: DEFLATE/zlib; E3: PNG + glTF static).
 pub const codecs = @import("codecs/root.zig");
+
+/// Source importers (E3: WAV decode; E4 adds png/gltf orchestration).
+pub const importers = @import("importers/root.zig");
 
 /// 64-bit typed asset handle (convenience re-export).
 pub const AssetHandle = registry.AssetHandle;
@@ -42,4 +45,5 @@ comptime {
     _ = format;
     _ = registry;
     _ = codecs;
+    _ = importers;
 }
