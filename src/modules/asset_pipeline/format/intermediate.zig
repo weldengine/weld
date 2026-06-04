@@ -3,16 +3,22 @@
 //!
 //! The on-disk text is the frozen surface (M0.6): a single top-level
 //! `asset "<name>" { … }` construct holding the importer-extracted metadata
-//! and the user-editable settings. It is the diffable, Git-versioned half
-//! of an asset (the bulk bytes live in a separate hashed blob).
+//! and the user-editable settings. The bulk bytes live in a separate hashed
+//! blob; `extracted.blob` references it.
 //!
-//! The reader/writer here is a deliberately small ad-hoc implementation:
-//! the brief forbids a `weld_etch` dependency in M0.6 (the full Etch parser
-//! is M0.8). The emitted text MUST stay a valid subset of `etch-grammar.md`
-//! so the M0.8 parser reads it back unchanged — fields are `key: value`,
-//! newline-separated inside `{ … }` blocks, arrays are comma-separated
-//! `[ … ]`, enum literals are `.name`, strings are `"…"`. The on-disk text
-//! is the frozen contract, not this reader implementation.
+//! Normative schema: `engine-asset-pipeline.md §3` — fixed fields `type`,
+//! `version`, `source`, `source_hash`, then the four blocks
+//! `import_settings`, `process_settings`, `cook_settings`, `extracted`, with
+//! `extracted.blob` ("<32 hex>", BLAKE3-128) mandatory. Grammar of the
+//! `asset` construct: `etch-grammar.md §21.4` (category-4,
+//! pipeline-generated). The container (fixed fields + block list + value
+//! grammar) is frozen; block *contents* are open per asset category.
+//!
+//! This ad-hoc reader/writer avoids a `weld_etch` dependency in M0.6 (the
+//! full Etch parser is M0.8). It covers exactly the §21.4 value grammar
+//! minus `@unit(...)` annotations, which the writer does not emit in M0.6
+//! (additive Phase 1). The on-disk text is the frozen contract, not this
+//! reader implementation.
 //!
 //! Ownership: `parseEtch` allocates every string/array/object into the
 //! caller-supplied allocator (use an arena and free it in one shot). The
@@ -69,6 +75,33 @@ pub const Field = struct {
     value: Value,
 };
 
+/// Look up `key` in `fields` and return its integer value, or null if the
+/// field is absent or not an int. (Used by cookers to read `extracted`.)
+pub fn fieldInt(fields: []const Field, key: []const u8) ?i64 {
+    for (fields) |f| {
+        if (std.mem.eql(u8, f.key, key)) {
+            return switch (f.value) {
+                .int => |v| v,
+                else => null,
+            };
+        }
+    }
+    return null;
+}
+
+/// Look up `key` in `fields` and return its string value, or null.
+pub fn fieldStr(fields: []const Field, key: []const u8) ?[]const u8 {
+    for (fields) |f| {
+        if (std.mem.eql(u8, f.key, key)) {
+            return switch (f.value) {
+                .string => |v| v,
+                else => null,
+            };
+        }
+    }
+    return null;
+}
+
 /// Deep equality over two ordered field lists.
 pub fn fieldsEql(a: []const Field, b: []const Field) bool {
     if (a.len != b.len) return false;
@@ -97,7 +130,11 @@ pub const AssetDoc = struct {
     import_settings: []const Field = &.{},
     /// User-editable process settings.
     process_settings: []const Field = &.{},
-    /// Importer-extracted, machine-maintained facts.
+    /// User-editable cook settings (per-platform sub-blocks, e.g.
+    /// `pc: { … }`). Emitted between `process_settings` and `extracted`.
+    cook_settings: []const Field = &.{},
+    /// Importer-extracted, machine-maintained facts. Always carries
+    /// `blob: "<32 hex>"` (see `blobHash`).
     extracted: []const Field = &.{},
 
     /// Deep structural equality (used by the round-trip test).
@@ -109,7 +146,21 @@ pub const AssetDoc = struct {
             std.mem.eql(u8, a.source_hash, b.source_hash) and
             fieldsEql(a.import_settings, b.import_settings) and
             fieldsEql(a.process_settings, b.process_settings) and
+            fieldsEql(a.cook_settings, b.cook_settings) and
             fieldsEql(a.extracted, b.extracted);
+    }
+
+    /// Return the mandatory `extracted.blob` hash string, or null if absent.
+    pub fn blobHash(self: AssetDoc) ?[]const u8 {
+        for (self.extracted) |f| {
+            if (std.mem.eql(u8, f.key, "blob")) {
+                return switch (f.value) {
+                    .string => |s| s,
+                    else => null,
+                };
+            }
+        }
+        return null;
     }
 };
 
@@ -127,6 +178,7 @@ pub fn writeEtch(doc: AssetDoc, out: *std.Io.Writer) WriteError!void {
     try out.print("  source_hash: \"{s}\"\n", .{doc.source_hash});
     try writeBlock(out, "import_settings", doc.import_settings);
     try writeBlock(out, "process_settings", doc.process_settings);
+    try writeBlock(out, "cook_settings", doc.cook_settings);
     try writeBlock(out, "extracted", doc.extracted);
     try out.writeAll("}\n");
 }
@@ -413,6 +465,11 @@ const Parser = struct {
                     .object => |o| o,
                     else => return error.UnexpectedChar,
                 };
+            } else if (std.mem.eql(u8, f.key, "cook_settings")) {
+                doc.cook_settings = switch (f.value) {
+                    .object => |o| o,
+                    else => return error.UnexpectedChar,
+                };
             } else if (std.mem.eql(u8, f.key, "extracted")) {
                 doc.extracted = switch (f.value) {
                     .object => |o| o,
@@ -443,10 +500,17 @@ test "intermediate doc round-trips through etch text" {
     const process_settings = [_]Field{
         .{ .key = "generate_lods", .value = .{ .boolean = false } },
     };
+    const pc_cook = [_]Field{
+        .{ .key = "vertex_format", .value = .{ .enum_literal = "compressed" } },
+    };
+    const cook_settings = [_]Field{
+        .{ .key = "pc", .value = .{ .object = &pc_cook } }, // per-platform sub-block
+    };
     const extracted = [_]Field{
         .{ .key = "vertex_count", .value = .{ .int = 24 } },
         .{ .key = "bounds", .value = .{ .object = &bounds } },
         .{ .key = "materials", .value = .{ .array = &materials } },
+        .{ .key = "blob", .value = .{ .string = "a3f2b1c98d" } }, // mandatory
     };
 
     const original = AssetDoc{
@@ -457,6 +521,7 @@ test "intermediate doc round-trips through etch text" {
         .source_hash = "abc123",
         .import_settings = &import_settings,
         .process_settings = &process_settings,
+        .cook_settings = &cook_settings,
         .extracted = &extracted,
     };
 
@@ -470,7 +535,14 @@ test "intermediate doc round-trips through etch text" {
     try std.testing.expect(original.eql(parsed));
     try std.testing.expectEqualStrings("StaticMesh", parsed.type_name);
     try std.testing.expectEqual(@as(u16, 1), parsed.version);
-    try std.testing.expectEqual(@as(usize, 3), parsed.extracted.len);
+    try std.testing.expectEqual(@as(usize, 4), parsed.extracted.len);
+    try std.testing.expectEqual(@as(usize, 1), parsed.cook_settings.len);
+    try std.testing.expectEqualStrings("a3f2b1c98d", original.blobHash().?);
+    try std.testing.expectEqualStrings("a3f2b1c98d", parsed.blobHash().?);
+    // Field accessors used by the cookers.
+    try std.testing.expectEqual(@as(i64, 24), fieldInt(parsed.extracted, "vertex_count").?);
+    try std.testing.expectEqualStrings("a3f2b1c98d", fieldStr(parsed.extracted, "blob").?);
+    try std.testing.expectEqual(@as(?i64, null), fieldInt(parsed.extracted, "bounds")); // not an int
 }
 
 test "intermediate writer emits a valid asset construct shape" {
