@@ -78,6 +78,36 @@ pub fn build(b: *std.Build) void {
     });
     render_module.addImport("weld_core", core_module);
 
+    // M0.6 — `weld_asset_pipeline` module: the Tier 1 Asset Pipeline. E1
+    // ships the day-1-frozen on-disk surfaces (intermediate
+    // `<type>.asset.etch` schema + runtime `.<type>.bin` 40-byte header),
+    // the `AssetHandle`, and the slot registry (refcount + generation
+    // invalidation). Depends on `weld_core` (the E5 async loader consumes the
+    // Tier 0 job system); the `foundation` (SIMD) import wires in at E2 when
+    // the `adler32` / `paeth` kernels land. No `weld_etch` dependency
+    // (brief §Out-of-scope).
+    // M0.6 / E2 — `foundation` module: transversal sibling submodules
+    // (math, simd). Ships `simd` (batched-SIMD kernels; `adler32` inaugural).
+    // Imports nothing but std (engine-simd.md §4). Consumed by
+    // `asset_pipeline` (zlib ADLER32 trailer check), the simd tests, and the
+    // adler32 bench.
+    const foundation_module = b.addModule("foundation", .{
+        .root_source_file = b.path("src/foundation/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const asset_pipeline_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/asset_pipeline/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    asset_pipeline_module.addImport("weld_core", core_module);
+    // M0.6 / E2 — `foundation` dep wires in now that simd exists (deferred
+    // from E1): the DEFLATE/zlib codec verifies the ADLER32 trailer via
+    // `foundation.simd.adler32`.
+    asset_pipeline_module.addImport("foundation", foundation_module);
+
     // M0.2 / E6 — plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
     // Exposes the C ABI types from `desc.zig` (no `WeldAPI` itself,
@@ -209,6 +239,18 @@ pub fn build(b: *std.Build) void {
     const etch_tests = b.addTest(.{ .root_module = etch_module });
     test_step.dependOn(&b.addRunArtifact(etch_tests).step);
 
+    // M0.6 — inline tests inside src/modules/asset_pipeline/**. The module
+    // root re-exports format/ and registry/, so every sub-file is reachable
+    // and its inline tests run (engine-zig-conventions.md §13).
+    const asset_pipeline_tests = b.addTest(.{ .root_module = asset_pipeline_module });
+    test_step.dependOn(&b.addRunArtifact(asset_pipeline_tests).step);
+
+    // M0.6 / E2 — inline tests inside src/foundation/** (traits + kernels).
+    // simd.zig re-exports traits/portable/dispatch/kernels, so they are all
+    // reachable and analysed (engine-zig-conventions.md §13).
+    const foundation_tests = b.addTest(.{ .root_module = foundation_module });
+    test_step.dependOn(&b.addRunArtifact(foundation_tests).step);
+
     // Out-of-tree tests. Each file is its own root_module and imports
     // `weld_core` to reach the engine internals.
     // Out-of-tree bindings tests need to reach files that live outside
@@ -276,6 +318,10 @@ pub fn build(b: *std.Build) void {
         /// M0.4 — when set, imports the `weld_render` module (GAL public
         /// surface + Null backend, Vulkan backend wires in later).
         render: bool = false,
+        /// M0.6 — when set, imports the `weld_asset_pipeline` module.
+        asset_pipeline: bool = false,
+        /// M0.6 / E2 — when set, imports the `foundation` module (simd).
+        foundation: bool = false,
         /// M0.4 stabilization — when set, create a dedicated `zig build
         /// <name>` step that runs ONLY this test. Used by the CI
         /// runtime-smoke-test job to gate strictly on the capture PSNR
@@ -390,6 +436,22 @@ pub fn build(b: *std.Build) void {
         // M0.4 — vk_gen *Raw variants emission (3 targets emitted, others
         // not emitted).
         .{ .path = "tests/vk_gen/raw_variants.zig" },
+        // M0.6 / E1 — asset registry stale-handle (generation) acceptance.
+        .{ .path = "tests/assets/handle_generation.zig", .asset_pipeline = true },
+        // M0.6 / E5 — async loader + lifecycle (internal 5 s watchdog).
+        .{ .path = "tests/assets/loader_async.zig", .asset_pipeline = true },
+        // M0.6 / E2 — DEFLATE/zlib inflate known-vector acceptance.
+        .{ .path = "tests/assets/deflate_vectors.zig", .asset_pipeline = true },
+        // M0.6 / E2 — adler32 kernel known vectors + cross-variant correctness.
+        .{ .path = "src/foundation/simd/tests/adler32_test.zig", .foundation = true },
+        .{ .path = "src/foundation/simd/tests/correctness.zig", .foundation = true },
+        // M0.6 / E3 — paeth_filter_decode kernel portable == reference.
+        .{ .path = "src/foundation/simd/tests/paeth_test.zig", .foundation = true },
+        // M0.6 / E4 — import → cook → load round-trips + cache differential.
+        .{ .path = "tests/assets/png_roundtrip.zig", .asset_pipeline = true },
+        .{ .path = "tests/assets/gltf_static_roundtrip.zig", .asset_pipeline = true },
+        .{ .path = "tests/assets/wav_roundtrip.zig", .asset_pipeline = true },
+        .{ .path = "tests/assets/cache_diff.zig", .asset_pipeline = true },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
@@ -416,6 +478,12 @@ pub fn build(b: *std.Build) void {
         }
         if (spec.render) {
             t_mod.addImport("weld_render", render_module);
+        }
+        if (spec.asset_pipeline) {
+            t_mod.addImport("weld_asset_pipeline", asset_pipeline_module);
+        }
+        if (spec.foundation) {
+            t_mod.addImport("foundation", foundation_module);
         }
         const t = b.addTest(.{ .root_module = t_mod });
         const t_run = b.addRunArtifact(t);
@@ -690,6 +758,77 @@ pub fn build(b: *std.Build) void {
         "Run the M0.4 render instancing bench (writes bench/out/render_instancing_<os>.md)",
     );
     render_bench_step.dependOn(&render_bench_run.step);
+
+    // ------------------------------------------- M0.6 adler32 baseline bench --
+    //
+    // Inaugural foundation/simd kernel throughput baseline. No parity target
+    // (cold path — runs once at cook time). `zig build bench-adler32`.
+    const adler32_bench_module = b.createModule(.{
+        .root_source_file = b.path("src/foundation/simd/bench/adler32_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    adler32_bench_module.addImport("foundation", foundation_module);
+    const adler32_bench_exe = b.addExecutable(.{
+        .name = "adler32-bench",
+        .root_module = adler32_bench_module,
+    });
+    b.installArtifact(adler32_bench_exe);
+    const adler32_bench_run = b.addRunArtifact(adler32_bench_exe);
+    adler32_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| adler32_bench_run.addArgs(args);
+    const adler32_bench_step = b.step(
+        "bench-adler32",
+        "Run the M0.6 adler32 throughput baseline (pass `-- --smoke` for a CI sanity run)",
+    );
+    adler32_bench_step.dependOn(&adler32_bench_run.step);
+
+    // ------------------------------------------- M0.6 paeth baseline bench ----
+    //
+    // Second foundation/simd kernel throughput baseline. No parity target.
+    const paeth_bench_module = b.createModule(.{
+        .root_source_file = b.path("src/foundation/simd/bench/paeth_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    paeth_bench_module.addImport("foundation", foundation_module);
+    const paeth_bench_exe = b.addExecutable(.{
+        .name = "paeth-bench",
+        .root_module = paeth_bench_module,
+    });
+    b.installArtifact(paeth_bench_exe);
+    const paeth_bench_run = b.addRunArtifact(paeth_bench_exe);
+    paeth_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| paeth_bench_run.addArgs(args);
+    const paeth_bench_step = b.step(
+        "bench-paeth",
+        "Run the M0.6 paeth_filter_decode throughput baseline (pass `-- --smoke` for a CI sanity run)",
+    );
+    paeth_bench_step.dependOn(&paeth_bench_run.step);
+
+    // ----------------------------------- M0.6 thin offline asset cook demo ----
+    //
+    // `zig build cook-demo` cooks the three M0.6 fixtures end-to-end through
+    // the cache and logs hits (brief §Observable behavior). The user-facing
+    // `weld cook` CLI is Phase 1.
+    const asset_cook_module = b.createModule(.{
+        .root_source_file = b.path("tools/asset_cook/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    asset_cook_module.addImport("weld_asset_pipeline", asset_pipeline_module);
+    const asset_cook_exe = b.addExecutable(.{
+        .name = "asset_cook",
+        .root_module = asset_cook_module,
+    });
+    b.installArtifact(asset_cook_exe);
+    const asset_cook_run = b.addRunArtifact(asset_cook_exe);
+    if (b.args) |args| asset_cook_run.addArgs(args);
+    const asset_cook_step = b.step(
+        "cook-demo",
+        "Cook the M0.6 fixtures end-to-end (import → cook → cache; logs hits)",
+    );
+    asset_cook_step.dependOn(&asset_cook_run.step);
 
     // -------------------------------------------- Fixture facade (S4 demo) --
 
