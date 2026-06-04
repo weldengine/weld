@@ -438,6 +438,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/vk_gen/raw_variants.zig" },
         // M0.6 / E1 — asset registry stale-handle (generation) acceptance.
         .{ .path = "tests/assets/handle_generation.zig", .asset_pipeline = true },
+        // M0.6 / E5 — async loader + lifecycle (internal 5 s watchdog).
+        .{ .path = "tests/assets/loader_async.zig", .asset_pipeline = true },
         // M0.6 / E2 — DEFLATE/zlib inflate known-vector acceptance.
         .{ .path = "tests/assets/deflate_vectors.zig", .asset_pipeline = true },
         // M0.6 / E2 — adler32 kernel known vectors + cross-variant correctness.

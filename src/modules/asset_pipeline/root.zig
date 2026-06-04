@@ -40,6 +40,11 @@ pub const hash = @import("hash.zig");
 /// Stable per-asset identity (UUIDv7).
 pub const uuid = @import("uuid.zig");
 
+/// Async runtime loader + lifecycle (E5).
+pub const loader = @import("loader/root.zig");
+/// Async runtime loader (convenience re-export).
+pub const Loader = loader.Loader;
+
 /// 64-bit typed asset handle (convenience re-export).
 pub const AssetHandle = registry.AssetHandle;
 /// Slot registry (convenience re-export).
@@ -62,4 +67,5 @@ comptime {
     _ = cache;
     _ = hash;
     _ = uuid;
+    _ = loader;
 }
