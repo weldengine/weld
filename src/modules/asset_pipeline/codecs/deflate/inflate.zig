@@ -245,29 +245,25 @@ fn inflateDynamic(gpa: std.mem.Allocator, br: *BitReader, out: *std.ArrayList(u8
             },
             16 => {
                 if (i == 0) return error.BadSymbol;
-                const repeat = 3 + try br.take(2);
+                const repeat: usize = 3 + try br.take(2);
+                // A repeat that overruns `total` is a corrupt stream, not a
+                // value to silently clamp.
+                const end = @as(usize, i) + repeat;
+                if (end > total) return error.BadSymbol;
                 const prev = lengths[i - 1];
-                var r: usize = 0;
-                while (r < repeat and i < total) : (r += 1) {
-                    lengths[i] = prev;
-                    i += 1;
-                }
+                while (i < end) : (i += 1) lengths[i] = prev;
             },
             17 => {
-                const repeat = 3 + try br.take(3);
-                var r: usize = 0;
-                while (r < repeat and i < total) : (r += 1) {
-                    lengths[i] = 0;
-                    i += 1;
-                }
+                const repeat: usize = 3 + try br.take(3);
+                const end = @as(usize, i) + repeat;
+                if (end > total) return error.BadSymbol;
+                while (i < end) : (i += 1) lengths[i] = 0;
             },
             18 => {
-                const repeat = 11 + try br.take(7);
-                var r: usize = 0;
-                while (r < repeat and i < total) : (r += 1) {
-                    lengths[i] = 0;
-                    i += 1;
-                }
+                const repeat: usize = 11 + try br.take(7);
+                const end = @as(usize, i) + repeat;
+                if (end > total) return error.BadSymbol;
+                while (i < end) : (i += 1) lengths[i] = 0;
             },
             else => return error.BadSymbol,
         }
