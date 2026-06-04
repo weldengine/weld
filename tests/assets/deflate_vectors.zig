@@ -65,3 +65,32 @@ test "zlib decompress rejects a corrupted adler32 trailer" {
     corrupt[corrupt.len - 1] ^= 0xff; // flip the last trailer byte
     try std.testing.expectError(error.BadChecksum, zlib.decompress(gpa, &corrupt));
 }
+
+// --- Negative vectors: one per inflate guard (hand-built, LSB-first). -------
+
+// Stored block with LEN=3 but NLEN=0xFFFF (≠ ~3), violating LEN == ~NLEN.
+const v_bad_stored_length = [_]u8{ 0x01, 0x03, 0x00, 0xff, 0xff, 0x61, 0x62, 0x63 };
+
+// Fixed block: literal/length symbol 257 (length 3) + distance symbol 0
+// (distance 1) with no output yet — distance reaches before the buffer start.
+const v_distance_too_far = [_]u8{ 0x03, 0x02 };
+
+// Dynamic block whose code-length table defines only symbol 16 at length 1
+// (an incomplete table); the next code-length symbol reads a `1` bit, which
+// matches no code.
+const v_bad_huffman_code = [_]u8{ 0x05, 0x00, 0x02, 0x20 };
+
+test "inflate rejects a stored block with bad LEN/NLEN" {
+    const gpa = std.testing.allocator;
+    try std.testing.expectError(error.BadStoredLength, inflate(gpa, &v_bad_stored_length));
+}
+
+test "inflate rejects a back-reference distance past the output start" {
+    const gpa = std.testing.allocator;
+    try std.testing.expectError(error.DistanceTooFar, inflate(gpa, &v_distance_too_far));
+}
+
+test "inflate rejects a bit pattern matching no Huffman code" {
+    const gpa = std.testing.allocator;
+    try std.testing.expectError(error.BadHuffmanCode, inflate(gpa, &v_bad_huffman_code));
+}
