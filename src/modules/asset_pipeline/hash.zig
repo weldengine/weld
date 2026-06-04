@@ -3,7 +3,7 @@
 //! `source_hash`, `extracted.blob`, and the cooking-cache key are all
 //! BLAKE3 truncated to 128 bits, rendered as 32 lowercase hex chars
 //! (`engine-asset-pipeline.md §3`, brief §E4). The runtime `.bin` header
-//! `hash` field is a u64 (the low 64 bits of the same digest).
+//! `hash` field is a u64 — the first 8 bytes of the same digest, read LE.
 
 const std = @import("std");
 
@@ -16,7 +16,9 @@ pub fn hex128(data: []const u8) [32]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-/// Low 64 bits of the BLAKE3 digest of `data` (the `.bin` header `hash`).
+/// The first 8 bytes of the BLAKE3 digest of `data`, read little-endian as a
+/// u64 (the `.bin` header `hash`). A truncation of the digest, not the low
+/// bits of some wider integer.
 pub fn u64Of(data: []const u8) u64 {
     var digest: [8]u8 = undefined;
     Blake3.hash(data, &digest, .{});

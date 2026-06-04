@@ -17,8 +17,11 @@ const std = @import("std");
 /// Largest prime smaller than 65536; the ADLER32 modulus.
 pub const base: u32 = 65521;
 
-/// Largest block length such that the deferred-modulo accumulation cannot
-/// overflow the u64 intermediates in `vectorized`.
+/// Block length between modulo reductions. 5552 is the classic ADLER32
+/// bound: the largest `n` for which `255*n*(n+1)/2 + (n+1)*(base-1)` stays
+/// within a 32-bit accumulator. It is conservative for the u64 intermediates
+/// used here (they would not overflow until far larger `n`); keeping 5552
+/// matches every reference implementation and the scalar `reference`.
 pub const nmax: usize = 5552;
 
 /// Scalar reference implementation — the correctness oracle. Computes
