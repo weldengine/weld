@@ -5,8 +5,14 @@
 //! the import → intermediate orchestration is added in E4.
 //!
 //! Supports linear PCM (`audio_format == 1`); compressed WAV is out of scope.
+//!
+//! E4 adds `import` (source → intermediate `AudioClip` doc + PCM blob) atop
+//! the E3 `decode`.
 
 const std = @import("std");
+const format = @import("../format/root.zig");
+const hash = @import("../hash.zig");
+const common = @import("common.zig");
 
 /// Errors raised by `decode`.
 pub const Error = error{
@@ -93,6 +99,40 @@ pub fn decode(gpa: std.mem.Allocator, src: []const u8) Error!Audio {
         .bits_per_sample = bits,
         .data = try gpa.dupe(u8, data),
     };
+}
+
+/// Imported asset (document arena + PCM blob).
+pub const Import = common.Import;
+
+/// Import a WAV file (`src` bytes from `source_path`) into an intermediate
+/// `AudioClip` document + PCM blob.
+pub fn import(gpa: std.mem.Allocator, source_path: []const u8, src: []const u8) Error!Import {
+    var audio = try decode(gpa, src);
+    errdefer audio.deinit(gpa);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+
+    const blob = audio.data; // ownership transfers to Import on success
+    const extracted = try a.dupe(format.Field, &[_]format.Field{
+        .{ .key = "sample_rate", .value = .{ .int = audio.sample_rate } },
+        .{ .key = "channels", .value = .{ .int = audio.channels } },
+        .{ .key = "bits_per_sample", .value = .{ .int = audio.bits_per_sample } },
+        .{ .key = "frame_count", .value = .{ .int = @intCast(audio.frameCount()) } },
+        .{ .key = "blob", .value = .{ .string = try a.dupe(u8, &hash.hex128(blob)) } },
+    });
+
+    const doc = format.AssetDoc{
+        .name = try a.dupe(u8, std.fs.path.stem(source_path)),
+        .type_name = "AudioClip",
+        .version = 1,
+        .source = try a.dupe(u8, source_path),
+        .source_hash = try a.dupe(u8, &hash.hex128(src)),
+        .extracted = extracted,
+    };
+
+    return .{ .arena = arena, .doc = doc, .blob = blob };
 }
 
 test "decode WAV PCM s16le extracts format and samples" {

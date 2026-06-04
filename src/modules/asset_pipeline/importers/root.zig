@@ -1,11 +1,24 @@
-//! Asset Pipeline `importers/` namespace.
+//! Asset Pipeline `importers/` namespace — source → intermediate.
 //!
-//! M0.6 / E3 ships the WAV decoder here (RIFF is trivial, brief §Notes). The
-//! png / gltf source→intermediate import orchestration lands in E4.
+//! Each importer decodes a source file (via the E3 codecs) and produces an
+//! `Import` = intermediate `AssetDoc` + referenced binary blob. M0.6: PNG
+//! (texture), glTF (static mesh), WAV (audio).
 
-/// WAV (RIFF PCM) decode.
+/// Shared importer output (`Import` = document arena + blob).
+pub const common = @import("common.zig");
+/// `Import` result type.
+pub const Import = common.Import;
+
+/// PNG importer (→ `Texture2D`).
+pub const png = @import("png.zig");
+/// glTF importer (→ `StaticMesh`).
+pub const gltf = @import("gltf.zig");
+/// WAV importer + RIFF PCM decode (→ `AudioClip`).
 pub const wav = @import("wav.zig");
 
 comptime {
+    _ = common;
+    _ = png;
+    _ = gltf;
     _ = wav;
 }

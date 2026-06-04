@@ -25,8 +25,17 @@ pub const registry = @import("registry/root.zig");
 /// Low-level codecs (E2: DEFLATE/zlib; E3: PNG + glTF static).
 pub const codecs = @import("codecs/root.zig");
 
-/// Source importers (E3: WAV decode; E4 adds png/gltf orchestration).
+/// Source importers (source → intermediate `AssetDoc` + blob).
 pub const importers = @import("importers/root.zig");
+
+/// Cookers (intermediate → runtime `.<type>.bin`).
+pub const cookers = @import("cookers/root.zig");
+
+/// Local cooking cache (BLAKE3-keyed).
+pub const cache = @import("cache/root.zig");
+
+/// Content hashing (BLAKE3-128 hex / u64).
+pub const hash = @import("hash.zig");
 
 /// 64-bit typed asset handle (convenience re-export).
 pub const AssetHandle = registry.AssetHandle;
@@ -46,4 +55,7 @@ comptime {
     _ = registry;
     _ = codecs;
     _ = importers;
+    _ = cookers;
+    _ = cache;
+    _ = hash;
 }
