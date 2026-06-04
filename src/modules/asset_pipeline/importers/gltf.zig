@@ -21,7 +21,8 @@ pub const Import = common.Import;
 pub const Error = error{OutOfMemory} || gltf.Error;
 
 /// Import a glTF file (`src` bytes from `source_path`) into an intermediate.
-pub fn import(gpa: std.mem.Allocator, source_path: []const u8, src: []const u8) Error!Import {
+/// `uuid` is the caller-resolved stable identity (canonical UUIDv7 string).
+pub fn import(gpa: std.mem.Allocator, source_path: []const u8, src: []const u8, uuid: []const u8) Error!Import {
     var mesh = try gltf.decode(gpa, src);
     defer mesh.deinit(gpa);
 
@@ -56,6 +57,7 @@ pub fn import(gpa: std.mem.Allocator, source_path: []const u8, src: []const u8) 
 
     const doc = AssetDoc{
         .name = try a.dupe(u8, std.fs.path.stem(source_path)),
+        .uuid = try a.dupe(u8, uuid),
         .type_name = "StaticMesh",
         .version = 1,
         .source = try a.dupe(u8, source_path),

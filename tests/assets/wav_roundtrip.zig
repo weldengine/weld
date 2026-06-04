@@ -13,9 +13,10 @@ test "wav import-cook-load round-trip" {
     defer audio.deinit(gpa);
 
     // Import → cook.
-    var imp = try assets.importers.wav.import(gpa, "tone.wav", tone_wav);
+    var imp = try assets.importers.wav.import(gpa, "tone.wav", tone_wav, "0190b3f0-1c2d-7e4a-8b6c-665544332211");
     defer imp.deinit(gpa);
     try std.testing.expectEqualStrings("AudioClip", imp.doc.type_name);
+    try std.testing.expectEqualStrings("0190b3f0-1c2d-7e4a-8b6c-665544332211", imp.doc.uuid);
 
     const bin = try assets.cookers.cookAudio(gpa, imp.doc, imp.blob);
     defer gpa.free(bin);

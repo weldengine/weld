@@ -13,9 +13,11 @@ test "png import-cook-load round-trip" {
     defer img.deinit(gpa);
 
     // Import: source → intermediate doc + RGBA8 blob.
-    var imp = try assets.importers.png.import(gpa, "checker.png", checker_png);
+    const imp_uuid = "0190b3f0-1c2d-7e4a-8b6c-aabbccddeeff";
+    var imp = try assets.importers.png.import(gpa, "checker.png", checker_png, imp_uuid);
     defer imp.deinit(gpa);
     try std.testing.expectEqualStrings("Texture2D", imp.doc.type_name);
+    try std.testing.expectEqualStrings(imp_uuid, imp.doc.uuid);
     try std.testing.expect(imp.doc.blobHash() != null);
     try std.testing.expectEqualSlices(u8, img.pixels, imp.blob);
 

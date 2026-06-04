@@ -13,9 +13,10 @@ test "gltf static import-cook-load round-trip" {
     defer mesh.deinit(gpa);
 
     // Import → cook.
-    var imp = try assets.importers.gltf.import(gpa, "cube.gltf", cube_gltf);
+    var imp = try assets.importers.gltf.import(gpa, "cube.gltf", cube_gltf, "0190b3f0-1c2d-7e4a-8b6c-001122334455");
     defer imp.deinit(gpa);
     try std.testing.expectEqualStrings("StaticMesh", imp.doc.type_name);
+    try std.testing.expectEqualStrings("0190b3f0-1c2d-7e4a-8b6c-001122334455", imp.doc.uuid);
 
     const bin = try assets.cookers.cookMesh(gpa, imp.doc, imp.blob);
     defer gpa.free(bin);

@@ -21,7 +21,10 @@ pub const Import = common.Import;
 pub const Error = error{OutOfMemory} || png.Error;
 
 /// Import a PNG file (`src` bytes from `source_path`) into an intermediate.
-pub fn import(gpa: std.mem.Allocator, source_path: []const u8, src: []const u8) Error!Import {
+/// `uuid` is the stable identity (canonical UUIDv7 string) the caller
+/// resolved — generated on first import, preserved from the existing
+/// `.asset.etch` on re-import.
+pub fn import(gpa: std.mem.Allocator, source_path: []const u8, src: []const u8, uuid: []const u8) Error!Import {
     var img = try png.decode(gpa, src);
     errdefer img.deinit(gpa);
 
@@ -50,6 +53,7 @@ pub fn import(gpa: std.mem.Allocator, source_path: []const u8, src: []const u8) 
 
     const doc = AssetDoc{
         .name = try a.dupe(u8, std.fs.path.stem(source_path)),
+        .uuid = try a.dupe(u8, uuid),
         .type_name = "Texture2D",
         .version = 1,
         .source = try a.dupe(u8, source_path),

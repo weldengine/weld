@@ -118,6 +118,12 @@ pub fn fieldsEql(a: []const Field, b: []const Field) bool {
 pub const AssetDoc = struct {
     /// Logical asset name (the `asset "<name>"` string).
     name: []const u8,
+    /// Stable identity — UUIDv7 canonical string, the first body field
+    /// (`uuid: "…"`). Generated once at first import and preserved across
+    /// re-imports (rename/move-safe); distinct from `source_hash`, which
+    /// changes with the source. Mirrors `entity "name" { uuid: … }` in
+    /// `.scene.etch`.
+    uuid: []const u8 = "",
     /// Asset class identifier (e.g. `Texture2D`, `StaticMesh`, `AudioClip`).
     type_name: []const u8,
     /// Schema version of this document.
@@ -140,6 +146,7 @@ pub const AssetDoc = struct {
     /// Deep structural equality (used by the round-trip test).
     pub fn eql(a: AssetDoc, b: AssetDoc) bool {
         return std.mem.eql(u8, a.name, b.name) and
+            std.mem.eql(u8, a.uuid, b.uuid) and
             std.mem.eql(u8, a.type_name, b.type_name) and
             a.version == b.version and
             std.mem.eql(u8, a.source, b.source) and
@@ -172,6 +179,7 @@ pub const WriteError = std.Io.Writer.Error;
 /// Serialize `doc` as `<type>.asset.etch` text into `out`.
 pub fn writeEtch(doc: AssetDoc, out: *std.Io.Writer) WriteError!void {
     try out.print("asset \"{s}\" {{\n", .{doc.name});
+    try out.print("  uuid: \"{s}\"\n", .{doc.uuid});
     try out.print("  type: {s}\n", .{doc.type_name});
     try out.print("  version: {d}\n", .{doc.version});
     try out.print("  source: \"{s}\"\n", .{doc.source});
@@ -428,13 +436,19 @@ const Parser = struct {
 
         var doc = AssetDoc{
             .name = name,
+            .uuid = "",
             .type_name = "",
             .version = 0,
             .source = "",
             .source_hash = "",
         };
         for (fields) |f| {
-            if (std.mem.eql(u8, f.key, "type")) {
+            if (std.mem.eql(u8, f.key, "uuid")) {
+                doc.uuid = switch (f.value) {
+                    .string => |s| s,
+                    else => return error.UnexpectedChar,
+                };
+            } else if (std.mem.eql(u8, f.key, "type")) {
                 doc.type_name = switch (f.value) {
                     .identifier => |s| s,
                     .string => |s| s,
@@ -515,6 +529,7 @@ test "intermediate doc round-trips through etch text" {
 
     const original = AssetDoc{
         .name = "cube_mesh",
+        .uuid = "0190b3f0-1c2d-7e4a-8b6c-0123456789ab",
         .type_name = "StaticMesh",
         .version = 1,
         .source = "cube.gltf",
@@ -533,6 +548,7 @@ test "intermediate doc round-trips through etch text" {
     const parsed = try parseEtch(arena.allocator(), text);
 
     try std.testing.expect(original.eql(parsed));
+    try std.testing.expectEqualStrings("0190b3f0-1c2d-7e4a-8b6c-0123456789ab", parsed.uuid);
     try std.testing.expectEqualStrings("StaticMesh", parsed.type_name);
     try std.testing.expectEqual(@as(u16, 1), parsed.version);
     try std.testing.expectEqual(@as(usize, 4), parsed.extracted.len);

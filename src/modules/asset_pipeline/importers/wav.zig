@@ -105,8 +105,9 @@ pub fn decode(gpa: std.mem.Allocator, src: []const u8) Error!Audio {
 pub const Import = common.Import;
 
 /// Import a WAV file (`src` bytes from `source_path`) into an intermediate
-/// `AudioClip` document + PCM blob.
-pub fn import(gpa: std.mem.Allocator, source_path: []const u8, src: []const u8) Error!Import {
+/// `AudioClip` document + PCM blob. `uuid` is the caller-resolved stable
+/// identity (canonical UUIDv7 string).
+pub fn import(gpa: std.mem.Allocator, source_path: []const u8, src: []const u8, uuid: []const u8) Error!Import {
     var audio = try decode(gpa, src);
     errdefer audio.deinit(gpa);
 
@@ -125,6 +126,7 @@ pub fn import(gpa: std.mem.Allocator, source_path: []const u8, src: []const u8) 
 
     const doc = format.AssetDoc{
         .name = try a.dupe(u8, std.fs.path.stem(source_path)),
+        .uuid = try a.dupe(u8, uuid),
         .type_name = "AudioClip",
         .version = 1,
         .source = try a.dupe(u8, source_path),

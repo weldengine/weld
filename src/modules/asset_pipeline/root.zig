@@ -37,6 +37,9 @@ pub const cache = @import("cache/root.zig");
 /// Content hashing (BLAKE3-128 hex / u64).
 pub const hash = @import("hash.zig");
 
+/// Stable per-asset identity (UUIDv7).
+pub const uuid = @import("uuid.zig");
+
 /// 64-bit typed asset handle (convenience re-export).
 pub const AssetHandle = registry.AssetHandle;
 /// Slot registry (convenience re-export).
@@ -58,4 +61,5 @@ comptime {
     _ = cookers;
     _ = cache;
     _ = hash;
+    _ = uuid;
 }

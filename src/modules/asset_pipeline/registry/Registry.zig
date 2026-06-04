@@ -34,6 +34,10 @@ const Slot = struct {
     refcount: u32,
     /// `true` while the slot points at a live asset.
     alive: bool,
+    /// Stable asset identity (UUIDv7 as u128). Stored only in M0.6 —
+    /// references resolve by path; uuid-based resolution is Phase 1+. 0 when
+    /// unknown (the runtime `.bin` carries no uuid in M0.6).
+    uuid: u128,
 };
 
 /// Errors surfaced by the mutating verbs.
@@ -53,6 +57,8 @@ pub const Resolved = struct {
     refcount: u32,
     /// Decoded `AssetType`, or `null` if the tag is not a known variant.
     asset_type: ?AssetType,
+    /// Stable asset identity (0 if unknown).
+    uuid: u128,
 };
 
 /// Create an empty registry. No allocation happens until the first `alloc`.
@@ -73,6 +79,12 @@ pub fn deinit(self: *Registry, gpa: std.mem.Allocator) void {
 ///
 /// Errors: `error.OutOfMemory` if the slot table needs to grow.
 pub fn alloc(self: *Registry, gpa: std.mem.Allocator, asset_type: AssetType) Error!AssetHandle {
+    return self.allocWithUuid(gpa, asset_type, 0);
+}
+
+/// Like `alloc`, but records the asset's stable `uuid` in the slot. The uuid
+/// is stored only (M0.6 resolves by path); use `alloc` when no uuid is known.
+pub fn allocWithUuid(self: *Registry, gpa: std.mem.Allocator, asset_type: AssetType, uuid: u128) Error!AssetHandle {
     const tag = asset_type.toU16();
     if (self.free_indices.pop()) |idx| {
         const slot = &self.slots.items[idx];
@@ -80,10 +92,11 @@ pub fn alloc(self: *Registry, gpa: std.mem.Allocator, asset_type: AssetType) Err
         slot.alive = true;
         slot.type_tag = tag;
         slot.refcount = 1;
+        slot.uuid = uuid;
         return .{ .index = idx, .generation = slot.generation, .type_tag = tag };
     }
     const idx: u32 = @intCast(self.slots.items.len);
-    try self.slots.append(gpa, .{ .generation = 0, .type_tag = tag, .refcount = 1, .alive = true });
+    try self.slots.append(gpa, .{ .generation = 0, .type_tag = tag, .refcount = 1, .alive = true, .uuid = uuid });
     return .{ .index = idx, .generation = 0, .type_tag = tag };
 }
 
@@ -96,6 +109,7 @@ pub fn resolve(self: *const Registry, handle: AssetHandle) ?Resolved {
         .type_tag = slot.type_tag,
         .refcount = slot.refcount,
         .asset_type = AssetType.fromU16(slot.type_tag),
+        .uuid = slot.uuid,
     };
 }
 
@@ -253,4 +267,17 @@ test "out-of-range handle is treated as stale" {
     const bogus = AssetHandle{ .index = 999, .generation = 0, .type_tag = AssetType.texture.toU16() };
     try std.testing.expect(!reg.isAlive(bogus));
     try std.testing.expectError(error.StaleHandle, reg.retain(bogus));
+}
+
+test "allocWithUuid stores the stable identity; alloc leaves it zero" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    const id: u128 = 0x0190b3f0_1c2d_7e4a_8b6c_0123456789ab;
+    const h = try reg.allocWithUuid(gpa, .mesh, id);
+    try std.testing.expectEqual(id, reg.resolve(h).?.uuid);
+
+    const h2 = try reg.alloc(gpa, .texture);
+    try std.testing.expectEqual(@as(u128, 0), reg.resolve(h2).?.uuid);
 }
