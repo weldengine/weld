@@ -445,6 +445,11 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/foundation/simd/tests/correctness.zig", .foundation = true },
         // M0.6 / E3 — paeth_filter_decode kernel portable == reference.
         .{ .path = "src/foundation/simd/tests/paeth_test.zig", .foundation = true },
+        // M0.6 / E4 — import → cook → load round-trips + cache differential.
+        .{ .path = "tests/assets/png_roundtrip.zig", .asset_pipeline = true },
+        .{ .path = "tests/assets/gltf_static_roundtrip.zig", .asset_pipeline = true },
+        .{ .path = "tests/assets/wav_roundtrip.zig", .asset_pipeline = true },
+        .{ .path = "tests/assets/cache_diff.zig", .asset_pipeline = true },
     };
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
@@ -798,6 +803,30 @@ pub fn build(b: *std.Build) void {
         "Run the M0.6 paeth_filter_decode throughput baseline (pass `-- --smoke` for a CI sanity run)",
     );
     paeth_bench_step.dependOn(&paeth_bench_run.step);
+
+    // ----------------------------------- M0.6 thin offline asset cook demo ----
+    //
+    // `zig build cook-demo` cooks the three M0.6 fixtures end-to-end through
+    // the cache and logs hits (brief §Observable behavior). The user-facing
+    // `weld cook` CLI is Phase 1.
+    const asset_cook_module = b.createModule(.{
+        .root_source_file = b.path("tools/asset_cook/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    asset_cook_module.addImport("weld_asset_pipeline", asset_pipeline_module);
+    const asset_cook_exe = b.addExecutable(.{
+        .name = "asset_cook",
+        .root_module = asset_cook_module,
+    });
+    b.installArtifact(asset_cook_exe);
+    const asset_cook_run = b.addRunArtifact(asset_cook_exe);
+    if (b.args) |args| asset_cook_run.addArgs(args);
+    const asset_cook_step = b.step(
+        "cook-demo",
+        "Cook the M0.6 fixtures end-to-end (import → cook → cache; logs hits)",
+    );
+    asset_cook_step.dependOn(&asset_cook_run.step);
 
     // -------------------------------------------- Fixture facade (S4 demo) --
 
