@@ -29,6 +29,7 @@ const framing = @import("framing.zig");
 const messages = @import("messages.zig");
 const protocol = @import("protocol.zig");
 const transport = @import("transport.zig");
+const command_log = @import("command_log.zig");
 
 /// All errors a connection method can raise. Union of the transport
 /// errors (socket I/O), framing errors (invalid header / schema
@@ -243,4 +244,45 @@ pub fn acceptShmHandoff(
     // a multi-region handoff cannot leak descriptors into the runtime.
     for (handles[1..]) |h| transport.closeHandle(h);
     return handles[0];
+}
+
+/// Outcome of a `replayCommands` pass.
+pub const ReplayResult = struct {
+    /// Commands successfully re-sent and acked.
+    replayed: usize,
+    /// True when every pending command replayed; false when a nack /
+    /// timeout / desync stopped the pass early (§7.2).
+    complete: bool,
+};
+
+/// Best-effort replay after a crash + restart (`engine-ipc.md` §7.2,
+/// `engine-tools-editor.md` §2.7.4). For each command in `log` since the
+/// last clean line still pending, re-send its frame verbatim over `conn`
+/// and await a reply carrying the same `seq_id`; on a match, mark it
+/// acked and continue. The first nack, timeout, or desync stops the pass
+/// hard — no idempotence is attempted (§7.3). The caller arms the
+/// per-command timeout via a socket recv timeout (`SO_RCVTIMEO` on
+/// POSIX); a recv error (timeout / EOF) ends the pass. `scratch` must
+/// hold one full reply frame. Never raises — failures end the pass with
+/// `complete = false`.
+pub fn replayCommands(
+    conn: *IpcConnection,
+    log: *command_log.CommandLog,
+    scratch: []u8,
+    now_us: u64,
+) ReplayResult {
+    var it = log.replaySince();
+    var replayed: usize = 0;
+    while (it.next()) |entry| {
+        const seq = entry.seq_id;
+        // Re-send the original frame byte-for-byte (same seq_id). `seq`
+        // is captured before any mutation; `entry` is not read after the
+        // `markAcked` below (forward-only iteration, no revisit).
+        conn.socket.send(entry.frameBytes()) catch return .{ .replayed = replayed, .complete = false };
+        const frame = conn.recvFrame(scratch) catch return .{ .replayed = replayed, .complete = false };
+        if (frame.header.seq_id != seq) return .{ .replayed = replayed, .complete = false };
+        log.markAcked(seq, now_us);
+        replayed += 1;
+    }
+    return .{ .replayed = replayed, .complete = true };
 }
