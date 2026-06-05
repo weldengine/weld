@@ -92,11 +92,6 @@ fn sleepMs(ms: u64) void {
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    if (!is_posix) {
-        std.debug.print("runtime stub: Windows path not implemented in S6 (cf. brief)\n", .{});
-        return error.Unimplemented;
-    }
-
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -118,24 +113,25 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return error.HandshakeRejected;
     }
 
-    // Receive the shm fd handoff (engine-ipc.md §4.8) and map the
-    // viewport from the received fd — the primary cross-process attach.
-    // The runtime never calls cross-process shm_open; `args.shm` is kept
-    // for the Windows by-name path (E3) and unused here on POSIX.
-    var handoff_buf: [framing.frameSizeOf(messages.ShmRegionsHandoff)]u8 = undefined;
-    var handoff_handles: [messages.MAX_SHM_REGIONS]transport.OsHandle = undefined;
-    @memset(&handoff_handles, transport.invalid_handle);
-    const hf = try client.connection().recvFrameWithHandles(&handoff_buf, &handoff_handles);
-    const handoff = try framing.decode(messages.ShmRegionsHandoff, hf.header, hf.payload_bytes);
-    // Validate §8.3 (count in range + strict fd/descriptor equality) and
-    // select the viewport fd. `acceptShmHandoff` closes every excess /
-    // unmapped region fd, so a malformed handoff cannot leak descriptors.
-    const viewport_fd = try ipc.connection.acceptShmHandoff(&handoff, handoff_handles[0..hf.handles]);
-    var vp = try viewport.ShmViewport.fromFd(
-        viewport_fd,
-        viewport.default_resolution.width,
-        viewport.default_resolution.height,
-    );
+    // Attach the viewport shm. POSIX: the editor passes the region fd
+    // out-of-band (SCM_RIGHTS) in a `ShmRegionsHandoff` right after the
+    // handshake — map it with `fromFd`, never cross-process `shm_open`
+    // (engine-ipc.md §4.8). Windows: no fd-passing — `open` the named
+    // mapping the editor created (§2.2), whose name arrived on argv.
+    var vp = if (is_posix) blk: {
+        var handoff_buf: [framing.frameSizeOf(messages.ShmRegionsHandoff)]u8 = undefined;
+        var handoff_handles: [messages.MAX_SHM_REGIONS]transport.OsHandle = undefined;
+        @memset(&handoff_handles, transport.invalid_handle);
+        const hf = try client.connection().recvFrameWithHandles(&handoff_buf, &handoff_handles);
+        const handoff = try framing.decode(messages.ShmRegionsHandoff, hf.header, hf.payload_bytes);
+        // Validate §8.3 (count in range + strict fd/descriptor equality);
+        // `acceptShmHandoff` closes every excess / unmapped region fd so a
+        // malformed handoff cannot leak descriptors.
+        const viewport_fd = try ipc.connection.acceptShmHandoff(&handoff, handoff_handles[0..hf.handles]);
+        break :blk try viewport.ShmViewport.fromFd(viewport_fd, viewport.default_resolution.width, viewport.default_resolution.height);
+    } else blk: {
+        break :blk try viewport.ShmViewport.open(args.shm, viewport.default_resolution.width, viewport.default_resolution.height);
+    };
     defer vp.close();
 
     // Spawn the dedicated IPC reader thread per brief § Scope —
@@ -189,14 +185,29 @@ const ReaderState = struct {
 };
 
 fn readerLoop(state: *ReaderState) void {
-    // Sized to the largest editor→runtime frame the reader decodes.
-    // `LoadScene` / `SaveScene` (256-byte path) dominate; `RuntimeError`
-    // is runtime→editor only, so it does not size this buffer.
-    const max_frame_buf_size = comptime @max(
-        framing.frameSizeOf(messages.Echo),
-        framing.frameSizeOf(messages.LoadScene),
-    );
-    var scratch: [@as(usize, max_frame_buf_size) + 64]u8 = undefined;
+    // Sized to the largest frame the editor can send the runtime —
+    // computed over the FULL incoming set (every editor→runtime type the
+    // reader reads, whether or not it decodes it: `recvFrame` buffers the
+    // whole frame before the switch). Runtime→editor types (RuntimeError,
+    // the acks, …) are never received here and do not size this buffer.
+    // Current max: LoadScene / SaveScene at 280 B (16 + 8 + 256). Relying
+    // on @max(Echo, LoadScene) would silently undersize if a future
+    // incoming message grew past 256 B — so enumerate them explicitly.
+    const max_incoming_frame = comptime blk: {
+        var m: usize = 0;
+        for (.{
+            messages.Heartbeat,       messages.Shutdown,
+            messages.Echo,            messages.SpawnEntity,
+            messages.ModifyComponent, messages.Play,
+            messages.Pause,           messages.Stop,
+            messages.LoadScene,       messages.HotReloadScript,
+            messages.SaveScene,       messages.SaveProject,
+        }) |T| {
+            m = @max(m, framing.frameSizeOf(T));
+        }
+        break :blk m;
+    };
+    var scratch: [max_incoming_frame]u8 = undefined;
     while (true) {
         const fr = state.client.connection().recvFrame(&scratch) catch {
             state.read_failed.store(1, .release);

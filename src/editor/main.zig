@@ -80,11 +80,6 @@ fn sleepMs(ms: u64) void {
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    if (!is_posix) {
-        std.debug.print("editor stub: Windows path not implemented in S6 (cf. brief)\n", .{});
-        return error.Unimplemented;
-    }
-
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -92,8 +87,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const args = try parseArgs(gpa, init);
 
     const my_pid = getpid();
-    const socket_path = try std.fmt.allocPrint(gpa, "/tmp/weld-{d}.sock", .{my_pid});
-    const shm_name = try std.fmt.allocPrint(gpa, "/weld-shm-viewport-{d}", .{my_pid});
+    // OS-correct endpoints. Socket: `/tmp/weld-<pid>.sock` (POSIX Unix
+    // socket) vs `\\.\pipe\weld-<pid>` (Windows named pipe), via
+    // `transport.buildSocketPath`. Shm name: POSIX `/weld-shm-...` vs
+    // Windows session-local `Local\weld-shm-...` (engine-ipc.md §2.2).
+    var ep_name_buf: [64]u8 = undefined;
+    const ep_name = try std.fmt.bufPrint(&ep_name_buf, "weld-{d}", .{my_pid});
+    var sock_path_buf: [128]u8 = undefined;
+    const socket_path: []const u8 = try ipc.transport.buildSocketPath(&sock_path_buf, ep_name);
+    const shm_name = if (is_posix)
+        try std.fmt.allocPrint(gpa, "/weld-shm-viewport-{d}", .{my_pid})
+    else
+        try std.fmt.allocPrint(gpa, "Local\\weld-shm-viewport-{d}", .{my_pid});
 
     // ---- Reap orphan sockets / shm regions from any previously
     // crashed editor (engine-ipc.md §2.4). Runs before we create our
@@ -173,8 +178,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // Hand the runtime the viewport region's fd via SCM_RIGHTS so it
     // maps the framebuffer with ShmRegion.fromFd — never cross-process
     // shm_open. The editor stays the region owner; its own mapping is
-    // untouched by the transfer.
-    {
+    // untouched by the transfer. Windows skips this: the runtime opens
+    // the named mapping by name (§2.2), so there is no fd to pass.
+    if (is_posix) {
         var handoff = messages.ShmRegionsHandoff{
             .region_count = 1,
             .regions = std.mem.zeroes([messages.MAX_SHM_REGIONS]messages.ShmRegionDesc),

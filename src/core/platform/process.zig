@@ -91,6 +91,39 @@ const win = struct {
     extern "kernel32" fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) callconv(.winapi) ?*anyopaque;
 };
 
+/// `STARTUPINFOW` — `cb` must be `@sizeOf(STARTUPINFOW)`; the rest is
+/// zeroed for a plain console-less spawn (we inherit nothing and pipe
+/// nothing — stdio piping is Phase 0.3 per the file header).
+const STARTUPINFOW = extern struct {
+    cb: u32,
+    lpReserved: ?[*:0]u16,
+    lpDesktop: ?[*:0]u16,
+    lpTitle: ?[*:0]u16,
+    dwX: u32,
+    dwY: u32,
+    dwXSize: u32,
+    dwYSize: u32,
+    dwXCountChars: u32,
+    dwYCountChars: u32,
+    dwFillAttribute: u32,
+    dwFlags: u32,
+    wShowWindow: u16,
+    cbReserved2: u16,
+    lpReserved2: ?[*]u8,
+    hStdInput: ?*anyopaque,
+    hStdOutput: ?*anyopaque,
+    hStdError: ?*anyopaque,
+};
+
+/// `PROCESS_INFORMATION` — filled by `CreateProcessW` with the child's
+/// process + primary-thread handles and ids.
+const PROCESS_INFORMATION = extern struct {
+    hProcess: ?*anyopaque,
+    hThread: ?*anyopaque,
+    dwProcessId: u32,
+    dwThreadId: u32,
+};
+
 // `posix_spawnp` needs the parent process's `envp` pointer. The
 // underlying symbol is OS-specific: Linux/glibc exposes a real
 // `environ` global; macOS hides it behind `_NSGetEnviron()` to
@@ -147,14 +180,44 @@ pub fn spawn_process(
             return .{ .pid = pid };
         },
         .windows => {
-            // Windows path is wired in S6 only at the API-surface
-            // level — the editor + runtime binaries are exercised on
-            // Linux/macOS for S6 acceptance. A real CreateProcessW
-            // implementation lands when Win11 hardware validation is
-            // added in Phase 0.6 (consistent with the S3/S4 inherited-
-            // debt pattern for Windows-only paths).
-            _ = .{ gpa, path, argv };
-            return error.SpawnFailed;
+            // Build a UTF-8 command line (each arg quoted), convert to
+            // UTF-16, and spawn via CreateProcessW. `lpApplicationName`
+            // pins the binary; argv[0] stays in the command line by
+            // convention. M0.7 / E3 — wires the Windows editor path.
+            var cmd: std.ArrayList(u8) = .empty;
+            defer cmd.deinit(gpa);
+            for (argv, 0..) |a, i| {
+                if (i != 0) try cmd.append(gpa, ' ');
+                try cmd.append(gpa, '"');
+                try cmd.appendSlice(gpa, a);
+                try cmd.append(gpa, '"');
+            }
+            const cmd_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, cmd.items);
+            defer gpa.free(cmd_w);
+            const path_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, path);
+            defer gpa.free(path_w);
+
+            var si: STARTUPINFOW = std.mem.zeroes(STARTUPINFOW);
+            si.cb = @sizeOf(STARTUPINFOW);
+            var pi: PROCESS_INFORMATION = std.mem.zeroes(PROCESS_INFORMATION);
+
+            const ok = win.CreateProcessW(
+                path_w.ptr,
+                cmd_w.ptr,
+                null,
+                null,
+                0, // bInheritHandles = FALSE
+                0, // dwCreationFlags
+                null,
+                null,
+                @ptrCast(&si),
+                @ptrCast(&pi),
+            );
+            if (ok == 0) return error.SpawnFailed;
+            // The primary-thread handle is unused; close it now. The
+            // process handle is retained for `wait_nonblock` / `kill`.
+            if (pi.hThread) |h| _ = win.CloseHandle(h);
+            return .{ .pid = pi.dwProcessId, .handle = pi.hProcess };
         },
         else => @compileError("spawn_process: unsupported OS"),
     }
