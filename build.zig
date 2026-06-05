@@ -621,6 +621,7 @@ pub fn build(b: *std.Build) void {
         "tests/ipc/viewport_cases/wrong_width.zig",
         "tests/ipc/viewport_cases/no_tearing_1000_frames.zig",
         "tests/ipc/fd_passing.zig",
+        "tests/ipc/handoff_fd.zig",
         "tests/ipc/process.zig",
         "tests/ipc/handshake.zig",
         "tests/ipc/crash_recovery.zig",
