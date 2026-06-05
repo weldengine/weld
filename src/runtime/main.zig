@@ -32,6 +32,7 @@ const messages = ipc.messages;
 const protocol = ipc.protocol;
 const transport = ipc.transport;
 const viewport = ipc.viewport;
+const snapshot = ipc.snapshot;
 
 const is_posix = builtin.os.tag == .linux or builtin.os.tag == .macos;
 
@@ -40,6 +41,9 @@ const Args = struct {
     shm: []const u8 = "",
     editor_pid: i64 = 0,
     frames: ?u64 = null,
+    /// Path of the minimal scene snapshot (engine-ipc.md §7.1): written
+    /// on `SaveProject`, reloaded on restart. Empty = no persistence.
+    snapshot: []const u8 = "",
 };
 
 fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init.Minimal) !Args {
@@ -60,6 +64,8 @@ fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init.Minimal) !Args {
             args.editor_pid = try std.fmt.parseInt(i64, a["--editor-pid=".len..], 10);
         } else if (std.mem.startsWith(u8, a, "--frames=")) {
             args.frames = try std.fmt.parseInt(u64, a["--frames=".len..], 10);
+        } else if (std.mem.startsWith(u8, a, "--snapshot=")) {
+            args.snapshot = try gpa.dupe(u8, a["--snapshot=".len..]);
         }
     }
     if (args.socket.len == 0) return error.MissingSocketArg;
@@ -101,6 +107,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const args = try parseArgs(gpa, init);
 
+    // Default I/O for the snapshot file ops. The runtime stays
+    // `Init.Minimal` per convention (it will bind a custom Io on the job
+    // system in Phase 1); a local `Threaded` covers M0.7. `page_allocator`
+    // is threadsafe, satisfying Threaded's async-allocator contract, and
+    // the `io` is safe to share with the reader thread.
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var client = ipc.client.IpcClient.init(gpa);
     defer client.deinit();
     try client.connect(args.socket);
@@ -137,6 +152,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     defer vp.close();
 
+    // Reload point: if the editor's last SaveProject persisted a snapshot,
+    // resume the mire from it (engine-ipc.md §7.2). Absent ⇒ start clean.
+    var start_frame: u64 = 0;
+    if (args.snapshot.len != 0) {
+        if (snapshot.read(io, args.snapshot)) |snap| start_frame = snap.frame_id;
+    }
+
     // Spawn the dedicated IPC reader thread per brief § Scope —
     // the main loop renders the mire at ~60 Hz while the reader
     // drains the socket and replies to transactional messages.
@@ -145,11 +167,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .shutdown_requested = std.atomic.Value(u8).init(0),
         .read_failed = std.atomic.Value(u8).init(0),
         .play_state = std.atomic.Value(u8).init(play_playing),
+        .io = io,
+        .snapshot_path = args.snapshot,
     };
     const reader = try std.Thread.spawn(.{}, readerLoop, .{&reader_state});
     defer reader.join();
 
-    var frame: u64 = 0; // mire animation parameter — advances only while playing
+    var frame: u64 = start_frame; // mire animation parameter — advances only while playing
     var iter: u64 = 0; // loop iterations — bounds the lifetime via --frames
     while (true) {
         if (args.frames) |max| {
@@ -185,6 +209,10 @@ const ReaderState = struct {
     read_failed: std.atomic.Value(u8),
     /// `play_stopped` / `play_playing` / `play_paused`.
     play_state: std.atomic.Value(u8),
+    /// I/O for the `SaveProject` snapshot write (shared with main).
+    io: std.Io,
+    /// Snapshot path, or empty to skip persistence.
+    snapshot_path: []const u8,
 };
 
 fn readerLoop(state: *ReaderState) void {
@@ -273,10 +301,23 @@ fn readerLoop(state: *ReaderState) void {
                 _ = framing.decode(messages.HotReloadScript, fr.header, fr.payload_bytes) catch return;
             },
             .save_project => {
-                // Transactional (§3.4): reply `ProjectSaved` with the same
-                // seq_id. The stub always succeeds; the minimal binary
-                // snapshot is wired in E4.
-                const ps = messages.ProjectSaved{ .ok = 1, .reason = std.mem.zeroes([128]u8) };
+                // Transactional (§3.4): persist the minimal scene snapshot
+                // (the replay reload point, §7.1) THEN reply `ProjectSaved`
+                // with the same seq_id. The stub records the SaveProject
+                // seq_id as the scene marker. A snapshot write failure is
+                // surfaced via `ok = 0` so the editor does not advance its
+                // clean line on a save that did not persist.
+                var ok: u8 = 1;
+                if (state.snapshot_path.len != 0) {
+                    snapshot.write(state.io, state.snapshot_path, .{
+                        .magic = 0,
+                        .version = 0,
+                        .frame_id = fr.header.seq_id,
+                    }) catch {
+                        ok = 0;
+                    };
+                }
+                const ps = messages.ProjectSaved{ .ok = ok, .reason = std.mem.zeroes([128]u8) };
                 state.client.connection().sendMessage(messages.ProjectSaved, fr.header.seq_id, &ps) catch return;
             },
             // `save_scene` (scene granularity) is declared with no wired

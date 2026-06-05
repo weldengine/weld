@@ -160,6 +160,10 @@ pub fn main(init: std.process.Init) !void {
     const socket_arg = try std.fmt.allocPrint(gpa, "--socket={s}", .{socket_path});
     const shm_arg = try std.fmt.allocPrint(gpa, "--shm={s}", .{shm_name});
     const pid_arg = try std.fmt.allocPrint(gpa, "--editor-pid={d}", .{my_pid});
+    // Snapshot path for SaveProject persistence / replay reload (§7.1).
+    // CWD-relative so it resolves identically in the spawned runtime
+    // (which inherits this process's CWD) on both POSIX and Windows.
+    const snapshot_arg = try std.fmt.allocPrint(gpa, "--snapshot=weld-snapshot-{d}.bin", .{my_pid});
 
     var spawn_argv = std.ArrayList([]const u8).empty;
     defer spawn_argv.deinit(gpa);
@@ -169,6 +173,7 @@ pub fn main(init: std.process.Init) !void {
     try spawn_argv.append(gpa, pid_arg);
     const frames_arg = try std.fmt.allocPrint(gpa, "--frames={d}", .{args.frames});
     try spawn_argv.append(gpa, frames_arg);
+    try spawn_argv.append(gpa, snapshot_arg);
 
     var proc_opt: ?platform_process.Process = null;
     if (args.no_spawn) {
