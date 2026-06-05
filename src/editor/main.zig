@@ -41,7 +41,10 @@ const vk_blit = @import("vk_blit.zig");
 const is_posix = builtin.os.tag == .linux or builtin.os.tag == .macos;
 
 const Args = struct {
-    runtime_path: []const u8 = "zig-out/bin/weld-runtime",
+    /// Empty = auto-derive from the editor's own executable directory
+    /// (`<exe-dir>/weld-runtime[.exe]`), set after parsing. `--runtime=`
+    /// overrides it (e.g. tests passing an explicit path).
+    runtime_path: []const u8 = "",
     frames: u64 = 3600,
     no_heartbeat: bool = false,
     no_spawn: bool = false,
@@ -82,12 +85,27 @@ fn sleepMs(ms: u64) void {
     _ = nanosleep(&ts, null);
 }
 
-pub fn main(init: std.process.Init.Minimal) !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
+pub fn main(init: std.process.Init) !void {
+    // Full Juicy Main (engine-zig-conventions §2 — `Init` for dev tools):
+    // `init.arena` is process-lifetime + auto-cleaned; `init.io` drives
+    // the executable-directory lookup used to resolve the runtime path.
+    const gpa = init.arena.allocator();
+    const io = init.io;
 
-    const args = try parseArgs(gpa, init);
+    const args = try parseArgs(gpa, init.minimal);
+
+    // Resolve the runtime binary. Without `--runtime=`, derive it from
+    // the editor's own executable directory + `weld-runtime[.exe]` —
+    // robust against the CWD and OS-correct (CreateProcessW with
+    // lpApplicationName needs the exact path, incl. the `.exe` suffix,
+    // and does not search PATH).
+    const runtime_path: []const u8 = if (args.runtime_path.len != 0)
+        args.runtime_path
+    else blk: {
+        const dir = try std.process.executableDirPathAlloc(io, gpa);
+        const exe_name = if (builtin.os.tag == .windows) "weld-runtime.exe" else "weld-runtime";
+        break :blk try std.fs.path.join(gpa, &.{ dir, exe_name });
+    };
 
     const my_pid = getpid();
     // OS-correct endpoints. Socket: `/tmp/weld-<pid>.sock` (POSIX Unix
@@ -145,7 +163,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     var spawn_argv = std.ArrayList([]const u8).empty;
     defer spawn_argv.deinit(gpa);
-    try spawn_argv.append(gpa, args.runtime_path);
+    try spawn_argv.append(gpa, runtime_path);
     try spawn_argv.append(gpa, socket_arg);
     try spawn_argv.append(gpa, shm_arg);
     try spawn_argv.append(gpa, pid_arg);
@@ -156,12 +174,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (args.no_spawn) {
         std.debug.print(
             "[editor] --no-spawn: launch the runtime manually with:\n  {s}",
-            .{args.runtime_path},
+            .{runtime_path},
         );
         for (spawn_argv.items[1..]) |a| std.debug.print(" {s}", .{a});
         std.debug.print("\n[editor] waiting for runtime to connect on {s} ...\n", .{socket_path});
     } else {
-        proc_opt = try platform_process.spawn_process(gpa, args.runtime_path, spawn_argv.items);
+        proc_opt = try platform_process.spawn_process(gpa, runtime_path, spawn_argv.items);
     }
 
     try server.acceptOne();

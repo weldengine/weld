@@ -89,6 +89,7 @@ const win = struct {
     extern "kernel32" fn GetExitCodeProcess(hProcess: *anyopaque, lpExitCode: *u32) callconv(.winapi) i32;
     extern "kernel32" fn CloseHandle(hObject: *anyopaque) callconv(.winapi) i32;
     extern "kernel32" fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) callconv(.winapi) ?*anyopaque;
+    extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 };
 
 /// `STARTUPINFOW` — `cb` must be `@sizeOf(STARTUPINFOW)`; the rest is
@@ -274,7 +275,17 @@ pub fn spawn_process(
                 @ptrCast(&si),
                 @ptrCast(&pi),
             );
-            if (ok == 0) return error.SpawnFailed;
+            if (ok == 0) {
+                // Surface the Win32 last-error so a spawn failure is
+                // diagnosable (e.g. 2 = ERROR_FILE_NOT_FOUND when the
+                // exe path is wrong / missing the `.exe` suffix) instead
+                // of an opaque `error.SpawnFailed`.
+                std.log.scoped(.process).err(
+                    "CreateProcessW failed: path='{s}' GetLastError={d}",
+                    .{ path, win.GetLastError() },
+                );
+                return error.SpawnFailed;
+            }
             // The primary-thread handle is unused; close it now. The
             // process handle is retained for `wait_nonblock` / `kill`.
             if (pi.hThread) |h| _ = win.CloseHandle(h);

@@ -89,6 +89,27 @@ test "spawn-then-kill terminates a long-running child" {
     return error.ChildNeverDied;
 }
 
+test "spawn_process runs a Windows binary and reaps exit 0" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // Anti-regression for the M0.7 / E3 addendum: the first real Windows
+    // run hit `CreateProcessW` → `error.SpawnFailed`. Exercise the path
+    // with a binary guaranteed present (`cmd.exe /c exit 0`).
+    const gpa = std.testing.allocator;
+    const exe = "C:\\Windows\\System32\\cmd.exe";
+    const argv = [_][]const u8{ exe, "/c", "exit 0" };
+
+    var proc = try process.spawn_process(gpa, exe, &argv);
+    var attempts: usize = 0;
+    while (attempts < 200) : (attempts += 1) {
+        if (try process.wait_nonblock(&proc)) |code| {
+            try std.testing.expectEqual(@as(i32, 0), code);
+            return;
+        }
+        sleepMs(10);
+    }
+    return error.ChildNeverExited;
+}
+
 // ------------------------------------------------------- quoteArg tests --
 //
 // `quoteArg` is pure and cross-platform, so these run on every host.
