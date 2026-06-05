@@ -1,7 +1,8 @@
-//! S6 process tests — `platform.process.spawn_process` + `wait_nonblock`
+//! Process tests — `platform.process.spawn_process` + `wait_nonblock`
 //! + `is_alive` against the real `/bin/true` and `/bin/sleep` binaries
-//! (POSIX). Windows is `skipNow` because `CreateProcessW` is stubbed in
-//! S6 (cf. `src/core/platform/process.zig`).
+//! (POSIX-gated). Plus `quoteArg` — the M0.7 / E3 Windows command-line
+//! quoter — tested cross-platform (no Windows needed) via golden cases
+//! and a round-trip through a reference `CommandLineToArgvW` parser.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -86,4 +87,139 @@ test "spawn-then-kill terminates a long-running child" {
         sleepMs(10);
     }
     return error.ChildNeverDied;
+}
+
+// ------------------------------------------------------- quoteArg tests --
+//
+// `quoteArg` is pure and cross-platform, so these run on every host.
+
+/// Reference re-implementation of `CommandLineToArgvW`, UTF-8 (the
+/// metacharacters are all ASCII). Used to prove `quoteArg` output parses
+/// back to the original argument. Faithful to the documented rules:
+/// argv[0] is delimited by quotes only (backslashes literal); the rest
+/// apply the `2n`/`2n+1` backslash-before-quote rules and toggle the
+/// in-quotes state. Caller owns the returned slices.
+fn refParseCommandLine(gpa: std.mem.Allocator, cmdline: []const u8) ![][]u8 {
+    var args: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (args.items) |a| gpa.free(a);
+        args.deinit(gpa);
+    }
+    var i: usize = 0;
+
+    // argv[0]: quotes delimit; backslashes are literal; no escaping.
+    while (i < cmdline.len and (cmdline[i] == ' ' or cmdline[i] == '\t')) i += 1;
+    if (i < cmdline.len) {
+        var a0: std.ArrayList(u8) = .empty;
+        errdefer a0.deinit(gpa);
+        if (cmdline[i] == '"') {
+            i += 1;
+            while (i < cmdline.len and cmdline[i] != '"') : (i += 1) try a0.append(gpa, cmdline[i]);
+            if (i < cmdline.len) i += 1; // consume closing quote
+        } else {
+            while (i < cmdline.len and cmdline[i] != ' ' and cmdline[i] != '\t') : (i += 1) try a0.append(gpa, cmdline[i]);
+        }
+        try args.append(gpa, try a0.toOwnedSlice(gpa));
+    }
+
+    // Remaining args: standard backslash/quote rules.
+    while (true) {
+        while (i < cmdline.len and (cmdline[i] == ' ' or cmdline[i] == '\t')) i += 1;
+        if (i >= cmdline.len) break;
+        var arg: std.ArrayList(u8) = .empty;
+        errdefer arg.deinit(gpa);
+        var in_quotes = false;
+        while (i < cmdline.len) {
+            const c = cmdline[i];
+            if (!in_quotes and (c == ' ' or c == '\t')) break;
+            if (c == '\\') {
+                var bs: usize = 0;
+                while (i < cmdline.len and cmdline[i] == '\\') : (i += 1) bs += 1;
+                if (i < cmdline.len and cmdline[i] == '"') {
+                    try arg.appendNTimes(gpa, '\\', bs / 2);
+                    if (bs % 2 == 1) {
+                        try arg.append(gpa, '"'); // escaped literal quote
+                        i += 1;
+                    }
+                    // even: leave the '"' for the quote branch next loop
+                } else {
+                    try arg.appendNTimes(gpa, '\\', bs); // backslashes literal
+                }
+            } else if (c == '"') {
+                if (in_quotes and i + 1 < cmdline.len and cmdline[i + 1] == '"') {
+                    try arg.append(gpa, '"'); // "" inside quotes → literal "
+                    i += 2;
+                } else {
+                    in_quotes = !in_quotes;
+                    i += 1;
+                }
+            } else {
+                try arg.append(gpa, c);
+                i += 1;
+            }
+        }
+        try args.append(gpa, try arg.toOwnedSlice(gpa));
+    }
+    return args.toOwnedSlice(gpa);
+}
+
+test "quoteArg golden cases" {
+    const gpa = std.testing.allocator;
+    const Case = struct { arg: []const u8, want: []const u8 };
+    const cases = [_]Case{
+        .{ .arg = "", .want = "\"\"" }, // empty must be quoted
+        .{ .arg = "simple", .want = "simple" }, // no metachar → verbatim
+        .{ .arg = "My Game", .want = "\"My Game\"" }, // space → quoted
+        // Trailing backslash, no space → verbatim (NOT `"C:\dir\"`, which
+        // the naive quoter would emit, escaping the closing quote).
+        .{ .arg = "C:\\dir\\", .want = "C:\\dir\\" },
+        // Space + trailing backslash → quoted with the backslash doubled.
+        .{ .arg = "C:\\My Dir\\", .want = "\"C:\\My Dir\\\\\"" },
+    };
+    for (cases) |c| {
+        const got = try process.quoteArg(gpa, c.arg);
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings(c.want, got);
+    }
+}
+
+test "quoteArg round-trips through a CommandLineToArgvW reference parser" {
+    const gpa = std.testing.allocator;
+    const cases = [_][]const u8{
+        "",
+        "simple",
+        "My Game",
+        "C:\\dir\\", // trailing backslash, no space
+        "C:\\Program Files\\", // space + trailing backslash
+        "a\"b", // internal quote
+        "x\\\"y", // backslash + quote
+        "\\\\", // backslashes only
+        "tab\there", // embedded tab
+        "trailing\\\\\\", // three trailing backslashes
+    };
+
+    var cmd: std.ArrayList(u8) = .empty;
+    defer cmd.deinit(gpa);
+    const argv0 = "prog"; // simple argv[0] — round-trips trivially
+    const q0 = try process.quoteArg(gpa, argv0);
+    defer gpa.free(q0);
+    try cmd.appendSlice(gpa, q0);
+    for (cases) |c| {
+        try cmd.append(gpa, ' ');
+        const q = try process.quoteArg(gpa, c);
+        defer gpa.free(q);
+        try cmd.appendSlice(gpa, q);
+    }
+
+    const parsed = try refParseCommandLine(gpa, cmd.items);
+    defer {
+        for (parsed) |p| gpa.free(p);
+        gpa.free(parsed);
+    }
+
+    try std.testing.expectEqual(cases.len + 1, parsed.len);
+    try std.testing.expectEqualStrings(argv0, parsed[0]);
+    for (cases, 0..) |c, idx| {
+        try std.testing.expectEqualStrings(c, parsed[idx + 1]);
+    }
 }

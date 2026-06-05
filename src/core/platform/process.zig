@@ -139,6 +139,56 @@ fn currentEnvp() [*]const ?[*:0]const u8 {
     };
 }
 
+/// Quotes a single argument for a Windows command line per the MSVCRT /
+/// `CommandLineToArgvW` rules, so the spawned process reconstructs
+/// `argv[i]` byte-for-byte — including the tricky cases the naive
+/// `"arg"` wrapping gets wrong (a path ending in one or more `\`, or an
+/// argument containing `"`). Caller owns the returned slice.
+///
+/// Operates on UTF-8: every metacharacter (` `, `\t`, `\n`, vertical
+/// tab, `"`, `\`) is ASCII and UTF-8 is ASCII-transparent, so byte-wise
+/// quoting matches the wide-char algorithm `CreateProcessW` will parse.
+///
+/// Algorithm (Daniel Colascione's `ArgvQuote`): emit the argument
+/// verbatim when it is non-empty and contains no whitespace or `"`;
+/// otherwise wrap in `"` and, scanning runs of backslashes, double them
+/// before a `"` (literal or the closing one) and leave them as-is
+/// elsewhere.
+pub fn quoteArg(gpa: std.mem.Allocator, arg: []const u8) std.mem.Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+
+    if (arg.len != 0 and std.mem.indexOfAny(u8, arg, " \t\n\x0B\"") == null) {
+        try out.appendSlice(gpa, arg);
+        return out.toOwnedSlice(gpa);
+    }
+
+    try out.append(gpa, '"');
+    var i: usize = 0;
+    while (i < arg.len) {
+        var backslashes: usize = 0;
+        while (i < arg.len and arg[i] == '\\') : (i += 1) backslashes += 1;
+        if (i == arg.len) {
+            // Trailing backslashes precede the closing quote — double them
+            // so the quote stays a delimiter, not an escaped literal.
+            try out.appendNTimes(gpa, '\\', backslashes * 2);
+            break;
+        } else if (arg[i] == '"') {
+            // Escape the run of backslashes AND the embedded quote.
+            try out.appendNTimes(gpa, '\\', backslashes * 2 + 1);
+            try out.append(gpa, '"');
+            i += 1;
+        } else {
+            // Backslashes are literal away from a quote.
+            try out.appendNTimes(gpa, '\\', backslashes);
+            try out.append(gpa, arg[i]);
+            i += 1;
+        }
+    }
+    try out.append(gpa, '"');
+    return out.toOwnedSlice(gpa);
+}
+
 /// Spawns a child process running `path` with the supplied
 /// `argv`. The caller's environment is inherited as-is. The
 /// returned `Process` must be passed to `wait_nonblock` /
@@ -188,9 +238,9 @@ pub fn spawn_process(
             defer cmd.deinit(gpa);
             for (argv, 0..) |a, i| {
                 if (i != 0) try cmd.append(gpa, ' ');
-                try cmd.append(gpa, '"');
-                try cmd.appendSlice(gpa, a);
-                try cmd.append(gpa, '"');
+                const quoted = try quoteArg(gpa, a);
+                defer gpa.free(quoted);
+                try cmd.appendSlice(gpa, quoted);
             }
             const cmd_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, cmd.items);
             defer gpa.free(cmd_w);
