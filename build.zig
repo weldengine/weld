@@ -701,9 +701,13 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(fuzz_1h_exe);
     const fuzz_1h_run = b.addRunArtifact(fuzz_1h_exe);
     fuzz_1h_run.step.dependOn(b.getInstallStep());
+    // Forward `-- <args>` so the duration can be overridden for a local
+    // smoke run, e.g. `zig build test-ipc-fuzz-1h -- --duration-ms=3000`.
+    // The nightly cron runs it with no args (1 h default).
+    if (b.args) |forwarded| fuzz_1h_run.addArgs(forwarded);
     const fuzz_1h_step = b.step(
         "test-ipc-fuzz-1h",
-        "Run the S6 1 h IPC fuzz harness (manual; output digest archived in validation/s6-go-nogo.md)",
+        "Run the IPC fuzz harness over the full catalogue (1 h default; nightly CI). Override: -- --duration-ms=N",
     );
     fuzz_1h_step.dependOn(&fuzz_1h_run.step);
 
