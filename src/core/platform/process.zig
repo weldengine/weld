@@ -189,6 +189,17 @@ pub fn quoteArg(gpa: std.mem.Allocator, arg: []const u8) std.mem.Allocator.Error
     return out.toOwnedSlice(gpa);
 }
 
+/// UTF-8 → NUL-terminated UTF-16LE for the Win32 wide APIs, remapping a
+/// non-UTF-8 input to `error.InvalidArgument` (it is invalid caller
+/// input, not an engine fault) so the process `Error` set stays free of
+/// a Unicode member. Caller owns the returned slice.
+fn utf8ToUtf16Z(gpa: std.mem.Allocator, s: []const u8) error{ InvalidArgument, OutOfMemory }![:0]u16 {
+    return std.unicode.utf8ToUtf16LeAllocZ(gpa, s) catch |e| switch (e) {
+        error.InvalidUtf8 => error.InvalidArgument,
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
 /// Spawns a child process running `path` with the supplied
 /// `argv`. The caller's environment is inherited as-is. The
 /// returned `Process` must be passed to `wait_nonblock` /
@@ -242,9 +253,9 @@ pub fn spawn_process(
                 defer gpa.free(quoted);
                 try cmd.appendSlice(gpa, quoted);
             }
-            const cmd_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, cmd.items);
+            const cmd_w = try utf8ToUtf16Z(gpa, cmd.items);
             defer gpa.free(cmd_w);
-            const path_w = try std.unicode.utf8ToUtf16LeAllocZ(gpa, path);
+            const path_w = try utf8ToUtf16Z(gpa, path);
             defer gpa.free(path_w);
 
             var si: STARTUPINFOW = std.mem.zeroes(STARTUPINFOW);

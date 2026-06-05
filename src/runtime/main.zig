@@ -44,7 +44,10 @@ const Args = struct {
 
 fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init.Minimal) !Args {
     var args = Args{};
-    var it = std.process.Args.Iterator.init(init.args);
+    // `Iterator.init` is a `@compileError` on Windows (no POSIX argv) —
+    // the allocator variant parses the wide command line. `init.args`
+    // (Juicy Main) is preserved; `deinit` frees the Windows buffer.
+    var it = try std.process.Args.Iterator.initAllocator(init.args, gpa);
     defer it.deinit();
     _ = it.skip(); // argv[0] (binary path)
 
