@@ -45,6 +45,16 @@ pub const Frame = struct {
     payload_bytes: []const u8,
 };
 
+/// A frame received alongside out-of-band OS handles
+/// (`recvFrameWithHandles`). `handles` is the number of descriptors
+/// written into the caller's `handles_out` slot vector — the order
+/// matches the sender's `sendMessageWithHandles` handle order.
+pub const FrameWithHandles = struct {
+    header: framing.Header,
+    payload_bytes: []const u8,
+    handles: usize,
+};
+
 /// One IPC connection. `socket` is borrowed — the caller owns the
 /// `IpcSocket` lifetime.
 pub const IpcConnection = struct {
@@ -127,6 +137,53 @@ pub const IpcConnection = struct {
         return .{
             .header = header,
             .payload_bytes = buf[@sizeOf(framing.Header) .. @sizeOf(framing.Header) + payload_len],
+        };
+    }
+
+    /// Receive one frame together with the out-of-band OS handles the
+    /// sender attached via `sendMessageWithHandles` (POSIX
+    /// `SCM_RIGHTS`). The ancillary fds are delivered by the kernel
+    /// with the first byte chunk; this reads that chunk via
+    /// `recvWithHandles` (capturing the handles), then tops up any
+    /// short read with plain `recv` to complete the frame — the
+    /// handles have already arrived. Used for `ShmRegionsHandoff`
+    /// (`engine-ipc.md` §4.8). `buf` should be sized to exactly
+    /// `framing.frameSizeOf(T)` so the first read cannot pull bytes of
+    /// a following frame. Returns `error.Unimplemented` on Windows
+    /// (the named-pipe backend has no `recvWithHandles` in M0.7).
+    pub fn recvFrameWithHandles(
+        self: *IpcConnection,
+        buf: []u8,
+        handles_out: []transport.OsHandle,
+    ) Error!FrameWithHandles {
+        if (buf.len < @sizeOf(framing.Header)) return error.UnexpectedEof;
+
+        const first = try self.socket.recvWithHandles(buf, handles_out);
+        if (first.bytes == 0) return error.UnexpectedEof;
+        var got: usize = first.bytes;
+
+        // Top up the header if the first chunk was short — the fds
+        // already rode in with `first`, so plain `recv` is correct here.
+        while (got < @sizeOf(framing.Header)) {
+            const n = try self.socket.recv(buf[got..]);
+            if (n == 0) return error.UnexpectedEof;
+            got += n;
+        }
+        const header = try framing.parseHeader(buf[0..@sizeOf(framing.Header)]);
+
+        const payload_len: usize = @intCast(header.payload_len);
+        const total = @sizeOf(framing.Header) + payload_len;
+        if (total > buf.len) return error.PayloadTooLarge;
+        while (got < total) {
+            const n = try self.socket.recv(buf[got..]);
+            if (n == 0) return error.UnexpectedEof;
+            got += n;
+        }
+
+        return .{
+            .header = header,
+            .payload_bytes = buf[@sizeOf(framing.Header)..total],
+            .handles = first.handles,
         };
     }
 

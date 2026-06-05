@@ -30,6 +30,7 @@ const ipc = weld_core.ipc;
 const framing = ipc.framing;
 const messages = ipc.messages;
 const protocol = ipc.protocol;
+const transport = ipc.transport;
 const viewport = ipc.viewport;
 
 const is_posix = builtin.os.tag == .linux or builtin.os.tag == .macos;
@@ -106,11 +107,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer client.deinit();
     try client.connect(args.socket);
 
-    // Attach the viewport shm region the editor created.
-    var vp = try viewport.ShmViewport.open(args.shm, viewport.default_resolution.width, viewport.default_resolution.height);
-    defer vp.close();
-
-    // Send ProtocolHello.
+    // Send ProtocolHello and await the editor's acceptance.
     try client.sendHello("0.0.7-S6", "deadbee", 0);
 
     var ack_buf: [framing.frameSizeOf(messages.ProtocolHelloAck)]u8 = undefined;
@@ -120,6 +117,24 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.debug.print("runtime stub: editor rejected handshake: {s}\n", .{reason});
         return error.HandshakeRejected;
     }
+
+    // Receive the shm fd handoff (engine-ipc.md §4.8) and map the
+    // viewport from the received fd — the primary cross-process attach.
+    // The runtime never calls cross-process shm_open; `args.shm` is kept
+    // for the Windows by-name path (E3) and unused here on POSIX.
+    var handoff_buf: [framing.frameSizeOf(messages.ShmRegionsHandoff)]u8 = undefined;
+    var handoff_handles: [messages.MAX_SHM_REGIONS]transport.OsHandle = undefined;
+    @memset(&handoff_handles, transport.invalid_handle);
+    const hf = try client.connection().recvFrameWithHandles(&handoff_buf, &handoff_handles);
+    const handoff = try framing.decode(messages.ShmRegionsHandoff, hf.header, hf.payload_bytes);
+    if (hf.handles < 1 or handoff.region_count < 1) return error.MissingShmHandoff;
+    // M0.7 hands off only viewport_framebuffer (regions[0]).
+    var vp = try viewport.ShmViewport.fromFd(
+        handoff_handles[0],
+        viewport.default_resolution.width,
+        viewport.default_resolution.height,
+    );
+    defer vp.close();
 
     // Spawn the dedicated IPC reader thread per brief § Scope —
     // the main loop renders the mire at ~60 Hz while the reader

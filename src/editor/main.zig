@@ -95,6 +95,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const socket_path = try std.fmt.allocPrint(gpa, "/tmp/weld-{d}.sock", .{my_pid});
     const shm_name = try std.fmt.allocPrint(gpa, "/weld-shm-viewport-{d}", .{my_pid});
 
+    // ---- Reap orphan sockets / shm regions from any previously
+    // crashed editor (engine-ipc.md §2.4). Runs before we create our
+    // own endpoints; only dead-PID orphans are removed, so a second
+    // live editor is never disturbed. ----
+    ipc.cleanup.reapOrphans();
+
     // ---- shm region (created before everything else; runtime
     // attaches to it once spawned) ----
     var vp = try viewport.ShmViewport.create(
@@ -161,6 +167,29 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try server.sendHelloAck(false, "protocol mismatch");
         if (proc_opt) |*p| _ = try platform_process.wait_nonblock(p);
         return error.HandshakeRejected;
+    }
+
+    // ---- POSIX shm fd handoff (engine-ipc.md §4.8) ----
+    // Hand the runtime the viewport region's fd via SCM_RIGHTS so it
+    // maps the framebuffer with ShmRegion.fromFd — never cross-process
+    // shm_open. The editor stays the region owner; its own mapping is
+    // untouched by the transfer.
+    {
+        var handoff = messages.ShmRegionsHandoff{
+            .region_count = 1,
+            .regions = std.mem.zeroes([messages.MAX_SHM_REGIONS]messages.ShmRegionDesc),
+        };
+        messages.writeFixedString(&handoff.regions[0].logical_name, "viewport_framebuffer");
+        handoff.regions[0].size = viewport.regionSize(
+            viewport.default_resolution.width,
+            viewport.default_resolution.height,
+        );
+        try server.connection().sendMessageWithHandles(
+            messages.ShmRegionsHandoff,
+            0,
+            &handoff,
+            &[_]ipc.transport.OsHandle{vp.fd()},
+        );
     }
 
     // ---- Render loop ----

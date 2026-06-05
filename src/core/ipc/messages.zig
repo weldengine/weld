@@ -1,8 +1,15 @@
-//! Catalogue of the 13 IPC messages used in S6, defined as `extern
-//! struct` POD per `engine-ipc.md` §3.2 + brief § Scope. Every payload
-//! is written/read byte-for-byte across the socket, preceded by an
-//! 8-byte `schema_hash` that detects build-version drift between the
-//! editor and the runtime.
+//! Catalogue of the IPC messages, defined as `extern struct` POD per
+//! `engine-ipc.md` §3.2 + brief § Scope. Every payload is written/read
+//! byte-for-byte across the socket, preceded by an 8-byte
+//! `schema_hash` that detects build-version drift between the editor
+//! and the runtime.
+//!
+//! S6 shipped 13 message types; M0.7 / E1 adds `ShmRegionsHandoff`
+//! (the POSIX fd handoff, §3.3 + §4.8). M0.7 / E2 extends the
+//! catalogue further (`Play`/`Pause`/`Stop`, `LoadScene`,
+//! `HotReloadScript`, `SaveScene`, `SaveProject`/`ProjectSaved`,
+//! `RuntimeError`). The `WELD_IPC_PROTOCOL_VERSION` 2→3 bump covers
+//! the whole M0.7 catalogue + attach-semantics change.
 //!
 //! The S6 brief acknowledges a triple count inconsistency in its own
 //! text — the catalogue is described as "exactly 11 message types",
@@ -28,10 +35,9 @@ const std = @import("std");
 const rtti = @import("../rtti/root.zig");
 
 /// Message-type discriminator written in the framing header
-/// (`framing.zig` `Header.msg_type: u16`). Values are stable across
-/// the protocol version `WELD_IPC_PROTOCOL_VERSION = 1`; reordering
-/// or renumbering is a breaking change that bumps the protocol
-/// version.
+/// (`framing.zig` `Header.msg_type: u16`). Discriminant values are
+/// stable for a given `WELD_IPC_PROTOCOL_VERSION`; reordering or
+/// renumbering is a breaking change that bumps the protocol version.
 pub const MsgType = enum(u16) {
     /// Runtime → Editor — handshake (first message after connect).
     protocol_hello = 1,
@@ -62,13 +68,17 @@ pub const MsgType = enum(u16) {
     shutdown_ack = 12,
     /// Runtime → Editor — unidirectional log event (no ack).
     log_message = 13,
+    /// Editor → Runtime — POSIX shm fd handoff (M0.7 / E1,
+    /// `engine-ipc.md` §3.3 + §4.8). Sent right after the handshake
+    /// via `sendWithHandles`; the fds ride as ancillary data.
+    shm_regions_handoff = 14,
 
     /// Returns true when the raw `u16` from a frame header maps to a
     /// declared variant. Used by `framing.validate` to fail fast on
     /// unknown discriminants.
     pub fn isKnown(raw: u16) bool {
         return switch (raw) {
-            1...13 => true,
+            1...14 => true,
             else => false,
         };
     }
@@ -210,6 +220,50 @@ pub const LogMessage = extern struct {
     text: [256]u8,
 };
 
+/// NUL-terminated capacity for a `ShmRegionDesc.logical_name`.
+/// `"viewport_framebuffer"` (20 bytes) is the longest name M0.7 hands
+/// off; 32 leaves headroom for the §4.1 names (`debug_overlays`,
+/// `profiler_samples`, `selection_snapshot`, `log_stream`).
+pub const SHM_LOGICAL_NAME_LEN: usize = 32;
+
+/// Maximum shm regions carried by one `ShmRegionsHandoff`. M0.7 hands
+/// off only `viewport_framebuffer`; the §4.1 catalogue tops out at 5
+/// regions. 8 is comfortable headroom and keeps the frame small
+/// (`8 × 40 + 8 = 328` payload bytes).
+pub const MAX_SHM_REGIONS: usize = 8;
+
+/// One shm-region descriptor inside a `ShmRegionsHandoff`
+/// (`engine-ipc.md` §3.3). The fd travels out-of-band via
+/// `SCM_RIGHTS`; this struct carries only the logical name and size so
+/// the runtime can pair each received fd with its role and `mmap` the
+/// right length via `ShmRegion.fromFd`.
+pub const ShmRegionDesc = extern struct {
+    /// NUL-terminated logical role, e.g. `"viewport_framebuffer"`.
+    logical_name: [SHM_LOGICAL_NAME_LEN]u8,
+    /// Region size in bytes — the `mmap` length on the runtime side.
+    size: u64,
+};
+
+/// Editor → Runtime, POSIX (M0.7 / E1). Hands the runtime the file
+/// descriptors of the shm regions the editor created
+/// (`engine-ipc.md` §4.8 + §3.3). Sent immediately after
+/// `ProtocolHelloAck` through `IpcSocket.sendWithHandles`: the fds
+/// ride as `SCM_RIGHTS` ancillary data in the same order as
+/// `regions[0..region_count]`. The runtime maps each via
+/// `ShmRegion.fromFd` and **never** calls cross-process `shm_open`.
+/// The receiver validates that the ancillary fd count equals
+/// `region_count` (`engine-ipc.md` §8.3).
+pub const ShmRegionsHandoff = extern struct {
+    /// Number of valid entries in `regions` (and of fds in the
+    /// ancillary data). `1` in M0.7 (`viewport_framebuffer` only).
+    region_count: u32,
+    _pad0: u32 = 0,
+    /// Fixed-capacity descriptor table; only the first `region_count`
+    /// entries are meaningful. Fixed size keeps the frame an
+    /// `extern struct` POD like every other catalogue message.
+    regions: [MAX_SHM_REGIONS]ShmRegionDesc,
+};
+
 /// Returns the `MsgType` discriminator for a given message struct.
 /// Used by callers to fill the framing header without manually
 /// keeping the type↔enum mapping in sync at each call site.
@@ -228,6 +282,7 @@ pub fn msgTypeOf(comptime T: type) MsgType {
         Shutdown => .shutdown,
         ShutdownAck => .shutdown_ack,
         LogMessage => .log_message,
+        ShmRegionsHandoff => .shm_regions_handoff,
         else => @compileError("msgTypeOf: not a Weld IPC message type: " ++ @typeName(T)),
     };
 }
@@ -274,7 +329,7 @@ test "every message type is extern with non-zero size" {
         ModifyComponent, ModifyAck,
         Heartbeat,       HeartbeatAck,
         Shutdown,        ShutdownAck,
-        LogMessage,
+        LogMessage,      ShmRegionsHandoff,
     }) |T| {
         try std.testing.expect(@sizeOf(T) > 0);
     }
@@ -289,8 +344,9 @@ test "msgTypeOf maps every message to its discriminator" {
 test "MsgType.isKnown rejects out-of-range values" {
     try std.testing.expect(MsgType.isKnown(1));
     try std.testing.expect(MsgType.isKnown(13));
+    try std.testing.expect(MsgType.isKnown(14)); // shm_regions_handoff (M0.7 / E1)
     try std.testing.expect(!MsgType.isKnown(0));
-    try std.testing.expect(!MsgType.isKnown(14));
+    try std.testing.expect(!MsgType.isKnown(15));
     try std.testing.expect(!MsgType.isKnown(65535));
 }
 
@@ -302,7 +358,7 @@ test "schemaHash is non-zero for every message type" {
         ModifyComponent, ModifyAck,
         Heartbeat,       HeartbeatAck,
         Shutdown,        ShutdownAck,
-        LogMessage,
+        LogMessage,      ShmRegionsHandoff,
     }) |T| {
         try std.testing.expect(schemaHash(T) != 0);
     }
