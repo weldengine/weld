@@ -806,6 +806,33 @@ pub fn build(b: *std.Build) void {
     );
     paeth_bench_step.dependOn(&paeth_bench_run.step);
 
+    // ------------------------------------- M0.6 asset cooking-cache bench -----
+    //
+    // Cold-cook-vs-warm-hit time differential. Host- and load-dependent, so
+    // it lives here (archived, non-blocking, measured under the opposable
+    // protocol) and NOT in `zig build test` — the correctness half (miss →
+    // hit transition + byte-identity) is the deterministic gate
+    // `tests/assets/cache_diff.zig`. `zig build bench-asset-cache`.
+    const asset_cache_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/asset_cache.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    asset_cache_bench_module.addImport("weld_asset_pipeline", asset_pipeline_module);
+    const asset_cache_bench_exe = b.addExecutable(.{
+        .name = "asset-cache-bench",
+        .root_module = asset_cache_bench_module,
+    });
+    b.installArtifact(asset_cache_bench_exe);
+    const asset_cache_bench_run = b.addRunArtifact(asset_cache_bench_exe);
+    asset_cache_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| asset_cache_bench_run.addArgs(args);
+    const asset_cache_bench_step = b.step(
+        "bench-asset-cache",
+        "Run the M0.6 cooking-cache cold-vs-hit differential (writes bench/out/asset_cache_<os>.md; pass `-- --smoke` for a CI sanity run)",
+    );
+    asset_cache_bench_step.dependOn(&asset_cache_bench_run.step);
+
     // ----------------------------------- M0.6 thin offline asset cook demo ----
     //
     // `zig build cook-demo` cooks the three M0.6 fixtures end-to-end through

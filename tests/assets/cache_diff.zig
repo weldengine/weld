@@ -1,19 +1,35 @@
-//! M0.6 / E4 — cooking-cache hit differential (brief §Acceptance ▸ Benchmarks).
+//! M0.6 / E4 — cooking-cache hit functional test (brief §Acceptance ▸ Benchmarks).
 //!
-//! A second cook of an unchanged asset hits the cache and skips the
-//! (expensive) cook entirely. The asset is sized so the first cook does real
-//! work (hash + write a large `.bin`); the hit is a directory lookup.
+//! A second cook of an unchanged asset hits the cache and returns the
+//! byte-identical artifact without re-cooking. This is the *correctness*
+//! half of the brief's cache criterion: a miss → hit transition plus
+//! byte-identity. It is deterministic and cross-host — no wall-clock
+//! assertion — so it belongs in the `zig build test` gate.
+//!
+//! The *performance* half — the cold-cook-vs-hit time differential — is a
+//! host- and load-dependent measurement, so it lives in the bench suite
+//! (`bench/asset_cache.zig`, `zig build bench-asset-cache`), measured under
+//! the opposable protocol on the reference machine. The original M0.6 test
+//! asserted an absolute millisecond ratio inside the correctness gate, which
+//! red-failed on slower / Windows CI runners (a single cache-hit sample can
+//! spike on a page fault, AV scan, or cold directory). That debt was flagged
+//! in the M0.7 brief (§ Acted deviations → "Known debt left untouched") and
+//! is resolved here by moving the timing out of the gate, leaving only the
+//! deterministic functional assertions below.
 
 const std = @import("std");
 const assets = @import("weld_asset_pipeline");
 
-// 2048×2048 RGBA8 = 16 MiB — large enough that the first cook (BLAKE3 over the
-// payload + writing the `.bin`) is clearly expensive vs a cache-hit lookup,
-// without bloating CI with a huge temp file.
-const width = 2048;
-const height = 2048;
+// 256×256 RGBA8 = 256 KiB — large enough to exercise a real cook (header +
+// metadata + payload copy + BLAKE3 content hash) and a non-trivial
+// byte-identity check, small enough to keep the correctness gate fast on
+// every host. The larger 16 MiB asset that makes a *cold cook* expensive
+// (the point of the timing differential) is the bench's concern, not the
+// gate's.
+const width = 256;
+const height = 256;
 
-test "second cook of unchanged asset hits cache" {
+test "second cook of unchanged asset hits cache and returns identical bytes" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
@@ -42,37 +58,19 @@ test "second cook of unchanged asset hits cache" {
 
     const key = assets.cache.computeKey(&source_hash, "pc", 0);
 
-    // First cook — cache miss: cook the .bin and store it.
-    const t_miss = std.Io.Clock.Timestamp.now(io, .awake);
+    // First cook — cache miss: the artifact is absent, so we cook it and
+    // store it.
     try std.testing.expect(!cache.contains(io, &key));
     const bin = try assets.cookers.cookTexture(gpa, doc, blob);
     defer gpa.free(bin);
     try cache.put(io, &key, bin);
-    const miss_ns: i64 = @intCast(t_miss.untilNow(io).raw.nanoseconds);
 
-    // Second cook — cache hit: the artifact already exists, the cook is
-    // skipped entirely.
-    const t_hit = std.Io.Clock.Timestamp.now(io, .awake);
-    const hit = cache.contains(io, &key);
-    const hit_ns: i64 = @intCast(t_hit.untilNow(io).raw.nanoseconds);
-    try std.testing.expect(hit);
+    // Second cook — cache hit: the artifact now exists, so the cook is
+    // skipped entirely (the runtime serves the stored `.bin`).
+    try std.testing.expect(cache.contains(io, &key));
 
     // The cached artifact is byte-identical to the fresh cook.
     const cached = (try cache.get(gpa, io, &key)).?;
     defer gpa.free(cached);
     try std.testing.expectEqualSlices(u8, bin, cached);
-
-    const miss_ms = @divTrunc(miss_ns, std.time.ns_per_ms);
-    const hit_us = @divTrunc(hit_ns, std.time.ns_per_us);
-    std.debug.print("\n[cache_diff] first cook (miss) = {d} ms, second cook (hit) = {d} us\n", .{ miss_ms, hit_us });
-
-    // Differential gate. The hit is a directory lookup (< 10 ms) and avoids
-    // the cook entirely — a large speedup. The absolute first-cook wall-time
-    // is build-mode- and disk-dependent (here ~800 ms Debug, ~50 ms
-    // ReleaseSafe for 16 MiB); the brief's "≥ 100 ms first cook / < 10 ms
-    // second" is the reference-machine figure for a real decode-heavy asset,
-    // so the test asserts the robust differential rather than a flaky
-    // absolute wall-time (see Closing notes).
-    try std.testing.expect(@divTrunc(hit_ns, std.time.ns_per_ms) < 10); // hit < 10 ms
-    try std.testing.expect(miss_ns > hit_ns * 20); // cache hit ≫ 20× faster
 }
