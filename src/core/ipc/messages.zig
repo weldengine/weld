@@ -72,13 +72,35 @@ pub const MsgType = enum(u16) {
     /// `engine-ipc.md` §3.3 + §4.8). Sent right after the handshake
     /// via `sendWithHandles`; the fds ride as ancillary data.
     shm_regions_handoff = 14,
+    /// Editor → Runtime — start simulation (fire-and-forget, §3.4).
+    play = 15,
+    /// Editor → Runtime — pause simulation (fire-and-forget).
+    pause = 16,
+    /// Editor → Runtime — stop simulation (fire-and-forget).
+    stop = 17,
+    /// Editor → Runtime — load a scene by path (fire-and-forget).
+    load_scene = 18,
+    /// Editor → Runtime — hot-reload a script by asset handle.
+    hot_reload_script = 19,
+    /// Editor → Runtime — save ONE scene by path (scene granularity).
+    /// Declared in M0.7 with **no wired handler** — wiring deferred to
+    /// the scene serialization pipeline (out of Phase 0, brief § Out-of-scope).
+    save_scene = 20,
+    /// Editor → Runtime — save the whole project (transactional, §3.4).
+    /// The runtime replies with `project_saved` carrying the same `seq_id`.
+    save_project = 21,
+    /// Runtime → Editor — ack of `save_project` (same `seq_id`).
+    project_saved = 22,
+    /// Runtime → Editor — non-fatal recoverable error event (no ack).
+    /// Distinct from `CrashReport` (reserved for the fatal case).
+    runtime_error = 23,
 
     /// Returns true when the raw `u16` from a frame header maps to a
     /// declared variant. Used by `framing.validate` to fail fast on
     /// unknown discriminants.
     pub fn isKnown(raw: u16) bool {
         return switch (raw) {
-            1...14 => true,
+            1...23 => true,
             else => false,
         };
     }
@@ -101,6 +123,13 @@ pub const LogLevel = enum(u32) {
     info = 2,
     warn = 3,
     err = 4,
+};
+
+/// Severity carried by `RuntimeError.severity` (`engine-ipc.md` §3.3).
+/// Numeric values are stable across the protocol version.
+pub const ErrorSeverity = enum(u32) {
+    warning = 0,
+    err = 1,
 };
 
 /// Runtime → Editor. First message of the handshake (cf.
@@ -264,6 +293,76 @@ pub const ShmRegionsHandoff = extern struct {
     regions: [MAX_SHM_REGIONS]ShmRegionDesc,
 };
 
+/// Editor → Runtime. Start the simulation. Fire-and-forget (§3.4) — no
+/// ack. The single reserved byte keeps it a non-zero-sized extern POD.
+pub const Play = extern struct {
+    _reserved: u8 = 0,
+};
+
+/// Editor → Runtime. Pause the simulation. Fire-and-forget.
+pub const Pause = extern struct {
+    _reserved: u8 = 0,
+};
+
+/// Editor → Runtime. Stop the simulation. Fire-and-forget.
+pub const Stop = extern struct {
+    _reserved: u8 = 0,
+};
+
+/// Editor → Runtime. Load a scene by filesystem path. Fire-and-forget.
+pub const LoadScene = extern struct {
+    /// NUL-terminated scene path. Longer paths truncate at the sender.
+    path: [256]u8,
+};
+
+/// Editor → Runtime. Hot-reload a script identified by its stable asset
+/// handle (`AssetHandle` = `u64` per §3.2).
+pub const HotReloadScript = extern struct {
+    script_handle: u64,
+};
+
+/// Editor → Runtime. Save ONE scene by path (scene granularity, maps
+/// Conduit `scene.save`). Declared in M0.7 with **no wired handler**
+/// (see `MsgType.save_scene`); wiring deferred to the scene
+/// serialization pipeline (out of Phase 0).
+pub const SaveScene = extern struct {
+    /// NUL-terminated scene path.
+    path: [256]u8,
+};
+
+/// Editor → Runtime. Save the whole project (all dirty scenes + project
+/// settings + modified prefabs). Transactional (§3.4): the runtime
+/// replies with `ProjectSaved` carrying the same `seq_id`. This ack
+/// anchors the editor `CommandLog.last_clean_line` (§7, wired in E4).
+/// No body — project granularity carries no path.
+pub const SaveProject = extern struct {
+    _reserved: u8 = 0,
+};
+
+/// Runtime → Editor. Ack of `SaveProject` (same `seq_id` in the frame
+/// header). `ok == 0` carries a human-readable `reason`.
+pub const ProjectSaved = extern struct {
+    /// 1 = saved, 0 = failed. `u8` because `bool` is not legal in an
+    /// `extern struct` in Zig 0.16.
+    ok: u8,
+    _pad0: [3]u8 = .{ 0, 0, 0 },
+    /// NUL-terminated failure reason. Empty when `ok == 1`.
+    reason: [128]u8,
+};
+
+/// Runtime → Editor. Non-fatal, recoverable error event (failed
+/// non-transactional command, missing asset, …), surfaced for a toast
+/// or the "Replay Errors" panel. Unidirectional — no ack. Distinct from
+/// `CrashReport` (reserved for the fatal signal + stacktrace case).
+pub const RuntimeError = extern struct {
+    /// `ErrorSeverity` as `u32` — extern struct can't embed Zig enums.
+    severity: u32,
+    /// NUL-terminated source module name.
+    source: [64]u8,
+    /// NUL-terminated UTF-8 error text.
+    text: [256]u8,
+};
+
 /// Returns the `MsgType` discriminator for a given message struct.
 /// Used by callers to fill the framing header without manually
 /// keeping the type↔enum mapping in sync at each call site.
@@ -283,6 +382,15 @@ pub fn msgTypeOf(comptime T: type) MsgType {
         ShutdownAck => .shutdown_ack,
         LogMessage => .log_message,
         ShmRegionsHandoff => .shm_regions_handoff,
+        Play => .play,
+        Pause => .pause,
+        Stop => .stop,
+        LoadScene => .load_scene,
+        HotReloadScript => .hot_reload_script,
+        SaveScene => .save_scene,
+        SaveProject => .save_project,
+        ProjectSaved => .project_saved,
+        RuntimeError => .runtime_error,
         else => @compileError("msgTypeOf: not a Weld IPC message type: " ++ @typeName(T)),
     };
 }
@@ -330,6 +438,11 @@ test "every message type is extern with non-zero size" {
         Heartbeat,       HeartbeatAck,
         Shutdown,        ShutdownAck,
         LogMessage,      ShmRegionsHandoff,
+        Play,            Pause,
+        Stop,            LoadScene,
+        HotReloadScript, SaveScene,
+        SaveProject,     ProjectSaved,
+        RuntimeError,
     }) |T| {
         try std.testing.expect(@sizeOf(T) > 0);
     }
@@ -343,10 +456,10 @@ test "msgTypeOf maps every message to its discriminator" {
 
 test "MsgType.isKnown rejects out-of-range values" {
     try std.testing.expect(MsgType.isKnown(1));
-    try std.testing.expect(MsgType.isKnown(13));
     try std.testing.expect(MsgType.isKnown(14)); // shm_regions_handoff (M0.7 / E1)
+    try std.testing.expect(MsgType.isKnown(23)); // runtime_error (M0.7 / E2)
     try std.testing.expect(!MsgType.isKnown(0));
-    try std.testing.expect(!MsgType.isKnown(15));
+    try std.testing.expect(!MsgType.isKnown(24));
     try std.testing.expect(!MsgType.isKnown(65535));
 }
 
@@ -359,6 +472,11 @@ test "schemaHash is non-zero for every message type" {
         Heartbeat,       HeartbeatAck,
         Shutdown,        ShutdownAck,
         LogMessage,      ShmRegionsHandoff,
+        Play,            Pause,
+        Stop,            LoadScene,
+        HotReloadScript, SaveScene,
+        SaveProject,     ProjectSaved,
+        RuntimeError,
     }) |T| {
         try std.testing.expect(schemaHash(T) != 0);
     }

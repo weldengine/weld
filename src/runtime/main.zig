@@ -141,14 +141,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // Spawn the dedicated IPC reader thread per brief § Scope —
     // the main loop renders the mire at ~60 Hz while the reader
     // drains the socket and replies to transactional messages.
-    var reader_state = ReaderState{ .client = &client, .shutdown_requested = std.atomic.Value(u8).init(0), .read_failed = std.atomic.Value(u8).init(0) };
+    var reader_state = ReaderState{
+        .client = &client,
+        .shutdown_requested = std.atomic.Value(u8).init(0),
+        .read_failed = std.atomic.Value(u8).init(0),
+        .play_state = std.atomic.Value(u8).init(play_playing),
+    };
     const reader = try std.Thread.spawn(.{}, readerLoop, .{&reader_state});
     defer reader.join();
 
-    var frame: u64 = 0;
+    var frame: u64 = 0; // mire animation parameter — advances only while playing
+    var iter: u64 = 0; // loop iterations — bounds the lifetime via --frames
     while (true) {
         if (args.frames) |max| {
-            if (frame >= max) break;
+            if (iter >= max) break;
         }
         if (reader_state.shutdown_requested.load(.acquire) != 0) break;
         if (reader_state.read_failed.load(.acquire) != 0) break;
@@ -156,23 +162,41 @@ pub fn main(init: std.process.Init.Minimal) !void {
         const slot = vp.nextWriteSlot();
         renderMire(&vp, slot, frame);
         vp.commit(slot);
+        // Play/Pause/Stop gate the animation: advance the mire only while
+        // playing; paused/stopped re-commit the held frame so the viewport
+        // stays live (G6 visual) without animating.
+        if (reader_state.play_state.load(.acquire) == play_playing) frame += 1;
         sleepMs(16); // ~60 Hz
-        frame += 1;
+        iter += 1;
     }
 }
+
+/// Play-state driven by the `Play` / `Pause` / `Stop` commands
+/// (`engine-ipc.md` §3.3). Default `playing` so the S6 mire renders
+/// immediately when no control command is sent (e.g. the crash-recovery
+/// tests). The reader thread sets it; the render loop reads it to gate
+/// the mire's frame advance.
+const play_stopped: u8 = 0;
+const play_playing: u8 = 1;
+const play_paused: u8 = 2;
 
 const ReaderState = struct {
     client: *ipc.client.IpcClient,
     shutdown_requested: std.atomic.Value(u8),
     read_failed: std.atomic.Value(u8),
+    /// `play_stopped` / `play_playing` / `play_paused`.
+    play_state: std.atomic.Value(u8),
 };
 
 fn readerLoop(state: *ReaderState) void {
+    // Sized to the largest editor→runtime frame the reader decodes.
+    // `LoadScene` / `SaveScene` (256-byte path) dominate; `RuntimeError`
+    // is runtime→editor only, so it does not size this buffer.
     const max_frame_buf_size = comptime @max(
-        @max(framing.frameSizeOf(messages.Heartbeat), framing.frameSizeOf(messages.Shutdown)),
         framing.frameSizeOf(messages.Echo),
+        framing.frameSizeOf(messages.LoadScene),
     );
-    var scratch: [@as(usize, max_frame_buf_size) + 256]u8 = undefined;
+    var scratch: [@as(usize, max_frame_buf_size) + 64]u8 = undefined;
     while (true) {
         const fr = state.client.connection().recvFrame(&scratch) catch {
             state.read_failed.store(1, .release);
@@ -207,6 +231,42 @@ fn readerLoop(state: *ReaderState) void {
                 const ack = messages.ModifyAck{ .success = 1 };
                 state.client.connection().sendMessage(messages.ModifyAck, fr.header.seq_id, &ack) catch return;
             },
+            .play => state.play_state.store(play_playing, .release),
+            .pause => state.play_state.store(play_paused, .release),
+            .stop => state.play_state.store(play_stopped, .release),
+            .load_scene => {
+                const ls = framing.decode(messages.LoadScene, fr.header, fr.payload_bytes) catch return;
+                const path = messages.readFixedString(&ls.path);
+                if (path.len == 0) {
+                    // Recoverable, non-transactional command failure → a
+                    // non-fatal RuntimeError event (§3.3), not a protocol
+                    // fatal. Surfaced for the editor's "Replay Errors" panel.
+                    var re = messages.RuntimeError{
+                        .severity = @intFromEnum(messages.ErrorSeverity.warning),
+                        .source = std.mem.zeroes([64]u8),
+                        .text = std.mem.zeroes([256]u8),
+                    };
+                    messages.writeFixedString(&re.source, "runtime");
+                    messages.writeFixedString(&re.text, "load_scene: empty path");
+                    state.client.connection().sendMessage(messages.RuntimeError, 0, &re) catch return;
+                }
+                // A non-empty path is accepted (the stub has no scene to load).
+            },
+            .hot_reload_script => {
+                // Stub: decode to validate the frame. The real reload + the
+                // ScriptHotReloadComplete event land with the script pipeline
+                // (out of M0.7 scope).
+                _ = framing.decode(messages.HotReloadScript, fr.header, fr.payload_bytes) catch return;
+            },
+            .save_project => {
+                // Transactional (§3.4): reply `ProjectSaved` with the same
+                // seq_id. The stub always succeeds; the minimal binary
+                // snapshot is wired in E4.
+                const ps = messages.ProjectSaved{ .ok = 1, .reason = std.mem.zeroes([128]u8) };
+                state.client.connection().sendMessage(messages.ProjectSaved, fr.header.seq_id, &ps) catch return;
+            },
+            // `save_scene` (scene granularity) is declared with no wired
+            // handler in M0.7 — it falls through to `else` and is ignored.
             else => {
                 // Unilateral / unsupported types — ignore at the stub level.
             },
