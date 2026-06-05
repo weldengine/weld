@@ -209,3 +209,38 @@ fn readExact(socket: *transport.IpcSocket, dst: []u8) transport.Error!void {
         got += n;
     }
 }
+
+/// Raised by `acceptShmHandoff` when a `ShmRegionsHandoff` is malformed.
+pub const HandoffError = error{InvalidHandoff};
+
+/// Validate a decoded `ShmRegionsHandoff` against the fds delivered
+/// out-of-band and select the viewport fd to map (`engine-ipc.md`
+/// §8.3). `handles` is the populated prefix of the receiver's handle
+/// vector (i.e. `handoff_handles[0..recv_result.handles]`).
+///
+/// Rules (any violation ⇒ `error.InvalidHandoff`):
+///   - `region_count` is in `[1, MAX_SHM_REGIONS]`;
+///   - the fd count equals `region_count` exactly.
+///
+/// On a violation, **every** received fd is closed before returning so
+/// a malformed handoff cannot leak descriptors into the runtime. On
+/// success, M0.7 maps only `regions[0]` (`viewport_framebuffer`); the
+/// fds of any further declared regions are closed here, and the
+/// viewport fd (`handles[0]`, now owned by the caller) is returned.
+pub fn acceptShmHandoff(
+    handoff: *const messages.ShmRegionsHandoff,
+    handles: []const transport.OsHandle,
+) HandoffError!transport.OsHandle {
+    const region_count: usize = handoff.region_count;
+    if (region_count == 0 or
+        region_count > messages.MAX_SHM_REGIONS or
+        handles.len != region_count)
+    {
+        for (handles) |h| transport.closeHandle(h);
+        return error.InvalidHandoff;
+    }
+    // Map only the viewport (regions[0]); close every other region fd so
+    // a multi-region handoff cannot leak descriptors into the runtime.
+    for (handles[1..]) |h| transport.closeHandle(h);
+    return handles[0];
+}

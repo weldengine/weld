@@ -35,11 +35,24 @@ const builtin = @import("builtin");
 const weld_core = @import("weld_core");
 const shm = weld_core.ipc.shm;
 const transport = weld_core.ipc.transport;
+const connection = weld_core.ipc.connection;
+const messages = weld_core.ipc.messages;
 
 const is_posix = builtin.os.tag == .linux or builtin.os.tag == .macos;
 
 extern "c" fn close(fd: c_int) c_int;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
+extern "c" fn dup(fd: c_int) c_int;
+extern "c" fn fcntl(fd: c_int, cmd: c_int) c_int;
+
+/// `F_GETFD` — same value (1) on Linux and macOS. `fcntl(fd, F_GETFD)`
+/// returns -1 (EBADF) for a closed fd, ≥ 0 for an open one.
+const F_GETFD: c_int = 1;
+
+/// True if `fd` is still an open descriptor in this process.
+fn fdOpen(fd: transport.OsHandle) bool {
+    return fcntl(fd, F_GETFD) != -1;
+}
 extern "c" fn setsockopt(
     sockfd: c_int,
     level: c_int,
@@ -129,4 +142,66 @@ test "fromFd is unimplemented on Windows (attach stays by name)" {
         error.Unimplemented,
         shm.ShmRegion.fromFd(transport.invalid_handle, 4096),
     );
+}
+
+fn zeroRegions() [messages.MAX_SHM_REGIONS]messages.ShmRegionDesc {
+    return std.mem.zeroes([messages.MAX_SHM_REGIONS]messages.ShmRegionDesc);
+}
+
+test "acceptShmHandoff rejects fd/region_count mismatch and closes every fd" {
+    if (!is_posix) return error.SkipZigTest;
+
+    // Two disposable fds, but a handoff that claims a single region —
+    // §8.3 requires fd count == region_count, so this is rejected.
+    const fd0 = dup(2);
+    const fd1 = dup(2);
+    try std.testing.expect(fd0 >= 0 and fd1 >= 0);
+
+    const handoff = messages.ShmRegionsHandoff{ .region_count = 1, .regions = zeroRegions() };
+    const handles = [_]transport.OsHandle{ fd0, fd1 };
+    try std.testing.expectError(
+        error.InvalidHandoff,
+        connection.acceptShmHandoff(&handoff, &handles),
+    );
+
+    // Both received fds were closed — no descriptor leak on rejection.
+    try std.testing.expect(!fdOpen(fd0));
+    try std.testing.expect(!fdOpen(fd1));
+}
+
+test "acceptShmHandoff rejects region_count above MAX_SHM_REGIONS" {
+    if (!is_posix) return error.SkipZigTest;
+
+    const fd0 = dup(2);
+    try std.testing.expect(fd0 >= 0);
+
+    const handoff = messages.ShmRegionsHandoff{
+        .region_count = @as(u32, @intCast(messages.MAX_SHM_REGIONS)) + 1,
+        .regions = zeroRegions(),
+    };
+    const handles = [_]transport.OsHandle{fd0};
+    try std.testing.expectError(
+        error.InvalidHandoff,
+        connection.acceptShmHandoff(&handoff, &handles),
+    );
+    try std.testing.expect(!fdOpen(fd0));
+}
+
+test "acceptShmHandoff returns the viewport fd and closes unmapped region fds" {
+    if (!is_posix) return error.SkipZigTest;
+
+    // A well-formed two-region handoff: the runtime maps only the
+    // viewport (regions[0]); the second region's fd must be closed.
+    const fd0 = dup(2);
+    const fd1 = dup(2);
+    try std.testing.expect(fd0 >= 0 and fd1 >= 0);
+
+    const handoff = messages.ShmRegionsHandoff{ .region_count = 2, .regions = zeroRegions() };
+    const handles = [_]transport.OsHandle{ fd0, fd1 };
+    const viewport_fd = try connection.acceptShmHandoff(&handoff, &handles);
+
+    try std.testing.expectEqual(fd0, viewport_fd); // handles[0] returned
+    try std.testing.expect(fdOpen(fd0)); // caller owns it — still open
+    try std.testing.expect(!fdOpen(fd1)); // unmapped region fd closed
+    _ = close(fd0); // caller cleans up the viewport fd
 }

@@ -140,6 +140,12 @@ pub const OsHandle = std.posix.fd_t;
 /// `invalid_handle` re-export.
 pub const invalid_handle: OsHandle = -1;
 
+/// Close a bare fd received via `recvWithHandles` that the receiver
+/// will not retain (avoids leaking descriptors from a handoff).
+pub fn closeHandle(h: OsHandle) void {
+    _ = sys.close(h);
+}
+
 const Error = transport.Error;
 
 /// Backend struct embedded inside `IpcSocket.impl`. The single field

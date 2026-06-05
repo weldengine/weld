@@ -127,10 +127,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     @memset(&handoff_handles, transport.invalid_handle);
     const hf = try client.connection().recvFrameWithHandles(&handoff_buf, &handoff_handles);
     const handoff = try framing.decode(messages.ShmRegionsHandoff, hf.header, hf.payload_bytes);
-    if (hf.handles < 1 or handoff.region_count < 1) return error.MissingShmHandoff;
-    // M0.7 hands off only viewport_framebuffer (regions[0]).
+    // Validate §8.3 (count in range + strict fd/descriptor equality) and
+    // select the viewport fd. `acceptShmHandoff` closes every excess /
+    // unmapped region fd, so a malformed handoff cannot leak descriptors.
+    const viewport_fd = try ipc.connection.acceptShmHandoff(&handoff, handoff_handles[0..hf.handles]);
     var vp = try viewport.ShmViewport.fromFd(
-        handoff_handles[0],
+        viewport_fd,
         viewport.default_resolution.width,
         viewport.default_resolution.height,
     );
