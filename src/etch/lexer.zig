@@ -24,10 +24,15 @@ const SourceSpan = token.SourceSpan;
 pub const Lexer = struct {
     source: []const u8,
     pos: u32 = 0,
-    /// Byte spans of every `//`, `/* */`, and `///` comment encountered.
-    /// Not attached to AST nodes in S3 — kept as a parallel slab for
-    /// Phase 0.2's `TriviaMap`.
+    /// Byte spans of every plain `//` line comment and `/* */` block
+    /// comment encountered, in source order. Consumed by the parser's
+    /// `TriviaMap` post-pass (M0.8 D-S3-trivia).
     comment_spans: std.ArrayListUnmanaged(SourceSpan) = .empty,
+    /// Byte spans of every `///` doc comment, in source order. Kept
+    /// separate from `comment_spans` (M0.8 D-S3-doccomment) so the parser
+    /// can attach them to declaration nodes as semantic doc comments rather
+    /// than discardable trivia.
+    doc_comment_spans: std.ArrayListUnmanaged(SourceSpan) = .empty,
 
     pub fn init(source: []const u8) Lexer {
         return .{ .source = source };
@@ -35,6 +40,7 @@ pub const Lexer = struct {
 
     pub fn deinit(self: *Lexer, gpa: std.mem.Allocator) void {
         self.comment_spans.deinit(gpa);
+        self.doc_comment_spans.deinit(gpa);
     }
 
     /// Produce the next token. Comments and whitespace are skipped
@@ -129,11 +135,22 @@ pub const Lexer = struct {
 
     fn skipLineComment(self: *Lexer, gpa: std.mem.Allocator) !void {
         const start = self.pos;
-        // Either `//` or `///` (doc comment). The brief lexes `///` as a
-        // regular comment in S3 (doc-comments map deferred Phase 0.2).
+        // Distinguish a `///` doc comment from a plain `//` line comment
+        // (M0.8 D-S3-doccomment): exactly three slashes followed by a
+        // non-slash is a doc comment; `////`+ is a plain comment (Rust
+        // convention). Doc spans feed the per-node doc map, plain comments
+        // the trivia slab.
+        const is_doc = self.pos + 2 < self.source.len and
+            self.source[self.pos + 2] == '/' and
+            (self.pos + 3 >= self.source.len or self.source[self.pos + 3] != '/');
         self.pos += 2;
         while (self.pos < self.source.len and self.source[self.pos] != '\n') : (self.pos += 1) {}
-        try self.comment_spans.append(gpa, .{ .byte_start = start, .byte_end = self.pos });
+        const span: SourceSpan = .{ .byte_start = start, .byte_end = self.pos };
+        if (is_doc) {
+            try self.doc_comment_spans.append(gpa, span);
+        } else {
+            try self.comment_spans.append(gpa, span);
+        }
     }
 
     fn skipBlockComment(self: *Lexer, gpa: std.mem.Allocator) !void {
@@ -295,16 +312,31 @@ test "lexer skips line and block comments, records spans in comment_spans" {
     try std.testing.expectEqualStrings("// header", src[lex.comment_spans.items[0].byte_start..lex.comment_spans.items[0].byte_end]);
 }
 
-test "lexer skips triple-slash doc comments like line comments" {
+test "lexer routes triple-slash doc comments to doc_comment_spans (D-S3-doccomment)" {
     const gpa = std.testing.allocator;
-    var lex = Lexer.init("/// doc\nlet x = 1");
+    const src = "/// doc\nlet x = 1";
+    var lex = Lexer.init(src);
     defer lex.deinit(gpa);
     try expectKind(&lex, gpa, .kw_let);
     try expectKind(&lex, gpa, .ident);
     try expectKind(&lex, gpa, .eq);
     try expectKind(&lex, gpa, .int_literal);
     try expectKind(&lex, gpa, .eof);
-    try std.testing.expectEqual(@as(usize, 1), lex.comment_spans.items.len);
+    // The `///` is a doc comment, not a plain trivia comment.
+    try std.testing.expectEqual(@as(usize, 1), lex.doc_comment_spans.items.len);
+    try std.testing.expectEqual(@as(usize, 0), lex.comment_spans.items.len);
+    const d = lex.doc_comment_spans.items[0];
+    try std.testing.expectEqualStrings("/// doc", src[d.byte_start..d.byte_end]);
+}
+
+test "lexer distinguishes //, ///, //// comment kinds (D-S3-doccomment)" {
+    const gpa = std.testing.allocator;
+    // `//` plain, `///` doc, `////` plain (4+ slashes is not a doc comment).
+    var lex = Lexer.init("// plain\n/// doc\n//// also plain\nlet x = 1");
+    defer lex.deinit(gpa);
+    while ((try lex.next(gpa)).kind != .eof) {}
+    try std.testing.expectEqual(@as(usize, 1), lex.doc_comment_spans.items.len);
+    try std.testing.expectEqual(@as(usize, 2), lex.comment_spans.items.len);
 }
 
 test "lexer rejects invalid UTF-8 with error_utf8" {

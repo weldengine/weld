@@ -94,10 +94,59 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
     // and resyncs — so the only error that escapes here is `OutOfMemory`.
     try parser.parseFile();
 
+    // Transfer the lexer's source-ordered comment / doc-comment slabs into
+    // the arena, then bucket them onto top-level items (M0.8 D-S3-trivia /
+    // D-S3-doccomment). `lexer.deinit` is the LAST statement so the armed
+    // `errdefer lexer.deinit` never double-frees: every fallible op (the
+    // appendSlices, `attachTrivia`, `toOwnedSlice`) runs before the lexer is
+    // explicitly torn down.
     try arena.comment_spans.appendSlice(gpa, lexer.comment_spans.items);
-    lexer.deinit(gpa);
+    try arena.doc_comment_spans.appendSlice(gpa, lexer.doc_comment_spans.items);
+    try attachTrivia(&arena, gpa);
     const diags = try parser.diagnostics.toOwnedSlice(gpa);
+    lexer.deinit(gpa);
     return .{ .ast = arena, .diagnostics = diags };
+}
+
+/// Bucket the arena's source-ordered comment / doc-comment slabs onto the
+/// top-level items they precede (M0.8 D-S3-trivia / D-S3-doccomment).
+///
+/// Both slabs and `arena.items` are in source order, so two forward cursors
+/// suffice. For each item, comments lying inside the *previous* item's span
+/// are skipped (intra-body trivia is not attached at top-level granularity
+/// in M0.8 — that is Phase 2 pretty-printer work); the remaining comments
+/// up to the item's start become its leading trivia / doc comments.
+fn attachTrivia(arena: *AstArena, gpa: std.mem.Allocator) ParseError!void {
+    const item_spans = arena.items.items(.span);
+    const comments = arena.comment_spans.items;
+    const docs = arena.doc_comment_spans.items;
+
+    var comment_cursor: u32 = 0;
+    var doc_cursor: u32 = 0;
+    var prev_end: u32 = 0;
+
+    for (item_spans, 0..) |span, i| {
+        const item_id: NodeId = .{ .category = .item, .index = @intCast(i) };
+
+        // Plain comments: skip any inside the previous item, then take those
+        // ending at or before this item's start.
+        while (comment_cursor < comments.len and comments[comment_cursor].byte_start < prev_end) : (comment_cursor += 1) {}
+        const c_start = comment_cursor;
+        while (comment_cursor < comments.len and comments[comment_cursor].byte_end <= span.byte_start) : (comment_cursor += 1) {}
+        if (comment_cursor > c_start) {
+            try arena.leading_comments.put(gpa, item_id, .{ .start = c_start, .len = comment_cursor - c_start });
+        }
+
+        // Doc comments: same bucketing against the doc slab.
+        while (doc_cursor < docs.len and docs[doc_cursor].byte_start < prev_end) : (doc_cursor += 1) {}
+        const d_start = doc_cursor;
+        while (doc_cursor < docs.len and docs[doc_cursor].byte_end <= span.byte_start) : (doc_cursor += 1) {}
+        if (doc_cursor > d_start) {
+            try arena.doc_comments.put(gpa, item_id, .{ .start = d_start, .len = doc_cursor - d_start });
+        }
+
+        prev_end = span.byte_end;
+    }
 }
 
 /// Explicit parser state — exposed for callers that want to drive the
@@ -1111,6 +1160,38 @@ test "parser captures annotation kind and args" {
     // applicability is deferred — only "kind + args reachable" is required.
     try std.testing.expect(result.diagnostics.len == 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
+}
+
+test "D-S3-trivia: doc comments and leading comments attach to top-level items" {
+    const gpa = std.testing.allocator;
+    const src =
+        "// leading plain comment\n" ++
+        "/// doc line one\n" ++
+        "/// doc line two\n" ++
+        "component Alpha { a: int = 1 }\n" ++
+        "/// bravo doc\n" ++
+        "component Bravo { b: int = 2 }";
+    var result = try parse(gpa, src);
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected diag: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 2), result.ast.items.len);
+
+    const alpha_id: NodeId = .{ .category = .item, .index = 0 };
+    const bravo_id: NodeId = .{ .category = .item, .index = 1 };
+
+    // Alpha gets the two `///` doc lines plus the one plain `//` comment.
+    try std.testing.expectEqual(@as(usize, 2), result.ast.docCommentsOf(alpha_id).len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.leadingCommentsOf(alpha_id).len);
+    // The doc text round-trips from the attached span.
+    const d0 = result.ast.docCommentsOf(alpha_id)[0];
+    try std.testing.expectEqualStrings("/// doc line one", src[d0.byte_start..d0.byte_end]);
+
+    // Bravo's doc must attach to Bravo, not bleed into Alpha.
+    try std.testing.expectEqual(@as(usize, 1), result.ast.docCommentsOf(bravo_id).len);
+    try std.testing.expectEqual(@as(usize, 0), result.ast.leadingCommentsOf(bravo_id).len);
 }
 
 test "D-S3-annot-field-access: annotation arg accepts a field access expression" {

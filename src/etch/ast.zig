@@ -550,10 +550,31 @@ pub const AstArena = struct {
     annot_pool: std.ArrayListUnmanaged(Annotation) = .empty,
     annot_args: std.ArrayListUnmanaged(AnnotationArg) = .empty,
 
-    /// Parallel slab — not attached to NodeIds in S3.
+    /// Plain `//` / `/* */` comment spans, source-ordered (M0.8 D-S3-trivia
+    /// pool). `leading_comments` maps a top-level item NodeId to a
+    /// `(start, len)` slice of this pool — the comments immediately
+    /// preceding it.
     comment_spans: std.ArrayListUnmanaged(SourceSpan) = .empty,
+    /// `///` doc-comment spans, source-ordered (M0.8 D-S3-doccomment pool).
+    /// `doc_comments` maps a declaration NodeId to a slice of this pool.
+    doc_comment_spans: std.ArrayListUnmanaged(SourceSpan) = .empty,
+    /// Leading plain-comment trivia attached to a top-level item. Empty for
+    /// items with no preceding comments. Finer-grained attachment (fields,
+    /// in-body statements) is Phase 2 pretty-printer work — M0.8 attaches at
+    /// the top-level declaration granularity (the meaningful case for doc
+    /// comments and the testable mechanism for D-S3-trivia).
+    leading_comments: std.AutoHashMapUnmanaged(NodeId, SpanRange) = .empty,
+    /// Doc comments (`///`) attached to a top-level declaration node.
+    doc_comments: std.AutoHashMapUnmanaged(NodeId, SpanRange) = .empty,
 
     pub const AnnotationSpan = struct {
+        start: u32,
+        len: u32,
+    };
+
+    /// `(start, len)` slice into a span pool (`comment_spans` for
+    /// `leading_comments`, `doc_comment_spans` for `doc_comments`).
+    pub const SpanRange = struct {
         start: u32,
         len: u32,
     };
@@ -588,6 +609,9 @@ pub const AstArena = struct {
         self.annot_pool.deinit(gpa);
         self.annot_args.deinit(gpa);
         self.comment_spans.deinit(gpa);
+        self.doc_comment_spans.deinit(gpa);
+        self.leading_comments.deinit(gpa);
+        self.doc_comments.deinit(gpa);
     }
 
     // ─── Add helpers ────────────────────────────────────────────────────
@@ -727,6 +751,20 @@ pub const AstArena = struct {
 
     pub fn isEmpty(self: *const AstArena) bool {
         return self.items.len == 0;
+    }
+
+    /// Doc comments (`///`) attached to a declaration node, in source order,
+    /// or an empty slice if none (M0.8 D-S3-doccomment / D-S3-trivia).
+    pub fn docCommentsOf(self: *const AstArena, id: NodeId) []const SourceSpan {
+        const r = self.doc_comments.get(id) orelse return &[_]SourceSpan{};
+        return self.doc_comment_spans.items[r.start .. r.start + r.len];
+    }
+
+    /// Leading plain-comment trivia attached to a top-level item, in source
+    /// order, or an empty slice if none (M0.8 D-S3-trivia).
+    pub fn leadingCommentsOf(self: *const AstArena, id: NodeId) []const SourceSpan {
+        const r = self.leading_comments.get(id) orelse return &[_]SourceSpan{};
+        return self.comment_spans.items[r.start .. r.start + r.len];
     }
 };
 
