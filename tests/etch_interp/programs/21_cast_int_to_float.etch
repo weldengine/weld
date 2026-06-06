@@ -1,0 +1,14 @@
+// M0.8 v0.6 foundation: numeric cast (`as`) — read an int field, cast it to
+// float, write it to a float field. Exercises cast parse + interpret +
+// codegen in the interpreter↔cooked-Zig differential.
+component Health {
+  current: float = 0.0
+  level: int = 4
+}
+
+rule promote(entity: Entity)
+  when entity has Health
+{
+  let lvl = entity.get(Health).level
+  entity.get_mut(Health).current = lvl as float
+}

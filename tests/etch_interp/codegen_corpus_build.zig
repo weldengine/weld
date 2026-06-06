@@ -37,4 +37,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p18_resource_changed_clean", .etch_path = "tests/etch_interp/programs/18_resource_changed_clean.etch" },
     .{ .name = "p19_rule_order_sees_mutation", .etch_path = "tests/etch_interp/programs/19_rule_order_sees_mutation.etch" },
     .{ .name = "p20_rule_order_sees_previous", .etch_path = "tests/etch_interp/programs/20_rule_order_sees_previous.etch" },
+    .{ .name = "p21_cast_int_to_float", .etch_path = "tests/etch_interp/programs/21_cast_int_to_float.etch" },
 };

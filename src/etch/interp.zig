@@ -434,6 +434,22 @@ pub const Interpreter = struct {
                     },
                 };
             },
+            .cast => {
+                // `operand as Type` (M0.8 v0.6 foundations). Runtime values
+                // carry int as i64 and float as f64; a cast only flips the
+                // numeric domain (int↔float). Integer width narrowing is a
+                // storage concern handled on write, not in the Value.
+                const c = self.ast.casts.items[data];
+                const v = try self.evalExpr(world, locals, c.operand);
+                const named = self.ast.named_types.items[self.ast.typeNodeData(c.type_node)];
+                const tname = self.ast.strings.slice(named.name);
+                const to_float = std.mem.eql(u8, tname, "float") or std.mem.eql(u8, tname, "f32") or std.mem.eql(u8, tname, "f64");
+                return switch (v) {
+                    .int_ => |x| if (to_float) Value{ .float_ = @floatFromInt(x) } else Value{ .int_ = x },
+                    .float_ => |x| if (to_float) Value{ .float_ = x } else Value{ .int_ = @intFromFloat(x) },
+                    else => error.RuntimeFailure,
+                };
+            },
             else => return error.RuntimeFailure, // path / tag_path / unsupported variants
         }
     }
@@ -975,4 +991,53 @@ test "runProgram resource get/get_mut without receiver reads and writes the reso
     var points: i32 = 0;
     @memcpy(std.mem.asBytes(&points), bytes[0..@sizeOf(i32)]);
     try std.testing.expectEqual(@as(i32, 15), points);
+}
+
+test "runProgram numeric cast int-to-float (M0.8 cast foundation)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const source =
+        \\component Health {
+        \\  current: float = 0.0
+        \\  level: i32 = 3
+        \\}
+        \\rule promote(entity: Entity)
+        \\  when entity has Health
+        \\{
+        \\  let lvl = entity.get(Health).level
+        \\  entity.get_mut(Health).current = lvl as float
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const comp_id = world.registry.idOf("Health").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{comp_id});
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    const idx = arch.componentIndex(comp_id).?;
+    const slot = arch.componentSlot(chunk, idx, loc.slot);
+    var current: f64 = 0;
+    @memcpy(std.mem.asBytes(&current), slot[0..@sizeOf(f64)]);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), current, 0.0001);
 }

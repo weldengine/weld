@@ -613,6 +613,24 @@ pub const TypeChecker = struct {
             },
             .binary => return try self.synthBinary(id, data, ctx_opt),
             .unary => return try self.synthUnary(id, data, ctx_opt),
+            .cast => {
+                // `operand as Type` (M0.8 v0.6 foundations). The S3 subset
+                // permits numeric-scalar → numeric-scalar conversions only;
+                // the result type is the (numeric) target. Casts to or from a
+                // non-numeric type are rejected (E0200).
+                const c = self.arena.casts.items[data];
+                const operand_t = try self.synthExprE(c.operand, ctx_opt);
+                const target_t = self.namedTypeToResolved(c.type_node);
+                if (target_t != .builtin or !target_t.builtin.isNumeric()) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "cast target must be a numeric primitive type ('as' converts between numbers in the S3 subset)", .{});
+                    return ResolvedType.unknown;
+                }
+                if (operand_t == .builtin and !operand_t.builtin.isNumeric()) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "cast operand must be a numeric primitive", .{});
+                    return ResolvedType.unknown;
+                }
+                return target_t;
+            },
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
             else => return ResolvedType.unknown,
         }
@@ -946,6 +964,47 @@ test "type-checker emits E1213 on receiver-less get of a resource absent from th
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .resource_expected_in_when);
+}
+
+test "type-checker accepts numeric casts and rejects non-numeric ones (M0.8 cast foundation)" {
+    const gpa = std.testing.allocator;
+
+    // Numeric → numeric cast chain is accepted.
+    var ok = try parseAndCheck(gpa,
+        \\component C { x: float = 0.0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let y = 3 as f32
+        \\  entity.get_mut(C).x = y as float
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+
+    // Cast target is not a numeric primitive → E0200.
+    var bad_target = try parseAndCheck(gpa,
+        \\component C { x: float = 0.0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let y = 3 as bool
+        \\}
+    );
+    defer bad_target.deinit(gpa);
+    try expectAnyCode(bad_target.diagnostics.items, .type_mismatch);
+
+    // Cast operand is not numeric → E0200.
+    var bad_operand = try parseAndCheck(gpa,
+        \\component C { x: float = 0.0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let y = true as f32
+        \\}
+    );
+    defer bad_operand.deinit(gpa);
+    try expectAnyCode(bad_operand.diagnostics.items, .type_mismatch);
 }
 
 test "type-checker emits E1210 on rule when clause referencing unknown component" {

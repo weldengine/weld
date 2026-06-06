@@ -412,6 +412,13 @@ const MethodGetExpr = struct {
     type_name: StringId,
 };
 
+/// `operand as Type` cast expression (M0.8 v0.6 foundations). `type_node`
+/// is a `.type_node` category id produced by `parseType`.
+pub const CastExpr = struct {
+    operand: NodeId,
+    type_node: NodeId,
+};
+
 const NamedTypeNode = struct {
     name: StringId,
 };
@@ -543,6 +550,7 @@ pub const AstArena = struct {
     unary_exprs: std.ArrayListUnmanaged(UnaryExpr) = .empty,
     field_accesses: std.ArrayListUnmanaged(FieldAccessExpr) = .empty,
     method_gets: std.ArrayListUnmanaged(MethodGetExpr) = .empty,
+    casts: std.ArrayListUnmanaged(CastExpr) = .empty,
     named_types: std.ArrayListUnmanaged(NamedTypeNode) = .empty,
 
     // Annotation storage.
@@ -604,6 +612,7 @@ pub const AstArena = struct {
         self.unary_exprs.deinit(gpa);
         self.field_accesses.deinit(gpa);
         self.method_gets.deinit(gpa);
+        self.casts.deinit(gpa);
         self.named_types.deinit(gpa);
         self.annotations.deinit(gpa);
         self.annot_pool.deinit(gpa);
@@ -669,6 +678,12 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.method_gets.items.len);
         try self.method_gets.append(gpa, .{ .receiver = receiver, .type_name = type_name });
         return try self.addExpr(gpa, kind, idx, span);
+    }
+
+    pub fn addCast(self: *AstArena, gpa: std.mem.Allocator, operand: NodeId, type_node: NodeId, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.casts.items.len);
+        try self.casts.append(gpa, .{ .operand = operand, .type_node = type_node });
+        return try self.addExpr(gpa, .cast, idx, span);
     }
 
     pub fn addLetStmt(self: *AstArena, gpa: std.mem.Allocator, let: LetStmt, span: SourceSpan) !NodeId {

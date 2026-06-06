@@ -861,7 +861,27 @@ pub const Parser = struct {
 
     fn parsePostfix(self: *Parser) ParseError!NodeId {
         const expr = try self.parsePrimary();
-        return self.continuePostfix(expr);
+        const after_postfix = try self.continuePostfix(expr);
+        return self.continueCast(after_postfix);
+    }
+
+    /// Continue a left-associative `expr as Type` cast chain (M0.8 v0.6
+    /// foundations). `as` binds tighter than the binary operators and
+    /// looser than the `.field` / `.get` postfix chain, so `a.b as f32 + c`
+    /// parses as `((a.b) as f32) + c`.
+    fn continueCast(self: *Parser, expr_in: NodeId) ParseError!NodeId {
+        var expr = expr_in;
+        while (self.peek() == .kw_as) {
+            _ = try self.advance();
+            const type_node = try self.parseType();
+            const operand_span = self.arena.exprSpan(expr);
+            const type_span = self.arena.typeNodeSpan(type_node);
+            expr = try self.arena.addCast(self.gpa, expr, type_node, .{
+                .byte_start = operand_span.byte_start,
+                .byte_end = type_span.byte_end,
+            });
+        }
+        return expr;
     }
 
     /// Continue a postfix `.field` / `.get(T)` / `.get_mut(T)` chain on an

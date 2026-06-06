@@ -47,6 +47,7 @@ pub const TokenKind = enum {
     kw_changed,
     kw_get,
     kw_get_mut,
+    kw_as, // cast operator (M0.8 v0.6 foundations)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -129,6 +130,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "changed", .kind = .kw_changed },
     .{ .lexeme = "get", .kind = .kw_get },
     .{ .lexeme = "get_mut", .kind = .kw_get_mut },
+    .{ .lexeme = "as", .kind = .kw_as },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -183,12 +185,12 @@ pub const non_s3_keywords = [_][]const u8{
     // ── Timers / emit / lifecycle (out of S3) ──
     "emit",        "after",        "every",       "after_unscaled", "quantize",
 
-    // Note: `as`, `where`, `self`, `none`, `some` are intentionally NOT
-    // listed — they appear in legitimate identifier-shaped positions in
-    // S3 annotation args (e.g. `@pause_group(.none)`). The S3 parser
-    // accepts them as plain identifiers; their grammar-level uses (cast,
-    // generic bound, impl self param, Optional construction) only show
-    // up in constructs already rejected at the top level.
+    // Note: `where`, `self`, `none`, `some` are intentionally NOT listed —
+    // they appear in legitimate identifier-shaped positions in S3 annotation
+    // args (e.g. `@pause_group(.none)`). The S3 parser accepts them as plain
+    // identifiers; their grammar-level uses (generic bound, impl self param,
+    // Optional construction) only show up in constructs rejected at the top
+    // level. `as` graduated to a real keyword with the M0.8 cast operator.
 };
 
 test "non_s3_keywords does not collide with s3_keywords" {

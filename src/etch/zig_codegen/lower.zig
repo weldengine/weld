@@ -586,6 +586,10 @@ fn walkExprForComponents(
             const u = ast.unary_exprs.items[data];
             try walkExprForComponents(gpa, ast, u.operand, out);
         },
+        .cast => {
+            const c = ast.casts.items[data];
+            try walkExprForComponents(gpa, ast, c.operand, out);
+        },
         else => {},
     }
 }
@@ -911,6 +915,28 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             if (mg.receiver.isNone()) return CodegenError.UnsupportedConstruct;
             try emitComponentSlot(w, ctx, ast.strings.slice(mg.type_name));
         },
+        .cast => {
+            // `operand as Type` → an explicit Zig numeric conversion wrapped
+            // in `@as(T, …)` (M0.8 v0.6 foundations). The conversion builtin
+            // is picked from the operand's inferred domain vs the target's.
+            const c = ast.casts.items[data];
+            const named = ast.named_types.items[ast.typeNodeData(c.type_node)];
+            const zig_t = type_map.mapBuiltin(ast.strings.slice(named.name)) orelse return CodegenError.UnsupportedConstruct;
+            const target_is_float = std.mem.eql(u8, zig_t, "f32") or std.mem.eql(u8, zig_t, "f64");
+            const src_zig = inferExprZigType(ast, ctx, c.operand);
+            const src_is_float = std.mem.eql(u8, src_zig, "f32") or std.mem.eql(u8, src_zig, "f64");
+            const conv: []const u8 = if (target_is_float and !src_is_float)
+                "@floatFromInt"
+            else if (!target_is_float and src_is_float)
+                "@intFromFloat"
+            else if (target_is_float)
+                "@floatCast"
+            else
+                "@intCast";
+            try w.print("@as({s}, {s}(", .{ zig_t, conv });
+            try emitExpr(w, ast, ctx, c.operand);
+            try w.write("))");
+        },
         .binary => {
             const b = ast.binary_exprs.items[data];
             try w.write("(");
@@ -1009,6 +1035,11 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
             break :blk z;
         },
         .method_get, .method_get_mut => "struct", // not directly inferable; should not appear at let-rhs after method_get handling
+        .cast => blk: {
+            const c = ast.casts.items[data];
+            const named = ast.named_types.items[ast.typeNodeData(c.type_node)];
+            break :blk type_map.mapBuiltin(ast.strings.slice(named.name)) orelse "i64";
+        },
         else => "i64",
     };
 }

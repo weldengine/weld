@@ -40,6 +40,7 @@ const p17 = @import("programs/17_resource_changed_dirty.expected.zig");
 const p18 = @import("programs/18_resource_changed_clean.expected.zig");
 const p19 = @import("programs/19_rule_order_sees_mutation.expected.zig");
 const p20 = @import("programs/20_rule_order_sees_previous.expected.zig");
+const p21 = @import("programs/21_cast_int_to_float.expected.zig");
 
 /// Embedded list of the 20 differential corpus programs consumed by
 /// the S4 interpreter test and the S5 codegen parity test.
@@ -64,4 +65,5 @@ pub const programs = [_]Program{
     .{ .name = "18_resource_changed_clean", .source = @embedFile("programs/18_resource_changed_clean.etch"), .config = p18.config, .initial = p18.initial, .expected = p18.expected },
     .{ .name = "19_rule_order_sees_mutation", .source = @embedFile("programs/19_rule_order_sees_mutation.etch"), .config = p19.config, .initial = p19.initial, .expected = p19.expected },
     .{ .name = "20_rule_order_sees_previous", .source = @embedFile("programs/20_rule_order_sees_previous.etch"), .config = p20.config, .initial = p20.initial, .expected = p20.expected },
+    .{ .name = "21_cast_int_to_float", .source = @embedFile("programs/21_cast_int_to_float.etch"), .config = p21.config, .initial = p21.initial, .expected = p21.expected },
 };
