@@ -891,6 +891,10 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 try w.writeIndent();
                 try w.write("} }\n");
             } else {
+                // A two-binding for-in is a map iteration (`for k, v in m`) —
+                // map codegen is deferred (heap / arena model), interpreter is
+                // the reference. Single-binding only here.
+                if (f.index_name != 0) return CodegenError.UnsupportedConstruct;
                 // `for v in <array> { body }` → Zig `for (<array>) |v| { ... }`
                 // (M0.8 collections). E1 codegen supports fixed-array iterables;
                 // the loop variable binds each element by value. Zig infers the

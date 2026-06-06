@@ -127,30 +127,47 @@ const Locals = struct {
     }
 };
 
+/// One `key: value` entry of a runtime map (M0.8 collections).
+const MapPair = struct { key: Value, value: Value };
+
 /// Per-rule-body heap store for Etch collection values (M0.8 collections).
 /// Arrays are `ArrayListUnmanaged(Value)` addressed by the `u32` handle carried
-/// in `Value.array_ref`. Reset at each rule-body boundary so collections
-/// created inside a body do not leak across invocations (rule-arena semantics,
-/// surface view of `etch-memory-model.md` §6). E1 stores arrays only; maps /
-/// sets join this store with their own slabs in the collections sub-tranche.
+/// in `Value.array_ref`; maps are `ArrayListUnmanaged(MapPair)` (insertion
+/// order, keys unique) addressed by `Value.map_ref`. Reset at each rule-body
+/// boundary so collections created inside a body do not leak across
+/// invocations (rule-arena semantics, surface view of `etch-memory-model.md`
+/// §6). Sets have no E1 literal / constructor (their `Set.from` needs the call
+/// mechanism), so they are not stored yet.
 const CollectionStore = struct {
     arrays: std.ArrayListUnmanaged(std.ArrayListUnmanaged(Value)) = .empty,
+    maps: std.ArrayListUnmanaged(std.ArrayListUnmanaged(MapPair)) = .empty,
 
     fn deinit(self: *CollectionStore, gpa: std.mem.Allocator) void {
         for (self.arrays.items) |*a| a.deinit(gpa);
         self.arrays.deinit(gpa);
+        for (self.maps.items) |*m| m.deinit(gpa);
+        self.maps.deinit(gpa);
     }
 
-    /// Free every per-body array, keeping the outer vector's capacity.
+    /// Free every per-body collection, keeping the outer vectors' capacity.
     fn reset(self: *CollectionStore, gpa: std.mem.Allocator) void {
         for (self.arrays.items) |*a| a.deinit(gpa);
         self.arrays.clearRetainingCapacity();
+        for (self.maps.items) |*m| m.deinit(gpa);
+        self.maps.clearRetainingCapacity();
     }
 
     /// Allocate a fresh empty array, returning its handle.
     fn newArray(self: *CollectionStore, gpa: std.mem.Allocator) !u32 {
         const idx: u32 = @intCast(self.arrays.items.len);
         try self.arrays.append(gpa, .empty);
+        return idx;
+    }
+
+    /// Allocate a fresh empty map, returning its handle.
+    fn newMap(self: *CollectionStore, gpa: std.mem.Allocator) !u32 {
+        const idx: u32 = @intCast(self.maps.items.len);
+        try self.maps.append(gpa, .empty);
         return idx;
     }
 };
@@ -383,6 +400,24 @@ pub const Interpreter = struct {
                             }
                         }
                     },
+                    .map_ref => |handle| {
+                        // `for k, v in m` — bind key then value per entry (M0.8
+                        // collections). Iteration order is insertion order in
+                        // the interpreter (maps are unordered by contract, so a
+                        // differential reads it only through an order-invariant
+                        // reduction such as a sum).
+                        const len = self.collections.maps.items[handle].items.len;
+                        var k: usize = 0;
+                        while (k < len) : (k += 1) {
+                            const pair = self.collections.maps.items[handle].items[k];
+                            try locals.put(self.gpa, f.var_name, pair.key, false);
+                            if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
+                            var s: u32 = 0;
+                            while (s < f.body_len) : (s += 1) {
+                                try self.execStmt(world, locals, @bitCast(self.ast.extra.items[f.body_start + s]));
+                            }
+                        }
+                    },
                     else => return error.RuntimeFailure,
                 }
             },
@@ -588,6 +623,30 @@ pub const Interpreter = struct {
                     }
                 }
                 return Value{ .array_ref = handle };
+            },
+            .map_lit => {
+                // `[k: v, ...]` → materialize a fresh map in the rule-body
+                // store (M0.8 collections). Duplicate keys are last-write-wins.
+                // The interpreter is the reference execution; map codegen is
+                // deferred (heap / arena model).
+                const ml = self.ast.map_lits.items[data];
+                const handle = try self.collections.newMap(self.gpa);
+                var i: u32 = 0;
+                while (i < ml.entries_len) : (i += 1) {
+                    const entry = self.ast.map_entries.items[ml.entries_start + i];
+                    const k = try self.evalExpr(world, locals, entry.key);
+                    const v = try self.evalExpr(world, locals, entry.value);
+                    var replaced = false;
+                    for (self.collections.maps.items[handle].items) |*pair| {
+                        if (pair.key.eql(k)) {
+                            pair.value = v;
+                            replaced = true;
+                            break;
+                        }
+                    }
+                    if (!replaced) try self.collections.maps.items[handle].append(self.gpa, .{ .key = k, .value = v });
+                }
+                return Value{ .map_ref = handle };
             },
             .index => {
                 // `receiver[index]` — slice if the index is a range, else a
@@ -1481,4 +1540,51 @@ test "runProgram for-in over a dynamic array iterates each element (M0.8 collect
     var total: i64 = 0;
     @memcpy(std.mem.asBytes(&total), slot[0..8]);
     try std.testing.expectEqual(@as(i64, 45), total);
+}
+
+test "runProgram map literal + for-in sums values (M0.8 collections)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A map literal iterated with `for k, v in m`, summing the values. The
+    // interpreter is the reference execution (map codegen is deferred). The
+    // sum (10 + 20 + 30 = 60) is order-invariant, matching the unordered-map
+    // contract.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule sum(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let m = [1: 10, 2: 20, 3: 30]
+        \\  let mut s = 0
+        \\  for k, v in m { s += v }
+        \\  entity.get_mut(Acc).out = s
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var total: i64 = 0;
+    @memcpy(std.mem.asBytes(&total), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 60), total);
 }

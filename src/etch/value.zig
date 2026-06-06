@@ -70,6 +70,9 @@ pub const Value = union(enum) {
     /// index resolved against `Interpreter.collections`. Invalidated at the
     /// rule-body boundary (rule-arena semantics).
     array_ref: u32,
+    /// Handle into the interpreter's per-rule-body map store (M0.8
+    /// collections). Same lifetime rules as `array_ref`.
+    map_ref: u32,
     unit,
 
     pub fn fromInt(x: i64) Value {
@@ -105,6 +108,7 @@ pub const Value = union(enum) {
             .resource_ref => false,
             .range => false,
             .array_ref => false,
+            .map_ref => false,
             .unit => true,
         };
     }

@@ -669,21 +669,31 @@ pub const TypeChecker = struct {
                 // body is checked with it in scope (M0.8 v0.6 foundations).
                 const f = self.arena.for_stmts.items[data];
                 const iter_t = self.synthExpr(f.iterable, ctx);
-                var elem_t: ResolvedType = ResolvedType.unknown;
-                if (iter_t == .range) {
-                    elem_t = .{ .builtin = iter_t.range };
-                } else if (iter_t.elementType()) |bt| {
-                    // Array / slice iteration binds the element type (M0.8
-                    // collections). Map iteration `for k, v in m` arrives with
-                    // the map runtime sub-tranche.
-                    elem_t = .{ .builtin = bt };
-                } else if (iter_t != .unknown) {
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "for-in iterable must be a range or array in E1", .{});
+                if (iter_t == .map_t) {
+                    // `for k, v in m` — two bindings: key then value (M0.8
+                    // collections). A single-binding map for-in is rejected.
+                    const mi = iter_t.map_t;
+                    if (f.index_name == 0) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "map for-in binds two variables (for k, v in m)", .{});
+                    } else {
+                        try ctx.locals.put(self.gpa, f.index_name, .{ .type_ = .{ .builtin = mi.value }, .is_mut = false });
+                    }
+                    try ctx.locals.put(self.gpa, f.var_name, .{ .type_ = .{ .builtin = mi.key }, .is_mut = false });
+                } else {
+                    var elem_t: ResolvedType = ResolvedType.unknown;
+                    if (iter_t == .range) {
+                        elem_t = .{ .builtin = iter_t.range };
+                    } else if (iter_t.elementType()) |bt| {
+                        // Array / slice iteration binds the element type (M0.8).
+                        elem_t = .{ .builtin = bt };
+                    } else if (iter_t != .unknown) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "for-in iterable must be a range, array, or map in E1", .{});
+                    }
+                    if (f.index_name != 0) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "this for-in binds a single loop variable", .{});
+                    }
+                    try ctx.locals.put(self.gpa, f.var_name, .{ .type_ = elem_t, .is_mut = false });
                 }
-                if (f.index_name != 0) {
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "this for-in binds a single loop variable", .{});
-                }
-                try ctx.locals.put(self.gpa, f.var_name, .{ .type_ = elem_t, .is_mut = false });
                 var i: u32 = 0;
                 while (i < f.body_len) : (i += 1) {
                     const body_stmt: NodeId = @bitCast(self.arena.extra.items[f.body_start + i]);
@@ -814,6 +824,7 @@ pub const TypeChecker = struct {
                 return target_t;
             },
             .array_lit => return try self.synthArrayLit(id, data, ctx_opt),
+            .map_lit => return try self.synthMapLit(id, data, ctx_opt),
             .index => return try self.synthIndex(id, data, ctx_opt),
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
             else => return ResolvedType.unknown,
@@ -857,6 +868,39 @@ pub const TypeChecker = struct {
             } else elem_bt = et.builtin;
         }
         return .{ .array_fixed = .{ .elem = elem_bt.?, .len = al.elements_len } };
+    }
+
+    /// Type a map literal (M0.8 collections). `[k: v, ...]` infers a map whose
+    /// key / value are the unified builtin types of the entries. E1 maps carry
+    /// builtin key / value types — a non-builtin (e.g. a `string` key, which is
+    /// not a builtin in E1) leaves the literal `unknown` (the interpreter still
+    /// builds it from the runtime values; precise string-keyed map typing is a
+    /// later refinement). Empty `[:]` stays `unknown` so the annotation types it.
+    fn synthMapLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        _ = id;
+        const ml = self.arena.map_lits.items[data];
+        if (ml.entries_len == 0) return ResolvedType.unknown; // empty: type from annotation
+        var key_bt: ?BuiltinType = null;
+        var val_bt: ?BuiltinType = null;
+        var all_builtin = true;
+        var i: u32 = 0;
+        while (i < ml.entries_len) : (i += 1) {
+            const entry = self.arena.map_entries.items[ml.entries_start + i];
+            const kt = try self.synthExprE(entry.key, ctx_opt);
+            const vt = try self.synthExprE(entry.value, ctx_opt);
+            if (kt != .builtin or vt != .builtin) {
+                all_builtin = false;
+                continue;
+            }
+            if (key_bt) |kb| {
+                if (!self.literalTypeFits(kb, entry.key, kt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.key), "map keys must all have the same type", .{});
+            } else key_bt = kt.builtin;
+            if (val_bt) |vb| {
+                if (!self.literalTypeFits(vb, entry.value, vt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.value), "map values must all have the same type", .{});
+            } else val_bt = vt.builtin;
+        }
+        if (!all_builtin or key_bt == null or val_bt == null) return ResolvedType.unknown;
+        return .{ .map_t = .{ .key = key_bt.?, .value = val_bt.? } };
     }
 
     /// Type an index / slice access (M0.8 collections). A range index
@@ -1653,4 +1697,34 @@ test "array literal element typing, indexing, and slicing (M0.8 collections)" {
     );
     defer coll_field.deinit(gpa);
     try expectAnyCode(coll_field.diagnostics.items, .undefined_symbol);
+}
+
+test "map literal typing and map for-in bindings (M0.8 collections)" {
+    const gpa = std.testing.allocator;
+
+    // A two-binding map for-in (`for k, v in m`) is clean.
+    var ok = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let m = [1: 10, 2: 20]
+        \\  for k, v in m { entity.get_mut(C).out += v }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+
+    // A single-binding map for-in → E0200 (maps bind two variables).
+    var single = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let m = [1: 10, 2: 20]
+        \\  for k in m { entity.get_mut(C).out = k }
+        \\}
+    );
+    defer single.deinit(gpa);
+    try expectAnyCode(single.diagnostics.items, .type_mismatch);
 }
