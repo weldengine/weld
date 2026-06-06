@@ -1,0 +1,10 @@
+// Receiver-less `get(T)` accesses a resource; `Health` is a component, so
+// this must surface E0301 ResourceExpectedComponentGiven
+// (M0.8 D-S3-resource-receiver). The component form is `entity.get(Health)`.
+component Health { current: float = 100.0 }
+
+rule tick(entity: Entity)
+    when entity has Health
+{
+    let h = get(Health)
+}

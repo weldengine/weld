@@ -1,0 +1,16 @@
+// Receiver-less resource access in a rule body (M0.8 D-S3-resource-receiver):
+// `get(R)` reads and `get_mut(R)` mutably accesses a resource declared in the
+// rule's when clause. Mirrors `entity.get(T)` for components but drops the
+// receiver, since a resource is a world singleton rather than per-entity data.
+resource Score {
+    points: i32 = 0
+    base: i32 = 5
+}
+
+rule bump()
+    when resource Score
+{
+    let earned = get(Score).base
+    let s = get_mut(Score)
+    s.points += earned
+}

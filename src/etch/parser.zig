@@ -912,6 +912,23 @@ pub const Parser = struct {
         });
     }
 
+    /// Parse a receiver-less `get(T)` / `get_mut(T)` resource accessor
+    /// (D-S3-resource-receiver). Stored as a `method_get` / `method_get_mut`
+    /// expression with `receiver == NodeId.none`; the type-checker resolves
+    /// `T` as a resource (E0301 if `T` names a component) and the
+    /// interpreter / codegen dispatch on the absent receiver. The span
+    /// starts at the `get` / `get_mut` keyword since there is no receiver.
+    fn parseResourceGetCall(self: *Parser, kind: ast_mod.ExprKind, get_span: SourceSpan) ParseError!NodeId {
+        _ = try self.expect(.lparen, "expected '(' after get/get_mut");
+        const type_tok = try self.expect(.type_ident, "expected resource type inside get(T)");
+        const type_name = try self.internSlice(type_tok.span);
+        const closing = try self.expect(.rparen, "expected ')' to close get/get_mut call");
+        return try self.arena.addMethodGet(self.gpa, kind, NodeId.none, type_name, .{
+            .byte_start = get_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
     fn parsePrimary(self: *Parser) ParseError!NodeId {
         try self.surfaceTokenErrors();
         switch (self.peek()) {
@@ -971,6 +988,16 @@ pub const Parser = struct {
                     .byte_start = dot_span.byte_start,
                     .byte_end = ident_tok.span.byte_end,
                 });
+            },
+            .kw_get => {
+                // Receiver-less `get(T)` — resource read (D-S3-resource-receiver).
+                const get_span = (try self.advance()).span;
+                return try self.parseResourceGetCall(.method_get, get_span);
+            },
+            .kw_get_mut => {
+                // Receiver-less `get_mut(T)` — resource mutable access.
+                const get_span = (try self.advance()).span;
+                return try self.parseResourceGetCall(.method_get_mut, get_span);
             },
             else => return self.parseErrFmt(self.peekSpan(), "expected expression, got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }

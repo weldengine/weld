@@ -34,6 +34,16 @@ pub const ComponentRef = struct {
     mutable: bool,
 };
 
+/// A handle to a resource's backing bytes in the world `ResourceStore`.
+/// The interpreter resolves receiver-less `get(T)` / `get_mut(T)` into one
+/// of these (D-S3-resource-receiver). `mutable = false` for `get(T)`, `true`
+/// for `get_mut(T)`. Unlike `ComponentRef` there is no chunk / slot — a
+/// resource is a world singleton keyed by `resource_id`.
+pub const ResourceRef = struct {
+    resource_id: u32,
+    mutable: bool,
+};
+
 /// Runtime tag for the S3 primitive value set. Mirrors `BuiltinType` in
 /// `src/etch/types.zig` but only carries the values the interpreter touches.
 pub const Value = union(enum) {
@@ -43,6 +53,7 @@ pub const Value = union(enum) {
     string_id: u32,
     entity_id: EntityId,
     component_ref: ComponentRef,
+    resource_ref: ResourceRef,
     unit,
 
     pub fn fromInt(x: i64) Value {
@@ -75,6 +86,7 @@ pub const Value = union(enum) {
             .string_id => |a| a == other.string_id,
             .entity_id => |a| a == other.entity_id,
             .component_ref => false,
+            .resource_ref => false,
             .unit => true,
         };
     }

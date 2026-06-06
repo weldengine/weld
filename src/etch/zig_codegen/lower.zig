@@ -567,6 +567,9 @@ fn walkExprForComponents(
     switch (kind) {
         .method_get, .method_get_mut => {
             const mg = ast.method_gets.items[data];
+            // Receiver-less `get(R)` accesses a resource, not a component —
+            // it must not enter the query tuple (D-S3-resource-receiver).
+            if (mg.receiver.isNone()) return;
             const cname = ast.strings.slice(mg.type_name);
             _ = try out.getOrPut(gpa, cname);
         },
@@ -806,6 +809,9 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
         // keep the file readable; subsequent uses of `h` resolve through
         // the local context.
         const mg = ast.method_gets.items[ast.exprData(let.value)];
+        // `let h = get(R)` binds a resource — codegen emission deferred to
+        // E3 (see emitExpr's method_get note, D-S3-resource-receiver).
+        if (mg.receiver.isNone()) return CodegenError.UnsupportedConstruct;
         const cname = ast.strings.slice(mg.type_name);
         try ctx.records.append(w.gpa, .{
             .key = .{ .name = let.name },
@@ -895,8 +901,15 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         },
         .method_get, .method_get_mut => {
             const mg = ast.method_gets.items[data];
-            const cname = ast.strings.slice(mg.type_name);
-            try emitComponentSlot(w, ctx, cname);
+            // Receiver-less `get(R)` / `get_mut(R)` resource access is parsed,
+            // type-checked, and executed by the interpreter (the S4 reference),
+            // but codegen emission is deferred: the resource store buffer is
+            // byte-aligned (`gpa.dupe(u8, …)`), so a typed `@as(*R,
+            // @alignCast(…))` would be unsound in ReleaseSafe. It lands with
+            // aligned resource storage at E3 (Level A complete in codegen).
+            // See the M0.8 journal (D-S3-resource-receiver).
+            if (mg.receiver.isNone()) return CodegenError.UnsupportedConstruct;
+            try emitComponentSlot(w, ctx, ast.strings.slice(mg.type_name));
         },
         .binary => {
             const b = ast.binary_exprs.items[data];

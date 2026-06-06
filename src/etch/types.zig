@@ -563,14 +563,50 @@ pub const TypeChecker = struct {
             },
             .method_get, .method_get_mut => {
                 const mg = self.arena.method_gets.items[data];
+                const tname = self.arena.strings.slice(mg.type_name);
+
+                // Receiver-less `get(T)` / `get_mut(T)` — resource access
+                // (D-S3-resource-receiver). `T` must name a resource; a
+                // component here is the symmetric E0301 error.
+                if (mg.receiver.isNone()) {
+                    if (self.symbols.get(mg.type_name)) |sym| {
+                        if (sym.kind == .component) {
+                            try self.emit(.resource_expected_component_given, .error_, self.arena.exprSpan(id), "'{s}' is a component — receiver-less get(...) accesses a resource; use entity.get({s})", .{ tname, tname });
+                            return ResolvedType.unknown;
+                        }
+                        if (sym.kind != .resource) {
+                            try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a resource", .{tname});
+                            return ResolvedType.unknown;
+                        }
+                    } else {
+                        try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "unknown resource '{s}'", .{tname});
+                        return ResolvedType.unknown;
+                    }
+                    if (ctx_opt) |ctx| {
+                        if (!ctx.resources_in_when.contains(mg.type_name)) {
+                            try self.emit(.resource_expected_in_when, .error_, self.arena.exprSpan(id), "resource '{s}' is not accessible — add it to the rule's when clause", .{tname});
+                        }
+                    }
+                    return .{ .resource = mg.type_name };
+                }
+
+                // Receiver form `entity.get(T)` — component access.
                 const receiver_type = try self.synthExprE(mg.receiver, ctx_opt);
                 if (receiver_type != .builtin or receiver_type.builtin != .entity) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "get / get_mut requires an Entity receiver", .{});
                     return ResolvedType.unknown;
                 }
+                // `T` must be a component; a resource here is the symmetric
+                // E0302 error (resource access drops the receiver).
+                if (self.symbols.get(mg.type_name)) |sym| {
+                    if (sym.kind == .resource) {
+                        try self.emit(.component_expected_resource_given, .error_, self.arena.exprSpan(id), "'{s}' is a resource — entity.get(...) accesses a component; use get({s})", .{ tname, tname });
+                        return ResolvedType.unknown;
+                    }
+                }
                 if (ctx_opt) |ctx| {
                     if (!ctx.components_in_when.contains(mg.type_name)) {
-                        try self.emit(.unknown_component_in_when, .error_, self.arena.exprSpan(id), "component '{s}' is not accessible — add it to the rule's when clause", .{self.arena.strings.slice(mg.type_name)});
+                        try self.emit(.unknown_component_in_when, .error_, self.arena.exprSpan(id), "component '{s}' is not accessible — add it to the rule's when clause", .{tname});
                     }
                 }
                 return .{ .component = mg.type_name };
@@ -850,6 +886,66 @@ test "type-checker emits E0502 when an annotation is applied to the wrong target
     );
     defer ok.deinit(gpa);
     try expectNoCode(ok.diagnostics.items, .annotation_misapplied);
+}
+
+test "type-checker emits E0301/E0302 on get receiver/kind mismatch (D-S3-resource-receiver)" {
+    const gpa = std.testing.allocator;
+
+    // Receiver-less `get(Health)` where Health is a component → E0301.
+    var bare_on_component = try parseAndCheck(gpa,
+        \\component Health { current: float = 100.0 }
+        \\rule tick(entity: Entity)
+        \\  when entity has Health
+        \\{
+        \\  let h = get(Health)
+        \\}
+    );
+    defer bare_on_component.deinit(gpa);
+    try expectAnyCode(bare_on_component.diagnostics.items, .resource_expected_component_given);
+
+    // `entity.get(Score)` where Score is a resource → E0302.
+    var receiver_on_resource = try parseAndCheck(gpa,
+        \\component Health { current: float = 100.0 }
+        \\resource Score { points: i32 = 0 }
+        \\rule tick(entity: Entity)
+        \\  when entity has Health
+        \\{
+        \\  let s = entity.get(Score)
+        \\}
+    );
+    defer receiver_on_resource.deinit(gpa);
+    try expectAnyCode(receiver_on_resource.diagnostics.items, .component_expected_resource_given);
+
+    // Control — receiver-less `get_mut(R)` on a resource present in the when
+    // clause is valid; neither E0301 nor E0302 fires.
+    var ok = try parseAndCheck(gpa,
+        \\resource Score { points: i32 = 0 }
+        \\rule tick()
+        \\  when resource Score
+        \\{
+        \\  let s = get_mut(Score)
+        \\  s.points += 1
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .resource_expected_component_given);
+    try expectNoCode(ok.diagnostics.items, .component_expected_resource_given);
+}
+
+test "type-checker emits E1213 on receiver-less get of a resource absent from the when clause (D-S3-resource-receiver)" {
+    const gpa = std.testing.allocator;
+    // `get(Score)` is valid only when Score is in the when clause.
+    var result = try parseAndCheck(gpa,
+        \\component Health { current: float = 100.0 }
+        \\resource Score { points: i32 = 0 }
+        \\rule tick(entity: Entity)
+        \\  when entity has Health
+        \\{
+        \\  let s = get(Score)
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .resource_expected_in_when);
 }
 
 test "type-checker emits E1210 on rule when clause referencing unknown component" {

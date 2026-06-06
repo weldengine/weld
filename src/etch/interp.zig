@@ -327,13 +327,26 @@ pub const Interpreter = struct {
         if (target_kind == .field_access) {
             const fa = self.ast.field_accesses.items[self.ast.exprData(assign.target)];
             const recv = try self.evalExpr(world, locals, fa.receiver);
-            if (recv != .component_ref or !recv.component_ref.mutable) return error.RuntimeFailure;
             const field_name = self.ast.strings.slice(fa.field_name);
-            const cur = Bridge.readComponentField(&world.registry, recv.component_ref, world, field_name) catch return error.RuntimeFailure;
-            const rhs = try self.evalExpr(world, locals, assign.value);
-            const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
-            Bridge.writeComponentField(&world.registry, recv.component_ref, world, field_name, new_v) catch return error.RuntimeFailure;
-            return;
+            switch (recv) {
+                .component_ref => |cref| {
+                    if (!cref.mutable) return error.RuntimeFailure;
+                    const cur = Bridge.readComponentField(&world.registry, cref, world, field_name) catch return error.RuntimeFailure;
+                    const rhs = try self.evalExpr(world, locals, assign.value);
+                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
+                    Bridge.writeComponentField(&world.registry, cref, world, field_name, new_v) catch return error.RuntimeFailure;
+                    return;
+                },
+                .resource_ref => |rref| {
+                    if (!rref.mutable) return error.RuntimeFailure;
+                    const cur = Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch return error.RuntimeFailure;
+                    const rhs = try self.evalExpr(world, locals, assign.value);
+                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
+                    Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, new_v) catch return error.RuntimeFailure;
+                    return;
+                },
+                else => return error.RuntimeFailure,
+            }
         }
         return error.RuntimeFailure;
     }
@@ -365,17 +378,27 @@ pub const Interpreter = struct {
             .field_access => {
                 const fa = self.ast.field_accesses.items[data];
                 const recv = try self.evalExpr(world, locals, fa.receiver);
-                if (recv != .component_ref) return error.RuntimeFailure;
                 const field_name = self.ast.strings.slice(fa.field_name);
-                return Bridge.readComponentField(&world.registry, recv.component_ref, world, field_name) catch error.RuntimeFailure;
+                switch (recv) {
+                    .component_ref => |cref| return Bridge.readComponentField(&world.registry, cref, world, field_name) catch error.RuntimeFailure,
+                    .resource_ref => |rref| return Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch error.RuntimeFailure,
+                    else => return error.RuntimeFailure,
+                }
             },
             .method_get, .method_get_mut => {
                 const mg = self.ast.method_gets.items[data];
+                const type_name = self.ast.strings.slice(mg.type_name);
+                const mutable = (kind == .method_get_mut);
+                // Receiver-less `get(T)` / `get_mut(T)` — resource access
+                // (D-S3-resource-receiver). The type-checker has already
+                // proven `T` is a resource present in the when clause.
+                if (mg.receiver.isNone()) {
+                    const rid = self.bridge.resourceIdOf(type_name) orelse return error.RuntimeFailure;
+                    return Value{ .resource_ref = .{ .resource_id = rid, .mutable = mutable } };
+                }
                 const recv = try self.evalExpr(world, locals, mg.receiver);
                 if (recv != .entity_id) return error.RuntimeFailure;
-                const comp_name = self.ast.strings.slice(mg.type_name);
-                const comp_id = self.bridge.componentIdOf(comp_name) orelse return error.RuntimeFailure;
-                const mutable = (kind == .method_get_mut);
+                const comp_id = self.bridge.componentIdOf(type_name) orelse return error.RuntimeFailure;
                 const cref = Bridge.componentRefOf(world, recv.entity_id, comp_id, mutable) catch return error.RuntimeFailure;
                 return Value{ .component_ref = cref };
             },
@@ -905,4 +928,51 @@ test "runProgram on minimal component + rule mutates entity" {
     var current: f64 = 0;
     @memcpy(std.mem.asBytes(&current), slot[0..@sizeOf(f64)]);
     try std.testing.expectApproxEqAbs(@as(f64, 103.0), current, 0.0001);
+}
+
+test "runProgram resource get/get_mut without receiver reads and writes the resource (D-S3-resource-receiver)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `get(Score).base` is a receiver-less immutable resource read; the
+    // `get_mut(Score)` binding then writes a field on the same resource.
+    const source =
+        \\resource Score {
+        \\  points: i32 = 0
+        \\  base: i32 = 5
+        \\}
+        \\rule bump()
+        \\  when resource Score
+        \\{
+        \\  let b = get(Score).base
+        \\  let s = get_mut(Score)
+        \\  s.points += b
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const report = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // points starts at 0 and gains base (5) per tick: 3 ticks → 15.
+    const score_id = world.registry.idOf("Score").?;
+    const bytes = world.resources.getResource(score_id).?;
+    var points: i32 = 0;
+    @memcpy(std.mem.asBytes(&points), bytes[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 15), points);
 }

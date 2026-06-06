@@ -52,6 +52,7 @@ pub const valid = [_]Entry{
     .{ .name = "rules/annotated.etch", .source = @embedFile("corpus/valid/rules/annotated.etch") },
     .{ .name = "rules/forward_ref.etch", .source = @embedFile("corpus/valid/rules/forward_ref.etch") },
     .{ .name = "rules/no_when.etch", .source = @embedFile("corpus/valid/rules/no_when.etch") },
+    .{ .name = "rules/resource_access.etch", .source = @embedFile("corpus/valid/rules/resource_access.etch") },
 
     .{ .name = "whens/has_only.etch", .source = @embedFile("corpus/valid/whens/has_only.etch") },
     .{ .name = "whens/with_filter.etch", .source = @embedFile("corpus/valid/whens/with_filter.etch") },
@@ -75,6 +76,8 @@ pub const invalid = [_]InvalidEntry{
     .{ .name = "E0102_unknown_field_type.etch", .expected_code = "E0102", .source = @embedFile("corpus/invalid/E0102_unknown_field_type.etch") },
     .{ .name = "E0102_string_field.etch", .expected_code = "E0102", .source = @embedFile("corpus/invalid/E0102_string_field.etch") },
     .{ .name = "E0200_int_plus_float.etch", .expected_code = "E0200", .source = @embedFile("corpus/invalid/E0200_int_plus_float.etch") },
+    .{ .name = "E0301_resource_expected_component_given.etch", .expected_code = "E0301", .source = @embedFile("corpus/invalid/E0301_resource_expected_component_given.etch") },
+    .{ .name = "E0302_component_expected_resource_given.etch", .expected_code = "E0302", .source = @embedFile("corpus/invalid/E0302_component_expected_resource_given.etch") },
     .{ .name = "E0502_annotation_misapplied.etch", .expected_code = "E0502", .source = @embedFile("corpus/invalid/E0502_annotation_misapplied.etch") },
     .{ .name = "E1101_non_const_default.etch", .expected_code = "E1101", .source = @embedFile("corpus/invalid/E1101_non_const_default.etch") },
     .{ .name = "E1210_unknown_component_in_when.etch", .expected_code = "E1210", .source = @embedFile("corpus/invalid/E1210_unknown_component_in_when.etch") },
