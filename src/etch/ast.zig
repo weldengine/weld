@@ -541,6 +541,23 @@ pub const BreakStmt = struct {
     value: NodeId,
 };
 
+/// `throw expression` statement (M0.8 error handling, `etch-grammar.md` §641).
+pub const ThrowStmt = struct {
+    value: NodeId,
+};
+
+/// `try { ... } catch IDENT { ... }` statement (M0.8 error handling,
+/// `etch-grammar.md` §640). Both bodies are statement runs in `arena.extra`
+/// (they are statement blocks, not block expressions). `catch_name` is the
+/// caught-value binding.
+pub const TryCatchStmt = struct {
+    try_start: u32,
+    try_len: u32,
+    catch_name: StringId,
+    catch_start: u32,
+    catch_len: u32,
+};
+
 /// `|a, b| expr` closure (M0.8 closures, `etch-grammar.md` §524). Params are a
 /// flat `(start, len)` range of `arena.closure_params`; the body is an
 /// expression node. E1 closures take an expression body — a `{ block }` body
@@ -737,6 +754,8 @@ pub const AstArena = struct {
     loop_exprs: std.ArrayListUnmanaged(LoopExpr) = .empty,
     block_exprs: std.ArrayListUnmanaged(BlockExpr) = .empty,
     break_stmts: std.ArrayListUnmanaged(BreakStmt) = .empty,
+    throw_stmts: std.ArrayListUnmanaged(ThrowStmt) = .empty,
+    try_catch_stmts: std.ArrayListUnmanaged(TryCatchStmt) = .empty,
     named_types: std.ArrayListUnmanaged(NamedTypeNode) = .empty,
     array_types: std.ArrayListUnmanaged(ArrayTypeNode) = .empty,
     map_types: std.ArrayListUnmanaged(MapTypeNode) = .empty,
@@ -818,6 +837,8 @@ pub const AstArena = struct {
         self.loop_exprs.deinit(gpa);
         self.block_exprs.deinit(gpa);
         self.break_stmts.deinit(gpa);
+        self.throw_stmts.deinit(gpa);
+        self.try_catch_stmts.deinit(gpa);
         self.named_types.deinit(gpa);
         self.array_types.deinit(gpa);
         self.map_types.deinit(gpa);
@@ -1035,6 +1056,18 @@ pub const AstArena = struct {
     /// statement's `data` (`0` when unlabeled); no side slab needed.
     pub fn addContinueStmt(self: *AstArena, gpa: std.mem.Allocator, label: StringId, span: SourceSpan) !NodeId {
         return try self.addStmt(gpa, .continue_stmt, label, span);
+    }
+
+    pub fn addThrowStmt(self: *AstArena, gpa: std.mem.Allocator, value: NodeId, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.throw_stmts.items.len);
+        try self.throw_stmts.append(gpa, .{ .value = value });
+        return try self.addStmt(gpa, .throw_stmt, idx, span);
+    }
+
+    pub fn addTryCatchStmt(self: *AstArena, gpa: std.mem.Allocator, tc: TryCatchStmt, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.try_catch_stmts.items.len);
+        try self.try_catch_stmts.append(gpa, tc);
+        return try self.addStmt(gpa, .try_catch_stmt, idx, span);
     }
 
     pub fn addLetStmt(self: *AstArena, gpa: std.mem.Allocator, let: LetStmt, span: SourceSpan) !NodeId {

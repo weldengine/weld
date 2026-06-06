@@ -235,6 +235,10 @@ pub const Interpreter = struct {
     break_value: Value = .{ .unit = {} },
     /// The label targeted by the active `break`/`continue` (`0` = unlabeled).
     control_label: StringId = 0,
+    /// Whether a `throw` is in flight, awaiting a `catch` (M0.8 error handling).
+    thrown: bool = false,
+    /// The value carried by the in-flight `throw`.
+    thrown_value: Value = .{ .unit = {} },
 
     pub fn deinit(self: *Interpreter) void {
         for (self.rule_descs) |*r| r.deinit(self.gpa);
@@ -384,6 +388,7 @@ pub const Interpreter = struct {
         defer self.closures.reset(self.gpa);
         try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
         self.control = .none; // defensive: each body starts with no pending signal
+        self.thrown = false;
 
         var s: u32 = 0;
         while (s < rule.body_len) : (s += 1) {
@@ -396,6 +401,13 @@ pub const Interpreter = struct {
                     return;
                 },
             };
+            // A `throw` reaching the rule top level was never caught — count it
+            // as a runtime error (the dev-build surfacing of an unhandled throw).
+            if (self.thrown) {
+                self.thrown = false;
+                report.runtime_errors += 1;
+                return;
+            }
             // A `break`/`continue` reaching the rule top level (outside any loop)
             // has nowhere to go — consume it and end the body.
             if (self.control != .none) {
@@ -412,7 +424,9 @@ pub const Interpreter = struct {
         var s: u32 = 0;
         while (s < len) : (s += 1) {
             try self.execStmt(world, locals, @bitCast(self.ast.extra.items[start + s]));
-            if (self.control != .none) return;
+            // Stop early on a control signal (break/continue) or an in-flight
+            // throw — both unwind to the enclosing loop / try.
+            if (self.control != .none or self.thrown) return;
         }
     }
 
@@ -478,6 +492,7 @@ pub const Interpreter = struct {
                         range_loop: while (if (r.inclusive) i <= r.end else i < r.end) : (i += 1) {
                             try locals.put(self.gpa, f.var_name, Value{ .int_ = i }, false);
                             try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            if (self.thrown) return; // propagate the throw out of the loop
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
                                 .stop => break :range_loop,
@@ -495,6 +510,7 @@ pub const Interpreter = struct {
                             const elem = self.collections.arrays.items[handle].items[k];
                             try locals.put(self.gpa, f.var_name, elem, false);
                             try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            if (self.thrown) return; // propagate the throw out of the loop
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
                                 .stop => break :arr_loop,
@@ -515,6 +531,7 @@ pub const Interpreter = struct {
                             try locals.put(self.gpa, f.var_name, pair.key, false);
                             if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
                             try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            if (self.thrown) return; // propagate the throw out of the loop
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
                                 .stop => break :map_loop,
@@ -537,6 +554,25 @@ pub const Interpreter = struct {
                 // `continue [label]` — the label id is stored directly in `data`.
                 self.control_label = data;
                 self.control = .continue_;
+            },
+            .throw_stmt => {
+                // `throw expression` (M0.8 error handling) — raise the throw
+                // signal carrying the evaluated value, to unwind to a `catch`.
+                const t = self.ast.throw_stmts.items[data];
+                self.thrown_value = try self.evalExpr(world, locals, t.value);
+                self.thrown = true;
+            },
+            .try_catch_stmt => {
+                // `try { ... } catch err { ... }` — run the try body; if it
+                // threw, clear the signal, bind the caught value, run the catch
+                // body (which may itself throw → re-propagates).
+                const tc = self.ast.try_catch_stmts.items[data];
+                try self.execStmtRun(world, locals, tc.try_start, tc.try_len);
+                if (self.thrown) {
+                    self.thrown = false;
+                    try locals.put(self.gpa, tc.catch_name, self.thrown_value, false);
+                    try self.execStmtRun(world, locals, tc.catch_start, tc.catch_len);
+                }
             },
             else => return error.RuntimeFailure,
         }
@@ -841,6 +877,7 @@ pub const Interpreter = struct {
                 const lp = self.ast.loop_exprs.items[data];
                 while (true) {
                     try self.execStmtRun(world, locals, lp.body_start, lp.body_len);
+                    if (self.thrown) return Value{ .unit = {} }; // propagate the throw
                     switch (self.control) {
                         .none => {}, // body completed → loop again (infinite)
                         .break_ => {
@@ -1815,4 +1852,87 @@ test "runProgram closure captures an outer local by value (M0.8 closures)" {
     var out: i64 = 0;
     @memcpy(std.mem.asBytes(&out), slot[0..8]);
     try std.testing.expectEqual(@as(i64, 15), out);
+}
+
+test "runProgram try/catch catches a thrown value (M0.8 error handling)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The throw aborts the rest of the try body (x stays 1) and is caught,
+    // binding the thrown value into `err`; x ends at 99. The interpreter is the
+    // reference execution (try/catch codegen is deferred).
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let mut x = 1
+        \\  try {
+        \\    x = 2
+        \\    throw 99
+        \\    x = 3
+        \\  } catch err {
+        \\    x = err
+        \\  }
+        \\  entity.get_mut(Acc).out = x
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 99), out);
+}
+
+test "runProgram uncaught throw surfaces a runtime error (M0.8 error handling)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A throw with no enclosing try reaches the rule top level → runtime error.
+    const source =
+        \\resource Tick { n: i32 = 0 }
+        \\rule bad()
+        \\  when resource Tick
+        \\{
+        \\  throw 7
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expect(report.runtime_errors > 0);
 }

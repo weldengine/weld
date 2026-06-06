@@ -963,6 +963,38 @@ pub const Parser = struct {
         return try self.arena.addContinueStmt(self.gpa, label, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
     }
 
+    /// Parse `throw expression` (M0.8 error handling, `etch-grammar.md` §641).
+    fn parseThrowStmt(self: *Parser) ParseError!NodeId {
+        const kw = try self.advance(); // 'throw'
+        const value = try self.parseExpr(0);
+        return try self.arena.addThrowStmt(self.gpa, value, .{
+            .byte_start = kw.span.byte_start,
+            .byte_end = self.arena.exprSpan(value).byte_end,
+        });
+    }
+
+    /// Parse `try { ... } catch IDENT { ... }` (M0.8 error handling,
+    /// `etch-grammar.md` §640). Both bodies are statement runs.
+    fn parseTryCatchStmt(self: *Parser) ParseError!NodeId {
+        const kw = try self.advance(); // 'try'
+        _ = try self.expect(.lbrace, "expected '{' to open try block");
+        const try_body = try self.parseStmtRun();
+        _ = try self.expect(.rbrace, "expected '}' to close try block");
+        _ = try self.expect(.kw_catch, "expected 'catch' after the try block");
+        const name_tok = try self.expect(.ident, "expected catch binding name");
+        const catch_name = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to open catch block");
+        const catch_body = try self.parseStmtRun();
+        const closing = try self.expect(.rbrace, "expected '}' to close catch block");
+        return try self.arena.addTryCatchStmt(self.gpa, .{
+            .try_start = try_body.start,
+            .try_len = try_body.len,
+            .catch_name = catch_name,
+            .catch_start = catch_body.start,
+            .catch_len = catch_body.len,
+        }, .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
     fn parseStmt(self: *Parser) ParseError!NodeId {
         if (self.peek() == .kw_let) {
             return try self.parseLetStmt();
@@ -978,6 +1010,12 @@ pub const Parser = struct {
         }
         if (self.peek() == .kw_continue) {
             return try self.parseContinueStmt();
+        }
+        if (self.peek() == .kw_throw) {
+            return try self.parseThrowStmt();
+        }
+        if (self.peek() == .kw_try) {
+            return try self.parseTryCatchStmt();
         }
         // Labeled loop: `IDENT ":" loop { ... }` (M0.8 loop/break).
         if (self.peek() == .ident and self.peekNext() == .colon) {
@@ -1852,6 +1890,35 @@ test "parser builds loops, labels, break value, and continue (M0.8 loop/break)" 
         if (b.label != 0) labeled += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), labeled);
+}
+
+test "parser builds throw and try/catch (M0.8 error handling)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  try {
+        \\    throw 99
+        \\  } catch err {
+        \\    let x = err
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var throws: usize = 0;
+    var tries: usize = 0;
+    for (result.ast.stmts.items(.kind)) |k| {
+        if (k == .throw_stmt) throws += 1;
+        if (k == .try_catch_stmt) tries += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), throws);
+    try std.testing.expectEqual(@as(usize, 1), tries);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.try_catch_stmts.items.len);
+    // The catch binding name round-trips.
+    try std.testing.expectEqualStrings("err", result.ast.strings.slice(result.ast.try_catch_stmts.items[0].catch_name));
 }
 
 test "parser does not leak comment spans on OOM during init" {

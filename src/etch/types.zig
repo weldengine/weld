@@ -712,6 +712,29 @@ pub const TypeChecker = struct {
                 if (!b.value.isNone()) _ = self.synthExpr(b.value, ctx);
             },
             .continue_stmt => {},
+            .throw_stmt => {
+                // `throw expression` (M0.8 error handling) — type the value. E1
+                // throws an arbitrary value (the `Error` struct type arrives
+                // with struct/enum in E2).
+                const t = self.arena.throw_stmts.items[data];
+                _ = self.synthExpr(t.value, ctx);
+            },
+            .try_catch_stmt => {
+                // `try { ... } catch err { ... }` (M0.8 error handling). Check
+                // both bodies; the caught binding's type is dynamic in E1
+                // (the thrown value type is not statically tracked), so it is
+                // bound as `unknown`.
+                const tc = self.arena.try_catch_stmts.items[data];
+                var i: u32 = 0;
+                while (i < tc.try_len) : (i += 1) {
+                    try self.checkStmt(ctx, @bitCast(self.arena.extra.items[tc.try_start + i]));
+                }
+                try ctx.locals.put(self.gpa, tc.catch_name, .{ .type_ = ResolvedType.unknown, .is_mut = false });
+                i = 0;
+                while (i < tc.catch_len) : (i += 1) {
+                    try self.checkStmt(ctx, @bitCast(self.arena.extra.items[tc.catch_start + i]));
+                }
+            },
             else => {},
         }
     }
