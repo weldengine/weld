@@ -172,7 +172,10 @@ fn emitComponentLikeStruct(w: *Writer, ast: *const AstArena, data: u32, kind: De
     while (f_i < fields_len) : (f_i += 1) {
         const f = ast.fields.items[fields_start + f_i];
         const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-        const etch_type = ast.strings.slice(tnode.name);
+        // Resolve through any `type` alias chain (M0.8): `x: Meters` where
+        // `type Meters = float` emits as `x: f64`, identical to the layout
+        // the interpreter computes, keeping the differential byte-exact.
+        const etch_type = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
         const zig_type = type_map.mapBuiltin(etch_type) orelse return CodegenError.NonPodComponent;
         const fname = ast.strings.slice(f.name);
         if (f.default_value.isNone()) {
@@ -256,7 +259,9 @@ fn emitRegisterCall(
     while (f_i < fields_len) : (f_i += 1) {
         const f = ast.fields.items[fields_start + f_i];
         const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-        const etch_t = ast.strings.slice(tnode.name);
+        // Resolve through any `type` alias chain (M0.8), matching the struct
+        // emission and the interpreter's FieldKind resolution.
+        const etch_t = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
         const zig_t = type_map.mapBuiltin(etch_t) orelse return CodegenError.NonPodComponent;
         const fname = ast.strings.slice(f.name);
         const fkind = fieldKindLiteral(zig_t);
@@ -764,7 +769,7 @@ const LocalCtx = struct {
         while (p_i < rule.params_len) : (p_i += 1) {
             const p = ast.rule_params.items[rule.params_start + p_i];
             const tnode = ast.named_types.items[ast.typeNodeData(p.type_node)];
-            const tname = ast.strings.slice(tnode.name);
+            const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
             if (std.mem.eql(u8, tname, "Entity")) {
                 // Entity params are handled by the iteration machinery; the
                 // ident never reaches `emitExpr` in compliant S3 programs.
@@ -921,7 +926,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // is picked from the operand's inferred domain vs the target's.
             const c = ast.casts.items[data];
             const named = ast.named_types.items[ast.typeNodeData(c.type_node)];
-            const zig_t = type_map.mapBuiltin(ast.strings.slice(named.name)) orelse return CodegenError.UnsupportedConstruct;
+            const zig_t = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(named.name))) orelse return CodegenError.UnsupportedConstruct;
             const target_is_float = std.mem.eql(u8, zig_t, "f32") or std.mem.eql(u8, zig_t, "f64");
             const src_zig = inferExprZigType(ast, ctx, c.operand);
             const src_is_float = std.mem.eql(u8, src_zig, "f32") or std.mem.eql(u8, src_zig, "f64");
@@ -991,7 +996,7 @@ fn emitFieldAccessExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, fa: ast
 fn inferZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId, annotation: NodeId) []const u8 {
     if (!annotation.isNone()) {
         const tnode = ast.named_types.items[ast.typeNodeData(annotation)];
-        const tname = ast.strings.slice(tnode.name);
+        const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
         if (type_map.mapBuiltin(tname)) |z| return z;
     }
     return inferExprZigType(ast, ctx, expr);
@@ -1038,7 +1043,7 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         .cast => blk: {
             const c = ast.casts.items[data];
             const named = ast.named_types.items[ast.typeNodeData(c.type_node)];
-            break :blk type_map.mapBuiltin(ast.strings.slice(named.name)) orelse "i64";
+            break :blk type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(named.name))) orelse "i64";
         },
         else => "i64",
     };
@@ -1090,7 +1095,7 @@ fn fieldZigTypeOnComponent(ast: *const AstArena, comp_name: []const u8, field_na
             const fname = ast.strings.slice(f.name);
             if (std.mem.eql(u8, fname, field_name)) {
                 const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-                const etch_t = ast.strings.slice(tnode.name);
+                const etch_t = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
                 return type_map.mapBuiltin(etch_t);
             }
         }

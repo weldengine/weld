@@ -294,13 +294,17 @@ pub const Parser = struct {
     /// Recovery sync-point: advance past the offending token, then to the
     /// next top-level construct keyword or EOF. Guarantees forward progress
     /// (always consumes ≥1 token when not already at EOF) so `parseFile`
-    /// cannot loop. Top-level starters are the S3 set (`component` /
-    /// `resource` / `rule`); later milestones add their keywords here.
+    /// cannot loop. The stop-set MUST list every top-level starter the
+    /// parser accepts, in lockstep with `parseTopLevel` — otherwise a valid
+    /// construct following a parse error is silently skipped. Current set:
+    /// S3 (`component` / `resource` / `rule`) + `type` (M0.8 alias). Later
+    /// milestones extend both sites together (`fn`/`struct`/… in E2,
+    /// `event`/`tags` in E3).
     fn recoverToTopLevel(self: *Parser) ParseError!void {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type => return,
                 else => _ = try self.advance(),
             }
         }
@@ -320,9 +324,27 @@ pub const Parser = struct {
             .kw_component => try self.parseComponentDecl(annotations),
             .kw_resource => try self.parseResourceDecl(annotations),
             .kw_rule => try self.parseRuleDecl(annotations),
+            .kw_type => try self.parseTypeAliasDecl(annotations),
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
+    }
+
+    /// Parse a top-level `type Name = Type` alias (M0.8 v0.6 foundations).
+    /// `Name` is a PascalCase type identifier; `Type` is any type node. The
+    /// `kw_type` starter is mirrored in `recoverToTopLevel`'s stop-set.
+    fn parseTypeAliasDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        _ = annotations; // type aliases carry no annotations in the v0.6 subset
+        const kw_span = (try self.advance()).span; // 'type'
+        const name_tok = try self.expect(.type_ident, "expected PascalCase alias name after 'type'");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.eq, "expected '=' in type alias declaration");
+        const target = try self.parseType();
+        const target_span = self.arena.typeNodeSpan(target);
+        _ = try self.arena.addTypeAlias(self.gpa, name_id, target, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = target_span.byte_end,
+        });
     }
 
     // ─── Annotations ─────────────────────────────────────────────────────

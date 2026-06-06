@@ -94,7 +94,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule };
+pub const SymbolKind = enum { component, resource, rule, type_alias };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -151,7 +151,29 @@ pub const TypeChecker = struct {
         };
         defer tc.deinit();
         try tc.pass1Collect();
+        try tc.validateTypeAliases();
         try tc.pass2Resolve();
+    }
+
+    /// Validate every `type Name = Type` alias once all symbols are known
+    /// (M0.8 v0.6 foundations): the alias must ultimately resolve to a
+    /// builtin primitive or a declared component/resource. A cyclic or
+    /// dangling alias surfaces as E0102 on the alias's target.
+    fn validateTypeAliases(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .type_alias) continue;
+            const decl = self.arena.type_alias_decls.items[datas[i]];
+            const ultimate = self.arena.resolveTypeAliasName(decl.name);
+            const uname = self.arena.strings.slice(ultimate);
+            if (BuiltinType.fromName(uname) != null) continue;
+            if (self.symbols.get(ultimate)) |sym| {
+                if (sym.kind == .component or sym.kind == .resource) continue;
+            }
+            try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.target), "type alias '{s}' does not resolve to a known type", .{self.arena.strings.slice(decl.name)});
+        }
     }
 
     // ─── Pass 1 ──────────────────────────────────────────────────────────
@@ -183,6 +205,13 @@ pub const TypeChecker = struct {
                     const decl = self.arena.rule_decls.items[data];
                     try self.registerSymbol(.rule, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .rule);
+                },
+                .type_alias => {
+                    // Register the alias name so it collides with a same-named
+                    // component/resource/rule (E0101); the target is validated
+                    // in `validateTypeAliases` once all symbols are known.
+                    const decl = self.arena.type_alias_decls.items[data];
+                    try self.registerSymbol(.type_alias, decl.name, item_id, span);
                 },
                 else => {}, // forward-compatible: unknown items ignored
             }
@@ -219,15 +248,16 @@ pub const TypeChecker = struct {
                 try self.emit(.duplicate_symbol, .error_, span, "duplicate field '{s}'", .{fname});
             }
 
-            // Resolve the type node.
+            // Resolve the type node (through any `type` alias chain, M0.8).
             const tspan = self.arena.typeNodeSpan(field.type_node);
             const named_idx = self.arena.typeNodeData(field.type_node);
             const named = self.arena.named_types.items[named_idx];
-            const tname = self.arena.strings.slice(named.name);
+            const resolved_name = self.arena.resolveTypeAliasName(named.name);
+            const tname = self.arena.strings.slice(resolved_name);
 
             if (BuiltinType.fromName(tname) == null) {
                 // Try user-declared component or resource.
-                if (self.symbols.get(named.name)) |sym| {
+                if (self.symbols.get(resolved_name)) |sym| {
                     if (sym.kind == .rule) {
                         try self.emit(.undefined_symbol, .error_, tspan, "type '{s}' is not a component, resource, or builtin", .{tname});
                     }
@@ -316,12 +346,14 @@ pub const TypeChecker = struct {
     fn namedTypeToResolved(self: *TypeChecker, type_node: NodeId) ResolvedType {
         const named_idx = self.arena.typeNodeData(type_node);
         const named = self.arena.named_types.items[named_idx];
-        const tname = self.arena.strings.slice(named.name);
+        // Resolve through any top-level `type` alias chain first (M0.8).
+        const resolved_name = self.arena.resolveTypeAliasName(named.name);
+        const tname = self.arena.strings.slice(resolved_name);
         if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
-        if (self.symbols.get(named.name)) |sym| {
+        if (self.symbols.get(resolved_name)) |sym| {
             return switch (sym.kind) {
-                .component => .{ .component = named.name },
-                .resource => .{ .resource = named.name },
+                .component => .{ .component = resolved_name },
+                .resource => .{ .resource = resolved_name },
                 else => .unknown,
             };
         }
@@ -964,6 +996,39 @@ test "type-checker emits E1213 on receiver-less get of a resource absent from th
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .resource_expected_in_when);
+}
+
+test "type aliases resolve through to the underlying type (M0.8 type alias foundation)" {
+    const gpa = std.testing.allocator;
+
+    // `Meters` aliases `float` and is used as a field type and a cast target.
+    var ok = try parseAndCheck(gpa,
+        \\type Meters = float
+        \\component Position { x: Meters = 0.0 }
+        \\rule move(entity: Entity)
+        \\  when entity has Position
+        \\{
+        \\  entity.get_mut(Position).x = 3 as Meters
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // An alias whose target names no known type → E0102.
+    var bad = try parseAndCheck(gpa,
+        \\type Bogus = NotAType
+        \\component C { x: Bogus = 0 }
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .undefined_symbol);
+
+    // An alias name colliding with a component name → E0101.
+    var dup = try parseAndCheck(gpa,
+        \\type Foo = int
+        \\component Foo { x: int = 0 }
+    );
+    defer dup.deinit(gpa);
+    try expectAnyCode(dup.diagnostics.items, .duplicate_symbol);
 }
 
 test "type-checker accepts numeric casts and rejects non-numeric ones (M0.8 cast foundation)" {

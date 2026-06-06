@@ -72,6 +72,37 @@ test "recovery resumes across multiple broken constructs (one diagnostic each)" 
     try std.testing.expectEqual(@as(usize, 3), good_count);
 }
 
+test "recovery resyncs at a top-level `type` alias after a broken construct (M0.8 lockstep)" {
+    const gpa = std.testing.allocator;
+    // A broken component precedes a valid `type` alias. Because `kw_type` is
+    // in recoverToTopLevel's stop-set — extended IN LOCKSTEP with the
+    // parseTopLevel `type` production — the alias is not skipped: it lands in
+    // the AST. Without the lockstep extension the recovery loop would run past
+    // `type Meters = float` to EOF and silently drop a valid construct.
+    var result = try etch.parseSource(gpa,
+        \\component Broken { x: int = }
+        \\type Meters = float
+        \\component After { y: float = 0.0 }
+    );
+    defer result.deinit(gpa);
+
+    try std.testing.expect(result.diagnostics.len >= 1);
+
+    // The valid `type` alias survived the resync.
+    var saw_alias = false;
+    for (result.ast.type_alias_decls.items) |ta| {
+        if (std.mem.eql(u8, result.ast.strings.slice(ta.name), "Meters")) saw_alias = true;
+    }
+    try std.testing.expect(saw_alias);
+
+    // The construct after the alias survived too.
+    var saw_after = false;
+    for (result.ast.component_decls.items) |cd| {
+        if (std.mem.eql(u8, result.ast.strings.slice(cd.name), "After")) saw_after = true;
+    }
+    try std.testing.expect(saw_after);
+}
+
 test "clean source still yields zero diagnostics under the recovery loop" {
     const gpa = std.testing.allocator;
     var result = try etch.parseSource(gpa,

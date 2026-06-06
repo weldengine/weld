@@ -323,6 +323,13 @@ const RuleParam = struct {
     type_node: NodeId,
 };
 
+/// Side-slab entry for a top-level `type Name = Type` alias (M0.8 v0.6
+/// foundations). `target` is the aliased type node (a `.type_node`).
+pub const TypeAliasDecl = struct {
+    name: StringId,
+    target: NodeId,
+};
+
 /// Side-slab entry for a `rule` declaration: params, optional `when`
 /// clause, body statement range, and annotation range.
 pub const RuleDecl = struct {
@@ -540,6 +547,7 @@ pub const AstArena = struct {
     component_decls: std.ArrayListUnmanaged(ComponentDecl) = .empty,
     resource_decls: std.ArrayListUnmanaged(ResourceDecl) = .empty,
     rule_decls: std.ArrayListUnmanaged(RuleDecl) = .empty,
+    type_alias_decls: std.ArrayListUnmanaged(TypeAliasDecl) = .empty,
     rule_params: std.ArrayListUnmanaged(RuleParam) = .empty,
     when_nodes: std.ArrayListUnmanaged(WhenNode) = .empty,
 
@@ -604,6 +612,7 @@ pub const AstArena = struct {
         self.component_decls.deinit(gpa);
         self.resource_decls.deinit(gpa);
         self.rule_decls.deinit(gpa);
+        self.type_alias_decls.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
         self.let_stmts.deinit(gpa);
@@ -629,6 +638,34 @@ pub const AstArena = struct {
         const idx: u28 = @intCast(self.items.len);
         try self.items.append(gpa, .{ .kind = kind, .data = data, .span = span });
         return .{ .category = .item, .index = idx };
+    }
+
+    pub fn addTypeAlias(self: *AstArena, gpa: std.mem.Allocator, name: StringId, target: NodeId, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.type_alias_decls.items.len);
+        try self.type_alias_decls.append(gpa, .{ .name = name, .target = target });
+        return try self.addItem(gpa, .type_alias, idx, span);
+    }
+
+    /// Resolve a type name through the top-level `type` alias chain to its
+    /// ultimate underlying name (M0.8 v0.6 foundations). Returns `name`
+    /// unchanged when it names no alias. Bounded by the alias count so a
+    /// cyclic alias (`type A = B; type B = A`) terminates rather than
+    /// looping — the type-checker reports the cycle as an unknown type.
+    pub fn resolveTypeAliasName(self: *const AstArena, name: StringId) StringId {
+        var current = name;
+        var guard: usize = 0;
+        const max = self.type_alias_decls.items.len + 1;
+        outer: while (guard <= max) : (guard += 1) {
+            for (self.type_alias_decls.items) |alias| {
+                if (alias.name == current) {
+                    const named = self.named_types.items[self.typeNodeData(alias.target)];
+                    current = named.name;
+                    continue :outer;
+                }
+            }
+            break;
+        }
+        return current;
     }
 
     pub fn addStmt(self: *AstArena, gpa: std.mem.Allocator, kind: StmtKind, data: u32, span: SourceSpan) !NodeId {

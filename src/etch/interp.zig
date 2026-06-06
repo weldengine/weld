@@ -442,7 +442,7 @@ pub const Interpreter = struct {
                 const c = self.ast.casts.items[data];
                 const v = try self.evalExpr(world, locals, c.operand);
                 const named = self.ast.named_types.items[self.ast.typeNodeData(c.type_node)];
-                const tname = self.ast.strings.slice(named.name);
+                const tname = self.ast.strings.slice(self.ast.resolveTypeAliasName(named.name));
                 const to_float = std.mem.eql(u8, tname, "float") or std.mem.eql(u8, tname, "f32") or std.mem.eql(u8, tname, "f64");
                 return switch (v) {
                     .int_ => |x| if (to_float) Value{ .float_ = @floatFromInt(x) } else Value{ .int_ = x },
@@ -670,7 +670,8 @@ fn compileTypeDecl(
     while (f_i < fields_len) : (f_i += 1) {
         const f = ast.fields.items[fields_start + f_i];
         const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-        const tname = ast.strings.slice(tnode.name);
+        // Resolve through any top-level `type` alias chain (M0.8 foundations).
+        const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
         const kind = fieldKindFromTypeName(tname) orelse return error.InvalidProgram;
         const align_b = kind.alignBytes();
         if (align_b > max_align) max_align = align_b;
@@ -991,6 +992,54 @@ test "runProgram resource get/get_mut without receiver reads and writes the reso
     var points: i32 = 0;
     @memcpy(std.mem.asBytes(&points), bytes[0..@sizeOf(i32)]);
     try std.testing.expectEqual(@as(i32, 15), points);
+}
+
+test "runProgram type-alias field resolves to the underlying primitive (M0.8 type alias)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `Meters` aliases `float`: the interpreter must resolve it to f64 when
+    // computing the field's FieldKind/layout, else compilation fails.
+    const source =
+        \\type Meters = float
+        \\component Position { x: Meters = 0.0 }
+        \\rule advance(entity: Entity)
+        \\  when entity has Position
+        \\{
+        \\  entity.get_mut(Position).x += 2.5
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const comp_id = world.registry.idOf("Position").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{comp_id});
+
+    const report = try interp.runFor(&world, 2);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    const idx = arch.componentIndex(comp_id).?;
+    const slot = arch.componentSlot(chunk, idx, loc.slot);
+    var x: f64 = 0;
+    @memcpy(std.mem.asBytes(&x), slot[0..@sizeOf(f64)]);
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0), x, 0.0001);
 }
 
 test "runProgram numeric cast int-to-float (M0.8 cast foundation)" {
