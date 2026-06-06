@@ -347,7 +347,11 @@ pub const Parser = struct {
             // by emitting an ident expr and continuing through Pratt.
             const ident_id = try self.internSlice(saved.span);
             const lhs = try self.arena.addExpr(self.gpa, .ident, ident_id, saved.span);
-            const continued = try self.continuePostfixAndBinary(lhs, 0);
+            // Route through the postfix chain first so `@requires(self.health)`
+            // (ident + `.field`) parses; then the binary continuation
+            // (D-S3-annot-field-access).
+            const after_postfix = try self.continuePostfix(lhs);
+            const continued = try self.continuePostfixAndBinary(after_postfix, 0);
             return .{ .name = 0, .value = continued };
         }
         // Positional: bare expression.
@@ -807,7 +811,19 @@ pub const Parser = struct {
     }
 
     fn parsePostfix(self: *Parser) ParseError!NodeId {
-        var expr = try self.parsePrimary();
+        const expr = try self.parsePrimary();
+        return self.continuePostfix(expr);
+    }
+
+    /// Continue a postfix `.field` / `.get(T)` / `.get_mut(T)` chain on an
+    /// already-parsed receiver. Extracted from `parsePostfix` so annotation
+    /// arguments that begin with an identifier (`@requires(self.health)`)
+    /// also pick up the postfix chain (D-S3-annot-field-access): the
+    /// named-arg lookahead in `parseAnnotationArg` consumes the leading
+    /// ident before the normal `parsePrimary` postfix path can run, so the
+    /// ident must be threaded back through this helper.
+    fn continuePostfix(self: *Parser, expr_in: NodeId) ParseError!NodeId {
+        var expr = expr_in;
         while (self.peek() == .dot) {
             _ = try self.advance();
             // After `.`: either a method `get(T)` / `get_mut(T)`, or a field.
@@ -1095,6 +1111,30 @@ test "parser captures annotation kind and args" {
     // applicability is deferred — only "kind + args reachable" is required.
     try std.testing.expect(result.diagnostics.len == 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
+}
+
+test "D-S3-annot-field-access: annotation arg accepts a field access expression" {
+    const gpa = std.testing.allocator;
+    // `@requires(self.health)` — annotation positional arg that is a field
+    // access. Pre-fix, the annotation-arg path built the ident then called
+    // the binary-only continuation, leaving `.health` unconsumed and
+    // surfacing "expected ')'". Postfix routing now parses it cleanly.
+    var result = try parse(gpa,
+        \\@requires(self.health)
+        \\component Inventory { gold: int = 0 }
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
+    const cd = result.ast.component_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 1), cd.annotations_len);
+    const annot = result.ast.annot_pool.items[cd.annotations_extra];
+    try std.testing.expectEqual(@as(u32, 1), annot.args_len);
+    const arg = result.ast.annot_args.items[annot.args_start];
+    try std.testing.expectEqual(ast_mod.ExprKind.field_access, result.ast.exprKind(arg.value));
 }
 
 test "parser does not leak comment spans on OOM during init" {
