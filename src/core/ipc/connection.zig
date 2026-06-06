@@ -265,6 +265,18 @@ pub const ReplayResult = struct {
 /// POSIX); a recv error (timeout / EOF) ends the pass. `scratch` must
 /// hold one full reply frame. Never raises — failures end the pass with
 /// `complete = false`.
+///
+/// **Invariant — `seq_id` safety (§3.4).** This pass is *synchronous* and
+/// drains each replayed command fully — `send` → `recvFrame` of the ack
+/// carrying the same `seq_id` → `markAcked` — before advancing to the next
+/// entry, and the caller (the editor) MUST NOT resume emitting new commands
+/// until this function returns. That strict serialization is what
+/// guarantees a replayed `seq_id` can never coexist with a freshly-issued
+/// one in the editor's `seq_id`→callback map: each replayed id is retired
+/// (acked) one at a time, before any new id is minted. Making the replay
+/// asynchronous, or pipelining it (issuing the next frame before the prior
+/// ack lands, or overlapping it with normal traffic), would BREAK this
+/// guarantee and reopen the collision window. Keep it strictly serial.
 pub fn replayCommands(
     conn: *IpcConnection,
     log: *command_log.CommandLog,
@@ -278,6 +290,8 @@ pub fn replayCommands(
         // Re-send the original frame byte-for-byte (same seq_id). `seq`
         // is captured before any mutation; `entry` is not read after the
         // `markAcked` below (forward-only iteration, no revisit).
+        // Synchronous drain: block on THIS command's ack before the next
+        // send — never pipeline (see the seq_id-safety invariant above).
         conn.socket.send(entry.frameBytes()) catch return .{ .replayed = replayed, .complete = false };
         const frame = conn.recvFrame(scratch) catch return .{ .replayed = replayed, .complete = false };
         if (frame.header.seq_id != seq) return .{ .replayed = replayed, .complete = false };
