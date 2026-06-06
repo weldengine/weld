@@ -36,6 +36,9 @@ pub const DiagnosticCode = enum {
     // ── Type errors (E0200-E0299) ──
     type_mismatch, // S3 — E0200 TypeMismatch
 
+    // ── Annotation errors (E0500-E0599) ──
+    annotation_misapplied, // M0.8 — E0502 AnnotationMisapplied
+
     // ── Const eval errors (E1100-E1199) ──
     not_const_evaluable, // S3 — E1101 NotConstEvaluable
 
@@ -51,6 +54,7 @@ pub const DiagnosticCode = enum {
             .duplicate_symbol => "E0101",
             .undefined_symbol => "E0102",
             .type_mismatch => "E0200",
+            .annotation_misapplied => "E0502",
             .not_const_evaluable => "E1101",
             .unknown_component_in_when => "E1210",
             .invalid_field_filter => "E1211",
@@ -65,6 +69,7 @@ pub const DiagnosticCode = enum {
             .duplicate_symbol => "DuplicateSymbol",
             .undefined_symbol => "UndefinedSymbol",
             .type_mismatch => "TypeMismatch",
+            .annotation_misapplied => "AnnotationMisapplied",
             .not_const_evaluable => "NotConstEvaluable",
             .unknown_component_in_when => "UnknownComponentInWhen",
             .invalid_field_filter => "InvalidFieldFilter",

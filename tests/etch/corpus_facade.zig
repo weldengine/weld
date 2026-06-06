@@ -75,6 +75,7 @@ pub const invalid = [_]InvalidEntry{
     .{ .name = "E0102_unknown_field_type.etch", .expected_code = "E0102", .source = @embedFile("corpus/invalid/E0102_unknown_field_type.etch") },
     .{ .name = "E0102_string_field.etch", .expected_code = "E0102", .source = @embedFile("corpus/invalid/E0102_string_field.etch") },
     .{ .name = "E0200_int_plus_float.etch", .expected_code = "E0200", .source = @embedFile("corpus/invalid/E0200_int_plus_float.etch") },
+    .{ .name = "E0502_annotation_misapplied.etch", .expected_code = "E0502", .source = @embedFile("corpus/invalid/E0502_annotation_misapplied.etch") },
     .{ .name = "E1101_non_const_default.etch", .expected_code = "E1101", .source = @embedFile("corpus/invalid/E1101_non_const_default.etch") },
     .{ .name = "E1210_unknown_component_in_when.etch", .expected_code = "E1210", .source = @embedFile("corpus/invalid/E1210_unknown_component_in_when.etch") },
     .{ .name = "E1211_field_filter_type_mismatch.etch", .expected_code = "E1211", .source = @embedFile("corpus/invalid/E1211_field_filter_type_mismatch.etch") },

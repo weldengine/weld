@@ -102,6 +102,33 @@ const Symbol = struct {
     item_id: NodeId,
 };
 
+/// Target categories the annotation-applicability check distinguishes
+/// (M0.8 D-S3-annot-applicability). At E1 only `component` / `resource` /
+/// `rule` items and their `field`s exist; `event` and other construct
+/// targets arrive with their constructs in later stages.
+const AnnotTarget = enum { component, resource, rule, field };
+
+/// Whether a builtin annotation kind is valid on `target`
+/// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
+/// `.custom` is accepted everywhere (plugin-registered, schema validated
+/// Phase 3). Annotations whose only valid target is a construct not present
+/// at E1 (`@networked` → `event`, `@loc` → expression) return `false` on
+/// every current target.
+fn annotationAppliesTo(kind: ast_mod.AnnotationKind, target: AnnotTarget) bool {
+    return switch (kind) {
+        .custom => true,
+        .save => target == .component or target == .resource,
+        .requires, .storage => target == .component,
+        .config, .state => target == .resource,
+        .transient => target == .resource or target == .field,
+        .phase, .priority, .run_on, .pause_group => target == .rule,
+        .id => target == .rule,
+        .unit, .range, .hidden, .readonly, .replicated => target == .field,
+        .networked => false,
+        .loc => false,
+    };
+}
+
 /// S3 type-checker — runs pass 1 (symbol collection) then pass 2
 /// (type resolution + body validation) against an `AstArena`,
 /// accumulating diagnostics in a caller-owned list.
@@ -143,16 +170,19 @@ pub const TypeChecker = struct {
                 .component_decl => {
                     const decl = self.arena.component_decls.items[data];
                     try self.registerSymbol(.component, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .component);
                     try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, true);
                 },
                 .resource_decl => {
                     const decl = self.arena.resource_decls.items[data];
                     try self.registerSymbol(.resource, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .resource);
                     try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, false);
                 },
                 .rule_decl => {
                     const decl = self.arena.rule_decls.items[data];
                     try self.registerSymbol(.rule, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .rule);
                 },
                 else => {}, // forward-compatible: unknown items ignored
             }
@@ -178,6 +208,9 @@ pub const TypeChecker = struct {
         while (i < fields_len) : (i += 1) {
             const field = self.arena.fields.items[fields_start + i];
             const fname = self.arena.strings.slice(field.name);
+
+            // Field-level annotation applicability (M0.8 D-S3-annot-applicability).
+            try self.validateAnnotations(field.annotations_extra, field.annotations_len, .field);
 
             // Check uniqueness.
             const gop = try seen.getOrPut(self.gpa, field.name);
@@ -219,6 +252,23 @@ pub const TypeChecker = struct {
             // Default value type check + const-evaluability.
             if (!field.default_value.isNone()) {
                 try self.checkFieldDefault(field.default_value, field.type_node);
+            }
+        }
+    }
+
+    /// Validate annotation applicability for a `(start, len)` range in
+    /// `annot_pool` against the target the annotations decorate (M0.8
+    /// D-S3-annot-applicability, cf. `etch-resolver-types.md` §13). Emits
+    /// `E0502 AnnotationMisapplied` per offending builtin annotation;
+    /// `.custom` (plugin) annotations are accepted on any target.
+    /// Argument-schema validation (E0503/E0504) is a separate §13 concern,
+    /// out of this debt's scope.
+    fn validateAnnotations(self: *TypeChecker, start: u32, len: u32, target: AnnotTarget) !void {
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            const annot = self.arena.annot_pool.items[start + i];
+            if (!annotationAppliesTo(annot.kind, target)) {
+                try self.emit(.annotation_misapplied, .error_, annot.span, "annotation '@{s}' is not valid on a {s}", .{ self.arena.strings.slice(annot.name), @tagName(target) });
             }
         }
     }
@@ -717,6 +767,10 @@ fn expectAnyCode(diagnostics: []const Diagnostic, code: DiagnosticCode) !void {
     return error.DiagnosticCodeNotEmitted;
 }
 
+fn expectNoCode(diagnostics: []const Diagnostic, code: DiagnosticCode) !void {
+    for (diagnostics) |d| if (d.code == code) return error.DiagnosticCodeUnexpectedlyEmitted;
+}
+
 test "type-checker emits E0101 on duplicate component declaration" {
     const gpa = std.testing.allocator;
     var result = try parseAndCheck(gpa,
@@ -757,6 +811,45 @@ test "type-checker emits E1101 on non-const default value" {
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .not_const_evaluable);
+}
+
+test "type-checker emits E0502 when an annotation is applied to the wrong target (D-S3-annot-applicability)" {
+    const gpa = std.testing.allocator;
+
+    // `@config` is resource-only — on a component it must be flagged.
+    var on_component = try parseAndCheck(gpa,
+        \\@config
+        \\component Health { current: float = 100.0 }
+    );
+    defer on_component.deinit(gpa);
+    try expectAnyCode(on_component.diagnostics.items, .annotation_misapplied);
+
+    // `@replicated` is field-only — on a component it must be flagged.
+    var item_only = try parseAndCheck(gpa,
+        \\@replicated(predicted)
+        \\component Predicted { flag: bool = false }
+    );
+    defer item_only.deinit(gpa);
+    try expectAnyCode(item_only.diagnostics.items, .annotation_misapplied);
+
+    // Control — every annotation here sits on a valid target, so no E0502.
+    var ok = try parseAndCheck(gpa,
+        \\@config
+        \\resource GameConfig { max_players: i32 = 8 }
+        \\@phase(.update)
+        \\rule tick(entity: Entity)
+        \\  when entity has Tag
+        \\{
+        \\}
+        \\component Tag {
+        \\  @hidden
+        \\  flag: bool = false
+        \\  @replicated(predicted)
+        \\  net: bool = false
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .annotation_misapplied);
 }
 
 test "type-checker emits E1210 on rule when clause referencing unknown component" {
