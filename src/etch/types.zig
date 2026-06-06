@@ -72,6 +72,14 @@ pub const BuiltinType = enum {
     }
 };
 
+/// Fixed-array carrier for `ResolvedType.array_fixed`: builtin element type +
+/// compile-time length. E1 collections hold **builtin primitive** elements
+/// only (collections of components / structs are E2); a non-builtin element
+/// resolves the whole collection type to `unknown`.
+pub const ArrayFixedInfo = struct { elem: BuiltinType, len: u64 };
+/// Map carrier for `ResolvedType.map_t`: builtin key + value types (E1).
+pub const MapInfo = struct { key: BuiltinType, value: BuiltinType };
+
 /// `ResolvedType` is the type-checker's internal type representation.
 pub const ResolvedType = union(enum) {
     builtin: BuiltinType,
@@ -80,6 +88,15 @@ pub const ResolvedType = union(enum) {
     /// `start..end` range; payload is the (integer) element type (M0.8 v0.6
     /// foundations). Only consumed by `for-in` in E1.
     range: BuiltinType,
+    /// `T[N]` fixed-size array (M0.8 collections). Element + compile-time len.
+    array_fixed: ArrayFixedInfo,
+    /// `T[]` dynamic array / slice (M0.8 collections). Slicing a fixed or
+    /// dynamic array yields this.
+    array_dyn: BuiltinType,
+    /// `[K: V]` map (M0.8 collections).
+    map_t: MapInfo,
+    /// `Set<T>` set (M0.8 collections).
+    set_t: BuiltinType,
     /// Type unknown / unresolved. Used as the fallback after a diagnostic
     /// has been emitted; subsequent checks treat `unknown` as wildcard to
     /// avoid cascade errors.
@@ -92,7 +109,22 @@ pub const ResolvedType = union(enum) {
             .component => |id| id == b.component,
             .resource => |id| id == b.resource,
             .range => |bt| bt == b.range,
+            .array_fixed => |info| info.elem == b.array_fixed.elem and info.len == b.array_fixed.len,
+            .array_dyn => |elem| elem == b.array_dyn,
+            .map_t => |info| info.key == b.map_t.key and info.value == b.map_t.value,
+            .set_t => |elem| elem == b.set_t,
             .unknown => true,
+        };
+    }
+
+    /// The element type produced by indexing or iterating this collection,
+    /// or `null` if the type is not an indexable/iterable collection.
+    pub fn elementType(self: ResolvedType) ?BuiltinType {
+        return switch (self) {
+            .array_fixed => |info| info.elem,
+            .array_dyn => |elem| elem,
+            .set_t => |elem| elem,
+            else => null,
         };
     }
 };
@@ -252,8 +284,16 @@ pub const TypeChecker = struct {
                 try self.emit(.duplicate_symbol, .error_, span, "duplicate field '{s}'", .{fname});
             }
 
-            // Resolve the type node (through any `type` alias chain, M0.8).
+            // Collection / composite field types (`T[]`, `[K: V]`, `Set<T>`,
+            // and fixed `T[N]`) are not part of the E1 component/resource
+            // surface — fields stay scalar POD. Reject anything non-named here
+            // rather than mis-indexing the `named_types` slab (M0.8 collections
+            // land as locals, not fields).
             const tspan = self.arena.typeNodeSpan(field.type_node);
+            if (self.arena.typeNodeKind(field.type_node) != .named) {
+                try self.emit(.undefined_symbol, .error_, tspan, "collection / composite field types are not supported in E1 — component and resource fields must be scalar POD", .{});
+                continue;
+            }
             const named_idx = self.arena.typeNodeData(field.type_node);
             const named = self.arena.named_types.items[named_idx];
             const resolved_name = self.arena.resolveTypeAliasName(named.name);
@@ -347,21 +387,68 @@ pub const TypeChecker = struct {
         return false;
     }
 
+    /// Resolve a type node to a `ResolvedType`. Despite the historical name it
+    /// dispatches on the node kind: `.named` resolves through the alias chain
+    /// to a builtin / component / resource; the collection kinds (`.array` /
+    /// `.slice` / `.map_type` / `.set_type`, M0.8) resolve their element /
+    /// key / value to a builtin (E1 collections carry builtin elements only —
+    /// a non-builtin element resolves the whole type to `unknown`).
     fn namedTypeToResolved(self: *TypeChecker, type_node: NodeId) ResolvedType {
-        const named_idx = self.arena.typeNodeData(type_node);
-        const named = self.arena.named_types.items[named_idx];
-        // Resolve through any top-level `type` alias chain first (M0.8).
-        const resolved_name = self.arena.resolveTypeAliasName(named.name);
-        const tname = self.arena.strings.slice(resolved_name);
-        if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
-        if (self.symbols.get(resolved_name)) |sym| {
-            return switch (sym.kind) {
-                .component => .{ .component = resolved_name },
-                .resource => .{ .resource = resolved_name },
-                else => .unknown,
-            };
+        switch (self.arena.typeNodeKind(type_node)) {
+            .named => {
+                const named_idx = self.arena.typeNodeData(type_node);
+                const named = self.arena.named_types.items[named_idx];
+                // Resolve through any top-level `type` alias chain first (M0.8).
+                const resolved_name = self.arena.resolveTypeAliasName(named.name);
+                const tname = self.arena.strings.slice(resolved_name);
+                if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
+                if (self.symbols.get(resolved_name)) |sym| {
+                    return switch (sym.kind) {
+                        .component => .{ .component = resolved_name },
+                        .resource => .{ .resource = resolved_name },
+                        else => .unknown,
+                    };
+                }
+                return .unknown;
+            },
+            .array => {
+                const at = self.arena.array_types.items[self.arena.typeNodeData(type_node)];
+                const elem = self.namedTypeToResolved(at.elem);
+                if (elem != .builtin) return .unknown;
+                const len = self.constArrayLen(at.size) orelse return .unknown;
+                return .{ .array_fixed = .{ .elem = elem.builtin, .len = len } };
+            },
+            .slice => {
+                const at = self.arena.array_types.items[self.arena.typeNodeData(type_node)];
+                const elem = self.namedTypeToResolved(at.elem);
+                if (elem != .builtin) return .unknown;
+                return .{ .array_dyn = elem.builtin };
+            },
+            .map_type => {
+                const mt = self.arena.map_types.items[self.arena.typeNodeData(type_node)];
+                const k = self.namedTypeToResolved(mt.key);
+                const v = self.namedTypeToResolved(mt.value);
+                if (k != .builtin or v != .builtin) return .unknown;
+                return .{ .map_t = .{ .key = k.builtin, .value = v.builtin } };
+            },
+            .set_type => {
+                const st = self.arena.set_types.items[self.arena.typeNodeData(type_node)];
+                const elem = self.namedTypeToResolved(st.elem);
+                if (elem != .builtin) return .unknown;
+                return .{ .set_t = elem.builtin };
+            },
+            else => return .unknown,
         }
-        return .unknown;
+    }
+
+    /// Const-fold a fixed-array size node to its `u64` length. E1 accepts a
+    /// bare integer literal (`int[8]`); a more general const expression is a
+    /// later refinement, so anything else returns `null` (→ `unknown` type).
+    fn constArrayLen(self: *TypeChecker, size_node: NodeId) ?u64 {
+        if (size_node.isNone()) return null;
+        if (self.arena.exprKind(size_node) != .int_lit) return null;
+        const text = self.arena.strings.slice(self.arena.exprData(size_node));
+        return std.fmt.parseInt(u64, text, 10) catch null;
     }
 
     // ─── Pass 2 ──────────────────────────────────────────────────────────
@@ -408,9 +495,13 @@ pub const TypeChecker = struct {
             const p = self.arena.rule_params.items[rule.params_start + i];
             const ptype = self.namedTypeToResolved(p.type_node);
             if (ptype == .unknown) {
-                const tname_idx = self.arena.typeNodeData(p.type_node);
-                const tname = self.arena.strings.slice(self.arena.named_types.items[tname_idx].name);
-                try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown type '{s}' on rule parameter", .{tname});
+                if (self.arena.typeNodeKind(p.type_node) == .named) {
+                    const tname_idx = self.arena.typeNodeData(p.type_node);
+                    const tname = self.arena.strings.slice(self.arena.named_types.items[tname_idx].name);
+                    try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown type '{s}' on rule parameter", .{tname});
+                } else {
+                    try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unsupported parameter type in E1 (rule parameters must be scalar or Entity)", .{});
+                }
             }
             try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
         }
@@ -717,8 +808,81 @@ pub const TypeChecker = struct {
                 }
                 return target_t;
             },
+            .array_lit => return try self.synthArrayLit(id, data, ctx_opt),
+            .index => return try self.synthIndex(id, data, ctx_opt),
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
             else => return ResolvedType.unknown,
+        }
+    }
+
+    /// Type an array literal (M0.8 collections). `[a, b, c]` (and `[v; n]`)
+    /// without an annotation infers a **fixed** array of the unified builtin
+    /// element type; an empty `[]` stays `unknown` so the `let`'s annotation
+    /// supplies the type. E1 arrays carry builtin primitive elements only.
+    fn synthArrayLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const al = self.arena.array_lits.items[data];
+        if (al.is_fill) {
+            const elem_id: NodeId = @bitCast(self.arena.extra.items[al.elements_start]);
+            const elem_t = try self.synthExprE(elem_id, ctx_opt);
+            const count_t = try self.synthExprE(al.fill_count, ctx_opt);
+            if (count_t == .builtin and !count_t.builtin.isInteger()) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(al.fill_count), "array fill count must be an integer", .{});
+            }
+            if (elem_t != .builtin) {
+                if (elem_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array elements must be a builtin primitive in E1", .{});
+                return ResolvedType.unknown;
+            }
+            const len = self.constArrayLen(al.fill_count) orelse 0;
+            return .{ .array_fixed = .{ .elem = elem_t.builtin, .len = len } };
+        }
+        if (al.elements_len == 0) return ResolvedType.unknown; // empty: type from annotation
+        var elem_bt: ?BuiltinType = null;
+        var i: u32 = 0;
+        while (i < al.elements_len) : (i += 1) {
+            const e: NodeId = @bitCast(self.arena.extra.items[al.elements_start + i]);
+            const et = try self.synthExprE(e, ctx_opt);
+            if (et != .builtin) {
+                if (et != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(e), "array elements must be a builtin primitive in E1", .{});
+                return ResolvedType.unknown;
+            }
+            if (elem_bt) |bt| {
+                if (!self.literalTypeFits(bt, e, et.builtin)) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(e), "array elements must all have the same type", .{});
+                }
+            } else elem_bt = et.builtin;
+        }
+        return .{ .array_fixed = .{ .elem = elem_bt.?, .len = al.elements_len } };
+    }
+
+    /// Type an index / slice access (M0.8 collections). A range index
+    /// (`arr[0..3]`) yields a dynamic-array slice of the element type; a scalar
+    /// index (`arr[i]`) yields the element type. The index must be an integer.
+    fn synthIndex(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const ix = self.arena.index_exprs.items[data];
+        const recv_t = try self.synthExprE(ix.receiver, ctx_opt);
+        if (self.arena.exprKind(ix.index) == .range) {
+            _ = try self.synthExprE(ix.index, ctx_opt); // type-check the bounds
+            const elem = recv_t.elementType() orelse {
+                if (recv_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "cannot slice a non-array value", .{});
+                return ResolvedType.unknown;
+            };
+            return .{ .array_dyn = elem };
+        }
+        const idx_t = try self.synthExprE(ix.index, ctx_opt);
+        switch (recv_t) {
+            .array_fixed => |info| {
+                if (idx_t == .builtin and !idx_t.builtin.isInteger()) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
+                return .{ .builtin = info.elem };
+            },
+            .array_dyn => |elem| {
+                if (idx_t == .builtin and !idx_t.builtin.isInteger()) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
+                return .{ .builtin = elem };
+            },
+            .unknown => return ResolvedType.unknown,
+            else => {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "cannot index a non-collection value", .{});
+                return ResolvedType.unknown;
+            },
         }
     }
 
@@ -858,7 +1022,7 @@ pub const TypeChecker = struct {
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on resource '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
-            .builtin, .range, .unknown => return ResolvedType.unknown,
+            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .unknown => return ResolvedType.unknown,
         }
     }
 
@@ -1419,4 +1583,69 @@ test "type-checker accepts top-level declarations in any order via pass 1 / pass
     );
     defer result.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
+}
+
+test "array literal element typing, indexing, and slicing (M0.8 collections)" {
+    const gpa = std.testing.allocator;
+
+    // Indexing a homogeneous array yields the element type — assigning it to
+    // a matching field is clean.
+    var ok = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let a = [10, 20, 30]
+        \\  let s = a[0..2]
+        \\  entity.get_mut(C).out = a[1] + s[0]
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+
+    // Heterogeneous elements (int + float) → E0200.
+    var mixed = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let a = [1, 2.0]
+        \\  entity.get_mut(C).out = a[0]
+        \\}
+    );
+    defer mixed.deinit(gpa);
+    try expectAnyCode(mixed.diagnostics.items, .type_mismatch);
+
+    // Non-integer index → E0200.
+    var bad_idx = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let a = [1, 2, 3]
+        \\  let y = a[true]
+        \\}
+    );
+    defer bad_idx.deinit(gpa);
+    try expectAnyCode(bad_idx.diagnostics.items, .type_mismatch);
+
+    // Indexing a non-collection → E0200.
+    var not_coll = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let n = 5
+        \\  let y = n[0]
+        \\}
+    );
+    defer not_coll.deinit(gpa);
+    try expectAnyCode(not_coll.diagnostics.items, .type_mismatch);
+
+    // Collection field types are rejected (E1 components stay scalar POD).
+    var coll_field = try parseAndCheck(gpa,
+        \\component Bad { items: int[] }
+    );
+    defer coll_field.deinit(gpa);
+    try expectAnyCode(coll_field.diagnostics.items, .undefined_symbol);
 }

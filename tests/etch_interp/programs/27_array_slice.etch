@@ -1,0 +1,16 @@
+// M0.8 collections: slicing a fixed-size array with an exclusive range, then
+// indexing the slice. `arr[1..3]` is the `arr[0..3]` consumer the scoped
+// collections line entails (cf. brief §Notes scope). The interpreter copies
+// elements [1, 3) into a fresh store array; the cooked Zig emits a native
+// slice `arr[1..3]`. Both read element 0 of the slice (20).
+component Acc {
+  out: int = 0
+}
+
+rule pick(entity: Entity)
+  when entity has Acc
+{
+  let arr = [10, 20, 30, 40]
+  let s = arr[1..3]
+  entity.get_mut(Acc).out = s[0]
+}

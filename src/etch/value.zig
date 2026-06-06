@@ -64,6 +64,12 @@ pub const Value = union(enum) {
     component_ref: ComponentRef,
     resource_ref: ResourceRef,
     range: RangeVal,
+    /// Handle into the interpreter's per-rule-body collection store (M0.8
+    /// collections). Arrays / maps / sets are heap-managed and cannot live
+    /// inline in this stack union, so a runtime collection value is a `u32`
+    /// index resolved against `Interpreter.collections`. Invalidated at the
+    /// rule-body boundary (rule-arena semantics).
+    array_ref: u32,
     unit,
 
     pub fn fromInt(x: i64) Value {
@@ -98,6 +104,7 @@ pub const Value = union(enum) {
             .component_ref => false,
             .resource_ref => false,
             .range => false,
+            .array_ref => false,
             .unit => true,
         };
     }

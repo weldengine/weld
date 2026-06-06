@@ -42,4 +42,6 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p23_assert_guard", .etch_path = "tests/etch_interp/programs/23_assert_guard.etch" },
     .{ .name = "p24_match_dispatch", .etch_path = "tests/etch_interp/programs/24_match_dispatch.etch" },
     .{ .name = "p25_for_range_sum", .etch_path = "tests/etch_interp/programs/25_for_range_sum.etch" },
+    .{ .name = "p26_array_index", .etch_path = "tests/etch_interp/programs/26_array_index.etch" },
+    .{ .name = "p27_array_slice", .etch_path = "tests/etch_interp/programs/27_array_slice.etch" },
 };

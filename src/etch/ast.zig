@@ -479,8 +479,65 @@ pub const MatchExpr = struct {
     arms_len: u32,
 };
 
+/// `[a, b, c]` (comma form) or `[v; n]` (fill form) array literal
+/// (M0.8 collections, `etch-grammar.md` §493-494). For the comma form,
+/// `elements_start`/`elements_len` index a run of expr `NodeId` raw values in
+/// `arena.extra`. For the fill form `[v; n]`, `is_fill = true`, the single
+/// element expr `v` sits at the run (`elements_len == 1`), and `fill_count`
+/// is the count expression `n`.
+pub const ArrayLitExpr = struct {
+    elements_start: u32,
+    elements_len: u32,
+    is_fill: bool,
+    fill_count: NodeId, // expr — only meaningful when is_fill
+};
+
+/// One `key: value` entry of a map literal.
+pub const MapEntry = struct {
+    key: NodeId,
+    value: NodeId,
+};
+
+/// `[k: v, ...]` (entries) or `[:]` (empty) map literal (M0.8 collections,
+/// `etch-grammar.md` §496-498). Entries live in a flat `(start, len)` range of
+/// `arena.map_entries`.
+pub const MapLitExpr = struct {
+    entries_start: u32,
+    entries_len: u32,
+};
+
+/// `receiver[index]` index / slice access (M0.8 collections, `etch-grammar.md`
+/// postfix_op §425). When `index` is a `.range` expr the access is a slice;
+/// otherwise it is a single-element index. The two are disambiguated at
+/// resolve time from the index expression's kind.
+pub const IndexExpr = struct {
+    receiver: NodeId,
+    index: NodeId,
+};
+
 const NamedTypeNode = struct {
     name: StringId,
+};
+
+/// `T[N]` (fixed, `size` is a const expr) or `T[]` (dynamic, `size` is
+/// `NodeId.none`) array type (M0.8 collections, `etch-grammar.md` §264). The
+/// `.array` type-node kind carries a fixed size, `.slice` carries none — both
+/// reach this slab through `data`.
+pub const ArrayTypeNode = struct {
+    elem: NodeId, // type_node
+    size: NodeId, // expr (const) for T[N]; NodeId.none for T[]
+};
+
+/// `[K: V]` map type (M0.8 collections, `etch-grammar.md` §278).
+pub const MapTypeNode = struct {
+    key: NodeId, // type_node
+    value: NodeId, // type_node
+};
+
+/// `Set<T>` set type (M0.8 collections, `etch-grammar.md` §270 generic_type
+/// specialised to `Set`). `elem` is the element type-node.
+pub const SetTypeNode = struct {
+    elem: NodeId, // type_node
 };
 
 /// Annotation stored in `annot_pool`. `args_start`/`args_len` refer to
@@ -617,7 +674,14 @@ pub const AstArena = struct {
     match_exprs: std.ArrayListUnmanaged(MatchExpr) = .empty,
     match_arms: std.ArrayListUnmanaged(MatchArm) = .empty,
     for_stmts: std.ArrayListUnmanaged(ForStmt) = .empty,
+    array_lits: std.ArrayListUnmanaged(ArrayLitExpr) = .empty,
+    map_lits: std.ArrayListUnmanaged(MapLitExpr) = .empty,
+    map_entries: std.ArrayListUnmanaged(MapEntry) = .empty,
+    index_exprs: std.ArrayListUnmanaged(IndexExpr) = .empty,
     named_types: std.ArrayListUnmanaged(NamedTypeNode) = .empty,
+    array_types: std.ArrayListUnmanaged(ArrayTypeNode) = .empty,
+    map_types: std.ArrayListUnmanaged(MapTypeNode) = .empty,
+    set_types: std.ArrayListUnmanaged(SetTypeNode) = .empty,
 
     // Annotation storage.
     annotations: std.AutoHashMapUnmanaged(NodeId, AnnotationSpan) = .empty,
@@ -685,7 +749,14 @@ pub const AstArena = struct {
         self.match_exprs.deinit(gpa);
         self.match_arms.deinit(gpa);
         self.for_stmts.deinit(gpa);
+        self.array_lits.deinit(gpa);
+        self.map_lits.deinit(gpa);
+        self.map_entries.deinit(gpa);
+        self.index_exprs.deinit(gpa);
         self.named_types.deinit(gpa);
+        self.array_types.deinit(gpa);
+        self.map_types.deinit(gpa);
+        self.set_types.deinit(gpa);
         self.annotations.deinit(gpa);
         self.annot_pool.deinit(gpa);
         self.annot_args.deinit(gpa);
@@ -804,6 +875,57 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.match_exprs.items.len);
         try self.match_exprs.append(gpa, .{ .scrutinee = scrutinee, .arms_start = arms_start, .arms_len = @intCast(arms.len) });
         return try self.addExpr(gpa, .match_expr, idx, span);
+    }
+
+    /// `elements` is a slice of `NodeId.raw()` values (the array's element
+    /// expressions), bulk-appended to `arena.extra` as a contiguous run.
+    pub fn addArrayLit(self: *AstArena, gpa: std.mem.Allocator, elements: []const u32, is_fill: bool, fill_count: NodeId, span: SourceSpan) !NodeId {
+        const start: u32 = @intCast(self.extra.items.len);
+        try self.extra.appendSlice(gpa, elements);
+        const idx: u32 = @intCast(self.array_lits.items.len);
+        try self.array_lits.append(gpa, .{
+            .elements_start = start,
+            .elements_len = @intCast(elements.len),
+            .is_fill = is_fill,
+            .fill_count = fill_count,
+        });
+        return try self.addExpr(gpa, .array_lit, idx, span);
+    }
+
+    pub fn addMapLit(self: *AstArena, gpa: std.mem.Allocator, entries: []const MapEntry, span: SourceSpan) !NodeId {
+        const start: u32 = @intCast(self.map_entries.items.len);
+        try self.map_entries.appendSlice(gpa, entries);
+        const idx: u32 = @intCast(self.map_lits.items.len);
+        try self.map_lits.append(gpa, .{ .entries_start = start, .entries_len = @intCast(entries.len) });
+        return try self.addExpr(gpa, .map_lit, idx, span);
+    }
+
+    pub fn addIndex(self: *AstArena, gpa: std.mem.Allocator, receiver: NodeId, index: NodeId, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.index_exprs.items.len);
+        try self.index_exprs.append(gpa, .{ .receiver = receiver, .index = index });
+        return try self.addExpr(gpa, .index, idx, span);
+    }
+
+    /// `T[N]` (`size` an expr) or `T[]` (`size` is `NodeId.none`). The
+    /// type-node kind is `.array` for the fixed form, `.slice` for the
+    /// dynamic form; both reach `array_types` through `data`.
+    pub fn addArrayType(self: *AstArena, gpa: std.mem.Allocator, elem: NodeId, size: NodeId, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.array_types.items.len);
+        try self.array_types.append(gpa, .{ .elem = elem, .size = size });
+        const kind: TypeNodeKind = if (size.isNone()) .slice else .array;
+        return try self.addTypeNode(gpa, kind, idx, span);
+    }
+
+    pub fn addMapType(self: *AstArena, gpa: std.mem.Allocator, key: NodeId, value: NodeId, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.map_types.items.len);
+        try self.map_types.append(gpa, .{ .key = key, .value = value });
+        return try self.addTypeNode(gpa, .map_type, idx, span);
+    }
+
+    pub fn addSetType(self: *AstArena, gpa: std.mem.Allocator, elem: NodeId, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.set_types.items.len);
+        try self.set_types.append(gpa, .{ .elem = elem });
+        return try self.addTypeNode(gpa, .set_type, idx, span);
     }
 
     pub fn addLetStmt(self: *AstArena, gpa: std.mem.Allocator, let: LetStmt, span: SourceSpan) !NodeId {

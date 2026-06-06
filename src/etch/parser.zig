@@ -516,10 +516,37 @@ pub const Parser = struct {
     // ─── Type ────────────────────────────────────────────────────────────
 
     fn parseType(self: *Parser) ParseError!NodeId {
+        // Map sugar `[K : V]` (M0.8 collections, `etch-grammar.md` §278): a
+        // type beginning with `[` is always a map type — array / slice are the
+        // postfix `T[...]` form handled below.
+        if (self.peek() == .lbracket) {
+            return try self.parseMapTypeSugar();
+        }
+        var base = try self.parseBaseType();
+        // Postfix `T[N]` (fixed) / `T[]` (dynamic slice) array types
+        // (`etch-grammar.md` §264), left-associative so `T[2][3]` nests.
+        while (self.peek() == .lbracket) {
+            _ = try self.advance(); // '['
+            var size: NodeId = NodeId.none;
+            if (self.peek() != .rbracket) {
+                size = try self.parseExpr(0);
+            }
+            const closing = try self.expect(.rbracket, "expected ']' to close array type");
+            const base_span = self.arena.typeNodeSpan(base);
+            base = try self.arena.addArrayType(self.gpa, base, size, .{
+                .byte_start = base_span.byte_start,
+                .byte_end = closing.span.byte_end,
+            });
+        }
+        return base;
+    }
+
+    /// Parse a base type: a primitive / engine / user type identifier, with
+    /// the `Set<T>` and `Map<K, V>` generic collection forms recognised
+    /// specially (full generic parsing is E2; only these two builtin
+    /// containers are accepted in E1, `etch-grammar.md` §270).
+    fn parseBaseType(self: *Parser) ParseError!NodeId {
         switch (self.peek()) {
-            // PascalCase type identifiers (Entity, Vec3, Color, Duration,
-            // user-declared components/resources) and the primitive type
-            // keywords baked into the S3 lexer.
             .type_ident,
             .kw_int,
             .kw_float,
@@ -528,18 +555,58 @@ pub const Parser = struct {
             .kw_u32,
             .kw_f32,
             .kw_f64,
-            // Lowercase identifiers that resemble types — including names
-            // outside the S3 builtin set (`string`, `char`, etc.). The
-            // type-checker emits `E0102 UndefinedSymbol` (or a POD-specific
-            // message when applicable).
             .ident,
             => {
                 const tok = try self.advance();
+                if (self.peek() == .lt) {
+                    const name = self.sliceOf(tok.span);
+                    if (std.mem.eql(u8, name, "Set")) return try self.parseSetGeneric(tok.span);
+                    if (std.mem.eql(u8, name, "Map")) return try self.parseMapGeneric(tok.span);
+                    return self.parseErrFmt(tok.span, "generic type '{s}<...>' is not supported in E1 (only Set<T> / Map<K,V>)", .{name});
+                }
                 const name_id = try self.internSlice(tok.span);
                 return try self.arena.addNamedType(self.gpa, name_id, tok.span);
             },
             else => return self.parseErrFmt(self.peekSpan(), "expected type, got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
+    }
+
+    /// `[ K : V ]` map type sugar. The caller has confirmed `peek() == [`.
+    fn parseMapTypeSugar(self: *Parser) ParseError!NodeId {
+        const open = try self.advance(); // '['
+        const key = try self.parseType();
+        _ = try self.expect(.colon, "expected ':' in map type '[K: V]'");
+        const value = try self.parseType();
+        const closing = try self.expect(.rbracket, "expected ']' to close map type");
+        return try self.arena.addMapType(self.gpa, key, value, .{
+            .byte_start = open.span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
+    /// `Set < T >`. The caller has consumed `Set` (span passed in) and
+    /// confirmed `peek() == <`.
+    fn parseSetGeneric(self: *Parser, set_span: SourceSpan) ParseError!NodeId {
+        _ = try self.advance(); // '<'
+        const elem = try self.parseType();
+        const closing = try self.expect(.gt, "expected '>' to close Set<T>");
+        return try self.arena.addSetType(self.gpa, elem, .{
+            .byte_start = set_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
+    /// `Map < K , V >` (generic alternative to the `[K: V]` sugar).
+    fn parseMapGeneric(self: *Parser, map_span: SourceSpan) ParseError!NodeId {
+        _ = try self.advance(); // '<'
+        const key = try self.parseType();
+        _ = try self.expect(.comma, "expected ',' between Map<K, V> arguments");
+        const value = try self.parseType();
+        const closing = try self.expect(.gt, "expected '>' to close Map<K, V>");
+        return try self.arena.addMapType(self.gpa, key, value, .{
+            .byte_start = map_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
     }
 
     // ─── Rule ────────────────────────────────────────────────────────────
@@ -1001,28 +1068,47 @@ pub const Parser = struct {
     /// ident must be threaded back through this helper.
     fn continuePostfix(self: *Parser, expr_in: NodeId) ParseError!NodeId {
         var expr = expr_in;
-        while (self.peek() == .dot) {
-            _ = try self.advance();
-            // After `.`: either a method `get(T)` / `get_mut(T)`, or a field.
+        while (true) {
             switch (self.peek()) {
-                .kw_get => {
+                .dot => {
                     _ = try self.advance();
-                    expr = try self.parseGetCall(expr, .method_get);
+                    // After `.`: either a method `get(T)` / `get_mut(T)`, or a field.
+                    switch (self.peek()) {
+                        .kw_get => {
+                            _ = try self.advance();
+                            expr = try self.parseGetCall(expr, .method_get);
+                        },
+                        .kw_get_mut => {
+                            _ = try self.advance();
+                            expr = try self.parseGetCall(expr, .method_get_mut);
+                        },
+                        .ident => {
+                            const field_tok = try self.advance();
+                            const field_id = try self.internSlice(field_tok.span);
+                            const recv_span = self.arena.exprSpan(expr);
+                            expr = try self.arena.addFieldAccess(self.gpa, expr, field_id, .{
+                                .byte_start = recv_span.byte_start,
+                                .byte_end = field_tok.span.byte_end,
+                            });
+                        },
+                        else => return self.parseErrFmt(self.peekSpan(), "expected field name or 'get'/'get_mut' after '.', got '{s}'", .{self.sliceOf(self.peekSpan())}),
+                    }
                 },
-                .kw_get_mut => {
-                    _ = try self.advance();
-                    expr = try self.parseGetCall(expr, .method_get_mut);
-                },
-                .ident => {
-                    const field_tok = try self.advance();
-                    const field_id = try self.internSlice(field_tok.span);
+                // Index / slice access `receiver[index]` (M0.8 collections,
+                // `etch-grammar.md` postfix_op §425). A range index expression
+                // (`arr[0..3]`) lowers to a slice; any other index to a single
+                // element — disambiguated downstream from the index expr kind.
+                .lbracket => {
+                    _ = try self.advance(); // '['
+                    const index = try self.parseExpr(0);
+                    const closing = try self.expect(.rbracket, "expected ']' to close index access");
                     const recv_span = self.arena.exprSpan(expr);
-                    expr = try self.arena.addFieldAccess(self.gpa, expr, field_id, .{
+                    expr = try self.arena.addIndex(self.gpa, expr, index, .{
                         .byte_start = recv_span.byte_start,
-                        .byte_end = field_tok.span.byte_end,
+                        .byte_end = closing.span.byte_end,
                     });
                 },
-                else => return self.parseErrFmt(self.peekSpan(), "expected field name or 'get'/'get_mut' after '.', got '{s}'", .{self.sliceOf(self.peekSpan())}),
+                else => break,
             }
         }
         return expr;
@@ -1114,10 +1200,68 @@ pub const Parser = struct {
         });
     }
 
+    /// Parse `[ ... ]` in expression position — disambiguated into an array
+    /// literal or a map literal (M0.8 collections, `etch-grammar.md`
+    /// §493-498). `[]` is an empty array; `[:]` an empty map; a first
+    /// expression followed by `:` is a map, by `;` a fill array, otherwise a
+    /// comma array.
+    fn parseArrayOrMapLiteral(self: *Parser) ParseError!NodeId {
+        const open = try self.advance(); // '['
+        // `[]` — empty array.
+        if (self.peek() == .rbracket) {
+            const closing = try self.advance();
+            return try self.arena.addArrayLit(self.gpa, &.{}, false, NodeId.none, .{ .byte_start = open.span.byte_start, .byte_end = closing.span.byte_end });
+        }
+        // `[:]` — empty map.
+        if (self.peek() == .colon and self.peekNext() == .rbracket) {
+            _ = try self.advance(); // ':'
+            const closing = try self.advance(); // ']'
+            return try self.arena.addMapLit(self.gpa, &.{}, .{ .byte_start = open.span.byte_start, .byte_end = closing.span.byte_end });
+        }
+        const first = try self.parseExpr(0);
+        // Map literal: `[ k : v , ... ]`.
+        if (self.peek() == .colon) {
+            _ = try self.advance(); // ':'
+            const first_val = try self.parseExpr(0);
+            var entries: std.ArrayListUnmanaged(ast_mod.MapEntry) = .empty;
+            defer entries.deinit(self.gpa);
+            try entries.append(self.gpa, .{ .key = first, .value = first_val });
+            while (try self.match(.comma)) {
+                if (self.peek() == .rbracket) break; // trailing comma
+                const k = try self.parseExpr(0);
+                _ = try self.expect(.colon, "expected ':' in map entry");
+                const v = try self.parseExpr(0);
+                try entries.append(self.gpa, .{ .key = k, .value = v });
+            }
+            const closing = try self.expect(.rbracket, "expected ']' to close map literal");
+            return try self.arena.addMapLit(self.gpa, entries.items, .{ .byte_start = open.span.byte_start, .byte_end = closing.span.byte_end });
+        }
+        // Fill array: `[ v ; n ]`.
+        if (self.peek() == .semicolon) {
+            _ = try self.advance(); // ';'
+            const count = try self.parseExpr(0);
+            const closing = try self.expect(.rbracket, "expected ']' to close fill array literal");
+            const elems = [_]u32{first.raw()};
+            return try self.arena.addArrayLit(self.gpa, &elems, true, count, .{ .byte_start = open.span.byte_start, .byte_end = closing.span.byte_end });
+        }
+        // Comma array: `[ a , b , c ]`.
+        var elems: std.ArrayListUnmanaged(u32) = .empty;
+        defer elems.deinit(self.gpa);
+        try elems.append(self.gpa, first.raw());
+        while (try self.match(.comma)) {
+            if (self.peek() == .rbracket) break; // trailing comma
+            const e = try self.parseExpr(0);
+            try elems.append(self.gpa, e.raw());
+        }
+        const closing = try self.expect(.rbracket, "expected ']' to close array literal");
+        return try self.arena.addArrayLit(self.gpa, elems.items, false, NodeId.none, .{ .byte_start = open.span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
     fn parsePrimary(self: *Parser) ParseError!NodeId {
         try self.surfaceTokenErrors();
         switch (self.peek()) {
             .kw_match => return try self.parseMatch(),
+            .lbracket => return try self.parseArrayOrMapLiteral(),
             .int_literal => {
                 const tok = try self.advance();
                 const id = try self.internSlice(tok.span);
@@ -1429,6 +1573,65 @@ test "D-S3-annot-field-access: annotation arg accepts a field access expression"
     try std.testing.expectEqual(@as(u32, 1), annot.args_len);
     const arg = result.ast.annot_args.items[annot.args_start];
     try std.testing.expectEqual(ast_mod.ExprKind.field_access, result.ast.exprKind(arg.value));
+}
+
+test "parser builds array literals, fill, and index/slice access (M0.8 collections)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  let a = [10, 20, 30]
+        \\  let b = [0; 4]
+        \\  let x = a[1]
+        \\  let s = a[0..2]
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var saw_array = false;
+    var saw_index = false;
+    var fill_count: usize = 0;
+    for (result.ast.exprs.items(.kind), 0..) |k, i| {
+        if (k == .array_lit) {
+            saw_array = true;
+            if (result.ast.array_lits.items[result.ast.exprs.items(.data)[i]].is_fill) fill_count += 1;
+        }
+        if (k == .index) saw_index = true;
+    }
+    try std.testing.expect(saw_array);
+    try std.testing.expect(saw_index);
+    try std.testing.expectEqual(@as(usize, 1), fill_count); // exactly the `[0; 4]` literal
+}
+
+test "parser builds map type, map literal, and Set<T> type (M0.8 collections)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  let m: [string: int] = ["a": 1, "b": 2]
+        \\  let e: [int: int] = [:]
+        \\  let s: Set<int> = [3]
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var saw_map = false;
+    for (result.ast.exprs.items(.kind)) |k| {
+        if (k == .map_lit) saw_map = true;
+    }
+    try std.testing.expect(saw_map);
+    var saw_map_type = false;
+    var saw_set_type = false;
+    for (result.ast.type_nodes.items(.kind)) |k| {
+        if (k == .map_type) saw_map_type = true;
+        if (k == .set_type) saw_set_type = true;
+    }
+    try std.testing.expect(saw_map_type);
+    try std.testing.expect(saw_set_type);
 }
 
 test "parser does not leak comment spans on OOM during init" {

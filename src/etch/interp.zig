@@ -127,6 +127,34 @@ const Locals = struct {
     }
 };
 
+/// Per-rule-body heap store for Etch collection values (M0.8 collections).
+/// Arrays are `ArrayListUnmanaged(Value)` addressed by the `u32` handle carried
+/// in `Value.array_ref`. Reset at each rule-body boundary so collections
+/// created inside a body do not leak across invocations (rule-arena semantics,
+/// surface view of `etch-memory-model.md` §6). E1 stores arrays only; maps /
+/// sets join this store with their own slabs in the collections sub-tranche.
+const CollectionStore = struct {
+    arrays: std.ArrayListUnmanaged(std.ArrayListUnmanaged(Value)) = .empty,
+
+    fn deinit(self: *CollectionStore, gpa: std.mem.Allocator) void {
+        for (self.arrays.items) |*a| a.deinit(gpa);
+        self.arrays.deinit(gpa);
+    }
+
+    /// Free every per-body array, keeping the outer vector's capacity.
+    fn reset(self: *CollectionStore, gpa: std.mem.Allocator) void {
+        for (self.arrays.items) |*a| a.deinit(gpa);
+        self.arrays.clearRetainingCapacity();
+    }
+
+    /// Allocate a fresh empty array, returning its handle.
+    fn newArray(self: *CollectionStore, gpa: std.mem.Allocator) !u32 {
+        const idx: u32 = @intCast(self.arrays.items.len);
+        try self.arrays.append(gpa, .empty);
+        return idx;
+    }
+};
+
 const StmtError = error{ OutOfMemory, RuntimeFailure };
 
 /// S4 tree-walking interpreter — owns the bridge state, evaluates
@@ -136,11 +164,14 @@ pub const Interpreter = struct {
     ast: *const AstArena,
     bridge: Bridge,
     rule_descs: []RuleDesc,
+    /// Heap store backing collection values created in rule bodies (M0.8).
+    collections: CollectionStore = .{},
 
     pub fn deinit(self: *Interpreter) void {
         for (self.rule_descs) |*r| r.deinit(self.gpa);
         self.gpa.free(self.rule_descs);
         self.bridge.deinit(self.gpa);
+        self.collections.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -276,6 +307,9 @@ pub const Interpreter = struct {
 
         var locals: Locals = .{};
         defer locals.deinit(self.gpa);
+        // Collections created in this body live in the rule arena: free them
+        // at the body boundary so handles never outlive their invocation.
+        defer self.collections.reset(self.gpa);
         try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
 
         var s: u32 = 0;
@@ -508,6 +542,65 @@ pub const Interpreter = struct {
                     .float_ => |x| if (to_float) Value{ .float_ = x } else Value{ .int_ = @intFromFloat(x) },
                     else => error.RuntimeFailure,
                 };
+            },
+            .array_lit => {
+                // `[a, b, c]` / `[v; n]` → materialize a fresh array in the
+                // rule-body collection store, return its handle (M0.8
+                // collections). E1 elements are builtin scalars (the
+                // type-checker rejects non-builtin / nested-array elements).
+                const al = self.ast.array_lits.items[data];
+                const handle = try self.collections.newArray(self.gpa);
+                if (al.is_fill) {
+                    const elem_id: NodeId = @bitCast(self.ast.extra.items[al.elements_start]);
+                    const elem_v = try self.evalExpr(world, locals, elem_id);
+                    const count_v = try self.evalExpr(world, locals, al.fill_count);
+                    if (count_v != .int_ or count_v.int_ < 0) return error.RuntimeFailure;
+                    var k: i64 = 0;
+                    while (k < count_v.int_) : (k += 1) {
+                        try self.collections.arrays.items[handle].append(self.gpa, elem_v);
+                    }
+                } else {
+                    var i: u32 = 0;
+                    while (i < al.elements_len) : (i += 1) {
+                        const e: NodeId = @bitCast(self.ast.extra.items[al.elements_start + i]);
+                        const v = try self.evalExpr(world, locals, e);
+                        // Re-index `arrays.items[handle]` after each element eval
+                        // (a nested collection could have grown the outer vec).
+                        try self.collections.arrays.items[handle].append(self.gpa, v);
+                    }
+                }
+                return Value{ .array_ref = handle };
+            },
+            .index => {
+                // `receiver[index]` — slice if the index is a range, else a
+                // single element (M0.8 collections). Out-of-bounds is a
+                // runtime error (the debug panic of `etch-stdlib.md` §13.3).
+                const ix = self.ast.index_exprs.items[data];
+                const recv = try self.evalExpr(world, locals, ix.receiver);
+                if (recv != .array_ref) return error.RuntimeFailure;
+                if (self.ast.exprKind(ix.index) == .range) {
+                    const r = self.ast.ranges.items[self.ast.exprData(ix.index)];
+                    const start_v = try self.evalExpr(world, locals, r.start);
+                    const end_v = try self.evalExpr(world, locals, r.end);
+                    if (start_v != .int_ or end_v != .int_) return error.RuntimeFailure;
+                    const lo = std.math.cast(usize, start_v.int_) orelse return error.RuntimeFailure;
+                    var hi = std.math.cast(usize, end_v.int_) orelse return error.RuntimeFailure;
+                    if (r.inclusive) hi += 1;
+                    const src_len = self.collections.arrays.items[recv.array_ref].items.len;
+                    if (lo > hi or hi > src_len) return error.RuntimeFailure;
+                    const handle = try self.collections.newArray(self.gpa);
+                    // Re-fetch the source after newArray (it may have realloc'd
+                    // the outer vector, invalidating an earlier pointer).
+                    const src = self.collections.arrays.items[recv.array_ref];
+                    try self.collections.arrays.items[handle].appendSlice(self.gpa, src.items[lo..hi]);
+                    return Value{ .array_ref = handle };
+                }
+                const idx_v = try self.evalExpr(world, locals, ix.index);
+                if (idx_v != .int_) return error.RuntimeFailure;
+                const arr = self.collections.arrays.items[recv.array_ref];
+                const i = std.math.cast(usize, idx_v.int_) orelse return error.RuntimeFailure;
+                if (i >= arr.items.len) return error.RuntimeFailure;
+                return arr.items[i];
             },
             else => return error.RuntimeFailure, // path / tag_path / unsupported variants
         }

@@ -88,6 +88,9 @@ pub const TokenKind = enum {
     rparen,
     lbrace,
     rbrace,
+    lbracket, // [ — array / map literals, indexing (M0.8 collections)
+    rbracket, // ]
+    semicolon, // ; — array fill literal `[v; n]` (M0.8 collections)
     colon,
     comma,
     dot,

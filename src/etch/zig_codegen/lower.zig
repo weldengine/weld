@@ -612,6 +612,19 @@ fn walkExprForComponents(
             try walkExprForComponents(gpa, ast, r.start, out);
             try walkExprForComponents(gpa, ast, r.end, out);
         },
+        .array_lit => {
+            const al = ast.array_lits.items[data];
+            var i: u32 = 0;
+            while (i < al.elements_len) : (i += 1) {
+                try walkExprForComponents(gpa, ast, @bitCast(ast.extra.items[al.elements_start + i]), out);
+            }
+            if (al.is_fill) try walkExprForComponents(gpa, ast, al.fill_count, out);
+        },
+        .index => {
+            const ix = ast.index_exprs.items[data];
+            try walkExprForComponents(gpa, ast, ix.receiver, out);
+            try walkExprForComponents(gpa, ast, ix.index, out);
+        },
         .match_expr => {
             const m = ast.match_exprs.items[data];
             try walkExprForComponents(gpa, ast, m.scrutinee, out);
@@ -915,7 +928,13 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
     try w.writeIndent();
     try w.print("{s} ", .{keyword});
     try w.ident(ast.strings.slice(let.name));
-    try w.print(": {s} = ", .{zig_t});
+    // A collection binding (array literal / index / slice) has no scalar Zig
+    // type to print — omit the `: T` annotation and let Zig infer it.
+    if (zig_t.len > 0) {
+        try w.print(": {s} = ", .{zig_t});
+    } else {
+        try w.write(" = ");
+    }
     try emitExpr(w, ast, ctx, let.value);
     try w.write(";\n");
 
@@ -990,6 +1009,51 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             try emitComponentSlot(w, ctx, ast.strings.slice(mg.type_name));
         },
         .match_expr => try emitMatch(w, ast, ctx, data),
+        .array_lit => {
+            // `[a, b, c]` → `[_]ELEM{ ... }`, `[v; n]` → `[_]ELEM{v} ** n`
+            // (M0.8 collections). E1 codegen emits fixed (stack) arrays only —
+            // the element type is inferred from the first element. Dynamic
+            // `T[]` / map / set codegen is deferred (heap, needs the arena
+            // model) and the interpreter is their reference execution.
+            const al = ast.array_lits.items[data];
+            if (al.elements_len == 0) return CodegenError.UnsupportedConstruct; // empty array → dynamic, deferred
+            const first: NodeId = @bitCast(ast.extra.items[al.elements_start]);
+            const elem_zig = inferExprZigType(ast, ctx, first);
+            if (al.is_fill) {
+                try w.print("[_]{s}{{", .{elem_zig});
+                try emitExpr(w, ast, ctx, first);
+                try w.write("} ** ");
+                try emitExpr(w, ast, ctx, al.fill_count);
+            } else {
+                try w.print("[_]{s}{{ ", .{elem_zig});
+                var i: u32 = 0;
+                while (i < al.elements_len) : (i += 1) {
+                    if (i > 0) try w.write(", ");
+                    const e: NodeId = @bitCast(ast.extra.items[al.elements_start + i]);
+                    try emitExpr(w, ast, ctx, e);
+                }
+                try w.write(" }");
+            }
+        },
+        .index => {
+            // `receiver[index]` → Zig index (`recv[@intCast(i)]`) or slice
+            // (`recv[lo..hi]`) (M0.8 collections). A range index lowers to a
+            // Zig slice; an inclusive range adds 1 to the exclusive Zig bound.
+            const ix = ast.index_exprs.items[data];
+            try emitExpr(w, ast, ctx, ix.receiver);
+            if (ast.exprKind(ix.index) == .range) {
+                const r = ast.ranges.items[ast.exprData(ix.index)];
+                try w.write("[@as(usize, @intCast(");
+                try emitExpr(w, ast, ctx, r.start);
+                try w.write("))..@as(usize, @intCast(");
+                try emitExpr(w, ast, ctx, r.end);
+                try w.write(if (r.inclusive) " + 1))]" else "))]");
+            } else {
+                try w.write("[@as(usize, @intCast(");
+                try emitExpr(w, ast, ctx, ix.index);
+                try w.write("))]");
+            }
+        },
         .range => return CodegenError.UnsupportedConstruct, // ranges appear only as for-in iterables in E1 (lowered by emitStmt .for_stmt)
         .cast => {
             // `operand as Type` → an explicit Zig numeric conversion wrapped
@@ -1123,7 +1187,10 @@ fn emitMatch(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Codege
 }
 
 fn inferZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId, annotation: NodeId) []const u8 {
-    if (!annotation.isNone()) {
+    // Only a named-type annotation maps to a scalar Zig type here; collection
+    // annotations (`T[]`, `[K: V]`, `Set<T>`, `T[N]`) leave the binding
+    // un-annotated so Zig infers the array / slice type (M0.8 collections).
+    if (!annotation.isNone() and ast.typeNodeKind(annotation) == .named) {
         const tnode = ast.named_types.items[ast.typeNodeData(annotation)];
         const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
         if (type_map.mapBuiltin(tname)) |z| return z;
@@ -1168,6 +1235,11 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
             const z = fieldZigTypeOnComponent(ast, comp_name, fname) orelse break :blk "i64";
             break :blk z;
         },
+        // Array literals and index/slice results are emitted without a `let`
+        // type annotation — Zig infers the array / element / slice type
+        // (M0.8 collections). Returning "" makes `emitLet` drop the `: T`.
+        .array_lit => "",
+        .index => "",
         .method_get, .method_get_mut => "struct", // not directly inferable; should not appear at let-rhs after method_get handling
         .cast => blk: {
             const c = ast.casts.items[data];
