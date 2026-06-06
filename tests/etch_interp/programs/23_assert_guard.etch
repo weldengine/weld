@@ -1,0 +1,14 @@
+// M0.8 v0.6 foundation: `assert` in a rule body. A true condition is a
+// no-op in both the interpreter and the cooked Zig (`if (!(cond))
+// unreachable;`), so the mutation after it runs normally and the
+// interpreter↔codegen differential stays byte-exact.
+component Counter {
+  value: int = 0
+}
+
+rule bump(entity: Entity)
+  when entity has Counter
+{
+  assert(1 < 2)
+  entity.get_mut(Counter).value += 1
+}

@@ -764,6 +764,9 @@ pub const Parser = struct {
         if (self.peek() == .kw_let) {
             return try self.parseLetStmt();
         }
+        if (self.peek() == .kw_assert) {
+            return try self.parseAssertStmt();
+        }
         // Either an assignment (lvalue followed by =/+=/etc.) or an expr stmt.
         const expr_start = self.current.span;
         const expr = try self.parseExpr(0);
@@ -810,6 +813,27 @@ pub const Parser = struct {
             .type_annotation = type_annotation,
             .value = value,
         }, span);
+    }
+
+    /// Parse `assert ( cond [, "message"] )` (M0.8 v0.6 foundations,
+    /// `etch-reference-part1.md` §10.3). The optional message is a string
+    /// literal dev diagnostic; the condition is checked to be `bool` by the
+    /// type-checker.
+    fn parseAssertStmt(self: *Parser) ParseError!NodeId {
+        const kw_span = (try self.advance()).span; // 'assert'
+        _ = try self.expect(.lparen, "expected '(' after 'assert'");
+        const cond = try self.parseExpr(0);
+        var message: StringId = 0;
+        if (self.peek() == .comma) {
+            _ = try self.advance();
+            const msg_tok = try self.expect(.string_literal, "expected a string-literal message after ',' in assert");
+            message = try self.internStringLiteral(msg_tok.span);
+        }
+        const closing = try self.expect(.rparen, "expected ')' to close assert");
+        return try self.arena.addAssertStmt(self.gpa, .{ .cond = cond, .message = message }, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
     }
 
     fn isAssignOp(kind: TokenKind) bool {

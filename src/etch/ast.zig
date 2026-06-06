@@ -397,6 +397,14 @@ pub const AssignStmt = struct {
     value: NodeId, // expr
 };
 
+/// Side-slab entry for an `assert(cond[, "message"])` statement (M0.8 v0.6
+/// foundations, `etch-reference-part1.md` §10.3). `message` is `0` when
+/// absent. Debug builds panic on a false condition; release strips it.
+pub const AssertStmt = struct {
+    cond: NodeId, // expr — must be bool
+    message: StringId, // 0 if no message literal
+};
+
 const BinaryExpr = struct {
     op: BinaryOp,
     lhs: NodeId,
@@ -553,6 +561,7 @@ pub const AstArena = struct {
 
     let_stmts: std.ArrayListUnmanaged(LetStmt) = .empty,
     assign_stmts: std.ArrayListUnmanaged(AssignStmt) = .empty,
+    assert_stmts: std.ArrayListUnmanaged(AssertStmt) = .empty,
 
     binary_exprs: std.ArrayListUnmanaged(BinaryExpr) = .empty,
     unary_exprs: std.ArrayListUnmanaged(UnaryExpr) = .empty,
@@ -617,6 +626,7 @@ pub const AstArena = struct {
         self.when_nodes.deinit(gpa);
         self.let_stmts.deinit(gpa);
         self.assign_stmts.deinit(gpa);
+        self.assert_stmts.deinit(gpa);
         self.binary_exprs.deinit(gpa);
         self.unary_exprs.deinit(gpa);
         self.field_accesses.deinit(gpa);
@@ -727,6 +737,12 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.let_stmts.items.len);
         try self.let_stmts.append(gpa, let);
         return try self.addStmt(gpa, .let_stmt, idx, span);
+    }
+
+    pub fn addAssertStmt(self: *AstArena, gpa: std.mem.Allocator, assert_stmt: AssertStmt, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.assert_stmts.items.len);
+        try self.assert_stmts.append(gpa, assert_stmt);
+        return try self.addStmt(gpa, .assert_stmt, idx, span);
     }
 
     pub fn addAssignStmt(self: *AstArena, gpa: std.mem.Allocator, assign: AssignStmt, span: SourceSpan) !NodeId {

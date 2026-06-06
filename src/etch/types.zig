@@ -559,6 +559,15 @@ pub const TypeChecker = struct {
                 const expr_id: NodeId = @bitCast(data);
                 _ = self.synthExpr(expr_id, ctx);
             },
+            .assert_stmt => {
+                // `assert(cond[, msg])` — the condition must be bool (M0.8
+                // v0.6 foundations, `etch-reference-part1.md` §10.3).
+                const a = self.arena.assert_stmts.items[data];
+                const cond_t = self.synthExpr(a.cond, ctx);
+                if (cond_t != .builtin or cond_t.builtin != .bool_) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(a.cond), "assert condition must be a bool expression", .{});
+                }
+            },
             else => {},
         }
     }
@@ -996,6 +1005,34 @@ test "type-checker emits E1213 on receiver-less get of a resource absent from th
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .resource_expected_in_when);
+}
+
+test "assert requires a bool condition (M0.8 assert foundation)" {
+    const gpa = std.testing.allocator;
+
+    // Non-bool assert condition → E0200.
+    var bad = try parseAndCheck(gpa,
+        \\resource R { n: i32 = 0 }
+        \\rule r()
+        \\  when resource R
+        \\{
+        \\  assert(1 + 2)
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .type_mismatch);
+
+    // Bool assert condition → no type error.
+    var ok = try parseAndCheck(gpa,
+        \\resource R { n: i32 = 0 }
+        \\rule r()
+        \\  when resource R
+        \\{
+        \\  assert(1 < 2)
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
 }
 
 test "type aliases resolve through to the underlying type (M0.8 type alias foundation)" {

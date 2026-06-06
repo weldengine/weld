@@ -39,4 +39,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p20_rule_order_sees_previous", .etch_path = "tests/etch_interp/programs/20_rule_order_sees_previous.etch" },
     .{ .name = "p21_cast_int_to_float", .etch_path = "tests/etch_interp/programs/21_cast_int_to_float.etch" },
     .{ .name = "p22_type_alias_field", .etch_path = "tests/etch_interp/programs/22_type_alias_field.etch" },
+    .{ .name = "p23_assert_guard", .etch_path = "tests/etch_interp/programs/23_assert_guard.etch" },
 };

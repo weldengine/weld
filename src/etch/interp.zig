@@ -309,6 +309,14 @@ pub const Interpreter = struct {
                 const eid: NodeId = @bitCast(data);
                 _ = try self.evalExpr(world, locals, eid);
             },
+            .assert_stmt => {
+                // `assert(cond)` — a false condition is a runtime failure (the
+                // dev-build panic of `etch-reference-part1.md` §10.3, surfaced
+                // here as a counted RuntimeReport error).
+                const a = self.ast.assert_stmts.items[data];
+                const v = try self.evalExpr(world, locals, a.cond);
+                if (v != .bool_ or !v.bool_) return error.RuntimeFailure;
+            },
             else => return error.RuntimeFailure,
         }
     }
@@ -1040,6 +1048,64 @@ test "runProgram type-alias field resolves to the underlying primitive (M0.8 typ
     var x: f64 = 0;
     @memcpy(std.mem.asBytes(&x), slot[0..@sizeOf(f64)]);
     try std.testing.expectApproxEqAbs(@as(f64, 5.0), x, 0.0001);
+}
+
+test "runProgram assert passes on true, reports a runtime error on false (M0.8 assert)" {
+    const gpa = std.testing.allocator;
+
+    // assert(true-ish) → no runtime error.
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa,
+            \\resource Tick { n: i32 = 0 }
+            \\rule ok()
+            \\  when resource Tick
+            \\{
+            \\  assert(1 < 2)
+            \\}
+        );
+        defer pr.deinit(gpa);
+        try std.testing.expect(pr.diagnostics.len == 0);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const report = try interp.runFor(&world, 1);
+        try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    }
+
+    // assert(false-ish) → one runtime error.
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa,
+            \\resource Tick { n: i32 = 0 }
+            \\rule bad()
+            \\  when resource Tick
+            \\{
+            \\  assert(2 < 1)
+            \\}
+        );
+        defer pr.deinit(gpa);
+        try std.testing.expect(pr.diagnostics.len == 0);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const report = try interp.runFor(&world, 1);
+        try std.testing.expect(report.runtime_errors > 0);
+    }
 }
 
 test "runProgram numeric cast int-to-float (M0.8 cast foundation)" {

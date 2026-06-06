@@ -557,6 +557,10 @@ fn walkStmtForComponents(
             const eid: NodeId = @bitCast(data);
             try walkExprForComponents(gpa, ast, eid, out);
         },
+        .assert_stmt => {
+            const a = ast.assert_stmts.items[data];
+            try walkExprForComponents(gpa, ast, a.cond, out);
+        },
         else => {},
     }
 }
@@ -805,6 +809,17 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             try w.write("_ = ");
             try emitExpr(w, ast, ctx, eid);
             try w.write(";\n");
+        },
+        .assert_stmt => {
+            // `assert(cond)` → a self-contained guard. `unreachable` panics in
+            // Debug/ReleaseSafe (the §10.3 dev-build behaviour) and is elided
+            // in ReleaseFast. The optional message is a dev diagnostic dropped
+            // in codegen. No `std` dependency (etch_cook strips imports).
+            const a = ast.assert_stmts.items[data];
+            try w.writeIndent();
+            try w.write("if (!(");
+            try emitExpr(w, ast, ctx, a.cond);
+            try w.write(")) unreachable;\n");
         },
         else => return CodegenError.UnsupportedConstruct,
     }
