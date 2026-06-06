@@ -50,6 +50,7 @@ pub const TokenKind = enum {
     kw_as, // cast operator (M0.8 v0.6 foundations)
     kw_type, // top-level type alias (M0.8 v0.6 foundations)
     kw_assert, // assert statement (M0.8 v0.6 foundations)
+    kw_match, // match expression (M0.8 v0.6 foundations)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -78,6 +79,7 @@ pub const TokenKind = enum {
     gt,
     lt_eq,
     gt_eq,
+    fat_arrow, // => (match arm, M0.8 v0.6 foundations)
     lparen,
     rparen,
     lbrace,
@@ -135,6 +137,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "as", .kind = .kw_as },
     .{ .lexeme = "type", .kind = .kw_type },
     .{ .lexeme = "assert", .kind = .kw_assert },
+    .{ .lexeme = "match", .kind = .kw_match },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -161,34 +164,32 @@ pub const s3_keywords = [_]KeywordEntry{
 /// `priority`.
 pub const non_s3_keywords = [_][]const u8{
     // ── Top-level constructs (26 of 29 from EBNF v0.6) ──
-    "fn",          "struct",         "enum",          "trait",       "impl",
-    "event",       "tags",           "import",        "const",       "private",
-    "behavior",    "routine",        "quest",         "dialogue",    "ability",
-    "effect",      "shader",         "widget",        "theme",       "motion",
-    "anim_graph",  "audio_graph",    "audio_score",   "sequence",    "data",
-    "scene",       "prefab",         "input_mapping", "locale",      "test",
+    "fn",             "struct",      "enum",          "trait",        "impl",
+    "event",          "tags",        "import",        "const",        "private",
+    "behavior",       "routine",     "quest",         "dialogue",     "ability",
+    "effect",         "shader",      "widget",        "theme",        "motion",
+    "anim_graph",     "audio_graph", "audio_score",   "sequence",     "data",
+    "scene",          "prefab",      "input_mapping", "locale",       "test",
     "override",
 
     // ── Control flow (out of S3 rule body) ──
-       "if",             "else",          "for",         "in",
-    "while",       "break",          "continue",      "loop",        "match",
-    "return",
+          "if",          "else",          "for",          "in",
+    "while",          "break",       "continue",      "loop",         "return",
 
     // ── Async machinery (out of S3) ──
-         "async",          "await",         "race",        "sync",
-    "branch",      "spawn",
+    "async",          "await",       "race",          "sync",         "branch",
+    "spawn",
 
     // ── Error handling (out of S3) ──
-             "try",           "catch",       "throws",
-    "throw",
+             "try",         "catch",         "throws",       "throw",
 
     // ── Tag operators (out of S3) ──
-          "has_tag",        "has_no_tag",    "has_any_tag", "has_all_tags",
-    "has_no_tags", "add_tag",        "remove_tag",
+    "has_tag",        "has_no_tag",  "has_any_tag",   "has_all_tags", "has_no_tags",
+    "add_tag",        "remove_tag",
 
     // ── Timers / emit / lifecycle (out of S3) ──
-       "emit",        "after",
-    "every",       "after_unscaled", "quantize",
+     "emit",          "after",        "every",
+    "after_unscaled", "quantize",
 
     // Note: `where`, `self`, `none`, `some` are intentionally NOT listed —
     // they appear in legitimate identifier-shaped positions in S3 annotation

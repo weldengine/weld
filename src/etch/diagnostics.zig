@@ -50,6 +50,7 @@ pub const DiagnosticCode = enum {
     unknown_component_in_when, // S3 — E1210 UnknownComponentInWhen
     invalid_field_filter, // S3 — E1211 InvalidFieldFilter
     resource_expected_in_when, // S3 — E1213 ResourceExpectedInWhen
+    non_exhaustive_match, // M0.8 — E1230 NonExhaustiveMatch
 
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
@@ -65,6 +66,7 @@ pub const DiagnosticCode = enum {
             .unknown_component_in_when => "E1210",
             .invalid_field_filter => "E1211",
             .resource_expected_in_when => "E1213",
+            .non_exhaustive_match => "E1230",
         };
     }
 
@@ -82,6 +84,7 @@ pub const DiagnosticCode = enum {
             .unknown_component_in_when => "UnknownComponentInWhen",
             .invalid_field_filter => "InvalidFieldFilter",
             .resource_expected_in_when => "ResourceExpectedInWhen",
+            .non_exhaustive_match => "NonExhaustiveMatch",
         };
     }
 };

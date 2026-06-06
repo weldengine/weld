@@ -599,6 +599,14 @@ fn walkExprForComponents(
             const c = ast.casts.items[data];
             try walkExprForComponents(gpa, ast, c.operand, out);
         },
+        .match_expr => {
+            const m = ast.match_exprs.items[data];
+            try walkExprForComponents(gpa, ast, m.scrutinee, out);
+            var i: u32 = 0;
+            while (i < m.arms_len) : (i += 1) {
+                try walkExprForComponents(gpa, ast, ast.match_arms.items[m.arms_start + i].body, out);
+            }
+        },
         else => {},
     }
 }
@@ -935,6 +943,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             if (mg.receiver.isNone()) return CodegenError.UnsupportedConstruct;
             try emitComponentSlot(w, ctx, ast.strings.slice(mg.type_name));
         },
+        .match_expr => try emitMatch(w, ast, ctx, data),
         .cast => {
             // `operand as Type` → an explicit Zig numeric conversion wrapped
             // in `@as(T, …)` (M0.8 v0.6 foundations). The conversion builtin
@@ -1008,6 +1017,64 @@ fn emitFieldAccessExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, fa: ast
     try w.ident(ast.strings.slice(fa.field_name));
 }
 
+/// Lower a `match` expression to a labeled Zig block that binds the
+/// scrutinee once and yields the first matching arm's value (M0.8 v0.6
+/// foundations). Literal arms compare with `==`; wildcard / binding arms are
+/// unconditional. A binding arm declares `const <name> = __m<n>` in an inner
+/// block statement so the arm body resolves the name. When no catch-all arm
+/// exists (a bool match covering true+false), a trailing `unreachable`
+/// satisfies Zig that the block always yields — exhaustiveness is already
+/// proven by the type-checker. `data` (the match-expr slab index) is unique
+/// per match in the file, so nested matches get distinct labels.
+fn emitMatch(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) CodegenError!void {
+    const m = ast.match_exprs.items[data];
+    const lbl = data;
+    try w.print("blk{d}: {{ const __m{d} = ", .{ lbl, lbl });
+    try emitExpr(w, ast, ctx, m.scrutinee);
+    try w.write("; ");
+
+    var has_catch_all = false;
+    var i: u32 = 0;
+    while (i < m.arms_len) : (i += 1) {
+        const arm = ast.match_arms.items[m.arms_start + i];
+        switch (arm.pattern_kind) {
+            .literal => {
+                const lit: NodeId = @bitCast(arm.pattern_payload);
+                try w.print("if (__m{d} == ", .{lbl});
+                try emitExpr(w, ast, ctx, lit);
+                try w.print(") break :blk{d} ", .{lbl});
+                try emitExpr(w, ast, ctx, arm.body);
+                try w.write("; ");
+            },
+            .wildcard => {
+                has_catch_all = true;
+                try w.print("break :blk{d} ", .{lbl});
+                try emitExpr(w, ast, ctx, arm.body);
+                try w.write("; ");
+            },
+            .binding => {
+                has_catch_all = true;
+                const name: StringId = arm.pattern_payload;
+                try w.write("{ const ");
+                try w.ident(ast.strings.slice(name));
+                try w.print(" = __m{d}; break :blk{d} ", .{ lbl, lbl });
+                const saved_len = ctx.records.items.len;
+                try ctx.records.append(w.gpa, .{
+                    .key = .{ .name = name },
+                    .info = .{ .kind = .value, .zig_type = "", .is_mut = false },
+                });
+                try emitExpr(w, ast, ctx, arm.body);
+                ctx.records.items.len = saved_len;
+                try w.write("; }");
+            },
+        }
+    }
+    // bool-exhaustive matches have no catch-all arm; the type-checker proved
+    // every case is covered, so the fall-through is unreachable.
+    if (!has_catch_all) try w.write("unreachable; ");
+    try w.write("}");
+}
+
 fn inferZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId, annotation: NodeId) []const u8 {
     if (!annotation.isNone()) {
         const tnode = ast.named_types.items[ast.typeNodeData(annotation)];
@@ -1059,6 +1126,13 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
             const c = ast.casts.items[data];
             const named = ast.named_types.items[ast.typeNodeData(c.type_node)];
             break :blk type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(named.name))) orelse "i64";
+        },
+        .match_expr => blk: {
+            // The match result type is the (unified) type of its arm bodies;
+            // infer it from the first arm.
+            const m = ast.match_exprs.items[data];
+            if (m.arms_len == 0) break :blk "i64";
+            break :blk inferExprZigType(ast, ctx, ast.match_arms.items[m.arms_start].body);
         },
         else => "i64",
     };

@@ -434,6 +434,30 @@ pub const CastExpr = struct {
     type_node: NodeId,
 };
 
+/// Pattern kind for a `match` arm (M0.8 v0.6 foundations, E1 subset:
+/// wildcard / literal / binding). Enum-variant, optional, tuple, and
+/// struct-destructure patterns arrive with their types in later stages
+/// (`etch-grammar.md` §pattern, `etch-reference-part1.md` §7.6).
+pub const PatternKind = enum { wildcard, literal, binding };
+
+/// One arm of a `match`. `pattern_kind` selects the meaning of
+/// `pattern_payload`: `.literal` → a literal expr `NodeId` (raw bits) the
+/// scrutinee is compared against; `.binding` → the bound `StringId`;
+/// `.wildcard` → unused (0). `body` is the arm's expression.
+pub const MatchArm = struct {
+    pattern_kind: PatternKind,
+    pattern_payload: u32,
+    body: NodeId,
+};
+
+/// `match scrutinee { arm, ... }` (M0.8 v0.6 foundations). Arms live in a
+/// flat `(start, len)` range of `match_arms`.
+pub const MatchExpr = struct {
+    scrutinee: NodeId,
+    arms_start: u32,
+    arms_len: u32,
+};
+
 const NamedTypeNode = struct {
     name: StringId,
 };
@@ -568,6 +592,8 @@ pub const AstArena = struct {
     field_accesses: std.ArrayListUnmanaged(FieldAccessExpr) = .empty,
     method_gets: std.ArrayListUnmanaged(MethodGetExpr) = .empty,
     casts: std.ArrayListUnmanaged(CastExpr) = .empty,
+    match_exprs: std.ArrayListUnmanaged(MatchExpr) = .empty,
+    match_arms: std.ArrayListUnmanaged(MatchArm) = .empty,
     named_types: std.ArrayListUnmanaged(NamedTypeNode) = .empty,
 
     // Annotation storage.
@@ -632,6 +658,8 @@ pub const AstArena = struct {
         self.field_accesses.deinit(gpa);
         self.method_gets.deinit(gpa);
         self.casts.deinit(gpa);
+        self.match_exprs.deinit(gpa);
+        self.match_arms.deinit(gpa);
         self.named_types.deinit(gpa);
         self.annotations.deinit(gpa);
         self.annot_pool.deinit(gpa);
@@ -731,6 +759,14 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.casts.items.len);
         try self.casts.append(gpa, .{ .operand = operand, .type_node = type_node });
         return try self.addExpr(gpa, .cast, idx, span);
+    }
+
+    pub fn addMatch(self: *AstArena, gpa: std.mem.Allocator, scrutinee: NodeId, arms: []const MatchArm, span: SourceSpan) !NodeId {
+        const arms_start: u32 = @intCast(self.match_arms.items.len);
+        try self.match_arms.appendSlice(gpa, arms);
+        const idx: u32 = @intCast(self.match_exprs.items.len);
+        try self.match_exprs.append(gpa, .{ .scrutinee = scrutinee, .arms_start = arms_start, .arms_len = @intCast(arms.len) });
+        return try self.addExpr(gpa, .match_expr, idx, span);
     }
 
     pub fn addLetStmt(self: *AstArena, gpa: std.mem.Allocator, let: LetStmt, span: SourceSpan) !NodeId {

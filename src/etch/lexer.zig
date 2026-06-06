@@ -72,7 +72,21 @@ pub const Lexer = struct {
                 '-' => return self.singleOrCompound(start, .minus, .minus_eq),
                 '*' => return self.singleOrCompound(start, .star, .star_eq),
                 '%' => return self.singleOrCompound(start, .percent, .percent_eq),
-                '=' => return self.singleOrCompound(start, .eq, .eq_eq),
+                '=' => {
+                    // `=` / `==` / `=>` (fat arrow for match arms, M0.8).
+                    self.pos += 1;
+                    if (self.pos < self.source.len) {
+                        if (self.source[self.pos] == '=') {
+                            self.pos += 1;
+                            return .{ .kind = .eq_eq, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                        }
+                        if (self.source[self.pos] == '>') {
+                            self.pos += 1;
+                            return .{ .kind = .fat_arrow, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                        }
+                    }
+                    return .{ .kind = .eq, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                },
                 '!' => {
                     self.pos += 1;
                     if (self.pos < self.source.len and self.source[self.pos] == '=') {

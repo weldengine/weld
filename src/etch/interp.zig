@@ -442,6 +442,31 @@ pub const Interpreter = struct {
                     },
                 };
             },
+            .match_expr => {
+                // First matching arm wins (M0.8 v0.6 foundations). Wildcard
+                // and binding always match; a binding binds the scrutinee for
+                // its arm body. The type-checker has proven exhaustiveness, so
+                // a fall-through is a real runtime failure.
+                const m = self.ast.match_exprs.items[data];
+                const scrut = try self.evalExpr(world, locals, m.scrutinee);
+                var i: u32 = 0;
+                while (i < m.arms_len) : (i += 1) {
+                    const arm = self.ast.match_arms.items[m.arms_start + i];
+                    switch (arm.pattern_kind) {
+                        .wildcard => return try self.evalExpr(world, locals, arm.body),
+                        .binding => {
+                            try locals.put(self.gpa, arm.pattern_payload, scrut, false);
+                            return try self.evalExpr(world, locals, arm.body);
+                        },
+                        .literal => {
+                            const lit: NodeId = @bitCast(arm.pattern_payload);
+                            const lit_v = try self.evalExpr(world, locals, lit);
+                            if (scrut.eql(lit_v)) return try self.evalExpr(world, locals, arm.body);
+                        },
+                    }
+                }
+                return error.RuntimeFailure;
+            },
             .cast => {
                 // `operand as Type` (M0.8 v0.6 foundations). Runtime values
                 // carry int as i64 and float as f64; a cast only flips the
@@ -1048,6 +1073,79 @@ test "runProgram type-alias field resolves to the underlying primitive (M0.8 typ
     var x: f64 = 0;
     @memcpy(std.mem.asBytes(&x), slot[0..@sizeOf(f64)]);
     try std.testing.expectApproxEqAbs(@as(f64, 5.0), x, 0.0001);
+}
+
+test "runProgram match dispatches on literal and binding arms (M0.8 match)" {
+    const gpa = std.testing.allocator;
+
+    // Literal dispatch: sel = 1 selects the `1 => 200` arm.
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa,
+            \\component C { sel: int = 1, out: int = 0 }
+            \\rule pick(entity: Entity)
+            \\  when entity has C
+            \\{
+            \\  entity.get_mut(C).out = match entity.get(C).sel { 0 => 100, 1 => 200, _ => 999 }
+            \\}
+        );
+        defer pr.deinit(gpa);
+        try std.testing.expect(pr.diagnostics.len == 0);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const cid = world.registry.idOf("C").?;
+        const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+        _ = try interp.runFor(&world, 1);
+        const loc = world.dynamicLocation(eid).?;
+        const arch = world.dynamicArchetype(loc.archetype_idx);
+        const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+        // out is the second field (offset 8: after sel i64).
+        var out: i64 = 0;
+        @memcpy(std.mem.asBytes(&out), slot[8..16]);
+        try std.testing.expectEqual(@as(i64, 200), out);
+    }
+
+    // Binding arm: `n => n + 5` binds the scrutinee; sel = 3 → out = 8.
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa,
+            \\component C { sel: int = 3, out: int = 0 }
+            \\rule pick(entity: Entity)
+            \\  when entity has C
+            \\{
+            \\  entity.get_mut(C).out = match entity.get(C).sel { n => n + 5 }
+            \\}
+        );
+        defer pr.deinit(gpa);
+        try std.testing.expect(pr.diagnostics.len == 0);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const cid = world.registry.idOf("C").?;
+        const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+        _ = try interp.runFor(&world, 1);
+        const loc = world.dynamicLocation(eid).?;
+        const arch = world.dynamicArchetype(loc.archetype_idx);
+        const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+        var out: i64 = 0;
+        @memcpy(std.mem.asBytes(&out), slot[8..16]);
+        try std.testing.expectEqual(@as(i64, 8), out);
+    }
 }
 
 test "runProgram assert passes on true, reports a runtime error on false (M0.8 assert)" {

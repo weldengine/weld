@@ -654,6 +654,7 @@ pub const TypeChecker = struct {
             },
             .binary => return try self.synthBinary(id, data, ctx_opt),
             .unary => return try self.synthUnary(id, data, ctx_opt),
+            .match_expr => return try self.synthMatch(id, data, ctx_opt),
             .cast => {
                 // `operand as Type` (M0.8 v0.6 foundations). The S3 subset
                 // permits numeric-scalar → numeric-scalar conversions only;
@@ -675,6 +676,55 @@ pub const TypeChecker = struct {
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
             else => return ResolvedType.unknown,
         }
+    }
+
+    /// Type a `match` expression (M0.8 v0.6 foundations,
+    /// `etch-resolver-types.md` §line 328 + §12.4). The scrutinee type gates
+    /// literal-pattern compatibility; all arm bodies must unify to one
+    /// result type; the arm set must be exhaustive (E1230 otherwise).
+    fn synthMatch(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const m = self.arena.match_exprs.items[data];
+        const scrut_t = try self.synthExprE(m.scrutinee, ctx_opt);
+
+        var result_t: ?ResolvedType = null;
+        var has_catch_all = false;
+        var saw_true = false;
+        var saw_false = false;
+
+        var i: u32 = 0;
+        while (i < m.arms_len) : (i += 1) {
+            const arm = self.arena.match_arms.items[m.arms_start + i];
+            switch (arm.pattern_kind) {
+                .wildcard, .binding => has_catch_all = true,
+                .literal => {
+                    const lit: NodeId = @bitCast(arm.pattern_payload);
+                    const lit_t = try self.synthExprE(lit, ctx_opt);
+                    if (scrut_t == .builtin and lit_t == .builtin and !self.literalTypeFits(scrut_t.builtin, lit, lit_t.builtin)) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(lit), "match pattern literal type does not match the scrutinee type", .{});
+                    }
+                    if (scrut_t == .builtin and scrut_t.builtin == .bool_ and self.arena.exprKind(lit) == .bool_lit) {
+                        const s = self.arena.strings.slice(self.arena.exprData(lit));
+                        if (std.mem.eql(u8, s, "true")) saw_true = true;
+                        if (std.mem.eql(u8, s, "false")) saw_false = true;
+                    }
+                },
+            }
+            const body_t = try self.synthExprE(arm.body, ctx_opt);
+            if (result_t == null) {
+                result_t = body_t;
+            } else if (result_t.? == .builtin and body_t == .builtin and !ResolvedType.eql(result_t.?, body_t)) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "match arms must all yield the same type", .{});
+            }
+        }
+
+        if (!has_catch_all) {
+            const bool_exhaustive = scrut_t == .builtin and scrut_t.builtin == .bool_ and saw_true and saw_false;
+            if (!bool_exhaustive) {
+                try self.emit(.non_exhaustive_match, .error_, self.arena.exprSpan(id), "non-exhaustive match: add a '_' arm or cover every case", .{});
+            }
+        }
+
+        return result_t orelse ResolvedType.unknown;
     }
 
     fn synthBinary(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
@@ -1005,6 +1055,63 @@ test "type-checker emits E1213 on receiver-less get of a resource absent from th
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .resource_expected_in_when);
+}
+
+test "match exhaustiveness and arm typing (M0.8 match foundation)" {
+    const gpa = std.testing.allocator;
+
+    // Exhaustive via wildcard → no exhaustiveness or typing error.
+    var ok = try parseAndCheck(gpa,
+        \\component C { level: int = 0, out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let lvl = entity.get(C).level
+        \\  entity.get_mut(C).out = match lvl { 0 => 10, 1 => 20, _ => 0 }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .non_exhaustive_match);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+
+    // Non-exhaustive int match (no catch-all) → E1230.
+    var bad = try parseAndCheck(gpa,
+        \\component C { level: int = 0, out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let lvl = entity.get(C).level
+        \\  entity.get_mut(C).out = match lvl { 0 => 10, 1 => 20 }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .non_exhaustive_match);
+
+    // Bool match covering true and false → exhaustive without a wildcard.
+    var boolean = try parseAndCheck(gpa,
+        \\component C { flag: bool = false, out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let f = entity.get(C).flag
+        \\  entity.get_mut(C).out = match f { true => 1, false => 0 }
+        \\}
+    );
+    defer boolean.deinit(gpa);
+    try expectNoCode(boolean.diagnostics.items, .non_exhaustive_match);
+
+    // Arms yielding different types → E0200.
+    var mixed = try parseAndCheck(gpa,
+        \\component C { level: int = 0, out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let lvl = entity.get(C).level
+        \\  let x = match lvl { 0 => 1, _ => true }
+        \\}
+    );
+    defer mixed.deinit(gpa);
+    try expectAnyCode(mixed.diagnostics.items, .type_mismatch);
 }
 
 test "assert requires a bool condition (M0.8 assert foundation)" {

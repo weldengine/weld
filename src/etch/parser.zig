@@ -995,9 +995,67 @@ pub const Parser = struct {
         });
     }
 
+    const ParsedPattern = struct { kind: ast_mod.PatternKind, payload: u32 };
+
+    /// Parse the E1 pattern subset (`etch-grammar.md` §pattern): `_`
+    /// (wildcard), a literal, or an `IDENT` binding. Enum-variant, optional,
+    /// tuple, and struct-destructure patterns arrive with their types later.
+    fn parsePattern(self: *Parser) ParseError!ParsedPattern {
+        switch (self.peek()) {
+            .ident => {
+                const tok = try self.advance();
+                if (std.mem.eql(u8, self.sliceOf(tok.span), "_")) {
+                    return .{ .kind = .wildcard, .payload = 0 };
+                }
+                return .{ .kind = .binding, .payload = try self.internSlice(tok.span) };
+            },
+            .int_literal, .float_literal, .bool_literal, .string_literal => {
+                const lit = try self.parsePrimary();
+                return .{ .kind = .literal, .payload = lit.raw() };
+            },
+            .minus => {
+                // Negative numeric literal pattern (`-5 => ...`).
+                const lit = try self.parseUnary();
+                return .{ .kind = .literal, .payload = lit.raw() };
+            },
+            else => return self.parseErrFmt(self.peekSpan(), "unsupported match pattern (E1 supports '_', literals, and bindings), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+        }
+    }
+
+    fn parseMatchArm(self: *Parser) ParseError!ast_mod.MatchArm {
+        const pat = try self.parsePattern();
+        _ = try self.expect(.fat_arrow, "expected '=>' after match pattern");
+        const body = try self.parseExpr(0);
+        return .{ .pattern_kind = pat.kind, .pattern_payload = pat.payload, .body = body };
+    }
+
+    /// Parse `match scrutinee { pattern => expr, ... }` (M0.8 v0.6
+    /// foundations). Arm bodies are expressions in the E1 subset.
+    fn parseMatch(self: *Parser) ParseError!NodeId {
+        const kw_span = (try self.advance()).span; // 'match'
+        const scrutinee = try self.parseExpr(0);
+        _ = try self.expect(.lbrace, "expected '{' to open match arms");
+        var arms: std.ArrayListUnmanaged(ast_mod.MatchArm) = .empty;
+        defer arms.deinit(self.gpa);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try arms.append(self.gpa, try self.parseMatchArm());
+            if (self.peek() == .comma) {
+                _ = try self.advance();
+            } else {
+                break;
+            }
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close match");
+        return try self.arena.addMatch(self.gpa, scrutinee, arms.items, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
     fn parsePrimary(self: *Parser) ParseError!NodeId {
         try self.surfaceTokenErrors();
         switch (self.peek()) {
+            .kw_match => return try self.parseMatch(),
             .int_literal => {
                 const tok = try self.advance();
                 const id = try self.internSlice(tok.span);
