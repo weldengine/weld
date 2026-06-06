@@ -77,6 +77,9 @@ pub const ResolvedType = union(enum) {
     builtin: BuiltinType,
     component: StringId, // user-declared component type name
     resource: StringId, // user-declared resource type name
+    /// `start..end` range; payload is the (integer) element type (M0.8 v0.6
+    /// foundations). Only consumed by `for-in` in E1.
+    range: BuiltinType,
     /// Type unknown / unresolved. Used as the fallback after a diagnostic
     /// has been emitted; subsequent checks treat `unknown` as wildcard to
     /// avoid cascade errors.
@@ -88,6 +91,7 @@ pub const ResolvedType = union(enum) {
             .builtin => |bt| bt == b.builtin,
             .component => |id| id == b.component,
             .resource => |id| id == b.resource,
+            .range => |bt| bt == b.range,
             .unknown => true,
         };
     }
@@ -568,6 +572,28 @@ pub const TypeChecker = struct {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(a.cond), "assert condition must be a bool expression", .{});
                 }
             },
+            .for_stmt => {
+                // `for v in iterable { body }` — E1 iterates ranges; the loop
+                // variable binds to the range's integer element type, then the
+                // body is checked with it in scope (M0.8 v0.6 foundations).
+                const f = self.arena.for_stmts.items[data];
+                const iter_t = self.synthExpr(f.iterable, ctx);
+                var elem_t: ResolvedType = ResolvedType.unknown;
+                if (iter_t == .range) {
+                    elem_t = .{ .builtin = iter_t.range };
+                } else if (iter_t != .unknown) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "for-in iterable must be a range in E1 (array/map iteration arrives with collections)", .{});
+                }
+                if (f.index_name != 0) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "a range for-in binds a single loop variable", .{});
+                }
+                try ctx.locals.put(self.gpa, f.var_name, .{ .type_ = elem_t, .is_mut = false });
+                var i: u32 = 0;
+                while (i < f.body_len) : (i += 1) {
+                    const body_stmt: NodeId = @bitCast(self.arena.extra.items[f.body_start + i]);
+                    try self.checkStmt(ctx, body_stmt);
+                }
+            },
             else => {},
         }
     }
@@ -655,6 +681,24 @@ pub const TypeChecker = struct {
             .binary => return try self.synthBinary(id, data, ctx_opt),
             .unary => return try self.synthUnary(id, data, ctx_opt),
             .match_expr => return try self.synthMatch(id, data, ctx_opt),
+            .range => {
+                // `start..end` / `start..=end` — both bounds must be the same
+                // integer type (M0.8 v0.6 foundations). Result is a range over
+                // that integer element type.
+                const r = self.arena.ranges.items[data];
+                const start_t = try self.synthExprE(r.start, ctx_opt);
+                const end_t = try self.synthExprE(r.end, ctx_opt);
+                if (start_t == .unknown or end_t == .unknown) return ResolvedType.unknown;
+                if (start_t == .builtin and end_t == .builtin and start_t.builtin.isInteger() and end_t.builtin.isInteger()) {
+                    if (!ResolvedType.eql(start_t, end_t)) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "range bounds must have the same integer type", .{});
+                        return ResolvedType.unknown;
+                    }
+                    return .{ .range = start_t.builtin };
+                }
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "range bounds must be integers", .{});
+                return ResolvedType.unknown;
+            },
             .cast => {
                 // `operand as Type` (M0.8 v0.6 foundations). The S3 subset
                 // permits numeric-scalar → numeric-scalar conversions only;
@@ -814,7 +858,7 @@ pub const TypeChecker = struct {
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on resource '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
-            .builtin, .unknown => return ResolvedType.unknown,
+            .builtin, .range, .unknown => return ResolvedType.unknown,
         }
     }
 
@@ -1055,6 +1099,48 @@ test "type-checker emits E1213 on receiver-less get of a resource absent from th
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .resource_expected_in_when);
+}
+
+test "for-in requires an integer range iterable (M0.8 ranges + for-in)" {
+    const gpa = std.testing.allocator;
+
+    // Valid integer range for-in → no type error.
+    var ok = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let mut s = 0
+        \\  for i in 0..3 { s += i }
+        \\  entity.get_mut(C).out = s
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+
+    // Non-range iterable → E0200.
+    var not_range = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  for i in 5 { let x = i }
+        \\}
+    );
+    defer not_range.deinit(gpa);
+    try expectAnyCode(not_range.diagnostics.items, .type_mismatch);
+
+    // Non-integer range bounds → E0200.
+    var float_range = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  for i in 0.0..3.0 { let x = i }
+        \\}
+    );
+    defer float_range.deinit(gpa);
+    try expectAnyCode(float_range.diagnostics.items, .type_mismatch);
 }
 
 test "match exhaustiveness and arm typing (M0.8 match foundation)" {

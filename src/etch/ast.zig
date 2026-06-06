@@ -405,6 +405,19 @@ pub const AssertStmt = struct {
     message: StringId, // 0 if no message literal
 };
 
+/// Side-slab entry for a `for IDENT [, IDENT] in iterable block` statement
+/// (M0.8 v0.6 foundations, `etch-grammar.md` §621). `index_name` is `0`
+/// when the optional second binding is absent. `body_start`/`body_len`
+/// index a run of statement ids in `arena.extra` (same layout as a rule
+/// body). E1 iterates ranges; array/map iterables arrive with collections.
+pub const ForStmt = struct {
+    var_name: StringId,
+    index_name: StringId, // 0 if absent
+    iterable: NodeId, // expr (a range in E1)
+    body_start: u32,
+    body_len: u32,
+};
+
 const BinaryExpr = struct {
     op: BinaryOp,
     lhs: NodeId,
@@ -432,6 +445,14 @@ const MethodGetExpr = struct {
 pub const CastExpr = struct {
     operand: NodeId,
     type_node: NodeId,
+};
+
+/// `start .. end` (exclusive) or `start ..= end` (inclusive) range
+/// expression (M0.8 v0.6 foundations, `etch-grammar.md` §410-411).
+pub const RangeExpr = struct {
+    start: NodeId,
+    end: NodeId,
+    inclusive: bool,
 };
 
 /// Pattern kind for a `match` arm (M0.8 v0.6 foundations, E1 subset:
@@ -592,8 +613,10 @@ pub const AstArena = struct {
     field_accesses: std.ArrayListUnmanaged(FieldAccessExpr) = .empty,
     method_gets: std.ArrayListUnmanaged(MethodGetExpr) = .empty,
     casts: std.ArrayListUnmanaged(CastExpr) = .empty,
+    ranges: std.ArrayListUnmanaged(RangeExpr) = .empty,
     match_exprs: std.ArrayListUnmanaged(MatchExpr) = .empty,
     match_arms: std.ArrayListUnmanaged(MatchArm) = .empty,
+    for_stmts: std.ArrayListUnmanaged(ForStmt) = .empty,
     named_types: std.ArrayListUnmanaged(NamedTypeNode) = .empty,
 
     // Annotation storage.
@@ -658,8 +681,10 @@ pub const AstArena = struct {
         self.field_accesses.deinit(gpa);
         self.method_gets.deinit(gpa);
         self.casts.deinit(gpa);
+        self.ranges.deinit(gpa);
         self.match_exprs.deinit(gpa);
         self.match_arms.deinit(gpa);
+        self.for_stmts.deinit(gpa);
         self.named_types.deinit(gpa);
         self.annotations.deinit(gpa);
         self.annot_pool.deinit(gpa);
@@ -759,6 +784,18 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.casts.items.len);
         try self.casts.append(gpa, .{ .operand = operand, .type_node = type_node });
         return try self.addExpr(gpa, .cast, idx, span);
+    }
+
+    pub fn addRange(self: *AstArena, gpa: std.mem.Allocator, start: NodeId, end: NodeId, inclusive: bool, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.ranges.items.len);
+        try self.ranges.append(gpa, .{ .start = start, .end = end, .inclusive = inclusive });
+        return try self.addExpr(gpa, .range, idx, span);
+    }
+
+    pub fn addForStmt(self: *AstArena, gpa: std.mem.Allocator, for_stmt: ForStmt, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.for_stmts.items.len);
+        try self.for_stmts.append(gpa, for_stmt);
+        return try self.addStmt(gpa, .for_stmt, idx, span);
     }
 
     pub fn addMatch(self: *AstArena, gpa: std.mem.Allocator, scrutinee: NodeId, arms: []const MatchArm, span: SourceSpan) !NodeId {

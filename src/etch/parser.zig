@@ -574,14 +574,10 @@ pub const Parser = struct {
         }
 
         _ = try self.expect(.lbrace, "expected '{' to start rule body");
-        const body_extra_start: u32 = @intCast(self.arena.extra.items.len);
-        while (self.peek() != .rbrace) {
-            try self.surfaceTokenErrors();
-            const stmt_id = try self.parseStmt();
-            try self.arena.extra.append(self.gpa, stmt_id.raw());
-        }
+        const body = try self.parseStmtRun();
         const closing = try self.expect(.rbrace, "expected '}' to close rule body");
-        const body_len: u32 = @as(u32, @intCast(self.arena.extra.items.len)) - body_extra_start;
+        const body_extra_start = body.start;
+        const body_len = body.len;
 
         const data_idx: u32 = @intCast(self.arena.rule_decls.items.len);
         try self.arena.rule_decls.append(self.gpa, .{
@@ -760,12 +756,60 @@ pub const Parser = struct {
 
     // ─── Statements ──────────────────────────────────────────────────────
 
+    /// Collect `statement*` until `}` / EOF (without consuming the brace)
+    /// into a contiguous run of statement ids in `arena.extra`, returning
+    /// `(start, len)`. Statements are gathered in a temp list and bulk-
+    /// appended only after the whole run is parsed, so a nested block (a
+    /// `for` body inside a rule body) finalizes its own run first and the two
+    /// ranges never interleave in `extra`.
+    fn parseStmtRun(self: *Parser) ParseError!struct { start: u32, len: u32 } {
+        var stmts: std.ArrayListUnmanaged(u32) = .empty;
+        defer stmts.deinit(self.gpa);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            try stmts.append(self.gpa, (try self.parseStmt()).raw());
+        }
+        const start: u32 = @intCast(self.arena.extra.items.len);
+        try self.arena.extra.appendSlice(self.gpa, stmts.items);
+        return .{ .start = start, .len = @intCast(stmts.items.len) };
+    }
+
+    /// Parse `for IDENT [, IDENT] in iterable { body }` (M0.8 v0.6
+    /// foundations, `etch-grammar.md` §621). E1 iterates ranges; array / map
+    /// iterables arrive with collections.
+    fn parseForStmt(self: *Parser) ParseError!NodeId {
+        const for_span = (try self.advance()).span; // 'for'
+        const var_tok = try self.expect(.ident, "expected loop variable after 'for'");
+        const var_name = try self.internSlice(var_tok.span);
+        var index_name: StringId = 0;
+        if (self.peek() == .comma) {
+            _ = try self.advance();
+            const idx_tok = try self.expect(.ident, "expected second binding after ',' in for");
+            index_name = try self.internSlice(idx_tok.span);
+        }
+        _ = try self.expect(.kw_in, "expected 'in' in for loop");
+        const iterable = try self.parseExpr(0);
+        _ = try self.expect(.lbrace, "expected '{' to open for body");
+        const body = try self.parseStmtRun();
+        const closing = try self.expect(.rbrace, "expected '}' to close for body");
+        return try self.arena.addForStmt(self.gpa, .{
+            .var_name = var_name,
+            .index_name = index_name,
+            .iterable = iterable,
+            .body_start = body.start,
+            .body_len = body.len,
+        }, .{ .byte_start = for_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
     fn parseStmt(self: *Parser) ParseError!NodeId {
         if (self.peek() == .kw_let) {
             return try self.parseLetStmt();
         }
         if (self.peek() == .kw_assert) {
             return try self.parseAssertStmt();
+        }
+        if (self.peek() == .kw_for) {
+            return try self.parseForStmt();
         }
         // Either an assignment (lvalue followed by =/+=/etc.) or an expr stmt.
         const expr_start = self.current.span;
@@ -862,9 +906,27 @@ pub const Parser = struct {
         return try self.continuePostfixAndBinary(lhs, min_bp);
     }
 
+    // Range binds weaker than additive (lbp 7) but stronger than comparison
+    // (lbp 5), per `etch-grammar.md` §410 (range_expr = additive [op additive]).
+    const range_lbp: u8 = 6;
+
     fn continuePostfixAndBinary(self: *Parser, lhs_in: NodeId, min_bp: u8) ParseError!NodeId {
         var lhs = lhs_in;
         while (true) {
+            const rk = self.peek();
+            if (rk == .dotdot or rk == .dotdot_eq) {
+                if (range_lbp < min_bp) break;
+                _ = try self.advance();
+                // Additive (rbp 7) binds into each bound; ranges don't chain.
+                const rhs = try self.parseExpr(7);
+                const lhs_span = self.arena.exprSpan(lhs);
+                const rhs_span = self.arena.exprSpan(rhs);
+                lhs = try self.arena.addRange(self.gpa, lhs, rhs, rk == .dotdot_eq, .{
+                    .byte_start = lhs_span.byte_start,
+                    .byte_end = rhs_span.byte_end,
+                });
+                break;
+            }
             const info = infixBindingPower(self.peek()) orelse break;
             if (info.lbp < min_bp) break;
             const op_tok = try self.advance();

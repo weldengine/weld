@@ -44,6 +44,15 @@ pub const ResourceRef = struct {
     mutable: bool,
 };
 
+/// A `start..end` / `start..=end` range value (M0.8 v0.6 foundations).
+/// Integer bounds; `for-in` iterates `[start, end)` (exclusive) or
+/// `[start, end]` (inclusive).
+pub const RangeVal = struct {
+    start: i64,
+    end: i64,
+    inclusive: bool,
+};
+
 /// Runtime tag for the S3 primitive value set. Mirrors `BuiltinType` in
 /// `src/etch/types.zig` but only carries the values the interpreter touches.
 pub const Value = union(enum) {
@@ -54,6 +63,7 @@ pub const Value = union(enum) {
     entity_id: EntityId,
     component_ref: ComponentRef,
     resource_ref: ResourceRef,
+    range: RangeVal,
     unit,
 
     pub fn fromInt(x: i64) Value {
@@ -87,6 +97,7 @@ pub const Value = union(enum) {
             .entity_id => |a| a == other.entity_id,
             .component_ref => false,
             .resource_ref => false,
+            .range => false,
             .unit => true,
         };
     }

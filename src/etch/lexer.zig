@@ -104,7 +104,21 @@ pub const Lexer = struct {
                 '}' => return self.consumeOne(.rbrace),
                 ':' => return self.consumeOne(.colon),
                 ',' => return self.consumeOne(.comma),
-                '.' => return self.consumeOne(.dot),
+                '.' => {
+                    // `.` / `..` / `..=` (range operators, M0.8). `lexNumber`
+                    // only treats `.` as a decimal point when a digit follows,
+                    // so `0..10` already lexes the `0` as an int before here.
+                    self.pos += 1;
+                    if (self.pos < self.source.len and self.source[self.pos] == '.') {
+                        self.pos += 1;
+                        if (self.pos < self.source.len and self.source[self.pos] == '=') {
+                            self.pos += 1;
+                            return .{ .kind = .dotdot_eq, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                        }
+                        return .{ .kind = .dotdot, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                    }
+                    return .{ .kind = .dot, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                },
                 '@' => return self.consumeOne(.at),
                 '"' => return self.lexString(start),
                 '0'...'9' => return self.lexNumber(start),
