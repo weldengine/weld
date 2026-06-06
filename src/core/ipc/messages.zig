@@ -1,8 +1,15 @@
-//! Catalogue of the 13 IPC messages used in S6, defined as `extern
-//! struct` POD per `engine-ipc.md` §3.2 + brief § Scope. Every payload
-//! is written/read byte-for-byte across the socket, preceded by an
-//! 8-byte `schema_hash` that detects build-version drift between the
-//! editor and the runtime.
+//! Catalogue of the IPC messages, defined as `extern struct` POD per
+//! `engine-ipc.md` §3.2 + brief § Scope. Every payload is written/read
+//! byte-for-byte across the socket, preceded by an 8-byte
+//! `schema_hash` that detects build-version drift between the editor
+//! and the runtime.
+//!
+//! S6 shipped 13 message types; M0.7 / E1 adds `ShmRegionsHandoff`
+//! (the POSIX fd handoff, §3.3 + §4.8). M0.7 / E2 extends the
+//! catalogue further (`Play`/`Pause`/`Stop`, `LoadScene`,
+//! `HotReloadScript`, `SaveScene`, `SaveProject`/`ProjectSaved`,
+//! `RuntimeError`). The `WELD_IPC_PROTOCOL_VERSION` 2→3 bump covers
+//! the whole M0.7 catalogue + attach-semantics change.
 //!
 //! The S6 brief acknowledges a triple count inconsistency in its own
 //! text — the catalogue is described as "exactly 11 message types",
@@ -28,10 +35,9 @@ const std = @import("std");
 const rtti = @import("../rtti/root.zig");
 
 /// Message-type discriminator written in the framing header
-/// (`framing.zig` `Header.msg_type: u16`). Values are stable across
-/// the protocol version `WELD_IPC_PROTOCOL_VERSION = 1`; reordering
-/// or renumbering is a breaking change that bumps the protocol
-/// version.
+/// (`framing.zig` `Header.msg_type: u16`). Discriminant values are
+/// stable for a given `WELD_IPC_PROTOCOL_VERSION`; reordering or
+/// renumbering is a breaking change that bumps the protocol version.
 pub const MsgType = enum(u16) {
     /// Runtime → Editor — handshake (first message after connect).
     protocol_hello = 1,
@@ -62,13 +68,39 @@ pub const MsgType = enum(u16) {
     shutdown_ack = 12,
     /// Runtime → Editor — unidirectional log event (no ack).
     log_message = 13,
+    /// Editor → Runtime — POSIX shm fd handoff (M0.7 / E1,
+    /// `engine-ipc.md` §3.3 + §4.8). Sent right after the handshake
+    /// via `sendWithHandles`; the fds ride as ancillary data.
+    shm_regions_handoff = 14,
+    /// Editor → Runtime — start simulation (fire-and-forget, §3.4).
+    play = 15,
+    /// Editor → Runtime — pause simulation (fire-and-forget).
+    pause = 16,
+    /// Editor → Runtime — stop simulation (fire-and-forget).
+    stop = 17,
+    /// Editor → Runtime — load a scene by path (fire-and-forget).
+    load_scene = 18,
+    /// Editor → Runtime — hot-reload a script by asset handle.
+    hot_reload_script = 19,
+    /// Editor → Runtime — save ONE scene by path (scene granularity).
+    /// Declared in M0.7 with **no wired handler** — wiring deferred to
+    /// the scene serialization pipeline (out of Phase 0, brief § Out-of-scope).
+    save_scene = 20,
+    /// Editor → Runtime — save the whole project (transactional, §3.4).
+    /// The runtime replies with `project_saved` carrying the same `seq_id`.
+    save_project = 21,
+    /// Runtime → Editor — ack of `save_project` (same `seq_id`).
+    project_saved = 22,
+    /// Runtime → Editor — non-fatal recoverable error event (no ack).
+    /// Distinct from `CrashReport` (reserved for the fatal case).
+    runtime_error = 23,
 
     /// Returns true when the raw `u16` from a frame header maps to a
     /// declared variant. Used by `framing.validate` to fail fast on
     /// unknown discriminants.
     pub fn isKnown(raw: u16) bool {
         return switch (raw) {
-            1...13 => true,
+            1...23 => true,
             else => false,
         };
     }
@@ -91,6 +123,13 @@ pub const LogLevel = enum(u32) {
     info = 2,
     warn = 3,
     err = 4,
+};
+
+/// Severity carried by `RuntimeError.severity` (`engine-ipc.md` §3.3).
+/// Numeric values are stable across the protocol version.
+pub const ErrorSeverity = enum(u32) {
+    warning = 0,
+    err = 1,
 };
 
 /// Runtime → Editor. First message of the handshake (cf.
@@ -210,6 +249,120 @@ pub const LogMessage = extern struct {
     text: [256]u8,
 };
 
+/// NUL-terminated capacity for a `ShmRegionDesc.logical_name`.
+/// `"viewport_framebuffer"` (20 bytes) is the longest name M0.7 hands
+/// off; 32 leaves headroom for the §4.1 names (`debug_overlays`,
+/// `profiler_samples`, `selection_snapshot`, `log_stream`).
+pub const SHM_LOGICAL_NAME_LEN: usize = 32;
+
+/// Maximum shm regions carried by one `ShmRegionsHandoff`. M0.7 hands
+/// off only `viewport_framebuffer`; the §4.1 catalogue tops out at 5
+/// regions. 8 is comfortable headroom and keeps the frame small
+/// (`8 × 40 + 8 = 328` payload bytes).
+pub const MAX_SHM_REGIONS: usize = 8;
+
+/// One shm-region descriptor inside a `ShmRegionsHandoff`
+/// (`engine-ipc.md` §3.3). The fd travels out-of-band via
+/// `SCM_RIGHTS`; this struct carries only the logical name and size so
+/// the runtime can pair each received fd with its role and `mmap` the
+/// right length via `ShmRegion.fromFd`.
+pub const ShmRegionDesc = extern struct {
+    /// NUL-terminated logical role, e.g. `"viewport_framebuffer"`.
+    logical_name: [SHM_LOGICAL_NAME_LEN]u8,
+    /// Region size in bytes — the `mmap` length on the runtime side.
+    size: u64,
+};
+
+/// Editor → Runtime, POSIX (M0.7 / E1). Hands the runtime the file
+/// descriptors of the shm regions the editor created
+/// (`engine-ipc.md` §4.8 + §3.3). Sent immediately after
+/// `ProtocolHelloAck` through `IpcSocket.sendWithHandles`: the fds
+/// ride as `SCM_RIGHTS` ancillary data in the same order as
+/// `regions[0..region_count]`. The runtime maps each via
+/// `ShmRegion.fromFd` and **never** calls cross-process `shm_open`.
+/// The receiver validates that the ancillary fd count equals
+/// `region_count` (`engine-ipc.md` §8.3).
+pub const ShmRegionsHandoff = extern struct {
+    /// Number of valid entries in `regions` (and of fds in the
+    /// ancillary data). `1` in M0.7 (`viewport_framebuffer` only).
+    region_count: u32,
+    _pad0: u32 = 0,
+    /// Fixed-capacity descriptor table; only the first `region_count`
+    /// entries are meaningful. Fixed size keeps the frame an
+    /// `extern struct` POD like every other catalogue message.
+    regions: [MAX_SHM_REGIONS]ShmRegionDesc,
+};
+
+/// Editor → Runtime. Start the simulation. Fire-and-forget (§3.4) — no
+/// ack. The single reserved byte keeps it a non-zero-sized extern POD.
+pub const Play = extern struct {
+    _reserved: u8 = 0,
+};
+
+/// Editor → Runtime. Pause the simulation. Fire-and-forget.
+pub const Pause = extern struct {
+    _reserved: u8 = 0,
+};
+
+/// Editor → Runtime. Stop the simulation. Fire-and-forget.
+pub const Stop = extern struct {
+    _reserved: u8 = 0,
+};
+
+/// Editor → Runtime. Load a scene by filesystem path. Fire-and-forget.
+pub const LoadScene = extern struct {
+    /// NUL-terminated scene path. Longer paths truncate at the sender.
+    path: [256]u8,
+};
+
+/// Editor → Runtime. Hot-reload a script identified by its stable asset
+/// handle (`AssetHandle` = `u64` per §3.2).
+pub const HotReloadScript = extern struct {
+    script_handle: u64,
+};
+
+/// Editor → Runtime. Save ONE scene by path (scene granularity, maps
+/// Conduit `scene.save`). Declared in M0.7 with **no wired handler**
+/// (see `MsgType.save_scene`); wiring deferred to the scene
+/// serialization pipeline (out of Phase 0).
+pub const SaveScene = extern struct {
+    /// NUL-terminated scene path.
+    path: [256]u8,
+};
+
+/// Editor → Runtime. Save the whole project (all dirty scenes + project
+/// settings + modified prefabs). Transactional (§3.4): the runtime
+/// replies with `ProjectSaved` carrying the same `seq_id`. This ack
+/// anchors the editor `CommandLog.last_clean_line` (§7, wired in E4).
+/// No body — project granularity carries no path.
+pub const SaveProject = extern struct {
+    _reserved: u8 = 0,
+};
+
+/// Runtime → Editor. Ack of `SaveProject` (same `seq_id` in the frame
+/// header). `ok == 0` carries a human-readable `reason`.
+pub const ProjectSaved = extern struct {
+    /// 1 = saved, 0 = failed. `u8` because `bool` is not legal in an
+    /// `extern struct` in Zig 0.16.
+    ok: u8,
+    _pad0: [3]u8 = .{ 0, 0, 0 },
+    /// NUL-terminated failure reason. Empty when `ok == 1`.
+    reason: [128]u8,
+};
+
+/// Runtime → Editor. Non-fatal, recoverable error event (failed
+/// non-transactional command, missing asset, …), surfaced for a toast
+/// or the "Replay Errors" panel. Unidirectional — no ack. Distinct from
+/// `CrashReport` (reserved for the fatal signal + stacktrace case).
+pub const RuntimeError = extern struct {
+    /// `ErrorSeverity` as `u32` — extern struct can't embed Zig enums.
+    severity: u32,
+    /// NUL-terminated source module name.
+    source: [64]u8,
+    /// NUL-terminated UTF-8 error text.
+    text: [256]u8,
+};
+
 /// Returns the `MsgType` discriminator for a given message struct.
 /// Used by callers to fill the framing header without manually
 /// keeping the type↔enum mapping in sync at each call site.
@@ -228,6 +381,16 @@ pub fn msgTypeOf(comptime T: type) MsgType {
         Shutdown => .shutdown,
         ShutdownAck => .shutdown_ack,
         LogMessage => .log_message,
+        ShmRegionsHandoff => .shm_regions_handoff,
+        Play => .play,
+        Pause => .pause,
+        Stop => .stop,
+        LoadScene => .load_scene,
+        HotReloadScript => .hot_reload_script,
+        SaveScene => .save_scene,
+        SaveProject => .save_project,
+        ProjectSaved => .project_saved,
+        RuntimeError => .runtime_error,
         else => @compileError("msgTypeOf: not a Weld IPC message type: " ++ @typeName(T)),
     };
 }
@@ -274,7 +437,12 @@ test "every message type is extern with non-zero size" {
         ModifyComponent, ModifyAck,
         Heartbeat,       HeartbeatAck,
         Shutdown,        ShutdownAck,
-        LogMessage,
+        LogMessage,      ShmRegionsHandoff,
+        Play,            Pause,
+        Stop,            LoadScene,
+        HotReloadScript, SaveScene,
+        SaveProject,     ProjectSaved,
+        RuntimeError,
     }) |T| {
         try std.testing.expect(@sizeOf(T) > 0);
     }
@@ -288,9 +456,10 @@ test "msgTypeOf maps every message to its discriminator" {
 
 test "MsgType.isKnown rejects out-of-range values" {
     try std.testing.expect(MsgType.isKnown(1));
-    try std.testing.expect(MsgType.isKnown(13));
+    try std.testing.expect(MsgType.isKnown(14)); // shm_regions_handoff (M0.7 / E1)
+    try std.testing.expect(MsgType.isKnown(23)); // runtime_error (M0.7 / E2)
     try std.testing.expect(!MsgType.isKnown(0));
-    try std.testing.expect(!MsgType.isKnown(14));
+    try std.testing.expect(!MsgType.isKnown(24));
     try std.testing.expect(!MsgType.isKnown(65535));
 }
 
@@ -302,7 +471,12 @@ test "schemaHash is non-zero for every message type" {
         ModifyComponent, ModifyAck,
         Heartbeat,       HeartbeatAck,
         Shutdown,        ShutdownAck,
-        LogMessage,
+        LogMessage,      ShmRegionsHandoff,
+        Play,            Pause,
+        Stop,            LoadScene,
+        HotReloadScript, SaveScene,
+        SaveProject,     ProjectSaved,
+        RuntimeError,
     }) |T| {
         try std.testing.expect(schemaHash(T) != 0);
     }

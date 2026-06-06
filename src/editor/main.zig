@@ -41,7 +41,10 @@ const vk_blit = @import("vk_blit.zig");
 const is_posix = builtin.os.tag == .linux or builtin.os.tag == .macos;
 
 const Args = struct {
-    runtime_path: []const u8 = "zig-out/bin/weld-runtime",
+    /// Empty = auto-derive from the editor's own executable directory
+    /// (`<exe-dir>/weld-runtime[.exe]`), set after parsing. `--runtime=`
+    /// overrides it (e.g. tests passing an explicit path).
+    runtime_path: []const u8 = "",
     frames: u64 = 3600,
     no_heartbeat: bool = false,
     no_spawn: bool = false,
@@ -49,7 +52,10 @@ const Args = struct {
 
 fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init.Minimal) !Args {
     var a = Args{};
-    var it = std.process.Args.Iterator.init(init.args);
+    // `Iterator.init` is a `@compileError` on Windows (no POSIX argv) —
+    // the allocator variant parses the wide command line. `init.args`
+    // (Juicy Main) is preserved; `deinit` frees the Windows buffer.
+    var it = try std.process.Args.Iterator.initAllocator(init.args, gpa);
     defer it.deinit();
     _ = it.skip();
     while (it.next()) |s| {
@@ -79,21 +85,47 @@ fn sleepMs(ms: u64) void {
     _ = nanosleep(&ts, null);
 }
 
-pub fn main(init: std.process.Init.Minimal) !void {
-    if (!is_posix) {
-        std.debug.print("editor stub: Windows path not implemented in S6 (cf. brief)\n", .{});
-        return error.Unimplemented;
-    }
+pub fn main(init: std.process.Init) !void {
+    // Full Juicy Main (engine-zig-conventions §2 — `Init` for dev tools):
+    // `init.arena` is process-lifetime + auto-cleaned; `init.io` drives
+    // the executable-directory lookup used to resolve the runtime path.
+    const gpa = init.arena.allocator();
+    const io = init.io;
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
+    const args = try parseArgs(gpa, init.minimal);
 
-    const args = try parseArgs(gpa, init);
+    // Resolve the runtime binary. Without `--runtime=`, derive it from
+    // the editor's own executable directory + `weld-runtime[.exe]` —
+    // robust against the CWD and OS-correct (CreateProcessW with
+    // lpApplicationName needs the exact path, incl. the `.exe` suffix,
+    // and does not search PATH).
+    const runtime_path: []const u8 = if (args.runtime_path.len != 0)
+        args.runtime_path
+    else blk: {
+        const dir = try std.process.executableDirPathAlloc(io, gpa);
+        const exe_name = if (builtin.os.tag == .windows) "weld-runtime.exe" else "weld-runtime";
+        break :blk try std.fs.path.join(gpa, &.{ dir, exe_name });
+    };
 
     const my_pid = getpid();
-    const socket_path = try std.fmt.allocPrint(gpa, "/tmp/weld-{d}.sock", .{my_pid});
-    const shm_name = try std.fmt.allocPrint(gpa, "/weld-shm-viewport-{d}", .{my_pid});
+    // OS-correct endpoints. Socket: `/tmp/weld-<pid>.sock` (POSIX Unix
+    // socket) vs `\\.\pipe\weld-<pid>` (Windows named pipe), via
+    // `transport.buildSocketPath`. Shm name: POSIX `/weld-shm-...` vs
+    // Windows session-local `Local\weld-shm-...` (engine-ipc.md §2.2).
+    var ep_name_buf: [64]u8 = undefined;
+    const ep_name = try std.fmt.bufPrint(&ep_name_buf, "weld-{d}", .{my_pid});
+    var sock_path_buf: [128]u8 = undefined;
+    const socket_path: []const u8 = try ipc.transport.buildSocketPath(&sock_path_buf, ep_name);
+    const shm_name = if (is_posix)
+        try std.fmt.allocPrint(gpa, "/weld-shm-viewport-{d}", .{my_pid})
+    else
+        try std.fmt.allocPrint(gpa, "Local\\weld-shm-viewport-{d}", .{my_pid});
+
+    // ---- Reap orphan sockets / shm regions from any previously
+    // crashed editor (engine-ipc.md §2.4). Runs before we create our
+    // own endpoints; only dead-PID orphans are removed, so a second
+    // live editor is never disturbed. ----
+    ipc.cleanup.reapOrphans();
 
     // ---- shm region (created before everything else; runtime
     // attaches to it once spawned) ----
@@ -128,26 +160,31 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const socket_arg = try std.fmt.allocPrint(gpa, "--socket={s}", .{socket_path});
     const shm_arg = try std.fmt.allocPrint(gpa, "--shm={s}", .{shm_name});
     const pid_arg = try std.fmt.allocPrint(gpa, "--editor-pid={d}", .{my_pid});
+    // Snapshot path for SaveProject persistence / replay reload (§7.1).
+    // CWD-relative so it resolves identically in the spawned runtime
+    // (which inherits this process's CWD) on both POSIX and Windows.
+    const snapshot_arg = try std.fmt.allocPrint(gpa, "--snapshot=weld-snapshot-{d}.bin", .{my_pid});
 
     var spawn_argv = std.ArrayList([]const u8).empty;
     defer spawn_argv.deinit(gpa);
-    try spawn_argv.append(gpa, args.runtime_path);
+    try spawn_argv.append(gpa, runtime_path);
     try spawn_argv.append(gpa, socket_arg);
     try spawn_argv.append(gpa, shm_arg);
     try spawn_argv.append(gpa, pid_arg);
     const frames_arg = try std.fmt.allocPrint(gpa, "--frames={d}", .{args.frames});
     try spawn_argv.append(gpa, frames_arg);
+    try spawn_argv.append(gpa, snapshot_arg);
 
     var proc_opt: ?platform_process.Process = null;
     if (args.no_spawn) {
         std.debug.print(
             "[editor] --no-spawn: launch the runtime manually with:\n  {s}",
-            .{args.runtime_path},
+            .{runtime_path},
         );
         for (spawn_argv.items[1..]) |a| std.debug.print(" {s}", .{a});
         std.debug.print("\n[editor] waiting for runtime to connect on {s} ...\n", .{socket_path});
     } else {
-        proc_opt = try platform_process.spawn_process(gpa, args.runtime_path, spawn_argv.items);
+        proc_opt = try platform_process.spawn_process(gpa, runtime_path, spawn_argv.items);
     }
 
     try server.acceptOne();
@@ -161,6 +198,30 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try server.sendHelloAck(false, "protocol mismatch");
         if (proc_opt) |*p| _ = try platform_process.wait_nonblock(p);
         return error.HandshakeRejected;
+    }
+
+    // ---- POSIX shm fd handoff (engine-ipc.md §4.8) ----
+    // Hand the runtime the viewport region's fd via SCM_RIGHTS so it
+    // maps the framebuffer with ShmRegion.fromFd — never cross-process
+    // shm_open. The editor stays the region owner; its own mapping is
+    // untouched by the transfer. Windows skips this: the runtime opens
+    // the named mapping by name (§2.2), so there is no fd to pass.
+    if (is_posix) {
+        var handoff = messages.ShmRegionsHandoff{
+            .region_count = 1,
+            .regions = std.mem.zeroes([messages.MAX_SHM_REGIONS]messages.ShmRegionDesc),
+        };
+        messages.writeFixedString(&handoff.regions[0].logical_name, "viewport_framebuffer");
+        handoff.regions[0].size = viewport.regionSize(
+            viewport.default_resolution.width,
+            viewport.default_resolution.height,
+        );
+        try server.connection().sendMessageWithHandles(
+            messages.ShmRegionsHandoff,
+            0,
+            &handoff,
+            &[_]ipc.transport.OsHandle{vp.fd()},
+        );
     }
 
     // ---- Render loop ----

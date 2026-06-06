@@ -35,7 +35,17 @@ pub const MAGIC: u32 = 0x57454C44;
 /// algorithms produce different bytes on the wire and
 /// `engine-ipc.md` §5.2 forbids negotiation, hence the version bump.
 /// Cf. `briefs/M0.2-rtti-resources-events-bindgen.md` E2.
-pub const WELD_IPC_PROTOCOL_VERSION: u16 = 2;
+///
+/// Bumped M0.7 (2 → 3) — two conjoint breaking changes
+/// (`engine-ipc.md` §5.2): (1) POSIX shm attach becomes `SCM_RIGHTS`
+/// fd-passing via `ShmRegionsHandoff` after the handshake (attach
+/// semantics, §4.8 / §5.1); (2) the catalogue gains mandatory messages
+/// (`ShmRegionsHandoff`, `SaveProject`, `ProjectSaved`, `RuntimeError`)
+/// and activates `Play`/`Pause`/`Stop`, `LoadScene`, `HotReloadScript`.
+/// An S6/M0.2 editor and an M0.7 runtime are strictly incompatible —
+/// expected behavior, no negotiation. Cf.
+/// `briefs/M0.7-ipc-scm-rights-windows-fuzz.md`.
+pub const WELD_IPC_PROTOCOL_VERSION: u16 = 3;
 
 /// Maximum payload size in bytes (`payload_len` ceiling per
 /// `engine-ipc.md` §3.1). Frames with `payload_len > MAX_PAYLOAD_LEN`

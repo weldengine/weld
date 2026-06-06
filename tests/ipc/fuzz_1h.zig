@@ -1,14 +1,21 @@
-//! S6 long fuzz harness (1 hour). Manual invocation only —
-//! not added to `zig build test` because it would dominate every
-//! CI run for the lifetime of Phase −1/0.
+//! S6 long fuzz harness — promoted to a nightly target at M0.7 / E4
+//! (was manual-only at S6). Stresses the **whole message catalogue**, not
+//! just `Echo`: each iteration the writer picks a random message type
+//! (incl. `ShmRegionsHandoff`, hardened in E1, and every E2 command) and
+//! sends a well-formed frame. Interleaving heterogeneous frame *sizes* is
+//! the real test — it exercises the length-prefixed framing's delimiting
+//! over tens of millions of back-to-back frames (the "no magic desync"
+//! gate). A counting allocator wraps `page_allocator` so any leak fails
+//! the run; `sent == recv` and a clean reader confirm no desync.
 //!
-//! Run via `zig build test-ipc-fuzz-1h`. Result digest goes into
-//! `validation/s6-go-nogo.md` for the G3 gate.
+//! Run via `zig build test-ipc-fuzz-1h` (1 h default). Pass a shorter
+//! duration for a local smoke run:
 //!
-//! Identical harness shape to `tests/ipc/fuzz_short.zig`, scaled
-//! to 1 hour. Counting allocator wraps `std.heap.page_allocator`
-//! so any leak fails the test immediately. Cross-platform — runs
-//! on Linux / macOS / Windows; pick whichever box is available.
+//!     zig build test-ipc-fuzz-1h -- --duration-ms=3000
+//!
+//! Cross-platform — runs on Linux / macOS / Windows. The nightly cron
+//! (`.github/workflows/nightly-fuzz.yml`) runs it on Linux + Windows and
+//! archives the stdout digest as an artifact (G3 gate).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -17,6 +24,7 @@ const weld_core = @import("weld_core");
 const ipc = weld_core.ipc;
 const framing = ipc.framing;
 const messages = ipc.messages;
+const CountingAllocator = weld_core.testing.alloc_counting.CountingAllocator;
 
 const can_unlink = builtin.os.tag == .linux or builtin.os.tag == .macos;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
@@ -53,46 +61,164 @@ fn nowMs() i64 {
     };
 }
 
+// The fuzzed slice of the catalogue. A deliberate spread of payload sizes
+// — tiny (`Play`/`Pause`/`Stop`), mid (`Echo`/`Heartbeat`), and large
+// (`LoadScene`/`SaveScene`/`ShmRegionsHandoff`) — so the stream constantly
+// changes frame length and the reader's delimiting is genuinely stressed.
+const fuzz_types = [_]type{
+    messages.Echo,            messages.Heartbeat,    messages.SpawnEntity,
+    messages.ModifyComponent, messages.LogMessage,   messages.Play,
+    messages.Pause,           messages.Stop,         messages.LoadScene,
+    messages.HotReloadScript, messages.SaveScene,    messages.SaveProject,
+    messages.ProjectSaved,    messages.RuntimeError, messages.ShmRegionsHandoff,
+};
+
+// The clean end-of-stream marker: a well-formed frame of a catalogue type
+// deliberately kept OUT of `fuzz_types`, so it can only ever appear on the
+// wire as the teardown sentinel, never as fuzz traffic. Using a *valid*
+// frame (not a bad-magic blob) is what lets `error.InvalidMagic` stay an
+// UNCONDITIONAL fault: a real framing desync on the last backlog frames —
+// after the writer has already set `stop` — can no longer be misread as a
+// benign teardown. `ShutdownAck` fits semantically (end of session).
+const sentinel_type = messages.ShutdownAck;
+const sentinel_msg_type: u16 = @intFromEnum(messages.msgTypeOf(sentinel_type));
+comptime {
+    for (fuzz_types) |T| {
+        if (T == sentinel_type) @compileError(
+            "sentinel_type must stay out of fuzz_types — otherwise the teardown " ++
+                "marker is indistinguishable from fuzz traffic",
+        );
+    }
+}
+
+// Reader scratch must hold the largest frame it can receive — the biggest
+// `fuzz_types` entry or the sentinel — else a big frame trips
+// `error.PayloadTooLarge` and reads as a (false) desync.
+const max_frame_size = blk: {
+    var m: usize = framing.frameSizeOf(sentinel_type);
+    for (fuzz_types) |T| m = @max(m, framing.frameSizeOf(T));
+    break :blk m;
+};
+
+// Encode a well-formed frame for `fuzz_types[idx]` with a zeroed body. The
+// body content is irrelevant to the framing/transport stress; the type
+// (hence the frame length + `msg_type`) is what varies.
+fn encodeRandom(gpa: std.mem.Allocator, idx: usize, seq: u32) ![]u8 {
+    inline for (fuzz_types, 0..) |T, i| {
+        if (i == idx) {
+            const msg: T = std.mem.zeroes(T);
+            return framing.encode(gpa, T, seq, &msg);
+        }
+    }
+    unreachable;
+}
+
 const FuzzCtx = struct {
     server_sock: *ipc.transport.IpcSocket,
     client_sock: *ipc.transport.IpcSocket,
     duration_ms: i64,
-    /// Outgoing `seq_id`. Matches the protocol-level `framing.Header.seq_id`
-    /// width (cf. `framing.zig`). 1 h × 10 000 msg/s ≈ 36 M, well under
-    /// `u32` max (~4.3 B), so the wraparound `+%` is theoretical here.
+    /// Writer-owned. Outgoing `seq_id` source; 1 h × ~1 M msg/s stays far
+    /// below `u32` overflow, so `+%` is theoretical.
     sent: u32 = 0,
-    /// Reader-side counter. Same width as `sent` for symmetry —
-    /// drives the post-run sanity check that recv == sent.
+    /// Reader-owned. Compared to `sent` after join — equality proves every
+    /// frame was received intact and in order (no desync, no drop).
     recv: u32 = 0,
+    /// Set by the reader on any framing desync: `InvalidMagic` /
+    /// `UnknownMsgType` / version / size mismatch at ANY time, or a socket
+    /// EOF before `stop`. Only a post-`stop` EOF is exempt.
     fault: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
+    /// Published by the writer (release) before the teardown sentinel; gates
+    /// only the benign tolerance of the post-teardown socket EOF.
     stop: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
 };
 
 fn writerLoop(ctx: *FuzzCtx, gpa: std.mem.Allocator) void {
-    const t = nowMs();
-    while (nowMs() - t < ctx.duration_ms) {
-        const echo = messages.Echo{ .payload = std.mem.zeroes([64]u8) };
-        const buf = framing.encode(gpa, messages.Echo, ctx.sent +% 1, &echo) catch return;
+    // Pre-encode the well-formed teardown sentinel once, before any traffic,
+    // so an (essentially impossible) allocation failure is handled up front
+    // rather than leaving the reader to block on its recv forever.
+    const sentinel_body = std.mem.zeroes(sentinel_type);
+    const sentinel_frame = framing.encode(gpa, sentinel_type, 0xFFFF_FFFF, &sentinel_body) catch {
+        ctx.fault.store(1, .release);
+        ctx.stop.store(1, .release); // let the reader's eventual EOF be benign
+        return;
+    };
+    defer gpa.free(sentinel_frame);
+
+    const t_start = nowMs();
+    var prng = std.Random.DefaultPrng.init(0xCAFEBABE);
+    const rng = prng.random();
+    while (nowMs() - t_start < ctx.duration_ms) {
+        const idx = rng.intRangeLessThan(usize, 0, fuzz_types.len);
+        const buf = encodeRandom(gpa, idx, ctx.sent +% 1) catch {
+            ctx.fault.store(1, .release);
+            break;
+        };
         defer gpa.free(buf);
-        ctx.client_sock.send(buf) catch return;
+        ctx.client_sock.send(buf) catch {
+            ctx.fault.store(1, .release);
+            break;
+        };
         ctx.sent += 1;
     }
+    // Teardown. Publish `stop` (release), then send the sentinel — a *valid*
+    // frame the reader recognises by its `msg_type`, not by any error. The
+    // reader therefore needs no error reclassification, so `InvalidMagic`
+    // stays an unconditional fault (see `readerLoop`). `stop` only gates the
+    // benign tolerance of the post-teardown socket EOF.
     ctx.stop.store(1, .release);
+    ctx.client_sock.send(sentinel_frame) catch {};
 }
 
 fn readerLoop(ctx: *FuzzCtx, gpa: std.mem.Allocator) void {
     var connection = ipc.connection.IpcConnection.init(gpa, ctx.server_sock);
-    var scratch: [framing.frameSizeOf(messages.Echo) + 256]u8 = undefined;
-    while (ctx.stop.load(.acquire) == 0) {
-        _ = connection.recvFrame(&scratch) catch return;
+    var scratch: [max_frame_size]u8 = undefined;
+    while (true) {
+        const frame = connection.recvFrame(&scratch) catch |e| {
+            // Clean end-of-stream is the well-formed sentinel frame (handled
+            // below), never an error. The ONLY tolerated errors are a socket
+            // torn down AFTER teardown (`UnexpectedEof` / `BrokenPipe` once
+            // `stop` is set). Everything else — `InvalidMagic`,
+            // `UnknownMsgType`, version / payload-size mismatch, at any time —
+            // is an unconditional framing desync ⇒ fault. This closes the
+            // window where a desync on the last backlog frames (writer
+            // already at `stop == 1`) could be misread as a benign teardown.
+            const tolerated = switch (e) {
+                error.UnexpectedEof, error.BrokenPipe => ctx.stop.load(.acquire) == 1,
+                else => false,
+            };
+            if (!tolerated) ctx.fault.store(1, .release);
+            return;
+        };
+        // The sentinel marks the deliberate end of the run; its type never
+        // appears as fuzz traffic. Not counted, so `sent == recv` stays a
+        // pure data-frame identity.
+        if (frame.header.msg_type == sentinel_msg_type) return;
         ctx.recv += 1;
     }
 }
 
-pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
+pub fn main(init: std.process.Init.Minimal) !void {
+    // Duration override: `zig build test-ipc-fuzz-1h -- --duration-ms=N`.
+    // Env vars (`std.posix.getenv` / `hasEnvVarConstant`) were removed in
+    // 0.16, so argv is the portable knob. The nightly cron uses the 1 h
+    // default; a local smoke run passes a few seconds. A separate
+    // `page_allocator` parses argv so it cannot pollute the leak counters.
+    var duration_ms: i64 = 60 * 60 * 1000;
+    {
+        var it = try std.process.Args.Iterator.initAllocator(init.args, std.heap.page_allocator);
+        defer it.deinit();
+        _ = it.skip();
+        while (it.next()) |a| {
+            if (std.mem.startsWith(u8, a, "--duration-ms=")) {
+                duration_ms = std.fmt.parseInt(i64, a["--duration-ms=".len..], 10) catch duration_ms;
+            }
+        }
+    }
+
+    // Leak detection: counting allocator over page_allocator. After join,
+    // alloc_count must equal free_count and the byte tallies must balance.
+    var counter = CountingAllocator.init(std.heap.page_allocator);
+    const gpa = counter.allocator();
 
     var path_buf: [128]u8 = undefined;
     const path = try ipc.transport.buildSocketPath(&path_buf, "weld-fuzz-1h");
@@ -109,12 +235,29 @@ pub fn main() !void {
     var ctx = FuzzCtx{
         .server_sock = &server,
         .client_sock = &client,
-        .duration_ms = 60 * 60 * 1000,
+        .duration_ms = duration_ms,
     };
     const reader = try std.Thread.spawn(.{}, readerLoop, .{ &ctx, gpa });
     const writer = try std.Thread.spawn(.{}, writerLoop, .{ &ctx, gpa });
     writer.join();
     reader.join();
 
-    std.debug.print("fuzz_1h: sent={d} recv={d} fault={d}\n", .{ ctx.sent, ctx.recv, ctx.fault.load(.acquire) });
+    const snap = counter.snapshot();
+    const leaked = snap.alloc_count != snap.free_count or
+        snap.bytes_allocated != snap.bytes_freed;
+    std.debug.print(
+        "fuzz_1h: duration_ms={d} types={d} sent={d} recv={d} fault={d} " ++
+            "alloc={d} free={d} bytes_alloc={d} bytes_freed={d}\n",
+        .{
+            duration_ms,     fuzz_types.len,           ctx.sent,
+            ctx.recv,        ctx.fault.load(.acquire), snap.alloc_count,
+            snap.free_count, snap.bytes_allocated,     snap.bytes_freed,
+        },
+    );
+
+    // Non-zero exit on any failure so the nightly job goes red.
+    if (ctx.fault.load(.acquire) != 0) return error.FuzzReaderFault;
+    if (ctx.sent == 0) return error.FuzzNoTraffic;
+    if (ctx.sent != ctx.recv) return error.FuzzSentRecvMismatch;
+    if (leaked) return error.FuzzLeak;
 }

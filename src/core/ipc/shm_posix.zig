@@ -91,11 +91,14 @@ const Error = shm.Error;
 /// POSIX `shm_open` + `mmap` backend for the IPC viewport shared
 /// memory segment. Embedded inside `shm.Segment.impl` on Linux/macOS.
 pub const Backend = struct {
-    name_z: [:0]u8,
+    /// `null` for a `fromFd` attach (the received fd has no name in
+    /// this process — cross-process attach is by fd, not by name,
+    /// per `engine-ipc.md` §4.8). Non-null for `create`/`open`.
+    name_z: ?[:0]u8 = null,
     gpa: std.mem.Allocator,
-    /// `shm_open` fd. Kept open for the lifetime of the `Backend`
-    /// per the macOS quirk documented in the file header. Closed in
-    /// `close()`.
+    /// `shm_open` fd (create/open) or the fd received via SCM_RIGHTS
+    /// (`fromFd`). Kept open for the lifetime of the `Backend` per the
+    /// macOS quirk documented in the file header. Closed in `close()`.
     fd: i32,
     ptr: [*]align(std.heap.pageSize()) u8,
     size: usize,
@@ -162,15 +165,44 @@ pub const Backend = struct {
         };
     }
 
+    /// Attach to a shm region from a file descriptor received over the
+    /// IPC socket via `SCM_RIGHTS` (`IpcSocket.recvWithHandles`). This
+    /// is the **primary cross-process attach** on POSIX
+    /// (`engine-ipc.md` §4.8): no `shm_open`, no name. The fd ownership
+    /// transfers to the `Backend` and is closed in `close()`. The
+    /// region is never the owner (the editor that created it via
+    /// `create` keeps ownership), so `close()` never `shm_unlink`s.
+    pub fn fromFd(fd: i32, size: usize) Error!Backend {
+        const raw = sys.mmap(null, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (raw == null or @intFromPtr(raw.?) == MAP_FAILED_RAW) return error.ShmMapFailed;
+
+        const ptr: [*]align(std.heap.pageSize()) u8 = @ptrCast(@alignCast(raw.?));
+        return Backend{
+            .name_z = null,
+            .gpa = std.heap.page_allocator,
+            .fd = fd,
+            .ptr = ptr,
+            .size = size,
+        };
+    }
+
+    /// The backing fd, to transmit to the runtime via
+    /// `IpcSocket.sendWithHandles` (`engine-ipc.md` §4.8). Named
+    /// `handle` rather than `fd` to avoid shadowing the `fd` field.
+    pub fn handle(self: *const Backend) i32 {
+        return self.fd;
+    }
+
     pub fn close(self: *Backend, is_owner: bool) void {
         _ = sys.munmap(@ptrCast(self.ptr), self.size);
         _ = sys.close(self.fd);
-        if (is_owner) _ = sys.shm_unlink(self.name_z.ptr);
-        self.gpa.free(self.name_z);
+        if (self.name_z) |nz| {
+            if (is_owner) _ = sys.shm_unlink(nz.ptr);
+            self.gpa.free(nz);
+        }
         self.fd = -1;
         self.size = 0;
-        // `name_z` is left dangling — close() is single-shot, the
-        // caller must drop the Backend value after.
+        self.name_z = null;
     }
 };
 

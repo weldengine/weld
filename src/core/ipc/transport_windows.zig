@@ -89,6 +89,13 @@ pub const OsHandle = std.os.windows.HANDLE;
 /// re-export.
 pub const invalid_handle: OsHandle = INVALID_HANDLE_VALUE;
 
+/// Close a bare handle received out-of-band that the receiver will not
+/// retain. (M0.7: the Windows handoff path is by-name, so this is only
+/// exercised on POSIX; present for cross-platform parity.)
+pub fn closeHandle(h: OsHandle) void {
+    _ = sys.CloseHandle(h);
+}
+
 const Error = transport.Error;
 
 /// Win32 named-pipe backend for `IpcSocket`. Embedded inside

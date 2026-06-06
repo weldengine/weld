@@ -46,6 +46,15 @@ pub const OsHandle = backend.OsHandle;
 /// Sentinel marking an absent handle in a slot.
 pub const invalid_handle: OsHandle = backend.invalid_handle;
 
+/// Close a single OS handle (POSIX `close` / Windows `CloseHandle`).
+/// Used to release an fd received via `recvWithHandles` that the
+/// receiver will not retain — e.g. a shm region the runtime declines
+/// to map — so a malformed or multi-region handoff cannot leak
+/// descriptors (`engine-ipc.md` §8.3).
+pub fn closeHandle(h: OsHandle) void {
+    backend.closeHandle(h);
+}
+
 /// Result returned by `recvWithHandles`.
 pub const RecvResult = struct {
     bytes: usize,

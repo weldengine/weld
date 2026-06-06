@@ -73,6 +73,9 @@ pub const ipc = struct {
     pub const connection = @import("ipc/connection.zig");
     pub const server = @import("ipc/server.zig");
     pub const client = @import("ipc/client.zig");
+    pub const cleanup = @import("ipc/cleanup.zig");
+    pub const command_log = @import("ipc/command_log.zig");
+    pub const snapshot = @import("ipc/snapshot.zig");
 };
 
 /// RTTI namespace — Tier 0 reflection runtime (M0.2 / E1). Comptime
@@ -119,6 +122,9 @@ comptime {
     _ = ipc.connection;
     _ = ipc.server;
     _ = ipc.client;
+    _ = ipc.cleanup;
+    _ = ipc.command_log;
+    _ = ipc.snapshot;
     // Same guard for the M0.1 identity module — `entity.zig`'s inline
     // tests must be reachable from the core test target's root.
     _ = ecs.entity;

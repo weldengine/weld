@@ -89,6 +89,40 @@ const win = struct {
     extern "kernel32" fn GetExitCodeProcess(hProcess: *anyopaque, lpExitCode: *u32) callconv(.winapi) i32;
     extern "kernel32" fn CloseHandle(hObject: *anyopaque) callconv(.winapi) i32;
     extern "kernel32" fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) callconv(.winapi) ?*anyopaque;
+    extern "kernel32" fn GetLastError() callconv(.winapi) u32;
+};
+
+/// `STARTUPINFOW` — `cb` must be `@sizeOf(STARTUPINFOW)`; the rest is
+/// zeroed for a plain console-less spawn (we inherit nothing and pipe
+/// nothing — stdio piping is Phase 0.3 per the file header).
+const STARTUPINFOW = extern struct {
+    cb: u32,
+    lpReserved: ?[*:0]u16,
+    lpDesktop: ?[*:0]u16,
+    lpTitle: ?[*:0]u16,
+    dwX: u32,
+    dwY: u32,
+    dwXSize: u32,
+    dwYSize: u32,
+    dwXCountChars: u32,
+    dwYCountChars: u32,
+    dwFillAttribute: u32,
+    dwFlags: u32,
+    wShowWindow: u16,
+    cbReserved2: u16,
+    lpReserved2: ?[*]u8,
+    hStdInput: ?*anyopaque,
+    hStdOutput: ?*anyopaque,
+    hStdError: ?*anyopaque,
+};
+
+/// `PROCESS_INFORMATION` — filled by `CreateProcessW` with the child's
+/// process + primary-thread handles and ids.
+const PROCESS_INFORMATION = extern struct {
+    hProcess: ?*anyopaque,
+    hThread: ?*anyopaque,
+    dwProcessId: u32,
+    dwThreadId: u32,
 };
 
 // `posix_spawnp` needs the parent process's `envp` pointer. The
@@ -103,6 +137,67 @@ fn currentEnvp() [*]const ?[*:0]const u8 {
         .macos => _NSGetEnviron().*,
         .linux => environ,
         else => @compileError("currentEnvp: unsupported OS"),
+    };
+}
+
+/// Quotes a single argument for a Windows command line per the MSVCRT /
+/// `CommandLineToArgvW` rules, so the spawned process reconstructs
+/// `argv[i]` byte-for-byte — including the tricky cases the naive
+/// `"arg"` wrapping gets wrong (a path ending in one or more `\`, or an
+/// argument containing `"`). Caller owns the returned slice.
+///
+/// Operates on UTF-8: every metacharacter (` `, `\t`, `\n`, vertical
+/// tab, `"`, `\`) is ASCII and UTF-8 is ASCII-transparent, so byte-wise
+/// quoting matches the wide-char algorithm `CreateProcessW` will parse.
+///
+/// Algorithm (Daniel Colascione's `ArgvQuote`): emit the argument
+/// verbatim when it is non-empty and contains no whitespace or `"`;
+/// otherwise wrap in `"` and, scanning runs of backslashes, double them
+/// before a `"` (literal or the closing one) and leave them as-is
+/// elsewhere.
+pub fn quoteArg(gpa: std.mem.Allocator, arg: []const u8) std.mem.Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+
+    if (arg.len != 0 and std.mem.indexOfAny(u8, arg, " \t\n\x0B\"") == null) {
+        try out.appendSlice(gpa, arg);
+        return out.toOwnedSlice(gpa);
+    }
+
+    try out.append(gpa, '"');
+    var i: usize = 0;
+    while (i < arg.len) {
+        var backslashes: usize = 0;
+        while (i < arg.len and arg[i] == '\\') : (i += 1) backslashes += 1;
+        if (i == arg.len) {
+            // Trailing backslashes precede the closing quote — double them
+            // so the quote stays a delimiter, not an escaped literal.
+            try out.appendNTimes(gpa, '\\', backslashes * 2);
+            break;
+        } else if (arg[i] == '"') {
+            // Escape the run of backslashes AND the embedded quote.
+            try out.appendNTimes(gpa, '\\', backslashes * 2 + 1);
+            try out.append(gpa, '"');
+            i += 1;
+        } else {
+            // Backslashes are literal away from a quote.
+            try out.appendNTimes(gpa, '\\', backslashes);
+            try out.append(gpa, arg[i]);
+            i += 1;
+        }
+    }
+    try out.append(gpa, '"');
+    return out.toOwnedSlice(gpa);
+}
+
+/// UTF-8 → NUL-terminated UTF-16LE for the Win32 wide APIs, remapping a
+/// non-UTF-8 input to `error.InvalidArgument` (it is invalid caller
+/// input, not an engine fault) so the process `Error` set stays free of
+/// a Unicode member. Caller owns the returned slice.
+fn utf8ToUtf16Z(gpa: std.mem.Allocator, s: []const u8) error{ InvalidArgument, OutOfMemory }![:0]u16 {
+    return std.unicode.utf8ToUtf16LeAllocZ(gpa, s) catch |e| switch (e) {
+        error.InvalidUtf8 => error.InvalidArgument,
+        error.OutOfMemory => error.OutOfMemory,
     };
 }
 
@@ -147,14 +242,54 @@ pub fn spawn_process(
             return .{ .pid = pid };
         },
         .windows => {
-            // Windows path is wired in S6 only at the API-surface
-            // level — the editor + runtime binaries are exercised on
-            // Linux/macOS for S6 acceptance. A real CreateProcessW
-            // implementation lands when Win11 hardware validation is
-            // added in Phase 0.6 (consistent with the S3/S4 inherited-
-            // debt pattern for Windows-only paths).
-            _ = .{ gpa, path, argv };
-            return error.SpawnFailed;
+            // Build a UTF-8 command line (each arg quoted), convert to
+            // UTF-16, and spawn via CreateProcessW. `lpApplicationName`
+            // pins the binary; argv[0] stays in the command line by
+            // convention. M0.7 / E3 — wires the Windows editor path.
+            var cmd: std.ArrayList(u8) = .empty;
+            defer cmd.deinit(gpa);
+            for (argv, 0..) |a, i| {
+                if (i != 0) try cmd.append(gpa, ' ');
+                const quoted = try quoteArg(gpa, a);
+                defer gpa.free(quoted);
+                try cmd.appendSlice(gpa, quoted);
+            }
+            const cmd_w = try utf8ToUtf16Z(gpa, cmd.items);
+            defer gpa.free(cmd_w);
+            const path_w = try utf8ToUtf16Z(gpa, path);
+            defer gpa.free(path_w);
+
+            var si: STARTUPINFOW = std.mem.zeroes(STARTUPINFOW);
+            si.cb = @sizeOf(STARTUPINFOW);
+            var pi: PROCESS_INFORMATION = std.mem.zeroes(PROCESS_INFORMATION);
+
+            const ok = win.CreateProcessW(
+                path_w.ptr,
+                cmd_w.ptr,
+                null,
+                null,
+                0, // bInheritHandles = FALSE
+                0, // dwCreationFlags
+                null,
+                null,
+                @ptrCast(&si),
+                @ptrCast(&pi),
+            );
+            if (ok == 0) {
+                // Surface the Win32 last-error so a spawn failure is
+                // diagnosable (e.g. 2 = ERROR_FILE_NOT_FOUND when the
+                // exe path is wrong / missing the `.exe` suffix) instead
+                // of an opaque `error.SpawnFailed`.
+                std.log.scoped(.process).err(
+                    "CreateProcessW failed: path='{s}' GetLastError={d}",
+                    .{ path, win.GetLastError() },
+                );
+                return error.SpawnFailed;
+            }
+            // The primary-thread handle is unused; close it now. The
+            // process handle is retained for `wait_nonblock` / `kill`.
+            if (pi.hThread) |h| _ = win.CloseHandle(h);
+            return .{ .pid = pi.dwProcessId, .handle = pi.hProcess };
         },
         else => @compileError("spawn_process: unsupported OS"),
     }

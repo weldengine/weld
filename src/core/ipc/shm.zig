@@ -6,9 +6,13 @@
 //!
 //! Lifetime: the editor side calls `create(name, size)` to allocate
 //! the region and `close()` to release it (POSIX also `shm_unlink`s
-//! the name). The runtime side calls `open(name)` to attach to an
-//! existing region and `close()` to detach (no `shm_unlink` on the
-//! attached side).
+//! the name). On POSIX the runtime side attaches via `fromFd(fd, size)`
+//! on the descriptor the editor passes over the socket (`SCM_RIGHTS`,
+//! the **primary cross-process attach** per `engine-ipc.md` §4.8);
+//! `open(name)` is demoted to intra-process discovery (a single
+//! process re-attaching a region it created) and is no longer used
+//! for the cross-process runtime attach. On Windows the attach stays
+//! by name (`open`) — the named mapping has no BSD shm quirk.
 //!
 //! Naming convention per `engine-ipc.md` §2:
 //!   - POSIX  : `/weld-shm-<role>-<editor-pid>`
@@ -27,6 +31,14 @@ const backend = switch (builtin.os.tag) {
     else => @compileError("Weld IPC shm: unsupported OS"),
 };
 
+const transport = @import("transport.zig");
+
+/// OS-native handle backing a region: `std.posix.fd_t` (i32) on
+/// Linux/macOS, `std.os.windows.HANDLE` on Windows. Same alias the
+/// transport layer passes to `IpcSocket.sendWithHandles`, so the
+/// editor can forward `ShmRegion.fd()` directly without a cast.
+pub const OsHandle = transport.OsHandle;
+
 /// Error set for shared-memory segment operations (create, open,
 /// resize, unlink). Backends translate native errors into this set.
 pub const Error = error{
@@ -40,6 +52,9 @@ pub const Error = error{
     ShmTruncateFailed,
     ShmMapFailed,
     ShmOpenFailed,
+    /// `fromFd` on Windows: CPU shm attach there is by name, not by
+    /// descriptor (the `SCM_RIGHTS` pivot is POSIX-only, §4.8).
+    Unimplemented,
 } || std.mem.Allocator.Error;
 
 /// One shared-memory region. Both the creator (editor) and the
@@ -71,7 +86,11 @@ pub const ShmRegion = struct {
         };
     }
 
-    /// Runtime side. Attaches to an already-created region.
+    /// Intra-process attach by name. Demoted in M0.7: it is **no
+    /// longer** the cross-process runtime attach (that is `fromFd`,
+    /// §4.8). Reserved for a single process re-attaching a region it
+    /// created, and for the Windows attach path (named mapping, no
+    /// BSD shm quirk).
     pub fn open(name: []const u8, size: usize) Error!ShmRegion {
         const impl = try backend.Backend.open(name, size);
         return .{
@@ -80,6 +99,30 @@ pub const ShmRegion = struct {
             .size = size,
             .is_owner = false,
         };
+    }
+
+    /// Runtime side, POSIX. Attaches to a region from a file descriptor
+    /// received over the IPC socket (`SCM_RIGHTS`). The **primary
+    /// cross-process attach** per `engine-ipc.md` §4.8 — no `shm_open`,
+    /// no name. The fd ownership transfers to the region (closed in
+    /// `close()`); the region is never the owner, so `close()` does not
+    /// `shm_unlink`. Returns `error.Unimplemented` on Windows.
+    pub fn fromFd(handle: OsHandle, size: usize) Error!ShmRegion {
+        const impl = try backend.Backend.fromFd(handle, size);
+        return .{
+            .impl = impl,
+            .ptr = impl.ptr,
+            .size = size,
+            .is_owner = false,
+        };
+    }
+
+    /// The OS handle backing this region (POSIX fd / Windows mapping
+    /// handle), to forward to the runtime via
+    /// `IpcSocket.sendWithHandles` (`engine-ipc.md` §4.8). Only the
+    /// POSIX fd is used for the cross-process attach in M0.7.
+    pub fn fd(self: *const ShmRegion) OsHandle {
+        return self.impl.handle();
     }
 
     /// Unmap + (creator only) unlink the underlying name. The

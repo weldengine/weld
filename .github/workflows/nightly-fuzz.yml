@@ -1,0 +1,64 @@
+name: Nightly IPC fuzz
+
+# 1 h IPC fuzz over the full message catalogue (tests/ipc/fuzz_1h.zig),
+# promoted to nightly CI at M0.7 / E4. Runs on Linux + Windows and
+# archives the stdout digest as an artifact (G3 gate). Scheduled runs
+# only fire from the default branch (GitHub rule), so this activates once
+# the M0.7 branch is squash-merged to `main`; `workflow_dispatch` lets it
+# be triggered manually from the Actions tab in the meantime.
+on:
+  schedule:
+    # 04:00 UTC daily — off-peak for the shared runner pool.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      duration_ms:
+        description: 'Fuzz duration in ms (default 3600000 = 1 h)'
+        required: false
+        default: '3600000'
+
+concurrency:
+  group: nightly-fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    # 1 h fuzz + ReleaseSafe build (~3 min on the 2-vCPU Windows runner) +
+    # overhead. 90 min leaves headroom without risking a runaway hang
+    # masquerading as a pass.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      # Pinned to 0.16.0 exact — same rationale as ci.yml (the action takes
+      # `0.16.x` literally and 404s on the mirrors).
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: zig build (ReleaseSafe)
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Run 1 h IPC fuzz over the full catalogue
+        shell: bash
+        run: |
+          set -euo pipefail
+          DURATION="${{ github.event.inputs.duration_ms || '3600000' }}"
+          zig build test-ipc-fuzz-1h -Doptimize=ReleaseSafe -- \
+            --duration-ms="${DURATION}" 2>&1 | tee "fuzz-${{ matrix.os }}.txt"
+
+      - name: Upload fuzz digest artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-fuzz-digest-${{ matrix.os }}
+          path: fuzz-${{ matrix.os }}.txt
+          retention-days: 30

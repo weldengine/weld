@@ -621,6 +621,8 @@ pub fn build(b: *std.Build) void {
         "tests/ipc/viewport_cases/wrong_width.zig",
         "tests/ipc/viewport_cases/no_tearing_1000_frames.zig",
         "tests/ipc/fd_passing.zig",
+        "tests/ipc/handoff_fd.zig",
+        "tests/ipc/catalogue.zig",
         "tests/ipc/process.zig",
         "tests/ipc/handshake.zig",
         "tests/ipc/crash_recovery.zig",
@@ -642,17 +644,18 @@ pub fn build(b: *std.Build) void {
         t_mod.addImport("weld_core", core_module);
         const t = b.addTest(.{ .root_module = t_mod });
         const run_t = b.addRunArtifact(t);
-        // `tests/ipc/crash_recovery.zig` spawns
-        // `zig-out/bin/weld-runtime` to exercise the editor↔runtime
-        // termination contract (G4 + G5). The path is relative to
-        // the project root which is the cwd when `zig build test`
-        // dispatches the test binary; the runtime exe must already
-        // be installed for `posix_spawnp` to find it. Bare
-        // `b.addRunArtifact(t).step.dependOn(b.getInstallStep())`
-        // would gate the test on every install step (including the
-        // S5 etch_cook), so we wire the dependency narrowly to the
-        // runtime install step alone.
-        if (std.mem.eql(u8, p, "tests/ipc/crash_recovery.zig")) {
+        // `tests/ipc/crash_recovery.zig` and `tests/ipc/catalogue.zig`
+        // spawn `zig-out/bin/weld-runtime` to exercise the editor↔runtime
+        // contract end-to-end (G4 + G5; M0.7 / E2 catalogue handlers). The
+        // path is relative to the project root which is the cwd when
+        // `zig build test` dispatches the test binary; the runtime exe must
+        // already be installed for `posix_spawnp` to find it. Bare
+        // `b.addRunArtifact(t).step.dependOn(b.getInstallStep())` would gate
+        // the test on every install step (including the S5 etch_cook), so we
+        // wire the dependency narrowly to the runtime install step alone.
+        if (std.mem.eql(u8, p, "tests/ipc/crash_recovery.zig") or
+            std.mem.eql(u8, p, "tests/ipc/catalogue.zig"))
+        {
             run_t.step.dependOn(&b.addInstallArtifact(runtime_exe, .{}).step);
         }
         test_step.dependOn(&run_t.step);
@@ -698,9 +701,13 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(fuzz_1h_exe);
     const fuzz_1h_run = b.addRunArtifact(fuzz_1h_exe);
     fuzz_1h_run.step.dependOn(b.getInstallStep());
+    // Forward `-- <args>` so the duration can be overridden for a local
+    // smoke run, e.g. `zig build test-ipc-fuzz-1h -- --duration-ms=3000`.
+    // The nightly cron runs it with no args (1 h default).
+    if (b.args) |forwarded| fuzz_1h_run.addArgs(forwarded);
     const fuzz_1h_step = b.step(
         "test-ipc-fuzz-1h",
-        "Run the S6 1 h IPC fuzz harness (manual; output digest archived in validation/s6-go-nogo.md)",
+        "Run the IPC fuzz harness over the full catalogue (1 h default; nightly CI). Override: -- --duration-ms=N",
     );
     fuzz_1h_step.dependOn(&fuzz_1h_run.step);
 

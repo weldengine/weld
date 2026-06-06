@@ -162,20 +162,43 @@ pub const ShmViewport = struct {
         return .{ .region = region, .width = width, .height = height };
     }
 
-    /// Runtime side. Attaches to an existing region and validates
-    /// the header.
+    /// Runtime side, intra-process / Windows. Attaches by name and
+    /// validates the header. On POSIX the cross-process runtime attach
+    /// is `fromFd` (§4.8); `open` is retained for Windows (named
+    /// mapping) and intra-process re-attach.
     pub fn open(name: []const u8, width: u32, height: u32) Error!ShmViewport {
         const size = regionSize(width, height);
         var region = try shm.ShmRegion.open(name, size);
         errdefer region.close();
+        try validateHeader(&region, width, height);
+        return .{ .region = region, .width = width, .height = height };
+    }
 
+    /// Runtime side, POSIX. Attaches from a descriptor received over
+    /// the socket (`SCM_RIGHTS`) — the primary cross-process attach
+    /// (`engine-ipc.md` §4.8) — and validates the header.
+    pub fn fromFd(handle: shm.OsHandle, width: u32, height: u32) Error!ShmViewport {
+        const size = regionSize(width, height);
+        var region = try shm.ShmRegion.fromFd(handle, size);
+        errdefer region.close();
+        try validateHeader(&region, width, height);
+        return .{ .region = region, .width = width, .height = height };
+    }
+
+    /// The fd of the backing region, for the editor to forward to the
+    /// runtime via `IpcSocket.sendWithHandles` (§4.8).
+    pub fn fd(self: *const ShmViewport) shm.OsHandle {
+        return self.region.fd();
+    }
+
+    /// Validates the viewport header of an attached region. Shared by
+    /// `open` and `fromFd`.
+    fn validateHeader(region: *const shm.ShmRegion, width: u32, height: u32) Error!void {
         const hdr: *Header = @ptrCast(@alignCast(region.ptr));
         if (hdr.magic != HEADER_MAGIC) return error.InvalidHeader;
         if (hdr.version != HEADER_VERSION) return error.InvalidHeader;
         if (hdr.width != width or hdr.height != height) return error.InvalidHeader;
         if (hdr.slot_count != slot_count) return error.InvalidHeader;
-
-        return .{ .region = region, .width = width, .height = height };
     }
 
     pub fn close(self: *ShmViewport) void {

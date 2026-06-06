@@ -48,9 +48,10 @@ test "renaming a field changes schemaHash" {
     try std.testing.expect(h_orig != h_renamed);
 }
 
-test "schemaHash distinguishes every S6 message type" {
+test "schemaHash distinguishes every message type" {
     // A subtle hash collision between two message types would mask
-    // the schema-mismatch detection. Verify all 13 hashes are unique.
+    // the schema-mismatch detection. Verify all 23 hashes are unique
+    // (13 S6 messages + `ShmRegionsHandoff` (E1) + 9 catalogue messages (E2)).
     const hashes = [_]u64{
         messages.schemaHash(messages.ProtocolHello),
         messages.schemaHash(messages.ProtocolHelloAck),
@@ -65,6 +66,16 @@ test "schemaHash distinguishes every S6 message type" {
         messages.schemaHash(messages.Shutdown),
         messages.schemaHash(messages.ShutdownAck),
         messages.schemaHash(messages.LogMessage),
+        messages.schemaHash(messages.ShmRegionsHandoff),
+        messages.schemaHash(messages.Play),
+        messages.schemaHash(messages.Pause),
+        messages.schemaHash(messages.Stop),
+        messages.schemaHash(messages.LoadScene),
+        messages.schemaHash(messages.HotReloadScript),
+        messages.schemaHash(messages.SaveScene),
+        messages.schemaHash(messages.SaveProject),
+        messages.schemaHash(messages.ProjectSaved),
+        messages.schemaHash(messages.RuntimeError),
     };
     for (hashes, 0..) |a, i| {
         for (hashes[i + 1 ..]) |b| {
