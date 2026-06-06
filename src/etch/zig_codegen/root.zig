@@ -101,14 +101,8 @@ pub fn generateToPath(
     }
 
     var pr = try parser_mod.parse(gpa, source);
-    defer {
-        if (pr.diagnostic) |*d| {
-            var dd = d.*;
-            dd.deinit(gpa);
-        }
-        pr.ast.deinit(gpa);
-    }
-    if (pr.diagnostic != null) return PipelineError.ParseFailed;
+    defer pr.deinit(gpa);
+    if (pr.diagnostics.len > 0) return PipelineError.ParseFailed;
 
     var diags: std.ArrayListUnmanaged(diag_mod.Diagnostic) = .empty;
     defer {

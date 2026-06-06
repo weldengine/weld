@@ -11,14 +11,8 @@ const lower = root.lower;
 
 fn parseTypeCheckGen(gpa: std.mem.Allocator, source: []const u8, out: *std.ArrayListUnmanaged(u8)) !lower.GenerateStats {
     var pr = try parser.parse(gpa, source);
-    defer {
-        if (pr.diagnostic) |*d| {
-            var dd = d.*;
-            dd.deinit(gpa);
-        }
-        pr.ast.deinit(gpa);
-    }
-    try std.testing.expect(pr.diagnostic == null);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
     var diags: std.ArrayListUnmanaged(diag.Diagnostic) = .empty;
     defer {
         for (diags.items) |*d| d.deinit(gpa);

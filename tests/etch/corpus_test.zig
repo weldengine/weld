@@ -17,9 +17,9 @@ test "all valid corpus files parse and type-check with zero diagnostics" {
     const gpa = std.testing.allocator;
     for (corpus.valid) |entry| {
         var pr = try etch.parseSource(gpa, entry.source);
-        defer pr.ast.deinit(gpa);
-        defer if (pr.diagnostic) |*d| d.deinit(gpa);
-        if (pr.diagnostic) |d| {
+        defer pr.deinit(gpa);
+        if (pr.diagnostics.len > 0) {
+            const d = pr.diagnostics[0];
             std.debug.print("\nvalid file '{s}' had parse diagnostic: {s} — {s}\n", .{ entry.name, d.code.code(), d.primary_message });
             return error.UnexpectedParseDiagnostic;
         }
@@ -44,8 +44,7 @@ test "every invalid corpus file emits the diagnostic code in its filename" {
     const gpa = std.testing.allocator;
     for (corpus.invalid) |entry| {
         var pr = try etch.parseSource(gpa, entry.source);
-        defer pr.ast.deinit(gpa);
-        defer if (pr.diagnostic) |*d| d.deinit(gpa);
+        defer pr.deinit(gpa);
 
         var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
         defer {
@@ -54,7 +53,13 @@ test "every invalid corpus file emits the diagnostic code in its filename" {
         }
         try etch.typeCheck(gpa, &pr.ast, &diags);
 
-        const parse_matches = pr.diagnostic != null and std.mem.eql(u8, pr.diagnostic.?.code.code(), entry.expected_code);
+        var parse_matches = false;
+        for (pr.diagnostics) |d| {
+            if (std.mem.eql(u8, d.code.code(), entry.expected_code)) {
+                parse_matches = true;
+                break;
+            }
+        }
         var type_matches = false;
         for (diags.items) |d| {
             if (std.mem.eql(u8, d.code.code(), entry.expected_code)) {
@@ -64,7 +69,7 @@ test "every invalid corpus file emits the diagnostic code in its filename" {
         }
         if (!parse_matches and !type_matches) {
             std.debug.print("\ninvalid file '{s}' did not emit the expected code {s}. ", .{ entry.name, entry.expected_code });
-            if (pr.diagnostic) |d| {
+            for (pr.diagnostics) |d| {
                 std.debug.print("Parse diagnostic: {s} — {s}. ", .{ d.code.code(), d.primary_message });
             }
             std.debug.print("Type diagnostics: {d}\n", .{diags.items.len});

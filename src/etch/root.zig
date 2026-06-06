@@ -64,8 +64,11 @@ pub const Interpreter = interp.Interpreter;
 pub const RuntimeReport = interp.RuntimeReport;
 
 /// Parse a full Etch source file. The returned `ParseResult` owns its
-/// `AstArena` — call `result.ast.deinit(gpa)` when done. The diagnostic
-/// (if any) owns its `primary_message` slice — call `diag.deinit(gpa)`.
+/// `AstArena` and its `diagnostics` slice — call `result.deinit(gpa)`
+/// when done (or move `ast` / `diagnostics` out and free them yourself).
+/// With the M0.8 top-level recovery sync-point the result may carry
+/// several diagnostics (one per broken construct); an empty slice means a
+/// clean parse.
 pub fn parseSource(gpa: std.mem.Allocator, source: []const u8) !parser.ParseResult {
     return try parser.parse(gpa, source);
 }
@@ -80,8 +83,8 @@ pub fn typeCheck(gpa: std.mem.Allocator, arena: *Ast, diags_out: *std.ArrayListU
 test "public API parses an empty source successfully" {
     const gpa = std.testing.allocator;
     var result = try parseSource(gpa, "");
-    defer result.ast.deinit(gpa);
-    try std.testing.expect(result.diagnostic == null);
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len == 0);
     try std.testing.expect(result.ast.isEmpty());
 }
 
@@ -95,8 +98,8 @@ test "public API parses and type-checks a minimal component + rule" {
         \\  entity.get_mut(Health).current += 1.0
         \\}
     );
-    defer result.ast.deinit(gpa);
-    try std.testing.expect(result.diagnostic == null);
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len == 0);
 
     var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
     defer {

@@ -29,13 +29,15 @@ pub const Runner = struct {
     pub fn setup(gpa: std.mem.Allocator, world: *World, name: []const u8, source: []const u8) !Runner {
         _ = name; // interpreter does not need program names — it compiles from source.
         var pr = try weld_etch.parser.parse(gpa, source);
-        if (pr.diagnostic) |d| {
-            var dd = d;
-            std.debug.print("parse diagnostic: {s}\n", .{dd.primary_message});
-            dd.deinit(gpa);
-            pr.ast.deinit(gpa);
+        if (pr.diagnostics.len > 0) {
+            std.debug.print("parse diagnostic: {s}\n", .{pr.diagnostics[0].primary_message});
+            pr.deinit(gpa);
             return error.ParseFailed;
         }
+        // Clean parse: the diagnostics slice is empty; free it now (a no-op
+        // on a zero-length slice). The arena moves into `ast_box` below, so
+        // it must not be freed here.
+        gpa.free(pr.diagnostics);
         errdefer pr.ast.deinit(gpa);
 
         var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;

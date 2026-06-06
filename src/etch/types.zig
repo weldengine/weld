@@ -689,15 +689,16 @@ fn isAssignTargetReachable(arena: *const AstArena, ctx: *TypeChecker.RuleCtx, id
 const parser_mod = @import("parser.zig");
 
 /// Bundle returned by the convenience `parseAndCheck` test helper —
-/// owns the arena, the optional parse diagnostic, and the type-check
+/// owns the arena, the parse diagnostics slice, and the type-check
 /// diagnostics list.
 pub const CheckOutcome = struct {
     ast: AstArena,
-    parse_diag: ?Diagnostic,
+    parse_diags: []Diagnostic,
     diagnostics: std.ArrayListUnmanaged(Diagnostic),
 
     pub fn deinit(self: *CheckOutcome, gpa: std.mem.Allocator) void {
-        if (self.parse_diag) |*d| d.deinit(gpa);
+        for (self.parse_diags) |*d| d.deinit(gpa);
+        gpa.free(self.parse_diags);
         for (self.diagnostics.items) |*d| d.deinit(gpa);
         self.diagnostics.deinit(gpa);
         self.ast.deinit(gpa);
@@ -708,7 +709,7 @@ fn parseAndCheck(gpa: std.mem.Allocator, source: []const u8) !CheckOutcome {
     var pr = try parser_mod.parse(gpa, source);
     var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
     try TypeChecker.check(gpa, &pr.ast, &diags);
-    return .{ .ast = pr.ast, .parse_diag = pr.diagnostic, .diagnostics = diags };
+    return .{ .ast = pr.ast, .parse_diags = pr.diagnostics, .diagnostics = diags };
 }
 
 fn expectAnyCode(diagnostics: []const Diagnostic, code: DiagnosticCode) !void {
@@ -844,10 +845,8 @@ test "type-checker accepts compound assignment += on numeric field via get_mut" 
         \\}
     );
     defer result.deinit(gpa);
-    if (result.parse_diag) |d| {
-        var dd = d;
-        defer dd.deinit(gpa);
-        std.debug.print("parse diag: {s}\n", .{dd.primary_message});
+    if (result.parse_diags.len > 0) {
+        std.debug.print("parse diag: {s}\n", .{result.parse_diags[0].primary_message});
         try std.testing.expect(false);
     }
     for (result.diagnostics.items) |d| {

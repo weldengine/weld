@@ -30,11 +30,27 @@ const Lexer = lexer_mod.Lexer;
 /// for the caller's arena.
 pub const ParseError = error{ ParseError, OutOfMemory };
 
-/// Container returned by `parse` — the populated arena plus at most
-/// one `Diagnostic` (the first error encountered, or `null` on success).
+/// Container returned by `parse` — the populated arena plus the list of
+/// diagnostics collected during the parse. With the M0.8 top-level
+/// recovery sync-point the parser no longer stops at the first error:
+/// after a diagnostic it advances to the next top-level keyword (or EOF)
+/// and resumes, so a file with several broken constructs yields one
+/// diagnostic per broken construct while the sane constructs still land
+/// in the AST. An empty slice means a clean parse.
+///
+/// Ownership: the result owns both the arena and the diagnostics slice
+/// (each `Diagnostic` owns its `primary_message`). Call `deinit` to free
+/// everything, or move `ast` / `diagnostics` out and free them yourself.
 pub const ParseResult = struct {
     ast: AstArena,
-    diagnostic: ?Diagnostic,
+    diagnostics: []Diagnostic,
+
+    /// Free the arena and every diagnostic plus the backing slice.
+    pub fn deinit(self: *ParseResult, gpa: std.mem.Allocator) void {
+        for (self.diagnostics) |*d| d.deinit(gpa);
+        gpa.free(self.diagnostics);
+        self.ast.deinit(gpa);
+    }
 };
 
 /// Entry point for the Etch parser. Lexes `source`, builds the
@@ -45,8 +61,8 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
     var lexer = Lexer.init(source);
     // Without this `errdefer`, an OOM coming from `lexer.next` or
     // `parser.parseFile` after the lexer has already appended a comment
-    // span would leak the `Lexer.comment_spans` slab. The two explicit
-    // `lexer.deinit(gpa)` calls on the value-return paths still fire
+    // span would leak the `Lexer.comment_spans` slab. The explicit
+    // `lexer.deinit(gpa)` call on the value-return path still fires
     // (errdefer does not run on value returns).
     errdefer lexer.deinit(gpa);
     var arena = try AstArena.init(gpa);
@@ -64,19 +80,24 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
         .next_tok = c1,
         .next2_tok = c2,
     };
-    parser.parseFile() catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        error.ParseError => {
-            // Diagnostic already populated; transfer comment spans.
-            try arena.comment_spans.appendSlice(gpa, lexer.comment_spans.items);
-            lexer.deinit(gpa);
-            return .{ .ast = arena, .diagnostic = parser.diagnostic };
-        },
-    };
+    // `parser.diagnostics` is not covered by the arena/lexer errdefers above;
+    // arm its own cleanup so an OOM anywhere below (parseFile or the final
+    // `toOwnedSlice`) frees the diagnostics collected so far. On the success
+    // path `toOwnedSlice` empties the list, so this errdefer becomes a no-op.
+    errdefer {
+        for (parser.diagnostics.items) |*d| d.deinit(gpa);
+        parser.diagnostics.deinit(gpa);
+    }
+
+    // With the top-level recovery sync-point, `parseFile` catches
+    // `ParseError` per top-level item internally, records the diagnostic,
+    // and resyncs — so the only error that escapes here is `OutOfMemory`.
+    try parser.parseFile();
 
     try arena.comment_spans.appendSlice(gpa, lexer.comment_spans.items);
     lexer.deinit(gpa);
-    return .{ .ast = arena, .diagnostic = parser.diagnostic };
+    const diags = try parser.diagnostics.toOwnedSlice(gpa);
+    return .{ .ast = arena, .diagnostics = diags };
 }
 
 /// Explicit parser state — exposed for callers that want to drive the
@@ -95,7 +116,12 @@ pub const Parser = struct {
     current: Token,
     next_tok: Token,
     next2_tok: Token,
-    diagnostic: ?Diagnostic = null,
+    /// Diagnostics collected across the whole file. The top-level recovery
+    /// loop (`parseFile`) records one diagnostic per broken construct: a
+    /// construct parse stops at its first error (the `ParseError` unwinds
+    /// to `parseFile`), so each broken construct contributes exactly one
+    /// entry before the parser resyncs to the next top-level keyword.
+    diagnostics: std.ArrayListUnmanaged(Diagnostic) = .empty,
 
     // ─── Token stream helpers ────────────────────────────────────────────
 
@@ -141,32 +167,34 @@ pub const Parser = struct {
     // ─── Diagnostic ──────────────────────────────────────────────────────
 
     fn parseErr(self: *Parser, span: SourceSpan, message: []const u8) ParseError {
-        if (self.diagnostic == null) {
-            const owned = self.gpa.dupe(u8, message) catch {
-                return error.OutOfMemory;
-            };
-            self.diagnostic = .{
-                .code = .parse_error,
-                .severity = .error_,
-                .primary_span = span,
-                .primary_message = owned,
-            };
-        }
+        const owned = self.gpa.dupe(u8, message) catch {
+            return error.OutOfMemory;
+        };
+        self.diagnostics.append(self.gpa, .{
+            .code = .parse_error,
+            .severity = .error_,
+            .primary_span = span,
+            .primary_message = owned,
+        }) catch {
+            self.gpa.free(owned);
+            return error.OutOfMemory;
+        };
         return error.ParseError;
     }
 
     fn parseErrFmt(self: *Parser, span: SourceSpan, comptime fmt: []const u8, args: anytype) ParseError {
-        if (self.diagnostic == null) {
-            const owned = std.fmt.allocPrint(self.gpa, fmt, args) catch {
-                return error.OutOfMemory;
-            };
-            self.diagnostic = .{
-                .code = .parse_error,
-                .severity = .error_,
-                .primary_span = span,
-                .primary_message = owned,
-            };
-        }
+        const owned = std.fmt.allocPrint(self.gpa, fmt, args) catch {
+            return error.OutOfMemory;
+        };
+        self.diagnostics.append(self.gpa, .{
+            .code = .parse_error,
+            .severity = .error_,
+            .primary_span = span,
+            .primary_message = owned,
+        }) catch {
+            self.gpa.free(owned);
+            return error.OutOfMemory;
+        };
         return error.ParseError;
     }
 
@@ -193,9 +221,39 @@ pub const Parser = struct {
 
     pub fn parseFile(self: *Parser) ParseError!void {
         while (self.peek() != .eof) {
-            try self.surfaceTokenErrors();
-            const annotations = try self.parseAnnotations();
-            try self.parseTopLevel(annotations);
+            self.parseOneTopLevel() catch |err| switch (err) {
+                // OOM is fatal — propagate to the caller's arena cleanup.
+                error.OutOfMemory => return error.OutOfMemory,
+                // A construct failed to parse: its diagnostic is already
+                // recorded (the unwind carried it here). Skip to the next
+                // top-level keyword (or EOF) and resume so later constructs
+                // still parse. This is the M0.8 top-level recovery sync-point
+                // — not a full panic-mode cascade (Phase 1 / S2+).
+                error.ParseError => try self.recoverToTopLevel(),
+            };
+        }
+    }
+
+    /// Parse one top-level item: surface any lexer error token, consume its
+    /// leading annotations, then dispatch on the construct keyword.
+    fn parseOneTopLevel(self: *Parser) ParseError!void {
+        try self.surfaceTokenErrors();
+        const annotations = try self.parseAnnotations();
+        try self.parseTopLevel(annotations);
+    }
+
+    /// Recovery sync-point: advance past the offending token, then to the
+    /// next top-level construct keyword or EOF. Guarantees forward progress
+    /// (always consumes ≥1 token when not already at EOF) so `parseFile`
+    /// cannot loop. Top-level starters are the S3 set (`component` /
+    /// `resource` / `rule`); later milestones add their keywords here.
+    fn recoverToTopLevel(self: *Parser) ParseError!void {
+        if (self.peek() != .eof) _ = try self.advance();
+        while (true) {
+            switch (self.peek()) {
+                .eof, .kw_component, .kw_resource, .kw_rule => return,
+                else => _ = try self.advance(),
+            }
         }
     }
 
@@ -900,10 +958,9 @@ test "parser builds ComponentDecl with two annotated fields" {
         \\  max: float = 100.0
         \\}
     );
-    defer result.ast.deinit(gpa);
-    if (result.diagnostic) |d| {
-        var diag = d;
-        diag.deinit(gpa);
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
         try std.testing.expect(false);
     }
     try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
@@ -923,8 +980,8 @@ test "parser builds ResourceDecl with default value expression" {
         \\  max_players: int = 4
         \\}
     );
-    defer result.ast.deinit(gpa);
-    try std.testing.expect(result.diagnostic == null);
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len == 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
     try std.testing.expectEqual(ast_mod.ItemKind.resource_decl, result.ast.items.items(.kind)[0]);
     const rd = result.ast.resource_decls.items[0];
@@ -943,11 +1000,9 @@ test "parser builds RuleDecl with when clause composition (and / or / not)" {
         \\{
         \\}
     );
-    defer result.ast.deinit(gpa);
-    if (result.diagnostic) |d| {
-        var diag = d;
-        defer diag.deinit(gpa);
-        std.debug.print("unexpected parse diagnostic: {s}\n", .{diag.primary_message});
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
         try std.testing.expect(false);
     }
     try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
@@ -965,8 +1020,8 @@ test "parser handles binary expression precedence per grammar subset" {
         \\  let x = 1 + 2 * 3
         \\}
     );
-    defer result.ast.deinit(gpa);
-    try std.testing.expect(result.diagnostic == null);
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len == 0);
     const rd = result.ast.rule_decls.items[0];
     try std.testing.expectEqual(@as(u32, 1), rd.body_len);
     const stmt_raw = result.ast.extra.items[rd.body_start];
@@ -987,24 +1042,22 @@ test "parser rejects unsupported top-level construct with E0001" {
     var result = try parse(gpa,
         \\fn foo() {}
     );
-    defer result.ast.deinit(gpa);
-    try std.testing.expect(result.diagnostic != null);
-    var diag = result.diagnostic.?;
-    defer diag.deinit(gpa);
-    try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, diag.code);
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, result.diagnostics[0].code);
 }
 
-test "parser stops at first parse error and returns partial AST" {
+test "parser recovers at top level and returns partial AST" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\component Health { current: float = 1.0 }
         \\@@@@invalid
     );
-    defer result.ast.deinit(gpa);
-    try std.testing.expect(result.diagnostic != null);
-    var diag = result.diagnostic.?;
-    defer diag.deinit(gpa);
-    // First component should be parsed.
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    // First component should be parsed; the trailing broken annotation is
+    // recovered from at the top-level sync-point (M0.8) rather than
+    // aborting the whole file.
     try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
     try std.testing.expectEqual(ast_mod.ItemKind.component_decl, result.ast.items.items(.kind)[0]);
 }
@@ -1019,11 +1072,9 @@ test "parser accepts top-level declarations in any order" {
         \\}
         \\component Health { current: float = 100.0 }
     );
-    defer result.ast.deinit(gpa);
-    if (result.diagnostic) |d| {
-        var diag = d;
-        defer diag.deinit(gpa);
-        std.debug.print("unexpected diag: {s}\n", .{diag.primary_message});
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected diag: {s}\n", .{result.diagnostics[0].primary_message});
         try std.testing.expect(false);
     }
     try std.testing.expectEqual(@as(usize, 2), result.ast.items.len);
@@ -1038,11 +1089,11 @@ test "parser captures annotation kind and args" {
         \\  current: float = 100.0
         \\}
     );
-    defer result.ast.deinit(gpa);
+    defer result.deinit(gpa);
     // We don't currently parse `.foo` patterns; for S3 we accept named or
     // bare expressions as annotation args. The brief notes annotation
     // applicability is deferred — only "kind + args reachable" is required.
-    try std.testing.expect(result.diagnostic == null);
+    try std.testing.expect(result.diagnostics.len == 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
 }
 
@@ -1068,8 +1119,7 @@ test "parser does not leak comment spans on OOM during init" {
                 // ran to completion with a real allocator. Free and
                 // move on; the test passes because no leak is reported.
                 var ok_mut = ok;
-                if (ok_mut.diagnostic) |*d| d.deinit(failing.allocator());
-                ok_mut.ast.deinit(failing.allocator());
+                ok_mut.deinit(failing.allocator());
                 break;
             } else |err| {
                 try std.testing.expectEqual(error.OutOfMemory, err);

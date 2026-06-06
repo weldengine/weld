@@ -28,11 +28,9 @@ pub fn main(init: std.process.Init) !void {
     defer world.deinit(gpa);
 
     var pr = try etch.parseSource(gpa, fixture_facade.demo_5_rules_etch);
-    defer pr.ast.deinit(gpa);
-    if (pr.diagnostic) |*d| {
-        var dd = d.*;
-        defer dd.deinit(gpa);
-        std.debug.print("demo fixture parse failed: {s}\n", .{dd.primary_message});
+    defer pr.deinit(gpa);
+    if (pr.diagnostics.len > 0) {
+        std.debug.print("demo fixture parse failed: {s}\n", .{pr.diagnostics[0].primary_message});
         return error.FixtureParseFailed;
     }
 

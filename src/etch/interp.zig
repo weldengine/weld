@@ -153,14 +153,8 @@ pub const Interpreter = struct {
         ticks: u32,
     ) !RuntimeReport {
         var pr = try parser_mod.parse(gpa, source);
-        defer {
-            if (pr.diagnostic) |*d| {
-                var dd = d.*;
-                dd.deinit(gpa);
-            }
-            pr.ast.deinit(gpa);
-        }
-        if (pr.diagnostic) |_| return error.DiagnosticsPresent;
+        defer pr.deinit(gpa);
+        if (pr.diagnostics.len > 0) return error.DiagnosticsPresent;
 
         var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
         defer {
@@ -882,8 +876,8 @@ test "runProgram on minimal component + rule mutates entity" {
 
     // Compile manually, spawn one entity, then runFor.
     var pr = try parser_mod.parse(gpa, source);
-    defer pr.ast.deinit(gpa);
-    try std.testing.expect(pr.diagnostic == null);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
 
     var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
     defer {

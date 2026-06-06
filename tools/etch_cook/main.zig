@@ -137,15 +137,9 @@ fn cookInto(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, in: InputSpec, 
 
     // Parse + type-check.
     var pr = try parser.parse(gpa, source);
-    defer {
-        if (pr.diagnostic) |*d| {
-            var dd = d.*;
-            dd.deinit(gpa);
-        }
-        pr.ast.deinit(gpa);
-    }
-    if (pr.diagnostic) |d| {
-        std.debug.print("etch_cook: {s}: parse diagnostic: {s}\n", .{ in.path, d.primary_message });
+    defer pr.deinit(gpa);
+    if (pr.diagnostics.len > 0) {
+        std.debug.print("etch_cook: {s}: parse diagnostic: {s}\n", .{ in.path, pr.diagnostics[0].primary_message });
         return error.ParseFailed;
     }
     var diags: std.ArrayListUnmanaged(diag.Diagnostic) = .empty;
