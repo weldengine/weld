@@ -379,6 +379,8 @@ pub fn build(b: *std.Build) void {
         // M0.8 / E1 — top-level recovery sync-point (ParseResult.diagnostics
         // slice + resync at the next top-level keyword).
         .{ .path = "tests/etch/recovery_toplevel_test.zig", .etch = true },
+        // M0.8 / E1 — EBNF harness: every ```etch example block parses clean.
+        .{ .path = "tests/etch/ebnf_examples_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
         // M0.3 — common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },
