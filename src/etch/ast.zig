@@ -225,6 +225,7 @@ pub const ExprKind = enum {
     if_expr,
     match_expr,
     block_expr,
+    loop_expr,
     closure,
     await_expr,
     throw_expr,
@@ -515,6 +516,31 @@ pub const IndexExpr = struct {
     index: NodeId,
 };
 
+/// `[label:] loop { body }` loop expression (M0.8 loop/break, `etch-grammar.md`
+/// §522/§624). `label` is `0` when unlabeled. The body is a run of statement
+/// ids in `arena.extra`; the loop's value is the operand of the `break` that
+/// exits it (or `unit`).
+pub const LoopExpr = struct {
+    label: StringId,
+    body_start: u32,
+    body_len: u32,
+};
+
+/// `{ stmt* }` block expression (M0.8 loop/break, `etch-grammar.md` §645). E1
+/// blocks are statement blocks (value `unit`); a trailing-expression value is
+/// a later refinement. Used for `match` arm blocks and closure block bodies.
+pub const BlockExpr = struct {
+    body_start: u32,
+    body_len: u32,
+};
+
+/// `break [label] [value]` statement (M0.8 loop/break, `etch-grammar.md` §632).
+/// `label` is `0` when unlabeled; `value` is `NodeId.none` when valueless.
+pub const BreakStmt = struct {
+    label: StringId,
+    value: NodeId,
+};
+
 /// `|a, b| expr` closure (M0.8 closures, `etch-grammar.md` §524). Params are a
 /// flat `(start, len)` range of `arena.closure_params`; the body is an
 /// expression node. E1 closures take an expression body — a `{ block }` body
@@ -708,6 +734,9 @@ pub const AstArena = struct {
     closure_exprs: std.ArrayListUnmanaged(ClosureExpr) = .empty,
     closure_params: std.ArrayListUnmanaged(ClosureParam) = .empty,
     call_exprs: std.ArrayListUnmanaged(CallExpr) = .empty,
+    loop_exprs: std.ArrayListUnmanaged(LoopExpr) = .empty,
+    block_exprs: std.ArrayListUnmanaged(BlockExpr) = .empty,
+    break_stmts: std.ArrayListUnmanaged(BreakStmt) = .empty,
     named_types: std.ArrayListUnmanaged(NamedTypeNode) = .empty,
     array_types: std.ArrayListUnmanaged(ArrayTypeNode) = .empty,
     map_types: std.ArrayListUnmanaged(MapTypeNode) = .empty,
@@ -786,6 +815,9 @@ pub const AstArena = struct {
         self.closure_exprs.deinit(gpa);
         self.closure_params.deinit(gpa);
         self.call_exprs.deinit(gpa);
+        self.loop_exprs.deinit(gpa);
+        self.block_exprs.deinit(gpa);
+        self.break_stmts.deinit(gpa);
         self.named_types.deinit(gpa);
         self.array_types.deinit(gpa);
         self.map_types.deinit(gpa);
@@ -977,6 +1009,32 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.call_exprs.items.len);
         try self.call_exprs.append(gpa, .{ .callee = callee, .args_start = start, .args_len = @intCast(args.len) });
         return try self.addExpr(gpa, .fn_call, idx, span);
+    }
+
+    /// `body_start`/`body_len` index a statement run in `arena.extra` (the
+    /// caller collects the body via `parseStmtRun`).
+    pub fn addLoopExpr(self: *AstArena, gpa: std.mem.Allocator, label: StringId, body_start: u32, body_len: u32, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.loop_exprs.items.len);
+        try self.loop_exprs.append(gpa, .{ .label = label, .body_start = body_start, .body_len = body_len });
+        return try self.addExpr(gpa, .loop_expr, idx, span);
+    }
+
+    pub fn addBlockExpr(self: *AstArena, gpa: std.mem.Allocator, body_start: u32, body_len: u32, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.block_exprs.items.len);
+        try self.block_exprs.append(gpa, .{ .body_start = body_start, .body_len = body_len });
+        return try self.addExpr(gpa, .block_expr, idx, span);
+    }
+
+    pub fn addBreakStmt(self: *AstArena, gpa: std.mem.Allocator, label: StringId, value: NodeId, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.break_stmts.items.len);
+        try self.break_stmts.append(gpa, .{ .label = label, .value = value });
+        return try self.addStmt(gpa, .break_stmt, idx, span);
+    }
+
+    /// `continue [label]` — the (interned) label id is stored directly in the
+    /// statement's `data` (`0` when unlabeled); no side slab needed.
+    pub fn addContinueStmt(self: *AstArena, gpa: std.mem.Allocator, label: StringId, span: SourceSpan) !NodeId {
+        return try self.addStmt(gpa, .continue_stmt, label, span);
     }
 
     pub fn addLetStmt(self: *AstArena, gpa: std.mem.Allocator, let: LetStmt, span: SourceSpan) !NodeId {

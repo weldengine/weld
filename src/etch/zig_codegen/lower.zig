@@ -540,7 +540,7 @@ fn walkStmtForComponents(
     ast: *const AstArena,
     stmt_id: NodeId,
     out: *std.StringHashMapUnmanaged(void),
-) !void {
+) std.mem.Allocator.Error!void {
     const kind = ast.stmtKind(stmt_id);
     const data = ast.stmtData(stmt_id);
     switch (kind) {
@@ -569,6 +569,10 @@ fn walkStmtForComponents(
                 try walkStmtForComponents(gpa, ast, @bitCast(ast.extra.items[f.body_start + s]), out);
             }
         },
+        .break_stmt => {
+            const b = ast.break_stmts.items[data];
+            if (!b.value.isNone()) try walkExprForComponents(gpa, ast, b.value, out);
+        },
         else => {},
     }
 }
@@ -578,7 +582,7 @@ fn walkExprForComponents(
     ast: *const AstArena,
     expr: NodeId,
     out: *std.StringHashMapUnmanaged(void),
-) !void {
+) std.mem.Allocator.Error!void {
     const kind = ast.exprKind(expr);
     const data = ast.exprData(expr);
     switch (kind) {
@@ -627,6 +631,13 @@ fn walkExprForComponents(
         },
         .closure => {
             try walkExprForComponents(gpa, ast, ast.closure_exprs.items[data].body, out);
+        },
+        .loop_expr => {
+            const lp = ast.loop_exprs.items[data];
+            var s: u32 = 0;
+            while (s < lp.body_len) : (s += 1) {
+                try walkStmtForComponents(gpa, ast, @bitCast(ast.extra.items[lp.body_start + s]), out);
+            }
         },
         .fn_call => {
             const call = ast.call_exprs.items[data];
@@ -847,6 +858,14 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
         },
         .expr_stmt => {
             const eid: NodeId = @bitCast(data);
+            // A bare `loop { ... }` statement emits as a Zig statement, not
+            // `_ = while (...)` (M0.8 loop/break).
+            if (ast.exprKind(eid) == .loop_expr) {
+                try w.writeIndent();
+                try emitExpr(w, ast, ctx, eid);
+                try w.write("\n");
+                return;
+            }
             try w.writeIndent();
             // Side-effect-only expression statement: typically a bare
             // `entity.get_mut(T)` discard. Emit as `_ = <expr>;` so Zig
@@ -928,6 +947,31 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 try w.writeIndent();
                 try w.write("}\n");
             }
+        },
+        .break_stmt => {
+            // `break [:label] [value]` (M0.8 loop/break).
+            const b = ast.break_stmts.items[data];
+            try w.writeIndent();
+            try w.write("break");
+            if (b.label != 0) {
+                try w.write(" :");
+                try w.ident(ast.strings.slice(b.label));
+            }
+            if (!b.value.isNone()) {
+                try w.write(" ");
+                try emitExpr(w, ast, ctx, b.value);
+            }
+            try w.write(";\n");
+        },
+        .continue_stmt => {
+            // `continue [:label]` — the label id is stored directly in `data`.
+            try w.writeIndent();
+            try w.write("continue");
+            if (data != 0) {
+                try w.write(" :");
+                try w.ident(ast.strings.slice(data));
+            }
+            try w.write(";\n");
         },
         else => return CodegenError.UnsupportedConstruct,
     }
@@ -1135,6 +1179,25 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 try emitExpr(w, ast, ctx, arg);
             }
             try w.write(")");
+        },
+        .loop_expr => {
+            // `[label:] loop { body }` → Zig `[label:] while (true) { ... }`
+            // (M0.8 loop/break). As an expression its value is the operand of
+            // the `break` that exits it (Zig `while (true)` is value-carrying).
+            const lp = ast.loop_exprs.items[data];
+            if (lp.label != 0) {
+                try w.ident(ast.strings.slice(lp.label));
+                try w.write(": ");
+            }
+            try w.write("while (true) {\n");
+            w.indentBy(1);
+            var s: u32 = 0;
+            while (s < lp.body_len) : (s += 1) {
+                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[lp.body_start + s]));
+            }
+            w.indentBy(-1);
+            try w.writeIndent();
+            try w.write("}");
         },
         .range => return CodegenError.UnsupportedConstruct, // ranges appear only as for-in iterables in E1 (lowered by emitStmt .for_stmt)
         .cast => {
@@ -1368,6 +1431,8 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         // inference too (M0.8 closures).
         .closure => "",
         .fn_call => "",
+        // A loop expression's value type is inferred by Zig from its break.
+        .loop_expr => "",
         .method_get, .method_get_mut => "struct", // not directly inferable; should not appear at let-rhs after method_get handling
         .cast => blk: {
             const c = ast.casts.items[data];

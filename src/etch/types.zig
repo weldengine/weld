@@ -705,6 +705,13 @@ pub const TypeChecker = struct {
                     try self.checkStmt(ctx, body_stmt);
                 }
             },
+            .break_stmt => {
+                // `break [label] [value]` (M0.8 loop/break). Type the value if
+                // present; loop-membership / label validity is permissive in E1.
+                const b = self.arena.break_stmts.items[data];
+                if (!b.value.isNone()) _ = self.synthExpr(b.value, ctx);
+            },
+            .continue_stmt => {},
             else => {},
         }
     }
@@ -833,6 +840,7 @@ pub const TypeChecker = struct {
             .index => return try self.synthIndex(id, data, ctx_opt),
             .closure => return .{ .closure = id },
             .fn_call => return try self.synthCall(id, data, ctx_opt),
+            .loop_expr => return try self.synthLoop(data, ctx_opt),
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
             else => return ResolvedType.unknown,
         }
@@ -908,6 +916,31 @@ pub const TypeChecker = struct {
         }
         if (!all_builtin or key_bt == null or val_bt == null) return ResolvedType.unknown;
         return .{ .map_t = .{ .key = key_bt.?, .value = val_bt.? } };
+    }
+
+    /// Type a `loop { body }` expression (M0.8 loop/break). The body statements
+    /// are checked, and the loop's value is the type of a top-level `break`
+    /// value (permissive: `unknown` when none — a labeled break out of a nested
+    /// loop is typed only through execution, the interpreter being the
+    /// reference; the assignment site treats `unknown` as a wildcard).
+    fn synthLoop(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const lp = self.arena.loop_exprs.items[data];
+        if (ctx_opt) |ctx| {
+            var i: u32 = 0;
+            while (i < lp.body_len) : (i += 1) {
+                const stmt: NodeId = @bitCast(self.arena.extra.items[lp.body_start + i]);
+                try self.checkStmt(ctx, stmt);
+            }
+        }
+        var i: u32 = 0;
+        while (i < lp.body_len) : (i += 1) {
+            const stmt: NodeId = @bitCast(self.arena.extra.items[lp.body_start + i]);
+            if (self.arena.stmtKind(stmt) == .break_stmt) {
+                const b = self.arena.break_stmts.items[self.arena.stmtData(stmt)];
+                if (!b.value.isNone()) return self.synthExpr(b.value, ctx_opt);
+            }
+        }
+        return ResolvedType.unknown;
     }
 
     /// Type a call expression (M0.8 closures). E1 only resolves calls whose

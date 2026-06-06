@@ -53,6 +53,9 @@ pub const TokenKind = enum {
     kw_match, // match expression (M0.8 v0.6 foundations)
     kw_for, // for-in loop (M0.8 v0.6 foundations)
     kw_in, // for-in loop (M0.8 v0.6 foundations)
+    kw_loop, // loop expression (M0.8 loop/break)
+    kw_break, // break [label] [value] (M0.8 loop/break)
+    kw_continue, // continue [label] (M0.8 loop/break)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -148,6 +151,9 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "match", .kind = .kw_match },
     .{ .lexeme = "for", .kind = .kw_for },
     .{ .lexeme = "in", .kind = .kw_in },
+    .{ .lexeme = "loop", .kind = .kw_loop },
+    .{ .lexeme = "break", .kind = .kw_break },
+    .{ .lexeme = "continue", .kind = .kw_continue },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -174,32 +180,32 @@ pub const s3_keywords = [_]KeywordEntry{
 /// `priority`.
 pub const non_s3_keywords = [_][]const u8{
     // ── Top-level constructs (26 of 29 from EBNF v0.6) ──
-    "fn",          "struct",       "enum",          "trait",          "impl",
-    "event",       "tags",         "import",        "const",          "private",
-    "behavior",    "routine",      "quest",         "dialogue",       "ability",
-    "effect",      "shader",       "widget",        "theme",          "motion",
-    "anim_graph",  "audio_graph",  "audio_score",   "sequence",       "data",
-    "scene",       "prefab",       "input_mapping", "locale",         "test",
+    "fn",             "struct",      "enum",          "trait",        "impl",
+    "event",          "tags",        "import",        "const",        "private",
+    "behavior",       "routine",     "quest",         "dialogue",     "ability",
+    "effect",         "shader",      "widget",        "theme",        "motion",
+    "anim_graph",     "audio_graph", "audio_score",   "sequence",     "data",
+    "scene",          "prefab",      "input_mapping", "locale",       "test",
     "override",
 
-    // ── Control flow (out of S3 rule body) ──
-       "if",           "else",          "while",          "break",
-    "continue",    "loop",         "return",
+    // ── Control flow still out of E1 (`loop`/`break`/`continue` graduated to
+    //    real keywords with M0.8 loop/break) ──
+          "if",          "else",          "while",        "return",
 
     // ── Async machinery (out of S3) ──
-           "async",          "await",
-    "race",        "sync",         "branch",        "spawn",
+    "async",          "await",       "race",          "sync",         "branch",
+    "spawn",
 
     // ── Error handling (out of S3) ──
-             "try",
-    "catch",       "throws",       "throw",
+             "try",         "catch",         "throws",       "throw",
 
     // ── Tag operators (out of S3) ──
-            "has_tag",        "has_no_tag",
-    "has_any_tag", "has_all_tags", "has_no_tags",   "add_tag",        "remove_tag",
+    "has_tag",        "has_no_tag",  "has_any_tag",   "has_all_tags", "has_no_tags",
+    "add_tag",        "remove_tag",
 
     // ── Timers / emit / lifecycle (out of S3) ──
-    "emit",        "after",        "every",         "after_unscaled", "quantize",
+     "emit",          "after",        "every",
+    "after_unscaled", "quantize",
 
     // Note: `where`, `self`, `none`, `some` are intentionally NOT listed —
     // they appear in legitimate identifier-shaped positions in S3 annotation

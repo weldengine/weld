@@ -88,6 +88,9 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
         for (parser.diagnostics.items) |*d| d.deinit(gpa);
         parser.diagnostics.deinit(gpa);
     }
+    // The label stack is push/pop balanced on the success path and torn down
+    // here on every path (an unwinding ParseError can leave entries behind).
+    defer parser.active_labels.deinit(gpa);
 
     // With the top-level recovery sync-point, `parseFile` catches
     // `ParseError` per top-level item internally, records the diagnostic,
@@ -171,6 +174,27 @@ pub const Parser = struct {
     /// to `parseFile`), so each broken construct contributes exactly one
     /// entry before the parser resyncs to the next top-level keyword.
     diagnostics: std.ArrayListUnmanaged(Diagnostic) = .empty,
+    /// Stack of loop labels currently in scope (M0.8 loop/break). `break IDENT`
+    /// treats IDENT as a label only when it names an enclosing loop — this
+    /// resolves the `break [IDENT] [expression]` ambiguity without a statement
+    /// separator (an IDENT that is not an active label starts the break value).
+    active_labels: std.ArrayListUnmanaged(StringId) = .empty,
+
+    fn isActiveLabel(self: *const Parser, name: StringId) bool {
+        for (self.active_labels.items) |l| {
+            if (l == name) return true;
+        }
+        return false;
+    }
+
+    /// Whether `kind` can begin an expression — used to decide if an optional
+    /// break value follows.
+    fn canStartExpr(kind: TokenKind) bool {
+        return switch (kind) {
+            .int_literal, .float_literal, .bool_literal, .string_literal, .ident, .type_ident, .lparen, .lbracket, .pipe, .minus, .kw_not, .kw_match, .kw_loop, .kw_get, .kw_get_mut, .dot => true,
+            else => false,
+        };
+    }
 
     // ─── Token stream helpers ────────────────────────────────────────────
 
@@ -868,6 +892,77 @@ pub const Parser = struct {
         }, .{ .byte_start = for_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
+    /// Parse `loop { body }` (M0.8 loop/break, `etch-grammar.md` §522/§624).
+    /// `label` is `0` for an unlabeled loop; a labeled loop pushes its label so
+    /// nested `break`/`continue` can target it.
+    fn parseLoop(self: *Parser, label: StringId) ParseError!NodeId {
+        const kw_span = (try self.advance()).span; // 'loop'
+        _ = try self.expect(.lbrace, "expected '{' to start loop body");
+        if (label != 0) try self.active_labels.append(self.gpa, label);
+        const body = try self.parseStmtRun();
+        if (label != 0) _ = self.active_labels.pop();
+        const closing = try self.expect(.rbrace, "expected '}' to close loop body");
+        return try self.arena.addLoopExpr(self.gpa, label, body.start, body.len, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
+    /// Parse `IDENT ":" loop { ... }` (M0.8 loop/break). Only `loop` can be
+    /// labeled in E1 (labeled `for` is a later refinement).
+    fn parseLabeledLoop(self: *Parser) ParseError!NodeId {
+        const label_tok = try self.advance(); // IDENT
+        const label = try self.internSlice(label_tok.span);
+        _ = try self.expect(.colon, "expected ':' after loop label");
+        if (self.peek() != .kw_loop) {
+            return self.parseErrFmt(self.peekSpan(), "only 'loop' can be labeled in E1, got '{s}'", .{self.sliceOf(self.peekSpan())});
+        }
+        // A labeled loop appears in statement position — wrap the loop
+        // expression as an expr-statement (matching the bare-`loop` statement
+        // path, which goes through `parseExpr` + `addExprStmt`).
+        const loop_node = try self.parseLoop(label);
+        return try self.arena.addExprStmt(self.gpa, loop_node, self.arena.exprSpan(loop_node));
+    }
+
+    /// Parse `break [label] [value]` (M0.8 loop/break, `etch-grammar.md` §632).
+    /// A leading IDENT is the label only when it names an active loop label
+    /// (else it begins the value expression).
+    fn parseBreakStmt(self: *Parser) ParseError!NodeId {
+        const kw = try self.advance(); // 'break'
+        var label: StringId = 0;
+        var value: NodeId = NodeId.none;
+        var end_byte = kw.span.byte_end;
+        if (self.peek() == .ident) {
+            const cand = try self.internSlice(self.current.span);
+            if (self.isActiveLabel(cand)) {
+                const lt = try self.advance();
+                label = cand;
+                end_byte = lt.span.byte_end;
+            }
+        }
+        if (canStartExpr(self.peek())) {
+            value = try self.parseExpr(0);
+            end_byte = self.arena.exprSpan(value).byte_end;
+        }
+        return try self.arena.addBreakStmt(self.gpa, label, value, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
+    }
+
+    /// Parse `continue [label]` (M0.8 loop/break, `etch-grammar.md` §633).
+    fn parseContinueStmt(self: *Parser) ParseError!NodeId {
+        const kw = try self.advance(); // 'continue'
+        var label: StringId = 0;
+        var end_byte = kw.span.byte_end;
+        if (self.peek() == .ident) {
+            const cand = try self.internSlice(self.current.span);
+            if (self.isActiveLabel(cand)) {
+                const lt = try self.advance();
+                label = cand;
+                end_byte = lt.span.byte_end;
+            }
+        }
+        return try self.arena.addContinueStmt(self.gpa, label, .{ .byte_start = kw.span.byte_start, .byte_end = end_byte });
+    }
+
     fn parseStmt(self: *Parser) ParseError!NodeId {
         if (self.peek() == .kw_let) {
             return try self.parseLetStmt();
@@ -877,6 +972,16 @@ pub const Parser = struct {
         }
         if (self.peek() == .kw_for) {
             return try self.parseForStmt();
+        }
+        if (self.peek() == .kw_break) {
+            return try self.parseBreakStmt();
+        }
+        if (self.peek() == .kw_continue) {
+            return try self.parseContinueStmt();
+        }
+        // Labeled loop: `IDENT ":" loop { ... }` (M0.8 loop/break).
+        if (self.peek() == .ident and self.peekNext() == .colon) {
+            return try self.parseLabeledLoop();
         }
         // Either an assignment (lvalue followed by =/+=/etc.) or an expr stmt.
         const expr_start = self.current.span;
@@ -1310,6 +1415,7 @@ pub const Parser = struct {
         try self.surfaceTokenErrors();
         switch (self.peek()) {
             .kw_match => return try self.parseMatch(),
+            .kw_loop => return try self.parseLoop(0),
             .lbracket => return try self.parseArrayOrMapLiteral(),
             .pipe => return try self.parseClosure(),
             .int_literal => {
@@ -1707,6 +1813,45 @@ test "parser builds closures and calls (M0.8 closures)" {
     }
     try std.testing.expectEqual(@as(usize, 3), closures); // f, g, h
     try std.testing.expectEqual(@as(usize, 1), calls); // f(10)
+}
+
+test "parser builds loops, labels, break value, and continue (M0.8 loop/break)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  let x = loop { break 42 }
+        \\  outer: loop {
+        \\    loop {
+        \\      continue
+        \\      break outer 1
+        \\    }
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var loops: usize = 0;
+    for (result.ast.exprs.items(.kind)) |k| {
+        if (k == .loop_expr) loops += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), loops); // x's loop, outer, inner
+    var breaks: usize = 0;
+    var continues: usize = 0;
+    for (result.ast.stmts.items(.kind)) |k| {
+        if (k == .break_stmt) breaks += 1;
+        if (k == .continue_stmt) continues += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), breaks); // break 42, break outer 1
+    try std.testing.expectEqual(@as(usize, 1), continues);
+    // The labeled break carries the `outer` label.
+    var labeled: usize = 0;
+    for (result.ast.break_stmts.items) |b| {
+        if (b.label != 0) labeled += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), labeled);
 }
 
 test "parser does not leak comment spans on OOM during init" {

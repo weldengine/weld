@@ -49,6 +49,8 @@ const p26 = @import("programs/26_array_index.expected.zig");
 const p27 = @import("programs/27_array_slice.expected.zig");
 const p28 = @import("programs/28_for_array_sum.expected.zig");
 const p29 = @import("programs/29_closure_apply.expected.zig");
+const p30 = @import("programs/30_loop_break_value.expected.zig");
+const p31 = @import("programs/31_labeled_break.expected.zig");
 
 /// Embedded list of the 20 differential corpus programs consumed by
 /// the S4 interpreter test and the S5 codegen parity test.
@@ -82,4 +84,6 @@ pub const programs = [_]Program{
     .{ .name = "27_array_slice", .source = @embedFile("programs/27_array_slice.etch"), .config = p27.config, .initial = p27.initial, .expected = p27.expected },
     .{ .name = "28_for_array_sum", .source = @embedFile("programs/28_for_array_sum.etch"), .config = p28.config, .initial = p28.initial, .expected = p28.expected },
     .{ .name = "29_closure_apply", .source = @embedFile("programs/29_closure_apply.etch"), .config = p29.config, .initial = p29.initial, .expected = p29.expected },
+    .{ .name = "30_loop_break_value", .source = @embedFile("programs/30_loop_break_value.etch"), .config = p30.config, .initial = p30.initial, .expected = p30.expected },
+    .{ .name = "31_labeled_break", .source = @embedFile("programs/31_labeled_break.etch"), .config = p31.config, .initial = p31.initial, .expected = p31.expected },
 };

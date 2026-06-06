@@ -207,6 +207,16 @@ const ClosureStore = struct {
 
 const StmtError = error{ OutOfMemory, RuntimeFailure };
 
+/// Control-flow signal raised by `break` / `continue` (M0.8 loop/break).
+/// Carried on the interpreter (not as a return value) so it can cross
+/// expression↔statement boundaries — e.g. a `break` inside a `match` arm block
+/// nested in a loop body. The enclosing loop consumes it; `none` is the
+/// ordinary fall-through.
+const Control = enum { none, break_, continue_ };
+
+/// What an enclosing loop should do once a control signal has surfaced.
+const LoopAction = enum { again, stop, propagate };
+
 /// S4 tree-walking interpreter — owns the bridge state, evaluates
 /// the type-checked AST against a `World` once per tick.
 pub const Interpreter = struct {
@@ -218,6 +228,13 @@ pub const Interpreter = struct {
     collections: CollectionStore = .{},
     /// Store backing closure values created in rule bodies (M0.8 closures).
     closures: ClosureStore = .{},
+    /// Active control-flow signal (M0.8 loop/break). Set by `break`/`continue`,
+    /// consumed by the enclosing loop.
+    control: Control = .none,
+    /// The value carried by the active `break` (`unit` for valueless breaks).
+    break_value: Value = .{ .unit = {} },
+    /// The label targeted by the active `break`/`continue` (`0` = unlabeled).
+    control_label: StringId = 0,
 
     pub fn deinit(self: *Interpreter) void {
         for (self.rule_descs) |*r| r.deinit(self.gpa);
@@ -366,6 +383,7 @@ pub const Interpreter = struct {
         defer self.collections.reset(self.gpa);
         defer self.closures.reset(self.gpa);
         try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
+        self.control = .none; // defensive: each body starts with no pending signal
 
         var s: u32 = 0;
         while (s < rule.body_len) : (s += 1) {
@@ -378,6 +396,47 @@ pub const Interpreter = struct {
                     return;
                 },
             };
+            // A `break`/`continue` reaching the rule top level (outside any loop)
+            // has nowhere to go — consume it and end the body.
+            if (self.control != .none) {
+                self.control = .none;
+                self.control_label = 0;
+                break;
+            }
+        }
+    }
+
+    /// Run a contiguous statement run, stopping early if a control signal
+    /// fires (left set on `self` for the enclosing loop to interpret).
+    fn execStmtRun(self: *Interpreter, world: *World, locals: *Locals, start: u32, len: u32) StmtError!void {
+        var s: u32 = 0;
+        while (s < len) : (s += 1) {
+            try self.execStmt(world, locals, @bitCast(self.ast.extra.items[start + s]));
+            if (self.control != .none) return;
+        }
+    }
+
+    /// Decide what a loop labeled `my_label` does with the active control
+    /// signal: consume it (again / stop) or let it propagate to an outer loop.
+    fn handleLoopControl(self: *Interpreter, my_label: StringId) LoopAction {
+        switch (self.control) {
+            .none => return .again,
+            .break_ => {
+                if (self.control_label == 0 or self.control_label == my_label) {
+                    self.control = .none;
+                    self.control_label = 0;
+                    return .stop;
+                }
+                return .propagate;
+            },
+            .continue_ => {
+                if (self.control_label == 0 or self.control_label == my_label) {
+                    self.control = .none;
+                    self.control_label = 0;
+                    return .again;
+                }
+                return .propagate;
+            },
         }
     }
 
@@ -407,19 +466,22 @@ pub const Interpreter = struct {
                 if (v != .bool_ or !v.bool_) return error.RuntimeFailure;
             },
             .for_stmt => {
-                // `for v in range { body }` (M0.8 v0.6 foundations). E1
-                // iterates integer ranges; the loop variable is rebound each
-                // iteration before the body statements run.
+                // `for v in range/array/map { body }` (M0.8). The loop variable
+                // is rebound each iteration; `break`/`continue` (unlabeled, or a
+                // label that escapes — `for` carries no label in E1) is handled
+                // via `handleLoopControl(0)`.
                 const f = self.ast.for_stmts.items[data];
                 const iter = try self.evalExpr(world, locals, f.iterable);
                 switch (iter) {
                     .range => |r| {
                         var i: i64 = r.start;
-                        while (if (r.inclusive) i <= r.end else i < r.end) : (i += 1) {
+                        range_loop: while (if (r.inclusive) i <= r.end else i < r.end) : (i += 1) {
                             try locals.put(self.gpa, f.var_name, Value{ .int_ = i }, false);
-                            var s: u32 = 0;
-                            while (s < f.body_len) : (s += 1) {
-                                try self.execStmt(world, locals, @bitCast(self.ast.extra.items[f.body_start + s]));
+                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            switch (self.handleLoopControl(0)) {
+                                .again => {},
+                                .stop => break :range_loop,
+                                .propagate => return,
                             }
                         }
                     },
@@ -429,12 +491,14 @@ pub const Interpreter = struct {
                         // outer store vector) never leaves a stale pointer.
                         const len = self.collections.arrays.items[handle].items.len;
                         var k: usize = 0;
-                        while (k < len) : (k += 1) {
+                        arr_loop: while (k < len) : (k += 1) {
                             const elem = self.collections.arrays.items[handle].items[k];
                             try locals.put(self.gpa, f.var_name, elem, false);
-                            var s: u32 = 0;
-                            while (s < f.body_len) : (s += 1) {
-                                try self.execStmt(world, locals, @bitCast(self.ast.extra.items[f.body_start + s]));
+                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            switch (self.handleLoopControl(0)) {
+                                .again => {},
+                                .stop => break :arr_loop,
+                                .propagate => return,
                             }
                         }
                     },
@@ -446,18 +510,33 @@ pub const Interpreter = struct {
                         // reduction such as a sum).
                         const len = self.collections.maps.items[handle].items.len;
                         var k: usize = 0;
-                        while (k < len) : (k += 1) {
+                        map_loop: while (k < len) : (k += 1) {
                             const pair = self.collections.maps.items[handle].items[k];
                             try locals.put(self.gpa, f.var_name, pair.key, false);
                             if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
-                            var s: u32 = 0;
-                            while (s < f.body_len) : (s += 1) {
-                                try self.execStmt(world, locals, @bitCast(self.ast.extra.items[f.body_start + s]));
+                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            switch (self.handleLoopControl(0)) {
+                                .again => {},
+                                .stop => break :map_loop,
+                                .propagate => return,
                             }
                         }
                     },
                     else => return error.RuntimeFailure,
                 }
+            },
+            .break_stmt => {
+                // `break [label] [value]` (M0.8 loop/break) — raise the signal
+                // for the enclosing loop to consume.
+                const b = self.ast.break_stmts.items[data];
+                self.break_value = if (b.value.isNone()) Value{ .unit = {} } else try self.evalExpr(world, locals, b.value);
+                self.control_label = b.label;
+                self.control = .break_;
+            },
+            .continue_stmt => {
+                // `continue [label]` — the label id is stored directly in `data`.
+                self.control_label = data;
+                self.control = .continue_;
             },
             else => return error.RuntimeFailure,
         }
@@ -753,6 +832,35 @@ pub const Interpreter = struct {
                     try frame.put(self.gpa, p.name, av, false);
                 }
                 return try self.evalExpr(world, &frame, ce.body);
+            },
+            .loop_expr => {
+                // `loop { body }` — run the body repeatedly until a `break`
+                // targeting this loop fires; the loop's value is that break's
+                // value (M0.8 loop/break). A labeled break / continue for an
+                // outer loop propagates (control left set, unit returned).
+                const lp = self.ast.loop_exprs.items[data];
+                while (true) {
+                    try self.execStmtRun(world, locals, lp.body_start, lp.body_len);
+                    switch (self.control) {
+                        .none => {}, // body completed → loop again (infinite)
+                        .break_ => {
+                            if (self.control_label == 0 or self.control_label == lp.label) {
+                                self.control = .none;
+                                self.control_label = 0;
+                                return self.break_value;
+                            }
+                            return Value{ .unit = {} }; // propagate to outer loop
+                        },
+                        .continue_ => {
+                            if (self.control_label == 0 or self.control_label == lp.label) {
+                                self.control = .none;
+                                self.control_label = 0; // continue → loop again
+                            } else {
+                                return Value{ .unit = {} }; // propagate
+                            }
+                        },
+                    }
+                }
             },
             else => return error.RuntimeFailure, // path / tag_path / unsupported variants
         }
