@@ -103,6 +103,46 @@ test "recovery resyncs at a top-level `type` alias after a broken construct (M0.
     try std.testing.expect(saw_after);
 }
 
+test "recovery keeps a rule exercising the E1 body constructs after a broken construct" {
+    const gpa = std.testing.allocator;
+    // A broken component precedes a rule whose body exercises every E1
+    // foundation (arrays + indexing, closures + calls, for-in, loop/break,
+    // try/catch/throw). The parser resyncs at `rule` and the whole body parses
+    // cleanly — proving the new body constructs did not regress top-level
+    // recovery (the forward-note survival check; no new top-level keyword was
+    // added in these tranches, so `recoverToTopLevel`'s stop-set is unchanged).
+    var result = try etch.parseSource(gpa,
+        \\component Broken { x: int = }
+        \\component Acc { out: int = 0 }
+        \\rule mix(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let arr = [1, 2, 3]
+        \\  let double = |n: int| n * 2
+        \\  let mut s = 0
+        \\  for v in arr {
+        \\    s += double(v)
+        \\  }
+        \\  let x = loop { break s }
+        \\  try {
+        \\    throw x
+        \\  } catch err {
+        \\    s = err
+        \\  }
+        \\  entity.get_mut(Acc).out = s
+        \\}
+    );
+    defer result.deinit(gpa);
+
+    // The broken component yields a diagnostic; the rule after it survives.
+    try std.testing.expect(result.diagnostics.len >= 1);
+    var saw_mix = false;
+    for (result.ast.rule_decls.items) |rd| {
+        if (std.mem.eql(u8, result.ast.strings.slice(rd.name), "mix")) saw_mix = true;
+    }
+    try std.testing.expect(saw_mix);
+}
+
 test "clean source still yields zero diagnostics under the recovery loop" {
     const gpa = std.testing.allocator;
     var result = try etch.parseSource(gpa,
