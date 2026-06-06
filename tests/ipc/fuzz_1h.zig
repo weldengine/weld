@@ -73,10 +73,29 @@ const fuzz_types = [_]type{
     messages.ProjectSaved,    messages.RuntimeError, messages.ShmRegionsHandoff,
 };
 
-// Reader scratch must hold the largest frame in `fuzz_types`, else a big
-// frame trips `error.PayloadTooLarge` and reads as a (false) desync.
+// The clean end-of-stream marker: a well-formed frame of a catalogue type
+// deliberately kept OUT of `fuzz_types`, so it can only ever appear on the
+// wire as the teardown sentinel, never as fuzz traffic. Using a *valid*
+// frame (not a bad-magic blob) is what lets `error.InvalidMagic` stay an
+// UNCONDITIONAL fault: a real framing desync on the last backlog frames —
+// after the writer has already set `stop` — can no longer be misread as a
+// benign teardown. `ShutdownAck` fits semantically (end of session).
+const sentinel_type = messages.ShutdownAck;
+const sentinel_msg_type: u16 = @intFromEnum(messages.msgTypeOf(sentinel_type));
+comptime {
+    for (fuzz_types) |T| {
+        if (T == sentinel_type) @compileError(
+            "sentinel_type must stay out of fuzz_types — otherwise the teardown " ++
+                "marker is indistinguishable from fuzz traffic",
+        );
+    }
+}
+
+// Reader scratch must hold the largest frame it can receive — the biggest
+// `fuzz_types` entry or the sentinel — else a big frame trips
+// `error.PayloadTooLarge` and reads as a (false) desync.
 const max_frame_size = blk: {
-    var m: usize = @sizeOf(framing.Header);
+    var m: usize = framing.frameSizeOf(sentinel_type);
     for (fuzz_types) |T| m = @max(m, framing.frameSizeOf(T));
     break :blk m;
 };
@@ -104,14 +123,27 @@ const FuzzCtx = struct {
     /// Reader-owned. Compared to `sent` after join — equality proves every
     /// frame was received intact and in order (no desync, no drop).
     recv: u32 = 0,
-    /// Set by the reader on a real desync / catastrophic error (any framing
-    /// error before teardown, or a non-teardown error class).
+    /// Set by the reader on any framing desync: `InvalidMagic` /
+    /// `UnknownMsgType` / version / size mismatch at ANY time, or a socket
+    /// EOF before `stop`. Only a post-`stop` EOF is exempt.
     fault: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
-    /// Published by the writer (release) before the teardown sentinel.
+    /// Published by the writer (release) before the teardown sentinel; gates
+    /// only the benign tolerance of the post-teardown socket EOF.
     stop: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
 };
 
 fn writerLoop(ctx: *FuzzCtx, gpa: std.mem.Allocator) void {
+    // Pre-encode the well-formed teardown sentinel once, before any traffic,
+    // so an (essentially impossible) allocation failure is handled up front
+    // rather than leaving the reader to block on its recv forever.
+    const sentinel_body = std.mem.zeroes(sentinel_type);
+    const sentinel_frame = framing.encode(gpa, sentinel_type, 0xFFFF_FFFF, &sentinel_body) catch {
+        ctx.fault.store(1, .release);
+        ctx.stop.store(1, .release); // let the reader's eventual EOF be benign
+        return;
+    };
+    defer gpa.free(sentinel_frame);
+
     const t_start = nowMs();
     var prng = std.Random.DefaultPrng.init(0xCAFEBABE);
     const rng = prng.random();
@@ -128,34 +160,39 @@ fn writerLoop(ctx: *FuzzCtx, gpa: std.mem.Allocator) void {
         };
         ctx.sent += 1;
     }
-    // Deterministic teardown. Publish `stop` (release) BEFORE the sentinel
-    // so the reader's acquire-load — run only after it receives the
-    // sentinel — always observes stop == 1 and treats the resulting
-    // `InvalidMagic` as the expected end-of-stream, not a mid-run desync.
-    // A 16-byte bad-magic frame unblocks the reader's blocking `recvFrame`.
+    // Teardown. Publish `stop` (release), then send the sentinel — a *valid*
+    // frame the reader recognises by its `msg_type`, not by any error. The
+    // reader therefore needs no error reclassification, so `InvalidMagic`
+    // stays an unconditional fault (see `readerLoop`). `stop` only gates the
+    // benign tolerance of the post-teardown socket EOF.
     ctx.stop.store(1, .release);
-    const sentinel = [_]u8{0xFF} ** @sizeOf(framing.Header);
-    ctx.client_sock.send(&sentinel) catch {};
+    ctx.client_sock.send(sentinel_frame) catch {};
 }
 
 fn readerLoop(ctx: *FuzzCtx, gpa: std.mem.Allocator) void {
     var connection = ipc.connection.IpcConnection.init(gpa, ctx.server_sock);
     var scratch: [max_frame_size]u8 = undefined;
     while (true) {
-        _ = connection.recvFrame(&scratch) catch |e| {
-            // After teardown, the bad-magic sentinel (`InvalidMagic`) and a
-            // torn-down socket (`UnexpectedEof` / `BrokenPipe`) are the
-            // expected end. The same errors *before* teardown — or any
-            // other error class at any time (a version / msg_type / size
-            // desync) — are real faults.
-            const stopped = ctx.stop.load(.acquire) == 1;
-            const benign_teardown = switch (e) {
-                error.InvalidMagic, error.UnexpectedEof, error.BrokenPipe => true,
+        const frame = connection.recvFrame(&scratch) catch |e| {
+            // Clean end-of-stream is the well-formed sentinel frame (handled
+            // below), never an error. The ONLY tolerated errors are a socket
+            // torn down AFTER teardown (`UnexpectedEof` / `BrokenPipe` once
+            // `stop` is set). Everything else — `InvalidMagic`,
+            // `UnknownMsgType`, version / payload-size mismatch, at any time —
+            // is an unconditional framing desync ⇒ fault. This closes the
+            // window where a desync on the last backlog frames (writer
+            // already at `stop == 1`) could be misread as a benign teardown.
+            const tolerated = switch (e) {
+                error.UnexpectedEof, error.BrokenPipe => ctx.stop.load(.acquire) == 1,
                 else => false,
             };
-            if (!stopped or !benign_teardown) ctx.fault.store(1, .release);
+            if (!tolerated) ctx.fault.store(1, .release);
             return;
         };
+        // The sentinel marks the deliberate end of the run; its type never
+        // appears as fuzz traffic. Not counted, so `sent == recv` stays a
+        // pure data-frame identity.
+        if (frame.header.msg_type == sentinel_msg_type) return;
         ctx.recv += 1;
     }
 }
