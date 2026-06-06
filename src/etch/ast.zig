@@ -515,6 +515,33 @@ pub const IndexExpr = struct {
     index: NodeId,
 };
 
+/// `|a, b| expr` closure (M0.8 closures, `etch-grammar.md` §524). Params are a
+/// flat `(start, len)` range of `arena.closure_params`; the body is an
+/// expression node. E1 closures take an expression body — a `{ block }` body
+/// arrives with block expressions (loop/break tranche).
+pub const ClosureExpr = struct {
+    params_start: u32,
+    params_len: u32,
+    body: NodeId,
+};
+
+/// One closure parameter: name + optional type annotation (`NodeId.none` when
+/// inferred from context, `etch-grammar.md` §526).
+pub const ClosureParam = struct {
+    name: StringId,
+    type_node: NodeId,
+};
+
+/// `callee(args)` call expression (M0.8 closures, `etch-grammar.md` postfix_op
+/// §424). Args are a run of expr `NodeId` raw values in `arena.extra`. E1
+/// resolves calls whose callee is a closure-typed local (function / method
+/// calls arrive with fn/impl in E2).
+pub const CallExpr = struct {
+    callee: NodeId,
+    args_start: u32,
+    args_len: u32,
+};
+
 const NamedTypeNode = struct {
     name: StringId,
 };
@@ -678,6 +705,9 @@ pub const AstArena = struct {
     map_lits: std.ArrayListUnmanaged(MapLitExpr) = .empty,
     map_entries: std.ArrayListUnmanaged(MapEntry) = .empty,
     index_exprs: std.ArrayListUnmanaged(IndexExpr) = .empty,
+    closure_exprs: std.ArrayListUnmanaged(ClosureExpr) = .empty,
+    closure_params: std.ArrayListUnmanaged(ClosureParam) = .empty,
+    call_exprs: std.ArrayListUnmanaged(CallExpr) = .empty,
     named_types: std.ArrayListUnmanaged(NamedTypeNode) = .empty,
     array_types: std.ArrayListUnmanaged(ArrayTypeNode) = .empty,
     map_types: std.ArrayListUnmanaged(MapTypeNode) = .empty,
@@ -753,6 +783,9 @@ pub const AstArena = struct {
         self.map_lits.deinit(gpa);
         self.map_entries.deinit(gpa);
         self.index_exprs.deinit(gpa);
+        self.closure_exprs.deinit(gpa);
+        self.closure_params.deinit(gpa);
+        self.call_exprs.deinit(gpa);
         self.named_types.deinit(gpa);
         self.array_types.deinit(gpa);
         self.map_types.deinit(gpa);
@@ -926,6 +959,24 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.set_types.items.len);
         try self.set_types.append(gpa, .{ .elem = elem });
         return try self.addTypeNode(gpa, .set_type, idx, span);
+    }
+
+    pub fn addClosure(self: *AstArena, gpa: std.mem.Allocator, params: []const ClosureParam, body: NodeId, span: SourceSpan) !NodeId {
+        const start: u32 = @intCast(self.closure_params.items.len);
+        try self.closure_params.appendSlice(gpa, params);
+        const idx: u32 = @intCast(self.closure_exprs.items.len);
+        try self.closure_exprs.append(gpa, .{ .params_start = start, .params_len = @intCast(params.len), .body = body });
+        return try self.addExpr(gpa, .closure, idx, span);
+    }
+
+    /// `args` is a slice of `NodeId.raw()` values (the call arguments),
+    /// bulk-appended to `arena.extra` as a contiguous run.
+    pub fn addCall(self: *AstArena, gpa: std.mem.Allocator, callee: NodeId, args: []const u32, span: SourceSpan) !NodeId {
+        const start: u32 = @intCast(self.extra.items.len);
+        try self.extra.appendSlice(gpa, args);
+        const idx: u32 = @intCast(self.call_exprs.items.len);
+        try self.call_exprs.append(gpa, .{ .callee = callee, .args_start = start, .args_len = @intCast(args.len) });
+        return try self.addExpr(gpa, .fn_call, idx, span);
     }
 
     pub fn addLetStmt(self: *AstArena, gpa: std.mem.Allocator, let: LetStmt, span: SourceSpan) !NodeId {

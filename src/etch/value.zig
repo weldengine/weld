@@ -73,6 +73,9 @@ pub const Value = union(enum) {
     /// Handle into the interpreter's per-rule-body map store (M0.8
     /// collections). Same lifetime rules as `array_ref`.
     map_ref: u32,
+    /// Handle into the interpreter's per-rule-body closure store (M0.8
+    /// closures). Same lifetime rules as `array_ref`.
+    closure: u32,
     unit,
 
     pub fn fromInt(x: i64) Value {
@@ -109,6 +112,7 @@ pub const Value = union(enum) {
             .range => false,
             .array_ref => false,
             .map_ref => false,
+            .closure => false,
             .unit => true,
         };
     }

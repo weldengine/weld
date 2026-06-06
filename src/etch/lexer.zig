@@ -105,6 +105,7 @@ pub const Lexer = struct {
                 '[' => return self.consumeOne(.lbracket),
                 ']' => return self.consumeOne(.rbracket),
                 ';' => return self.consumeOne(.semicolon),
+                '|' => return self.consumeOne(.pipe),
                 ':' => return self.consumeOne(.colon),
                 ',' => return self.consumeOne(.comma),
                 '.' => {

@@ -91,6 +91,7 @@ pub const TokenKind = enum {
     lbracket, // [ — array / map literals, indexing (M0.8 collections)
     rbracket, // ]
     semicolon, // ; — array fill literal `[v; n]` (M0.8 collections)
+    pipe, // | — closure delimiter `|a| e` (M0.8 closures; bitwise-or is out of E1)
     colon,
     comma,
     dot,

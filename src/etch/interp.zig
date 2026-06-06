@@ -172,6 +172,39 @@ const CollectionStore = struct {
     }
 };
 
+/// A runtime closure value (M0.8 closures): the closure-expression node plus a
+/// by-value snapshot of the environment captured at the definition site
+/// (§5.6 — value types copied). E1 closures are short-lived (invoked in the
+/// same rule body), so capturing component refs is sound; long-lived closures
+/// (event handlers) are E3+.
+const ClosureVal = struct {
+    node: NodeId,
+    captured: std.AutoHashMapUnmanaged(StringId, Value),
+};
+
+/// Per-rule-body store for closure values, addressed by `Value.closure`. Reset
+/// at the body boundary like the collection store (rule-arena semantics).
+const ClosureStore = struct {
+    list: std.ArrayListUnmanaged(ClosureVal) = .empty,
+
+    fn deinit(self: *ClosureStore, gpa: std.mem.Allocator) void {
+        for (self.list.items) |*c| c.captured.deinit(gpa);
+        self.list.deinit(gpa);
+    }
+
+    fn reset(self: *ClosureStore, gpa: std.mem.Allocator) void {
+        for (self.list.items) |*c| c.captured.deinit(gpa);
+        self.list.clearRetainingCapacity();
+    }
+
+    /// Store a closure (taking ownership of `captured`), returning its handle.
+    fn newClosure(self: *ClosureStore, gpa: std.mem.Allocator, node: NodeId, captured: std.AutoHashMapUnmanaged(StringId, Value)) !u32 {
+        const idx: u32 = @intCast(self.list.items.len);
+        try self.list.append(gpa, .{ .node = node, .captured = captured });
+        return idx;
+    }
+};
+
 const StmtError = error{ OutOfMemory, RuntimeFailure };
 
 /// S4 tree-walking interpreter — owns the bridge state, evaluates
@@ -183,12 +216,15 @@ pub const Interpreter = struct {
     rule_descs: []RuleDesc,
     /// Heap store backing collection values created in rule bodies (M0.8).
     collections: CollectionStore = .{},
+    /// Store backing closure values created in rule bodies (M0.8 closures).
+    closures: ClosureStore = .{},
 
     pub fn deinit(self: *Interpreter) void {
         for (self.rule_descs) |*r| r.deinit(self.gpa);
         self.gpa.free(self.rule_descs);
         self.bridge.deinit(self.gpa);
         self.collections.deinit(self.gpa);
+        self.closures.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -324,9 +360,11 @@ pub const Interpreter = struct {
 
         var locals: Locals = .{};
         defer locals.deinit(self.gpa);
-        // Collections created in this body live in the rule arena: free them
-        // at the body boundary so handles never outlive their invocation.
+        // Collections and closures created in this body live in the rule arena:
+        // free them at the body boundary so handles never outlive their
+        // invocation.
         defer self.collections.reset(self.gpa);
+        defer self.closures.reset(self.gpa);
         try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
 
         var s: u32 = 0;
@@ -678,6 +716,43 @@ pub const Interpreter = struct {
                 const i = std.math.cast(usize, idx_v.int_) orelse return error.RuntimeFailure;
                 if (i >= arr.items.len) return error.RuntimeFailure;
                 return arr.items[i];
+            },
+            .closure => {
+                // `|a| body` → snapshot the locals as the captured env (value
+                // capture, §5.6) and return a closure handle (M0.8 closures).
+                var captured: std.AutoHashMapUnmanaged(StringId, Value) = .empty;
+                errdefer captured.deinit(self.gpa);
+                var it = locals.map.iterator();
+                while (it.next()) |e| try captured.put(self.gpa, e.key_ptr.*, e.value_ptr.value);
+                const handle = try self.closures.newClosure(self.gpa, id, captured);
+                return Value{ .closure = handle };
+            },
+            .fn_call => {
+                // `callee(args)` — E1 invokes a closure: build a call frame from
+                // the captured env plus the parameters bound to the arguments
+                // (evaluated in the caller's scope), then evaluate the body in
+                // that frame (M0.8 closures).
+                const call = self.ast.call_exprs.items[data];
+                const callee = try self.evalExpr(world, locals, call.callee);
+                if (callee != .closure) return error.RuntimeFailure;
+                const handle = callee.closure;
+                const node = self.closures.list.items[handle].node;
+                const ce = self.ast.closure_exprs.items[self.ast.exprData(node)];
+                if (ce.params_len != call.args_len) return error.RuntimeFailure;
+                var frame: Locals = .{};
+                defer frame.deinit(self.gpa);
+                // Copy the captured environment into the frame first (before any
+                // arg eval can grow / realloc the closure store).
+                var cap_it = self.closures.list.items[handle].captured.iterator();
+                while (cap_it.next()) |e| try frame.put(self.gpa, e.key_ptr.*, e.value_ptr.*, false);
+                var i: u32 = 0;
+                while (i < ce.params_len) : (i += 1) {
+                    const p = self.ast.closure_params.items[ce.params_start + i];
+                    const arg: NodeId = @bitCast(self.ast.extra.items[call.args_start + i]);
+                    const av = try self.evalExpr(world, locals, arg);
+                    try frame.put(self.gpa, p.name, av, false);
+                }
+                return try self.evalExpr(world, &frame, ce.body);
             },
             else => return error.RuntimeFailure, // path / tag_path / unsupported variants
         }
@@ -1587,4 +1662,49 @@ test "runProgram map literal + for-in sums values (M0.8 collections)" {
     var total: i64 = 0;
     @memcpy(std.mem.asBytes(&total), slot[0..8]);
     try std.testing.expectEqual(@as(i64, 60), total);
+}
+
+test "runProgram closure captures an outer local by value (M0.8 closures)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A closure capturing an outer local (`factor`) by value and invoked. The
+    // interpreter is the reference execution; capturing-closure codegen is
+    // deferred (struct-with-fields lowering). scale(5) = 5 * 3 = 15.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule apply(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let factor = 3
+        \\  let scale = |x: int| x * factor
+        \\  entity.get_mut(Acc).out = scale(5)
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 15), out);
 }

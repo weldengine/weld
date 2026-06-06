@@ -97,6 +97,10 @@ pub const ResolvedType = union(enum) {
     map_t: MapInfo,
     /// `Set<T>` set (M0.8 collections).
     set_t: BuiltinType,
+    /// A closure value (M0.8 closures). Payload is the closure-expression
+    /// `NodeId`; the return type is inferred lazily at each call site (params
+    /// bound to the argument types in the caller's scope).
+    closure: NodeId,
     /// Type unknown / unresolved. Used as the fallback after a diagnostic
     /// has been emitted; subsequent checks treat `unknown` as wildcard to
     /// avoid cascade errors.
@@ -113,6 +117,7 @@ pub const ResolvedType = union(enum) {
             .array_dyn => |elem| elem == b.array_dyn,
             .map_t => |info| info.key == b.map_t.key and info.value == b.map_t.value,
             .set_t => |elem| elem == b.set_t,
+            .closure => |node| std.meta.eql(node, b.closure),
             .unknown => true,
         };
     }
@@ -826,6 +831,8 @@ pub const TypeChecker = struct {
             .array_lit => return try self.synthArrayLit(id, data, ctx_opt),
             .map_lit => return try self.synthMapLit(id, data, ctx_opt),
             .index => return try self.synthIndex(id, data, ctx_opt),
+            .closure => return .{ .closure = id },
+            .fn_call => return try self.synthCall(id, data, ctx_opt),
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
             else => return ResolvedType.unknown,
         }
@@ -901,6 +908,49 @@ pub const TypeChecker = struct {
         }
         if (!all_builtin or key_bt == null or val_bt == null) return ResolvedType.unknown;
         return .{ .map_t = .{ .key = key_bt.?, .value = val_bt.? } };
+    }
+
+    /// Type a call expression (M0.8 closures). E1 only resolves calls whose
+    /// callee is a closure: arity is checked, then the body is typed for the
+    /// return with the parameters bound (to their annotation, else the argument
+    /// type) in the caller's scope. Calls on non-closures are an error
+    /// (function / method calls arrive with fn / impl in E2).
+    fn synthCall(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const call = self.arena.call_exprs.items[data];
+        const callee_t = try self.synthExprE(call.callee, ctx_opt);
+        if (callee_t != .closure) {
+            if (callee_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "call target is not callable in E1 (only closures can be called)", .{});
+            return ResolvedType.unknown;
+        }
+        const ce = self.arena.closure_exprs.items[self.arena.exprData(callee_t.closure)];
+        if (ce.params_len != call.args_len) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "closure called with {d} argument(s), expected {d}", .{ call.args_len, ce.params_len });
+            return ResolvedType.unknown;
+        }
+        const ctx = ctx_opt orelse return ResolvedType.unknown;
+        var i: u32 = 0;
+        while (i < ce.params_len) : (i += 1) {
+            const p = self.arena.closure_params.items[ce.params_start + i];
+            const arg: NodeId = @bitCast(self.arena.extra.items[call.args_start + i]);
+            const arg_t = try self.synthExprE(arg, ctx_opt);
+            var ptype = arg_t;
+            if (!p.type_node.isNone()) {
+                ptype = self.namedTypeToResolved(p.type_node);
+                if (ptype == .builtin and arg_t == .builtin and !self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "closure argument type does not match the parameter type", .{});
+                }
+            }
+            try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
+        }
+        const ret = try self.synthExprE(ce.body, ctx_opt);
+        // Remove the parameter bindings (E1 closures don't collide their params
+        // with outer locals in practice; a save/restore is a later refinement).
+        i = 0;
+        while (i < ce.params_len) : (i += 1) {
+            const p = self.arena.closure_params.items[ce.params_start + i];
+            _ = ctx.locals.remove(p.name);
+        }
+        return ret;
     }
 
     /// Type an index / slice access (M0.8 collections). A range index
@@ -1071,7 +1121,7 @@ pub const TypeChecker = struct {
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on resource '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
-            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .unknown => return ResolvedType.unknown,
+            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .unknown => return ResolvedType.unknown,
         }
     }
 
@@ -1727,4 +1777,47 @@ test "map literal typing and map for-in bindings (M0.8 collections)" {
     );
     defer single.deinit(gpa);
     try expectAnyCode(single.diagnostics.items, .type_mismatch);
+}
+
+test "closure call arity, return typing, and non-callable (M0.8 closures)" {
+    const gpa = std.testing.allocator;
+
+    // A closure returning int, called and assigned to an int field — clean.
+    var ok = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let double = |x: int| x * 2
+        \\  entity.get_mut(C).out = double(5)
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+
+    // Wrong arity → E0200.
+    var arity = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let double = |x: int| x * 2
+        \\  let y = double(1, 2)
+        \\}
+    );
+    defer arity.deinit(gpa);
+    try expectAnyCode(arity.diagnostics.items, .type_mismatch);
+
+    // Calling a non-closure → E0200.
+    var noncallable = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let n = 5
+        \\  let y = n(3)
+        \\}
+    );
+    defer noncallable.deinit(gpa);
+    try expectAnyCode(noncallable.diagnostics.items, .type_mismatch);
 }

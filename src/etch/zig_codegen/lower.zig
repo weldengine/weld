@@ -625,6 +625,17 @@ fn walkExprForComponents(
             try walkExprForComponents(gpa, ast, ix.receiver, out);
             try walkExprForComponents(gpa, ast, ix.index, out);
         },
+        .closure => {
+            try walkExprForComponents(gpa, ast, ast.closure_exprs.items[data].body, out);
+        },
+        .fn_call => {
+            const call = ast.call_exprs.items[data];
+            try walkExprForComponents(gpa, ast, call.callee, out);
+            var i: u32 = 0;
+            while (i < call.args_len) : (i += 1) {
+                try walkExprForComponents(gpa, ast, @bitCast(ast.extra.items[call.args_start + i]), out);
+            }
+        },
         .match_expr => {
             const m = ast.match_exprs.items[data];
             try walkExprForComponents(gpa, ast, m.scrutinee, out);
@@ -1084,6 +1095,47 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 try w.write("))]");
             }
         },
+        .closure => {
+            // `|a| body` → an anonymous `struct { fn call(params) ret { return
+            // body; } }` (M0.8 closures). E1 codegen handles capture-free
+            // closures; a capturing closure is deferred (struct-with-fields
+            // lowering) and the interpreter is its reference execution.
+            const ce = ast.closure_exprs.items[data];
+            if (closureHasCaptures(ast, ce)) return CodegenError.UnsupportedConstruct;
+            const saved = ctx.records.items.len;
+            var i: u32 = 0;
+            while (i < ce.params_len) : (i += 1) {
+                const p = ast.closure_params.items[ce.params_start + i];
+                try ctx.records.append(w.gpa, .{ .key = .{ .name = p.name }, .info = .{ .kind = .value, .zig_type = closureParamZigType(ast, p), .is_mut = false } });
+            }
+            const ret_zig = inferExprZigType(ast, ctx, ce.body);
+            try w.write("struct { fn call(");
+            i = 0;
+            while (i < ce.params_len) : (i += 1) {
+                if (i > 0) try w.write(", ");
+                const p = ast.closure_params.items[ce.params_start + i];
+                try w.ident(ast.strings.slice(p.name));
+                try w.print(": {s}", .{closureParamZigType(ast, p)});
+            }
+            try w.print(") {s} {{ return ", .{ret_zig});
+            try emitExpr(w, ast, ctx, ce.body);
+            try w.write("; } }");
+            ctx.records.items.len = saved;
+        },
+        .fn_call => {
+            // `callee(args)` → `callee.call(args)` (M0.8 closures): the callee
+            // is a closure-typed local, lowered to the anonymous struct above.
+            const call = ast.call_exprs.items[data];
+            try emitExpr(w, ast, ctx, call.callee);
+            try w.write(".call(");
+            var i: u32 = 0;
+            while (i < call.args_len) : (i += 1) {
+                if (i > 0) try w.write(", ");
+                const arg: NodeId = @bitCast(ast.extra.items[call.args_start + i]);
+                try emitExpr(w, ast, ctx, arg);
+            }
+            try w.write(")");
+        },
         .range => return CodegenError.UnsupportedConstruct, // ranges appear only as for-in iterables in E1 (lowered by emitStmt .for_stmt)
         .cast => {
             // `operand as Type` → an explicit Zig numeric conversion wrapped
@@ -1216,6 +1268,48 @@ fn emitMatch(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Codege
     try w.write("}");
 }
 
+/// The Zig type emitted for a closure parameter (M0.8 closures). E1 codegen
+/// expects annotated scalar params; a missing / non-scalar annotation falls
+/// back to `i64` (the interpreter is the reference for richer closures).
+fn closureParamZigType(ast: *const AstArena, p: ast_mod.ClosureParam) []const u8 {
+    if (p.type_node.isNone() or ast.typeNodeKind(p.type_node) != .named) return "i64";
+    const tnode = ast.named_types.items[ast.typeNodeData(p.type_node)];
+    return type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(tnode.name))) orelse "i64";
+}
+
+/// True if a closure body references any identifier that is not one of its
+/// parameters — i.e. it captures an outer binding (M0.8 closures). E1 codegen
+/// only handles capture-free closures; a capturing closure is deferred (the
+/// struct-with-fields lowering) and runs through the interpreter instead.
+fn closureHasCaptures(ast: *const AstArena, ce: ast_mod.ClosureExpr) bool {
+    return exprReferencesNonParam(ast, ce.body, ce);
+}
+
+fn exprReferencesNonParam(ast: *const AstArena, expr: NodeId, ce: ast_mod.ClosureExpr) bool {
+    const kind = ast.exprKind(expr);
+    const data = ast.exprData(expr);
+    switch (kind) {
+        .int_lit, .float_lit, .bool_lit, .string_lit, .tag_path => return false,
+        .ident => {
+            const name: StringId = data;
+            var i: u32 = 0;
+            while (i < ce.params_len) : (i += 1) {
+                if (ast.closure_params.items[ce.params_start + i].name == name) return false;
+            }
+            return true;
+        },
+        .binary => {
+            const b = ast.binary_exprs.items[data];
+            return exprReferencesNonParam(ast, b.lhs, ce) or exprReferencesNonParam(ast, b.rhs, ce);
+        },
+        .unary => return exprReferencesNonParam(ast, ast.unary_exprs.items[data].operand, ce),
+        .cast => return exprReferencesNonParam(ast, ast.casts.items[data].operand, ce),
+        // Any other body shape (field access, calls, collections, …) is
+        // conservatively treated as capturing → deferred codegen.
+        else => return true,
+    }
+}
+
 fn inferZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId, annotation: NodeId) []const u8 {
     // Only a named-type annotation maps to a scalar Zig type here; collection
     // annotations (`T[]`, `[K: V]`, `Set<T>`, `T[N]`) leave the binding
@@ -1270,6 +1364,10 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         // (M0.8 collections). Returning "" makes `emitLet` drop the `: T`.
         .array_lit => "",
         .index => "",
+        // Closures (anonymous struct type) and call results are left to Zig
+        // inference too (M0.8 closures).
+        .closure => "",
+        .fn_call => "",
         .method_get, .method_get_mut => "struct", // not directly inferable; should not appear at let-rhs after method_get handling
         .cast => blk: {
             const c = ast.casts.items[data];

@@ -45,4 +45,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p26_array_index", .etch_path = "tests/etch_interp/programs/26_array_index.etch" },
     .{ .name = "p27_array_slice", .etch_path = "tests/etch_interp/programs/27_array_slice.etch" },
     .{ .name = "p28_for_array_sum", .etch_path = "tests/etch_interp/programs/28_for_array_sum.etch" },
+    .{ .name = "p29_closure_apply", .etch_path = "tests/etch_interp/programs/29_closure_apply.etch" },
 };

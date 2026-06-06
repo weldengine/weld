@@ -1108,6 +1108,28 @@ pub const Parser = struct {
                         .byte_end = closing.span.byte_end,
                     });
                 },
+                // Call `callee(args)` (M0.8 closures, `etch-grammar.md`
+                // postfix_op §424). E1 resolves calls on closure-typed locals;
+                // positional args only (named args arrive with default-valued
+                // functions in E2).
+                .lparen => {
+                    _ = try self.advance(); // '('
+                    var args: std.ArrayListUnmanaged(u32) = .empty;
+                    defer args.deinit(self.gpa);
+                    if (self.peek() != .rparen) {
+                        while (true) {
+                            const a = try self.parseExpr(0);
+                            try args.append(self.gpa, a.raw());
+                            if (!try self.match(.comma)) break;
+                        }
+                    }
+                    const closing = try self.expect(.rparen, "expected ')' to close call arguments");
+                    const recv_span = self.arena.exprSpan(expr);
+                    expr = try self.arena.addCall(self.gpa, expr, args.items, .{
+                        .byte_start = recv_span.byte_start,
+                        .byte_end = closing.span.byte_end,
+                    });
+                },
                 else => break,
             }
         }
@@ -1257,11 +1279,39 @@ pub const Parser = struct {
         return try self.arena.addArrayLit(self.gpa, elems.items, false, NodeId.none, .{ .byte_start = open.span.byte_start, .byte_end = closing.span.byte_end });
     }
 
+    /// Parse `|a, b| expr` / `|| expr` closure (M0.8 closures, `etch-grammar.md`
+    /// §524). E1 takes an expression body; a `{ block }` body arrives with
+    /// block expressions (loop/break tranche).
+    fn parseClosure(self: *Parser) ParseError!NodeId {
+        const open = try self.advance(); // '|'
+        var params: std.ArrayListUnmanaged(ast_mod.ClosureParam) = .empty;
+        defer params.deinit(self.gpa);
+        if (self.peek() != .pipe) {
+            while (true) {
+                const name_tok = try self.expect(.ident, "expected closure parameter name");
+                var type_node: NodeId = NodeId.none;
+                if (try self.match(.colon)) {
+                    type_node = try self.parseType();
+                }
+                try params.append(self.gpa, .{ .name = try self.internSlice(name_tok.span), .type_node = type_node });
+                if (!try self.match(.comma)) break;
+            }
+        }
+        _ = try self.expect(.pipe, "expected '|' to close closure parameters");
+        const body = try self.parseExpr(0);
+        const body_span = self.arena.exprSpan(body);
+        return try self.arena.addClosure(self.gpa, params.items, body, .{
+            .byte_start = open.span.byte_start,
+            .byte_end = body_span.byte_end,
+        });
+    }
+
     fn parsePrimary(self: *Parser) ParseError!NodeId {
         try self.surfaceTokenErrors();
         switch (self.peek()) {
             .kw_match => return try self.parseMatch(),
             .lbracket => return try self.parseArrayOrMapLiteral(),
+            .pipe => return try self.parseClosure(),
             .int_literal => {
                 const tok = try self.advance();
                 const id = try self.internSlice(tok.span);
@@ -1632,6 +1682,31 @@ test "parser builds map type, map literal, and Set<T> type (M0.8 collections)" {
     }
     try std.testing.expect(saw_map_type);
     try std.testing.expect(saw_set_type);
+}
+
+test "parser builds closures and calls (M0.8 closures)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  let f = |x: int| x + 1
+        \\  let g = |a, b| a
+        \\  let h = || 7
+        \\  let y = f(10)
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var closures: usize = 0;
+    var calls: usize = 0;
+    for (result.ast.exprs.items(.kind)) |k| {
+        if (k == .closure) closures += 1;
+        if (k == .fn_call) calls += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), closures); // f, g, h
+    try std.testing.expectEqual(@as(usize, 1), calls); // f(10)
 }
 
 test "parser does not leak comment spans on OOM during init" {
