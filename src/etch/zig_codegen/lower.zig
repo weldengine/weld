@@ -861,32 +861,58 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             // directly (a range has no standalone Zig value). The loop var is
             // recorded as a value local for the body's ident resolution.
             const f = ast.for_stmts.items[data];
-            if (ast.exprKind(f.iterable) != .range) return CodegenError.UnsupportedConstruct;
-            const r = ast.ranges.items[ast.exprData(f.iterable)];
             const vname = ast.strings.slice(f.var_name);
-            try w.writeIndent();
-            try w.write("{ var ");
-            try w.ident(vname);
-            try w.write(": i64 = ");
-            try emitExpr(w, ast, ctx, r.start);
-            try w.write("; while (");
-            try w.ident(vname);
-            try w.write(if (r.inclusive) " <= " else " < ");
-            try emitExpr(w, ast, ctx, r.end);
-            try w.write(") : (");
-            try w.ident(vname);
-            try w.write(" += 1) {\n");
-            w.indentBy(1);
-            const saved = ctx.records.items.len;
-            try ctx.records.append(w.gpa, .{ .key = .{ .name = f.var_name }, .info = .{ .kind = .value, .zig_type = "i64", .is_mut = false } });
-            var s: u32 = 0;
-            while (s < f.body_len) : (s += 1) {
-                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]));
+            if (ast.exprKind(f.iterable) == .range) {
+                // `for v in start..end { body }` → a Zig `while` over an i64
+                // counter (the range has no standalone Zig value). The loop var
+                // is recorded as a value local for the body's ident resolution.
+                const r = ast.ranges.items[ast.exprData(f.iterable)];
+                try w.writeIndent();
+                try w.write("{ var ");
+                try w.ident(vname);
+                try w.write(": i64 = ");
+                try emitExpr(w, ast, ctx, r.start);
+                try w.write("; while (");
+                try w.ident(vname);
+                try w.write(if (r.inclusive) " <= " else " < ");
+                try emitExpr(w, ast, ctx, r.end);
+                try w.write(") : (");
+                try w.ident(vname);
+                try w.write(" += 1) {\n");
+                w.indentBy(1);
+                const saved = ctx.records.items.len;
+                try ctx.records.append(w.gpa, .{ .key = .{ .name = f.var_name }, .info = .{ .kind = .value, .zig_type = "i64", .is_mut = false } });
+                var s: u32 = 0;
+                while (s < f.body_len) : (s += 1) {
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]));
+                }
+                ctx.records.items.len = saved;
+                w.indentBy(-1);
+                try w.writeIndent();
+                try w.write("} }\n");
+            } else {
+                // `for v in <array> { body }` → Zig `for (<array>) |v| { ... }`
+                // (M0.8 collections). E1 codegen supports fixed-array iterables;
+                // the loop variable binds each element by value. Zig infers the
+                // element type, so the local is recorded with no zig_type.
+                try w.writeIndent();
+                try w.write("for (");
+                try emitExpr(w, ast, ctx, f.iterable);
+                try w.write(") |");
+                try w.ident(vname);
+                try w.write("| {\n");
+                w.indentBy(1);
+                const saved = ctx.records.items.len;
+                try ctx.records.append(w.gpa, .{ .key = .{ .name = f.var_name }, .info = .{ .kind = .value, .zig_type = "", .is_mut = false } });
+                var s: u32 = 0;
+                while (s < f.body_len) : (s += 1) {
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]));
+                }
+                ctx.records.items.len = saved;
+                w.indentBy(-1);
+                try w.writeIndent();
+                try w.write("}\n");
             }
-            ctx.records.items.len = saved;
-            w.indentBy(-1);
-            try w.writeIndent();
-            try w.write("} }\n");
         },
         else => return CodegenError.UnsupportedConstruct,
     }

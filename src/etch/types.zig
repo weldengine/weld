@@ -672,11 +672,16 @@ pub const TypeChecker = struct {
                 var elem_t: ResolvedType = ResolvedType.unknown;
                 if (iter_t == .range) {
                     elem_t = .{ .builtin = iter_t.range };
+                } else if (iter_t.elementType()) |bt| {
+                    // Array / slice iteration binds the element type (M0.8
+                    // collections). Map iteration `for k, v in m` arrives with
+                    // the map runtime sub-tranche.
+                    elem_t = .{ .builtin = bt };
                 } else if (iter_t != .unknown) {
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "for-in iterable must be a range in E1 (array/map iteration arrives with collections)", .{});
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "for-in iterable must be a range or array in E1", .{});
                 }
                 if (f.index_name != 0) {
-                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "a range for-in binds a single loop variable", .{});
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "this for-in binds a single loop variable", .{});
                 }
                 try ctx.locals.put(self.gpa, f.var_name, .{ .type_ = elem_t, .is_mut = false });
                 var i: u32 = 0;

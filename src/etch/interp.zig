@@ -357,15 +357,33 @@ pub const Interpreter = struct {
                 // iteration before the body statements run.
                 const f = self.ast.for_stmts.items[data];
                 const iter = try self.evalExpr(world, locals, f.iterable);
-                if (iter != .range) return error.RuntimeFailure;
-                const r = iter.range;
-                var i: i64 = r.start;
-                while (if (r.inclusive) i <= r.end else i < r.end) : (i += 1) {
-                    try locals.put(self.gpa, f.var_name, Value{ .int_ = i }, false);
-                    var s: u32 = 0;
-                    while (s < f.body_len) : (s += 1) {
-                        try self.execStmt(world, locals, @bitCast(self.ast.extra.items[f.body_start + s]));
-                    }
+                switch (iter) {
+                    .range => |r| {
+                        var i: i64 = r.start;
+                        while (if (r.inclusive) i <= r.end else i < r.end) : (i += 1) {
+                            try locals.put(self.gpa, f.var_name, Value{ .int_ = i }, false);
+                            var s: u32 = 0;
+                            while (s < f.body_len) : (s += 1) {
+                                try self.execStmt(world, locals, @bitCast(self.ast.extra.items[f.body_start + s]));
+                            }
+                        }
+                    },
+                    .array_ref => |handle| {
+                        // Snapshot the length once; re-index each iteration so a
+                        // collection created in the body (which may grow the
+                        // outer store vector) never leaves a stale pointer.
+                        const len = self.collections.arrays.items[handle].items.len;
+                        var k: usize = 0;
+                        while (k < len) : (k += 1) {
+                            const elem = self.collections.arrays.items[handle].items[k];
+                            try locals.put(self.gpa, f.var_name, elem, false);
+                            var s: u32 = 0;
+                            while (s < f.body_len) : (s += 1) {
+                                try self.execStmt(world, locals, @bitCast(self.ast.extra.items[f.body_start + s]));
+                            }
+                        }
+                    },
+                    else => return error.RuntimeFailure,
                 }
             },
             else => return error.RuntimeFailure,
@@ -1417,4 +1435,50 @@ test "runProgram numeric cast int-to-float (M0.8 cast foundation)" {
     var current: f64 = 0;
     @memcpy(std.mem.asBytes(&current), slot[0..@sizeOf(f64)]);
     try std.testing.expectApproxEqAbs(@as(f64, 3.0), current, 0.0001);
+}
+
+test "runProgram for-in over a dynamic array iterates each element (M0.8 collections)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A `T[]`-annotated dynamic array — the interpreter is its reference
+    // execution (codegen for dynamic arrays is deferred, heap/arena model).
+    // for-in over it sums 5 + 15 + 25 = 45.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule sum(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let xs: int[] = [5, 15, 25]
+        \\  let mut s = 0
+        \\  for x in xs { s += x }
+        \\  entity.get_mut(Acc).out = s
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var total: i64 = 0;
+    @memcpy(std.mem.asBytes(&total), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 45), total);
 }
