@@ -1678,6 +1678,57 @@ test "runProgram while loop with a conditional break (M0.8 control flow)" {
     try std.testing.expectEqual(@as(i64, 10), out);
 }
 
+test "runProgram closure with a block body (M0.8 control flow)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `|x| { let y = x + 1; y * 2 }` — a closure whose body is a block
+    // expression, unblocked by block-1 block expressions (the E1
+    // closure-block-body deferral). The interpreter is the reference; a
+    // block-body closure's codegen folds into the E3 "Level A complete in
+    // codegen" gate (deferred there, as for capturing closures), so this has no
+    // codegen differential.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule run(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let f = |x: int| {
+        \\    let y = x + 1
+        \\    y * 2
+        \\  }
+        \\  entity.get_mut(Acc).out = f(4)
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    // f(4): y = 5, y * 2 = 10.
+    try std.testing.expectEqual(@as(i64, 10), out);
+}
+
 test "runProgram match dispatches on literal and binding arms (M0.8 match)" {
     const gpa = std.testing.allocator;
 

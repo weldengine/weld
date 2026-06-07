@@ -1,0 +1,23 @@
+// M0.8 control flow: a `match` arm whose body is a block expression
+// `{ stmts; value }` (closing the E1 match-arm-block deferral). The interpreter
+// runs the arm body's statements then yields its trailing value; the cooked Zig
+// nests the value-block inside the labeled match block. sel = 1 selects the
+// block arm → out = base * 2 = 20.
+component C {
+  sel: int = 1
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has C
+{
+  let s = entity.get(C).sel
+  entity.get_mut(C).out = match s {
+    0 => 100,
+    1 => {
+      let base = 10
+      base * 2
+    },
+    _ => 999,
+  }
+}

@@ -1,0 +1,25 @@
+// M0.8 control flow: a `match` used as a statement whose arms carry control
+// flow (`5 => { break }`) and side effects (the `_` arm mutates) — the form the
+// value-block `match` codegen cannot express. The cooked Zig lowers it to an
+// if-else chain of statement blocks (`emitMatchAsStmt`). Breaks when i reaches
+// 5 → s = 0 + 1 + 2 + 3 + 4 = 10.
+component Acc {
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has Acc
+{
+  let mut i = 0
+  let mut s = 0
+  loop {
+    match i {
+      5 => { break },
+      _ => {
+        s += i
+        i += 1
+      },
+    }
+  }
+  entity.get_mut(Acc).out = s
+}

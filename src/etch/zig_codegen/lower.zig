@@ -898,6 +898,10 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 try emitIfAsStmt(w, ast, ctx, ast.exprData(eid));
                 return;
             }
+            if (ek == .match_expr) {
+                try emitMatchAsStmt(w, ast, ctx, ast.exprData(eid));
+                return;
+            }
             try w.writeIndent();
             // Side-effect-only expression statement: typically a bare
             // `entity.get_mut(T)` discard. Emit as `_ = <expr>;` so Zig
@@ -1398,6 +1402,86 @@ fn emitMatch(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Codege
     // bool-exhaustive matches have no catch-all arm; the type-checker proved
     // every case is covered, so the fall-through is unreachable.
     if (!has_catch_all) try w.write("unreachable; ");
+    try w.write("}");
+}
+
+/// Emit a `match` in statement position (M0.8 control flow): an if-else chain
+/// over the scrutinee binding, each arm body run as statements with its value
+/// discarded. Used when arms carry control flow (`_ => { break }`) or side
+/// effects, where the value-block form (`emitMatch`) would be ill-typed
+/// (value-less / divergent arms). `data` is the `match_exprs` slab index;
+/// `__ms<n>` is unique per match. Well-formed matches place the catch-all
+/// (wildcard / binding) arm last, so the `else` lands at the chain's tail.
+fn emitMatchAsStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) CodegenError!void {
+    const m = ast.match_exprs.items[data];
+    const lbl = data;
+    try w.writeIndent();
+    try w.print("{{ const __ms{d} = ", .{lbl});
+    try emitExpr(w, ast, ctx, m.scrutinee);
+    try w.write(";\n");
+    w.indentBy(1);
+    var i: u32 = 0;
+    var chained = false;
+    while (i < m.arms_len) : (i += 1) {
+        const arm = ast.match_arms.items[m.arms_start + i];
+        try w.writeIndent();
+        if (chained) try w.write("else ");
+        switch (arm.pattern_kind) {
+            .literal => {
+                const lit: NodeId = @bitCast(arm.pattern_payload);
+                try w.print("if (__ms{d} == ", .{lbl});
+                try emitExpr(w, ast, ctx, lit);
+                try w.write(") ");
+                try emitArmBodyAsStmts(w, ast, ctx, arm.body, lbl, null);
+                chained = true;
+            },
+            .wildcard => try emitArmBodyAsStmts(w, ast, ctx, arm.body, lbl, null),
+            .binding => try emitArmBodyAsStmts(w, ast, ctx, arm.body, lbl, arm.pattern_payload),
+        }
+        try w.write("\n");
+    }
+    w.indentBy(-1);
+    try w.writeIndent();
+    try w.write("}\n");
+}
+
+/// Emit a match arm body as a braced Zig statement block with its value
+/// discarded (M0.8 control flow). A `bind_name` (binding-pattern arm) declares
+/// the bound name from the scrutinee snapshot `__ms<lbl>`. A `block_expr` body
+/// inlines its statements + discarded trailing value; an expression body is
+/// discarded with `_ = <expr>;`.
+fn emitArmBodyAsStmts(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, body: NodeId, lbl: u32, bind_name: ?StringId) CodegenError!void {
+    try w.write("{\n");
+    w.indentBy(1);
+    const saved = ctx.records.items.len;
+    if (bind_name) |name| {
+        try w.writeIndent();
+        try w.write("const ");
+        try w.ident(ast.strings.slice(name));
+        try w.print(" = __ms{d};\n", .{lbl});
+        try ctx.records.append(w.gpa, .{ .key = .{ .name = name }, .info = .{ .kind = .value, .zig_type = "", .is_mut = false } });
+    }
+    if (ast.exprKind(body) == .block_expr) {
+        const blk = ast.block_exprs.items[ast.exprData(body)];
+        var s: u32 = 0;
+        while (s < blk.body_len) : (s += 1) {
+            try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]));
+        }
+        if (!blk.value.isNone()) {
+            try w.writeIndent();
+            try w.write("_ = ");
+            try emitExpr(w, ast, ctx, blk.value);
+            try w.write(";\n");
+        }
+    } else {
+        try w.writeIndent();
+        try w.write("_ = ");
+        try emitExpr(w, ast, ctx, body);
+        try w.write(";\n");
+    }
+    ctx.records.items.len = saved;
+    w.indentBy(-1);
+    try w.writeIndent();
     try w.write("}");
 }
 

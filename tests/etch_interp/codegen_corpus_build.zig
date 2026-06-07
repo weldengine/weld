@@ -51,4 +51,7 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p32_block_expr_value", .etch_path = "tests/etch_interp/programs/32_block_expr_value.etch" },
     .{ .name = "p33_if_else", .etch_path = "tests/etch_interp/programs/33_if_else.etch" },
     .{ .name = "p34_while_sum", .etch_path = "tests/etch_interp/programs/34_while_sum.etch" },
+    .{ .name = "p35_match_block_arm", .etch_path = "tests/etch_interp/programs/35_match_block_arm.etch" },
+    .{ .name = "p36_loop_if_break", .etch_path = "tests/etch_interp/programs/36_loop_if_break.etch" },
+    .{ .name = "p37_match_stmt_control", .etch_path = "tests/etch_interp/programs/37_match_stmt_control.etch" },
 };

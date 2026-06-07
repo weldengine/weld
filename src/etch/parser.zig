@@ -2119,6 +2119,37 @@ test "parser builds a while statement (M0.8 control flow)" {
     try std.testing.expectEqual(@as(usize, 1), whiles);
 }
 
+test "parser accepts block bodies in closures and match arms (M0.8 control flow)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  let f = |x: int| {
+        \\    let y = x
+        \\    y + 1
+        \\  }
+        \\  let m = match 1 {
+        \\    0 => { 10 },
+        \\    _ => 20
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var closures: usize = 0;
+    var blocks: usize = 0;
+    for (result.ast.exprs.items(.kind)) |k| {
+        if (k == .closure) closures += 1;
+        if (k == .block_expr) blocks += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), closures);
+    // Two block expressions: the closure body and the `0 =>` arm body (the
+    // `_ => 20` arm body is a bare expression, not a block).
+    try std.testing.expectEqual(@as(usize, 2), blocks);
+}
+
 test "parser does not leak comment spans on OOM during init" {
     // FailingAllocator wraps std.testing.allocator (which itself flags any
     // leak as a test failure). Each `fail_index` from 1..N forces the Nth
