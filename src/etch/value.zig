@@ -76,6 +76,11 @@ pub const Value = union(enum) {
     /// Handle into the interpreter's per-rule-body closure store (M0.8
     /// closures). Same lifetime rules as `array_ref`.
     closure: u32,
+    /// Handle into the interpreter's per-rule-body struct store (M0.8 E2 block
+    /// 3). A struct value is a by-value aggregate; the handle resolves against
+    /// `Interpreter.structs`. Same lifetime rules as `array_ref` (reset at the
+    /// rule-body boundary).
+    struct_ref: u32,
     unit,
 
     pub fn fromInt(x: i64) Value {
@@ -113,6 +118,7 @@ pub const Value = union(enum) {
             .array_ref => false,
             .map_ref => false,
             .closure => false,
+            .struct_ref => false,
             .unit => true,
         };
     }

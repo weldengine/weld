@@ -179,6 +179,13 @@ pub const Parser = struct {
     /// resolves the `break [IDENT] [expression]` ambiguity without a statement
     /// separator (an IDENT that is not an active label starts the break value).
     active_labels: std.ArrayListUnmanaged(StringId) = .empty,
+    /// When true, a bare `TYPE_IDENT {` is NOT parsed as a struct literal (M0.8
+    /// E2 block 3). Set while parsing the head expression of `if` / `while` /
+    /// `for` / `match` (where the `{` opens the body / arms, not a struct
+    /// literal — the classic struct-literal-vs-block ambiguity, resolved as in
+    /// Rust). Reset inside delimited contexts (`( … )`, `[ … ]`, a `{ … }`
+    /// block, a struct-literal field value) where a `{` is unambiguous again.
+    no_struct_lit: bool = false,
 
     fn isActiveLabel(self: *const Parser, name: StringId) bool {
         for (self.active_labels.items) |l| {
@@ -322,14 +329,14 @@ pub const Parser = struct {
     /// parser accepts, in lockstep with `parseTopLevel` — otherwise a valid
     /// construct following a parse error is silently skipped. Current set:
     /// S3 (`component` / `resource` / `rule`) + `type` (M0.8 alias) + `fn` /
-    /// `async` (M0.8 E2 call mechanism). Later milestones extend both sites
-    /// together (`struct`/`enum`/`trait`/`impl` in E2 block 3,
-    /// `event`/`tags` in E3).
+    /// `async` (M0.8 E2 call mechanism) + `struct` / `impl` (M0.8 E2 block 3
+    /// declaration layer). Later milestones extend both sites together
+    /// (`enum`/`trait` in E2 block 3 tranches B/C, `event`/`tags` in E3).
     fn recoverToTopLevel(self: *Parser) ParseError!void {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl => return,
                 else => _ = try self.advance(),
             }
         }
@@ -351,6 +358,8 @@ pub const Parser = struct {
             .kw_rule => try self.parseRuleDecl(annotations),
             .kw_type => try self.parseTypeAliasDecl(annotations),
             .kw_fn => try self.parseFnDecl(annotations, false),
+            .kw_struct => try self.parseStructDecl(annotations),
+            .kw_impl => try self.parseImplDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2): the only top-level `async` construct in
                 // E2. `async rule` interpretation/codegen is E3 — reject it here
@@ -362,7 +371,7 @@ pub const Parser = struct {
                 try self.parseFnDeclFrom(annotations, true, async_span);
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -707,16 +716,32 @@ pub const Parser = struct {
         return self.parseFnDeclFrom(annotations, is_async, self.current.span);
     }
 
-    /// Parse `[async] fn IDENT "(" [params] ")" [throws] ["->" type] block`
-    /// (M0.8 E2 call mechanism, `etch-grammar.md` §5.3). On entry the current
-    /// token is `fn` (the optional `async` was already consumed by the caller,
-    /// its span passed as `start_span`). The body is a value-block: the trailing
-    /// bare expression is the implicit return value (`etch-grammar.md` §4.1
-    /// l.645). Generics (`<...>`) and the `where` clause are E2 block 4 and
-    /// rejected here; the bodyless `.d.etch` form is out of scope (a body is
-    /// required). `async` is parsed (interp E3, codegen Phase 2); `throws` is
-    /// parsed (its codegen folds into the E3 error-handling gate).
+    /// Parse a top-level `fn` and add it as a `.fn_decl` item (M0.8 E2 call
+    /// mechanism). On entry the current token is `fn` (the optional `async` was
+    /// already consumed by the caller, its span passed as `start_span`). Shares
+    /// the signature/body machinery with `impl` methods via `parseFnLike`; a
+    /// top-level `fn` takes no `self` receiver (`allow_self = false`).
     fn parseFnDeclFrom(self: *Parser, annotations: AnnotationRange, is_async: bool, start_span: SourceSpan) ParseError!void {
+        const parsed = try self.parseFnLike(is_async, false, annotations);
+        _ = try self.arena.addFnDecl(self.gpa, parsed.decl, .{
+            .byte_start = start_span.byte_start,
+            .byte_end = parsed.close_span.byte_end,
+        });
+    }
+
+    const ParsedFn = struct { decl: ast_mod.FnDecl, close_span: SourceSpan };
+
+    /// Parse `[async] fn IDENT "(" [self_param ,] [params] ")" [throws]
+    /// ["->" type] block` and return the `FnDecl` value plus its closing brace
+    /// span — without adding an item (`etch-grammar.md` §5.3). On entry the
+    /// current token is `fn`. The body is a value-block: the trailing bare
+    /// expression is the implicit return (`etch-grammar.md` §4.1 l.645).
+    /// `allow_self` lets the first parameter be a `self` / `mut self` receiver
+    /// (M0.8 E2 block 3 `impl` methods); a top-level `fn` passes `false`.
+    /// Generics (`<...>`) + the `where` clause are E2 block 4 and rejected; the
+    /// bodyless `.d.etch` form is out of scope. `async` is parsed (interp E3,
+    /// codegen Phase 2); `throws` is parsed (codegen folds into the E3 gate).
+    fn parseFnLike(self: *Parser, is_async: bool, allow_self: bool, annotations: AnnotationRange) ParseError!ParsedFn {
         _ = try self.advance(); // 'fn'
         const name_tok = try self.expect(.ident, "expected function name (identifier) after 'fn'");
         const name_id = try self.internSlice(name_tok.span);
@@ -727,8 +752,18 @@ pub const Parser = struct {
 
         _ = try self.expect(.lparen, "expected '(' to begin function parameters");
         const params_start: u32 = @intCast(self.arena.fn_params.items.len);
+        var self_kind: ast_mod.SelfKind = .none;
         if (self.peek() != .rparen) {
+            var first = true;
             while (true) {
+                if (first and allow_self) {
+                    self_kind = try self.tryParseSelfParam();
+                    if (self_kind != .none) {
+                        first = false;
+                        if (!try self.match(.comma)) break;
+                        continue;
+                    }
+                }
                 const p_name = try self.expect(.ident, "expected parameter name");
                 _ = try self.expect(.colon, "expected ':' after parameter name");
                 const p_type = try self.parseType();
@@ -736,6 +771,7 @@ pub const Parser = struct {
                     .name = try self.internSlice(p_name.span),
                     .type_node = p_type,
                 });
+                first = false;
                 if (!try self.match(.comma)) break;
             }
         }
@@ -757,22 +793,128 @@ pub const Parser = struct {
         const body = try self.parseBlockBody();
         const closing = try self.expect(.rbrace, "expected '}' to close function body");
 
-        _ = try self.arena.addFnDecl(self.gpa, .{
+        return .{
+            .decl = .{
+                .name = name_id,
+                .params_start = params_start,
+                .params_len = params_len,
+                .return_type = return_type,
+                .is_async = is_async,
+                .throws = throws,
+                .body_start = body.start,
+                .body_len = body.len,
+                .value = body.value,
+                .annotations_extra = annotations.start,
+                .annotations_len = annotations.len,
+                .self_kind = self_kind,
+            },
+            .close_span = closing.span,
+        };
+    }
+
+    /// Recognise and consume a leading `self` / `mut self` method receiver
+    /// (M0.8 E2 block 3, `etch-grammar.md` §5.3 `self_param = [mut] self`).
+    /// `self` is a plain identifier (not a keyword), so the receiver is detected
+    /// by lexeme. Returns `.none` (consuming nothing) when the first parameter
+    /// is an ordinary `IDENT : type`.
+    fn tryParseSelfParam(self: *Parser) ParseError!ast_mod.SelfKind {
+        if (self.peek() == .kw_mut and self.peekNext() == .ident and std.mem.eql(u8, self.sliceOf(self.next_tok.span), "self")) {
+            _ = try self.advance(); // 'mut'
+            _ = try self.advance(); // 'self'
+            // Intern "self" so consumers holding only a *const arena (interp /
+            // codegen) can resolve the receiver binding even when the body never
+            // names `self` explicitly.
+            _ = try self.arena.strings.intern(self.gpa, "self");
+            return .by_mut;
+        }
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.current.span), "self")) {
+            _ = try self.advance(); // 'self'
+            _ = try self.arena.strings.intern(self.gpa, "self");
+            return .by_value;
+        }
+        return .none;
+    }
+
+    /// Parse `struct TYPE_IDENT "{" {annotated_field} "}"` (M0.8 E2 block 3,
+    /// `etch-grammar.md` §5.7). Same field machinery as a component / resource;
+    /// a struct is a by-value type (not registered with the world). Generics
+    /// (`<...>`) are block 4 and rejected here.
+    fn parseStructDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'struct'
+        const name_tok = try self.expect(.type_ident, "expected struct name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        if (self.peek() == .lt) {
+            return self.parseErr(self.peekSpan(), "generic structs are not supported yet (generics land in E2 block 4)");
+        }
+        _ = try self.expect(.lbrace, "expected '{' to start struct body");
+        const fields_start: u32 = @intCast(self.arena.fields.items.len);
+        while (self.peek() != .rbrace) {
+            try self.surfaceTokenErrors();
+            const field_annotations = try self.parseAnnotations();
+            try self.parseField(field_annotations);
+            _ = try self.match(.comma);
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close struct body");
+        const fields_len: u32 = @as(u32, @intCast(self.arena.fields.items.len)) - fields_start;
+        _ = try self.arena.addStructDecl(self.gpa, .{
             .name = name_id,
-            .params_start = params_start,
-            .params_len = params_len,
-            .return_type = return_type,
-            .is_async = is_async,
-            .throws = throws,
-            .body_start = body.start,
-            .body_len = body.len,
-            .value = body.value,
+            .fields_start = fields_start,
+            .fields_len = fields_len,
             .annotations_extra = annotations.start,
             .annotations_len = annotations.len,
-        }, .{
-            .byte_start = start_span.byte_start,
-            .byte_end = closing.span.byte_end,
-        });
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse `impl TYPE_IDENT [when_clause] "{" {fn_method} "}"` — an inherent
+    /// impl (M0.8 E2 block 3 tranche A, `etch-grammar.md` §5.9). The trait form
+    /// `impl Trait for Type` lands in tranche C; a `for` after the first type
+    /// name is rejected with a clear pointer. Methods reuse `parseFnLike` with
+    /// `allow_self = true` and are stored in `arena.impl_methods`.
+    fn parseImplDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        _ = annotations; // inherent impl carries no annotations in this subset
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'impl'
+        if (self.peek() == .lt) {
+            return self.parseErr(self.peekSpan(), "generic impls are not supported yet (generics land in E2 block 4)");
+        }
+        const type_tok = try self.expect(.type_ident, "expected type name (TYPE_IDENT) after 'impl'");
+        const type_name = try self.internSlice(type_tok.span);
+        if (self.peek() == .kw_for) {
+            return self.parseErr(self.peekSpan(), "trait impls ('impl Trait for Type') land in E2 block 3 tranche C");
+        }
+
+        var when_root: u32 = ast_mod.RuleDecl.none_when;
+        if (self.peek() == .kw_when) {
+            _ = try self.advance();
+            when_root = try self.parseWhenExpr();
+        }
+
+        _ = try self.expect(.lbrace, "expected '{' to start impl body");
+        const methods_start: u32 = @intCast(self.arena.impl_methods.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const method_annotations = try self.parseAnnotations();
+            var is_async = false;
+            if (self.peek() == .kw_async) {
+                _ = try self.advance();
+                is_async = true;
+            }
+            if (self.peek() != .kw_fn) {
+                return self.parseErrFmt(self.peekSpan(), "expected 'fn' to start an impl method, got '{s}'", .{self.sliceOf(self.peekSpan())});
+            }
+            const parsed = try self.parseFnLike(is_async, true, method_annotations);
+            try self.arena.impl_methods.append(self.gpa, parsed.decl);
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close impl body");
+        const methods_len: u32 = @as(u32, @intCast(self.arena.impl_methods.items.len)) - methods_start;
+        _ = try self.arena.addImplDecl(self.gpa, .{
+            .type_name = type_name,
+            .trait_name = 0,
+            .when_root = when_root,
+            .methods_start = methods_start,
+            .methods_len = methods_len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
     // ─── When clause ─────────────────────────────────────────────────────
@@ -1031,7 +1173,7 @@ pub const Parser = struct {
     /// `else_branch` (a nested `if_expr`); a final `else { }` is a `block_expr`.
     fn parseIf(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'if'
-        const cond = try self.parseExpr(0);
+        const cond = try self.parseExprNoStruct(0);
         const then_block = try self.parseBlockExpr();
         var else_branch: NodeId = NodeId.none;
         if (self.peek() == .kw_else) {
@@ -1062,7 +1204,7 @@ pub const Parser = struct {
             index_name = try self.internSlice(idx_tok.span);
         }
         _ = try self.expect(.kw_in, "expected 'in' in for loop");
-        const iterable = try self.parseExpr(0);
+        const iterable = try self.parseExprNoStruct(0);
         _ = try self.expect(.lbrace, "expected '{' to open for body");
         const body = try self.parseStmtRun();
         const closing = try self.expect(.rbrace, "expected '}' to close for body");
@@ -1082,7 +1224,7 @@ pub const Parser = struct {
     /// `while let` Optional-destructuring form lands with the Optional tranche.
     fn parseWhileStmt(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'while'
-        const cond = try self.parseExpr(0);
+        const cond = try self.parseExprNoStruct(0);
         _ = try self.expect(.lbrace, "expected '{' to start the while body");
         const body = try self.parseStmtRun();
         const closing = try self.expect(.rbrace, "expected '}' to close the while body");
@@ -1340,6 +1482,17 @@ pub const Parser = struct {
         return try self.continuePostfixAndBinary(lhs, min_bp);
     }
 
+    /// Parse an expression with struct literals suppressed at the top level
+    /// (M0.8 E2 block 3) — used for `if` / `while` / `for` / `match` head
+    /// expressions, where a trailing `{` opens the body, not a `TYPE_IDENT {`
+    /// struct literal. Delimited sub-contexts re-enable struct literals.
+    fn parseExprNoStruct(self: *Parser, min_bp: u8) ParseError!NodeId {
+        const saved = self.no_struct_lit;
+        self.no_struct_lit = true;
+        defer self.no_struct_lit = saved;
+        return try self.parseExpr(min_bp);
+    }
+
     // Range binds weaker than additive (lbp 7) but stronger than comparison
     // (lbp 5), per `etch-grammar.md` §410 (range_expr = additive [op additive]).
     const range_lbp: u8 = 6;
@@ -1478,7 +1631,12 @@ pub const Parser = struct {
                 // element — disambiguated downstream from the index expr kind.
                 .lbracket => {
                     _ = try self.advance(); // '['
+                    // A bracketed index re-enables struct literals (M0.8 E2
+                    // block 3) even inside an `if`/`while`/`for`/`match` head.
+                    const saved = self.no_struct_lit;
+                    self.no_struct_lit = false;
                     const index = try self.parseExpr(0);
+                    self.no_struct_lit = saved;
                     const closing = try self.expect(.rbracket, "expected ']' to close index access");
                     const recv_span = self.arena.exprSpan(expr);
                     expr = try self.arena.addIndex(self.gpa, expr, index, .{
@@ -1492,6 +1650,11 @@ pub const Parser = struct {
                 // functions in E2).
                 .lparen => {
                     _ = try self.advance(); // '('
+                    // Call arguments re-enable struct literals (M0.8 E2 block 3)
+                    // even inside an `if`/`while`/`for`/`match` head.
+                    const saved = self.no_struct_lit;
+                    self.no_struct_lit = false;
+                    defer self.no_struct_lit = saved;
                     var args: std.ArrayListUnmanaged(u32) = .empty;
                     defer args.deinit(self.gpa);
                     if (self.peek() != .rparen) {
@@ -1535,6 +1698,10 @@ pub const Parser = struct {
         const name_tok = try self.advance(); // method name
         const method_name = try self.internSlice(name_tok.span);
         _ = try self.advance(); // '('
+        // Method-call arguments re-enable struct literals (M0.8 E2 block 3).
+        const saved = self.no_struct_lit;
+        self.no_struct_lit = false;
+        defer self.no_struct_lit = saved;
         var args: std.ArrayListUnmanaged(u32) = .empty;
         defer args.deinit(self.gpa);
         if (self.peek() != .rparen) {
@@ -1607,7 +1774,7 @@ pub const Parser = struct {
     /// foundations). Arm bodies are expressions in the E1 subset.
     fn parseMatch(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'match'
-        const scrutinee = try self.parseExpr(0);
+        const scrutinee = try self.parseExprNoStruct(0);
         _ = try self.expect(.lbrace, "expected '{' to open match arms");
         var arms: std.ArrayListUnmanaged(ast_mod.MatchArm) = .empty;
         defer arms.deinit(self.gpa);
@@ -1633,6 +1800,10 @@ pub const Parser = struct {
     /// comma array.
     fn parseArrayOrMapLiteral(self: *Parser) ParseError!NodeId {
         const open = try self.advance(); // '['
+        // Array / map elements re-enable struct literals (M0.8 E2 block 3).
+        const saved_nsl = self.no_struct_lit;
+        self.no_struct_lit = false;
+        defer self.no_struct_lit = saved_nsl;
         // `[]` — empty array.
         if (self.peek() == .rbracket) {
             const closing = try self.advance();
@@ -1710,6 +1881,36 @@ pub const Parser = struct {
         });
     }
 
+    /// Parse the `{ field_init {"," field_init} [","] }` body of a struct
+    /// literal `TYPE_IDENT { … }` (M0.8 E2 block 3, `etch-grammar.md` §3.2
+    /// l.486). `field_init = IDENT ":" expression`. The spread form `..base`
+    /// (data-table inheritance, E4) is rejected. The caller has consumed the
+    /// type name and confirmed `peek() == {`. Field values re-enable struct
+    /// literals (a `no_struct_lit` head context does not propagate inside).
+    fn parseStructLiteral(self: *Parser, type_name: StringId, name_span: SourceSpan) ParseError!NodeId {
+        _ = try self.advance(); // '{'
+        const saved = self.no_struct_lit;
+        self.no_struct_lit = false;
+        defer self.no_struct_lit = saved;
+        var fields: std.ArrayListUnmanaged(ast_mod.StructLitField) = .empty;
+        defer fields.deinit(self.gpa);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            if (self.peek() == .dotdot) {
+                return self.parseErr(self.peekSpan(), "struct-literal spread '..base' is not supported in M0.8 (data-table feature, E4)");
+            }
+            const fname = try self.expect(.ident, "expected field name in struct literal");
+            _ = try self.expect(.colon, "expected ':' after struct-literal field name");
+            const value = try self.parseExpr(0);
+            try fields.append(self.gpa, .{ .name = try self.internSlice(fname.span), .value = value });
+            if (!try self.match(.comma)) break;
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close struct literal");
+        return try self.arena.addStructLit(self.gpa, type_name, fields.items, .{
+            .byte_start = name_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
     fn parsePrimary(self: *Parser) ParseError!NodeId {
         try self.surfaceTokenErrors();
         switch (self.peek()) {
@@ -1745,16 +1946,27 @@ pub const Parser = struct {
                 return try self.arena.addExpr(self.gpa, .ident, id, tok.span);
             },
             .type_ident => {
-                // TYPE_IDENT in expression position is a path-like value.
-                // S3 only accepts it as annotation argument shape — the
-                // type-checker does not resolve annotation args (Phase 0.2).
+                // A TYPE_IDENT in expression position is either a struct literal
+                // `T { f: v }` (M0.8 E2 block 3) or a path-like value (an
+                // associated-fn receiver `T.assoc()`, an enum scrutinee, an
+                // annotation arg). The `{` lookahead picks the struct literal —
+                // suppressed inside an `if`/`while`/`for`/`match` head, where the
+                // `{` opens the body (`no_struct_lit`).
                 const tok = try self.advance();
                 const id = try self.internSlice(tok.span);
+                if (self.peek() == .lbrace and !self.no_struct_lit) {
+                    return try self.parseStructLiteral(id, tok.span);
+                }
                 return try self.arena.addExpr(self.gpa, .path, id, tok.span);
             },
             .lparen => {
                 _ = try self.advance();
+                // A parenthesized sub-expression re-enables struct literals even
+                // inside an `if`/`while`/`for`/`match` head (M0.8 E2 block 3).
+                const saved = self.no_struct_lit;
+                self.no_struct_lit = false;
                 const inner = try self.parseExpr(0);
+                self.no_struct_lit = saved;
                 _ = try self.expect(.rparen, "expected ')' to close parenthesized expression");
                 return inner;
             },
@@ -2372,6 +2584,107 @@ test "parser accepts block bodies in closures and match arms (M0.8 control flow)
     // Two block expressions: the closure body and the `0 =>` arm body (the
     // `_ => 20` arm body is a bare expression, not a block).
     try std.testing.expectEqual(@as(usize, 2), blocks);
+}
+
+test "parser builds struct + inherent impl + struct literal + method calls (M0.8 E2 block 3)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\struct V2 { x: int = 0, y: int = 0 }
+        \\impl V2 {
+        \\  fn sum(self) -> int { self.x + self.y }
+        \\  fn make(a: int, b: int) -> V2 { V2 { x: a, y: b } }
+        \\}
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let v = V2.make(3, 4)
+        \\  let s = v.sum()
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.struct_decls.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.impl_decls.items.len);
+    const impl = result.ast.impl_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 2), impl.methods_len);
+    try std.testing.expectEqual(@as(StringId, 0), impl.trait_name); // inherent
+    // `sum` takes `self` (by value); `make` is an associated fn (no self).
+    const sum_m = result.ast.impl_methods.items[impl.methods_start];
+    const make_m = result.ast.impl_methods.items[impl.methods_start + 1];
+    try std.testing.expectEqual(ast_mod.SelfKind.by_value, sum_m.self_kind);
+    try std.testing.expectEqual(ast_mod.SelfKind.none, make_m.self_kind);
+    try std.testing.expectEqual(@as(u32, 2), make_m.params_len); // a, b
+    // A struct literal (in `make`) and two method calls (`V2.make`, `v.sum`).
+    var struct_lits: usize = 0;
+    var method_calls: usize = 0;
+    for (result.ast.exprs.items(.kind)) |k| {
+        if (k == .struct_lit) struct_lits += 1;
+        if (k == .method_call) method_calls += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), struct_lits);
+    try std.testing.expectEqual(@as(usize, 2), method_calls);
+}
+
+test "parser recovers and a valid struct/impl after a broken construct survives (M0.8 E2 block 3 lockstep)" {
+    const gpa = std.testing.allocator;
+    // A broken leading annotation forces the top-level resync; the `struct` and
+    // `impl` that follow must still land in the AST (the lockstep stop-set now
+    // lists `kw_struct` / `kw_impl`).
+    var result = try parse(gpa,
+        \\@@@bad
+        \\struct V2 { x: int = 0 }
+        \\impl V2 { fn id(self) -> int { self.x } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.struct_decls.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.impl_decls.items.len);
+}
+
+test "parser suppresses struct literals in if/while/for/match heads (M0.8 E2 block 3)" {
+    const gpa = std.testing.allocator;
+    // `while Cond { … }` must parse `Cond` as a path (a value) and `{ … }` as
+    // the loop body, NOT as a `Cond { … }` struct literal. With a struct
+    // literal allowed in the head this would mis-parse and error.
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  let mut n = 0
+        \\  while n < 3 { n += 1 }
+        \\  if n > 0 { n += 1 }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var struct_lits: usize = 0;
+    for (result.ast.exprs.items(.kind)) |k| {
+        if (k == .struct_lit) struct_lits += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), struct_lits);
+}
+
+test "parser rejects trait impl in tranche A and generic struct (M0.8 E2 block 3)" {
+    const gpa = std.testing.allocator;
+    // `impl Trait for T` lands in tranche C — rejected with a clear pointer.
+    {
+        var result = try parse(gpa,
+            \\struct T { x: int = 0 }
+            \\impl Show for T { fn show(self) -> int { self.x } }
+        );
+        defer result.deinit(gpa);
+        try std.testing.expect(result.diagnostics.len > 0);
+    }
+    // Generic struct → block 4.
+    {
+        var result = try parse(gpa,
+            \\struct Box<T> { value: int = 0 }
+        );
+        defer result.deinit(gpa);
+        try std.testing.expect(result.diagnostics.len > 0);
+    }
 }
 
 test "parser does not leak comment spans on OOM during init" {

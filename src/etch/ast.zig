@@ -111,6 +111,14 @@ pub const StringPool = struct {
         if (id >= self.slices.items.len) return &[_]u8{};
         return self.slices.items[id];
     }
+
+    /// Look up an already-interned string's id without inserting (M0.8 E2
+    /// block 3). Returns `null` if `s` was never interned. Used by consumers
+    /// that only hold a `*const AstArena` (e.g. the interpreter resolving the
+    /// `self` receiver binding) and so cannot intern.
+    pub fn find(self: *const StringPool, s: []const u8) ?StringId {
+        return self.map.get(s);
+    }
 };
 
 // ─────────────────────────────── Kinds ──────────────────────────────────
@@ -623,13 +631,20 @@ pub const MethodCall = struct {
 };
 
 /// One `fn` parameter: name + type node (M0.8 E2 call mechanism,
-/// `etch-grammar.md` §5.3 `regular_param`). Default values and `self` params
-/// arrive with their consumers (defaults: an E2 refinement; `self`: `impl`,
-/// block 3).
+/// `etch-grammar.md` §5.3 `regular_param`). Default values arrive with their
+/// consumers (an E2 refinement). The `self` receiver is not a `FnParam` — it is
+/// carried out-of-band on `FnDecl.self_kind` (M0.8 E2 block 3 `impl`).
 pub const FnParam = struct {
     name: StringId,
     type_node: NodeId,
 };
+
+/// Method receiver shape (M0.8 E2 block 3 `impl`, `etch-grammar.md` §5.3
+/// `self_param = [mut] self`). `none` for a free `fn` or an associated fn
+/// (no receiver); `by_value` for `self`; `by_mut` for `mut self`. The receiver
+/// type is the `impl`'s target type, resolved at dispatch — it is not stored on
+/// the param list.
+pub const SelfKind = enum { none, by_value, by_mut };
 
 /// Side-slab entry for a top-level `fn` declaration (M0.8 E2 call mechanism,
 /// `etch-grammar.md` §5.3). The body is a block: `body_start`/`body_len` index
@@ -650,6 +665,54 @@ pub const FnDecl = struct {
     value: NodeId, // trailing block value (implicit return); NodeId.none if absent
     annotations_extra: u32,
     annotations_len: u32,
+    /// Receiver shape (M0.8 E2 block 3). `.none` for a top-level `fn` and for an
+    /// associated fn inside an `impl`; `.by_value` / `.by_mut` for a method.
+    self_kind: SelfKind = .none,
+};
+
+/// Side-slab entry for a `struct` declaration (M0.8 E2 block 3,
+/// `etch-grammar.md` §5.7). Same shape as `ComponentDecl` — name + range into
+/// `arena.fields` + annotation range — but a struct is a by-value type, not
+/// registered with the world (no RTTI / archetype storage). Generics are
+/// block 4 (a `<` after the name is rejected at parse time).
+pub const StructDecl = struct {
+    name: StringId,
+    fields_start: u32, // index into `arena.fields`
+    fields_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
+/// Side-slab entry for an `impl` block (M0.8 E2 block 3, `etch-grammar.md`
+/// §5.9). `trait_name` is `0` for an inherent `impl Type { … }`; non-zero for
+/// `impl Trait for Type { … }`. `when_root` indexes `arena.when_nodes`
+/// (`none_when` if absent — a conditional impl `impl … when self has H`).
+/// Methods live in a contiguous `(start, len)` run of `arena.impl_methods`
+/// (each an `FnDecl` carrying its `self_kind`).
+pub const ImplDecl = struct {
+    type_name: StringId,
+    trait_name: StringId, // 0 = inherent impl
+    when_root: u32, // `RuleDecl.none_when` if absent
+    methods_start: u32, // index into `arena.impl_methods`
+    methods_len: u32,
+};
+
+/// One field initializer of a struct literal (`IDENT ":" expression`,
+/// `etch-grammar.md` §3.2 l.490). The spread form `.. expression` (data-table
+/// inheritance, E4) is out of M0.8 scope.
+pub const StructLitField = struct {
+    name: StringId,
+    value: NodeId, // expr
+};
+
+/// `TYPE_IDENT "{" [field_init …] "}"` struct literal (M0.8 E2 block 3,
+/// `etch-grammar.md` §3.2 l.486). `type_name` is the explicit struct type; the
+/// anonymous `.{ … }` form (which needs the expected type from context) is
+/// deferred. Fields live in a `(start, len)` run of `arena.struct_lit_fields`.
+pub const StructLitExpr = struct {
+    type_name: StringId,
+    fields_start: u32,
+    fields_len: u32,
 };
 
 const NamedTypeNode = struct {
@@ -795,6 +858,12 @@ pub const AstArena = struct {
     resource_decls: std.ArrayListUnmanaged(ResourceDecl) = .empty,
     rule_decls: std.ArrayListUnmanaged(RuleDecl) = .empty,
     fn_decls: std.ArrayListUnmanaged(FnDecl) = .empty,
+    struct_decls: std.ArrayListUnmanaged(StructDecl) = .empty,
+    impl_decls: std.ArrayListUnmanaged(ImplDecl) = .empty,
+    /// `impl` block methods, each an `FnDecl` carrying its `self_kind`. Stored
+    /// here (not in `fn_decls`) so the free-fn index never mistakes a method
+    /// for a top-level callable. `ImplDecl` references a `(start, len)` run.
+    impl_methods: std.ArrayListUnmanaged(FnDecl) = .empty,
     type_alias_decls: std.ArrayListUnmanaged(TypeAliasDecl) = .empty,
     rule_params: std.ArrayListUnmanaged(RuleParam) = .empty,
     fn_params: std.ArrayListUnmanaged(FnParam) = .empty,
@@ -822,6 +891,8 @@ pub const AstArena = struct {
     closure_params: std.ArrayListUnmanaged(ClosureParam) = .empty,
     call_exprs: std.ArrayListUnmanaged(CallExpr) = .empty,
     method_calls: std.ArrayListUnmanaged(MethodCall) = .empty,
+    struct_lits: std.ArrayListUnmanaged(StructLitExpr) = .empty,
+    struct_lit_fields: std.ArrayListUnmanaged(StructLitField) = .empty,
     loop_exprs: std.ArrayListUnmanaged(LoopExpr) = .empty,
     block_exprs: std.ArrayListUnmanaged(BlockExpr) = .empty,
     if_exprs: std.ArrayListUnmanaged(IfExpr) = .empty,
@@ -885,6 +956,9 @@ pub const AstArena = struct {
         self.resource_decls.deinit(gpa);
         self.rule_decls.deinit(gpa);
         self.fn_decls.deinit(gpa);
+        self.struct_decls.deinit(gpa);
+        self.impl_decls.deinit(gpa);
+        self.impl_methods.deinit(gpa);
         self.type_alias_decls.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
@@ -910,6 +984,8 @@ pub const AstArena = struct {
         self.closure_params.deinit(gpa);
         self.call_exprs.deinit(gpa);
         self.method_calls.deinit(gpa);
+        self.struct_lits.deinit(gpa);
+        self.struct_lit_fields.deinit(gpa);
         self.loop_exprs.deinit(gpa);
         self.block_exprs.deinit(gpa);
         self.if_exprs.deinit(gpa);
@@ -1132,6 +1208,33 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.fn_decls.items.len);
         try self.fn_decls.append(gpa, decl);
         return try self.addItem(gpa, .fn_decl, idx, span);
+    }
+
+    /// `struct Name { fields }` (M0.8 E2 block 3). The caller appends the
+    /// fields to `arena.fields` beforehand, passing the range in `decl`.
+    pub fn addStructDecl(self: *AstArena, gpa: std.mem.Allocator, decl: StructDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.struct_decls.items.len);
+        try self.struct_decls.append(gpa, decl);
+        return try self.addItem(gpa, .struct_decl, idx, span);
+    }
+
+    /// `impl [Trait for] Type [when …] { methods }` (M0.8 E2 block 3). The
+    /// caller appends the methods to `arena.impl_methods` beforehand, passing
+    /// the range in `decl`.
+    pub fn addImplDecl(self: *AstArena, gpa: std.mem.Allocator, decl: ImplDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.impl_decls.items.len);
+        try self.impl_decls.append(gpa, decl);
+        return try self.addItem(gpa, .impl_decl, idx, span);
+    }
+
+    /// `Type { f: v, … }` struct literal (M0.8 E2 block 3). `fields` is
+    /// bulk-appended to `arena.struct_lit_fields` as a contiguous run.
+    pub fn addStructLit(self: *AstArena, gpa: std.mem.Allocator, type_name: StringId, fields: []const StructLitField, span: SourceSpan) !NodeId {
+        const start: u32 = @intCast(self.struct_lit_fields.items.len);
+        try self.struct_lit_fields.appendSlice(gpa, fields);
+        const idx: u32 = @intCast(self.struct_lits.items.len);
+        try self.struct_lits.append(gpa, .{ .type_name = type_name, .fields_start = start, .fields_len = @intCast(fields.len) });
+        return try self.addExpr(gpa, .struct_lit, idx, span);
     }
 
     /// `return [expr]` (M0.8 E2). The value `NodeId` is stored directly in the

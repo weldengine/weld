@@ -66,6 +66,8 @@ pub const TokenKind = enum {
     kw_return, // return [expr] (M0.8 E2 call mechanism)
     kw_throws, // fn throws marker (M0.8 E2 call mechanism)
     kw_async, // async fn (parsed E2; interp E3, codegen Phase 2)
+    kw_struct, // struct declaration (M0.8 E2 block 3 declaration layer)
+    kw_impl, // impl block (M0.8 E2 block 3 declaration layer)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -175,6 +177,8 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "return", .kind = .kw_return },
     .{ .lexeme = "throws", .kind = .kw_throws },
     .{ .lexeme = "async", .kind = .kw_async },
+    .{ .lexeme = "struct", .kind = .kw_struct },
+    .{ .lexeme = "impl", .kind = .kw_impl },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -201,29 +205,27 @@ pub const s3_keywords = [_]KeywordEntry{
 /// `priority`.
 pub const non_s3_keywords = [_][]const u8{
     // ── Top-level constructs still out of scope (`fn` graduated with M0.8 E2
-    //    call mechanism) ──
-    "struct",      "enum",           "trait",         "impl",
-    "event",       "tags",           "import",        "const",
-    "private",     "behavior",       "routine",       "quest",
-    "dialogue",    "ability",        "effect",        "shader",
-    "widget",      "theme",          "motion",        "anim_graph",
-    "audio_graph", "audio_score",    "sequence",      "data",
-    "scene",       "prefab",         "input_mapping", "locale",
-    "test",        "override",
+    //    call mechanism; `struct` / `impl` with E2 block 3) ──
+    "enum",          "trait",       "event",       "tags",
+    "import",        "const",       "private",     "behavior",
+    "routine",       "quest",       "dialogue",    "ability",
+    "effect",        "shader",      "widget",      "theme",
+    "motion",        "anim_graph",  "audio_graph", "audio_score",
+    "sequence",      "data",        "scene",       "prefab",
+    "input_mapping", "locale",      "test",        "override",
 
     // ── Async machinery: `async` graduated with M0.8 E2 (`async fn` parsed;
     //    interp E3, codegen Phase 2); the await machinery stays out of scope ──
-          "await",         "race",
-    "sync",        "branch",         "spawn",
+    "await",         "race",        "sync",        "branch",
+    "spawn",
 
     // ── Tag operators (out of S3) ──
-            "has_tag",
-    "has_no_tag",  "has_any_tag",    "has_all_tags",  "has_no_tags",
-    "add_tag",     "remove_tag",
+            "has_tag",     "has_no_tag",  "has_any_tag",
+    "has_all_tags",  "has_no_tags", "add_tag",     "remove_tag",
 
     // ── Timers / emit / lifecycle (out of S3) ──
-        "emit",          "after",
-    "every",       "after_unscaled", "quantize",
+    "emit",          "after",       "every",       "after_unscaled",
+    "quantize",
 
     // Note: `where`, `self`, `none`, `some` are intentionally NOT listed —
     // they appear in legitimate identifier-shaped positions in S3 annotation

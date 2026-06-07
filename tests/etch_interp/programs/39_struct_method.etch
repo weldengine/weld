@@ -1,0 +1,32 @@
+// M0.8 E2 block 3 tranche A: a `struct` with an inherent `impl`. `make` is an
+// associated function (no self) that builds the struct via a literal; `sum` is
+// a `self` (by-value) method that reads its fields. The rule constructs a V2
+// via `V2.make(3, 4)` (associated dispatch, §5.1) then reads it with `v.sum()`
+// (instance dispatch). Both backends must agree byte-exact: the interpreter
+// materializes the struct in its struct store and dispatches by type name; the
+// cooked Zig emits `V2.make(3, 4)` + `v.sum()` against the `extern struct`'s
+// `pub fn` members. out = 3 + 4 = 7.
+struct V2 {
+  x: int = 0
+  y: int = 0
+}
+
+impl V2 {
+  fn sum(self) -> int {
+    self.x + self.y
+  }
+  fn make(a: int, b: int) -> V2 {
+    V2 { x: a, y: b }
+  }
+}
+
+component Acc {
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has Acc
+{
+  let v = V2.make(3, 4)
+  entity.get_mut(Acc).out = v.sum()
+}

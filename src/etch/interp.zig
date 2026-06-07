@@ -205,6 +205,49 @@ const ClosureStore = struct {
     }
 };
 
+/// One field of a runtime `struct` value (M0.8 E2 block 3).
+const StructField = struct { name: StringId, value: Value };
+
+/// A runtime `struct` value: its type name plus an ordered set of field values
+/// (declaration order). Addressed by `Value.struct_ref`.
+const StructVal = struct {
+    type_name: StringId,
+    fields: std.ArrayListUnmanaged(StructField) = .empty,
+};
+
+/// Per-rule-body store for struct values (M0.8 E2 block 3), addressed by
+/// `Value.struct_ref`. Reset at the body boundary like the collection / closure
+/// stores (rule-arena semantics). A struct is a by-value type; in the
+/// interpreter the handle is shared (reference-like), which is sound for the
+/// block-3 surface — `self` mutation through a `mut self` method must propagate
+/// to the receiver, and no differential aliases two struct locals.
+const StructStore = struct {
+    list: std.ArrayListUnmanaged(StructVal) = .empty,
+
+    fn deinit(self: *StructStore, gpa: std.mem.Allocator) void {
+        for (self.list.items) |*s| s.fields.deinit(gpa);
+        self.list.deinit(gpa);
+    }
+
+    fn reset(self: *StructStore, gpa: std.mem.Allocator) void {
+        for (self.list.items) |*s| s.fields.deinit(gpa);
+        self.list.clearRetainingCapacity();
+    }
+
+    /// Allocate a fresh struct value, returning its handle.
+    fn newStruct(self: *StructStore, gpa: std.mem.Allocator, type_name: StringId) !u32 {
+        const idx: u32 = @intCast(self.list.items.len);
+        try self.list.append(gpa, .{ .type_name = type_name });
+        return idx;
+    }
+};
+
+/// Compose the inherent-method map key from a type name and a method name (M0.8
+/// E2 block 3) — same packing as `types.methodKey`.
+fn methodKey(type_name: StringId, method_name: StringId) u64 {
+    return (@as(u64, type_name) << 32) | @as(u64, method_name);
+}
+
 const StmtError = error{ OutOfMemory, RuntimeFailure };
 
 /// Control-flow signal raised by `break` / `continue` (M0.8 loop/break).
@@ -227,10 +270,19 @@ pub const Interpreter = struct {
     /// Top-level `fn` declarations keyed by name (M0.8 E2 call mechanism), for
     /// resolving a free-function call `f(args)` whose callee names a `fn`.
     fns: std.AutoHashMapUnmanaged(StringId, ast_mod.FnDecl) = .empty,
+    /// Inherent `impl` methods keyed by `methodKey(type_name, method_name)`
+    /// (M0.8 E2 block 3), for `recv.method()` / `Type.assoc()` dispatch.
+    methods: std.AutoHashMapUnmanaged(u64, ast_mod.FnDecl) = .empty,
+    /// `struct` declarations keyed by name (M0.8 E2 block 3), for materializing
+    /// a struct literal (field order + declared defaults for omitted fields).
+    struct_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.StructDecl) = .empty,
     /// Heap store backing collection values created in rule bodies (M0.8).
     collections: CollectionStore = .{},
     /// Store backing closure values created in rule bodies (M0.8 closures).
     closures: ClosureStore = .{},
+    /// Store backing struct values created in rule / fn / method bodies (M0.8
+    /// E2 block 3).
+    structs: StructStore = .{},
     /// Active control-flow signal (M0.8 loop/break). Set by `break`/`continue`,
     /// consumed by the enclosing loop.
     control: Control = .none,
@@ -255,7 +307,10 @@ pub const Interpreter = struct {
         self.bridge.deinit(self.gpa);
         self.collections.deinit(self.gpa);
         self.closures.deinit(self.gpa);
+        self.structs.deinit(self.gpa);
         self.fns.deinit(self.gpa);
+        self.methods.deinit(self.gpa);
+        self.struct_decls.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -338,6 +393,35 @@ pub const Interpreter = struct {
             try fns.put(gpa, decl.name, decl);
         }
 
+        // Pass D — index inherent `impl` methods by `(type_name, method_name)`
+        // for `recv.method()` / `Type.assoc()` dispatch, plus `struct`
+        // declarations by name for struct-literal materialization (M0.8 E2
+        // block 3).
+        var methods: std.AutoHashMapUnmanaged(u64, ast_mod.FnDecl) = .empty;
+        errdefer methods.deinit(gpa);
+        var struct_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.StructDecl) = .empty;
+        errdefer struct_decls.deinit(gpa);
+        i = 0;
+        while (i < ast.items.len) : (i += 1) {
+            const kind = ast.items.items(.kind)[i];
+            const data = ast.items.items(.data)[i];
+            switch (kind) {
+                .impl_decl => {
+                    const impl = ast.impl_decls.items[data];
+                    var m: u32 = 0;
+                    while (m < impl.methods_len) : (m += 1) {
+                        const method = ast.impl_methods.items[impl.methods_start + m];
+                        try methods.put(gpa, methodKey(impl.type_name, method.name), method);
+                    }
+                },
+                .struct_decl => {
+                    const decl = ast.struct_decls.items[data];
+                    try struct_decls.put(gpa, decl.name, decl);
+                },
+                else => {},
+            }
+        }
+
         const slice = try rule_descs.toOwnedSlice(gpa);
         return .{
             .gpa = gpa,
@@ -345,6 +429,8 @@ pub const Interpreter = struct {
             .bridge = bridge,
             .rule_descs = slice,
             .fns = fns,
+            .methods = methods,
+            .struct_decls = struct_decls,
         };
     }
 
@@ -405,11 +491,12 @@ pub const Interpreter = struct {
 
         var locals: Locals = .{};
         defer locals.deinit(self.gpa);
-        // Collections and closures created in this body live in the rule arena:
-        // free them at the body boundary so handles never outlive their
-        // invocation.
+        // Collections, closures, and structs created in this body live in the
+        // rule arena: free them at the body boundary so handles never outlive
+        // their invocation.
         defer self.collections.reset(self.gpa);
         defer self.closures.reset(self.gpa);
+        defer self.structs.reset(self.gpa);
         try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
         self.control = .none; // defensive: each body starts with no pending signal
         self.thrown = false;
@@ -670,6 +757,26 @@ pub const Interpreter = struct {
                     Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, new_v) catch return error.RuntimeFailure;
                     return;
                 },
+                // Struct field write (M0.8 E2 block 3) — `self.x = …` in a `mut
+                // self` method, or `v.x = …` on a `let mut v`. The field index
+                // is resolved before evaluating the rhs, then written back by
+                // index (the rhs eval may move the outer store, never the
+                // field's backing buffer).
+                .struct_ref => |handle| {
+                    var fi: ?usize = null;
+                    for (self.structs.list.items[handle].fields.items, 0..) |f, k| {
+                        if (f.name == fa.field_name) {
+                            fi = k;
+                            break;
+                        }
+                    }
+                    const k = fi orelse return error.RuntimeFailure;
+                    const cur = self.structs.list.items[handle].fields.items[k].value;
+                    const rhs = try self.evalExpr(world, locals, assign.value);
+                    const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
+                    self.structs.list.items[handle].fields.items[k].value = new_v;
+                    return;
+                },
                 else => return error.RuntimeFailure,
             }
         }
@@ -709,6 +816,41 @@ pub const Interpreter = struct {
         return try self.evalExpr(world, &frame, fndecl.value);
     }
 
+    /// Invoke an inherent `impl` method or associated fn (M0.8 E2 block 3).
+    /// Mirrors `callFn` but, for an instance method, binds `self` to the
+    /// receiver value first (`mut self` shares the struct handle, so mutation
+    /// propagates back). `self_value == null` is an associated fn (no receiver).
+    /// A `return` inside the body unwinds to *this* boundary (the method's own
+    /// frame), never the caller's — `returning` is consumed here.
+    fn callMethod(self: *Interpreter, world: *World, caller_locals: *Locals, method: ast_mod.FnDecl, mc: ast_mod.MethodCall, self_value: ?Value) StmtError!Value {
+        if (method.is_async) return error.RuntimeFailure; // async interp lands in E3
+        if (method.params_len != mc.args_len) return error.RuntimeFailure;
+        var frame: Locals = .{};
+        defer frame.deinit(self.gpa);
+        if (self_value) |sv| {
+            if (self.ast.strings.find("self")) |self_id| {
+                try frame.put(self.gpa, self_id, sv, method.self_kind == .by_mut);
+            }
+        }
+        var i: u32 = 0;
+        while (i < method.params_len) : (i += 1) {
+            const p = self.ast.fn_params.items[method.params_start + i];
+            const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start + i]);
+            const av = try self.evalExpr(world, caller_locals, arg);
+            try frame.put(self.gpa, p.name, av, false);
+        }
+        try self.execStmtRun(world, &frame, method.body_start, method.body_len);
+        if (self.returning) {
+            self.returning = false;
+            const rv = self.return_value;
+            self.return_value = .{ .unit = {} };
+            return rv;
+        }
+        if (self.thrown or self.control != .none) return Value{ .unit = {} };
+        if (method.value.isNone()) return Value{ .unit = {} };
+        return try self.evalExpr(world, &frame, method.value);
+    }
+
     fn evalExpr(self: *Interpreter, world: *World, locals: *Locals, id: NodeId) StmtError!Value {
         const kind = self.ast.exprKind(id);
         const data = self.ast.exprData(id);
@@ -740,6 +882,13 @@ pub const Interpreter = struct {
                 switch (recv) {
                     .component_ref => |cref| return Bridge.readComponentField(&world.registry, cref, world, field_name) catch error.RuntimeFailure,
                     .resource_ref => |rref| return Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch error.RuntimeFailure,
+                    // Struct field read (M0.8 E2 block 3) — `self.x` / `v.x`.
+                    .struct_ref => |handle| {
+                        for (self.structs.list.items[handle].fields.items) |f| {
+                            if (f.name == fa.field_name) return f.value;
+                        }
+                        return error.RuntimeFailure;
+                    },
                     else => return error.RuntimeFailure,
                 }
             },
@@ -972,12 +1121,57 @@ pub const Interpreter = struct {
                 }
                 return try self.evalExpr(world, &frame, ce.body);
             },
+            .struct_lit => {
+                // `T { f: v, … }` → materialize a fresh struct value in the
+                // rule-body struct store (M0.8 E2 block 3). Every declared field
+                // is filled in declaration order: the literal's value if given,
+                // else the field's const default (matching the Zig codegen,
+                // which relies on the `extern struct` default-fill). The handle
+                // is re-fetched after each field eval (a nested struct literal
+                // may have grown the outer store vector).
+                const sl = self.ast.struct_lits.items[data];
+                const decl = self.struct_decls.get(sl.type_name) orelse return error.RuntimeFailure;
+                const handle = try self.structs.newStruct(self.gpa, sl.type_name);
+                var fi: u32 = 0;
+                while (fi < decl.fields_len) : (fi += 1) {
+                    const f = self.ast.fields.items[decl.fields_start + fi];
+                    var provided: ?Value = null;
+                    var li: u32 = 0;
+                    while (li < sl.fields_len) : (li += 1) {
+                        const flit = self.ast.struct_lit_fields.items[sl.fields_start + li];
+                        if (flit.name == f.name) {
+                            provided = try self.evalExpr(world, locals, flit.value);
+                            break;
+                        }
+                    }
+                    const fval = provided orelse blk: {
+                        if (f.default_value.isNone()) break :blk Value{ .int_ = 0 };
+                        break :blk evalConst(self.ast, f.default_value) catch Value{ .int_ = 0 };
+                    };
+                    try self.structs.list.items[handle].fields.append(self.gpa, .{ .name = f.name, .value = fval });
+                }
+                return Value{ .struct_ref = handle };
+            },
             .method_call => {
-                // `recv.method(args)` is parsed in E2 block 2; its 4-kind
-                // dispatch (`etch-resolver-types.md §5`) lands in block 3 with
-                // `impl`. Until then a method call cannot be executed — fail
-                // loud (the interpreter is the reference, no silent wrong value).
-                return error.RuntimeFailure;
+                // `recv.method(args)` / `Type.assoc(args)` — inherent dispatch
+                // (M0.8 E2 block 3, §5.1; the block-2 fail-loud is wired here).
+                // Associated fn: a bare type-path receiver, no self. Instance
+                // method: a struct-valued receiver, self bound to it (a `mut
+                // self` method mutates it in place — the store handle is shared).
+                const mc = self.ast.method_calls.items[data];
+                if (self.ast.exprKind(mc.receiver) == .path) {
+                    const type_name = self.ast.exprData(mc.receiver);
+                    const method = self.methods.get(methodKey(type_name, mc.method_name)) orelse return error.RuntimeFailure;
+                    return try self.callMethod(world, locals, method, mc, null);
+                }
+                const recv = try self.evalExpr(world, locals, mc.receiver);
+                // Block-3 instance methods dispatch on struct receivers; methods
+                // on component / resource values are deferred (the interpreter
+                // cannot recover the type name from a bare ref) — fail loud.
+                if (recv != .struct_ref) return error.RuntimeFailure;
+                const type_name = self.structs.list.items[recv.struct_ref].type_name;
+                const method = self.methods.get(methodKey(type_name, mc.method_name)) orelse return error.RuntimeFailure;
+                return try self.callMethod(world, locals, method, mc, recv);
             },
             .loop_expr => {
                 // `loop { body }` — run the body repeatedly until a `break`
@@ -2228,6 +2422,106 @@ test "runProgram early return unwinds the fn body past later statements (M0.8 E2
     var out: i64 = 0;
     @memcpy(std.mem.asBytes(&out), slot[0..8]);
     try std.testing.expectEqual(@as(i64, 7), out);
+}
+
+test "runProgram struct method dispatch: associated fn + instance method (M0.8 E2 block 3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `V2.make(3, 4)` (associated dispatch) builds the struct; `v.sum()`
+    // (instance dispatch) reads it. out = 7. Mirrors differential 39 — kept
+    // inline so the interpreter path is exercised directly.
+    const source =
+        \\struct V2 { x: int = 0, y: int = 0 }
+        \\impl V2 {
+        \\  fn sum(self) -> int { self.x + self.y }
+        \\  fn make(a: int, b: int) -> V2 { V2 { x: a, y: b } }
+        \\}
+        \\component Acc { out: int = 0 }
+        \\rule run(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let v = V2.make(3, 4)
+        \\  entity.get_mut(Acc).out = v.sum()
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 7), out);
+}
+
+test "runProgram mut-self method mutates the receiver in place (M0.8 E2 block 3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A `mut self` method mutates the receiver; the mutation is visible to the
+    // caller (the struct handle is shared — reference semantics for `mut self`).
+    // The interpreter is the reference for `mut self`; its codegen is deferred
+    // (pointer receiver), so this has no differential. c.n: 10 → +5 → 15.
+    const source =
+        \\struct Counter { n: int = 0 }
+        \\impl Counter {
+        \\  fn bump(mut self, by: int) { self.n += by }
+        \\  fn get(self) -> int { self.n }
+        \\}
+        \\component Acc { out: int = 0 }
+        \\rule run(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let mut c = Counter { n: 10 }
+        \\  c.bump(5)
+        \\  entity.get_mut(Acc).out = c.get()
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 15), out);
 }
 
 test "runProgram try/catch catches a thrown value (M0.8 error handling)" {

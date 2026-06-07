@@ -314,3 +314,21 @@ rule try_catch(entity: Entity)
   entity.get_mut(Counter).value = x
 }
 ```
+
+## Declarations — struct + inherent impl (E2 block 3)
+
+```etch
+struct V2 {
+  x: int = 0
+  y: int = 0
+}
+
+impl V2 {
+  fn sum(self) -> int {
+    self.x + self.y
+  }
+  fn make(a: int, b: int) -> V2 {
+    V2 { x: a, y: b }
+  }
+}
+```

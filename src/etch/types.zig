@@ -101,6 +101,10 @@ pub const ResolvedType = union(enum) {
     /// `NodeId`; the return type is inferred lazily at each call site (params
     /// bound to the argument types in the caller's scope).
     closure: NodeId,
+    /// A `struct` value (M0.8 E2 block 3). Payload is the struct type name. A
+    /// struct is a by-value type (not registered with the world); its fields
+    /// and inherent methods resolve by name through the symbol table.
+    struct_t: StringId,
     /// Type unknown / unresolved. Used as the fallback after a diagnostic
     /// has been emitted; subsequent checks treat `unknown` as wildcard to
     /// avoid cascade errors.
@@ -118,6 +122,7 @@ pub const ResolvedType = union(enum) {
             .map_t => |info| info.key == b.map_t.key and info.value == b.map_t.value,
             .set_t => |elem| elem == b.set_t,
             .closure => |node| std.meta.eql(node, b.closure),
+            .struct_t => |id| id == b.struct_t,
             .unknown => true,
         };
     }
@@ -135,13 +140,20 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_ };
 
 const Symbol = struct {
     kind: SymbolKind,
     name: StringId,
     item_id: NodeId,
 };
+
+/// Compose the `methods` map key from a type name and a method name (M0.8 E2
+/// block 3). Both are interned `StringId`s; packing into a `u64` gives a
+/// collision-free key for the inherent-method lookup.
+fn methodKey(type_name: StringId, method_name: StringId) u64 {
+    return (@as(u64, type_name) << 32) | @as(u64, method_name);
+}
 
 /// Target categories the annotation-applicability check distinguishes
 /// (M0.8 D-S3-annot-applicability). E1 had `component` / `resource` / `rule`
@@ -182,13 +194,19 @@ pub const TypeChecker = struct {
     diagnostics: *std.ArrayListUnmanaged(Diagnostic),
     /// Symbol table keyed by interned name `StringId`.
     symbols: std.AutoHashMapUnmanaged(StringId, Symbol) = .empty,
-    /// Declared return type of the `fn` currently being checked (M0.8 E2),
-    /// used to type a `return expr` body statement against. `null` outside a
-    /// `fn` body; `.unit` for a void fn (no `-> type`).
+    /// Inherent `impl` methods (M0.8 E2 block 3), keyed by `methodKey(type_name,
+    /// method_name)` → index into `arena.impl_methods`. Drives the inherent
+    /// (kind 1, `etch-resolver-types.md §5.1`) dispatch of `recv.method()` and
+    /// the associated-fn dispatch of `Type.assoc()`.
+    methods: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    /// Declared return type of the `fn` / method currently being checked (M0.8
+    /// E2), used to type a `return expr` body statement against. `null` outside
+    /// a body; `.unit` for a void fn (no `-> type`).
     current_fn_return: ?ResolvedType = null,
 
     pub fn deinit(self: *TypeChecker) void {
         self.symbols.deinit(self.gpa);
+        self.methods.deinit(self.gpa);
     }
 
     pub fn check(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
@@ -200,6 +218,7 @@ pub const TypeChecker = struct {
         defer tc.deinit();
         try tc.pass1Collect();
         try tc.validateTypeAliases();
+        try tc.validateImpls();
         try tc.pass2Resolve();
     }
 
@@ -259,6 +278,21 @@ pub const TypeChecker = struct {
                     try self.registerSymbol(.fn_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .function);
                 },
+                .struct_decl => {
+                    // A `struct` is a by-value type (M0.8 E2 block 3). Register
+                    // the name and validate fields. Block-3 struct fields are
+                    // builtin scalars (the same surface as component/resource
+                    // fields); nested-struct / string fields are deferred.
+                    const decl = self.arena.struct_decls.items[data];
+                    try self.registerSymbol(.struct_, decl.name, item_id, span);
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, false);
+                },
+                .impl_decl => {
+                    // Index inherent-impl methods by `(type_name, method_name)`
+                    // for the kind-1 dispatch (M0.8 E2 block 3, §5.1). The
+                    // method bodies are checked in pass 2 (`checkImplMethod`).
+                    try self.collectImplMethods(self.arena.impl_decls.items[data], span);
+                },
                 .type_alias => {
                     // Register the alias name so it collides with a same-named
                     // component/resource/rule (E0101); the target is validated
@@ -279,6 +313,56 @@ pub const TypeChecker = struct {
             return;
         }
         gop.value_ptr.* = .{ .kind = kind, .name = name, .item_id = item_id };
+    }
+
+    /// Index an inherent `impl`'s methods into the `methods` map (M0.8 E2 block
+    /// 3, §5.1). Order-independent — the target type need not be declared yet
+    /// (top-level decls come in any order); the target is validated separately
+    /// in `validateImpls` once all symbols are known. A method name colliding
+    /// with another inherent method on the same type is E0101 (the inherent
+    /// `AmbiguousInherentMethod` of §7.5, reusing the duplicate-symbol code).
+    fn collectImplMethods(self: *TypeChecker, impl: ast_mod.ImplDecl, span: SourceSpan) !void {
+        var i: u32 = 0;
+        while (i < impl.methods_len) : (i += 1) {
+            const m_idx = impl.methods_start + i;
+            const method = self.arena.impl_methods.items[m_idx];
+            const gop = try self.methods.getOrPut(self.gpa, methodKey(impl.type_name, method.name));
+            if (gop.found_existing) {
+                try self.emit(.duplicate_symbol, .error_, span, "duplicate method '{s}' on type '{s}'", .{ self.arena.strings.slice(method.name), self.arena.strings.slice(impl.type_name) });
+            } else {
+                gop.value_ptr.* = m_idx;
+            }
+        }
+    }
+
+    /// Validate every `impl`'s target type once all symbols are known (M0.8 E2
+    /// block 3) — the target must be a declared `struct` / `component` /
+    /// `resource`. Coherence / orphan rules (§7.4) and trait impls arrive in
+    /// tranche C.
+    fn validateImpls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        const spans = self.arena.items.items(.span);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .impl_decl) continue;
+            const impl = self.arena.impl_decls.items[datas[i]];
+            const tname = self.arena.strings.slice(impl.type_name);
+            if (self.symbols.get(impl.type_name)) |sym| {
+                if (sym.kind != .struct_ and sym.kind != .component and sym.kind != .resource) {
+                    try self.emit(.undefined_symbol, .error_, spans[i], "impl target '{s}' is not a struct, component, or resource", .{tname});
+                }
+            } else {
+                try self.emit(.undefined_symbol, .error_, spans[i], "impl target type '{s}' is not declared", .{tname});
+            }
+        }
+    }
+
+    /// Resolve an inherent method `(type_name, method_name)` to its `FnDecl`
+    /// (M0.8 E2 block 3, §5.1), or `null` if no such method exists.
+    fn lookupMethod(self: *TypeChecker, type_name: StringId, method_name: StringId) ?ast_mod.FnDecl {
+        const idx = self.methods.get(methodKey(type_name, method_name)) orelse return null;
+        return self.arena.impl_methods.items[idx];
     }
 
     fn validateFieldsInDecl(self: *TypeChecker, fields_start: u32, fields_len: u32, is_component: bool) !void {
@@ -423,6 +507,7 @@ pub const TypeChecker = struct {
                     return switch (sym.kind) {
                         .component => .{ .component = resolved_name },
                         .resource => .{ .resource = resolved_name },
+                        .struct_ => .{ .struct_t = resolved_name },
                         else => .unknown,
                     };
                 }
@@ -480,7 +565,72 @@ pub const TypeChecker = struct {
             switch (kind) {
                 .rule_decl => try self.checkRule(self.arena.rule_decls.items[data]),
                 .fn_decl => try self.checkFn(self.arena.fn_decls.items[data]),
+                .impl_decl => try self.checkImpl(self.arena.impl_decls.items[data]),
                 else => {},
+            }
+        }
+    }
+
+    /// Type-check every method of an inherent `impl` (M0.8 E2 block 3). Each
+    /// method is checked like a `fn`, with `self` bound (for `self` / `mut self`
+    /// receivers) to the impl's target type so `self.field` / `self.method()`
+    /// resolve. Associated fns (`self_kind == .none`) bind no receiver.
+    fn checkImpl(self: *TypeChecker, impl: ast_mod.ImplDecl) !void {
+        // The receiver type for `self`: the impl's target. A declared struct →
+        // `.struct_t`; a component / resource → their resolved type; anything
+        // else (validateImpls already flagged it) → `unknown`.
+        const self_type: ResolvedType = if (self.symbols.get(impl.type_name)) |sym| switch (sym.kind) {
+            .struct_ => .{ .struct_t = impl.type_name },
+            .component => .{ .component = impl.type_name },
+            .resource => .{ .resource = impl.type_name },
+            else => ResolvedType.unknown,
+        } else ResolvedType.unknown;
+
+        var i: u32 = 0;
+        while (i < impl.methods_len) : (i += 1) {
+            try self.checkImplMethod(self.arena.impl_methods.items[impl.methods_start + i], self_type);
+        }
+    }
+
+    /// Type-check one `impl` method body (M0.8 E2 block 3). Mirrors `checkFn`
+    /// but, when the method takes a `self` receiver, binds `self` to the impl's
+    /// target type first so the body's `self.field` / `self.method()` resolve.
+    fn checkImplMethod(self: *TypeChecker, decl: ast_mod.FnDecl, self_type: ResolvedType) !void {
+        var ctx: RuleCtx = .{};
+        defer ctx.deinit(self.gpa);
+
+        if (decl.self_kind != .none) {
+            const self_id = try self.arena.strings.intern(self.gpa, "self");
+            try ctx.locals.put(self.gpa, self_id, .{ .type_ = self_type, .is_mut = decl.self_kind == .by_mut });
+        }
+
+        var i: u32 = 0;
+        while (i < decl.params_len) : (i += 1) {
+            const p = self.arena.fn_params.items[decl.params_start + i];
+            const ptype = self.namedTypeToResolved(p.type_node);
+            if (ptype == .unknown) {
+                try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown or unsupported parameter type on method '{s}'", .{self.arena.strings.slice(decl.name)});
+            }
+            try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
+        }
+
+        const ret_t: ResolvedType = if (decl.return_type.isNone())
+            ResolvedType.unknown
+        else
+            self.namedTypeToResolved(decl.return_type);
+        const saved_ret = self.current_fn_return;
+        self.current_fn_return = ret_t;
+        defer self.current_fn_return = saved_ret;
+
+        var s: u32 = 0;
+        while (s < decl.body_len) : (s += 1) {
+            try self.checkStmt(&ctx, @bitCast(self.arena.extra.items[decl.body_start + s]));
+        }
+
+        if (!decl.value.isNone()) {
+            const vt = self.synthExpr(decl.value, &ctx);
+            if (!decl.return_type.isNone() and ret_t == .builtin and vt == .builtin and !self.literalTypeFits(ret_t.builtin, decl.value, vt.builtin)) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(decl.value), "method '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
             }
         }
     }
@@ -954,6 +1104,8 @@ pub const TypeChecker = struct {
             .index => return try self.synthIndex(id, data, ctx_opt),
             .closure => return .{ .closure = id },
             .fn_call => return try self.synthCall(id, data, ctx_opt),
+            .struct_lit => return try self.synthStructLit(id, data, ctx_opt),
+            .method_call => return try self.synthMethodCall(id, data, ctx_opt),
             .loop_expr => return try self.synthLoop(data, ctx_opt),
             .block_expr => return try self.synthBlock(data, ctx_opt),
             .if_expr => return try self.synthIf(id, data, ctx_opt),
@@ -1183,6 +1335,121 @@ pub const TypeChecker = struct {
         return if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
     }
 
+    /// Type a struct literal `T { f: v, … }` (M0.8 E2 block 3). `T` must name a
+    /// declared struct; each provided field must exist on it with a matching
+    /// value type. Fields may be omitted (the codegen / interpreter fill the
+    /// struct's declared defaults). The result type is `.struct_t = T`. The
+    /// anonymous `.{ … }` form (deferred) carries `type_name == 0`.
+    fn synthStructLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const sl = self.arena.struct_lits.items[data];
+        const sym = self.symbols.get(sl.type_name);
+        if (sym == null or sym.?.kind != .struct_) {
+            try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a struct type", .{self.arena.strings.slice(sl.type_name)});
+            return ResolvedType.unknown;
+        }
+        const decl = self.arena.struct_decls.items[self.arena.itemData(sym.?.item_id)];
+        var i: u32 = 0;
+        while (i < sl.fields_len) : (i += 1) {
+            const flit = self.arena.struct_lit_fields.items[sl.fields_start + i];
+            // Locate the field on the struct declaration.
+            var declared: ?ResolvedType = null;
+            var f_i: u32 = 0;
+            while (f_i < decl.fields_len) : (f_i += 1) {
+                const f = self.arena.fields.items[decl.fields_start + f_i];
+                if (f.name == flit.name) {
+                    declared = self.namedTypeToResolved(f.type_node);
+                    break;
+                }
+            }
+            const actual = try self.synthExprE(flit.value, ctx_opt);
+            if (declared) |d| {
+                if (d == .builtin and actual == .builtin and !self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "struct-literal field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
+                }
+            } else {
+                try self.emit(.invalid_field_filter, .error_, self.arena.exprSpan(id), "struct '{s}' has no field '{s}'", .{ self.arena.strings.slice(sl.type_name), self.arena.strings.slice(flit.name) });
+            }
+        }
+        return .{ .struct_t = sl.type_name };
+    }
+
+    /// The user type name carried by a struct / component / resource type, or
+    /// `null` for builtins / collections (no user methods in M0.8 E2 block 3 —
+    /// builtin/stdlib methods like `Vec3.length` are §5.3, out of scope).
+    fn typeNameOfResolved(rt: ResolvedType) ?StringId {
+        return switch (rt) {
+            .struct_t => |n| n,
+            .component => |n| n,
+            .resource => |n| n,
+            else => null,
+        };
+    }
+
+    /// Type a method call `recv.method(args)` / `Type.assoc(args)` (M0.8 E2
+    /// block 3 — the dispatch deferred fail-loud from block 2). Kind-1 inherent
+    /// dispatch (`etch-resolver-types.md §5.1`): an associated fn when the
+    /// receiver is a bare type path (`Type.assoc()`, `self_kind == .none`); an
+    /// instance method when the receiver is a value of a struct / component /
+    /// resource type (`recv.method()`, `self_kind != .none`). Trait (§5.2) and
+    /// builtin (§5.3) dispatch arrive in tranche C / E3. Diagnostics reuse
+    /// E0200 (the dedicated E0201 MethodNotFound is an additive follow-up).
+    fn synthMethodCall(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const mc = self.arena.method_calls.items[data];
+        const method_slice = self.arena.strings.slice(mc.method_name);
+
+        // Associated-fn dispatch: the receiver is a bare type name (`.path`).
+        if (self.arena.exprKind(mc.receiver) == .path) {
+            const type_name = self.arena.exprData(mc.receiver);
+            const method = self.lookupMethod(type_name, mc.method_name) orelse {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no associated function '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
+                return ResolvedType.unknown;
+            };
+            if (method.self_kind != .none) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'{s}' is a method (takes self) — call it as a receiver method 'value.{s}(...)'", .{ method_slice, method_slice });
+                return ResolvedType.unknown;
+            }
+            return try self.checkMethodArgs(id, mc, method, ctx_opt);
+        }
+
+        // Instance dispatch: synth the receiver, take its user type name.
+        const recv_t = try self.synthExprE(mc.receiver, ctx_opt);
+        const type_name = typeNameOfResolved(recv_t) orelse {
+            if (recv_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "method call '{s}' on a value with no methods (builtin / collection methods are not supported here)", .{method_slice});
+            return ResolvedType.unknown;
+        };
+        const method = self.lookupMethod(type_name, mc.method_name) orelse {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
+            return ResolvedType.unknown;
+        };
+        if (method.self_kind == .none) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'{s}' is an associated function (no self) — call it as '{s}.{s}(...)'", .{ method_slice, self.arena.strings.slice(type_name), method_slice });
+            return ResolvedType.unknown;
+        }
+        return try self.checkMethodArgs(id, mc, method, ctx_opt);
+    }
+
+    /// Check a method/associated-fn call's argument count + types against the
+    /// resolved `method` (M0.8 E2 block 3) and return its declared return type.
+    /// `self` is not part of the argument list (it is the receiver).
+    fn checkMethodArgs(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, method: ast_mod.FnDecl, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const ret: ResolvedType = if (method.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(method.return_type);
+        if (method.params_len != mc.args_len) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "method '{s}' called with {d} argument(s), expected {d}", .{ self.arena.strings.slice(mc.method_name), mc.args_len, method.params_len });
+            return ret;
+        }
+        var i: u32 = 0;
+        while (i < method.params_len) : (i += 1) {
+            const p = self.arena.fn_params.items[method.params_start + i];
+            const ptype = self.namedTypeToResolved(p.type_node);
+            const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start + i]);
+            const arg_t = try self.synthExprE(arg, ctx_opt);
+            if (ptype == .builtin and arg_t == .builtin and !self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of method '{s}'", .{self.arena.strings.slice(mc.method_name)});
+            }
+        }
+        return ret;
+    }
+
     /// Type an index / slice access (M0.8 collections). A range index
     /// (`arr[0..3]`) yields a dynamic-array slice of the element type; a scalar
     /// index (`arr[i]`) yields the element type. The index must be an integer.
@@ -1349,6 +1616,19 @@ pub const TypeChecker = struct {
                     if (f.name == field_name) return self.namedTypeToResolved(f.type_node);
                 }
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on resource '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
+                return ResolvedType.unknown;
+            },
+            .struct_t => |name_id| {
+                // Field of a `struct` value (M0.8 E2 block 3) — e.g. `self.x`
+                // inside a method or `v.x` on a struct local.
+                const sym = self.symbols.get(name_id) orelse return ResolvedType.unknown;
+                const decl = self.arena.struct_decls.items[self.arena.itemData(sym.item_id)];
+                var i: u32 = 0;
+                while (i < decl.fields_len) : (i += 1) {
+                    const f = self.arena.fields.items[decl.fields_start + i];
+                    if (f.name == field_name) return self.namedTypeToResolved(f.type_node);
+                }
+                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on struct '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
             .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .unknown => return ResolvedType.unknown,
@@ -2173,4 +2453,91 @@ test "free-function call arity, arg, and return typing (M0.8 E2)" {
     );
     defer retty.deinit(gpa);
     try expectAnyCode(retty.diagnostics.items, .type_mismatch);
+}
+
+test "struct inherent methods: dispatch, struct literal, and error cases (M0.8 E2 block 3)" {
+    const gpa = std.testing.allocator;
+
+    // Valid: an associated fn builds the struct via a literal, an instance
+    // method reads it — clean.
+    var ok = try parseAndCheck(gpa,
+        \\struct V2 { x: int = 0, y: int = 0 }
+        \\impl V2 {
+        \\  fn sum(self) -> int { self.x + self.y }
+        \\  fn make(a: int, b: int) -> V2 { V2 { x: a, y: b } }
+        \\}
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let v = V2.make(3, 4)
+        \\  entity.get_mut(Acc).out = v.sum()
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+    try expectNoCode(ok.diagnostics.items, .undefined_symbol);
+
+    // No such method on the type → E0200.
+    var no_method = try parseAndCheck(gpa,
+        \\struct V2 { x: int = 0 }
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let v = V2 { x: 1 }
+        \\  entity.get_mut(Acc).out = v.nope()
+        \\}
+    );
+    defer no_method.deinit(gpa);
+    try expectAnyCode(no_method.diagnostics.items, .type_mismatch);
+
+    // Calling an associated fn through an instance receiver → E0200.
+    var wrong_kind = try parseAndCheck(gpa,
+        \\struct V2 { x: int = 0 }
+        \\impl V2 { fn make() -> V2 { V2 { x: 1 } } }
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let v = V2 { x: 1 }
+        \\  entity.get_mut(Acc).out = v.make().x
+        \\}
+    );
+    defer wrong_kind.deinit(gpa);
+    try expectAnyCode(wrong_kind.diagnostics.items, .type_mismatch);
+
+    // Struct literal naming a field the struct does not have → E1211.
+    var bad_field = try parseAndCheck(gpa,
+        \\struct V2 { x: int = 0 }
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let v = V2 { z: 1 }
+        \\}
+    );
+    defer bad_field.deinit(gpa);
+    try expectAnyCode(bad_field.diagnostics.items, .invalid_field_filter);
+
+    // `impl` on an undeclared type → E0102.
+    var no_target = try parseAndCheck(gpa,
+        \\impl Ghost { fn f(self) -> int { 0 } }
+    );
+    defer no_target.deinit(gpa);
+    try expectAnyCode(no_target.diagnostics.items, .undefined_symbol);
+
+    // Argument-count mismatch on an associated fn → E0200.
+    var arity = try parseAndCheck(gpa,
+        \\struct V2 { x: int = 0 }
+        \\impl V2 { fn make(a: int) -> V2 { V2 { x: a } } }
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let v = V2.make(1, 2)
+        \\}
+    );
+    defer arity.deinit(gpa);
+    try expectAnyCode(arity.diagnostics.items, .type_mismatch);
 }

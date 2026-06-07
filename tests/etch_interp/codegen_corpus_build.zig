@@ -55,4 +55,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p36_loop_if_break", .etch_path = "tests/etch_interp/programs/36_loop_if_break.etch" },
     .{ .name = "p37_match_stmt_control", .etch_path = "tests/etch_interp/programs/37_match_stmt_control.etch" },
     .{ .name = "p38_fn_free_call", .etch_path = "tests/etch_interp/programs/38_fn_free_call.etch" },
+    .{ .name = "p39_struct_method", .etch_path = "tests/etch_interp/programs/39_struct_method.etch" },
 };

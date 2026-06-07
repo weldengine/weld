@@ -83,6 +83,10 @@ pub fn generateFile(
                 try emitComponentLikeStruct(&w, ast, data, .resource);
                 stats.resources += 1;
             },
+            // A `struct` is a by-value type (M0.8 E2 block 3): emit the
+            // `extern struct` with its fields and its inherent `impl` methods
+            // (as Zig `pub fn` members), but no RTTI registration.
+            .struct_decl => try emitStructDecl(&w, ast, data),
             else => {},
         }
     }
@@ -212,6 +216,108 @@ fn zeroDefault(zig_type: []const u8) []const u8 {
     if (type_map.isFloatLikeZigType(zig_type)) return "0.0";
     if (std.mem.eql(u8, zig_type, "bool")) return "false";
     return "0";
+}
+
+// ─── struct (by-value type) ──────────────────────────────────────────────
+
+/// Emit a `struct` declaration as a Zig `extern struct` with its fields plus
+/// its inherent `impl` methods as `pub fn` members (M0.8 E2 block 3). Unlike a
+/// component / resource, a struct is not RTTI-registered (it is a by-value
+/// type, not an ECS type). Field layout mirrors `emitComponentLikeStruct` so
+/// the runtime registry's `@offsetOf` semantics match if the struct is later
+/// nested in a component (out of block-3 scope, but layout-compatible).
+fn emitStructDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void {
+    const decl = ast.struct_decls.items[data];
+    const name = ast.strings.slice(decl.name);
+    try w.printLine("pub const {s} = extern struct {{", .{name});
+    w.indentBy(1);
+    var f_i: u32 = 0;
+    while (f_i < decl.fields_len) : (f_i += 1) {
+        const f = ast.fields.items[decl.fields_start + f_i];
+        const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
+        const etch_type = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+        const zig_type = type_map.mapBuiltin(etch_type) orelse return CodegenError.NonPodComponent;
+        const fname = ast.strings.slice(f.name);
+        try w.writeIndent();
+        try w.ident(fname);
+        if (f.default_value.isNone()) {
+            try w.print(": {s} = {s},\n", .{ zig_type, zeroDefault(zig_type) });
+        } else {
+            try w.print(": {s} = ", .{zig_type});
+            try emitConstExpr(w, ast, f.default_value, zig_type);
+            try w.write(",\n");
+        }
+    }
+    // Inherent methods: walk every `impl <this type> { … }` and emit its
+    // methods as `pub fn` members (declaration order across impls).
+    var i: u28 = 0;
+    while (i < ast.items.len) : (i += 1) {
+        if (ast.items.items(.kind)[i] != .impl_decl) continue;
+        const impl = ast.impl_decls.items[ast.items.items(.data)[i]];
+        if (impl.type_name != decl.name) continue;
+        var m: u32 = 0;
+        while (m < impl.methods_len) : (m += 1) {
+            try emitMethod(w, ast, name, ast.impl_methods.items[impl.methods_start + m]);
+        }
+    }
+    w.indentBy(-1);
+    try w.line("};");
+    try w.blankLine();
+}
+
+/// Emit one inherent `impl` method as a Zig `pub fn` member (M0.8 E2 block 3).
+/// A `self` (by-value) receiver lowers to `self: T`; an associated fn (no self)
+/// to a plain function. `mut self` needs a pointer receiver (`self: *T`) and an
+/// addressable call site — deferred (the interpreter is its reference), as are
+/// `async` / `throws` methods (E3). The body is a value-block (trailing
+/// expression → implicit `return`), shared with `emitFnDecl`'s shape.
+fn emitMethod(w: *Writer, ast: *const AstArena, struct_name: []const u8, method: ast_mod.FnDecl) CodegenError!void {
+    if (method.is_async) return CodegenError.UnsupportedConstruct; // async codegen → Phase 2
+    if (method.throws) return CodegenError.UnsupportedConstruct; // throws codegen → E3 gate
+    if (method.self_kind == .by_mut) return CodegenError.UnsupportedConstruct; // mut-self pointer receiver → deferred
+
+    var ctx: LocalCtx = .{};
+    defer ctx.deinit(w.gpa);
+
+    try w.writeIndent();
+    try w.write("pub fn ");
+    try w.ident(ast.strings.slice(method.name));
+    try w.write("(");
+    var wrote_param = false;
+    if (method.self_kind == .by_value) {
+        try w.print("self: {s}", .{struct_name});
+        wrote_param = true;
+        if (ast.strings.find("self")) |sid| {
+            try ctx.records.append(w.gpa, .{ .key = .{ .name = sid }, .info = .{ .kind = .value, .zig_type = struct_name, .is_mut = false } });
+        }
+    }
+    var p_i: u32 = 0;
+    while (p_i < method.params_len) : (p_i += 1) {
+        if (wrote_param) try w.write(", ");
+        const p = ast.fn_params.items[method.params_start + p_i];
+        const zig_t = fnTypeZig(ast, p.type_node);
+        try w.ident(ast.strings.slice(p.name));
+        try w.print(": {s}", .{zig_t});
+        wrote_param = true;
+        try ctx.records.append(w.gpa, .{ .key = .{ .name = p.name }, .info = .{ .kind = .value, .zig_type = zig_t, .is_mut = false } });
+    }
+    try w.write(") ");
+    try w.write(if (method.return_type.isNone()) "void" else fnTypeZig(ast, method.return_type));
+    try w.write(" {\n");
+    w.indentBy(1);
+    var s: u32 = 0;
+    while (s < method.body_len) : (s += 1) {
+        try emitStmt(w, ast, &ctx, @bitCast(ast.extra.items[method.body_start + s]));
+    }
+    if (!method.value.isNone()) {
+        try w.writeIndent();
+        try w.write("return ");
+        try emitExpr(w, ast, &ctx, method.value);
+        try w.write(";\n");
+    }
+    w.indentBy(-1);
+    try w.writeIndent();
+    try w.write("}\n");
 }
 
 // ─── `register` function ────────────────────────────────────────────────────
@@ -721,6 +827,23 @@ fn walkExprForComponents(
             var i: u32 = 0;
             while (i < call.args_len) : (i += 1) {
                 try walkExprForComponents(gpa, ast, @bitCast(ast.extra.items[call.args_start + i]), out);
+            }
+        },
+        .method_call => {
+            const mc = ast.method_calls.items[data];
+            // The receiver of a `Type.assoc()` is a bare type path (no
+            // component ref); a `recv.method()` receiver may carry one.
+            if (ast.exprKind(mc.receiver) != .path) try walkExprForComponents(gpa, ast, mc.receiver, out);
+            var i: u32 = 0;
+            while (i < mc.args_len) : (i += 1) {
+                try walkExprForComponents(gpa, ast, @bitCast(ast.extra.items[mc.args_start + i]), out);
+            }
+        },
+        .struct_lit => {
+            const sl = ast.struct_lits.items[data];
+            var i: u32 = 0;
+            while (i < sl.fields_len) : (i += 1) {
+                try walkExprForComponents(gpa, ast, ast.struct_lit_fields.items[sl.fields_start + i].value, out);
             }
         },
         .match_expr => {
@@ -1324,11 +1447,45 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             }
             try w.write(")");
         },
+        .struct_lit => {
+            // `T { f: v, … }` → Zig `T{ .f = v, … }` (M0.8 E2 block 3). The
+            // anonymous `.{ … }` form (`type_name == 0`) is deferred. Omitted
+            // fields fall back to the `extern struct` declared defaults.
+            const sl = ast.struct_lits.items[data];
+            if (sl.type_name == 0) return CodegenError.UnsupportedConstruct;
+            try w.print("{s}{{", .{ast.strings.slice(sl.type_name)});
+            var i: u32 = 0;
+            while (i < sl.fields_len) : (i += 1) {
+                const flit = ast.struct_lit_fields.items[sl.fields_start + i];
+                if (i > 0) try w.write(",");
+                try w.write(" .");
+                try w.ident(ast.strings.slice(flit.name));
+                try w.write(" = ");
+                try emitExpr(w, ast, ctx, flit.value);
+            }
+            try w.write(" }");
+        },
         .method_call => {
-            // `recv.method(args)` is parsed in E2 block 2 but its 4-kind
-            // dispatch (`etch-resolver-types.md §5`) lands in block 3 with
-            // `impl`. Fail loud rather than emit silently-wrong Zig.
-            return CodegenError.UnsupportedConstruct;
+            // `recv.method(args)` / `Type.assoc(args)` → Zig method / associated
+            // call (M0.8 E2 block 3, §5.1). Inherent methods are emitted inside
+            // the struct, so Zig's `value.method(args)` / `Type.assoc(args)`
+            // syntax resolves them directly.
+            const mc = ast.method_calls.items[data];
+            if (ast.exprKind(mc.receiver) == .path) {
+                // Associated fn: the receiver is a bare type name.
+                try w.write(ast.strings.slice(ast.exprData(mc.receiver)));
+            } else {
+                try emitExpr(w, ast, ctx, mc.receiver);
+            }
+            try w.write(".");
+            try w.ident(ast.strings.slice(mc.method_name));
+            try w.write("(");
+            var i: u32 = 0;
+            while (i < mc.args_len) : (i += 1) {
+                if (i > 0) try w.write(", ");
+                try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + i]));
+            }
+            try w.write(")");
         },
         .loop_expr => {
             // `[label:] loop { body }` → Zig `[label:] while (true) { ... }`
@@ -1773,6 +1930,10 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         // inference too (M0.8 closures).
         .closure => "",
         .fn_call => "",
+        // Struct literals (struct type) and method-call results (the method's
+        // return type) are left to Zig inference (M0.8 E2 block 3).
+        .struct_lit => "",
+        .method_call => "",
         // A loop expression's value type is inferred by Zig from its break.
         .loop_expr => "",
         // A block expression's value type is inferred by Zig from its trailing
@@ -1814,7 +1975,13 @@ fn receiverComponentName(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) ?[]
         },
         .ident => blk: {
             const sid: StringId = data;
-            if (ctx.lookup(sid)) |local| if (local.kind == .component_alias) break :blk local.component_name;
+            if (ctx.lookup(sid)) |local| {
+                if (local.kind == .component_alias) break :blk local.component_name;
+                // A struct-typed value local (M0.8 E2 block 3): its Zig type
+                // name is the struct name (Etch ↔ Zig types map 1:1), so the
+                // field's declared type resolves on that struct.
+                if (local.kind == .value and local.zig_type.len > 0 and type_map.mapBuiltin(local.zig_type) == null) break :blk local.zig_type;
+            }
             break :blk null;
         },
         .field_access => null, // chained field access not introspected — fall back to default type
@@ -1826,22 +1993,25 @@ fn fieldZigTypeOnComponent(ast: *const AstArena, comp_name: []const u8, field_na
     var i: u28 = 0;
     while (i < ast.items.len) : (i += 1) {
         const kind = ast.items.items(.kind)[i];
-        if (kind != .component_decl and kind != .resource_decl) continue;
+        if (kind != .component_decl and kind != .resource_decl and kind != .struct_decl) continue;
         const data = ast.items.items(.data)[i];
         const decl_name: []const u8 = switch (kind) {
             .component_decl => ast.strings.slice(ast.component_decls.items[data].name),
             .resource_decl => ast.strings.slice(ast.resource_decls.items[data].name),
+            .struct_decl => ast.strings.slice(ast.struct_decls.items[data].name),
             else => unreachable,
         };
         if (!std.mem.eql(u8, decl_name, comp_name)) continue;
         const fields_start: u32 = switch (kind) {
             .component_decl => ast.component_decls.items[data].fields_start,
             .resource_decl => ast.resource_decls.items[data].fields_start,
+            .struct_decl => ast.struct_decls.items[data].fields_start,
             else => unreachable,
         };
         const fields_len: u32 = switch (kind) {
             .component_decl => ast.component_decls.items[data].fields_len,
             .resource_decl => ast.resource_decls.items[data].fields_len,
+            .struct_decl => ast.struct_decls.items[data].fields_len,
             else => unreachable,
         };
         var f_i: u32 = 0;
