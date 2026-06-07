@@ -865,6 +865,7 @@ pub const TypeChecker = struct {
             .fn_call => return try self.synthCall(id, data, ctx_opt),
             .loop_expr => return try self.synthLoop(data, ctx_opt),
             .block_expr => return try self.synthBlock(data, ctx_opt),
+            .if_expr => return try self.synthIf(id, data, ctx_opt),
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
             else => return ResolvedType.unknown,
         }
@@ -983,6 +984,27 @@ pub const TypeChecker = struct {
         }
         if (blk.value.isNone()) return ResolvedType.unknown;
         return try self.synthExprE(blk.value, ctx_opt);
+    }
+
+    /// Type an `if` expression (M0.8 control flow). The condition must be
+    /// `bool`; the then / else branches (block expressions, `else if` chaining
+    /// through a nested `if`) must unify to one result type. An `if` with no
+    /// `else` has no value (`unknown` ≈ unit) — valid only in statement
+    /// position (the type-checker does not separately reject a value-position
+    /// else-less `if`; the codegen surfaces it as `UnsupportedConstruct`).
+    fn synthIf(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const ife = self.arena.if_exprs.items[data];
+        const cond_t = try self.synthExprE(ife.cond, ctx_opt);
+        if (cond_t == .builtin and cond_t.builtin != .bool_) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ife.cond), "if condition must be a bool expression", .{});
+        }
+        const then_t = try self.synthExprE(ife.then_block, ctx_opt);
+        if (ife.else_branch.isNone()) return ResolvedType.unknown;
+        const else_t = try self.synthExprE(ife.else_branch, ctx_opt);
+        if (then_t == .builtin and else_t == .builtin and !ResolvedType.eql(then_t, else_t)) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "if branches must yield the same type", .{});
+        }
+        return then_t;
     }
 
     /// Type a call expression (M0.8 closures). E1 only resolves calls whose
@@ -1560,6 +1582,48 @@ test "assert requires a bool condition (M0.8 assert foundation)" {
         \\  when resource R
         \\{
         \\  assert(1 < 2)
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+}
+
+test "if requires a bool condition and unifies its branch types (M0.8 control flow)" {
+    const gpa = std.testing.allocator;
+
+    // Non-bool condition → E0200.
+    var bad_cond = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let x = if 5 { 1 } else { 2 }
+        \\  entity.get_mut(C).out = x
+        \\}
+    );
+    defer bad_cond.deinit(gpa);
+    try expectAnyCode(bad_cond.diagnostics.items, .type_mismatch);
+
+    // Branches yielding different types → E0200.
+    var bad_branch = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let x = if 1 < 2 { 1 } else { true }
+        \\}
+    );
+    defer bad_branch.deinit(gpa);
+    try expectAnyCode(bad_branch.diagnostics.items, .type_mismatch);
+
+    // Valid bool condition + unified int branches → no type error.
+    var ok = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let x = if 1 < 2 { 10 } else { 20 }
+        \\  entity.get_mut(C).out = x
         \\}
     );
     defer ok.deinit(gpa);

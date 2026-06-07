@@ -49,4 +49,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p30_loop_break_value", .etch_path = "tests/etch_interp/programs/30_loop_break_value.etch" },
     .{ .name = "p31_labeled_break", .etch_path = "tests/etch_interp/programs/31_labeled_break.etch" },
     .{ .name = "p32_block_expr_value", .etch_path = "tests/etch_interp/programs/32_block_expr_value.etch" },
+    .{ .name = "p33_if_else", .etch_path = "tests/etch_interp/programs/33_if_else.etch" },
 };

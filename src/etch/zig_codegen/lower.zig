@@ -663,6 +663,12 @@ fn walkExprForComponents(
             }
             if (!blk.value.isNone()) try walkExprForComponents(gpa, ast, blk.value, out);
         },
+        .if_expr => {
+            const ife = ast.if_exprs.items[data];
+            try walkExprForComponents(gpa, ast, ife.cond, out);
+            try walkExprForComponents(gpa, ast, ife.then_block, out);
+            if (!ife.else_branch.isNone()) try walkExprForComponents(gpa, ast, ife.else_branch, out);
+        },
         else => {},
     }
 }
@@ -878,6 +884,10 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             }
             if (ek == .block_expr) {
                 try emitBlockExprStmts(w, ast, ctx, ast.exprData(eid));
+                return;
+            }
+            if (ek == .if_expr) {
+                try emitIfAsStmt(w, ast, ctx, ast.exprData(eid));
                 return;
             }
             try w.writeIndent();
@@ -1214,6 +1224,23 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             try w.write("}");
         },
         .block_expr => try emitBlockExprValue(w, ast, ctx, data),
+        .if_expr => {
+            // `if cond { a } else { b }` in value position → Zig if-expression
+            // `if (<cond>) <then-value> else <else-value>` (M0.8 control flow).
+            // The branches are block expressions emitted as values; `else if`
+            // recurses as a nested if-expression. An else-less `if` in value
+            // position has no Zig value — the type-checker treats it as unit, so
+            // a sound program never lands one here.
+            const ife = ast.if_exprs.items[data];
+            try w.write("if (");
+            try emitExpr(w, ast, ctx, ife.cond);
+            try w.write(") ");
+            try emitExpr(w, ast, ctx, ife.then_block);
+            if (!ife.else_branch.isNone()) {
+                try w.write(" else ");
+                try emitExpr(w, ast, ctx, ife.else_branch);
+            }
+        },
         .range => return CodegenError.UnsupportedConstruct, // ranges appear only as for-in iterables in E1 (lowered by emitStmt .for_stmt)
         .cast => {
             // `operand as Type` → an explicit Zig numeric conversion wrapped
@@ -1380,14 +1407,15 @@ fn emitBlockExprValue(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u3
     ctx.records.items.len = saved;
 }
 
-/// Emit a block expression in statement position (M0.8 control flow): a Zig
-/// brace-block running the body statements, then the trailing value (if any)
-/// as a discarded `_ = <value>;`. Used for a bare block statement and for
-/// `if` / `while` branch bodies (the block value is discarded there).
-fn emitBlockExprStmts(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) CodegenError!void {
+/// Emit a block expression's body as a braced Zig statement block
+/// `{ <stmts> [_ = <value>;] }` — the body statements plus the trailing value
+/// discarded — with no leading indent and no trailing newline. The caller
+/// positions it (bare block statement, `if` / `while` branch bodies). `data` is
+/// the `block_exprs` slab index.
+fn emitBraceBlock(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) CodegenError!void {
     const blk = ast.block_exprs.items[data];
     const saved = ctx.records.items.len;
-    try w.line("{");
+    try w.write("{\n");
     w.indentBy(1);
     var s: u32 = 0;
     while (s < blk.body_len) : (s += 1) {
@@ -1400,8 +1428,43 @@ fn emitBlockExprStmts(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u3
         try w.write(";\n");
     }
     w.indentBy(-1);
-    try w.line("}");
+    try w.writeIndent();
+    try w.write("}");
     ctx.records.items.len = saved;
+}
+
+/// Emit a bare block expression in statement position (M0.8 control flow): the
+/// braced block with its trailing value discarded.
+fn emitBlockExprStmts(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) CodegenError!void {
+    try w.writeIndent();
+    try emitBraceBlock(w, ast, ctx, data);
+    try w.write("\n");
+}
+
+/// Emit an `if` expression in statement position (M0.8 control flow): a Zig
+/// `if (<cond>) { ... } [else if ...] [else { ... }]` statement whose branch
+/// values are discarded. `data` is the `if_exprs` slab index.
+fn emitIfAsStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) CodegenError!void {
+    try w.writeIndent();
+    try emitIfChain(w, ast, ctx, data);
+    try w.write("\n");
+}
+
+/// Emit the `if (...) { ... } else ...` chain (no leading indent / trailing
+/// newline). The else-if branch recurses; a final `else` is a block.
+fn emitIfChain(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) CodegenError!void {
+    const ife = ast.if_exprs.items[data];
+    try w.write("if (");
+    try emitExpr(w, ast, ctx, ife.cond);
+    try w.write(") ");
+    try emitBraceBlock(w, ast, ctx, ast.exprData(ife.then_block));
+    if (ife.else_branch.isNone()) return;
+    try w.write(" else ");
+    if (ast.exprKind(ife.else_branch) == .if_expr) {
+        try emitIfChain(w, ast, ctx, ast.exprData(ife.else_branch));
+    } else {
+        try emitBraceBlock(w, ast, ctx, ast.exprData(ife.else_branch));
+    }
 }
 
 /// The Zig type emitted for a closure parameter (M0.8 closures). E1 codegen
@@ -1509,6 +1572,15 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         // A block expression's value type is inferred by Zig from its trailing
         // value (left un-annotated so block-locals need not be in scope here).
         .block_expr => "",
+        // An if-expression needs a concrete `let` annotation: a runtime
+        // condition selecting bare comptime-int / -float literal branches is
+        // rejected by Zig unless a result type is fixed. Infer it from the
+        // then-branch's trailing value.
+        .if_expr => blk: {
+            const ife = ast.if_exprs.items[data];
+            const tb = ast.block_exprs.items[ast.exprData(ife.then_block)];
+            break :blk if (tb.value.isNone()) "i64" else inferExprZigType(ast, ctx, tb.value);
+        },
         .method_get, .method_get_mut => "struct", // not directly inferable; should not appear at let-rhs after method_get handling
         .cast => blk: {
             const c = ast.casts.items[data];

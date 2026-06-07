@@ -538,6 +538,17 @@ pub const BlockExpr = struct {
     value: NodeId,
 };
 
+/// `if cond block {else if cond block} [else block]` if expression (M0.8
+/// control flow, `etch-grammar.md` §3.2 l.500 / §4.1 l.618). The else-if chain
+/// is encoded recursively: `else_branch` is `NodeId.none` (no `else`), a
+/// `block_expr` (final `else { }`), or another `if_expr` (`else if ...`).
+/// `then_block` is always a `block_expr`.
+pub const IfExpr = struct {
+    cond: NodeId,
+    then_block: NodeId,
+    else_branch: NodeId,
+};
+
 /// `break [label] [value]` statement (M0.8 loop/break, `etch-grammar.md` §632).
 /// `label` is `0` when unlabeled; `value` is `NodeId.none` when valueless.
 pub const BreakStmt = struct {
@@ -757,6 +768,7 @@ pub const AstArena = struct {
     call_exprs: std.ArrayListUnmanaged(CallExpr) = .empty,
     loop_exprs: std.ArrayListUnmanaged(LoopExpr) = .empty,
     block_exprs: std.ArrayListUnmanaged(BlockExpr) = .empty,
+    if_exprs: std.ArrayListUnmanaged(IfExpr) = .empty,
     break_stmts: std.ArrayListUnmanaged(BreakStmt) = .empty,
     throw_stmts: std.ArrayListUnmanaged(ThrowStmt) = .empty,
     try_catch_stmts: std.ArrayListUnmanaged(TryCatchStmt) = .empty,
@@ -840,6 +852,7 @@ pub const AstArena = struct {
         self.call_exprs.deinit(gpa);
         self.loop_exprs.deinit(gpa);
         self.block_exprs.deinit(gpa);
+        self.if_exprs.deinit(gpa);
         self.break_stmts.deinit(gpa);
         self.throw_stmts.deinit(gpa);
         self.try_catch_stmts.deinit(gpa);
@@ -1048,6 +1061,12 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.block_exprs.items.len);
         try self.block_exprs.append(gpa, .{ .body_start = body_start, .body_len = body_len, .value = value });
         return try self.addExpr(gpa, .block_expr, idx, span);
+    }
+
+    pub fn addIfExpr(self: *AstArena, gpa: std.mem.Allocator, cond: NodeId, then_block: NodeId, else_branch: NodeId, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.if_exprs.items.len);
+        try self.if_exprs.append(gpa, .{ .cond = cond, .then_block = then_block, .else_branch = else_branch });
+        return try self.addExpr(gpa, .if_expr, idx, span);
     }
 
     pub fn addBreakStmt(self: *AstArena, gpa: std.mem.Allocator, label: StringId, value: NodeId, span: SourceSpan) !NodeId {

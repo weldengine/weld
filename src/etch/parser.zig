@@ -935,6 +935,32 @@ pub const Parser = struct {
         });
     }
 
+    /// Parse `if cond block {else if cond block} [else block]` (M0.8 control
+    /// flow, `etch-grammar.md` §3.2 l.500 / §4.1 l.618). Parsed as an
+    /// if-expression in `parsePrimary`; in statement position it is wrapped as
+    /// an expr-statement (mirroring `loop`). The condition is an ordinary
+    /// expression — it stops before the then-block's `{` (a `{` is not a
+    /// postfix / infix continuation). The else-if chain recurses through
+    /// `else_branch` (a nested `if_expr`); a final `else { }` is a `block_expr`.
+    fn parseIf(self: *Parser) ParseError!NodeId {
+        const kw_span = (try self.advance()).span; // 'if'
+        const cond = try self.parseExpr(0);
+        const then_block = try self.parseBlockExpr();
+        var else_branch: NodeId = NodeId.none;
+        if (self.peek() == .kw_else) {
+            _ = try self.advance(); // 'else'
+            else_branch = if (self.peek() == .kw_if)
+                try self.parseIf()
+            else
+                try self.parseBlockExpr();
+        }
+        const end = if (else_branch.isNone()) self.arena.exprSpan(then_block) else self.arena.exprSpan(else_branch);
+        return try self.arena.addIfExpr(self.gpa, cond, then_block, else_branch, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = end.byte_end,
+        });
+    }
+
     /// Parse `for IDENT [, IDENT] in iterable { body }` (M0.8 v0.6
     /// foundations, `etch-grammar.md` §621). E1 iterates ranges; array / map
     /// iterables arrive with collections.
@@ -1524,6 +1550,7 @@ pub const Parser = struct {
         switch (self.peek()) {
             .kw_match => return try self.parseMatch(),
             .kw_loop => return try self.parseLoop(0),
+            .kw_if => return try self.parseIf(),
             .lbrace => return try self.parseBlockExpr(),
             .lbracket => return try self.parseArrayOrMapLiteral(),
             .pipe => return try self.parseClosure(),
@@ -2020,6 +2047,34 @@ test "parser builds block expressions with a trailing value (M0.8 control flow)"
     // value-less (its only item is a `let`, so no trailing expression).
     try std.testing.expectEqual(@as(usize, 2), blocks);
     try std.testing.expectEqual(@as(usize, 1), with_value);
+}
+
+test "parser builds if/else with an else-if chain (M0.8 control flow)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  let x = if 1 < 2 { 10 } else if 3 < 4 { 20 } else { 30 }
+        \\  if x > 5 { let y = 1 }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var ifs: usize = 0;
+    var with_else: usize = 0;
+    for (result.ast.exprs.items(.kind), 0..) |k, i| {
+        if (k == .if_expr) {
+            ifs += 1;
+            if (!result.ast.if_exprs.items[result.ast.exprs.items(.data)[i]].else_branch.isNone()) with_else += 1;
+        }
+    }
+    // Three if-expressions: the value `if`, its `else if`, and the statement
+    // `if x > 5 { ... }`. The value `if` and its `else if` carry an else
+    // branch; the statement `if` does not.
+    try std.testing.expectEqual(@as(usize, 3), ifs);
+    try std.testing.expectEqual(@as(usize, 2), with_else);
 }
 
 test "parser does not leak comment spans on OOM during init" {

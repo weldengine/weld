@@ -912,6 +912,19 @@ pub const Interpreter = struct {
                 if (blk.value.isNone()) return Value{ .unit = {} };
                 return try self.evalExpr(world, locals, blk.value);
             },
+            .if_expr => {
+                // `if cond { then } [else if ...] [else { else }]` (M0.8 control
+                // flow). Evaluate the condition; run the matching branch (a
+                // block expression, or a nested `if` for `else if`). An `if`
+                // with no `else` and a false condition yields `unit`. Branch
+                // evaluation propagates any control / throw signal raised in it.
+                const ife = self.ast.if_exprs.items[data];
+                const cond = try self.evalExpr(world, locals, ife.cond);
+                if (cond != .bool_) return error.RuntimeFailure;
+                if (cond.bool_) return try self.evalExpr(world, locals, ife.then_block);
+                if (ife.else_branch.isNone()) return Value{ .unit = {} };
+                return try self.evalExpr(world, locals, ife.else_branch);
+            },
             else => return error.RuntimeFailure, // path / tag_path / unsupported variants
         }
     }
