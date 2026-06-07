@@ -1324,6 +1324,12 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             }
             try w.write(")");
         },
+        .method_call => {
+            // `recv.method(args)` is parsed in E2 block 2 but its 4-kind
+            // dispatch (`etch-resolver-types.md §5`) lands in block 3 with
+            // `impl`. Fail loud rather than emit silently-wrong Zig.
+            return CodegenError.UnsupportedConstruct;
+        },
         .loop_expr => {
             // `[label:] loop { body }` → Zig `[label:] while (true) { ... }`
             // (M0.8 loop/break). As an expression its value is the operand of

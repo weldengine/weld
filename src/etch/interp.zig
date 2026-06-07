@@ -972,6 +972,13 @@ pub const Interpreter = struct {
                 }
                 return try self.evalExpr(world, &frame, ce.body);
             },
+            .method_call => {
+                // `recv.method(args)` is parsed in E2 block 2; its 4-kind
+                // dispatch (`etch-resolver-types.md §5`) lands in block 3 with
+                // `impl`. Until then a method call cannot be executed — fail
+                // loud (the interpreter is the reference, no silent wrong value).
+                return error.RuntimeFailure;
+            },
             .loop_expr => {
                 // `loop { body }` — run the body repeatedly until a `break`
                 // targeting this loop fires; the loop's value is that break's

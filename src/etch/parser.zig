@@ -1450,13 +1450,24 @@ pub const Parser = struct {
                             expr = try self.parseGetCall(expr, .method_get_mut);
                         },
                         .ident => {
-                            const field_tok = try self.advance();
-                            const field_id = try self.internSlice(field_tok.span);
-                            const recv_span = self.arena.exprSpan(expr);
-                            expr = try self.arena.addFieldAccess(self.gpa, expr, field_id, .{
-                                .byte_start = recv_span.byte_start,
-                                .byte_end = field_tok.span.byte_end,
-                            });
+                            // `recv.method(args)` → the reserved `method_call`
+                            // kind (M0.8 E2 call mechanism, `etch-grammar.md`
+                            // postfix_op §421); `recv.field` (no `(`) stays a
+                            // field access. The 4-kind method dispatch
+                            // (`etch-resolver-types.md §5`) is exercised in block
+                            // 3 once `impl` provides methods — block 2 only
+                            // produces the node.
+                            if (self.peekNext() == .lparen) {
+                                expr = try self.parseMethodCall(expr);
+                            } else {
+                                const field_tok = try self.advance();
+                                const field_id = try self.internSlice(field_tok.span);
+                                const recv_span = self.arena.exprSpan(expr);
+                                expr = try self.arena.addFieldAccess(self.gpa, expr, field_id, .{
+                                    .byte_start = recv_span.byte_start,
+                                    .byte_end = field_tok.span.byte_end,
+                                });
+                            }
                         },
                         else => return self.parseErrFmt(self.peekSpan(), "expected field name or 'get'/'get_mut' after '.', got '{s}'", .{self.sliceOf(self.peekSpan())}),
                     }
@@ -1510,6 +1521,32 @@ pub const Parser = struct {
         const closing = try self.expect(.rparen, "expected ')' to close get/get_mut call");
         const recv_span = self.arena.exprSpan(receiver);
         return try self.arena.addMethodGet(self.gpa, kind, receiver, type_name, .{
+            .byte_start = recv_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
+    /// Parse `receiver.method(args)` into the reserved `method_call` kind (M0.8
+    /// E2 call mechanism, `etch-grammar.md` postfix_op §421). On entry the
+    /// current token is the method-name identifier and the next is `(`.
+    /// Positional args only (named args are an E2 refinement). The dispatch
+    /// (`etch-resolver-types.md §5`) lands in block 3 with `impl`.
+    fn parseMethodCall(self: *Parser, receiver: NodeId) ParseError!NodeId {
+        const name_tok = try self.advance(); // method name
+        const method_name = try self.internSlice(name_tok.span);
+        _ = try self.advance(); // '('
+        var args: std.ArrayListUnmanaged(u32) = .empty;
+        defer args.deinit(self.gpa);
+        if (self.peek() != .rparen) {
+            while (true) {
+                const a = try self.parseExpr(0);
+                try args.append(self.gpa, a.raw());
+                if (!try self.match(.comma)) break;
+            }
+        }
+        const closing = try self.expect(.rparen, "expected ')' to close method-call arguments");
+        const recv_span = self.arena.exprSpan(receiver);
+        return try self.arena.addMethodCall(self.gpa, receiver, method_name, args.items, .{
             .byte_start = recv_span.byte_start,
             .byte_end = closing.span.byte_end,
         });
@@ -2124,6 +2161,38 @@ test "parser builds top-level fn declarations, free calls, and return (M0.8 E2)"
         if (k == .return_stmt) returns += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), returns); // the `return x * 2`
+}
+
+test "parser builds method-call postfix into the reserved method_call kind (M0.8 E2)" {
+    const gpa = std.testing.allocator;
+    // `recv.method(args)` → method_call; `recv.field` (no parens) → field_access.
+    // Parser-only: the 4-kind dispatch is block 3.
+    var result = try parse(gpa,
+        \\rule r(entity: Entity) {
+        \\  let a = entity.normalize()
+        \\  let b = entity.length
+        \\  let c = weapon.calculate(target, 5)
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var method_calls: usize = 0;
+    var field_accesses: usize = 0;
+    var calculate_args: usize = 999;
+    for (result.ast.exprs.items(.kind), 0..) |k, i| {
+        if (k == .method_call) {
+            method_calls += 1;
+            const mc = result.ast.method_calls.items[result.ast.exprs.items(.data)[i]];
+            if (std.mem.eql(u8, result.ast.strings.slice(mc.method_name), "calculate")) calculate_args = mc.args_len;
+        }
+        if (k == .field_access) field_accesses += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), method_calls); // normalize(), calculate(...)
+    try std.testing.expectEqual(@as(usize, 1), field_accesses); // entity.length
+    try std.testing.expectEqual(@as(usize, 2), calculate_args); // (target, 5)
 }
 
 test "parser builds loops, labels, break value, and continue (M0.8 loop/break)" {
