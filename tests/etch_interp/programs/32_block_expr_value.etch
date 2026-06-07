@@ -1,0 +1,19 @@
+// M0.8 control flow: a block expression `{ stmts; value }` whose trailing
+// expression is the block's value. The interpreter runs the body statements
+// then evaluates the trailing value; the cooked Zig emits a labeled
+// value-block `__bex<n>: { ...; break :__bex<n> (a + b); }`. Both yield 30,
+// keeping the differential byte-exact. Block-local `a`/`b` are scope-confined.
+component Acc {
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has Acc
+{
+  let x = {
+    let a = 10
+    let b = 20
+    a + b
+  }
+  entity.get_mut(Acc).out = x
+}

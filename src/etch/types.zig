@@ -864,6 +864,7 @@ pub const TypeChecker = struct {
             .closure => return .{ .closure = id },
             .fn_call => return try self.synthCall(id, data, ctx_opt),
             .loop_expr => return try self.synthLoop(data, ctx_opt),
+            .block_expr => return try self.synthBlock(data, ctx_opt),
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
             else => return ResolvedType.unknown,
         }
@@ -964,6 +965,24 @@ pub const TypeChecker = struct {
             }
         }
         return ResolvedType.unknown;
+    }
+
+    /// Type a block expression `{ stmts; value }` (M0.8 control flow). The body
+    /// statements are checked in order, then the block's type is the trailing
+    /// value's type (or `unknown` ≈ unit when value-less). Locals declared in
+    /// the block use the flat per-rule locals map — lexical scoping is a later
+    /// refinement (consistent with E1; the interpreter is the reference).
+    fn synthBlock(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const blk = self.arena.block_exprs.items[data];
+        if (ctx_opt) |ctx| {
+            var i: u32 = 0;
+            while (i < blk.body_len) : (i += 1) {
+                const stmt: NodeId = @bitCast(self.arena.extra.items[blk.body_start + i]);
+                try self.checkStmt(ctx, stmt);
+            }
+        }
+        if (blk.value.isNone()) return ResolvedType.unknown;
+        return try self.synthExprE(blk.value, ctx_opt);
     }
 
     /// Type a call expression (M0.8 closures). E1 only resolves calls whose

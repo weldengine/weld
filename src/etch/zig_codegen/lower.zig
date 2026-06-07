@@ -655,6 +655,14 @@ fn walkExprForComponents(
                 try walkExprForComponents(gpa, ast, ast.match_arms.items[m.arms_start + i].body, out);
             }
         },
+        .block_expr => {
+            const blk = ast.block_exprs.items[data];
+            var s: u32 = 0;
+            while (s < blk.body_len) : (s += 1) {
+                try walkStmtForComponents(gpa, ast, @bitCast(ast.extra.items[blk.body_start + s]), out);
+            }
+            if (!blk.value.isNone()) try walkExprForComponents(gpa, ast, blk.value, out);
+        },
         else => {},
     }
 }
@@ -858,12 +866,18 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
         },
         .expr_stmt => {
             const eid: NodeId = @bitCast(data);
-            // A bare `loop { ... }` statement emits as a Zig statement, not
-            // `_ = while (...)` (M0.8 loop/break).
-            if (ast.exprKind(eid) == .loop_expr) {
+            const ek = ast.exprKind(eid);
+            // Control-flow expressions in statement position emit as Zig
+            // statements (no `_ = ...;` discard): a bare `loop { ... }` (M0.8
+            // loop/break) and a bare block `{ ... }` whose value is discarded.
+            if (ek == .loop_expr) {
                 try w.writeIndent();
                 try emitExpr(w, ast, ctx, eid);
                 try w.write("\n");
+                return;
+            }
+            if (ek == .block_expr) {
+                try emitBlockExprStmts(w, ast, ctx, ast.exprData(eid));
                 return;
             }
             try w.writeIndent();
@@ -1199,6 +1213,7 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             try w.writeIndent();
             try w.write("}");
         },
+        .block_expr => try emitBlockExprValue(w, ast, ctx, data),
         .range => return CodegenError.UnsupportedConstruct, // ranges appear only as for-in iterables in E1 (lowered by emitStmt .for_stmt)
         .cast => {
             // `operand as Type` → an explicit Zig numeric conversion wrapped
@@ -1331,6 +1346,64 @@ fn emitMatch(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Codege
     try w.write("}");
 }
 
+/// Emit a block expression in value position (M0.8 control flow). A block with
+/// statements lowers to a labeled Zig value-block
+/// `__bex<n>: { <stmts> break :__bex<n> <value>; }`; an empty-body block to
+/// `(<value>)`. The slab index `data` is unique per block in the file, so
+/// nested blocks get distinct labels (and never collide with `emitMatch`'s
+/// `blk<n>` — different prefix). A value-less block in value position is `unit`
+/// and deferred (`UnsupportedConstruct`); the type-checker treats it as a
+/// non-value so a sound program never lands one in a value slot.
+fn emitBlockExprValue(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) CodegenError!void {
+    const blk = ast.block_exprs.items[data];
+    if (blk.value.isNone()) return CodegenError.UnsupportedConstruct;
+    if (blk.body_len == 0) {
+        try w.write("(");
+        try emitExpr(w, ast, ctx, blk.value);
+        try w.write(")");
+        return;
+    }
+    const saved = ctx.records.items.len;
+    try w.print("__bex{d}: {{\n", .{data});
+    w.indentBy(1);
+    var s: u32 = 0;
+    while (s < blk.body_len) : (s += 1) {
+        try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]));
+    }
+    try w.writeIndent();
+    try w.print("break :__bex{d} ", .{data});
+    try emitExpr(w, ast, ctx, blk.value);
+    try w.write(";\n");
+    w.indentBy(-1);
+    try w.writeIndent();
+    try w.write("}");
+    ctx.records.items.len = saved;
+}
+
+/// Emit a block expression in statement position (M0.8 control flow): a Zig
+/// brace-block running the body statements, then the trailing value (if any)
+/// as a discarded `_ = <value>;`. Used for a bare block statement and for
+/// `if` / `while` branch bodies (the block value is discarded there).
+fn emitBlockExprStmts(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) CodegenError!void {
+    const blk = ast.block_exprs.items[data];
+    const saved = ctx.records.items.len;
+    try w.line("{");
+    w.indentBy(1);
+    var s: u32 = 0;
+    while (s < blk.body_len) : (s += 1) {
+        try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[blk.body_start + s]));
+    }
+    if (!blk.value.isNone()) {
+        try w.writeIndent();
+        try w.write("_ = ");
+        try emitExpr(w, ast, ctx, blk.value);
+        try w.write(";\n");
+    }
+    w.indentBy(-1);
+    try w.line("}");
+    ctx.records.items.len = saved;
+}
+
 /// The Zig type emitted for a closure parameter (M0.8 closures). E1 codegen
 /// expects annotated scalar params; a missing / non-scalar annotation falls
 /// back to `i64` (the interpreter is the reference for richer closures).
@@ -1433,6 +1506,9 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         .fn_call => "",
         // A loop expression's value type is inferred by Zig from its break.
         .loop_expr => "",
+        // A block expression's value type is inferred by Zig from its trailing
+        // value (left un-annotated so block-locals need not be in scope here).
+        .block_expr => "",
         .method_get, .method_get_mut => "struct", // not directly inferable; should not appear at let-rhs after method_get handling
         .cast => blk: {
             const c = ast.casts.items[data];

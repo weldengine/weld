@@ -899,6 +899,19 @@ pub const Interpreter = struct {
                     }
                 }
             },
+            .block_expr => {
+                // `{ stmts; value }` — run the body statements, then evaluate
+                // the trailing value (or `unit` when value-less). A control
+                // signal (`break`/`continue`) or an in-flight `throw` raised in
+                // the body unwinds out of the block: it is left set on `self`
+                // for the enclosing loop / `try` to interpret, and the block
+                // yields `unit` (M0.8 control flow).
+                const blk = self.ast.block_exprs.items[data];
+                try self.execStmtRun(world, locals, blk.body_start, blk.body_len);
+                if (self.control != .none or self.thrown) return Value{ .unit = {} };
+                if (blk.value.isNone()) return Value{ .unit = {} };
+                return try self.evalExpr(world, locals, blk.value);
+            },
             else => return error.RuntimeFailure, // path / tag_path / unsupported variants
         }
     }
@@ -1534,6 +1547,52 @@ test "runProgram for-in over a range accumulates (M0.8 ranges + for-in)" {
     @memcpy(std.mem.asBytes(&total), slot[0..8]);
     // 0 + 1 + 2 + 3 + 4 = 10 (exclusive range).
     try std.testing.expectEqual(@as(i64, 10), total);
+}
+
+test "runProgram block expression yields its trailing value (M0.8 control flow)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule run(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let x = {
+        \\    let a = 10
+        \\    let b = 20
+        \\    a + b
+        \\  }
+        \\  entity.get_mut(Acc).out = x
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    // { let a = 10; let b = 20; a + b } = 30.
+    try std.testing.expectEqual(@as(i64, 30), out);
 }
 
 test "runProgram match dispatches on literal and binding arms (M0.8 match)" {

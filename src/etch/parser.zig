@@ -865,6 +865,76 @@ pub const Parser = struct {
         return .{ .start = start, .len = @intCast(stmts.items.len) };
     }
 
+    /// True when the current token starts a keyword-led statement that can
+    /// never be a block's trailing value (`let` / `assert` / `for` / `break` /
+    /// `continue` / `throw` / `try`, plus the `IDENT ":" loop` labeled-loop
+    /// form; `while` joins this set when its keyword lands). Mirrors the keyword
+    /// dispatch in `parseStmt`; used by
+    /// `parseBlockBody` to route those to `parseStmt` while keeping the
+    /// expression-led path open for trailing-value detection.
+    fn startsKeywordStmt(self: *const Parser) bool {
+        return switch (self.peek()) {
+            .kw_let, .kw_assert, .kw_for, .kw_break, .kw_continue, .kw_throw, .kw_try => true,
+            .ident => self.peekNext() == .colon, // labeled loop `outer:`
+            else => false,
+        };
+    }
+
+    /// Parse a value-block body `{ statement } [ expression ]` (M0.8 control
+    /// flow, `etch-grammar.md` §4.1 l.645). Returns the statement run plus the
+    /// trailing expression that is the block's value (`NodeId.none` when
+    /// value-less). Etch has no statement separator, so the last expression-led
+    /// item immediately before `}` — not an assignment, not a keyword statement
+    /// — is the block value (reference §6.11/§6.12). Distinct from
+    /// `parseStmtRun` (rule / `loop` / `for` / `while` / `try` bodies, which are
+    /// statement-only and never extract a trailing value).
+    fn parseBlockBody(self: *Parser) ParseError!struct { start: u32, len: u32, value: NodeId } {
+        var stmts: std.ArrayListUnmanaged(u32) = .empty;
+        defer stmts.deinit(self.gpa);
+        var value: NodeId = NodeId.none;
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.startsKeywordStmt()) {
+                try stmts.append(self.gpa, (try self.parseStmt()).raw());
+                continue;
+            }
+            // Expression-led: an assignment statement, an expression statement,
+            // or the trailing block value.
+            const expr_start = self.current.span;
+            const expr = try self.parseExpr(0);
+            if (isAssignOp(self.peek())) {
+                const op_tok = try self.advance();
+                const op = assignOpFromKind(op_tok.kind);
+                const rhs = try self.parseExpr(0);
+                const span: SourceSpan = .{ .byte_start = expr_start.byte_start, .byte_end = self.arena.exprSpan(rhs).byte_end };
+                try stmts.append(self.gpa, (try self.arena.addAssignStmt(self.gpa, .{ .target = expr, .op = op, .value = rhs }, span)).raw());
+            } else if (self.peek() == .rbrace) {
+                value = expr; // last bare expression before `}` is the block value
+            } else {
+                const span: SourceSpan = .{ .byte_start = expr_start.byte_start, .byte_end = self.arena.exprSpan(expr).byte_end };
+                try stmts.append(self.gpa, (try self.arena.addExprStmt(self.gpa, expr, span)).raw());
+            }
+        }
+        const start: u32 = @intCast(self.arena.extra.items.len);
+        try self.arena.extra.appendSlice(self.gpa, stmts.items);
+        return .{ .start = start, .len = @intCast(stmts.items.len), .value = value };
+    }
+
+    /// Parse a block expression `{ ... }` in expression position (M0.8 control
+    /// flow, `etch-grammar.md` §3.2 l.520 — `block_expr = block`). The block's
+    /// value is its trailing expression (or `unit` when value-less). Used
+    /// directly (`let x = { ...; v }`), as `if` / `match` arm bodies, and as
+    /// closure bodies.
+    fn parseBlockExpr(self: *Parser) ParseError!NodeId {
+        const open = try self.expect(.lbrace, "expected '{' to start block expression");
+        const body = try self.parseBlockBody();
+        const closing = try self.expect(.rbrace, "expected '}' to close block expression");
+        return try self.arena.addBlockExpr(self.gpa, body.start, body.len, body.value, .{
+            .byte_start = open.span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
     /// Parse `for IDENT [, IDENT] in iterable { body }` (M0.8 v0.6
     /// foundations, `etch-grammar.md` §621). E1 iterates ranges; array / map
     /// iterables arrive with collections.
@@ -1454,6 +1524,7 @@ pub const Parser = struct {
         switch (self.peek()) {
             .kw_match => return try self.parseMatch(),
             .kw_loop => return try self.parseLoop(0),
+            .lbrace => return try self.parseBlockExpr(),
             .lbracket => return try self.parseArrayOrMapLiteral(),
             .pipe => return try self.parseClosure(),
             .int_literal => {
@@ -1919,6 +1990,36 @@ test "parser builds throw and try/catch (M0.8 error handling)" {
     try std.testing.expectEqual(@as(usize, 1), result.ast.try_catch_stmts.items.len);
     // The catch binding name round-trips.
     try std.testing.expectEqualStrings("err", result.ast.strings.slice(result.ast.try_catch_stmts.items[0].catch_name));
+}
+
+test "parser builds block expressions with a trailing value (M0.8 control flow)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  let x = {
+        \\    let a = 10
+        \\    a + 1
+        \\  }
+        \\  let y = { let b = 2 }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var blocks: usize = 0;
+    var with_value: usize = 0;
+    for (result.ast.exprs.items(.kind), 0..) |k, i| {
+        if (k == .block_expr) {
+            blocks += 1;
+            if (!result.ast.block_exprs.items[result.ast.exprs.items(.data)[i]].value.isNone()) with_value += 1;
+        }
+    }
+    // Two blocks: `x`'s block has a trailing value (`a + 1`); `y`'s block is
+    // value-less (its only item is a `let`, so no trailing expression).
+    try std.testing.expectEqual(@as(usize, 2), blocks);
+    try std.testing.expectEqual(@as(usize, 1), with_value);
 }
 
 test "parser does not leak comment spans on OOM during init" {

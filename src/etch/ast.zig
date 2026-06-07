@@ -526,12 +526,16 @@ pub const LoopExpr = struct {
     body_len: u32,
 };
 
-/// `{ stmt* }` block expression (M0.8 loop/break, `etch-grammar.md` §645). E1
-/// blocks are statement blocks (value `unit`); a trailing-expression value is
-/// a later refinement. Used for `match` arm blocks and closure block bodies.
+/// `{ statement* [expression] }` block expression (M0.8 control flow,
+/// `etch-grammar.md` §3.2 l.520 / §4.1 l.645). `body_start`/`body_len` index a
+/// statement run in `arena.extra`; `value` is the trailing expression that is
+/// the block's value (`NodeId.none` when value-less — Etch has no `;`, so the
+/// last bare expression before `}` is the value). Used directly
+/// (`let x = { ...; v }`), as `if`/`match` arm bodies, and as closure bodies.
 pub const BlockExpr = struct {
     body_start: u32,
     body_len: u32,
+    value: NodeId,
 };
 
 /// `break [label] [value]` statement (M0.8 loop/break, `etch-grammar.md` §632).
@@ -1040,9 +1044,9 @@ pub const AstArena = struct {
         return try self.addExpr(gpa, .loop_expr, idx, span);
     }
 
-    pub fn addBlockExpr(self: *AstArena, gpa: std.mem.Allocator, body_start: u32, body_len: u32, span: SourceSpan) !NodeId {
+    pub fn addBlockExpr(self: *AstArena, gpa: std.mem.Allocator, body_start: u32, body_len: u32, value: NodeId, span: SourceSpan) !NodeId {
         const idx: u32 = @intCast(self.block_exprs.items.len);
-        try self.block_exprs.append(gpa, .{ .body_start = body_start, .body_len = body_len });
+        try self.block_exprs.append(gpa, .{ .body_start = body_start, .body_len = body_len, .value = value });
         return try self.addExpr(gpa, .block_expr, idx, span);
     }
 

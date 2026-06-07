@@ -48,4 +48,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p29_closure_apply", .etch_path = "tests/etch_interp/programs/29_closure_apply.etch" },
     .{ .name = "p30_loop_break_value", .etch_path = "tests/etch_interp/programs/30_loop_break_value.etch" },
     .{ .name = "p31_labeled_break", .etch_path = "tests/etch_interp/programs/31_labeled_break.etch" },
+    .{ .name = "p32_block_expr_value", .etch_path = "tests/etch_interp/programs/32_block_expr_value.etch" },
 };
