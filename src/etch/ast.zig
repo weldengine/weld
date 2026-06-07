@@ -602,12 +602,54 @@ pub const ClosureParam = struct {
 
 /// `callee(args)` call expression (M0.8 closures, `etch-grammar.md` postfix_op
 /// §424). Args are a run of expr `NodeId` raw values in `arena.extra`. E1
-/// resolves calls whose callee is a closure-typed local (function / method
-/// calls arrive with fn/impl in E2).
+/// resolves calls whose callee is a closure-typed local; M0.8 E2 also resolves
+/// a callee naming a top-level `fn` (free-function call).
 pub const CallExpr = struct {
     callee: NodeId,
     args_start: u32,
     args_len: u32,
+};
+
+/// `receiver.method(args)` call expression (M0.8 E2 call mechanism,
+/// `etch-grammar.md` postfix_op §421). Args are a run of expr `NodeId` raw
+/// values in `arena.extra`. Block 2 produces the node (parser-testable); the
+/// 4-kind method dispatch (`etch-resolver-types.md §5`) is exercised in block 3
+/// once `impl` provides methods.
+pub const MethodCall = struct {
+    receiver: NodeId,
+    method_name: StringId,
+    args_start: u32,
+    args_len: u32,
+};
+
+/// One `fn` parameter: name + type node (M0.8 E2 call mechanism,
+/// `etch-grammar.md` §5.3 `regular_param`). Default values and `self` params
+/// arrive with their consumers (defaults: an E2 refinement; `self`: `impl`,
+/// block 3).
+pub const FnParam = struct {
+    name: StringId,
+    type_node: NodeId,
+};
+
+/// Side-slab entry for a top-level `fn` declaration (M0.8 E2 call mechanism,
+/// `etch-grammar.md` §5.3). The body is a block: `body_start`/`body_len` index
+/// a statement run in `arena.extra`, `value` is the trailing expression (the
+/// implicit return value; `NodeId.none` when value-less). `return_type` is
+/// `NodeId.none` for a void fn. `is_async` / `throws` carry the parsed effect
+/// markers — `async` interpretation is E3 + its codegen Phase 2; a `throws`
+/// fn's codegen folds into the E3 error-handling-codegen gate.
+pub const FnDecl = struct {
+    name: StringId,
+    params_start: u32, // index into `arena.fn_params`
+    params_len: u32,
+    return_type: NodeId, // NodeId.none = void
+    is_async: bool,
+    throws: bool,
+    body_start: u32, // index into `arena.extra` (statement run)
+    body_len: u32,
+    value: NodeId, // trailing block value (implicit return); NodeId.none if absent
+    annotations_extra: u32,
+    annotations_len: u32,
 };
 
 const NamedTypeNode = struct {
@@ -752,8 +794,10 @@ pub const AstArena = struct {
     component_decls: std.ArrayListUnmanaged(ComponentDecl) = .empty,
     resource_decls: std.ArrayListUnmanaged(ResourceDecl) = .empty,
     rule_decls: std.ArrayListUnmanaged(RuleDecl) = .empty,
+    fn_decls: std.ArrayListUnmanaged(FnDecl) = .empty,
     type_alias_decls: std.ArrayListUnmanaged(TypeAliasDecl) = .empty,
     rule_params: std.ArrayListUnmanaged(RuleParam) = .empty,
+    fn_params: std.ArrayListUnmanaged(FnParam) = .empty,
     when_nodes: std.ArrayListUnmanaged(WhenNode) = .empty,
 
     let_stmts: std.ArrayListUnmanaged(LetStmt) = .empty,
@@ -777,6 +821,7 @@ pub const AstArena = struct {
     closure_exprs: std.ArrayListUnmanaged(ClosureExpr) = .empty,
     closure_params: std.ArrayListUnmanaged(ClosureParam) = .empty,
     call_exprs: std.ArrayListUnmanaged(CallExpr) = .empty,
+    method_calls: std.ArrayListUnmanaged(MethodCall) = .empty,
     loop_exprs: std.ArrayListUnmanaged(LoopExpr) = .empty,
     block_exprs: std.ArrayListUnmanaged(BlockExpr) = .empty,
     if_exprs: std.ArrayListUnmanaged(IfExpr) = .empty,
@@ -839,8 +884,10 @@ pub const AstArena = struct {
         self.component_decls.deinit(gpa);
         self.resource_decls.deinit(gpa);
         self.rule_decls.deinit(gpa);
+        self.fn_decls.deinit(gpa);
         self.type_alias_decls.deinit(gpa);
         self.rule_params.deinit(gpa);
+        self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
         self.let_stmts.deinit(gpa);
         self.assign_stmts.deinit(gpa);
@@ -862,6 +909,7 @@ pub const AstArena = struct {
         self.closure_exprs.deinit(gpa);
         self.closure_params.deinit(gpa);
         self.call_exprs.deinit(gpa);
+        self.method_calls.deinit(gpa);
         self.loop_exprs.deinit(gpa);
         self.block_exprs.deinit(gpa);
         self.if_exprs.deinit(gpa);
@@ -1065,6 +1113,32 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.call_exprs.items.len);
         try self.call_exprs.append(gpa, .{ .callee = callee, .args_start = start, .args_len = @intCast(args.len) });
         return try self.addExpr(gpa, .fn_call, idx, span);
+    }
+
+    /// `receiver.method(args)` (M0.8 E2 call mechanism). `args` is a slice of
+    /// expr `NodeId.raw()` values, bulk-appended to `arena.extra`.
+    pub fn addMethodCall(self: *AstArena, gpa: std.mem.Allocator, receiver: NodeId, method_name: StringId, args: []const u32, span: SourceSpan) !NodeId {
+        const start: u32 = @intCast(self.extra.items.len);
+        try self.extra.appendSlice(gpa, args);
+        const idx: u32 = @intCast(self.method_calls.items.len);
+        try self.method_calls.append(gpa, .{ .receiver = receiver, .method_name = method_name, .args_start = start, .args_len = @intCast(args.len) });
+        return try self.addExpr(gpa, .method_call, idx, span);
+    }
+
+    /// Top-level `fn` declaration (M0.8 E2). The caller appends the params to
+    /// `arena.fn_params` and the body run to `arena.extra` beforehand, passing
+    /// their ranges in `decl`.
+    pub fn addFnDecl(self: *AstArena, gpa: std.mem.Allocator, decl: FnDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.fn_decls.items.len);
+        try self.fn_decls.append(gpa, decl);
+        return try self.addItem(gpa, .fn_decl, idx, span);
+    }
+
+    /// `return [expr]` (M0.8 E2). The value `NodeId` is stored directly in the
+    /// statement's `data` (`NodeId.none` for a bare `return`), no side slab —
+    /// same encoding as `expr_stmt`.
+    pub fn addReturnStmt(self: *AstArena, gpa: std.mem.Allocator, value: NodeId, span: SourceSpan) !NodeId {
+        return try self.addStmt(gpa, .return_stmt, value.raw(), span);
     }
 
     /// `body_start`/`body_len` index a statement run in `arena.extra` (the

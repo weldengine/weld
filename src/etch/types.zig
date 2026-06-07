@@ -135,7 +135,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -144,10 +144,13 @@ const Symbol = struct {
 };
 
 /// Target categories the annotation-applicability check distinguishes
-/// (M0.8 D-S3-annot-applicability). At E1 only `component` / `resource` /
-/// `rule` items and their `field`s exist; `event` and other construct
-/// targets arrive with their constructs in later stages.
-const AnnotTarget = enum { component, resource, rule, field };
+/// (M0.8 D-S3-annot-applicability). E1 had `component` / `resource` / `rule`
+/// items and their `field`s; `function` joins with top-level `fn` (E2). No
+/// builtin annotation in the current catalogue applies to a `function` (the
+/// fn-targeting `@native` / `@shader_fn` are not modelled yet), so only
+/// `@custom` is accepted there; `event` and other construct targets arrive
+/// with their constructs in later stages.
+const AnnotTarget = enum { component, resource, rule, field, function };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -179,6 +182,10 @@ pub const TypeChecker = struct {
     diagnostics: *std.ArrayListUnmanaged(Diagnostic),
     /// Symbol table keyed by interned name `StringId`.
     symbols: std.AutoHashMapUnmanaged(StringId, Symbol) = .empty,
+    /// Declared return type of the `fn` currently being checked (M0.8 E2),
+    /// used to type a `return expr` body statement against. `null` outside a
+    /// `fn` body; `.unit` for a void fn (no `-> type`).
+    current_fn_return: ?ResolvedType = null,
 
     pub fn deinit(self: *TypeChecker) void {
         self.symbols.deinit(self.gpa);
@@ -246,6 +253,11 @@ pub const TypeChecker = struct {
                     const decl = self.arena.rule_decls.items[data];
                     try self.registerSymbol(.rule, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .rule);
+                },
+                .fn_decl => {
+                    const decl = self.arena.fn_decls.items[data];
+                    try self.registerSymbol(.fn_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .function);
                 },
                 .type_alias => {
                     // Register the alias name so it collides with a same-named
@@ -467,6 +479,7 @@ pub const TypeChecker = struct {
             const data = datas[i];
             switch (kind) {
                 .rule_decl => try self.checkRule(self.arena.rule_decls.items[data]),
+                .fn_decl => try self.checkFn(self.arena.fn_decls.items[data]),
                 else => {},
             }
         }
@@ -522,6 +535,54 @@ pub const TypeChecker = struct {
             const stmt_raw = self.arena.extra.items[rule.body_start + s];
             const stmt_id: NodeId = @bitCast(stmt_raw);
             try self.checkStmt(&ctx, stmt_id);
+        }
+    }
+
+    /// Type-check a top-level `fn` body (M0.8 E2 call mechanism). Binds params
+    /// as locals (no `when` clause / no entity context), records the declared
+    /// return type for `return` / trailing-value checks, walks the body run,
+    /// then checks the trailing block value (the implicit return) against the
+    /// declared return type. `async` bodies are checked the same way (their
+    /// interpretation is E3); the `throws` marker does not change body checking.
+    fn checkFn(self: *TypeChecker, decl: ast_mod.FnDecl) !void {
+        var ctx: RuleCtx = .{};
+        defer ctx.deinit(self.gpa);
+
+        var i: u32 = 0;
+        while (i < decl.params_len) : (i += 1) {
+            const p = self.arena.fn_params.items[decl.params_start + i];
+            const ptype = self.namedTypeToResolved(p.type_node);
+            if (ptype == .unknown) {
+                try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(p.type_node), "unknown or unsupported parameter type on function '{s}'", .{self.arena.strings.slice(decl.name)});
+            }
+            try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
+        }
+
+        // Declared return type drives `return` / trailing-value checks. A void
+        // fn (no `-> type`) records `.unknown` — return values aren't strictly
+        // checked against void in block 2.
+        const ret_t: ResolvedType = if (decl.return_type.isNone())
+            ResolvedType.unknown
+        else
+            self.namedTypeToResolved(decl.return_type);
+        const saved_ret = self.current_fn_return;
+        self.current_fn_return = ret_t;
+        defer self.current_fn_return = saved_ret;
+
+        var s: u32 = 0;
+        while (s < decl.body_len) : (s += 1) {
+            const stmt_raw = self.arena.extra.items[decl.body_start + s];
+            const stmt_id: NodeId = @bitCast(stmt_raw);
+            try self.checkStmt(&ctx, stmt_id);
+        }
+
+        // The trailing block value is the implicit return — check it against the
+        // declared return type (E0200, consistent with the closure-call path).
+        if (!decl.value.isNone()) {
+            const vt = self.synthExpr(decl.value, &ctx);
+            if (!decl.return_type.isNone() and ret_t == .builtin and vt == .builtin and !self.literalTypeFits(ret_t.builtin, decl.value, vt.builtin)) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(decl.value), "function '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
+            }
         }
     }
 
@@ -747,6 +808,22 @@ pub const TypeChecker = struct {
                 i = 0;
                 while (i < tc.catch_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[tc.catch_start + i]));
+                }
+            },
+            .return_stmt => {
+                // `return [expr]` (M0.8 E2 call mechanism). Type the value (if
+                // any) against the enclosing fn's declared return type (E0200,
+                // consistent with the closure-call / trailing-value checks). A
+                // bare `return` is valid in a void fn; a `return` with no
+                // enclosing fn (e.g. a rule body) is permissive.
+                const value: NodeId = @bitCast(data);
+                if (!value.isNone()) {
+                    const vt = self.synthExpr(value, ctx);
+                    if (self.current_fn_return) |ret| {
+                        if (ret == .builtin and vt == .builtin and !self.literalTypeFits(ret.builtin, value, vt.builtin)) {
+                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "return value type does not match the declared return type", .{});
+                        }
+                    }
                 }
             },
             else => {},
@@ -1028,6 +1105,25 @@ pub const TypeChecker = struct {
     /// (function / method calls arrive with fn / impl in E2).
     fn synthCall(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const call = self.arena.call_exprs.items[data];
+
+        // Free-function call (M0.8 E2): a callee that is a plain identifier
+        // naming a top-level `fn` (and not shadowed by a local binding) is the
+        // §4.2 rule — synth the signature, check arity + arg types, result is
+        // the declared return type. The other three dispatch kinds need `impl`
+        // (block 3) or the service registry (Level B), so block 2 ships free
+        // calls; method-call dispatch follows in block 3.
+        if (self.arena.exprKind(call.callee) == .ident) {
+            const callee_name = self.arena.exprData(call.callee);
+            const shadowed = if (ctx_opt) |ctx| ctx.locals.contains(callee_name) else false;
+            if (!shadowed) {
+                if (self.symbols.get(callee_name)) |sym| {
+                    if (sym.kind == .fn_) {
+                        return try self.synthFreeFnCall(id, call, sym.item_id, ctx_opt);
+                    }
+                }
+            }
+        }
+
         const callee_t = try self.synthExprE(call.callee, ctx_opt);
         if (callee_t != .closure) {
             if (callee_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "call target is not callable in E1 (only closures can be called)", .{});
@@ -1062,6 +1158,29 @@ pub const TypeChecker = struct {
             _ = ctx.locals.remove(p.name);
         }
         return ret;
+    }
+
+    /// Type a free-function call `f(args)` to a top-level `fn` (M0.8 E2). Checks
+    /// arity then each argument against the declared parameter type; the result
+    /// is the declared return type (`unknown` for a void fn). Diagnostics reuse
+    /// E0200 (TypeMismatch), consistent with the sibling closure-call path.
+    fn synthFreeFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, item_id: NodeId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const decl = self.arena.fn_decls.items[self.arena.itemData(item_id)];
+        if (decl.params_len != call.args_len) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "function '{s}' called with {d} argument(s), expected {d}", .{ self.arena.strings.slice(decl.name), call.args_len, decl.params_len });
+            return if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
+        }
+        var i: u32 = 0;
+        while (i < decl.params_len) : (i += 1) {
+            const p = self.arena.fn_params.items[decl.params_start + i];
+            const ptype = self.namedTypeToResolved(p.type_node);
+            const arg: NodeId = @bitCast(self.arena.extra.items[call.args_start + i]);
+            const arg_t = try self.synthExprE(arg, ctx_opt);
+            if (ptype == .builtin and arg_t == .builtin and !self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of function '{s}'", .{self.arena.strings.slice(decl.name)});
+            }
+        }
+        return if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
     }
 
     /// Type an index / slice access (M0.8 collections). A range index
@@ -2004,4 +2123,54 @@ test "closure call arity, return typing, and non-callable (M0.8 closures)" {
     );
     defer noncallable.deinit(gpa);
     try expectAnyCode(noncallable.diagnostics.items, .type_mismatch);
+}
+
+test "free-function call arity, arg, and return typing (M0.8 E2)" {
+    const gpa = std.testing.allocator;
+
+    // A top-level fn returning int, called and assigned to an int field — clean.
+    var ok = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\fn double(x: int) -> int { x * 2 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  entity.get_mut(C).out = double(21)
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+
+    // Wrong arity → E0200.
+    var arity = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\fn double(x: int) -> int { x * 2 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let y = double(1, 2)
+        \\}
+    );
+    defer arity.deinit(gpa);
+    try expectAnyCode(arity.diagnostics.items, .type_mismatch);
+
+    // Argument type mismatch (float arg to an int param) → E0200.
+    var argty = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\fn double(x: int) -> int { x * 2 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let y = double(1.5)
+        \\}
+    );
+    defer argty.deinit(gpa);
+    try expectAnyCode(argty.diagnostics.items, .type_mismatch);
+
+    // Body value type does not match the declared return type → E0200.
+    var retty = try parseAndCheck(gpa,
+        \\fn bad(x: int) -> bool { x * 2 }
+    );
+    defer retty.deinit(gpa);
+    try expectAnyCode(retty.diagnostics.items, .type_mismatch);
 }

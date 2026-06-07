@@ -321,14 +321,15 @@ pub const Parser = struct {
     /// cannot loop. The stop-set MUST list every top-level starter the
     /// parser accepts, in lockstep with `parseTopLevel` — otherwise a valid
     /// construct following a parse error is silently skipped. Current set:
-    /// S3 (`component` / `resource` / `rule`) + `type` (M0.8 alias). Later
-    /// milestones extend both sites together (`fn`/`struct`/… in E2,
+    /// S3 (`component` / `resource` / `rule`) + `type` (M0.8 alias) + `fn` /
+    /// `async` (M0.8 E2 call mechanism). Later milestones extend both sites
+    /// together (`struct`/`enum`/`trait`/`impl` in E2 block 3,
     /// `event`/`tags` in E3).
     fn recoverToTopLevel(self: *Parser) ParseError!void {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async => return,
                 else => _ = try self.advance(),
             }
         }
@@ -349,8 +350,19 @@ pub const Parser = struct {
             .kw_resource => try self.parseResourceDecl(annotations),
             .kw_rule => try self.parseRuleDecl(annotations),
             .kw_type => try self.parseTypeAliasDecl(annotations),
+            .kw_fn => try self.parseFnDecl(annotations, false),
+            .kw_async => {
+                // `async fn` (M0.8 E2): the only top-level `async` construct in
+                // E2. `async rule` interpretation/codegen is E3 — reject it here
+                // with a clear pointer rather than mis-parsing.
+                const async_span = (try self.advance()).span;
+                if (self.peek() != .kw_fn) {
+                    return self.parseErrFmt(self.peekSpan(), "expected 'fn' after 'async' (async rules land in E3), got '{s}'", .{self.sliceOf(self.peekSpan())});
+                }
+                try self.parseFnDeclFrom(annotations, true, async_span);
+            },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -687,6 +699,82 @@ pub const Parser = struct {
         });
     }
 
+    // ─── Functions (M0.8 E2 call mechanism) ──────────────────────────────
+
+    /// Parse a top-level `fn` (no `async` prefix). `kw_fn` is the lockstep
+    /// stop-set member added to `recoverToTopLevel` in the same commit.
+    fn parseFnDecl(self: *Parser, annotations: AnnotationRange, is_async: bool) ParseError!void {
+        return self.parseFnDeclFrom(annotations, is_async, self.current.span);
+    }
+
+    /// Parse `[async] fn IDENT "(" [params] ")" [throws] ["->" type] block`
+    /// (M0.8 E2 call mechanism, `etch-grammar.md` §5.3). On entry the current
+    /// token is `fn` (the optional `async` was already consumed by the caller,
+    /// its span passed as `start_span`). The body is a value-block: the trailing
+    /// bare expression is the implicit return value (`etch-grammar.md` §4.1
+    /// l.645). Generics (`<...>`) and the `where` clause are E2 block 4 and
+    /// rejected here; the bodyless `.d.etch` form is out of scope (a body is
+    /// required). `async` is parsed (interp E3, codegen Phase 2); `throws` is
+    /// parsed (its codegen folds into the E3 error-handling gate).
+    fn parseFnDeclFrom(self: *Parser, annotations: AnnotationRange, is_async: bool, start_span: SourceSpan) ParseError!void {
+        _ = try self.advance(); // 'fn'
+        const name_tok = try self.expect(.ident, "expected function name (identifier) after 'fn'");
+        const name_id = try self.internSlice(name_tok.span);
+
+        if (self.peek() == .lt) {
+            return self.parseErr(self.peekSpan(), "generic functions are not supported yet (generics land in E2 block 4)");
+        }
+
+        _ = try self.expect(.lparen, "expected '(' to begin function parameters");
+        const params_start: u32 = @intCast(self.arena.fn_params.items.len);
+        if (self.peek() != .rparen) {
+            while (true) {
+                const p_name = try self.expect(.ident, "expected parameter name");
+                _ = try self.expect(.colon, "expected ':' after parameter name");
+                const p_type = try self.parseType();
+                try self.arena.fn_params.append(self.gpa, .{
+                    .name = try self.internSlice(p_name.span),
+                    .type_node = p_type,
+                });
+                if (!try self.match(.comma)) break;
+            }
+        }
+        _ = try self.expect(.rparen, "expected ')' to close function parameters");
+        const params_len: u32 = @as(u32, @intCast(self.arena.fn_params.items.len)) - params_start;
+
+        const throws = try self.match(.kw_throws);
+
+        var return_type: NodeId = NodeId.none;
+        if (self.peek() == .arrow) {
+            _ = try self.advance(); // '->'
+            return_type = try self.parseType();
+        }
+
+        // A `where` clause is tied to generics (E2 block 4); `where` is not yet
+        // a token, so nothing to consume here.
+
+        _ = try self.expect(.lbrace, "expected '{' to start function body");
+        const body = try self.parseBlockBody();
+        const closing = try self.expect(.rbrace, "expected '}' to close function body");
+
+        _ = try self.arena.addFnDecl(self.gpa, .{
+            .name = name_id,
+            .params_start = params_start,
+            .params_len = params_len,
+            .return_type = return_type,
+            .is_async = is_async,
+            .throws = throws,
+            .body_start = body.start,
+            .body_len = body.len,
+            .value = body.value,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{
+            .byte_start = start_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
     // ─── When clause ─────────────────────────────────────────────────────
 
     fn parseWhenExpr(self: *Parser) ParseError!u32 {
@@ -873,7 +961,7 @@ pub const Parser = struct {
     /// expression-led path open for trailing-value detection.
     fn startsKeywordStmt(self: *const Parser) bool {
         return switch (self.peek()) {
-            .kw_let, .kw_assert, .kw_for, .kw_while, .kw_break, .kw_continue, .kw_throw, .kw_try => true,
+            .kw_let, .kw_assert, .kw_for, .kw_while, .kw_break, .kw_continue, .kw_throw, .kw_try, .kw_return => true,
             .ident => self.peekNext() == .colon, // labeled loop `outer:`
             else => false,
         };
@@ -1086,6 +1174,23 @@ pub const Parser = struct {
         });
     }
 
+    /// Parse `return [expression]` (M0.8 E2 call mechanism, `etch-grammar.md`
+    /// §4.1 l.630). Etch has no statement separator, so a `return` immediately
+    /// before `}` (or EOF) is a bare/void return; otherwise the following
+    /// expression is the return value. Dead-code `return` mid-block (followed by
+    /// more statements) is not in the block-2 surface.
+    fn parseReturnStmt(self: *Parser) ParseError!NodeId {
+        const kw = try self.advance(); // 'return'
+        if (self.peek() == .rbrace or self.peek() == .eof) {
+            return try self.arena.addReturnStmt(self.gpa, NodeId.none, kw.span);
+        }
+        const value = try self.parseExpr(0);
+        return try self.arena.addReturnStmt(self.gpa, value, .{
+            .byte_start = kw.span.byte_start,
+            .byte_end = self.arena.exprSpan(value).byte_end,
+        });
+    }
+
     /// Parse `try { ... } catch IDENT { ... }` (M0.8 error handling,
     /// `etch-grammar.md` §640). Both bodies are statement runs.
     fn parseTryCatchStmt(self: *Parser) ParseError!NodeId {
@@ -1132,6 +1237,9 @@ pub const Parser = struct {
         }
         if (self.peek() == .kw_try) {
             return try self.parseTryCatchStmt();
+        }
+        if (self.peek() == .kw_return) {
+            return try self.parseReturnStmt();
         }
         // Labeled loop: `IDENT ":" loop { ... }` (M0.8 loop/break).
         if (self.peek() == .ident and self.peekNext() == .colon) {
@@ -1773,8 +1881,10 @@ test "parser handles binary expression precedence per grammar subset" {
 
 test "parser rejects unsupported top-level construct with E0001" {
     const gpa = std.testing.allocator;
+    // `behavior` is still out of scope (E4); `fn` graduated with the M0.8 E2
+    // call mechanism, so it no longer rejects here.
     var result = try parse(gpa,
-        \\fn foo() {}
+        \\behavior Foo {}
     );
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
@@ -1969,6 +2079,51 @@ test "parser builds closures and calls (M0.8 closures)" {
     }
     try std.testing.expectEqual(@as(usize, 3), closures); // f, g, h
     try std.testing.expectEqual(@as(usize, 1), calls); // f(10)
+}
+
+test "parser builds top-level fn declarations, free calls, and return (M0.8 E2)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\fn double(x: int) -> int {
+        \\  return x * 2
+        \\}
+        \\fn noop() {
+        \\}
+        \\async fn tick(n: int) -> int { n }
+        \\fn caller(x: int) -> int {
+        \\  double(x)
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    // Four fn declarations, one async.
+    try std.testing.expectEqual(@as(usize, 4), result.ast.fn_decls.items.len);
+    var async_count: usize = 0;
+    var double_ret: bool = false;
+    var noop_void: bool = false;
+    for (result.ast.fn_decls.items) |fd| {
+        if (fd.is_async) async_count += 1;
+        const name = result.ast.strings.slice(fd.name);
+        if (std.mem.eql(u8, name, "double")) double_ret = !fd.return_type.isNone();
+        if (std.mem.eql(u8, name, "noop")) noop_void = fd.return_type.isNone();
+    }
+    try std.testing.expectEqual(@as(usize, 1), async_count);
+    try std.testing.expect(double_ret); // `-> int`
+    try std.testing.expect(noop_void); // no `-> type`
+    // The free call `double(x)` in `caller` is a fn_call expr; one return stmt.
+    var calls: usize = 0;
+    for (result.ast.exprs.items(.kind)) |k| {
+        if (k == .fn_call) calls += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    var returns: usize = 0;
+    for (result.ast.stmts.items(.kind)) |k| {
+        if (k == .return_stmt) returns += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), returns); // the `return x * 2`
 }
 
 test "parser builds loops, labels, break value, and continue (M0.8 loop/break)" {

@@ -224,6 +224,9 @@ pub const Interpreter = struct {
     ast: *const AstArena,
     bridge: Bridge,
     rule_descs: []RuleDesc,
+    /// Top-level `fn` declarations keyed by name (M0.8 E2 call mechanism), for
+    /// resolving a free-function call `f(args)` whose callee names a `fn`.
+    fns: std.AutoHashMapUnmanaged(StringId, ast_mod.FnDecl) = .empty,
     /// Heap store backing collection values created in rule bodies (M0.8).
     collections: CollectionStore = .{},
     /// Store backing closure values created in rule bodies (M0.8 closures).
@@ -239,6 +242,12 @@ pub const Interpreter = struct {
     thrown: bool = false,
     /// The value carried by the in-flight `throw`.
     thrown_value: Value = .{ .unit = {} },
+    /// Whether a `return` is unwinding to the enclosing `fn` boundary (M0.8 E2).
+    /// Mirrors `thrown`: every statement-run / loop / block site that stops on a
+    /// throw also stops on a return; the fn-call boundary consumes it.
+    returning: bool = false,
+    /// The value carried by the in-flight `return` (`unit` for a bare return).
+    return_value: Value = .{ .unit = {} },
 
     pub fn deinit(self: *Interpreter) void {
         for (self.rule_descs) |*r| r.deinit(self.gpa);
@@ -246,6 +255,7 @@ pub const Interpreter = struct {
         self.bridge.deinit(self.gpa);
         self.collections.deinit(self.gpa);
         self.closures.deinit(self.gpa);
+        self.fns.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -315,12 +325,26 @@ pub const Interpreter = struct {
             try rule_descs.append(gpa, desc);
         }
 
+        // Pass C — index top-level `fn` declarations by name for free-call
+        // resolution (M0.8 E2 call mechanism).
+        var fns: std.AutoHashMapUnmanaged(StringId, ast_mod.FnDecl) = .empty;
+        errdefer fns.deinit(gpa);
+        i = 0;
+        while (i < ast.items.len) : (i += 1) {
+            const kind = ast.items.items(.kind)[i];
+            const data = ast.items.items(.data)[i];
+            if (kind != .fn_decl) continue;
+            const decl = ast.fn_decls.items[data];
+            try fns.put(gpa, decl.name, decl);
+        }
+
         const slice = try rule_descs.toOwnedSlice(gpa);
         return .{
             .gpa = gpa,
             .ast = ast,
             .bridge = bridge,
             .rule_descs = slice,
+            .fns = fns,
         };
     }
 
@@ -389,6 +413,7 @@ pub const Interpreter = struct {
         try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
         self.control = .none; // defensive: each body starts with no pending signal
         self.thrown = false;
+        self.returning = false;
 
         var s: u32 = 0;
         while (s < rule.body_len) : (s += 1) {
@@ -415,6 +440,13 @@ pub const Interpreter = struct {
                 self.control_label = 0;
                 break;
             }
+            // A `return` at the rule top level (rules have no return value) is an
+            // early exit — consume the signal and end the body.
+            if (self.returning) {
+                self.returning = false;
+                self.return_value = .{ .unit = {} };
+                break;
+            }
         }
     }
 
@@ -424,9 +456,10 @@ pub const Interpreter = struct {
         var s: u32 = 0;
         while (s < len) : (s += 1) {
             try self.execStmt(world, locals, @bitCast(self.ast.extra.items[start + s]));
-            // Stop early on a control signal (break/continue) or an in-flight
-            // throw — both unwind to the enclosing loop / try.
-            if (self.control != .none or self.thrown) return;
+            // Stop early on a control signal (break/continue), an in-flight
+            // throw, or a `return` — all unwind out of the run (to the enclosing
+            // loop / try, or the fn boundary for a return).
+            if (self.control != .none or self.thrown or self.returning) return;
         }
     }
 
@@ -492,7 +525,7 @@ pub const Interpreter = struct {
                         range_loop: while (if (r.inclusive) i <= r.end else i < r.end) : (i += 1) {
                             try locals.put(self.gpa, f.var_name, Value{ .int_ = i }, false);
                             try self.execStmtRun(world, locals, f.body_start, f.body_len);
-                            if (self.thrown) return; // propagate the throw out of the loop
+                            if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
                                 .stop => break :range_loop,
@@ -510,7 +543,7 @@ pub const Interpreter = struct {
                             const elem = self.collections.arrays.items[handle].items[k];
                             try locals.put(self.gpa, f.var_name, elem, false);
                             try self.execStmtRun(world, locals, f.body_start, f.body_len);
-                            if (self.thrown) return; // propagate the throw out of the loop
+                            if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
                                 .stop => break :arr_loop,
@@ -531,7 +564,7 @@ pub const Interpreter = struct {
                             try locals.put(self.gpa, f.var_name, pair.key, false);
                             if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
                             try self.execStmtRun(world, locals, f.body_start, f.body_len);
-                            if (self.thrown) return; // propagate the throw out of the loop
+                            if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                             switch (self.handleLoopControl(0)) {
                                 .again => {},
                                 .stop => break :map_loop,
@@ -553,7 +586,7 @@ pub const Interpreter = struct {
                     if (cond != .bool_) return error.RuntimeFailure;
                     if (!cond.bool_) break :while_loop;
                     try self.execStmtRun(world, locals, wh.body_start, wh.body_len);
-                    if (self.thrown) return; // propagate the throw out of the loop
+                    if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                     switch (self.handleLoopControl(0)) {
                         .again => {},
                         .stop => break :while_loop,
@@ -592,6 +625,14 @@ pub const Interpreter = struct {
                     try locals.put(self.gpa, tc.catch_name, self.thrown_value, false);
                     try self.execStmtRun(world, locals, tc.catch_start, tc.catch_len);
                 }
+            },
+            .return_stmt => {
+                // `return [expr]` (M0.8 E2 call mechanism) — evaluate the value
+                // (or `unit` for a bare return) and raise the `returning` signal
+                // to unwind to the enclosing fn-call boundary (mirrors `throw`).
+                const value: NodeId = @bitCast(data);
+                self.return_value = if (value.isNone()) Value{ .unit = {} } else try self.evalExpr(world, locals, value);
+                self.returning = true;
             },
             else => return error.RuntimeFailure,
         }
@@ -633,6 +674,39 @@ pub const Interpreter = struct {
             }
         }
         return error.RuntimeFailure;
+    }
+
+    /// Invoke a top-level `fn` (free call, M0.8 E2 call mechanism). Args are
+    /// evaluated in the caller's scope, then bound into a fresh frame; the body
+    /// run executes there. A `return` inside the body raises `self.returning`,
+    /// consumed at this boundary; with no explicit return the trailing block
+    /// value is the implicit return. `async fn` interpretation is E3 (fail loud).
+    fn callFn(self: *Interpreter, world: *World, caller_locals: *Locals, fndecl: ast_mod.FnDecl, call: ast_mod.CallExpr) StmtError!Value {
+        if (fndecl.is_async) return error.RuntimeFailure; // async interp lands in E3
+        if (fndecl.params_len != call.args_len) return error.RuntimeFailure;
+        var frame: Locals = .{};
+        defer frame.deinit(self.gpa);
+        var i: u32 = 0;
+        while (i < fndecl.params_len) : (i += 1) {
+            const p = self.ast.fn_params.items[fndecl.params_start + i];
+            const arg: NodeId = @bitCast(self.ast.extra.items[call.args_start + i]);
+            const av = try self.evalExpr(world, caller_locals, arg);
+            try frame.put(self.gpa, p.name, av, false);
+        }
+        try self.execStmtRun(world, &frame, fndecl.body_start, fndecl.body_len);
+        if (self.returning) {
+            self.returning = false;
+            const rv = self.return_value;
+            self.return_value = .{ .unit = {} };
+            return rv;
+        }
+        // A throw / break / continue escaping a fn body is malformed in block 2
+        // (no enclosing try / loop around the call): leave the signal set and
+        // yield unit.
+        if (self.thrown or self.control != .none) return Value{ .unit = {} };
+        // No explicit return → the trailing block value is the implicit return.
+        if (fndecl.value.isNone()) return Value{ .unit = {} };
+        return try self.evalExpr(world, &frame, fndecl.value);
     }
 
     fn evalExpr(self: *Interpreter, world: *World, locals: *Locals, id: NodeId) StmtError!Value {
@@ -862,11 +936,21 @@ pub const Interpreter = struct {
                 return Value{ .closure = handle };
             },
             .fn_call => {
-                // `callee(args)` — E1 invokes a closure: build a call frame from
-                // the captured env plus the parameters bound to the arguments
-                // (evaluated in the caller's scope), then evaluate the body in
-                // that frame (M0.8 closures).
+                // `callee(args)` — two callee shapes: a top-level `fn` (free
+                // call, M0.8 E2) when the callee is an ident naming a `fn` and
+                // not a local binding; otherwise a closure-typed local (E1).
                 const call = self.ast.call_exprs.items[data];
+                if (self.ast.exprKind(call.callee) == .ident) {
+                    const callee_name = self.ast.exprData(call.callee);
+                    if (locals.get(callee_name) == null) {
+                        if (self.fns.get(callee_name)) |fndecl| {
+                            return try self.callFn(world, locals, fndecl, call);
+                        }
+                    }
+                }
+                // E1 closure invocation: build a call frame from the captured
+                // env plus the parameters bound to the arguments (evaluated in
+                // the caller's scope), then evaluate the body in that frame.
                 const callee = try self.evalExpr(world, locals, call.callee);
                 if (callee != .closure) return error.RuntimeFailure;
                 const handle = callee.closure;
@@ -896,7 +980,7 @@ pub const Interpreter = struct {
                 const lp = self.ast.loop_exprs.items[data];
                 while (true) {
                     try self.execStmtRun(world, locals, lp.body_start, lp.body_len);
-                    if (self.thrown) return Value{ .unit = {} }; // propagate the throw
+                    if (self.thrown or self.returning) return Value{ .unit = {} }; // throw / return unwinds out
                     switch (self.control) {
                         .none => {}, // body completed → loop again (infinite)
                         .break_ => {
@@ -927,7 +1011,7 @@ pub const Interpreter = struct {
                 // yields `unit` (M0.8 control flow).
                 const blk = self.ast.block_exprs.items[data];
                 try self.execStmtRun(world, locals, blk.body_start, blk.body_len);
-                if (self.control != .none or self.thrown) return Value{ .unit = {} };
+                if (self.control != .none or self.thrown or self.returning) return Value{ .unit = {} };
                 if (blk.value.isNone()) return Value{ .unit = {} };
                 return try self.evalExpr(world, locals, blk.value);
             },
@@ -2045,6 +2129,98 @@ test "runProgram closure captures an outer local by value (M0.8 closures)" {
     var out: i64 = 0;
     @memcpy(std.mem.asBytes(&out), slot[0..8]);
     try std.testing.expectEqual(@as(i64, 15), out);
+}
+
+test "runProgram free-function call returns the computed value (M0.8 E2)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A top-level `fn` invoked as a free call: the interpreter binds the arg in
+    // a fresh frame and yields the trailing block value (implicit return).
+    // double(21) = 42.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\fn double(x: int) -> int { x * 2 }
+        \\rule apply(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  entity.get_mut(Acc).out = double(21)
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 42), out);
+}
+
+test "runProgram early return unwinds the fn body past later statements (M0.8 E2)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `return` inside the `if` block must unwind out of the fn, skipping the
+    // trailing `return 0`. classify(5) takes the early branch → 7.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\fn classify(n: int) -> int {
+        \\  if n > 0 {
+        \\    return 7
+        \\  }
+        \\  return 0
+        \\}
+        \\rule apply(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  entity.get_mut(Acc).out = classify(5)
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 7), out);
 }
 
 test "runProgram try/catch catches a thrown value (M0.8 error handling)" {

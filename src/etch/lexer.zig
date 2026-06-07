@@ -69,7 +69,21 @@ pub const Lexer = struct {
                     return self.singleOrCompound(start, .slash, .slash_eq);
                 },
                 '+' => return self.singleOrCompound(start, .plus, .plus_eq),
-                '-' => return self.singleOrCompound(start, .minus, .minus_eq),
+                '-' => {
+                    // `-` / `-=` / `->` (fn return type arrow, M0.8 E2).
+                    self.pos += 1;
+                    if (self.pos < self.source.len) {
+                        if (self.source[self.pos] == '=') {
+                            self.pos += 1;
+                            return .{ .kind = .minus_eq, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                        }
+                        if (self.source[self.pos] == '>') {
+                            self.pos += 1;
+                            return .{ .kind = .arrow, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                        }
+                    }
+                    return .{ .kind = .minus, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                },
                 '*' => return self.singleOrCompound(start, .star, .star_eq),
                 '%' => return self.singleOrCompound(start, .percent, .percent_eq),
                 '=' => {
@@ -394,11 +408,30 @@ test "lexer disambiguates integer vs float literal" {
 
 test "lexer flags unknown Etch keyword from full grammar as error_unknown_keyword" {
     const gpa = std.testing.allocator;
+    // `fn` graduated to a real keyword with the M0.8 E2 call mechanism; `enum`
+    // and `behavior` are still out of scope and lex as error_unknown_keyword.
     var lex = Lexer.init("fn enum behavior");
     defer lex.deinit(gpa);
+    try expectKind(&lex, gpa, .kw_fn);
     try expectKind(&lex, gpa, .error_unknown_keyword);
     try expectKind(&lex, gpa, .error_unknown_keyword);
-    try expectKind(&lex, gpa, .error_unknown_keyword);
+}
+
+test "lexer recognizes the M0.8 E2 keywords and the `->` arrow" {
+    const gpa = std.testing.allocator;
+    var lex = Lexer.init("async fn f() -> int { return throws }");
+    defer lex.deinit(gpa);
+    try expectKind(&lex, gpa, .kw_async);
+    try expectKind(&lex, gpa, .kw_fn);
+    try expectKind(&lex, gpa, .ident); // f
+    try expectKind(&lex, gpa, .lparen);
+    try expectKind(&lex, gpa, .rparen);
+    try expectKind(&lex, gpa, .arrow); // ->
+    try expectKind(&lex, gpa, .kw_int);
+    try expectKind(&lex, gpa, .lbrace);
+    try expectKind(&lex, gpa, .kw_return);
+    try expectKind(&lex, gpa, .kw_throws);
+    try expectKind(&lex, gpa, .rbrace);
 }
 
 test "lexer handles compound operators and keywords" {

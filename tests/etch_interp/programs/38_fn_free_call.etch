@@ -1,0 +1,19 @@
+// M0.8 E2 call mechanism: a top-level `fn` invoked as a free function call.
+// The interpreter indexes top-level fns by name and runs the body in a fresh
+// frame (params bound to args, the trailing expression is the implicit
+// return); the cooked Zig emits a plain `fn double(x: i64) i64 { return x * 2;
+// }` and a direct `double(21)`. Both must yield 42, keeping the differential
+// byte-exact.
+component Acc {
+  out: int = 0
+}
+
+fn double(x: int) -> int {
+  x * 2
+}
+
+rule apply(entity: Entity)
+  when entity has Acc
+{
+  entity.get_mut(Acc).out = double(21)
+}

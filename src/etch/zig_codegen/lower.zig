@@ -91,7 +91,18 @@ pub fn generateFile(
     // order matching source order.
     try emitRegister(&w, ast);
 
-    // Pass C — emit one Zig function per Etch rule.
+    // Pass C — emit one Zig function per top-level Etch `fn` (M0.8 E2 call
+    // mechanism). Emitted before the rules so the file reads top-down; Zig
+    // resolves container-level references regardless of declaration order.
+    i = 0;
+    while (i < ast.items.len) : (i += 1) {
+        const kind = ast.items.items(.kind)[i];
+        const data = ast.items.items(.data)[i];
+        if (kind != .fn_decl) continue;
+        try emitFnDecl(&w, ast, ast.fn_decls.items[data]);
+    }
+
+    // Pass D — emit one Zig function per Etch rule.
     var rule_names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer rule_names.deinit(gpa);
 
@@ -341,6 +352,63 @@ const FieldFilter = struct {
     /// emits the right literal style (`== true`, `== 5.0`, etc.).
     value_zig_type: []const u8,
 };
+
+/// Emit one Zig `fn` for a top-level Etch `fn` (M0.8 E2 call mechanism). The
+/// body is a value-block: the statement run is emitted, then the trailing
+/// expression as `return <value>;` (the implicit return). Params + return type
+/// map through `type_map`. `async` codegen is Phase 2 and a `throws` fn's
+/// codegen folds into the E3 error-handling-codegen gate — both fail loud
+/// (`UnsupportedConstruct`); the interpreter is the reference for them.
+fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenError!void {
+    if (decl.is_async) return CodegenError.UnsupportedConstruct; // async codegen → Phase 2
+    if (decl.throws) return CodegenError.UnsupportedConstruct; // throws codegen → E3 gate
+
+    var ctx: LocalCtx = .{};
+    defer ctx.deinit(w.gpa);
+
+    try w.writeIndent();
+    try w.write("fn ");
+    try w.ident(ast.strings.slice(decl.name));
+    try w.write("(");
+    var p_i: u32 = 0;
+    while (p_i < decl.params_len) : (p_i += 1) {
+        if (p_i > 0) try w.write(", ");
+        const p = ast.fn_params.items[decl.params_start + p_i];
+        const zig_t = fnTypeZig(ast, p.type_node);
+        try w.ident(ast.strings.slice(p.name));
+        try w.print(": {s}", .{zig_t});
+        try ctx.records.append(w.gpa, .{ .key = .{ .name = p.name }, .info = .{ .kind = .value, .zig_type = zig_t, .is_mut = false } });
+    }
+    try w.write(") ");
+    try w.write(if (decl.return_type.isNone()) "void" else fnTypeZig(ast, decl.return_type));
+    try w.write(" {\n");
+    w.indentBy(1);
+
+    var s: u32 = 0;
+    while (s < decl.body_len) : (s += 1) {
+        try emitStmt(w, ast, &ctx, @bitCast(ast.extra.items[decl.body_start + s]));
+    }
+    // Trailing block value = implicit return.
+    if (!decl.value.isNone()) {
+        try w.writeIndent();
+        try w.write("return ");
+        try emitExpr(w, ast, &ctx, decl.value);
+        try w.write(";\n");
+    }
+
+    w.indentBy(-1);
+    try w.writeIndent();
+    try w.write("}\n\n");
+}
+
+/// Map a `fn` parameter / return type node to its Zig type name (M0.8 E2).
+/// Block-2 fns use named scalar types (alias-resolved); a builtin maps through
+/// `type_map`, a user type passes through 1:1 (same as rule params).
+fn fnTypeZig(ast: *const AstArena, type_node: NodeId) []const u8 {
+    const tnode = ast.named_types.items[ast.typeNodeData(type_node)];
+    const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+    return type_map.mapBuiltin(tname) orelse tname;
+}
 
 fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) CodegenError!void {
     const name = ast.strings.slice(rule.name);
@@ -921,6 +989,18 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             try emitExpr(w, ast, ctx, a.cond);
             try w.write(")) unreachable;\n");
         },
+        .return_stmt => {
+            // `return [expr]` (M0.8 E2 call mechanism) → Zig `return [<expr>];`.
+            const value: NodeId = @bitCast(data);
+            try w.writeIndent();
+            if (value.isNone()) {
+                try w.write("return;\n");
+            } else {
+                try w.write("return ");
+                try emitExpr(w, ast, ctx, value);
+                try w.write(";\n");
+            }
+        },
         .for_stmt => {
             // `for v in start..end { body }` → a Zig `while` over an i64
             // counter (M0.8 v0.6 foundations). The range bounds are read
@@ -1223,11 +1303,19 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             ctx.records.items.len = saved;
         },
         .fn_call => {
-            // `callee(args)` → `callee.call(args)` (M0.8 closures): the callee
-            // is a closure-typed local, lowered to the anonymous struct above.
+            // Two callee shapes (M0.8 E2). A callee that is an ident not bound
+            // to a local is a top-level `fn` → direct `name(args)`. Otherwise
+            // it's a closure-typed local → `callee.call(args)` (E1 closures,
+            // lowered to the anonymous struct above).
             const call = ast.call_exprs.items[data];
-            try emitExpr(w, ast, ctx, call.callee);
-            try w.write(".call(");
+            const is_free_fn = ast.exprKind(call.callee) == .ident and ctx.lookup(ast.exprData(call.callee)) == null;
+            if (is_free_fn) {
+                try w.ident(ast.strings.slice(ast.exprData(call.callee)));
+            } else {
+                try emitExpr(w, ast, ctx, call.callee);
+                try w.write(".call");
+            }
+            try w.write("(");
             var i: u32 = 0;
             while (i < call.args_len) : (i += 1) {
                 if (i > 0) try w.write(", ");

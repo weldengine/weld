@@ -103,6 +103,58 @@ test "recovery resyncs at a top-level `type` alias after a broken construct (M0.
     try std.testing.expect(saw_after);
 }
 
+test "recovery resyncs at a top-level `fn` after a broken construct (M0.8 E2 lockstep)" {
+    const gpa = std.testing.allocator;
+    // A broken component precedes a valid top-level `fn`. Because `kw_fn` joined
+    // recoverToTopLevel's stop-set IN LOCKSTEP with the parseTopLevel `fn`
+    // production (M0.8 E2 block 2 — the first top-level keyword E2 introduces),
+    // the function is not skipped: it lands in the AST. Without the lockstep
+    // extension the recovery loop would run past `fn double` to EOF and silently
+    // drop a valid construct.
+    var result = try etch.parseSource(gpa,
+        \\component Broken { x: int = }
+        \\fn double(n: int) -> int { n * 2 }
+        \\component After { y: float = 0.0 }
+    );
+    defer result.deinit(gpa);
+
+    try std.testing.expect(result.diagnostics.len >= 1);
+
+    // The valid `fn` survived the resync.
+    var saw_fn = false;
+    for (result.ast.fn_decls.items) |fd| {
+        if (std.mem.eql(u8, result.ast.strings.slice(fd.name), "double")) saw_fn = true;
+    }
+    try std.testing.expect(saw_fn);
+
+    // The construct after the function survived too.
+    var saw_after = false;
+    for (result.ast.component_decls.items) |cd| {
+        if (std.mem.eql(u8, result.ast.strings.slice(cd.name), "After")) saw_after = true;
+    }
+    try std.testing.expect(saw_after);
+}
+
+test "recovery resyncs at a top-level `async fn` after a broken construct (M0.8 E2 lockstep)" {
+    const gpa = std.testing.allocator;
+    // The `async` starter also joined recoverToTopLevel's stop-set in lockstep
+    // (an `async fn` is a top-level construct in E2). A broken construct before
+    // an `async fn` must not swallow it.
+    var result = try etch.parseSource(gpa,
+        \\component Broken { x: int = }
+        \\async fn tick(n: int) -> int { n }
+        \\component After { y: float = 0.0 }
+    );
+    defer result.deinit(gpa);
+
+    try std.testing.expect(result.diagnostics.len >= 1);
+    var saw_fn = false;
+    for (result.ast.fn_decls.items) |fd| {
+        if (std.mem.eql(u8, result.ast.strings.slice(fd.name), "tick")) saw_fn = true;
+    }
+    try std.testing.expect(saw_fn);
+}
+
 test "recovery keeps a rule exercising the E1 body constructs after a broken construct" {
     const gpa = std.testing.allocator;
     // A broken component precedes a rule whose body exercises every E1

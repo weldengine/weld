@@ -70,7 +70,7 @@ pub const valid = [_]Entry{
 /// an `.etch` file plus the diagnostic code (`E0xxx`) the corpus
 /// driver expects the parser / type-checker to emit.
 pub const invalid = [_]InvalidEntry{
-    .{ .name = "E0001_unsupported_fn.etch", .expected_code = "E0001", .source = @embedFile("corpus/invalid/E0001_unsupported_fn.etch") },
+    .{ .name = "E0001_unsupported_behavior.etch", .expected_code = "E0001", .source = @embedFile("corpus/invalid/E0001_unsupported_behavior.etch") },
     .{ .name = "E0001_unexpected_top_level.etch", .expected_code = "E0001", .source = @embedFile("corpus/invalid/E0001_unexpected_top_level.etch") },
     .{ .name = "E0101_duplicate_component.etch", .expected_code = "E0101", .source = @embedFile("corpus/invalid/E0101_duplicate_component.etch") },
     .{ .name = "E0102_unknown_field_type.etch", .expected_code = "E0102", .source = @embedFile("corpus/invalid/E0102_unknown_field_type.etch") },

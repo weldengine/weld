@@ -62,6 +62,10 @@ pub const TokenKind = enum {
     kw_throw, // throw expression (M0.8 error handling)
     kw_try, // try { } catch (M0.8 error handling)
     kw_catch, // try { } catch IDENT { } (M0.8 error handling)
+    kw_fn, // top-level fn declaration (M0.8 E2 call mechanism)
+    kw_return, // return [expr] (M0.8 E2 call mechanism)
+    kw_throws, // fn throws marker (M0.8 E2 call mechanism)
+    kw_async, // async fn (parsed E2; interp E3, codegen Phase 2)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -91,6 +95,7 @@ pub const TokenKind = enum {
     lt_eq,
     gt_eq,
     fat_arrow, // => (match arm, M0.8 v0.6 foundations)
+    arrow, // -> (fn return type, M0.8 E2 call mechanism)
     dotdot, // .. exclusive range (M0.8 v0.6 foundations)
     dotdot_eq, // ..= inclusive range (M0.8 v0.6 foundations)
     lparen,
@@ -166,6 +171,10 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "throw", .kind = .kw_throw },
     .{ .lexeme = "try", .kind = .kw_try },
     .{ .lexeme = "catch", .kind = .kw_catch },
+    .{ .lexeme = "fn", .kind = .kw_fn },
+    .{ .lexeme = "return", .kind = .kw_return },
+    .{ .lexeme = "throws", .kind = .kw_throws },
+    .{ .lexeme = "async", .kind = .kw_async },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -191,36 +200,30 @@ pub const s3_keywords = [_]KeywordEntry{
 /// would collide with legitimate identifier names like `state`, `event`,
 /// `priority`.
 pub const non_s3_keywords = [_][]const u8{
-    // ── Top-level constructs (26 of 29 from EBNF v0.6) ──
-    "fn",         "struct",      "enum",          "trait",       "impl",
-    "event",      "tags",        "import",        "const",       "private",
-    "behavior",   "routine",     "quest",         "dialogue",    "ability",
-    "effect",     "shader",      "widget",        "theme",       "motion",
-    "anim_graph", "audio_graph", "audio_score",   "sequence",    "data",
-    "scene",      "prefab",      "input_mapping", "locale",      "test",
-    "override",
+    // ── Top-level constructs still out of scope (`fn` graduated with M0.8 E2
+    //    call mechanism) ──
+    "struct",      "enum",           "trait",         "impl",
+    "event",       "tags",           "import",        "const",
+    "private",     "behavior",       "routine",       "quest",
+    "dialogue",    "ability",        "effect",        "shader",
+    "widget",      "theme",          "motion",        "anim_graph",
+    "audio_graph", "audio_score",    "sequence",      "data",
+    "scene",       "prefab",         "input_mapping", "locale",
+    "test",        "override",
 
-    // ── Control flow still out of scope (`loop`/`break`/`continue` graduated
-    //    with M0.8 loop/break; `if`/`else`/`while` with M0.8 control-flow
-    //    completion; `return` graduates with `fn`) ──
-      "return",
-
-    // ── Async machinery (out of S3) ──
-         "async",         "await",       "race",
-    "sync",       "branch",      "spawn",
-
-    // ── Error handling: `try`/`catch`/`throw` graduated to real keywords with
-    //    M0.8 error handling; `throws` (a fn marker) stays out until fn (E2) ──
-            "throws",
+    // ── Async machinery: `async` graduated with M0.8 E2 (`async fn` parsed;
+    //    interp E3, codegen Phase 2); the await machinery stays out of scope ──
+          "await",         "race",
+    "sync",        "branch",         "spawn",
 
     // ── Tag operators (out of S3) ──
-         "has_tag",
-    "has_no_tag", "has_any_tag", "has_all_tags",  "has_no_tags", "add_tag",
-    "remove_tag",
+            "has_tag",
+    "has_no_tag",  "has_any_tag",    "has_all_tags",  "has_no_tags",
+    "add_tag",     "remove_tag",
 
     // ── Timers / emit / lifecycle (out of S3) ──
-    "emit",        "after",         "every",       "after_unscaled",
-    "quantize",
+        "emit",          "after",
+    "every",       "after_unscaled", "quantize",
 
     // Note: `where`, `self`, `none`, `some` are intentionally NOT listed —
     // they appear in legitimate identifier-shaped positions in S3 annotation
