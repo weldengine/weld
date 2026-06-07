@@ -705,6 +705,20 @@ pub const TypeChecker = struct {
                     try self.checkStmt(ctx, body_stmt);
                 }
             },
+            .while_stmt => {
+                // `while cond { body }` (M0.8 control flow) — the condition must
+                // be bool, then the body statements are checked with the rule's
+                // locals in scope.
+                const wh = self.arena.while_stmts.items[data];
+                const cond_t = self.synthExpr(wh.cond, ctx);
+                if (cond_t == .builtin and cond_t.builtin != .bool_) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(wh.cond), "while condition must be a bool expression", .{});
+                }
+                var i: u32 = 0;
+                while (i < wh.body_len) : (i += 1) {
+                    try self.checkStmt(ctx, @bitCast(self.arena.extra.items[wh.body_start + i]));
+                }
+            },
             .break_stmt => {
                 // `break [label] [value]` (M0.8 loop/break). Type the value if
                 // present; loop-membership / label validity is permissive in E1.
@@ -1624,6 +1638,37 @@ test "if requires a bool condition and unifies its branch types (M0.8 control fl
         \\{
         \\  let x = if 1 < 2 { 10 } else { 20 }
         \\  entity.get_mut(C).out = x
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+}
+
+test "while requires a bool condition (M0.8 control flow)" {
+    const gpa = std.testing.allocator;
+
+    // Non-bool while condition → E0200.
+    var bad = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let mut i = 0
+        \\  while i { i += 1 }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .type_mismatch);
+
+    // Bool while condition → no type error.
+    var ok = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let mut i = 0
+        \\  while i < 3 { i += 1 }
+        \\  entity.get_mut(C).out = i
         \\}
     );
     defer ok.deinit(gpa);

@@ -53,6 +53,7 @@ const p30 = @import("programs/30_loop_break_value.expected.zig");
 const p31 = @import("programs/31_labeled_break.expected.zig");
 const p32 = @import("programs/32_block_expr_value.expected.zig");
 const p33 = @import("programs/33_if_else.expected.zig");
+const p34 = @import("programs/34_while_sum.expected.zig");
 
 /// Embedded list of the 20 differential corpus programs consumed by
 /// the S4 interpreter test and the S5 codegen parity test.
@@ -90,4 +91,5 @@ pub const programs = [_]Program{
     .{ .name = "31_labeled_break", .source = @embedFile("programs/31_labeled_break.etch"), .config = p31.config, .initial = p31.initial, .expected = p31.expected },
     .{ .name = "32_block_expr_value", .source = @embedFile("programs/32_block_expr_value.etch"), .config = p32.config, .initial = p32.initial, .expected = p32.expected },
     .{ .name = "33_if_else", .source = @embedFile("programs/33_if_else.etch"), .config = p33.config, .initial = p33.initial, .expected = p33.expected },
+    .{ .name = "34_while_sum", .source = @embedFile("programs/34_while_sum.etch"), .config = p34.config, .initial = p34.initial, .expected = p34.expected },
 };

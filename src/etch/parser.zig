@@ -866,15 +866,14 @@ pub const Parser = struct {
     }
 
     /// True when the current token starts a keyword-led statement that can
-    /// never be a block's trailing value (`let` / `assert` / `for` / `break` /
-    /// `continue` / `throw` / `try`, plus the `IDENT ":" loop` labeled-loop
-    /// form; `while` joins this set when its keyword lands). Mirrors the keyword
-    /// dispatch in `parseStmt`; used by
+    /// never be a block's trailing value (`let` / `assert` / `for` / `while` /
+    /// `break` / `continue` / `throw` / `try`, plus the `IDENT ":" loop`
+    /// labeled-loop form). Mirrors the keyword dispatch in `parseStmt`; used by
     /// `parseBlockBody` to route those to `parseStmt` while keeping the
     /// expression-led path open for trailing-value detection.
     fn startsKeywordStmt(self: *const Parser) bool {
         return switch (self.peek()) {
-            .kw_let, .kw_assert, .kw_for, .kw_break, .kw_continue, .kw_throw, .kw_try => true,
+            .kw_let, .kw_assert, .kw_for, .kw_while, .kw_break, .kw_continue, .kw_throw, .kw_try => true,
             .ident => self.peekNext() == .colon, // labeled loop `outer:`
             else => false,
         };
@@ -986,6 +985,24 @@ pub const Parser = struct {
             .body_start = body.start,
             .body_len = body.len,
         }, .{ .byte_start = for_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse `while cond block` (M0.8 control flow, `etch-grammar.md` §4.1
+    /// l.622). The condition is an ordinary expression (it stops before the
+    /// body's `{`); the body is a statement run (no value, like a loop body).
+    /// `break` / `continue` inside target this loop (unlabeled in M0.8); the
+    /// `while let` Optional-destructuring form lands with the Optional tranche.
+    fn parseWhileStmt(self: *Parser) ParseError!NodeId {
+        const kw_span = (try self.advance()).span; // 'while'
+        const cond = try self.parseExpr(0);
+        _ = try self.expect(.lbrace, "expected '{' to start the while body");
+        const body = try self.parseStmtRun();
+        const closing = try self.expect(.rbrace, "expected '}' to close the while body");
+        return try self.arena.addWhileStmt(self.gpa, .{
+            .cond = cond,
+            .body_start = body.start,
+            .body_len = body.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
     /// Parse `loop { body }` (M0.8 loop/break, `etch-grammar.md` §522/§624).
@@ -1100,6 +1117,9 @@ pub const Parser = struct {
         }
         if (self.peek() == .kw_for) {
             return try self.parseForStmt();
+        }
+        if (self.peek() == .kw_while) {
+            return try self.parseWhileStmt();
         }
         if (self.peek() == .kw_break) {
             return try self.parseBreakStmt();
@@ -2075,6 +2095,28 @@ test "parser builds if/else with an else-if chain (M0.8 control flow)" {
     // branch; the statement `if` does not.
     try std.testing.expectEqual(@as(usize, 3), ifs);
     try std.testing.expectEqual(@as(usize, 2), with_else);
+}
+
+test "parser builds a while statement (M0.8 control flow)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  let mut i = 0
+        \\  while i < 3 {
+        \\    i += 1
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var whiles: usize = 0;
+    for (result.ast.stmts.items(.kind)) |k| {
+        if (k == .while_stmt) whiles += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), whiles);
 }
 
 test "parser does not leak comment spans on OOM during init" {

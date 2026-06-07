@@ -542,6 +542,25 @@ pub const Interpreter = struct {
                     else => return error.RuntimeFailure,
                 }
             },
+            .while_stmt => {
+                // `while cond { body }` (M0.8 control flow). Re-evaluate the
+                // condition each iteration; run the body run; an unlabeled
+                // `break`/`continue` is consumed via `handleLoopControl(0)`; a
+                // labeled signal for an outer loop, or a `throw`, propagates.
+                const wh = self.ast.while_stmts.items[data];
+                while_loop: while (true) {
+                    const cond = try self.evalExpr(world, locals, wh.cond);
+                    if (cond != .bool_) return error.RuntimeFailure;
+                    if (!cond.bool_) break :while_loop;
+                    try self.execStmtRun(world, locals, wh.body_start, wh.body_len);
+                    if (self.thrown) return; // propagate the throw out of the loop
+                    switch (self.handleLoopControl(0)) {
+                        .again => {},
+                        .stop => break :while_loop,
+                        .propagate => return,
+                    }
+                }
+            },
             .break_stmt => {
                 // `break [label] [value]` (M0.8 loop/break) — raise the signal
                 // for the enclosing loop to consume.
@@ -1606,6 +1625,57 @@ test "runProgram block expression yields its trailing value (M0.8 control flow)"
     @memcpy(std.mem.asBytes(&out), slot[0..8]);
     // { let a = 10; let b = 20; a + b } = 30.
     try std.testing.expectEqual(@as(i64, 30), out);
+}
+
+test "runProgram while loop with a conditional break (M0.8 control flow)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `while` + `if cond { break }` exercises the while control signal plus the
+    // conditional loop exit (an `if`-guarded `break` inside the body), unblocked
+    // by block-1's `if` + block expressions.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule run(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let mut i = 0
+        \\  let mut s = 0
+        \\  while i < 100 {
+        \\    if i == 5 { break }
+        \\    s += i
+        \\    i += 1
+        \\  }
+        \\  entity.get_mut(Acc).out = s
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    // Breaks at i == 5: s = 0 + 1 + 2 + 3 + 4 = 10.
+    try std.testing.expectEqual(@as(i64, 10), out);
 }
 
 test "runProgram match dispatches on literal and binding arms (M0.8 match)" {

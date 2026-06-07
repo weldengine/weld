@@ -419,6 +419,16 @@ pub const ForStmt = struct {
     body_len: u32,
 };
 
+/// `while cond block` statement (M0.8 control flow, `etch-grammar.md` §4.1
+/// l.622). `body_start`/`body_len` index a statement run in `arena.extra` (the
+/// body has no value, like a loop body). M0.8 `while` is unlabeled; the
+/// `while let` Optional-destructuring form lands with the Optional tranche.
+pub const WhileStmt = struct {
+    cond: NodeId,
+    body_start: u32,
+    body_len: u32,
+};
+
 const BinaryExpr = struct {
     op: BinaryOp,
     lhs: NodeId,
@@ -759,6 +769,7 @@ pub const AstArena = struct {
     match_exprs: std.ArrayListUnmanaged(MatchExpr) = .empty,
     match_arms: std.ArrayListUnmanaged(MatchArm) = .empty,
     for_stmts: std.ArrayListUnmanaged(ForStmt) = .empty,
+    while_stmts: std.ArrayListUnmanaged(WhileStmt) = .empty,
     array_lits: std.ArrayListUnmanaged(ArrayLitExpr) = .empty,
     map_lits: std.ArrayListUnmanaged(MapLitExpr) = .empty,
     map_entries: std.ArrayListUnmanaged(MapEntry) = .empty,
@@ -843,6 +854,7 @@ pub const AstArena = struct {
         self.match_exprs.deinit(gpa);
         self.match_arms.deinit(gpa);
         self.for_stmts.deinit(gpa);
+        self.while_stmts.deinit(gpa);
         self.array_lits.deinit(gpa);
         self.map_lits.deinit(gpa);
         self.map_entries.deinit(gpa);
@@ -970,6 +982,12 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.for_stmts.items.len);
         try self.for_stmts.append(gpa, for_stmt);
         return try self.addStmt(gpa, .for_stmt, idx, span);
+    }
+
+    pub fn addWhileStmt(self: *AstArena, gpa: std.mem.Allocator, while_stmt: WhileStmt, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.while_stmts.items.len);
+        try self.while_stmts.append(gpa, while_stmt);
+        return try self.addStmt(gpa, .while_stmt, idx, span);
     }
 
     pub fn addMatch(self: *AstArena, gpa: std.mem.Allocator, scrutinee: NodeId, arms: []const MatchArm, span: SourceSpan) !NodeId {

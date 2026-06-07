@@ -58,6 +58,7 @@ pub const TokenKind = enum {
     kw_continue, // continue [label] (M0.8 loop/break)
     kw_if, // if/else expression + statement (M0.8 control-flow completion)
     kw_else,
+    kw_while, // while loop statement (M0.8 control-flow completion)
     kw_throw, // throw expression (M0.8 error handling)
     kw_try, // try { } catch (M0.8 error handling)
     kw_catch, // try { } catch IDENT { } (M0.8 error handling)
@@ -161,6 +162,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "continue", .kind = .kw_continue },
     .{ .lexeme = "if", .kind = .kw_if },
     .{ .lexeme = "else", .kind = .kw_else },
+    .{ .lexeme = "while", .kind = .kw_while },
     .{ .lexeme = "throw", .kind = .kw_throw },
     .{ .lexeme = "try", .kind = .kw_try },
     .{ .lexeme = "catch", .kind = .kw_catch },
@@ -190,34 +192,35 @@ pub const s3_keywords = [_]KeywordEntry{
 /// `priority`.
 pub const non_s3_keywords = [_][]const u8{
     // ── Top-level constructs (26 of 29 from EBNF v0.6) ──
-    "fn",             "struct",      "enum",          "trait",        "impl",
-    "event",          "tags",        "import",        "const",        "private",
-    "behavior",       "routine",     "quest",         "dialogue",     "ability",
-    "effect",         "shader",      "widget",        "theme",        "motion",
-    "anim_graph",     "audio_graph", "audio_score",   "sequence",     "data",
-    "scene",          "prefab",      "input_mapping", "locale",       "test",
+    "fn",         "struct",      "enum",          "trait",       "impl",
+    "event",      "tags",        "import",        "const",       "private",
+    "behavior",   "routine",     "quest",         "dialogue",    "ability",
+    "effect",     "shader",      "widget",        "theme",       "motion",
+    "anim_graph", "audio_graph", "audio_score",   "sequence",    "data",
+    "scene",      "prefab",      "input_mapping", "locale",      "test",
     "override",
 
     // ── Control flow still out of scope (`loop`/`break`/`continue` graduated
-    //    with M0.8 loop/break; `if`/`else` with M0.8 control-flow completion;
-    //    `while` graduates next, `return` with `fn`) ──
-          "while",       "return",
+    //    with M0.8 loop/break; `if`/`else`/`while` with M0.8 control-flow
+    //    completion; `return` graduates with `fn`) ──
+      "return",
 
     // ── Async machinery (out of S3) ──
-           "async",        "await",
-    "race",           "sync",        "branch",        "spawn",
+         "async",         "await",       "race",
+    "sync",       "branch",      "spawn",
 
     // ── Error handling: `try`/`catch`/`throw` graduated to real keywords with
     //    M0.8 error handling; `throws` (a fn marker) stays out until fn (E2) ──
-           "throws",
+            "throws",
 
     // ── Tag operators (out of S3) ──
-    "has_tag",        "has_no_tag",  "has_any_tag",   "has_all_tags", "has_no_tags",
-    "add_tag",        "remove_tag",
+         "has_tag",
+    "has_no_tag", "has_any_tag", "has_all_tags",  "has_no_tags", "add_tag",
+    "remove_tag",
 
     // ── Timers / emit / lifecycle (out of S3) ──
-     "emit",          "after",        "every",
-    "after_unscaled", "quantize",
+    "emit",        "after",         "every",       "after_unscaled",
+    "quantize",
 
     // Note: `where`, `self`, `none`, `some` are intentionally NOT listed —
     // they appear in legitimate identifier-shaped positions in S3 annotation

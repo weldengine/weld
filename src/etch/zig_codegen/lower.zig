@@ -569,6 +569,14 @@ fn walkStmtForComponents(
                 try walkStmtForComponents(gpa, ast, @bitCast(ast.extra.items[f.body_start + s]), out);
             }
         },
+        .while_stmt => {
+            const wh = ast.while_stmts.items[data];
+            try walkExprForComponents(gpa, ast, wh.cond, out);
+            var s: u32 = 0;
+            while (s < wh.body_len) : (s += 1) {
+                try walkStmtForComponents(gpa, ast, @bitCast(ast.extra.items[wh.body_start + s]), out);
+            }
+        },
         .break_stmt => {
             const b = ast.break_stmts.items[data];
             if (!b.value.isNone()) try walkExprForComponents(gpa, ast, b.value, out);
@@ -971,6 +979,26 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 try w.writeIndent();
                 try w.write("}\n");
             }
+        },
+        .while_stmt => {
+            // `while cond { body }` → Zig `while (<cond>) { <body> }` (M0.8
+            // control flow). The body is a statement run; `break` / `continue`
+            // inside lower through their own statement cases.
+            const wh = ast.while_stmts.items[data];
+            try w.writeIndent();
+            try w.write("while (");
+            try emitExpr(w, ast, ctx, wh.cond);
+            try w.write(") {\n");
+            w.indentBy(1);
+            const saved = ctx.records.items.len;
+            var s: u32 = 0;
+            while (s < wh.body_len) : (s += 1) {
+                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[wh.body_start + s]));
+            }
+            ctx.records.items.len = saved;
+            w.indentBy(-1);
+            try w.writeIndent();
+            try w.write("}\n");
         },
         .break_stmt => {
             // `break [:label] [value]` (M0.8 loop/break).

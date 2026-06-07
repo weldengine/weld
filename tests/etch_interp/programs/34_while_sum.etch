@@ -1,0 +1,19 @@
+// M0.8 control flow: a `while` loop with a runtime condition and a mutating
+// body. The interpreter re-evaluates the condition each iteration and runs the
+// body run; the cooked Zig emits `while (<cond>) { <body> }`. Both accumulate
+// s = 0 + 1 + 2 + 3 + 4 = 10 over the iterations where i < 5.
+component Acc {
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has Acc
+{
+  let mut i = 0
+  let mut s = 0
+  while i < 5 {
+    s += i
+    i += 1
+  }
+  entity.get_mut(Acc).out = s
+}
