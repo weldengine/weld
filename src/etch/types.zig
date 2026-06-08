@@ -12,6 +12,7 @@
 const std = @import("std");
 const ast_mod = @import("ast.zig");
 const diag_mod = @import("diagnostics.zig");
+const tags_mod = @import("tags.zig");
 const token_mod = @import("token.zig");
 
 const AstArena = ast_mod.AstArena;
@@ -226,6 +227,11 @@ pub const TypeChecker = struct {
     /// E2), used to type a `return expr` body statement against. `null` outside
     /// a body; `.unit` for a void fn (no `-> type`).
     current_fn_return: ?ResolvedType = null,
+    /// Merged global tag table (M0.8 E3, `etch-validation-ecs.md` §5.2), built
+    /// between pass 1 and pass 2 from every `tags { ... }` block. `null` until
+    /// `buildTags` runs. Pass 2 (tag-op when-conditions / `tag_path` operands,
+    /// landed in the query-operator commit) resolves paths against it.
+    tag_table: ?tags_mod.TagTable = null,
 
     /// One `impl Trait for Type [when …]` (M0.8 E2 block 3 tranche C).
     /// `methods_start`/`methods_len` index `arena.impl_methods` (the
@@ -245,6 +251,15 @@ pub const TypeChecker = struct {
         self.methods.deinit(self.gpa);
         self.trait_impls.deinit(self.gpa);
         self.generic_scope.deinit(self.gpa);
+        if (self.tag_table) |*t| t.deinit(self.gpa);
+    }
+
+    /// Build the merged global tag table (M0.8 E3) between pass 1 and pass 2
+    /// (`etch-validation-ecs.md` §5.2). Surfaces `E0831`/`E0832` during
+    /// construction; the resolved table backs the tag-op when-conditions and
+    /// `tag_path` operands checked in pass 2 (query-operator commit).
+    fn buildTags(self: *TypeChecker) !void {
+        self.tag_table = try tags_mod.TagTable.build(self.gpa, self.arena, self.diagnostics, tags_mod.default_max_tags);
     }
 
     pub fn check(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
@@ -257,6 +272,7 @@ pub const TypeChecker = struct {
         try tc.pass1Collect();
         try tc.validateTypeAliases();
         try tc.validateImpls();
+        try tc.buildTags();
         try tc.pass2Resolve();
     }
 
