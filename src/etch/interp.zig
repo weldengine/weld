@@ -2305,6 +2305,50 @@ test "runProgram generic fn + generic struct run type-erased (M0.8 E2 block 4)" 
     try std.testing.expectEqual(@as(i64, 142), out);
 }
 
+test "runProgram generic inherent impl (impl<T> Range<T>) resolves + interps (§891, M0.8 E2)" {
+    const gpa = std.testing.allocator;
+    // The §891-patched grammar accepts a generic-type inherent impl target. A
+    // method on `Range<T>` dispatches + runs type-erased: `contains(5)` on
+    // `Range { min: 2, max: 8 }` is 2 <= 5 <= 8 → true → out = 1. Generic
+    // codegen stays UnsupportedConstruct (so this is interp-reference, not a
+    // codegen differential — consistent with block 4).
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\struct Range<T> { min: T  max: T }
+        \\impl<T> Range<T> {
+        \\  fn contains(self, v: T) -> bool { v >= self.min and v <= self.max }
+        \\}
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let rng = Range { min: 2, max: 8 }
+        \\  entity.get_mut(C).out = if rng.contains(5) { 1 } else { 0 }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("C").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    _ = try interp.runFor(&world, 1);
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 1), out);
+}
+
 test "runProgram assert passes on true, reports a runtime error on false (M0.8 assert)" {
     const gpa = std.testing.allocator;
 

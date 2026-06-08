@@ -1182,11 +1182,13 @@ pub const Parser = struct {
         const first_tok = try self.expect(.type_ident, "expected type or trait name (TYPE_IDENT) after 'impl'");
         const first_name = try self.internSlice(first_tok.span);
         // An optional `<type_list>` after the first name: the trait's generic
-        // args in `impl Trait<T> for Type` (EBNF `impl_trait_for_type`). The args
-        // are erased in M0.8 (no monomorphisation codegen).
-        const first_had_args = try self.skipGenericArgs();
-        // `impl Trait for Type` (trait impl) vs `impl Type` (inherent). For the
-        // trait form the first name is the trait; the target type follows `for`.
+        // args in `impl Trait<T> for Type` (EBNF `impl_trait_for_type`) OR the
+        // inherent target's args in `impl<T> Range<T>` (EBNF `generic_type`
+        // target, §891 patch). Either way the args are erased in M0.8 (no
+        // monomorphisation codegen — the impl-level `<T>` carries the params).
+        _ = try self.skipGenericArgs();
+        // `impl Trait for Type` (trait impl) vs `impl [Type | Type<…>]` (inherent).
+        // For the trait form the first name is the trait; the target follows `for`.
         var trait_name: StringId = 0;
         var type_name = first_name;
         if (self.peek() == .kw_for) {
@@ -1194,14 +1196,11 @@ pub const Parser = struct {
             trait_name = first_name;
             const target_tok = try self.expect(.type_ident, "expected target type (TYPE_IDENT) after 'for'");
             type_name = try self.internSlice(target_tok.span);
-            // The EBNF target is a bare TYPE_IDENT (`impl_trait_for_type`).
+            // The trait-form target is a bare TYPE_IDENT (`impl_trait_for_type`);
+            // a generic target there (`impl T for Bar<U>`) is not in the EBNF.
             if (self.peek() == .lt) {
                 return self.parseErr(self.peekSpan(), "generic type arguments on a trait-impl target are not in the EBNF v0.6 (the target is a bare TYPE_IDENT; use impl-level generics 'impl<T> …')");
             }
-        } else if (first_had_args) {
-            // `impl Range<T>` (inherent generic target) is not in the EBNF v0.6
-            // (the inherent target is a bare TYPE_IDENT). Use `impl<T> Range`.
-            return self.parseErr(first_tok.span, "generic type arguments on an inherent impl target ('impl Range<T>') are not in the EBNF v0.6 — write 'impl<T> Range { … }' (target is a bare TYPE_IDENT)");
         }
 
         var when_root: u32 = ast_mod.RuleDecl.none_when;
@@ -3133,28 +3132,48 @@ test "parser builds generic params + bounds + where + generic type (M0.8 E2 bloc
     try std.testing.expectEqual(@as(u32, 1), result.ast.enum_decls.items[0].generics_len);
 }
 
-test "parser rejects an inherent impl generic target (EBNF-strict, M0.8 E2 block 4)" {
+test "parser accepts inherent impl generic + bare targets, rejects generic trait-impl target (§891, M0.8 E2)" {
     const gpa = std.testing.allocator;
-    // `impl<T> Range<T>` — a generic-type inherent target is not in the EBNF
-    // v0.6 (the target is a bare TYPE_IDENT); the impl-level `impl<T> Range` is.
-    var bad = try parse(gpa,
-        \\struct Range<T> { min: T  max: T }
-        \\impl<T> Range<T> { fn lo(self) -> int { 0 } }
-    );
-    defer bad.deinit(gpa);
-    try std.testing.expect(bad.diagnostics.len > 0);
-
-    // `impl<T> Range { … }` (bare target, impl-level generics) parses.
-    var ok = try parse(gpa,
-        \\struct Range<T> { min: T  max: T }
-        \\impl<T> Range { fn lo(self) -> int { 0 } }
-    );
-    defer ok.deinit(gpa);
-    if (ok.diagnostics.len > 0) {
-        std.debug.print("unexpected parse diagnostic: {s}\n", .{ok.diagnostics[0].primary_message});
-        try std.testing.expect(false);
+    // `impl<T> Range<T>` — a generic-type inherent target, now grammatical
+    // (`etch-grammar.md §891`: `impl_decl` target = impl_trait_for_type |
+    // generic_type | TYPE_IDENT). The `<T>` target args are erased; the
+    // impl-level `<T>` carries the param. `type_name` is the base `Range`.
+    {
+        var result = try parse(gpa,
+            \\struct Range<T> { min: T  max: T }
+            \\impl<T> Range<T> { fn lo(self) -> int { 0 } }
+        );
+        defer result.deinit(gpa);
+        if (result.diagnostics.len > 0) {
+            std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+            try std.testing.expect(false);
+        }
+        const impl = result.ast.impl_decls.items[0];
+        try std.testing.expectEqual(@as(u32, 1), impl.generics_len);
+        try std.testing.expectEqual(@as(StringId, 0), impl.trait_name); // inherent
+        try std.testing.expectEqualStrings("Range", result.ast.strings.slice(impl.type_name));
     }
-    try std.testing.expectEqual(@as(u32, 1), ok.ast.impl_decls.items[0].generics_len);
+    // `impl<T> Range { … }` (bare inherent target) still parses.
+    {
+        var result = try parse(gpa,
+            \\struct Range<T> { min: T  max: T }
+            \\impl<T> Range { fn lo(self) -> int { 0 } }
+        );
+        defer result.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+        try std.testing.expectEqual(@as(u32, 1), result.ast.impl_decls.items[0].generics_len);
+    }
+    // A generic target in the *trait* form (`impl T for Bar<U>`) stays rejected —
+    // `impl_trait_for_type`'s target is a bare TYPE_IDENT.
+    {
+        var result = try parse(gpa,
+            \\trait Show { fn show(self) -> int }
+            \\struct Bar<T> { v: T }
+            \\impl Show for Bar<T> { fn show(self) -> int { 0 } }
+        );
+        defer result.deinit(gpa);
+        try std.testing.expect(result.diagnostics.len > 0);
+    }
 }
 
 test "parser builds enum decl + enum-variant match patterns (M0.8 E2 block 3 tranche B)" {

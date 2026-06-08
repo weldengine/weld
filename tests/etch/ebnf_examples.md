@@ -412,3 +412,25 @@ rule pick(entity: Entity)
   entity.get_mut(Counter).value = chosen
 }
 ```
+
+## Generics — inherent impl with a generic target (§891)
+
+```etch
+struct Range<T> {
+  min: T
+  max: T
+}
+
+impl<T> Range<T> {
+  fn contains(self, v: T) -> bool {
+    v >= self.min and v <= self.max
+  }
+}
+
+rule pick(entity: Entity)
+  when entity has Counter
+{
+  let rng = Range { min: 2, max: 8 }
+  entity.get_mut(Counter).value = if rng.contains(5) { 1 } else { 0 }
+}
+```
