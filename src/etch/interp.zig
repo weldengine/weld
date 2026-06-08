@@ -279,6 +279,10 @@ pub const Interpreter = struct {
     /// `enum` declarations keyed by name (M0.8 E2 block 3 tranche B), for
     /// resolving enum values + match-arm variant indices.
     enum_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.EnumDecl) = .empty,
+    /// Trait-impl methods keyed by `methodKey(type_name, method_name)` (M0.8 E2
+    /// block 3 tranche C), each resolved to the impl-provided method or the
+    /// trait's default. Consulted AFTER `methods` (inherent) per §5.5.
+    trait_methods: std.AutoHashMapUnmanaged(u64, ast_mod.FnDecl) = .empty,
     /// Heap store backing collection values created in rule bodies (M0.8).
     collections: CollectionStore = .{},
     /// Store backing closure values created in rule bodies (M0.8 closures).
@@ -315,6 +319,7 @@ pub const Interpreter = struct {
         self.methods.deinit(self.gpa);
         self.struct_decls.deinit(self.gpa);
         self.enum_decls.deinit(self.gpa);
+        self.trait_methods.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -407,13 +412,22 @@ pub const Interpreter = struct {
         errdefer struct_decls.deinit(gpa);
         var enum_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.EnumDecl) = .empty;
         errdefer enum_decls.deinit(gpa);
+        var trait_methods: std.AutoHashMapUnmanaged(u64, ast_mod.FnDecl) = .empty;
+        errdefer trait_methods.deinit(gpa);
+        // Trait declarations by name (M0.8 E2 block 3 tranche C) — a local index
+        // used to resolve a trait impl's defaults; not stored on the interpreter.
+        var trait_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.TraitDecl) = .empty;
+        defer trait_decls.deinit(gpa);
         i = 0;
         while (i < ast.items.len) : (i += 1) {
             const kind = ast.items.items(.kind)[i];
             const data = ast.items.items(.data)[i];
             switch (kind) {
                 .impl_decl => {
+                    // Inherent impl → `methods`; trait impl handled in pass D2
+                    // (needs the trait decls, whose source order is arbitrary).
                     const impl = ast.impl_decls.items[data];
+                    if (impl.trait_name != 0) continue;
                     var m: u32 = 0;
                     while (m < impl.methods_len) : (m += 1) {
                         const method = ast.impl_methods.items[impl.methods_start + m];
@@ -428,7 +442,37 @@ pub const Interpreter = struct {
                     const decl = ast.enum_decls.items[data];
                     try enum_decls.put(gpa, decl.name, decl);
                 },
+                .trait_decl => {
+                    const decl = ast.trait_decls.items[data];
+                    try trait_decls.put(gpa, decl.name, decl);
+                },
                 else => {},
+            }
+        }
+
+        // Pass D2 — trait impls: key each (type, method) to the impl-provided
+        // method, or the trait's default when the impl does not override it
+        // (M0.8 E2 block 3 tranche C). Inherent (`methods`) wins at dispatch.
+        i = 0;
+        while (i < ast.items.len) : (i += 1) {
+            if (ast.items.items(.kind)[i] != .impl_decl) continue;
+            const impl = ast.impl_decls.items[ast.items.items(.data)[i]];
+            if (impl.trait_name == 0) continue;
+            // Impl-provided methods.
+            var m: u32 = 0;
+            while (m < impl.methods_len) : (m += 1) {
+                const method = ast.impl_methods.items[impl.methods_start + m];
+                try trait_methods.put(gpa, methodKey(impl.type_name, method.name), method);
+            }
+            // Trait defaults the impl does not provide.
+            if (trait_decls.get(impl.trait_name)) |tdecl| {
+                var t: u32 = 0;
+                while (t < tdecl.methods_len) : (t += 1) {
+                    const tm = ast.impl_methods.items[tdecl.methods_start + t];
+                    if (!tm.has_body) continue; // abstract → the impl provides it
+                    const key = methodKey(impl.type_name, tm.name);
+                    if (!trait_methods.contains(key)) try trait_methods.put(gpa, key, tm);
+                }
             }
         }
 
@@ -442,6 +486,7 @@ pub const Interpreter = struct {
             .methods = methods,
             .struct_decls = struct_decls,
             .enum_decls = enum_decls,
+            .trait_methods = trait_methods,
         };
     }
 
@@ -1196,11 +1241,12 @@ pub const Interpreter = struct {
                 return Value{ .struct_ref = handle };
             },
             .method_call => {
-                // `recv.method(args)` / `Type.assoc(args)` — inherent dispatch
-                // (M0.8 E2 block 3, §5.1; the block-2 fail-loud is wired here).
-                // Associated fn: a bare type-path receiver, no self. Instance
-                // method: a struct-valued receiver, self bound to it (a `mut
-                // self` method mutates it in place — the store handle is shared).
+                // `recv.method(args)` / `Type.assoc(args)` — dispatch in the
+                // §5.5 order (inherent → trait). Associated fn: a bare type-path
+                // receiver, no self. Instance method: a struct receiver (self
+                // bound to it — a `mut self` method mutates it in place via the
+                // shared store handle) or an `Entity` receiver for a trait method
+                // (`impl Trait for Entity`; mutation flows through `self.get_mut`).
                 const mc = self.ast.method_calls.items[data];
                 if (self.ast.exprKind(mc.receiver) == .path) {
                     const type_name = self.ast.exprData(mc.receiver);
@@ -1208,13 +1254,24 @@ pub const Interpreter = struct {
                     return try self.callMethod(world, locals, method, mc, null);
                 }
                 const recv = try self.evalExpr(world, locals, mc.receiver);
-                // Block-3 instance methods dispatch on struct receivers; methods
-                // on component / resource values are deferred (the interpreter
-                // cannot recover the type name from a bare ref) — fail loud.
-                if (recv != .struct_ref) return error.RuntimeFailure;
-                const type_name = self.structs.list.items[recv.struct_ref].type_name;
-                const method = self.methods.get(methodKey(type_name, mc.method_name)) orelse return error.RuntimeFailure;
-                return try self.callMethod(world, locals, method, mc, recv);
+                switch (recv) {
+                    .struct_ref => |handle| {
+                        const type_name = self.structs.list.items[handle].type_name;
+                        const key = methodKey(type_name, mc.method_name);
+                        const method = self.methods.get(key) orelse self.trait_methods.get(key) orelse return error.RuntimeFailure;
+                        return try self.callMethod(world, locals, method, mc, recv);
+                    },
+                    .entity_id => {
+                        // Trait method on an Entity (`impl Trait for Entity`). The
+                        // type key is the interned `Entity`; self is the handle.
+                        const entity_name = self.ast.strings.find("Entity") orelse return error.RuntimeFailure;
+                        const method = self.trait_methods.get(methodKey(entity_name, mc.method_name)) orelse return error.RuntimeFailure;
+                        return try self.callMethod(world, locals, method, mc, recv);
+                    },
+                    // Methods on a component / resource ref are deferred (the
+                    // interpreter cannot recover the type name from a bare ref).
+                    else => return error.RuntimeFailure,
+                }
             },
             .loop_expr => {
                 // `loop { body }` — run the body repeatedly until a `break`
@@ -2166,6 +2223,46 @@ test "runProgram enum value + match selects the right arm (M0.8 E2 block 3 tranc
     var out: i64 = 0;
     @memcpy(std.mem.asBytes(&out), slot[0..8]);
     try std.testing.expectEqual(@as(i64, 2), out);
+}
+
+test "runProgram trait method on Entity mutates via get_mut (M0.8 E2 block 3 tranche C)" {
+    const gpa = std.testing.allocator;
+    // A conditional trait impl on Entity; the rule's `when` guarantees Health,
+    // so the call type-checks and the interpreter dispatches it (Entity trait
+    // dispatch). The body mutates through `self.get_mut(Health)`. current: 100
+    // - 30 = 70.
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\trait Damageable { fn take_damage(self, amount: int) }
+        \\component Health { current: int = 100 }
+        \\impl Damageable for Entity when self has Health {
+        \\  fn take_damage(self, amount: int) { self.get_mut(Health).current -= amount }
+        \\}
+        \\rule hit(entity: Entity) when entity has Health {
+        \\  entity.take_damage(30)
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Health").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    _ = try interp.runFor(&world, 1);
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var current: i64 = 0;
+    @memcpy(std.mem.asBytes(&current), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 70), current);
 }
 
 test "runProgram assert passes on true, reports a runtime error on false (M0.8 assert)" {

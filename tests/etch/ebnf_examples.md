@@ -353,3 +353,31 @@ rule pick(entity: Entity)
   }
 }
 ```
+
+## Declarations — trait + impl Trait for T (E2 block 3 tranche C)
+
+```etch
+trait Doubler {
+  fn base(self) -> int
+  fn doubled(self) -> int {
+    self.base() * 2
+  }
+}
+
+struct N {
+  v: int = 0
+}
+
+impl Doubler for N {
+  fn base(self) -> int {
+    self.v
+  }
+}
+
+rule pick(entity: Entity)
+  when entity has Counter
+{
+  let n = N { v: 21 }
+  entity.get_mut(Counter).value = n.doubled()
+}
+```

@@ -144,7 +144,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -203,14 +203,32 @@ pub const TypeChecker = struct {
     /// (kind 1, `etch-resolver-types.md §5.1`) dispatch of `recv.method()` and
     /// the associated-fn dispatch of `Type.assoc()`.
     methods: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    /// Trait impls (`impl Trait for Type [when …]`, M0.8 E2 block 3 tranche C),
+    /// in declaration order. The kind-2 trait dispatch (`etch-resolver-types.md
+    /// §5.2`) scans this for the receiver type, AFTER inherent (§5.5 order).
+    trait_impls: std.ArrayListUnmanaged(TraitImplEntry) = .empty,
     /// Declared return type of the `fn` / method currently being checked (M0.8
     /// E2), used to type a `return expr` body statement against. `null` outside
     /// a body; `.unit` for a void fn (no `-> type`).
     current_fn_return: ?ResolvedType = null,
 
+    /// One `impl Trait for Type [when …]` (M0.8 E2 block 3 tranche C).
+    /// `methods_start`/`methods_len` index `arena.impl_methods` (the
+    /// impl-provided methods); `when_root` is `RuleDecl.none_when` for an
+    /// unconditional impl.
+    pub const TraitImplEntry = struct {
+        trait_name: StringId,
+        type_name: StringId,
+        when_root: u32,
+        methods_start: u32,
+        methods_len: u32,
+        span: SourceSpan,
+    };
+
     pub fn deinit(self: *TypeChecker) void {
         self.symbols.deinit(self.gpa);
         self.methods.deinit(self.gpa);
+        self.trait_impls.deinit(self.gpa);
     }
 
     pub fn check(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
@@ -299,11 +317,30 @@ pub const TypeChecker = struct {
                     try self.registerSymbol(.enum_, decl.name, item_id, span);
                     try self.validateEnumVariants(decl, span);
                 },
+                .trait_decl => {
+                    // Register the trait name (M0.8 E2 block 3 tranche C). Its
+                    // methods (abstract + defaults) are looked up on demand from
+                    // the `TraitDecl` via the symbol for dispatch / E0214.
+                    const decl = self.arena.trait_decls.items[data];
+                    try self.registerSymbol(.trait_, decl.name, item_id, span);
+                },
                 .impl_decl => {
-                    // Index inherent-impl methods by `(type_name, method_name)`
-                    // for the kind-1 dispatch (M0.8 E2 block 3, §5.1). The
-                    // method bodies are checked in pass 2 (`checkImplMethod`).
-                    try self.collectImplMethods(self.arena.impl_decls.items[data], span);
+                    // Inherent impl (`impl Type`, §5.1) → the `methods` map;
+                    // trait impl (`impl Trait for Type`, §5.2) → `trait_impls`.
+                    // Bodies are checked in pass 2 (`checkImplMethod`).
+                    const impl = self.arena.impl_decls.items[data];
+                    if (impl.trait_name == 0) {
+                        try self.collectImplMethods(impl, span);
+                    } else {
+                        try self.trait_impls.append(self.gpa, .{
+                            .trait_name = impl.trait_name,
+                            .type_name = impl.type_name,
+                            .when_root = impl.when_root,
+                            .methods_start = impl.methods_start,
+                            .methods_len = impl.methods_len,
+                            .span = span,
+                        });
+                    }
                 },
                 .type_alias => {
                     // Register the alias name so it collides with a same-named
@@ -360,14 +397,75 @@ pub const TypeChecker = struct {
             if (kinds[i] != .impl_decl) continue;
             const impl = self.arena.impl_decls.items[datas[i]];
             const tname = self.arena.strings.slice(impl.type_name);
-            if (self.symbols.get(impl.type_name)) |sym| {
-                if (sym.kind != .struct_ and sym.kind != .component and sym.kind != .resource) {
-                    try self.emit(.undefined_symbol, .error_, spans[i], "impl target '{s}' is not a struct, component, or resource", .{tname});
+            if (impl.trait_name == 0) {
+                // Inherent impl (§5.1): target is a declared struct / component /
+                // resource. No coherence (§7.5).
+                if (self.symbols.get(impl.type_name)) |sym| {
+                    if (sym.kind != .struct_ and sym.kind != .component and sym.kind != .resource) {
+                        try self.emit(.undefined_symbol, .error_, spans[i], "impl target '{s}' is not a struct, component, or resource", .{tname});
+                    }
+                } else {
+                    try self.emit(.undefined_symbol, .error_, spans[i], "impl target type '{s}' is not declared", .{tname});
                 }
             } else {
-                try self.emit(.undefined_symbol, .error_, spans[i], "impl target type '{s}' is not declared", .{tname});
+                try self.validateTraitImpl(impl, spans[i]);
             }
         }
+    }
+
+    /// Validate one `impl Trait for Type [when …]` (M0.8 E2 block 3 tranche C,
+    /// `etch-resolver-types.md §7.2/§7.4`). Checks: the trait is declared; the
+    /// orphan rule (§7.4 — trait OR type local to this module); every abstract
+    /// trait method is provided (E0214, else the trait must supply a default);
+    /// the target type is a struct / component / resource / `Entity`.
+    fn validateTraitImpl(self: *TypeChecker, impl: ast_mod.ImplDecl, span: SourceSpan) !void {
+        const trait_slice = self.arena.strings.slice(impl.trait_name);
+        const type_slice = self.arena.strings.slice(impl.type_name);
+
+        // The trait must be a declared `trait`.
+        const trait_sym = self.symbols.get(impl.trait_name);
+        const trait_local = trait_sym != null and trait_sym.?.kind == .trait_;
+        if (!trait_local) {
+            try self.emit(.undefined_symbol, .error_, span, "trait '{s}' is not declared", .{trait_slice});
+            return; // nothing further provable without the trait
+        }
+
+        // The target type must be a local struct / component / resource, or the
+        // builtin `Entity` (the conditional-impl receiver, §7.3).
+        const type_sym = self.symbols.get(impl.type_name);
+        const type_is_entity = std.mem.eql(u8, type_slice, "Entity");
+        const type_local = type_sym != null and (type_sym.?.kind == .struct_ or type_sym.?.kind == .component or type_sym.?.kind == .resource or type_sym.?.kind == .enum_);
+        if (!type_local and !type_is_entity) {
+            try self.emit(.undefined_symbol, .error_, span, "trait-impl target '{s}' is not a struct, component, resource, or Entity", .{type_slice});
+        }
+
+        // Orphan rule (§7.4): trait OR type local to the impl's module. In M0.8
+        // (single module) the trait is always local, so this holds — the check
+        // is structural for the cross-module future.
+        if (!trait_local and !type_local) {
+            try self.emit(.orphan_impl, .error_, span, "orphan impl: neither trait '{s}' nor type '{s}' is defined in this module", .{ trait_slice, type_slice });
+        }
+
+        // E0214: every abstract trait method (no default body) must be provided.
+        const tdecl = self.arena.trait_decls.items[self.arena.itemData(trait_sym.?.item_id)];
+        var m: u32 = 0;
+        while (m < tdecl.methods_len) : (m += 1) {
+            const tmethod = self.arena.impl_methods.items[tdecl.methods_start + m];
+            if (tmethod.has_body) continue; // default-bodied → optional
+            if (!self.implProvidesMethod(impl, tmethod.name)) {
+                try self.emit(.incomplete_trait_impl, .error_, span, "impl of trait '{s}' for '{s}' is missing method '{s}'", .{ trait_slice, type_slice, self.arena.strings.slice(tmethod.name) });
+            }
+        }
+    }
+
+    /// `true` if `impl` provides a method named `name` (M0.8 E2 block 3 tranche
+    /// C).
+    fn implProvidesMethod(self: *TypeChecker, impl: ast_mod.ImplDecl, name: StringId) bool {
+        var m: u32 = 0;
+        while (m < impl.methods_len) : (m += 1) {
+            if (self.arena.impl_methods.items[impl.methods_start + m].name == name) return true;
+        }
+        return false;
     }
 
     /// Validate an `enum`'s variant set (M0.8 E2 block 3 tranche B): non-empty,
@@ -626,25 +724,32 @@ pub const TypeChecker = struct {
     /// resolve. Associated fns (`self_kind == .none`) bind no receiver.
     fn checkImpl(self: *TypeChecker, impl: ast_mod.ImplDecl) !void {
         // The receiver type for `self`: the impl's target. A declared struct →
-        // `.struct_t`; a component / resource → their resolved type; anything
+        // `.struct_t`; a component / resource → their resolved type; the builtin
+        // `Entity` (a trait impl `impl Trait for Entity`) → `.entity`; anything
         // else (validateImpls already flagged it) → `unknown`.
         const self_type: ResolvedType = if (self.symbols.get(impl.type_name)) |sym| switch (sym.kind) {
             .struct_ => .{ .struct_t = impl.type_name },
             .component => .{ .component = impl.type_name },
             .resource => .{ .resource = impl.type_name },
             else => ResolvedType.unknown,
-        } else ResolvedType.unknown;
+        } else if (std.mem.eql(u8, self.arena.strings.slice(impl.type_name), "Entity"))
+            .{ .builtin = .entity }
+        else
+            ResolvedType.unknown;
 
         var i: u32 = 0;
         while (i < impl.methods_len) : (i += 1) {
-            try self.checkImplMethod(self.arena.impl_methods.items[impl.methods_start + i], self_type);
+            try self.checkImplMethod(self.arena.impl_methods.items[impl.methods_start + i], self_type, impl.when_root);
         }
     }
 
     /// Type-check one `impl` method body (M0.8 E2 block 3). Mirrors `checkFn`
     /// but, when the method takes a `self` receiver, binds `self` to the impl's
     /// target type first so the body's `self.field` / `self.method()` resolve.
-    fn checkImplMethod(self: *TypeChecker, decl: ast_mod.FnDecl, self_type: ResolvedType) !void {
+    /// A conditional trait impl's `when` (`impl Trait for Entity when self has
+    /// H`, tranche C) is folded into the method's accessible-component set so
+    /// `self.get(H)` / `self.get_mut(H)` are allowed in the body (§7.3).
+    fn checkImplMethod(self: *TypeChecker, decl: ast_mod.FnDecl, self_type: ResolvedType, when_root: u32) !void {
         var ctx: RuleCtx = .{};
         defer ctx.deinit(self.gpa);
 
@@ -652,6 +757,7 @@ pub const TypeChecker = struct {
             const self_id = try self.arena.strings.intern(self.gpa, "self");
             try ctx.locals.put(self.gpa, self_id, .{ .type_ = self_type, .is_mut = decl.self_kind == .by_mut });
         }
+        if (when_root != ast_mod.RuleDecl.none_when) try self.collectWhen(&ctx, when_root);
 
         var i: u32 = 0;
         while (i < decl.params_len) : (i += 1) {
@@ -1448,13 +1554,15 @@ pub const TypeChecker = struct {
     }
 
     /// Type a method call `recv.method(args)` / `Type.assoc(args)` (M0.8 E2
-    /// block 3 — the dispatch deferred fail-loud from block 2). Kind-1 inherent
-    /// dispatch (`etch-resolver-types.md §5.1`): an associated fn when the
-    /// receiver is a bare type path (`Type.assoc()`, `self_kind == .none`); an
-    /// instance method when the receiver is a value of a struct / component /
-    /// resource type (`recv.method()`, `self_kind != .none`). Trait (§5.2) and
-    /// builtin (§5.3) dispatch arrive in tranche C / E3. Diagnostics reuse
-    /// E0200 (the dedicated E0201 MethodNotFound is an additive follow-up).
+    /// block 3). Associated-fn dispatch when the receiver is a bare type path
+    /// (`Type.assoc()`, `self_kind == .none`). Instance dispatch follows the
+    /// strict order of `etch-resolver-types.md §5.5`: inherent (§5.1) → trait
+    /// (§5.2) → builtin/service (§5.3-5.4, out of M0.8 block-3 core). A trait
+    /// receiver may be a struct / component / resource or `Entity`; a `mut self`
+    /// call on an immutable receiver is E0220 (§7.6); a conditional trait impl's
+    /// `when` must be provable from the calling rule's `when` (E0215, §7.3).
+    /// Diagnostics reuse E0200 for method-not-found (the dedicated E0201 is an
+    /// additive follow-up).
     fn synthMethodCall(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const mc = self.arena.method_calls.items[data];
         const method_slice = self.arena.strings.slice(mc.method_name);
@@ -1473,21 +1581,130 @@ pub const TypeChecker = struct {
             return try self.checkMethodArgs(id, mc, method, ctx_opt);
         }
 
-        // Instance dispatch: synth the receiver, take its user type name.
+        // Instance dispatch (`etch-resolver-types.md §5.5` strict order: inherent
+        // → trait → builtin → service). The receiver type name is the user type
+        // for a struct / component / resource, or `Entity` for a builtin entity
+        // (the conditional-trait-impl receiver).
         const recv_t = try self.synthExprE(mc.receiver, ctx_opt);
-        const type_name = typeNameOfResolved(recv_t) orelse {
+        const type_name: StringId = typeNameOfResolved(recv_t) orelse blk: {
+            if (recv_t == .builtin and recv_t.builtin == .entity) {
+                break :blk self.arena.strings.find("Entity") orelse {
+                    // No `Entity` interned ⇒ no trait impl targets it.
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on an Entity (no trait impl in scope)", .{method_slice});
+                    return ResolvedType.unknown;
+                };
+            }
             if (recv_t != .unknown) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "method call '{s}' on a value with no methods (builtin / collection methods are not supported here)", .{method_slice});
             return ResolvedType.unknown;
         };
-        const method = self.lookupMethod(type_name, mc.method_name) orelse {
-            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
-            return ResolvedType.unknown;
-        };
-        if (method.self_kind == .none) {
-            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'{s}' is an associated function (no self) — call it as '{s}.{s}(...)'", .{ method_slice, self.arena.strings.slice(type_name), method_slice });
-            return ResolvedType.unknown;
+
+        // Step 1 — inherent method (§5.1).
+        if (self.lookupMethod(type_name, mc.method_name)) |method| {
+            if (method.self_kind == .none) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'{s}' is an associated function (no self) — call it as '{s}.{s}(...)'", .{ method_slice, self.arena.strings.slice(type_name), method_slice });
+                return ResolvedType.unknown;
+            }
+            try self.checkMutSelfReceiver(method, mc, ctx_opt);
+            return try self.checkMethodArgs(id, mc, method, ctx_opt);
         }
-        return try self.checkMethodArgs(id, mc, method, ctx_opt);
+
+        // Step 2 — trait method (§5.2), after inherent.
+        if (try self.findTraitMethod(type_name, mc.method_name, self.arena.exprSpan(id))) |disp| {
+            // Conditional impl (§7.3): the `when` conditions must be provable
+            // from the calling rule's `when` (E0215 otherwise).
+            if (!self.traitImplConditionsProven(disp.when_root, ctx_opt)) {
+                try self.emit(.conditional_impl_condition_not_proven, .error_, self.arena.exprSpan(id), "conditional impl method '{s}' requires components the calling context does not guarantee — add the matching 'when ... has' to the rule", .{method_slice});
+            }
+            try self.checkMutSelfReceiver(disp.method, mc, ctx_opt);
+            return try self.checkMethodArgs(id, mc, disp.method, ctx_opt);
+        }
+
+        // Steps 3-4 (builtin / service) are §5.3-5.4 — out of M0.8 block-3 core.
+        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
+        return ResolvedType.unknown;
+    }
+
+    /// One resolved trait-dispatch candidate (M0.8 E2 block 3 tranche C): the
+    /// `FnDecl` to call (impl-provided or trait default) + the impl's `when_root`
+    /// (for the §7.3 conditional proof).
+    const TraitDispatch = struct { method: ast_mod.FnDecl, when_root: u32 };
+
+    /// Find the trait method `method_name` on `type_name` (`etch-resolver-types.md
+    /// §5.2`). Scans `trait_impls` for the type; a candidate is an impl-provided
+    /// method or, failing that, the trait's default-bodied method. >1 distinct
+    /// candidate ⇒ E0211 AmbiguousTraitMethod (the first is returned to avoid a
+    /// cascade). M0.8 simplification: multiple conditional impls of the same
+    /// trait also surface as E0211 (the §7.3 most-specific-wins / E0216 tie-break
+    /// is a refinement — flagged for review).
+    fn findTraitMethod(self: *TypeChecker, type_name: StringId, method_name: StringId, span: SourceSpan) TypeError!?TraitDispatch {
+        var found: ?TraitDispatch = null;
+        var count: u32 = 0;
+        for (self.trait_impls.items) |entry| {
+            if (entry.type_name != type_name) continue;
+            var resolved: ?ast_mod.FnDecl = null;
+            var k: u32 = 0;
+            while (k < entry.methods_len) : (k += 1) {
+                const mth = self.arena.impl_methods.items[entry.methods_start + k];
+                if (mth.name == method_name) {
+                    resolved = mth;
+                    break;
+                }
+            }
+            if (resolved == null) resolved = self.traitDefaultMethod(entry.trait_name, method_name);
+            if (resolved) |mth| {
+                count += 1;
+                if (found == null) found = .{ .method = mth, .when_root = entry.when_root };
+            }
+        }
+        if (count > 1) {
+            try self.emit(.ambiguous_trait_method, .error_, span, "ambiguous trait method '{s}' — implemented by more than one trait/impl for this type", .{self.arena.strings.slice(method_name)});
+        }
+        return found;
+    }
+
+    /// The trait's default-bodied method `method_name`, or `null` (M0.8 E2 block
+    /// 3 tranche C).
+    fn traitDefaultMethod(self: *TypeChecker, trait_name: StringId, method_name: StringId) ?ast_mod.FnDecl {
+        const sym = self.symbols.get(trait_name) orelse return null;
+        if (sym.kind != .trait_) return null;
+        const tdecl = self.arena.trait_decls.items[self.arena.itemData(sym.item_id)];
+        var m: u32 = 0;
+        while (m < tdecl.methods_len) : (m += 1) {
+            const tm = self.arena.impl_methods.items[tdecl.methods_start + m];
+            if (tm.name == method_name and tm.has_body) return tm;
+        }
+        return null;
+    }
+
+    /// Prove a conditional trait impl's `when` (§7.3). Unconditional ⇒ always
+    /// proven; otherwise every `has C` the impl requires must be in the calling
+    /// rule's guaranteed component set (`ctx.components_in_when`). Outside a rule
+    /// context, or for an `or`/`not`/resource condition (not provable in M0.8),
+    /// the proof fails (conservative).
+    fn traitImplConditionsProven(self: *TypeChecker, when_root: u32, ctx_opt: ?*RuleCtx) bool {
+        if (when_root == ast_mod.RuleDecl.none_when) return true;
+        const ctx = ctx_opt orelse return false;
+        return self.requiredComponentsProven(when_root, ctx);
+    }
+
+    fn requiredComponentsProven(self: *TypeChecker, idx: u32, ctx: *RuleCtx) bool {
+        const node = self.arena.when_nodes.items[idx];
+        return switch (node.kind) {
+            .has, .has_with_filter => ctx.components_in_when.contains(node.type_name),
+            .logical_and => self.requiredComponentsProven(node.lhs, ctx) and self.requiredComponentsProven(node.rhs, ctx),
+            else => false, // or / not / resource conditions are not provable in M0.8
+        };
+    }
+
+    /// E0220 (`etch-resolver-types.md §7.6`): a `mut self` method called on an
+    /// immutable receiver. A struct bound by `let` (not `let mut`) is immutable;
+    /// `let mut` / a `get_mut` ref is mutable. Skipped without a rule context.
+    fn checkMutSelfReceiver(self: *TypeChecker, method: ast_mod.FnDecl, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx) !void {
+        if (method.self_kind != .by_mut) return;
+        const ctx = ctx_opt orelse return;
+        if (!isAssignTargetReachable(self.arena, ctx, mc.receiver)) {
+            try self.emit(.immutable_receiver_for_mut_self, .error_, self.arena.exprSpan(mc.receiver), "cannot call a 'mut self' method on an immutable receiver (bind it with 'let mut')", .{});
+        }
     }
 
     /// Check a method/associated-fn call's argument count + types against the
@@ -2119,6 +2336,97 @@ test "enum match exhaustiveness and variant resolution (M0.8 E2 block 3 tranche 
     );
     defer unknown.deinit(gpa);
     try expectAnyCode(unknown.diagnostics.items, .enum_variant_not_found);
+}
+
+test "trait dispatch, E0220 mut-self receiver, E0214 incomplete impl (M0.8 E2 block 3 tranche C)" {
+    const gpa = std.testing.allocator;
+
+    // Trait method on a struct dispatches cleanly (no inherent method of that
+    // name; trait wins at step 2). The default `doubled` calls the abstract
+    // `base` the impl provides.
+    var ok = try parseAndCheck(gpa,
+        \\trait Doubler { fn base(self) -> int  fn doubled(self) -> int { self.base() * 2 } }
+        \\struct N { v: int = 0 }
+        \\impl Doubler for N { fn base(self) -> int { self.v } }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let n = N { v: 21 }
+        \\  entity.get_mut(C).out = n.doubled()
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+    try expectNoCode(ok.diagnostics.items, .incomplete_trait_impl);
+    try expectNoCode(ok.diagnostics.items, .immutable_receiver_for_mut_self);
+
+    // E0220: a `mut self` method on an immutable (`let`) receiver.
+    var immut = try parseAndCheck(gpa,
+        \\struct Cnt { v: int = 0 }
+        \\impl Cnt { fn bump(mut self) { self.v += 1 } }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let c = Cnt { v: 0 }
+        \\  c.bump()
+        \\}
+    );
+    defer immut.deinit(gpa);
+    try expectAnyCode(immut.diagnostics.items, .immutable_receiver_for_mut_self);
+
+    // The same call on a `let mut` receiver is fine.
+    var mut_ok = try parseAndCheck(gpa,
+        \\struct Cnt { v: int = 0 }
+        \\impl Cnt { fn bump(mut self) { self.v += 1 } }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let mut c = Cnt { v: 0 }
+        \\  c.bump()
+        \\}
+    );
+    defer mut_ok.deinit(gpa);
+    try expectNoCode(mut_ok.diagnostics.items, .immutable_receiver_for_mut_self);
+
+    // E0214: an impl missing an abstract trait method.
+    var incomplete = try parseAndCheck(gpa,
+        \\trait Damageable { fn take_damage(self, amount: int)  fn heal(self, amount: int) }
+        \\struct Mob { hp: int = 0 }
+        \\impl Damageable for Mob { fn take_damage(self, amount: int) {} }
+    );
+    defer incomplete.deinit(gpa);
+    try expectAnyCode(incomplete.diagnostics.items, .incomplete_trait_impl);
+}
+
+test "conditional trait impl proof E0215 (M0.8 E2 block 3 tranche C §7.3)" {
+    const gpa = std.testing.allocator;
+
+    // A conditional impl `when self has Health` called from a rule whose `when`
+    // does NOT guarantee Health → E0215.
+    var not_proven = try parseAndCheck(gpa,
+        \\trait Damageable { fn take_damage(self, amount: int) }
+        \\component Health { current: int = 100 }
+        \\component Marker { tag: int = 0 }
+        \\impl Damageable for Entity when self has Health {
+        \\  fn take_damage(self, amount: int) { self.get_mut(Health).current -= amount }
+        \\}
+        \\rule hit(entity: Entity) when entity has Marker {
+        \\  entity.take_damage(10)
+        \\}
+    );
+    defer not_proven.deinit(gpa);
+    try expectAnyCode(not_proven.diagnostics.items, .conditional_impl_condition_not_proven);
+
+    // The same call from a rule whose `when` guarantees Health → proven.
+    var proven = try parseAndCheck(gpa,
+        \\trait Damageable { fn take_damage(self, amount: int) }
+        \\component Health { current: int = 100 }
+        \\impl Damageable for Entity when self has Health {
+        \\  fn take_damage(self, amount: int) { self.get_mut(Health).current -= amount }
+        \\}
+        \\rule hit(entity: Entity) when entity has Health {
+        \\  entity.take_damage(10)
+        \\}
+    );
+    defer proven.deinit(gpa);
+    try expectNoCode(proven.diagnostics.items, .conditional_impl_condition_not_proven);
 }
 
 test "assert requires a bool condition (M0.8 assert foundation)" {

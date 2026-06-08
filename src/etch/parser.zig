@@ -336,7 +336,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait => return,
                 else => _ = try self.advance(),
             }
         }
@@ -361,6 +361,7 @@ pub const Parser = struct {
             .kw_struct => try self.parseStructDecl(annotations),
             .kw_impl => try self.parseImplDecl(annotations),
             .kw_enum => try self.parseEnumDecl(annotations),
+            .kw_trait => try self.parseTraitDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2): the only top-level `async` construct in
                 // E2. `async rule` interpretation/codegen is E3 — reject it here
@@ -372,7 +373,7 @@ pub const Parser = struct {
                 try self.parseFnDeclFrom(annotations, true, async_span);
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -723,7 +724,7 @@ pub const Parser = struct {
     /// the signature/body machinery with `impl` methods via `parseFnLike`; a
     /// top-level `fn` takes no `self` receiver (`allow_self = false`).
     fn parseFnDeclFrom(self: *Parser, annotations: AnnotationRange, is_async: bool, start_span: SourceSpan) ParseError!void {
-        const parsed = try self.parseFnLike(is_async, false, annotations);
+        const parsed = try self.parseFnLike(is_async, false, false, annotations);
         _ = try self.arena.addFnDecl(self.gpa, parsed.decl, .{
             .byte_start = start_span.byte_start,
             .byte_end = parsed.close_span.byte_end,
@@ -742,7 +743,7 @@ pub const Parser = struct {
     /// Generics (`<...>`) + the `where` clause are E2 block 4 and rejected; the
     /// bodyless `.d.etch` form is out of scope. `async` is parsed (interp E3,
     /// codegen Phase 2); `throws` is parsed (codegen folds into the E3 gate).
-    fn parseFnLike(self: *Parser, is_async: bool, allow_self: bool, annotations: AnnotationRange) ParseError!ParsedFn {
+    fn parseFnLike(self: *Parser, is_async: bool, allow_self: bool, allow_signature_only: bool, annotations: AnnotationRange) ParseError!ParsedFn {
         _ = try self.advance(); // 'fn'
         const name_tok = try self.expect(.ident, "expected function name (identifier) after 'fn'");
         const name_id = try self.internSlice(name_tok.span);
@@ -782,13 +783,39 @@ pub const Parser = struct {
         const throws = try self.match(.kw_throws);
 
         var return_type: NodeId = NodeId.none;
+        var sig_end_span = self.current.span; // last token of the signature so far (')')
         if (self.peek() == .arrow) {
             _ = try self.advance(); // '->'
             return_type = try self.parseType();
+            sig_end_span = self.arena.typeNodeSpan(return_type);
         }
 
         // A `where` clause is tied to generics (E2 block 4); `where` is not yet
         // a token, so nothing to consume here.
+
+        // An abstract trait member (`function_signature`, M0.8 E2 block 3
+        // tranche C) ends without a body. Outside a trait, a missing body is the
+        // existing "expected '{'" error.
+        if (allow_signature_only and self.peek() != .lbrace) {
+            return .{
+                .decl = .{
+                    .name = name_id,
+                    .params_start = params_start,
+                    .params_len = params_len,
+                    .return_type = return_type,
+                    .is_async = is_async,
+                    .throws = throws,
+                    .body_start = 0,
+                    .body_len = 0,
+                    .value = NodeId.none,
+                    .annotations_extra = annotations.start,
+                    .annotations_len = annotations.len,
+                    .self_kind = self_kind,
+                    .has_body = false,
+                },
+                .close_span = sig_end_span,
+            };
+        }
 
         _ = try self.expect(.lbrace, "expected '{' to start function body");
         const body = try self.parseBlockBody();
@@ -808,6 +835,7 @@ pub const Parser = struct {
                 .annotations_extra = annotations.start,
                 .annotations_len = annotations.len,
                 .self_kind = self_kind,
+                .has_body = true,
             },
             .close_span = closing.span,
         };
@@ -943,6 +971,46 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
+    /// Parse `trait TYPE_IDENT "{" {trait_member} "}"` (M0.8 E2 block 3 tranche
+    /// C, `etch-grammar.md` §5.9). `trait_member = function_signature` (abstract
+    /// — no body, `has_body = false`) `| function_decl` (default body). Members
+    /// reuse `parseFnLike` (`allow_self = true`, `allow_signature_only = true`)
+    /// and are stored in `arena.impl_methods`. Generics (`<...>`) are block 4.
+    fn parseTraitDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'trait'
+        const name_tok = try self.expect(.type_ident, "expected trait name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        if (self.peek() == .lt) {
+            return self.parseErr(self.peekSpan(), "generic traits are not supported yet (generics land in E2 block 4)");
+        }
+        _ = try self.expect(.lbrace, "expected '{' to start trait body");
+        const methods_start: u32 = @intCast(self.arena.impl_methods.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const member_annotations = try self.parseAnnotations();
+            var is_async = false;
+            if (self.peek() == .kw_async) {
+                _ = try self.advance();
+                is_async = true;
+            }
+            if (self.peek() != .kw_fn) {
+                return self.parseErrFmt(self.peekSpan(), "expected 'fn' to start a trait member, got '{s}'", .{self.sliceOf(self.peekSpan())});
+            }
+            const parsed = try self.parseFnLike(is_async, true, true, member_annotations);
+            try self.arena.impl_methods.append(self.gpa, parsed.decl);
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close trait body");
+        const methods_len: u32 = @as(u32, @intCast(self.arena.impl_methods.items.len)) - methods_start;
+        _ = try self.arena.addTraitDecl(self.gpa, .{
+            .name = name_id,
+            .methods_start = methods_start,
+            .methods_len = methods_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
     /// Parse `impl TYPE_IDENT [when_clause] "{" {fn_method} "}"` — an inherent
     /// impl (M0.8 E2 block 3 tranche A, `etch-grammar.md` §5.9). The trait form
     /// `impl Trait for Type` lands in tranche C; a `for` after the first type
@@ -955,10 +1023,22 @@ pub const Parser = struct {
         if (self.peek() == .lt) {
             return self.parseErr(self.peekSpan(), "generic impls are not supported yet (generics land in E2 block 4)");
         }
-        const type_tok = try self.expect(.type_ident, "expected type name (TYPE_IDENT) after 'impl'");
-        const type_name = try self.internSlice(type_tok.span);
+        const first_tok = try self.expect(.type_ident, "expected type or trait name (TYPE_IDENT) after 'impl'");
+        const first_name = try self.internSlice(first_tok.span);
+        // `impl Trait <…> for Type` — the trait's generic args are block 4.
+        if (self.peek() == .lt) {
+            return self.parseErr(self.peekSpan(), "generic trait impls are not supported yet (generics land in E2 block 4)");
+        }
+        // `impl Trait for Type` (trait impl) vs `impl Type` (inherent). For the
+        // trait form (M0.8 E2 block 3 tranche C), the first name is the trait;
+        // the target type follows `for`.
+        var trait_name: StringId = 0;
+        var type_name = first_name;
         if (self.peek() == .kw_for) {
-            return self.parseErr(self.peekSpan(), "trait impls ('impl Trait for Type') land in E2 block 3 tranche C");
+            _ = try self.advance(); // 'for'
+            trait_name = first_name;
+            const target_tok = try self.expect(.type_ident, "expected target type (TYPE_IDENT) after 'for'");
+            type_name = try self.internSlice(target_tok.span);
         }
 
         var when_root: u32 = ast_mod.RuleDecl.none_when;
@@ -980,14 +1060,14 @@ pub const Parser = struct {
             if (self.peek() != .kw_fn) {
                 return self.parseErrFmt(self.peekSpan(), "expected 'fn' to start an impl method, got '{s}'", .{self.sliceOf(self.peekSpan())});
             }
-            const parsed = try self.parseFnLike(is_async, true, method_annotations);
+            const parsed = try self.parseFnLike(is_async, true, false, method_annotations);
             try self.arena.impl_methods.append(self.gpa, parsed.decl);
         }
         const closing = try self.expect(.rbrace, "expected '}' to close impl body");
         const methods_len: u32 = @as(u32, @intCast(self.arena.impl_methods.items.len)) - methods_start;
         _ = try self.arena.addImplDecl(self.gpa, .{
             .type_name = type_name,
-            .trait_name = 0,
+            .trait_name = trait_name,
             .when_root = when_root,
             .methods_start = methods_start,
             .methods_len = methods_len,
@@ -2771,16 +2851,30 @@ test "parser suppresses struct literals in if/while/for/match heads (M0.8 E2 blo
     try std.testing.expectEqual(@as(usize, 0), struct_lits);
 }
 
-test "parser rejects trait impl in tranche A and generic struct (M0.8 E2 block 3)" {
+test "parser accepts trait impl (tranche C) and rejects generic struct (M0.8 E2 block 3)" {
     const gpa = std.testing.allocator;
-    // `impl Trait for T` lands in tranche C — rejected with a clear pointer.
+    // `impl Trait for T` parses in tranche C — the first name is the trait, the
+    // post-`for` name the target type (trait existence is a resolver concern).
     {
         var result = try parse(gpa,
+            \\trait Show { fn show(self) -> int }
             \\struct T { x: int = 0 }
             \\impl Show for T { fn show(self) -> int { self.x } }
         );
         defer result.deinit(gpa);
-        try std.testing.expect(result.diagnostics.len > 0);
+        if (result.diagnostics.len > 0) {
+            std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+            try std.testing.expect(false);
+        }
+        try std.testing.expectEqual(@as(usize, 1), result.ast.trait_decls.items.len);
+        // Two impl decls? No — one trait + one impl.
+        try std.testing.expectEqual(@as(usize, 1), result.ast.impl_decls.items.len);
+        const impl = result.ast.impl_decls.items[0];
+        try std.testing.expect(impl.trait_name != 0); // trait impl
+        // The trait's abstract member carries no body.
+        const td = result.ast.trait_decls.items[0];
+        try std.testing.expectEqual(@as(u32, 1), td.methods_len);
+        try std.testing.expectEqual(false, result.ast.impl_methods.items[td.methods_start].has_body);
     }
     // Generic struct → block 4.
     {
@@ -2789,6 +2883,40 @@ test "parser rejects trait impl in tranche A and generic struct (M0.8 E2 block 3
         );
         defer result.deinit(gpa);
         try std.testing.expect(result.diagnostics.len > 0);
+    }
+}
+
+test "parser builds trait decl with abstract + default members + survives lockstep (M0.8 E2 block 3 tranche C)" {
+    const gpa = std.testing.allocator;
+    {
+        var result = try parse(gpa,
+            \\trait Damageable {
+            \\  fn take_damage(mut self, amount: int)
+            \\  fn is_dead(self) -> bool { false }
+            \\}
+        );
+        defer result.deinit(gpa);
+        if (result.diagnostics.len > 0) {
+            std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+            try std.testing.expect(false);
+        }
+        const td = result.ast.trait_decls.items[0];
+        try std.testing.expectEqual(@as(u32, 2), td.methods_len);
+        const m0 = result.ast.impl_methods.items[td.methods_start];
+        const m1 = result.ast.impl_methods.items[td.methods_start + 1];
+        try std.testing.expectEqual(false, m0.has_body); // abstract signature
+        try std.testing.expectEqual(ast_mod.SelfKind.by_mut, m0.self_kind);
+        try std.testing.expectEqual(true, m1.has_body); // default body
+    }
+    // LOCKSTEP: a broken construct resyncs at the `trait` that follows.
+    {
+        var result = try parse(gpa,
+            \\@@@bad
+            \\trait Show { fn show(self) -> int }
+        );
+        defer result.deinit(gpa);
+        try std.testing.expect(result.diagnostics.len > 0);
+        try std.testing.expectEqual(@as(usize, 1), result.ast.trait_decls.items.len);
     }
 }
 

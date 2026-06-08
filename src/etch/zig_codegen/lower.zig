@@ -280,8 +280,11 @@ fn emitStructDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void
             try w.write(",\n");
         }
     }
-    // Inherent methods: walk every `impl <this type> { … }` and emit its
-    // methods as `pub fn` members (declaration order across impls).
+    // Methods: walk every `impl … <this type> { … }` (inherent §5.1 and trait
+    // §5.2) and emit its methods as `pub fn` members (declaration order across
+    // impls). For a trait impl, also emit the trait's default-bodied methods the
+    // impl does not override, so a call to a defaulted method compiles (M0.8 E2
+    // block 3 tranche C).
     var i: u28 = 0;
     while (i < ast.items.len) : (i += 1) {
         if (ast.items.items(.kind)[i] != .impl_decl) continue;
@@ -291,10 +294,41 @@ fn emitStructDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void
         while (m < impl.methods_len) : (m += 1) {
             try emitMethod(w, ast, name, ast.impl_methods.items[impl.methods_start + m]);
         }
+        if (impl.trait_name != 0) {
+            if (findTraitDecl(ast, impl.trait_name)) |tdecl| {
+                var t: u32 = 0;
+                while (t < tdecl.methods_len) : (t += 1) {
+                    const tm = ast.impl_methods.items[tdecl.methods_start + t];
+                    if (!tm.has_body) continue; // abstract → impl provided it above
+                    if (implHasMethod(ast, impl, tm.name)) continue; // overridden
+                    try emitMethod(w, ast, name, tm);
+                }
+            }
+        }
     }
     w.indentBy(-1);
     try w.line("};");
     try w.blankLine();
+}
+
+/// The `TraitDecl` named `trait_name`, or `null` (M0.8 E2 block 3 tranche C).
+fn findTraitDecl(ast: *const AstArena, trait_name: StringId) ?ast_mod.TraitDecl {
+    var i: usize = 0;
+    while (i < ast.items.len) : (i += 1) {
+        if (ast.items.items(.kind)[i] != .trait_decl) continue;
+        const tdecl = ast.trait_decls.items[ast.items.items(.data)[i]];
+        if (tdecl.name == trait_name) return tdecl;
+    }
+    return null;
+}
+
+/// `true` if `impl` provides a method named `name` (M0.8 E2 block 3 tranche C).
+fn implHasMethod(ast: *const AstArena, impl: ast_mod.ImplDecl, name: StringId) bool {
+    var m: u32 = 0;
+    while (m < impl.methods_len) : (m += 1) {
+        if (ast.impl_methods.items[impl.methods_start + m].name == name) return true;
+    }
+    return false;
 }
 
 /// Emit one inherent `impl` method as a Zig `pub fn` member (M0.8 E2 block 3).

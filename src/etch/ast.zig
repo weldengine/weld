@@ -680,6 +680,11 @@ pub const FnDecl = struct {
     /// Receiver shape (M0.8 E2 block 3). `.none` for a top-level `fn` and for an
     /// associated fn inside an `impl`; `.by_value` / `.by_mut` for a method.
     self_kind: SelfKind = .none,
+    /// `false` for an abstract trait method (a `function_signature` with no
+    /// body, M0.8 E2 block 3 tranche C); `true` for a fn / method / default-
+    /// bodied trait method. When `false`, `body_start`/`body_len`/`value` are
+    /// unused (the impl must provide the body).
+    has_body: bool = true,
 };
 
 /// Side-slab entry for a `struct` declaration (M0.8 E2 block 3,
@@ -734,6 +739,19 @@ pub const EnumDecl = struct {
     name: StringId,
     variants_start: u32, // index into `arena.enum_variants`
     variants_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
+/// Side-slab entry for a `trait` declaration (M0.8 E2 block 3 tranche C,
+/// `etch-grammar.md` §5.9). `trait_member = function_signature | function_decl`
+/// — members live in a `(start, len)` run of `arena.impl_methods` (each an
+/// `FnDecl`; an abstract member carries `has_body = false`, a default-bodied
+/// one `has_body = true`). Generics (`<...>`) are block 4 (rejected at parse).
+pub const TraitDecl = struct {
+    name: StringId,
+    methods_start: u32, // index into `arena.impl_methods`
+    methods_len: u32,
     annotations_extra: u32,
     annotations_len: u32,
 };
@@ -903,6 +921,7 @@ pub const AstArena = struct {
     impl_decls: std.ArrayListUnmanaged(ImplDecl) = .empty,
     enum_decls: std.ArrayListUnmanaged(EnumDecl) = .empty,
     enum_variants: std.ArrayListUnmanaged(EnumVariant) = .empty,
+    trait_decls: std.ArrayListUnmanaged(TraitDecl) = .empty,
     /// `impl` block methods, each an `FnDecl` carrying its `self_kind`. Stored
     /// here (not in `fn_decls`) so the free-fn index never mistakes a method
     /// for a top-level callable. `ImplDecl` references a `(start, len)` run.
@@ -1004,6 +1023,7 @@ pub const AstArena = struct {
         self.impl_decls.deinit(gpa);
         self.enum_decls.deinit(gpa);
         self.enum_variants.deinit(gpa);
+        self.trait_decls.deinit(gpa);
         self.impl_methods.deinit(gpa);
         self.type_alias_decls.deinit(gpa);
         self.rule_params.deinit(gpa);
@@ -1272,6 +1292,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.impl_decls.items.len);
         try self.impl_decls.append(gpa, decl);
         return try self.addItem(gpa, .impl_decl, idx, span);
+    }
+
+    /// `trait Name { members }` (M0.8 E2 block 3 tranche C). The caller appends
+    /// the member `FnDecl`s to `arena.impl_methods` beforehand, passing the
+    /// range in `decl`.
+    pub fn addTraitDecl(self: *AstArena, gpa: std.mem.Allocator, decl: TraitDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.trait_decls.items.len);
+        try self.trait_decls.append(gpa, decl);
+        return try self.addItem(gpa, .trait_decl, idx, span);
     }
 
     /// `enum Name { variant, … }` (M0.8 E2 block 3 tranche B). The caller

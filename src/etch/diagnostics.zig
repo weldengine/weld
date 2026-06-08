@@ -36,6 +36,11 @@ pub const DiagnosticCode = enum {
 
     // ── Type errors (E0200-E0299) ──
     type_mismatch, // S3 — E0200 TypeMismatch
+    ambiguous_trait_method, // M0.8 — E0211 AmbiguousTraitMethod
+    incomplete_trait_impl, // M0.8 — E0214 IncompleteTraitImpl
+    conditional_impl_condition_not_proven, // M0.8 — E0215 ConditionalImplConditionNotProven
+    orphan_impl, // M0.8 — E0217 OrphanImpl
+    immutable_receiver_for_mut_self, // M0.8 — E0220 ImmutableReceiverForMutSelfMethod
 
     // ── ECS access errors (E0300-E0399) ──
     resource_expected_component_given, // M0.8 — E0301 ResourceExpectedComponentGiven
@@ -61,6 +66,11 @@ pub const DiagnosticCode = enum {
             .undefined_symbol => "E0102",
             .enum_variant_not_found => "E0105",
             .type_mismatch => "E0200",
+            .ambiguous_trait_method => "E0211",
+            .incomplete_trait_impl => "E0214",
+            .conditional_impl_condition_not_proven => "E0215",
+            .orphan_impl => "E0217",
+            .immutable_receiver_for_mut_self => "E0220",
             .resource_expected_component_given => "E0301",
             .component_expected_resource_given => "E0302",
             .annotation_misapplied => "E0502",
@@ -80,6 +90,11 @@ pub const DiagnosticCode = enum {
             .undefined_symbol => "UndefinedSymbol",
             .enum_variant_not_found => "EnumVariantNotFound",
             .type_mismatch => "TypeMismatch",
+            .ambiguous_trait_method => "AmbiguousTraitMethod",
+            .incomplete_trait_impl => "IncompleteTraitImpl",
+            .conditional_impl_condition_not_proven => "ConditionalImplConditionNotProven",
+            .orphan_impl => "OrphanImpl",
+            .immutable_receiver_for_mut_self => "ImmutableReceiverForMutSelfMethod",
             .resource_expected_component_given => "ResourceExpectedComponentGiven",
             .component_expected_resource_given => "ComponentExpectedResourceGiven",
             .annotation_misapplied => "AnnotationMisapplied",
