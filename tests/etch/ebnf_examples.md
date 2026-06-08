@@ -381,3 +381,34 @@ rule pick(entity: Entity)
   entity.get_mut(Counter).value = n.doubled()
 }
 ```
+
+## Generics — params, bounds, where, generic types (E2 block 4)
+
+```etch
+trait Comparable {
+  fn cmp(self, other: int) -> int
+}
+
+fn largest<T: Comparable>(a: T, b: T) -> T
+  where T: Comparable
+{
+  a
+}
+
+struct Range<T> {
+  min: T
+  max: T
+}
+
+enum Holder<T> {
+  present,
+  absent,
+}
+
+rule pick(entity: Entity)
+  when entity has Counter
+{
+  let chosen = largest(1, 2)
+  entity.get_mut(Counter).value = chosen
+}
+```

@@ -49,6 +49,11 @@ pub const DiagnosticCode = enum {
     // ── Annotation errors (E0500-E0599) ──
     annotation_misapplied, // M0.8 — E0502 AnnotationMisapplied
 
+    // ── Generics (E0600-E0699) ──
+    bound_not_satisfied, // M0.8 — E0601 BoundNotSatisfied
+    generic_type_annotation_required, // M0.8 — E0603 GenericTypeAnnotationRequired
+    inconsistent_generic_inference, // M0.8 — E0604 InconsistentGenericInference
+
     // ── Const eval errors (E1100-E1199) ──
     not_const_evaluable, // S3 — E1101 NotConstEvaluable
 
@@ -74,6 +79,9 @@ pub const DiagnosticCode = enum {
             .resource_expected_component_given => "E0301",
             .component_expected_resource_given => "E0302",
             .annotation_misapplied => "E0502",
+            .bound_not_satisfied => "E0601",
+            .generic_type_annotation_required => "E0603",
+            .inconsistent_generic_inference => "E0604",
             .not_const_evaluable => "E1101",
             .unknown_component_in_when => "E1210",
             .invalid_field_filter => "E1211",
@@ -98,6 +106,9 @@ pub const DiagnosticCode = enum {
             .resource_expected_component_given => "ResourceExpectedComponentGiven",
             .component_expected_resource_given => "ComponentExpectedResourceGiven",
             .annotation_misapplied => "AnnotationMisapplied",
+            .bound_not_satisfied => "BoundNotSatisfied",
+            .generic_type_annotation_required => "GenericTypeAnnotationRequired",
+            .inconsistent_generic_inference => "InconsistentGenericInference",
             .not_const_evaluable => "NotConstEvaluable",
             .unknown_component_in_when => "UnknownComponentInWhen",
             .invalid_field_filter => "InvalidFieldFilter",

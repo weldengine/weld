@@ -238,6 +238,7 @@ fn zeroDefault(zig_type: []const u8) []const u8 {
 /// (`UnsupportedConstruct`) and the interpreter is its reference.
 fn emitEnumDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void {
     const decl = ast.enum_decls.items[data];
+    if (decl.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation → Phase 2
     var v_i: u32 = 0;
     while (v_i < decl.variants_len) : (v_i += 1) {
         if (ast.enum_variants.items[decl.variants_start + v_i].shape != .c_like) {
@@ -260,6 +261,7 @@ fn emitEnumDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void {
 
 fn emitStructDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void {
     const decl = ast.struct_decls.items[data];
+    if (decl.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation → Phase 2
     const name = ast.strings.slice(decl.name);
     try w.printLine("pub const {s} = extern struct {{", .{name});
     w.indentBy(1);
@@ -338,6 +340,7 @@ fn implHasMethod(ast: *const AstArena, impl: ast_mod.ImplDecl, name: StringId) b
 /// `async` / `throws` methods (E3). The body is a value-block (trailing
 /// expression → implicit `return`), shared with `emitFnDecl`'s shape.
 fn emitMethod(w: *Writer, ast: *const AstArena, struct_name: []const u8, method: ast_mod.FnDecl) CodegenError!void {
+    if (method.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation → Phase 2
     if (method.is_async) return CodegenError.UnsupportedConstruct; // async codegen → Phase 2
     if (method.throws) return CodegenError.UnsupportedConstruct; // throws codegen → E3 gate
     if (method.self_kind == .by_mut) return CodegenError.UnsupportedConstruct; // mut-self pointer receiver → deferred
@@ -532,6 +535,7 @@ const FieldFilter = struct {
 /// codegen folds into the E3 error-handling-codegen gate — both fail loud
 /// (`UnsupportedConstruct`); the interpreter is the reference for them.
 fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenError!void {
+    if (decl.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation → Phase 2
     if (decl.is_async) return CodegenError.UnsupportedConstruct; // async codegen → Phase 2
     if (decl.throws) return CodegenError.UnsupportedConstruct; // throws codegen → E3 gate
 

@@ -108,6 +108,10 @@ pub const ResolvedType = union(enum) {
     /// A C-like `enum` value (M0.8 E2 block 3 tranche B). Payload is the enum
     /// type name; variants resolve by name against the declaration.
     enum_t: StringId,
+    /// A generic type variable in scope (M0.8 E2 block 4). Payload is the type-
+    /// parameter name. Opaque within a generic body (operations are permissive,
+    /// like `unknown`); resolved to a concrete type by inference at the call site.
+    generic: StringId,
     /// Type unknown / unresolved. Used as the fallback after a diagnostic
     /// has been emitted; subsequent checks treat `unknown` as wildcard to
     /// avoid cascade errors.
@@ -127,6 +131,7 @@ pub const ResolvedType = union(enum) {
             .closure => |node| std.meta.eql(node, b.closure),
             .struct_t => |id| id == b.struct_t,
             .enum_t => |id| id == b.enum_t,
+            .generic => |id| id == b.generic,
             .unknown => true,
         };
     }
@@ -207,6 +212,11 @@ pub const TypeChecker = struct {
     /// in declaration order. The kind-2 trait dispatch (`etch-resolver-types.md
     /// §5.2`) scans this for the receiver type, AFTER inherent (§5.5 order).
     trait_impls: std.ArrayListUnmanaged(TraitImplEntry) = .empty,
+    /// Generic type-parameter names currently in scope (M0.8 E2 block 4). Set
+    /// while checking a generic `fn` / `impl` / `struct` / `enum` body so a
+    /// type annotation naming a param resolves to `.generic` rather than an
+    /// undefined symbol. Cleared (save/restore) at the construct boundary.
+    generic_scope: std.AutoHashMapUnmanaged(StringId, void) = .empty,
     /// Declared return type of the `fn` / method currently being checked (M0.8
     /// E2), used to type a `return expr` body statement against. `null` outside
     /// a body; `.unit` for a void fn (no `-> type`).
@@ -229,6 +239,7 @@ pub const TypeChecker = struct {
         self.symbols.deinit(self.gpa);
         self.methods.deinit(self.gpa);
         self.trait_impls.deinit(self.gpa);
+        self.generic_scope.deinit(self.gpa);
     }
 
     pub fn check(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
@@ -307,6 +318,10 @@ pub const TypeChecker = struct {
                     // fields); nested-struct / string fields are deferred.
                     const decl = self.arena.struct_decls.items[data];
                     try self.registerSymbol(.struct_, decl.name, item_id, span);
+                    // Generic params (M0.8 E2 block 4) in scope so a field typed
+                    // by a param (`min: T`) is accepted as a generic field.
+                    try self.addGenerics(decl.generics_start, decl.generics_len);
+                    defer self.removeGenerics(decl.generics_start, decl.generics_len);
                     try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, false);
                 },
                 .enum_decl => {
@@ -543,6 +558,10 @@ pub const TypeChecker = struct {
             }
             const named_idx = self.arena.typeNodeData(field.type_node);
             const named = self.arena.named_types.items[named_idx];
+            // A field typed by an in-scope generic param (`min: T`, M0.8 E2
+            // block 4) is a generic field — accepted (type-erased). Only structs
+            // are generic; component / resource fields never reach this branch.
+            if (self.generic_scope.contains(named.name)) continue;
             const resolved_name = self.arena.resolveTypeAliasName(named.name);
             const tname = self.arena.strings.slice(resolved_name);
 
@@ -645,6 +664,9 @@ pub const TypeChecker = struct {
             .named => {
                 const named_idx = self.arena.typeNodeData(type_node);
                 const named = self.arena.named_types.items[named_idx];
+                // A type-parameter name in scope resolves to a generic variable
+                // (M0.8 E2 block 4), checked before alias / builtin / symbol.
+                if (self.generic_scope.contains(named.name)) return .{ .generic = named.name };
                 // Resolve through any top-level `type` alias chain first (M0.8).
                 const resolved_name = self.arena.resolveTypeAliasName(named.name);
                 const tname = self.arena.strings.slice(resolved_name);
@@ -655,6 +677,22 @@ pub const TypeChecker = struct {
                         .resource => .{ .resource = resolved_name },
                         .struct_ => .{ .struct_t = resolved_name },
                         .enum_ => .{ .enum_t = resolved_name },
+                        else => .unknown,
+                    };
+                }
+                return .unknown;
+            },
+            .generic => {
+                // `Foo<T, …>` generic type application (M0.8 E2 block 4). The
+                // type arguments are erased (no monomorphisation in M0.8); the
+                // result is the base type. A generic param name as the base
+                // (e.g. `T<…>`, unusual) resolves to the variable.
+                const gt = self.arena.generic_type_nodes.items[self.arena.typeNodeData(type_node)];
+                if (self.generic_scope.contains(gt.name)) return .{ .generic = gt.name };
+                if (self.symbols.get(gt.name)) |sym| {
+                    return switch (sym.kind) {
+                        .struct_ => .{ .struct_t = gt.name },
+                        .enum_ => .{ .enum_t = gt.name },
                         else => .unknown,
                     };
                 }
@@ -737,6 +775,11 @@ pub const TypeChecker = struct {
         else
             ResolvedType.unknown;
 
+        // Impl-level generics (`impl<T> …`, M0.8 E2 block 4) are in scope for
+        // every method body.
+        try self.addGenerics(impl.generics_start, impl.generics_len);
+        defer self.removeGenerics(impl.generics_start, impl.generics_len);
+
         var i: u32 = 0;
         while (i < impl.methods_len) : (i += 1) {
             try self.checkImplMethod(self.arena.impl_methods.items[impl.methods_start + i], self_type, impl.when_root);
@@ -752,6 +795,11 @@ pub const TypeChecker = struct {
     fn checkImplMethod(self: *TypeChecker, decl: ast_mod.FnDecl, self_type: ResolvedType, when_root: u32) !void {
         var ctx: RuleCtx = .{};
         defer ctx.deinit(self.gpa);
+
+        // The method's own generics (M0.8 E2 block 4) — additive to the impl's
+        // (already in scope via `checkImpl`).
+        try self.addGenerics(decl.generics_start, decl.generics_len);
+        defer self.removeGenerics(decl.generics_start, decl.generics_len);
 
         if (decl.self_kind != .none) {
             const self_id = try self.arena.strings.intern(self.gpa, "self");
@@ -849,9 +897,30 @@ pub const TypeChecker = struct {
     /// then checks the trailing block value (the implicit return) against the
     /// declared return type. `async` bodies are checked the same way (their
     /// interpretation is E3); the `throws` marker does not change body checking.
+    /// Bring a construct's generic type parameters into scope (M0.8 E2 block 4)
+    /// so their names resolve to `.generic` inside the body. Balanced by
+    /// `removeGenerics`.
+    fn addGenerics(self: *TypeChecker, start: u32, len: u32) !void {
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            try self.generic_scope.put(self.gpa, self.arena.generic_params.items[start + i].name, {});
+        }
+    }
+
+    fn removeGenerics(self: *TypeChecker, start: u32, len: u32) void {
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            _ = self.generic_scope.remove(self.arena.generic_params.items[start + i].name);
+        }
+    }
+
     fn checkFn(self: *TypeChecker, decl: ast_mod.FnDecl) !void {
         var ctx: RuleCtx = .{};
         defer ctx.deinit(self.gpa);
+
+        // Generic params (M0.8 E2 block 4) in scope for the whole signature + body.
+        try self.addGenerics(decl.generics_start, decl.generics_len);
+        defer self.removeGenerics(decl.generics_start, decl.generics_len);
 
         var i: u32 = 0;
         while (i < decl.params_len) : (i += 1) {
@@ -1490,6 +1559,7 @@ pub const TypeChecker = struct {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "function '{s}' called with {d} argument(s), expected {d}", .{ self.arena.strings.slice(decl.name), call.args_len, decl.params_len });
             return if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
         }
+        if (decl.generics_len > 0) return try self.synthGenericFnCall(id, call, decl, ctx_opt);
         var i: u32 = 0;
         while (i < decl.params_len) : (i += 1) {
             const p = self.arena.fn_params.items[decl.params_start + i];
@@ -1501,6 +1571,135 @@ pub const TypeChecker = struct {
             }
         }
         return if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
+    }
+
+    /// Type a call to a generic `fn` (M0.8 E2 block 4, `etch-resolver-types.md`
+    /// §6.3/§6.4). Type arguments are inferred structurally from the value
+    /// arguments (E0603 if a parameter can't be inferred, E0604 on inconsistent
+    /// inference); each inferred type is bound-checked (E0601); the return type
+    /// is the declared return with the inferred substitution applied. The
+    /// monomorphisation instance table (§6.2) drives the Phase-2 codegen
+    /// lowering — there is no consumer in the M0.8 direct AST→Zig path, so the
+    /// resolver computes the substitution per call without persisting it.
+    fn synthGenericFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, decl: ast_mod.FnDecl, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        var subst: std.AutoHashMapUnmanaged(StringId, ResolvedType) = .empty;
+        defer subst.deinit(self.gpa);
+
+        var i: u32 = 0;
+        while (i < decl.params_len) : (i += 1) {
+            const p = self.arena.fn_params.items[decl.params_start + i];
+            const arg: NodeId = @bitCast(self.arena.extra.items[call.args_start + i]);
+            const arg_t = try self.synthExprE(arg, ctx_opt);
+            try self.unifyGeneric(decl, p.type_node, arg_t, &subst, self.arena.exprSpan(arg));
+        }
+
+        var gi: u32 = 0;
+        while (gi < decl.generics_len) : (gi += 1) {
+            const gp = self.arena.generic_params.items[decl.generics_start + gi];
+            const inferred = subst.get(gp.name);
+            if (inferred == null) {
+                try self.emit(.generic_type_annotation_required, .error_, self.arena.exprSpan(id), "cannot infer type parameter '{s}' of '{s}' from the arguments", .{ self.arena.strings.slice(gp.name), self.arena.strings.slice(decl.name) });
+                continue;
+            }
+            try self.checkGenericBounds(gp, inferred.?, self.arena.exprSpan(id));
+        }
+
+        if (decl.return_type.isNone()) return ResolvedType.unknown;
+        return self.substituteGeneric(decl, decl.return_type, &subst);
+    }
+
+    /// `true` if `name` is a generic parameter of `decl` (M0.8 E2 block 4).
+    fn isGenericParamOf(self: *TypeChecker, decl: ast_mod.FnDecl, name: StringId) bool {
+        var i: u32 = 0;
+        while (i < decl.generics_len) : (i += 1) {
+            if (self.arena.generic_params.items[decl.generics_start + i].name == name) return true;
+        }
+        return false;
+    }
+
+    /// Structurally match a formal parameter type-node against an actual argument
+    /// type, binding generic variables into `subst` (M0.8 E2 block 4, §6.4).
+    /// Handles a bare param `T` and an element-of `T[]` / `T[N]`; deeper nesting
+    /// is not inferred in M0.8 (leaves the param unbound → E0603 if unresolved).
+    fn unifyGeneric(self: *TypeChecker, decl: ast_mod.FnDecl, formal: NodeId, actual: ResolvedType, subst: *std.AutoHashMapUnmanaged(StringId, ResolvedType), span: SourceSpan) TypeError!void {
+        switch (self.arena.typeNodeKind(formal)) {
+            .named => {
+                const named = self.arena.named_types.items[self.arena.typeNodeData(formal)];
+                if (!self.isGenericParamOf(decl, named.name)) return; // concrete formal — no binding
+                if (actual == .unknown) return; // don't pin a param to a post-error unknown
+                if (subst.get(named.name)) |prev| {
+                    if (!ResolvedType.eql(prev, actual)) {
+                        try self.emit(.inconsistent_generic_inference, .error_, span, "type parameter '{s}' is inferred as two different types", .{self.arena.strings.slice(named.name)});
+                    }
+                } else {
+                    try subst.put(self.gpa, named.name, actual);
+                }
+            },
+            .array, .slice => {
+                const at = self.arena.array_types.items[self.arena.typeNodeData(formal)];
+                const elem: ?ResolvedType = switch (actual) {
+                    .array_fixed => |info| .{ .builtin = info.elem },
+                    .array_dyn => |e| .{ .builtin = e },
+                    else => null,
+                };
+                if (elem) |ea| try self.unifyGeneric(decl, at.elem, ea, subst, span);
+            },
+            else => {}, // generic_type / map / set — not inferred in M0.8
+        }
+    }
+
+    /// Apply the inferred substitution to a declared return type-node (M0.8 E2
+    /// block 4). A bare param `T` → its inferred type (or `.generic` if still
+    /// unbound); `T[]` → a dynamic array of the substituted element; otherwise
+    /// the ordinary resolution.
+    fn substituteGeneric(self: *TypeChecker, decl: ast_mod.FnDecl, node: NodeId, subst: *std.AutoHashMapUnmanaged(StringId, ResolvedType)) ResolvedType {
+        switch (self.arena.typeNodeKind(node)) {
+            .named => {
+                const named = self.arena.named_types.items[self.arena.typeNodeData(node)];
+                if (self.isGenericParamOf(decl, named.name)) {
+                    return subst.get(named.name) orelse ResolvedType{ .generic = named.name };
+                }
+                return self.namedTypeToResolved(node);
+            },
+            .slice => {
+                const at = self.arena.array_types.items[self.arena.typeNodeData(node)];
+                const e = self.substituteGeneric(decl, at.elem, subst);
+                if (e == .builtin) return .{ .array_dyn = e.builtin };
+                return ResolvedType.unknown;
+            },
+            else => return self.namedTypeToResolved(node),
+        }
+    }
+
+    /// Check an inferred type argument against a parameter's bounds (M0.8 E2
+    /// block 4, §6.5). `component` / `resource` require the RTTI category;
+    /// `trait` requires an `impl Trait for <actual>` in the compilation set;
+    /// `event` is unsatisfiable until events land (E3). E0601 otherwise.
+    fn checkGenericBounds(self: *TypeChecker, gp: ast_mod.GenericParam, actual: ResolvedType, span: SourceSpan) TypeError!void {
+        var bi: u32 = 0;
+        while (bi < gp.bounds_len) : (bi += 1) {
+            const b = self.arena.generic_bounds.items[gp.bounds_start + bi];
+            const ok = switch (b.kind) {
+                .component => actual == .component,
+                .resource => actual == .resource,
+                .event => false, // `event` bound needs the `event` keyword (E3)
+                .trait_ => blk: {
+                    const tn = typeNameOfResolved(actual) orelse break :blk false;
+                    break :blk self.typeImplementsTrait(tn, b.trait_name);
+                },
+            };
+            if (!ok) {
+                try self.emit(.bound_not_satisfied, .error_, span, "type argument for '{s}' does not satisfy its bound", .{self.arena.strings.slice(gp.name)});
+            }
+        }
+    }
+
+    /// `true` if an `impl <trait_name> for <type_name>` exists (M0.8 E2 block 4).
+    fn typeImplementsTrait(self: *TypeChecker, type_name: StringId, trait_name: StringId) bool {
+        for (self.trait_impls.items) |entry| {
+            if (entry.type_name == type_name and entry.trait_name == trait_name) return true;
+        }
+        return false;
     }
 
     /// Type a struct literal `T { f: v, … }` (M0.8 E2 block 3). `T` must name a
@@ -1549,6 +1748,7 @@ pub const TypeChecker = struct {
             .struct_t => |n| n,
             .component => |n| n,
             .resource => |n| n,
+            .enum_t => |n| n,
             else => null,
         };
     }
@@ -1942,7 +2142,7 @@ pub const TypeChecker = struct {
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on struct '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
-            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .unknown => return ResolvedType.unknown,
+            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .unknown => return ResolvedType.unknown,
         }
     }
 
@@ -2427,6 +2627,88 @@ test "conditional trait impl proof E0215 (M0.8 E2 block 3 tranche C §7.3)" {
     );
     defer proven.deinit(gpa);
     try expectNoCode(proven.diagnostics.items, .conditional_impl_condition_not_proven);
+}
+
+test "generic fn inference + bounds (E0601/E0603/E0604, M0.8 E2 block 4)" {
+    const gpa = std.testing.allocator;
+
+    // `id<T>(x: T) -> T` inferred from the arg; no diagnostic, result is int.
+    var ok = try parseAndCheck(gpa,
+        \\fn id<T>(x: T) -> T { x }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  entity.get_mut(C).out = id(41)
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .generic_type_annotation_required);
+    try expectNoCode(ok.diagnostics.items, .inconsistent_generic_inference);
+    try expectNoCode(ok.diagnostics.items, .bound_not_satisfied);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+
+    // E0604: `T` inferred as two different types.
+    var inconsistent = try parseAndCheck(gpa,
+        \\fn pick<T>(a: T, b: T) -> T { a }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let x = pick(1, true)
+        \\  entity.get_mut(C).out = 0
+        \\}
+    );
+    defer inconsistent.deinit(gpa);
+    try expectAnyCode(inconsistent.diagnostics.items, .inconsistent_generic_inference);
+
+    // E0603: `T` appears only in the return — not inferable from the args.
+    var uninferable = try parseAndCheck(gpa,
+        \\fn make<T>() -> T { make() }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let x = make()
+        \\  entity.get_mut(C).out = 0
+        \\}
+    );
+    defer uninferable.deinit(gpa);
+    try expectAnyCode(uninferable.diagnostics.items, .generic_type_annotation_required);
+
+    // E0601: a trait-bounded param inferred to a type with no matching impl.
+    var unbound = try parseAndCheck(gpa,
+        \\trait Showable { fn show(self) -> int }
+        \\struct Named { id: int = 0 }
+        \\fn render<T: Showable>(t: T) -> int { 0 }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let n = Named { id: 1 }
+        \\  let x = render(n)
+        \\  entity.get_mut(C).out = 0
+        \\}
+    );
+    defer unbound.deinit(gpa);
+    try expectAnyCode(unbound.diagnostics.items, .bound_not_satisfied);
+
+    // The same call satisfies the bound once `Named` implements the trait.
+    var bound_ok = try parseAndCheck(gpa,
+        \\trait Showable { fn show(self) -> int }
+        \\struct Named { id: int = 0 }
+        \\impl Showable for Named { fn show(self) -> int { self.id } }
+        \\fn render<T: Showable>(t: T) -> int { 0 }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let n = Named { id: 1 }
+        \\  let x = render(n)
+        \\  entity.get_mut(C).out = 0
+        \\}
+    );
+    defer bound_ok.deinit(gpa);
+    try expectNoCode(bound_ok.diagnostics.items, .bound_not_satisfied);
+
+    // A generic struct's field typed by a param is accepted (no spurious error).
+    var generic_struct = try parseAndCheck(gpa,
+        \\struct Box<T> { value: T }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C { entity.get_mut(C).out = 0 }
+    );
+    defer generic_struct.deinit(gpa);
+    try expectNoCode(generic_struct.diagnostics.items, .undefined_symbol);
 }
 
 test "assert requires a bool condition (M0.8 assert foundation)" {

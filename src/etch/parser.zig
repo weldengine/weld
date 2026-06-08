@@ -609,7 +609,9 @@ pub const Parser = struct {
                     const name = self.sliceOf(tok.span);
                     if (std.mem.eql(u8, name, "Set")) return try self.parseSetGeneric(tok.span);
                     if (std.mem.eql(u8, name, "Map")) return try self.parseMapGeneric(tok.span);
-                    return self.parseErrFmt(tok.span, "generic type '{s}<...>' is not supported in E1 (only Set<T> / Map<K,V>)", .{name});
+                    // General `Name<T, …>` generic type (M0.8 E2 block 4,
+                    // `etch-grammar.md` §270).
+                    return try self.parseGenericTypeApp(try self.internSlice(tok.span), tok.span);
                 }
                 const name_id = try self.internSlice(tok.span);
                 return try self.arena.addNamedType(self.gpa, name_id, tok.span);
@@ -654,6 +656,137 @@ pub const Parser = struct {
             .byte_start = map_span.byte_start,
             .byte_end = closing.span.byte_end,
         });
+    }
+
+    /// `Name < type , … >` — a generic type application in type position (M0.8
+    /// E2 block 4, `etch-grammar.md` §270). The caller has consumed `Name`
+    /// (span passed in) and confirmed `peek() == <`. `Set` / `Map` keep their
+    /// dedicated nodes (handled by the caller before this).
+    fn parseGenericTypeApp(self: *Parser, name_id: StringId, name_span: SourceSpan) ParseError!NodeId {
+        _ = try self.advance(); // '<'
+        var args: std.ArrayListUnmanaged(NodeId) = .empty;
+        defer args.deinit(self.gpa);
+        while (true) {
+            try args.append(self.gpa, try self.parseType());
+            if (!try self.match(.comma)) break;
+        }
+        const closing = try self.expect(.gt, "expected '>' to close generic type arguments");
+        return try self.arena.addGenericType(self.gpa, name_id, args.items, .{
+            .byte_start = name_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
+    // ─── Generic parameters (M0.8 E2 block 4) ────────────────────────────────
+
+    /// One type parameter being parsed; its bounds (inline `<T: A + B>` and/or
+    /// `where`) accumulate here before being committed contiguously to the
+    /// arena. `bounds` is freed by `commitGenerics`.
+    const TempGenericParam = struct {
+        name: StringId,
+        bounds: std.ArrayListUnmanaged(ast_mod.GenericBound) = .empty,
+    };
+
+    /// A committed `(start, len)` run into `arena.generic_params`.
+    const GenericsRange = struct { start: u32, len: u32 };
+
+    /// Parse `< generic_param { "," generic_param } >` (`etch-grammar.md` §2.4)
+    /// into a temp buffer (so a later `where` clause can extend a param's
+    /// bounds before they are committed). The caller has confirmed `peek() == <`.
+    fn parseGenericParamsBuffered(self: *Parser, out: *std.ArrayListUnmanaged(TempGenericParam)) ParseError!void {
+        _ = try self.advance(); // '<'
+        while (true) {
+            const name_tok = try self.expect(.type_ident, "expected type parameter name (TYPE_IDENT) in generic parameters");
+            var tp: TempGenericParam = .{ .name = try self.internSlice(name_tok.span) };
+            if (try self.match(.colon)) {
+                try self.parseBoundsInto(&tp.bounds);
+            }
+            try out.append(self.gpa, tp);
+            if (!try self.match(.comma)) break;
+        }
+        _ = try self.expect(.gt, "expected '>' to close generic parameters");
+    }
+
+    /// Parse `trait_bound { "+" trait_bound }` (`etch-grammar.md` §2.4) into
+    /// `bounds`.
+    fn parseBoundsInto(self: *Parser, bounds: *std.ArrayListUnmanaged(ast_mod.GenericBound)) ParseError!void {
+        while (true) {
+            try bounds.append(self.gpa, try self.parseOneBound());
+            if (!try self.match(.plus)) break;
+        }
+    }
+
+    /// `TYPE_IDENT` (trait) | `component` | `resource`. The `event` bound needs
+    /// the `event` keyword (E3) — it lexes as an unknown keyword here.
+    fn parseOneBound(self: *Parser) ParseError!ast_mod.GenericBound {
+        switch (self.peek()) {
+            .kw_component => {
+                _ = try self.advance();
+                return .{ .kind = .component };
+            },
+            .kw_resource => {
+                _ = try self.advance();
+                return .{ .kind = .resource };
+            },
+            .type_ident => {
+                const t = try self.advance();
+                return .{ .kind = .trait_, .trait_name = try self.internSlice(t.span) };
+            },
+            else => return self.parseErrFmt(self.peekSpan(), "expected a trait bound (TraitName / component / resource), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+        }
+    }
+
+    /// `where TYPE_IDENT ":" trait_bound { "+" trait_bound } { "," … }`
+    /// (`etch-grammar.md` §2.4). `where` is a plain identifier (not a keyword),
+    /// detected by lexeme by the caller. Each constraint extends the matching
+    /// already-parsed param's bounds.
+    fn parseWhereInto(self: *Parser, params: *std.ArrayListUnmanaged(TempGenericParam)) ParseError!void {
+        _ = try self.advance(); // 'where'
+        while (true) {
+            const name_tok = try self.expect(.type_ident, "expected type parameter name in where clause");
+            const name = try self.internSlice(name_tok.span);
+            _ = try self.expect(.colon, "expected ':' in where constraint");
+            var target: ?*TempGenericParam = null;
+            for (params.items) |*p| {
+                if (p.name == name) {
+                    target = p;
+                    break;
+                }
+            }
+            if (target == null) {
+                return self.parseErrFmt(name_tok.span, "where clause names unknown type parameter '{s}'", .{self.sliceOf(name_tok.span)});
+            }
+            try self.parseBoundsInto(&target.?.bounds);
+            if (!try self.match(.comma)) break;
+        }
+    }
+
+    /// Commit the buffered params + their bounds to the arena slabs. Returns the
+    /// `(start, len)` run into `arena.generic_params`. The temp buffer is freed
+    /// separately by `deinitTempGenerics` (a `defer` in the caller).
+    fn commitGenerics(self: *Parser, params: *std.ArrayListUnmanaged(TempGenericParam)) ParseError!GenericsRange {
+        const start: u32 = @intCast(self.arena.generic_params.items.len);
+        for (params.items) |*p| {
+            const b_start: u32 = @intCast(self.arena.generic_bounds.items.len);
+            try self.arena.generic_bounds.appendSlice(self.gpa, p.bounds.items);
+            try self.arena.generic_params.append(self.gpa, .{
+                .name = p.name,
+                .bounds_start = b_start,
+                .bounds_len = @intCast(p.bounds.items.len),
+            });
+        }
+        return .{ .start = start, .len = @intCast(params.items.len) };
+    }
+
+    /// Free a temp generic-param buffer (per-param bound lists + the list).
+    fn deinitTempGenerics(self: *Parser, params: *std.ArrayListUnmanaged(TempGenericParam)) void {
+        for (params.items) |*p| p.bounds.deinit(self.gpa);
+        params.deinit(self.gpa);
+    }
+
+    /// `true` when the current token is the `where` keyword (a plain identifier).
+    fn atWhere(self: *Parser) bool {
+        return self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.current.span), "where");
     }
 
     // ─── Rule ────────────────────────────────────────────────────────────
@@ -748,8 +881,12 @@ pub const Parser = struct {
         const name_tok = try self.expect(.ident, "expected function name (identifier) after 'fn'");
         const name_id = try self.internSlice(name_tok.span);
 
+        // Generic parameters `<T: bound, …>` (M0.8 E2 block 4). Buffered so the
+        // `where` clause (after the return type) can extend their bounds.
+        var temp_generics: std.ArrayListUnmanaged(TempGenericParam) = .empty;
+        defer self.deinitTempGenerics(&temp_generics);
         if (self.peek() == .lt) {
-            return self.parseErr(self.peekSpan(), "generic functions are not supported yet (generics land in E2 block 4)");
+            try self.parseGenericParamsBuffered(&temp_generics);
         }
 
         _ = try self.expect(.lparen, "expected '(' to begin function parameters");
@@ -790,8 +927,12 @@ pub const Parser = struct {
             sig_end_span = self.arena.typeNodeSpan(return_type);
         }
 
-        // A `where` clause is tied to generics (E2 block 4); `where` is not yet
-        // a token, so nothing to consume here.
+        // `where T: bound, …` (M0.8 E2 block 4) — `where` is a plain identifier,
+        // detected by lexeme; it extends the buffered params' bounds.
+        if (self.atWhere()) {
+            try self.parseWhereInto(&temp_generics);
+        }
+        const generics = try self.commitGenerics(&temp_generics);
 
         // An abstract trait member (`function_signature`, M0.8 E2 block 3
         // tranche C) ends without a body. Outside a trait, a missing body is the
@@ -812,6 +953,8 @@ pub const Parser = struct {
                     .annotations_len = annotations.len,
                     .self_kind = self_kind,
                     .has_body = false,
+                    .generics_start = generics.start,
+                    .generics_len = generics.len,
                 },
                 .close_span = sig_end_span,
             };
@@ -835,6 +978,8 @@ pub const Parser = struct {
                 .annotations_extra = annotations.start,
                 .annotations_len = annotations.len,
                 .self_kind = self_kind,
+                .generics_start = generics.start,
+                .generics_len = generics.len,
                 .has_body = true,
             },
             .close_span = closing.span,
@@ -873,9 +1018,7 @@ pub const Parser = struct {
         _ = try self.advance(); // 'struct'
         const name_tok = try self.expect(.type_ident, "expected struct name (TYPE_IDENT)");
         const name_id = try self.internSlice(name_tok.span);
-        if (self.peek() == .lt) {
-            return self.parseErr(self.peekSpan(), "generic structs are not supported yet (generics land in E2 block 4)");
-        }
+        const generics = try self.parseOptionalGenerics();
         _ = try self.expect(.lbrace, "expected '{' to start struct body");
         const fields_start: u32 = @intCast(self.arena.fields.items.len);
         while (self.peek() != .rbrace) {
@@ -892,7 +1035,20 @@ pub const Parser = struct {
             .fields_len = fields_len,
             .annotations_extra = annotations.start,
             .annotations_len = annotations.len,
+            .generics_start = generics.start,
+            .generics_len = generics.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse an optional `< generic_param, … >` (no `where` — only `fn`/methods
+    /// have a where clause) and commit it, returning the `(start, len)` run.
+    /// `(0, 0)` when there are no generic parameters (M0.8 E2 block 4).
+    fn parseOptionalGenerics(self: *Parser) ParseError!GenericsRange {
+        if (self.peek() != .lt) return .{ .start = 0, .len = 0 };
+        var temp: std.ArrayListUnmanaged(TempGenericParam) = .empty;
+        defer self.deinitTempGenerics(&temp);
+        try self.parseGenericParamsBuffered(&temp);
+        return try self.commitGenerics(&temp);
     }
 
     /// Parse `enum TYPE_IDENT "{" enum_variant {"," enum_variant} [","] "}"`
@@ -907,9 +1063,7 @@ pub const Parser = struct {
         _ = try self.advance(); // 'enum'
         const name_tok = try self.expect(.type_ident, "expected enum name (TYPE_IDENT)");
         const name_id = try self.internSlice(name_tok.span);
-        if (self.peek() == .lt) {
-            return self.parseErr(self.peekSpan(), "generic enums are not supported yet (generics land in E2 block 4)");
-        }
+        const generics = try self.parseOptionalGenerics();
         _ = try self.expect(.lbrace, "expected '{' to start enum body");
         const variants_start: u32 = @intCast(self.arena.enum_variants.items.len);
         while (self.peek() != .rbrace and self.peek() != .eof) {
@@ -968,6 +1122,8 @@ pub const Parser = struct {
             .variants_len = variants_len,
             .annotations_extra = annotations.start,
             .annotations_len = annotations.len,
+            .generics_start = generics.start,
+            .generics_len = generics.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
@@ -981,9 +1137,7 @@ pub const Parser = struct {
         _ = try self.advance(); // 'trait'
         const name_tok = try self.expect(.type_ident, "expected trait name (TYPE_IDENT)");
         const name_id = try self.internSlice(name_tok.span);
-        if (self.peek() == .lt) {
-            return self.parseErr(self.peekSpan(), "generic traits are not supported yet (generics land in E2 block 4)");
-        }
+        const generics = try self.parseOptionalGenerics();
         _ = try self.expect(.lbrace, "expected '{' to start trait body");
         const methods_start: u32 = @intCast(self.arena.impl_methods.items.len);
         while (self.peek() != .rbrace and self.peek() != .eof) {
@@ -1008,6 +1162,8 @@ pub const Parser = struct {
             .methods_len = methods_len,
             .annotations_extra = annotations.start,
             .annotations_len = annotations.len,
+            .generics_start = generics.start,
+            .generics_len = generics.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
@@ -1020,18 +1176,17 @@ pub const Parser = struct {
         _ = annotations; // inherent impl carries no annotations in this subset
         const kw_span = self.current.span;
         _ = try self.advance(); // 'impl'
-        if (self.peek() == .lt) {
-            return self.parseErr(self.peekSpan(), "generic impls are not supported yet (generics land in E2 block 4)");
-        }
+        // Optional impl-level generic params `impl<T> …` (M0.8 E2 block 4); in
+        // scope for every method body.
+        const impl_generics = try self.parseOptionalGenerics();
         const first_tok = try self.expect(.type_ident, "expected type or trait name (TYPE_IDENT) after 'impl'");
         const first_name = try self.internSlice(first_tok.span);
-        // `impl Trait <…> for Type` — the trait's generic args are block 4.
-        if (self.peek() == .lt) {
-            return self.parseErr(self.peekSpan(), "generic trait impls are not supported yet (generics land in E2 block 4)");
-        }
+        // An optional `<type_list>` after the first name: the trait's generic
+        // args in `impl Trait<T> for Type` (EBNF `impl_trait_for_type`). The args
+        // are erased in M0.8 (no monomorphisation codegen).
+        const first_had_args = try self.skipGenericArgs();
         // `impl Trait for Type` (trait impl) vs `impl Type` (inherent). For the
-        // trait form (M0.8 E2 block 3 tranche C), the first name is the trait;
-        // the target type follows `for`.
+        // trait form the first name is the trait; the target type follows `for`.
         var trait_name: StringId = 0;
         var type_name = first_name;
         if (self.peek() == .kw_for) {
@@ -1039,6 +1194,14 @@ pub const Parser = struct {
             trait_name = first_name;
             const target_tok = try self.expect(.type_ident, "expected target type (TYPE_IDENT) after 'for'");
             type_name = try self.internSlice(target_tok.span);
+            // The EBNF target is a bare TYPE_IDENT (`impl_trait_for_type`).
+            if (self.peek() == .lt) {
+                return self.parseErr(self.peekSpan(), "generic type arguments on a trait-impl target are not in the EBNF v0.6 (the target is a bare TYPE_IDENT; use impl-level generics 'impl<T> …')");
+            }
+        } else if (first_had_args) {
+            // `impl Range<T>` (inherent generic target) is not in the EBNF v0.6
+            // (the inherent target is a bare TYPE_IDENT). Use `impl<T> Range`.
+            return self.parseErr(first_tok.span, "generic type arguments on an inherent impl target ('impl Range<T>') are not in the EBNF v0.6 — write 'impl<T> Range { … }' (target is a bare TYPE_IDENT)");
         }
 
         var when_root: u32 = ast_mod.RuleDecl.none_when;
@@ -1071,7 +1234,24 @@ pub const Parser = struct {
             .when_root = when_root,
             .methods_start = methods_start,
             .methods_len = methods_len,
+            .generics_start = impl_generics.start,
+            .generics_len = impl_generics.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Consume an optional `< type { "," type } >` generic-argument list,
+    /// returning whether one was present (M0.8 E2 block 4). The arguments are
+    /// parsed (and land in the arena) but erased — M0.8 has no monomorphisation
+    /// codegen, so trait-arg / type-arg tracking is Phase 2.
+    fn skipGenericArgs(self: *Parser) ParseError!bool {
+        if (self.peek() != .lt) return false;
+        _ = try self.advance(); // '<'
+        while (true) {
+            _ = try self.parseType();
+            if (!try self.match(.comma)) break;
+        }
+        _ = try self.expect(.gt, "expected '>' to close generic type arguments");
+        return true;
     }
 
     // ─── When clause ─────────────────────────────────────────────────────
@@ -2851,7 +3031,7 @@ test "parser suppresses struct literals in if/while/for/match heads (M0.8 E2 blo
     try std.testing.expectEqual(@as(usize, 0), struct_lits);
 }
 
-test "parser accepts trait impl (tranche C) and rejects generic struct (M0.8 E2 block 3)" {
+test "parser accepts a trait impl (tranche C) and a generic struct (block 4) (M0.8 E2)" {
     const gpa = std.testing.allocator;
     // `impl Trait for T` parses in tranche C — the first name is the trait, the
     // post-`for` name the target type (trait existence is a resolver concern).
@@ -2876,13 +3056,14 @@ test "parser accepts trait impl (tranche C) and rejects generic struct (M0.8 E2 
         try std.testing.expectEqual(@as(u32, 1), td.methods_len);
         try std.testing.expectEqual(false, result.ast.impl_methods.items[td.methods_start].has_body);
     }
-    // Generic struct → block 4.
+    // Generic struct now parses (M0.8 E2 block 4) — `Box<T>` carries one param.
     {
         var result = try parse(gpa,
             \\struct Box<T> { value: int = 0 }
         );
         defer result.deinit(gpa);
-        try std.testing.expect(result.diagnostics.len > 0);
+        try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+        try std.testing.expectEqual(@as(u32, 1), result.ast.struct_decls.items[0].generics_len);
     }
 }
 
@@ -2918,6 +3099,62 @@ test "parser builds trait decl with abstract + default members + survives lockst
         try std.testing.expect(result.diagnostics.len > 0);
         try std.testing.expectEqual(@as(usize, 1), result.ast.trait_decls.items.len);
     }
+}
+
+test "parser builds generic params + bounds + where + generic type (M0.8 E2 block 4)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\trait Comparable { fn cmp(self, other: int) -> int }
+        \\fn largest<T: Comparable>(items: T) -> T { items }
+        \\fn pair<A, B>(a: A, b: B) -> A where A: Comparable { a }
+        \\struct Range<T> { min: T  max: T }
+        \\enum Opt<T> { present, absent }
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    // `largest<T: Comparable>` — one param, one trait bound.
+    try std.testing.expect(result.ast.generic_params.items.len >= 5);
+    // The first fn decl is `largest`: 1 generic param with 1 bound.
+    const largest = result.ast.fn_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 1), largest.generics_len);
+    const lp = result.ast.generic_params.items[largest.generics_start];
+    try std.testing.expectEqual(@as(u32, 1), lp.bounds_len);
+    try std.testing.expectEqual(ast_mod.GenericBoundKind.trait_, result.ast.generic_bounds.items[lp.bounds_start].kind);
+    // `pair<A, B> … where A: Comparable` — 2 params, A gains a bound from where.
+    const pair = result.ast.fn_decls.items[1];
+    try std.testing.expectEqual(@as(u32, 2), pair.generics_len);
+    try std.testing.expectEqual(@as(u32, 1), result.ast.generic_params.items[pair.generics_start].bounds_len); // A: Comparable (from where)
+    try std.testing.expectEqual(@as(u32, 0), result.ast.generic_params.items[pair.generics_start + 1].bounds_len); // B
+    // Struct + enum carry their generic params.
+    try std.testing.expectEqual(@as(u32, 1), result.ast.struct_decls.items[0].generics_len);
+    try std.testing.expectEqual(@as(u32, 1), result.ast.enum_decls.items[0].generics_len);
+}
+
+test "parser rejects an inherent impl generic target (EBNF-strict, M0.8 E2 block 4)" {
+    const gpa = std.testing.allocator;
+    // `impl<T> Range<T>` — a generic-type inherent target is not in the EBNF
+    // v0.6 (the target is a bare TYPE_IDENT); the impl-level `impl<T> Range` is.
+    var bad = try parse(gpa,
+        \\struct Range<T> { min: T  max: T }
+        \\impl<T> Range<T> { fn lo(self) -> int { 0 } }
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expect(bad.diagnostics.len > 0);
+
+    // `impl<T> Range { … }` (bare target, impl-level generics) parses.
+    var ok = try parse(gpa,
+        \\struct Range<T> { min: T  max: T }
+        \\impl<T> Range { fn lo(self) -> int { 0 } }
+    );
+    defer ok.deinit(gpa);
+    if (ok.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{ok.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(u32, 1), ok.ast.impl_decls.items[0].generics_len);
 }
 
 test "parser builds enum decl + enum-variant match patterns (M0.8 E2 block 3 tranche B)" {
@@ -2971,7 +3208,7 @@ test "parser recovers and a valid enum after a broken construct survives (M0.8 E
     try std.testing.expectEqual(@as(usize, 1), result.ast.enum_decls.items.len);
 }
 
-test "parser parses data-carrying enum variants but rejects generic enums (M0.8 E2 block 3 tranche B)" {
+test "parser parses data-carrying + generic enum variants (M0.8 E2 block 3 tranche B / block 4)" {
     const gpa = std.testing.allocator;
     // Struct-like + tuple-like variant shapes parse (construction / patterns are
     // deferred; the grammar is accepted). Variant names are `IDENT` per
@@ -2991,13 +3228,14 @@ test "parser parses data-carrying enum variants but rejects generic enums (M0.8 
         try std.testing.expectEqual(ast_mod.EnumVariantShape.tuple_like, result.ast.enum_variants.items[ed.variants_start + 1].shape);
         try std.testing.expectEqual(ast_mod.EnumVariantShape.c_like, result.ast.enum_variants.items[ed.variants_start + 2].shape);
     }
-    // Generic enum → block 4.
+    // Generic enum now parses (M0.8 E2 block 4) — `Opt<T>` carries one param.
     {
         var result = try parse(gpa,
             \\enum Opt<T> { some_, none_ }
         );
         defer result.deinit(gpa);
-        try std.testing.expect(result.diagnostics.len > 0);
+        try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+        try std.testing.expectEqual(@as(u32, 1), result.ast.enum_decls.items[0].generics_len);
     }
 }
 

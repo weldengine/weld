@@ -658,6 +658,37 @@ pub const FnParam = struct {
 /// the param list.
 pub const SelfKind = enum { none, by_value, by_mut };
 
+/// A generic bound on a type parameter (M0.8 E2 block 4, `etch-grammar.md`
+/// §2.4 `trait_bound`). `trait_` names a declared trait (`trait_name`); the
+/// `component` / `resource` / `event` markers are RTTI-category bounds
+/// (`trait_name` unused, `0`).
+pub const GenericBoundKind = enum { trait_, component, resource, event };
+
+/// One bound (`T: Bound`) applied to a generic parameter (M0.8 E2 block 4).
+pub const GenericBound = struct {
+    kind: GenericBoundKind,
+    trait_name: StringId = 0, // set only for `.trait_`
+};
+
+/// A generic type parameter (`etch-grammar.md` §2.4 `generic_param`). Bounds
+/// (inline `<T: A + B>` and/or `where`-clause) live in a contiguous run of
+/// `arena.generic_bounds`.
+pub const GenericParam = struct {
+    name: StringId,
+    bounds_start: u32,
+    bounds_len: u32,
+};
+
+/// A generic type application in *type* position (`Foo<T, U>`,
+/// `etch-grammar.md` §270 `generic_type`). `args` are type-`NodeId`s in a run
+/// of `arena.extra`. `Set<T>` / `Map<K,V>` keep their dedicated nodes; this is
+/// every other `TYPE_IDENT "<" … ">"`.
+pub const GenericTypeNode = struct {
+    name: StringId,
+    args_start: u32, // into `arena.extra` (type NodeIds)
+    args_len: u32,
+};
+
 /// Side-slab entry for a top-level `fn` declaration (M0.8 E2 call mechanism,
 /// `etch-grammar.md` §5.3). The body is a block: `body_start`/`body_len` index
 /// a statement run in `arena.extra`, `value` is the trailing expression (the
@@ -685,6 +716,10 @@ pub const FnDecl = struct {
     /// bodied trait method. When `false`, `body_start`/`body_len`/`value` are
     /// unused (the impl must provide the body).
     has_body: bool = true,
+    /// Generic type parameters (M0.8 E2 block 4) — a run of `arena.generic_params`.
+    /// `generics_len == 0` for a non-generic fn / method.
+    generics_start: u32 = 0,
+    generics_len: u32 = 0,
 };
 
 /// Side-slab entry for a `struct` declaration (M0.8 E2 block 3,
@@ -698,6 +733,9 @@ pub const StructDecl = struct {
     fields_len: u32,
     annotations_extra: u32,
     annotations_len: u32,
+    /// Generic type parameters (M0.8 E2 block 4) — run of `arena.generic_params`.
+    generics_start: u32 = 0,
+    generics_len: u32 = 0,
 };
 
 /// Side-slab entry for an `impl` block (M0.8 E2 block 3, `etch-grammar.md`
@@ -712,6 +750,10 @@ pub const ImplDecl = struct {
     when_root: u32, // `RuleDecl.none_when` if absent
     methods_start: u32, // index into `arena.impl_methods`
     methods_len: u32,
+    /// Generic type parameters (`impl<T> …`, M0.8 E2 block 4) — run of
+    /// `arena.generic_params`. In scope for every method body.
+    generics_start: u32 = 0,
+    generics_len: u32 = 0,
 };
 
 /// Shape of an enum variant (M0.8 E2 block 3 tranche B, `etch-grammar.md`
@@ -741,6 +783,9 @@ pub const EnumDecl = struct {
     variants_len: u32,
     annotations_extra: u32,
     annotations_len: u32,
+    /// Generic type parameters (M0.8 E2 block 4) — run of `arena.generic_params`.
+    generics_start: u32 = 0,
+    generics_len: u32 = 0,
 };
 
 /// Side-slab entry for a `trait` declaration (M0.8 E2 block 3 tranche C,
@@ -754,6 +799,9 @@ pub const TraitDecl = struct {
     methods_len: u32,
     annotations_extra: u32,
     annotations_len: u32,
+    /// Generic type parameters (M0.8 E2 block 4) — run of `arena.generic_params`.
+    generics_start: u32 = 0,
+    generics_len: u32 = 0,
 };
 
 /// One field initializer of a struct literal (`IDENT ":" expression`,
@@ -966,6 +1014,9 @@ pub const AstArena = struct {
     array_types: std.ArrayListUnmanaged(ArrayTypeNode) = .empty,
     map_types: std.ArrayListUnmanaged(MapTypeNode) = .empty,
     set_types: std.ArrayListUnmanaged(SetTypeNode) = .empty,
+    generic_type_nodes: std.ArrayListUnmanaged(GenericTypeNode) = .empty,
+    generic_params: std.ArrayListUnmanaged(GenericParam) = .empty,
+    generic_bounds: std.ArrayListUnmanaged(GenericBound) = .empty,
 
     // Annotation storage.
     annotations: std.AutoHashMapUnmanaged(NodeId, AnnotationSpan) = .empty,
@@ -1063,6 +1114,9 @@ pub const AstArena = struct {
         self.array_types.deinit(gpa);
         self.map_types.deinit(gpa);
         self.set_types.deinit(gpa);
+        self.generic_type_nodes.deinit(gpa);
+        self.generic_params.deinit(gpa);
+        self.generic_bounds.deinit(gpa);
         self.annotations.deinit(gpa);
         self.annot_pool.deinit(gpa);
         self.annot_args.deinit(gpa);
@@ -1238,6 +1292,17 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.set_types.items.len);
         try self.set_types.append(gpa, .{ .elem = elem });
         return try self.addTypeNode(gpa, .set_type, idx, span);
+    }
+
+    /// `Foo<T, U>` generic type in type position (M0.8 E2 block 4,
+    /// `etch-grammar.md` §270). `args` is a slice of type-`NodeId`s, bulk-
+    /// appended to `arena.extra` as a contiguous run.
+    pub fn addGenericType(self: *AstArena, gpa: std.mem.Allocator, name: StringId, args: []const NodeId, span: SourceSpan) !NodeId {
+        const start: u32 = @intCast(self.extra.items.len);
+        for (args) |a| try self.extra.append(gpa, a.raw());
+        const idx: u32 = @intCast(self.generic_type_nodes.items.len);
+        try self.generic_type_nodes.append(gpa, .{ .name = name, .args_start = start, .args_len = @intCast(args.len) });
+        return try self.addTypeNode(gpa, .generic, idx, span);
     }
 
     pub fn addClosure(self: *AstArena, gpa: std.mem.Allocator, params: []const ClosureParam, body: NodeId, span: SourceSpan) !NodeId {
