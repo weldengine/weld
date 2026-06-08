@@ -327,6 +327,19 @@ pub const ResourceDecl = struct {
     annotations_len: u32,
 };
 
+/// Side-slab entry for an `event` declaration (M0.8 E3, `etch-grammar.md`
+/// §5.10 `event_decl = "event" TYPE_IDENT "{" {annotated_field} "}"`). Same
+/// shape as `ComponentDecl`/`ResourceDecl` — an event is a POD struct of
+/// fields (ABI §3.1) consumed by `emit` and `@on_event` rules; kept separate
+/// to preserve the AST-level distinction.
+pub const EventDecl = struct {
+    name: StringId,
+    fields_start: u32,
+    fields_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
 const RuleParam = struct {
     name: StringId,
     type_node: NodeId,
@@ -609,6 +622,17 @@ pub const TryCatchStmt = struct {
     catch_name: StringId,
     catch_start: u32,
     catch_len: u32,
+};
+
+/// `emit TYPE_IDENT "{" {field_init} "}"` statement (M0.8 E3, `etch-grammar.md`
+/// §4.1 `emit_stmt` + §5.10). `event_type` is the emitted event; the field
+/// initializers (`IDENT ":" expression`) live in a `(start, len)` run of
+/// `arena.struct_lit_fields` (same shape as a struct literal — an event is a
+/// POD struct of fields, ABI §3.1).
+pub const EmitStmt = struct {
+    event_type: StringId,
+    fields_start: u32,
+    fields_len: u32,
 };
 
 /// `|a, b| expr` closure (M0.8 closures, `etch-grammar.md` §524). Params are a
@@ -971,6 +995,7 @@ pub const AstArena = struct {
     fields: std.ArrayListUnmanaged(Field) = .empty,
     component_decls: std.ArrayListUnmanaged(ComponentDecl) = .empty,
     resource_decls: std.ArrayListUnmanaged(ResourceDecl) = .empty,
+    event_decls: std.ArrayListUnmanaged(EventDecl) = .empty,
     rule_decls: std.ArrayListUnmanaged(RuleDecl) = .empty,
     fn_decls: std.ArrayListUnmanaged(FnDecl) = .empty,
     struct_decls: std.ArrayListUnmanaged(StructDecl) = .empty,
@@ -1018,6 +1043,7 @@ pub const AstArena = struct {
     break_stmts: std.ArrayListUnmanaged(BreakStmt) = .empty,
     throw_stmts: std.ArrayListUnmanaged(ThrowStmt) = .empty,
     try_catch_stmts: std.ArrayListUnmanaged(TryCatchStmt) = .empty,
+    emit_stmts: std.ArrayListUnmanaged(EmitStmt) = .empty,
     named_types: std.ArrayListUnmanaged(NamedTypeNode) = .empty,
     array_types: std.ArrayListUnmanaged(ArrayTypeNode) = .empty,
     map_types: std.ArrayListUnmanaged(MapTypeNode) = .empty,
@@ -1076,6 +1102,7 @@ pub const AstArena = struct {
         self.fields.deinit(gpa);
         self.component_decls.deinit(gpa);
         self.resource_decls.deinit(gpa);
+        self.event_decls.deinit(gpa);
         self.rule_decls.deinit(gpa);
         self.fn_decls.deinit(gpa);
         self.struct_decls.deinit(gpa);
@@ -1118,6 +1145,7 @@ pub const AstArena = struct {
         self.break_stmts.deinit(gpa);
         self.throw_stmts.deinit(gpa);
         self.try_catch_stmts.deinit(gpa);
+        self.emit_stmts.deinit(gpa);
         self.named_types.deinit(gpa);
         self.array_types.deinit(gpa);
         self.map_types.deinit(gpa);
@@ -1445,6 +1473,12 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.throw_stmts.items.len);
         try self.throw_stmts.append(gpa, .{ .value = value });
         return try self.addStmt(gpa, .throw_stmt, idx, span);
+    }
+
+    pub fn addEmitStmt(self: *AstArena, gpa: std.mem.Allocator, em: EmitStmt, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.emit_stmts.items.len);
+        try self.emit_stmts.append(gpa, em);
+        return try self.addStmt(gpa, .emit_stmt, idx, span);
     }
 
     pub fn addTryCatchStmt(self: *AstArena, gpa: std.mem.Allocator, tc: TryCatchStmt, span: SourceSpan) !NodeId {

@@ -155,7 +155,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -175,16 +175,15 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
 /// items and their `field`s; `function` joins with top-level `fn` (E2). No
 /// builtin annotation in the current catalogue applies to a `function` (the
 /// fn-targeting `@native` / `@shader_fn` are not modelled yet), so only
-/// `@custom` is accepted there; `event` and other construct targets arrive
-/// with their constructs in later stages.
-const AnnotTarget = enum { component, resource, rule, field, function };
+/// `@custom` is accepted there; `event` joins with the `event` construct
+/// (M0.8 E3); other construct targets arrive with their constructs.
+const AnnotTarget = enum { component, resource, rule, field, function, event };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
 /// `.custom` is accepted everywhere (plugin-registered, schema validated
-/// Phase 3). Annotations whose only valid target is a construct not present
-/// at E1 (`@networked` → `event`, `@loc` → expression) return `false` on
-/// every current target.
+/// Phase 3). `@networked` targets `event` (M0.8 E3, `etch-grammar.md` §18.2).
+/// `@loc` → expression returns `false` on every current target.
 fn annotationAppliesTo(kind: ast_mod.AnnotationKind, target: AnnotTarget) bool {
     return switch (kind) {
         .custom => true,
@@ -195,7 +194,7 @@ fn annotationAppliesTo(kind: ast_mod.AnnotationKind, target: AnnotTarget) bool {
         .phase, .priority, .run_on, .pause_group => target == .rule,
         .id => target == .rule,
         .unit, .range, .hidden, .readonly, .replicated => target == .field,
-        .networked => false,
+        .networked => target == .event,
         .loc => false,
     };
 }
@@ -306,6 +305,17 @@ pub const TypeChecker = struct {
                     try self.registerSymbol(.resource, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .resource);
                     try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, false);
+                },
+                .event_decl => {
+                    // An `event` is a POD struct of fields (M0.8 E3,
+                    // `etch-grammar.md` §5.10; ABI §3.1). Register the symbol,
+                    // validate `@networked` applicability, and enforce the same
+                    // POD-scalar field surface as component/resource (`true` =
+                    // component-style POD wording).
+                    const decl = self.arena.event_decls.items[data];
+                    try self.registerSymbol(.event_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .event);
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, true);
                 },
                 .rule_decl => {
                     const decl = self.arena.rule_decls.items[data];
@@ -1215,6 +1225,42 @@ pub const TypeChecker = struct {
                     if (self.current_fn_return) |ret| {
                         if (ret == .builtin and vt == .builtin and !self.literalTypeFits(ret.builtin, value, vt.builtin)) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "return value type does not match the declared return type", .{});
+                        }
+                    }
+                }
+            },
+            .emit_stmt => {
+                // `emit EventType { field: value, … }` (M0.8 E3,
+                // `etch-grammar.md` §4.1 + §5.10). The target must be a declared
+                // `event`; each field initializer must name a field on the event
+                // and type-match it (mirrors `synthStructLit`). The payload is
+                // enqueued at runtime (interp dynamic event store / codegen
+                // `world.event_bus.emit`).
+                const em = self.arena.emit_stmts.items[data];
+                const sym = self.symbols.get(em.event_type);
+                if (sym == null or sym.?.kind != .event_) {
+                    try self.emit(.undefined_symbol, .error_, self.arena.stmtSpan(stmt_id), "'{s}' is not a declared event", .{self.arena.strings.slice(em.event_type)});
+                } else {
+                    const decl = self.arena.event_decls.items[self.arena.itemData(sym.?.item_id)];
+                    var i: u32 = 0;
+                    while (i < em.fields_len) : (i += 1) {
+                        const flit = self.arena.struct_lit_fields.items[em.fields_start + i];
+                        var declared: ?ResolvedType = null;
+                        var f_i: u32 = 0;
+                        while (f_i < decl.fields_len) : (f_i += 1) {
+                            const f = self.arena.fields.items[decl.fields_start + f_i];
+                            if (f.name == flit.name) {
+                                declared = self.namedTypeToResolved(f.type_node);
+                                break;
+                            }
+                        }
+                        const actual = self.synthExpr(flit.value, ctx);
+                        if (declared) |d| {
+                            if (d == .builtin and actual == .builtin and !self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
+                                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "emit field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
+                            }
+                        } else {
+                            try self.emit(.invalid_field_filter, .error_, self.arena.stmtSpan(stmt_id), "event '{s}' has no field '{s}'", .{ self.arena.strings.slice(em.event_type), self.arena.strings.slice(flit.name) });
                         }
                     }
                 }
@@ -3376,4 +3422,64 @@ test "struct inherent methods: dispatch, struct literal, and error cases (M0.8 E
     );
     defer arity.deinit(gpa);
     try expectAnyCode(arity.diagnostics.items, .type_mismatch);
+}
+
+test "type-checker validates event declaration + emit (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+
+    // Clean: a declared event emitted with matching fields → no diagnostics.
+    var ok = try parseAndCheck(gpa,
+        \\event Damage { amount: int = 0, crit: bool = false }
+        \\component Health { current: float = 100.0 }
+        \\rule deal(entity: Entity)
+        \\  when entity has Health
+        \\{
+        \\  emit Damage { amount: 5, crit: true }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // Emitting an undeclared event → E0102 (undefined_symbol).
+    var unknown_evt = try parseAndCheck(gpa,
+        \\rule r() { emit Ghost { x: 1 } }
+    );
+    defer unknown_evt.deinit(gpa);
+    try expectAnyCode(unknown_evt.diagnostics.items, .undefined_symbol);
+
+    // Emitting a field the event does not declare → E1211 (invalid_field_filter).
+    var bad_field = try parseAndCheck(gpa,
+        \\event Damage { amount: int = 0 }
+        \\rule r() { emit Damage { nope: 1 } }
+    );
+    defer bad_field.deinit(gpa);
+    try expectAnyCode(bad_field.diagnostics.items, .invalid_field_filter);
+
+    // `emit`-ing a non-event (a component) → E0102 (not a declared event).
+    var not_event = try parseAndCheck(gpa,
+        \\component Health { current: float = 100.0 }
+        \\rule r() { emit Health { current: 1.0 } }
+    );
+    defer not_event.deinit(gpa);
+    try expectAnyCode(not_event.diagnostics.items, .undefined_symbol);
+}
+
+test "type-checker validates @networked on event, rejects @config on event (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+
+    // `@networked` is valid on an event (`etch-grammar.md` §18.2) → no E0502.
+    var net = try parseAndCheck(gpa,
+        \\@networked
+        \\event Hit { amount: int = 0 }
+    );
+    defer net.deinit(gpa);
+    try expectNoCode(net.diagnostics.items, .annotation_misapplied);
+
+    // `@config` (resource-only) on an event → E0502 AnnotationMisapplied.
+    var misapplied = try parseAndCheck(gpa,
+        \\@config
+        \\event Hit { amount: int = 0 }
+    );
+    defer misapplied.deinit(gpa);
+    try expectAnyCode(misapplied.diagnostics.items, .annotation_misapplied);
 }

@@ -134,6 +134,28 @@ test "fallback to manual archetype walk when when clause contains 'not'" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "comptime_query.query") == null);
 }
 
+test "lowers event declaration, bus registration, and emit (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    const stats = try parseTypeCheckGen(gpa,
+        \\event Damage { amount: int = 0, crit: bool = false }
+        \\rule deal() { emit Damage { amount: 5, crit: true } }
+    , &out);
+    try std.testing.expectEqual(@as(u32, 1), stats.events);
+    // The event is an `extern struct` (POD, ABI §3.1).
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "pub const Damage = extern struct {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "amount: i64 = 0,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "crit: bool = false,") != null);
+    // Registered as a typed queue on the world's event bus (`.tick` lifetime).
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "try world.event_bus.register(Damage, 256, .tick);") != null);
+    // `emit` → a typed enqueue; `catch unreachable` (rule fns return void; the
+    // event is always registered, so emit cannot fail).
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "world.event_bus.emit(Damage, Damage{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, ".amount = 5,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "}) catch unreachable;") != null);
+}
+
 test "type mapping int=>i64 float=>f64 bool=>bool" {
     const gpa = std.testing.allocator;
     var out: std.ArrayListUnmanaged(u8) = .empty;

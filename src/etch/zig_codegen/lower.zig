@@ -48,6 +48,7 @@ const StringId = ast_mod.StringId;
 pub const GenerateStats = struct {
     components: u32 = 0,
     resources: u32 = 0,
+    events: u32 = 0,
     rules: u32 = 0,
     /// Distinct `(component_name, ...)` tuples reached by rule when-clauses.
     /// Reported in the bench for the monomorphisation gate.
@@ -82,6 +83,14 @@ pub fn generateFile(
             .resource_decl => {
                 try emitComponentLikeStruct(&w, ast, data, .resource);
                 stats.resources += 1;
+            },
+            // An `event` is a POD struct of fields (M0.8 E3, `etch-grammar.md`
+            // §5.10; ABI §3.1) → an `extern struct`, like a component. It is
+            // registered with the typed `world.event_bus` in the register pass,
+            // not the component registry.
+            .event_decl => {
+                try emitComponentLikeStruct(&w, ast, data, .event);
+                stats.events += 1;
             },
             // A `struct` is a by-value type (M0.8 E2 block 3): emit the
             // `extern struct` with its fields and its inherent `impl` methods
@@ -167,22 +176,26 @@ fn emitImports(w: *Writer) CodegenError!void {
 
 // ─── Component / resource as extern struct ─────────────────────────────────
 
-const DeclKind = enum { component, resource };
+const DeclKind = enum { component, resource, event };
 
 fn emitComponentLikeStruct(w: *Writer, ast: *const AstArena, data: u32, kind: DeclKind) CodegenError!void {
-    // Both ComponentDecl and ResourceDecl share the same layout for our
-    // purposes — we only care about (name, fields_start, fields_len).
+    // ComponentDecl, ResourceDecl and EventDecl share the same layout for our
+    // purposes — we only care about (name, fields_start, fields_len). An event
+    // is a POD struct of fields (M0.8 E3, ABI §3.1).
     const name: []const u8 = switch (kind) {
         .component => ast.strings.slice(ast.component_decls.items[data].name),
         .resource => ast.strings.slice(ast.resource_decls.items[data].name),
+        .event => ast.strings.slice(ast.event_decls.items[data].name),
     };
     const fields_start: u32 = switch (kind) {
         .component => ast.component_decls.items[data].fields_start,
         .resource => ast.resource_decls.items[data].fields_start,
+        .event => ast.event_decls.items[data].fields_start,
     };
     const fields_len: u32 = switch (kind) {
         .component => ast.component_decls.items[data].fields_len,
         .resource => ast.resource_decls.items[data].fields_len,
+        .event => ast.event_decls.items[data].fields_len,
     };
 
     try w.printLine("pub const {s} = extern struct {{", .{name});
@@ -416,6 +429,15 @@ fn emitRegister(w: *Writer, ast: *const AstArena) CodegenError!void {
             .resource_decl => {
                 const decl = ast.resource_decls.items[data];
                 try emitRegisterCall(w, ast, ast.strings.slice(decl.name), decl.fields_start, decl.fields_len, true);
+            },
+            // An `event` registers a typed queue on `world.event_bus` (M0.8 E3).
+            // `cap` is a power-of-two ring size (256, a per-tick default);
+            // `.tick` lifetime drains it at the tick boundary
+            // (`src/core/events/lifetime.zig`). `.tick` is an enum literal
+            // inferred against the `Lifetime` parameter — no extra import.
+            .event_decl => {
+                const decl = ast.event_decls.items[data];
+                try w.printLine("try world.event_bus.register({s}, 256, .tick);", .{ast.strings.slice(decl.name)});
             },
             else => {},
         }
@@ -1309,6 +1331,35 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 try w.ident(ast.strings.slice(data));
             }
             try w.write(";\n");
+        },
+        .emit_stmt => {
+            // `emit EventType { field: value, … }` → a typed enqueue on the
+            // world's event bus (M0.8 E3). An event is a POD struct (ABI §3.1);
+            // the field initializers become a typed struct literal. Omitted
+            // fields take the `extern struct`'s declared defaults. `emit` is
+            // `comptime T` over the event type. (The `@on_event` observer that
+            // polls the bus is the E3 observer tranche, resolver-types §12.)
+            const em = ast.emit_stmts.items[data];
+            const ename = ast.strings.slice(em.event_type);
+            // `catch unreachable`, not `try`: a generated rule fn returns `void`
+            // (rule error-propagation is the sub-slice-C error-handling codegen,
+            // ABI §11). `emit` only errors on an unregistered event type, which
+            // cannot happen — every declared event is registered at init
+            // (`register`), and queue saturation drops internally (no error).
+            try w.printLine("world.event_bus.emit({s}, {s}{{", .{ ename, ename });
+            w.indentBy(1);
+            var i: u32 = 0;
+            while (i < em.fields_len) : (i += 1) {
+                const flit = ast.struct_lit_fields.items[em.fields_start + i];
+                try w.writeIndent();
+                try w.write(".");
+                try w.ident(ast.strings.slice(flit.name));
+                try w.write(" = ");
+                try emitExpr(w, ast, ctx, flit.value);
+                try w.write(",\n");
+            }
+            w.indentBy(-1);
+            try w.line("}) catch unreachable;");
         },
         else => return CodegenError.UnsupportedConstruct,
     }

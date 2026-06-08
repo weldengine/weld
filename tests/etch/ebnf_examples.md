@@ -458,3 +458,15 @@ rule pick(entity: Entity)
   entity.get_mut(Counter).value = total
 }
 ```
+
+## Events — event declaration / emit (E3 ECS layer)
+
+```etch
+event DamageDealt { amount: int = 0, crit: bool = false }
+
+rule deal_damage(entity: Entity)
+  when entity has Health
+{
+  emit DamageDealt { amount: 25, crit: true }
+}
+```

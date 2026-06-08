@@ -330,13 +330,14 @@ pub const Parser = struct {
     /// construct following a parse error is silently skipped. Current set:
     /// S3 (`component` / `resource` / `rule`) + `type` (M0.8 alias) + `fn` /
     /// `async` (M0.8 E2 call mechanism) + `struct` / `impl` (M0.8 E2 block 3
-    /// declaration layer). Later milestones extend both sites together
-    /// (`enum`/`trait` in E2 block 3 tranches B/C, `event`/`tags` in E3).
+    /// declaration layer) + `enum` / `trait` (E2 block 3 tranches B/C) +
+    /// `event` (E3 ECS layer). Later milestones extend both sites together
+    /// (`tags` later in E3).
     fn recoverToTopLevel(self: *Parser) ParseError!void {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event => return,
                 else => _ = try self.advance(),
             }
         }
@@ -362,6 +363,7 @@ pub const Parser = struct {
             .kw_impl => try self.parseImplDecl(annotations),
             .kw_enum => try self.parseEnumDecl(annotations),
             .kw_trait => try self.parseTraitDecl(annotations),
+            .kw_event => try self.parseEventDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2): the only top-level `async` construct in
                 // E2. `async rule` interpretation/codegen is E3 — reject it here
@@ -373,7 +375,7 @@ pub const Parser = struct {
                 try self.parseFnDeclFrom(annotations, true, async_span);
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -537,6 +539,41 @@ pub const Parser = struct {
             .annotations_len = annotations.len,
         });
         _ = try self.arena.addItem(self.gpa, .resource_decl, data_idx, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
+    /// Parse `event TYPE_IDENT "{" {annotated_field} "}"` (M0.8 E3,
+    /// `etch-grammar.md` §5.10). Same shape as `parseComponentDecl` /
+    /// `parseResourceDecl` — an event is a POD struct of fields. `kw_event`
+    /// is mirrored in `parseTopLevel` AND `recoverToTopLevel`'s stop-set.
+    fn parseEventDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'event'
+        const name_tok = try self.expect(.type_ident, "expected event name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start event body");
+
+        const fields_start: u32 = @intCast(self.arena.fields.items.len);
+        while (self.peek() != .rbrace) {
+            try self.surfaceTokenErrors();
+            const field_annotations = try self.parseAnnotations();
+            try self.parseField(field_annotations);
+            _ = try self.match(.comma);
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close event body");
+        const fields_len: u32 = @as(u32, @intCast(self.arena.fields.items.len)) - fields_start;
+
+        const data_idx: u32 = @intCast(self.arena.event_decls.items.len);
+        try self.arena.event_decls.append(self.gpa, .{
+            .name = name_id,
+            .fields_start = fields_start,
+            .fields_len = fields_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        });
+        _ = try self.arena.addItem(self.gpa, .event_decl, data_idx, .{
             .byte_start = kw_span.byte_start,
             .byte_end = closing.span.byte_end,
         });
@@ -725,8 +762,10 @@ pub const Parser = struct {
         }
     }
 
-    /// `TYPE_IDENT` (trait) | `component` | `resource`. The `event` bound needs
-    /// the `event` keyword (E3) — it lexes as an unknown keyword here.
+    /// `TYPE_IDENT` (trait) | `component` | `resource`. The `event` generic
+    /// bound (`T: event`) stays out of scope in the M0.8 event vertical — its
+    /// satisfaction check needs events usable as type arguments (event-as-value
+    /// plumbing), absent here; `kw_event` here errors as an unsupported bound.
     fn parseOneBound(self: *Parser) ParseError!ast_mod.GenericBound {
         switch (self.peek()) {
             .kw_component => {
@@ -1448,7 +1487,7 @@ pub const Parser = struct {
     /// expression-led path open for trailing-value detection.
     fn startsKeywordStmt(self: *const Parser) bool {
         return switch (self.peek()) {
-            .kw_let, .kw_assert, .kw_for, .kw_while, .kw_break, .kw_continue, .kw_throw, .kw_try, .kw_return => true,
+            .kw_let, .kw_assert, .kw_for, .kw_while, .kw_break, .kw_continue, .kw_throw, .kw_try, .kw_return, .kw_emit => true,
             .ident => self.peekNext() == .colon, // labeled loop `outer:`
             else => false,
         };
@@ -1721,6 +1760,39 @@ pub const Parser = struct {
         }, .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end });
     }
 
+    /// Parse `emit TYPE_IDENT "{" {field_init} "}"` (M0.8 E3, `etch-grammar.md`
+    /// §4.1 `emit_stmt` + §5.10). `field_init = IDENT ":" expression`; the
+    /// field-init loop mirrors `parseStructLiteral` (an event is a POD struct).
+    /// The spread form `..base` is rejected. Field initializers are stored in a
+    /// `(start, len)` run of `arena.struct_lit_fields`.
+    fn parseEmitStmt(self: *Parser) ParseError!NodeId {
+        const kw = try self.advance(); // 'emit'
+        const name_tok = try self.expect(.type_ident, "expected event type (TYPE_IDENT) after 'emit'");
+        const event_type = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start the emitted event body");
+        const saved = self.no_struct_lit;
+        self.no_struct_lit = false;
+        defer self.no_struct_lit = saved;
+        const fields_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            if (self.peek() == .dotdot) {
+                return self.parseErr(self.peekSpan(), "emit-body spread '..base' is not supported in M0.8 (data-table feature, E4)");
+            }
+            const fname = try self.expect(.ident, "expected field name in emit body");
+            _ = try self.expect(.colon, "expected ':' after emit-body field name");
+            const value = try self.parseExpr(0);
+            try self.arena.struct_lit_fields.append(self.gpa, .{ .name = try self.internSlice(fname.span), .value = value });
+            if (!try self.match(.comma)) break;
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the emitted event body");
+        const fields_len: u32 = @as(u32, @intCast(self.arena.struct_lit_fields.items.len)) - fields_start;
+        return try self.arena.addEmitStmt(self.gpa, .{
+            .event_type = event_type,
+            .fields_start = fields_start,
+            .fields_len = fields_len,
+        }, .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
     fn parseStmt(self: *Parser) ParseError!NodeId {
         if (self.peek() == .kw_let) {
             return try self.parseLetStmt();
@@ -1748,6 +1820,9 @@ pub const Parser = struct {
         }
         if (self.peek() == .kw_return) {
             return try self.parseReturnStmt();
+        }
+        if (self.peek() == .kw_emit) {
+            return try self.parseEmitStmt();
         }
         // Labeled loop: `IDENT ":" loop { ... }` (M0.8 loop/break).
         if (self.peek() == .ident and self.peekNext() == .colon) {
@@ -3381,4 +3456,40 @@ test "parser does not leak comment spans on OOM during init" {
             }
         }
     }
+}
+
+test "parser builds event declaration + emit statement (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\event Damage { amount: int, crit: bool }
+        \\rule deal(entity: Entity) when entity has Health {
+        \\  emit Damage { amount: 5, crit: true }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.event_decls.items.len);
+    const ed = result.ast.event_decls.items[0];
+    try std.testing.expectEqualStrings("Damage", result.ast.strings.slice(ed.name));
+    try std.testing.expectEqual(@as(u32, 2), ed.fields_len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.emit_stmts.items.len);
+    const em = result.ast.emit_stmts.items[0];
+    try std.testing.expectEqualStrings("Damage", result.ast.strings.slice(em.event_type));
+    try std.testing.expectEqual(@as(u32, 2), em.fields_len);
+}
+
+test "parser recovers and a valid event after a broken construct survives (M0.8 E3 lockstep)" {
+    const gpa = std.testing.allocator;
+    // The lockstep stop-set now lists `kw_event`: a broken leading construct
+    // resyncs at the `event` that follows, which lands in the AST.
+    var result = try parse(gpa,
+        \\@@@bad
+        \\event Spawned { id: int }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.event_decls.items.len);
 }

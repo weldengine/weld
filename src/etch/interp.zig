@@ -242,6 +242,50 @@ const StructStore = struct {
     }
 };
 
+/// One emitted event instance in the interpreter's dynamic event store (M0.8
+/// E3). Reuses `StructField` for its `(name, value)` payload — an event is a
+/// POD struct of fields (ABI §3.1); field values are POD scalars (the resolver
+/// enforces POD event fields), so they are stored by value.
+const EventVal = struct {
+    type_name: StringId,
+    fields: std.ArrayListUnmanaged(StructField) = .empty,
+};
+
+/// Dynamic per-tick event queue for the interpreter (M0.8 E3). The
+/// comptime-typed `World.event_bus` (`register`/`emit` are `comptime T: type`)
+/// cannot be driven by the dynamic tree-walker, so `emit` accumulates events
+/// here, each tagged by its type name; `@on_event` observers drain them. The
+/// observer/drain side is the E3 observer tranche (resolver-types §12,
+/// deferred). Cleared at the start of each tick (`stepOnce`), matching the
+/// `Lifetime.tick` drain cadence (`src/core/events/lifetime.zig`).
+const EventStore = struct {
+    list: std.ArrayListUnmanaged(EventVal) = .empty,
+
+    fn deinit(self: *EventStore, gpa: std.mem.Allocator) void {
+        for (self.list.items) |*e| e.fields.deinit(gpa);
+        self.list.deinit(gpa);
+    }
+
+    fn clear(self: *EventStore, gpa: std.mem.Allocator) void {
+        for (self.list.items) |*e| e.fields.deinit(gpa);
+        self.list.clearRetainingCapacity();
+    }
+
+    /// Enqueue an event of `type_name`, taking ownership of `fields`.
+    fn enqueue(self: *EventStore, gpa: std.mem.Allocator, type_name: StringId, fields: std.ArrayListUnmanaged(StructField)) !void {
+        try self.list.append(gpa, .{ .type_name = type_name, .fields = fields });
+    }
+
+    /// Number of queued events of `type_name` (test / inspection helper).
+    fn count(self: *const EventStore, type_name: StringId) usize {
+        var n: usize = 0;
+        for (self.list.items) |e| {
+            if (e.type_name == type_name) n += 1;
+        }
+        return n;
+    }
+};
+
 /// Compose the inherent-method map key from a type name and a method name (M0.8
 /// E2 block 3) — same packing as `types.methodKey`.
 fn methodKey(type_name: StringId, method_name: StringId) u64 {
@@ -290,6 +334,11 @@ pub const Interpreter = struct {
     /// Store backing struct values created in rule / fn / method bodies (M0.8
     /// E2 block 3).
     structs: StructStore = .{},
+    /// Dynamic per-tick event queue (M0.8 E3). `emit` enqueues here; `@on_event`
+    /// observers drain it (observer side deferred to resolver-types §12). Cleared
+    /// at the start of each tick. NOT a rule-body store — events outlive the body
+    /// (they cross to observers), so it is not reset at the body boundary.
+    events: EventStore = .{},
     /// Store backing optional values created in rule bodies (M0.8 E2 block 5).
     /// Each entry is `?Value` — `null` = `none`, else the `some` payload.
     /// Reset at the rule-body boundary (rule-arena semantics).
@@ -319,6 +368,7 @@ pub const Interpreter = struct {
         self.collections.deinit(self.gpa);
         self.closures.deinit(self.gpa);
         self.structs.deinit(self.gpa);
+        self.events.deinit(self.gpa);
         self.optionals.deinit(self.gpa);
         self.fns.deinit(self.gpa);
         self.methods.deinit(self.gpa);
@@ -506,6 +556,9 @@ pub const Interpreter = struct {
     }
 
     pub fn stepOnce(self: *Interpreter, world: *World, report: *RuntimeReport) !void {
+        // Events have a per-tick lifetime (`Lifetime.tick`): clear the previous
+        // tick's queue before running this tick's rules (M0.8 E3).
+        self.events.clear(self.gpa);
         for (self.rule_descs) |*rd| {
             report.rules_evaluated += 1;
             if (!resourceDepsSatisfied(world, rd.*)) continue;
@@ -792,6 +845,23 @@ pub const Interpreter = struct {
                 const value: NodeId = @bitCast(data);
                 self.return_value = if (value.isNone()) Value{ .unit = {} } else try self.evalExpr(world, locals, value);
                 self.returning = true;
+            },
+            .emit_stmt => {
+                // `emit EventType { field: value, … }` (M0.8 E3). Evaluate the
+                // field initializers and enqueue the event in the dynamic event
+                // store. The comptime-typed `World.event_bus` is unusable by the
+                // tree-walker; `@on_event` observers drain this store (deferred
+                // to the E3 observer tranche, resolver-types §12).
+                const em = self.ast.emit_stmts.items[data];
+                var fields: std.ArrayListUnmanaged(StructField) = .empty;
+                errdefer fields.deinit(self.gpa);
+                var i: u32 = 0;
+                while (i < em.fields_len) : (i += 1) {
+                    const flit = self.ast.struct_lit_fields.items[em.fields_start + i];
+                    const v = try self.evalExpr(world, locals, flit.value);
+                    try fields.append(self.gpa, .{ .name = flit.name, .value = v });
+                }
+                try self.events.enqueue(self.gpa, em.event_type, fields);
             },
             else => return error.RuntimeFailure,
         }
@@ -2952,4 +3022,51 @@ test "runProgram uncaught throw surfaces a runtime error (M0.8 error handling)" 
     defer interp.deinit();
     const report = try interp.runFor(&world, 1);
     try std.testing.expect(report.runtime_errors > 0);
+}
+
+test "runProgram emit enqueues an event into the dynamic event store (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A global rule (no when clause) emits once per tick.
+    const source =
+        \\event Damage { amount: int = 0, crit: bool = false }
+        \\rule deal() { emit Damage { amount: 5, crit: true } }
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // One Damage event enqueued this tick, with amount == 5.
+    const dmg_id = pr.ast.strings.find("Damage").?;
+    try std.testing.expectEqual(@as(usize, 1), interp.events.count(dmg_id));
+    const amount_id = pr.ast.strings.find("amount").?;
+    var amount: i64 = -1;
+    for (interp.events.list.items[0].fields.items) |f| {
+        if (f.name == amount_id) {
+            try std.testing.expect(f.value == .int_);
+            amount = f.value.int_;
+        }
+    }
+    try std.testing.expectEqual(@as(i64, 5), amount);
+
+    // Per-tick lifetime: a second tick clears the previous queue rather than
+    // accumulating (the count stays 1, not 2).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(usize, 1), interp.events.count(dmg_id));
 }
