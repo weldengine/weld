@@ -105,6 +105,9 @@ pub const ResolvedType = union(enum) {
     /// struct is a by-value type (not registered with the world); its fields
     /// and inherent methods resolve by name through the symbol table.
     struct_t: StringId,
+    /// A C-like `enum` value (M0.8 E2 block 3 tranche B). Payload is the enum
+    /// type name; variants resolve by name against the declaration.
+    enum_t: StringId,
     /// Type unknown / unresolved. Used as the fallback after a diagnostic
     /// has been emitted; subsequent checks treat `unknown` as wildcard to
     /// avoid cascade errors.
@@ -123,6 +126,7 @@ pub const ResolvedType = union(enum) {
             .set_t => |elem| elem == b.set_t,
             .closure => |node| std.meta.eql(node, b.closure),
             .struct_t => |id| id == b.struct_t,
+            .enum_t => |id| id == b.enum_t,
             .unknown => true,
         };
     }
@@ -140,7 +144,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -287,6 +291,14 @@ pub const TypeChecker = struct {
                     try self.registerSymbol(.struct_, decl.name, item_id, span);
                     try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, false);
                 },
+                .enum_decl => {
+                    // A C-like `enum` is a value type (M0.8 E2 block 3 tranche
+                    // B). Register the name; validate the variant set is
+                    // non-empty and free of duplicate variant names.
+                    const decl = self.arena.enum_decls.items[data];
+                    try self.registerSymbol(.enum_, decl.name, item_id, span);
+                    try self.validateEnumVariants(decl, span);
+                },
                 .impl_decl => {
                     // Index inherent-impl methods by `(type_name, method_name)`
                     // for the kind-1 dispatch (M0.8 E2 block 3, §5.1). The
@@ -356,6 +368,42 @@ pub const TypeChecker = struct {
                 try self.emit(.undefined_symbol, .error_, spans[i], "impl target type '{s}' is not declared", .{tname});
             }
         }
+    }
+
+    /// Validate an `enum`'s variant set (M0.8 E2 block 3 tranche B): non-empty,
+    /// no duplicate variant names. The grammar already guarantees ≥1 variant,
+    /// so the duplicate check is the substantive one (E0101).
+    fn validateEnumVariants(self: *TypeChecker, decl: ast_mod.EnumDecl, span: SourceSpan) !void {
+        var i: u32 = 0;
+        while (i < decl.variants_len) : (i += 1) {
+            const vi = self.arena.enum_variants.items[decl.variants_start + i];
+            var j: u32 = 0;
+            while (j < i) : (j += 1) {
+                if (self.arena.enum_variants.items[decl.variants_start + j].name == vi.name) {
+                    try self.emit(.duplicate_symbol, .error_, span, "duplicate enum variant '{s}' on enum '{s}'", .{ self.arena.strings.slice(vi.name), self.arena.strings.slice(decl.name) });
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Look up the declaration-order index of `variant` within the enum named
+    /// `enum_name` (M0.8 E2 block 3 tranche B), or `null` if `enum_name` is not
+    /// a declared enum or has no such variant.
+    fn enumVariantIndex(self: *TypeChecker, enum_name: StringId, variant: StringId) ?u32 {
+        const decl = self.enumDecl(enum_name) orelse return null;
+        var i: u32 = 0;
+        while (i < decl.variants_len) : (i += 1) {
+            if (self.arena.enum_variants.items[decl.variants_start + i].name == variant) return i;
+        }
+        return null;
+    }
+
+    /// The `EnumDecl` for `enum_name`, or `null` if it is not a declared enum.
+    fn enumDecl(self: *TypeChecker, enum_name: StringId) ?ast_mod.EnumDecl {
+        const sym = self.symbols.get(enum_name) orelse return null;
+        if (sym.kind != .enum_) return null;
+        return self.arena.enum_decls.items[self.arena.itemData(sym.item_id)];
     }
 
     /// Resolve an inherent method `(type_name, method_name)` to its `FnDecl`
@@ -508,6 +556,7 @@ pub const TypeChecker = struct {
                         .component => .{ .component = resolved_name },
                         .resource => .{ .resource = resolved_name },
                         .struct_ => .{ .struct_t = resolved_name },
+                        .enum_ => .{ .enum_t = resolved_name },
                         else => .unknown,
                     };
                 }
@@ -1007,6 +1056,19 @@ pub const TypeChecker = struct {
             },
             .field_access => {
                 const fa = self.arena.field_accesses.items[data];
+                // Enum value `Difficulty.hard` (M0.8 E2 block 3 tranche B): a
+                // `.path` receiver naming a declared enum + a variant field.
+                // Resolved here (a bare type is not field-accessible otherwise).
+                if (self.arena.exprKind(fa.receiver) == .path) {
+                    const path_name = self.arena.exprData(fa.receiver);
+                    if (self.enumDecl(path_name) != null) {
+                        if (self.enumVariantIndex(path_name, fa.field_name) == null) {
+                            try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(id), "enum '{s}' has no variant '{s}'", .{ self.arena.strings.slice(path_name), self.arena.strings.slice(fa.field_name) });
+                            return ResolvedType.unknown;
+                        }
+                        return .{ .enum_t = path_name };
+                    }
+                }
                 const receiver_type = try self.synthExprE(fa.receiver, ctx_opt);
                 return self.lookupFieldType(receiver_type, fa.field_name, self.arena.exprSpan(id));
             },
@@ -1495,6 +1557,15 @@ pub const TypeChecker = struct {
         var saw_true = false;
         var saw_false = false;
 
+        // Enum scrutinee: track covered variants for exhaustiveness (E1230,
+        // `etch-resolver-types.md §12.4` — all variants ⇒ exhaustive).
+        const enum_name: ?StringId = if (scrut_t == .enum_t) scrut_t.enum_t else null;
+        var covered: std.ArrayListUnmanaged(bool) = .empty;
+        defer covered.deinit(self.gpa);
+        if (enum_name) |en| {
+            if (self.enumDecl(en)) |d| try covered.appendNTimes(self.gpa, false, d.variants_len);
+        }
+
         var i: u32 = 0;
         while (i < m.arms_len) : (i += 1) {
             const arm = self.arena.match_arms.items[m.arms_start + i];
@@ -1512,6 +1583,22 @@ pub const TypeChecker = struct {
                         if (std.mem.eql(u8, s, "false")) saw_false = true;
                     }
                 },
+                .enum_variant => {
+                    const pat = self.arena.enum_pattern_payloads.items[arm.pattern_payload];
+                    if (enum_name) |en| {
+                        // A qualified `Type.variant` pattern must name the
+                        // scrutinee's enum.
+                        if (pat.type_name != 0 and pat.type_name != en) {
+                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "enum-variant pattern names enum '{s}' but the scrutinee is '{s}'", .{ self.arena.strings.slice(pat.type_name), self.arena.strings.slice(en) });
+                        } else if (self.enumVariantIndex(en, pat.variant)) |vidx| {
+                            if (vidx < covered.items.len) covered.items[vidx] = true;
+                        } else {
+                            try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(arm.body), "enum '{s}' has no variant '{s}'", .{ self.arena.strings.slice(en), self.arena.strings.slice(pat.variant) });
+                        }
+                    } else if (scrut_t != .unknown) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "enum-variant pattern used on a non-enum scrutinee", .{});
+                    }
+                },
             }
             const body_t = try self.synthExprE(arm.body, ctx_opt);
             if (result_t == null) {
@@ -1523,7 +1610,14 @@ pub const TypeChecker = struct {
 
         if (!has_catch_all) {
             const bool_exhaustive = scrut_t == .builtin and scrut_t.builtin == .bool_ and saw_true and saw_false;
-            if (!bool_exhaustive) {
+            var enum_exhaustive = false;
+            if (enum_name != null) {
+                enum_exhaustive = covered.items.len > 0;
+                for (covered.items) |c| {
+                    if (!c) enum_exhaustive = false;
+                }
+            }
+            if (!bool_exhaustive and !enum_exhaustive) {
                 try self.emit(.non_exhaustive_match, .error_, self.arena.exprSpan(id), "non-exhaustive match: add a '_' arm or cover every case", .{});
             }
         }
@@ -1631,7 +1725,7 @@ pub const TypeChecker = struct {
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on struct '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
-            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .unknown => return ResolvedType.unknown,
+            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .unknown => return ResolvedType.unknown,
         }
     }
 
@@ -1971,6 +2065,60 @@ test "match exhaustiveness and arm typing (M0.8 match foundation)" {
     );
     defer mixed.deinit(gpa);
     try expectAnyCode(mixed.diagnostics.items, .type_mismatch);
+}
+
+test "enum match exhaustiveness and variant resolution (M0.8 E2 block 3 tranche B)" {
+    const gpa = std.testing.allocator;
+
+    // All variants covered (no `_`) → exhaustive (E1230 not emitted), no E0105.
+    var ok = try parseAndCheck(gpa,
+        \\enum Difficulty { easy, normal, hard }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let d = Difficulty.hard
+        \\  entity.get_mut(C).out = match d { Difficulty.easy => 1, .normal => 2, Difficulty.hard => 3 }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .non_exhaustive_match);
+    try expectNoCode(ok.diagnostics.items, .enum_variant_not_found);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+
+    // A missing variant without a `_` arm → E1230.
+    var bad = try parseAndCheck(gpa,
+        \\enum Difficulty { easy, normal, hard }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let d = Difficulty.hard
+        \\  entity.get_mut(C).out = match d { Difficulty.easy => 1, Difficulty.normal => 2 }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .non_exhaustive_match);
+
+    // A partial cover with a `_` catch-all → exhaustive.
+    var wild = try parseAndCheck(gpa,
+        \\enum Difficulty { easy, normal, hard }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let d = Difficulty.easy
+        \\  entity.get_mut(C).out = match d { Difficulty.easy => 1, _ => 0 }
+        \\}
+    );
+    defer wild.deinit(gpa);
+    try expectNoCode(wild.diagnostics.items, .non_exhaustive_match);
+
+    // An unknown variant → E0105 (both in a value form and a pattern).
+    var unknown = try parseAndCheck(gpa,
+        \\enum Difficulty { easy, normal, hard }
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let d = Difficulty.medium
+        \\  entity.get_mut(C).out = match d { Difficulty.easy => 1, _ => 0 }
+        \\}
+    );
+    defer unknown.deinit(gpa);
+    try expectAnyCode(unknown.diagnostics.items, .enum_variant_not_found);
 }
 
 test "assert requires a bool condition (M0.8 assert foundation)" {

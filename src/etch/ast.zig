@@ -478,16 +478,28 @@ pub const RangeExpr = struct {
 /// wildcard / literal / binding). Enum-variant, optional, tuple, and
 /// struct-destructure patterns arrive with their types in later stages
 /// (`etch-grammar.md` §pattern, `etch-reference-part1.md` §7.6).
-pub const PatternKind = enum { wildcard, literal, binding };
+pub const PatternKind = enum { wildcard, literal, binding, enum_variant };
 
 /// One arm of a `match`. `pattern_kind` selects the meaning of
 /// `pattern_payload`: `.literal` → a literal expr `NodeId` (raw bits) the
 /// scrutinee is compared against; `.binding` → the bound `StringId`;
-/// `.wildcard` → unused (0). `body` is the arm's expression.
+/// `.wildcard` → unused (0); `.enum_variant` → an index into
+/// `arena.enum_pattern_payloads` (M0.8 E2 block 3 tranche B). `body` is the
+/// arm's expression.
 pub const MatchArm = struct {
     pattern_kind: PatternKind,
     pattern_payload: u32,
     body: NodeId,
+};
+
+/// Payload of an `.enum_variant` match pattern (M0.8 E2 block 3 tranche B,
+/// `etch-grammar.md` §3.2 l.510-511). The shorthand `.easy` stores
+/// `type_name = 0` (resolved type-driven from the scrutinee enum); the
+/// qualified `Difficulty.easy` stores the explicit enum type name. `variant`
+/// is the variant identifier.
+pub const EnumPatternPayload = struct {
+    type_name: StringId, // 0 = shorthand `.variant`
+    variant: StringId,
 };
 
 /// `match scrutinee { arm, ... }` (M0.8 v0.6 foundations). Arms live in a
@@ -697,6 +709,35 @@ pub const ImplDecl = struct {
     methods_len: u32,
 };
 
+/// Shape of an enum variant (M0.8 E2 block 3 tranche B, `etch-grammar.md`
+/// §5.8). `c_like` (`easy`) is fully supported end-to-end; `struct_like`
+/// (`Physical { amount: float }`) and `tuple_like` (`ok(T)`) are PARSED so the
+/// grammar is accepted, but their construction + destructuring are deferred
+/// (the post-Phase-1 advanced pattern set) — fail-loud in interp / codegen.
+pub const EnumVariantShape = enum { c_like, struct_like, tuple_like };
+
+/// One variant of an `enum` (M0.8 E2 block 3 tranche B). `data_start`/`data_len`
+/// index `arena.fields` for `struct_like` variants and `arena.extra` (a run of
+/// type `NodeId`s) for `tuple_like`; both are `0` for `c_like`.
+pub const EnumVariant = struct {
+    name: StringId,
+    shape: EnumVariantShape,
+    data_start: u32,
+    data_len: u32,
+};
+
+/// Side-slab entry for an `enum` declaration (M0.8 E2 block 3 tranche B,
+/// `etch-grammar.md` §5.8). Variants live in a `(start, len)` run of
+/// `arena.enum_variants`. Generics (`<...>`) are block 4 (a `<` after the name
+/// is rejected at parse time, like `struct`).
+pub const EnumDecl = struct {
+    name: StringId,
+    variants_start: u32, // index into `arena.enum_variants`
+    variants_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
 /// One field initializer of a struct literal (`IDENT ":" expression`,
 /// `etch-grammar.md` §3.2 l.490). The spread form `.. expression` (data-table
 /// inheritance, E4) is out of M0.8 scope.
@@ -860,6 +901,8 @@ pub const AstArena = struct {
     fn_decls: std.ArrayListUnmanaged(FnDecl) = .empty,
     struct_decls: std.ArrayListUnmanaged(StructDecl) = .empty,
     impl_decls: std.ArrayListUnmanaged(ImplDecl) = .empty,
+    enum_decls: std.ArrayListUnmanaged(EnumDecl) = .empty,
+    enum_variants: std.ArrayListUnmanaged(EnumVariant) = .empty,
     /// `impl` block methods, each an `FnDecl` carrying its `self_kind`. Stored
     /// here (not in `fn_decls`) so the free-fn index never mistakes a method
     /// for a top-level callable. `ImplDecl` references a `(start, len)` run.
@@ -881,6 +924,7 @@ pub const AstArena = struct {
     ranges: std.ArrayListUnmanaged(RangeExpr) = .empty,
     match_exprs: std.ArrayListUnmanaged(MatchExpr) = .empty,
     match_arms: std.ArrayListUnmanaged(MatchArm) = .empty,
+    enum_pattern_payloads: std.ArrayListUnmanaged(EnumPatternPayload) = .empty,
     for_stmts: std.ArrayListUnmanaged(ForStmt) = .empty,
     while_stmts: std.ArrayListUnmanaged(WhileStmt) = .empty,
     array_lits: std.ArrayListUnmanaged(ArrayLitExpr) = .empty,
@@ -958,6 +1002,8 @@ pub const AstArena = struct {
         self.fn_decls.deinit(gpa);
         self.struct_decls.deinit(gpa);
         self.impl_decls.deinit(gpa);
+        self.enum_decls.deinit(gpa);
+        self.enum_variants.deinit(gpa);
         self.impl_methods.deinit(gpa);
         self.type_alias_decls.deinit(gpa);
         self.rule_params.deinit(gpa);
@@ -974,6 +1020,7 @@ pub const AstArena = struct {
         self.ranges.deinit(gpa);
         self.match_exprs.deinit(gpa);
         self.match_arms.deinit(gpa);
+        self.enum_pattern_payloads.deinit(gpa);
         self.for_stmts.deinit(gpa);
         self.while_stmts.deinit(gpa);
         self.array_lits.deinit(gpa);
@@ -1225,6 +1272,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.impl_decls.items.len);
         try self.impl_decls.append(gpa, decl);
         return try self.addItem(gpa, .impl_decl, idx, span);
+    }
+
+    /// `enum Name { variant, … }` (M0.8 E2 block 3 tranche B). The caller
+    /// appends the variants to `arena.enum_variants` beforehand, passing the
+    /// range in `decl`.
+    pub fn addEnumDecl(self: *AstArena, gpa: std.mem.Allocator, decl: EnumDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.enum_decls.items.len);
+        try self.enum_decls.append(gpa, decl);
+        return try self.addItem(gpa, .enum_decl, idx, span);
     }
 
     /// `Type { f: v, … }` struct literal (M0.8 E2 block 3). `fields` is

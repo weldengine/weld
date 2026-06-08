@@ -332,3 +332,24 @@ impl V2 {
   }
 }
 ```
+
+## Declarations — enum + variant match (E2 block 3 tranche B)
+
+```etch
+enum Difficulty {
+  easy,
+  normal,
+  hard,
+}
+
+rule pick(entity: Entity)
+  when entity has Counter
+{
+  let d = Difficulty.hard
+  entity.get_mut(Counter).value = match d {
+    Difficulty.easy => 1,
+    .normal => 2,
+    Difficulty.hard => 3,
+  }
+}
+```

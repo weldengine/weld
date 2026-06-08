@@ -81,6 +81,10 @@ pub const Value = union(enum) {
     /// `Interpreter.structs`. Same lifetime rules as `array_ref` (reset at the
     /// rule-body boundary).
     struct_ref: u32,
+    /// A C-like enum value (M0.8 E2 block 3 tranche B). Carries the enum type
+    /// name (interned `StringId`) and the variant's declaration-order index.
+    /// Value-typed: compared by `(type_name, variant)` equality.
+    enum_value: EnumValue,
     unit,
 
     pub fn fromInt(x: i64) Value {
@@ -119,9 +123,16 @@ pub const Value = union(enum) {
             .map_ref => false,
             .closure => false,
             .struct_ref => false,
+            .enum_value => |a| a.type_name == other.enum_value.type_name and a.variant == other.enum_value.variant,
             .unit => true,
         };
     }
+};
+
+/// Payload of a C-like enum `Value` (M0.8 E2 block 3 tranche B).
+pub const EnumValue = struct {
+    type_name: u32,
+    variant: u32,
 };
 
 /// Typed sum carrying a `SourceSpan` resolved from the AST `NodeId` that

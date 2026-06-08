@@ -276,6 +276,9 @@ pub const Interpreter = struct {
     /// `struct` declarations keyed by name (M0.8 E2 block 3), for materializing
     /// a struct literal (field order + declared defaults for omitted fields).
     struct_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.StructDecl) = .empty,
+    /// `enum` declarations keyed by name (M0.8 E2 block 3 tranche B), for
+    /// resolving enum values + match-arm variant indices.
+    enum_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.EnumDecl) = .empty,
     /// Heap store backing collection values created in rule bodies (M0.8).
     collections: CollectionStore = .{},
     /// Store backing closure values created in rule bodies (M0.8 closures).
@@ -311,6 +314,7 @@ pub const Interpreter = struct {
         self.fns.deinit(self.gpa);
         self.methods.deinit(self.gpa);
         self.struct_decls.deinit(self.gpa);
+        self.enum_decls.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -401,6 +405,8 @@ pub const Interpreter = struct {
         errdefer methods.deinit(gpa);
         var struct_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.StructDecl) = .empty;
         errdefer struct_decls.deinit(gpa);
+        var enum_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.EnumDecl) = .empty;
+        errdefer enum_decls.deinit(gpa);
         i = 0;
         while (i < ast.items.len) : (i += 1) {
             const kind = ast.items.items(.kind)[i];
@@ -418,6 +424,10 @@ pub const Interpreter = struct {
                     const decl = ast.struct_decls.items[data];
                     try struct_decls.put(gpa, decl.name, decl);
                 },
+                .enum_decl => {
+                    const decl = ast.enum_decls.items[data];
+                    try enum_decls.put(gpa, decl.name, decl);
+                },
                 else => {},
             }
         }
@@ -431,6 +441,7 @@ pub const Interpreter = struct {
             .fns = fns,
             .methods = methods,
             .struct_decls = struct_decls,
+            .enum_decls = enum_decls,
         };
     }
 
@@ -822,6 +833,16 @@ pub const Interpreter = struct {
     /// propagates back). `self_value == null` is an associated fn (no receiver).
     /// A `return` inside the body unwinds to *this* boundary (the method's own
     /// frame), never the caller's — `returning` is consumed here.
+    /// Declaration-order index of `variant` within `edecl`, or `null` if the
+    /// enum has no such variant (M0.8 E2 block 3 tranche B).
+    fn enumVariantIndexOf(self: *Interpreter, edecl: ast_mod.EnumDecl, variant: StringId) ?u32 {
+        var i: u32 = 0;
+        while (i < edecl.variants_len) : (i += 1) {
+            if (self.ast.enum_variants.items[edecl.variants_start + i].name == variant) return i;
+        }
+        return null;
+    }
+
     fn callMethod(self: *Interpreter, world: *World, caller_locals: *Locals, method: ast_mod.FnDecl, mc: ast_mod.MethodCall, self_value: ?Value) StmtError!Value {
         if (method.is_async) return error.RuntimeFailure; // async interp lands in E3
         if (method.params_len != mc.args_len) return error.RuntimeFailure;
@@ -877,6 +898,17 @@ pub const Interpreter = struct {
             },
             .field_access => {
                 const fa = self.ast.field_accesses.items[data];
+                // Enum value `Difficulty.hard` (M0.8 E2 block 3 tranche B): a
+                // `.path` receiver naming a declared enum + a variant field.
+                if (self.ast.exprKind(fa.receiver) == .path) {
+                    const path_name = self.ast.exprData(fa.receiver);
+                    if (self.enum_decls.get(path_name)) |edecl| {
+                        if (self.enumVariantIndexOf(edecl, fa.field_name)) |vidx| {
+                            return Value{ .enum_value = .{ .type_name = path_name, .variant = vidx } };
+                        }
+                        return error.RuntimeFailure;
+                    }
+                }
                 const recv = try self.evalExpr(world, locals, fa.receiver);
                 const field_name = self.ast.strings.slice(fa.field_name);
                 switch (recv) {
@@ -970,6 +1002,17 @@ pub const Interpreter = struct {
                             const lit: NodeId = @bitCast(arm.pattern_payload);
                             const lit_v = try self.evalExpr(world, locals, lit);
                             if (scrut.eql(lit_v)) return try self.evalExpr(world, locals, arm.body);
+                        },
+                        .enum_variant => {
+                            // Compare the scrutinee's enum value against the
+                            // pattern's variant (M0.8 E2 block 3 tranche B). The
+                            // pattern carries the variant name; resolve it to the
+                            // declaration-order index of the scrutinee's enum.
+                            if (scrut != .enum_value) return error.RuntimeFailure;
+                            const pat = self.ast.enum_pattern_payloads.items[arm.pattern_payload];
+                            const edecl = self.enum_decls.get(scrut.enum_value.type_name) orelse return error.RuntimeFailure;
+                            const vidx = self.enumVariantIndexOf(edecl, pat.variant) orelse return error.RuntimeFailure;
+                            if (scrut.enum_value.variant == vidx) return try self.evalExpr(world, locals, arm.body);
                         },
                     }
                 }
@@ -2085,6 +2128,44 @@ test "runProgram match dispatches on literal and binding arms (M0.8 match)" {
         @memcpy(std.mem.asBytes(&out), slot[8..16]);
         try std.testing.expectEqual(@as(i64, 8), out);
     }
+}
+
+test "runProgram enum value + match selects the right arm (M0.8 E2 block 3 tranche B)" {
+    const gpa = std.testing.allocator;
+    // `let d = Difficulty.normal` builds an enum value; the match selects the
+    // `.normal => 2` arm (the middle of the if-else chain). out = 2.
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\enum Difficulty { easy, normal, hard }
+        \\component C { out: int = 0 }
+        \\rule pick(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let d = Difficulty.normal
+        \\  entity.get_mut(C).out = match d { Difficulty.easy => 1, Difficulty.normal => 2, Difficulty.hard => 3 }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("C").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    _ = try interp.runFor(&world, 1);
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 2), out);
 }
 
 test "runProgram assert passes on true, reports a runtime error on false (M0.8 assert)" {

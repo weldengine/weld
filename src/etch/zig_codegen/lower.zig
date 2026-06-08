@@ -87,6 +87,10 @@ pub fn generateFile(
             // `extern struct` with its fields and its inherent `impl` methods
             // (as Zig `pub fn` members), but no RTTI registration.
             .struct_decl => try emitStructDecl(&w, ast, data),
+            // A C-like `enum` (M0.8 E2 block 3 tranche B) → Zig `enum(i32)`
+            // (`etch-abi-zig.md` §3.1). Data-carrying variants are deferred
+            // (fail-loud) inside `emitEnumDecl`.
+            .enum_decl => try emitEnumDecl(&w, ast, data),
             else => {},
         }
     }
@@ -226,6 +230,34 @@ fn zeroDefault(zig_type: []const u8) []const u8 {
 /// type, not an ECS type). Field layout mirrors `emitComponentLikeStruct` so
 /// the runtime registry's `@offsetOf` semantics match if the struct is later
 /// nested in a component (out of block-3 scope, but layout-compatible).
+/// Emit a C-like `enum` as a Zig `enum(i32)` (M0.8 E2 block 3 tranche B,
+/// `etch-abi-zig.md` §3.1 — `enum E { A, B }` → `enum(i32) { a, b }`). Variant
+/// names are preserved verbatim (Etch variants are snake_case by convention).
+/// A data-carrying variant (struct-like / tuple-like) is deferred: its
+/// construction + destructuring are post-Phase-1, so the whole enum fails loud
+/// (`UnsupportedConstruct`) and the interpreter is its reference.
+fn emitEnumDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void {
+    const decl = ast.enum_decls.items[data];
+    var v_i: u32 = 0;
+    while (v_i < decl.variants_len) : (v_i += 1) {
+        if (ast.enum_variants.items[decl.variants_start + v_i].shape != .c_like) {
+            return CodegenError.UnsupportedConstruct; // data-carrying variant → deferred
+        }
+    }
+    try w.printLine("pub const {s} = enum(i32) {{", .{ast.strings.slice(decl.name)});
+    w.indentBy(1);
+    v_i = 0;
+    while (v_i < decl.variants_len) : (v_i += 1) {
+        const variant = ast.enum_variants.items[decl.variants_start + v_i];
+        try w.writeIndent();
+        try w.ident(ast.strings.slice(variant.name));
+        try w.write(",\n");
+    }
+    w.indentBy(-1);
+    try w.line("};");
+    try w.blankLine();
+}
+
 fn emitStructDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void {
     const decl = ast.struct_decls.items[data];
     const name = ast.strings.slice(decl.name);
@@ -1338,6 +1370,13 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         },
         .field_access => {
             const fa = ast.field_accesses.items[data];
+            // Enum value `EnumName.variant` → Zig `EnumName.variant` (M0.8 E2
+            // block 3 tranche B).
+            if (enumValueName(ast, id)) |ename| {
+                try w.print("{s}.", .{ename});
+                try w.ident(ast.strings.slice(fa.field_name));
+                return;
+            }
             try emitFieldAccessExpr(w, ast, ctx, fa);
         },
         .method_get, .method_get_mut => {
@@ -1627,6 +1666,15 @@ fn emitMatch(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Codege
                 try emitExpr(w, ast, ctx, arm.body);
                 try w.write("; ");
             },
+            .enum_variant => {
+                const pat = ast.enum_pattern_payloads.items[arm.pattern_payload];
+                const ename = enumPatternTypeName(ast, ctx, pat, m.scrutinee) orelse return CodegenError.UnsupportedConstruct;
+                try w.print("if (__m{d} == {s}.", .{ lbl, ename });
+                try w.ident(ast.strings.slice(pat.variant));
+                try w.print(") break :blk{d} ", .{lbl});
+                try emitExpr(w, ast, ctx, arm.body);
+                try w.write("; ");
+            },
             .wildcard => {
                 has_catch_all = true;
                 try w.print("break :blk{d} ", .{lbl});
@@ -1682,6 +1730,15 @@ fn emitMatchAsStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) 
                 const lit: NodeId = @bitCast(arm.pattern_payload);
                 try w.print("if (__ms{d} == ", .{lbl});
                 try emitExpr(w, ast, ctx, lit);
+                try w.write(") ");
+                try emitArmBodyAsStmts(w, ast, ctx, arm.body, lbl, null);
+                chained = true;
+            },
+            .enum_variant => {
+                const pat = ast.enum_pattern_payloads.items[arm.pattern_payload];
+                const ename = enumPatternTypeName(ast, ctx, pat, m.scrutinee) orelse return CodegenError.UnsupportedConstruct;
+                try w.print("if (__ms{d} == {s}.", .{ lbl, ename });
+                try w.ident(ast.strings.slice(pat.variant));
                 try w.write(") ");
                 try emitArmBodyAsStmts(w, ast, ctx, arm.body, lbl, null);
                 chained = true;
@@ -1884,6 +1941,42 @@ fn inferZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId, annotation: 
     return inferExprZigType(ast, ctx, expr);
 }
 
+/// `true` if `name` is a declared `enum` (M0.8 E2 block 3 tranche B).
+fn isEnumName(ast: *const AstArena, name: StringId) bool {
+    var i: usize = 0;
+    while (i < ast.items.len) : (i += 1) {
+        if (ast.items.items(.kind)[i] != .enum_decl) continue;
+        if (ast.enum_decls.items[ast.items.items(.data)[i]].name == name) return true;
+    }
+    return false;
+}
+
+/// The enum type name if `expr` is an enum value `EnumName.variant` — a `.path`
+/// receiver naming a declared `enum` + a variant field (M0.8 E2 block 3 tranche
+/// B). `null` otherwise.
+fn enumValueName(ast: *const AstArena, expr: NodeId) ?[]const u8 {
+    if (ast.exprKind(expr) != .field_access) return null;
+    const fa = ast.field_accesses.items[ast.exprData(expr)];
+    if (ast.exprKind(fa.receiver) != .path) return null;
+    const path_name = ast.exprData(fa.receiver);
+    if (!isEnumName(ast, path_name)) return null;
+    return ast.strings.slice(path_name);
+}
+
+/// The enum type name an `.enum_variant` match pattern compares against (M0.8
+/// E2 block 3 tranche B). Qualified `Type.v` uses its explicit type; shorthand
+/// `.v` infers the enum from the scrutinee. Returns `null` when the shorthand's
+/// scrutinee type is not a resolvable enum, so the caller fails loud rather than
+/// emit `i64.v`.
+fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPatternPayload, scrutinee: NodeId) ?[]const u8 {
+    if (pat.type_name != 0) return ast.strings.slice(pat.type_name);
+    const inferred = inferExprZigType(ast, ctx, scrutinee);
+    if (ast.strings.find(inferred)) |sid| {
+        if (isEnumName(ast, sid)) return inferred;
+    }
+    return null;
+}
+
 fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const u8 {
     const kind = ast.exprKind(expr);
     const data = ast.exprData(expr);
@@ -1913,6 +2006,9 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
             };
         },
         .field_access => blk: {
+            // Enum value `EnumName.variant` → the enum type name (M0.8 E2 block
+            // 3 tranche B), so a `let d = Difficulty.hard` binds at that type.
+            if (enumValueName(ast, expr)) |ename| break :blk ename;
             const fa = ast.field_accesses.items[data];
             // Resolve the receiver to a component name, then look up the
             // field's declared type in the AST.

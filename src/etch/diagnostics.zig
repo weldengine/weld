@@ -32,6 +32,7 @@ pub const DiagnosticCode = enum {
     // ── Resolver — symbols / paths (E0100-E0199) ──
     duplicate_symbol, // S3 — E0101 DuplicateSymbol
     undefined_symbol, // S3 — E0102 UndefinedSymbol
+    enum_variant_not_found, // M0.8 — E0105 EnumVariantNotFound
 
     // ── Type errors (E0200-E0299) ──
     type_mismatch, // S3 — E0200 TypeMismatch
@@ -58,6 +59,7 @@ pub const DiagnosticCode = enum {
             .parse_error => "E0001",
             .duplicate_symbol => "E0101",
             .undefined_symbol => "E0102",
+            .enum_variant_not_found => "E0105",
             .type_mismatch => "E0200",
             .resource_expected_component_given => "E0301",
             .component_expected_resource_given => "E0302",
@@ -76,6 +78,7 @@ pub const DiagnosticCode = enum {
             .parse_error => "ParseError",
             .duplicate_symbol => "DuplicateSymbol",
             .undefined_symbol => "UndefinedSymbol",
+            .enum_variant_not_found => "EnumVariantNotFound",
             .type_mismatch => "TypeMismatch",
             .resource_expected_component_given => "ResourceExpectedComponentGiven",
             .component_expected_resource_given => "ComponentExpectedResourceGiven",

@@ -336,7 +336,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum => return,
                 else => _ = try self.advance(),
             }
         }
@@ -360,6 +360,7 @@ pub const Parser = struct {
             .kw_fn => try self.parseFnDecl(annotations, false),
             .kw_struct => try self.parseStructDecl(annotations),
             .kw_impl => try self.parseImplDecl(annotations),
+            .kw_enum => try self.parseEnumDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2): the only top-level `async` construct in
                 // E2. `async rule` interpretation/codegen is E3 — reject it here
@@ -371,7 +372,7 @@ pub const Parser = struct {
                 try self.parseFnDeclFrom(annotations, true, async_span);
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -861,6 +862,82 @@ pub const Parser = struct {
             .name = name_id,
             .fields_start = fields_start,
             .fields_len = fields_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse `enum TYPE_IDENT "{" enum_variant {"," enum_variant} [","] "}"`
+    /// (M0.8 E2 block 3 tranche B, `etch-grammar.md` §5.8). C-like variants
+    /// (`easy`) are the supported end-to-end form; struct-like
+    /// (`Physical { amount: float }`) and tuple-like (`ok(T)`) variants are
+    /// parsed so the grammar is accepted, with their data recorded for a
+    /// fail-loud downstream (construction / destructuring are deferred).
+    /// Generics (`<...>`) are block 4 and rejected here, as for `struct`.
+    fn parseEnumDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'enum'
+        const name_tok = try self.expect(.type_ident, "expected enum name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        if (self.peek() == .lt) {
+            return self.parseErr(self.peekSpan(), "generic enums are not supported yet (generics land in E2 block 4)");
+        }
+        _ = try self.expect(.lbrace, "expected '{' to start enum body");
+        const variants_start: u32 = @intCast(self.arena.enum_variants.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const variant_tok = try self.expect(.ident, "expected enum variant name (identifier)");
+            const variant_name = try self.internSlice(variant_tok.span);
+            var shape: ast_mod.EnumVariantShape = .c_like;
+            var data_start: u32 = 0;
+            var data_len: u32 = 0;
+            switch (self.peek()) {
+                .lbrace => {
+                    // Struct-like variant `Name { annotated_field, ... }`.
+                    _ = try self.advance(); // '{'
+                    shape = .struct_like;
+                    data_start = @intCast(self.arena.fields.items.len);
+                    while (self.peek() != .rbrace and self.peek() != .eof) {
+                        try self.surfaceTokenErrors();
+                        const field_annotations = try self.parseAnnotations();
+                        try self.parseField(field_annotations);
+                        _ = try self.match(.comma);
+                    }
+                    _ = try self.expect(.rbrace, "expected '}' to close struct-like enum variant");
+                    data_len = @as(u32, @intCast(self.arena.fields.items.len)) - data_start;
+                },
+                .lparen => {
+                    // Tuple-like variant `Name ( type, ... )`. Types are stored
+                    // as a run of type-`NodeId`s in `arena.extra`.
+                    _ = try self.advance(); // '('
+                    shape = .tuple_like;
+                    data_start = @intCast(self.arena.extra.items.len);
+                    if (self.peek() != .rparen) {
+                        while (true) {
+                            const t = try self.parseType();
+                            try self.arena.extra.append(self.gpa, t.raw());
+                            if (!try self.match(.comma)) break;
+                        }
+                    }
+                    _ = try self.expect(.rparen, "expected ')' to close tuple-like enum variant");
+                    data_len = @as(u32, @intCast(self.arena.extra.items.len)) - data_start;
+                },
+                else => {},
+            }
+            try self.arena.enum_variants.append(self.gpa, .{
+                .name = variant_name,
+                .shape = shape,
+                .data_start = data_start,
+                .data_len = data_len,
+            });
+            if (!try self.match(.comma)) break;
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close enum body");
+        const variants_len: u32 = @as(u32, @intCast(self.arena.enum_variants.items.len)) - variants_start;
+        _ = try self.arena.addEnumDecl(self.gpa, .{
+            .name = name_id,
+            .variants_start = variants_start,
+            .variants_len = variants_len,
             .annotations_extra = annotations.start,
             .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
@@ -1759,7 +1836,35 @@ pub const Parser = struct {
                 const lit = try self.parseUnary();
                 return .{ .kind = .literal, .payload = lit.raw() };
             },
-            else => return self.parseErrFmt(self.peekSpan(), "unsupported match pattern (E1 supports '_', literals, and bindings), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            .dot => {
+                // Enum-variant shorthand pattern `.variant` (M0.8 E2 block 3
+                // tranche B, `etch-grammar.md` §3.2 l.510). Type-driven from the
+                // scrutinee enum at resolve time (`type_name = 0`).
+                _ = try self.advance(); // '.'
+                const variant_tok = try self.expect(.ident, "expected enum variant name after '.'");
+                const variant = try self.internSlice(variant_tok.span);
+                const idx: u32 = @intCast(self.arena.enum_pattern_payloads.items.len);
+                try self.arena.enum_pattern_payloads.append(self.gpa, .{ .type_name = 0, .variant = variant });
+                return .{ .kind = .enum_variant, .payload = idx };
+            },
+            .type_ident => {
+                // Qualified enum-variant pattern `Difficulty.easy` (M0.8 E2 block
+                // 3 tranche B, `etch-grammar.md` §3.2 l.511). A `TYPE_IDENT "{"`
+                // struct-destructure pattern (l.512) and a bare `TYPE_IDENT` are
+                // the post-Phase-1 advanced pattern set — rejected with a pointer.
+                const type_tok = try self.advance();
+                const type_name = try self.internSlice(type_tok.span);
+                if (self.peek() != .dot) {
+                    return self.parseErrFmt(self.peekSpan(), "struct-destructuring and bare type patterns are deferred (post-Phase-1 advanced patterns); write an enum-variant pattern 'Type.variant'", .{});
+                }
+                _ = try self.advance(); // '.'
+                const variant_tok = try self.expect(.ident, "expected enum variant name after 'Type.'");
+                const variant = try self.internSlice(variant_tok.span);
+                const idx: u32 = @intCast(self.arena.enum_pattern_payloads.items.len);
+                try self.arena.enum_pattern_payloads.append(self.gpa, .{ .type_name = type_name, .variant = variant });
+                return .{ .kind = .enum_variant, .payload = idx };
+            },
+            else => return self.parseErrFmt(self.peekSpan(), "unsupported match pattern (supported: '_', literals, bindings, enum variants '.v' / 'Type.v'), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -2681,6 +2786,87 @@ test "parser rejects trait impl in tranche A and generic struct (M0.8 E2 block 3
     {
         var result = try parse(gpa,
             \\struct Box<T> { value: int = 0 }
+        );
+        defer result.deinit(gpa);
+        try std.testing.expect(result.diagnostics.len > 0);
+    }
+}
+
+test "parser builds enum decl + enum-variant match patterns (M0.8 E2 block 3 tranche B)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\enum Difficulty { easy, normal, hard }
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let d = Difficulty.hard
+        \\  let s = match d {
+        \\    Difficulty.easy => 1,
+        \\    .normal => 2,
+        \\    Difficulty.hard => 3,
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.enum_decls.items.len);
+    const ed = result.ast.enum_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 3), ed.variants_len);
+    try std.testing.expectEqual(ast_mod.EnumVariantShape.c_like, result.ast.enum_variants.items[ed.variants_start].shape);
+    // Three enum-variant patterns: two qualified (`Difficulty.easy/hard`), one
+    // shorthand (`.normal`). The shorthand stores `type_name = 0`.
+    var enum_pats: usize = 0;
+    for (result.ast.match_arms.items) |arm| {
+        if (arm.pattern_kind == .enum_variant) enum_pats += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), enum_pats);
+    try std.testing.expectEqual(@as(usize, 3), result.ast.enum_pattern_payloads.items.len);
+    // The `.normal` shorthand payload carries no explicit type name.
+    var shorthand: usize = 0;
+    for (result.ast.enum_pattern_payloads.items) |p| {
+        if (p.type_name == 0) shorthand += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), shorthand);
+}
+
+test "parser recovers and a valid enum after a broken construct survives (M0.8 E2 block 3 tranche B lockstep)" {
+    const gpa = std.testing.allocator;
+    // The lockstep stop-set now lists `kw_enum`: a broken leading construct
+    // resyncs at the `enum` that follows, which lands in the AST.
+    var result = try parse(gpa,
+        \\@@@bad
+        \\enum Color { red, green, blue }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.enum_decls.items.len);
+}
+
+test "parser parses data-carrying enum variants but rejects generic enums (M0.8 E2 block 3 tranche B)" {
+    const gpa = std.testing.allocator;
+    // Struct-like + tuple-like variant shapes parse (construction / patterns are
+    // deferred; the grammar is accepted). Variant names are `IDENT` per
+    // `etch-grammar.md` §5.8 (`enum_variant = IDENT [...]` for all three shapes).
+    {
+        var result = try parse(gpa,
+            \\enum Shape { circle { r: float = 0.0 }, pair(int, int), empty }
+        );
+        defer result.deinit(gpa);
+        if (result.diagnostics.len > 0) {
+            std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+            try std.testing.expect(false);
+        }
+        const ed = result.ast.enum_decls.items[0];
+        try std.testing.expectEqual(@as(u32, 3), ed.variants_len);
+        try std.testing.expectEqual(ast_mod.EnumVariantShape.struct_like, result.ast.enum_variants.items[ed.variants_start].shape);
+        try std.testing.expectEqual(ast_mod.EnumVariantShape.tuple_like, result.ast.enum_variants.items[ed.variants_start + 1].shape);
+        try std.testing.expectEqual(ast_mod.EnumVariantShape.c_like, result.ast.enum_variants.items[ed.variants_start + 2].shape);
+    }
+    // Generic enum → block 4.
+    {
+        var result = try parse(gpa,
+            \\enum Opt<T> { some_, none_ }
         );
         defer result.deinit(gpa);
         try std.testing.expect(result.diagnostics.len > 0);
