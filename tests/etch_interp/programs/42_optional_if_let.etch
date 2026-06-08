@@ -1,0 +1,17 @@
+// M0.8 E2 block 5: `Optional<T>` (`T?`) + `if let`. `some(41)` is an optional
+// scalar; `if let x = present { … } else { … }` unwraps it, binding `x` to the
+// payload. Both backends must agree byte-exact: the interpreter stores the
+// optional in its per-body optional store and branches on some/none; the cooked
+// Zig emits `const present: ?i64 = @as(?i64, 41)` and `if (present) |x| … else
+// …`. The optional is an intermediate local; the diff is on the int field
+// `out`. out = if let x = some(41) { x + 1 } else { 0 } = 42.
+component Acc {
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has Acc
+{
+  let present: int? = some(41)
+  entity.get_mut(Acc).out = if let x = present { x + 1 } else { 0 }
+}

@@ -58,4 +58,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p39_struct_method", .etch_path = "tests/etch_interp/programs/39_struct_method.etch" },
     .{ .name = "p40_enum_match", .etch_path = "tests/etch_interp/programs/40_enum_match.etch" },
     .{ .name = "p41_trait_method", .etch_path = "tests/etch_interp/programs/41_trait_method.etch" },
+    .{ .name = "p42_optional_if_let", .etch_path = "tests/etch_interp/programs/42_optional_if_let.etch" },
 };

@@ -434,3 +434,27 @@ rule pick(entity: Entity)
   entity.get_mut(Counter).value = if rng.contains(5) { 1 } else { 0 }
 }
 ```
+
+## Optionals — T? / none / some / if let / while let (E2 block 5)
+
+```etch
+fn first_positive(a: int, b: int) -> int? {
+  if a > 0 { some(a) } else if b > 0 { some(b) } else { none }
+}
+
+rule pick(entity: Entity)
+  when entity has Counter
+{
+  let chosen: int? = first_positive(0, 9)
+  let mut total = 0
+  if let x = chosen {
+    total += x
+  } else {
+    total = -1
+  }
+  while let y = (if total < 3 { some(total) } else { none }) {
+    total += 1
+  }
+  entity.get_mut(Counter).value = total
+}
+```

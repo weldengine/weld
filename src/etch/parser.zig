@@ -585,6 +585,15 @@ pub const Parser = struct {
                 .byte_end = closing.span.byte_end,
             });
         }
+        // Optional suffix `T?` (M0.8 E2 block 5, `etch-grammar.md` §267).
+        if (self.peek() == .question) {
+            const q = try self.advance();
+            const base_span = self.arena.typeNodeSpan(base);
+            base = try self.arena.addOptionalType(self.gpa, base, .{
+                .byte_start = base_span.byte_start,
+                .byte_end = q.span.byte_end,
+            });
+        }
         return base;
     }
 
@@ -1509,6 +1518,16 @@ pub const Parser = struct {
     /// `else_branch` (a nested `if_expr`); a final `else { }` is a `block_expr`.
     fn parseIf(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'if'
+        // `if let <name> = <optional> { … } [else { … }]` (M0.8 E2 block 5,
+        // `etch-grammar.md` §501) — unwraps an optional, binding `<name>` to its
+        // payload in the then-block.
+        var let_binding: StringId = 0;
+        if (self.peek() == .kw_let) {
+            _ = try self.advance(); // 'let'
+            const target = try self.expect(.ident, "expected binding name after 'if let'");
+            let_binding = try self.internSlice(target.span);
+            _ = try self.expect(.eq, "expected '=' in 'if let' binding");
+        }
         const cond = try self.parseExprNoStruct(0);
         const then_block = try self.parseBlockExpr();
         var else_branch: NodeId = NodeId.none;
@@ -1520,7 +1539,7 @@ pub const Parser = struct {
                 try self.parseBlockExpr();
         }
         const end = if (else_branch.isNone()) self.arena.exprSpan(then_block) else self.arena.exprSpan(else_branch);
-        return try self.arena.addIfExpr(self.gpa, cond, then_block, else_branch, .{
+        return try self.arena.addIfExpr(self.gpa, cond, then_block, else_branch, let_binding, .{
             .byte_start = kw_span.byte_start,
             .byte_end = end.byte_end,
         });
@@ -1560,6 +1579,16 @@ pub const Parser = struct {
     /// `while let` Optional-destructuring form lands with the Optional tranche.
     fn parseWhileStmt(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'while'
+        // `while let <name> = <optional> { … }` (M0.8 E2 block 5,
+        // `etch-grammar.md` §623) — re-evaluates the optional each iteration,
+        // binding `<name>` to its payload in the body; stops on `none`.
+        var let_binding: StringId = 0;
+        if (self.peek() == .kw_let) {
+            _ = try self.advance(); // 'let'
+            const target = try self.expect(.ident, "expected binding name after 'while let'");
+            let_binding = try self.internSlice(target.span);
+            _ = try self.expect(.eq, "expected '=' in 'while let' binding");
+        }
         const cond = try self.parseExprNoStruct(0);
         _ = try self.expect(.lbrace, "expected '{' to start the while body");
         const body = try self.parseStmtRun();
@@ -1568,6 +1597,7 @@ pub const Parser = struct {
             .cond = cond,
             .body_start = body.start,
             .body_len = body.len,
+            .let_binding = let_binding,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
@@ -2305,6 +2335,26 @@ pub const Parser = struct {
                 return try self.arena.addExpr(self.gpa, .string_lit, id, tok.span);
             },
             .ident => {
+                // `none` / `some(x)` optional literals (M0.8 E2 block 5,
+                // `etch-grammar.md` §480-481). `none` / `some` are not keywords
+                // (they appear in identifier positions in annotations) — detected
+                // by lexeme. `some(` opens a some-literal; a bare `some` / `none`
+                // identifier elsewhere stays a plain ident (`none` → `none_lit`).
+                const lexeme = self.sliceOf(self.current.span);
+                if (std.mem.eql(u8, lexeme, "none")) {
+                    const tok = try self.advance();
+                    return try self.arena.addExpr(self.gpa, .none_lit, 0, tok.span);
+                }
+                if (std.mem.eql(u8, lexeme, "some") and self.peekNext() == .lparen) {
+                    const some_tok = try self.advance(); // 'some'
+                    _ = try self.advance(); // '('
+                    const inner = try self.parseExpr(0);
+                    const closing = try self.expect(.rparen, "expected ')' to close some(...)");
+                    return try self.arena.addExpr(self.gpa, .some_lit, inner.raw(), .{
+                        .byte_start = some_tok.span.byte_start,
+                        .byte_end = closing.span.byte_end,
+                    });
+                }
                 const tok = try self.advance();
                 const id = try self.internSlice(tok.span);
                 return try self.arena.addExpr(self.gpa, .ident, id, tok.span);
@@ -3098,6 +3148,46 @@ test "parser builds trait decl with abstract + default members + survives lockst
         try std.testing.expect(result.diagnostics.len > 0);
         try std.testing.expectEqual(@as(usize, 1), result.ast.trait_decls.items.len);
     }
+}
+
+test "parser builds optional type + none/some + if let / while let (M0.8 E2 block 5)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r(entity: Entity) when entity has Acc {
+        \\  let a: int? = some(7)
+        \\  let b: int? = none
+        \\  let mut n = 0
+        \\  entity.get_mut(Acc).out = if let x = a { x } else { 0 }
+        \\  while let y = b { n += y }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    // Two optional type nodes (`int?` ×2), a some_lit, a none_lit, an if-let, a
+    // while-let.
+    var optional_types: usize = 0;
+    for (result.ast.type_nodes.items(.kind)) |k| {
+        if (k == .optional) optional_types += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), optional_types);
+    var some_lits: usize = 0;
+    var none_lits: usize = 0;
+    for (result.ast.exprs.items(.kind)) |k| {
+        if (k == .some_lit) some_lits += 1;
+        if (k == .none_lit) none_lits += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), some_lits);
+    try std.testing.expectEqual(@as(usize, 1), none_lits);
+    // The if-let carries a binding; the while-let too.
+    var if_let_bindings: usize = 0;
+    for (result.ast.if_exprs.items) |ife| {
+        if (ife.let_binding != 0) if_let_bindings += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), if_let_bindings);
+    try std.testing.expect(result.ast.while_stmts.items[0].let_binding != 0);
 }
 
 test "parser builds generic params + bounds + where + generic type (M0.8 E2 block 4)" {

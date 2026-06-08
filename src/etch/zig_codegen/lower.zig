@@ -1259,15 +1259,23 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
         },
         .while_stmt => {
             // `while cond { body }` → Zig `while (<cond>) { <body> }` (M0.8
-            // control flow). The body is a statement run; `break` / `continue`
-            // inside lower through their own statement cases.
+            // control flow). `while let x = opt { body }` → `while (opt) |x| {
+            // body }` (M0.8 E2 block 5). The body is a statement run; `break` /
+            // `continue` inside lower through their own statement cases.
             const wh = ast.while_stmts.items[data];
             try w.writeIndent();
             try w.write("while (");
             try emitExpr(w, ast, ctx, wh.cond);
-            try w.write(") {\n");
-            w.indentBy(1);
+            try w.write(") ");
             const saved = ctx.records.items.len;
+            if (wh.let_binding != 0) {
+                try w.write("|");
+                try w.ident(ast.strings.slice(wh.let_binding));
+                try w.write("| ");
+                try ctx.records.append(w.gpa, .{ .key = .{ .name = wh.let_binding }, .info = .{ .kind = .value, .zig_type = "", .is_mut = false } });
+            }
+            try w.write("{\n");
+            w.indentBy(1);
             var s: u32 = 0;
             while (s < wh.body_len) : (s += 1) {
                 try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[wh.body_start + s]));
@@ -1392,6 +1400,19 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // strings (they would only reach the codegen via a debug print
             // call that S3 doesn't support — flagged unsupported).
             return CodegenError.UnsupportedConstruct;
+        },
+        // `none` / `some(x)` optional literals (M0.8 E2 block 5). `none` → Zig
+        // `null` (its type comes from the binding annotation / context);
+        // `some(x)` self-types as `@as(?<payload>, x)` for a scalar payload
+        // (a non-scalar payload is deferred → fail loud).
+        .none_lit => try w.write("null"),
+        .some_lit => {
+            const inner: NodeId = @bitCast(data);
+            const payload_zig = inferExprZigType(ast, ctx, inner);
+            const opt_zig = optionalOf(payload_zig) orelse return CodegenError.UnsupportedConstruct;
+            try w.print("@as({s}, ", .{opt_zig});
+            try emitExpr(w, ast, ctx, inner);
+            try w.write(")");
         },
         .ident => {
             const name_id: StringId = data;
@@ -1595,7 +1616,18 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             try w.write("if (");
             try emitExpr(w, ast, ctx, ife.cond);
             try w.write(") ");
+            // `if let x = opt { … } else { … }` in value position → Zig
+            // `if (opt) |x| <then> else <else>` (M0.8 E2 block 5). Zig infers
+            // `x`'s type from the optional payload.
+            const saved = ctx.records.items.len;
+            if (ife.let_binding != 0) {
+                try w.write("|");
+                try w.ident(ast.strings.slice(ife.let_binding));
+                try w.write("| ");
+                try ctx.records.append(w.gpa, .{ .key = .{ .name = ife.let_binding }, .info = .{ .kind = .value, .zig_type = "", .is_mut = false } });
+            }
             try emitExpr(w, ast, ctx, ife.then_block);
+            ctx.records.items.len = saved;
             if (!ife.else_branch.isNone()) {
                 try w.write(" else ");
                 try emitExpr(w, ast, ctx, ife.else_branch);
@@ -1915,7 +1947,16 @@ fn emitIfChain(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Code
     try w.write("if (");
     try emitExpr(w, ast, ctx, ife.cond);
     try w.write(") ");
+    // `if let x = opt { … }` → `if (opt) |x| { … }` (M0.8 E2 block 5).
+    const saved = ctx.records.items.len;
+    if (ife.let_binding != 0) {
+        try w.write("|");
+        try w.ident(ast.strings.slice(ife.let_binding));
+        try w.write("| ");
+        try ctx.records.append(w.gpa, .{ .key = .{ .name = ife.let_binding }, .info = .{ .kind = .value, .zig_type = "", .is_mut = false } });
+    }
     try emitBraceBlock(w, ast, ctx, ast.exprData(ife.then_block));
+    ctx.records.items.len = saved;
     if (ife.else_branch.isNone()) return;
     try w.write(" else ");
     if (ast.exprKind(ife.else_branch) == .if_expr) {
@@ -1976,7 +2017,38 @@ fn inferZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId, annotation: 
         const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
         if (type_map.mapBuiltin(tname)) |z| return z;
     }
+    // `T?` optional annotation → `?<payload>` (M0.8 E2 block 5): used so `let o:
+    // int? = none` emits `const o: ?i64 = null;`. A `some(...)` RHS self-types
+    // via `@as`, so the annotation is redundant there but harmless.
+    if (!annotation.isNone() and ast.typeNodeKind(annotation) == .optional) {
+        if (optionalAnnotationZig(ast, annotation)) |z| return z;
+    }
     return inferExprZigType(ast, ctx, expr);
+}
+
+/// The Zig type string for a `T?` optional type-node with a builtin-scalar
+/// payload (M0.8 E2 block 5): `?i64` / `?f64` / `?bool` / … A non-scalar
+/// payload (deferred) yields `null`.
+fn optionalAnnotationZig(ast: *const AstArena, type_node: NodeId) ?[]const u8 {
+    const payload_node: NodeId = @bitCast(ast.typeNodeData(type_node));
+    if (ast.typeNodeKind(payload_node) != .named) return null;
+    const tnode = ast.named_types.items[ast.typeNodeData(payload_node)];
+    const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+    return optionalOf(type_map.mapBuiltin(tname) orelse return null);
+}
+
+/// Map a builtin Zig scalar type to its `?`-prefixed optional literal (M0.8 E2
+/// block 5). Returns `null` for any non-scalar payload.
+fn optionalOf(zig_scalar: []const u8) ?[]const u8 {
+    const pairs = .{
+        .{ "i64", "?i64" },       .{ "f64", "?f64" }, .{ "bool", "?bool" },
+        .{ "i32", "?i32" },       .{ "u32", "?u32" }, .{ "f32", "?f32" },
+        .{ "Entity", "?Entity" },
+    };
+    inline for (pairs) |p| {
+        if (std.mem.eql(u8, zig_scalar, p[0])) return p[1];
+    }
+    return null;
 }
 
 /// `true` if `name` is a declared `enum` (M0.8 E2 block 3 tranche B).
@@ -2022,6 +2094,10 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         .int_lit => "i64",
         .float_lit => "f64",
         .bool_lit => "bool",
+        // Optionals (M0.8 E2 block 5): `some(x)` self-types via `@as` in
+        // `emitExpr`, so the binding needs no annotation ("" → Zig infers);
+        // `none` relies on the binding annotation (handled in `inferZigType`).
+        .some_lit, .none_lit => "",
         .ident => blk: {
             const sid: StringId = data;
             if (ctx.lookup(sid)) |local| break :blk if (local.zig_type.len > 0) local.zig_type else "i64";

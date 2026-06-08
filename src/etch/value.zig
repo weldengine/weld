@@ -81,6 +81,11 @@ pub const Value = union(enum) {
     /// `Interpreter.structs`. Same lifetime rules as `array_ref` (reset at the
     /// rule-body boundary).
     struct_ref: u32,
+    /// Handle into the interpreter's per-rule-body optional store (M0.8 E2 block
+    /// 5). An `Optional<T>` value resolves against `Interpreter.optionals` to a
+    /// `?Value` (`null` = `none`, else the `some` payload). Same lifetime rules
+    /// as `array_ref` (reset at the rule-body boundary).
+    optional: u32,
     /// A C-like enum value (M0.8 E2 block 3 tranche B). Carries the enum type
     /// name (interned `StringId`) and the variant's declaration-order index.
     /// Value-typed: compared by `(type_name, variant)` equality.
@@ -123,6 +128,7 @@ pub const Value = union(enum) {
             .map_ref => false,
             .closure => false,
             .struct_ref => false,
+            .optional => false, // optional equality is not exercised in M0.8 (unwrap via if/while let)
             .enum_value => |a| a.type_name == other.enum_value.type_name and a.variant == other.enum_value.variant,
             .unit => true,
         };

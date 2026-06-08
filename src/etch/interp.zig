@@ -290,6 +290,10 @@ pub const Interpreter = struct {
     /// Store backing struct values created in rule / fn / method bodies (M0.8
     /// E2 block 3).
     structs: StructStore = .{},
+    /// Store backing optional values created in rule bodies (M0.8 E2 block 5).
+    /// Each entry is `?Value` — `null` = `none`, else the `some` payload.
+    /// Reset at the rule-body boundary (rule-arena semantics).
+    optionals: std.ArrayListUnmanaged(?Value) = .empty,
     /// Active control-flow signal (M0.8 loop/break). Set by `break`/`continue`,
     /// consumed by the enclosing loop.
     control: Control = .none,
@@ -315,6 +319,7 @@ pub const Interpreter = struct {
         self.collections.deinit(self.gpa);
         self.closures.deinit(self.gpa);
         self.structs.deinit(self.gpa);
+        self.optionals.deinit(self.gpa);
         self.fns.deinit(self.gpa);
         self.methods.deinit(self.gpa);
         self.struct_decls.deinit(self.gpa);
@@ -553,6 +558,7 @@ pub const Interpreter = struct {
         defer self.collections.reset(self.gpa);
         defer self.closures.reset(self.gpa);
         defer self.structs.reset(self.gpa);
+        defer self.optionals.clearRetainingCapacity();
         try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
         self.control = .none; // defensive: each body starts with no pending signal
         self.thrown = false;
@@ -723,11 +729,21 @@ pub const Interpreter = struct {
                 // condition each iteration; run the body run; an unlabeled
                 // `break`/`continue` is consumed via `handleLoopControl(0)`; a
                 // labeled signal for an outer loop, or a `throw`, propagates.
+                // `while let x = <optional> { body }` (M0.8 E2 block 5): the
+                // optional is re-evaluated each iteration; `some` binds `x` and
+                // runs the body, `none` stops the loop.
                 const wh = self.ast.while_stmts.items[data];
                 while_loop: while (true) {
-                    const cond = try self.evalExpr(world, locals, wh.cond);
-                    if (cond != .bool_) return error.RuntimeFailure;
-                    if (!cond.bool_) break :while_loop;
+                    if (wh.let_binding != 0) {
+                        const opt = try self.evalExpr(world, locals, wh.cond);
+                        if (opt != .optional) return error.RuntimeFailure;
+                        const payload = self.optionals.items[opt.optional] orelse break :while_loop;
+                        try locals.put(self.gpa, wh.let_binding, payload, false);
+                    } else {
+                        const cond = try self.evalExpr(world, locals, wh.cond);
+                        if (cond != .bool_) return error.RuntimeFailure;
+                        if (!cond.bool_) break :while_loop;
+                    }
                     try self.execStmtRun(world, locals, wh.body_start, wh.body_len);
                     if (self.thrown or self.returning) return; // throw / return unwinds out of the loop
                     switch (self.handleLoopControl(0)) {
@@ -936,6 +952,20 @@ pub const Interpreter = struct {
                 return Value{ .bool_ = std.mem.eql(u8, text, "true") };
             },
             .string_lit => return Value{ .string_id = data },
+            // `none` / `some(x)` optional literals (M0.8 E2 block 5) →
+            // materialise an entry in the optional store, return its handle.
+            .none_lit => {
+                const handle: u32 = @intCast(self.optionals.items.len);
+                try self.optionals.append(self.gpa, null);
+                return Value{ .optional = handle };
+            },
+            .some_lit => {
+                const inner: NodeId = @bitCast(data);
+                const payload = try self.evalExpr(world, locals, inner);
+                const handle: u32 = @intCast(self.optionals.items.len);
+                try self.optionals.append(self.gpa, payload);
+                return Value{ .optional = handle };
+            },
             .ident => {
                 const name_id: StringId = data;
                 if (locals.get(name_id)) |v| return v;
@@ -1317,12 +1347,25 @@ pub const Interpreter = struct {
                 return try self.evalExpr(world, locals, blk.value);
             },
             .if_expr => {
+                const ife = self.ast.if_exprs.items[data];
+                // `if let x = <optional> { then } [else { else }]` (M0.8 E2 block
+                // 5): unwrap the optional — `some` binds `x` to the payload and
+                // runs the then-block; `none` runs the else (or yields unit).
+                if (ife.let_binding != 0) {
+                    const opt = try self.evalExpr(world, locals, ife.cond);
+                    if (opt != .optional) return error.RuntimeFailure;
+                    if (self.optionals.items[opt.optional]) |payload| {
+                        try locals.put(self.gpa, ife.let_binding, payload, false);
+                        return try self.evalExpr(world, locals, ife.then_block);
+                    }
+                    if (ife.else_branch.isNone()) return Value{ .unit = {} };
+                    return try self.evalExpr(world, locals, ife.else_branch);
+                }
                 // `if cond { then } [else if ...] [else { else }]` (M0.8 control
                 // flow). Evaluate the condition; run the matching branch (a
                 // block expression, or a nested `if` for `else if`). An `if`
                 // with no `else` and a false condition yields `unit`. Branch
                 // evaluation propagates any control / throw signal raised in it.
-                const ife = self.ast.if_exprs.items[data];
                 const cond = try self.evalExpr(world, locals, ife.cond);
                 if (cond != .bool_) return error.RuntimeFailure;
                 if (cond.bool_) return try self.evalExpr(world, locals, ife.then_block);
@@ -2347,6 +2390,48 @@ test "runProgram generic inherent impl (impl<T> Range<T>) resolves + interps (§
     var out: i64 = 0;
     @memcpy(std.mem.asBytes(&out), slot[0..8]);
     try std.testing.expectEqual(@as(i64, 1), out);
+}
+
+test "runProgram while let unwraps an optional each iteration (M0.8 E2 block 5)" {
+    const gpa = std.testing.allocator;
+    // `while let y = <optional>` re-evaluates the optional each iteration: a
+    // counter yields `some(n)` while n > 0, then `none` to stop. sum = 3+2+1 = 6.
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let mut n = 3
+        \\  let mut sum = 0
+        \\  while let y = (if n > 0 { some(n) } else { none }) {
+        \\    sum += y
+        \\    n -= 1
+        \\  }
+        \\  entity.get_mut(C).out = sum
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("C").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    _ = try interp.runFor(&world, 1);
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 6), out);
 }
 
 test "runProgram assert passes on true, reports a runtime error on false (M0.8 assert)" {

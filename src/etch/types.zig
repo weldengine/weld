@@ -112,6 +112,11 @@ pub const ResolvedType = union(enum) {
     /// parameter name. Opaque within a generic body (operations are permissive,
     /// like `unknown`); resolved to a concrete type by inference at the call site.
     generic: StringId,
+    /// `T?` optional of a builtin-scalar payload (M0.8 E2 block 5). Non-builtin
+    /// payloads (`struct?` / `enum?`) are deferred — they resolve to `.unknown`
+    /// (the optional-ness is not tracked; permissive). `if let` / `while let`
+    /// unwrap this to the payload builtin.
+    optional: BuiltinType,
     /// Type unknown / unresolved. Used as the fallback after a diagnostic
     /// has been emitted; subsequent checks treat `unknown` as wildcard to
     /// avoid cascade errors.
@@ -132,6 +137,7 @@ pub const ResolvedType = union(enum) {
             .struct_t => |id| id == b.struct_t,
             .enum_t => |id| id == b.enum_t,
             .generic => |id| id == b.generic,
+            .optional => |bt| bt == b.optional,
             .unknown => true,
         };
     }
@@ -724,6 +730,15 @@ pub const TypeChecker = struct {
                 if (elem != .builtin) return .unknown;
                 return .{ .set_t = elem.builtin };
             },
+            .optional => {
+                // `T?` (M0.8 E2 block 5). The payload type-node is stored as the
+                // type-node data. A builtin-scalar payload → `.optional(bt)`;
+                // a non-builtin payload (`struct?`/`enum?`) is deferred → `.unknown`.
+                const payload_node: NodeId = @bitCast(self.arena.typeNodeData(type_node));
+                const payload = self.namedTypeToResolved(payload_node);
+                if (payload != .builtin) return .unknown;
+                return .{ .optional = payload.builtin };
+            },
             else => return .unknown,
         }
     }
@@ -1141,18 +1156,22 @@ pub const TypeChecker = struct {
                 }
             },
             .while_stmt => {
-                // `while cond { body }` (M0.8 control flow) — the condition must
-                // be bool, then the body statements are checked with the rule's
-                // locals in scope.
+                // `while cond { body }` (M0.8 control flow) — bool condition.
+                // `while let x = <optional> { body }` (M0.8 E2 block 5) — `x`
+                // binds the optional's payload in the body scope each iteration.
                 const wh = self.arena.while_stmts.items[data];
                 const cond_t = self.synthExpr(wh.cond, ctx);
-                if (cond_t == .builtin and cond_t.builtin != .bool_) {
+                if (wh.let_binding != 0) {
+                    const payload = try self.optionalPayload(cond_t, self.arena.exprSpan(wh.cond), "while let");
+                    try ctx.locals.put(self.gpa, wh.let_binding, .{ .type_ = payload, .is_mut = false });
+                } else if (cond_t == .builtin and cond_t.builtin != .bool_) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(wh.cond), "while condition must be a bool expression", .{});
                 }
                 var i: u32 = 0;
                 while (i < wh.body_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[wh.body_start + i]));
                 }
+                if (wh.let_binding != 0) _ = ctx.locals.remove(wh.let_binding);
             },
             .break_stmt => {
                 // `break [label] [value]` (M0.8 loop/break). Type the value if
@@ -1221,6 +1240,17 @@ pub const TypeChecker = struct {
             .bool_lit => return .{ .builtin = .bool_ },
             .string_lit => return ResolvedType.unknown,
             .tag_path => return ResolvedType.unknown, // enum-variant shorthand; type unknown in S3
+            // `none` (M0.8 E2 block 5): an optional with an unknown payload —
+            // typed by the binding annotation / context (e.g. `let o: int? = none`).
+            .none_lit => return ResolvedType.unknown,
+            // `some(x)`: an optional of `x`'s type. Builtin-scalar payload →
+            // `.optional(bt)`; a non-builtin payload (`some(struct)`) is deferred.
+            .some_lit => {
+                const inner: NodeId = @bitCast(data);
+                const inner_t = try self.synthExprE(inner, ctx_opt);
+                if (inner_t == .builtin) return .{ .optional = inner_t.builtin };
+                return ResolvedType.unknown;
+            },
             .ident => {
                 const name_id: StringId = data;
                 if (ctx_opt) |ctx| {
@@ -1475,6 +1505,20 @@ pub const TypeChecker = struct {
     fn synthIf(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const ife = self.arena.if_exprs.items[data];
         const cond_t = try self.synthExprE(ife.cond, ctx_opt);
+        if (ife.let_binding != 0) {
+            // `if let x = <optional>` (M0.8 E2 block 5): the cond must be an
+            // optional; `x` binds its payload in the then-block scope.
+            const payload = try self.optionalPayload(cond_t, self.arena.exprSpan(ife.cond), "if let");
+            if (ctx_opt) |ctx| try ctx.locals.put(self.gpa, ife.let_binding, .{ .type_ = payload, .is_mut = false });
+            const then_t = try self.synthExprE(ife.then_block, ctx_opt);
+            if (ctx_opt) |ctx| _ = ctx.locals.remove(ife.let_binding);
+            if (ife.else_branch.isNone()) return ResolvedType.unknown;
+            const else_t = try self.synthExprE(ife.else_branch, ctx_opt);
+            if (then_t == .builtin and else_t == .builtin and !ResolvedType.eql(then_t, else_t)) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "if branches must yield the same type", .{});
+            }
+            return then_t;
+        }
         if (cond_t == .builtin and cond_t.builtin != .bool_) {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ife.cond), "if condition must be a bool expression", .{});
         }
@@ -1485,6 +1529,21 @@ pub const TypeChecker = struct {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "if branches must yield the same type", .{});
         }
         return then_t;
+    }
+
+    /// The payload type unwrapped by `if let` / `while let` (M0.8 E2 block 5).
+    /// `.optional(bt)` → the payload builtin; `.unknown` (e.g. a bare `none`,
+    /// or a deferred non-scalar optional) → `.unknown` (permissive). A
+    /// non-optional scrutinee is an error.
+    fn optionalPayload(self: *TypeChecker, cond_t: ResolvedType, span: SourceSpan, comptime form: []const u8) TypeError!ResolvedType {
+        return switch (cond_t) {
+            .optional => |bt| .{ .builtin = bt },
+            .unknown => ResolvedType.unknown,
+            else => blk: {
+                try self.emit(.type_mismatch, .error_, span, "'" ++ form ++ "' requires an optional (T?) value", .{});
+                break :blk ResolvedType.unknown;
+            },
+        };
     }
 
     /// Type a call expression (M0.8 closures). E1 only resolves calls whose
@@ -2142,7 +2201,7 @@ pub const TypeChecker = struct {
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on struct '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
-            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .unknown => return ResolvedType.unknown,
+            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .optional, .unknown => return ResolvedType.unknown,
         }
     }
 
@@ -2627,6 +2686,45 @@ test "conditional trait impl proof E0215 (M0.8 E2 block 3 tranche C §7.3)" {
     );
     defer proven.deinit(gpa);
     try expectNoCode(proven.diagnostics.items, .conditional_impl_condition_not_proven);
+}
+
+test "optional if let / while let binding + non-optional rejection (M0.8 E2 block 5)" {
+    const gpa = std.testing.allocator;
+
+    // `if let x = <int?>` binds `x` to the int payload; `x + 1` type-checks.
+    var ok = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let o: int? = some(41)
+        \\  entity.get_mut(C).out = if let x = o { x + 1 } else { 0 }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .type_mismatch);
+
+    // `if let` / `while let` on a non-optional scrutinee → E0200 (type mismatch).
+    var bad = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let n = 5
+        \\  if let x = n { entity.get_mut(C).out = x }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .type_mismatch);
+
+    // `while let` binds the payload in the body scope.
+    var wl = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity) when entity has C {
+        \\  let mut acc = 0
+        \\  let o: int? = some(3)
+        \\  while let y = o { acc += y  break }
+        \\  entity.get_mut(C).out = acc
+        \\}
+    );
+    defer wl.deinit(gpa);
+    try expectNoCode(wl.diagnostics.items, .type_mismatch);
 }
 
 test "generic fn inference + bounds (E0601/E0603/E0604, M0.8 E2 block 4)" {

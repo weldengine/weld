@@ -138,6 +138,10 @@ pub const Lexer = struct {
                     return .{ .kind = .dot, .span = .{ .byte_start = start, .byte_end = self.pos } };
                 },
                 '@' => return self.consumeOne(.at),
+                // `?` — the optional type suffix `T?` (M0.8 E2 block 5). The
+                // `?.` (optional chain) / `??` (null coalesce) operators are
+                // deferred, so a bare `?` is always a single `question` token.
+                '?' => return self.consumeOne(.question),
                 '"' => return self.lexString(start),
                 '0'...'9' => return self.lexNumber(start),
                 'a'...'z', 'A'...'Z', '_' => return self.lexIdent(start),

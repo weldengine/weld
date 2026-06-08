@@ -435,6 +435,10 @@ pub const WhileStmt = struct {
     cond: NodeId,
     body_start: u32,
     body_len: u32,
+    /// `while let <name> = <cond> { … }` (M0.8 E2 block 5): `cond` is an
+    /// optional-typed expression, `let_binding` the name bound to its payload in
+    /// the body each iteration. `0` for a plain `while cond`.
+    let_binding: StringId = 0,
 };
 
 const BinaryExpr = struct {
@@ -577,6 +581,10 @@ pub const IfExpr = struct {
     cond: NodeId,
     then_block: NodeId,
     else_branch: NodeId,
+    /// `if let <name> = <cond> { … } [else { … }]` (M0.8 E2 block 5): `cond` is
+    /// an optional-typed expression, `let_binding` the name bound to its payload
+    /// in the then-block. `0` for a plain `if cond`.
+    let_binding: StringId = 0,
 };
 
 /// `break [label] [value]` statement (M0.8 loop/break, `etch-grammar.md` §632).
@@ -1294,6 +1302,13 @@ pub const AstArena = struct {
         return try self.addTypeNode(gpa, .set_type, idx, span);
     }
 
+    /// `T?` optional type (M0.8 E2 block 5, `etch-grammar.md` §267
+    /// `optional_type = type "?"`). The payload type-node is stored directly as
+    /// the type-node `data` (no side slab).
+    pub fn addOptionalType(self: *AstArena, gpa: std.mem.Allocator, payload: NodeId, span: SourceSpan) !NodeId {
+        return try self.addTypeNode(gpa, .optional, payload.raw(), span);
+    }
+
     /// `Foo<T, U>` generic type in type position (M0.8 E2 block 4,
     /// `etch-grammar.md` §270). `args` is a slice of type-`NodeId`s, bulk-
     /// appended to `arena.extra` as a contiguous run.
@@ -1408,9 +1423,9 @@ pub const AstArena = struct {
         return try self.addExpr(gpa, .block_expr, idx, span);
     }
 
-    pub fn addIfExpr(self: *AstArena, gpa: std.mem.Allocator, cond: NodeId, then_block: NodeId, else_branch: NodeId, span: SourceSpan) !NodeId {
+    pub fn addIfExpr(self: *AstArena, gpa: std.mem.Allocator, cond: NodeId, then_block: NodeId, else_branch: NodeId, let_binding: StringId, span: SourceSpan) !NodeId {
         const idx: u32 = @intCast(self.if_exprs.items.len);
-        try self.if_exprs.append(gpa, .{ .cond = cond, .then_block = then_block, .else_branch = else_branch });
+        try self.if_exprs.append(gpa, .{ .cond = cond, .then_block = then_block, .else_branch = else_branch, .let_binding = let_binding });
         return try self.addExpr(gpa, .if_expr, idx, span);
     }
 
