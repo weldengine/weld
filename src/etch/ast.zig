@@ -340,6 +340,47 @@ pub const EventDecl = struct {
     annotations_len: u32,
 };
 
+/// Side-slab entry for a `tags { ... }` hierarchical declaration (M0.8 E3,
+/// `etch-grammar.md` §5.11 `tags_decl`). The hierarchy is stored flat and
+/// parent-linked across `arena.tag_namespaces` + `arena.tag_leaves`, appended
+/// in **pre-order** (the parser descends top-down). Pre-order append order is
+/// exactly the depth-first + declaration order `etch-validation-ecs.md` §5.2
+/// mandates for `bit_index` assignment, so a leaf's position in
+/// `arena.tag_leaves` is its canonical bit_index ordering before the
+/// cross-block merge performed by the global tag-table pass (`tags.zig`). A
+/// `tags_decl` item records the `(start, len)` runs this block contributed.
+pub const TagsDecl = struct {
+    ns_start: u32, // into `arena.tag_namespaces`
+    ns_len: u32,
+    leaf_start: u32, // into `arena.tag_leaves`
+    leaf_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
+/// A namespace node in a `tags { }` hierarchy (`tag_namespace`, M0.8 E3).
+/// Flat + parent-linked: `parent` indexes `arena.tag_namespaces` (the
+/// enclosing namespace) or `no_parent` for a top-level namespace. Recorded in
+/// pre-order (the parent is appended before its children).
+pub const TagNamespace = struct {
+    name: StringId,
+    parent: u32,
+    span: SourceSpan,
+
+    pub const no_parent: u32 = std.math.maxInt(u32);
+};
+
+/// A leaf (concrete tag) in a `tags { }` hierarchy (`tag_leaf`, M0.8 E3).
+/// `parent` indexes its enclosing namespace in `arena.tag_namespaces`. Leaves
+/// are appended in pre-order = depth-first declaration order, so their order
+/// in `arena.tag_leaves` mirrors the canonical `bit_index` ordering before the
+/// cross-block merge (`tags.zig`).
+pub const TagLeaf = struct {
+    name: StringId,
+    parent: u32,
+    span: SourceSpan,
+};
+
 const RuleParam = struct {
     name: StringId,
     type_node: NodeId,
@@ -996,6 +1037,9 @@ pub const AstArena = struct {
     component_decls: std.ArrayListUnmanaged(ComponentDecl) = .empty,
     resource_decls: std.ArrayListUnmanaged(ResourceDecl) = .empty,
     event_decls: std.ArrayListUnmanaged(EventDecl) = .empty,
+    tags_decls: std.ArrayListUnmanaged(TagsDecl) = .empty,
+    tag_namespaces: std.ArrayListUnmanaged(TagNamespace) = .empty,
+    tag_leaves: std.ArrayListUnmanaged(TagLeaf) = .empty,
     rule_decls: std.ArrayListUnmanaged(RuleDecl) = .empty,
     fn_decls: std.ArrayListUnmanaged(FnDecl) = .empty,
     struct_decls: std.ArrayListUnmanaged(StructDecl) = .empty,
@@ -1103,6 +1147,9 @@ pub const AstArena = struct {
         self.component_decls.deinit(gpa);
         self.resource_decls.deinit(gpa);
         self.event_decls.deinit(gpa);
+        self.tags_decls.deinit(gpa);
+        self.tag_namespaces.deinit(gpa);
+        self.tag_leaves.deinit(gpa);
         self.rule_decls.deinit(gpa);
         self.fn_decls.deinit(gpa);
         self.struct_decls.deinit(gpa);

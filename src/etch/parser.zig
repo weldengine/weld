@@ -331,13 +331,13 @@ pub const Parser = struct {
     /// S3 (`component` / `resource` / `rule`) + `type` (M0.8 alias) + `fn` /
     /// `async` (M0.8 E2 call mechanism) + `struct` / `impl` (M0.8 E2 block 3
     /// declaration layer) + `enum` / `trait` (E2 block 3 tranches B/C) +
-    /// `event` (E3 ECS layer). Later milestones extend both sites together
-    /// (`tags` later in E3).
+    /// `event` / `tags` (E3 ECS layer). Later milestones extend both sites
+    /// together.
     fn recoverToTopLevel(self: *Parser) ParseError!void {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags => return,
                 else => _ = try self.advance(),
             }
         }
@@ -364,6 +364,7 @@ pub const Parser = struct {
             .kw_enum => try self.parseEnumDecl(annotations),
             .kw_trait => try self.parseTraitDecl(annotations),
             .kw_event => try self.parseEventDecl(annotations),
+            .kw_tags => try self.parseTagsDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2): the only top-level `async` construct in
                 // E2. `async rule` interpretation/codegen is E3 — reject it here
@@ -375,7 +376,7 @@ pub const Parser = struct {
                 try self.parseFnDeclFrom(annotations, true, async_span);
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -577,6 +578,82 @@ pub const Parser = struct {
             .byte_start = kw_span.byte_start,
             .byte_end = closing.span.byte_end,
         });
+    }
+
+    /// Parse `tags "{" { tag_namespace } "}"` (M0.8 E3, `etch-grammar.md`
+    /// §5.11). The top-level body is zero-or-more `tag_namespace`s (leaves
+    /// cannot sit directly under `tags`). Namespaces + leaves are appended to
+    /// the shared `tag_namespaces` / `tag_leaves` slabs in pre-order (= the
+    /// depth-first declaration order the global tag-table pass relies on); the
+    /// `(start, len)` runs this block contributed are recorded on the item.
+    /// `kw_tags` is mirrored in `parseTopLevel` AND `recoverToTopLevel`.
+    fn parseTagsDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'tags'
+        _ = try self.expect(.lbrace, "expected '{' to start tags body");
+
+        const ns_start: u32 = @intCast(self.arena.tag_namespaces.items.len);
+        const leaf_start: u32 = @intCast(self.arena.tag_leaves.items.len);
+        // The top-level `tags { }` body is namespaces only (`tag_leaf` is not a
+        // `declaration_body`); a bare leaf here surfaces as the `expected '{'`
+        // mismatch inside `parseTagNamespace`.
+        while (self.peek() == .ident) {
+            try self.parseTagNamespace(ast_mod.TagNamespace.no_parent);
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close tags body");
+
+        const data_idx: u32 = @intCast(self.arena.tags_decls.items.len);
+        try self.arena.tags_decls.append(self.gpa, .{
+            .ns_start = ns_start,
+            .ns_len = @as(u32, @intCast(self.arena.tag_namespaces.items.len)) - ns_start,
+            .leaf_start = leaf_start,
+            .leaf_len = @as(u32, @intCast(self.arena.tag_leaves.items.len)) - leaf_start,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        });
+        _ = try self.arena.addItem(self.gpa, .tags_decl, data_idx, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
+    /// Parse one `tag_namespace = IDENT "{" tag_body "}"` (M0.8 E3,
+    /// `etch-grammar.md` §5.11). The namespace node is appended BEFORE its
+    /// children (pre-order), so its index is a stable parent handle passed
+    /// down. `tag_body` is homogeneous — leaves OR sub-namespaces, never mixed
+    /// — disambiguated by one-token lookahead: `IDENT "{"` starts a
+    /// sub-namespace, `IDENT ("," | "}")` starts a leaf list. A mixed body
+    /// surfaces as the trailing `expected '}'` mismatch.
+    fn parseTagNamespace(self: *Parser, parent: u32) ParseError!void {
+        const name_tok = try self.expect(.ident, "expected tag namespace name (identifier)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start tag namespace body");
+
+        const my_idx: u32 = @intCast(self.arena.tag_namespaces.items.len);
+        try self.arena.tag_namespaces.append(self.gpa, .{
+            .name = name_id,
+            .parent = parent,
+            .span = name_tok.span,
+        });
+
+        if (self.peek() == .ident and self.peekNext() == .lbrace) {
+            // Sub-namespace mode: `tag_namespace { tag_namespace }` (no separator).
+            while (self.peek() == .ident) {
+                try self.parseTagNamespace(my_idx);
+            }
+        } else {
+            // Leaf mode: `tag_leaf { "," tag_leaf } [ "," ]`.
+            while (self.peek() == .ident) {
+                const leaf_tok = try self.advance();
+                try self.arena.tag_leaves.append(self.gpa, .{
+                    .name = try self.internSlice(leaf_tok.span),
+                    .parent = my_idx,
+                    .span = leaf_tok.span,
+                });
+                if (!try self.match(.comma)) break;
+            }
+        }
+        _ = try self.expect(.rbrace, "expected '}' to close tag namespace body");
     }
 
     fn parseField(self: *Parser, annotations: AnnotationRange) ParseError!void {
@@ -3492,4 +3569,63 @@ test "parser recovers and a valid event after a broken construct survives (M0.8 
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.event_decls.items.len);
+}
+
+test "parser builds a hierarchical tags declaration (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\tags {
+        \\  character {
+        \\    status { alive, dead, stunned }
+        \\    team { red, blue }
+        \\  }
+        \\  item {
+        \\    rarity { common, rare }
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    // One block; pre-order namespaces: character(0), status(1), team(2),
+    // item(3), rarity(4); leaves in depth-first declaration order: alive, dead,
+    // stunned, red, blue, common, rare.
+    try std.testing.expectEqual(@as(usize, 1), result.ast.tags_decls.items.len);
+    try std.testing.expectEqual(@as(usize, 5), result.ast.tag_namespaces.items.len);
+    try std.testing.expectEqual(@as(usize, 7), result.ast.tag_leaves.items.len);
+
+    const character = result.ast.tag_namespaces.items[0];
+    try std.testing.expectEqualStrings("character", result.ast.strings.slice(character.name));
+    try std.testing.expectEqual(ast_mod.TagNamespace.no_parent, character.parent);
+    // `status` (index 1) and `team` (index 2) are children of `character` (0).
+    try std.testing.expectEqual(@as(u32, 0), result.ast.tag_namespaces.items[1].parent);
+    try std.testing.expectEqual(@as(u32, 0), result.ast.tag_namespaces.items[2].parent);
+    // `rarity` (index 4) is a child of `item` (index 3).
+    try std.testing.expectEqual(@as(u32, 3), result.ast.tag_namespaces.items[4].parent);
+
+    // Leaf order == bit_index order; first leaf is `alive` under `status` (1).
+    try std.testing.expectEqualStrings("alive", result.ast.strings.slice(result.ast.tag_leaves.items[0].name));
+    try std.testing.expectEqual(@as(u32, 1), result.ast.tag_leaves.items[0].parent);
+    // Last leaf is `rare` under `rarity` (4).
+    try std.testing.expectEqualStrings("rare", result.ast.strings.slice(result.ast.tag_leaves.items[6].name));
+    try std.testing.expectEqual(@as(u32, 4), result.ast.tag_leaves.items[6].parent);
+
+    const td = result.ast.tags_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 5), td.ns_len);
+    try std.testing.expectEqual(@as(u32, 7), td.leaf_len);
+}
+
+test "parser recovers and a valid tags after a broken construct survives (M0.8 E3 lockstep)" {
+    const gpa = std.testing.allocator;
+    // The lockstep stop-set now lists `kw_tags`: a broken leading construct
+    // resyncs at the `tags` that follows, which lands in the AST.
+    var result = try parse(gpa,
+        \\@@@bad
+        \\tags { character { status { alive } } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.tags_decls.items.len);
 }

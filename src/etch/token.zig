@@ -72,6 +72,7 @@ pub const TokenKind = enum {
     kw_trait, // trait declaration (M0.8 E2 block 3 tranche C)
     kw_event, // event declaration (M0.8 E3 ECS layer)
     kw_emit, // emit statement (M0.8 E3 ECS layer)
+    kw_tags, // tags hierarchical declaration (M0.8 E3 ECS layer)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -188,6 +189,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "trait", .kind = .kw_trait },
     .{ .lexeme = "event", .kind = .kw_event },
     .{ .lexeme = "emit", .kind = .kw_emit },
+    .{ .lexeme = "tags", .kind = .kw_tags },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -215,8 +217,7 @@ pub const s3_keywords = [_]KeywordEntry{
 pub const non_s3_keywords = [_][]const u8{
     // ── Top-level constructs still out of scope (`fn` graduated with M0.8 E2
     //    call mechanism; `struct` / `impl` / `enum` / `trait` with E2 block 3;
-    //    `event` with E3 ECS layer) ──
-    "tags",
+    //    `event` + `tags` with E3 ECS layer) ──
     "import",
     "const",
     "private",
