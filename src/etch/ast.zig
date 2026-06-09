@@ -449,6 +449,10 @@ pub const RuleDecl = struct {
     body_len: u32,
     annotations_extra: u32,
     annotations_len: u32,
+    /// `async rule` (M0.8 E3 sub-slice B): the body may `await`, suspending the
+    /// rule as a task that resumes a later tick. Interpreter-only (Option-A
+    /// task-record); codegen rejects it (`UnsupportedConstruct`, Phase 2).
+    is_async: bool = false,
 
     pub const none_when: u32 = std.math.maxInt(u32);
 };
@@ -723,6 +727,32 @@ pub const EmitStmt = struct {
     event_type: StringId,
     fields_start: u32,
     fields_len: u32,
+};
+
+/// The suspension source of an `await` (M0.8 E3 sub-slice B, `etch-grammar.md`
+/// §4.2 `await_target`). `wait`/`wait_unscaled`/`entity_event`/`global_event`
+/// are contextual builtins recognised by name after `await` (not keywords);
+/// `future` is the fall-through `await <expression>` form (awaiting a `Future`).
+pub const AwaitTargetKind = enum {
+    wait, // await wait(<ticks>) — M0.8 interp counts the arg in TICKS (no clock)
+    wait_unscaled, // await wait_unscaled(<dur>) — needs a real clock → interp fail-loud (out of E3)
+    entity_event, // await entity_event(<entity>, T)
+    global_event, // await global_event(T)
+    future, // await <expression> (Future) — T2, interp fail-loud in sub-slice B
+};
+
+/// `await <target>` expression (M0.8 E3 sub-slice B, `etch-grammar.md` §3.2
+/// `await_expr` / §4.2 `await_stmt`). One node covers both the statement form
+/// (`await target`, wrapped in an expr-stmt) and the value form. `arg_expr` is
+/// the duration/tick expr (`wait`/`wait_unscaled`) or the awaited future
+/// (`future`), else `NodeId.none`; `entity_expr` is the `entity_event` entity,
+/// else `NodeId.none`; `event_type` is the event type name for the two event
+/// forms, else `0`.
+pub const AwaitExpr = struct {
+    target_kind: AwaitTargetKind,
+    arg_expr: NodeId,
+    entity_expr: NodeId,
+    event_type: StringId,
 };
 
 /// `|a, b| expr` closure (M0.8 closures, `etch-grammar.md` §524). Params are a
@@ -1144,6 +1174,7 @@ pub const AstArena = struct {
     throw_stmts: std.ArrayListUnmanaged(ThrowStmt) = .empty,
     try_catch_stmts: std.ArrayListUnmanaged(TryCatchStmt) = .empty,
     emit_stmts: std.ArrayListUnmanaged(EmitStmt) = .empty,
+    await_exprs: std.ArrayListUnmanaged(AwaitExpr) = .empty,
     named_types: std.ArrayListUnmanaged(NamedTypeNode) = .empty,
     array_types: std.ArrayListUnmanaged(ArrayTypeNode) = .empty,
     map_types: std.ArrayListUnmanaged(MapTypeNode) = .empty,
@@ -1254,6 +1285,7 @@ pub const AstArena = struct {
         self.throw_stmts.deinit(gpa);
         self.try_catch_stmts.deinit(gpa);
         self.emit_stmts.deinit(gpa);
+        self.await_exprs.deinit(gpa);
         self.named_types.deinit(gpa);
         self.array_types.deinit(gpa);
         self.map_types.deinit(gpa);
@@ -1589,6 +1621,12 @@ pub const AstArena = struct {
         return try self.addStmt(gpa, .emit_stmt, idx, span);
     }
 
+    pub fn addAwaitExpr(self: *AstArena, gpa: std.mem.Allocator, aw: AwaitExpr, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.await_exprs.items.len);
+        try self.await_exprs.append(gpa, aw);
+        return try self.addExpr(gpa, .await_expr, idx, span);
+    }
+
     pub fn addTagMutationStmt(self: *AstArena, gpa: std.mem.Allocator, tm: TagMutationStmt, span: SourceSpan) !NodeId {
         const idx: u32 = @intCast(self.tag_mutation_stmts.items.len);
         try self.tag_mutation_stmts.append(gpa, tm);
@@ -1679,6 +1717,12 @@ pub const AstArena = struct {
     pub fn exprData(self: *const AstArena, id: NodeId) u32 {
         std.debug.assert(id.category == .expr);
         return self.exprs.items(.data)[id.index];
+    }
+
+    /// The `AwaitExpr` payload of an `.await_expr` node (M0.8 E3 sub-slice B).
+    pub fn awaitExpr(self: *const AstArena, id: NodeId) AwaitExpr {
+        std.debug.assert(self.exprKind(id) == .await_expr);
+        return self.await_exprs.items[self.exprData(id)];
     }
 
     /// The `@on_event(T)` annotation on a `rule`, or null if the rule is not an

@@ -66,6 +66,7 @@ pub const TokenKind = enum {
     kw_return, // return [expr] (M0.8 E2 call mechanism)
     kw_throws, // fn throws marker (M0.8 E2 call mechanism)
     kw_async, // async fn (parsed E2; interp E3, codegen Phase 2)
+    kw_await, // await <target> (M0.8 E3 sub-slice B; interp-only, codegen Phase 2)
     kw_struct, // struct declaration (M0.8 E2 block 3 declaration layer)
     kw_impl, // impl block (M0.8 E2 block 3 declaration layer)
     kw_enum, // enum declaration (M0.8 E2 block 3 tranche B)
@@ -190,6 +191,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "return", .kind = .kw_return },
     .{ .lexeme = "throws", .kind = .kw_throws },
     .{ .lexeme = "async", .kind = .kw_async },
+    .{ .lexeme = "await", .kind = .kw_await },
     .{ .lexeme = "struct", .kind = .kw_struct },
     .{ .lexeme = "impl", .kind = .kw_impl },
     .{ .lexeme = "enum", .kind = .kw_enum },
@@ -258,8 +260,10 @@ pub const non_s3_keywords = [_][]const u8{
     "override",
 
     // ── Async machinery: `async` graduated with M0.8 E2 (`async fn` parsed;
-    //    interp E3, codegen Phase 2); the await machinery stays out of scope ──
-    "await",
+    //    interp E3, codegen Phase 2); `await` graduated with M0.8 E3 sub-slice B
+    //    (`async rule`/`async fn` + `await` interpreted, codegen Phase 2). The
+    //    concurrency algebra (`race`/`sync`/`branch`/`spawn`) stays reserved
+    //    (T2/T3, deferred — flagged for Review E3) ──
     "race",
     "sync",
     "branch",

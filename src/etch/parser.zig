@@ -356,7 +356,7 @@ pub const Parser = struct {
         switch (self.peek()) {
             .kw_component => try self.parseComponentDecl(annotations),
             .kw_resource => try self.parseResourceDecl(annotations),
-            .kw_rule => try self.parseRuleDecl(annotations),
+            .kw_rule => try self.parseRuleDecl(annotations, false),
             .kw_type => try self.parseTypeAliasDecl(annotations),
             .kw_fn => try self.parseFnDecl(annotations, false),
             .kw_struct => try self.parseStructDecl(annotations),
@@ -366,14 +366,16 @@ pub const Parser = struct {
             .kw_event => try self.parseEventDecl(annotations),
             .kw_tags => try self.parseTagsDecl(annotations),
             .kw_async => {
-                // `async fn` (M0.8 E2): the only top-level `async` construct in
-                // E2. `async rule` interpretation/codegen is E3 — reject it here
-                // with a clear pointer rather than mis-parsing.
+                // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
+                // the two top-level `async` constructs. `kw_async` is already in
+                // the `recoverToTopLevel` stop-set; `kw_rule`/`kw_fn` likewise —
+                // so `async rule` adds no new stop-set member (LOCKSTEP no-op).
                 const async_span = (try self.advance()).span;
-                if (self.peek() != .kw_fn) {
-                    return self.parseErrFmt(self.peekSpan(), "expected 'fn' after 'async' (async rules land in E3), got '{s}'", .{self.sliceOf(self.peekSpan())});
+                switch (self.peek()) {
+                    .kw_fn => try self.parseFnDeclFrom(annotations, true, async_span),
+                    .kw_rule => try self.parseRuleDecl(annotations, true),
+                    else => return self.parseErrFmt(self.peekSpan(), "expected 'fn' or 'rule' after 'async', got '{s}'", .{self.sliceOf(self.peekSpan())}),
                 }
-                try self.parseFnDeclFrom(annotations, true, async_span);
             },
             .eof => {},
             else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags), got '{s}'", .{self.sliceOf(self.peekSpan())}),
@@ -916,7 +918,10 @@ pub const Parser = struct {
 
     // ─── Rule ────────────────────────────────────────────────────────────
 
-    fn parseRuleDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+    fn parseRuleDecl(self: *Parser, annotations: AnnotationRange, is_async: bool) ParseError!void {
+        // On entry the current token is `rule` (an optional `async` was already
+        // consumed by `parseTopLevel`). `is_async` marks an `async rule` whose
+        // body may `await` (M0.8 E3 sub-slice B).
         const kw_span = self.current.span;
         _ = try self.advance(); // 'rule'
         const name_tok = try self.expect(.ident, "expected rule name (identifier)");
@@ -961,6 +966,7 @@ pub const Parser = struct {
             .body_len = body_len,
             .annotations_extra = annotations.start,
             .annotations_len = annotations.len,
+            .is_async = is_async,
         });
         _ = try self.arena.addItem(self.gpa, .rule_decl, data_idx, .{
             .byte_start = kw_span.byte_start,
@@ -2609,12 +2615,83 @@ pub const Parser = struct {
         });
     }
 
+    /// Parse `await <target>` (M0.8 E3 sub-slice B, `etch-grammar.md` §4.2
+    /// `await_target`). `wait` / `wait_unscaled` / `entity_event` /
+    /// `global_event` are contextual builtins recognised by lexeme when
+    /// followed by `(` (they are NOT keywords); anything else is the
+    /// fall-through `await <expression>` (Future) form. Produces one
+    /// `.await_expr` node, used both as a bare statement (the canonical
+    /// async-rule shape) and grammatically in value position. The interpreter
+    /// bounds `await` to a top-level statement; value/nested await fails loud.
+    fn parseAwaitExpr(self: *Parser) ParseError!NodeId {
+        const kw_span = (try self.advance()).span; // 'await'
+        if (self.peek() == .ident and self.peekNext() == .lparen) {
+            const name = self.sliceOf(self.current.span);
+            if (std.mem.eql(u8, name, "wait") or std.mem.eql(u8, name, "wait_unscaled")) {
+                const unscaled = std.mem.eql(u8, name, "wait_unscaled");
+                _ = try self.advance(); // 'wait' / 'wait_unscaled'
+                _ = try self.advance(); // '('
+                const arg = try self.parseExpr(0);
+                const closing = try self.expect(.rparen, "expected ')' to close the await wait(...) argument");
+                return try self.arena.addAwaitExpr(self.gpa, .{
+                    .target_kind = if (unscaled) .wait_unscaled else .wait,
+                    .arg_expr = arg,
+                    .entity_expr = NodeId.none,
+                    .event_type = 0,
+                }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+            }
+            if (std.mem.eql(u8, name, "entity_event")) {
+                _ = try self.advance(); // 'entity_event'
+                _ = try self.advance(); // '('
+                const entity = try self.parseExpr(0);
+                _ = try self.expect(.comma, "expected ',' between entity and event type in entity_event(...)");
+                const ty = try self.expect(.type_ident, "expected event type (TYPE_IDENT) in entity_event(...)");
+                const event_type = try self.internSlice(ty.span);
+                // The optional `entity_event(e, T { ... })` payload-filter body is
+                // a post-Phase-0 feature — reject it rather than silently drop it.
+                if (self.peek() == .lbrace) {
+                    return self.parseErr(self.peekSpan(), "entity_event payload-filter body is not supported in M0.8 (T2 / Phase 2)");
+                }
+                const closing = try self.expect(.rparen, "expected ')' to close entity_event(...)");
+                return try self.arena.addAwaitExpr(self.gpa, .{
+                    .target_kind = .entity_event,
+                    .arg_expr = NodeId.none,
+                    .entity_expr = entity,
+                    .event_type = event_type,
+                }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+            }
+            if (std.mem.eql(u8, name, "global_event")) {
+                _ = try self.advance(); // 'global_event'
+                _ = try self.advance(); // '('
+                const ty = try self.expect(.type_ident, "expected event type (TYPE_IDENT) in global_event(...)");
+                const event_type = try self.internSlice(ty.span);
+                const closing = try self.expect(.rparen, "expected ')' to close global_event(...)");
+                return try self.arena.addAwaitExpr(self.gpa, .{
+                    .target_kind = .global_event,
+                    .arg_expr = NodeId.none,
+                    .entity_expr = NodeId.none,
+                    .event_type = event_type,
+                }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+            }
+        }
+        // Fall-through: `await <expression>` (Future) — interp-deferred to T2.
+        const fut = try self.parseExpr(0);
+        const fut_span = self.arena.exprSpan(fut);
+        return try self.arena.addAwaitExpr(self.gpa, .{
+            .target_kind = .future,
+            .arg_expr = fut,
+            .entity_expr = NodeId.none,
+            .event_type = 0,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = fut_span.byte_end });
+    }
+
     fn parsePrimary(self: *Parser) ParseError!NodeId {
         try self.surfaceTokenErrors();
         switch (self.peek()) {
             .kw_match => return try self.parseMatch(),
             .kw_loop => return try self.parseLoop(0),
             .kw_if => return try self.parseIf(),
+            .kw_await => return try self.parseAwaitExpr(),
             .lbrace => return try self.parseBlockExpr(),
             .lbracket => return try self.parseArrayOrMapLiteral(),
             .pipe => return try self.parseClosure(),
@@ -3907,4 +3984,72 @@ test "parser builds tag mutation statements (M0.8 E3)" {
     const first_stmt: ast_mod.NodeId = @bitCast(result.ast.extra.items[rule.body_start]);
     try std.testing.expectEqual(ast_mod.NodeCategory.stmt, first_stmt.category);
     try std.testing.expectEqual(ast_mod.StmtKind.tag_mutation_stmt, result.ast.stmtKind(first_stmt));
+}
+
+test "parser: async rule parses with await wait + global_event targets (M0.8 E3 sub-slice B)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\event Done { }
+        \\async rule seq() {
+        \\  await wait(3)
+        \\  await global_event(Done)
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.rule_decls.items.len);
+    const rule = result.ast.rule_decls.items[0];
+    try std.testing.expect(rule.is_async);
+    try std.testing.expectEqual(@as(u32, 2), rule.body_len);
+
+    // stmt 0: a bare expr-stmt wrapping `await wait(3)` (a `.wait` target).
+    const s0: ast_mod.NodeId = @bitCast(result.ast.extra.items[rule.body_start]);
+    try std.testing.expectEqual(ast_mod.StmtKind.expr_stmt, result.ast.stmtKind(s0));
+    const e0: ast_mod.NodeId = @bitCast(result.ast.stmtData(s0));
+    try std.testing.expectEqual(ast_mod.ExprKind.await_expr, result.ast.exprKind(e0));
+    try std.testing.expectEqual(ast_mod.AwaitTargetKind.wait, result.ast.awaitExpr(e0).target_kind);
+
+    // stmt 1: `await global_event(Done)` (a `.global_event` target naming `Done`).
+    const s1: ast_mod.NodeId = @bitCast(result.ast.extra.items[rule.body_start + 1]);
+    const e1: ast_mod.NodeId = @bitCast(result.ast.stmtData(s1));
+    try std.testing.expectEqual(ast_mod.ExprKind.await_expr, result.ast.exprKind(e1));
+    const aw1 = result.ast.awaitExpr(e1);
+    try std.testing.expectEqual(ast_mod.AwaitTargetKind.global_event, aw1.target_kind);
+    try std.testing.expectEqualStrings("Done", result.ast.strings.slice(aw1.event_type));
+}
+
+test "parser: await entity_event(entity, T) parses; payload-filter body rejected (M0.8 E3 sub-slice B)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\event Hit { }
+        \\async rule watch(target: Entity) {
+        \\  await entity_event(target, Hit)
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    const rule = result.ast.rule_decls.items[0];
+    try std.testing.expect(rule.is_async);
+    const s0: ast_mod.NodeId = @bitCast(result.ast.extra.items[rule.body_start]);
+    const e0: ast_mod.NodeId = @bitCast(result.ast.stmtData(s0));
+    const aw = result.ast.awaitExpr(e0);
+    try std.testing.expectEqual(ast_mod.AwaitTargetKind.entity_event, aw.target_kind);
+    try std.testing.expectEqualStrings("Hit", result.ast.strings.slice(aw.event_type));
+    try std.testing.expect(!aw.entity_expr.isNone());
+
+    // The optional `entity_event(e, T { ... })` payload-filter body is rejected.
+    var bad = try parse(gpa,
+        \\event Hit { }
+        \\async rule watch(target: Entity) {
+        \\  await entity_event(target, Hit { x: 1 })
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expect(bad.diagnostics.len > 0);
 }

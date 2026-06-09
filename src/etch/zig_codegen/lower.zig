@@ -832,6 +832,11 @@ fn emitObserverRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, ta
 }
 
 fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable, program_has_changed: bool) CodegenError!void {
+    // `async rule` (M0.8 E3 sub-slice B) lowers to a suspend/resume state
+    // machine — HIR-dependent, Phase 2. The interpreter is the reference; the
+    // codegen rejects it loudly (consistent with `async fn` at l.689).
+    if (rule.is_async) return CodegenError.UnsupportedConstruct;
+
     const name = ast.strings.slice(rule.name);
 
     // Collect what the when clause needs first (a negative tag op fails loud
