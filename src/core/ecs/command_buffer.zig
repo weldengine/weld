@@ -46,7 +46,7 @@ const EntityId = world_mod.EntityId;
 const ComponentId = registry_mod.ComponentId;
 
 /// Tag enum for the `Command` union.
-pub const CommandKind = enum { spawn, despawn, add_component, remove_component };
+pub const CommandKind = enum { spawn, despawn, add_component, remove_component, set_tag, clear_tag };
 
 /// Deferred spawn: arrays of component ids + payload bytes. Both
 /// arrays live in the buffer's arena. `payloads[i]` is paired with
@@ -75,12 +75,26 @@ pub const RemoveComponentCommand = struct {
     component_id: ComponentId,
 };
 
+/// Deferred tag bit set/clear (M0.8 E3, `etch-grammar.md` §4.4). `tagset_id`
+/// is the registered `TagSet` component id; `bit_index` is the leaf's global
+/// bit. Applied via `World.applyTagMutation`, which adds `TagSet` to the
+/// entity (an archetype transition) when a `set_tag` lands on an entity that
+/// lacks one. Sits beside add/remove-component as a sibling deferred
+/// structural change.
+pub const TagCommand = struct {
+    entity: EntityId,
+    tagset_id: ComponentId,
+    bit_index: u32,
+};
+
 /// Tagged union of all deferrable commands.
 pub const Command = union(CommandKind) {
     spawn: SpawnCommand,
     despawn: DespawnCommand,
     add_component: AddComponentCommand,
     remove_component: RemoveComponentCommand,
+    set_tag: TagCommand,
+    clear_tag: TagCommand,
 };
 
 /// Per-system command buffer.
@@ -202,6 +216,27 @@ pub const CommandBuffer = struct {
         } });
     }
 
+    /// Record a deferred `add_tag` (M0.8 E3) — set `bit_index` of `entity`'s
+    /// `TagSet` at flush time. `tagset_id` is the registered `TagSet`
+    /// component id.
+    pub fn setTag(self: *CommandBuffer, entity: EntityId, tagset_id: ComponentId, bit_index: u32) !void {
+        try self.commands.append(self.gpa, .{ .set_tag = .{
+            .entity = entity,
+            .tagset_id = tagset_id,
+            .bit_index = bit_index,
+        } });
+    }
+
+    /// Record a deferred `remove_tag` (M0.8 E3) — clear `bit_index` of
+    /// `entity`'s `TagSet` at flush time.
+    pub fn clearTag(self: *CommandBuffer, entity: EntityId, tagset_id: ComponentId, bit_index: u32) !void {
+        try self.commands.append(self.gpa, .{ .clear_tag = .{
+            .entity = entity,
+            .tagset_id = tagset_id,
+            .bit_index = bit_index,
+        } });
+    }
+
     /// Apply every recorded command, in submission order, against
     /// the world. Resets the buffer at the end so the system is
     /// ready for the next frame. Observer dispatch is layered on top
@@ -244,6 +279,12 @@ pub const CommandBuffer = struct {
                     r.entity,
                     r.component_id,
                 );
+            },
+            .set_tag => |t| {
+                try self.world.applyTagMutation(self.gpa, t.entity, t.tagset_id, t.bit_index, true);
+            },
+            .clear_tag => |t| {
+                try self.world.applyTagMutation(self.gpa, t.entity, t.tagset_id, t.bit_index, false);
             },
         }
     }
@@ -295,4 +336,52 @@ test "CommandBuffer.flush applies spawn → world entity count incremented" {
 
     try testing.expectEqual(@as(usize, 1), world.entityCount());
     try testing.expectEqual(@as(usize, 0), cmd.commandCount());
+}
+
+test "CommandBuffer set_tag adds TagSet and sets the bit; clear_tag clears it" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A `TagSet`-shaped component: one 64-bit word, zeroed default, no fields.
+    const zero = [_]u8{0} ** 8;
+    const tagset_id = try world.registry.registerComponentRaw(gpa, .{
+        .name = "TagSet",
+        .size = 8,
+        .alignment = 8,
+        .default_bytes = &zero,
+        .fields = &.{},
+    });
+    const eid = try world.spawn(gpa, world_mod.Transform{}, world_mod.Velocity{});
+
+    var cmd = CommandBuffer.init(gpa, &world);
+    defer cmd.deinit();
+
+    // Recorded, not yet applied — the entity still lacks TagSet.
+    try cmd.setTag(eid, tagset_id, 3);
+    try testing.expectEqual(@as(usize, 1), cmd.commandCount());
+    {
+        const loc = world.dynamicLocation(eid).?;
+        try testing.expect(world.dynamicArchetype(loc.archetype_idx).componentIndex(tagset_id) == null);
+    }
+
+    // Flush adds TagSet (archetype transition) with bit 3 set.
+    try cmd.flush();
+    try testing.expectEqual(@as(u64, 1) << 3, readTagWord(&world, tagset_id, eid));
+
+    // clear_tag flips the bit back in place (no further transition).
+    try cmd.clearTag(eid, tagset_id, 3);
+    try cmd.flush();
+    try testing.expectEqual(@as(u64, 0), readTagWord(&world, tagset_id, eid));
+}
+
+fn readTagWord(world: *World, tagset_id: ComponentId, eid: EntityId) u64 {
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const col = arch.componentIndex(tagset_id).?;
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    const bytes = arch.componentSlot(chunk, col, loc.slot);
+    var word: u64 = 0;
+    @memcpy(std.mem.asBytes(&word), bytes[0..8]);
+    return word;
 }

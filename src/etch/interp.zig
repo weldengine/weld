@@ -728,22 +728,14 @@ pub const Interpreter = struct {
             self.pending_tags.clearRetainingCapacity();
             return;
         };
-        const size: usize = @as(usize, self.tag_table.words()) * 8;
+        // Each mutation routes through the shared Tier-0 apply primitive
+        // (`World.applyTagMutation`) — the same code the codegen command buffer
+        // runs, so interpreter ↔ codegen stay byte-exact by construction. The
+        // location is looked up fresh per mutation (inside the primitive), so a
+        // transition from an earlier mutation on the same entity is observed.
         for (self.pending_tags.items) |pt| {
             const core_id: CoreEntityId = @bitCast(pt.entity);
-            const loc = world.dynamicLocation(core_id) orelse continue; // stale handle
-            const arch = world.dynamicArchetype(loc.archetype_idx);
-            if (arch.componentIndex(tid)) |col| {
-                const chunk = arch.chunks.items[loc.chunk_idx];
-                const bytes = arch.componentSlot(chunk, col, loc.slot);
-                setBitInBytes(bytes, pt.bit_index, pt.set);
-            } else if (pt.set) {
-                const buf = try self.gpa.alloc(u8, size);
-                defer self.gpa.free(buf);
-                @memset(buf, 0);
-                setBitInBytes(buf, pt.bit_index, true);
-                try world.addComponentDynamic(self.gpa, core_id, tid, buf);
-            }
+            try world.applyTagMutation(self.gpa, core_id, tid, pt.bit_index, pt.set);
         }
         self.pending_tags.clearRetainingCapacity();
     }
@@ -1677,20 +1669,6 @@ fn entityTagBitSet(world: *World, tagset_id: ComponentId, entity: EntityId, bit:
     var word: u64 = 0;
     @memcpy(std.mem.asBytes(&word), bytes[off .. off + 8]);
     return (word & (@as(u64, 1) << @intCast(bit % 64))) != 0;
-}
-
-/// Set or clear bit `bit` in a `TagSet`'s raw `[words]u64` bytes (M0.8 E3).
-fn setBitInBytes(bytes: []u8, bit: u32, set: bool) void {
-    const off: usize = @as(usize, bit / 64) * 8;
-    var word: u64 = 0;
-    @memcpy(std.mem.asBytes(&word), bytes[off .. off + 8]);
-    const mask = @as(u64, 1) << @intCast(bit % 64);
-    if (set) {
-        word |= mask;
-    } else {
-        word &= ~mask;
-    }
-    @memcpy(bytes[off .. off + 8], std.mem.asBytes(&word));
 }
 
 fn bindParams(

@@ -257,6 +257,10 @@ pub fn applyWithObservers(
             }
             try world.removeComponentDynamic(gpa, r.entity, r.component_id);
         },
+        // Tag bit set/clear (M0.8 E3) — a deferred structural change with no
+        // observer hook (tags are not add/remove-component events).
+        .set_tag => |t| try world.applyTagMutation(gpa, t.entity, t.tagset_id, t.bit_index, true),
+        .clear_tag => |t| try world.applyTagMutation(gpa, t.entity, t.tagset_id, t.bit_index, false),
     }
 }
 
@@ -271,6 +275,8 @@ fn applyRawCommand(world: *World, gpa: std.mem.Allocator, c: Command) !void {
         .despawn => |d| try world.despawn(gpa, d.entity),
         .add_component => |a| try world.addComponentDynamic(gpa, a.entity, a.component_id, a.bytes),
         .remove_component => |r| try world.removeComponentDynamic(gpa, r.entity, r.component_id),
+        .set_tag => |t| try world.applyTagMutation(gpa, t.entity, t.tagset_id, t.bit_index, true),
+        .clear_tag => |t| try world.applyTagMutation(gpa, t.entity, t.tagset_id, t.bit_index, false),
     }
 }
 
