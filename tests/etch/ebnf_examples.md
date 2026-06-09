@@ -492,3 +492,18 @@ rule tag_ops(entity: Entity)
   entity.remove_tag(.unit.status.alive)
 }
 ```
+
+## Observer — @on_event rule with the implicit `event` binding (E3 ECS layer)
+
+```etch
+event DamageDealt { amount: int = 0 }
+resource DamageTally { total: int = 0 }
+
+@on_event(DamageDealt)
+rule absorb_damage()
+  when resource DamageTally
+{
+  let t = get_mut(DamageTally)
+  t.total += event.amount
+}
+```

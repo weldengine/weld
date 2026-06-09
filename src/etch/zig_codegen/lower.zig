@@ -164,12 +164,27 @@ pub fn generateFile(
         if (kind != .rule_decl) continue;
         const rule = ast.rule_decls.items[data];
         const name_slice = ast.strings.slice(rule.name);
-        // A rule whose body issues a tag mutation takes a `*CommandBuffer`
-        // param (the deferred set_tag/clear_tag is queued through it); `tick`
-        // dispatches such rules with `&cmd` (M0.8 E3).
-        try rule_emits.append(gpa, .{ .name = name_slice, .tag_mutating = ruleHasTagMutation(ast, rule) });
+        // An `@on_event(T)` observer (M0.8 E3) takes a `*EventCursor` param;
+        // `tick` subscribes the cursor at head=0 (before any emit) and threads
+        // it in. A tag-mutating rule takes a `*CommandBuffer`. The two are
+        // mutually exclusive (an observer is global → no iterated entity → no
+        // tag mutation).
+        const on_event = ast.onEventAnnotation(rule);
+        const event_type: ?[]const u8 = if (on_event) |a|
+            (if (ast.onEventTypeName(a)) |t| ast.strings.slice(t) else null)
+        else
+            null;
+        try rule_emits.append(gpa, .{
+            .name = name_slice,
+            .tag_mutating = ruleHasTagMutation(ast, rule),
+            .event_type = event_type,
+        });
 
-        try emitRule(&w, ast, rule, &tag_table);
+        if (on_event != null) {
+            try emitObserverRule(&w, ast, rule, &tag_table);
+        } else {
+            try emitRule(&w, ast, rule, &tag_table);
+        }
         stats.rules += 1;
 
         // Track the rule's archetype signature (the sorted set of component
@@ -206,6 +221,10 @@ fn emitImports(w: *Writer) CodegenError!void {
     // an unused container-level import is permitted, so it is emitted
     // unconditionally for layout stability (M0.8 E3).
     try w.line("const CommandBuffer = weld_core.ecs.command_buffer.CommandBuffer;");
+    // `EventCursor` is referenced only by `tick` + observer fns when the program
+    // declares an `@on_event(T)` observer (M0.8 E3); an unused container-level
+    // import is permitted, so it is emitted unconditionally for layout stability.
+    try w.line("const EventCursor = weld_core.events.EventCursor;");
     try w.blankLine();
 }
 
@@ -482,7 +501,12 @@ fn emitRegister(w: *Writer, ast: *const AstArena, tag_table: *const tags_mod.Tag
             // inferred against the `Lifetime` parameter — no extra import.
             .event_decl => {
                 const decl = ast.event_decls.items[data];
-                try w.printLine("try world.event_bus.register({s}, 256, .tick);", .{ast.strings.slice(decl.name)});
+                // `EventBus.register(self, gpa, comptime T, cap, lifetime)` —
+                // `gpa` is the FIRST runtime arg (the queue's ring buffer is
+                // heap-allocated). The producer tranche emitted it without `gpa`
+                // (never Sema-compiled — events had no codegen differential);
+                // surfaced + fixed by the observer drain's `build-obj` check.
+                try w.printLine("try world.event_bus.register(gpa, {s}, 256, .tick);", .{ast.strings.slice(decl.name)});
             },
             else => {},
         }
@@ -622,6 +646,10 @@ const TagFilterInfo = struct {
 const RuleEmit = struct {
     name: []const u8,
     tag_mutating: bool,
+    /// `@on_event(T)` observer (M0.8 E3): the event type name, or null for a
+    /// non-observer. When set, `tick` subscribes a `*EventCursor` at head=0 and
+    /// threads it into the rule call.
+    event_type: ?[]const u8 = null,
 };
 
 const ResourceDep = struct {
@@ -712,13 +740,79 @@ fn ruleHasTagMutation(ast: *const AstArena, rule: ast_mod.RuleDecl) bool {
     return false;
 }
 
+/// Emit an `@on_event(T)` observer rule (M0.8 E3): drain the world event bus
+/// for type `T`, firing the body once per event with the implicit `event`
+/// binding (a Zig local of type `T`, so `event.field` lowers to `event.field`).
+///
+/// The engraved drain contract (validated for the C-tranche byte-exact diff):
+/// `tick` calls `world.event_bus.drainAtBoundary(.tick)` then `subscribe`s a
+/// `*EventCursor` at head=0 — BEFORE any rule runs / emits — and threads it in;
+/// the observer then `while (poll) |event|` reads every event emitted earlier
+/// the same tick. This matches the interpreter's per-tick `EventStore` (cleared
+/// at `stepOnce` start, drained in emit order), so the two backends agree.
+///
+/// Scope: the observer is pure event-based. A combined event+entity form (a
+/// component `when` or tag filter on the observer) and the body's receiver-less
+/// resource write (`get_mut(R)`, D-S3-resource-receiver) are deferred — the
+/// former fails loud here, the latter in `emitStmt`; the interpreter is the
+/// reference for both, and the full byte-exact event differential closes in the
+/// sub-slice-C codegen tranche once resource-receiver codegen lands.
+fn emitObserverRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable) CodegenError!void {
+    const name = ast.strings.slice(rule.name);
+    const annot = ast.onEventAnnotation(rule) orelse return CodegenError.UnsupportedConstruct;
+    const event_type = ast.onEventTypeName(annot) orelse return CodegenError.UnsupportedConstruct;
+    const etype_name = ast.strings.slice(event_type);
+
+    var info = try collectWhenInfo(w.gpa, ast, rule, tag_table);
+    defer freeWhenInfo(w.gpa, &info);
+    // Combined event+entity (an observer that also iterates entities via a
+    // component `when`, or a per-entity tag filter) is out of M0.8 scope.
+    if (info.has_component_ref or info.tag_filters.len > 0) return CodegenError.UnsupportedConstruct;
+
+    try w.printLine("pub fn rule_{s}(world: *World, ev_cursor: *EventCursor) void {{", .{name});
+    w.indentBy(1);
+
+    // Resource gates (`when resource R [changed]`) — checked once before the
+    // drain, identical to the entity-rule path.
+    for (info.resource_deps) |dep| {
+        try w.printLine("const {s}_id = world.registry.idOf(\"{s}\") orelse return;", .{ dep.name, dep.name });
+        if (dep.must_be_changed) {
+            try w.printLine("if (!world.resources.isDirty({s}_id)) return;", .{dep.name});
+        } else {
+            try w.printLine("if (!world.resources.contains({s}_id)) return;", .{dep.name});
+        }
+    }
+
+    // Drain: one body run per event of type `T`.
+    try w.printLine("while (world.event_bus.poll({s}, ev_cursor) catch null) |event| {{", .{etype_name});
+    w.indentBy(1);
+
+    var ctx: LocalCtx = .{ .tag_table = tag_table };
+    defer ctx.deinit(w.gpa);
+    try ctx.recordParams(w.gpa, ast, rule);
+    // Bind the implicit `event` payload as a value of type `T`. The body must
+    // reference `event` (an observer that ignores its payload trips Zig's
+    // unused-capture check — fail loud; a discard refinement is deferred).
+    if (ast.strings.find("event")) |event_id| {
+        try ctx.records.append(w.gpa, .{
+            .key = .{ .name = event_id },
+            .info = .{ .kind = .value, .zig_type = etype_name, .is_mut = false },
+        });
+    }
+    var s: u32 = 0;
+    while (s < rule.body_len) : (s += 1) {
+        try emitStmt(w, ast, &ctx, @bitCast(ast.extra.items[rule.body_start + s]));
+    }
+
+    w.indentBy(-1);
+    try w.line("}"); // while drain
+    w.indentBy(-1);
+    try w.line("}"); // fn
+    try w.blankLine();
+}
+
 fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable) CodegenError!void {
     const name = ast.strings.slice(rule.name);
-
-    // `@on_event(T)` observer codegen (bus subscribe/poll drain) is the next
-    // tranche (M0.8 E3 sub-slice A); the interpreter is the reference until then.
-    // Fail loud so a sound program never silently drops an observer's drain.
-    if (ast.onEventAnnotation(rule) != null) return CodegenError.UnsupportedConstruct;
 
     // Collect what the when clause needs first (a negative tag op fails loud
     // here, before any output is emitted).
@@ -2511,11 +2605,10 @@ fn emitConstExpr(w: *Writer, ast: *const AstArena, expr: NodeId, target_zig_type
 
 fn emitTick(w: *Writer, rules: []const RuleEmit) CodegenError!void {
     var any_tag_mutation = false;
+    var any_observer = false;
     for (rules) |r| {
-        if (r.tag_mutating) {
-            any_tag_mutation = true;
-            break;
-        }
+        if (r.tag_mutating) any_tag_mutation = true;
+        if (r.event_type != null) any_observer = true;
     }
 
     try w.line("/// Execute every rule once in source declaration order, apply any");
@@ -2524,8 +2617,16 @@ fn emitTick(w: *Writer, rules: []const RuleEmit) CodegenError!void {
     try w.line("/// (rules + `flushPendingTags`) + `tickBoundary`. `gpa` is the");
     try w.line("/// uniform allocator-threading contract for the generated code");
     try w.line("/// (M0.8 E3); the tag command buffer is its first consumer.");
+    if (any_observer) {
+        try w.line("///");
+        try w.line("/// `@on_event(T)` observers: the per-tick event queue is drained at the");
+        try w.line("/// top (matching the interpreter's `events.clear()` at `stepOnce` start),");
+        try w.line("/// then every observer cursor is subscribed at head=0 BEFORE any rule");
+        try w.line("/// emits — so an observer reads every event emitted earlier the same tick.");
+    }
     try w.line("pub fn tick(world: *World, gpa: std.mem.Allocator) void {");
     w.indentBy(1);
+
     if (any_tag_mutation) {
         // A tick-scoped command buffer collects deferred tag mutations; it is
         // flushed (applied) after every rule has run, before the boundary —
@@ -2533,21 +2634,35 @@ fn emitTick(w: *Writer, rules: []const RuleEmit) CodegenError!void {
         // a plain gpa is leak-free here.
         try w.line("var cmd = CommandBuffer.init(gpa, world);");
         try w.line("defer cmd.deinit();");
-        for (rules) |r| {
-            if (r.tag_mutating) {
-                try w.printLine("rule_{s}(world, &cmd);", .{r.name});
-            } else {
-                try w.printLine("rule_{s}(world);", .{r.name});
+    } else {
+        // No tag mutation → the threaded gpa is unused this tick (event
+        // drain / subscribe / poll need no allocator).
+        try w.line("_ = gpa;");
+    }
+
+    if (any_observer) {
+        // Clear the previous tick's events (per-tick lifetime), then open every
+        // observer cursor at the current head (0 after the drain) — before any
+        // rule runs, so a cursor sees this tick's emissions from the start.
+        try w.line("world.event_bus.drainAtBoundary(.tick);");
+        for (rules, 0..) |r, i| {
+            if (r.event_type) |etype| {
+                try w.printLine("var __evcur_{d} = world.event_bus.subscribe({s}) catch unreachable;", .{ i, etype });
             }
         }
-        try w.line("cmd.flush() catch {};");
-    } else {
-        // No tag mutation → the threaded gpa is unused this tick.
-        try w.line("_ = gpa;");
-        for (rules) |r| {
+    }
+
+    for (rules, 0..) |r, i| {
+        if (r.tag_mutating) {
+            try w.printLine("rule_{s}(world, &cmd);", .{r.name});
+        } else if (r.event_type != null) {
+            try w.printLine("rule_{s}(world, &__evcur_{d});", .{ r.name, i });
+        } else {
             try w.printLine("rule_{s}(world);", .{r.name});
         }
     }
+
+    if (any_tag_mutation) try w.line("cmd.flush() catch {};");
     try w.line("world.tickBoundary();");
     w.indentBy(-1);
     try w.line("}");

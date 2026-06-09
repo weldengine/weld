@@ -148,7 +148,8 @@ test "lowers event declaration, bus registration, and emit (M0.8 E3)" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "amount: i64 = 0,") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "crit: bool = false,") != null);
     // Registered as a typed queue on the world's event bus (`.tick` lifetime).
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "try world.event_bus.register(Damage, 256, .tick);") != null);
+    // `gpa` is the bus register's first runtime arg (the queue is heap-backed).
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "try world.event_bus.register(gpa, Damage, 256, .tick);") != null);
     // `emit` → a typed enqueue; `catch unreachable` (rule fns return void; the
     // event is always registered, so emit cannot fail).
     try std.testing.expect(std.mem.indexOf(u8, out.items, "world.event_bus.emit(Damage, Damage{") != null);
@@ -166,4 +167,41 @@ test "type mapping int=>i64 float=>f64 bool=>bool" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "i: i64 = 0,") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "f: f64 = 0.0,") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "b: bool = true,") != null);
+}
+
+test "lowers an @on_event observer to the bus drain (subscribe + poll), valid Zig (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    // A global producer emits A; the `@on_event(A)` observer (relay) drains A
+    // and re-emits B carrying the payload field. The body uses only codegen-
+    // sound constructs (emit + `event`-field access) — a world-state write
+    // (resource) is deferred to the sub-slice-C codegen tranche, so the
+    // byte-exact world-state event differential is interpreter-reference for
+    // now; this test validates the engraved drain contract cooks to valid Zig.
+    _ = try parseTypeCheckGen(gpa,
+        \\event A { x: i32 = 0 }
+        \\event B { y: i32 = 0 }
+        \\rule prod() { emit A { x: 7 } }
+        \\@on_event(A)
+        \\rule relay() { emit B { y: event.x } }
+    , &out);
+
+    // The generated Zig is syntactically valid (Zig's own parser).
+    const z = try gpa.dupeZ(u8, out.items);
+    defer gpa.free(z);
+    var tree = try std.zig.Ast.parse(gpa, z, .zig);
+    defer tree.deinit(gpa);
+    if (tree.errors.len != 0) std.debug.print("generated zig parse errors:\n{s}\n", .{out.items});
+    try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
+
+    // The engraved drain contract: clear the per-tick queue at the tick top,
+    // subscribe the observer cursor at head=0 BEFORE any rule emits, the
+    // observer fn polls the threaded cursor, and `event.field` lowers verbatim.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "world.event_bus.drainAtBoundary(.tick);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "world.event_bus.subscribe(A) catch unreachable;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "pub fn rule_relay(world: *World, ev_cursor: *EventCursor) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "while (world.event_bus.poll(A, ev_cursor) catch null) |event| {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "rule_relay(world, &__evcur_") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "event.x") != null);
 }
