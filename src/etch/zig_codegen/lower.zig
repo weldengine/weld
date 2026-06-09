@@ -1822,11 +1822,13 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         .float_lit => try w.write(ast.strings.slice(data)),
         .bool_lit => try w.write(ast.strings.slice(data)),
         .string_lit => {
-            // String literals in expression position are not exercised by
-            // the S3 subset rule bodies, but emit them defensively as Zig
-            // strings (they would only reach the codegen via a debug print
-            // call that S3 doesn't support — flagged unsupported).
-            return CodegenError.UnsupportedConstruct;
+            // String literal (M0.8 sub-slice C tranche 1) → a Zig `[]const u8`
+            // slice so `.len` and (tranche 1b) concat compose uniformly. The
+            // Etch literal's bytes are re-emitted as an escaped Zig string
+            // literal.
+            try w.write("@as([]const u8, ");
+            try emitZigStringLiteral(w, ast.strings.slice(data));
+            try w.write(")");
         },
         // `none` / `some(x)` optional literals (M0.8 E2 block 5). `none` → Zig
         // `null` (its type comes from the binding annotation / context);
@@ -1996,6 +1998,21 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // the struct, so Zig's `value.method(args)` / `Type.assoc(args)`
             // syntax resolves them directly.
             const mc = ast.method_calls.items[data];
+            // Builtin string method (M0.8 sub-slice C tranche 1). `s.len()` →
+            // Zig `(s).len` cast to `i64` (Etch `int`). Other string methods are
+            // stdlib Phase 1+ → fail loud (the resolver already rejects them, so
+            // this is a defensive belt).
+            if (ast.exprKind(mc.receiver) != .path and
+                std.mem.eql(u8, inferExprZigType(ast, ctx, mc.receiver), "[]const u8"))
+            {
+                if (!std.mem.eql(u8, ast.strings.slice(mc.method_name), "len")) {
+                    return CodegenError.UnsupportedConstruct;
+                }
+                try w.write("@as(i64, @intCast((");
+                try emitExpr(w, ast, ctx, mc.receiver);
+                try w.write(").len))");
+                return;
+            }
             if (ast.exprKind(mc.receiver) == .path) {
                 // Associated fn: the receiver is a bare type name.
                 try w.write(ast.strings.slice(ast.exprData(mc.receiver)));
@@ -2514,6 +2531,30 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
     return null;
 }
 
+/// Re-emit an Etch string literal's raw bytes as a valid Zig string literal
+/// (M0.8 sub-slice C tranche 1). Escapes the quote / backslash / common
+/// control bytes; any other non-printable byte becomes `\xHH`.
+fn emitZigStringLiteral(w: *Writer, bytes: []const u8) CodegenError!void {
+    try w.write("\"");
+    for (bytes) |c| {
+        switch (c) {
+            '"' => try w.write("\\\""),
+            '\\' => try w.write("\\\\"),
+            '\n' => try w.write("\\n"),
+            '\r' => try w.write("\\r"),
+            '\t' => try w.write("\\t"),
+            else => {
+                if (c < 0x20 or c == 0x7f) {
+                    try w.print("\\x{x:0>2}", .{c});
+                } else {
+                    try w.buffer.append(w.gpa, c);
+                }
+            },
+        }
+    }
+    try w.write("\"");
+}
+
 fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const u8 {
     const kind = ast.exprKind(expr);
     const data = ast.exprData(expr);
@@ -2521,6 +2562,9 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         .int_lit => "i64",
         .float_lit => "f64",
         .bool_lit => "bool",
+        // String (M0.8 sub-slice C tranche 1) → `[]const u8`; drives the
+        // string-receiver dispatch in the `method_call` emit.
+        .string_lit => "[]const u8",
         // Optionals (M0.8 E2 block 5): `some(x)` self-types via `@as` in
         // `emitExpr`, so the binding needs no annotation ("" → Zig infers);
         // `none` relies on the binding annotation (handled in `inferZigType`).

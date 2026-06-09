@@ -1856,6 +1856,16 @@ pub const Interpreter = struct {
                         const method = self.trait_methods.get(methodKey(entity_name, mc.method_name)) orelse return error.RuntimeFailure;
                         return try self.callMethod(world, locals, method, mc, recv);
                     },
+                    .string_id => |sid| {
+                        // Builtin string methods (M0.8 sub-slice C tranche 1 —
+                        // minimal faithful subset). `len` → byte length; any
+                        // other §12 method is stdlib Phase 1+ → fail loud.
+                        const mname = self.ast.strings.slice(mc.method_name);
+                        if (std.mem.eql(u8, mname, "len")) {
+                            return Value{ .int_ = @intCast(self.ast.strings.slice(sid).len) };
+                        }
+                        return error.RuntimeFailure;
+                    },
                     // Methods on a component / resource ref are deferred (the
                     // interpreter cannot recover the type name from a bare ref).
                     else => return error.RuntimeFailure,

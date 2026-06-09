@@ -35,6 +35,12 @@ pub const BuiltinType = enum {
     vec3,
     color,
     duration,
+    /// `string` (M0.8 sub-slice C tranche 1). A first-class expression type so
+    /// `"lit"` / concat / `.len()` resolve, but deliberately NOT in `fromName`
+    /// — `string` stays rejected as a component/resource field type (POD /
+    /// "not in the builtin set", `validateFieldsInDecl`); string fields land
+    /// with the Error layer (tranche 2).
+    string_,
 
     pub fn isNumeric(self: BuiltinType) bool {
         return switch (self) {
@@ -1405,7 +1411,7 @@ pub const TypeChecker = struct {
             .int_lit => return .{ .builtin = .int_ },
             .float_lit => return .{ .builtin = .float_ },
             .bool_lit => return .{ .builtin = .bool_ },
-            .string_lit => return ResolvedType.unknown,
+            .string_lit => return ResolvedType{ .builtin = .string_ },
             .tag_path => return ResolvedType.unknown, // enum-variant shorthand; type unknown in S3
             // `none` (M0.8 E2 block 5): an optional with an unknown payload —
             // typed by the binding annotation / context (e.g. `let o: int? = none`).
@@ -2012,6 +2018,22 @@ pub const TypeChecker = struct {
         // for a struct / component / resource, or `Entity` for a builtin entity
         // (the conditional-trait-impl receiver).
         const recv_t = try self.synthExprE(mc.receiver, ctx_opt);
+
+        // Builtin string methods (M0.8 sub-slice C tranche 1 — minimal faithful
+        // subset). `len` → int (byte length). Any other §12 String method is a
+        // stdlib activation (Phase 1+), not Level-A language → diagnostic here +
+        // fail-loud codegen.
+        if (recv_t == .builtin and recv_t.builtin == .string_) {
+            if (std.mem.eql(u8, method_slice, "len")) {
+                if (mc.args_len != 0) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "string method 'len' takes no arguments", .{});
+                }
+                return ResolvedType{ .builtin = .int_ };
+            }
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "string method '{s}' is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{method_slice});
+            return ResolvedType.unknown;
+        }
+
         const type_name: StringId = typeNameOfResolved(recv_t) orelse blk: {
             if (recv_t == .builtin and recv_t.builtin == .entity) {
                 break :blk self.arena.strings.find("Entity") orelse {
@@ -3268,6 +3290,33 @@ test "type-checker rejects string field on component (POD enforcement)" {
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .undefined_symbol);
+}
+
+test "type-checker accepts string .len() as int, rejects other string methods (M0.8 sub-slice C)" {
+    const gpa = std.testing.allocator;
+    // `.len()` resolves to int — the minimal faithful string subset; the
+    // assignment to an int field type-checks clean.
+    {
+        var result = try parseAndCheck(gpa,
+            \\component Acc { out: int = 0 }
+            \\rule run(entity: Entity) when entity has Acc {
+            \\  entity.get_mut(Acc).out = "hello".len()
+            \\}
+        );
+        defer result.deinit(gpa);
+        try expectNoCode(result.diagnostics.items, .type_mismatch);
+    }
+    // Any other §12 String method is stdlib Phase 1+ → rejected (E0200).
+    {
+        var result = try parseAndCheck(gpa,
+            \\component Acc { out: int = 0 }
+            \\rule run(entity: Entity) when entity has Acc {
+            \\  entity.get_mut(Acc).out = "hello".index_of("e")
+            \\}
+        );
+        defer result.deinit(gpa);
+        try expectAnyCode(result.diagnostics.items, .type_mismatch);
+    }
 }
 
 test "type-checker accepts top-level declarations in any order via pass 1 / pass 2" {
