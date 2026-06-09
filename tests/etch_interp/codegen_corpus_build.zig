@@ -62,4 +62,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p43_tag_filter_mutation", .etch_path = "tests/etch_interp/programs/43_tag_filter_mutation.etch" },
     .{ .name = "p44_changed_filter", .etch_path = "tests/etch_interp/programs/44_changed_filter.etch" },
     .{ .name = "p45_string_len", .etch_path = "tests/etch_interp/programs/45_string_len.etch" },
+    .{ .name = "p46_string_concat", .etch_path = "tests/etch_interp/programs/46_string_concat.etch" },
 };

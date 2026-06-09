@@ -60,6 +60,13 @@ pub const Value = union(enum) {
     float_: f64,
     bool_: bool,
     string_id: u32,
+    /// Handle into the interpreter's per-rule-body runtime-string store (M0.8
+    /// sub-slice C tranche 1b). A string PRODUCED at runtime (concat — and,
+    /// 1c, interpolation) cannot be a `string_id` (the AST string table is
+    /// immutable input), so it lives as owned bytes in `Interpreter
+    /// .run_strings`, reset at the rule-body boundary (rule-arena semantics,
+    /// `etch-memory-model.md` §2). Same lifetime rules as `array_ref`.
+    string_run: u32,
     entity_id: EntityId,
     component_ref: ComponentRef,
     resource_ref: ResourceRef,
@@ -120,6 +127,7 @@ pub const Value = union(enum) {
             .float_ => |a| a == other.float_,
             .bool_ => |a| a == other.bool_,
             .string_id => |a| a == other.string_id,
+            .string_run => false, // string equality is not in the M0.8 minimal subset (Eq/Ord deferred)
             .entity_id => |a| a == other.entity_id,
             .component_ref => false,
             .resource_ref => false,

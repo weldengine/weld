@@ -1182,6 +1182,14 @@ pub const TypeChecker = struct {
                         if (local.type_ == .builtin and rhs_type == .builtin and !self.literalTypeFits(local.type_.builtin, assign.value, rhs_type.builtin)) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match binding type", .{});
                         }
+                        // Compound assignment on strings (`s += t`) is not in
+                        // the M0.8 minimal subset (only `+` concatenation is —
+                        // stdlib §12.4): reject here so neither backend sees
+                        // one (interp would fail at runtime, codegen would
+                        // emit invalid Zig — fail loud, not divergently).
+                        if (assign.op != .assign and ((local.type_ == .builtin and local.type_.builtin == .string_) or (rhs_type == .builtin and rhs_type.builtin == .string_))) {
+                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.target), "compound assignment on strings is not in the M0.8 minimal subset (use 's = s + ...')", .{});
+                        }
                     } else {
                         const name = self.arena.strings.slice(name_id);
                         try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(assign.target), "unknown binding '{s}'", .{name});
@@ -2299,6 +2307,14 @@ pub const TypeChecker = struct {
         switch (bin.op) {
             .add, .sub, .mul, .div, .rem => {
                 if (lhs_t == .builtin and rhs_t == .builtin) {
+                    // `string + string → string` — concatenation, the only
+                    // string arithmetic in the M0.8 minimal subset (stdlib
+                    // §12.4 / `etch-resolver-types.md` §16 builtin `Add`).
+                    // `-`/`*`/`/`/`%` on strings stay errors via the numeric
+                    // checks below.
+                    if (bin.op == .add and lhs_t.builtin == .string_ and rhs_t.builtin == .string_) {
+                        return ResolvedType{ .builtin = .string_ };
+                    }
                     if (lhs_t.builtin.isInteger() and rhs_t.builtin.isInteger() and lhs_t.builtin == rhs_t.builtin) {
                         return lhs_t;
                     }
@@ -2313,6 +2329,14 @@ pub const TypeChecker = struct {
                 return ResolvedType.unknown;
             },
             .eq, .neq, .lt, .gt, .le, .ge => {
+                // String `Eq`/`Ord` (content equality, lexicographic order —
+                // stdlib §12.4) are NOT in the M0.8 minimal subset: reject at
+                // type-check so neither backend sees one (fail loud here, not
+                // divergently at runtime / in generated Zig).
+                if ((lhs_t == .builtin and lhs_t.builtin == .string_) or (rhs_t == .builtin and rhs_t.builtin == .string_)) {
+                    try self.emit(.type_mismatch, .error_, span, "string comparison is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{});
+                    return ResolvedType.unknown;
+                }
                 if (lhs_t == .builtin and rhs_t == .builtin and lhs_t.builtin == rhs_t.builtin) {
                     return .{ .builtin = .bool_ };
                 }

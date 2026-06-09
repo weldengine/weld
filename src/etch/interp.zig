@@ -436,6 +436,13 @@ pub const Interpreter = struct {
     /// Each entry is `?Value` — `null` = `none`, else the `some` payload.
     /// Reset at the rule-body boundary (rule-arena semantics).
     optionals: std.ArrayListUnmanaged(?Value) = .empty,
+    /// Store backing runtime-produced strings (M0.8 sub-slice C tranche 1b):
+    /// concat (and, 1c, interpolation) results, addressed by `Value
+    /// .string_run`. Each entry is gpa-owned bytes. Reset at the rule-body
+    /// boundary like `collections` (rule-arena semantics — the codegen
+    /// counterpart is the per-tick frame arena, observably identical since
+    /// strings never enter the POD world state).
+    run_strings: std.ArrayListUnmanaged([]u8) = .empty,
     /// Active control-flow signal (M0.8 loop/break). Set by `break`/`continue`,
     /// consumed by the enclosing loop.
     control: Control = .none,
@@ -489,6 +496,8 @@ pub const Interpreter = struct {
         self.structs.deinit(self.gpa);
         self.events.deinit(self.gpa);
         self.optionals.deinit(self.gpa);
+        for (self.run_strings.items) |s| self.gpa.free(s);
+        self.run_strings.deinit(self.gpa);
         self.fns.deinit(self.gpa);
         self.methods.deinit(self.gpa);
         self.struct_decls.deinit(self.gpa);
@@ -1059,6 +1068,7 @@ pub const Interpreter = struct {
         defer self.closures.reset(self.gpa);
         defer self.structs.reset(self.gpa);
         defer self.optionals.clearRetainingCapacity();
+        defer self.resetRunStrings();
         try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
         // `@on_event(T)` observer (M0.8 E3): inject the implicit `event` payload
         // self-style (like `self` in `callMethod`). The event is materialised as
@@ -1491,6 +1501,31 @@ pub const Interpreter = struct {
         return try self.evalExpr(world, &frame, method.value);
     }
 
+    /// Free every per-body runtime string, keeping the list's capacity
+    /// (rule-arena semantics, M0.8 sub-slice C tranche 1b).
+    fn resetRunStrings(self: *Interpreter) void {
+        for (self.run_strings.items) |s| self.gpa.free(s);
+        self.run_strings.clearRetainingCapacity();
+    }
+
+    /// The bytes of a string value — an AST-table literal (`string_id`) or a
+    /// runtime-produced string (`string_run`). Null for any non-string value.
+    fn stringBytes(self: *const Interpreter, v: Value) ?[]const u8 {
+        return switch (v) {
+            .string_id => |sid| self.ast.strings.slice(sid),
+            .string_run => |handle| self.run_strings.items[handle],
+            else => null,
+        };
+    }
+
+    /// Take ownership of `bytes` into the per-body runtime-string store,
+    /// returning its `string_run` handle value.
+    fn newRunString(self: *Interpreter, bytes: []u8) !Value {
+        const handle: u32 = @intCast(self.run_strings.items.len);
+        try self.run_strings.append(self.gpa, bytes);
+        return Value{ .string_run = handle };
+    }
+
     fn evalExpr(self: *Interpreter, world: *World, locals: *Locals, id: NodeId) StmtError!Value {
         const kind = self.ast.exprKind(id);
         const data = self.ast.exprData(id);
@@ -1578,6 +1613,19 @@ pub const Interpreter = struct {
                 const b = self.ast.binary_exprs.items[data];
                 const lhs = try self.evalExpr(world, locals, b.lhs);
                 const rhs = try self.evalExpr(world, locals, b.rhs);
+                // `string + string` → concatenation into the per-body
+                // runtime-string store (M0.8 sub-slice C tranche 1b, stdlib
+                // §12.4). Same logical point as the codegen's frame-arena
+                // `std.mem.concat` on the binary `.add` — byte-exact by
+                // construction. A string mixed with a non-string operand is
+                // resolver-rejected; fail loud if one slips through.
+                if (b.op == .add) {
+                    if (self.stringBytes(lhs)) |lb| {
+                        const rb = self.stringBytes(rhs) orelse return error.RuntimeFailure;
+                        const bytes = try std.mem.concat(self.gpa, u8, &.{ lb, rb });
+                        return try self.newRunString(bytes);
+                    }
+                }
                 return switch (b.op) {
                     .add, .sub, .mul, .div, .rem => binaryArith(b.op, lhs, rhs) catch return error.RuntimeFailure,
                     .eq, .neq, .lt, .gt, .le, .ge => binaryCompare(b.op, lhs, rhs) catch return error.RuntimeFailure,
@@ -1856,13 +1904,16 @@ pub const Interpreter = struct {
                         const method = self.trait_methods.get(methodKey(entity_name, mc.method_name)) orelse return error.RuntimeFailure;
                         return try self.callMethod(world, locals, method, mc, recv);
                     },
-                    .string_id => |sid| {
+                    .string_id, .string_run => {
                         // Builtin string methods (M0.8 sub-slice C tranche 1 —
-                        // minimal faithful subset). `len` → byte length; any
-                        // other §12 method is stdlib Phase 1+ → fail loud.
+                        // minimal faithful subset). `len` → byte length, on a
+                        // literal (`string_id`) or a runtime-produced string
+                        // (`string_run`, tranche 1b); any other §12 method is
+                        // stdlib Phase 1+ → fail loud.
                         const mname = self.ast.strings.slice(mc.method_name);
                         if (std.mem.eql(u8, mname, "len")) {
-                            return Value{ .int_ = @intCast(self.ast.strings.slice(sid).len) };
+                            const bytes = self.stringBytes(recv) orelse return error.RuntimeFailure;
+                            return Value{ .int_ = @intCast(bytes.len) };
                         }
                         return error.RuntimeFailure;
                     },

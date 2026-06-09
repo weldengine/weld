@@ -180,17 +180,19 @@ pub fn generateFile(
             (if (ast.onEventTypeName(a)) |t| ast.strings.slice(t) else null)
         else
             null;
+        // Emission first: the two-pass arena classification (M0.8 E3-C
+        // tranche 1b) is a property of the emitted body, so the RuleEmit
+        // entry consumed by `tick` is appended after it is known.
+        const needs_arena = if (on_event != null)
+            try emitObserverRule(&w, ast, rule, &tag_table)
+        else
+            try emitRule(&w, ast, rule, &tag_table, program_has_changed);
         try rule_emits.append(gpa, .{
             .name = name_slice,
             .tag_mutating = ruleHasTagMutation(ast, rule),
             .event_type = event_type,
+            .needs_arena = needs_arena,
         });
-
-        if (on_event != null) {
-            try emitObserverRule(&w, ast, rule, &tag_table);
-        } else {
-            try emitRule(&w, ast, rule, &tag_table, program_has_changed);
-        }
         stats.rules += 1;
 
         // Track the rule's archetype signature (the sorted set of component
@@ -660,6 +662,12 @@ const RuleEmit = struct {
     /// non-observer. When set, `tick` subscribes a `*EventCursor` at head=0 and
     /// threads it into the rule call.
     event_type: ?[]const u8 = null,
+    /// The rule fn allocates from the frame arena (M0.8 E3-C tranche 1b:
+    /// string concat) and takes the conditional trailing
+    /// `fa: std.mem.Allocator` param; `tick` mounts `__frame` on the threaded
+    /// `gpa` and dispatches `__frame.allocator()`. Reported by the emission
+    /// two-pass (`emitRule`/`emitObserverRule` return value).
+    needs_arena: bool = false,
 };
 
 const ResourceDep = struct {
@@ -777,7 +785,23 @@ fn programUsesChanged(ast: *const AstArena) bool {
 /// former fails loud here, the latter in `emitStmt`; the interpreter is the
 /// reference for both, and the full byte-exact event differential closes in the
 /// sub-slice-C codegen tranche once resource-receiver codegen lands.
-fn emitObserverRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable) CodegenError!void {
+/// Observer variant of the `emitRule` two-pass frame-arena classification
+/// (M0.8 E3-C tranche 1b) — returns whether the fn takes the conditional
+/// `fa` param. See `emitRule` for why the classification must be exact.
+fn emitObserverRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable) CodegenError!bool {
+    var scratch_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer scratch_buf.deinit(w.gpa);
+    var scratch = Writer.init(w.gpa, &scratch_buf);
+    try emitObserverRuleInner(&scratch, ast, rule, tag_table, true);
+    if (scratch.arena_used) {
+        try w.write(scratch_buf.items);
+        return true;
+    }
+    try emitObserverRuleInner(w, ast, rule, tag_table, false);
+    return false;
+}
+
+fn emitObserverRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable, needs_arena: bool) CodegenError!void {
     const name = ast.strings.slice(rule.name);
     const annot = ast.onEventAnnotation(rule) orelse return CodegenError.UnsupportedConstruct;
     const event_type = ast.onEventTypeName(annot) orelse return CodegenError.UnsupportedConstruct;
@@ -789,7 +813,9 @@ fn emitObserverRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, ta
     // component `when`, or a per-entity tag filter) is out of M0.8 scope.
     if (info.has_component_ref or info.tag_filters.len > 0) return CodegenError.UnsupportedConstruct;
 
-    try w.printLine("pub fn rule_{s}(world: *World, ev_cursor: *EventCursor) void {{", .{name});
+    // The conditional frame-arena param (M0.8 E3-C tranche 1b), appended last.
+    const fa_param: []const u8 = if (needs_arena) ", fa: std.mem.Allocator" else "";
+    try w.printLine("pub fn rule_{s}(world: *World, ev_cursor: *EventCursor{s}) void {{", .{ name, fa_param });
     w.indentBy(1);
 
     // Resource gates (`when resource R [changed]`) — checked once before the
@@ -807,7 +833,7 @@ fn emitObserverRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, ta
     try w.printLine("while (world.event_bus.poll({s}, ev_cursor) catch null) |event| {{", .{etype_name});
     w.indentBy(1);
 
-    var ctx: LocalCtx = .{ .tag_table = tag_table };
+    var ctx: LocalCtx = .{ .tag_table = tag_table, .arena_param = if (needs_arena) "fa" else null };
     defer ctx.deinit(w.gpa);
     try ctx.recordParams(w.gpa, ast, rule);
     // Bind the implicit `event` payload as a value of type `T`. The body must
@@ -831,13 +857,40 @@ fn emitObserverRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, ta
     try w.blankLine();
 }
 
-fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable, program_has_changed: bool) CodegenError!void {
+/// Emit one Zig `fn` for an Etch rule, returning whether the fn takes the
+/// conditional frame-arena param `fa` (M0.8 E3-C tranche 1b). Exact two-pass
+/// classification: the fn is first emitted into a scratch buffer with the
+/// arena available; iff that emission allocated (`Writer.arena_used` — string
+/// concat today), the scratch text (whose signature already has `fa`) is
+/// spliced into the output. Otherwise the fn is re-emitted without the arena
+/// — identical text minus the param. Exactness matters: Zig rejects an unused
+/// fn param AND a pointless discard, so an over- or under-approximating
+/// body-walk would break the generated code on any divergence from the
+/// emitter's own string-typing; flag-on-emission cannot diverge.
+fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable, program_has_changed: bool) CodegenError!bool {
+    var scratch_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer scratch_buf.deinit(w.gpa);
+    var scratch = Writer.init(w.gpa, &scratch_buf);
+    try emitRuleInner(&scratch, ast, rule, tag_table, program_has_changed, true);
+    if (scratch.arena_used) {
+        try w.write(scratch_buf.items);
+        return true;
+    }
+    try emitRuleInner(w, ast, rule, tag_table, program_has_changed, false);
+    return false;
+}
+
+fn emitRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable, program_has_changed: bool, needs_arena: bool) CodegenError!void {
     // `async rule` (M0.8 E3 sub-slice B) lowers to a suspend/resume state
     // machine — HIR-dependent, Phase 2. The interpreter is the reference; the
     // codegen rejects it loudly (consistent with `async fn` at l.689).
     if (rule.is_async) return CodegenError.UnsupportedConstruct;
 
     const name = ast.strings.slice(rule.name);
+    // The conditional frame-arena param (M0.8 E3-C tranche 1b) — appended
+    // last, after the `*CommandBuffer` / `*EventCursor` conditional params.
+    const fa_param: []const u8 = if (needs_arena) ", fa: std.mem.Allocator" else "";
+    const arena: ?[]const u8 = if (needs_arena) "fa" else null;
 
     // Collect what the when clause needs first (a negative tag op fails loud
     // here, before any output is emitted).
@@ -860,9 +913,9 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table:
     }
 
     if (tag_mutating) {
-        try w.printLine("pub fn rule_{s}(world: *World, cmd: *CommandBuffer) void {{", .{name});
+        try w.printLine("pub fn rule_{s}(world: *World, cmd: *CommandBuffer{s}) void {{", .{ name, fa_param });
     } else {
-        try w.printLine("pub fn rule_{s}(world: *World) void {{", .{name});
+        try w.printLine("pub fn rule_{s}(world: *World{s}) void {{", .{ name, fa_param });
     }
     w.indentBy(1);
 
@@ -878,7 +931,7 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table:
 
     if (!info.has_component_ref) {
         // Resource-only or no-when rule: body runs at most once per tick.
-        try emitRuleBodyOnce(w, ast, rule);
+        try emitRuleBodyOnce(w, ast, rule, arena);
         w.indentBy(-1);
         try w.line("}");
         try w.blankLine();
@@ -912,13 +965,13 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table:
         // `markChanged` and a `changed` filter's per-slot `changedTick` can
         // address `arch`/`chunk`/`slot`. The synth bench corpus never hits this
         // branch (gate 4's monomorphisation count reflects only the AND path).
-        try emitRuleAsArchWalk(w, ast, rule, info, &body_used, tag_mutating, tag_table, program_has_changed);
+        try emitRuleAsArchWalk(w, ast, rule, info, &body_used, tag_mutating, tag_table, program_has_changed, arena);
     } else {
         // Path 1 — comptime query. The cooked code emits one
         // `comptime_query.query(world, .{T1, T2, ...})` invocation per
         // rule signature; Zig comptime monomorphises one iterator type
         // per distinct tuple.
-        try emitRuleAsComptimeQuery(w, ast, rule, info, &body_used);
+        try emitRuleAsComptimeQuery(w, ast, rule, info, &body_used, arena);
     }
 
     // Advance this rule's change-detection baseline to the current tick — the
@@ -941,7 +994,7 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table:
 /// also appear in the tuple, otherwise the iterator would yield rows
 /// from archetypes that satisfy a strictly weaker predicate than the
 /// rule asked for.
-fn emitRuleAsComptimeQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, body_used: *const std.StringHashMapUnmanaged(void)) CodegenError!void {
+fn emitRuleAsComptimeQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, body_used: *const std.StringHashMapUnmanaged(void), arena: ?[]const u8) CodegenError!void {
     _ = body_used;
 
     // Query tuple = full set of `has`-conjunction components, ordered as
@@ -972,7 +1025,7 @@ fn emitRuleAsComptimeQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleD
         try w.write(") continue;\n");
     }
 
-    try emitRuleBodyQuery(w, ast, rule, info);
+    try emitRuleBodyQuery(w, ast, rule, info, arena);
 
     w.indentBy(-1);
     try w.line("}"); // while it.next()
@@ -982,7 +1035,7 @@ fn emitRuleAsComptimeQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleD
 /// when clauses containing `or` / `not`. Same shape as the pre-rewrite
 /// codegen — kept until the inherited S4 debts (`not` / `or` predicates)
 /// are addressed in Phase 0.2.
-fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, body_used: *const std.StringHashMapUnmanaged(void), tag_mutating: bool, tag_table: *const tags_mod.TagTable, program_has_changed: bool) CodegenError!void {
+fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, body_used: *const std.StringHashMapUnmanaged(void), tag_mutating: bool, tag_table: *const tags_mod.TagTable, program_has_changed: bool, arena: ?[]const u8) CodegenError!void {
     for (info.components) |cname| {
         try w.printLine("const {s}_id = world.registry.idOf(\"{s}\") orelse return;", .{ cname, cname });
     }
@@ -1046,7 +1099,7 @@ fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, 
     for (info.changed_components) |cname| {
         try w.printLine("if (!(arch.changedTick(chunk, {s}_idx, slot) > __last_run_{s})) continue;", .{ cname, rname });
     }
-    try emitRuleBody(w, ast, rule, info, tag_table, program_has_changed);
+    try emitRuleBody(w, ast, rule, info, tag_table, program_has_changed, arena);
     w.indentBy(-1);
     try w.line("}"); // while slot
     w.indentBy(-1);
@@ -1316,10 +1369,10 @@ fn emitArchPredicate(w: *Writer, ast: *const AstArena, when_idx: u32) CodegenErr
 }
 
 /// Emit a rule body that does NOT iterate entities (resource-only rule).
-fn emitRuleBodyOnce(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) CodegenError!void {
+fn emitRuleBodyOnce(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, arena: ?[]const u8) CodegenError!void {
     // No component_ref → still need a (degenerate) LocalCtx for any
     // non-component locals the body might declare.
-    var ctx: LocalCtx = .{};
+    var ctx: LocalCtx = .{ .arena_param = arena };
     defer ctx.deinit(w.gpa);
     try ctx.recordParams(w.gpa, ast, rule);
     var s: u32 = 0;
@@ -1330,8 +1383,8 @@ fn emitRuleBodyOnce(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) Co
     }
 }
 
-fn emitRuleBody(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, tag_table: *const tags_mod.TagTable, mark_changed: bool) CodegenError!void {
-    var ctx: LocalCtx = .{ .tag_table = tag_table, .mark_changed = mark_changed };
+fn emitRuleBody(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, tag_table: *const tags_mod.TagTable, mark_changed: bool, arena: ?[]const u8) CodegenError!void {
+    var ctx: LocalCtx = .{ .tag_table = tag_table, .mark_changed = mark_changed, .arena_param = arena };
     defer ctx.deinit(w.gpa);
 
     // Record component aliases so `entity.get(T)` / `entity.get_mut(T)`
@@ -1355,9 +1408,10 @@ fn emitRuleBody(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: 
 /// Variant of `emitRuleBody` used inside the comptime-query iteration.
 /// Sets `ctx.query_components` so component accesses lower to
 /// `__row[idx].field` instead of `<comp>_arr[slot].field`.
-fn emitRuleBodyQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo) CodegenError!void {
+fn emitRuleBodyQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, arena: ?[]const u8) CodegenError!void {
     var ctx: LocalCtx = .{
         .query_components = info.components,
+        .arena_param = arena,
     };
     defer ctx.deinit(w.gpa);
     for (info.components) |cname| {
@@ -1429,6 +1483,12 @@ const LocalCtx = struct {
     /// same per-write point as the interpreter's `markComponentChanged`, hence
     /// the `changed` differential is byte-exact by construction.
     mark_changed: bool = false,
+    /// The in-scope frame-arena allocator parameter name (`"fa"`), or null
+    /// when the emission context has no arena — top-level fns / methods,
+    /// where a string concat fails loud (M0.8 E3-C tranche 1b; fn-body
+    /// allocation = the §6.3 outparam-arena model, deferred). Set on
+    /// rule-body contexts by the rule emitters.
+    arena_param: ?[]const u8 = null,
 
     pub fn deinit(self: *LocalCtx, gpa: std.mem.Allocator) void {
         self.records.deinit(gpa);
@@ -2102,6 +2162,26 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         },
         .binary => {
             const b = ast.binary_exprs.items[data];
+            // `string + string` → concat allocated in the tick's frame arena
+            // via the rule's threaded `fa` (M0.8 E3-C tranche 1b; stdlib
+            // §12.4, arena model `etch-memory-model.md` §3 / abi-zig §5.6).
+            // Same logical point as the interpreter's `.add` intercept in
+            // `evalExpr` — byte-exact by construction. The resolver only
+            // lets string+string through, so one string operand suffices to
+            // classify. No arena in scope (fn/method body) → fail loud.
+            if (b.op == .add and
+                (std.mem.eql(u8, inferExprZigType(ast, ctx, b.lhs), "[]const u8") or
+                    std.mem.eql(u8, inferExprZigType(ast, ctx, b.rhs), "[]const u8")))
+            {
+                const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
+                w.arena_used = true;
+                try w.print("(std.mem.concat({s}, u8, &.{{ ", .{fa});
+                try emitExpr(w, ast, ctx, b.lhs);
+                try w.write(", ");
+                try emitExpr(w, ast, ctx, b.rhs);
+                try w.write(" }) catch unreachable)");
+                return;
+            }
             try w.write("(");
             try emitExpr(w, ast, ctx, b.lhs);
             try w.print(" {s} ", .{binaryOpText(b.op)});
@@ -2759,9 +2839,11 @@ fn emitConstExpr(w: *Writer, ast: *const AstArena, expr: NodeId, target_zig_type
 fn emitTick(w: *Writer, rules: []const RuleEmit, program_has_changed: bool) CodegenError!void {
     var any_tag_mutation = false;
     var any_observer = false;
+    var any_arena = false;
     for (rules) |r| {
         if (r.tag_mutating) any_tag_mutation = true;
         if (r.event_type != null) any_observer = true;
+        if (r.needs_arena) any_arena = true;
     }
 
     try w.line("/// Execute every rule once in source declaration order, apply any");
@@ -2769,7 +2851,8 @@ fn emitTick(w: *Writer, rules: []const RuleEmit, program_has_changed: bool) Code
     try w.line("/// equivalent to a single tick of the S4 interpreter's `stepOnce`");
     try w.line("/// (rules + `flushPendingTags`) + `tickBoundary`. `gpa` is the");
     try w.line("/// uniform allocator-threading contract for the generated code");
-    try w.line("/// (M0.8 E3); the tag command buffer is its first consumer.");
+    try w.line("/// (M0.8 E3); the tag command buffer and the per-tick frame arena");
+    try w.line("/// (string concat results — `etch-memory-model.md` §3) consume it.");
     if (any_observer) {
         try w.line("///");
         try w.line("/// `@on_event(T)` observers: the per-tick event queue is drained at the");
@@ -2795,9 +2878,21 @@ fn emitTick(w: *Writer, rules: []const RuleEmit, program_has_changed: bool) Code
         // a plain gpa is leak-free here.
         try w.line("var cmd = CommandBuffer.init(gpa, world);");
         try w.line("defer cmd.deinit();");
-    } else {
-        // No tag mutation → the threaded gpa is unused this tick (event
-        // drain / subscribe / poll need no allocator).
+    }
+    if (any_arena) {
+        // Frame arena (M0.8 E3-C tranche 1b, `etch-memory-model.md` §3 /
+        // abi-zig §5.6): transient non-POD allocations (string concat) live
+        // here, threaded into arena-needing rule fns as `fa`. Arena-per-tick
+        // mounted on the threaded gpa = reset-at-tick-boundary by
+        // construction (deinit when `tick` returns). The interpreter's
+        // per-body string-store reset is finer-grained but observably
+        // identical — strings never enter the POD world state.
+        try w.line("var __frame = std.heap.ArenaAllocator.init(gpa);");
+        try w.line("defer __frame.deinit();");
+    }
+    if (!any_tag_mutation and !any_arena) {
+        // No tag mutation, no frame arena → the threaded gpa is unused this
+        // tick (event drain / subscribe / poll need no allocator).
         try w.line("_ = gpa;");
     }
 
@@ -2815,9 +2910,19 @@ fn emitTick(w: *Writer, rules: []const RuleEmit, program_has_changed: bool) Code
 
     for (rules, 0..) |r, i| {
         if (r.tag_mutating) {
-            try w.printLine("rule_{s}(world, &cmd);", .{r.name});
+            if (r.needs_arena) {
+                try w.printLine("rule_{s}(world, &cmd, __frame.allocator());", .{r.name});
+            } else {
+                try w.printLine("rule_{s}(world, &cmd);", .{r.name});
+            }
         } else if (r.event_type != null) {
-            try w.printLine("rule_{s}(world, &__evcur_{d});", .{ r.name, i });
+            if (r.needs_arena) {
+                try w.printLine("rule_{s}(world, &__evcur_{d}, __frame.allocator());", .{ r.name, i });
+            } else {
+                try w.printLine("rule_{s}(world, &__evcur_{d});", .{ r.name, i });
+            }
+        } else if (r.needs_arena) {
+            try w.printLine("rule_{s}(world, __frame.allocator());", .{r.name});
         } else {
             try w.printLine("rule_{s}(world);", .{r.name});
         }
