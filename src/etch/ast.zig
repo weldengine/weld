@@ -381,6 +381,34 @@ pub const TagLeaf = struct {
     span: SourceSpan,
 };
 
+/// The five tag query operators (M0.8 E3, `etch-grammar.md` §3.2 `tag_op`,
+/// `etch-validation-ecs.md` §5.4). `has_tag`/`has_no_tag` take a single tag;
+/// `has_any_tag`/`has_all_tags`/`has_no_tags` take a list (or a category
+/// namespace expanding to a mask).
+pub const TagOp = enum { has_tag, has_no_tag, has_any_tag, has_all_tags, has_no_tags };
+
+/// Side-slab entry for a `tag_path` expression (`TAG_PATH = "." IDENT {"."
+/// IDENT}`, `etch-grammar.md` §1.3). The dotted segments are a `(start, len)`
+/// run of `arena.tag_path_segs` (interned segment names). Produced only in tag
+/// operand position (after a `tag_op`, or in a tag mutation) — never as a bare
+/// primary, so there is no ambiguity with the `.variant` enum shorthand.
+pub const TagPathExpr = struct {
+    segs_start: u32,
+    segs_len: u32,
+};
+
+/// Side-slab entry for a `tag_filter` `when` condition (`expression tag_op
+/// tag_operand`, M0.8 E3, `etch-grammar.md` §6 l.945). The operand is a
+/// `(start, len)` run of `arena.tag_operands` (each a `tag_path` expr NodeId):
+/// length 1 for `has_tag`/`has_no_tag`, ≥1 for the multi operators (or a single
+/// category path). Referenced from a `WhenNode` of kind `.tag_filter` via its
+/// `aux` index.
+pub const TagFilter = struct {
+    op: TagOp,
+    operand_start: u32,
+    operand_len: u32,
+};
+
 const RuleParam = struct {
     name: StringId,
     type_node: NodeId,
@@ -420,6 +448,7 @@ pub const WhenNodeKind = enum {
     has_with_filter, // entity has T { field == value }
     resource, // resource T
     resource_changed, // resource T changed
+    tag_filter, // entity has_tag .path (M0.8 E3) — `aux` indexes `tag_filters`
 };
 
 /// Side-slab entry for one node of the `when` boolean tree. Composite
@@ -440,6 +469,9 @@ pub const WhenNode = struct {
     /// for `and` / `or`.
     lhs: u32, // index into when_nodes
     rhs: u32,
+    /// Kind-specific auxiliary index. For `.tag_filter`: index into
+    /// `arena.tag_filters` (M0.8 E3). Unused (0) for every other kind.
+    aux: u32 = 0,
     span: SourceSpan,
 
     pub const no_child: u32 = std.math.maxInt(u32);
@@ -1040,6 +1072,10 @@ pub const AstArena = struct {
     tags_decls: std.ArrayListUnmanaged(TagsDecl) = .empty,
     tag_namespaces: std.ArrayListUnmanaged(TagNamespace) = .empty,
     tag_leaves: std.ArrayListUnmanaged(TagLeaf) = .empty,
+    tag_paths: std.ArrayListUnmanaged(TagPathExpr) = .empty,
+    tag_path_segs: std.ArrayListUnmanaged(StringId) = .empty,
+    tag_filters: std.ArrayListUnmanaged(TagFilter) = .empty,
+    tag_operands: std.ArrayListUnmanaged(NodeId) = .empty,
     rule_decls: std.ArrayListUnmanaged(RuleDecl) = .empty,
     fn_decls: std.ArrayListUnmanaged(FnDecl) = .empty,
     struct_decls: std.ArrayListUnmanaged(StructDecl) = .empty,
@@ -1150,6 +1186,10 @@ pub const AstArena = struct {
         self.tags_decls.deinit(gpa);
         self.tag_namespaces.deinit(gpa);
         self.tag_leaves.deinit(gpa);
+        self.tag_paths.deinit(gpa);
+        self.tag_path_segs.deinit(gpa);
+        self.tag_filters.deinit(gpa);
+        self.tag_operands.deinit(gpa);
         self.rule_decls.deinit(gpa);
         self.fn_decls.deinit(gpa);
         self.struct_decls.deinit(gpa);
@@ -1526,6 +1566,17 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.emit_stmts.items.len);
         try self.emit_stmts.append(gpa, em);
         return try self.addStmt(gpa, .emit_stmt, idx, span);
+    }
+
+    /// Build a `tag_path` expression node (M0.8 E3) from its interned dotted
+    /// segments. The segments are copied into `tag_path_segs`; the node data
+    /// indexes `tag_paths`.
+    pub fn addTagPath(self: *AstArena, gpa: std.mem.Allocator, segs: []const StringId, span: SourceSpan) !NodeId {
+        const segs_start: u32 = @intCast(self.tag_path_segs.items.len);
+        try self.tag_path_segs.appendSlice(gpa, segs);
+        const idx: u32 = @intCast(self.tag_paths.items.len);
+        try self.tag_paths.append(gpa, .{ .segs_start = segs_start, .segs_len = @intCast(segs.len) });
+        return try self.addExpr(gpa, .tag_path, idx, span);
     }
 
     pub fn addTryCatchStmt(self: *AstArena, gpa: std.mem.Allocator, tc: TryCatchStmt, span: SourceSpan) !NodeId {

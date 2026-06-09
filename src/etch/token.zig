@@ -73,6 +73,11 @@ pub const TokenKind = enum {
     kw_event, // event declaration (M0.8 E3 ECS layer)
     kw_emit, // emit statement (M0.8 E3 ECS layer)
     kw_tags, // tags hierarchical declaration (M0.8 E3 ECS layer)
+    kw_has_tag, // tag query operator (M0.8 E3 ECS layer)
+    kw_has_no_tag, // tag query operator (M0.8 E3 ECS layer)
+    kw_has_any_tag, // tag query operator (M0.8 E3 ECS layer)
+    kw_has_all_tags, // tag query operator (M0.8 E3 ECS layer)
+    kw_has_no_tags, // tag query operator (M0.8 E3 ECS layer)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -190,6 +195,11 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "event", .kind = .kw_event },
     .{ .lexeme = "emit", .kind = .kw_emit },
     .{ .lexeme = "tags", .kind = .kw_tags },
+    .{ .lexeme = "has_tag", .kind = .kw_has_tag },
+    .{ .lexeme = "has_no_tag", .kind = .kw_has_no_tag },
+    .{ .lexeme = "has_any_tag", .kind = .kw_has_any_tag },
+    .{ .lexeme = "has_all_tags", .kind = .kw_has_all_tags },
+    .{ .lexeme = "has_no_tags", .kind = .kw_has_no_tags },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -251,12 +261,10 @@ pub const non_s3_keywords = [_][]const u8{
     "branch",
     "spawn",
 
-    // ── Tag operators (out of S3) ──
-    "has_tag",
-    "has_no_tag",
-    "has_any_tag",
-    "has_all_tags",
-    "has_no_tags",
+    // ── Tag mutation operators (out of S3; the 5 query operators
+    //    `has_tag`/`has_no_tag`/`has_any_tag`/`has_all_tags`/`has_no_tags`
+    //    graduated with the E3 ECS layer; `add_tag`/`remove_tag` graduate
+    //    with the tag-mutation commit) ──
     "add_tag",
     "remove_tag",
 

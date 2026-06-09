@@ -1039,6 +1039,42 @@ pub const TypeChecker = struct {
                     try self.emit(.resource_expected_in_when, .error_, node.span, "unknown resource '{s}' in when clause", .{tname_slice});
                 }
             },
+            .tag_filter => {
+                // `entity has_tag .path` (M0.8 E3, `etch-validation-ecs.md`
+                // §7.2). Validate each operand path against the global tag
+                // table; an unknown path is E1212 (the `when`-context tag code).
+                const tf = self.arena.tag_filters.items[node.aux];
+                var oi: u32 = 0;
+                while (oi < tf.operand_len) : (oi += 1) {
+                    const path_node = self.arena.tag_operands.items[tf.operand_start + oi];
+                    try self.validateTagPath(path_node, tf.op);
+                }
+            },
+        }
+    }
+
+    /// Validate one tag operand path against the global tag table (M0.8 E3,
+    /// `etch-validation-ecs.md` §5.4-5.5 / §7.2). An unknown path is `E1212
+    /// UnknownTag`; `has_tag` / `has_no_tag` additionally require a leaf (a
+    /// namespace operand is only meaningful for the multi operators, where it
+    /// expands to a category mask).
+    fn validateTagPath(self: *TypeChecker, path_node: NodeId, op: ast_mod.TagOp) !void {
+        const tp = self.arena.tag_paths.items[self.arena.exprData(path_node)];
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(self.gpa);
+        var i: u32 = 0;
+        while (i < tp.segs_len) : (i += 1) {
+            if (i > 0) try buf.append(self.gpa, '.');
+            try buf.appendSlice(self.gpa, self.arena.strings.slice(self.arena.tag_path_segs.items[tp.segs_start + i]));
+        }
+        const table = self.tag_table orelse return;
+        const entry = table.lookup(buf.items);
+        if (entry == null) {
+            try self.emit(.unknown_tag, .error_, self.arena.exprSpan(path_node), "unknown tag path '.{s}' in when clause", .{buf.items});
+            return;
+        }
+        if ((op == .has_tag or op == .has_no_tag) and !entry.?.is_leaf) {
+            try self.emit(.unknown_tag, .error_, self.arena.exprSpan(path_node), "'{s}' is a tag namespace; '{s}' requires a single leaf tag", .{ buf.items, @tagName(op) });
         }
     }
 
@@ -3498,4 +3534,41 @@ test "type-checker validates @networked on event, rejects @config on event (M0.8
     );
     defer misapplied.deinit(gpa);
     try expectAnyCode(misapplied.diagnostics.items, .annotation_misapplied);
+}
+
+test "type-checker validates tag-filter when conditions (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+
+    // Valid: a declared leaf path in a `has_tag` filter → no E1212.
+    var ok = try parseAndCheck(gpa,
+        \\tags { character { status { alive, stunned } } }
+        \\component Health { current: float = 100.0 }
+        \\rule r(entity: Entity) when entity has Health and entity has_tag .character.status.stunned { }
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .unknown_tag);
+
+    // Unknown tag path → E1212 UnknownTag.
+    var unknown = try parseAndCheck(gpa,
+        \\tags { character { status { alive } } }
+        \\rule r(entity: Entity) when entity has_tag .character.status.frozen { }
+    );
+    defer unknown.deinit(gpa);
+    try expectAnyCode(unknown.diagnostics.items, .unknown_tag);
+
+    // A namespace where `has_tag` requires a leaf → E1212.
+    var ns = try parseAndCheck(gpa,
+        \\tags { character { status { alive } } }
+        \\rule r(entity: Entity) when entity has_tag .character.status { }
+    );
+    defer ns.deinit(gpa);
+    try expectAnyCode(ns.diagnostics.items, .unknown_tag);
+
+    // `has_any_tag` accepts a category namespace (mask) → no E1212.
+    var cat = try parseAndCheck(gpa,
+        \\tags { character { status { alive, stunned } } }
+        \\rule r(entity: Entity) when entity has_any_tag .character.status { }
+    );
+    defer cat.deinit(gpa);
+    try expectNoCode(cat.diagnostics.items, .unknown_tag);
 }

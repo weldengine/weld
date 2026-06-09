@@ -1496,9 +1496,15 @@ pub const Parser = struct {
             try self.arena.when_nodes.append(self.gpa, node);
             return idx;
         }
-        // `entity has T [{ field == value }]`
+        // `entity has T [{ field == value }]` or `entity tag_op tag_operand`.
         const entity_tok = try self.expect(.ident, "expected entity binding in when clause");
         const entity_name = try self.internSlice(entity_tok.span);
+        // `entity has_tag .path` / `entity has_any_tag [.a, .b]` (M0.8 E3 tag
+        // filter, `etch-grammar.md` §6 l.945). The tag op stands where `has`
+        // would; dispatch before the `has` path.
+        if (isTagOp(self.peek())) {
+            return try self.parseTagFilterWhen(entity_name, entity_tok.span);
+        }
         _ = try self.expect(.kw_has, "expected 'has' in when clause");
         const type_tok = try self.expect(.type_ident, "expected component type after 'has'");
         const type_name = try self.internSlice(type_tok.span);
@@ -1530,6 +1536,99 @@ pub const Parser = struct {
             .lhs = ast_mod.WhenNode.no_child,
             .rhs = ast_mod.WhenNode.no_child,
             .span = .{ .byte_start = entity_tok.span.byte_start, .byte_end = end_byte },
+        };
+        const idx: u32 = @intCast(self.arena.when_nodes.items.len);
+        try self.arena.when_nodes.append(self.gpa, node);
+        return idx;
+    }
+
+    /// True when `k` is one of the five tag query operator keywords (M0.8 E3).
+    fn isTagOp(k: token_mod.TokenKind) bool {
+        return switch (k) {
+            .kw_has_tag, .kw_has_no_tag, .kw_has_any_tag, .kw_has_all_tags, .kw_has_no_tags => true,
+            else => false,
+        };
+    }
+
+    fn tagOpFromToken(k: token_mod.TokenKind) ast_mod.TagOp {
+        return switch (k) {
+            .kw_has_tag => .has_tag,
+            .kw_has_no_tag => .has_no_tag,
+            .kw_has_any_tag => .has_any_tag,
+            .kw_has_all_tags => .has_all_tags,
+            .kw_has_no_tags => .has_no_tags,
+            else => unreachable,
+        };
+    }
+
+    /// Parse a `TAG_PATH = "." IDENT {"." IDENT}` (M0.8 E3, `etch-grammar.md`
+    /// §1.3) into a `tag_path` expression. Parsed only in tag-operand position,
+    /// so the leading `.` never collides with the `.variant` enum shorthand.
+    fn parseTagPathExpr(self: *Parser) ParseError!NodeId {
+        const dot = try self.expect(.dot, "expected '.' to start a tag path");
+        var segs: std.ArrayListUnmanaged(StringId) = .empty;
+        defer segs.deinit(self.gpa);
+        const first = try self.expect(.ident, "expected tag segment after '.'");
+        try segs.append(self.gpa, try self.internSlice(first.span));
+        var end_byte = first.span.byte_end;
+        while (self.peek() == .dot) {
+            _ = try self.advance();
+            const seg = try self.expect(.ident, "expected tag segment after '.'");
+            try segs.append(self.gpa, try self.internSlice(seg.span));
+            end_byte = seg.span.byte_end;
+        }
+        return try self.arena.addTagPath(self.gpa, segs.items, .{ .byte_start = dot.span.byte_start, .byte_end = end_byte });
+    }
+
+    /// Parse the operand of a tag op into a `(start, len)` run of `tag_path`
+    /// node ids in `arena.tag_operands`: a single `.path`, or a bracketed list
+    /// `[.a, .b]` (`etch-grammar.md` §3.2 `tag_operand`). The bare-`TYPE_IDENT`
+    /// category operand form is deferred (a dotted path resolving to a namespace
+    /// already expresses a category).
+    fn parseTagOperandRun(self: *Parser) ParseError!struct { start: u32, len: u32 } {
+        const start: u32 = @intCast(self.arena.tag_operands.items.len);
+        if (self.peek() == .lbracket) {
+            _ = try self.advance(); // '['
+            while (self.peek() != .rbracket and self.peek() != .eof) {
+                const p = try self.parseTagPathExpr();
+                try self.arena.tag_operands.append(self.gpa, p);
+                if (!try self.match(.comma)) break;
+            }
+            _ = try self.expect(.rbracket, "expected ']' to close the tag list");
+        } else {
+            const p = try self.parseTagPathExpr();
+            try self.arena.tag_operands.append(self.gpa, p);
+        }
+        return .{ .start = start, .len = @as(u32, @intCast(self.arena.tag_operands.items.len)) - start };
+    }
+
+    /// Parse `entity tag_op tag_operand` into a `.tag_filter` when-node (M0.8
+    /// E3). The receiver `entity` ident is already consumed; the current token
+    /// is the tag op.
+    fn parseTagFilterWhen(self: *Parser, entity_name: StringId, entity_span: token_mod.SourceSpan) ParseError!u32 {
+        const op_tok = try self.advance(); // the tag op keyword
+        const op = tagOpFromToken(op_tok.kind);
+        const operand = try self.parseTagOperandRun();
+        const filter_idx: u32 = @intCast(self.arena.tag_filters.items.len);
+        try self.arena.tag_filters.append(self.gpa, .{
+            .op = op,
+            .operand_start = operand.start,
+            .operand_len = operand.len,
+        });
+        const end_byte = if (operand.len > 0)
+            self.arena.exprSpan(self.arena.tag_operands.items[operand.start + operand.len - 1]).byte_end
+        else
+            op_tok.span.byte_end;
+        const node = ast_mod.WhenNode{
+            .kind = .tag_filter,
+            .entity_name = entity_name,
+            .type_name = 0,
+            .field_name = 0,
+            .filter_value = NodeId.none,
+            .lhs = ast_mod.WhenNode.no_child,
+            .rhs = ast_mod.WhenNode.no_child,
+            .aux = filter_idx,
+            .span = .{ .byte_start = entity_span.byte_start, .byte_end = end_byte },
         };
         const idx: u32 = @intCast(self.arena.when_nodes.items.len);
         try self.arena.when_nodes.append(self.gpa, node);
@@ -3628,4 +3727,32 @@ test "parser recovers and a valid tags after a broken construct survives (M0.8 E
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.tags_decls.items.len);
+}
+
+test "parser builds tag-filter when conditions (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\tags { character { status { alive, stunned } } }
+        \\rule a(entity: Entity) when entity has_tag .character.status.stunned { }
+        \\rule b(entity: Entity) when entity has_any_tag [.character.status.alive, .character.status.stunned] { }
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    // Two tag filters: a single-operand `has_tag`, a two-operand `has_any_tag`.
+    try std.testing.expectEqual(@as(usize, 2), result.ast.tag_filters.items.len);
+    const f0 = result.ast.tag_filters.items[0];
+    try std.testing.expectEqual(ast_mod.TagOp.has_tag, f0.op);
+    try std.testing.expectEqual(@as(u32, 1), f0.operand_len);
+    const f1 = result.ast.tag_filters.items[1];
+    try std.testing.expectEqual(ast_mod.TagOp.has_any_tag, f1.op);
+    try std.testing.expectEqual(@as(u32, 2), f1.operand_len);
+    // The first operand of `has_tag` is a 3-segment tag path.
+    const path_node = result.ast.tag_operands.items[f0.operand_start];
+    const tp = result.ast.tag_paths.items[result.ast.exprData(path_node)];
+    try std.testing.expectEqual(@as(u32, 3), tp.segs_len);
+    try std.testing.expectEqualStrings("character", result.ast.strings.slice(result.ast.tag_path_segs.items[tp.segs_start]));
+    try std.testing.expectEqualStrings("stunned", result.ast.strings.slice(result.ast.tag_path_segs.items[tp.segs_start + 2]));
 }

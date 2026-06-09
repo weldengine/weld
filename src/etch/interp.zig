@@ -1836,6 +1836,10 @@ fn lowerWhen(
             try res_deps.append(gpa, .{ .resource_id = rid, .must_be_changed = true });
             return PredicateNode.no_child;
         },
+        // Tag-filter `when` conditions parse + resolve in this commit; their
+        // runtime (TagSet bit test) is the tag-execution commit. Fail loud
+        // rather than silently dropping the filter (M0.8 E3).
+        .tag_filter => return error.InvalidProgram,
     }
 }
 

@@ -996,6 +996,9 @@ fn emitArchPredicate(w: *Writer, ast: *const AstArena, when_idx: u32) CodegenErr
             // a constant `true`.
             try w.write("true");
         },
+        // Tag-filter codegen (bit test on the entity's TagSet) is the
+        // tag-execution commit; fail loud here (M0.8 E3).
+        .tag_filter => return CodegenError.UnsupportedConstruct,
     }
 }
 
@@ -2438,6 +2441,10 @@ fn walkWhen(
             const rname = ast.strings.slice(node.type_name);
             try res_deps.append(gpa, .{ .name = rname, .must_be_changed = true });
         },
+        // A tag-filter `when` condition needs the TagSet bit-test codegen
+        // (tag-execution commit); fail loud so a rule that uses one is never
+        // cooked into a query that silently drops the filter (M0.8 E3).
+        .tag_filter => return CodegenError.UnsupportedConstruct,
     }
 }
 
@@ -2492,6 +2499,7 @@ fn collectComponents(
             if (!gop.found_existing) try components.append(gpa, cname);
         },
         .resource, .resource_changed => {},
+        .tag_filter => return CodegenError.UnsupportedConstruct,
     }
 }
 
