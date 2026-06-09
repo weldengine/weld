@@ -19,6 +19,7 @@ const parser_mod = @import("parser.zig");
 const diag_mod = @import("diagnostics.zig");
 const value_mod = @import("value.zig");
 const bridge_mod = @import("ecs_bridge.zig");
+const tags_mod = @import("tags.zig");
 
 const weld_core = @import("weld_core");
 const Registry = weld_core.ecs.registry.Registry;
@@ -28,6 +29,7 @@ const FieldKind = weld_core.ecs.registry.FieldKind;
 const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
 const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
 const World = weld_core.ecs.world.World;
+const CoreEntityId = weld_core.ecs.entity.EntityId;
 
 const AstArena = ast_mod.AstArena;
 const NodeId = ast_mod.NodeId;
@@ -56,6 +58,31 @@ const FieldFilter = struct {
     field_offset: u16,
     field_kind: FieldKind,
     expected_value: Value,
+};
+
+/// A per-entity tag query predicate compiled from a `.tag_filter` when-node
+/// (M0.8 E3). `bits` is the resolved leaf-bit set of the operand(s) — a single
+/// bit for `has_tag`/`has_no_tag`, the union of operand bits (leaves + expanded
+/// category masks) for the multi operators. Evaluated against the entity's
+/// `TagSet` at iteration time (an entity without `TagSet` reads as all-zero).
+const TagPredicate = struct {
+    op: ast_mod.TagOp,
+    bits: []u32,
+
+    fn deinit(self: *TagPredicate, gpa: std.mem.Allocator) void {
+        gpa.free(self.bits);
+    }
+};
+
+/// A deferred tag mutation (M0.8 E3, `etch-grammar.md` §4.4). Enqueued by
+/// `add_tag`/`remove_tag` during a tick, applied at the tick boundary (after
+/// every rule has run) — never mid-archetype-walk. Applying may add the
+/// `TagSet` component to an entity that lacks one (an archetype transition),
+/// which is precisely why tag mutations are deferred structural changes.
+const PendingTag = struct {
+    entity: EntityId,
+    bit_index: u32,
+    set: bool,
 };
 
 /// Resolved view of a `when` clause node. The interpreter walks
@@ -88,6 +115,12 @@ const RuleDesc = struct {
     predicate_root: ?u32,
     resource_deps: []ResourceDep,
     field_filter: ?FieldFilter,
+    /// Per-entity tag query predicates (M0.8 E3) — applied after `field_filter`
+    /// at iteration time, ANDed with the rest (same flat model as
+    /// `field_filter`; an `or`/`not` over a tag filter is the same documented
+    /// S4-debt imprecision the field filter carries — the differential uses
+    /// AND only).
+    tag_predicates: []TagPredicate,
     entity_param_name: ?StringId,
     /// True iff the rule iterates entities (predicate references at least
     /// one component and a parameter of type Entity is present). False if
@@ -97,6 +130,8 @@ const RuleDesc = struct {
     fn deinit(self: *RuleDesc, gpa: std.mem.Allocator) void {
         gpa.free(self.predicate_pool);
         gpa.free(self.resource_deps);
+        for (self.tag_predicates) |*tp| tp.deinit(gpa);
+        gpa.free(self.tag_predicates);
     }
 };
 
@@ -360,6 +395,16 @@ pub const Interpreter = struct {
     returning: bool = false,
     /// The value carried by the in-flight `return` (`unit` for a bare return).
     return_value: Value = .{ .unit = {} },
+    /// Merged global tag table (M0.8 E3) — built identically to the resolver's
+    /// (`tags.zig` is the shared algorithm). Consulted at exec time to resolve
+    /// a `tag_mutation_stmt` path to its leaf bit.
+    tag_table: tags_mod.TagTable,
+    /// Registry id of the builtin `TagSet` component, or `null` when the
+    /// program declares no tags. `TagSet` is `[words]u64` of bits.
+    tagset_id: ?ComponentId = null,
+    /// Deferred tag mutations queued during a tick, flushed at the tick boundary
+    /// (M0.8 E3) — never applied mid-archetype-walk.
+    pending_tags: std.ArrayListUnmanaged(PendingTag) = .empty,
 
     pub fn deinit(self: *Interpreter) void {
         for (self.rule_descs) |*r| r.deinit(self.gpa);
@@ -375,6 +420,8 @@ pub const Interpreter = struct {
         self.struct_decls.deinit(self.gpa);
         self.enum_decls.deinit(self.gpa);
         self.trait_methods.deinit(self.gpa);
+        self.tag_table.deinit(self.gpa);
+        self.pending_tags.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -416,6 +463,18 @@ pub const Interpreter = struct {
         var bridge = Bridge.init();
         errdefer bridge.deinit(gpa);
 
+        // Build the merged global tag table (M0.8 E3) — same algorithm as the
+        // resolver / codegen (`tags.zig`). The program is already type-checked,
+        // so `build` reports no new diagnostics; collect them into a throwaway
+        // list and drop it.
+        var tag_diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (tag_diags.items) |*d| d.deinit(gpa);
+            tag_diags.deinit(gpa);
+        }
+        var tag_table = try tags_mod.TagTable.build(gpa, ast, &tag_diags, tags_mod.default_max_tags);
+        errdefer tag_table.deinit(gpa);
+
         // Pass A — register components and resources with the world.
         var i: u28 = 0;
         while (i < ast.items.len) : (i += 1) {
@@ -426,6 +485,27 @@ pub const Interpreter = struct {
                 .resource_decl => try compileResource(gpa, ast, world, &bridge, ast.resource_decls.items[data]),
                 else => {},
             }
+        }
+
+        // Register the builtin `TagSet` component (M0.8 E3) when the program
+        // declares any tag — a fixed `[words]u64` bitfield, one slot per entity
+        // carrying tags. It has no named scalar fields; the runtime reads/writes
+        // its raw bytes as bits.
+        var tagset_id: ?ComponentId = null;
+        if (tag_table.leaf_count > 0) {
+            const size: u16 = @intCast(tag_table.words() * 8);
+            const zeroed = try gpa.alloc(u8, size);
+            defer gpa.free(zeroed);
+            @memset(zeroed, 0);
+            const id = try world.registry.registerComponentRaw(gpa, .{
+                .name = "TagSet",
+                .size = size,
+                .alignment = 8,
+                .default_bytes = zeroed,
+                .fields = &.{},
+            });
+            try bridge.mapComponent(gpa, "TagSet", id);
+            tagset_id = id;
         }
 
         // Pass B — compile rules. Need the registry to resolve field
@@ -440,7 +520,7 @@ pub const Interpreter = struct {
             const kind = ast.items.items(.kind)[i];
             const data = ast.items.items(.data)[i];
             if (kind != .rule_decl) continue;
-            const desc = try compileRule(gpa, ast, &bridge, &world.registry, data);
+            const desc = try compileRule(gpa, ast, &bridge, &world.registry, &tag_table, tagset_id, data);
             try rule_descs.append(gpa, desc);
         }
 
@@ -542,6 +622,8 @@ pub const Interpreter = struct {
             .struct_decls = struct_decls,
             .enum_decls = enum_decls,
             .trait_methods = trait_methods,
+            .tag_table = tag_table,
+            .tagset_id = tagset_id,
         };
     }
 
@@ -564,6 +646,9 @@ pub const Interpreter = struct {
             if (!resourceDepsSatisfied(world, rd.*)) continue;
             try self.runRule(world, rd.*, report);
         }
+        // Apply deferred tag mutations at the tick boundary — after every rule
+        // has run, never mid-archetype-walk (M0.8 E3, `etch-grammar.md` §4.4).
+        try self.flushPendingTags(world);
     }
 
     fn runRule(self: *Interpreter, world: *World, rd: RuleDesc, report: *RuntimeReport) !void {
@@ -585,19 +670,104 @@ pub const Interpreter = struct {
                     if (rd.field_filter) |ff| {
                         if (!filterPasses(arch, chunk, ff, slot)) continue;
                     }
-                    report.entities_iterated += 1;
-                    rule_matched = true;
                     // The chunk array stores the core `EntityId` packed
                     // struct; Etch's local `EntityId` is the raw u64 wire
                     // form that lives inside `Value.entity_id`. The two
                     // share the same 8-byte layout — `@bitCast` does the
                     // conversion without touching bits.
                     const entity_id: EntityId = @bitCast(ids[slot]);
+                    // Per-entity tag predicates (M0.8 E3) — applied after the
+                    // archetype-level predicate, like the field filter.
+                    if (rd.tag_predicates.len > 0 and !self.tagPredicatesPass(world, entity_id, rd.tag_predicates)) continue;
+                    report.entities_iterated += 1;
+                    rule_matched = true;
                     try self.execBody(world, rd, entity_id, report);
                 }
             }
         }
         if (rule_matched) report.rules_matched += 1;
+    }
+
+    /// Evaluate a rule's per-entity tag predicates against `entity`'s `TagSet`
+    /// (M0.8 E3). An entity without a `TagSet` component reads as all-zero, so
+    /// `has_no_tag`/`has_no_tags` pass and the positive operators fail.
+    fn tagPredicatesPass(self: *Interpreter, world: *World, entity: EntityId, preds: []const TagPredicate) bool {
+        const tid = self.tagset_id orelse return false;
+        for (preds) |tp| {
+            switch (tp.op) {
+                .has_tag, .has_all_tags => for (tp.bits) |b| {
+                    if (!entityTagBitSet(world, tid, entity, b)) return false;
+                },
+                .has_no_tag, .has_no_tags => for (tp.bits) |b| {
+                    if (entityTagBitSet(world, tid, entity, b)) return false;
+                },
+                .has_any_tag => {
+                    var any = false;
+                    for (tp.bits) |b| {
+                        if (entityTagBitSet(world, tid, entity, b)) {
+                            any = true;
+                            break;
+                        }
+                    }
+                    if (!any) return false;
+                },
+            }
+        }
+        return true;
+    }
+
+    /// Apply every queued `add_tag`/`remove_tag` (M0.8 E3, `etch-grammar.md`
+    /// §4.4). A `set` on an entity that already has `TagSet` flips the bit in
+    /// place; on one that lacks it, `TagSet` is added (archetype transition)
+    /// with the bit set. Clearing a bit on an entity without `TagSet` is a
+    /// no-op. The location is looked up fresh per mutation so a transition from
+    /// an earlier mutation on the same entity is observed.
+    fn flushPendingTags(self: *Interpreter, world: *World) !void {
+        if (self.pending_tags.items.len == 0) return;
+        const tid = self.tagset_id orelse {
+            self.pending_tags.clearRetainingCapacity();
+            return;
+        };
+        const size: usize = @as(usize, self.tag_table.words()) * 8;
+        for (self.pending_tags.items) |pt| {
+            const core_id: CoreEntityId = @bitCast(pt.entity);
+            const loc = world.dynamicLocation(core_id) orelse continue; // stale handle
+            const arch = world.dynamicArchetype(loc.archetype_idx);
+            if (arch.componentIndex(tid)) |col| {
+                const chunk = arch.chunks.items[loc.chunk_idx];
+                const bytes = arch.componentSlot(chunk, col, loc.slot);
+                setBitInBytes(bytes, pt.bit_index, pt.set);
+            } else if (pt.set) {
+                const buf = try self.gpa.alloc(u8, size);
+                defer self.gpa.free(buf);
+                @memset(buf, 0);
+                setBitInBytes(buf, pt.bit_index, true);
+                try world.addComponentDynamic(self.gpa, core_id, tid, buf);
+            }
+        }
+        self.pending_tags.clearRetainingCapacity();
+    }
+
+    /// Resolve a `tag_path` operand node to its leaf bit via the global table,
+    /// or `null` if unknown / a namespace (the resolver rejects those — a
+    /// `null` here means an inconsistent program and the caller fails loud).
+    fn tagPathLeafBit(self: *Interpreter, path_node: NodeId) ?u32 {
+        const tp = self.ast.tag_paths.items[self.ast.exprData(path_node)];
+        var buf: [256]u8 = undefined;
+        var len: usize = 0;
+        var i: u32 = 0;
+        while (i < tp.segs_len) : (i += 1) {
+            const seg = self.ast.strings.slice(self.ast.tag_path_segs.items[tp.segs_start + i]);
+            const need = seg.len + @as(usize, if (i > 0) 1 else 0);
+            if (len + need > buf.len) return null;
+            if (i > 0) {
+                buf[len] = '.';
+                len += 1;
+            }
+            @memcpy(buf[len .. len + seg.len], seg);
+            len += seg.len;
+        }
+        return self.tag_table.leafBit(buf[0..len]);
     }
 
     fn execBody(self: *Interpreter, world: *World, rd: RuleDesc, entity_id: ?EntityId, report: *RuntimeReport) !void {
@@ -862,6 +1032,25 @@ pub const Interpreter = struct {
                     try fields.append(self.gpa, .{ .name = flit.name, .value = v });
                 }
                 try self.events.enqueue(self.gpa, em.event_type, fields);
+            },
+            .tag_mutation_stmt => {
+                // `entity.add_tag(.path)` / `entity.remove_tag(.path)` (M0.8 E3,
+                // `etch-grammar.md` §4.4) — a deferred structural change. Resolve
+                // the receiver to an entity + the path to its leaf bit, then
+                // queue the mutation; the flush at the tick boundary applies it
+                // (adding `TagSet` if absent), never mid-archetype-walk.
+                const tm = self.ast.tag_mutation_stmts.items[data];
+                const recv = try self.evalExpr(world, locals, tm.receiver);
+                const entity = switch (recv) {
+                    .entity_id => |e| e,
+                    else => return error.RuntimeFailure,
+                };
+                const bit = self.tagPathLeafBit(tm.path) orelse return error.RuntimeFailure;
+                try self.pending_tags.append(self.gpa, .{
+                    .entity = entity,
+                    .bit_index = bit,
+                    .set = tm.kind == .add,
+                });
             },
             else => return error.RuntimeFailure,
         }
@@ -1475,6 +1664,35 @@ fn filterPasses(arch: *DynamicArchetype, chunk: *Chunk, ff: FieldFilter, slot: u
     return v.eql(ff.expected_value);
 }
 
+/// Whether bit `bit` of `entity`'s `TagSet` is set (M0.8 E3). An entity with no
+/// `TagSet` component reads as all-zero.
+fn entityTagBitSet(world: *World, tagset_id: ComponentId, entity: EntityId, bit: u32) bool {
+    const core_id: CoreEntityId = @bitCast(entity);
+    const loc = world.dynamicLocation(core_id) orelse return false;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const col = arch.componentIndex(tagset_id) orelse return false;
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    const bytes = arch.componentSlot(chunk, col, loc.slot);
+    const off: usize = @as(usize, bit / 64) * 8;
+    var word: u64 = 0;
+    @memcpy(std.mem.asBytes(&word), bytes[off .. off + 8]);
+    return (word & (@as(u64, 1) << @intCast(bit % 64))) != 0;
+}
+
+/// Set or clear bit `bit` in a `TagSet`'s raw `[words]u64` bytes (M0.8 E3).
+fn setBitInBytes(bytes: []u8, bit: u32, set: bool) void {
+    const off: usize = @as(usize, bit / 64) * 8;
+    var word: u64 = 0;
+    @memcpy(std.mem.asBytes(&word), bytes[off .. off + 8]);
+    const mask = @as(u64, 1) << @intCast(bit % 64);
+    if (set) {
+        word |= mask;
+    } else {
+        word &= ~mask;
+    }
+    @memcpy(bytes[off .. off + 8], std.mem.asBytes(&word));
+}
+
 fn bindParams(
     gpa: std.mem.Allocator,
     ast: *const AstArena,
@@ -1720,6 +1938,8 @@ fn compileRule(
     ast: *const AstArena,
     bridge: *Bridge,
     registry: *const Registry,
+    tag_table: *const tags_mod.TagTable,
+    tagset_id: ?ComponentId,
     rule_data: u32,
 ) !RuleDesc {
     const rule = ast.rule_decls.items[rule_data];
@@ -1728,12 +1948,30 @@ fn compileRule(
     errdefer pool.deinit(gpa);
     var res_deps: std.ArrayListUnmanaged(ResourceDep) = .empty;
     errdefer res_deps.deinit(gpa);
+    var tag_preds: std.ArrayListUnmanaged(TagPredicate) = .empty;
+    errdefer {
+        for (tag_preds.items) |*tp| tp.deinit(gpa);
+        tag_preds.deinit(gpa);
+    }
     var field_filter: ?FieldFilter = null;
     var predicate_root: ?u32 = null;
     var has_component_ref: bool = false;
 
+    var lw: LowerWhenCtx = .{
+        .ast = ast,
+        .bridge = bridge,
+        .registry = registry,
+        .tag_table = tag_table,
+        .tagset_id = tagset_id,
+        .pool = &pool,
+        .res_deps = &res_deps,
+        .filter = &field_filter,
+        .tag_preds = &tag_preds,
+        .gpa = gpa,
+        .has_component_ref = &has_component_ref,
+    };
     if (rule.when_root != ast_mod.RuleDecl.none_when) {
-        const r = try lowerWhen(ast, bridge, registry, &pool, &res_deps, &field_filter, gpa, rule.when_root, &has_component_ref);
+        const r = try lowerWhen(&lw, rule.when_root);
         predicate_root = r;
     }
 
@@ -1757,90 +1995,147 @@ fn compileRule(
         .predicate_root = predicate_root,
         .resource_deps = try res_deps.toOwnedSlice(gpa),
         .field_filter = field_filter,
+        .tag_predicates = try tag_preds.toOwnedSlice(gpa),
         .entity_param_name = entity_param_name,
         .is_entity_bound = is_entity_bound,
     };
 }
 
-/// Recursively lower a `when` tree into a flat `PredicateNode` pool plus
-/// a list of resource deps and at most one field filter. Returns the
-/// pool-index of the lowered node, or `PredicateNode.no_child` when the
-/// when subtree contributes only resource deps (and thus no archetype-
-/// side predicate).
-fn lowerWhen(
+/// Shared state threaded through `lowerWhen`'s recursion. Carries the output
+/// accumulators (predicate pool, resource deps, field filter, tag predicates)
+/// plus the bridge / registry / tag table needed to resolve names.
+const LowerWhenCtx = struct {
     ast: *const AstArena,
     bridge: *Bridge,
     registry: *const Registry,
+    tag_table: *const tags_mod.TagTable,
+    tagset_id: ?ComponentId,
     pool: *std.ArrayListUnmanaged(PredicateNode),
     res_deps: *std.ArrayListUnmanaged(ResourceDep),
     filter: *?FieldFilter,
+    tag_preds: *std.ArrayListUnmanaged(TagPredicate),
     gpa: std.mem.Allocator,
-    when_idx: u32,
     has_component_ref: *bool,
-) error{ OutOfMemory, InvalidProgram }!u32 {
+};
+
+/// Recursively lower a `when` tree into a flat `PredicateNode` pool plus
+/// a list of resource deps, at most one field filter, and a list of tag
+/// predicates. Returns the pool-index of the lowered node, or
+/// `PredicateNode.no_child` when the subtree contributes only resource deps /
+/// negative tag filters (and thus no archetype-side predicate).
+fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgram }!u32 {
+    const ast = ctx.ast;
     const node = ast.when_nodes.items[when_idx];
     switch (node.kind) {
         .logical_and, .logical_or => {
-            const lhs_idx = try lowerWhen(ast, bridge, registry, pool, res_deps, filter, gpa, node.lhs, has_component_ref);
-            const rhs_idx = try lowerWhen(ast, bridge, registry, pool, res_deps, filter, gpa, node.rhs, has_component_ref);
+            const lhs_idx = try lowerWhen(ctx, node.lhs);
+            const rhs_idx = try lowerWhen(ctx, node.rhs);
             // If a branch contributed only resource deps, propagate the
             // other branch's predicate unchanged.
             if (lhs_idx == PredicateNode.no_child) return rhs_idx;
             if (rhs_idx == PredicateNode.no_child) return lhs_idx;
             const kind: PredicateNodeKind = if (node.kind == .logical_and) .and_ else .or_;
-            const idx: u32 = @intCast(pool.items.len);
-            try pool.append(gpa, .{ .kind = kind, .lhs = lhs_idx, .rhs = rhs_idx });
+            const idx: u32 = @intCast(ctx.pool.items.len);
+            try ctx.pool.append(ctx.gpa, .{ .kind = kind, .lhs = lhs_idx, .rhs = rhs_idx });
             return idx;
         },
         .logical_not => {
-            const child = try lowerWhen(ast, bridge, registry, pool, res_deps, filter, gpa, node.lhs, has_component_ref);
+            const child = try lowerWhen(ctx, node.lhs);
             if (child == PredicateNode.no_child) return PredicateNode.no_child;
-            const idx: u32 = @intCast(pool.items.len);
-            try pool.append(gpa, .{ .kind = .not_, .lhs = child });
+            const idx: u32 = @intCast(ctx.pool.items.len);
+            try ctx.pool.append(ctx.gpa, .{ .kind = .not_, .lhs = child });
             return idx;
         },
         .has => {
             const tname = ast.strings.slice(node.type_name);
-            const id = bridge.componentIdOf(tname) orelse return error.InvalidProgram;
-            const idx: u32 = @intCast(pool.items.len);
-            try pool.append(gpa, .{ .kind = .has, .component_id = id });
-            has_component_ref.* = true;
+            const id = ctx.bridge.componentIdOf(tname) orelse return error.InvalidProgram;
+            const idx: u32 = @intCast(ctx.pool.items.len);
+            try ctx.pool.append(ctx.gpa, .{ .kind = .has, .component_id = id });
+            ctx.has_component_ref.* = true;
             return idx;
         },
         .has_with_filter => {
             const tname = ast.strings.slice(node.type_name);
-            const id = bridge.componentIdOf(tname) orelse return error.InvalidProgram;
+            const id = ctx.bridge.componentIdOf(tname) orelse return error.InvalidProgram;
             const fname = ast.strings.slice(node.field_name);
-            const fd = registry.findField(id, fname) orelse return error.InvalidProgram;
+            const fd = ctx.registry.findField(id, fname) orelse return error.InvalidProgram;
             const v = evalConst(ast, node.filter_value) catch return error.InvalidProgram;
-            filter.* = .{
+            ctx.filter.* = .{
                 .component_id = id,
                 .field_offset = fd.offset,
                 .field_kind = fd.kind,
                 .expected_value = v,
             };
-            const idx: u32 = @intCast(pool.items.len);
-            try pool.append(gpa, .{ .kind = .has, .component_id = id });
-            has_component_ref.* = true;
+            const idx: u32 = @intCast(ctx.pool.items.len);
+            try ctx.pool.append(ctx.gpa, .{ .kind = .has, .component_id = id });
+            ctx.has_component_ref.* = true;
             return idx;
         },
         .resource => {
             const tname = ast.strings.slice(node.type_name);
-            const rid = bridge.resourceIdOf(tname) orelse return error.InvalidProgram;
-            try res_deps.append(gpa, .{ .resource_id = rid, .must_be_changed = false });
+            const rid = ctx.bridge.resourceIdOf(tname) orelse return error.InvalidProgram;
+            try ctx.res_deps.append(ctx.gpa, .{ .resource_id = rid, .must_be_changed = false });
             return PredicateNode.no_child;
         },
         .resource_changed => {
             const tname = ast.strings.slice(node.type_name);
-            const rid = bridge.resourceIdOf(tname) orelse return error.InvalidProgram;
-            try res_deps.append(gpa, .{ .resource_id = rid, .must_be_changed = true });
+            const rid = ctx.bridge.resourceIdOf(tname) orelse return error.InvalidProgram;
+            try ctx.res_deps.append(ctx.gpa, .{ .resource_id = rid, .must_be_changed = true });
             return PredicateNode.no_child;
         },
-        // Tag-filter `when` conditions parse + resolve in this commit; their
-        // runtime (TagSet bit test) is the tag-execution commit. Fail loud
-        // rather than silently dropping the filter (M0.8 E3).
-        .tag_filter => return error.InvalidProgram,
+        .tag_filter => {
+            // `entity has_tag .path` (M0.8 E3). Resolve operand paths → leaf
+            // bits (a leaf → its bit, a category namespace → its mask) into a
+            // per-entity `TagPredicate`. A tag filter makes the rule
+            // entity-bound; a positive op additionally requires the entity to
+            // have `TagSet` (a `has TagSet` archetype predicate), while a
+            // negative op (`has_no_tag`/`has_no_tags`) also matches entities
+            // lacking `TagSet`, so it adds no archetype predicate.
+            const tf = ast.tag_filters.items[node.aux];
+            var bits: std.ArrayListUnmanaged(u32) = .empty;
+            errdefer bits.deinit(ctx.gpa);
+            var oi: u32 = 0;
+            while (oi < tf.operand_len) : (oi += 1) {
+                const path_node = ast.tag_operands.items[tf.operand_start + oi];
+                try resolveTagOperandBits(ctx, path_node, &bits);
+            }
+            try ctx.tag_preds.append(ctx.gpa, .{ .op = tf.op, .bits = try bits.toOwnedSlice(ctx.gpa) });
+            ctx.has_component_ref.* = true;
+            const positive = switch (tf.op) {
+                .has_tag, .has_any_tag, .has_all_tags => true,
+                .has_no_tag, .has_no_tags => false,
+            };
+            if (positive) {
+                if (ctx.tagset_id) |tid| {
+                    const idx: u32 = @intCast(ctx.pool.items.len);
+                    try ctx.pool.append(ctx.gpa, .{ .kind = .has, .component_id = tid });
+                    return idx;
+                }
+            }
+            return PredicateNode.no_child;
+        },
     }
+}
+
+/// Resolve one tag operand path to its leaf bit(s), appending to `out`: a leaf
+/// path contributes its single bit; a namespace path expands to the bits of
+/// every leaf under it (`collectUnder`). An unknown path / a leaf where a
+/// namespace was expected fails loud (the resolver should have caught it).
+fn resolveTagOperandBits(ctx: *LowerWhenCtx, path_node: NodeId, out: *std.ArrayListUnmanaged(u32)) error{ OutOfMemory, InvalidProgram }!void {
+    const tp = ctx.ast.tag_paths.items[ctx.ast.exprData(path_node)];
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(ctx.gpa);
+    var i: u32 = 0;
+    while (i < tp.segs_len) : (i += 1) {
+        if (i > 0) try buf.append(ctx.gpa, '.');
+        try buf.appendSlice(ctx.gpa, ctx.ast.strings.slice(ctx.ast.tag_path_segs.items[tp.segs_start + i]));
+    }
+    if (ctx.tag_table.leafBit(buf.items)) |bit| {
+        try out.append(ctx.gpa, bit);
+    } else if (ctx.tag_table.lookup(buf.items)) |entry| {
+        if (entry.is_leaf) return error.InvalidProgram;
+        try ctx.tag_table.collectUnder(ctx.gpa, buf.items, out);
+    } else return error.InvalidProgram;
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────
@@ -3073,4 +3368,63 @@ test "runProgram emit enqueues an event into the dynamic event store (M0.8 E3)" 
     // accumulating (the count stays 1, not 2).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(usize, 1), interp.events.count(dmg_id));
+}
+
+test "runProgram add_tag is deferred to the tick boundary; has_tag query gates a counter (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const source =
+        \\tags { unit { status { tagged } } }
+        \\component Counter { value: int = 0 }
+        \\rule mark(entity: Entity) when entity has Counter {
+        \\  entity.add_tag(.unit.status.tagged)
+        \\}
+        \\rule count(entity: Entity) when entity has Counter and entity has_tag .unit.status.tagged {
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const counter_id = world.registry.idOf("Counter").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{counter_id});
+
+    // Tick 1: `mark` queues the add (flushed at the tick boundary); `count`
+    // sees no tag yet (the entity still lacks TagSet → its `has TagSet`
+    // archetype predicate fails) → no increment. Ticks 2 + 3: the bit is set,
+    // `count` matches → value = 2.
+    const report = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // The entity migrated to {Counter, TagSet}; read both back.
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    const cidx = arch.componentIndex(counter_id).?;
+    const cslot = arch.componentSlot(chunk, cidx, loc.slot);
+    var value: i64 = 0;
+    @memcpy(std.mem.asBytes(&value), cslot[0..@sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 2), value);
+
+    // The TagSet bit for `.unit.status.tagged` (the only leaf → bit 0) is set.
+    const tagset_id = interp.tagset_id.?;
+    const tidx = arch.componentIndex(tagset_id).?;
+    const tslot = arch.componentSlot(chunk, tidx, loc.slot);
+    var word0: u64 = 0;
+    @memcpy(std.mem.asBytes(&word0), tslot[0..8]);
+    try std.testing.expectEqual(@as(u64, 1), word0 & 1);
 }
