@@ -144,6 +144,10 @@ const RuleDesc = struct {
     /// last_run_tick`. Updated after each evaluation in `stepOnce`. Starts at
     /// `initial_tick` (0).
     last_run_tick: Tick,
+    /// `async rule` (M0.8 E3 sub-slice B): the rule suspends at `await` and
+    /// resumes a later tick via its `AsyncSlot`, instead of running to
+    /// completion every tick. Dispatched by `runAsyncRule` in `stepOnce`.
+    is_async: bool,
 
     fn deinit(self: *RuleDesc, gpa: std.mem.Allocator) void {
         gpa.free(self.predicate_pool);
@@ -358,6 +362,41 @@ const Control = enum { none, break_, continue_ };
 /// What an enclosing loop should do once a control signal has surfaced.
 const LoopAction = enum { again, stop, propagate };
 
+/// The condition that resumes a suspended `async rule` (M0.8 E3 sub-slice B).
+/// The tree-walker is its own runtime (`etch-reference-part1.md §9`): an
+/// `await` suspends the rule as a task-record, polled each tick in `stepOnce`.
+const WakeCond = union(enum) {
+    /// Resume once `async_tick` reaches this value. `await wait(N)` reached at
+    /// tick T sets it to T + N — M0.8 counts `wait` in TICKS (no wall-clock;
+    /// `wait_unscaled` / duration waits fail loud, out of E3 — Guy's ruling).
+    wait_until: u64,
+    /// Resume once an event of this type is present in the per-tick EventStore
+    /// (M0.8 E3 sub-slice B — `await global_event(T)`). The producer must run
+    /// before the awaiter in the rule order, same as the observer drain.
+    global_event: StringId,
+};
+
+/// Per-`async rule` suspend/resume state (M0.8 E3 sub-slice B — the Option-A
+/// task-record, validated by Guy). Held in a slice parallel to `rule_descs`;
+/// only `is_async` rules use their slot. This is the interpreter-level analogue
+/// of the async state struct (`etch-memory-model.md §5.7`) — at the tree-walk
+/// level, no compiled state machine (that is Phase-2 codegen).
+const AsyncSlot = struct {
+    state: enum { unspawned, suspended, done } = .unspawned,
+    /// Next top-level body-statement index to run on resume. `await` is bounded
+    /// to a top-level statement (the M0.8 cursor model); nested/value await
+    /// fails loud (the Phase-2 state machine covers the general case).
+    cursor: u32 = 0,
+    wake: WakeCond = .{ .wait_until = 0 },
+    /// The task's locals, retained across suspension. POD-only in M0.8 (heap
+    /// locals surviving a suspend are out of scope — flagged for Review E3).
+    locals: Locals = .{},
+
+    fn deinit(self: *AsyncSlot, gpa: std.mem.Allocator) void {
+        self.locals.deinit(gpa);
+    }
+};
+
 /// S4 tree-walking interpreter — owns the bridge state, evaluates
 /// the type-checked AST against a `World` once per tick.
 pub const Interpreter = struct {
@@ -430,6 +469,16 @@ pub const Interpreter = struct {
     /// a `changed`-free program is byte-identical to the pre-E3 runtime (no
     /// tick churn, no marking overhead).
     has_changed: bool = false,
+    /// True iff any rule is `async` (M0.8 E3 sub-slice B). Gates the async tick
+    /// counter + the task-record dispatch in `stepOnce`; a sync-only program is
+    /// byte-identical to the pre-B runtime (no `async_tick` churn, no slots).
+    has_async: bool = false,
+    /// Logical async clock — incremented once per `stepOnce` when `has_async`.
+    /// `await wait(N)` resolves against it (N is a tick count, not seconds).
+    async_tick: u64 = 0,
+    /// Suspend/resume state, one slot per rule (parallel to `rule_descs`). Empty
+    /// when `!has_async`; a non-async rule never touches its slot.
+    async_slots: []AsyncSlot = &.{},
 
     pub fn deinit(self: *Interpreter) void {
         for (self.rule_descs) |*r| r.deinit(self.gpa);
@@ -447,6 +496,8 @@ pub const Interpreter = struct {
         self.trait_methods.deinit(self.gpa);
         self.tag_table.deinit(self.gpa);
         self.pending_tags.deinit(self.gpa);
+        for (self.async_slots) |*slot| slot.deinit(self.gpa);
+        self.gpa.free(self.async_slots);
         self.* = undefined;
     }
 
@@ -646,6 +697,21 @@ pub const Interpreter = struct {
                 break;
             }
         }
+        // Allocate one suspend/resume slot per rule iff any rule is `async`
+        // (M0.8 E3 sub-slice B). A sync-only program keeps an empty slice and
+        // never advances `async_tick` — byte-identical to the pre-B runtime.
+        var any_async = false;
+        for (slice) |rd| {
+            if (rd.is_async) {
+                any_async = true;
+                break;
+            }
+        }
+        const async_slots: []AsyncSlot = if (any_async) blk: {
+            const slots = try gpa.alloc(AsyncSlot, slice.len);
+            for (slots) |*slot| slot.* = .{};
+            break :blk slots;
+        } else &.{};
         return .{
             .gpa = gpa,
             .ast = ast,
@@ -659,6 +725,8 @@ pub const Interpreter = struct {
             .tag_table = tag_table,
             .tagset_id = tagset_id,
             .has_changed = any_changed,
+            .has_async = any_async,
+            .async_slots = async_slots,
         };
     }
 
@@ -682,11 +750,22 @@ pub const Interpreter = struct {
         // calls `beginFrame` at the same point. A `changed`-free program never
         // advances the tick (byte-identical to the pre-E3 runtime).
         if (self.has_changed) world.beginFrame();
+        // Advance the logical async clock once per tick when async rules are
+        // present (M0.8 E3 sub-slice B). `await wait(N)` resolves against it.
+        if (self.has_async) self.async_tick += 1;
         // Events have a per-tick lifetime (`Lifetime.tick`): clear the previous
         // tick's queue before running this tick's rules (M0.8 E3).
         self.events.clear(self.gpa);
-        for (self.rule_descs) |*rd| {
+        for (self.rule_descs, 0..) |*rd, i| {
             report.rules_evaluated += 1;
+            // `async rule` (M0.8 E3 sub-slice B): drive its suspend/resume task
+            // at this position in the rule order, so events it emits/consumes
+            // interleave with the other rules exactly like the observer drain
+            // (the producer-before-consumer ordering — Guy's ruling).
+            if (rd.is_async) {
+                try self.runAsyncRule(world, i, report);
+                continue;
+            }
             if (!resourceDepsSatisfied(world, rd.*)) continue;
             try self.runRule(world, rd.*, report);
             // Record the tick at which this rule ran — the baseline its next
@@ -761,6 +840,137 @@ pub const Interpreter = struct {
             try self.execBody(world, rd, null, i, report);
         }
         if (matched) report.rules_matched += 1;
+    }
+
+    /// Drive an `async rule`'s suspend/resume task at its position in the rule
+    /// order (M0.8 E3 sub-slice B, Option-A task-record). Spawns the task on
+    /// first reach, resumes a suspended one whose wake has fired, skips one
+    /// still waiting, and never re-runs a completed one.
+    fn runAsyncRule(self: *Interpreter, world: *World, idx: usize, report: *RuntimeReport) !void {
+        const rd = self.rule_descs[idx];
+        const slot = &self.async_slots[idx];
+        switch (slot.state) {
+            .done => return,
+            .suspended => {
+                if (!self.asyncWakeFired(slot.wake)) return;
+                // wake fired → resume from `slot.cursor` below
+            },
+            .unspawned => {
+                // M0.8 bounds async rules to the §9.2 shape: a single
+                // (non-entity-bound) task, parameterless. A resource-only
+                // `when` is fine; an entity-bound async rule (entity param +
+                // component `when`) would need one task per matching entity —
+                // deferred, fail-loud, flagged for Review E3.
+                const rule = self.ast.rule_decls.items[rd.rule_idx];
+                if (rule.params_len > 0 or rd.is_entity_bound) {
+                    report.runtime_errors += 1;
+                    slot.state = .done;
+                    return;
+                }
+                slot.locals = .{};
+                slot.cursor = 0;
+                // run from the start below
+            },
+        }
+        report.rules_matched += 1;
+        try self.driveAsyncBody(world, rd, slot, report);
+    }
+
+    /// Run an async rule body from `slot.cursor`, suspending at the next
+    /// top-level `await` statement (recording its wake + the resume cursor) or
+    /// running to completion. `await` is bounded to a bare top-level statement
+    /// (the M0.8 cursor model); a nested / value `await` reaches `evalExpr`'s
+    /// `await_expr` arm and fails loud.
+    fn driveAsyncBody(self: *Interpreter, world: *World, rd: RuleDesc, slot: *AsyncSlot, report: *RuntimeReport) !void {
+        const rule = self.ast.rule_decls.items[rd.rule_idx];
+        self.control = .none;
+        self.thrown = false;
+        self.returning = false;
+        var s: u32 = slot.cursor;
+        while (s < rule.body_len) : (s += 1) {
+            const stmt_id: NodeId = @bitCast(self.ast.extra.items[rule.body_start + s]);
+            if (self.bareAwaitExpr(stmt_id)) |aw_id| {
+                const wake = self.evalAwaitTarget(world, &slot.locals, aw_id) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.RuntimeFailure => return self.finishAsync(slot, report, true),
+                };
+                slot.cursor = s + 1;
+                slot.wake = wake;
+                slot.state = .suspended;
+                return;
+            }
+            self.execStmt(world, &slot.locals, stmt_id) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.RuntimeFailure => return self.finishAsync(slot, report, true),
+            };
+            if (self.thrown) {
+                self.thrown = false;
+                return self.finishAsync(slot, report, true);
+            }
+            // A `break`/`continue`/`return` reaching the async rule top level
+            // ends the task (rules have no return value), like `execBody`.
+            if (self.control != .none) {
+                self.control = .none;
+                self.control_label = 0;
+                break;
+            }
+            if (self.returning) {
+                self.returning = false;
+                self.return_value = .{ .unit = {} };
+                break;
+            }
+        }
+        self.finishAsync(slot, report, false);
+    }
+
+    /// Complete a task (success or fail-loud), freeing its retained locals so
+    /// the final slot deinit is a no-op.
+    fn finishAsync(self: *Interpreter, slot: *AsyncSlot, report: *RuntimeReport, failed: bool) void {
+        if (failed) report.runtime_errors += 1;
+        slot.state = .done;
+        slot.locals.deinit(self.gpa);
+        slot.locals = .{};
+    }
+
+    /// The `await_expr` of a bare top-level `await <target>` statement (an
+    /// expr-stmt wrapping an `.await_expr`), or null. Only a bare top-level
+    /// await is a suspension point — the cursor-based resume re-enters at the
+    /// statement after it.
+    fn bareAwaitExpr(self: *const Interpreter, stmt_id: NodeId) ?NodeId {
+        if (self.ast.stmtKind(stmt_id) != .expr_stmt) return null;
+        const e: NodeId = @bitCast(self.ast.stmtData(stmt_id));
+        if (self.ast.exprKind(e) != .await_expr) return null;
+        return e;
+    }
+
+    /// Resolve an `await` target to a `WakeCond` (M0.8 E3 sub-slice B). `wait(N)`
+    /// counts N TICKS from now; `global_event(T)` waits for an event of type T.
+    /// `wait_unscaled` (needs a real clock), `entity_event` (no entity-
+    /// association in the global EventStore), and `future` (T2) fail loud —
+    /// deferred, flagged for Review E3. The interpreter is the reference.
+    fn evalAwaitTarget(self: *Interpreter, world: *World, locals: *Locals, await_id: NodeId) StmtError!WakeCond {
+        const aw = self.ast.awaitExpr(await_id);
+        switch (aw.target_kind) {
+            .wait => {
+                const v = try self.evalExpr(world, locals, aw.arg_expr);
+                const n: i64 = switch (v) {
+                    .int_ => |x| x,
+                    else => return error.RuntimeFailure,
+                };
+                if (n < 0) return error.RuntimeFailure;
+                return .{ .wait_until = self.async_tick + @as(u64, @intCast(n)) };
+            },
+            .global_event => return .{ .global_event = aw.event_type },
+            .wait_unscaled, .entity_event, .future => return error.RuntimeFailure,
+        }
+    }
+
+    /// True iff a suspended task's wake condition is satisfied this tick.
+    fn asyncWakeFired(self: *const Interpreter, wake: WakeCond) bool {
+        return switch (wake) {
+            .wait_until => |t| self.async_tick >= t,
+            .global_event => |type_name| self.events.count(type_name) > 0,
+        };
     }
 
     /// Evaluate a rule's per-entity tag predicates against `entity`'s `TagSet`
@@ -2099,6 +2309,7 @@ fn compileRule(
         .event_type = event_type,
         .changed_filters = try changed_filters.toOwnedSlice(gpa),
         .last_run_tick = initial_tick,
+        .is_async = rule.is_async,
     };
 }
 
@@ -3661,4 +3872,65 @@ fn readCounterValue(world: *World, counter_id: ComponentId, entity: CoreEntityId
     var value: i32 = 0;
     @memcpy(std.mem.asBytes(&value), cslot[0..@sizeOf(i32)]);
     return value;
+}
+
+/// Read the first `int` (`i64`) field of resource `id` (test helper).
+fn readResourceInt(world: *World, id: ComponentId) i64 {
+    const bytes = world.resources.getResource(id).?;
+    var value: i64 = 0;
+    @memcpy(std.mem.asBytes(&value), bytes[0..@sizeOf(i64)]);
+    return value;
+}
+
+test "async rule suspends at await wait(N) and resumes N ticks later (M0.8 E3 sub-slice B)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The §9.2 shape: a parameterless async rule sets a resource field, suspends
+    // for 2 ticks (`await wait(2)`), then sets it again. The tree-walker is its
+    // own runtime — it suspends at the await and resumes on wake, no state
+    // machine (codegen is Phase 2). The interpreter is the reference.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule seq()
+        \\  when resource Out
+        \\{
+        \\  let a = get_mut(Out)
+        \\  a.n = 1
+        \\  await wait(2)
+        \\  let b = get_mut(Out)
+        \\  b.n = 2
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: spawn → n=1, suspend at `await wait(2)` (wake at async_tick 3).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // tick 2: still suspended (async_tick 2 < 3) — n unchanged.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // tick 3: wake fires (3 >= 3) → resume, n=2, complete.
+    const r3 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r3.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+    // tick 4: task done — n stays 2 (the rule never re-runs).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
 }
