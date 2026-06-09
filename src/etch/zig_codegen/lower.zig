@@ -1222,7 +1222,9 @@ fn emitArchPredicate(w: *Writer, ast: *const AstArena, when_idx: u32) CodegenErr
             try emitArchPredicate(w, ast, node.lhs);
             try w.write(")");
         },
-        .has, .has_with_filter => {
+        .has, .has_with_filter, .has_changed => {
+            // `has T changed` shares the `has T` archetype predicate (the entity
+            // must own T); the per-slot change check is emitted in the body walk.
             const cname = ast.strings.slice(node.type_name);
             try w.print("arch.hasComponent({s}_id)", .{cname});
         },
@@ -2761,6 +2763,13 @@ fn walkWhen(
                 .value_zig_type = zig_t,
             };
         },
+        .has_changed => {
+            // `entity has T changed` codegen (arch-walk routing + `markChanged`
+            // on writes + per-slot `changedTick > last_run_tick` guard) is the
+            // next tranche; the interpreter is the byte-exact reference until
+            // then. Fail loud so a `changed` program never cooks silently-wrong.
+            return error.UnsupportedConstruct;
+        },
         .resource => {
             const rname = ast.strings.slice(node.type_name);
             try res_deps.append(gpa, .{ .name = rname, .must_be_changed = false });
@@ -2834,7 +2843,7 @@ fn collectComponents(
         .logical_not => {
             try collectComponents(gpa, ast, node.lhs, components, seen);
         },
-        .has, .has_with_filter => {
+        .has, .has_with_filter, .has_changed => {
             const cname = ast.strings.slice(node.type_name);
             const gop = try seen.getOrPut(gpa, cname);
             if (!gop.found_existing) try components.append(gpa, cname);

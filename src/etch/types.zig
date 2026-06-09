@@ -1038,7 +1038,12 @@ pub const TypeChecker = struct {
             .logical_not => {
                 try self.collectWhen(ctx, node.lhs);
             },
-            .has, .has_with_filter => {
+            .has, .has_with_filter, .has_changed => {
+                // `has T`, `has T { f == v }`, and `has T changed` (M0.8 E3) all
+                // require `T` to be a declared component — same check, same code
+                // (E1210). `changed` adds no new error case (a change-detection
+                // filter on a non-component is just an unknown component); the
+                // resolver/ruling deliberately does NOT mint a new E12xx for it.
                 const tname_slice = self.arena.strings.slice(node.type_name);
                 if (self.symbols.get(node.type_name)) |sym| {
                     if (sym.kind != .component) {
@@ -3673,6 +3678,32 @@ test "type-checker validates tag-filter when conditions (M0.8 E3)" {
     );
     defer unknown.deinit(gpa);
     try expectAnyCode(unknown.diagnostics.items, .unknown_tag);
+}
+
+test "type-checker accepts `has T changed` on a component, E1210 on a non-component (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+
+    // Valid: `has Health changed` where Health is a declared component → no
+    // diagnostic (the `changed` filter reuses the `has` component check).
+    var ok = try parseAndCheck(gpa,
+        \\component Health { current: i32 = 0 }
+        \\component Counter { value: i32 = 0 }
+        \\rule react(entity: Entity)
+        \\  when entity has Counter and entity has Health changed
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // `has T changed` where T is not a declared component → E1210 (reused; no
+    // new E12xx code is minted for the `changed` form, per the resolver ruling).
+    var unknown = try parseAndCheck(gpa,
+        \\rule react(entity: Entity) when entity has Nope changed { }
+    );
+    defer unknown.deinit(gpa);
+    try expectAnyCode(unknown.diagnostics.items, .unknown_component_in_when);
 
     // A namespace where `has_tag` requires a leaf → E1212.
     var ns = try parseAndCheck(gpa,

@@ -30,6 +30,8 @@ const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
 const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
 const World = weld_core.ecs.world.World;
 const CoreEntityId = weld_core.ecs.entity.EntityId;
+const Tick = weld_core.ecs.tick.Tick;
+const initial_tick = weld_core.ecs.tick.initial_tick;
 
 const AstArena = ast_mod.AstArena;
 const NodeId = ast_mod.NodeId;
@@ -132,12 +134,23 @@ const RuleDesc = struct {
     /// self-style (resolver-types §12). Takes precedence over entity/global
     /// dispatch in `runRule`.
     event_type: ?StringId,
+    /// `entity has T changed` change-detection filters (M0.8 E3): component ids
+    /// that must have changed since `last_run_tick` for the entity to match.
+    /// Per-entity, ANDed after the field filter and tag predicates (same flat
+    /// model). Empty for a rule with no `changed` filter.
+    changed_filters: []ComponentId,
+    /// The `current_tick` at which this rule last ran (`engine-ecs-internals.md`
+    /// §5). A `changed` filter matches a slot iff `changedTick(slot) >
+    /// last_run_tick`. Updated after each evaluation in `stepOnce`. Starts at
+    /// `initial_tick` (0).
+    last_run_tick: Tick,
 
     fn deinit(self: *RuleDesc, gpa: std.mem.Allocator) void {
         gpa.free(self.predicate_pool);
         gpa.free(self.resource_deps);
         for (self.tag_predicates) |*tp| tp.deinit(gpa);
         gpa.free(self.tag_predicates);
+        gpa.free(self.changed_filters);
     }
 };
 
@@ -411,6 +424,12 @@ pub const Interpreter = struct {
     /// Deferred tag mutations queued during a tick, flushed at the tick boundary
     /// (M0.8 E3) — never applied mid-archetype-walk.
     pending_tags: std.ArrayListUnmanaged(PendingTag) = .empty,
+    /// True iff any rule carries a `changed` filter (M0.8 E3). Gates the whole
+    /// tick-based change-detection path: only then does `runFor` advance
+    /// `current_tick` (`beginFrame`) and a component write `markChanged`s — so
+    /// a `changed`-free program is byte-identical to the pre-E3 runtime (no
+    /// tick churn, no marking overhead).
+    has_changed: bool = false,
 
     pub fn deinit(self: *Interpreter) void {
         for (self.rule_descs) |*r| r.deinit(self.gpa);
@@ -618,6 +637,15 @@ pub const Interpreter = struct {
         }
 
         const slice = try rule_descs.toOwnedSlice(gpa);
+        // Enable the tick-based change-detection path iff some rule filters by
+        // `changed` (M0.8 E3) — keeps `changed`-free programs free of tick churn.
+        var any_changed = false;
+        for (slice) |rd| {
+            if (rd.changed_filters.len > 0) {
+                any_changed = true;
+                break;
+            }
+        }
         return .{
             .gpa = gpa,
             .ast = ast,
@@ -630,6 +658,7 @@ pub const Interpreter = struct {
             .trait_methods = trait_methods,
             .tag_table = tag_table,
             .tagset_id = tagset_id,
+            .has_changed = any_changed,
         };
     }
 
@@ -637,6 +666,12 @@ pub const Interpreter = struct {
         var report: RuntimeReport = .{};
         var t: u32 = 0;
         while (t < ticks) : (t += 1) {
+            // Advance `current_tick` (and clear the dirty bitsets) before the
+            // tick's rules when change detection is live, so a write this tick
+            // stamps `changedTick = current_tick > last_run_tick` and a `changed`
+            // filter fires for it (`engine-ecs-internals.md` §5). A `changed`-free
+            // program never advances the tick — byte-identical to the pre-E3 run.
+            if (self.has_changed) world.beginFrame();
             try self.stepOnce(world, &report);
             world.tickBoundary();
         }
@@ -651,6 +686,10 @@ pub const Interpreter = struct {
             report.rules_evaluated += 1;
             if (!resourceDepsSatisfied(world, rd.*)) continue;
             try self.runRule(world, rd.*, report);
+            // Record the tick at which this rule ran — the baseline its next
+            // `changed` filter compares against (M0.8 E3). `runRule` was passed
+            // the pre-update value, so the filter saw the correct baseline.
+            if (self.has_changed) rd.last_run_tick = world.current_tick;
         }
         // Apply deferred tag mutations at the tick boundary — after every rule
         // has run, never mid-archetype-walk (M0.8 E3, `etch-grammar.md` §4.4).
@@ -692,6 +731,9 @@ pub const Interpreter = struct {
                     // Per-entity tag predicates (M0.8 E3) — applied after the
                     // archetype-level predicate, like the field filter.
                     if (rd.tag_predicates.len > 0 and !self.tagPredicatesPass(world, entity_id, rd.tag_predicates)) continue;
+                    // Per-entity `changed` filters (M0.8 E3) — the slot's
+                    // `changedTick(T)` must exceed the rule's `last_run_tick`.
+                    if (rd.changed_filters.len > 0 and !changedFiltersPass(arch, chunk, slot, rd.changed_filters, rd.last_run_tick)) continue;
                     report.entities_iterated += 1;
                     rule_matched = true;
                     try self.execBody(world, rd, entity_id, null, report);
@@ -1117,6 +1159,11 @@ pub const Interpreter = struct {
                     const rhs = try self.evalExpr(world, locals, assign.value);
                     const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
                     Bridge.writeComponentField(&world.registry, cref, world, field_name, new_v) catch return error.RuntimeFailure;
+                    // Change detection (M0.8 E3): stamp `changed_tick = current_tick`
+                    // so an `entity has T changed` rule sees this write. Gated on
+                    // `has_changed` — a `changed`-free program never marks. Same
+                    // logical point as the codegen's post-write `markChanged`.
+                    if (self.has_changed) Bridge.markComponentChanged(world, cref, world.current_tick);
                     return;
                 },
                 .resource_ref => |rref| {
@@ -1703,6 +1750,18 @@ fn filterPasses(arch: *DynamicArchetype, chunk: *Chunk, ff: FieldFilter, slot: u
     return v.eql(ff.expected_value);
 }
 
+/// Whether every `changed` filter passes for `(chunk, slot)` (M0.8 E3): each
+/// listed component's `changedTick` must exceed `last_run_tick`
+/// (`engine-ecs-internals.md` §5). The `has T` archetype predicate guarantees
+/// the component is present, so a missing column is an inconsistent program.
+fn changedFiltersPass(arch: *DynamicArchetype, chunk: *Chunk, slot: u32, cids: []const ComponentId, last_run_tick: Tick) bool {
+    for (cids) |cid| {
+        const col = arch.componentIndex(cid) orelse return false;
+        if (!(arch.changedTick(chunk, col, slot) > last_run_tick)) return false;
+    }
+    return true;
+}
+
 /// Whether bit `bit` of `entity`'s `TagSet` is set (M0.8 E3). An entity with no
 /// `TagSet` component reads as all-zero.
 fn entityTagBitSet(world: *World, tagset_id: ComponentId, entity: EntityId, bit: u32) bool {
@@ -1978,6 +2037,8 @@ fn compileRule(
         for (tag_preds.items) |*tp| tp.deinit(gpa);
         tag_preds.deinit(gpa);
     }
+    var changed_filters: std.ArrayListUnmanaged(ComponentId) = .empty;
+    errdefer changed_filters.deinit(gpa);
     var field_filter: ?FieldFilter = null;
     var predicate_root: ?u32 = null;
     var has_component_ref: bool = false;
@@ -1992,6 +2053,7 @@ fn compileRule(
         .res_deps = &res_deps,
         .filter = &field_filter,
         .tag_preds = &tag_preds,
+        .changed_filters = &changed_filters,
         .gpa = gpa,
         .has_component_ref = &has_component_ref,
     };
@@ -2032,6 +2094,8 @@ fn compileRule(
         .entity_param_name = entity_param_name,
         .is_entity_bound = is_entity_bound,
         .event_type = event_type,
+        .changed_filters = try changed_filters.toOwnedSlice(gpa),
+        .last_run_tick = initial_tick,
     };
 }
 
@@ -2048,6 +2112,7 @@ const LowerWhenCtx = struct {
     res_deps: *std.ArrayListUnmanaged(ResourceDep),
     filter: *?FieldFilter,
     tag_preds: *std.ArrayListUnmanaged(TagPredicate),
+    changed_filters: *std.ArrayListUnmanaged(ComponentId),
     gpa: std.mem.Allocator,
     has_component_ref: *bool,
 };
@@ -2100,6 +2165,21 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
                 .field_kind = fd.kind,
                 .expected_value = v,
             };
+            const idx: u32 = @intCast(ctx.pool.items.len);
+            try ctx.pool.append(ctx.gpa, .{ .kind = .has, .component_id = id });
+            ctx.has_component_ref.* = true;
+            return idx;
+        },
+        .has_changed => {
+            // `entity has T changed` (M0.8 E3, `engine-ecs-internals.md` §5):
+            // a `has T` archetype predicate (the entity must own T) PLUS a
+            // per-entity change-detection filter — the slot's `changedTick(T)`
+            // must exceed the rule's `last_run_tick`. The component id joins
+            // `changed_filters`, checked per entity in `runRule` after the
+            // field filter / tag predicates.
+            const tname = ast.strings.slice(node.type_name);
+            const id = ctx.bridge.componentIdOf(tname) orelse return error.InvalidProgram;
+            try ctx.changed_filters.append(ctx.gpa, id);
             const idx: u32 = @intCast(ctx.pool.items.len);
             try ctx.pool.append(ctx.gpa, .{ .kind = .has, .component_id = id });
             ctx.has_component_ref.* = true;
@@ -3510,4 +3590,72 @@ test "runProgram add_tag is deferred to the tick boundary; has_tag query gates a
     var word0: u64 = 0;
     @memcpy(std.mem.asBytes(&word0), tslot[0..8]);
     try std.testing.expectEqual(@as(u64, 1), word0 & 1);
+}
+
+test "runProgram `has T changed` gates a rule on per-tick change detection (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `damage` writes Health each tick ONLY for entities carrying `Marked`, so
+    // their Health changes every tick. `react` (`has Health changed`) fires for
+    // an entity iff its Health changed since react's last run. Entity A (Marked)
+    // → Health written each tick → react fires each tick → Counter == 3. Entity
+    // B (no Marked) → Health never written (changed_tick stays the spawn tick)
+    // → react never fires → Counter == 0. This proves the filter gates, not
+    // merely that it always passes.
+    const source =
+        \\component Health { current: i32 = 100 }
+        \\component Counter { value: i32 = 0 }
+        \\component Marked { v: i32 = 0 }
+        \\rule damage(entity: Entity)
+        \\  when entity has Health and entity has Marked
+        \\{
+        \\  entity.get_mut(Health).current -= 1
+        \\}
+        \\rule react(entity: Entity)
+        \\  when entity has Counter and entity has Health changed
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try std.testing.expect(interp.has_changed);
+
+    const health_id = world.registry.idOf("Health").?;
+    const counter_id = world.registry.idOf("Counter").?;
+    const marked_id = world.registry.idOf("Marked").?;
+    const a = try world.spawnDynamic(gpa, &[_]ComponentId{ health_id, counter_id, marked_id });
+    const b = try world.spawnDynamic(gpa, &[_]ComponentId{ health_id, counter_id });
+
+    const report = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    try std.testing.expectEqual(@as(i32, 3), readCounterValue(&world, counter_id, a));
+    try std.testing.expectEqual(@as(i32, 0), readCounterValue(&world, counter_id, b));
+}
+
+/// Read the first `i32` field of `counter_id` on `entity` (test helper).
+fn readCounterValue(world: *World, counter_id: ComponentId, entity: CoreEntityId) i32 {
+    const loc = world.dynamicLocation(entity).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    const cidx = arch.componentIndex(counter_id).?;
+    const cslot = arch.componentSlot(chunk, cidx, loc.slot);
+    var value: i32 = 0;
+    @memcpy(std.mem.asBytes(&value), cslot[0..@sizeOf(i32)]);
+    return value;
 }

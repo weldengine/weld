@@ -464,6 +464,7 @@ pub const WhenNodeKind = enum {
     has_with_filter, // entity has T { field == value }
     resource, // resource T
     resource_changed, // resource T changed
+    has_changed, // entity has T changed (M0.8 E3) — change-detection filter
     tag_filter, // entity has_tag .path (M0.8 E3) — `aux` indexes `tag_filters`
 };
 

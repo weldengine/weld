@@ -1513,11 +1513,15 @@ pub const Parser = struct {
         var field_name: StringId = 0;
         var filter_value: NodeId = NodeId.none;
         var end_byte = type_tok.span.byte_end;
-        // Disambiguation `{` filter vs `{` rule body: the filter form
-        // requires `{ IDENT == ... }`. Anything else (including `{ }` or
-        // `{ let ... }`) belongs to the surrounding rule body and must
-        // be left for `parseRuleDecl` to consume.
-        if (self.peek() == .lbrace and self.peekNext() == .ident and self.peekNext2() == .eq_eq) {
+        // `entity has T changed` (M0.8 E3) — change-detection filter, the exact
+        // mirror of `resource T changed` (`etch-grammar.md` §6, patched). Tested
+        // before the `{ filter }` form: the two are mutually exclusive (the EBNF
+        // `has T changed` carries no field filter).
+        if (self.peek() == .kw_changed) {
+            const changed_tok = try self.advance();
+            kind = .has_changed;
+            end_byte = changed_tok.span.byte_end;
+        } else if (self.peek() == .lbrace and self.peekNext() == .ident and self.peekNext2() == .eq_eq) {
             _ = try self.advance(); // '{'
             const field_tok = try self.advance(); // IDENT
             field_name = try self.internSlice(field_tok.span);
@@ -3748,6 +3752,30 @@ test "parser builds an @on_event observer rule with the implicit `event` binding
     const annot = result.ast.onEventAnnotation(rule) orelse return error.OnEventAnnotationMissing;
     const ev_type = result.ast.onEventTypeName(annot) orelse return error.OnEventTypeMissing;
     try std.testing.expectEqualStrings("Damage", result.ast.strings.slice(ev_type));
+}
+
+test "parser builds `entity has T changed` change-detection filter (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+    // `changed` is a reserved keyword; `has T changed` mirrors `resource T
+    // changed` (`etch-grammar.md` §6, patched) and produces a `has_changed`
+    // when-node — distinct from the `has T { f == v }` filter form.
+    var result = try parse(gpa,
+        \\component Health { current: i32 = 0 }
+        \\rule react(entity: Entity) when entity has Health changed { }
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var found = false;
+    for (result.ast.when_nodes.items) |n| {
+        if (n.kind == .has_changed) {
+            try std.testing.expectEqualStrings("Health", result.ast.strings.slice(n.type_name));
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
 }
 
 test "parser recovers and a valid event after a broken construct survives (M0.8 E3 lockstep)" {
