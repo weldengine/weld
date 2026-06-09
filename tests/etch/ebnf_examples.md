@@ -307,9 +307,9 @@ rule try_catch(entity: Entity)
 {
   let mut x = 0
   try {
-    throw 99
+    throw Error { message: "boom", code: ErrorCode.io_fail }
   } catch err {
-    x = err
+    x = err.message.len()
   }
   entity.get_mut(Counter).value = x
 }

@@ -1222,6 +1222,24 @@ pub const AstArena = struct {
     /// Doc comments (`///`) attached to a top-level declaration node.
     doc_comments: std.AutoHashMapUnmanaged(NodeId, SpanRange) = .empty,
 
+    /// Interned name of the builtin `Error` struct (M0.8 E3-C tranche 2,
+    /// `etch-reference-part1.md` §10.2). `0` until `ensureErrorBuiltins`
+    /// has injected the synthetic declarations.
+    error_type_name: StringId = 0,
+    /// Interned name of the builtin `ErrorCode` enum. `0` until injected.
+    errorcode_type_name: StringId = 0,
+    /// Index of the first synthetic builtin item appended by
+    /// `ensureErrorBuiltins`. Items at or past this index back no source
+    /// text (zero spans); the codegen's declaration pass skips them and
+    /// emits the canonical prelude instead. `maxInt(u32)` = none injected.
+    builtin_items_from: u32 = std.math.maxInt(u32),
+    /// Index of the first synthetic field appended by `ensureErrorBuiltins`
+    /// (the builtin Error's `message`/`code`/`source`). Lets the codegen's
+    /// `programUsesError` scan source-declared fields only — the synthetic
+    /// ones reference `Error`/`ErrorCode` by construction and would force
+    /// the prelude into every program. `maxInt(u32)` = none injected.
+    builtin_fields_from: u32 = std.math.maxInt(u32),
+
     pub const AnnotationSpan = struct {
         start: u32,
         len: u32,
@@ -1326,6 +1344,81 @@ pub const AstArena = struct {
         const idx: u28 = @intCast(self.items.len);
         try self.items.append(gpa, .{ .kind = kind, .data = data, .span = span });
         return .{ .category = .item, .index = idx };
+    }
+
+    /// Inject the builtin `Error` struct + `ErrorCode` enum (M0.8 E3-C
+    /// tranche 2, `etch-reference-part1.md` §10.2) as synthetic declaration
+    /// items, so the resolver / interpreter / codegen resolve them through
+    /// the ordinary declaration machinery:
+    ///
+    ///   enum ErrorCode { io_fail, network_timeout, invalid_arg,
+    ///                    permission_denied, out_of_memory }
+    ///   struct Error { message: string, code: ErrorCode, source: Error? }
+    ///
+    /// The variant set is pinned to the five listed in part1 §10.2 — the
+    /// spec's "extensible" comment is language-evolution headroom, not user
+    /// extensibility (v0.6 has no enum-extension syntax). Idempotent; spans
+    /// are zero (no source text backs these items). Called by the
+    /// type-checker before pass 1, the single composition point every
+    /// interp / codegen driver runs through.
+    pub fn ensureErrorBuiltins(self: *AstArena, gpa: std.mem.Allocator) !void {
+        if (self.error_type_name != 0) return;
+        const zero_span: SourceSpan = .{ .byte_start = 0, .byte_end = 0 };
+        self.builtin_items_from = @intCast(self.items.len);
+
+        self.errorcode_type_name = try self.strings.intern(gpa, "ErrorCode");
+        const variant_names = [_][]const u8{
+            "io_fail", "network_timeout", "invalid_arg", "permission_denied", "out_of_memory",
+        };
+        const variants_start: u32 = @intCast(self.enum_variants.items.len);
+        for (variant_names) |vn| {
+            try self.enum_variants.append(gpa, .{
+                .name = try self.strings.intern(gpa, vn),
+                .shape = .c_like,
+                .data_start = 0,
+                .data_len = 0,
+            });
+        }
+        const enum_idx: u32 = @intCast(self.enum_decls.items.len);
+        try self.enum_decls.append(gpa, .{
+            .name = self.errorcode_type_name,
+            .variants_start = variants_start,
+            .variants_len = variant_names.len,
+            .annotations_extra = 0,
+            .annotations_len = 0,
+        });
+        _ = try self.addItem(gpa, .enum_decl, enum_idx, zero_span);
+
+        self.error_type_name = try self.strings.intern(gpa, "Error");
+        const string_type = try self.addNamedType(gpa, try self.strings.intern(gpa, "string"), zero_span);
+        const errorcode_type = try self.addNamedType(gpa, self.errorcode_type_name, zero_span);
+        const error_named = try self.addNamedType(gpa, self.error_type_name, zero_span);
+        const error_opt = try self.addOptionalType(gpa, error_named, zero_span);
+        const field_specs = [_]struct { name: []const u8, type_node: NodeId }{
+            .{ .name = "message", .type_node = string_type },
+            .{ .name = "code", .type_node = errorcode_type },
+            .{ .name = "source", .type_node = error_opt },
+        };
+        const fields_start: u32 = @intCast(self.fields.items.len);
+        self.builtin_fields_from = fields_start;
+        for (field_specs) |fs| {
+            try self.fields.append(gpa, .{
+                .name = try self.strings.intern(gpa, fs.name),
+                .type_node = fs.type_node,
+                .default_value = NodeId.none,
+                .annotations_extra = 0,
+                .annotations_len = 0,
+            });
+        }
+        const struct_idx: u32 = @intCast(self.struct_decls.items.len);
+        try self.struct_decls.append(gpa, .{
+            .name = self.error_type_name,
+            .fields_start = fields_start,
+            .fields_len = field_specs.len,
+            .annotations_extra = 0,
+            .annotations_len = 0,
+        });
+        _ = try self.addItem(gpa, .struct_decl, struct_idx, zero_span);
     }
 
     pub fn addTypeAlias(self: *AstArena, gpa: std.mem.Allocator, name: StringId, target: NodeId, span: SourceSpan) !NodeId {

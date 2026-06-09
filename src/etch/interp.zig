@@ -3672,9 +3672,10 @@ test "runProgram try/catch catches a thrown value (M0.8 error handling)" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    // The throw aborts the rest of the try body (x stays 1) and is caught,
-    // binding the thrown value into `err`; x ends at 99. The interpreter is the
-    // reference execution (try/catch codegen is deferred).
+    // The throw aborts the rest of the try body (x never reaches 3) and is
+    // caught, binding the thrown `Error` into `err` (M0.8 E3-C tranche 2:
+    // the thrown value is statically the builtin Error, part1 §10.2); x ends
+    // at `"boom".len()` = 4.
     const source =
         \\component Acc { out: int = 0 }
         \\rule r(entity: Entity)
@@ -3683,10 +3684,10 @@ test "runProgram try/catch catches a thrown value (M0.8 error handling)" {
         \\  let mut x = 1
         \\  try {
         \\    x = 2
-        \\    throw 99
+        \\    throw Error { message: "boom", code: ErrorCode.io_fail }
         \\    x = 3
         \\  } catch err {
-        \\    x = err
+        \\    x = err.message.len()
         \\  }
         \\  entity.get_mut(Acc).out = x
         \\}
@@ -3715,7 +3716,7 @@ test "runProgram try/catch catches a thrown value (M0.8 error handling)" {
     const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
     var out: i64 = 0;
     @memcpy(std.mem.asBytes(&out), slot[0..8]);
-    try std.testing.expectEqual(@as(i64, 99), out);
+    try std.testing.expectEqual(@as(i64, 4), out);
 }
 
 test "runProgram uncaught throw surfaces a runtime error (M0.8 error handling)" {
@@ -3729,7 +3730,7 @@ test "runProgram uncaught throw surfaces a runtime error (M0.8 error handling)" 
         \\rule bad()
         \\  when resource Tick
         \\{
-        \\  throw 7
+        \\  throw Error { message: "boom", code: ErrorCode.io_fail }
         \\}
     ;
 

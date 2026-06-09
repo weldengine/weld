@@ -92,6 +92,11 @@ pub fn generateFile(
     // Pass A — declare every component and resource as an `extern struct`.
     var i: u28 = 0;
     while (i < ast.items.len) : (i += 1) {
+        // The synthetic builtin `Error` / `ErrorCode` items (M0.8 E3-C
+        // tranche 2) are skipped — their string / enum / optional fields do
+        // not fit the POD declaration emitters; the canonical prelude below
+        // is their codegen image.
+        if (i >= ast.builtin_items_from) continue;
         const kind = ast.items.items(.kind)[i];
         const data = ast.items.items(.data)[i];
         switch (kind) {
@@ -121,6 +126,18 @@ pub fn generateFile(
             .enum_decl => try emitEnumDecl(&w, ast, data),
             else => {},
         }
+    }
+
+    // Builtin `Error` / `ErrorCode` prelude (M0.8 E3-C tranche 2, part1
+    // §10.2) — the codegen image of the synthetic declarations skipped in
+    // pass A. Emitted only when the program touches error handling, so an
+    // error-free program keeps byte-identical output. `Error` is a plain
+    // (non-extern) struct: a `[]const u8` slice field is not extern-
+    // compatible. The field defaults exist for Zig's literal completeness;
+    // the resolver requires `message` + `code` on every `Error` literal, so
+    // only `source = null` (the omittable chaining field) is observable.
+    if (programUsesError(ast)) {
+        try emitErrorPrelude(&w);
     }
 
     // The builtin `TagSet` component (M0.8 E3): a fixed `[words]u64` bitfield,
@@ -307,6 +324,431 @@ fn zeroDefault(zig_type: []const u8) []const u8 {
     return "0";
 }
 
+// ─── Builtin Error / ErrorCode (M0.8 E3-C tranche 2) ─────────────────────
+
+/// The canonical Zig shape of the builtin `Error` struct + `ErrorCode` enum
+/// (part1 §10.2). `Error` is a plain struct (a `[]const u8` slice field is
+/// not extern-compatible); `source` is `?*const Error` — a struct cannot
+/// contain itself by value. Field defaults satisfy Zig literal completeness:
+/// the resolver requires `message` + `code` on every `Error` literal, so only
+/// `source = null` (the omittable chaining field, tranche 4) is observable.
+fn emitErrorPrelude(w: *Writer) CodegenError!void {
+    try w.line("pub const ErrorCode = enum(i32) {");
+    w.indentBy(1);
+    try w.line("io_fail,");
+    try w.line("network_timeout,");
+    try w.line("invalid_arg,");
+    try w.line("permission_denied,");
+    try w.line("out_of_memory,");
+    w.indentBy(-1);
+    try w.line("};");
+    try w.blankLine();
+    try w.line("pub const Error = struct {");
+    w.indentBy(1);
+    try w.line("message: []const u8 = \"\",");
+    try w.line("code: ErrorCode = .io_fail,");
+    try w.line("source: ?*const Error = null,");
+    w.indentBy(-1);
+    try w.line("};");
+    try w.blankLine();
+}
+
+/// Whether the program references the builtin error machinery, so the
+/// `Error`/`ErrorCode` prelude must be emitted (M0.8 E3-C tranche 2). Scans:
+/// the throw / try-catch slabs, `throws` markers on fns and methods, `Error`
+/// struct literals, qualified `Error`/`ErrorCode` paths (`ErrorCode.io_fail`),
+/// and source-declared field / param type references. Synthetic entries
+/// appended by `ensureErrorBuiltins` are excluded via the arena's
+/// `builtin_fields_from` mark — they reference the types by construction.
+/// A missed exotic reference fails loud in `zig build` (undeclared
+/// identifier), never silently.
+fn programUsesError(ast: *const AstArena) bool {
+    if (ast.throw_stmts.items.len > 0 or ast.try_catch_stmts.items.len > 0) return true;
+    for (ast.fn_decls.items) |d| {
+        if (d.throws) return true;
+    }
+    for (ast.impl_methods.items) |m| {
+        if (m.throws) return true;
+    }
+    const err_id = ast.strings.find("Error");
+    const code_id = ast.strings.find("ErrorCode");
+    if (err_id == null and code_id == null) return false;
+    for (ast.struct_lits.items) |sl| {
+        if (isErrorName(sl.type_name, err_id, code_id)) return true;
+    }
+    var e: usize = 0;
+    while (e < ast.exprs.len) : (e += 1) {
+        if (ast.exprs.items(.kind)[e] != .path) continue;
+        if (isErrorName(ast.exprs.items(.data)[e], err_id, code_id)) return true;
+    }
+    const fields_end = @min(ast.fields.items.len, ast.builtin_fields_from);
+    for (ast.fields.items[0..fields_end]) |f| {
+        if (typeNodeNamesError(ast, f.type_node, err_id, code_id)) return true;
+    }
+    for (ast.fn_params.items) |p| {
+        if (typeNodeNamesError(ast, p.type_node, err_id, code_id)) return true;
+    }
+    return false;
+}
+
+fn isErrorName(name: StringId, err_id: ?StringId, code_id: ?StringId) bool {
+    if (err_id) |id| {
+        if (name == id) return true;
+    }
+    if (code_id) |id| {
+        if (name == id) return true;
+    }
+    return false;
+}
+
+/// `true` if a type node names `Error`/`ErrorCode` directly or as an
+/// optional payload (`Error?`).
+fn typeNodeNamesError(ast: *const AstArena, type_node: NodeId, err_id: ?StringId, code_id: ?StringId) bool {
+    switch (ast.typeNodeKind(type_node)) {
+        .named => {
+            const named = ast.named_types.items[ast.typeNodeData(type_node)];
+            return isErrorName(ast.resolveTypeAliasName(named.name), err_id, code_id);
+        },
+        .optional => {
+            const payload: NodeId = @bitCast(ast.typeNodeData(type_node));
+            return typeNodeNamesError(ast, payload, err_id, code_id);
+        },
+        else => return false,
+    }
+}
+
+/// The top-level `fn` declaration named `name`, or `null` (M0.8 E3-C
+/// tranche 2 — `throws` call-site detection).
+fn findFnDecl(ast: *const AstArena, name: StringId) ?ast_mod.FnDecl {
+    var i: u28 = 0;
+    while (i < ast.items.len) : (i += 1) {
+        if (ast.items.items(.kind)[i] != .fn_decl) continue;
+        const d = ast.fn_decls.items[ast.items.items(.data)[i]];
+        if (d.name == name) return d;
+    }
+    return null;
+}
+
+/// The `throws` callee declaration of a free-fn call, or `null` when the
+/// callee is a local (closure) or a non-`throws` fn (M0.8 E3-C tranche 2).
+fn throwsCalleeDecl(ast: *const AstArena, ctx: *const LocalCtx, call: ast_mod.CallExpr) ?ast_mod.FnDecl {
+    if (ast.exprKind(call.callee) != .ident) return null;
+    const name: StringId = ast.exprData(call.callee);
+    if (ctx.lookup(name) != null) return null;
+    const decl = findFnDecl(ast, name) orelse return null;
+    return if (decl.throws) decl else null;
+}
+
+/// Whether a statement run can raise the throw signal at THIS level (M0.8
+/// E3-C tranche 2): a reachable `throw`, or a call of a `throws` fn. Drives
+/// (a) the try/catch plumbing elision — a throw-free try body emits inline,
+/// since Zig rejects the never-mutated `var __thrown_N` and the catch body
+/// is unreachable per the interpreter's semantics — and (b) the `_ = __err;`
+/// discard in a `throws` fn that never throws (W0901-shaped). Throws inside
+/// a NESTED try body are consumed by its own catch and do not count; its
+/// catch body propagates outward, so it does. The scan over-approximates on
+/// call positions the emitters reject (`UnsupportedConstruct`) — safe, the
+/// program is rejected before Zig sees it; a missed exotic form surfaces as
+/// a loud Zig compile error (undeclared label / never-mutated var), never a
+/// silent divergence.
+fn stmtRunCanThrow(ast: *const AstArena, start: u32, len: u32) bool {
+    var s: u32 = 0;
+    while (s < len) : (s += 1) {
+        if (stmtCanThrow(ast, @bitCast(ast.extra.items[start + s]))) return true;
+    }
+    return false;
+}
+
+fn stmtCanThrow(ast: *const AstArena, stmt_id: NodeId) bool {
+    const data = ast.stmtData(stmt_id);
+    switch (ast.stmtKind(stmt_id)) {
+        .throw_stmt => return true,
+        .try_catch_stmt => {
+            const tc = ast.try_catch_stmts.items[data];
+            return stmtRunCanThrow(ast, tc.catch_start, tc.catch_len);
+        },
+        .let_stmt => return exprCanThrow(ast, ast.let_stmts.items[data].value),
+        .assign_stmt => {
+            const a = ast.assign_stmts.items[data];
+            return exprCanThrow(ast, a.target) or exprCanThrow(ast, a.value);
+        },
+        .expr_stmt => return exprCanThrow(ast, @bitCast(data)),
+        .assert_stmt => return exprCanThrow(ast, ast.assert_stmts.items[data].cond),
+        .return_stmt => {
+            const value: NodeId = @bitCast(data);
+            return !value.isNone() and exprCanThrow(ast, value);
+        },
+        .for_stmt => {
+            const f = ast.for_stmts.items[data];
+            return exprCanThrow(ast, f.iterable) or stmtRunCanThrow(ast, f.body_start, f.body_len);
+        },
+        .while_stmt => {
+            const wh = ast.while_stmts.items[data];
+            return exprCanThrow(ast, wh.cond) or stmtRunCanThrow(ast, wh.body_start, wh.body_len);
+        },
+        .break_stmt => {
+            const b = ast.break_stmts.items[data];
+            return !b.value.isNone() and exprCanThrow(ast, b.value);
+        },
+        .emit_stmt => {
+            const em = ast.emit_stmts.items[data];
+            var i: u32 = 0;
+            while (i < em.fields_len) : (i += 1) {
+                if (exprCanThrow(ast, ast.struct_lit_fields.items[em.fields_start + i].value)) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+fn exprCanThrow(ast: *const AstArena, expr: NodeId) bool {
+    const data = ast.exprData(expr);
+    switch (ast.exprKind(expr)) {
+        .fn_call => {
+            const call = ast.call_exprs.items[data];
+            if (ast.exprKind(call.callee) == .ident) {
+                // A local of the same name shadows the fn; the emitters
+                // resolve that through `ctx`, the scan over-approximates
+                // (a shadowed throws-fn name is exotic and fails loud).
+                if (findFnDecl(ast, ast.exprData(call.callee))) |d| {
+                    if (d.throws) return true;
+                }
+            }
+            var i: u32 = 0;
+            while (i < call.args_len) : (i += 1) {
+                if (exprCanThrow(ast, @bitCast(ast.extra.items[call.args_start + i]))) return true;
+            }
+            return false;
+        },
+        .binary => {
+            const b = ast.binary_exprs.items[data];
+            return exprCanThrow(ast, b.lhs) or exprCanThrow(ast, b.rhs);
+        },
+        .unary => return exprCanThrow(ast, ast.unary_exprs.items[data].operand),
+        .cast => return exprCanThrow(ast, ast.casts.items[data].operand),
+        .field_access => return exprCanThrow(ast, ast.field_accesses.items[data].receiver),
+        .index => {
+            const ix = ast.index_exprs.items[data];
+            return exprCanThrow(ast, ix.receiver) or exprCanThrow(ast, ix.index);
+        },
+        .range => {
+            const r = ast.ranges.items[data];
+            return exprCanThrow(ast, r.start) or exprCanThrow(ast, r.end);
+        },
+        .method_call => {
+            const mc = ast.method_calls.items[data];
+            if (ast.exprKind(mc.receiver) != .path and exprCanThrow(ast, mc.receiver)) return true;
+            var i: u32 = 0;
+            while (i < mc.args_len) : (i += 1) {
+                if (exprCanThrow(ast, @bitCast(ast.extra.items[mc.args_start + i]))) return true;
+            }
+            return false;
+        },
+        .struct_lit => {
+            const sl = ast.struct_lits.items[data];
+            var i: u32 = 0;
+            while (i < sl.fields_len) : (i += 1) {
+                if (exprCanThrow(ast, ast.struct_lit_fields.items[sl.fields_start + i].value)) return true;
+            }
+            return false;
+        },
+        .array_lit => {
+            const al = ast.array_lits.items[data];
+            var i: u32 = 0;
+            while (i < al.elements_len) : (i += 1) {
+                if (exprCanThrow(ast, @bitCast(ast.extra.items[al.elements_start + i]))) return true;
+            }
+            return al.is_fill and exprCanThrow(ast, al.fill_count);
+        },
+        .block_expr => {
+            const blk = ast.block_exprs.items[data];
+            if (stmtRunCanThrow(ast, blk.body_start, blk.body_len)) return true;
+            return !blk.value.isNone() and exprCanThrow(ast, blk.value);
+        },
+        .if_expr => {
+            const ife = ast.if_exprs.items[data];
+            if (exprCanThrow(ast, ife.cond)) return true;
+            if (exprCanThrow(ast, ife.then_block)) return true;
+            return !ife.else_branch.isNone() and exprCanThrow(ast, ife.else_branch);
+        },
+        .match_expr => {
+            const m = ast.match_exprs.items[data];
+            if (exprCanThrow(ast, m.scrutinee)) return true;
+            var i: u32 = 0;
+            while (i < m.arms_len) : (i += 1) {
+                if (exprCanThrow(ast, ast.match_arms.items[m.arms_start + i].body)) return true;
+            }
+            return false;
+        },
+        .loop_expr => {
+            const lp = ast.loop_exprs.items[data];
+            return stmtRunCanThrow(ast, lp.body_start, lp.body_len);
+        },
+        .string_interp => {
+            const si = ast.string_interps.items[data];
+            var i: u32 = 0;
+            while (i < si.n_exprs) : (i += 1) {
+                if (exprCanThrow(ast, @bitCast(ast.extra.items[si.exprs_start + i]))) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+/// Whether a statement run references identifier `name` (M0.8 E3-C tranche
+/// 2) — drives the `_ = <name>;` discard for an unused catch binding (Zig
+/// rejects unused captures). An inner rebinding of the same name counts as
+/// a use (over-approximation): the discard is then skipped and Zig fails
+/// loud on the unused outer capture — an exotic shadowing shape, never a
+/// silent divergence.
+fn stmtRunUsesIdent(ast: *const AstArena, name: StringId, start: u32, len: u32) bool {
+    var s: u32 = 0;
+    while (s < len) : (s += 1) {
+        if (stmtUsesIdent(ast, name, @bitCast(ast.extra.items[start + s]))) return true;
+    }
+    return false;
+}
+
+fn stmtUsesIdent(ast: *const AstArena, name: StringId, stmt_id: NodeId) bool {
+    const data = ast.stmtData(stmt_id);
+    switch (ast.stmtKind(stmt_id)) {
+        .throw_stmt => return exprUsesIdent(ast, name, ast.throw_stmts.items[data].value),
+        .try_catch_stmt => {
+            const tc = ast.try_catch_stmts.items[data];
+            return stmtRunUsesIdent(ast, name, tc.try_start, tc.try_len) or
+                stmtRunUsesIdent(ast, name, tc.catch_start, tc.catch_len);
+        },
+        .let_stmt => return exprUsesIdent(ast, name, ast.let_stmts.items[data].value),
+        .assign_stmt => {
+            const a = ast.assign_stmts.items[data];
+            return exprUsesIdent(ast, name, a.target) or exprUsesIdent(ast, name, a.value);
+        },
+        .expr_stmt => return exprUsesIdent(ast, name, @bitCast(data)),
+        .assert_stmt => return exprUsesIdent(ast, name, ast.assert_stmts.items[data].cond),
+        .return_stmt => {
+            const value: NodeId = @bitCast(data);
+            return !value.isNone() and exprUsesIdent(ast, name, value);
+        },
+        .for_stmt => {
+            const f = ast.for_stmts.items[data];
+            return exprUsesIdent(ast, name, f.iterable) or stmtRunUsesIdent(ast, name, f.body_start, f.body_len);
+        },
+        .while_stmt => {
+            const wh = ast.while_stmts.items[data];
+            return exprUsesIdent(ast, name, wh.cond) or stmtRunUsesIdent(ast, name, wh.body_start, wh.body_len);
+        },
+        .break_stmt => {
+            const b = ast.break_stmts.items[data];
+            return !b.value.isNone() and exprUsesIdent(ast, name, b.value);
+        },
+        .emit_stmt => {
+            const em = ast.emit_stmts.items[data];
+            var i: u32 = 0;
+            while (i < em.fields_len) : (i += 1) {
+                if (exprUsesIdent(ast, name, ast.struct_lit_fields.items[em.fields_start + i].value)) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+fn exprUsesIdent(ast: *const AstArena, name: StringId, expr: NodeId) bool {
+    const data = ast.exprData(expr);
+    switch (ast.exprKind(expr)) {
+        .ident => return data == name,
+        .fn_call => {
+            const call = ast.call_exprs.items[data];
+            if (exprUsesIdent(ast, name, call.callee)) return true;
+            var i: u32 = 0;
+            while (i < call.args_len) : (i += 1) {
+                if (exprUsesIdent(ast, name, @bitCast(ast.extra.items[call.args_start + i]))) return true;
+            }
+            return false;
+        },
+        .binary => {
+            const b = ast.binary_exprs.items[data];
+            return exprUsesIdent(ast, name, b.lhs) or exprUsesIdent(ast, name, b.rhs);
+        },
+        .unary => return exprUsesIdent(ast, name, ast.unary_exprs.items[data].operand),
+        .cast => return exprUsesIdent(ast, name, ast.casts.items[data].operand),
+        .field_access => return exprUsesIdent(ast, name, ast.field_accesses.items[data].receiver),
+        .index => {
+            const ix = ast.index_exprs.items[data];
+            return exprUsesIdent(ast, name, ix.receiver) or exprUsesIdent(ast, name, ix.index);
+        },
+        .range => {
+            const r = ast.ranges.items[data];
+            return exprUsesIdent(ast, name, r.start) or exprUsesIdent(ast, name, r.end);
+        },
+        .method_call => {
+            const mc = ast.method_calls.items[data];
+            if (ast.exprKind(mc.receiver) != .path and exprUsesIdent(ast, name, mc.receiver)) return true;
+            var i: u32 = 0;
+            while (i < mc.args_len) : (i += 1) {
+                if (exprUsesIdent(ast, name, @bitCast(ast.extra.items[mc.args_start + i]))) return true;
+            }
+            return false;
+        },
+        .struct_lit => {
+            const sl = ast.struct_lits.items[data];
+            var i: u32 = 0;
+            while (i < sl.fields_len) : (i += 1) {
+                if (exprUsesIdent(ast, name, ast.struct_lit_fields.items[sl.fields_start + i].value)) return true;
+            }
+            return false;
+        },
+        .array_lit => {
+            const al = ast.array_lits.items[data];
+            var i: u32 = 0;
+            while (i < al.elements_len) : (i += 1) {
+                if (exprUsesIdent(ast, name, @bitCast(ast.extra.items[al.elements_start + i]))) return true;
+            }
+            return al.is_fill and exprUsesIdent(ast, name, al.fill_count);
+        },
+        .block_expr => {
+            const blk = ast.block_exprs.items[data];
+            if (stmtRunUsesIdent(ast, name, blk.body_start, blk.body_len)) return true;
+            return !blk.value.isNone() and exprUsesIdent(ast, name, blk.value);
+        },
+        .if_expr => {
+            const ife = ast.if_exprs.items[data];
+            if (exprUsesIdent(ast, name, ife.cond)) return true;
+            if (exprUsesIdent(ast, name, ife.then_block)) return true;
+            return !ife.else_branch.isNone() and exprUsesIdent(ast, name, ife.else_branch);
+        },
+        .match_expr => {
+            const m = ast.match_exprs.items[data];
+            if (exprUsesIdent(ast, name, m.scrutinee)) return true;
+            var i: u32 = 0;
+            while (i < m.arms_len) : (i += 1) {
+                if (exprUsesIdent(ast, name, ast.match_arms.items[m.arms_start + i].body)) return true;
+            }
+            return false;
+        },
+        .loop_expr => {
+            const lp = ast.loop_exprs.items[data];
+            return stmtRunUsesIdent(ast, name, lp.body_start, lp.body_len);
+        },
+        .string_interp => {
+            const si = ast.string_interps.items[data];
+            var i: u32 = 0;
+            while (i < si.n_exprs) : (i += 1) {
+                if (exprUsesIdent(ast, name, @bitCast(ast.extra.items[si.exprs_start + i]))) return true;
+            }
+            return false;
+        },
+        .closure => return exprUsesIdent(ast, name, ast.closure_exprs.items[data].body),
+        .method_get, .method_get_mut => {
+            const mg = ast.method_gets.items[data];
+            return !mg.receiver.isNone() and exprUsesIdent(ast, name, mg.receiver);
+        },
+        else => return false,
+    }
+}
+
 // ─── struct (by-value type) ──────────────────────────────────────────────
 
 /// Emit a `struct` declaration as a Zig `extern struct` with its fields plus
@@ -348,15 +790,52 @@ fn emitStructDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void
     const decl = ast.struct_decls.items[data];
     if (decl.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation → Phase 2
     const name = ast.strings.slice(decl.name);
-    try w.printLine("pub const {s} = extern struct {{", .{name});
-    w.indentBy(1);
+    // A `string` field (unlocked with the Error layer, M0.8 E3-C tranche 2)
+    // lowers to `[]const u8` — not extern-compatible, so such a struct is a
+    // plain Zig struct. String-free structs keep the extern layout.
+    var has_string = false;
     var f_i: u32 = 0;
     while (f_i < decl.fields_len) : (f_i += 1) {
         const f = ast.fields.items[decl.fields_start + f_i];
+        if (ast.typeNodeKind(f.type_node) != .named) continue;
         const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-        const etch_type = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
-        const zig_type = type_map.mapBuiltin(etch_type) orelse return CodegenError.NonPodComponent;
+        if (std.mem.eql(u8, ast.strings.slice(ast.resolveTypeAliasName(tnode.name)), "string")) has_string = true;
+    }
+    try w.printLine("pub const {s} = {s}struct {{", .{ name, if (has_string) "" else "extern " });
+    w.indentBy(1);
+    f_i = 0;
+    while (f_i < decl.fields_len) : (f_i += 1) {
+        const f = ast.fields.items[decl.fields_start + f_i];
+        // Optional fields (`Error?`) have no codegen lowering yet — deferred
+        // to the Optional-ops tranche (interpreter reference). The guard also
+        // protects the `named_types` index below.
+        if (ast.typeNodeKind(f.type_node) != .named) return CodegenError.UnsupportedConstruct;
+        const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
+        const resolved = ast.resolveTypeAliasName(tnode.name);
+        const etch_type = ast.strings.slice(resolved);
         const fname = ast.strings.slice(f.name);
+        // `string` field (M0.8 E3-C tranche 2): `[]const u8`, empty default;
+        // a declared default is deferred (the const-eval path has no string
+        // emission — interpreter reference).
+        if (std.mem.eql(u8, etch_type, "string")) {
+            if (!f.default_value.isNone()) return CodegenError.UnsupportedConstruct;
+            try w.writeIndent();
+            try w.ident(fname);
+            try w.write(": []const u8 = \"\",\n");
+            continue;
+        }
+        // Enum-typed field (M0.8 E3-C tranche 2): the enum maps 1:1; with no
+        // declared default, the first variant (ordinal 0) fills omissions —
+        // matching the prelude `Error.code` shape. A declared enum default
+        // is deferred (no const-eval enum path — interpreter reference).
+        if (isEnumName(ast, resolved)) {
+            if (!f.default_value.isNone()) return CodegenError.UnsupportedConstruct;
+            try w.writeIndent();
+            try w.ident(fname);
+            try w.print(": {s} = @enumFromInt(0),\n", .{etch_type});
+            continue;
+        }
+        const zig_type = type_map.mapBuiltin(etch_type) orelse return CodegenError.NonPodComponent;
         try w.writeIndent();
         try w.ident(fname);
         if (f.default_value.isNone()) {
@@ -689,16 +1168,31 @@ const FieldFilter = struct {
 /// Emit one Zig `fn` for a top-level Etch `fn` (M0.8 E2 call mechanism). The
 /// body is a value-block: the statement run is emitted, then the trailing
 /// expression as `return <value>;` (the implicit return). Params + return type
-/// map through `type_map`. `async` codegen is Phase 2 and a `throws` fn's
-/// codegen folds into the E3 error-handling-codegen gate — both fail loud
-/// (`UnsupportedConstruct`); the interpreter is the reference for them.
+/// map through `type_map`. `async` codegen is Phase 2 and fails loud
+/// (`UnsupportedConstruct`); the interpreter is its reference. A `throws` fn
+/// (M0.8 E3-C tranche 2) gains a hidden trailing `__err: *?Error` out-param —
+/// the codegen image of the interpreter's `thrown` signal crossing the
+/// `callFn` boundary; an in-body throw stores through it and returns the
+/// never-read zero default of the return type.
 fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenError!void {
     if (decl.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation → Phase 2
     if (decl.is_async) return CodegenError.UnsupportedConstruct; // async codegen → Phase 2
-    if (decl.throws) return CodegenError.UnsupportedConstruct; // throws codegen → E3 gate
+
+    const ret_zig: []const u8 = if (decl.return_type.isNone()) "" else fnTypeZig(ast, decl.return_type);
+    if (decl.throws and !decl.return_type.isNone()) {
+        // The throwing path returns `zeroDefault(ret)` — only meaningful for
+        // builtin-mapped scalars (checked on the ETCH type name; `fnTypeZig`
+        // passes user names through 1:1). A `throws` fn returning a user
+        // type is deferred (interpreter reference).
+        const tnode = ast.named_types.items[ast.typeNodeData(decl.return_type)];
+        const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+        if (type_map.mapBuiltin(tname) == null) return CodegenError.UnsupportedConstruct;
+    }
 
     var ctx: LocalCtx = .{};
     defer ctx.deinit(w.gpa);
+    ctx.throws_fn = decl.throws;
+    ctx.fn_ret_zig = ret_zig;
 
     try w.writeIndent();
     try w.write("fn ");
@@ -713,10 +1207,22 @@ fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenErr
         try w.print(": {s}", .{zig_t});
         try ctx.records.append(w.gpa, .{ .key = .{ .name = p.name }, .info = .{ .kind = .value, .zig_type = zig_t, .is_mut = false } });
     }
+    if (decl.throws) {
+        if (decl.params_len > 0) try w.write(", ");
+        try w.write("__err: *?Error");
+    }
     try w.write(") ");
-    try w.write(if (decl.return_type.isNone()) "void" else fnTypeZig(ast, decl.return_type));
+    try w.write(if (decl.return_type.isNone()) "void" else ret_zig);
     try w.write(" {\n");
     w.indentBy(1);
+
+    // A `throws` fn whose body cannot throw (W0901-shaped) never touches
+    // `__err`; Zig rejects the unused param, so discard it. When the body CAN
+    // throw, the emission mirrors the same scan and a use follows — the
+    // discard would then be the rejected "pointless discard".
+    if (decl.throws and !fnBodyCanThrow(ast, decl)) {
+        try w.line("_ = __err;");
+    }
 
     var s: u32 = 0;
     while (s < decl.body_len) : (s += 1) {
@@ -733,6 +1239,14 @@ fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenErr
     w.indentBy(-1);
     try w.writeIndent();
     try w.write("}\n\n");
+}
+
+/// Whether a `fn` body (statement run + trailing value expression) can raise
+/// the throw signal (M0.8 E3-C tranche 2) — drives the `_ = __err;` discard
+/// for a `throws` fn that never throws.
+fn fnBodyCanThrow(ast: *const AstArena, decl: ast_mod.FnDecl) bool {
+    if (stmtRunCanThrow(ast, decl.body_start, decl.body_len)) return true;
+    return !decl.value.isNone() and exprCanThrow(ast, decl.value);
 }
 
 /// Map a `fn` parameter / return type node to its Zig type name (M0.8 E2).
@@ -1489,6 +2003,22 @@ const LocalCtx = struct {
     /// allocation = the §6.3 outparam-arena model, deferred). Set on
     /// rule-body contexts by the rule emitters.
     arena_param: ?[]const u8 = null,
+    /// The innermost enclosing `try` block's label index (the try-catch slab
+    /// index, unique per program), or null outside any `try` (M0.8 E3-C
+    /// tranche 2). A `throw` / failed `throws`-fn call transfers control via
+    /// `__thrown_<label> = <err>; break :__try_<label>;`. Saved/restored
+    /// around try bodies; a catch body sees the OUTER label, so a rethrow
+    /// propagates outward — same unwind shape as the interpreter's `thrown`.
+    try_label: ?u32 = null,
+    /// True while emitting the body of a `throws` fn (M0.8 E3-C tranche 2):
+    /// an uncaught throw stores through the hidden `__err: *?Error` out-param
+    /// and returns — the codegen image of the interpreter's signal crossing
+    /// the `callFn` boundary.
+    throws_fn: bool = false,
+    /// The enclosing fn's Zig return type ("" = void) — the value a `throws`
+    /// fn returns after storing the error (never read by the caller, which
+    /// checks `__terr_*` before using the result).
+    fn_ret_zig: []const u8 = "",
 
     pub fn deinit(self: *LocalCtx, gpa: std.mem.Allocator) void {
         self.records.deinit(gpa);
@@ -1572,6 +2102,22 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             if (ek == .match_expr) {
                 try emitMatchAsStmt(w, ast, ctx, ast.exprData(eid));
                 return;
+            }
+            // A bare `throwing_fn(args…)` statement (M0.8 E3-C tranche 2) —
+            // the sanctioned statement-position `throws` call: per-call error
+            // local, call with the hidden out-param, re-raise.
+            if (ek == .fn_call) {
+                const call_idx = ast.exprData(eid);
+                const call = ast.call_exprs.items[call_idx];
+                if (throwsCalleeDecl(ast, ctx, call) != null) {
+                    try w.printLine("var __terr_{d}: ?Error = null;", .{call_idx});
+                    try w.writeIndent();
+                    try w.write("_ = ");
+                    try emitThrowsCallExpr(w, ast, ctx, call, call_idx);
+                    try w.write(";\n");
+                    try emitThrowsCallCheck(w, ctx, call_idx);
+                    return;
+                }
             }
             try w.writeIndent();
             // Side-effect-only expression statement: typically a bare
@@ -1763,8 +2309,141 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             try w.writeIndent();
             try w.print("cmd.{s}(__entity, world.registry.idOf(\"TagSet\").?, {d}) catch {{}};\n", .{ method, bit });
         },
+        .throw_stmt => {
+            // `throw expression` (M0.8 E3-C tranche 2) — the flag+branch
+            // desugar, at the SAME logical point as the interpreter's
+            // `thrown_value = eval(value); thrown = true`: evaluate the
+            // operand, set the in-flight `Error`, transfer control. Inside a
+            // `try`, the transfer is a labeled break to the try block's end;
+            // inside a `throws` fn, it stores through the hidden `__err`
+            // out-param and returns. A throw with neither home (an uncaught
+            // rule-level throw — the interpreter counts a runtime error and
+            // aborts the body) is deferred: fail loud, interpreter reference.
+            const t = ast.throw_stmts.items[data];
+            if (ctx.try_label) |lbl| {
+                try w.writeIndent();
+                try w.print("__thrown_{d} = ", .{lbl});
+                try emitExpr(w, ast, ctx, t.value);
+                try w.write(";\n");
+                try w.writeIndent();
+                try w.print("break :__try_{d};\n", .{lbl});
+            } else if (ctx.throws_fn) {
+                try w.writeIndent();
+                try w.write("__err.* = ");
+                try emitExpr(w, ast, ctx, t.value);
+                try w.write(";\n");
+                try emitThrowsFnAbort(w, ctx);
+            } else {
+                return CodegenError.UnsupportedConstruct;
+            }
+        },
+        .try_catch_stmt => {
+            // `try { … } catch err { … }` (M0.8 E3-C tranche 2) — flag+branch:
+            //   var __thrown_N: ?Error = null;
+            //   __try_N: { …try body… }      // throw → assign + break :__try_N
+            //   if (__thrown_N) |err| { …catch body… }
+            // N is the try-catch slab index — unique per program and stable
+            // across the two-pass rule emission. A statically throw-free try
+            // body emits inline without the plumbing: the catch body is
+            // unreachable per the interpreter's semantics, and Zig rejects
+            // the never-mutated `var`. The catch body sees the OUTER try
+            // label, so a rethrow propagates outward — the interpreter's
+            // re-raise from a catch body. An unused catch binding gets a
+            // leading `_ = <name>;` (Zig rejects unused captures).
+            const tc = ast.try_catch_stmts.items[data];
+            var s: u32 = 0;
+            if (!stmtRunCanThrow(ast, tc.try_start, tc.try_len)) {
+                while (s < tc.try_len) : (s += 1) {
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.try_start + s]));
+                }
+                return;
+            }
+            try w.printLine("var __thrown_{d}: ?Error = null;", .{data});
+            try w.printLine("__try_{d}: {{", .{data});
+            w.indentBy(1);
+            const saved_label = ctx.try_label;
+            ctx.try_label = data;
+            while (s < tc.try_len) : (s += 1) {
+                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.try_start + s]));
+            }
+            ctx.try_label = saved_label;
+            w.indentBy(-1);
+            try w.line("}");
+            try w.writeIndent();
+            try w.print("if (__thrown_{d}) |", .{data});
+            try w.ident(ast.strings.slice(tc.catch_name));
+            try w.write("| {\n");
+            w.indentBy(1);
+            if (!stmtRunUsesIdent(ast, tc.catch_name, tc.catch_start, tc.catch_len)) {
+                try w.writeIndent();
+                try w.write("_ = ");
+                try w.ident(ast.strings.slice(tc.catch_name));
+                try w.write(";\n");
+            }
+            const saved_records = ctx.records.items.len;
+            try ctx.records.append(w.gpa, .{ .key = .{ .name = tc.catch_name }, .info = .{ .kind = .value, .zig_type = "Error", .is_mut = false } });
+            s = 0;
+            while (s < tc.catch_len) : (s += 1) {
+                try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[tc.catch_start + s]));
+            }
+            ctx.records.items.len = saved_records;
+            w.indentBy(-1);
+            try w.line("}");
+        },
         else => return CodegenError.UnsupportedConstruct,
     }
+}
+
+/// `return <zero default>;` for the enclosing `throws` fn — the value a
+/// throwing path returns after storing through `__err` (M0.8 E3-C tranche
+/// 2). Never read: every sanctioned call site checks its `__terr_*` local
+/// before using the result, mirroring the interpreter's `callFn` returning
+/// unit with the signal set.
+fn emitThrowsFnAbort(w: *Writer, ctx: *const LocalCtx) CodegenError!void {
+    try w.writeIndent();
+    if (ctx.fn_ret_zig.len == 0) {
+        try w.write("return;\n");
+    } else {
+        try w.print("return {s};\n", .{zeroDefault(ctx.fn_ret_zig)});
+    }
+}
+
+/// The post-call check of a sanctioned `throws`-fn call site (M0.8 E3-C
+/// tranche 2): if the callee stored an error, re-raise it at THIS level —
+/// into the enclosing try's flag, or through the enclosing `throws` fn's
+/// own out-param. Same logical point as the interpreter's signal check on
+/// `callFn` return. A call with neither home (an uncaught rule-level call)
+/// is deferred: fail loud, interpreter reference.
+fn emitThrowsCallCheck(w: *Writer, ctx: *const LocalCtx, call_idx: u32) CodegenError!void {
+    try w.writeIndent();
+    if (ctx.try_label) |lbl| {
+        try w.print("if (__terr_{d}) |__e| {{ __thrown_{d} = __e; break :__try_{d}; }}\n", .{ call_idx, lbl, lbl });
+    } else if (ctx.throws_fn) {
+        if (ctx.fn_ret_zig.len == 0) {
+            try w.print("if (__terr_{d}) |__e| {{ __err.* = __e; return; }}\n", .{call_idx});
+        } else {
+            try w.print("if (__terr_{d}) |__e| {{ __err.* = __e; return {s}; }}\n", .{ call_idx, zeroDefault(ctx.fn_ret_zig) });
+        }
+    } else {
+        return CodegenError.UnsupportedConstruct;
+    }
+}
+
+/// Emit a sanctioned `throws`-fn call: declare the per-call error local,
+/// emit `name(args…, &__terr_K)`, where K is the call-expr slab index
+/// (unique per program). The caller writes what receives the value (a
+/// `const x: T =` head or a `_ =` discard) between `emitThrowsCallLocal`
+/// and this call emission, then `emitThrowsCallCheck`.
+fn emitThrowsCallExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, call: ast_mod.CallExpr, call_idx: u32) CodegenError!void {
+    try w.ident(ast.strings.slice(ast.exprData(call.callee)));
+    try w.write("(");
+    var i: u32 = 0;
+    while (i < call.args_len) : (i += 1) {
+        if (i > 0) try w.write(", ");
+        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[call.args_start + i]));
+    }
+    if (call.args_len > 0) try w.write(", ");
+    try w.print("&__terr_{d})", .{call_idx});
 }
 
 fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStmt) CodegenError!void {
@@ -1793,6 +2472,33 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
             cname,
         });
         return;
+    }
+
+    // `let x = throwing_fn(args…)` (M0.8 E3-C tranche 2) — the sanctioned
+    // let-position `throws` call: declare the per-call error local, call with
+    // the hidden out-param, then re-raise. The binding takes the callee's
+    // declared return type; on a throwing run it holds the never-read zero
+    // default (the interpreter binds unit), and control transfers before any
+    // use — observably identical.
+    if (value_kind == .fn_call) {
+        const call_idx = ast.exprData(let.value);
+        const call = ast.call_exprs.items[call_idx];
+        if (throwsCalleeDecl(ast, ctx, call)) |callee| {
+            try w.printLine("var __terr_{d}: ?Error = null;", .{call_idx});
+            try w.writeIndent();
+            try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
+            try w.ident(ast.strings.slice(let.name));
+            try w.write(" = ");
+            try emitThrowsCallExpr(w, ast, ctx, call, call_idx);
+            try w.write(";\n");
+            const ret_zig = if (callee.return_type.isNone()) "" else fnTypeZig(ast, callee.return_type);
+            try ctx.records.append(w.gpa, .{
+                .key = .{ .name = let.name },
+                .info = .{ .kind = .value, .zig_type = ret_zig, .is_mut = let.is_mut },
+            });
+            try emitThrowsCallCheck(w, ctx, call_idx);
+            return;
+        }
     }
 
     // Plain-value let. Try to infer the Zig type so the binding is annotated
@@ -2068,6 +2774,11 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             const call = ast.call_exprs.items[data];
             const is_free_fn = ast.exprKind(call.callee) == .ident and ctx.lookup(ast.exprData(call.callee)) == null;
             if (is_free_fn) {
+                // A `throws` fn call in expression position (M0.8 E3-C
+                // tranche 2): the hidden out-param needs statement-level
+                // sequencing — sanctioned positions are a `let` initializer
+                // and a bare call statement, anything nested fails loud.
+                if (throwsCalleeDecl(ast, ctx, call) != null) return CodegenError.UnsupportedConstruct;
                 try w.ident(ast.strings.slice(ast.exprData(call.callee)));
             } else {
                 try emitExpr(w, ast, ctx, call.callee);
@@ -2854,8 +3565,19 @@ fn fieldZigTypeOnComponent(ast: *const AstArena, comp_name: []const u8, field_na
             const f = ast.fields.items[fields_start + f_i];
             const fname = ast.strings.slice(f.name);
             if (std.mem.eql(u8, fname, field_name)) {
+                // A non-named field type (`Error?` — the builtin Error's
+                // `source`) has no scalar Zig name; the caller falls back.
+                // Guards the `named_types` mis-index too (M0.8 E3-C tranche 2).
+                if (ast.typeNodeKind(f.type_node) != .named) return null;
                 const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-                const etch_t = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+                const resolved = ast.resolveTypeAliasName(tnode.name);
+                const etch_t = ast.strings.slice(resolved);
+                // `string` fields (`Error.message`) → the codegen string
+                // type, driving `.len()` dispatch; enum-typed fields
+                // (`Error.code`) map 1:1, driving the match shorthand
+                // (M0.8 E3-C tranche 2).
+                if (std.mem.eql(u8, etch_t, "string")) return "[]const u8";
+                if (isEnumName(ast, resolved)) return etch_t;
                 return type_map.mapBuiltin(etch_t);
             }
         }

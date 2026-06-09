@@ -38,8 +38,9 @@ pub const BuiltinType = enum {
     /// `string` (M0.8 sub-slice C tranche 1). A first-class expression type so
     /// `"lit"` / concat / `.len()` resolve, but deliberately NOT in `fromName`
     /// — `string` stays rejected as a component/resource field type (POD /
-    /// "not in the builtin set", `validateFieldsInDecl`); string fields land
-    /// with the Error layer (tranche 2).
+    /// "not in the builtin set", `validateFieldsInDecl`). Since tranche 2
+    /// (the Error layer) `string` is accepted on `struct` fields and resolves
+    /// as a declared type through `namedTypeToResolved`'s special case.
     string_,
 
     pub fn isNumeric(self: BuiltinType) bool {
@@ -276,6 +277,11 @@ pub const TypeChecker = struct {
     }
 
     pub fn check(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
+        // Builtin `Error` / `ErrorCode` declarations (M0.8 E3-C tranche 2,
+        // part1 §10.2) join the arena before pass 1 so they register like
+        // ordinary declarations. Every interp / codegen driver runs through
+        // `check`, so the injection point is unique.
+        try arena.ensureErrorBuiltins(gpa);
         var tc: TypeChecker = .{
             .gpa = gpa,
             .arena = arena,
@@ -327,13 +333,13 @@ pub const TypeChecker = struct {
                     const decl = self.arena.component_decls.items[data];
                     try self.registerSymbol(.component, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .component);
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, true);
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .component_like);
                 },
                 .resource_decl => {
                     const decl = self.arena.resource_decls.items[data];
                     try self.registerSymbol(.resource, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .resource);
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, false);
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .resource);
                 },
                 .event_decl => {
                     // An `event` is a POD struct of fields (M0.8 E3,
@@ -344,7 +350,7 @@ pub const TypeChecker = struct {
                     const decl = self.arena.event_decls.items[data];
                     try self.registerSymbol(.event_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .event);
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, true);
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .component_like);
                 },
                 .rule_decl => {
                     const decl = self.arena.rule_decls.items[data];
@@ -358,16 +364,16 @@ pub const TypeChecker = struct {
                 },
                 .struct_decl => {
                     // A `struct` is a by-value type (M0.8 E2 block 3). Register
-                    // the name and validate fields. Block-3 struct fields are
-                    // builtin scalars (the same surface as component/resource
-                    // fields); nested-struct / string fields are deferred.
+                    // the name and validate fields. Struct fields are builtin
+                    // scalars plus, since tranche 2 (the Error layer), `string`
+                    // and enum-typed fields; nested-struct fields stay deferred.
                     const decl = self.arena.struct_decls.items[data];
                     try self.registerSymbol(.struct_, decl.name, item_id, span);
                     // Generic params (M0.8 E2 block 4) in scope so a field typed
                     // by a param (`min: T`) is accepted as a generic field.
                     try self.addGenerics(decl.generics_start, decl.generics_len);
                     defer self.removeGenerics(decl.generics_start, decl.generics_len);
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, false);
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .struct_);
                 },
                 .enum_decl => {
                     // A C-like `enum` is a value type (M0.8 E2 block 3 tranche
@@ -571,7 +577,14 @@ pub const TypeChecker = struct {
         return self.arena.impl_methods.items[idx];
     }
 
-    fn validateFieldsInDecl(self: *TypeChecker, fields_start: u32, fields_len: u32, is_component: bool) !void {
+    /// Which declaration kind a validated field range belongs to. Components
+    /// and events share the POD wording (`component_like`); resources keep
+    /// their own rejection wording (Option A alignment is tranche 7);
+    /// `struct_` fields gain the tranche-2 unlocks (`string` + enum-typed
+    /// fields, forced by the builtin `Error` per part1 §10.2).
+    const FieldDeclOrigin = enum { component_like, resource, struct_ };
+
+    fn validateFieldsInDecl(self: *TypeChecker, fields_start: u32, fields_len: u32, origin: FieldDeclOrigin) !void {
         // Field name uniqueness within parent: collect into a small set.
         var seen: std.AutoHashMapUnmanaged(StringId, void) = .empty;
         defer seen.deinit(self.gpa);
@@ -598,6 +611,16 @@ pub const TypeChecker = struct {
             // land as locals, not fields).
             const tspan = self.arena.typeNodeSpan(field.type_node);
             if (self.arena.typeNodeKind(field.type_node) != .named) {
+                // One bounded exception (M0.8 E3-C tranche 2): a `struct` field
+                // may be `Error?` — the builtin Error's `source` chaining field
+                // (part1 §10.2). General optional fields are tranche 4.
+                if (origin == .struct_ and self.arena.typeNodeKind(field.type_node) == .optional) {
+                    const payload: NodeId = @bitCast(self.arena.typeNodeData(field.type_node));
+                    if (self.arena.typeNodeKind(payload) == .named) {
+                        const pn = self.arena.named_types.items[self.arena.typeNodeData(payload)];
+                        if (pn.name == self.arena.error_type_name) continue;
+                    }
+                }
                 try self.emit(.undefined_symbol, .error_, tspan, "collection / composite field types are not supported in E1 — component and resource fields must be scalar POD", .{});
                 continue;
             }
@@ -611,8 +634,17 @@ pub const TypeChecker = struct {
             const tname = self.arena.strings.slice(resolved_name);
 
             if (BuiltinType.fromName(tname) == null) {
-                // Try user-declared component or resource.
-                if (self.symbols.get(resolved_name)) |sym| {
+                if (origin == .struct_ and std.mem.eql(u8, tname, "string")) {
+                    // `string` struct fields unlock with the Error layer
+                    // (M0.8 E3-C tranche 2 — `Error.message` forces them;
+                    // part1 §5.5 constrains components, not structs).
+                    // Component / resource string fields stay rejected below.
+                } else if (origin == .struct_ and self.declaredEnumName(resolved_name)) {
+                    // Enum-typed struct fields unlock with `Error.code:
+                    // ErrorCode` (same tranche). Checked against the AST enum
+                    // slab (not the symbol table) so a later-declared enum is
+                    // seen — pass 1 registers symbols incrementally.
+                } else if (self.symbols.get(resolved_name)) |sym| {
                     if (sym.kind == .rule) {
                         try self.emit(.undefined_symbol, .error_, tspan, "type '{s}' is not a component, resource, or builtin", .{tname});
                     }
@@ -624,7 +656,7 @@ pub const TypeChecker = struct {
                     // `string` rejected on components per brief §POD; for
                     // resources `string` is also out of the S3 builtin set
                     // (resources POD-enforced via the same builtin table).
-                    if (is_component) {
+                    if (origin == .component_like) {
                         try self.emit(.undefined_symbol, .error_, tspan, "type 'string' is rejected on components in S3 (POD enforcement)", .{});
                     } else {
                         try self.emit(.undefined_symbol, .error_, tspan, "type 'string' is not in the S3 builtin set", .{});
@@ -639,6 +671,16 @@ pub const TypeChecker = struct {
                 try self.checkFieldDefault(field.default_value, field.type_node);
             }
         }
+    }
+
+    /// `true` if `name` is a declared `enum`, checked against the AST slab
+    /// (declaration-order independent, unlike the incrementally-built pass-1
+    /// symbol table). Includes the synthetic builtin `ErrorCode`.
+    fn declaredEnumName(self: *TypeChecker, name: StringId) bool {
+        for (self.arena.enum_decls.items) |decl| {
+            if (decl.name == name) return true;
+        }
+        return false;
     }
 
     /// Validate annotation applicability for a `(start, len)` range in
@@ -715,6 +757,12 @@ pub const TypeChecker = struct {
                 // Resolve through any top-level `type` alias chain first (M0.8).
                 const resolved_name = self.arena.resolveTypeAliasName(named.name);
                 const tname = self.arena.strings.slice(resolved_name);
+                // `string` in a declared-type position (M0.8 E3-C tranche 2 —
+                // struct fields like `Error.message`, `let s: string = …`).
+                // Kept out of `fromName` so the component/resource POD
+                // rejection wording in `validateFieldsInDecl` stays keyed on
+                // the builtin table.
+                if (std.mem.eql(u8, tname, "string")) return .{ .builtin = .string_ };
                 if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
                 if (self.symbols.get(resolved_name)) |sym| {
                     return switch (sym.kind) {
@@ -1289,23 +1337,32 @@ pub const TypeChecker = struct {
             },
             .continue_stmt => {},
             .throw_stmt => {
-                // `throw expression` (M0.8 error handling) — type the value. E1
-                // throws an arbitrary value (the `Error` struct type arrives
-                // with struct/enum in E2).
+                // `throw expression` (M0.8 error handling, E3-C tranche 2).
+                // The thrown value must be the builtin `Error` struct — part1
+                // §10.2 ("no custom error hierarchy") + `etch-grammar.md`
+                // l.793 ("peut throw une Error"): the catch binding is
+                // statically an `Error`, so a non-Error operand is rejected
+                // here (no runtime coercion). The interpreter's carrier stays
+                // an arbitrary `Value` — unreachable for checked programs.
                 const t = self.arena.throw_stmts.items[data];
-                _ = self.synthExpr(t.value, ctx);
+                const vt = self.synthExpr(t.value, ctx);
+                const is_error = vt == .struct_t and vt.struct_t == self.arena.error_type_name;
+                if (!is_error and vt != .unknown) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(t.value), "thrown value must be the builtin 'Error' struct (part1 §10.2)", .{});
+                }
             },
             .try_catch_stmt => {
                 // `try { ... } catch err { ... }` (M0.8 error handling). Check
-                // both bodies; the caught binding's type is dynamic in E1
-                // (the thrown value type is not statically tracked), so it is
-                // bound as `unknown`.
+                // both bodies; the caught binding is statically the builtin
+                // `Error` struct (E3-C tranche 2 — the throw rule above pins
+                // every thrown value to `Error`), so `err.message` /
+                // `err.code` resolve through the ordinary struct machinery.
                 const tc = self.arena.try_catch_stmts.items[data];
                 var i: u32 = 0;
                 while (i < tc.try_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[tc.try_start + i]));
                 }
-                try ctx.locals.put(self.gpa, tc.catch_name, .{ .type_ = ResolvedType.unknown, .is_mut = false });
+                try ctx.locals.put(self.gpa, tc.catch_name, .{ .type_ = .{ .struct_t = self.arena.error_type_name }, .is_mut = false });
                 i = 0;
                 while (i < tc.catch_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[tc.catch_start + i]));
@@ -1998,6 +2055,28 @@ pub const TypeChecker = struct {
                 }
             } else {
                 try self.emit(.invalid_field_filter, .error_, self.arena.exprSpan(id), "struct '{s}' has no field '{s}'", .{ self.arena.strings.slice(sl.type_name), self.arena.strings.slice(flit.name) });
+            }
+        }
+        // A builtin-`Error` literal must provide `message` and `code` (part1
+        // §10.2 declares no defaults; `source` is the omittable chaining
+        // field). Bounded to `Error` — general struct-literal completeness
+        // stays permissive (declared defaults fill omissions), but Error's
+        // fields have no defaults the two backends could agree on.
+        if (sl.type_name == self.arena.error_type_name) {
+            const required = [_][]const u8{ "message", "code" };
+            for (required) |req| {
+                var provided = false;
+                var li: u32 = 0;
+                while (li < sl.fields_len) : (li += 1) {
+                    const flit = self.arena.struct_lit_fields.items[sl.fields_start + li];
+                    if (std.mem.eql(u8, self.arena.strings.slice(flit.name), req)) {
+                        provided = true;
+                        break;
+                    }
+                }
+                if (!provided) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'Error' literal must provide field '{s}' (part1 §10.2)", .{req});
+                }
             }
         }
         return .{ .struct_t = sl.type_name };
@@ -3856,4 +3935,97 @@ test "type-checker validates tag mutations (M0.8 E3)" {
     );
     defer bad_recv.deinit(gpa);
     try expectAnyCode(bad_recv.diagnostics.items, .tag_invalid_operation);
+}
+
+test "type-checker accepts string and enum fields on struct, keeps component/resource rejection (M0.8 E3-C tranche 2)" {
+    const gpa = std.testing.allocator;
+
+    // `string` + enum-typed struct fields are the tranche-2 unlock (the
+    // builtin Error forces both; part1 §5.5 constrains components only).
+    var ok = try parseAndCheck(gpa,
+        \\enum Severity { low, high }
+        \\struct LogLine {
+        \\  text: string
+        \\  severity: Severity
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .undefined_symbol);
+
+    // Components stay POD: `string` rejected.
+    var comp = try parseAndCheck(gpa,
+        \\component Name { value: string }
+    );
+    defer comp.deinit(gpa);
+    try expectAnyCode(comp.diagnostics.items, .undefined_symbol);
+
+    // Resources keep the S3 rejection until the Option A alignment (tranche 7).
+    var res = try parseAndCheck(gpa,
+        \\resource Settings { player_name: string }
+    );
+    defer res.deinit(gpa);
+    try expectAnyCode(res.diagnostics.items, .undefined_symbol);
+}
+
+test "type-checker resolves the builtin Error struct end-to-end (M0.8 E3-C tranche 2)" {
+    const gpa = std.testing.allocator;
+    // Construct, throw, catch, read fields — every step through the synthetic
+    // declarations; `err.message.len()` types as int, `err.code` as ErrorCode.
+    var ok = try parseAndCheck(gpa,
+        \\component Probe { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Probe
+        \\{
+        \\  try {
+        \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+        \\  } catch err {
+        \\    entity.get_mut(Probe).n = err.message.len()
+        \\    let c = err.code
+        \\  }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+}
+
+test "type-checker rejects throwing a non-Error value (M0.8 E3-C tranche 2)" {
+    const gpa = std.testing.allocator;
+    // part1 §10.2: no custom error hierarchy — the thrown value is an Error.
+    var bad = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  try {
+        \\    throw 99
+        \\  } catch err {
+        \\    let x = err
+        \\  }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .type_mismatch);
+}
+
+test "type-checker requires message and code on an Error literal (M0.8 E3-C tranche 2)" {
+    const gpa = std.testing.allocator;
+    // part1 §10.2 declares no defaults for message/code; `source` is the
+    // omittable chaining field.
+    var bad = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  try {
+        \\    throw Error { message: "boom" }
+        \\  } catch err {
+        \\    let x = err
+        \\  }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .type_mismatch);
+}
+
+test "type-checker rejects a user declaration colliding with the builtin Error (M0.8 E3-C tranche 2)" {
+    const gpa = std.testing.allocator;
+    var bad = try parseAndCheck(gpa,
+        \\struct Error { value: int }
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .duplicate_symbol);
 }

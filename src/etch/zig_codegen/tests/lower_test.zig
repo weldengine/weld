@@ -245,3 +245,103 @@ test "lowers `has T changed` to tick-based change-detection codegen (M0.8 E3)" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "if (!(arch.changedTick(chunk, Health_idx, slot) > __last_run_react)) continue;") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "__last_run_react = world.current_tick;") != null);
 }
+
+test "emits the Error/ErrorCode prelude only when the program uses error handling (M0.8 E3-C tranche 2)" {
+    const gpa = std.testing.allocator;
+
+    // An error-free program keeps byte-identical output: no prelude, and the
+    // synthetic builtin declarations injected by the type-checker are skipped.
+    var plain: std.ArrayListUnmanaged(u8) = .empty;
+    defer plain.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Counter { value: int = 0 }
+        \\rule update(entity: Entity)
+        \\  when entity has Counter
+        \\{
+        \\  entity.get_mut(Counter).value = 5
+        \\}
+    , &plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain.items, "pub const Error") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain.items, "pub const ErrorCode") == null);
+
+    // throw/try/catch force the prelude and the flag+branch desugar.
+    var errful: std.ArrayListUnmanaged(u8) = .empty;
+    defer errful.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Counter { value: int = 0 }
+        \\rule update(entity: Entity)
+        \\  when entity has Counter
+        \\{
+        \\  try {
+        \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+        \\  } catch err {
+        \\    entity.get_mut(Counter).value = err.message.len()
+        \\  }
+        \\}
+    , &errful);
+    try std.testing.expect(std.mem.indexOf(u8, errful.items, "pub const Error = struct {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, errful.items, "pub const ErrorCode = enum(i32) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, errful.items, "var __thrown_0: ?Error = null;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, errful.items, "break :__try_0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, errful.items, "if (__thrown_0) |err| {") != null);
+}
+
+test "lowers a throws fn to the hidden __err out-param and rejects unsanctioned call positions (M0.8 E3-C tranche 2)" {
+    const gpa = std.testing.allocator;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Counter { value: int = 0 }
+        \\fn risky(n: int) throws -> int {
+        \\  if n > 2 {
+        \\    throw Error { message: "too big", code: ErrorCode.invalid_arg }
+        \\  }
+        \\  return n * 10
+        \\}
+        \\rule update(entity: Entity)
+        \\  when entity has Counter
+        \\{
+        \\  try {
+        \\    let v = risky(5)
+        \\    entity.get_mut(Counter).value = v
+        \\  } catch err {
+        \\    entity.get_mut(Counter).value = err.message.len()
+        \\  }
+        \\}
+    , &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "fn risky(n: i64, __err: *?Error) i64 {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "__err.* = Error{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "const v = risky(5, &__terr_0);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "if (__terr_0) |__e| { __thrown_0 = __e; break :__try_0; }") != null);
+
+    // A throws call nested in an expression has no statement-level home for
+    // the out-param check — fail loud (sanctioned positions: let / bare call).
+    var pr = try parser.parse(gpa,
+        \\component Counter { value: int = 0 }
+        \\fn risky(n: int) throws -> int { return n }
+        \\rule update(entity: Entity)
+        \\  when entity has Counter
+        \\{
+        \\  try {
+        \\    entity.get_mut(Counter).value = risky(5) + 1
+        \\  } catch err {
+        \\    entity.get_mut(Counter).value = err.message.len()
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(diag.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types.TypeChecker.check(gpa, &pr.ast, &diags);
+    var nested: std.ArrayListUnmanaged(u8) = .empty;
+    defer nested.deinit(gpa);
+    try std.testing.expectError(
+        root.CodegenError.UnsupportedConstruct,
+        root.generateToBuffer(gpa, &pr.ast, "<test>", &nested),
+    );
+}
