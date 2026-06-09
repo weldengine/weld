@@ -1545,6 +1545,44 @@ pub const Interpreter = struct {
                 return Value{ .bool_ = std.mem.eql(u8, text, "true") };
             },
             .string_lit => return Value{ .string_id = data },
+            .string_interp => {
+                // Interpolation (M0.8 E3-C tranche 1c, stdlib §12.5:
+                // compile-time lowering to segment ++ Display(expr) concat).
+                // Pieces are formatted with the SAME `std.fmt` specs the
+                // codegen's `allocPrint` uses (`{d}` for ints and floats,
+                // literal true/false for bools, raw bytes for strings) —
+                // identical formatting code in both backends → byte-exact.
+                const si = self.ast.string_interps.items[data];
+                var out: std.ArrayListUnmanaged(u8) = .empty;
+                errdefer out.deinit(self.gpa);
+                var k: u32 = 0;
+                while (k < si.n_exprs) : (k += 1) {
+                    const seg: u32 = self.ast.extra.items[si.segs_start + k];
+                    try out.appendSlice(self.gpa, self.ast.strings.slice(seg));
+                    const e: NodeId = @bitCast(self.ast.extra.items[si.exprs_start + k]);
+                    const v = try self.evalExpr(world, locals, e);
+                    switch (v) {
+                        .int_ => |x| {
+                            const piece = try std.fmt.allocPrint(self.gpa, "{d}", .{x});
+                            defer self.gpa.free(piece);
+                            try out.appendSlice(self.gpa, piece);
+                        },
+                        .float_ => |x| {
+                            const piece = try std.fmt.allocPrint(self.gpa, "{d}", .{x});
+                            defer self.gpa.free(piece);
+                            try out.appendSlice(self.gpa, piece);
+                        },
+                        .bool_ => |x| try out.appendSlice(self.gpa, if (x) "true" else "false"),
+                        .string_id, .string_run => try out.appendSlice(self.gpa, self.stringBytes(v).?),
+                        // Any other type is resolver-gated (minimal Display
+                        // subset) — fail loud if one slips through.
+                        else => return error.RuntimeFailure,
+                    }
+                }
+                const last_seg: u32 = self.ast.extra.items[si.segs_start + si.n_exprs];
+                try out.appendSlice(self.gpa, self.ast.strings.slice(last_seg));
+                return try self.newRunString(try out.toOwnedSlice(self.gpa));
+            },
             // `none` / `some(x)` optional literals (M0.8 E2 block 5) →
             // materialise an entry in the optional store, return its handle.
             .none_lit => {

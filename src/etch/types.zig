@@ -1420,6 +1420,29 @@ pub const TypeChecker = struct {
             .float_lit => return .{ .builtin = .float_ },
             .bool_lit => return .{ .builtin = .bool_ },
             .string_lit => return ResolvedType{ .builtin = .string_ },
+            // Interpolated string `"a {x} b"` (M0.8 E3-C tranche 1c, stdlib
+            // §12.5): each embedded expression must be Display-able within
+            // the minimal subset — int / i32 / u32 / float / f64 / bool /
+            // string. `f32` is rejected: the interpreter widens it to f64
+            // before formatting, so its text could diverge from the
+            // codegen's native-f32 formatting (byte-exact guard). The rest
+            // of the §4.2 Display catalogue is stdlib Phase 1+ → fail loud.
+            .string_interp => {
+                const si = self.arena.string_interps.items[data];
+                var k: u32 = 0;
+                while (k < si.n_exprs) : (k += 1) {
+                    const e: NodeId = @bitCast(self.arena.extra.items[si.exprs_start + k]);
+                    const t = try self.synthExprE(e, ctx_opt);
+                    const ok = t == .builtin and switch (t.builtin) {
+                        .int_, .i32_, .u32_, .float_, .f64_, .bool_, .string_ => true,
+                        else => false,
+                    };
+                    if (!ok and t != .unknown) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(e), "interpolation of this type is not in the M0.8 minimal subset (stdlib Display activation is Phase 1+)", .{});
+                    }
+                }
+                return ResolvedType{ .builtin = .string_ };
+            },
             .tag_path => return ResolvedType.unknown, // enum-variant shorthand; type unknown in S3
             // `none` (M0.8 E2 block 5): an optional with an unknown payload —
             // typed by the binding annotation / context (e.g. `let o: int? = none`).

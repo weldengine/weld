@@ -538,3 +538,17 @@ async rule intro_sequence()
   done.stage = 2
 }
 ```
+
+## String interpolation — `"a {expr} b"` (E3 sub-slice C tranche 1c)
+
+```etch
+component Acc { out: int = 0 }
+
+rule announce(entity: Entity)
+  when entity has Acc
+{
+  let who = "weld"
+  let msg = "hi {who}, n={1 + 2}, literal brace: \{x}"
+  entity.get_mut(Acc).out = msg.len()
+}
+```

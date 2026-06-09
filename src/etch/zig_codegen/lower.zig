@@ -1890,6 +1890,54 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             try emitZigStringLiteral(w, ast.strings.slice(data));
             try w.write(")");
         },
+        .string_interp => {
+            // Interpolated string (M0.8 E3-C tranche 1c, stdlib §12.5) →
+            // ONE `std.fmt.allocPrint(fa, "<segments+specs>", .{args})` in
+            // the tick's frame arena. Per-arg specs mirror the interpreter's
+            // piece formatting exactly: `{d}` for ints and floats (f64 args
+            // are `@as(f64, …)`-pinned so a comptime_float literal formats
+            // through the same runtime f64 path), bools lower to a
+            // `{s}`-fed true/false selection, strings are `{s}`. Identical
+            // `std.fmt` specs on identically-typed values → byte-exact with
+            // the interp. No arena in scope (fn/method body) → fail loud.
+            const si = ast.string_interps.items[data];
+            const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
+            w.arena_used = true;
+            try w.print("(std.fmt.allocPrint({s}, \"", .{fa});
+            var k: u32 = 0;
+            while (k < si.n_exprs) : (k += 1) {
+                try emitFmtSegment(w, ast.strings.slice(ast.extra.items[si.segs_start + k]));
+                const e: NodeId = @bitCast(ast.extra.items[si.exprs_start + k]);
+                const zig_t = inferExprZigType(ast, ctx, e);
+                if (std.mem.eql(u8, zig_t, "[]const u8") or std.mem.eql(u8, zig_t, "bool")) {
+                    try w.write("{s}");
+                } else {
+                    try w.write("{d}");
+                }
+            }
+            try emitFmtSegment(w, ast.strings.slice(ast.extra.items[si.segs_start + si.n_exprs]));
+            try w.write("\", .{ ");
+            k = 0;
+            while (k < si.n_exprs) : (k += 1) {
+                if (k > 0) try w.write(", ");
+                const e: NodeId = @bitCast(ast.extra.items[si.exprs_start + k]);
+                const zig_t = inferExprZigType(ast, ctx, e);
+                if (std.mem.eql(u8, zig_t, "bool")) {
+                    // Literal true/false text, exactly the interp's pieces —
+                    // sidesteps any fmt-spec semantics on bool.
+                    try w.write("@as([]const u8, if (");
+                    try emitExpr(w, ast, ctx, e);
+                    try w.write(") \"true\" else \"false\")");
+                } else if (std.mem.eql(u8, zig_t, "f64")) {
+                    try w.write("@as(f64, ");
+                    try emitExpr(w, ast, ctx, e);
+                    try w.write(")");
+                } else {
+                    try emitExpr(w, ast, ctx, e);
+                }
+            }
+            try w.write(" }) catch unreachable)");
+        },
         // `none` / `some(x)` optional literals (M0.8 E2 block 5). `none` → Zig
         // `null` (its type comes from the binding annotation / context);
         // `some(x)` self-types as `@as(?<payload>, x)` for a scalar payload
@@ -2635,6 +2683,31 @@ fn emitZigStringLiteral(w: *Writer, bytes: []const u8) CodegenError!void {
     try w.write("\"");
 }
 
+/// Write one interpolation segment into the `std.fmt` format string being
+/// emitted (M0.8 E3-C tranche 1c): the same byte escaping as
+/// `emitZigStringLiteral` (without the surrounding quotes) plus `{`/`}`
+/// doubling, since the destination is a format string.
+fn emitFmtSegment(w: *Writer, bytes: []const u8) CodegenError!void {
+    for (bytes) |c| {
+        switch (c) {
+            '"' => try w.write("\\\""),
+            '\\' => try w.write("\\\\"),
+            '\n' => try w.write("\\n"),
+            '\r' => try w.write("\\r"),
+            '\t' => try w.write("\\t"),
+            '{' => try w.write("{{"),
+            '}' => try w.write("}}"),
+            else => {
+                if (c < 0x20 or c == 0x7f) {
+                    try w.print("\\x{x:0>2}", .{c});
+                } else {
+                    try w.buffer.append(w.gpa, c);
+                }
+            },
+        }
+    }
+}
+
 fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const u8 {
     const kind = ast.exprKind(expr);
     const data = ast.exprData(expr);
@@ -2643,8 +2716,9 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         .float_lit => "f64",
         .bool_lit => "bool",
         // String (M0.8 sub-slice C tranche 1) → `[]const u8`; drives the
-        // string-receiver dispatch in the `method_call` emit.
-        .string_lit => "[]const u8",
+        // string-receiver dispatch in the `method_call` emit. Interpolation
+        // (tranche 1c) produces a string too.
+        .string_lit, .string_interp => "[]const u8",
         // Optionals (M0.8 E2 block 5): `some(x)` self-types via `@as` in
         // `emitExpr`, so the binding needs no annotation ("" → Zig infers);
         // `none` relies on the binding annotation (handled in `inferZigType`).

@@ -237,6 +237,10 @@ pub const ExprKind = enum {
     closure,
     await_expr,
     throw_expr,
+    /// Interpolated string literal `"a {expr} b"` (M0.8 E3-C tranche 1c,
+    /// `etch-grammar.md` §1.4 `interpolation = "{" , expression , "}"`).
+    /// Data indexes `string_interps`.
+    string_interp,
 };
 
 /// Closed enum of type-node kinds the parser can produce.
@@ -665,6 +669,18 @@ pub const LoopExpr = struct {
     label: StringId,
     body_start: u32,
     body_len: u32,
+};
+
+/// Interpolated string literal `"a {x} b {y} c"` (M0.8 E3-C tranche 1c).
+/// `n_exprs` embedded expressions alternate with `n_exprs + 1` literal
+/// segments (possibly empty): seg0 expr0 seg1 expr1 … segN. Segments are
+/// escape-processed interned `StringId`s, a run of `n_exprs + 1` entries in
+/// `arena.extra` at `segs_start`; the embedded expressions are a run of
+/// `n_exprs` `NodeId`s at `exprs_start`.
+pub const StringInterp = struct {
+    segs_start: u32,
+    exprs_start: u32,
+    n_exprs: u32,
 };
 
 /// `{ statement* [expression] }` block expression (M0.8 control flow,
@@ -1168,6 +1184,7 @@ pub const AstArena = struct {
     struct_lits: std.ArrayListUnmanaged(StructLitExpr) = .empty,
     struct_lit_fields: std.ArrayListUnmanaged(StructLitField) = .empty,
     loop_exprs: std.ArrayListUnmanaged(LoopExpr) = .empty,
+    string_interps: std.ArrayListUnmanaged(StringInterp) = .empty,
     block_exprs: std.ArrayListUnmanaged(BlockExpr) = .empty,
     if_exprs: std.ArrayListUnmanaged(IfExpr) = .empty,
     break_stmts: std.ArrayListUnmanaged(BreakStmt) = .empty,
@@ -1279,6 +1296,7 @@ pub const AstArena = struct {
         self.struct_lits.deinit(gpa);
         self.struct_lit_fields.deinit(gpa);
         self.loop_exprs.deinit(gpa);
+        self.string_interps.deinit(gpa);
         self.block_exprs.deinit(gpa);
         self.if_exprs.deinit(gpa);
         self.break_stmts.deinit(gpa);

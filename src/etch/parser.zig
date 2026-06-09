@@ -291,10 +291,176 @@ pub const Parser = struct {
     fn internStringLiteral(self: *Parser, span: SourceSpan) !StringId {
         // Trim the surrounding quotes; S3 string literals are simple-quote.
         const raw = self.sliceOf(span);
-        if (raw.len < 2 or raw[0] != '"' or raw[raw.len - 1] != '"') {
-            return try self.arena.strings.intern(self.gpa, raw);
+        const body = if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"')
+            raw[1 .. raw.len - 1]
+        else
+            raw;
+        // Process the grammar's escape sequences (`etch-grammar.md` §1.4
+        // `escape_seq`: \" \\ \n \t \r \{ — M0.8 E3-C tranche 1c; forced by
+        // interpolation, where `\{` must NOT open an embedded expression).
+        // Escape-free fast path interns the body bytes verbatim.
+        if (std.mem.indexOfScalar(u8, body, '\\') == null) {
+            return try self.arena.strings.intern(self.gpa, body);
         }
-        return try self.arena.strings.intern(self.gpa, raw[1 .. raw.len - 1]);
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(self.gpa);
+        var i: usize = 0;
+        while (i < body.len) {
+            if (body[i] == '\\' and i + 1 < body.len) {
+                try appendEscaped(self.gpa, &buf, body[i + 1]);
+                i += 2;
+            } else {
+                try buf.append(self.gpa, body[i]);
+                i += 1;
+            }
+        }
+        return try self.arena.strings.intern(self.gpa, buf.items);
+    }
+
+    /// Append the byte an `escape_seq` denotes (`etch-grammar.md` §1.4:
+    /// `\"`, `\\`, `\n`, `\t`, `\r`, `\{`). A backslash before any other
+    /// byte is not a grammar escape — kept verbatim (lenient; strict
+    /// rejection is a diagnostics refinement, Phase 1+).
+    fn appendEscaped(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), c: u8) !void {
+        switch (c) {
+            '"' => try buf.append(gpa, '"'),
+            '\\' => try buf.append(gpa, '\\'),
+            'n' => try buf.append(gpa, '\n'),
+            't' => try buf.append(gpa, '\t'),
+            'r' => try buf.append(gpa, '\r'),
+            '{' => try buf.append(gpa, '{'),
+            else => {
+                try buf.append(gpa, '\\');
+                try buf.append(gpa, c);
+            },
+        }
+    }
+
+    /// Whether the (quote-trimmed) string body contains an unescaped `{` —
+    /// i.e. the literal is interpolated (M0.8 E3-C tranche 1c).
+    fn hasUnescapedBrace(body: []const u8) bool {
+        var i: usize = 0;
+        while (i < body.len) {
+            if (body[i] == '\\') {
+                i += 2;
+                continue;
+            }
+            if (body[i] == '{') return true;
+            i += 1;
+        }
+        return false;
+    }
+
+    /// Parse a `string_literal` token into either a plain `string_lit` or,
+    /// when the body holds an unescaped `{`, a `string_interp` node (M0.8
+    /// E3-C tranche 1c, `etch-grammar.md` §1.4 `simple_string = '"' {
+    /// string_char | interpolation } '"'`). Approach (a) of the resume
+    /// marker: the lexer keeps one token; the embedded `{expr}` spans are
+    /// sub-parsed here, at parse time, into the same arena.
+    fn parseStringLiteralExpr(self: *Parser, tok: Token) ParseError!NodeId {
+        const raw = self.sliceOf(tok.span);
+        // Degenerate unquoted form (error token recovery) and plain
+        // literals take the existing path.
+        if (raw.len < 2 or raw[0] != '"' or raw[raw.len - 1] != '"') {
+            const id = try self.internStringLiteral(tok.span);
+            return try self.arena.addExpr(self.gpa, .string_lit, id, tok.span);
+        }
+        const body = raw[1 .. raw.len - 1];
+        if (!hasUnescapedBrace(body)) {
+            const id = try self.internStringLiteral(tok.span);
+            return try self.arena.addExpr(self.gpa, .string_lit, id, tok.span);
+        }
+
+        // Interpolated: alternate escape-processed literal segments with
+        // sub-parsed embedded expressions (segments = exprs + 1).
+        var segs: std.ArrayListUnmanaged(u32) = .empty;
+        defer segs.deinit(self.gpa);
+        var exprs: std.ArrayListUnmanaged(u32) = .empty;
+        defer exprs.deinit(self.gpa);
+        var seg_bytes: std.ArrayListUnmanaged(u8) = .empty;
+        defer seg_bytes.deinit(self.gpa);
+
+        const body_abs: u32 = tok.span.byte_start + 1; // file offset of body[0]
+        const limit: u32 = tok.span.byte_end - 1; // file offset of the closing '"'
+        var i: u32 = 0;
+        while (i < body.len) {
+            const c = body[i];
+            if (c == '\\' and i + 1 < body.len) {
+                try appendEscaped(self.gpa, &seg_bytes, body[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (c == '{') {
+                const sid = try self.arena.strings.intern(self.gpa, seg_bytes.items);
+                try segs.append(self.gpa, sid);
+                seg_bytes.clearRetainingCapacity();
+                const embedded = try self.parseEmbeddedExpr(body_abs + i + 1, limit);
+                try exprs.append(self.gpa, embedded.node.raw());
+                i = embedded.resume_at - body_abs; // just past the matching '}'
+                continue;
+            }
+            try seg_bytes.append(self.gpa, c);
+            i += 1;
+        }
+        const last_sid = try self.arena.strings.intern(self.gpa, seg_bytes.items);
+        try segs.append(self.gpa, last_sid);
+
+        const segs_start: u32 = @intCast(self.arena.extra.items.len);
+        try self.arena.extra.appendSlice(self.gpa, segs.items);
+        const exprs_start: u32 = @intCast(self.arena.extra.items.len);
+        try self.arena.extra.appendSlice(self.gpa, exprs.items);
+        const row: u32 = @intCast(self.arena.string_interps.items.len);
+        try self.arena.string_interps.append(self.gpa, .{
+            .segs_start = segs_start,
+            .exprs_start = exprs_start,
+            .n_exprs = @intCast(exprs.items.len),
+        });
+        return try self.arena.addExpr(self.gpa, .string_interp, row, tok.span);
+    }
+
+    const EmbeddedExpr = struct {
+        node: NodeId,
+        /// File offset just past the matching `}` — where the outer
+        /// segment scan resumes.
+        resume_at: u32,
+    };
+
+    /// Sub-parse one embedded interpolation expression starting at absolute
+    /// file offset `abs_start` (just past the `{`). The parser is swapped
+    /// onto a throwaway lexer primed at that offset in the SAME source, so
+    /// every span and diagnostic stays file-relative; `parseExpr` stops
+    /// naturally on the matching `}` (rbrace is not an infix operator).
+    /// State is restored on every path. `limit` is the file offset of the
+    /// string's closing quote: a `}` at or past it means the expression ran
+    /// out of the literal (e.g. an embedded `"` ended the token early) —
+    /// fail loud.
+    fn parseEmbeddedExpr(self: *Parser, abs_start: u32, limit: u32) ParseError!EmbeddedExpr {
+        const saved_lexer = self.lexer;
+        const saved_cur = self.current;
+        const saved_next = self.next_tok;
+        const saved_next2 = self.next2_tok;
+        const saved_nsl = self.no_struct_lit;
+        var sub_lexer = Lexer.init(self.source);
+        sub_lexer.pos = abs_start;
+        defer sub_lexer.deinit(self.gpa);
+        defer {
+            self.lexer = saved_lexer;
+            self.current = saved_cur;
+            self.next_tok = saved_next;
+            self.next2_tok = saved_next2;
+            self.no_struct_lit = saved_nsl;
+        }
+        self.lexer = &sub_lexer;
+        self.current = try sub_lexer.next(self.gpa);
+        self.next_tok = try sub_lexer.next(self.gpa);
+        self.next2_tok = try sub_lexer.next(self.gpa);
+        self.no_struct_lit = false;
+
+        const node = try self.parseExpr(0);
+        if (self.peek() != .rbrace or self.current.span.byte_end > limit) {
+            return self.parseErr(self.current.span, "expected '}' to close string interpolation");
+        }
+        return .{ .node = node, .resume_at = self.current.span.byte_end };
     }
 
     // ─── Top-level ───────────────────────────────────────────────────────
@@ -2712,8 +2878,7 @@ pub const Parser = struct {
             },
             .string_literal => {
                 const tok = try self.advance();
-                const id = try self.internStringLiteral(tok.span);
-                return try self.arena.addExpr(self.gpa, .string_lit, id, tok.span);
+                return try self.parseStringLiteralExpr(tok);
             },
             .ident => {
                 // `none` / `some(x)` optional literals (M0.8 E2 block 5,
