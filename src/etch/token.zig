@@ -78,6 +78,8 @@ pub const TokenKind = enum {
     kw_has_any_tag, // tag query operator (M0.8 E3 ECS layer)
     kw_has_all_tags, // tag query operator (M0.8 E3 ECS layer)
     kw_has_no_tags, // tag query operator (M0.8 E3 ECS layer)
+    kw_add_tag, // tag mutation (M0.8 E3 ECS layer — deferred structural change)
+    kw_remove_tag, // tag mutation (M0.8 E3 ECS layer — deferred structural change)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -200,6 +202,8 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "has_any_tag", .kind = .kw_has_any_tag },
     .{ .lexeme = "has_all_tags", .kind = .kw_has_all_tags },
     .{ .lexeme = "has_no_tags", .kind = .kw_has_no_tags },
+    .{ .lexeme = "add_tag", .kind = .kw_add_tag },
+    .{ .lexeme = "remove_tag", .kind = .kw_remove_tag },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -260,13 +264,6 @@ pub const non_s3_keywords = [_][]const u8{
     "sync",
     "branch",
     "spawn",
-
-    // ── Tag mutation operators (out of S3; the 5 query operators
-    //    `has_tag`/`has_no_tag`/`has_any_tag`/`has_all_tags`/`has_no_tags`
-    //    graduated with the E3 ECS layer; `add_tag`/`remove_tag` graduate
-    //    with the tag-mutation commit) ──
-    "add_tag",
-    "remove_tag",
 
     // ── Timers / lifecycle (out of S3; `emit` graduated with E3 ECS layer) ──
     "after",

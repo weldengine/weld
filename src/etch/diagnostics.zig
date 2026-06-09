@@ -55,8 +55,10 @@ pub const DiagnosticCode = enum {
     inconsistent_generic_inference, // M0.8 — E0604 InconsistentGenericInference
 
     // ── Tags (E0800-E0899) ──
+    tag_path_invalid, // M0.8 E3 — E0830 TagPathInvalid (path not declared, general/mutation context)
     tag_path_conflict, // M0.8 E3 — E0831 TagPathConflict (leaf vs namespace, or duplicate leaf)
     tag_bitfield_overflow, // M0.8 E3 — E0832 TagBitfieldOverflow
+    tag_invalid_operation, // M0.8 E3 — E0833 TagInvalidOperation (tag op on non-Entity)
 
     // ── Const eval errors (E1100-E1199) ──
     not_const_evaluable, // S3 — E1101 NotConstEvaluable
@@ -87,8 +89,10 @@ pub const DiagnosticCode = enum {
             .bound_not_satisfied => "E0601",
             .generic_type_annotation_required => "E0603",
             .inconsistent_generic_inference => "E0604",
+            .tag_path_invalid => "E0830",
             .tag_path_conflict => "E0831",
             .tag_bitfield_overflow => "E0832",
+            .tag_invalid_operation => "E0833",
             .not_const_evaluable => "E1101",
             .unknown_component_in_when => "E1210",
             .invalid_field_filter => "E1211",
@@ -117,8 +121,10 @@ pub const DiagnosticCode = enum {
             .bound_not_satisfied => "BoundNotSatisfied",
             .generic_type_annotation_required => "GenericTypeAnnotationRequired",
             .inconsistent_generic_inference => "InconsistentGenericInference",
+            .tag_path_invalid => "TagPathInvalid",
             .tag_path_conflict => "TagPathConflict",
             .tag_bitfield_overflow => "TagBitfieldOverflow",
+            .tag_invalid_operation => "TagInvalidOperation",
             .not_const_evaluable => "NotConstEvaluable",
             .unknown_component_in_when => "UnknownComponentInWhen",
             .invalid_field_filter => "InvalidFieldFilter",

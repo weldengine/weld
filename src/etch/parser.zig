@@ -1635,6 +1635,26 @@ pub const Parser = struct {
         return idx;
     }
 
+    /// Parse the tail of a `tag_mutation_stmt` (`expression "."
+    /// ("add_tag"|"remove_tag") "(" TAG_PATH ")"`, M0.8 E3, `etch-grammar.md`
+    /// §4.4 l.697). The `receiver` and the `add_tag`/`remove_tag` keyword are
+    /// already consumed; the current token is `(`. Produces a `.stmt`-category
+    /// `tag_mutation_stmt` node — a mutation has no value, so it is a statement,
+    /// not an expression. The bare-`TYPE_IDENT` category operand is deferred (a
+    /// dotted namespace path already expresses a category), consistent with the
+    /// query-operand parser.
+    fn parseTagMutation(self: *Parser, receiver: NodeId, kind: ast_mod.TagMutationKind) ParseError!NodeId {
+        _ = try self.expect(.lparen, "expected '(' after add_tag/remove_tag");
+        const path = try self.parseTagPathExpr();
+        const closing = try self.expect(.rparen, "expected ')' to close add_tag/remove_tag");
+        const recv_span = self.arena.exprSpan(receiver);
+        return try self.arena.addTagMutationStmt(self.gpa, .{
+            .receiver = receiver,
+            .kind = kind,
+            .path = path,
+        }, .{ .byte_start = recv_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
     // ─── Statements ──────────────────────────────────────────────────────
 
     /// Collect `statement*` until `}` / EOF (without consuming the brace)
@@ -1691,6 +1711,13 @@ pub const Parser = struct {
             // or the trailing block value.
             const expr_start = self.current.span;
             const expr = try self.parseExpr(0);
+            // A `tag_mutation_stmt` (`entity.add_tag(.x)`) parses as a
+            // `.stmt`-category node inside `continuePostfix` (M0.8 E3); it is a
+            // statement, never a block's trailing value.
+            if (expr.category == .stmt) {
+                try stmts.append(self.gpa, expr.raw());
+                continue;
+            }
             if (isAssignOp(self.peek())) {
                 const op_tok = try self.advance();
                 const op = assignOpFromKind(op_tok.kind);
@@ -2007,6 +2034,11 @@ pub const Parser = struct {
         // Either an assignment (lvalue followed by =/+=/etc.) or an expr stmt.
         const expr_start = self.current.span;
         const expr = try self.parseExpr(0);
+        // `entity.add_tag(.x)` / `entity.remove_tag(.x)` parse as a complete
+        // statement inside `continuePostfix` (M0.8 E3) — a `.stmt`-category
+        // node. Return it directly; it is neither an assignment target nor an
+        // expression statement to be wrapped.
+        if (expr.category == .stmt) return expr;
         if (isAssignOp(self.peek())) {
             const op_tok = try self.advance();
             const op = assignOpFromKind(op_tok.kind);
@@ -2218,6 +2250,23 @@ pub const Parser = struct {
                         .kw_get_mut => {
                             _ = try self.advance();
                             expr = try self.parseGetCall(expr, .method_get_mut);
+                        },
+                        // `entity.add_tag(.path)` / `entity.remove_tag(.path)`
+                        // (M0.8 E3, `etch-grammar.md` §4.4 l.697). These are
+                        // keywords, not idents, so they never form a
+                        // `method_call`; the whole form is a `tag_mutation_stmt`
+                        // (a statement, not an expression — it has no value). The
+                        // node is returned with `.stmt` category and the
+                        // statement formers (`parseStmt` / `parseBlockBody`)
+                        // detect it and use it directly. Terminates the postfix
+                        // chain (a mutation is a complete statement).
+                        .kw_add_tag => {
+                            _ = try self.advance();
+                            return try self.parseTagMutation(expr, .add);
+                        },
+                        .kw_remove_tag => {
+                            _ = try self.advance();
+                            return try self.parseTagMutation(expr, .remove);
                         },
                         .ident => {
                             // `recv.method(args)` → the reserved `method_call`
@@ -3755,4 +3804,35 @@ test "parser builds tag-filter when conditions (M0.8 E3)" {
     try std.testing.expectEqual(@as(u32, 3), tp.segs_len);
     try std.testing.expectEqualStrings("character", result.ast.strings.slice(result.ast.tag_path_segs.items[tp.segs_start]));
     try std.testing.expectEqualStrings("stunned", result.ast.strings.slice(result.ast.tag_path_segs.items[tp.segs_start + 2]));
+}
+
+test "parser builds tag mutation statements (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\tags { character { status { alive, stunned } } }
+        \\rule a(entity: Entity) {
+        \\  entity.add_tag(.character.status.stunned)
+        \\  entity.remove_tag(.character.status.alive)
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    // Two mutations: an `add_tag` then a `remove_tag`.
+    try std.testing.expectEqual(@as(usize, 2), result.ast.tag_mutation_stmts.items.len);
+    const m0 = result.ast.tag_mutation_stmts.items[0];
+    try std.testing.expectEqual(ast_mod.TagMutationKind.add, m0.kind);
+    const m1 = result.ast.tag_mutation_stmts.items[1];
+    try std.testing.expectEqual(ast_mod.TagMutationKind.remove, m1.kind);
+    // The mutation operand is a 3-segment tag path.
+    const tp = result.ast.tag_paths.items[result.ast.exprData(m0.path)];
+    try std.testing.expectEqual(@as(u32, 3), tp.segs_len);
+    try std.testing.expectEqualStrings("stunned", result.ast.strings.slice(result.ast.tag_path_segs.items[tp.segs_start + 2]));
+    // Both mutations are `.stmt`-category nodes living in the rule body run.
+    const rule = result.ast.rule_decls.items[0];
+    const first_stmt: ast_mod.NodeId = @bitCast(result.ast.extra.items[rule.body_start]);
+    try std.testing.expectEqual(ast_mod.NodeCategory.stmt, first_stmt.category);
+    try std.testing.expectEqual(ast_mod.StmtKind.tag_mutation_stmt, result.ast.stmtKind(first_stmt));
 }

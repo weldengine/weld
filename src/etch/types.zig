@@ -1317,7 +1317,44 @@ pub const TypeChecker = struct {
                     }
                 }
             },
+            .tag_mutation_stmt => {
+                // `entity.add_tag(.path)` / `entity.remove_tag(.path)` (M0.8 E3,
+                // `etch-grammar.md` §4.4). The receiver must be an `Entity`
+                // (E0833); the operand must be a declared leaf tag (E0830) —
+                // a mutation sets or clears a single bit. Resolves only; the
+                // deferred structural mutation runs in the interpreter / codegen.
+                const tm = self.arena.tag_mutation_stmts.items[data];
+                const recv_t = self.synthExpr(tm.receiver, ctx);
+                if (recv_t != .builtin or recv_t.builtin != .entity) {
+                    const op_name = switch (tm.kind) {
+                        .add => "add_tag",
+                        .remove => "remove_tag",
+                    };
+                    try self.emit(.tag_invalid_operation, .error_, self.arena.exprSpan(tm.receiver), "'{s}' applies to an Entity, not this receiver", .{op_name});
+                }
+                try self.validateTagMutationPath(tm.path);
+            },
             else => {},
+        }
+    }
+
+    /// Validate a tag-mutation operand path against the global tag table (M0.8
+    /// E3, `etch-grammar.md` §4.4). `add_tag` / `remove_tag` set or clear a
+    /// single bit, so the path must resolve to a declared **leaf**; an unknown
+    /// path or a namespace is `E0830 TagPathInvalid` (the bare-category mutation
+    /// form is deferred, consistent with the query operands).
+    fn validateTagMutationPath(self: *TypeChecker, path_node: NodeId) !void {
+        const tp = self.arena.tag_paths.items[self.arena.exprData(path_node)];
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(self.gpa);
+        var i: u32 = 0;
+        while (i < tp.segs_len) : (i += 1) {
+            if (i > 0) try buf.append(self.gpa, '.');
+            try buf.appendSlice(self.gpa, self.arena.strings.slice(self.arena.tag_path_segs.items[tp.segs_start + i]));
+        }
+        const table = self.tag_table orelse return;
+        if (table.leafBit(buf.items) == null) {
+            try self.emit(.tag_path_invalid, .error_, self.arena.exprSpan(path_node), "unknown tag path '.{s}' (add_tag/remove_tag require a declared leaf tag)", .{buf.items});
         }
     }
 
@@ -3571,4 +3608,44 @@ test "type-checker validates tag-filter when conditions (M0.8 E3)" {
     );
     defer cat.deinit(gpa);
     try expectNoCode(cat.diagnostics.items, .unknown_tag);
+}
+
+test "type-checker validates tag mutations (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+
+    // Valid: an Entity receiver + declared leaf paths → no E0830 / E0833.
+    var ok = try parseAndCheck(gpa,
+        \\tags { character { status { alive, stunned } } }
+        \\rule r(entity: Entity) {
+        \\  entity.add_tag(.character.status.stunned)
+        \\  entity.remove_tag(.character.status.alive)
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .tag_path_invalid);
+    try expectNoCode(ok.diagnostics.items, .tag_invalid_operation);
+
+    // Unknown tag path → E0830 TagPathInvalid.
+    var unknown = try parseAndCheck(gpa,
+        \\tags { character { status { alive } } }
+        \\rule r(entity: Entity) { entity.add_tag(.character.status.frozen) }
+    );
+    defer unknown.deinit(gpa);
+    try expectAnyCode(unknown.diagnostics.items, .tag_path_invalid);
+
+    // A namespace (not a leaf) → E0830: a mutation sets a single bit.
+    var ns = try parseAndCheck(gpa,
+        \\tags { character { status { alive } } }
+        \\rule r(entity: Entity) { entity.add_tag(.character.status) }
+    );
+    defer ns.deinit(gpa);
+    try expectAnyCode(ns.diagnostics.items, .tag_path_invalid);
+
+    // A non-Entity receiver → E0833 TagInvalidOperation.
+    var bad_recv = try parseAndCheck(gpa,
+        \\tags { character { status { alive } } }
+        \\rule r(dt: float) { dt.add_tag(.character.status.alive) }
+    );
+    defer bad_recv.deinit(gpa);
+    try expectAnyCode(bad_recv.diagnostics.items, .tag_invalid_operation);
 }

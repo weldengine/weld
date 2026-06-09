@@ -409,6 +409,22 @@ pub const TagFilter = struct {
     operand_len: u32,
 };
 
+/// `add_tag` vs `remove_tag` mutation (M0.8 E3, `etch-grammar.md` §4.4 l.697).
+pub const TagMutationKind = enum { add, remove };
+
+/// Side-slab entry for a `tag_mutation_stmt` (`expression "."
+/// ("add_tag"|"remove_tag") "(" TAG_PATH ")"`, M0.8 E3, `etch-grammar.md`
+/// §4.4). A deferred structural change (queued, applied at the tick boundary).
+/// `receiver` is the entity expression; `path` is the `tag_path` operand. The
+/// bare-`TYPE_IDENT` category operand form is deferred (a dotted path resolving
+/// to a namespace already expresses a category — consistent with the query
+/// operands).
+pub const TagMutationStmt = struct {
+    receiver: NodeId,
+    kind: TagMutationKind,
+    path: NodeId,
+};
+
 const RuleParam = struct {
     name: StringId,
     type_node: NodeId,
@@ -1076,6 +1092,7 @@ pub const AstArena = struct {
     tag_path_segs: std.ArrayListUnmanaged(StringId) = .empty,
     tag_filters: std.ArrayListUnmanaged(TagFilter) = .empty,
     tag_operands: std.ArrayListUnmanaged(NodeId) = .empty,
+    tag_mutation_stmts: std.ArrayListUnmanaged(TagMutationStmt) = .empty,
     rule_decls: std.ArrayListUnmanaged(RuleDecl) = .empty,
     fn_decls: std.ArrayListUnmanaged(FnDecl) = .empty,
     struct_decls: std.ArrayListUnmanaged(StructDecl) = .empty,
@@ -1190,6 +1207,7 @@ pub const AstArena = struct {
         self.tag_path_segs.deinit(gpa);
         self.tag_filters.deinit(gpa);
         self.tag_operands.deinit(gpa);
+        self.tag_mutation_stmts.deinit(gpa);
         self.rule_decls.deinit(gpa);
         self.fn_decls.deinit(gpa);
         self.struct_decls.deinit(gpa);
@@ -1566,6 +1584,12 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.emit_stmts.items.len);
         try self.emit_stmts.append(gpa, em);
         return try self.addStmt(gpa, .emit_stmt, idx, span);
+    }
+
+    pub fn addTagMutationStmt(self: *AstArena, gpa: std.mem.Allocator, tm: TagMutationStmt, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.tag_mutation_stmts.items.len);
+        try self.tag_mutation_stmts.append(gpa, tm);
+        return try self.addStmt(gpa, .tag_mutation_stmt, idx, span);
     }
 
     /// Build a `tag_path` expression node (M0.8 E3) from its interned dotted
