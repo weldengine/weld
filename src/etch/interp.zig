@@ -3934,3 +3934,59 @@ test "async rule suspends at await wait(N) and resumes N ticks later (M0.8 E3 su
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
 }
+
+test "async rule resumes on await global_event(T) (M0.8 E3 sub-slice B)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `pinger` (declared first) emits `Ping` every tick; `waiter` awaits it.
+    // The producer runs before the awaiter in rule order — so the awaiter sees
+    // the event the tick AFTER it suspends (it suspends at the await without
+    // consuming the same-tick event present when it spawned). The wake check
+    // reads the live per-tick EventStore, mirroring the observer drain.
+    const source =
+        \\event Ping { }
+        \\resource Out { n: int = 0 }
+        \\rule pinger()
+        \\  when resource Out
+        \\{
+        \\  emit Ping { }
+        \\}
+        \\async rule waiter()
+        \\  when resource Out
+        \\{
+        \\  await global_event(Ping)
+        \\  let o = get_mut(Out)
+        \\  o.n = 7
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: waiter spawns, suspends at the await (does not consume the Ping
+    // present when it spawned) — n unchanged.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    // tick 2: pinger (earlier in order) emits Ping; waiter's wake fires → n=7.
+    const r2 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r2.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 7), readResourceInt(&world, out_id));
+    // tick 3: waiter done — n stays 7.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 7), readResourceInt(&world, out_id));
+}

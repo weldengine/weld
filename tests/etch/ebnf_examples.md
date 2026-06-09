@@ -520,3 +520,21 @@ rule react(entity: Entity)
   entity.get_mut(Counter).value += 1
 }
 ```
+
+## Async — `async rule` + `await` (E3 sub-slice B)
+
+```etch
+event QuestStarted { }
+resource Quest { stage: int = 0 }
+
+async rule intro_sequence()
+  when resource Quest
+{
+  let q = get_mut(Quest)
+  q.stage = 1
+  await wait(2)
+  await global_event(QuestStarted)
+  let done = get_mut(Quest)
+  done.stage = 2
+}
+```
