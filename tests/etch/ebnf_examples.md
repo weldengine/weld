@@ -507,3 +507,16 @@ rule absorb_damage()
   t.total += event.amount
 }
 ```
+
+## Change detection — `entity has T changed` filter (E3 ECS layer)
+
+```etch
+component Health { current: i32 = 100 }
+component Counter { value: i32 = 0 }
+
+rule react(entity: Entity)
+  when entity has Counter and entity has Health changed
+{
+  entity.get_mut(Counter).value += 1
+}
+```

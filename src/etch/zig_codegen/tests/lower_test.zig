@@ -205,3 +205,43 @@ test "lowers an @on_event observer to the bus drain (subscribe + poll), valid Zi
     try std.testing.expect(std.mem.indexOf(u8, out.items, "rule_relay(world, &__evcur_") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "event.x") != null);
 }
+
+test "lowers `has T changed` to tick-based change-detection codegen (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    // `damage` writes Health (marking it changed); `react` is gated on
+    // `Health changed`. The byte-exact runtime behaviour is the `44_changed_filter`
+    // differential; this test pins the engraved codegen contract — `beginFrame`
+    // opens the tick, a component write `markChanged`s at `world.current_tick`,
+    // and a `changed` rule keeps a per-rule `__last_run` it both reads (the
+    // `changedTick > __last_run` guard) and advances at the fn end.
+    _ = try parseTypeCheckGen(gpa,
+        \\component Health { current: i32 = 10 }
+        \\component Counter { value: i32 = 0 }
+        \\component Marked { v: i32 = 0 }
+        \\rule damage(entity: Entity)
+        \\  when entity has Health and entity has Marked
+        \\{
+        \\  entity.get_mut(Health).current -= 1
+        \\}
+        \\rule react(entity: Entity)
+        \\  when entity has Counter and entity has Health changed
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+    , &out);
+
+    const z = try gpa.dupeZ(u8, out.items);
+    defer gpa.free(z);
+    var tree = try std.zig.Ast.parse(gpa, z, .zig);
+    defer tree.deinit(gpa);
+    if (tree.errors.len != 0) std.debug.print("generated zig parse errors:\n{s}\n", .{out.items});
+    try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "world.beginFrame();") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "var __last_run_react: u32 = 0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "arch.markChanged(chunk, Health_idx, slot, world.current_tick);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "if (!(arch.changedTick(chunk, Health_idx, slot) > __last_run_react)) continue;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "__last_run_react = world.current_tick;") != null);
+}

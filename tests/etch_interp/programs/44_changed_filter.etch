@@ -1,0 +1,15 @@
+component Health { current: i32 = 10 }
+component Counter { value: i32 = 0 }
+component Marked { v: i32 = 0 }
+
+rule damage(entity: Entity)
+  when entity has Health and entity has Marked
+{
+  entity.get_mut(Health).current -= 1
+}
+
+rule react(entity: Entity)
+  when entity has Counter and entity has Health changed
+{
+  entity.get_mut(Counter).value += 1
+}

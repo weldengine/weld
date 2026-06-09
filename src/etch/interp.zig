@@ -666,12 +666,6 @@ pub const Interpreter = struct {
         var report: RuntimeReport = .{};
         var t: u32 = 0;
         while (t < ticks) : (t += 1) {
-            // Advance `current_tick` (and clear the dirty bitsets) before the
-            // tick's rules when change detection is live, so a write this tick
-            // stamps `changedTick = current_tick > last_run_tick` and a `changed`
-            // filter fires for it (`engine-ecs-internals.md` §5). A `changed`-free
-            // program never advances the tick — byte-identical to the pre-E3 run.
-            if (self.has_changed) world.beginFrame();
             try self.stepOnce(world, &report);
             world.tickBoundary();
         }
@@ -679,6 +673,15 @@ pub const Interpreter = struct {
     }
 
     pub fn stepOnce(self: *Interpreter, world: *World, report: *RuntimeReport) !void {
+        // Advance `current_tick` (and clear the dirty bitsets) at the start of
+        // the tick when change detection is live, so a write this tick stamps
+        // `changedTick = current_tick > last_run_tick` and a `changed` filter
+        // fires for it (`engine-ecs-internals.md` §5). Lives in `stepOnce` (not
+        // `runFor`) so every per-tick driver — `runFor` AND the differential
+        // harness's `step` — advances the tick identically; the codegen `tick`
+        // calls `beginFrame` at the same point. A `changed`-free program never
+        // advances the tick (byte-identical to the pre-E3 runtime).
+        if (self.has_changed) world.beginFrame();
         // Events have a per-tick lifetime (`Lifetime.tick`): clear the previous
         // tick's queue before running this tick's rules (M0.8 E3).
         self.events.clear(self.gpa);

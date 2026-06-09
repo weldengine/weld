@@ -157,6 +157,12 @@ pub fn generateFile(
         sig_set.deinit(gpa);
     }
 
+    // Whether ANY rule filters by `changed` (M0.8 E3). When set, `tick` advances
+    // `current_tick`, EVERY component rule routes through the arch walk, and
+    // component writes `markChanged` — so a `changed`-free program keeps the
+    // comptime-query fast path and emits no change-detection plumbing.
+    const program_has_changed = programUsesChanged(ast);
+
     i = 0;
     while (i < ast.items.len) : (i += 1) {
         const kind = ast.items.items(.kind)[i];
@@ -183,7 +189,7 @@ pub fn generateFile(
         if (on_event != null) {
             try emitObserverRule(&w, ast, rule, &tag_table);
         } else {
-            try emitRule(&w, ast, rule, &tag_table);
+            try emitRule(&w, ast, rule, &tag_table, program_has_changed);
         }
         stats.rules += 1;
 
@@ -192,7 +198,7 @@ pub fn generateFile(
         try collectSignature(gpa, ast, rule, &sig_set);
     }
 
-    try emitTick(&w, rule_emits.items);
+    try emitTick(&w, rule_emits.items, program_has_changed);
 
     stats.distinct_signatures = @intCast(sig_set.count());
     return stats;
@@ -630,6 +636,10 @@ const WhenInfo = struct {
     /// walk. Non-empty forces the arch-walk path. Negative tag ops fail loud
     /// upstream (deferred to the interpreter reference).
     tag_filters: []TagFilterInfo,
+    /// Components named by `has T changed` filters (M0.8 E3). Each emits a
+    /// per-slot `changedTick(T) > __last_run` continue guard in the arch walk.
+    /// Non-empty forces the arch-walk path.
+    changed_components: [][]const u8,
 };
 
 /// A positive tag-filter predicate lowered to its operand leaf bits — the
@@ -740,6 +750,16 @@ fn ruleHasTagMutation(ast: *const AstArena, rule: ast_mod.RuleDecl) bool {
     return false;
 }
 
+/// Whether the program contains any `entity has T changed` filter (M0.8 E3).
+/// `when_nodes` is a flat slab over every rule's when clause, so a single scan
+/// for a `has_changed` kind answers the program-level question.
+fn programUsesChanged(ast: *const AstArena) bool {
+    for (ast.when_nodes.items) |n| {
+        if (n.kind == .has_changed) return true;
+    }
+    return false;
+}
+
 /// Emit an `@on_event(T)` observer rule (M0.8 E3): drain the world event bus
 /// for type `T`, firing the body once per event with the implicit `event`
 /// binding (a Zig local of type `T`, so `event.field` lowers to `event.field`).
@@ -811,7 +831,7 @@ fn emitObserverRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, ta
     try w.blankLine();
 }
 
-fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable) CodegenError!void {
+fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable, program_has_changed: bool) CodegenError!void {
     const name = ast.strings.slice(rule.name);
 
     // Collect what the when clause needs first (a negative tag op fails loud
@@ -825,6 +845,14 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table:
     // inconsistent and fails loud (the interpreter is the reference).
     const tag_mutating = ruleHasTagMutation(ast, rule);
     if (tag_mutating and !info.has_component_ref) return CodegenError.UnsupportedConstruct;
+
+    // A rule with a `changed` filter (M0.8 E3) keeps its own module-level
+    // `last_run_tick`: the baseline `changedTick(T) > __last_run_<name>` compares
+    // against, updated at the end of the fn. Per-rule, byte-exact with the
+    // interpreter's `RuleDesc.last_run_tick`.
+    if (info.changed_components.len > 0) {
+        try w.printLine("var __last_run_{s}: u32 = 0;", .{name});
+    }
 
     if (tag_mutating) {
         try w.printLine("pub fn rule_{s}(world: *World, cmd: *CommandBuffer) void {{", .{name});
@@ -870,20 +898,29 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table:
         _ = try body_used.getOrPut(w.gpa, "TagSet");
     }
 
-    if (info.has_or_or_not or info.tag_filters.len > 0 or tag_mutating) {
+    if (info.has_or_or_not or info.tag_filters.len > 0 or tag_mutating or program_has_changed) {
         // Path 2 — manual archetype walk. Reserved for the S4 inherited
-        // debt cases (`not has X`, `entity has A or entity has B`) plus the
-        // M0.8 E3 tag cases: a positive tag filter (per-slot bit test) or a
-        // tag mutation (needs the entity id, which the comptime-query `Row`
-        // does not expose). The synth bench corpus never hits this branch
-        // (gate 4's monomorphisation count therefore reflects only the AND path).
-        try emitRuleAsArchWalk(w, ast, rule, info, &body_used, tag_mutating, tag_table);
+        // debt cases (`not has X`, `entity has A or entity has B`), the M0.8 E3
+        // tag cases (a positive tag filter / a tag mutation needs the entity id,
+        // which the comptime-query `Row` does not expose), and — when the
+        // program uses `changed` filters — EVERY component rule, so a writer's
+        // `markChanged` and a `changed` filter's per-slot `changedTick` can
+        // address `arch`/`chunk`/`slot`. The synth bench corpus never hits this
+        // branch (gate 4's monomorphisation count reflects only the AND path).
+        try emitRuleAsArchWalk(w, ast, rule, info, &body_used, tag_mutating, tag_table, program_has_changed);
     } else {
         // Path 1 — comptime query. The cooked code emits one
         // `comptime_query.query(world, .{T1, T2, ...})` invocation per
         // rule signature; Zig comptime monomorphises one iterator type
         // per distinct tuple.
         try emitRuleAsComptimeQuery(w, ast, rule, info, &body_used);
+    }
+
+    // Advance this rule's change-detection baseline to the current tick — the
+    // value its next-tick `changed` guard compares against (M0.8 E3). Emitted
+    // after the walk so the guard saw the pre-update baseline.
+    if (info.changed_components.len > 0) {
+        try w.printLine("__last_run_{s} = world.current_tick;", .{name});
     }
 
     w.indentBy(-1);
@@ -940,7 +977,7 @@ fn emitRuleAsComptimeQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleD
 /// when clauses containing `or` / `not`. Same shape as the pre-rewrite
 /// codegen — kept until the inherited S4 debts (`not` / `or` predicates)
 /// are addressed in Phase 0.2.
-fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, body_used: *const std.StringHashMapUnmanaged(void), tag_mutating: bool, tag_table: *const tags_mod.TagTable) CodegenError!void {
+fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, body_used: *const std.StringHashMapUnmanaged(void), tag_mutating: bool, tag_table: *const tags_mod.TagTable, program_has_changed: bool) CodegenError!void {
     for (info.components) |cname| {
         try w.printLine("const {s}_id = world.registry.idOf(\"{s}\") orelse return;", .{ cname, cname });
     }
@@ -954,9 +991,17 @@ fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, 
         try w.write(")) continue;\n");
     }
     for (info.components) |cname| {
-        if (!body_used.contains(cname)) continue;
+        // `<C>_idx` is needed by a body access (`<C>_off` → `<C>_arr`) OR by a
+        // `changed` guard (`changedTick(<C>_idx, …)`). `<C>_off`/`<C>_arr` are
+        // emitted only for body-accessed components (a `changed`-only component
+        // needs the index, not the data pointer).
+        const in_body = body_used.contains(cname);
+        const in_changed = isChangedComponent(info, cname);
+        if (!in_body and !in_changed) continue;
         try w.printLine("const {s}_idx = arch.componentIndex({s}_id).?;", .{ cname, cname });
-        try w.printLine("const {s}_off = arch.layout.component_offsets[{s}_idx];", .{ cname, cname });
+        if (in_body) {
+            try w.printLine("const {s}_off = arch.layout.component_offsets[{s}_idx];", .{ cname, cname });
+        }
     }
     try w.line("for (arch.chunks.items) |chunk| {");
     w.indentBy(1);
@@ -989,7 +1034,14 @@ fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, 
     for (info.tag_filters) |tf| {
         try emitTagFilterGuard(w, tf);
     }
-    try emitRuleBody(w, ast, rule, info, tag_table);
+    // Per-slot `changed` guards (M0.8 E3): skip the slot unless its
+    // `changedTick(T)` exceeds the rule's `last_run_tick` — byte-exact with the
+    // interpreter's `changedFiltersPass`.
+    const rname = ast.strings.slice(rule.name);
+    for (info.changed_components) |cname| {
+        try w.printLine("if (!(arch.changedTick(chunk, {s}_idx, slot) > __last_run_{s})) continue;", .{ cname, rname });
+    }
+    try emitRuleBody(w, ast, rule, info, tag_table, program_has_changed);
     w.indentBy(-1);
     try w.line("}"); // while slot
     w.indentBy(-1);
@@ -1003,6 +1055,15 @@ fn indexOfComponent(comps: []const []const u8, name: []const u8) ?usize {
         if (std.mem.eql(u8, c, name)) return i;
     }
     return null;
+}
+
+/// Whether component `name` carries an `entity has T changed` filter in this
+/// rule (M0.8 E3) — its slot needs a `changedTick(T) > __last_run` guard.
+fn isChangedComponent(info: WhenInfo, name: []const u8) bool {
+    for (info.changed_components) |c| {
+        if (std.mem.eql(u8, c, name)) return true;
+    }
+    return false;
 }
 
 /// Emit the source-level expression that names the current slot of
@@ -1264,8 +1325,8 @@ fn emitRuleBodyOnce(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) Co
     }
 }
 
-fn emitRuleBody(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, tag_table: *const tags_mod.TagTable) CodegenError!void {
-    var ctx: LocalCtx = .{ .tag_table = tag_table };
+fn emitRuleBody(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, tag_table: *const tags_mod.TagTable, mark_changed: bool) CodegenError!void {
+    var ctx: LocalCtx = .{ .tag_table = tag_table, .mark_changed = mark_changed };
     defer ctx.deinit(w.gpa);
 
     // Record component aliases so `entity.get(T)` / `entity.get_mut(T)`
@@ -1356,6 +1417,13 @@ const LocalCtx = struct {
     /// path to its leaf bit (M0.8 E3). Null on the comptime-query path, where
     /// tag mutations cannot appear.
     tag_table: ?*const tags_mod.TagTable = null,
+    /// True when the program uses `changed` filters and this body is on the
+    /// arch-walk path (M0.8 E3): a component-field write then emits a trailing
+    /// `arch.markChanged(chunk, <C>_idx, slot, world.current_tick)`, co-located
+    /// with the assignment so it marks exactly when the write executes — the
+    /// same per-write point as the interpreter's `markComponentChanged`, hence
+    /// the `changed` differential is byte-exact by construction.
+    mark_changed: bool = false,
 
     pub fn deinit(self: *LocalCtx, gpa: std.mem.Allocator) void {
         self.records.deinit(gpa);
@@ -1694,6 +1762,40 @@ fn emitAssign(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, assign: ast_mod.
     try w.write(" ");
     try emitExpr(w, ast, ctx, assign.value);
     try w.write(";\n");
+    // Change detection (M0.8 E3): right after a component-field write, stamp
+    // the slot's `changed_tick` so an `entity has T changed` rule sees it. The
+    // marking is co-located with the assignment (so it executes exactly when
+    // the write does, even under a conditional) and at the same logical point
+    // as the interpreter's `markComponentChanged` → byte-exact by construction.
+    if (ctx.mark_changed) {
+        if (assignTargetComponent(ast, ctx, assign.target)) |cname| {
+            try w.printLine("arch.markChanged(chunk, {s}_idx, slot, world.current_tick);", .{cname});
+        }
+    }
+}
+
+/// The component name a write targets, when `assign.target` is a component-field
+/// write (`entity.get_mut(C).field` or a `let h = get_mut(C)` alias) (M0.8 E3) —
+/// or null for any other target (resource / struct / local). Drives the trailing
+/// `markChanged`; a non-component write must not mark.
+fn assignTargetComponent(ast: *const AstArena, ctx: *const LocalCtx, target: NodeId) ?[]const u8 {
+    if (ast.exprKind(target) != .field_access) return null;
+    const fa = ast.field_accesses.items[ast.exprData(target)];
+    const recv = fa.receiver;
+    switch (ast.exprKind(recv)) {
+        .method_get_mut => {
+            const mg = ast.method_gets.items[ast.exprData(recv)];
+            if (mg.receiver.isNone()) return null; // receiver-less get → resource, not a component
+            return ast.strings.slice(mg.type_name);
+        },
+        .ident => {
+            if (ctx.lookup(ast.exprData(recv))) |local| {
+                if (local.kind == .component_alias) return local.component_name;
+            }
+            return null;
+        },
+        else => return null,
+    }
 }
 
 fn assignOpText(op: ast_mod.AssignOp) []const u8 {
@@ -2605,7 +2707,7 @@ fn emitConstExpr(w: *Writer, ast: *const AstArena, expr: NodeId, target_zig_type
 
 // ─── `tick` ─────────────────────────────────────────────────────────────────
 
-fn emitTick(w: *Writer, rules: []const RuleEmit) CodegenError!void {
+fn emitTick(w: *Writer, rules: []const RuleEmit, program_has_changed: bool) CodegenError!void {
     var any_tag_mutation = false;
     var any_observer = false;
     for (rules) |r| {
@@ -2628,6 +2730,14 @@ fn emitTick(w: *Writer, rules: []const RuleEmit) CodegenError!void {
     }
     try w.line("pub fn tick(world: *World, gpa: std.mem.Allocator) void {");
     w.indentBy(1);
+
+    if (program_has_changed) {
+        // Open the tick before its rules run (change detection, M0.8 E3):
+        // advance `current_tick` + clear the dirty bitsets, so a write this tick
+        // stamps `changedTick = current_tick > __last_run` and a `changed` rule
+        // fires for it — byte-exact with the interpreter's `runFor` `beginFrame`.
+        try w.line("world.beginFrame();");
+    }
 
     if (any_tag_mutation) {
         // A tick-scoped command buffer collects deferred tag mutations; it is
@@ -2688,13 +2798,15 @@ fn collectWhenInfo(gpa: std.mem.Allocator, ast: *const AstArena, rule: ast_mod.R
     var field_filter: ?FieldFilter = null;
     var has_component_ref: bool = false;
     var has_or_or_not: bool = false;
+    var changed_components: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer changed_components.deinit(gpa);
 
     if (rule.when_root != ast_mod.RuleDecl.none_when) {
         // `walkWhen` populates components / resources / field filter and adds
         // "TagSet" to components for positive tag filters (fails loud on
         // negative tag ops). A second pass resolves the operand leaf bits for
         // the per-slot guards (M0.8 E3).
-        try walkWhen(gpa, ast, rule.when_root, &components, &seen_components, &res_deps, &field_filter, &has_component_ref, &has_or_or_not);
+        try walkWhen(gpa, ast, rule.when_root, &components, &seen_components, &res_deps, &field_filter, &has_component_ref, &has_or_or_not, &changed_components);
         try collectTagFilters(gpa, ast, tag_table, rule.when_root, &tag_filters);
     }
 
@@ -2705,6 +2817,7 @@ fn collectWhenInfo(gpa: std.mem.Allocator, ast: *const AstArena, rule: ast_mod.R
         .has_component_ref = has_component_ref,
         .has_or_or_not = has_or_or_not,
         .tag_filters = try tag_filters.toOwnedSlice(gpa),
+        .changed_components = try changed_components.toOwnedSlice(gpa),
     };
 }
 
@@ -2713,6 +2826,7 @@ fn freeWhenInfo(gpa: std.mem.Allocator, info: *WhenInfo) void {
     gpa.free(info.resource_deps);
     for (info.tag_filters) |*tf| gpa.free(tf.bits);
     gpa.free(info.tag_filters);
+    gpa.free(info.changed_components);
 }
 
 fn walkWhen(
@@ -2725,21 +2839,22 @@ fn walkWhen(
     filter: *?FieldFilter,
     has_component_ref: *bool,
     has_or_or_not: *bool,
+    changed: *std.ArrayListUnmanaged([]const u8),
 ) !void {
     const node = ast.when_nodes.items[when_idx];
     switch (node.kind) {
         .logical_and => {
-            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not);
-            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not);
+            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not, changed);
+            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not, changed);
         },
         .logical_or => {
             has_or_or_not.* = true;
-            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not);
-            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not);
+            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not, changed);
+            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not, changed);
         },
         .logical_not => {
             has_or_or_not.* = true;
-            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not);
+            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not, changed);
         },
         .has => {
             const cname = ast.strings.slice(node.type_name);
@@ -2764,11 +2879,15 @@ fn walkWhen(
             };
         },
         .has_changed => {
-            // `entity has T changed` codegen (arch-walk routing + `markChanged`
-            // on writes + per-slot `changedTick > last_run_tick` guard) is the
-            // next tranche; the interpreter is the byte-exact reference until
-            // then. Fail loud so a `changed` program never cooks silently-wrong.
-            return error.UnsupportedConstruct;
+            // `entity has T changed` (M0.8 E3): the `has T` archetype predicate
+            // (component present) + a per-slot `changedTick(T) > __last_run`
+            // guard emitted in the arch walk. Forces the arch-walk path (it
+            // needs `arch`/`chunk`/`slot` for `changedTick`).
+            const cname = ast.strings.slice(node.type_name);
+            const gop = try seen.getOrPut(gpa, cname);
+            if (!gop.found_existing) try components.append(gpa, cname);
+            has_component_ref.* = true;
+            try changed.append(gpa, cname);
         },
         .resource => {
             const rname = ast.strings.slice(node.type_name);

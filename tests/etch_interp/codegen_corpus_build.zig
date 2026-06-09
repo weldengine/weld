@@ -60,4 +60,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p41_trait_method", .etch_path = "tests/etch_interp/programs/41_trait_method.etch" },
     .{ .name = "p42_optional_if_let", .etch_path = "tests/etch_interp/programs/42_optional_if_let.etch" },
     .{ .name = "p43_tag_filter_mutation", .etch_path = "tests/etch_interp/programs/43_tag_filter_mutation.etch" },
+    .{ .name = "p44_changed_filter", .etch_path = "tests/etch_interp/programs/44_changed_filter.etch" },
 };
