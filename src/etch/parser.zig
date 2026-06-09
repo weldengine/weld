@@ -198,7 +198,7 @@ pub const Parser = struct {
     /// break value follows.
     fn canStartExpr(kind: TokenKind) bool {
         return switch (kind) {
-            .int_literal, .float_literal, .bool_literal, .string_literal, .ident, .type_ident, .lparen, .lbracket, .pipe, .minus, .kw_not, .kw_match, .kw_loop, .kw_get, .kw_get_mut, .dot => true,
+            .int_literal, .float_literal, .bool_literal, .string_literal, .ident, .type_ident, .lparen, .lbracket, .pipe, .minus, .kw_not, .kw_match, .kw_loop, .kw_get, .kw_get_mut, .kw_event, .dot => true,
             else => false,
         };
     }
@@ -2702,6 +2702,20 @@ pub const Parser = struct {
                     .byte_end = ident_tok.span.byte_end,
                 });
             },
+            .kw_event => {
+                // `event` in expression position is the implicit event binding
+                // of an `@on_event(T)` observer rule (M0.8 E3) — self-style, like
+                // `self` in a method (resolver-types §12, the ruling: `event`
+                // stays a keyword, the observer payload is an implicit binding
+                // named `event`, NOT a declared param). Lex it as an `.ident`
+                // expr with the interned name "event"; the resolver binds it to
+                // the event type in the observer body, the interpreter injects it
+                // self-style. Outside an observer body the resolver leaves it
+                // unbound (an ordinary undefined-symbol error).
+                const ev_tok = try self.advance();
+                const id = try self.arena.strings.intern(self.gpa, "event");
+                return try self.arena.addExpr(self.gpa, .ident, id, ev_tok.span);
+            },
             .kw_get => {
                 // Receiver-less `get(T)` — resource read (D-S3-resource-receiver).
                 const get_span = (try self.advance()).span;
@@ -3704,6 +3718,36 @@ test "parser builds event declaration + emit statement (M0.8 E3)" {
     const em = result.ast.emit_stmts.items[0];
     try std.testing.expectEqualStrings("Damage", result.ast.strings.slice(em.event_type));
     try std.testing.expectEqual(@as(u32, 2), em.fields_len);
+}
+
+test "parser builds an @on_event observer rule with the implicit `event` binding (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+    // `event` is a keyword (the declaration); in expression position inside an
+    // observer body it parses as the implicit `event` binding (self-style) — so
+    // `event.amount` is a field access on an `.ident` named "event".
+    var result = try parse(gpa,
+        \\event Damage { amount: i32 = 0 }
+        \\resource Tally { total: i32 = 0 }
+        \\@on_event(Damage)
+        \\rule absorb()
+        \\  when resource Tally
+        \\{
+        \\  let t = get_mut(Tally)
+        \\  t.total += event.amount
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    // The observer rule carries the `@on_event(Damage)` annotation; the AST
+    // helpers extract the event type the resolver/interpreter consume.
+    try std.testing.expectEqual(@as(usize, 1), result.ast.rule_decls.items.len);
+    const rule = result.ast.rule_decls.items[0];
+    const annot = result.ast.onEventAnnotation(rule) orelse return error.OnEventAnnotationMissing;
+    const ev_type = result.ast.onEventTypeName(annot) orelse return error.OnEventTypeMissing;
+    try std.testing.expectEqualStrings("Damage", result.ast.strings.slice(ev_type));
 }
 
 test "parser recovers and a valid event after a broken construct survives (M0.8 E3 lockstep)" {

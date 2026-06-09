@@ -126,6 +126,12 @@ const RuleDesc = struct {
     /// one component and a parameter of type Entity is present). False if
     /// the rule runs once per tick (resource-only or no-when).
     is_entity_bound: bool,
+    /// `@on_event(T)` observer (M0.8 E3): the event type name `T`, or null for
+    /// a non-observer rule. When set, the rule fires once per event of type `T`
+    /// in the per-tick `EventStore`, with the implicit `event` binding injected
+    /// self-style (resolver-types §12). Takes precedence over entity/global
+    /// dispatch in `runRule`.
+    event_type: ?StringId,
 
     fn deinit(self: *RuleDesc, gpa: std.mem.Allocator) void {
         gpa.free(self.predicate_pool);
@@ -652,8 +658,15 @@ pub const Interpreter = struct {
     }
 
     fn runRule(self: *Interpreter, world: *World, rd: RuleDesc, report: *RuntimeReport) !void {
+        // `@on_event(T)` observer (M0.8 E3): fire once per event of type `T` in
+        // the per-tick `EventStore`, in emit order, with the implicit `event`
+        // binding injected. Takes precedence over entity/global dispatch.
+        if (rd.event_type) |event_type| {
+            try self.runObserver(world, rd, event_type, report);
+            return;
+        }
         if (!rd.is_entity_bound) {
-            try self.execBody(world, rd, null, report);
+            try self.execBody(world, rd, null, null, report);
             report.rules_matched += 1;
             return;
         }
@@ -681,11 +694,28 @@ pub const Interpreter = struct {
                     if (rd.tag_predicates.len > 0 and !self.tagPredicatesPass(world, entity_id, rd.tag_predicates)) continue;
                     report.entities_iterated += 1;
                     rule_matched = true;
-                    try self.execBody(world, rd, entity_id, report);
+                    try self.execBody(world, rd, entity_id, null, report);
                 }
             }
         }
         if (rule_matched) report.rules_matched += 1;
+    }
+
+    /// Run an `@on_event(T)` observer (M0.8 E3): fire the body once per event of
+    /// type `event_type` currently in the per-tick `EventStore`, in emit order.
+    /// The list length is re-checked each iteration so an event the body itself
+    /// emits (of the same type) is also delivered — byte-exact with the codegen
+    /// bus drain (`subscribe` at head=0, `while (poll) |event|`), which likewise
+    /// reads up to the live head. A non-observer never reaches this path.
+    fn runObserver(self: *Interpreter, world: *World, rd: RuleDesc, event_type: StringId, report: *RuntimeReport) !void {
+        var matched = false;
+        var i: usize = 0;
+        while (i < self.events.list.items.len) : (i += 1) {
+            if (self.events.list.items[i].type_name != event_type) continue;
+            matched = true;
+            try self.execBody(world, rd, null, i, report);
+        }
+        if (matched) report.rules_matched += 1;
     }
 
     /// Evaluate a rule's per-entity tag predicates against `entity`'s `TagSet`
@@ -762,7 +792,7 @@ pub const Interpreter = struct {
         return self.tag_table.leafBit(buf[0..len]);
     }
 
-    fn execBody(self: *Interpreter, world: *World, rd: RuleDesc, entity_id: ?EntityId, report: *RuntimeReport) !void {
+    fn execBody(self: *Interpreter, world: *World, rd: RuleDesc, entity_id: ?EntityId, event_idx: ?usize, report: *RuntimeReport) !void {
         const rule = self.ast.rule_decls.items[rd.rule_idx];
 
         var locals: Locals = .{};
@@ -775,6 +805,23 @@ pub const Interpreter = struct {
         defer self.structs.reset(self.gpa);
         defer self.optionals.clearRetainingCapacity();
         try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
+        // `@on_event(T)` observer (M0.8 E3): inject the implicit `event` payload
+        // self-style (like `self` in `callMethod`). The event is materialised as
+        // a struct value from the per-tick store — `EventVal` and `StructVal`
+        // share the `(type_name, fields)` shape, so the existing struct-ref
+        // field-access path serves `event.field`. Fields are copied by value
+        // (POD scalars) before the body runs, so a body `emit` that reallocates
+        // the event store cannot invalidate the binding.
+        if (event_idx) |ei| {
+            if (self.ast.strings.find("event")) |event_id| {
+                const ev = self.events.list.items[ei];
+                const handle = try self.structs.newStruct(self.gpa, ev.type_name);
+                for (ev.fields.items) |f| {
+                    try self.structs.list.items[handle].fields.append(self.gpa, f);
+                }
+                try locals.put(self.gpa, event_id, .{ .struct_ref = handle }, false);
+            }
+        }
         self.control = .none; // defensive: each body starts with no pending signal
         self.thrown = false;
         self.returning = false;
@@ -1966,6 +2013,14 @@ fn compileRule(
     }
     const is_entity_bound = (entity_param_name != null) and has_component_ref;
 
+    // `@on_event(T)` observer (M0.8 E3): the event type name, or null. A
+    // malformed annotation (caught + reported E1203 by the resolver) yields
+    // null here → the rule degrades to a global/entity rule, no observer drain.
+    const event_type: ?StringId = if (ast.onEventAnnotation(rule)) |annot|
+        ast.onEventTypeName(annot)
+    else
+        null;
+
     return .{
         .rule_idx = rule_data,
         .name = rule.name,
@@ -1976,6 +2031,7 @@ fn compileRule(
         .tag_predicates = try tag_preds.toOwnedSlice(gpa),
         .entity_param_name = entity_param_name,
         .is_entity_bound = is_entity_bound,
+        .event_type = event_type,
     };
 }
 
@@ -3346,6 +3402,55 @@ test "runProgram emit enqueues an event into the dynamic event store (M0.8 E3)" 
     // accumulating (the count stays 1, not 2).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(usize, 1), interp.events.count(dmg_id));
+}
+
+test "runProgram @on_event observer drains the event store and writes a resource (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Global producer emits one Damage per tick; the `@on_event(Damage)`
+    // observer (declared after) drains it same-tick and accumulates the amount
+    // into a resource. The implicit `event` binding (self-style) carries the
+    // payload — no declared `event:` param. Interpreter-reference: the
+    // observer's resource write codegen is deferred (D-S3-resource-receiver,
+    // E3 gate), so this lives only as an interpreter test, not a differential.
+    const source =
+        \\event Damage { amount: i32 = 0 }
+        \\resource Tally { total: i32 = 0 }
+        \\rule deal() { emit Damage { amount: 10 } }
+        \\@on_event(Damage)
+        \\rule absorb()
+        \\  when resource Tally
+        \\{
+        \\  let t = get_mut(Tally)
+        \\  t.total += event.amount
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const report = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // 10 accumulated per tick (one Damage event each tick) → 30 after 3 ticks.
+    const tally_id = world.registry.idOf("Tally").?;
+    const bytes = world.resources.getResource(tally_id).?;
+    var total: i32 = 0;
+    @memcpy(std.mem.asBytes(&total), bytes[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 30), total);
 }
 
 test "runProgram add_tag is deferred to the tick boundary; has_tag query gates a counter (M0.8 E3)" {

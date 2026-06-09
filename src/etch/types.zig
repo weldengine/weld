@@ -109,6 +109,11 @@ pub const ResolvedType = union(enum) {
     /// A C-like `enum` value (M0.8 E2 block 3 tranche B). Payload is the enum
     /// type name; variants resolve by name against the declaration.
     enum_t: StringId,
+    /// An `event` value (M0.8 E3) — the implicit `event` binding of an
+    /// `@on_event(T)` observer rule. Payload is the event type name; fields
+    /// resolve by name against the event declaration (POD struct of fields,
+    /// like a component/resource). Self-style binding, no declared param.
+    event_t: StringId,
     /// A generic type variable in scope (M0.8 E2 block 4). Payload is the type-
     /// parameter name. Opaque within a generic body (operations are permissive,
     /// like `unknown`); resolved to a concrete type by inference at the call site.
@@ -137,6 +142,7 @@ pub const ResolvedType = union(enum) {
             .closure => |node| std.meta.eql(node, b.closure),
             .struct_t => |id| id == b.struct_t,
             .enum_t => |id| id == b.enum_t,
+            .event_t => |id| id == b.event_t,
             .generic => |id| id == b.generic,
             .optional => |bt| bt == b.optional,
             .unknown => true,
@@ -194,6 +200,7 @@ fn annotationAppliesTo(kind: ast_mod.AnnotationKind, target: AnnotTarget) bool {
         .transient => target == .resource or target == .field,
         .phase, .priority, .run_on, .pause_group => target == .rule,
         .id => target == .rule,
+        .on_event => target == .rule,
         .unit, .range, .hidden, .readonly, .replicated => target == .field,
         .networked => target == .event,
         .loc => false,
@@ -916,6 +923,26 @@ pub const TypeChecker = struct {
                 }
             }
             try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
+        }
+
+        // `@on_event(T)` observer: bind the implicit `event` payload (M0.8 E3,
+        // resolver-types §12). E1203 OnEventTypeMismatch is a type-coherence
+        // check — the implicit `event` binding carries the annotation's type T,
+        // so T must be a declared event. There is NO declared `event:` param
+        // (the ruling: `event` stays a keyword, the payload is an implicit
+        // binding named `event`, self-style like `self` in a method).
+        if (self.arena.onEventAnnotation(rule)) |annot| {
+            if (self.arena.onEventTypeName(annot)) |event_type| {
+                const sym = self.symbols.get(event_type);
+                if (sym != null and sym.?.kind == .event_) {
+                    const event_id = try self.arena.strings.intern(self.gpa, "event");
+                    try ctx.locals.put(self.gpa, event_id, .{ .type_ = .{ .event_t = event_type }, .is_mut = false });
+                } else {
+                    try self.emit(.on_event_type_mismatch, .error_, annot.span, "@on_event(...) requires a declared event type; '{s}' is not an event", .{self.arena.strings.slice(event_type)});
+                }
+            } else {
+                try self.emit(.on_event_type_mismatch, .error_, annot.span, "@on_event(EventType) requires a single event-type argument", .{});
+            }
         }
 
         // Validate when-clause and collect accessible component/resource types.
@@ -2336,6 +2363,20 @@ pub const TypeChecker = struct {
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on struct '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
+            .event_t => |name_id| {
+                // Field of the implicit `event` binding inside an `@on_event(T)`
+                // observer (M0.8 E3) — e.g. `event.amount`. An event is a POD
+                // struct of fields, resolved against its declaration.
+                const sym = self.symbols.get(name_id) orelse return ResolvedType.unknown;
+                const decl = self.arena.event_decls.items[self.arena.itemData(sym.item_id)];
+                var i: u32 = 0;
+                while (i < decl.fields_len) : (i += 1) {
+                    const f = self.arena.fields.items[decl.fields_start + i];
+                    if (f.name == field_name) return self.namedTypeToResolved(f.type_node);
+                }
+                try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on event '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
+                return ResolvedType.unknown;
+            },
             .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .optional, .unknown => return ResolvedType.unknown,
         }
     }
@@ -3571,6 +3612,46 @@ test "type-checker validates @networked on event, rejects @config on event (M0.8
     );
     defer misapplied.deinit(gpa);
     try expectAnyCode(misapplied.diagnostics.items, .annotation_misapplied);
+}
+
+test "type-checker validates @on_event observer: E1203 on non-event, accepts declared event + event-field access (M0.8 E3)" {
+    const gpa = std.testing.allocator;
+
+    // Valid: `@on_event(Damage)` on a declared event; the implicit `event`
+    // binding resolves `event.amount` against the event's fields (no E1203, no
+    // field error, no diagnostics at all).
+    var ok = try parseAndCheck(gpa,
+        \\event Damage { amount: i32 = 0 }
+        \\resource Tally { total: i32 = 0 }
+        \\@on_event(Damage)
+        \\rule absorb()
+        \\  when resource Tally
+        \\{
+        \\  let t = get_mut(Tally)
+        \\  t.total += event.amount
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .on_event_type_mismatch);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // E1203: `@on_event(T)` where T is a component, not an event.
+    var not_event = try parseAndCheck(gpa,
+        \\component Health { hp: i32 = 0 }
+        \\@on_event(Health)
+        \\rule react() { }
+    );
+    defer not_event.deinit(gpa);
+    try expectAnyCode(not_event.diagnostics.items, .on_event_type_mismatch);
+
+    // E1203: malformed `@on_event` with no type argument.
+    var malformed = try parseAndCheck(gpa,
+        \\event Damage { amount: i32 = 0 }
+        \\@on_event()
+        \\rule react() { }
+    );
+    defer malformed.deinit(gpa);
+    try expectAnyCode(malformed.diagnostics.items, .on_event_type_mismatch);
 }
 
 test "type-checker validates tag-filter when conditions (M0.8 E3)" {

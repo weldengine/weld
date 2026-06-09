@@ -1016,6 +1016,7 @@ pub const AnnotationKind = enum {
     networked,
     id,
     loc,
+    on_event,
 
     pub fn fromName(name: []const u8) AnnotationKind {
         if (std.mem.eql(u8, name, "phase")) return .phase;
@@ -1036,6 +1037,7 @@ pub const AnnotationKind = enum {
         if (std.mem.eql(u8, name, "networked")) return .networked;
         if (std.mem.eql(u8, name, "id")) return .id;
         if (std.mem.eql(u8, name, "loc")) return .loc;
+        if (std.mem.eql(u8, name, "on_event")) return .on_event;
         return .custom;
     }
 };
@@ -1676,6 +1678,29 @@ pub const AstArena = struct {
     pub fn exprData(self: *const AstArena, id: NodeId) u32 {
         std.debug.assert(id.category == .expr);
         return self.exprs.items(.data)[id.index];
+    }
+
+    /// The `@on_event(T)` annotation on a `rule`, or null if the rule is not an
+    /// event observer (M0.8 E3). When present, the rule fires once per received
+    /// event of type `T`; the resolver validates `T` (E1203) and binds the
+    /// implicit `event`, the interpreter/codegen drive the bus drain.
+    pub fn onEventAnnotation(self: *const AstArena, rule: RuleDecl) ?Annotation {
+        var i: u32 = 0;
+        while (i < rule.annotations_len) : (i += 1) {
+            const annot = self.annot_pool.items[rule.annotations_extra + i];
+            if (annot.kind == .on_event) return annot;
+        }
+        return null;
+    }
+
+    /// The event type name `T` from an `@on_event(T)` annotation, or null when
+    /// the annotation is malformed (no argument, or the argument is not a type
+    /// path). The resolver reports E1203 for the null / non-event cases.
+    pub fn onEventTypeName(self: *const AstArena, annot: Annotation) ?StringId {
+        if (annot.args_len == 0) return null;
+        const arg = self.annot_args.items[annot.args_start];
+        if (self.exprKind(arg.value) != .path) return null;
+        return self.exprData(arg.value);
     }
 
     pub fn typeNodeKind(self: *const AstArena, id: NodeId) TypeNodeKind {

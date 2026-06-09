@@ -715,6 +715,11 @@ fn ruleHasTagMutation(ast: *const AstArena, rule: ast_mod.RuleDecl) bool {
 fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable) CodegenError!void {
     const name = ast.strings.slice(rule.name);
 
+    // `@on_event(T)` observer codegen (bus subscribe/poll drain) is the next
+    // tranche (M0.8 E3 sub-slice A); the interpreter is the reference until then.
+    // Fail loud so a sound program never silently drops an observer's drain.
+    if (ast.onEventAnnotation(rule) != null) return CodegenError.UnsupportedConstruct;
+
     // Collect what the when clause needs first (a negative tag op fails loud
     // here, before any output is emitted).
     var info = try collectWhenInfo(w.gpa, ast, rule, tag_table);

@@ -64,6 +64,7 @@ pub const DiagnosticCode = enum {
     not_const_evaluable, // S3 — E1101 NotConstEvaluable
 
     // ── Rule-specific errors (E1200-E1299) ──
+    on_event_type_mismatch, // M0.8 E3 — E1203 OnEventTypeMismatch (@on_event(T) ↔ event binding type)
     unknown_component_in_when, // S3 — E1210 UnknownComponentInWhen
     invalid_field_filter, // S3 — E1211 InvalidFieldFilter
     unknown_tag, // M0.8 E3 — E1212 UnknownTag (tag path in a `when` clause)
@@ -94,6 +95,7 @@ pub const DiagnosticCode = enum {
             .tag_bitfield_overflow => "E0832",
             .tag_invalid_operation => "E0833",
             .not_const_evaluable => "E1101",
+            .on_event_type_mismatch => "E1203",
             .unknown_component_in_when => "E1210",
             .invalid_field_filter => "E1211",
             .unknown_tag => "E1212",
@@ -126,6 +128,7 @@ pub const DiagnosticCode = enum {
             .tag_bitfield_overflow => "TagBitfieldOverflow",
             .tag_invalid_operation => "TagInvalidOperation",
             .not_const_evaluable => "NotConstEvaluable",
+            .on_event_type_mismatch => "OnEventTypeMismatch",
             .unknown_component_in_when => "UnknownComponentInWhen",
             .invalid_field_filter => "InvalidFieldFilter",
             .unknown_tag => "UnknownTag",
