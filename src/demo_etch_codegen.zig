@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Tick the cooked program.
     var t: u32 = 0;
-    while (t < Ticks) : (t += 1) cooked.demo.tick(&world);
+    while (t < Ticks) : (t += 1) cooked.demo.tick(&world, gpa);
 
     var out_buf: [4096]u8 = undefined;
     var out_w = std.Io.File.stdout().writer(io, &out_buf);

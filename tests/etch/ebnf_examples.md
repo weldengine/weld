@@ -470,3 +470,25 @@ rule deal_damage(entity: Entity)
   emit DamageDealt { amount: 25, crit: true }
 }
 ```
+
+## Tags — declaration / query operators / deferred mutation (E3 ECS layer)
+
+```etch
+tags {
+  unit {
+    status { alive, dead, stunned }
+    team { red, blue }
+  }
+}
+
+rule tag_ops(entity: Entity)
+  when entity has Counter
+  and entity has_tag .unit.status.alive
+  and entity has_no_tag .unit.status.dead
+  and entity has_any_tag [.unit.team.red, .unit.team.blue]
+  and entity has_all_tags [.unit.status.alive, .unit.status.stunned]
+{
+  entity.add_tag(.unit.status.stunned)
+  entity.remove_tag(.unit.status.alive)
+}
+```

@@ -62,6 +62,7 @@ const p39 = @import("programs/39_struct_method.expected.zig");
 const p40 = @import("programs/40_enum_match.expected.zig");
 const p41 = @import("programs/41_trait_method.expected.zig");
 const p42 = @import("programs/42_optional_if_let.expected.zig");
+const p43 = @import("programs/43_tag_filter_mutation.expected.zig");
 
 /// Embedded list of the 20 differential corpus programs consumed by
 /// the S4 interpreter test and the S5 codegen parity test.
@@ -108,4 +109,5 @@ pub const programs = [_]Program{
     .{ .name = "40_enum_match", .source = @embedFile("programs/40_enum_match.etch"), .config = p40.config, .initial = p40.initial, .expected = p40.expected },
     .{ .name = "41_trait_method", .source = @embedFile("programs/41_trait_method.etch"), .config = p41.config, .initial = p41.initial, .expected = p41.expected },
     .{ .name = "42_optional_if_let", .source = @embedFile("programs/42_optional_if_let.etch"), .config = p42.config, .initial = p42.initial, .expected = p42.expected },
+    .{ .name = "43_tag_filter_mutation", .source = @embedFile("programs/43_tag_filter_mutation.etch"), .config = p43.config, .initial = p43.initial, .expected = p43.expected },
 };

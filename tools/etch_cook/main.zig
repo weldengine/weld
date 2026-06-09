@@ -213,7 +213,7 @@ fn emitProgramsTable(gpa: std.mem.Allocator, buffer: *std.ArrayListUnmanaged(u8)
         \\pub const Program = struct {
         \\    name: []const u8,
         \\    register: *const fn (world: *World, gpa: std.mem.Allocator) anyerror!void,
-        \\    tick: *const fn (world: *World) void,
+        \\    tick: *const fn (world: *World, gpa: std.mem.Allocator) void,
         \\};
         \\
         \\pub const programs = [_]Program{

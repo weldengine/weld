@@ -11,10 +11,14 @@
 //!     ...
 //!     pub const <Comp> = extern struct { ... };   // 1 per Etch component
 //!     pub const <Res>  = extern struct { ... };   // 1 per Etch resource
+//!     pub const TagSet = extern struct { bits: [N]u64 = ... }; // iff tags
 //!     pub fn register(world, gpa) !void { ... }   // RTTI + resource init
 //!     pub fn rule_<name>(world: *World) void { .. } // 1 per Etch rule
-//!     pub fn tick(world: *World) void { ... }     // calls each rule in
-//!                                                  // source order
+//!                                                  // (+ `, cmd: *CommandBuffer`
+//!                                                  //  when the rule mutates tags)
+//!     pub fn tick(world, gpa) void { ... }         // calls each rule in
+//!                                                  // source order, flushes
+//!                                                  // tag mutations
 //!
 //! Implementation choices (cf. brief Notes):
 //! - `extern struct` types match Etch component names verbatim (no prefix).
@@ -24,13 +28,15 @@
 //!   slot pointer to `[*]<Comp>`. The component layout computed by the
 //!   runtime registry matches the Zig `extern struct` layout exactly
 //!   (same `@offsetOf` semantics on both sides) so the cast is well-formed.
-//! - Rules are emitted in source declaration order; `tick(world)` invokes
+//! - Rules are emitted in source declaration order; `tick(world, gpa)` invokes
 //!   them sequentially, matching the S4 interpreter's scheduler so
 //!   differential corpus parity holds.
 
 const std = @import("std");
 const ast_mod = @import("../ast.zig");
 const types_mod = @import("../types.zig");
+const tags_mod = @import("../tags.zig");
+const diag_mod = @import("../diagnostics.zig");
 const emit_mod = @import("emit.zig");
 const type_map = @import("type_map.zig");
 const errors_mod = @import("errors.zig");
@@ -70,6 +76,19 @@ pub fn generateFile(
 
     var stats: GenerateStats = .{};
 
+    // Build the global tag table (the shared `tags.zig` algorithm, same as
+    // the resolver and the interpreter) so tag filters resolve to leaf bits
+    // and `TagSet` is emitted + registered when the program declares any tag
+    // (M0.8 E3). The program is already type-checked, so `build` reports no
+    // new diagnostics here; the throwaway list is freed immediately.
+    var tag_diags: std.ArrayListUnmanaged(diag_mod.Diagnostic) = .empty;
+    defer {
+        for (tag_diags.items) |*d| d.deinit(gpa);
+        tag_diags.deinit(gpa);
+    }
+    var tag_table = try tags_mod.TagTable.build(gpa, ast, &tag_diags, tags_mod.default_max_tags);
+    defer tag_table.deinit(gpa);
+
     // Pass A — declare every component and resource as an `extern struct`.
     var i: u28 = 0;
     while (i < ast.items.len) : (i += 1) {
@@ -104,9 +123,17 @@ pub fn generateFile(
         }
     }
 
+    // The builtin `TagSet` component (M0.8 E3): a fixed `[words]u64` bitfield,
+    // one slot per entity carrying tags. Emitted as an `extern struct` so its
+    // layout matches the registry's raw `words*8`-byte / align-8 component
+    // (`etch-abi-zig.md` §3) — byte-exact with the interpreter's `registerComponentRaw`.
+    if (tag_table.leaf_count > 0) {
+        try emitTagSetStruct(&w, tag_table.words());
+    }
+
     // Pass B — `register` function. Walk items again to keep registration
     // order matching source order.
-    try emitRegister(&w, ast);
+    try emitRegister(&w, ast, &tag_table);
 
     // Pass C — emit one Zig function per top-level Etch `fn` (M0.8 E2 call
     // mechanism). Emitted before the rules so the file reads top-down; Zig
@@ -120,8 +147,8 @@ pub fn generateFile(
     }
 
     // Pass D — emit one Zig function per Etch rule.
-    var rule_names: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer rule_names.deinit(gpa);
+    var rule_emits: std.ArrayListUnmanaged(RuleEmit) = .empty;
+    defer rule_emits.deinit(gpa);
 
     var sig_set: std.StringHashMapUnmanaged(void) = .empty;
     defer {
@@ -137,9 +164,12 @@ pub fn generateFile(
         if (kind != .rule_decl) continue;
         const rule = ast.rule_decls.items[data];
         const name_slice = ast.strings.slice(rule.name);
-        try rule_names.append(gpa, name_slice);
+        // A rule whose body issues a tag mutation takes a `*CommandBuffer`
+        // param (the deferred set_tag/clear_tag is queued through it); `tick`
+        // dispatches such rules with `&cmd` (M0.8 E3).
+        try rule_emits.append(gpa, .{ .name = name_slice, .tag_mutating = ruleHasTagMutation(ast, rule) });
 
-        try emitRule(&w, ast, rule);
+        try emitRule(&w, ast, rule, &tag_table);
         stats.rules += 1;
 
         // Track the rule's archetype signature (the sorted set of component
@@ -147,7 +177,7 @@ pub fn generateFile(
         try collectSignature(gpa, ast, rule, &sig_set);
     }
 
-    try emitTick(&w, rule_names.items);
+    try emitTick(&w, rule_emits.items);
 
     stats.distinct_signatures = @intCast(sig_set.count());
     return stats;
@@ -171,6 +201,21 @@ fn emitImports(w: *Writer) CodegenError!void {
     try w.line("const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;");
     try w.line("const Chunk = weld_core.ecs.archetype_dynamic.Chunk;");
     try w.line("const comptime_query = weld_core.ecs.comptime_query;");
+    // `CommandBuffer` is referenced only by `tick` when the program declares
+    // tag mutations (`add_tag`/`remove_tag` → deferred `set_tag`/`clear_tag`);
+    // an unused container-level import is permitted, so it is emitted
+    // unconditionally for layout stability (M0.8 E3).
+    try w.line("const CommandBuffer = weld_core.ecs.command_buffer.CommandBuffer;");
+    try w.blankLine();
+}
+
+/// Emit the builtin `TagSet` component (M0.8 E3): `words` 64-bit words of
+/// bits, zero-initialised. One slot per entity carrying tags; the per-slot
+/// tag-filter guard reads `bits[w]` and a tag mutation flips a bit via the
+/// command buffer. Layout matches the registry's raw component
+/// (size `words*8`, align 8, no named fields).
+fn emitTagSetStruct(w: *Writer, words: u32) CodegenError!void {
+    try w.printLine("pub const TagSet = extern struct {{ bits: [{d}]u64 = [_]u64{{0}} ** {d} }};", .{ words, words });
     try w.blankLine();
 }
 
@@ -404,7 +449,7 @@ fn emitMethod(w: *Writer, ast: *const AstArena, struct_name: []const u8, method:
 
 // ─── `register` function ────────────────────────────────────────────────────
 
-fn emitRegister(w: *Writer, ast: *const AstArena) CodegenError!void {
+fn emitRegister(w: *Writer, ast: *const AstArena, tag_table: *const tags_mod.TagTable) CodegenError!void {
     try w.line("/// Register every component and resource declared in the source");
     try w.line("/// program with the world's RTTI and seed the resource store.");
     try w.line("/// Must be called once at program start, before `tick`.");
@@ -441,6 +486,29 @@ fn emitRegister(w: *Writer, ast: *const AstArena) CodegenError!void {
             },
             else => {},
         }
+    }
+
+    // Register the builtin `TagSet` component (M0.8 E3) when the program
+    // declares any tag. The raw descriptor mirrors the interpreter's
+    // `compileProgram` registration exactly (name "TagSet", size `@sizeOf`,
+    // align `@alignOf`, zeroed default, no named fields) so the runtime
+    // component id and layout are byte-identical across backends. The id is
+    // discarded — the rules look it up by name via `idOf("TagSet")`.
+    if (tag_table.leaf_count > 0) {
+        try w.line("{");
+        w.indentBy(1);
+        try w.line("var __tagset_default: TagSet = .{};");
+        try w.line("_ = try world.registry.registerComponentRaw(gpa, .{");
+        w.indentBy(1);
+        try w.line(".name = \"TagSet\",");
+        try w.line(".size = @sizeOf(TagSet),");
+        try w.line(".alignment = @alignOf(TagSet),");
+        try w.line(".default_bytes = std.mem.asBytes(&__tagset_default),");
+        try w.line(".fields = &.{},");
+        w.indentBy(-1);
+        try w.line("});");
+        w.indentBy(-1);
+        try w.line("}");
     }
 
     w.indentBy(-1);
@@ -532,6 +600,28 @@ const WhenInfo = struct {
     /// conjunctions use the comptime `world.query(.{...})` path, which
     /// is what gates the monomorphisation count (Gate 4).
     has_or_or_not: bool,
+    /// Positive tag filters (`has_tag` / `has_any_tag` / `has_all_tags`) with
+    /// their operand leaf bits resolved against the global tag table (M0.8
+    /// E3). Each emits a per-slot bit-test `continue` guard in the archetype
+    /// walk. Non-empty forces the arch-walk path. Negative tag ops fail loud
+    /// upstream (deferred to the interpreter reference).
+    tag_filters: []TagFilterInfo,
+};
+
+/// A positive tag-filter predicate lowered to its operand leaf bits — the
+/// codegen analogue of the interpreter's `TagPredicate` (M0.8 E3). `bits` is
+/// the resolved leaf-bit set (a single bit for `has_tag`, the operand union or
+/// an expanded category mask for the multi operators).
+const TagFilterInfo = struct {
+    op: ast_mod.TagOp,
+    bits: []u32,
+};
+
+/// A rule's emission descriptor consumed by `tick`: its Zig name and whether
+/// its body issues a tag mutation (and therefore takes a `*CommandBuffer`).
+const RuleEmit = struct {
+    name: []const u8,
+    tag_mutating: bool,
 };
 
 const ResourceDep = struct {
@@ -608,14 +698,41 @@ fn fnTypeZig(ast: *const AstArena, type_node: NodeId) []const u8 {
     return type_map.mapBuiltin(tname) orelse tname;
 }
 
-fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) CodegenError!void {
-    const name = ast.strings.slice(rule.name);
-    try w.printLine("pub fn rule_{s}(world: *World) void {{", .{name});
-    w.indentBy(1);
+/// Whether a rule's body issues a tag mutation (`add_tag` / `remove_tag`),
+/// scanned at the top level of the body (M0.8 E3). Tag mutations are rule
+/// actions and appear as top-level statements in the delivered grammar; a
+/// mutation nested in control flow would surface as a loud Zig compile error
+/// (`cmd` out of scope), never a silent miss.
+fn ruleHasTagMutation(ast: *const AstArena, rule: ast_mod.RuleDecl) bool {
+    var s: u32 = 0;
+    while (s < rule.body_len) : (s += 1) {
+        const stmt_id: NodeId = @bitCast(ast.extra.items[rule.body_start + s]);
+        if (ast.stmtKind(stmt_id) == .tag_mutation_stmt) return true;
+    }
+    return false;
+}
 
-    // Collect what the when clause needs.
-    var info = try collectWhenInfo(w.gpa, ast, rule);
+fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable) CodegenError!void {
+    const name = ast.strings.slice(rule.name);
+
+    // Collect what the when clause needs first (a negative tag op fails loud
+    // here, before any output is emitted).
+    var info = try collectWhenInfo(w.gpa, ast, rule, tag_table);
     defer freeWhenInfo(w.gpa, &info);
+
+    // A tag-mutating rule takes a `*CommandBuffer` and is dispatched with
+    // `&cmd` by `tick`. A mutation needs an iterated entity, so it must be
+    // entity-bound — a resource-only / global rule with a tag mutation is
+    // inconsistent and fails loud (the interpreter is the reference).
+    const tag_mutating = ruleHasTagMutation(ast, rule);
+    if (tag_mutating and !info.has_component_ref) return CodegenError.UnsupportedConstruct;
+
+    if (tag_mutating) {
+        try w.printLine("pub fn rule_{s}(world: *World, cmd: *CommandBuffer) void {{", .{name});
+    } else {
+        try w.printLine("pub fn rule_{s}(world: *World) void {{", .{name});
+    }
+    w.indentBy(1);
 
     // Resource-id locals + gating early-returns.
     for (info.resource_deps) |dep| {
@@ -646,15 +763,22 @@ fn emitRule(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) CodegenErr
     if (info.field_filter) |ff| {
         _ = try body_used.getOrPut(w.gpa, ff.component_name);
     }
+    // A positive tag filter reads `TagSet_arr[slot].bits[..]` per entity, so
+    // `TagSet` needs a per-slot pointer emitted (M0.8 E3). `collectWhenInfo`
+    // already added "TagSet" to `info.components` for the id + `has TagSet`
+    // archetype predicate.
+    if (info.tag_filters.len > 0) {
+        _ = try body_used.getOrPut(w.gpa, "TagSet");
+    }
 
-    if (info.has_or_or_not) {
+    if (info.has_or_or_not or info.tag_filters.len > 0 or tag_mutating) {
         // Path 2 — manual archetype walk. Reserved for the S4 inherited
-        // debt cases (`not has X`, `entity has A or entity has B`) that
-        // do not collapse to a single AND-conjunction tuple. The current
-        // S3 corpus exercises this in 2/20 differential programs; the
-        // synth bench corpus never hits this branch (gate 4's
-        // monomorphisation count therefore reflects only the AND path).
-        try emitRuleAsArchWalk(w, ast, rule, info, &body_used);
+        // debt cases (`not has X`, `entity has A or entity has B`) plus the
+        // M0.8 E3 tag cases: a positive tag filter (per-slot bit test) or a
+        // tag mutation (needs the entity id, which the comptime-query `Row`
+        // does not expose). The synth bench corpus never hits this branch
+        // (gate 4's monomorphisation count therefore reflects only the AND path).
+        try emitRuleAsArchWalk(w, ast, rule, info, &body_used, tag_mutating, tag_table);
     } else {
         // Path 1 — comptime query. The cooked code emits one
         // `comptime_query.query(world, .{T1, T2, ...})` invocation per
@@ -717,7 +841,7 @@ fn emitRuleAsComptimeQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleD
 /// when clauses containing `or` / `not`. Same shape as the pre-rewrite
 /// codegen — kept until the inherited S4 debts (`not` / `or` predicates)
 /// are addressed in Phase 0.2.
-fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, body_used: *const std.StringHashMapUnmanaged(void)) CodegenError!void {
+fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, body_used: *const std.StringHashMapUnmanaged(void), tag_mutating: bool, tag_table: *const tags_mod.TagTable) CodegenError!void {
     for (info.components) |cname| {
         try w.printLine("const {s}_id = world.registry.idOf(\"{s}\") orelse return;", .{ cname, cname });
     }
@@ -745,6 +869,13 @@ fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, 
     try w.line("var slot: u32 = 0;");
     try w.line("while (slot < __count) : (slot += 1) {");
     w.indentBy(1);
+    // Materialise the entity id for any tag mutation in the body — the
+    // command-buffer `setTag`/`clearTag` calls take it (M0.8 E3). The
+    // comptime-query `Row` exposes no entity id, which is why a tag mutation
+    // forces this arch-walk path.
+    if (tag_mutating) {
+        try w.line("const __entity = arch.entityIdsConst(chunk)[slot];");
+    }
     if (info.field_filter) |ff| {
         try w.writeIndent();
         try w.print("if ({s}_arr[slot].", .{ff.component_name});
@@ -753,7 +884,13 @@ fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, 
         try emitConstExpr(w, ast, ff.value, ff.value_zig_type);
         try w.write(") continue;\n");
     }
-    try emitRuleBody(w, ast, rule, info);
+    // Per-slot tag-filter guards (positive ops): skip the entity unless its
+    // `TagSet` satisfies the predicate, byte-exact with the interpreter's
+    // `tagPredicatesPass` (M0.8 E3).
+    for (info.tag_filters) |tf| {
+        try emitTagFilterGuard(w, tf);
+    }
+    try emitRuleBody(w, ast, rule, info, tag_table);
     w.indentBy(-1);
     try w.line("}"); // while slot
     w.indentBy(-1);
@@ -996,9 +1133,18 @@ fn emitArchPredicate(w: *Writer, ast: *const AstArena, when_idx: u32) CodegenErr
             // a constant `true`.
             try w.write("true");
         },
-        // Tag-filter codegen (bit test on the entity's TagSet) is the
-        // tag-execution commit; fail loud here (M0.8 E3).
-        .tag_filter => return CodegenError.UnsupportedConstruct,
+        // A positive tag filter requires the entity to carry `TagSet`; the
+        // per-slot bit test is a separate guard (`emitTagFilterGuard`). A
+        // negative tag op also matches entities lacking `TagSet`, so its
+        // arch-walk slot access is undefined — deferred, fail loud (M0.8 E3,
+        // the interpreter is the reference).
+        .tag_filter => {
+            const tf = ast.tag_filters.items[node.aux];
+            switch (tf.op) {
+                .has_tag, .has_any_tag, .has_all_tags => try w.write("arch.hasComponent(TagSet_id)"),
+                .has_no_tag, .has_no_tags => return CodegenError.UnsupportedConstruct,
+            }
+        },
     }
 }
 
@@ -1017,8 +1163,8 @@ fn emitRuleBodyOnce(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl) Co
     }
 }
 
-fn emitRuleBody(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo) CodegenError!void {
-    var ctx: LocalCtx = .{};
+fn emitRuleBody(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, tag_table: *const tags_mod.TagTable) CodegenError!void {
+    var ctx: LocalCtx = .{ .tag_table = tag_table };
     defer ctx.deinit(w.gpa);
 
     // Record component aliases so `entity.get(T)` / `entity.get_mut(T)`
@@ -1104,6 +1250,11 @@ const LocalCtx = struct {
     /// is in the manual archetype-walk fallback and component accesses
     /// lower to `<comp>_arr[slot].field`.
     query_components: ?[]const []const u8 = null,
+    /// The global tag table, set when emitting a body that may contain a tag
+    /// mutation (the arch-walk path). Used to resolve an `add_tag`/`remove_tag`
+    /// path to its leaf bit (M0.8 E3). Null on the comptime-query path, where
+    /// tag mutations cannot appear.
+    tag_table: ?*const tags_mod.TagTable = null,
 
     pub fn deinit(self: *LocalCtx, gpa: std.mem.Allocator) void {
         self.records.deinit(gpa);
@@ -1363,6 +1514,20 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
             }
             w.indentBy(-1);
             try w.line("}) catch unreachable;");
+        },
+        // `entity.add_tag(.path)` / `entity.remove_tag(.path)` (M0.8 E3,
+        // `etch-grammar.md` §4.4) → a deferred `set_tag`/`clear_tag` command,
+        // applied at the tick boundary by `cmd.flush()`. `__entity` is the
+        // arch-walk slot's entity id; the `TagSet` id is looked up by name.
+        // The append only fails on OOM, which a `void` rule swallows
+        // (best-effort, matching the codegen's void-rule error stance).
+        .tag_mutation_stmt => {
+            const tm = ast.tag_mutation_stmts.items[data];
+            const table = ctx.tag_table orelse return CodegenError.UnsupportedConstruct;
+            const bit = tagPathLeafBitCodegen(ast, table, tm.path) orelse return CodegenError.UnsupportedConstruct;
+            const method = if (tm.kind == .add) "setTag" else "clearTag";
+            try w.writeIndent();
+            try w.print("cmd.{s}(__entity, world.registry.idOf(\"TagSet\").?, {d}) catch {{}};\n", .{ method, bit });
         },
         else => return CodegenError.UnsupportedConstruct,
     }
@@ -2339,14 +2504,44 @@ fn emitConstExpr(w: *Writer, ast: *const AstArena, expr: NodeId, target_zig_type
 
 // ─── `tick` ─────────────────────────────────────────────────────────────────
 
-fn emitTick(w: *Writer, rule_names: []const []const u8) CodegenError!void {
-    try w.line("/// Execute every rule once in source declaration order, then");
-    try w.line("/// clear resource dirty bits — equivalent to a single tick of");
-    try w.line("/// the S4 interpreter's `stepOnce` + `tickBoundary`.");
-    try w.line("pub fn tick(world: *World) void {");
+fn emitTick(w: *Writer, rules: []const RuleEmit) CodegenError!void {
+    var any_tag_mutation = false;
+    for (rules) |r| {
+        if (r.tag_mutating) {
+            any_tag_mutation = true;
+            break;
+        }
+    }
+
+    try w.line("/// Execute every rule once in source declaration order, apply any");
+    try w.line("/// deferred tag mutations, then clear resource dirty bits —");
+    try w.line("/// equivalent to a single tick of the S4 interpreter's `stepOnce`");
+    try w.line("/// (rules + `flushPendingTags`) + `tickBoundary`. `gpa` is the");
+    try w.line("/// uniform allocator-threading contract for the generated code");
+    try w.line("/// (M0.8 E3); the tag command buffer is its first consumer.");
+    try w.line("pub fn tick(world: *World, gpa: std.mem.Allocator) void {");
     w.indentBy(1);
-    for (rule_names) |name| {
-        try w.printLine("rule_{s}(world);", .{name});
+    if (any_tag_mutation) {
+        // A tick-scoped command buffer collects deferred tag mutations; it is
+        // flushed (applied) after every rule has run, before the boundary —
+        // never mid-archetype-walk. It owns and frees its arena each tick, so
+        // a plain gpa is leak-free here.
+        try w.line("var cmd = CommandBuffer.init(gpa, world);");
+        try w.line("defer cmd.deinit();");
+        for (rules) |r| {
+            if (r.tag_mutating) {
+                try w.printLine("rule_{s}(world, &cmd);", .{r.name});
+            } else {
+                try w.printLine("rule_{s}(world);", .{r.name});
+            }
+        }
+        try w.line("cmd.flush() catch {};");
+    } else {
+        // No tag mutation → the threaded gpa is unused this tick.
+        try w.line("_ = gpa;");
+        for (rules) |r| {
+            try w.printLine("rule_{s}(world);", .{r.name});
+        }
     }
     try w.line("world.tickBoundary();");
     w.indentBy(-1);
@@ -2356,19 +2551,29 @@ fn emitTick(w: *Writer, rule_names: []const []const u8) CodegenError!void {
 
 // ─── WhenInfo collection ────────────────────────────────────────────────────
 
-fn collectWhenInfo(gpa: std.mem.Allocator, ast: *const AstArena, rule: ast_mod.RuleDecl) !WhenInfo {
+fn collectWhenInfo(gpa: std.mem.Allocator, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_table: *const tags_mod.TagTable) CodegenError!WhenInfo {
     var components: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer components.deinit(gpa);
     var seen_components: std.StringHashMapUnmanaged(void) = .empty;
     defer seen_components.deinit(gpa);
     var res_deps: std.ArrayListUnmanaged(ResourceDep) = .empty;
     errdefer res_deps.deinit(gpa);
+    var tag_filters: std.ArrayListUnmanaged(TagFilterInfo) = .empty;
+    errdefer {
+        for (tag_filters.items) |*tf| gpa.free(tf.bits);
+        tag_filters.deinit(gpa);
+    }
     var field_filter: ?FieldFilter = null;
     var has_component_ref: bool = false;
     var has_or_or_not: bool = false;
 
     if (rule.when_root != ast_mod.RuleDecl.none_when) {
+        // `walkWhen` populates components / resources / field filter and adds
+        // "TagSet" to components for positive tag filters (fails loud on
+        // negative tag ops). A second pass resolves the operand leaf bits for
+        // the per-slot guards (M0.8 E3).
         try walkWhen(gpa, ast, rule.when_root, &components, &seen_components, &res_deps, &field_filter, &has_component_ref, &has_or_or_not);
+        try collectTagFilters(gpa, ast, tag_table, rule.when_root, &tag_filters);
     }
 
     return .{
@@ -2377,12 +2582,15 @@ fn collectWhenInfo(gpa: std.mem.Allocator, ast: *const AstArena, rule: ast_mod.R
         .field_filter = field_filter,
         .has_component_ref = has_component_ref,
         .has_or_or_not = has_or_or_not,
+        .tag_filters = try tag_filters.toOwnedSlice(gpa),
     };
 }
 
 fn freeWhenInfo(gpa: std.mem.Allocator, info: *WhenInfo) void {
     gpa.free(info.components);
     gpa.free(info.resource_deps);
+    for (info.tag_filters) |*tf| gpa.free(tf.bits);
+    gpa.free(info.tag_filters);
 }
 
 fn walkWhen(
@@ -2441,10 +2649,23 @@ fn walkWhen(
             const rname = ast.strings.slice(node.type_name);
             try res_deps.append(gpa, .{ .name = rname, .must_be_changed = true });
         },
-        // A tag-filter `when` condition needs the TagSet bit-test codegen
-        // (tag-execution commit); fail loud so a rule that uses one is never
-        // cooked into a query that silently drops the filter (M0.8 E3).
-        .tag_filter => return CodegenError.UnsupportedConstruct,
+        // A positive tag filter makes the rule entity-bound and requires the
+        // entity to carry `TagSet` — add it to the components so the id +
+        // `arch.hasComponent(TagSet_id)` predicate + per-slot `_arr` are
+        // emitted. A negative tag op (`has_no_tag`/`has_no_tags`) also matches
+        // entities lacking `TagSet`, so its arch-walk codegen is deferred —
+        // fail loud, the interpreter is the reference (M0.8 E3).
+        .tag_filter => {
+            const tf = ast.tag_filters.items[node.aux];
+            switch (tf.op) {
+                .has_tag, .has_any_tag, .has_all_tags => {
+                    const gop = try seen.getOrPut(gpa, "TagSet");
+                    if (!gop.found_existing) try components.append(gpa, "TagSet");
+                    has_component_ref.* = true;
+                },
+                .has_no_tag, .has_no_tags => return CodegenError.UnsupportedConstruct,
+            }
+        },
     }
 }
 
@@ -2499,12 +2720,149 @@ fn collectComponents(
             if (!gop.found_existing) try components.append(gpa, cname);
         },
         .resource, .resource_changed => {},
-        .tag_filter => return CodegenError.UnsupportedConstruct,
+        // A positive tag filter contributes `TagSet` to the archetype
+        // signature (the rule matches archetypes carrying it); a negative tag
+        // op's codegen is deferred and already failed loud upstream (M0.8 E3).
+        .tag_filter => {
+            const tf = ast.tag_filters.items[node.aux];
+            switch (tf.op) {
+                .has_tag, .has_any_tag, .has_all_tags => {
+                    const gop = try seen.getOrPut(gpa, "TagSet");
+                    if (!gop.found_existing) try components.append(gpa, "TagSet");
+                },
+                .has_no_tag, .has_no_tags => return CodegenError.UnsupportedConstruct,
+            }
+        },
     }
 }
 
 fn lexLess(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == .lt;
+}
+
+// ─── Tag codegen helpers (M0.8 E3) ──────────────────────────────────────────
+
+/// Resolve a `tag_path` mutation operand to its leaf bit via the global table
+/// — the codegen analogue of the interpreter's `tagPathLeafBit`. Returns null
+/// for an unknown path or a namespace (the resolver rejects those; a null here
+/// is an inconsistent program → the caller fails loud).
+fn tagPathLeafBitCodegen(ast: *const AstArena, tag_table: *const tags_mod.TagTable, path_node: NodeId) ?u32 {
+    const tp = ast.tag_paths.items[ast.exprData(path_node)];
+    var buf: [256]u8 = undefined;
+    var len: usize = 0;
+    var i: u32 = 0;
+    while (i < tp.segs_len) : (i += 1) {
+        const seg = ast.strings.slice(ast.tag_path_segs.items[tp.segs_start + i]);
+        const need = seg.len + @as(usize, if (i > 0) 1 else 0);
+        if (len + need > buf.len) return null;
+        if (i > 0) {
+            buf[len] = '.';
+            len += 1;
+        }
+        @memcpy(buf[len .. len + seg.len], seg);
+        len += seg.len;
+    }
+    return tag_table.leafBit(buf[0..len]);
+}
+
+/// Resolve one tag-filter operand path to its leaf bit(s), appending to `out`:
+/// a leaf path contributes its single bit; a namespace path expands to the
+/// bits of every leaf under it. Mirrors the interpreter's
+/// `resolveTagOperandBits` (M0.8 E3).
+fn resolveTagOperandBitsCodegen(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    tag_table: *const tags_mod.TagTable,
+    path_node: NodeId,
+    out: *std.ArrayListUnmanaged(u32),
+) CodegenError!void {
+    const tp = ast.tag_paths.items[ast.exprData(path_node)];
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(gpa);
+    var i: u32 = 0;
+    while (i < tp.segs_len) : (i += 1) {
+        if (i > 0) try buf.append(gpa, '.');
+        try buf.appendSlice(gpa, ast.strings.slice(ast.tag_path_segs.items[tp.segs_start + i]));
+    }
+    if (tag_table.leafBit(buf.items)) |bit| {
+        try out.append(gpa, bit);
+    } else if (tag_table.lookup(buf.items)) |entry| {
+        if (entry.is_leaf) return CodegenError.UnsupportedConstruct;
+        try tag_table.collectUnder(gpa, buf.items, out);
+    } else return CodegenError.UnsupportedConstruct;
+}
+
+/// Walk the when clause and resolve every positive tag filter's operand bits
+/// into `out` (M0.8 E3). Negative tag ops already failed loud in `walkWhen`.
+fn collectTagFilters(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    tag_table: *const tags_mod.TagTable,
+    when_idx: u32,
+    out: *std.ArrayListUnmanaged(TagFilterInfo),
+) CodegenError!void {
+    const node = ast.when_nodes.items[when_idx];
+    switch (node.kind) {
+        .logical_and, .logical_or => {
+            try collectTagFilters(gpa, ast, tag_table, node.lhs, out);
+            try collectTagFilters(gpa, ast, tag_table, node.rhs, out);
+        },
+        .logical_not => try collectTagFilters(gpa, ast, tag_table, node.lhs, out),
+        .tag_filter => {
+            const tf = ast.tag_filters.items[node.aux];
+            var bits: std.ArrayListUnmanaged(u32) = .empty;
+            errdefer bits.deinit(gpa);
+            var oi: u32 = 0;
+            while (oi < tf.operand_len) : (oi += 1) {
+                const path_node = ast.tag_operands.items[tf.operand_start + oi];
+                try resolveTagOperandBitsCodegen(gpa, ast, tag_table, path_node, &bits);
+            }
+            try out.append(gpa, .{ .op = tf.op, .bits = try bits.toOwnedSlice(gpa) });
+        },
+        else => {},
+    }
+}
+
+/// Emit a per-slot `continue` guard for a positive tag filter, byte-exact with
+/// the interpreter's `tagPredicatesPass` (M0.8 E3): `has_tag`/`has_all_tags`
+/// skip unless every operand bit is set; `has_any_tag` skips unless at least
+/// one is set. Bits are grouped into per-word masks read from `TagSet_arr[slot]`.
+fn emitTagFilterGuard(w: *Writer, tf: TagFilterInfo) CodegenError!void {
+    const WordMask = struct { word: u32, mask: u64 };
+    var entries: std.ArrayListUnmanaged(WordMask) = .empty;
+    defer entries.deinit(w.gpa);
+    for (tf.bits) |b| {
+        const word = b / 64;
+        const m = @as(u64, 1) << @intCast(b % 64);
+        var found = false;
+        for (entries.items) |*e| {
+            if (e.word == word) {
+                e.mask |= m;
+                found = true;
+                break;
+            }
+        }
+        if (!found) try entries.append(w.gpa, .{ .word = word, .mask = m });
+    }
+    switch (tf.op) {
+        .has_tag, .has_all_tags => {
+            // Every listed bit must be set.
+            for (entries.items) |e| {
+                try w.printLine("if ((TagSet_arr[slot].bits[{d}] & 0x{x}) != 0x{x}) continue;", .{ e.word, e.mask, e.mask });
+            }
+        },
+        .has_any_tag => {
+            // At least one listed bit set → skip when none are set.
+            try w.writeIndent();
+            try w.write("if (");
+            for (entries.items, 0..) |e, idx| {
+                if (idx > 0) try w.write(" and ");
+                try w.print("(TagSet_arr[slot].bits[{d}] & 0x{x}) == 0", .{ e.word, e.mask });
+            }
+            try w.write(") continue;\n");
+        },
+        .has_no_tag, .has_no_tags => return CodegenError.UnsupportedConstruct,
+    }
 }
 
 // Dedicated lowering tests live under `src/etch/zig_codegen/tests/lower_test.zig`.

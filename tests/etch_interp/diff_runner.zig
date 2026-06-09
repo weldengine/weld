@@ -99,7 +99,7 @@ pub const ResourceCheck = struct {
 
 /// Runner interface — `Runner` must declare:
 ///   pub fn setup(gpa: std.mem.Allocator, world: *World, name: []const u8, source: []const u8) !Runner;
-///   pub fn step(self: *Runner, world: *World) !void;
+///   pub fn step(self: *Runner, gpa: std.mem.Allocator, world: *World) !void;
 ///   pub fn finalize(self: *Runner, gpa: std.mem.Allocator, world: *World) void;
 ///
 /// The S5 codegen runner uses `name` to dispatch into the pre-compiled
@@ -131,7 +131,7 @@ pub fn runProgram(
 
     var t: u32 = 0;
     while (t < config.ticks) : (t += 1) {
-        try runner.step(&world);
+        try runner.step(gpa, &world);
     }
 
     try verifyEntities(name, &world, expected.entities);

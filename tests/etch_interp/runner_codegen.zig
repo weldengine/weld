@@ -8,7 +8,7 @@
 //!
 //! Implements the same `Runner` contract as `runner_interp.zig`:
 //!   pub fn setup(gpa, world, name, source) !Runner
-//!   pub fn step(self, world) !void
+//!   pub fn step(self, gpa, world) !void
 //!   pub fn finalize(self, gpa, world) void
 
 const std = @import("std");
@@ -42,8 +42,8 @@ pub const Runner = struct {
         return .{ .program = program };
     }
 
-    pub fn step(self: *Runner, world: *World) !void {
-        self.program.tick(world);
+    pub fn step(self: *Runner, gpa: std.mem.Allocator, world: *World) !void {
+        self.program.tick(world, gpa);
     }
 
     pub fn finalize(self: *Runner, gpa: std.mem.Allocator, world: *World) void {

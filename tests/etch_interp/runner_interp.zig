@@ -2,7 +2,7 @@
 //!
 //! Implements the `Runner` contract consumed by `diff_runner.zig`:
 //!   pub fn setup(gpa, world, source) !Runner
-//!   pub fn step(self: *Runner, world) !void
+//!   pub fn step(self: *Runner, gpa, world) !void
 //!   pub fn finalize(self: *Runner, gpa, world) void
 
 const std = @import("std");
@@ -61,7 +61,11 @@ pub const Runner = struct {
         return .{ .ast = ast_box, .interp = interp, .report = .{} };
     }
 
-    pub fn step(self: *Runner, world: *World) !void {
+    pub fn step(self: *Runner, gpa: std.mem.Allocator, world: *World) !void {
+        // The interpreter owns its own gpa (stored at compile time); the
+        // harness gpa is part of the shared `step(gpa, world)` contract with
+        // the codegen runner (which threads it into `tick`) but unused here.
+        _ = gpa;
         try self.interp.stepOnce(world, &self.report);
         world.tickBoundary();
     }
