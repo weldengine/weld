@@ -987,10 +987,13 @@ pub const TraitDecl = struct {
 };
 
 /// One field initializer of a struct literal (`IDENT ":" expression`,
-/// `etch-grammar.md` §3.2 l.490). The spread form `.. expression` (data-table
-/// inheritance, E4) is out of M0.8 scope.
+/// `etch-grammar.md` §3.2 l.490). The spread form `".." expression` (§3.2
+/// l.491, data-table inheritance) lands with E4 and is encoded as
+/// `name == 0` with `value` holding the spread expression; it is parsed in
+/// data-entry bodies only (general struct literals keep rejecting it — the
+/// E2 deferral homed at the data table, see the M0.8 brief journal).
 pub const StructLitField = struct {
-    name: StringId,
+    name: StringId, // 0 = spread entry (`..expr`)
     value: NodeId, // expr
 };
 
@@ -1004,6 +1007,34 @@ pub const StructLitExpr = struct {
     type_name: StringId,
     fields_start: u32,
     fields_len: u32,
+};
+
+/// One entry of a `data` table (M0.8 E4, `etch-grammar.md` §14:
+/// `data_entry = IDENT ":" struct_literal_body [","]`). The entry body is a
+/// `(start, len)` run of `arena.struct_lit_fields` (spread fields carry
+/// `name == 0`). `id_pascal` records that the id token was TYPE_IDENT-shaped
+/// so validation can emit `E1768 IdInvalidFormat` (ids are snake_case IDENTs)
+/// without re-lexing. `span` covers `id ... }` for entry-precise diagnostics.
+pub const DataEntry = struct {
+    id: StringId,
+    id_pascal: bool,
+    fields_start: u32, // index into `arena.struct_lit_fields`
+    fields_len: u32,
+    span: SourceSpan,
+};
+
+/// Side-slab entry for a `data` table declaration (M0.8 E4 Level B,
+/// `etch-grammar.md` §14: `data_decl = "data" TYPE_IDENT ":" TYPE_IDENT "{"
+/// {data_entry} "}"`). `entry_type` is the shared entry type (a declared
+/// `struct`); entries live in a `(start, len)` run of `arena.data_entries`.
+pub const DataDecl = struct {
+    name: StringId,
+    entry_type: StringId,
+    entry_type_span: SourceSpan,
+    entries_start: u32, // index into `arena.data_entries`
+    entries_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
 };
 
 const NamedTypeNode = struct {
@@ -1170,6 +1201,8 @@ pub const AstArena = struct {
     /// for a top-level callable. `ImplDecl` references a `(start, len)` run.
     impl_methods: std.ArrayListUnmanaged(FnDecl) = .empty,
     type_alias_decls: std.ArrayListUnmanaged(TypeAliasDecl) = .empty,
+    data_decls: std.ArrayListUnmanaged(DataDecl) = .empty,
+    data_entries: std.ArrayListUnmanaged(DataEntry) = .empty,
     rule_params: std.ArrayListUnmanaged(RuleParam) = .empty,
     fn_params: std.ArrayListUnmanaged(FnParam) = .empty,
     when_nodes: std.ArrayListUnmanaged(WhenNode) = .empty,
@@ -1302,6 +1335,8 @@ pub const AstArena = struct {
         self.trait_decls.deinit(gpa);
         self.impl_methods.deinit(gpa);
         self.type_alias_decls.deinit(gpa);
+        self.data_decls.deinit(gpa);
+        self.data_entries.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
@@ -1685,6 +1720,16 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.enum_decls.items.len);
         try self.enum_decls.append(gpa, decl);
         return try self.addItem(gpa, .enum_decl, idx, span);
+    }
+
+    /// `data Name: Type { entries }` (M0.8 E4, `etch-grammar.md` §14). The
+    /// caller appends the entries to `arena.data_entries` (and their field
+    /// runs to `arena.struct_lit_fields`) beforehand, passing the range in
+    /// `decl`.
+    pub fn addDataDecl(self: *AstArena, gpa: std.mem.Allocator, decl: DataDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.data_decls.items.len);
+        try self.data_decls.append(gpa, decl);
+        return try self.addItem(gpa, .data_decl, idx, span);
     }
 
     /// `Type { f: v, … }` struct literal (M0.8 E2 block 3). `fields` is

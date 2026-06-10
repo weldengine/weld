@@ -81,6 +81,7 @@ pub const TokenKind = enum {
     kw_has_no_tags, // tag query operator (M0.8 E3 ECS layer)
     kw_add_tag, // tag mutation (M0.8 E3 ECS layer — deferred structural change)
     kw_remove_tag, // tag mutation (M0.8 E3 ECS layer — deferred structural change)
+    kw_data, // data table declaration (M0.8 E4 Level B gameplay)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -209,6 +210,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "has_no_tags", .kind = .kw_has_no_tags },
     .{ .lexeme = "add_tag", .kind = .kw_add_tag },
     .{ .lexeme = "remove_tag", .kind = .kw_remove_tag },
+    .{ .lexeme = "data", .kind = .kw_data },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -236,7 +238,7 @@ pub const s3_keywords = [_]KeywordEntry{
 pub const non_s3_keywords = [_][]const u8{
     // ── Top-level constructs still out of scope (`fn` graduated with M0.8 E2
     //    call mechanism; `struct` / `impl` / `enum` / `trait` with E2 block 3;
-    //    `event` + `tags` with E3 ECS layer) ──
+    //    `event` + `tags` with E3 ECS layer; `data` with E4 Level B gameplay) ──
     "import",
     "const",
     "private",
@@ -254,7 +256,6 @@ pub const non_s3_keywords = [_][]const u8{
     "audio_graph",
     "audio_score",
     "sequence",
-    "data",
     "scene",
     "prefab",
     "input_mapping",

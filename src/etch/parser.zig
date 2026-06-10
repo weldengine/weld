@@ -503,7 +503,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data => return,
                 else => _ = try self.advance(),
             }
         }
@@ -531,6 +531,7 @@ pub const Parser = struct {
             .kw_trait => try self.parseTraitDecl(annotations),
             .kw_event => try self.parseEventDecl(annotations),
             .kw_tags => try self.parseTagsDecl(annotations),
+            .kw_data => try self.parseDataDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -544,7 +545,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -1422,6 +1423,99 @@ pub const Parser = struct {
             .generics_start = generics.start,
             .generics_len = generics.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse `data TYPE_IDENT ":" TYPE_IDENT "{" {data_entry} "}"` (M0.8 E4
+    /// Level B, `etch-grammar.md` §14). `data_entry = IDENT ":"
+    /// struct_literal_body [","]` — the body reuses the §3.2 `field_init`
+    /// forms INCLUDING the spread `".." expression` (l.491): the E2 spread
+    /// deferral is homed here (data-table inheritance); general struct
+    /// literals keep rejecting it. A TYPE_IDENT-shaped entry id is accepted
+    /// at parse and flagged by validation (`E1768 IdInvalidFormat`). Each
+    /// entry's fields are buffered locally and committed as a contiguous
+    /// `struct_lit_fields` run AFTER its values are parsed — a value may
+    /// itself contain a struct literal, whose nested run must not interleave
+    /// with the entry's own.
+    fn parseDataDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'data'
+        const name_tok = try self.expect(.type_ident, "expected data table name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.colon, "expected ':' between the data table name and its entry type");
+        const type_tok = try self.expect(.type_ident, "expected entry type (TYPE_IDENT) after ':'");
+        const entry_type = try self.internSlice(type_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start the data table body");
+        const entries_start: u32 = @intCast(self.arena.data_entries.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const id_tok = switch (self.peek()) {
+                .ident, .type_ident => try self.advance(),
+                else => return self.parseErr(self.peekSpan(), "expected data entry id (identifier)"),
+            };
+            const entry_id = try self.internSlice(id_tok.span);
+            _ = try self.expect(.colon, "expected ':' after the data entry id");
+            const body_close = try self.parseDataEntryBody();
+            try self.arena.data_entries.append(self.gpa, .{
+                .id = entry_id,
+                .id_pascal = id_tok.kind == .type_ident,
+                .fields_start = body_close.fields_start,
+                .fields_len = body_close.fields_len,
+                .span = .{ .byte_start = id_tok.span.byte_start, .byte_end = body_close.end_byte },
+            });
+            _ = try self.match(.comma);
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the data table body");
+        const entries_len: u32 = @as(u32, @intCast(self.arena.data_entries.items.len)) - entries_start;
+        _ = try self.arena.addDataDecl(self.gpa, .{
+            .name = name_id,
+            .entry_type = entry_type,
+            .entry_type_span = type_tok.span,
+            .entries_start = entries_start,
+            .entries_len = entries_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    const DataEntryBody = struct {
+        fields_start: u32,
+        fields_len: u32,
+        end_byte: u32,
+    };
+
+    /// Parse one data-entry `struct_literal_body` (`"{" [field_init {","
+    /// field_init} [","]] "}"`, §3.2) buffering the field initializers and
+    /// committing them as one contiguous `struct_lit_fields` run. Spread
+    /// fields (`".." expression`) are stored with `name == 0`.
+    fn parseDataEntryBody(self: *Parser) ParseError!DataEntryBody {
+        _ = try self.expect(.lbrace, "expected '{' to start the data entry body");
+        const saved = self.no_struct_lit;
+        self.no_struct_lit = false;
+        defer self.no_struct_lit = saved;
+        var temp: std.ArrayListUnmanaged(ast_mod.StructLitField) = .empty;
+        defer temp.deinit(self.gpa);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.peek() == .dotdot) {
+                _ = try self.advance(); // '..'
+                const spread_value = try self.parseExpr(0);
+                try temp.append(self.gpa, .{ .name = 0, .value = spread_value });
+            } else {
+                const fname = try self.expect(.ident, "expected field name in data entry body");
+                _ = try self.expect(.colon, "expected ':' after data entry field name");
+                const value = try self.parseExpr(0);
+                try temp.append(self.gpa, .{ .name = try self.internSlice(fname.span), .value = value });
+            }
+            if (!try self.match(.comma)) break;
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the data entry body");
+        const fields_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        try self.arena.struct_lit_fields.appendSlice(self.gpa, temp.items);
+        return .{
+            .fields_start = fields_start,
+            .fields_len = @intCast(temp.items.len),
+            .end_byte = closing.span.byte_end,
+        };
     }
 
     /// Parse `trait TYPE_IDENT "{" {trait_member} "}"` (M0.8 E2 block 3 tranche
@@ -4283,4 +4377,110 @@ test "parser: await entity_event(entity, T) parses; payload-filter body rejected
     );
     defer bad.deinit(gpa);
     try std.testing.expect(bad.diagnostics.len > 0);
+}
+
+test "parser builds a data table declaration with entries + spread (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\data ItemDatabase: Item {
+        \\  iron_sword: {
+        \\    display_name: "Iron Sword",
+        \\    value: 50,
+        \\  },
+        \\  iron_sword_enchanted: {
+        \\    ..ItemDatabase.iron_sword,
+        \\    value: 120,
+        \\  },
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.data_decls.items.len);
+    const decl = result.ast.data_decls.items[0];
+    try std.testing.expectEqualStrings("ItemDatabase", result.ast.strings.slice(decl.name));
+    try std.testing.expectEqualStrings("Item", result.ast.strings.slice(decl.entry_type));
+    try std.testing.expectEqual(@as(u32, 2), decl.entries_len);
+
+    const first = result.ast.data_entries.items[decl.entries_start];
+    try std.testing.expectEqualStrings("iron_sword", result.ast.strings.slice(first.id));
+    try std.testing.expect(!first.id_pascal);
+    try std.testing.expectEqual(@as(u32, 2), first.fields_len);
+    const f0 = result.ast.struct_lit_fields.items[first.fields_start];
+    try std.testing.expectEqualStrings("display_name", result.ast.strings.slice(f0.name));
+
+    // Second entry: a spread (`name == 0`) followed by one override field.
+    const second = result.ast.data_entries.items[decl.entries_start + 1];
+    try std.testing.expectEqualStrings("iron_sword_enchanted", result.ast.strings.slice(second.id));
+    try std.testing.expectEqual(@as(u32, 2), second.fields_len);
+    const spread = result.ast.struct_lit_fields.items[second.fields_start];
+    try std.testing.expectEqual(@as(ast_mod.StringId, 0), spread.name);
+    try std.testing.expect(!spread.value.isNone());
+    const override_field = result.ast.struct_lit_fields.items[second.fields_start + 1];
+    try std.testing.expectEqualStrings("value", result.ast.strings.slice(override_field.name));
+}
+
+test "parser keeps data entry field runs contiguous around nested struct literals (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    // The `pos` value is a struct literal whose own fields land in
+    // `struct_lit_fields` DURING the entry parse; the entry's run must stay
+    // contiguous (buffered commit), i.e. exactly [pos, hp].
+    var result = try parse(gpa,
+        \\data SpawnTable: Spawn {
+        \\  guard: { pos: Vec2 { x: 1.0, y: 2.0 }, hp: 5 },
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    const decl = result.ast.data_decls.items[0];
+    const entry = result.ast.data_entries.items[decl.entries_start];
+    try std.testing.expectEqual(@as(u32, 2), entry.fields_len);
+    const f0 = result.ast.struct_lit_fields.items[entry.fields_start];
+    const f1 = result.ast.struct_lit_fields.items[entry.fields_start + 1];
+    try std.testing.expectEqualStrings("pos", result.ast.strings.slice(f0.name));
+    try std.testing.expectEqualStrings("hp", result.ast.strings.slice(f1.name));
+}
+
+test "parser accepts a PascalCase data entry id, recorded for E1768 (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\data Foo: Bar {
+        \\  BadId: { x: 1 },
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    const decl = result.ast.data_decls.items[0];
+    const entry = result.ast.data_entries.items[decl.entries_start];
+    try std.testing.expect(entry.id_pascal);
+}
+
+test "parser rejects a data table without its entry type (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\data ItemDatabase {
+        \\  iron_sword: { value: 50 },
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 0), result.ast.data_decls.items.len);
+}
+
+test "parser recovers and a valid data after a broken construct survives (M0.8 E4 lockstep)" {
+    const gpa = std.testing.allocator;
+    // The lockstep stop-set now lists `kw_data`: a broken leading construct
+    // resyncs at the `data` that follows, which lands in the AST.
+    var result = try parse(gpa,
+        \\@@@bad
+        \\data ItemDatabase: Item { iron_sword: { value: 50 } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.data_decls.items.len);
 }
