@@ -2232,7 +2232,22 @@ pub const Interpreter = struct {
                     const av = try self.evalExpr(world, locals, arg);
                     try frame.put(self.gpa, p.name, av, false);
                 }
-                return try self.evalExpr(world, &frame, ce.body);
+                // The closure call boundary consumes `returning` (E2 forward
+                // note, executed at E3-C tranche 6): a `return` inside the
+                // body exits the CLOSURE — it becomes the call's value — never
+                // the enclosing fn. Same boundary-consume as `callFn` /
+                // `callMethod`; `thrown` and `break`/`continue` keep
+                // propagating (the enclosing try / loop interprets them) and
+                // the call yields unit.
+                const result = try self.evalExpr(world, &frame, ce.body);
+                if (self.returning) {
+                    self.returning = false;
+                    const rv = self.return_value;
+                    self.return_value = .{ .unit = {} };
+                    return rv;
+                }
+                if (self.thrown or self.control != .none) return Value{ .unit = {} };
+                return result;
             },
             .struct_lit => {
                 const sl = self.ast.struct_lits.items[data];
@@ -3275,6 +3290,60 @@ test "runProgram closure with a block body (M0.8 control flow)" {
     @memcpy(std.mem.asBytes(&out), slot[0..8]);
     // f(4): y = 5, y * 2 = 10.
     try std.testing.expectEqual(@as(i64, 10), out);
+}
+
+test "runProgram return inside a closure exits the closure only (M0.8 closures)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A `return` inside a closure block body exits the CLOSURE — it becomes
+    // the call's value — and the enclosing rule body CONTINUES (the E2
+    // forward note executed at E3-C tranche 6: the closure call boundary
+    // consumes `returning`, mirroring `callFn`/`callMethod`). Before the
+    // boundary-consume fix the signal leaked: `v` bound unit and the
+    // post-call assignment never ran (out stayed 0).
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule run(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let pick = |x: int| {
+        \\    if x > 3 {
+        \\      return 40
+        \\    }
+        \\    x
+        \\  }
+        \\  let v = pick(7)
+        \\  entity.get_mut(Acc).out = v + 2
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    // pick(7): the `return 40` exits the closure; the rule continues → 42.
+    try std.testing.expectEqual(@as(i64, 42), out);
 }
 
 test "runProgram match dispatches on literal and binding arms (M0.8 match)" {
