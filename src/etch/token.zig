@@ -84,6 +84,8 @@ pub const TokenKind = enum {
     kw_remove_tag, // tag mutation (M0.8 E3 ECS layer — deferred structural change)
     kw_data, // data table declaration (M0.8 E4 Level B gameplay)
     kw_routine, // routine declaration (M0.8 E4 Level B gameplay)
+    kw_behavior, // behavior tree declaration (M0.8 E4 Level B gameplay)
+    kw_sequence, // behavior composite type (M0.8 E4; the E6 top-level `sequence` construct stays out of scope — default top-level error)
     kw_after, // routine trigger `after Segment` (M0.8 E4; the §4.3 timer statement stays out of M0.8 — explicit parse error)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
@@ -215,6 +217,8 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "remove_tag", .kind = .kw_remove_tag },
     .{ .lexeme = "data", .kind = .kw_data },
     .{ .lexeme = "routine", .kind = .kw_routine },
+    .{ .lexeme = "behavior", .kind = .kw_behavior },
+    .{ .lexeme = "sequence", .kind = .kw_sequence },
     .{ .lexeme = "after", .kind = .kw_after },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
@@ -247,7 +251,6 @@ pub const non_s3_keywords = [_][]const u8{
     "import",
     "const",
     "private",
-    "behavior",
     "quest",
     "dialogue",
     "ability",
@@ -259,7 +262,6 @@ pub const non_s3_keywords = [_][]const u8{
     "anim_graph",
     "audio_graph",
     "audio_score",
-    "sequence",
     "scene",
     "prefab",
     "input_mapping",

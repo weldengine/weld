@@ -203,7 +203,7 @@ fn containsUppercase(s: []const u8) bool {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -313,6 +313,7 @@ pub const TypeChecker = struct {
         try tc.validateDataDecls();
         try tc.validateRoutineDecls();
         try tc.buildTags();
+        try tc.validateBehaviorDecls();
         try tc.pass2Resolve();
     }
 
@@ -682,6 +683,224 @@ pub const TypeChecker = struct {
         }
     }
 
+    // ─── Behaviors (M0.8 E4, `etch-validation-ecs.md` §8) ────────────────
+
+    /// Validate every `behavior` once all symbols are known AND the tag
+    /// table is built (composite when clauses ride the §6 machinery):
+    /// E1500 composite root, E1501 empty composites, E1502 unknown
+    /// behavior/routine references in leaf intrinsics, E1503 condition
+    /// bool, E1504 action returns void (item-3 ruling), E1505 when-clause
+    /// arms, E1506 recursion via `run_behavior` (DFS). Expressions type in
+    /// the AMBIENT behavior scope — implicit `self: Entity` + `target:
+    /// Entity` (item-5 ruling, the self/event injection pattern). An action
+    /// `let` binds for the REST OF ITS COMPOSITE (M0.8 structural
+    /// approximation; the cross-action scope is pinned by Cortex Phase 1+,
+    /// item-2 ruling).
+    fn validateBehaviorDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        // behavior name → behaviors-slab index, for the recursion DFS.
+        var index_of: std.AutoHashMapUnmanaged(StringId, u32) = .empty;
+        defer index_of.deinit(self.gpa);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .behavior_decl) continue;
+            try index_of.put(self.gpa, self.arena.behavior_decls.items[datas[i]].name, datas[i]);
+        }
+        // `run_behavior` edges: edge list per behavior-slab index.
+        var edges: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer edges.deinit(self.gpa);
+        i = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .behavior_decl) continue;
+            const decl = self.arena.behavior_decls.items[datas[i]];
+            var ctx: RuleCtx = .{};
+            defer ctx.deinit(self.gpa);
+            const entity_t: ResolvedType = .{ .builtin = .entity };
+            if (self.arena.strings.find("self")) |self_id| try ctx.locals.put(self.gpa, self_id, .{ .type_ = entity_t, .is_mut = false });
+            if (self.arena.strings.find("target")) |target_id| try ctx.locals.put(self.gpa, target_id, .{ .type_ = entity_t, .is_mut = false });
+            const root = self.arena.bt_nodes.items[decl.root];
+            if (root.kind != .selector and root.kind != .sequence) {
+                try self.emit(.behavior_root_missing, .error_, root.span, "behavior '{s}' must have a composite root (selector or sequence)", .{self.arena.strings.slice(decl.name)});
+            }
+            try self.validateBTNode(decl.root, datas[i], &ctx, &index_of, &edges);
+        }
+        // E1506 — any cycle in the run_behavior graph (validation-ecs §8.3:
+        // every recursion is rejected, direct or transitive).
+        var visiting: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        defer visiting.deinit(self.gpa);
+        var done: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        defer done.deinit(self.gpa);
+        i = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .behavior_decl) continue;
+            try self.behaviorCycleDfs(datas[i], &edges, &visiting, &done);
+        }
+    }
+
+    fn behaviorCycleDfs(self: *TypeChecker, b: u32, edges: *const std.AutoHashMapUnmanaged(u64, void), visiting: *std.AutoHashMapUnmanaged(u32, void), done: *std.AutoHashMapUnmanaged(u32, void)) !void {
+        if (done.contains(b)) return;
+        if (visiting.contains(b)) {
+            const decl = self.arena.behavior_decls.items[b];
+            const span = self.arena.bt_nodes.items[decl.root].span;
+            try self.emit(.behavior_recursion, .error_, span, "behavior '{s}' references itself (directly or transitively via run_behavior)", .{self.arena.strings.slice(decl.name)});
+            return;
+        }
+        try visiting.put(self.gpa, b, {});
+        const n: u32 = @intCast(self.arena.behavior_decls.items.len);
+        var to: u32 = 0;
+        while (to < n) : (to += 1) {
+            if (edges.contains((@as(u64, b) << 32) | to)) {
+                try self.behaviorCycleDfs(to, edges, visiting, done);
+            }
+        }
+        _ = visiting.remove(b);
+        try done.put(self.gpa, b, {});
+    }
+
+    fn validateBTNode(self: *TypeChecker, node_idx: u32, behavior_idx: u32, ctx: *RuleCtx, index_of: *const std.AutoHashMapUnmanaged(StringId, u32), edges: *std.AutoHashMapUnmanaged(u64, void)) (TypeError || error{OutOfMemory})!void {
+        const node = self.arena.bt_nodes.items[node_idx];
+        switch (node.kind) {
+            .selector, .sequence => {
+                if (node.children_len == 0) {
+                    try self.emit(.behavior_empty_composite, .error_, node.span, "a composite must have at least one child", .{});
+                }
+                if (node.when_root != ast_mod.RuleDecl.none_when) {
+                    // The composite `when` rides the §6 machinery: structured
+                    // arms validate as in rules; bool-arm violations surface
+                    // as E1211/E0200 from `collectWhen` — the construct-level
+                    // E1505 wraps a when clause whose ARMS are unknown kinds
+                    // is parse-impossible, so E1505 fires on the bare-expr
+                    // arm typing below via the dedicated path.
+                    try self.collectWhenBehavior(ctx, node.when_root);
+                }
+                // Action `let` bindings scope to the rest of THIS composite:
+                // snapshot the locals and restore at exit.
+                var added: std.ArrayListUnmanaged(StringId) = .empty;
+                defer added.deinit(self.gpa);
+                var c: u32 = 0;
+                while (c < node.children_len) : (c += 1) {
+                    const child_idx = self.arena.extra.items[node.children_start + c];
+                    const child = self.arena.bt_nodes.items[child_idx];
+                    try self.validateBTNode(child_idx, behavior_idx, ctx, index_of, edges);
+                    // An action `let` child binds for the following siblings.
+                    if (child.kind == .action and child.payload_is_stmt and self.arena.stmtKind(child.payload) == .let_stmt) {
+                        const let = self.arena.let_stmts.items[self.arena.stmtData(child.payload)];
+                        try added.append(self.gpa, let.name);
+                    }
+                }
+                for (added.items) |name| _ = ctx.locals.remove(name);
+            },
+            .condition => {
+                const t = try self.synthExprE(node.payload, ctx);
+                if (t != .unknown and !(t == .builtin and t.builtin == .bool_)) {
+                    try self.emit(.behavior_condition_not_bool, .error_, node.span, "a behavior condition must be a bool expression", .{});
+                }
+            },
+            .action => {
+                if (node.payload_is_stmt) {
+                    // `let` / `emit` action (item-2 PATCHED forms): the
+                    // regular statement checks validate the binding value /
+                    // the event structurally. The `let` name joins the
+                    // composite scope at the parent (sibling visibility).
+                    try self.checkStmt(ctx, node.payload);
+                    return;
+                }
+                // Cortex intrinsics: `run_behavior(B)` / `run_routine(R)` —
+                // the referenced symbol must exist with the right kind
+                // (E1502); the call is void by definition. `run_behavior`
+                // records a recursion edge.
+                if (try self.btIntrinsicAction(node, behavior_idx, index_of, edges)) return;
+                const t = try self.synthExprE(node.payload, ctx);
+                // Item-3 ruling: actions return void. A free-fn call to a
+                // declared fn must have no return type; other expression
+                // shapes that type non-void are rejected. (Method-call
+                // actions: the declared-return check is bounded to free fns
+                // — recorded.)
+                if (self.arena.exprKind(node.payload) == .fn_call) {
+                    const call = self.arena.call_exprs.items[self.arena.exprData(node.payload)];
+                    if (self.arena.exprKind(call.callee) == .ident) {
+                        if (self.symbols.get(self.arena.exprData(call.callee))) |sym| {
+                            if (sym.kind == .fn_) {
+                                const fdecl = self.arena.fn_decls.items[self.arena.itemData(sym.item_id)];
+                                if (!fdecl.return_type.isNone()) {
+                                    try self.emit(.behavior_action_invalid_return, .error_, node.span, "a behavior action must call a void fn (item-3 ruling)", .{});
+                                }
+                                return;
+                            }
+                        }
+                    }
+                } else if (t != .unknown) {
+                    try self.emit(.behavior_action_invalid_return, .error_, node.span, "a behavior action must be a void call, a 'let' binding, or an 'emit' (got a value expression)", .{});
+                }
+            },
+        }
+    }
+
+    /// Recognize and validate a Cortex intrinsic action (`run_behavior` /
+    /// `run_routine`, M0.8 E4): the single argument must name a declared
+    /// behavior / routine (E1502 BehaviorInvalidLeaf otherwise — the
+    /// "unknown identifier referenced by a leaf"). Returns true when the
+    /// payload was an intrinsic (normal synth skipped — Cortex owns the
+    /// runtime signature, Phase 1+).
+    fn btIntrinsicAction(self: *TypeChecker, node: ast_mod.BTNode, behavior_idx: u32, index_of: *const std.AutoHashMapUnmanaged(StringId, u32), edges: *std.AutoHashMapUnmanaged(u64, void)) !bool {
+        if (self.arena.exprKind(node.payload) != .fn_call) return false;
+        const call = self.arena.call_exprs.items[self.arena.exprData(node.payload)];
+        if (self.arena.exprKind(call.callee) != .ident) return false;
+        const callee = self.arena.strings.slice(self.arena.exprData(call.callee));
+        const is_behavior = std.mem.eql(u8, callee, "run_behavior");
+        const is_routine = std.mem.eql(u8, callee, "run_routine");
+        if (!is_behavior and !is_routine) return false;
+        if (call.args_len != 1 or call.names_start != ast_mod.no_arg_names) {
+            try self.emit(.behavior_invalid_leaf, .error_, node.span, "'{s}' takes exactly one positional argument (the referenced declaration)", .{callee});
+            return true;
+        }
+        const arg: NodeId = @bitCast(self.arena.extra.items[call.args_start]);
+        if (self.arena.exprKind(arg) != .path and self.arena.exprKind(arg) != .ident) {
+            try self.emit(.behavior_invalid_leaf, .error_, node.span, "'{s}' argument must name a declared {s}", .{ callee, if (is_behavior) "behavior" else "routine" });
+            return true;
+        }
+        const ref_name: StringId = self.arena.exprData(arg);
+        const sym = self.symbols.get(ref_name) orelse {
+            try self.emit(.behavior_invalid_leaf, .error_, node.span, "'{s}' references unknown {s} '{s}'", .{ callee, if (is_behavior) "behavior" else "routine", self.arena.strings.slice(ref_name) });
+            return true;
+        };
+        if (is_behavior) {
+            if (sym.kind != .behavior_) {
+                try self.emit(.behavior_invalid_leaf, .error_, node.span, "'run_behavior' target '{s}' is not a behavior", .{self.arena.strings.slice(ref_name)});
+                return true;
+            }
+            if (index_of.get(ref_name)) |to| {
+                try edges.put(self.gpa, (@as(u64, behavior_idx) << 32) | to, {});
+            }
+        } else if (sym.kind != .routine_) {
+            try self.emit(.behavior_invalid_leaf, .error_, node.span, "'run_routine' target '{s}' is not a routine", .{self.arena.strings.slice(ref_name)});
+            return true;
+        }
+        return true;
+    }
+
+    /// `collectWhen` specialization for behavior composites (M0.8 E4): the
+    /// same §6 arm checks, with the bare-expression arm's non-bool case
+    /// reported as the construct code E1505 (the rule path reports E0200).
+    fn collectWhenBehavior(self: *TypeChecker, ctx: *RuleCtx, idx: u32) !void {
+        const node = self.arena.when_nodes.items[idx];
+        switch (node.kind) {
+            .logical_and, .logical_or => {
+                try self.collectWhenBehavior(ctx, node.lhs);
+                try self.collectWhenBehavior(ctx, node.rhs);
+            },
+            .logical_not => try self.collectWhenBehavior(ctx, node.lhs),
+            .expr_cond => {
+                const t = try self.synthExprE(node.filter_value, ctx);
+                if (t != .unknown and !(t == .builtin and t.builtin == .bool_)) {
+                    try self.emit(.behavior_when_clause_not_bool, .error_, node.span, "a composite when clause must be a bool expression", .{});
+                }
+            },
+            else => try self.collectWhen(ctx, idx),
+        }
+    }
+
     // ─── Pass 1 ──────────────────────────────────────────────────────────
 
     fn pass1Collect(self: *TypeChecker) !void {
@@ -789,6 +1008,15 @@ pub const TypeChecker = struct {
                     const decl = self.arena.data_decls.items[data];
                     try self.registerSymbol(.data_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .data);
+                },
+                .behavior_decl => {
+                    // A `behavior` (M0.8 E4 Level B) registers its name; the
+                    // tree (root shape, composites, leaves, when clauses,
+                    // recursion) is validated in `validateBehaviorDecls` once
+                    // all symbols are known.
+                    const decl = self.arena.behavior_decls.items[data];
+                    try self.registerSymbol(.behavior_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .behavior);
                 },
                 .routine_decl => {
                     // A `routine` (M0.8 E4 Level B) registers its name; the
@@ -5934,4 +6162,122 @@ test "named args: closure and builtin callees are an M0.8 bound, E0203 (M0.8 E4)
         if (d.code == .arg_count_mismatch) count += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "behavior: canonical tree with ambient self/target checks clean (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\component Health {
+        \\  current: float = 100.0
+        \\  max: float = 100.0
+        \\}
+        \\event Fled { who: int }
+        \\fn find_cover(threat: Entity) -> int { 1 }
+        \\fn move_to(spot: int) { }
+        \\fn attack_melee(threat: Entity) { }
+        \\routine IdleDaily {
+        \\  segment Idle {
+        \\    trigger: at 06:00
+        \\    actions: move_to(0)
+        \\    until: at 22:00
+        \\  }
+        \\}
+        \\behavior Patrol {
+        \\  sequence {
+        \\    action: run_routine(IdleDaily)
+        \\  }
+        \\}
+        \\behavior CombatBehavior {
+        \\  selector {
+        \\    sequence when self has Health { current < max * 0.2 } {
+        \\      action: let cover = find_cover(target)
+        \\      action: move_to(cover)
+        \\      action: emit Fled { who: 1 }
+        \\    }
+        \\    condition: self.get(Health).current > 0.0
+        \\    action: attack_melee(target)
+        \\    action: run_behavior(Patrol)
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
+}
+
+test "behavior: E1500/E1501/E1503/E1504/E1505 structural codes (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var leaf_root = try parseAndCheck(gpa,
+        \\fn f() { }
+        \\behavior B { action: f() }
+    );
+    defer leaf_root.deinit(gpa);
+    try expectAnyCode(leaf_root.diagnostics.items, .behavior_root_missing);
+
+    var empty = try parseAndCheck(gpa,
+        \\behavior B { selector { } }
+    );
+    defer empty.deinit(gpa);
+    try expectAnyCode(empty.diagnostics.items, .behavior_empty_composite);
+
+    var bad = try parseAndCheck(gpa,
+        \\component Health { current: float = 0.0 }
+        \\fn scored() -> int { 1 }
+        \\behavior B {
+        \\  selector when self.get(Health).current + 1.0 {
+        \\    condition: self.get(Health).current + 1.0
+        \\    action: scored()
+        \\    action: 42
+        \\  }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .behavior_when_clause_not_bool);
+    try expectAnyCode(bad.diagnostics.items, .behavior_condition_not_bool);
+    var e1504: usize = 0;
+    for (bad.diagnostics.items) |d| {
+        if (d.code == .behavior_action_invalid_return) e1504 += 1;
+    }
+    // `scored()` (non-void fn) and `42` (value expression).
+    try std.testing.expectEqual(@as(usize, 2), e1504);
+}
+
+test "behavior: E1502 unknown intrinsic targets + E1506 recursion (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var unknown = try parseAndCheck(gpa,
+        \\behavior B {
+        \\  selector {
+        \\    action: run_behavior(Missing)
+        \\    action: run_routine(AlsoMissing)
+        \\  }
+        \\}
+    );
+    defer unknown.deinit(gpa);
+    var e1502: usize = 0;
+    for (unknown.diagnostics.items) |d| {
+        if (d.code == .behavior_invalid_leaf) e1502 += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), e1502);
+
+    var cyclic = try parseAndCheck(gpa,
+        \\behavior A {
+        \\  selector { action: run_behavior(B) }
+        \\}
+        \\behavior B {
+        \\  selector { action: run_behavior(A) }
+        \\}
+    );
+    defer cyclic.deinit(gpa);
+    try expectAnyCode(cyclic.diagnostics.items, .behavior_recursion);
+
+    var acyclic = try parseAndCheck(gpa,
+        \\behavior Leaf {
+        \\  selector { condition: true }
+        \\}
+        \\behavior Root {
+        \\  selector { action: run_behavior(Leaf) }
+        \\}
+    );
+    defer acyclic.deinit(gpa);
+    try expectNoCode(acyclic.diagnostics.items, .behavior_recursion);
 }

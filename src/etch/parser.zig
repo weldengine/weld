@@ -503,7 +503,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior => return,
                 else => _ = try self.advance(),
             }
         }
@@ -533,6 +533,7 @@ pub const Parser = struct {
             .kw_tags => try self.parseTagsDecl(annotations),
             .kw_data => try self.parseDataDecl(annotations),
             .kw_routine => try self.parseRoutineDecl(annotations),
+            .kw_behavior => try self.parseBehaviorDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -546,7 +547,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -1573,6 +1574,107 @@ pub const Parser = struct {
             .annotations_extra = annotations.start,
             .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse `behavior TYPE_IDENT "{" bt_node "}"` (M0.8 E4 Level B,
+    /// `etch-grammar.md` §8.1 PATCHED). The root accepts a leaf (`bt_leaf =
+    /// bt_condition | bt_action`, item-1 ruling) — `E1500` enforces the
+    /// composite root at validation. `selector` / `condition` / `action`
+    /// are contextual identifiers (the S3 sub-construct doctrine);
+    /// `sequence` is the graduated `kw_sequence` (it doubles as the E6
+    /// top-level construct keyword, which stays out of scope via the
+    /// default top-level error).
+    fn parseBehaviorDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'behavior'
+        const name_tok = try self.expect(.type_ident, "expected behavior name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start behavior body");
+        const root = try self.parseBTNode();
+        const closing = try self.expect(.rbrace, "expected '}' to close behavior body");
+        _ = try self.arena.addBehaviorDecl(self.gpa, .{
+            .name = name_id,
+            .root = root,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse one §8.1 `bt_node` (composite or leaf), returning its
+    /// `arena.bt_nodes` index. Composite children are buffered and
+    /// committed as a contiguous `arena.extra` run (child parses interleave
+    /// the pool otherwise).
+    fn parseBTNode(self: *Parser) ParseError!u32 {
+        if (self.peek() == .kw_sequence) return try self.parseBTComposite(.sequence);
+        if (self.peek() == .ident) {
+            const head = self.sliceOf(self.peekSpan());
+            if (std.mem.eql(u8, head, "selector")) return try self.parseBTComposite(.selector);
+            if (std.mem.eql(u8, head, "condition")) return try self.parseBTLeaf(.condition);
+            if (std.mem.eql(u8, head, "action")) return try self.parseBTLeaf(.action);
+        }
+        return self.parseErrFmt(self.peekSpan(), "expected a behavior node ('selector' | 'sequence' | 'condition:' | 'action:'), got '{s}'", .{self.sliceOf(self.peekSpan())});
+    }
+
+    fn parseBTComposite(self: *Parser, kind: ast_mod.BTNodeKind) ParseError!u32 {
+        const kw = try self.advance(); // 'selector' / 'sequence'
+        var when_root: u32 = ast_mod.RuleDecl.none_when;
+        if (self.peek() == .kw_when) {
+            _ = try self.advance(); // 'when'
+            when_root = try self.parseWhenExpr();
+        }
+        _ = try self.expect(.lbrace, "expected '{' to start composite children");
+        var children: std.ArrayListUnmanaged(u32) = .empty;
+        defer children.deinit(self.gpa);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            try children.append(self.gpa, try self.parseBTNode());
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close composite children");
+        const children_start: u32 = @intCast(self.arena.extra.items.len);
+        try self.arena.extra.appendSlice(self.gpa, children.items);
+        const idx: u32 = @intCast(self.arena.bt_nodes.items.len);
+        try self.arena.bt_nodes.append(self.gpa, .{
+            .kind = kind,
+            .when_root = when_root,
+            .children_start = children_start,
+            .children_len = @intCast(children.items.len),
+            .payload = NodeId.none,
+            .payload_is_stmt = false,
+            .span = .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end },
+        });
+        return idx;
+    }
+
+    /// Parse a §8.1 leaf: `condition: expression` or `action: ( let_stmt |
+    /// expression | emit_stmt )` (the item-2 PATCHED action forms — an
+    /// action `let` binds for later actions, scope pinned by Cortex
+    /// Phase 1+).
+    fn parseBTLeaf(self: *Parser, kind: ast_mod.BTNodeKind) ParseError!u32 {
+        const kw = try self.advance(); // 'condition' / 'action'
+        _ = try self.expect(.colon, "expected ':' after the behavior leaf keyword");
+        var payload: NodeId = undefined;
+        var payload_is_stmt = false;
+        if (kind == .action and self.peek() == .kw_let) {
+            payload = try self.parseLetStmt();
+            payload_is_stmt = true;
+        } else if (kind == .action and self.peek() == .kw_emit) {
+            payload = try self.parseEmitStmt();
+            payload_is_stmt = true;
+        } else {
+            payload = try self.parseExpr(0);
+        }
+        const payload_span = if (payload_is_stmt) self.arena.stmtSpan(payload) else self.arena.exprSpan(payload);
+        const idx: u32 = @intCast(self.arena.bt_nodes.items.len);
+        try self.arena.bt_nodes.append(self.gpa, .{
+            .kind = kind,
+            .when_root = ast_mod.RuleDecl.none_when,
+            .children_start = 0,
+            .children_len = 0,
+            .payload = payload,
+            .payload_is_stmt = payload_is_stmt,
+            .span = .{ .byte_start = kw.span.byte_start, .byte_end = payload_span.byte_end },
+        });
+        return idx;
     }
 
     /// Parse one `segment IDENT { trigger: … actions: … until: … }` (§8.2).
@@ -5014,4 +5116,70 @@ test "parser rejects a positional argument after a named one (M0.8 E4 §3.3)" {
     );
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
+}
+
+test "parser builds a behavior tree with composites, when, and leaf forms (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\behavior CombatBehavior {
+        \\  selector {
+        \\    sequence when self has Health { current < max * 0.2 } {
+        \\      action: let cover = find_cover(target)
+        \\      action: move_to(cover)
+        \\      action: emit Fled { who: 1 }
+        \\    }
+        \\    condition: self.get(Health).current > 0.0
+        \\    action: attack_melee(target)
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.behavior_decls.items.len);
+    const decl = result.ast.behavior_decls.items[0];
+    const root = result.ast.bt_nodes.items[decl.root];
+    try std.testing.expectEqual(ast_mod.BTNodeKind.selector, root.kind);
+    try std.testing.expectEqual(@as(u32, 3), root.children_len);
+    // First child: a sequence with a when clause and 3 action leaves
+    // (let / call / emit).
+    const seq = result.ast.bt_nodes.items[result.ast.extra.items[root.children_start]];
+    try std.testing.expectEqual(ast_mod.BTNodeKind.sequence, seq.kind);
+    try std.testing.expect(seq.when_root != ast_mod.RuleDecl.none_when);
+    try std.testing.expectEqual(@as(u32, 3), seq.children_len);
+    const let_action = result.ast.bt_nodes.items[result.ast.extra.items[seq.children_start]];
+    try std.testing.expect(let_action.payload_is_stmt);
+    try std.testing.expectEqual(ast_mod.StmtKind.let_stmt, result.ast.stmtKind(let_action.payload));
+    const emit_action = result.ast.bt_nodes.items[result.ast.extra.items[seq.children_start + 2]];
+    try std.testing.expect(emit_action.payload_is_stmt);
+    // Second child: a condition leaf with an expression payload.
+    const cond = result.ast.bt_nodes.items[result.ast.extra.items[root.children_start + 1]];
+    try std.testing.expectEqual(ast_mod.BTNodeKind.condition, cond.kind);
+    try std.testing.expect(!cond.payload_is_stmt);
+}
+
+test "parser accepts a leaf behavior root (E1500 is validation's call) (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\behavior JustAct {
+        \\  action: do_thing()
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    const decl = result.ast.behavior_decls.items[0];
+    try std.testing.expectEqual(ast_mod.BTNodeKind.action, result.ast.bt_nodes.items[decl.root].kind);
+}
+
+test "parser recovers and a valid behavior after a broken construct survives (M0.8 E4 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\behavior B { selector { action: f() } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.behavior_decls.items.len);
 }

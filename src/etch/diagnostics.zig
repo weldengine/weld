@@ -76,6 +76,15 @@ pub const DiagnosticCode = enum {
     resource_expected_in_when, // S3 — E1213 ResourceExpectedInWhen
     non_exhaustive_match, // M0.8 — E1230 NonExhaustiveMatch
 
+    // ── behavior (E1500-E1519, M0.8 E4 — etch-validation-ecs.md §8) ──
+    behavior_root_missing, // M0.8 E4 — E1500 BehaviorRootMissing
+    behavior_empty_composite, // M0.8 E4 — E1501 BehaviorEmptyComposite
+    behavior_invalid_leaf, // M0.8 E4 — E1502 BehaviorInvalidLeaf (unknown behavior/routine referenced by a leaf intrinsic)
+    behavior_condition_not_bool, // M0.8 E4 — E1503 BehaviorConditionNotBool
+    behavior_action_invalid_return, // M0.8 E4 — E1504 BehaviorActionInvalidReturn (void per the item-3 ruling)
+    behavior_when_clause_not_bool, // M0.8 E4 — E1505 BehaviorWhenClauseNotBool
+    behavior_recursion, // M0.8 E4 — E1506 BehaviorRecursion
+
     // ── routine (E1520-E1539, M0.8 E4 — etch-validation-ecs.md §9) ──
     routine_empty_segments, // M0.8 E4 — E1520 RoutineEmptySegments
     duplicate_segment_name, // M0.8 E4 — E1521 DuplicateSegmentName
@@ -132,6 +141,13 @@ pub const DiagnosticCode = enum {
             .unknown_tag => "E1212",
             .resource_expected_in_when => "E1213",
             .non_exhaustive_match => "E1230",
+            .behavior_root_missing => "E1500",
+            .behavior_empty_composite => "E1501",
+            .behavior_invalid_leaf => "E1502",
+            .behavior_condition_not_bool => "E1503",
+            .behavior_action_invalid_return => "E1504",
+            .behavior_when_clause_not_bool => "E1505",
+            .behavior_recursion => "E1506",
             .routine_empty_segments => "E1520",
             .duplicate_segment_name => "E1521",
             .trigger_invalid => "E1522",
@@ -187,6 +203,13 @@ pub const DiagnosticCode = enum {
             .unknown_tag => "UnknownTag",
             .resource_expected_in_when => "ResourceExpectedInWhen",
             .non_exhaustive_match => "NonExhaustiveMatch",
+            .behavior_root_missing => "BehaviorRootMissing",
+            .behavior_empty_composite => "BehaviorEmptyComposite",
+            .behavior_invalid_leaf => "BehaviorInvalidLeaf",
+            .behavior_condition_not_bool => "BehaviorConditionNotBool",
+            .behavior_action_invalid_return => "BehaviorActionInvalidReturn",
+            .behavior_when_clause_not_bool => "BehaviorWhenClauseNotBool",
+            .behavior_recursion => "BehaviorRecursion",
             .routine_empty_segments => "RoutineEmptySegments",
             .duplicate_segment_name => "DuplicateSegmentName",
             .trigger_invalid => "TriggerInvalid",

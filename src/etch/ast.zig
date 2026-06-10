@@ -1090,6 +1090,37 @@ pub const RoutineInterrupt = struct {
     span: SourceSpan,
 };
 
+/// Kind of one behavior-tree node (M0.8 E4, `etch-grammar.md` §8.1
+/// PATCHED: `bt_leaf = bt_condition | bt_action` — item-1 ruling).
+pub const BTNodeKind = enum { selector, sequence, condition, action };
+
+/// One node of a behavior tree (M0.8 E4, §8.1). Composites carry an
+/// optional when clause (`when_root`, `RuleDecl.none_when` if absent) and a
+/// children run (`arena.extra`, indices into `arena.bt_nodes`). Leaves
+/// carry a payload: `condition: expression`; `action: ( let_stmt |
+/// expression | emit_stmt )` (item-2 ruling — `payload_is_stmt` marks the
+/// statement forms). The cross-action binding scope of an action `let` is
+/// pinned by Cortex Phase 1+ (M0.8 validates the binding structurally).
+pub const BTNode = struct {
+    kind: BTNodeKind,
+    when_root: u32, // RuleDecl.none_when if absent
+    children_start: u32, // index into `arena.extra` (u32 bt_nodes indices)
+    children_len: u32,
+    payload: NodeId, // leaf condition/action; NodeId.none for composites
+    payload_is_stmt: bool,
+    span: SourceSpan,
+};
+
+/// Side-slab entry for a `behavior` declaration (M0.8 E4 Level B, §8.1).
+/// `root` indexes `arena.bt_nodes`; the parser accepts a leaf root (item-1
+/// ruling) — `E1500` enforces the composite root at validation.
+pub const BehaviorDecl = struct {
+    name: StringId,
+    root: u32, // index into `arena.bt_nodes`
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
 /// Side-slab entry for a `routine` declaration (M0.8 E4 Level B, §8.2).
 /// Segments and interrupts live in `(start, len)` runs of
 /// `arena.routine_segments` / `arena.routine_interrupts`.
@@ -1269,6 +1300,8 @@ pub const AstArena = struct {
     type_alias_decls: std.ArrayListUnmanaged(TypeAliasDecl) = .empty,
     data_decls: std.ArrayListUnmanaged(DataDecl) = .empty,
     data_entries: std.ArrayListUnmanaged(DataEntry) = .empty,
+    behavior_decls: std.ArrayListUnmanaged(BehaviorDecl) = .empty,
+    bt_nodes: std.ArrayListUnmanaged(BTNode) = .empty,
     routine_decls: std.ArrayListUnmanaged(RoutineDecl) = .empty,
     routine_segments: std.ArrayListUnmanaged(RoutineSegment) = .empty,
     routine_triggers: std.ArrayListUnmanaged(RoutineTrigger) = .empty,
@@ -1411,6 +1444,8 @@ pub const AstArena = struct {
         self.type_alias_decls.deinit(gpa);
         self.data_decls.deinit(gpa);
         self.data_entries.deinit(gpa);
+        self.behavior_decls.deinit(gpa);
+        self.bt_nodes.deinit(gpa);
         self.routine_decls.deinit(gpa);
         self.routine_segments.deinit(gpa);
         self.routine_triggers.deinit(gpa);
@@ -1852,6 +1887,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.data_decls.items.len);
         try self.data_decls.append(gpa, decl);
         return try self.addItem(gpa, .data_decl, idx, span);
+    }
+
+    /// `behavior Name { bt_node }` (M0.8 E4, `etch-grammar.md` §8.1). The
+    /// caller appends the BT nodes to `arena.bt_nodes` beforehand, passing
+    /// the root index in `decl`.
+    pub fn addBehaviorDecl(self: *AstArena, gpa: std.mem.Allocator, decl: BehaviorDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.behavior_decls.items.len);
+        try self.behavior_decls.append(gpa, decl);
+        return try self.addItem(gpa, .behavior_decl, idx, span);
     }
 
     /// `routine Name { segments + interrupts }` (M0.8 E4, `etch-grammar.md`
