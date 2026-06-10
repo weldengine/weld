@@ -62,7 +62,44 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
         .data => |t| freeData(gpa, t),
         .routine => |r| freeRoutine(gpa, r),
         .behavior => |b| freeBehavior(gpa, b),
+        .quest => |q| freeQuest(gpa, q),
     }
+}
+
+fn freeQuest(gpa: std.mem.Allocator, q: types.Quest) void {
+    gpa.free(q.name);
+    for (q.properties) |prop| {
+        gpa.free(prop.name);
+        gpa.free(prop.value);
+    }
+    gpa.free(q.properties);
+    for (q.stages) |stage| freeQuestStage(gpa, stage);
+    gpa.free(q.stages);
+}
+
+fn freeQuestStage(gpa: std.mem.Allocator, stage: types.QuestStageDesc) void {
+    gpa.free(stage.name);
+    for (stage.elements) |elem| {
+        switch (elem) {
+            .objective => |o| {
+                gpa.free(o.modifier);
+                gpa.free(o.label);
+                gpa.free(o.value);
+            },
+            .handler => |h| {
+                gpa.free(h.kind);
+                gpa.free(h.payload);
+            },
+            .branch => |b| {
+                gpa.free(b.name);
+                gpa.free(b.when);
+                for (b.stages) |inner| freeQuestStage(gpa, inner);
+                gpa.free(b.stages);
+            },
+            .statement => |text| gpa.free(text),
+        }
+    }
+    gpa.free(stage.elements);
 }
 
 fn freeBehavior(gpa: std.mem.Allocator, b: types.Behavior) void {
@@ -127,6 +164,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .data_decl => try list.append(gpa, .{ .data = try buildData(gpa, arena, arena.data_decls.items[datas[i]]) }),
             .routine_decl => try list.append(gpa, .{ .routine = try buildRoutine(gpa, arena, arena.routine_decls.items[datas[i]]) }),
             .behavior_decl => try list.append(gpa, .{ .behavior = try buildBehavior(gpa, arena, arena.behavior_decls.items[datas[i]]) }),
+            .quest_decl => try list.append(gpa, .{ .quest = try buildQuest(gpa, arena, arena.quest_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -332,6 +370,240 @@ fn buildBTNode(gpa: std.mem.Allocator, arena: *const AstArena, node_idx: u32) Bu
             };
         },
     }
+}
+
+fn buildQuest(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.QuestDecl) BuildError!types.Quest {
+    var properties: std.ArrayListUnmanaged(types.QuestPropDesc) = .empty;
+    errdefer {
+        for (properties.items) |prop| {
+            gpa.free(prop.name);
+            gpa.free(prop.value);
+        }
+        properties.deinit(gpa);
+    }
+    var p: u32 = 0;
+    while (p < decl.properties_len) : (p += 1) {
+        const prop = arena.quest_properties.items[decl.properties_start + p];
+        const value = try renderExprAlloc(gpa, arena, prop.value);
+        errdefer gpa.free(value);
+        const name = try gpa.dupe(u8, arena.strings.slice(prop.name));
+        errdefer gpa.free(name);
+        try properties.append(gpa, .{ .name = name, .value = value });
+    }
+    var stages: std.ArrayListUnmanaged(types.QuestStageDesc) = .empty;
+    errdefer {
+        for (stages.items) |stage| freeQuestStage(gpa, stage);
+        stages.deinit(gpa);
+    }
+    var st: u32 = 0;
+    while (st < decl.stages_len) : (st += 1) {
+        try stages.append(gpa, try buildQuestStage(gpa, arena, arena.extra.items[decl.stages_start + st]));
+    }
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    return .{
+        .name = name,
+        .properties = try properties.toOwnedSlice(gpa),
+        .stages = try stages.toOwnedSlice(gpa),
+    };
+}
+
+fn buildQuestStage(gpa: std.mem.Allocator, arena: *const AstArena, stage_idx: u32) BuildError!types.QuestStageDesc {
+    const stage = arena.quest_stages.items[stage_idx];
+    var elements: std.ArrayListUnmanaged(types.QuestElementDesc) = .empty;
+    errdefer {
+        for (elements.items) |elem| {
+            switch (elem) {
+                .objective => |o| {
+                    gpa.free(o.modifier);
+                    gpa.free(o.label);
+                    gpa.free(o.value);
+                },
+                .handler => |h| {
+                    gpa.free(h.kind);
+                    gpa.free(h.payload);
+                },
+                .branch => |b| {
+                    gpa.free(b.name);
+                    gpa.free(b.when);
+                    for (b.stages) |inner| freeQuestStage(gpa, inner);
+                    gpa.free(b.stages);
+                },
+                .statement => |text| gpa.free(text),
+            }
+        }
+        elements.deinit(gpa);
+    }
+    var e: u32 = 0;
+    while (e < stage.elems_len) : (e += 1) {
+        const elem = arena.quest_elems.items[stage.elems_start + e];
+        switch (elem.kind) {
+            .objective => {
+                const obj = arena.quest_objectives.items[elem.index];
+                const value = try renderExprAlloc(gpa, arena, obj.value);
+                errdefer gpa.free(value);
+                const modifier = try gpa.dupe(u8, switch (obj.modifier) {
+                    .none => "",
+                    .main => "main",
+                    .optional => "optional",
+                });
+                errdefer gpa.free(modifier);
+                const label = try gpa.dupe(u8, if (obj.label == 0) "" else arena.strings.slice(obj.label));
+                errdefer gpa.free(label);
+                try elements.append(gpa, .{ .objective = .{ .modifier = modifier, .label = label, .value = value } });
+            },
+            .handler => {
+                const h = arena.quest_handlers.items[elem.index];
+                const payload = try renderQuestHandlerPayload(gpa, arena, h);
+                errdefer gpa.free(payload);
+                const kind_text = try gpa.dupe(u8, switch (h.kind) {
+                    .on_start => "on_start",
+                    .on_complete => "on_complete",
+                    .on_fail => "on_fail",
+                });
+                errdefer gpa.free(kind_text);
+                try elements.append(gpa, .{ .handler = .{ .kind = kind_text, .payload = payload } });
+            },
+            .branch => {
+                const branch = arena.quest_branches.items[elem.index];
+                const when_text = if (branch.when_root == ast_mod.RuleDecl.none_when)
+                    try gpa.dupe(u8, "")
+                else
+                    try renderWhenAlloc(gpa, arena, branch.when_root);
+                errdefer gpa.free(when_text);
+                var inner: std.ArrayListUnmanaged(types.QuestStageDesc) = .empty;
+                errdefer {
+                    for (inner.items) |st2| freeQuestStage(gpa, st2);
+                    inner.deinit(gpa);
+                }
+                var bs: u32 = 0;
+                while (bs < branch.stages_len) : (bs += 1) {
+                    try inner.append(gpa, try buildQuestStage(gpa, arena, arena.extra.items[branch.stages_start + bs]));
+                }
+                const bname = try gpa.dupe(u8, arena.strings.slice(branch.name));
+                errdefer gpa.free(bname);
+                try elements.append(gpa, .{ .branch = .{ .name = bname, .when = when_text, .stages = try inner.toOwnedSlice(gpa) } });
+            },
+            .statement => {
+                const stmt: NodeId = @bitCast(elem.index);
+                try elements.append(gpa, .{ .statement = try renderStmtAlloc(gpa, arena, stmt) });
+            },
+        }
+    }
+    const name = try gpa.dupe(u8, arena.strings.slice(stage.name));
+    return .{
+        .name = name,
+        .is_async = stage.is_async,
+        .elements = try elements.toOwnedSlice(gpa),
+    };
+}
+
+/// Render a quest handler payload (M0.8 E4): on_start/on_complete carry an
+/// emit or a block; on_fail renders `<cond> -> <action>[(branch)]`.
+pub fn renderQuestHandlerPayloadAlloc(gpa: std.mem.Allocator, arena: *const AstArena, h: ast_mod.QuestHandler) BuildError![]u8 {
+    return renderQuestHandlerPayload(gpa, arena, h);
+}
+
+fn renderQuestHandlerPayload(gpa: std.mem.Allocator, arena: *const AstArena, h: ast_mod.QuestHandler) BuildError![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(gpa);
+    if (h.kind == .on_fail) {
+        try renderExpr(gpa, arena, h.fail_cond, &buf);
+        try buf.appendSlice(gpa, " -> ");
+        try buf.appendSlice(gpa, switch (h.fail_action) {
+            .restart_stage => "restart_stage",
+            .fail_quest => "fail_quest",
+            .switch_branch => "switch_branch",
+        });
+        if (h.fail_action == .switch_branch) {
+            try buf.appendSlice(gpa, "(");
+            try buf.appendSlice(gpa, arena.strings.slice(h.fail_branch));
+            try buf.appendSlice(gpa, ")");
+        }
+        return try buf.toOwnedSlice(gpa);
+    }
+    if (h.payload_is_stmt) {
+        const text = try renderStmtAlloc(gpa, arena, h.payload);
+        buf.deinit(gpa);
+        return text;
+    }
+    try renderBlock(gpa, arena, h.payload, &buf);
+    return try buf.toOwnedSlice(gpa);
+}
+
+/// Render one statement to canonical text (M0.8 E4 — quest handler blocks
+/// and stage statements). Bounded to the script-shaped kinds (`let` /
+/// `emit` / expression / assignment); anything else fails loud.
+pub fn renderStmtAlloc(gpa: std.mem.Allocator, arena: *const AstArena, stmt: NodeId) BuildError![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(gpa);
+    try renderStmt(gpa, arena, stmt, &buf);
+    return try buf.toOwnedSlice(gpa);
+}
+
+fn renderStmt(gpa: std.mem.Allocator, arena: *const AstArena, stmt: NodeId, out: *std.ArrayListUnmanaged(u8)) BuildError!void {
+    switch (arena.stmtKind(stmt)) {
+        .let_stmt => {
+            const let = arena.let_stmts.items[arena.stmtData(stmt)];
+            try out.appendSlice(gpa, "let ");
+            if (let.is_mut) try out.appendSlice(gpa, "mut ");
+            try out.appendSlice(gpa, arena.strings.slice(let.name));
+            try out.appendSlice(gpa, " = ");
+            try renderExpr(gpa, arena, let.value, out);
+        },
+        .emit_stmt => {
+            const em = arena.emit_stmts.items[arena.stmtData(stmt)];
+            try out.appendSlice(gpa, "emit ");
+            try out.appendSlice(gpa, arena.strings.slice(em.event_type));
+            if (em.fields_len == 0) {
+                try out.appendSlice(gpa, " {}");
+            } else {
+                try out.appendSlice(gpa, " { ");
+                var f: u32 = 0;
+                while (f < em.fields_len) : (f += 1) {
+                    if (f != 0) try out.appendSlice(gpa, ", ");
+                    const field = arena.struct_lit_fields.items[em.fields_start + f];
+                    try out.appendSlice(gpa, arena.strings.slice(field.name));
+                    try out.appendSlice(gpa, ": ");
+                    try renderExpr(gpa, arena, field.value, out);
+                }
+                try out.appendSlice(gpa, " }");
+            }
+        },
+        .expr_stmt => try renderExpr(gpa, arena, @bitCast(arena.stmtData(stmt)), out),
+        .assign_stmt => {
+            const a = arena.assign_stmts.items[arena.stmtData(stmt)];
+            try renderExpr(gpa, arena, a.target, out);
+            try out.appendSlice(gpa, switch (a.op) {
+                .assign => " = ",
+                .add_assign => " += ",
+                .sub_assign => " -= ",
+                .mul_assign => " *= ",
+                .div_assign => " /= ",
+                else => return error.UnsupportedDescriptorExpr,
+            });
+            try renderExpr(gpa, arena, a.value, out);
+        },
+        else => return error.UnsupportedDescriptorExpr,
+    }
+}
+
+/// Render a block expression payload as `{ stmt; …[; value] }`.
+fn renderBlock(gpa: std.mem.Allocator, arena: *const AstArena, block: NodeId, out: *std.ArrayListUnmanaged(u8)) BuildError!void {
+    const b = arena.block_exprs.items[arena.exprData(block)];
+    try out.appendSlice(gpa, "{ ");
+    var first = true;
+    var i: u32 = 0;
+    while (i < b.body_len) : (i += 1) {
+        if (!first) try out.appendSlice(gpa, "; ");
+        first = false;
+        const stmt: NodeId = @bitCast(arena.extra.items[b.body_start + i]);
+        try renderStmt(gpa, arena, stmt, out);
+    }
+    if (!b.value.isNone()) {
+        if (!first) try out.appendSlice(gpa, "; ");
+        try renderExpr(gpa, arena, b.value, out);
+    }
+    try out.appendSlice(gpa, " }");
 }
 
 /// Render a behavior leaf payload (M0.8 E4): the item-2 PATCHED action

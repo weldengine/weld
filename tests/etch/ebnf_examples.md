@@ -845,3 +845,55 @@ behavior JustCheck {
   condition: true
 }
 ```
+
+## Quests (E4 — §8.3 PATCHED)
+
+```etch
+quest EscortMerchant {
+  display_name: "Escorting the Merchant"
+  required_level: 5
+  requires: player has_tag .quest.merchant_intro_done
+
+  stage talk_to_merchant {
+    objective main: interact_with("merchant_01")
+    on_complete: emit DialogueStart { npc: 1 }
+  }
+
+  async stage escort {
+    objective main: escort_distance("merchant_01")
+    objective optional bonus: no_combat_for(5)
+    on_fail: entity_died("merchant_01") -> fail_quest
+
+    branch ambush_branch when player has Health { current < 10.0 } {
+      stage defeat_bandits {
+        objective: kill_count(5)
+      }
+    }
+  }
+
+  stage return_back {
+    objective main: interact_with("quest_giver")
+    on_complete: {
+      reward_xp(500)
+      reward_gold(100)
+    }
+  }
+}
+```
+
+The on_fail action set and switch_branch:
+
+```etch
+quest TimedTrial {
+  stage trial {
+    objective main: survive_for(60)
+    on_fail: out_of_time() -> restart_stage
+    on_fail: gave_up() -> switch_branch(easy_path)
+    branch easy_path {
+      stage easy {
+        objective main: survive_for(30)
+      }
+    }
+  }
+}
+```

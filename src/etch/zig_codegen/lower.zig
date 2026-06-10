@@ -1460,36 +1460,64 @@ fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenErr
         try w.line("_ = __err;");
     }
 
-    // An EMPTY fn body leaves every param unused (Level-B stub fns, M0.8
-    // E4 — first occurrence in the cooked corpus): discard them so the
-    // generated file compiles. Non-empty bodies keep Zig's unused-param
-    // check (a real unused param in real code should stay loud).
-    if (decl.body_len == 0 and decl.value.isNone()) {
-        p_i = 0;
-        while (p_i < decl.params_len) : (p_i += 1) {
-            const p = ast.fn_params.items[decl.params_start + p_i];
+    // Pre-render the body into a scratch buffer (the established two-pass
+    // pattern), then discard any param the rendered body never mentions —
+    // Level-B stub fns (M0.8 E4) commonly take params they ignore, and Zig
+    // rejects both an unused param and a pointless discard, so the test
+    // must be exact on the EMITTED text (word-boundary scan).
+    var body_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer body_buf.deinit(w.gpa);
+    var body_w = Writer.init(w.gpa, &body_buf);
+    body_w.indent = w.indent;
+    body_w.arena_used = w.arena_used;
+    var s: u32 = 0;
+    while (s < decl.body_len) : (s += 1) {
+        try emitStmt(&body_w, ast, &ctx, @bitCast(ast.extra.items[decl.body_start + s]));
+    }
+    // Trailing block value = implicit return.
+    if (!decl.value.isNone()) {
+        try body_w.writeIndent();
+        try body_w.write("return ");
+        try emitExpr(&body_w, ast, &ctx, decl.value);
+        try body_w.write(";\n");
+    }
+    w.arena_used = body_w.arena_used;
+    p_i = 0;
+    while (p_i < decl.params_len) : (p_i += 1) {
+        const p = ast.fn_params.items[decl.params_start + p_i];
+        if (!mentionsWord(body_buf.items, ast.strings.slice(p.name))) {
             try w.writeIndent();
             try w.write("_ = ");
             try w.ident(ast.strings.slice(p.name));
             try w.write(";\n");
         }
     }
-
-    var s: u32 = 0;
-    while (s < decl.body_len) : (s += 1) {
-        try emitStmt(w, ast, &ctx, @bitCast(ast.extra.items[decl.body_start + s]));
-    }
-    // Trailing block value = implicit return.
-    if (!decl.value.isNone()) {
-        try w.writeIndent();
-        try w.write("return ");
-        try emitExpr(w, ast, &ctx, decl.value);
-        try w.write(";\n");
-    }
+    try w.write(body_buf.items);
 
     w.indentBy(-1);
     try w.writeIndent();
     try w.write("}\n\n");
+}
+
+/// Whether `text` contains `word` as a whole identifier (boundaries are
+/// non-identifier bytes). Drives the stub-fn param discards — a false
+/// positive (the word inside a string/field) merely skips a discard and
+/// surfaces as Zig's loud unused-param error, never silent breakage.
+fn mentionsWord(text: []const u8, word: []const u8) bool {
+    if (word.len == 0) return false;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, text, i, word)) |at| {
+        const before_ok = at == 0 or !isIdentByte(text[at - 1]);
+        const after = at + word.len;
+        const after_ok = after >= text.len or !isIdentByte(text[after]);
+        if (before_ok and after_ok) return true;
+        i = at + 1;
+    }
+    return false;
+}
+
+fn isIdentByte(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
 }
 
 /// Whether a `fn` body (statement run + trailing value expression) can raise
@@ -4882,7 +4910,7 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// `true` when the program declares at least one Level-B construct with a
 /// descriptor (M0.8 E4: `data`, `routine`).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4902,6 +4930,7 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .data_decl => try emitDataDescriptor(w, gpa, ast, ast.data_decls.items[datas[i]]),
             .routine_decl => try emitRoutineDescriptor(w, gpa, ast, ast.routine_decls.items[datas[i]]),
             .behavior_decl => try emitBehaviorDescriptor(w, gpa, ast, ast.behavior_decls.items[datas[i]]),
+            .quest_decl => try emitQuestDescriptor(w, gpa, ast, ast.quest_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -5028,6 +5057,123 @@ fn emitBTNodeLiteral(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, n
         try emitBTNodeLiteral(w, gpa, ast, ast.extra.items[node.children_start + c]);
     }
     try w.write("} }");
+}
+
+fn emitQuestDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.QuestDecl) CodegenError!void {
+    try w.print("    .{{ .quest = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.line(", .properties = &[_]etch_descriptor.QuestPropDesc{");
+    var p: u32 = 0;
+    while (p < decl.properties_len) : (p += 1) {
+        const prop = ast.quest_properties.items[decl.properties_start + p];
+        const value = try renderDescExpr(gpa, ast, prop.value);
+        defer gpa.free(value);
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(prop.name));
+        try w.print(", .value = ", .{});
+        try emitZigStringLiteral(w, value);
+        try w.line(" },");
+    }
+    try w.line("    }, .stages = &[_]etch_descriptor.QuestStageDesc{");
+    var st: u32 = 0;
+    while (st < decl.stages_len) : (st += 1) {
+        try w.write("        ");
+        try emitQuestStageLiteral(w, gpa, ast, ast.extra.items[decl.stages_start + st]);
+        try w.line(",");
+    }
+    try w.line("    } } },");
+}
+
+/// Emit one quest stage as a `QuestStageDesc` literal (recursive through
+/// branches; the codegen's OWN walk, texts via the SHARED renderers).
+fn emitQuestStageLiteral(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, stage_idx: u32) CodegenError!void {
+    const stage = ast.quest_stages.items[stage_idx];
+    try w.print(".{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(stage.name));
+    try w.print(", .is_async = {}, .elements = &[_]etch_descriptor.QuestElementDesc{{", .{stage.is_async});
+    var e: u32 = 0;
+    while (e < stage.elems_len) : (e += 1) {
+        if (e != 0) try w.write(", ");
+        const elem = ast.quest_elems.items[stage.elems_start + e];
+        switch (elem.kind) {
+            .objective => {
+                const obj = ast.quest_objectives.items[elem.index];
+                const value = try renderDescExpr(gpa, ast, obj.value);
+                defer gpa.free(value);
+                try w.write(".{ .objective = .{ .modifier = ");
+                try emitZigStringLiteral(w, switch (obj.modifier) {
+                    .none => "",
+                    .main => "main",
+                    .optional => "optional",
+                });
+                try w.write(", .label = ");
+                try emitZigStringLiteral(w, if (obj.label == 0) "" else ast.strings.slice(obj.label));
+                try w.write(", .value = ");
+                try emitZigStringLiteral(w, value);
+                try w.write(" } }");
+            },
+            .handler => {
+                const h = ast.quest_handlers.items[elem.index];
+                const payload = descriptor_mod.renderQuestHandlerPayloadAlloc(gpa, ast, h) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+                };
+                defer gpa.free(payload);
+                try w.write(".{ .handler = .{ .kind = ");
+                try emitZigStringLiteral(w, switch (h.kind) {
+                    .on_start => "on_start",
+                    .on_complete => "on_complete",
+                    .on_fail => "on_fail",
+                });
+                try w.write(", .payload = ");
+                try emitZigStringLiteral(w, payload);
+                try w.write(" } }");
+            },
+            .branch => {
+                const branch = ast.quest_branches.items[elem.index];
+                try w.write(".{ .branch = .{ .name = ");
+                try emitZigStringLiteral(w, ast.strings.slice(branch.name));
+                try w.write(", .when = ");
+                if (branch.when_root == ast_mod.RuleDecl.none_when) {
+                    try w.write("\"\"");
+                } else {
+                    const when_text = descriptor_mod.renderWhenAlloc(gpa, ast, branch.when_root) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+                    };
+                    defer gpa.free(when_text);
+                    try emitZigStringLiteral(w, when_text);
+                }
+                try w.write(", .stages = &[_]etch_descriptor.QuestStageDesc{");
+                var bs: u32 = 0;
+                while (bs < branch.stages_len) : (bs += 1) {
+                    if (bs != 0) try w.write(", ");
+                    try emitQuestStageLiteral(w, gpa, ast, ast.extra.items[branch.stages_start + bs]);
+                }
+                try w.write("} } }");
+            },
+            .statement => {
+                const stmt: ast_mod.NodeId = @bitCast(elem.index);
+                const text = descriptor_mod.renderStmtAlloc(gpa, ast, stmt) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+                };
+                defer gpa.free(text);
+                try w.write(".{ .statement = ");
+                try emitZigStringLiteral(w, text);
+                try w.write(" }");
+            },
+        }
+    }
+    try w.write("} }");
+}
+
+/// Render an expression via the shared renderer, mapping the error set.
+fn renderDescExpr(gpa: std.mem.Allocator, ast: *const AstArena, id: ast_mod.NodeId) CodegenError![]u8 {
+    return descriptor_mod.renderExprAlloc(gpa, ast, id) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+    };
 }
 
 fn emitTriggerRun(w: *Writer, ast: *const AstArena, start: u32, len: u32) CodegenError!void {

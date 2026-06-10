@@ -97,6 +97,56 @@ pub const Behavior = struct {
     root: BehaviorNode,
 };
 
+/// One quest property (`name = rendered value`).
+pub const QuestPropDesc = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// One quest objective (modifier/label may be empty).
+pub const QuestObjectiveDesc = struct {
+    modifier: []const u8,
+    label: []const u8,
+    value: []const u8,
+};
+
+/// One quest handler. `payload` is the canonical text: an emit / a block
+/// for on_start/on_complete, `<cond> -> <action>[(branch)]` for on_fail.
+pub const QuestHandlerDesc = struct {
+    kind: []const u8,
+    payload: []const u8,
+};
+
+/// One quest branch — recursive stages.
+pub const QuestBranchDesc = struct {
+    name: []const u8,
+    when: []const u8,
+    stages: []const QuestStageDesc,
+};
+
+/// One stage element, DECLARATION ORDER preserved across kinds.
+pub const QuestElementDesc = union(enum) {
+    objective: QuestObjectiveDesc,
+    handler: QuestHandlerDesc,
+    branch: QuestBranchDesc,
+    statement: []const u8,
+};
+
+/// One `[async] stage` with its ordered elements.
+pub const QuestStageDesc = struct {
+    name: []const u8,
+    is_async: bool,
+    elements: []const QuestElementDesc,
+};
+
+/// `quest` descriptor (`etch-ast-ir.md` §3.5 — handlers live per stage in
+/// the PATCHED §8.3 grammar; the §3.5 principal shape is indicative).
+pub const Quest = struct {
+    name: []const u8,
+    properties: []const QuestPropDesc,
+    stages: []const QuestStageDesc,
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -104,6 +154,7 @@ pub const Descriptor = union(enum) {
     data: Data,
     routine: Routine,
     behavior: Behavior,
+    quest: Quest,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -111,6 +162,7 @@ pub const Descriptor = union(enum) {
             .data => |d| try writeData(d, gpa, out),
             .routine => |r| try writeRoutine(r, gpa, out),
             .behavior => |b| try writeBehavior(b, gpa, out),
+            .quest => |q| try writeQuest(q, gpa, out),
         }
     }
 };
@@ -196,6 +248,98 @@ fn writeBTNode(node: BehaviorNode, depth: u32, gpa: std.mem.Allocator, out: *std
         .condition => try appendFmt(gpa, out, "condition {s}\n", .{node.payload}),
         .action => try appendFmt(gpa, out, "action {s}\n", .{node.payload}),
     }
+}
+
+/// Canonical serialization of one `quest` descriptor (stages recurse
+/// through branches).
+pub fn writeQuest(q: Quest, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "quest {s} {{\n", .{q.name});
+    for (q.properties) |prop| {
+        try appendFmt(gpa, out, "  property {s} = {s}\n", .{ prop.name, prop.value });
+    }
+    for (q.stages) |stage| {
+        try writeQuestStage(stage, 1, gpa, out);
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+fn writeIndent(depth: u32, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    var d: u32 = 0;
+    while (d < depth) : (d += 1) try out.appendSlice(gpa, "  ");
+}
+
+fn writeQuestStage(stage: QuestStageDesc, depth: u32, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try writeIndent(depth, gpa, out);
+    try appendFmt(gpa, out, "stage {s}{s} {{\n", .{ stage.name, if (stage.is_async) " async" else "" });
+    for (stage.elements) |elem| {
+        switch (elem) {
+            .objective => |o| {
+                try writeIndent(depth + 1, gpa, out);
+                try out.appendSlice(gpa, "objective");
+                if (o.modifier.len != 0) try appendFmt(gpa, out, " {s}", .{o.modifier});
+                if (o.label.len != 0) try appendFmt(gpa, out, " {s}", .{o.label});
+                try appendFmt(gpa, out, ": {s}\n", .{o.value});
+            },
+            .handler => |h| {
+                try writeIndent(depth + 1, gpa, out);
+                try appendFmt(gpa, out, "{s}: {s}\n", .{ h.kind, h.payload });
+            },
+            .branch => |b| {
+                try writeIndent(depth + 1, gpa, out);
+                try out.appendSlice(gpa, "branch ");
+                try out.appendSlice(gpa, b.name);
+                if (b.when.len != 0) try appendFmt(gpa, out, " when {s}", .{b.when});
+                try out.appendSlice(gpa, " {\n");
+                for (b.stages) |inner| {
+                    try writeQuestStage(inner, depth + 2, gpa, out);
+                }
+                try writeIndent(depth + 1, gpa, out);
+                try out.appendSlice(gpa, "}\n");
+            },
+            .statement => |text| {
+                try writeIndent(depth + 1, gpa, out);
+                try appendFmt(gpa, out, "statement {s}\n", .{text});
+            },
+        }
+    }
+    try writeIndent(depth, gpa, out);
+    try out.appendSlice(gpa, "}\n");
+}
+
+test "writeQuest canonical form is stable" {
+    const gpa = std.testing.allocator;
+    const q: Quest = .{
+        .name = "Escort",
+        .properties = &.{
+            .{ .name = "required_level", .value = "5" },
+        },
+        .stages = &.{
+            .{ .name = "talk", .is_async = false, .elements = &.{
+                .{ .objective = .{ .modifier = "main", .label = "", .value = "interact_with(\"m\")" } },
+                .{ .handler = .{ .kind = "on_fail", .payload = "died() -> fail_quest" } },
+                .{ .branch = .{ .name = "alt", .when = "true", .stages = &.{
+                    .{ .name = "inner", .is_async = true, .elements = &.{} },
+                } } },
+            } },
+        },
+    };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try writeQuest(q, gpa, &out);
+    try std.testing.expectEqualStrings(
+        \\quest Escort {
+        \\  property required_level = 5
+        \\  stage talk {
+        \\    objective main: interact_with("m")
+        \\    on_fail: died() -> fail_quest
+        \\    branch alt when true {
+        \\      stage inner async {
+        \\      }
+        \\    }
+        \\  }
+        \\}
+        \\
+    , out.items);
 }
 
 test "writeBehavior canonical form is stable" {
