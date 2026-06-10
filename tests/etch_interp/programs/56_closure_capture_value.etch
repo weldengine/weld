@@ -1,0 +1,12 @@
+component CapAcc {
+  out: int = 0
+}
+
+rule capture_by_value(entity: Entity)
+  when entity has CapAcc
+{
+  let mut factor = 40
+  let scale = |x: int| x + factor
+  factor = 100
+  entity.get_mut(CapAcc).out = scale(2)
+}

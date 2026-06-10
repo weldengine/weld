@@ -72,4 +72,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p53_set_ops", .etch_path = "tests/etch_interp/programs/53_set_ops.etch" },
     .{ .name = "p54_mut_self_method", .etch_path = "tests/etch_interp/programs/54_mut_self_method.etch" },
     .{ .name = "p55_anon_struct_literal", .etch_path = "tests/etch_interp/programs/55_anon_struct_literal.etch" },
+    .{ .name = "p56_closure_capture_value", .etch_path = "tests/etch_interp/programs/56_closure_capture_value.etch" },
 };

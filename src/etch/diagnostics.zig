@@ -43,6 +43,7 @@ pub const DiagnosticCode = enum {
     conditional_impl_condition_not_proven, // M0.8 — E0215 ConditionalImplConditionNotProven
     orphan_impl, // M0.8 — E0217 OrphanImpl
     immutable_receiver_for_mut_self, // M0.8 — E0220 ImmutableReceiverForMutSelfMethod
+    closure_cannot_mutate_capture, // M0.8 — E0221 ClosureCannotMutateCapture
 
     // ── ECS access errors (E0300-E0399) ──
     resource_expected_component_given, // M0.8 — E0301 ResourceExpectedComponentGiven
@@ -88,6 +89,7 @@ pub const DiagnosticCode = enum {
             .conditional_impl_condition_not_proven => "E0215",
             .orphan_impl => "E0217",
             .immutable_receiver_for_mut_self => "E0220",
+            .closure_cannot_mutate_capture => "E0221",
             .resource_expected_component_given => "E0301",
             .component_expected_resource_given => "E0302",
             .annotation_misapplied => "E0502",
@@ -123,6 +125,7 @@ pub const DiagnosticCode = enum {
             .conditional_impl_condition_not_proven => "ConditionalImplConditionNotProven",
             .orphan_impl => "OrphanImpl",
             .immutable_receiver_for_mut_self => "ImmutableReceiverForMutSelfMethod",
+            .closure_cannot_mutate_capture => "ClosureCannotMutateCapture",
             .resource_expected_component_given => "ResourceExpectedComponentGiven",
             .component_expected_resource_given => "ComponentExpectedResourceGiven",
             .annotation_misapplied => "AnnotationMisapplied",

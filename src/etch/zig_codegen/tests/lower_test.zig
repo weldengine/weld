@@ -616,3 +616,71 @@ test "lowers anonymous struct literals to qualified Zig literals from the expect
     if (tree.errors.len != 0) std.debug.print("generated zig parse errors:\n{s}\n", .{out.items});
     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
 }
+
+test "lowers capturing closures to struct-with-fields, snapshot at creation (M0.8 E3-C tranche 6)" {
+    const gpa = std.testing.allocator;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let mut factor = 40
+        \\  let scale = |x: int| x + factor
+        \\  let double = |x: int| x * 2
+        \\  factor = 100
+        \\  entity.get_mut(Acc).n = scale(2) + double(0)
+        \\}
+    , &out);
+    // The capturing closure is an INSTANCE of a struct-with-fields: the
+    // captured value is copied at creation (before `factor = 100`), and the
+    // body reads it through the `__self` receiver — by-value capture at the
+    // interpreter's exact logical point (its locals snapshot).
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "struct { factor: i64, fn call(__self: @This(), x: i64) i64 { return ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "__self.factor") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "}{ .factor = factor };") != null);
+    // The capture-free closure keeps the bare TYPE shape (namespace call) —
+    // byte-identical to the E1 emission.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "struct { fn call(x: i64) i64 { return ") != null);
+
+    // The generated Zig is syntactically valid (Zig's own parser).
+    const z = try gpa.dupeZ(u8, out.items);
+    defer gpa.free(z);
+    var tree = try std.zig.Ast.parse(gpa, z, .zig);
+    defer tree.deinit(gpa);
+    if (tree.errors.len != 0) std.debug.print("generated zig parse errors:\n{s}\n", .{out.items});
+    try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
+}
+
+test "closure captures are bounded to POD scalars: string capture fails loud (M0.8 E3-C tranche 6)" {
+    const gpa = std.testing.allocator;
+    // A string-typed capture is a §8.2 ref-capture — outside the M0.8
+    // codegen subset (interpreter reference, fail loud).
+    var pr = try parser.parse(gpa,
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let name = "weld"
+        \\  let len_of = |x: int| x + name.len()
+        \\  entity.get_mut(Acc).n = len_of(38)
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(diag.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try std.testing.expectError(
+        root.CodegenError.UnsupportedConstruct,
+        root.generateToBuffer(gpa, &pr.ast, "<test>", &out),
+    );
+}

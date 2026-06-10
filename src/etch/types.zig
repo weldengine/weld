@@ -246,6 +246,13 @@ pub const TypeChecker = struct {
     /// `buildTags` runs. Pass 2 (tag-op when-conditions / `tag_path` operands,
     /// landed in the query-operator commit) resolves paths against it.
     tag_table: ?tags_mod.TagTable = null,
+    /// Names captured by the closure body currently being typed (M0.8 E3-C
+    /// tranche 6, `etch-resolver-types.md` §8.2): the caller-scope bindings
+    /// snapshotted at `synthCall` minus the closure params. An assignment
+    /// targeting one of them is E0221 ClosureCannotMutateCapture; a body-local
+    /// `let` re-declaring a name removes it (it is body-owned from there).
+    /// `null` outside a closure body. Saved/restored around nested typing.
+    closure_captures: ?*std.AutoHashMapUnmanaged(StringId, void) = null,
 
     /// One `impl Trait for Type [when …]` (M0.8 E2 block 3 tranche C).
     /// `methods_start`/`methods_len` index `arena.impl_methods` (the
@@ -1250,6 +1257,10 @@ pub const TypeChecker = struct {
                 // component reference, so the local inherits mutability
                 // even when written `let h = ...` without `mut`.
                 const value_is_get_mut = self.arena.exprKind(let.value) == .method_get_mut;
+                // A `let` inside a closure body re-declaring a captured name
+                // owns it from there (nested-scope shadowing) — it is no
+                // longer a capture for the E0221 gate (M0.8 E3-C tranche 6).
+                if (self.closure_captures) |caps| _ = caps.remove(let.name);
                 try ctx.locals.put(self.gpa, let.name, .{ .type_ = final, .is_mut = let.is_mut or value_is_get_mut });
             },
             .assign_stmt => {
@@ -1259,7 +1270,16 @@ pub const TypeChecker = struct {
                 if (target_kind == .ident) {
                     const name_id = self.arena.exprData(assign.target);
                     if (ctx.locals.get(name_id)) |local| {
-                        if (!local.is_mut) {
+                        // E0221 (M0.8 E3-C tranche 6, resolver-types §8.2):
+                        // a closure body cannot mutate a captured binding —
+                        // captures are value snapshots in both backends. The
+                        // capture check precedes the mutability check (a
+                        // captured `let mut` is still immutable here).
+                        const is_captured = if (self.closure_captures) |caps| caps.contains(name_id) else false;
+                        if (is_captured) {
+                            const span = self.arena.exprSpan(assign.target);
+                            try self.emit(.closure_cannot_mutate_capture, .error_, span, "closure cannot mutate captured binding '{s}' (pass it as an argument or mutate through entity.get_mut)", .{self.arena.strings.slice(name_id)});
+                        } else if (!local.is_mut) {
                             const span = self.arena.exprSpan(assign.target);
                             try self.emit(.type_mismatch, .error_, span, "cannot assign to immutable binding (use 'let mut')", .{});
                         }
@@ -1913,6 +1933,15 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
         const ctx = ctx_opt orelse return ResolvedType.unknown;
+        // Snapshot the caller-scope binding names BEFORE the params bind:
+        // those are the body's potential captures (`etch-resolver-types.md`
+        // §8.1 — any body ident resolving to the parent scope). Params are
+        // excluded below; a body-local `let` removes its name at the
+        // `let_stmt` check. The set gates E0221 in the assign-stmt path.
+        var captures: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer captures.deinit(self.gpa);
+        var locals_it = ctx.locals.iterator();
+        while (locals_it.next()) |e| try captures.put(self.gpa, e.key_ptr.*, {});
         var i: u32 = 0;
         while (i < ce.params_len) : (i += 1) {
             const p = self.arena.closure_params.items[ce.params_start + i];
@@ -1925,8 +1954,12 @@ pub const TypeChecker = struct {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "closure argument type does not match the parameter type", .{});
                 }
             }
+            _ = captures.remove(p.name);
             try ctx.locals.put(self.gpa, p.name, .{ .type_ = ptype, .is_mut = false });
         }
+        const saved_captures = self.closure_captures;
+        self.closure_captures = &captures;
+        defer self.closure_captures = saved_captures;
         const ret = try self.synthExprE(ce.body, ctx_opt);
         // Remove the parameter bindings (E1 closures don't collide their params
         // with outer locals in practice; a save/restore is a later refinement).
@@ -3994,6 +4027,64 @@ test "closure call arity, return typing, and non-callable (M0.8 closures)" {
     );
     defer noncallable.deinit(gpa);
     try expectAnyCode(noncallable.diagnostics.items, .type_mismatch);
+}
+
+test "closure body cannot mutate a capture, E0221 (M0.8 E3-C tranche 6)" {
+    const gpa = std.testing.allocator;
+
+    // Mutating a captured binding inside the body → E0221, even though the
+    // source binding is `let mut` (resolver-types §8.2: captures are value
+    // snapshots; mutation through a closure is forbidden).
+    var mutate = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let mut total = 0
+        \\  let add = |x: int| {
+        \\    total = total + x
+        \\    total
+        \\  }
+        \\  entity.get_mut(C).out = add(2)
+        \\}
+    );
+    defer mutate.deinit(gpa);
+    try expectAnyCode(mutate.diagnostics.items, .closure_cannot_mutate_capture);
+
+    // A body-local `let mut` re-declaring the name owns it — mutating it is
+    // clean (nested-scope shadowing, not a capture).
+    var local_mut = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let total = 40
+        \\  let add = |x: int| {
+        \\    let mut total = 0
+        \\    total = total + x
+        \\    total
+        \\  }
+        \\  entity.get_mut(C).out = add(2) + total
+        \\}
+    );
+    defer local_mut.deinit(gpa);
+    try expectNoCode(local_mut.diagnostics.items, .closure_cannot_mutate_capture);
+
+    // READING a capture stays clean (the E1 capture path, unchanged).
+    var read_ok = try parseAndCheck(gpa,
+        \\component C { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has C
+        \\{
+        \\  let mut factor = 40
+        \\  let scale = |x: int| x + factor
+        \\  factor = 100
+        \\  entity.get_mut(C).out = scale(2)
+        \\}
+    );
+    defer read_ok.deinit(gpa);
+    try expectNoCode(read_ok.diagnostics.items, .closure_cannot_mutate_capture);
+    try expectNoCode(read_ok.diagnostics.items, .type_mismatch);
 }
 
 test "free-function call arity, arg, and return typing (M0.8 E2)" {

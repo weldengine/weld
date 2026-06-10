@@ -2106,6 +2106,10 @@ fn emitRuleBodyQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, i
 const LocalKind = enum {
     value,
     component_alias,
+    /// A closure capture (M0.8 E3-C tranche 6): an outer binding snapshotted
+    /// into a field of the generated closure struct. Inside the closure's
+    /// `call` fn body the ident emits as `__self.<name>`.
+    capture,
 };
 
 const LocalInfo = struct {
@@ -3032,6 +3036,13 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             if (ctx.lookup(name_id)) |local| {
                 switch (local.kind) {
                     .value => try w.ident(ast.strings.slice(name_id)),
+                    .capture => {
+                        // A captured outer binding reads through the closure
+                        // struct's receiver (M0.8 E3-C tranche 6) — the value
+                        // snapshotted at creation, not the live outer local.
+                        try w.write("__self.");
+                        try w.ident(ast.strings.slice(name_id));
+                    },
                     .component_alias => try emitComponentSlot(w, ctx, local.component_name),
                 }
             } else {
@@ -3132,22 +3143,53 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         },
         .closure => {
             // `|a| body` → an anonymous `struct { fn call(params) ret { return
-            // body; } }` (M0.8 closures). E1 codegen handles capture-free
-            // closures; a capturing closure is deferred (struct-with-fields
-            // lowering) and the interpreter is its reference execution.
+            // body; } }` (M0.8 closures). A CAPTURING closure (E3-C tranche 6)
+            // lowers to struct-with-fields: the captured outer values are
+            // snapshotted into the instance AT CREATION — the same logical
+            // point as the interpreter's locals snapshot (§5.6 value capture)
+            // — and the body reads them through the `__self` receiver. The
+            // capture-free form stays the bare TYPE (namespace call); both
+            // shapes serve `callee.call(args)` at the call site. A block body
+            // is deferred (lifted with the block-body tranche-6 stage).
             const ce = ast.closure_exprs.items[data];
-            if (closureHasCaptures(ast, ce)) return CodegenError.UnsupportedConstruct;
+            var captures: std.ArrayListUnmanaged(Capture) = .empty;
+            defer captures.deinit(w.gpa);
+            try collectClosureCaptures(w.gpa, ast, ctx, ce, &captures);
+            if (ast.exprKind(ce.body) == .block_expr) return CodegenError.UnsupportedConstruct;
             const saved = ctx.records.items.len;
             var i: u32 = 0;
             while (i < ce.params_len) : (i += 1) {
                 const p = ast.closure_params.items[ce.params_start + i];
                 try ctx.records.append(w.gpa, .{ .key = .{ .name = p.name }, .info = .{ .kind = .value, .zig_type = closureParamZigType(ast, p), .is_mut = false } });
             }
+            for (captures.items) |c| {
+                try ctx.records.append(w.gpa, .{ .key = .{ .name = c.name }, .info = .{ .kind = .capture, .zig_type = c.zig_type, .is_mut = false } });
+            }
             const ret_zig = inferExprZigType(ast, ctx, ce.body);
-            try w.write("struct { fn call(");
+            // A body whose Zig type is not inferable would emit a void fn
+            // returning a value — fail loud instead (interpreter reference).
+            if (ret_zig.len == 0) return CodegenError.UnsupportedConstruct;
+            // The closure's `call` fn is a NEW fn boundary: the enclosing
+            // try label / frame arena are not in scope inside it.
+            const saved_try = ctx.try_label;
+            const saved_arena = ctx.arena_param;
+            ctx.try_label = null;
+            ctx.arena_param = null;
+            try w.write("struct { ");
+            for (captures.items) |c| {
+                try w.ident(ast.strings.slice(c.name));
+                try w.print(": {s}, ", .{c.zig_type});
+            }
+            try w.write("fn call(");
+            var first = true;
+            if (captures.items.len > 0) {
+                try w.write("__self: @This()");
+                first = false;
+            }
             i = 0;
             while (i < ce.params_len) : (i += 1) {
-                if (i > 0) try w.write(", ");
+                if (!first) try w.write(", ");
+                first = false;
                 const p = ast.closure_params.items[ce.params_start + i];
                 try w.ident(ast.strings.slice(p.name));
                 try w.print(": {s}", .{closureParamZigType(ast, p)});
@@ -3155,7 +3197,22 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             try w.print(") {s} {{ return ", .{ret_zig});
             try emitExpr(w, ast, ctx, ce.body);
             try w.write("; } }");
+            ctx.try_label = saved_try;
+            ctx.arena_param = saved_arena;
             ctx.records.items.len = saved;
+            // Instantiate with the CURRENT outer values (the records are
+            // restored first, so each name resolves to the outer binding).
+            if (captures.items.len > 0) {
+                try w.write("{ ");
+                for (captures.items, 0..) |c, c_i| {
+                    if (c_i > 0) try w.write(", ");
+                    try w.write(".");
+                    try w.ident(ast.strings.slice(c.name));
+                    try w.write(" = ");
+                    try w.ident(ast.strings.slice(c.name));
+                }
+                try w.write(" }");
+            }
         },
         .fn_call => {
             // Two callee shapes (M0.8 E2). A callee that is an ident not bound
@@ -3811,36 +3868,210 @@ fn closureParamZigType(ast: *const AstArena, p: ast_mod.ClosureParam) []const u8
     return type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(tnode.name))) orelse "i64";
 }
 
-/// True if a closure body references any identifier that is not one of its
-/// parameters — i.e. it captures an outer binding (M0.8 closures). E1 codegen
-/// only handles capture-free closures; a capturing closure is deferred (the
-/// struct-with-fields lowering) and runs through the interpreter instead.
-fn closureHasCaptures(ast: *const AstArena, ce: ast_mod.ClosureExpr) bool {
-    return exprReferencesNonParam(ast, ce.body, ce);
+/// One captured outer binding of a closure (M0.8 E3-C tranche 6): the Etch
+/// name doubles as the generated closure struct's field name; `zig_type` is
+/// the binding's recorded scalar Zig type.
+const Capture = struct { name: StringId, zig_type: []const u8 };
+
+/// True for the POD scalar Zig types a closure may capture (M0.8 E3-C
+/// tranche 6) — the `etch-resolver-types.md` §8.2 value-by-copy rows the
+/// M0.8 codegen subset records concretely. Strings / collections are
+/// ref-captures per §8.2 and stay deferred (interpreter reference).
+fn isCapturableZigType(t: []const u8) bool {
+    return std.mem.eql(u8, t, "i64") or std.mem.eql(u8, t, "f64") or std.mem.eql(u8, t, "bool");
 }
 
-fn exprReferencesNonParam(ast: *const AstArena, expr: NodeId, ce: ast_mod.ClosureExpr) bool {
-    const kind = ast.exprKind(expr);
+/// Collect the outer bindings a closure body references, in first-reference
+/// order — the generated struct's field order, stable per program (M0.8
+/// E3-C tranche 6). `bound` tracks the names the body itself binds (params,
+/// body-local `let`s, loop vars, catch bindings); the set is flat
+/// (post-resolver, Etch forbids same-scope shadowing — a nested-scope
+/// shadow that escapes its block was already resolver-rejected, and an
+/// exotic miss surfaces as an undeclared identifier at `zig build`, never a
+/// silent divergence). Captures are bounded to POD scalar value locals; a
+/// body reference to any other outer binding (component alias, string /
+/// collection handle, struct, closure) fails loud — interpreter reference.
+fn collectClosureCaptures(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    ctx: *const LocalCtx,
+    ce: ast_mod.ClosureExpr,
+    out: *std.ArrayListUnmanaged(Capture),
+) CodegenError!void {
+    var bound: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+    defer bound.deinit(gpa);
+    var i: u32 = 0;
+    while (i < ce.params_len) : (i += 1) {
+        try bound.put(gpa, ast.closure_params.items[ce.params_start + i].name, {});
+    }
+    try collectCapturesExpr(gpa, ast, ctx, &bound, out, ce.body);
+}
+
+fn collectCapturesExpr(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    ctx: *const LocalCtx,
+    bound: *std.AutoHashMapUnmanaged(StringId, void),
+    out: *std.ArrayListUnmanaged(Capture),
+    expr: NodeId,
+) CodegenError!void {
     const data = ast.exprData(expr);
-    switch (kind) {
-        .int_lit, .float_lit, .bool_lit, .string_lit, .tag_path => return false,
+    switch (ast.exprKind(expr)) {
+        .int_lit, .float_lit, .bool_lit, .string_lit, .tag_path, .none_lit => {},
         .ident => {
             const name: StringId = data;
-            var i: u32 = 0;
-            while (i < ce.params_len) : (i += 1) {
-                if (ast.closure_params.items[ce.params_start + i].name == name) return false;
+            if (bound.contains(name)) return;
+            // An unknown name is a top-level fn (free-call callee) — not a
+            // capture; a plain undefined ident was resolver-rejected.
+            const local = ctx.lookup(name) orelse return;
+            if (local.kind != .value or !isCapturableZigType(local.zig_type)) {
+                return CodegenError.UnsupportedConstruct;
             }
-            return true;
+            for (out.items) |c| {
+                if (c.name == name) return;
+            }
+            try out.append(gpa, .{ .name = name, .zig_type = local.zig_type });
         },
         .binary => {
             const b = ast.binary_exprs.items[data];
-            return exprReferencesNonParam(ast, b.lhs, ce) or exprReferencesNonParam(ast, b.rhs, ce);
+            try collectCapturesExpr(gpa, ast, ctx, bound, out, b.lhs);
+            try collectCapturesExpr(gpa, ast, ctx, bound, out, b.rhs);
         },
-        .unary => return exprReferencesNonParam(ast, ast.unary_exprs.items[data].operand, ce),
-        .cast => return exprReferencesNonParam(ast, ast.casts.items[data].operand, ce),
-        // Any other body shape (field access, calls, collections, …) is
-        // conservatively treated as capturing → deferred codegen.
-        else => return true,
+        .unary => try collectCapturesExpr(gpa, ast, ctx, bound, out, ast.unary_exprs.items[data].operand),
+        .cast => try collectCapturesExpr(gpa, ast, ctx, bound, out, ast.casts.items[data].operand),
+        .some_lit => try collectCapturesExpr(gpa, ast, ctx, bound, out, @bitCast(data)),
+        .fn_call => {
+            const call = ast.call_exprs.items[data];
+            try collectCapturesExpr(gpa, ast, ctx, bound, out, call.callee);
+            var i: u32 = 0;
+            while (i < call.args_len) : (i += 1) {
+                try collectCapturesExpr(gpa, ast, ctx, bound, out, @bitCast(ast.extra.items[call.args_start + i]));
+            }
+        },
+        .method_call => {
+            const mc = ast.method_calls.items[data];
+            if (ast.exprKind(mc.receiver) != .path) try collectCapturesExpr(gpa, ast, ctx, bound, out, mc.receiver);
+            var i: u32 = 0;
+            while (i < mc.args_len) : (i += 1) {
+                try collectCapturesExpr(gpa, ast, ctx, bound, out, @bitCast(ast.extra.items[mc.args_start + i]));
+            }
+        },
+        .field_access => try collectCapturesExpr(gpa, ast, ctx, bound, out, ast.field_accesses.items[data].receiver),
+        .index => {
+            const ix = ast.index_exprs.items[data];
+            try collectCapturesExpr(gpa, ast, ctx, bound, out, ix.receiver);
+            try collectCapturesExpr(gpa, ast, ctx, bound, out, ix.index);
+        },
+        .range => {
+            const r = ast.ranges.items[data];
+            try collectCapturesExpr(gpa, ast, ctx, bound, out, r.start);
+            try collectCapturesExpr(gpa, ast, ctx, bound, out, r.end);
+        },
+        .struct_lit => {
+            const sl = ast.struct_lits.items[data];
+            var i: u32 = 0;
+            while (i < sl.fields_len) : (i += 1) {
+                try collectCapturesExpr(gpa, ast, ctx, bound, out, ast.struct_lit_fields.items[sl.fields_start + i].value);
+            }
+        },
+        .array_lit => {
+            const al = ast.array_lits.items[data];
+            var i: u32 = 0;
+            while (i < al.elements_len) : (i += 1) {
+                try collectCapturesExpr(gpa, ast, ctx, bound, out, @bitCast(ast.extra.items[al.elements_start + i]));
+            }
+            if (al.is_fill) try collectCapturesExpr(gpa, ast, ctx, bound, out, al.fill_count);
+        },
+        .string_interp => {
+            const si = ast.string_interps.items[data];
+            var i: u32 = 0;
+            while (i < si.n_exprs) : (i += 1) {
+                try collectCapturesExpr(gpa, ast, ctx, bound, out, @bitCast(ast.extra.items[si.exprs_start + i]));
+            }
+        },
+        .if_expr => {
+            const ife = ast.if_exprs.items[data];
+            try collectCapturesExpr(gpa, ast, ctx, bound, out, ife.cond);
+            if (ife.let_binding != 0) try bound.put(gpa, ife.let_binding, {});
+            try collectCapturesExpr(gpa, ast, ctx, bound, out, ife.then_block);
+            if (!ife.else_branch.isNone()) try collectCapturesExpr(gpa, ast, ctx, bound, out, ife.else_branch);
+        },
+        .block_expr => {
+            const blk = ast.block_exprs.items[data];
+            try collectCapturesStmtRun(gpa, ast, ctx, bound, out, blk.body_start, blk.body_len);
+            if (!blk.value.isNone()) try collectCapturesExpr(gpa, ast, ctx, bound, out, blk.value);
+        },
+        .loop_expr => {
+            const lp = ast.loop_exprs.items[data];
+            try collectCapturesStmtRun(gpa, ast, ctx, bound, out, lp.body_start, lp.body_len);
+        },
+        // Match arms (pattern bindings), nested closures, ECS accessors
+        // (`entity.get` — cross-fn world machinery) and anything else inside
+        // a closure body stay deferred: fail loud, interpreter reference.
+        else => return CodegenError.UnsupportedConstruct,
+    }
+}
+
+fn collectCapturesStmtRun(
+    gpa: std.mem.Allocator,
+    ast: *const AstArena,
+    ctx: *const LocalCtx,
+    bound: *std.AutoHashMapUnmanaged(StringId, void),
+    out: *std.ArrayListUnmanaged(Capture),
+    start: u32,
+    len: u32,
+) CodegenError!void {
+    var s: u32 = 0;
+    while (s < len) : (s += 1) {
+        const stmt_id: NodeId = @bitCast(ast.extra.items[start + s]);
+        const data = ast.stmtData(stmt_id);
+        switch (ast.stmtKind(stmt_id)) {
+            .let_stmt => {
+                const let = ast.let_stmts.items[data];
+                try collectCapturesExpr(gpa, ast, ctx, bound, out, let.value);
+                try bound.put(gpa, let.name, {});
+            },
+            .assign_stmt => {
+                const a = ast.assign_stmts.items[data];
+                try collectCapturesExpr(gpa, ast, ctx, bound, out, a.target);
+                try collectCapturesExpr(gpa, ast, ctx, bound, out, a.value);
+            },
+            .expr_stmt => try collectCapturesExpr(gpa, ast, ctx, bound, out, @bitCast(data)),
+            .return_stmt => {
+                const value: NodeId = @bitCast(data);
+                if (!value.isNone()) try collectCapturesExpr(gpa, ast, ctx, bound, out, value);
+            },
+            .throw_stmt => try collectCapturesExpr(gpa, ast, ctx, bound, out, ast.throw_stmts.items[data].value),
+            .assert_stmt => try collectCapturesExpr(gpa, ast, ctx, bound, out, ast.assert_stmts.items[data].cond),
+            .break_stmt => {
+                const b = ast.break_stmts.items[data];
+                if (!b.value.isNone()) try collectCapturesExpr(gpa, ast, ctx, bound, out, b.value);
+            },
+            .continue_stmt => {},
+            .while_stmt => {
+                const wh = ast.while_stmts.items[data];
+                if (wh.let_binding != 0) try bound.put(gpa, wh.let_binding, {});
+                try collectCapturesExpr(gpa, ast, ctx, bound, out, wh.cond);
+                try collectCapturesStmtRun(gpa, ast, ctx, bound, out, wh.body_start, wh.body_len);
+            },
+            .for_stmt => {
+                const f = ast.for_stmts.items[data];
+                try collectCapturesExpr(gpa, ast, ctx, bound, out, f.iterable);
+                try bound.put(gpa, f.var_name, {});
+                if (f.index_name != 0) try bound.put(gpa, f.index_name, {});
+                try collectCapturesStmtRun(gpa, ast, ctx, bound, out, f.body_start, f.body_len);
+            },
+            .try_catch_stmt => {
+                const tc = ast.try_catch_stmts.items[data];
+                try collectCapturesStmtRun(gpa, ast, ctx, bound, out, tc.try_start, tc.try_len);
+                try bound.put(gpa, tc.catch_name, {});
+                try collectCapturesStmtRun(gpa, ast, ctx, bound, out, tc.catch_start, tc.catch_len);
+            },
+            // `emit` inside a closure body needs the rule fn's `world`
+            // param — cross-fn; deferred (interpreter reference), as is any
+            // statement kind not listed.
+            else => return CodegenError.UnsupportedConstruct,
+        }
     }
 }
 
