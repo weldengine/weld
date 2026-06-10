@@ -1527,6 +1527,15 @@ pub const TypeChecker = struct {
             },
             .field_access => {
                 const fa = self.arena.field_accesses.items[data];
+                // `recv?.field` (M0.8 E3-C tranche 4): optional payloads are
+                // builtin scalars in M0.8 — they have no fields, so the
+                // chained field form has nothing to resolve against. The
+                // interpreter stays the reference for the op set delivered
+                // (`?.method`, `??`, `!`, patterns).
+                if (fa.opt_chain) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "optional-chained field access is not in the M0.8 minimal subset (scalar optional payloads have no fields)", .{});
+                    return ResolvedType.unknown;
+                }
                 // Enum value `Difficulty.hard` (M0.8 E2 block 3 tranche B): a
                 // `.path` receiver naming a declared enum + a variant field.
                 // Resolved here (a bare type is not field-accessible otherwise).
@@ -2129,6 +2138,10 @@ pub const TypeChecker = struct {
 
         // Associated-fn dispatch: the receiver is a bare type name (`.path`).
         if (self.arena.exprKind(mc.receiver) == .path) {
+            if (mc.opt_chain) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "optional chain '?.' cannot target an associated function (the receiver is a type, not an optional)", .{});
+                return ResolvedType.unknown;
+            }
             const type_name = self.arena.exprData(mc.receiver);
             const method = self.lookupMethod(type_name, mc.method_name) orelse {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no associated function '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
@@ -2141,11 +2154,31 @@ pub const TypeChecker = struct {
             return try self.checkMethodArgs(id, mc, method, ctx_opt);
         }
 
-        // Instance dispatch (`etch-resolver-types.md §5.5` strict order: inherent
-        // → trait → builtin → service). The receiver type name is the user type
-        // for a struct / component / resource, or `Entity` for a builtin entity
-        // (the conditional-trait-impl receiver).
-        const recv_t = try self.synthExprE(mc.receiver, ctx_opt);
+        const raw_t = try self.synthExprE(mc.receiver, ctx_opt);
+
+        // `recv?.method(args)` — optional chain (M0.8 E3-C tranche 4, part1
+        // §6.6): the method dispatches against the payload type and the
+        // result re-wraps in an optional (`none` short-circuits at runtime).
+        if (mc.opt_chain) {
+            if (raw_t == .unknown) return ResolvedType.unknown;
+            if (raw_t != .optional) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "optional chain '?.' requires an optional receiver", .{});
+                return ResolvedType.unknown;
+            }
+            const res = try self.dispatchMethodOnType(id, mc, .{ .builtin = raw_t.optional }, ctx_opt);
+            if (res == .builtin) return .{ .optional = res.builtin };
+            return ResolvedType.unknown;
+        }
+        return try self.dispatchMethodOnType(id, mc, raw_t, ctx_opt);
+    }
+
+    /// Dispatch an instance method call against an already-typed receiver
+    /// (`etch-resolver-types.md §5.5` strict order: inherent → trait →
+    /// builtin → service). Split from `synthMethodCall` so the optional
+    /// chain dispatches the same way on the payload type (M0.8 E3-C
+    /// tranche 4) — same logical point, both entry paths.
+    fn dispatchMethodOnType(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, recv_t: ResolvedType, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const method_slice = self.arena.strings.slice(mc.method_name);
 
         // Builtin string methods (M0.8 sub-slice C tranche 1 — minimal faithful
         // subset). `len` → int (byte length). Any other §12 String method is a
@@ -2186,6 +2219,16 @@ pub const TypeChecker = struct {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array method 'len' takes no arguments", .{});
                 }
                 return ResolvedType{ .builtin = .int_ };
+            }
+            // `pop() -> T?` (stdlib §13.2, M0.8 E3-C tranche 4): the
+            // optional-returning accessor unlocked by the Optional ops —
+            // lifts the tranche-3 rejection. `mut self` like `push`.
+            if (std.mem.eql(u8, method_slice, "pop")) {
+                if (mc.args_len != 0) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array method 'pop' takes no arguments", .{});
+                }
+                try self.checkMutCollectionReceiver(mc, ctx_opt);
+                return .{ .optional = recv_t.array_dyn };
             }
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array method '{s}' is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{method_slice});
             return ResolvedType.unknown;
@@ -2402,13 +2445,15 @@ pub const TypeChecker = struct {
                 if (idx_t == .builtin and !idx_t.builtin.isInteger()) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
                 return .{ .builtin = elem };
             },
-            .map_t => {
-                // `m[k]` returns `V?` (stdlib §14.3) — optional-returning
-                // accessors are out of the M0.8 minimal subset (M0.8 E3-C
-                // tranche 3; the Optional ops close later). Read maps through
-                // `for k, v in m` instead.
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "map index read returns an optional — not in the M0.8 minimal subset (iterate with 'for k, v in m')", .{});
-                return ResolvedType.unknown;
+            .map_t => |mi| {
+                // `m[k] -> V?` (stdlib §14.2/§14.3, M0.8 E3-C tranche 4):
+                // the optional-returning accessor unlocked by the Optional
+                // ops — lifts the tranche-3 rejection. The key must fit the
+                // map's key type.
+                if (idx_t == .builtin and !self.literalTypeFits(mi.key, ix.index, idx_t.builtin)) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "map index key type does not match the map key type", .{});
+                }
+                return .{ .optional = mi.value };
             },
             .unknown => return ResolvedType.unknown,
             else => {
@@ -2430,6 +2475,8 @@ pub const TypeChecker = struct {
         var has_catch_all = false;
         var saw_true = false;
         var saw_false = false;
+        var saw_some = false;
+        var saw_none = false;
 
         // Enum scrutinee: track covered variants for exhaustiveness (E1230,
         // `etch-resolver-types.md §12.4` — all variants ⇒ exhaustive).
@@ -2473,6 +2520,27 @@ pub const TypeChecker = struct {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "enum-variant pattern used on a non-enum scrutinee", .{});
                     }
                 },
+                // `some(v)` / `none` optional patterns (M0.8 E3-C tranche 4,
+                // part1 §7.6): the scrutinee must be an optional; `some(v)`
+                // binds the payload for its arm body (flat per-rule locals,
+                // the E1 scoping policy).
+                .optional_some => {
+                    if (scrut_t == .optional) {
+                        saw_some = true;
+                        if (ctx_opt) |ctx| {
+                            try ctx.locals.put(self.gpa, arm.pattern_payload, .{ .type_ = .{ .builtin = scrut_t.optional }, .is_mut = false });
+                        }
+                    } else if (scrut_t != .unknown) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "some(...) pattern used on a non-optional scrutinee", .{});
+                    }
+                },
+                .optional_none => {
+                    if (scrut_t == .optional) {
+                        saw_none = true;
+                    } else if (scrut_t != .unknown) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arm.body), "none pattern used on a non-optional scrutinee", .{});
+                    }
+                },
             }
             const body_t = try self.synthExprE(arm.body, ctx_opt);
             if (result_t == null) {
@@ -2484,6 +2552,9 @@ pub const TypeChecker = struct {
 
         if (!has_catch_all) {
             const bool_exhaustive = scrut_t == .builtin and scrut_t.builtin == .bool_ and saw_true and saw_false;
+            // An optional scrutinee is exhaustive iff both `some(v)` and
+            // `none` are covered (M0.8 E3-C tranche 4).
+            const optional_exhaustive = scrut_t == .optional and saw_some and saw_none;
             var enum_exhaustive = false;
             if (enum_name != null) {
                 enum_exhaustive = covered.items.len > 0;
@@ -2491,7 +2562,7 @@ pub const TypeChecker = struct {
                     if (!c) enum_exhaustive = false;
                 }
             }
-            if (!bool_exhaustive and !enum_exhaustive) {
+            if (!bool_exhaustive and !enum_exhaustive and !optional_exhaustive) {
                 try self.emit(.non_exhaustive_match, .error_, self.arena.exprSpan(id), "non-exhaustive match: add a '_' arm or cover every case", .{});
             }
         }
@@ -2553,6 +2624,21 @@ pub const TypeChecker = struct {
                 try self.emit(.type_mismatch, .error_, span, "logical operators require bool operands", .{});
                 return ResolvedType.unknown;
             },
+            .coalesce => {
+                // `expr ?? default` ≡ `expr.unwrap_or(default)` (stdlib
+                // §16.2, M0.8 E3-C tranche 4): the lhs must be an optional;
+                // the default must fit the payload type; the result is the
+                // unwrapped payload.
+                if (lhs_t == .optional) {
+                    if (rhs_t == .builtin and !self.literalTypeFits(lhs_t.optional, bin.rhs, rhs_t.builtin)) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(bin.rhs), "'??' default type does not match the optional payload type", .{});
+                    }
+                    return .{ .builtin = lhs_t.optional };
+                }
+                if (lhs_t == .unknown) return rhs_t;
+                try self.emit(.type_mismatch, .error_, span, "'??' requires an optional left operand", .{});
+                return ResolvedType.unknown;
+            },
         }
     }
 
@@ -2573,6 +2659,14 @@ pub const TypeChecker = struct {
                 if (operand_t == .builtin and operand_t.builtin == .bool_) return .{ .builtin = .bool_ };
                 if (operand_t == .unknown) return ResolvedType.unknown;
                 try self.emit(.type_mismatch, .error_, span, "'not' requires bool operand", .{});
+                return ResolvedType.unknown;
+            },
+            .force_unwrap => {
+                // `expr!` ≡ `expr.unwrap()` — panic if none (stdlib §16.2,
+                // M0.8 E3-C tranche 4).
+                if (operand_t == .optional) return .{ .builtin = operand_t.optional };
+                if (operand_t == .unknown) return ResolvedType.unknown;
+                try self.emit(.type_mismatch, .error_, span, "'!' force unwrap requires an optional operand", .{});
                 return ResolvedType.unknown;
             },
         }
@@ -4149,17 +4243,17 @@ test "type-checker accepts the minimal collection method subset (M0.8 E3-C tranc
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
 
-test "type-checker rejects out-of-subset collection methods, immutable receivers, and map index reads (M0.8 E3-C tranche 3)" {
+test "type-checker rejects out-of-subset collection methods and immutable receivers (M0.8 E3-C tranches 3-4)" {
     const gpa = std.testing.allocator;
-    // `pop` is §13.2 but optional-returning — out of the minimal subset.
-    var pop = try parseAndCheck(gpa,
+    // `remove` is §13.2 but outside the minimal subset (stdlib Phase 1+).
+    var rem = try parseAndCheck(gpa,
         \\rule r(entity: Entity) {
-        \\  let mut xs: int[] = []
-        \\  let v = xs.pop()
+        \\  let mut xs: int[] = [1, 2]
+        \\  let v = xs.remove(0)
         \\}
     );
-    defer pop.deinit(gpa);
-    try expectAnyCode(pop.diagnostics.items, .type_mismatch);
+    defer rem.deinit(gpa);
+    try expectAnyCode(rem.diagnostics.items, .type_mismatch);
 
     // `push` is `mut self` (stdlib §13.2): an immutable binding is rejected.
     var immut = try parseAndCheck(gpa,
@@ -4171,16 +4265,16 @@ test "type-checker rejects out-of-subset collection methods, immutable receivers
     defer immut.deinit(gpa);
     try expectAnyCode(immut.diagnostics.items, .immutable_receiver_for_mut_self);
 
-    // `m[k]` returns `V?` (stdlib §14.3) — optional accessors are out of
-    // the subset; maps are read through `for k, v in m`.
-    var idx = try parseAndCheck(gpa,
+    // `pop` is `mut self` too (lifted into the subset in tranche 4): an
+    // immutable receiver stays rejected.
+    var pop_immut = try parseAndCheck(gpa,
         \\rule r(entity: Entity) {
-        \\  let m = [1: 10]
-        \\  let v = m[1]
+        \\  let xs: int[] = [1]
+        \\  let v = xs.pop()
         \\}
     );
-    defer idx.deinit(gpa);
-    try expectAnyCode(idx.diagnostics.items, .type_mismatch);
+    defer pop_immut.deinit(gpa);
+    try expectAnyCode(pop_immut.diagnostics.items, .immutable_receiver_for_mut_self);
 }
 
 test "type-checker checks collection method argument types (M0.8 E3-C tranche 3)" {
@@ -4204,6 +4298,85 @@ test "type-checker checks collection method argument types (M0.8 E3-C tranche 3)
     );
     defer bad_insert.deinit(gpa);
     try expectAnyCode(bad_insert.diagnostics.items, .type_mismatch);
+}
+
+test "type-checker types the Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)" {
+    const gpa = std.testing.allocator;
+    // The full tranche-4 op surface (part1 §6.6, stdlib §16.2/§16.3):
+    // `??` unwraps to the payload, `!` force-unwraps, `?.len()` re-wraps the
+    // string-method result, `some(v)`/`none` patterns are exhaustive on an
+    // optional scrutinee, and the tranche-3 lift points type `pop() -> T?`
+    // and `m[k] -> V?`.
+    var ok = try parseAndCheck(gpa,
+        \\component Probe { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Probe
+        \\{
+        \\  let mut xs: int[] = [10, 20]
+        \\  let p = xs.pop()
+        \\  let a = p ?? -1
+        \\  let mut m = [1: 100]
+        \\  let b = m[1] ?? 0
+        \\  let c = m[1]!
+        \\  let s: string? = some("hello")
+        \\  let d = s?.len() ?? 0
+        \\  let e = match m[2] { some(x) => x + 1, none => 0 }
+        \\  entity.get_mut(Probe).n = a + b + c + d + e
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+}
+
+test "type-checker rejects misused Optional ops (M0.8 E3-C tranche 4)" {
+    const gpa = std.testing.allocator;
+    // `??` requires an optional lhs.
+    var bad_coalesce = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let x = 1 ?? 2
+        \\}
+    );
+    defer bad_coalesce.deinit(gpa);
+    try expectAnyCode(bad_coalesce.diagnostics.items, .type_mismatch);
+
+    // `!` requires an optional operand.
+    var bad_unwrap = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let x = true!
+        \\}
+    );
+    defer bad_unwrap.deinit(gpa);
+    try expectAnyCode(bad_unwrap.diagnostics.items, .type_mismatch);
+
+    // A some-only optional match is non-exhaustive (needs `none` or `_`).
+    var partial = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let m = [1: 10]
+        \\  let x = match m[1] { some(v) => v }
+        \\}
+    );
+    defer partial.deinit(gpa);
+    try expectAnyCode(partial.diagnostics.items, .non_exhaustive_match);
+
+    // `?.field` is out of the subset (scalar payloads have no fields).
+    var chain_field = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let s: string? = none
+        \\  let x = s?.foo
+        \\}
+    );
+    defer chain_field.deinit(gpa);
+    try expectAnyCode(chain_field.diagnostics.items, .type_mismatch);
+
+    // `??` default must fit the payload type.
+    var bad_default = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let m = [1: 10]
+        \\  let x = m[1] ?? true
+        \\}
+    );
+    defer bad_default.deinit(gpa);
+    try expectAnyCode(bad_default.diagnostics.items, .type_mismatch);
 }
 
 test "type-checker rejects float map keys at both gates (E0601, M0.8 E3-C tranche 4)" {

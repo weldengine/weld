@@ -107,8 +107,10 @@ pub const Lexer = struct {
                         self.pos += 1;
                         return .{ .kind = .bang_eq, .span = .{ .byte_start = start, .byte_end = self.pos } };
                     }
-                    // `!` postfix isn't in the S3 operator set — fall through to error.
-                    return .{ .kind = .error_byte, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                    // Bare `!` — the postfix force-unwrap operator (M0.8 E3-C
+                    // tranche 4, part1 §6.6). `!=` is handled above by maximal
+                    // munch, so this never splits a comparison.
+                    return .{ .kind = .bang, .span = .{ .byte_start = start, .byte_end = self.pos } };
                 },
                 '<' => return self.singleOrCompound(start, .lt, .lt_eq),
                 '>' => return self.singleOrCompound(start, .gt, .gt_eq),
@@ -138,10 +140,22 @@ pub const Lexer = struct {
                     return .{ .kind = .dot, .span = .{ .byte_start = start, .byte_end = self.pos } };
                 },
                 '@' => return self.consumeOne(.at),
-                // `?` — the optional type suffix `T?` (M0.8 E2 block 5). The
-                // `?.` (optional chain) / `??` (null coalesce) operators are
-                // deferred, so a bare `?` is always a single `question` token.
-                '?' => return self.consumeOne(.question),
+                // `?` / `?.` / `??` — the optional type suffix `T?` plus the
+                // optional-chain and null-coalesce operators (M0.8 E3-C
+                // tranche 4, part1 §6.6). Maximal munch: `?.` and `??` never
+                // appear in type positions, so the longest match is safe.
+                '?' => {
+                    self.pos += 1;
+                    if (self.pos < self.source.len and self.source[self.pos] == '.') {
+                        self.pos += 1;
+                        return .{ .kind = .question_dot, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                    }
+                    if (self.pos < self.source.len and self.source[self.pos] == '?') {
+                        self.pos += 1;
+                        return .{ .kind = .question_question, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                    }
+                    return .{ .kind = .question, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                },
                 '"' => return self.lexString(start),
                 '0'...'9' => return self.lexNumber(start),
                 'a'...'z', 'A'...'Z', '_' => return self.lexIdent(start),

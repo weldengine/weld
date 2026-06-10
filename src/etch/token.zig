@@ -125,7 +125,10 @@ pub const TokenKind = enum {
     comma,
     dot,
     at,
-    question, // ? — optional type suffix `T?` (M0.8 E2 block 5). `?.` / `??` deferred.
+    question, // ? — optional type suffix `T?` (M0.8 E2 block 5)
+    question_dot, // ?. — optional chain (M0.8 E3-C tranche 4, part1 §6.6)
+    question_question, // ?? — null coalesce (M0.8 E3-C tranche 4, part1 §6.6)
+    bang, // ! postfix — force unwrap (M0.8 E3-C tranche 4, part1 §6.6)
 
     // ── End / error ──
     eof,

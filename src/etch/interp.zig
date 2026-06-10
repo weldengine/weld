@@ -1472,6 +1472,110 @@ pub const Interpreter = struct {
         return null;
     }
 
+    /// Dispatch an instance method call on an already-evaluated receiver
+    /// value — §5.5 order: inherent / trait on user types, then the builtin
+    /// string / collection subsets. Split from the `.method_call` arm so the
+    /// optional chain `recv?.method()` dispatches the same way on the
+    /// unwrapped payload (M0.8 E3-C tranche 4) — same logical point as the
+    /// resolver's `dispatchMethodOnType` split.
+    fn dispatchMethodOnValue(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall, recv: Value) StmtError!Value {
+        switch (recv) {
+            .struct_ref => |handle| {
+                const type_name = self.structs.list.items[handle].type_name;
+                const key = methodKey(type_name, mc.method_name);
+                const method = self.methods.get(key) orelse self.trait_methods.get(key) orelse return error.RuntimeFailure;
+                return try self.callMethod(world, locals, method, mc, recv);
+            },
+            .entity_id => {
+                // Trait method on an Entity (`impl Trait for Entity`). The
+                // type key is the interned `Entity`; self is the handle.
+                const entity_name = self.ast.strings.find("Entity") orelse return error.RuntimeFailure;
+                const method = self.trait_methods.get(methodKey(entity_name, mc.method_name)) orelse return error.RuntimeFailure;
+                return try self.callMethod(world, locals, method, mc, recv);
+            },
+            .string_id, .string_run => {
+                // Builtin string methods (M0.8 sub-slice C tranche 1 —
+                // minimal faithful subset). `len` → byte length, on a
+                // literal (`string_id`) or a runtime-produced string
+                // (`string_run`, tranche 1b); any other §12 method is
+                // stdlib Phase 1+ → fail loud.
+                const mname = self.ast.strings.slice(mc.method_name);
+                if (std.mem.eql(u8, mname, "len")) {
+                    const bytes = self.stringBytes(recv) orelse return error.RuntimeFailure;
+                    return Value{ .int_ = @intCast(bytes.len) };
+                }
+                return error.RuntimeFailure;
+            },
+            .array_ref => |handle| {
+                // Builtin dynamic-array methods (M0.8 E3-C tranches 3-4 —
+                // minimal faithful subset of stdlib §13.2). `push` appends
+                // (mut receiver enforced by the resolver), `len` is the
+                // element count, `pop` removes and returns the last element
+                // as `T?` (tranche 4, unlocked by the Optional ops); any
+                // other §13 method is stdlib Phase 1+ → fail loud.
+                const mname = self.ast.strings.slice(mc.method_name);
+                if (std.mem.eql(u8, mname, "push")) {
+                    if (mc.args_len != 1) return error.RuntimeFailure;
+                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+                    const v = try self.evalExpr(world, locals, arg);
+                    // Re-index after the arg eval (a nested collection
+                    // could have grown the outer store vector).
+                    try self.collections.arrays.items[handle].append(self.gpa, v);
+                    return Value{ .unit = {} };
+                }
+                if (std.mem.eql(u8, mname, "len")) {
+                    if (mc.args_len != 0) return error.RuntimeFailure;
+                    return Value{ .int_ = @intCast(self.collections.arrays.items[handle].items.len) };
+                }
+                if (std.mem.eql(u8, mname, "pop")) {
+                    if (mc.args_len != 0) return error.RuntimeFailure;
+                    const popped: ?Value = self.collections.arrays.items[handle].pop();
+                    const oh: u32 = @intCast(self.optionals.items.len);
+                    try self.optionals.append(self.gpa, popped);
+                    return Value{ .optional = oh };
+                }
+                return error.RuntimeFailure;
+            },
+            .map_ref => |handle| {
+                // Builtin map methods (M0.8 E3-C tranche 3 — minimal
+                // faithful subset of stdlib §14.2). `insert` is
+                // last-write-wins through the same scan-replace-or-
+                // append as the map literal (its `V?` return is out of
+                // the subset — statement use only, the value here is
+                // unit); `len` is the entry count; any other §14
+                // method is stdlib Phase 1+ → fail loud.
+                const mname = self.ast.strings.slice(mc.method_name);
+                if (std.mem.eql(u8, mname, "insert")) {
+                    if (mc.args_len != 2) return error.RuntimeFailure;
+                    const karg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+                    const varg: NodeId = @bitCast(self.ast.extra.items[mc.args_start + 1]);
+                    const k = try self.evalExpr(world, locals, karg);
+                    const v = try self.evalExpr(world, locals, varg);
+                    // Re-index after the arg evals (a nested collection
+                    // could have grown the outer store vector).
+                    var replaced = false;
+                    for (self.collections.maps.items[handle].items) |*pair| {
+                        if (pair.key.eql(k)) {
+                            pair.value = v;
+                            replaced = true;
+                            break;
+                        }
+                    }
+                    if (!replaced) try self.collections.maps.items[handle].append(self.gpa, .{ .key = k, .value = v });
+                    return Value{ .unit = {} };
+                }
+                if (std.mem.eql(u8, mname, "len")) {
+                    if (mc.args_len != 0) return error.RuntimeFailure;
+                    return Value{ .int_ = @intCast(self.collections.maps.items[handle].items.len) };
+                }
+                return error.RuntimeFailure;
+            },
+            // Methods on a component / resource ref are deferred (the
+            // interpreter cannot recover the type name from a bare ref).
+            else => return error.RuntimeFailure,
+        }
+    }
+
     fn callMethod(self: *Interpreter, world: *World, caller_locals: *Locals, method: ast_mod.FnDecl, mc: ast_mod.MethodCall, self_value: ?Value) StmtError!Value {
         if (method.is_async) return error.RuntimeFailure; // async interp lands in E3
         if (method.params_len != mc.args_len) return error.RuntimeFailure;
@@ -1649,6 +1753,16 @@ pub const Interpreter = struct {
             },
             .binary => {
                 const b = self.ast.binary_exprs.items[data];
+                // `expr ?? default` (M0.8 E3-C tranche 4, stdlib §16.2):
+                // unwrap-or-default. The default is NOT evaluated when the
+                // lhs is `some` — short-circuit, the same semantics as the
+                // codegen's Zig `orelse` (byte-exact by construction).
+                if (b.op == .coalesce) {
+                    const lhs = try self.evalExpr(world, locals, b.lhs);
+                    if (lhs != .optional) return error.RuntimeFailure;
+                    if (self.optionals.items[lhs.optional]) |payload| return payload;
+                    return try self.evalExpr(world, locals, b.rhs);
+                }
                 const lhs = try self.evalExpr(world, locals, b.lhs);
                 const rhs = try self.evalExpr(world, locals, b.rhs);
                 // `string + string` → concatenation into the per-body
@@ -1675,6 +1789,7 @@ pub const Interpreter = struct {
                         if (lhs != .bool_ or rhs != .bool_) return error.RuntimeFailure;
                         return Value{ .bool_ = lhs.bool_ or rhs.bool_ };
                     },
+                    .coalesce => unreachable, // handled (short-circuit) above
                 };
             },
             .unary => {
@@ -1689,6 +1804,14 @@ pub const Interpreter = struct {
                     .logical_not => switch (v) {
                         .bool_ => |x| Value{ .bool_ = !x },
                         else => error.RuntimeFailure,
+                    },
+                    // `expr!` — force unwrap, panic on none (M0.8 E3-C
+                    // tranche 4, stdlib §16.2). The interp's panic is
+                    // RuntimeFailure, same observable as the codegen's `.?`
+                    // null-unwrap panic.
+                    .force_unwrap => {
+                        if (v != .optional) return error.RuntimeFailure;
+                        return self.optionals.items[v.optional] orelse error.RuntimeFailure;
                     },
                 };
             },
@@ -1732,6 +1855,22 @@ pub const Interpreter = struct {
                             const edecl = self.enum_decls.get(scrut.enum_value.type_name) orelse return error.RuntimeFailure;
                             const vidx = self.enumVariantIndexOf(edecl, pat.variant) orelse return error.RuntimeFailure;
                             if (scrut.enum_value.variant == vidx) return try self.evalExpr(world, locals, arm.body);
+                        },
+                        // `some(v)` / `none` optional patterns (M0.8 E3-C
+                        // tranche 4, part1 §7.6): `some` binds the payload
+                        // for its arm body.
+                        .optional_some => {
+                            if (scrut != .optional) return error.RuntimeFailure;
+                            if (self.optionals.items[scrut.optional]) |payload| {
+                                try locals.put(self.gpa, arm.pattern_payload, payload, false);
+                                return try self.evalExpr(world, locals, arm.body);
+                            }
+                        },
+                        .optional_none => {
+                            if (scrut != .optional) return error.RuntimeFailure;
+                            if (self.optionals.items[scrut.optional] == null) {
+                                return try self.evalExpr(world, locals, arm.body);
+                            }
                         },
                     }
                 }
@@ -1812,6 +1951,23 @@ pub const Interpreter = struct {
                 // runtime error (the debug panic of `etch-stdlib.md` §13.3).
                 const ix = self.ast.index_exprs.items[data];
                 const recv = try self.evalExpr(world, locals, ix.receiver);
+                if (recv == .map_ref) {
+                    // `m[k] -> V?` (stdlib §14.2, M0.8 E3-C tranche 4): scan
+                    // the insertion-ordered pair list — found → some(value),
+                    // absent → none. Same lookup the codegen's __etchMapGet
+                    // helper performs, byte-exact by construction.
+                    const key_v = try self.evalExpr(world, locals, ix.index);
+                    var found: ?Value = null;
+                    for (self.collections.maps.items[recv.map_ref].items) |pair| {
+                        if (pair.key.eql(key_v)) {
+                            found = pair.value;
+                            break;
+                        }
+                    }
+                    const oh: u32 = @intCast(self.optionals.items.len);
+                    try self.optionals.append(self.gpa, found);
+                    return Value{ .optional = oh };
+                }
                 if (recv != .array_ref) return error.RuntimeFailure;
                 if (self.ast.exprKind(ix.index) == .range) {
                     const r = self.ast.ranges.items[self.ast.exprData(ix.index)];
@@ -1929,93 +2085,23 @@ pub const Interpreter = struct {
                     return try self.callMethod(world, locals, method, mc, null);
                 }
                 const recv = try self.evalExpr(world, locals, mc.receiver);
-                switch (recv) {
-                    .struct_ref => |handle| {
-                        const type_name = self.structs.list.items[handle].type_name;
-                        const key = methodKey(type_name, mc.method_name);
-                        const method = self.methods.get(key) orelse self.trait_methods.get(key) orelse return error.RuntimeFailure;
-                        return try self.callMethod(world, locals, method, mc, recv);
-                    },
-                    .entity_id => {
-                        // Trait method on an Entity (`impl Trait for Entity`). The
-                        // type key is the interned `Entity`; self is the handle.
-                        const entity_name = self.ast.strings.find("Entity") orelse return error.RuntimeFailure;
-                        const method = self.trait_methods.get(methodKey(entity_name, mc.method_name)) orelse return error.RuntimeFailure;
-                        return try self.callMethod(world, locals, method, mc, recv);
-                    },
-                    .string_id, .string_run => {
-                        // Builtin string methods (M0.8 sub-slice C tranche 1 —
-                        // minimal faithful subset). `len` → byte length, on a
-                        // literal (`string_id`) or a runtime-produced string
-                        // (`string_run`, tranche 1b); any other §12 method is
-                        // stdlib Phase 1+ → fail loud.
-                        const mname = self.ast.strings.slice(mc.method_name);
-                        if (std.mem.eql(u8, mname, "len")) {
-                            const bytes = self.stringBytes(recv) orelse return error.RuntimeFailure;
-                            return Value{ .int_ = @intCast(bytes.len) };
-                        }
-                        return error.RuntimeFailure;
-                    },
-                    .array_ref => |handle| {
-                        // Builtin dynamic-array methods (M0.8 E3-C tranche 3 —
-                        // minimal faithful subset of stdlib §13.2). `push`
-                        // appends (mut receiver enforced by the resolver),
-                        // `len` is the element count; any other §13 method is
-                        // stdlib Phase 1+ → fail loud.
-                        const mname = self.ast.strings.slice(mc.method_name);
-                        if (std.mem.eql(u8, mname, "push")) {
-                            if (mc.args_len != 1) return error.RuntimeFailure;
-                            const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
-                            const v = try self.evalExpr(world, locals, arg);
-                            // Re-index after the arg eval (a nested collection
-                            // could have grown the outer store vector).
-                            try self.collections.arrays.items[handle].append(self.gpa, v);
-                            return Value{ .unit = {} };
-                        }
-                        if (std.mem.eql(u8, mname, "len")) {
-                            if (mc.args_len != 0) return error.RuntimeFailure;
-                            return Value{ .int_ = @intCast(self.collections.arrays.items[handle].items.len) };
-                        }
-                        return error.RuntimeFailure;
-                    },
-                    .map_ref => |handle| {
-                        // Builtin map methods (M0.8 E3-C tranche 3 — minimal
-                        // faithful subset of stdlib §14.2). `insert` is
-                        // last-write-wins through the same scan-replace-or-
-                        // append as the map literal (its `V?` return is out of
-                        // the subset — statement use only, the value here is
-                        // unit); `len` is the entry count; any other §14
-                        // method is stdlib Phase 1+ → fail loud.
-                        const mname = self.ast.strings.slice(mc.method_name);
-                        if (std.mem.eql(u8, mname, "insert")) {
-                            if (mc.args_len != 2) return error.RuntimeFailure;
-                            const karg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
-                            const varg: NodeId = @bitCast(self.ast.extra.items[mc.args_start + 1]);
-                            const k = try self.evalExpr(world, locals, karg);
-                            const v = try self.evalExpr(world, locals, varg);
-                            // Re-index after the arg evals (a nested collection
-                            // could have grown the outer store vector).
-                            var replaced = false;
-                            for (self.collections.maps.items[handle].items) |*pair| {
-                                if (pair.key.eql(k)) {
-                                    pair.value = v;
-                                    replaced = true;
-                                    break;
-                                }
-                            }
-                            if (!replaced) try self.collections.maps.items[handle].append(self.gpa, .{ .key = k, .value = v });
-                            return Value{ .unit = {} };
-                        }
-                        if (std.mem.eql(u8, mname, "len")) {
-                            if (mc.args_len != 0) return error.RuntimeFailure;
-                            return Value{ .int_ = @intCast(self.collections.maps.items[handle].items.len) };
-                        }
-                        return error.RuntimeFailure;
-                    },
-                    // Methods on a component / resource ref are deferred (the
-                    // interpreter cannot recover the type name from a bare ref).
-                    else => return error.RuntimeFailure,
+                // `recv?.method(args)` — optional chain (M0.8 E3-C tranche 4,
+                // part1 §6.6): `none` short-circuits to a fresh `none` without
+                // dispatching; `some(p)` dispatches on the payload and
+                // re-wraps the result in an optional.
+                if (mc.opt_chain) {
+                    if (recv != .optional) return error.RuntimeFailure;
+                    const payload = self.optionals.items[recv.optional] orelse {
+                        const oh: u32 = @intCast(self.optionals.items.len);
+                        try self.optionals.append(self.gpa, null);
+                        return Value{ .optional = oh };
+                    };
+                    const res = try self.dispatchMethodOnValue(world, locals, mc, payload);
+                    const oh: u32 = @intCast(self.optionals.items.len);
+                    try self.optionals.append(self.gpa, res);
+                    return Value{ .optional = oh };
                 }
+                return try self.dispatchMethodOnValue(world, locals, mc, recv);
             },
             .loop_expr => {
                 // `loop { body }` — run the body repeatedly until a `break`
@@ -2280,6 +2366,8 @@ pub fn evalConst(ast: *const AstArena, node: NodeId) !Value {
                     .bool_ => |x| Value{ .bool_ = !x },
                     else => return error.NotConstEvaluable,
                 },
+                // `expr!` needs the runtime optional store — never const.
+                .force_unwrap => return error.NotConstEvaluable,
             };
         },
         else => return error.UnsupportedExpr,
@@ -4241,4 +4329,93 @@ test "async rule resumes on await global_event(T) (M0.8 E3 sub-slice B)" {
     // tick 3: waiter done — n stays 7.
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 7), readResourceInt(&world, out_id));
+}
+
+test "runProgram Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The tranche-4 op surface end-to-end in the reference backend:
+    // pop → some(20) then `?? -1` = 20; second pop force-unwraps to 10;
+    // third pop on the emptied array → none, `?? -1` = -1;
+    // m[1] present → 100, m[9] absent → `?? 7` = 7;
+    // s?.len() on some("hello") → some(5), `?? 0` = 5;
+    // match m[2] = some(200) → 201.
+    // Sum: 20 + 10 - 1 + 100 + 7 + 5 + 201 = 342.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule opts(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let mut xs: int[] = [10, 20]
+        \\  let a = xs.pop() ?? -1
+        \\  let b = xs.pop()!
+        \\  let c = xs.pop() ?? -1
+        \\  let mut m = [1: 100, 2: 200]
+        \\  let d = m[1] ?? 0
+        \\  let e = m[9] ?? 7
+        \\  let s: string? = some("hello")
+        \\  let f = s?.len() ?? 0
+        \\  let g = match m[2] {
+        \\    some(x) => x + 1,
+        \\    none => 0,
+        \\  }
+        \\  entity.get_mut(Acc).out = a + b + c + d + e + f + g
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 342), out);
+}
+
+test "runProgram force unwrap of none is a runtime failure (M0.8 E3-C tranche 4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `none!` panics (stdlib §16.2) — surfaced as a counted runtime error,
+    // the interp's panic observable.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule boom(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let mut xs: int[] = []
+        \\  let v = xs.pop()!
+        \\  entity.get_mut(Acc).out = v
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
 }

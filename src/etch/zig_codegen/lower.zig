@@ -140,12 +140,14 @@ pub fn generateFile(
         try emitErrorPrelude(&w);
     }
 
-    // Map-insert helper (M0.8 E3-C tranche 3) — emitted iff the program has a
-    // map literal (the only source of a map value in the M0.8 subset). An
-    // unused private fn is legal Zig, so over-emitting on a map-literal-only
-    // program is harmless; map-free programs stay byte-identical.
+    // Map-insert + map-get helpers (M0.8 E3-C tranches 3-4) — emitted iff the
+    // program has a map literal (the only source of a map value in the M0.8
+    // subset). An unused private fn is legal Zig, so over-emitting on a
+    // program that only inserts (or only reads) is harmless; map-free
+    // programs stay byte-identical.
     if (ast.map_lits.items.len > 0) {
         try emitMapInsertPrelude(&w);
+        try emitMapGetPrelude(&w);
     }
 
     // The builtin `TagSet` component (M0.8 E3): a fixed `[words]u64` bitfield,
@@ -383,6 +385,24 @@ fn emitMapInsertPrelude(w: *Writer) CodegenError!void {
     w.indentBy(-1);
     try w.line("}");
     try w.line("m.append(fa, .{ .key = k, .value = v }) catch unreachable;");
+    w.indentBy(-1);
+    try w.line("}");
+    try w.blankLine();
+}
+
+/// Emit the map-get helper (M0.8 E3-C tranche 4, stdlib §14.2 `m[k] -> V?`):
+/// the same insertion-ordered scan as `__etchMapInsert` (and the
+/// interpreter's map store) returning the value or `null`. Same gate as the
+/// insert helper (a map literal in the program).
+fn emitMapGetPrelude(w: *Writer) CodegenError!void {
+    try w.line("fn __etchMapGet(m: anytype, k: anytype) ?@FieldType(std.meta.Child(@TypeOf(m.items)), \"value\") {");
+    w.indentBy(1);
+    try w.line("for (m.items) |p| {");
+    w.indentBy(1);
+    try w.line("if (p.key == k) return p.value;");
+    w.indentBy(-1);
+    try w.line("}");
+    try w.line("return null;");
     w.indentBy(-1);
     try w.line("}");
     try w.blankLine();
@@ -2892,6 +2912,19 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // (`recv[lo..hi]`) (M0.8 collections). A range index lowers to a
             // Zig slice; an inclusive range adds 1 to the exclusive Zig bound.
             const ix = ast.index_exprs.items[data];
+            // `m[k] -> V?` (stdlib §14.2, M0.8 E3-C tranche 4): a map
+            // receiver routes through the __etchMapGet prelude helper — the
+            // same insertion-ordered scan as the interpreter's map store,
+            // byte-exact by construction.
+            if (mapKVZig(inferExprZigType(ast, ctx, ix.receiver)) != null) {
+                if (ast.exprKind(ix.index) == .range) return CodegenError.UnsupportedConstruct;
+                try w.write("__etchMapGet(");
+                try emitExpr(w, ast, ctx, ix.receiver);
+                try w.write(", ");
+                try emitExpr(w, ast, ctx, ix.index);
+                try w.write(")");
+                return;
+            }
             // A dynamic-array receiver (M0.8 E3-C tranche 3) indexes through
             // its backing items slice; range-slicing a dynamic array (a fresh
             // array in the interpreter) is deferred — fail loud.
@@ -2990,17 +3023,41 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // the struct, so Zig's `value.method(args)` / `Type.assoc(args)`
             // syntax resolves them directly.
             const mc = ast.method_calls.items[data];
-            // Builtin dynamic-array / map methods (M0.8 E3-C tranche 3 —
+            // `recv?.method()` — optional chain (M0.8 E3-C tranche 4): a Zig
+            // if-capture that short-circuits to `null`. The resolver bounds
+            // the op to builtin-payload methods; the only one in the M0.8
+            // subset is string `len`, so the emission is closed over it —
+            // anything else fails loud (interpreter reference).
+            if (mc.opt_chain) {
+                const recv_zig = inferExprZigType(ast, ctx, mc.receiver);
+                if (std.mem.eql(u8, recv_zig, "?[]const u8") and
+                    std.mem.eql(u8, ast.strings.slice(mc.method_name), "len") and mc.args_len == 0)
+                {
+                    try w.write("(if (");
+                    try emitExpr(w, ast, ctx, mc.receiver);
+                    try w.write(") |__opv| @as(?i64, @intCast(__opv.len)) else null)");
+                    return;
+                }
+                return CodegenError.UnsupportedConstruct;
+            }
+            // Builtin dynamic-array / map methods (M0.8 E3-C tranches 3-4 —
             // minimal faithful subset, stdlib §13.2/§14.2), routed on the
             // receiver's emitted declaration type. `push` / `insert` allocate
             // on the frame arena and value as Zig `void` — sound in statement
             // position (the resolver bounds them there); a value-position use
             // fails loud downstream (`void` binding). `len` is the count as
-            // Etch `int`. Anything else is stdlib Phase 1+ → fail loud.
+            // Etch `int`; `pop` maps to the list's own `?T`-returning pop
+            // (tranche 4). Anything else is stdlib Phase 1+ → fail loud.
             if (ast.exprKind(mc.receiver) != .path) {
                 const recv_zig = inferExprZigType(ast, ctx, mc.receiver);
                 if (dynArrayElemZig(recv_zig) != null) {
                     const mname = ast.strings.slice(mc.method_name);
+                    if (std.mem.eql(u8, mname, "pop") and mc.args_len == 0) {
+                        try w.write("(");
+                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try w.write(").pop()");
+                        return;
+                    }
                     if (std.mem.eql(u8, mname, "push") and mc.args_len == 1) {
                         const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
                         w.arena_used = true;
@@ -3185,6 +3242,14 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                     try emitExpr(w, ast, ctx, u.operand);
                     try w.write(")");
                 },
+                // `expr!` → Zig `.?` (M0.8 E3-C tranche 4, stdlib §16.2):
+                // the null-unwrap panic is the same observable as the
+                // interpreter's RuntimeFailure on a `none`.
+                .force_unwrap => {
+                    try w.write("(");
+                    try emitExpr(w, ast, ctx, u.operand);
+                    try w.write(").?");
+                },
             }
         },
         else => return CodegenError.UnsupportedConstruct,
@@ -3206,6 +3271,9 @@ fn binaryOpText(op: ast_mod.BinaryOp) []const u8 {
         .ge => ">=",
         .logical_and => "and",
         .logical_or => "or",
+        // `a ?? b` → Zig `orelse` (M0.8 E3-C tranche 4): same short-circuit
+        // semantics as the interpreter's coalesce intercept.
+        .coalesce => "orelse",
     };
 }
 
@@ -3274,10 +3342,33 @@ fn emitMatch(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) Codege
                 ctx.records.items.len = saved_len;
                 try w.write("; }");
             },
+            // `some(v)` / `none` optional patterns (M0.8 E3-C tranche 4,
+            // part1 §7.6) → Zig optional capture / null comparison on the
+            // scrutinee snapshot.
+            .optional_some => {
+                const name: StringId = arm.pattern_payload;
+                try w.print("if (__m{d}) |", .{lbl});
+                try w.ident(ast.strings.slice(name));
+                try w.print("| break :blk{d} ", .{lbl});
+                const saved_len = ctx.records.items.len;
+                try ctx.records.append(w.gpa, .{
+                    .key = .{ .name = name },
+                    .info = .{ .kind = .value, .zig_type = "", .is_mut = false },
+                });
+                try emitExpr(w, ast, ctx, arm.body);
+                ctx.records.items.len = saved_len;
+                try w.write("; ");
+            },
+            .optional_none => {
+                try w.print("if (__m{d} == null) break :blk{d} ", .{ lbl, lbl });
+                try emitExpr(w, ast, ctx, arm.body);
+                try w.write("; ");
+            },
         }
     }
-    // bool-exhaustive matches have no catch-all arm; the type-checker proved
-    // every case is covered, so the fall-through is unreachable.
+    // bool- / optional-exhaustive matches have no catch-all arm; the
+    // type-checker proved every case is covered, so the fall-through is
+    // unreachable.
     if (!has_catch_all) try w.write("unreachable; ");
     try w.write("}");
 }
@@ -3323,6 +3414,26 @@ fn emitMatchAsStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, data: u32) 
             },
             .wildcard => try emitArmBodyAsStmts(w, ast, ctx, arm.body, lbl, null),
             .binding => try emitArmBodyAsStmts(w, ast, ctx, arm.body, lbl, arm.pattern_payload),
+            // `some(v)` / `none` optional patterns in statement position
+            // (M0.8 E3-C tranche 4): Zig optional capture / null comparison.
+            .optional_some => {
+                try w.print("if (__ms{d}) |", .{lbl});
+                try w.ident(ast.strings.slice(arm.pattern_payload));
+                try w.write("| ");
+                const saved_len = ctx.records.items.len;
+                try ctx.records.append(w.gpa, .{
+                    .key = .{ .name = arm.pattern_payload },
+                    .info = .{ .kind = .value, .zig_type = "", .is_mut = false },
+                });
+                try emitArmBodyAsStmts(w, ast, ctx, arm.body, lbl, null);
+                ctx.records.items.len = saved_len;
+                chained = true;
+            },
+            .optional_none => {
+                try w.print("if (__ms{d} == null) ", .{lbl});
+                try emitArmBodyAsStmts(w, ast, ctx, arm.body, lbl, null);
+                chained = true;
+            },
         }
         try w.write("\n");
     }
@@ -3542,16 +3653,20 @@ fn optionalAnnotationZig(ast: *const AstArena, type_node: NodeId) ?[]const u8 {
     if (ast.typeNodeKind(payload_node) != .named) return null;
     const tnode = ast.named_types.items[ast.typeNodeData(payload_node)];
     const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+    // `string?` (M0.8 E3-C tranche 4): `string` is deliberately not in
+    // `type_map.mapBuiltin` (the let-routing leaves plain string bindings
+    // un-annotated) — only the optional path needs its Zig spelling.
+    if (std.mem.eql(u8, tname, "string")) return optionalOf("[]const u8");
     return optionalOf(type_map.mapBuiltin(tname) orelse return null);
 }
 
 /// Map a builtin Zig scalar type to its `?`-prefixed optional literal (M0.8 E2
-/// block 5). Returns `null` for any non-scalar payload.
+/// block 5; string payloads tranche 4). Returns `null` for any other payload.
 fn optionalOf(zig_scalar: []const u8) ?[]const u8 {
     const pairs = .{
-        .{ "i64", "?i64" },       .{ "f64", "?f64" }, .{ "bool", "?bool" },
-        .{ "i32", "?i32" },       .{ "u32", "?u32" }, .{ "f32", "?f32" },
-        .{ "Entity", "?Entity" },
+        .{ "i64", "?i64" },       .{ "f64", "?f64" },               .{ "bool", "?bool" },
+        .{ "i32", "?i32" },       .{ "u32", "?u32" },               .{ "f32", "?f32" },
+        .{ "Entity", "?Entity" }, .{ "[]const u8", "?[]const u8" },
     };
     inline for (pairs) |p| {
         if (std.mem.eql(u8, zig_scalar, p[0])) return p[1];
@@ -3757,6 +3872,14 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
             // operand type (S3 forbids mixing) — recurse on lhs.
             break :blk switch (b.op) {
                 .eq, .neq, .lt, .gt, .le, .ge, .logical_and, .logical_or => "bool",
+                // `a ?? b` unwraps the lhs optional (M0.8 E3-C tranche 4):
+                // strip the `?` when known, else fall back to the default's
+                // type.
+                .coalesce => {
+                    const lz = inferExprZigType(ast, ctx, b.lhs);
+                    if (lz.len > 1 and lz[0] == '?') break :blk lz[1..];
+                    break :blk inferExprZigType(ast, ctx, b.rhs);
+                },
                 else => inferExprZigType(ast, ctx, b.lhs),
             };
         },
@@ -3765,6 +3888,12 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
             break :blk switch (u.op) {
                 .logical_not => "bool",
                 .neg => inferExprZigType(ast, ctx, u.operand),
+                // `expr!` unwraps the operand optional (M0.8 E3-C tranche 4).
+                .force_unwrap => {
+                    const oz = inferExprZigType(ast, ctx, u.operand);
+                    if (oz.len > 1 and oz[0] == '?') break :blk oz[1..];
+                    break :blk "";
+                },
             };
         },
         .field_access => blk: {
@@ -3936,6 +4065,8 @@ fn emitConstExpr(w: *Writer, ast: *const AstArena, expr: NodeId, target_zig_type
                     try emitConstExpr(w, ast, u.operand, target_zig_type);
                     try w.write(")");
                 },
+                // `expr!` needs a runtime optional — never const-evaluable.
+                .force_unwrap => return CodegenError.UnsupportedConstruct,
             }
         },
         else => return CodegenError.UnsupportedConstruct,

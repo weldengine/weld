@@ -2513,6 +2513,42 @@ pub const Parser = struct {
                         .byte_end = closing.span.byte_end,
                     });
                 },
+                // `recv?.method(args)` / `recv?.field` — optional chain (M0.8
+                // E3-C tranche 4, part1 §6.6): `none` short-circuits, `some`
+                // dispatches on the payload. `?.get` / `?.get_mut` (optional
+                // ECS access) are out of the M0.8 subset — fail loud at parse.
+                .question_dot => {
+                    _ = try self.advance();
+                    switch (self.peek()) {
+                        .ident => {
+                            if (self.peekNext() == .lparen) {
+                                expr = try self.parseMethodCall(expr);
+                                self.arena.method_calls.items[self.arena.exprData(expr)].opt_chain = true;
+                            } else {
+                                const field_tok = try self.advance();
+                                const field_id = try self.internSlice(field_tok.span);
+                                const recv_span = self.arena.exprSpan(expr);
+                                expr = try self.arena.addFieldAccess(self.gpa, expr, field_id, .{
+                                    .byte_start = recv_span.byte_start,
+                                    .byte_end = field_tok.span.byte_end,
+                                });
+                                self.arena.field_accesses.items[self.arena.exprData(expr)].opt_chain = true;
+                            }
+                        },
+                        else => return self.parseErrFmt(self.peekSpan(), "expected a method or field name after '?.' ('?.get'/'?.get_mut' are not in the M0.8 minimal subset)", .{}),
+                    }
+                },
+                // Postfix `!` — force unwrap, panic on `none` (M0.8 E3-C
+                // tranche 4, part1 §6.6). `!=` lexes as one token (maximal
+                // munch), so this never splits a comparison.
+                .bang => {
+                    const bang_tok = try self.advance();
+                    const recv_span = self.arena.exprSpan(expr);
+                    expr = try self.arena.addUnary(self.gpa, .force_unwrap, expr, .{
+                        .byte_start = recv_span.byte_start,
+                        .byte_end = bang_tok.span.byte_end,
+                    });
+                },
                 else => break,
             }
         }
@@ -2586,6 +2622,23 @@ pub const Parser = struct {
     fn parsePattern(self: *Parser) ParseError!ParsedPattern {
         switch (self.peek()) {
             .ident => {
+                // `none` / `some(v)` optional patterns (M0.8 E3-C tranche 4,
+                // part1 §7.6). Like the literals, `some` / `none` are detected
+                // by lexeme (not keywords); a bare `some` with no `(` stays an
+                // ordinary binding.
+                const lexeme = self.sliceOf(self.peekSpan());
+                if (std.mem.eql(u8, lexeme, "none")) {
+                    _ = try self.advance();
+                    return .{ .kind = .optional_none, .payload = 0 };
+                }
+                if (std.mem.eql(u8, lexeme, "some") and self.peekNext() == .lparen) {
+                    _ = try self.advance(); // 'some'
+                    _ = try self.advance(); // '('
+                    const bind_tok = try self.expect(.ident, "expected a binding name inside a some(...) pattern");
+                    const bind = try self.internSlice(bind_tok.span);
+                    _ = try self.expect(.rparen, "expected ')' to close a some(...) pattern");
+                    return .{ .kind = .optional_some, .payload = bind };
+                }
                 const tok = try self.advance();
                 if (std.mem.eql(u8, self.sliceOf(tok.span), "_")) {
                     return .{ .kind = .wildcard, .payload = 0 };
@@ -2985,6 +3038,9 @@ pub const Parser = struct {
             .kw_or => .{ .lbp = 1, .rbp = 2 },
             .kw_and => .{ .lbp = 3, .rbp = 4 },
             .eq_eq, .bang_eq, .lt, .gt, .lt_eq, .gt_eq => .{ .lbp = 5, .rbp = 6 },
+            // `??` binds tighter than comparison, looser than additive
+            // (part1 §6.1 level 6, M0.8 E3-C tranche 4).
+            .question_question => .{ .lbp = 6, .rbp = 7 },
             .plus, .minus => .{ .lbp = 7, .rbp = 8 },
             .star, .slash, .percent => .{ .lbp = 9, .rbp = 10 },
             else => null,
@@ -3006,6 +3062,7 @@ pub const Parser = struct {
             .gt_eq => .ge,
             .kw_and => .logical_and,
             .kw_or => .logical_or,
+            .question_question => .coalesce,
             else => unreachable,
         };
     }

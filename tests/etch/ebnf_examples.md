@@ -552,3 +552,26 @@ rule announce(entity: Entity)
   entity.get_mut(Acc).out = msg.len()
 }
 ```
+
+## Optional ops — `?.` / `??` / `!` + `some`/`none` patterns (E3 sub-slice C tranche 4)
+
+```etch
+component OptAcc { out: int = 0 }
+
+rule optional_ops(entity: Entity)
+  when entity has OptAcc
+{
+  let mut xs: int[] = [10, 20]
+  let a = xs.pop() ?? -1
+  let b = xs.pop()!
+  let mut m = [1: 100, 2: 200]
+  let c = m[1] ?? 0
+  let s: string? = some("hello")
+  let d = s?.len() ?? 0
+  let e = match m[2] {
+    some(x) => x + 1,
+    none => 0,
+  }
+  entity.get_mut(OptAcc).out = a + b + c + d + e
+}
+```

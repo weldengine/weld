@@ -67,4 +67,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p48_error_throw_catch", .etch_path = "tests/etch_interp/programs/48_error_throw_catch.etch" },
     .{ .name = "p49_dyn_array_push", .etch_path = "tests/etch_interp/programs/49_dyn_array_push.etch" },
     .{ .name = "p50_map_insert_iterate", .etch_path = "tests/etch_interp/programs/50_map_insert_iterate.etch" },
+    .{ .name = "p51_optional_ops", .etch_path = "tests/etch_interp/programs/51_optional_ops.etch" },
 };

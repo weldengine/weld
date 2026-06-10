@@ -396,6 +396,53 @@ test "lowers dynamic-array and map locals to frame-arena lists, gating the map-i
     try std.testing.expect(std.mem.indexOf(u8, plain.items, "__etchMapInsert") == null);
 }
 
+test "lowers the Optional ops to orelse/.?/if-capture and gates the map-get helper (M0.8 E3-C tranche 4)" {
+    const gpa = std.testing.allocator;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let mut xs: int[] = [10, 20]
+        \\  let a = xs.pop() ?? -1
+        \\  let b = xs.pop()!
+        \\  let mut m = [1: 100]
+        \\  let c = m[1] ?? 0
+        \\  let s: string? = some("hi")
+        \\  let d = s?.len() ?? 0
+        \\  let e = match m[2] { some(x) => x + 1, none => 0 }
+        \\  entity.get_mut(Acc).n = a + b + c + d + e
+        \\}
+    , &out);
+    // `pop` maps to the list's own `?T` pop; `??` → orelse; `!` → `.?`.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "((xs).pop() orelse -(1))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "((xs).pop()).?") != null);
+    // `m[k]` routes through the gated map-get helper.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "fn __etchMapGet(m: anytype, k: anytype) ?@FieldType(std.meta.Child(@TypeOf(m.items)), \"value\") {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "(__etchMapGet(m, 1) orelse 0)") != null);
+    // `s?.len()` → if-capture short-circuiting to null; `string?` → ?[]const u8.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "const s: ?[]const u8 =") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "(if (s) |__opv| @as(?i64, @intCast(__opv.len)) else null)") != null);
+    // Optional match → labeled block, capture arm + null arm, no catch-all.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "if (__m0) |x| break :blk0 (x + 1); if (__m0 == null) break :blk0 0; unreachable;") != null);
+
+    // A map-free program never emits the get helper (same gate as insert).
+    var plain: std.ArrayListUnmanaged(u8) = .empty;
+    defer plain.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  entity.get_mut(Acc).n = 5
+        \\}
+    , &plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain.items, "__etchMapGet") == null);
+}
+
 test "collection allocations require the frame arena: fn-body push fails loud (M0.8 E3-C tranche 3)" {
     const gpa = std.testing.allocator;
     // A fn body has no arena (§6.3 outparam model deferred) — a collection

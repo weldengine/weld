@@ -280,12 +280,15 @@ pub const BinaryOp = enum {
     ge,
     logical_and,
     logical_or,
+    coalesce, // a ?? b — null coalesce (M0.8 E3-C tranche 4, part1 §6.6)
 };
 
-/// Closed enum of the S3 prefix unary operators.
+/// Closed enum of the unary operators. `force_unwrap` is postfix in the
+/// grammar but stores identically (operand + span).
 pub const UnaryOp = enum {
     neg, // -x
     logical_not, // not x
+    force_unwrap, // x! — panic if none (M0.8 E3-C tranche 4, part1 §6.6)
 };
 
 /// Closed enum of assignment-style operators inside an `AssignStmt`.
@@ -567,6 +570,10 @@ const UnaryExpr = struct {
 pub const FieldAccessExpr = struct {
     receiver: NodeId,
     field_name: StringId,
+    /// `recv?.field` (M0.8 E3-C tranche 4): short-circuits to `none` when the
+    /// receiver is `none`. Out of the M0.8 subset (scalar optional payloads
+    /// have no fields) — parsed so the resolver rejects it with a pointer.
+    opt_chain: bool = false,
 };
 
 const MethodGetExpr = struct {
@@ -593,7 +600,10 @@ pub const RangeExpr = struct {
 /// wildcard / literal / binding). Enum-variant, optional, tuple, and
 /// struct-destructure patterns arrive with their types in later stages
 /// (`etch-grammar.md` §pattern, `etch-reference-part1.md` §7.6).
-pub const PatternKind = enum { wildcard, literal, binding, enum_variant };
+/// `optional_some` / `optional_none` are the `some(v)` / `none` optional
+/// patterns (M0.8 E3-C tranche 4, part1 §7.6): `optional_some`'s payload is
+/// the binding name `StringId`; `optional_none` carries no payload (0).
+pub const PatternKind = enum { wildcard, literal, binding, enum_variant, optional_some, optional_none };
 
 /// One arm of a `match`. `pattern_kind` selects the meaning of
 /// `pattern_payload`: `.literal` → a literal expr `NodeId` (raw bits) the
@@ -808,6 +818,10 @@ pub const MethodCall = struct {
     method_name: StringId,
     args_start: u32,
     args_len: u32,
+    /// `recv?.method(args)` (M0.8 E3-C tranche 4): the receiver is an
+    /// optional — `none` short-circuits, `some(p)` dispatches the method on
+    /// the payload and re-wraps the result in an optional.
+    opt_chain: bool = false,
 };
 
 /// One `fn` parameter: name + type node (M0.8 E2 call mechanism,
