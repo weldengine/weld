@@ -68,6 +68,8 @@ pub const valid = [_]Entry{
     .{ .name = "data/item_database.etch", .source = @embedFile("corpus/valid/data/item_database.etch") },
 
     .{ .name = "routines/blacksmith_daily.etch", .source = @embedFile("corpus/valid/routines/blacksmith_daily.etch") },
+
+    .{ .name = "behaviors/combat.etch", .source = @embedFile("corpus/valid/behaviors/combat.etch") },
 };
 
 /// Embedded list of the invalid S3 corpus fixtures. Each entry pins
@@ -96,6 +98,13 @@ pub const invalid = [_]InvalidEntry{
     .{ .name = "E1766_spread_reference_not_found.etch", .expected_code = "E1766", .source = @embedFile("corpus/invalid/E1766_spread_reference_not_found.etch") },
     .{ .name = "E1767_spread_cycle.etch", .expected_code = "E1767", .source = @embedFile("corpus/invalid/E1767_spread_cycle.etch") },
     .{ .name = "E1768_id_invalid_format.etch", .expected_code = "E1768", .source = @embedFile("corpus/invalid/E1768_id_invalid_format.etch") },
+    .{ .name = "E1500_behavior_root_missing.etch", .expected_code = "E1500", .source = @embedFile("corpus/invalid/E1500_behavior_root_missing.etch") },
+    .{ .name = "E1501_behavior_empty_composite.etch", .expected_code = "E1501", .source = @embedFile("corpus/invalid/E1501_behavior_empty_composite.etch") },
+    .{ .name = "E1502_behavior_invalid_leaf.etch", .expected_code = "E1502", .source = @embedFile("corpus/invalid/E1502_behavior_invalid_leaf.etch") },
+    .{ .name = "E1503_behavior_condition_not_bool.etch", .expected_code = "E1503", .source = @embedFile("corpus/invalid/E1503_behavior_condition_not_bool.etch") },
+    .{ .name = "E1504_behavior_action_invalid_return.etch", .expected_code = "E1504", .source = @embedFile("corpus/invalid/E1504_behavior_action_invalid_return.etch") },
+    .{ .name = "E1505_behavior_when_not_bool.etch", .expected_code = "E1505", .source = @embedFile("corpus/invalid/E1505_behavior_when_not_bool.etch") },
+    .{ .name = "E1506_behavior_recursion.etch", .expected_code = "E1506", .source = @embedFile("corpus/invalid/E1506_behavior_recursion.etch") },
     .{ .name = "E1520_routine_empty_segments.etch", .expected_code = "E1520", .source = @embedFile("corpus/invalid/E1520_routine_empty_segments.etch") },
     .{ .name = "E1521_duplicate_segment_name.etch", .expected_code = "E1521", .source = @embedFile("corpus/invalid/E1521_duplicate_segment_name.etch") },
     .{ .name = "E1522_trigger_invalid.etch", .expected_code = "E1522", .source = @embedFile("corpus/invalid/E1522_trigger_invalid.etch") },

@@ -1,0 +1,5 @@
+behavior B {
+  selector {
+    action: run_behavior(Missing)
+  }
+}

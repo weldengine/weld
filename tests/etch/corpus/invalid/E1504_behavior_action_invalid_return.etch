@@ -1,0 +1,9 @@
+fn scored() -> int {
+  1
+}
+
+behavior B {
+  selector {
+    action: scored()
+  }
+}

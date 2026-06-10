@@ -1,0 +1,5 @@
+behavior B {
+  selector {
+    condition: 1 + 2
+  }
+}

@@ -61,7 +61,20 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
     switch (d) {
         .data => |t| freeData(gpa, t),
         .routine => |r| freeRoutine(gpa, r),
+        .behavior => |b| freeBehavior(gpa, b),
     }
+}
+
+fn freeBehavior(gpa: std.mem.Allocator, b: types.Behavior) void {
+    gpa.free(b.name);
+    freeBTNode(gpa, b.root);
+}
+
+fn freeBTNode(gpa: std.mem.Allocator, node: types.BehaviorNode) void {
+    gpa.free(node.when);
+    gpa.free(node.payload);
+    for (node.children) |child| freeBTNode(gpa, child);
+    gpa.free(node.children);
 }
 
 fn freeRoutine(gpa: std.mem.Allocator, r: types.Routine) void {
@@ -113,6 +126,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
         switch (kinds[i]) {
             .data_decl => try list.append(gpa, .{ .data = try buildData(gpa, arena, arena.data_decls.items[datas[i]]) }),
             .routine_decl => try list.append(gpa, .{ .routine = try buildRoutine(gpa, arena, arena.routine_decls.items[datas[i]]) }),
+            .behavior_decl => try list.append(gpa, .{ .behavior = try buildBehavior(gpa, arena, arena.behavior_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -269,6 +283,186 @@ fn buildData(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.DataD
     };
 }
 
+fn buildBehavior(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.BehaviorDecl) BuildError!types.Behavior {
+    const root = try buildBTNode(gpa, arena, decl.root);
+    errdefer freeBTNode(gpa, root);
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    return .{ .name = name, .root = root };
+}
+
+fn buildBTNode(gpa: std.mem.Allocator, arena: *const AstArena, node_idx: u32) BuildError!types.BehaviorNode {
+    const node = arena.bt_nodes.items[node_idx];
+    const kind: types.BehaviorNodeKind = switch (node.kind) {
+        .selector => .selector,
+        .sequence => .sequence,
+        .condition => .condition,
+        .action => .action,
+    };
+    switch (node.kind) {
+        .selector, .sequence => {
+            const when_text = if (node.when_root == ast_mod.RuleDecl.none_when)
+                try gpa.dupe(u8, "")
+            else
+                try renderWhenAlloc(gpa, arena, node.when_root);
+            errdefer gpa.free(when_text);
+            var children: std.ArrayListUnmanaged(types.BehaviorNode) = .empty;
+            errdefer {
+                for (children.items) |child| freeBTNode(gpa, child);
+                children.deinit(gpa);
+            }
+            var c: u32 = 0;
+            while (c < node.children_len) : (c += 1) {
+                try children.append(gpa, try buildBTNode(gpa, arena, arena.extra.items[node.children_start + c]));
+            }
+            return .{
+                .kind = kind,
+                .when = when_text,
+                .payload = try gpa.dupe(u8, ""),
+                .children = try children.toOwnedSlice(gpa),
+            };
+        },
+        .condition, .action => {
+            const payload = try renderBTPayloadAlloc(gpa, arena, node);
+            errdefer gpa.free(payload);
+            return .{
+                .kind = kind,
+                .when = try gpa.dupe(u8, ""),
+                .payload = payload,
+                .children = try gpa.alloc(types.BehaviorNode, 0),
+            };
+        },
+    }
+}
+
+/// Render a behavior leaf payload (M0.8 E4): the item-2 PATCHED action
+/// forms — `let <name> = <expr>` / `emit T { f: v, … }` / an expression —
+/// plus the plain condition expression.
+pub fn renderBTPayloadAlloc(gpa: std.mem.Allocator, arena: *const AstArena, node: ast_mod.BTNode) BuildError![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(gpa);
+    if (!node.payload_is_stmt) {
+        try renderExpr(gpa, arena, node.payload, &buf);
+        return try buf.toOwnedSlice(gpa);
+    }
+    switch (arena.stmtKind(node.payload)) {
+        .let_stmt => {
+            const let = arena.let_stmts.items[arena.stmtData(node.payload)];
+            try buf.appendSlice(gpa, "let ");
+            if (let.is_mut) try buf.appendSlice(gpa, "mut ");
+            try buf.appendSlice(gpa, arena.strings.slice(let.name));
+            try buf.appendSlice(gpa, " = ");
+            try renderExpr(gpa, arena, let.value, &buf);
+        },
+        .emit_stmt => {
+            const em = arena.emit_stmts.items[arena.stmtData(node.payload)];
+            try buf.appendSlice(gpa, "emit ");
+            try buf.appendSlice(gpa, arena.strings.slice(em.event_type));
+            if (em.fields_len == 0) {
+                try buf.appendSlice(gpa, " {}");
+            } else {
+                try buf.appendSlice(gpa, " { ");
+                var f: u32 = 0;
+                while (f < em.fields_len) : (f += 1) {
+                    if (f != 0) try buf.appendSlice(gpa, ", ");
+                    const field = arena.struct_lit_fields.items[em.fields_start + f];
+                    try buf.appendSlice(gpa, arena.strings.slice(field.name));
+                    try buf.appendSlice(gpa, ": ");
+                    try renderExpr(gpa, arena, field.value, &buf);
+                }
+                try buf.appendSlice(gpa, " }");
+            }
+        },
+        else => return error.UnsupportedDescriptorExpr,
+    }
+    return try buf.toOwnedSlice(gpa);
+}
+
+/// Render a §6 when tree to its canonical text (M0.8 E4 — behavior
+/// composite when clauses; the ONE canonical renderer family). Composites
+/// parenthesize; leaves render their structured form.
+pub fn renderWhenAlloc(gpa: std.mem.Allocator, arena: *const AstArena, when_idx: u32) BuildError![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(gpa);
+    try renderWhen(gpa, arena, when_idx, &buf);
+    return try buf.toOwnedSlice(gpa);
+}
+
+fn renderWhen(gpa: std.mem.Allocator, arena: *const AstArena, when_idx: u32, out: *std.ArrayListUnmanaged(u8)) BuildError!void {
+    const node = arena.when_nodes.items[when_idx];
+    switch (node.kind) {
+        .logical_and, .logical_or => {
+            try out.appendSlice(gpa, "(");
+            try renderWhen(gpa, arena, node.lhs, out);
+            try out.appendSlice(gpa, if (node.kind == .logical_and) " and " else " or ");
+            try renderWhen(gpa, arena, node.rhs, out);
+            try out.appendSlice(gpa, ")");
+        },
+        .logical_not => {
+            try out.appendSlice(gpa, "(not ");
+            try renderWhen(gpa, arena, node.lhs, out);
+            try out.appendSlice(gpa, ")");
+        },
+        .has, .has_changed, .has_with_filter, .has_expr_filter => {
+            try out.appendSlice(gpa, arena.strings.slice(node.entity_name));
+            try out.appendSlice(gpa, " has ");
+            try out.appendSlice(gpa, arena.strings.slice(node.type_name));
+            switch (node.kind) {
+                .has_changed => try out.appendSlice(gpa, " changed"),
+                .has_with_filter => {
+                    try out.appendSlice(gpa, " { ");
+                    try out.appendSlice(gpa, arena.strings.slice(node.field_name));
+                    try out.appendSlice(gpa, " == ");
+                    try renderExpr(gpa, arena, node.filter_value, out);
+                    try out.appendSlice(gpa, " }");
+                },
+                .has_expr_filter => {
+                    try out.appendSlice(gpa, " { ");
+                    try renderExpr(gpa, arena, node.filter_value, out);
+                    try out.appendSlice(gpa, " }");
+                },
+                else => {},
+            }
+        },
+        .resource, .resource_changed, .resource_filter => {
+            try out.appendSlice(gpa, "resource ");
+            try out.appendSlice(gpa, arena.strings.slice(node.type_name));
+            switch (node.kind) {
+                .resource_changed => try out.appendSlice(gpa, " changed"),
+                .resource_filter => {
+                    try out.appendSlice(gpa, " { ");
+                    try renderExpr(gpa, arena, node.filter_value, out);
+                    try out.appendSlice(gpa, " }");
+                },
+                else => {},
+            }
+        },
+        .expr_cond => try renderExpr(gpa, arena, node.filter_value, out),
+        .tag_filter => {
+            const tf = arena.tag_filters.items[node.aux];
+            try out.appendSlice(gpa, arena.strings.slice(node.entity_name));
+            try out.appendSlice(gpa, " ");
+            try out.appendSlice(gpa, @tagName(tf.op));
+            try out.appendSlice(gpa, " ");
+            if (tf.operand_len > 1) try out.appendSlice(gpa, "[");
+            var oi: u32 = 0;
+            while (oi < tf.operand_len) : (oi += 1) {
+                if (oi != 0) try out.appendSlice(gpa, ", ");
+                try renderTagPath(gpa, arena, arena.tag_operands.items[tf.operand_start + oi], out);
+            }
+            if (tf.operand_len > 1) try out.appendSlice(gpa, "]");
+        },
+    }
+}
+
+fn renderTagPath(gpa: std.mem.Allocator, arena: *const AstArena, path_node: NodeId, out: *std.ArrayListUnmanaged(u8)) BuildError!void {
+    const tp = arena.tag_paths.items[arena.exprData(path_node)];
+    var i: u32 = 0;
+    while (i < tp.segs_len) : (i += 1) {
+        try out.appendSlice(gpa, ".");
+        try out.appendSlice(gpa, arena.strings.slice(arena.tag_path_segs.items[tp.segs_start + i]));
+    }
+}
+
 /// Render one expression to its canonical text, allocated.
 pub fn renderExprAlloc(gpa: std.mem.Allocator, arena: *const AstArena, id: NodeId) BuildError![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -308,6 +502,13 @@ pub fn renderExpr(gpa: std.mem.Allocator, arena: *const AstArena, id: NodeId, ou
             var i: u32 = 0;
             while (i < call.args_len) : (i += 1) {
                 if (i != 0) try out.appendSlice(gpa, ", ");
+                if (call.names_start != ast_mod.no_arg_names) {
+                    const label = arena.call_arg_names.items[call.names_start + i];
+                    if (label != 0) {
+                        try out.appendSlice(gpa, arena.strings.slice(label));
+                        try out.appendSlice(gpa, ": ");
+                    }
+                }
                 const arg: NodeId = @bitCast(arena.extra.items[call.args_start + i]);
                 try renderExpr(gpa, arena, arg, out);
             }
@@ -319,6 +520,38 @@ pub fn renderExpr(gpa: std.mem.Allocator, arena: *const AstArena, id: NodeId, ou
             try renderExpr(gpa, arena, fa.receiver, out);
             try out.appendSlice(gpa, ".");
             try out.appendSlice(gpa, arena.strings.slice(fa.field_name));
+        },
+        .method_get, .method_get_mut => {
+            const mg = arena.method_gets.items[data];
+            if (!mg.receiver.isNone()) {
+                try renderExpr(gpa, arena, mg.receiver, out);
+                try out.appendSlice(gpa, ".");
+            }
+            try out.appendSlice(gpa, if (arena.exprKind(id) == .method_get) "get(" else "get_mut(");
+            try out.appendSlice(gpa, arena.strings.slice(mg.type_name));
+            try out.appendSlice(gpa, ")");
+        },
+        .method_call => {
+            const mcall = arena.method_calls.items[data];
+            if (mcall.opt_chain) return error.UnsupportedDescriptorExpr;
+            try renderExpr(gpa, arena, mcall.receiver, out);
+            try out.appendSlice(gpa, ".");
+            try out.appendSlice(gpa, arena.strings.slice(mcall.method_name));
+            try out.appendSlice(gpa, "(");
+            var i: u32 = 0;
+            while (i < mcall.args_len) : (i += 1) {
+                if (i != 0) try out.appendSlice(gpa, ", ");
+                if (mcall.names_start != ast_mod.no_arg_names) {
+                    const label = arena.call_arg_names.items[mcall.names_start + i];
+                    if (label != 0) {
+                        try out.appendSlice(gpa, arena.strings.slice(label));
+                        try out.appendSlice(gpa, ": ");
+                    }
+                }
+                const arg: NodeId = @bitCast(arena.extra.items[mcall.args_start + i]);
+                try renderExpr(gpa, arena, arg, out);
+            }
+            try out.appendSlice(gpa, ")");
         },
         .unary => {
             const un = arena.unary_exprs.items[data];

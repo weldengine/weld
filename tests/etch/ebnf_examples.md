@@ -819,3 +819,29 @@ rule wave(entity: Entity)
   spawn_enemy(name: "orc", level: 5, elite: true)
 }
 ```
+
+## Behavior trees (E4 — §8.1 PATCHED)
+
+```etch
+behavior CombatBehavior {
+  selector {
+    sequence when self has Health { current < max * 0.2 } {
+      action: let cover = find_cover(7)
+      action: move_to(cover)
+      action: emit Fled { who: 1 }
+    }
+    condition: self.get(Health).current > 0.0
+    action: attack_melee(3)
+    action: run_behavior(Patrol)
+  }
+}
+```
+
+A leaf root parses (`bt_leaf = bt_condition | bt_action`, item-1 ruling —
+`E1500` enforces the composite root at validation):
+
+```etch
+behavior JustCheck {
+  condition: true
+}
+```

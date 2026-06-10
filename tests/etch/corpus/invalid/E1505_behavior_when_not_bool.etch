@@ -1,0 +1,9 @@
+component Health {
+  current: float = 0.0
+}
+
+behavior B {
+  selector when self.get(Health).current + 1.0 {
+    condition: true
+  }
+}

@@ -4869,7 +4869,7 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// `true` when the program declares at least one Level-B construct with a
 /// descriptor (M0.8 E4: `data`, `routine`).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4888,6 +4888,7 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
         switch (kinds[i]) {
             .data_decl => try emitDataDescriptor(w, gpa, ast, ast.data_decls.items[datas[i]]),
             .routine_decl => try emitRoutineDescriptor(w, gpa, ast, ast.routine_decls.items[datas[i]]),
+            .behavior_decl => try emitBehaviorDescriptor(w, gpa, ast, ast.behavior_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -4963,6 +4964,57 @@ fn emitRoutineDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
         try w.printLine(", .is_pause = {} }},", .{intr.is_pause});
     }
     try w.line("    } } },");
+}
+
+fn emitBehaviorDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.BehaviorDecl) CodegenError!void {
+    try w.print("    .{{ .behavior = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.write(", .root = ");
+    try emitBTNodeLiteral(w, gpa, ast, decl.root);
+    try w.line(" } },");
+}
+
+/// Emit one behavior-tree node as a `etch_descriptor.BehaviorNode` literal
+/// (M0.8 E4, emit-structure — the codegen's OWN recursive walk; when /
+/// payload texts through the SHARED canonical renderers).
+fn emitBTNodeLiteral(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, node_idx: u32) CodegenError!void {
+    const node = ast.bt_nodes.items[node_idx];
+    const kind_tag = switch (node.kind) {
+        .selector => "selector",
+        .sequence => "sequence",
+        .condition => "condition",
+        .action => "action",
+    };
+    try w.print(".{{ .kind = .{s}, .when = ", .{kind_tag});
+    if (node.when_root == ast_mod.RuleDecl.none_when) {
+        try w.write("\"\"");
+    } else {
+        const when_text = descriptor_mod.renderWhenAlloc(gpa, ast, node.when_root) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        };
+        defer gpa.free(when_text);
+        try emitZigStringLiteral(w, when_text);
+    }
+    try w.write(", .payload = ");
+    switch (node.kind) {
+        .selector, .sequence => try w.write("\"\""),
+        .condition, .action => {
+            const payload = descriptor_mod.renderBTPayloadAlloc(gpa, ast, node) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+            };
+            defer gpa.free(payload);
+            try emitZigStringLiteral(w, payload);
+        },
+    }
+    try w.write(", .children = &[_]etch_descriptor.BehaviorNode{");
+    var c: u32 = 0;
+    while (c < node.children_len) : (c += 1) {
+        if (c != 0) try w.write(", ");
+        try emitBTNodeLiteral(w, gpa, ast, ast.extra.items[node.children_start + c]);
+    }
+    try w.write("} }");
 }
 
 fn emitTriggerRun(w: *Writer, ast: *const AstArena, start: u32, len: u32) CodegenError!void {

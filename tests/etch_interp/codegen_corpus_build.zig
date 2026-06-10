@@ -88,4 +88,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p64_when_expr_surface", .etch_path = "tests/etch_interp/programs/64_when_expr_surface.etch" },
     .{ .name = "p65_when_expr_archwalk", .etch_path = "tests/etch_interp/programs/65_when_expr_archwalk.etch" },
     .{ .name = "p66_named_args", .etch_path = "tests/etch_interp/programs/66_named_args.etch" },
+    .{ .name = "p67_behavior_tree", .etch_path = "tests/etch_interp/programs/67_behavior_tree.etch" },
 };

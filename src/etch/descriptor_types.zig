@@ -75,18 +75,42 @@ pub const Routine = struct {
     interrupts: []const RoutineInterrupt,
 };
 
+/// Kind of one behavior-tree descriptor node (§8.1).
+pub const BehaviorNodeKind = enum { selector, sequence, condition, action };
+
+/// One behavior-tree node (M0.8 E4, `etch-ast-ir.md` §3.5: `Behavior {
+/// root }` tree). `when` / `payload` are canonical-rendered texts ("" when
+/// absent); `children` recurse for composites. NOTE (item-2 ruling): an
+/// action `let` binds for later actions of its composite — the binding's
+/// runtime SCOPE is pinned by Cortex Phase 1+, the descriptor carries the
+/// structure only.
+pub const BehaviorNode = struct {
+    kind: BehaviorNodeKind,
+    when: []const u8,
+    payload: []const u8,
+    children: []const BehaviorNode,
+};
+
+/// `behavior` descriptor (§3.5: `Behavior { root: BTNodeId }`).
+pub const Behavior = struct {
+    name: []const u8,
+    root: BehaviorNode,
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
 pub const Descriptor = union(enum) {
     data: Data,
     routine: Routine,
+    behavior: Behavior,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
         switch (self) {
             .data => |d| try writeData(d, gpa, out),
             .routine => |r| try writeRoutine(r, gpa, out),
+            .behavior => |b| try writeBehavior(b, gpa, out),
         }
     }
 };
@@ -143,6 +167,67 @@ pub fn writeRoutine(r: Routine, gpa: std.mem.Allocator, out: *std.ArrayListUnman
         try appendFmt(gpa, out, "  interrupt {s} -> {s}\n", .{ intr.event, intr.target });
     }
     try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `behavior` descriptor (recursive tree).
+pub fn writeBehavior(b: Behavior, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "behavior {s} {{\n", .{b.name});
+    try writeBTNode(b.root, 1, gpa, out);
+    try out.appendSlice(gpa, "}\n");
+}
+
+fn writeBTNode(node: BehaviorNode, depth: u32, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    var d: u32 = 0;
+    while (d < depth) : (d += 1) try out.appendSlice(gpa, "  ");
+    switch (node.kind) {
+        .selector, .sequence => {
+            try out.appendSlice(gpa, if (node.kind == .selector) "selector" else "sequence");
+            if (node.when.len != 0) {
+                try appendFmt(gpa, out, " when {s}", .{node.when});
+            }
+            try out.appendSlice(gpa, " {\n");
+            for (node.children) |child| {
+                try writeBTNode(child, depth + 1, gpa, out);
+            }
+            d = 0;
+            while (d < depth) : (d += 1) try out.appendSlice(gpa, "  ");
+            try out.appendSlice(gpa, "}\n");
+        },
+        .condition => try appendFmt(gpa, out, "condition {s}\n", .{node.payload}),
+        .action => try appendFmt(gpa, out, "action {s}\n", .{node.payload}),
+    }
+}
+
+test "writeBehavior canonical form is stable" {
+    const gpa = std.testing.allocator;
+    const b: Behavior = .{
+        .name = "CombatBehavior",
+        .root = .{
+            .kind = .selector,
+            .when = "",
+            .payload = "",
+            .children = &.{
+                .{ .kind = .sequence, .when = "self has Health { (current < (max * 0.2)) }", .payload = "", .children = &.{
+                    .{ .kind = .action, .when = "", .payload = "let cover = find_cover(target)", .children = &.{} },
+                } },
+                .{ .kind = .condition, .when = "", .payload = "(hp > 0)", .children = &.{} },
+            },
+        },
+    };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try writeBehavior(b, gpa, &out);
+    try std.testing.expectEqualStrings(
+        \\behavior CombatBehavior {
+        \\  selector {
+        \\    sequence when self has Health { (current < (max * 0.2)) } {
+        \\      action let cover = find_cover(target)
+        \\    }
+        \\    condition (hp > 0)
+        \\  }
+        \\}
+        \\
+    , out.items);
 }
 
 test "writeRoutine canonical form is stable" {
