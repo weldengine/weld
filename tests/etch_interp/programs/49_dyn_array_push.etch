@@ -1,0 +1,23 @@
+component Acc {
+  first: int = 0
+  third: int = 0
+  count: int = 0
+  sum: int = 0
+}
+
+rule dyn_array_ops(entity: Entity)
+  when entity has Acc
+{
+  let acc = entity.get_mut(Acc)
+  let mut xs: int[] = [10, 20]
+  xs.push(30)
+  xs.push(40)
+  acc.first = xs[0]
+  acc.third = xs[2]
+  acc.count = xs.len()
+  let mut total = 0
+  for v in xs {
+    total += v
+  }
+  acc.sum = total
+}

@@ -2144,6 +2144,68 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
 
+        // Builtin dynamic-array methods (M0.8 E3-C tranche 3 — minimal
+        // faithful subset of stdlib §13.2). `push(item)` (mut receiver,
+        // element-typed arg, void return) and `len()` (→ int). Any other §13
+        // method is a stdlib activation (Phase 1+) → diagnostic here +
+        // fail-loud codegen.
+        if (recv_t == .array_dyn) {
+            if (std.mem.eql(u8, method_slice, "push")) {
+                if (mc.args_len != 1) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array method 'push' takes exactly one argument", .{});
+                } else {
+                    const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+                    const arg_t = try self.synthExprE(arg, ctx_opt);
+                    if (arg_t == .builtin and !self.literalTypeFits(recv_t.array_dyn, arg, arg_t.builtin)) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "pushed value type does not match the array element type", .{});
+                    }
+                }
+                try self.checkMutCollectionReceiver(mc, ctx_opt);
+                return ResolvedType.unknown; // void return
+            }
+            if (std.mem.eql(u8, method_slice, "len")) {
+                if (mc.args_len != 0) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array method 'len' takes no arguments", .{});
+                }
+                return ResolvedType{ .builtin = .int_ };
+            }
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "array method '{s}' is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{method_slice});
+            return ResolvedType.unknown;
+        }
+
+        // Builtin map methods (M0.8 E3-C tranche 3 — minimal faithful subset
+        // of stdlib §14.2). `insert(k, v)` (mut receiver, key/value-typed
+        // args; its `V?` return is out of the subset — statement use only)
+        // and `len()` (→ int). Any other §14 method is stdlib Phase 1+.
+        if (recv_t == .map_t) {
+            if (std.mem.eql(u8, method_slice, "insert")) {
+                if (mc.args_len != 2) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "map method 'insert' takes exactly two arguments (key, value)", .{});
+                } else {
+                    const karg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+                    const varg: NodeId = @bitCast(self.arena.extra.items[mc.args_start + 1]);
+                    const k_t = try self.synthExprE(karg, ctx_opt);
+                    const v_t = try self.synthExprE(varg, ctx_opt);
+                    if (k_t == .builtin and !self.literalTypeFits(recv_t.map_t.key, karg, k_t.builtin)) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(karg), "inserted key type does not match the map key type", .{});
+                    }
+                    if (v_t == .builtin and !self.literalTypeFits(recv_t.map_t.value, varg, v_t.builtin)) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(varg), "inserted value type does not match the map value type", .{});
+                    }
+                }
+                try self.checkMutCollectionReceiver(mc, ctx_opt);
+                return ResolvedType.unknown; // V? return is out of the subset
+            }
+            if (std.mem.eql(u8, method_slice, "len")) {
+                if (mc.args_len != 0) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "map method 'len' takes no arguments", .{});
+                }
+                return ResolvedType{ .builtin = .int_ };
+            }
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "map method '{s}' is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{method_slice});
+            return ResolvedType.unknown;
+        }
+
         const type_name: StringId = typeNameOfResolved(recv_t) orelse blk: {
             if (recv_t == .builtin and recv_t.builtin == .entity) {
                 break :blk self.arena.strings.find("Entity") orelse {
@@ -2254,6 +2316,17 @@ pub const TypeChecker = struct {
         };
     }
 
+    /// E0220-shaped check for the builtin mutating collection methods
+    /// (M0.8 E3-C tranche 3): `push` / `insert` are `mut self` per stdlib
+    /// §13.2/§14.2, so the receiver must be a mutable binding. Same
+    /// reachability rule as `checkMutSelfReceiver`, without a user `FnDecl`.
+    fn checkMutCollectionReceiver(self: *TypeChecker, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx) !void {
+        const ctx = ctx_opt orelse return;
+        if (!isAssignTargetReachable(self.arena, ctx, mc.receiver)) {
+            try self.emit(.immutable_receiver_for_mut_self, .error_, self.arena.exprSpan(mc.receiver), "cannot call a mutating collection method on an immutable receiver (bind it with 'let mut')", .{});
+        }
+    }
+
     /// E0220 (`etch-resolver-types.md §7.6`): a `mut self` method called on an
     /// immutable receiver. A struct bound by `let` (not `let mut`) is immutable;
     /// `let mut` / a `get_mut` ref is mutable. Skipped without a rule context.
@@ -2310,6 +2383,14 @@ pub const TypeChecker = struct {
             .array_dyn => |elem| {
                 if (idx_t == .builtin and !idx_t.builtin.isInteger()) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ix.index), "array index must be an integer", .{});
                 return .{ .builtin = elem };
+            },
+            .map_t => {
+                // `m[k]` returns `V?` (stdlib §14.3) — optional-returning
+                // accessors are out of the M0.8 minimal subset (M0.8 E3-C
+                // tranche 3; the Optional ops close later). Read maps through
+                // `for k, v in m` instead.
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "map index read returns an optional — not in the M0.8 minimal subset (iterate with 'for k, v in m')", .{});
+                return ResolvedType.unknown;
             },
             .unknown => return ResolvedType.unknown,
             else => {
@@ -4028,4 +4109,81 @@ test "type-checker rejects a user declaration colliding with the builtin Error (
     );
     defer bad.deinit(gpa);
     try expectAnyCode(bad.diagnostics.items, .duplicate_symbol);
+}
+
+test "type-checker accepts the minimal collection method subset (M0.8 E3-C tranche 3)" {
+    const gpa = std.testing.allocator;
+    // stdlib §13.2/§14.2 minimal subset: array push/len, map insert/len —
+    // mutating methods on `let mut` receivers, `len` typing as int.
+    var ok = try parseAndCheck(gpa,
+        \\component Probe { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Probe
+        \\{
+        \\  let mut xs: int[] = []
+        \\  xs.push(4)
+        \\  let mut m = [1: 10]
+        \\  m.insert(2, 20)
+        \\  entity.get_mut(Probe).n = xs.len() + m.len()
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+}
+
+test "type-checker rejects out-of-subset collection methods, immutable receivers, and map index reads (M0.8 E3-C tranche 3)" {
+    const gpa = std.testing.allocator;
+    // `pop` is §13.2 but optional-returning — out of the minimal subset.
+    var pop = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let mut xs: int[] = []
+        \\  let v = xs.pop()
+        \\}
+    );
+    defer pop.deinit(gpa);
+    try expectAnyCode(pop.diagnostics.items, .type_mismatch);
+
+    // `push` is `mut self` (stdlib §13.2): an immutable binding is rejected.
+    var immut = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let xs: int[] = []
+        \\  xs.push(1)
+        \\}
+    );
+    defer immut.deinit(gpa);
+    try expectAnyCode(immut.diagnostics.items, .immutable_receiver_for_mut_self);
+
+    // `m[k]` returns `V?` (stdlib §14.3) — optional accessors are out of
+    // the subset; maps are read through `for k, v in m`.
+    var idx = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let m = [1: 10]
+        \\  let v = m[1]
+        \\}
+    );
+    defer idx.deinit(gpa);
+    try expectAnyCode(idx.diagnostics.items, .type_mismatch);
+}
+
+test "type-checker checks collection method argument types (M0.8 E3-C tranche 3)" {
+    const gpa = std.testing.allocator;
+    // A pushed value must fit the array element type...
+    var bad_push = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let mut xs: int[] = []
+        \\  xs.push(1.5)
+        \\}
+    );
+    defer bad_push.deinit(gpa);
+    try expectAnyCode(bad_push.diagnostics.items, .type_mismatch);
+
+    // ...and an inserted key/value must fit the map's key/value types.
+    var bad_insert = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let mut m = [1: 10]
+        \\  m.insert(true, 20)
+        \\}
+    );
+    defer bad_insert.deinit(gpa);
+    try expectAnyCode(bad_insert.diagnostics.items, .type_mismatch);
 }

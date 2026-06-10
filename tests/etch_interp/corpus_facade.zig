@@ -68,6 +68,8 @@ const p45 = @import("programs/45_string_len.expected.zig");
 const p46 = @import("programs/46_string_concat.expected.zig");
 const p47 = @import("programs/47_string_interp.expected.zig");
 const p48 = @import("programs/48_error_throw_catch.expected.zig");
+const p49 = @import("programs/49_dyn_array_push.expected.zig");
+const p50 = @import("programs/50_map_insert_iterate.expected.zig");
 
 /// Embedded list of the 20 differential corpus programs consumed by
 /// the S4 interpreter test and the S5 codegen parity test.
@@ -120,4 +122,6 @@ pub const programs = [_]Program{
     .{ .name = "46_string_concat", .source = @embedFile("programs/46_string_concat.etch"), .config = p46.config, .initial = p46.initial, .expected = p46.expected },
     .{ .name = "47_string_interp", .source = @embedFile("programs/47_string_interp.etch"), .config = p47.config, .initial = p47.initial, .expected = p47.expected },
     .{ .name = "48_error_throw_catch", .source = @embedFile("programs/48_error_throw_catch.etch"), .config = p48.config, .initial = p48.initial, .expected = p48.expected },
+    .{ .name = "49_dyn_array_push", .source = @embedFile("programs/49_dyn_array_push.etch"), .config = p49.config, .initial = p49.initial, .expected = p49.expected },
+    .{ .name = "50_map_insert_iterate", .source = @embedFile("programs/50_map_insert_iterate.etch"), .config = p50.config, .initial = p50.initial, .expected = p50.expected },
 };

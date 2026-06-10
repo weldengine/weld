@@ -1783,9 +1783,10 @@ pub const Interpreter = struct {
             },
             .map_lit => {
                 // `[k: v, ...]` → materialize a fresh map in the rule-body
-                // store (M0.8 collections). Duplicate keys are last-write-wins.
-                // The interpreter is the reference execution; map codegen is
-                // deferred (heap / arena model).
+                // store (M0.8 collections). Duplicate keys are last-write-wins
+                // — the same scan-replace-or-append the tranche-3 codegen
+                // emits (`__etchMapInsert`), so the two backends agree on
+                // iteration order by construction.
                 const ml = self.ast.map_lits.items[data];
                 const handle = try self.collections.newMap(self.gpa);
                 var i: u32 = 0;
@@ -1952,6 +1953,62 @@ pub const Interpreter = struct {
                         if (std.mem.eql(u8, mname, "len")) {
                             const bytes = self.stringBytes(recv) orelse return error.RuntimeFailure;
                             return Value{ .int_ = @intCast(bytes.len) };
+                        }
+                        return error.RuntimeFailure;
+                    },
+                    .array_ref => |handle| {
+                        // Builtin dynamic-array methods (M0.8 E3-C tranche 3 —
+                        // minimal faithful subset of stdlib §13.2). `push`
+                        // appends (mut receiver enforced by the resolver),
+                        // `len` is the element count; any other §13 method is
+                        // stdlib Phase 1+ → fail loud.
+                        const mname = self.ast.strings.slice(mc.method_name);
+                        if (std.mem.eql(u8, mname, "push")) {
+                            if (mc.args_len != 1) return error.RuntimeFailure;
+                            const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+                            const v = try self.evalExpr(world, locals, arg);
+                            // Re-index after the arg eval (a nested collection
+                            // could have grown the outer store vector).
+                            try self.collections.arrays.items[handle].append(self.gpa, v);
+                            return Value{ .unit = {} };
+                        }
+                        if (std.mem.eql(u8, mname, "len")) {
+                            if (mc.args_len != 0) return error.RuntimeFailure;
+                            return Value{ .int_ = @intCast(self.collections.arrays.items[handle].items.len) };
+                        }
+                        return error.RuntimeFailure;
+                    },
+                    .map_ref => |handle| {
+                        // Builtin map methods (M0.8 E3-C tranche 3 — minimal
+                        // faithful subset of stdlib §14.2). `insert` is
+                        // last-write-wins through the same scan-replace-or-
+                        // append as the map literal (its `V?` return is out of
+                        // the subset — statement use only, the value here is
+                        // unit); `len` is the entry count; any other §14
+                        // method is stdlib Phase 1+ → fail loud.
+                        const mname = self.ast.strings.slice(mc.method_name);
+                        if (std.mem.eql(u8, mname, "insert")) {
+                            if (mc.args_len != 2) return error.RuntimeFailure;
+                            const karg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+                            const varg: NodeId = @bitCast(self.ast.extra.items[mc.args_start + 1]);
+                            const k = try self.evalExpr(world, locals, karg);
+                            const v = try self.evalExpr(world, locals, varg);
+                            // Re-index after the arg evals (a nested collection
+                            // could have grown the outer store vector).
+                            var replaced = false;
+                            for (self.collections.maps.items[handle].items) |*pair| {
+                                if (pair.key.eql(k)) {
+                                    pair.value = v;
+                                    replaced = true;
+                                    break;
+                                }
+                            }
+                            if (!replaced) try self.collections.maps.items[handle].append(self.gpa, .{ .key = k, .value = v });
+                            return Value{ .unit = {} };
+                        }
+                        if (std.mem.eql(u8, mname, "len")) {
+                            if (mc.args_len != 0) return error.RuntimeFailure;
+                            return Value{ .int_ = @intCast(self.collections.maps.items[handle].items.len) };
                         }
                         return error.RuntimeFailure;
                     },
@@ -3342,8 +3399,8 @@ test "runProgram for-in over a dynamic array iterates each element (M0.8 collect
     var world = World.init();
     defer world.deinit(gpa);
 
-    // A `T[]`-annotated dynamic array — the interpreter is its reference
-    // execution (codegen for dynamic arrays is deferred, heap/arena model).
+    // A `T[]`-annotated dynamic array — the interpreter is the reference
+    // execution the tranche-3 codegen matches byte-exactly (frame arena).
     // for-in over it sums 5 + 15 + 25 = 45.
     const source =
         \\component Acc { out: int = 0 }
@@ -3389,9 +3446,9 @@ test "runProgram map literal + for-in sums values (M0.8 collections)" {
     defer world.deinit(gpa);
 
     // A map literal iterated with `for k, v in m`, summing the values. The
-    // interpreter is the reference execution (map codegen is deferred). The
-    // sum (10 + 20 + 30 = 60) is order-invariant, matching the unordered-map
-    // contract.
+    // interpreter is the reference execution the tranche-3 codegen mirrors
+    // (insertion-ordered pair list). The sum (10 + 20 + 30 = 60) is
+    // order-invariant, matching the unordered-map contract.
     const source =
         \\component Acc { out: int = 0 }
         \\rule sum(entity: Entity)
@@ -3428,6 +3485,101 @@ test "runProgram map literal + for-in sums values (M0.8 collections)" {
     var total: i64 = 0;
     @memcpy(std.mem.asBytes(&total), slot[0..8]);
     try std.testing.expectEqual(@as(i64, 60), total);
+}
+
+test "runProgram dynamic array push and len (M0.8 E3-C tranche 3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The minimal §13.2 method subset on a dynamic array: two `push` calls
+    // grow [1, 2] to [1, 2, 7, 9]; `len` and an index read flow back into
+    // the component (out = 4 * 100 + xs[3] = 409).
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule grow(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let mut xs: int[] = [1, 2]
+        \\  xs.push(7)
+        \\  xs.push(9)
+        \\  entity.get_mut(Acc).out = xs.len() * 100 + xs[3]
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var total: i64 = 0;
+    @memcpy(std.mem.asBytes(&total), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 409), total);
+}
+
+test "runProgram map insert replaces and appends, len counts (M0.8 E3-C tranche 3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The minimal §14.2 method subset on a map: `insert(3, 30)` appends,
+    // `insert(2, 25)` replaces in place (last-write-wins — same scan as the
+    // map literal). The value sum reads 10 + 25 + 30 = 65; with `len` the
+    // component sees 3 * 1000 + 65 = 3065.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule upsert(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let mut m = [1: 10, 2: 20]
+        \\  m.insert(3, 30)
+        \\  m.insert(2, 25)
+        \\  let mut s = 0
+        \\  for k, v in m { s += v }
+        \\  entity.get_mut(Acc).out = m.len() * 1000 + s
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var total: i64 = 0;
+    @memcpy(std.mem.asBytes(&total), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 3065), total);
 }
 
 test "runProgram closure captures an outer local by value (M0.8 closures)" {

@@ -65,4 +65,6 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p46_string_concat", .etch_path = "tests/etch_interp/programs/46_string_concat.etch" },
     .{ .name = "p47_string_interp", .etch_path = "tests/etch_interp/programs/47_string_interp.etch" },
     .{ .name = "p48_error_throw_catch", .etch_path = "tests/etch_interp/programs/48_error_throw_catch.etch" },
+    .{ .name = "p49_dyn_array_push", .etch_path = "tests/etch_interp/programs/49_dyn_array_push.etch" },
+    .{ .name = "p50_map_insert_iterate", .etch_path = "tests/etch_interp/programs/50_map_insert_iterate.etch" },
 };

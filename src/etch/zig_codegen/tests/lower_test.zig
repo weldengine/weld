@@ -345,3 +345,87 @@ test "lowers a throws fn to the hidden __err out-param and rejects unsanctioned 
         root.generateToBuffer(gpa, &pr.ast, "<test>", &nested),
     );
 }
+
+test "lowers dynamic-array and map locals to frame-arena lists, gating the map-insert helper (M0.8 E3-C tranche 3)" {
+    const gpa = std.testing.allocator;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let mut xs: int[] = [1, 2]
+        \\  xs.push(3)
+        \\  let mut m = [1: 10]
+        \\  m.insert(2, 20)
+        \\  let mut s = 0
+        \\  for k, v in m { s += k + v }
+        \\  for x in xs { s += x }
+        \\  entity.get_mut(Acc).n = s + xs.len() + m.len() + xs[0]
+        \\}
+    , &out);
+    // Dynamic array: list decl + literal seed + arena push + items access.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "var xs: std.ArrayListUnmanaged(i64) = .empty;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "xs.appendSlice(fa, &[_]i64{ 1, 2 }) catch unreachable;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "(xs).append(fa, 3) catch unreachable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "for ((xs).items) |x| {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "xs.items[@as(usize, @intCast(0))]") != null);
+    // Map: insertion-ordered pair list + helper-seeded literal + kv loop.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "var m: std.ArrayListUnmanaged(struct { key: i64, value: i64 }) = .empty;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "fn __etchMapInsert(m: anytype, fa: std.mem.Allocator, k: anytype, v: anytype) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "__etchMapInsert(&m, fa, 1, 10);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "__etchMapInsert(&(m), fa, 2, 20)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "for ((m).items) |__kv| {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "const k = __kv.key;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "const v = __kv.value;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "@as(i64, @intCast((m).items.len))") != null);
+
+    // A map-free program never emits the helper (byte-identity belt).
+    var plain: std.ArrayListUnmanaged(u8) = .empty;
+    defer plain.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  entity.get_mut(Acc).n = 5
+        \\}
+    , &plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain.items, "__etchMapInsert") == null);
+}
+
+test "collection allocations require the frame arena: fn-body push fails loud (M0.8 E3-C tranche 3)" {
+    const gpa = std.testing.allocator;
+    // A fn body has no arena (§6.3 outparam model deferred) — a collection
+    // allocation inside one fails loud, same policy as string concat.
+    var pr = try parser.parse(gpa,
+        \\component Acc { n: int = 0 }
+        \\fn build() -> int {
+        \\  let mut xs: int[] = [1]
+        \\  xs.push(2)
+        \\  return xs.len()
+        \\}
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  entity.get_mut(Acc).n = build()
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(diag.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try std.testing.expectError(
+        root.CodegenError.UnsupportedConstruct,
+        root.generateToBuffer(gpa, &pr.ast, "<test>", &out),
+    );
+}

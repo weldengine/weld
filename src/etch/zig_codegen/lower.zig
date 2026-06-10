@@ -140,6 +140,14 @@ pub fn generateFile(
         try emitErrorPrelude(&w);
     }
 
+    // Map-insert helper (M0.8 E3-C tranche 3) — emitted iff the program has a
+    // map literal (the only source of a map value in the M0.8 subset). An
+    // unused private fn is legal Zig, so over-emitting on a map-literal-only
+    // program is harmless; map-free programs stay byte-identical.
+    if (ast.map_lits.items.len > 0) {
+        try emitMapInsertPrelude(&w);
+    }
+
     // The builtin `TagSet` component (M0.8 E3): a fixed `[words]u64` bitfield,
     // one slot per entity carrying tags. Emitted as an `extern struct` so its
     // layout matches the registry's raw `words*8`-byte / align-8 component
@@ -350,6 +358,33 @@ fn emitErrorPrelude(w: *Writer) CodegenError!void {
     try w.line("source: ?*const Error = null,");
     w.indentBy(-1);
     try w.line("};");
+    try w.blankLine();
+}
+
+/// Emit the map-insert helper (M0.8 E3-C tranche 3, stdlib §14.2): one
+/// duck-typed fn shared by `m.insert(k, v)`, the map-literal seeding, and
+/// nothing else. Last-write-wins through the same scan-replace-or-append as
+/// the interpreter's map store — byte-exact iteration order by construction.
+/// `m` is a `*std.ArrayListUnmanaged(struct { key: K, value: V })`; `==` on
+/// the key bounds K to the scalar key types the emitter's type table allows.
+/// Gated on the program containing a map literal (the only way a map value
+/// exists in the M0.8 subset), so map-free programs stay byte-identical.
+fn emitMapInsertPrelude(w: *Writer) CodegenError!void {
+    try w.line("fn __etchMapInsert(m: anytype, fa: std.mem.Allocator, k: anytype, v: anytype) void {");
+    w.indentBy(1);
+    try w.line("for (m.items) |*p| {");
+    w.indentBy(1);
+    try w.line("if (p.key == k) {");
+    w.indentBy(1);
+    try w.line("p.value = v;");
+    try w.line("return;");
+    w.indentBy(-1);
+    try w.line("}");
+    w.indentBy(-1);
+    try w.line("}");
+    try w.line("m.append(fa, .{ .key = k, .value = v }) catch unreachable;");
+    w.indentBy(-1);
+    try w.line("}");
     try w.blankLine();
 }
 
@@ -2185,24 +2220,71 @@ fn emitStmt(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, stmt_id: NodeId) C
                 w.indentBy(-1);
                 try w.writeIndent();
                 try w.write("} }\n");
+            } else if (f.index_name != 0) {
+                // `for k, v in m` — a two-binding for-in is a map iteration
+                // (M0.8 E3-C tranche 3). The map local is an insertion-ordered
+                // pair list (the interpreter's exact iteration order), so the
+                // loop walks the items slice and binds key then value as
+                // consts. An unused binding gets a `_ =` discard (the same
+                // static-scan discipline as the tranche-2 catch binding). Any
+                // non-map two-binding iterable already failed at the resolver;
+                // fail loud here as the belt.
+                const kv = mapKVZig(inferExprZigType(ast, ctx, f.iterable)) orelse return CodegenError.UnsupportedConstruct;
+                try w.writeIndent();
+                try w.write("for ((");
+                try emitExpr(w, ast, ctx, f.iterable);
+                try w.write(").items) |__kv| {\n");
+                w.indentBy(1);
+                try w.writeIndent();
+                try w.write("const ");
+                try w.ident(vname);
+                try w.write(" = __kv.key;\n");
+                if (!stmtRunUsesIdent(ast, f.var_name, f.body_start, f.body_len)) {
+                    try w.writeIndent();
+                    try w.write("_ = ");
+                    try w.ident(vname);
+                    try w.write(";\n");
+                }
+                try w.writeIndent();
+                try w.write("const ");
+                try w.ident(ast.strings.slice(f.index_name));
+                try w.write(" = __kv.value;\n");
+                if (!stmtRunUsesIdent(ast, f.index_name, f.body_start, f.body_len)) {
+                    try w.writeIndent();
+                    try w.write("_ = ");
+                    try w.ident(ast.strings.slice(f.index_name));
+                    try w.write(";\n");
+                }
+                const saved = ctx.records.items.len;
+                try ctx.records.append(w.gpa, .{ .key = .{ .name = f.var_name }, .info = .{ .kind = .value, .zig_type = kv.key, .is_mut = false } });
+                try ctx.records.append(w.gpa, .{ .key = .{ .name = f.index_name }, .info = .{ .kind = .value, .zig_type = kv.value, .is_mut = false } });
+                var s: u32 = 0;
+                while (s < f.body_len) : (s += 1) {
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]));
+                }
+                ctx.records.items.len = saved;
+                w.indentBy(-1);
+                try w.writeIndent();
+                try w.write("}\n");
             } else {
-                // A two-binding for-in is a map iteration (`for k, v in m`) —
-                // map codegen is deferred (heap / arena model), interpreter is
-                // the reference. Single-binding only here.
-                if (f.index_name != 0) return CodegenError.UnsupportedConstruct;
                 // `for v in <array> { body }` → Zig `for (<array>) |v| { ... }`
-                // (M0.8 collections). E1 codegen supports fixed-array iterables;
-                // the loop variable binds each element by value. Zig infers the
-                // element type, so the local is recorded with no zig_type.
+                // (M0.8 collections). Fixed arrays iterate directly; a dynamic
+                // array (M0.8 E3-C tranche 3) iterates its backing items
+                // slice, with the loop variable typed at the element type. Zig
+                // infers the element type for fixed iterables, so that local
+                // is recorded with no zig_type.
+                const dyn_elem = dynArrayElemZig(inferExprZigType(ast, ctx, f.iterable));
                 try w.writeIndent();
                 try w.write("for (");
+                if (dyn_elem != null) try w.write("(");
                 try emitExpr(w, ast, ctx, f.iterable);
+                if (dyn_elem != null) try w.write(").items");
                 try w.write(") |");
                 try w.ident(vname);
                 try w.write("| {\n");
                 w.indentBy(1);
                 const saved = ctx.records.items.len;
-                try ctx.records.append(w.gpa, .{ .key = .{ .name = f.var_name }, .info = .{ .kind = .value, .zig_type = "", .is_mut = false } });
+                try ctx.records.append(w.gpa, .{ .key = .{ .name = f.var_name }, .info = .{ .kind = .value, .zig_type = dyn_elem orelse "", .is_mut = false } });
                 var s: u32 = 0;
                 while (s < f.body_len) : (s += 1) {
                     try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[f.body_start + s]));
@@ -2501,6 +2583,89 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
         }
     }
 
+    // `let [mut] xs: T[] = <array literal>` (M0.8 E3-C tranche 3) — a dynamic
+    // array local: a frame-arena-backed list, the codegen image of the
+    // interpreter's per-body array store. Empty literal → `.empty` (no
+    // allocation, no arena needed); a non-empty literal seeds via one
+    // `appendSlice` on the frame arena. A fill literal / non-scalar element
+    // is deferred — fail loud, interpreter reference.
+    if (!let.type_annotation.isNone() and ast.typeNodeKind(let.type_annotation) == .slice) {
+        const list_t = sliceAnnotationListType(ast, let.type_annotation) orelse return CodegenError.UnsupportedConstruct;
+        if (ast.exprKind(let.value) != .array_lit) return CodegenError.UnsupportedConstruct;
+        const al = ast.array_lits.items[ast.exprData(let.value)];
+        if (al.is_fill) return CodegenError.UnsupportedConstruct;
+        try w.writeIndent();
+        try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
+        try w.ident(ast.strings.slice(let.name));
+        try w.print(": {s} = .empty;\n", .{list_t});
+        if (al.elements_len > 0) {
+            const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
+            w.arena_used = true;
+            try w.writeIndent();
+            try w.ident(ast.strings.slice(let.name));
+            try w.print(".appendSlice({s}, &[_]{s}{{ ", .{ fa, dynArrayElemZig(list_t).? });
+            var i: u32 = 0;
+            while (i < al.elements_len) : (i += 1) {
+                if (i > 0) try w.write(", ");
+                try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[al.elements_start + i]));
+            }
+            try w.write(" }) catch unreachable;\n");
+        }
+        try ctx.records.append(w.gpa, .{
+            .key = .{ .name = let.name },
+            .info = .{ .kind = .value, .zig_type = list_t, .is_mut = let.is_mut },
+        });
+        return;
+    }
+
+    // `let [mut] m: [K: V] = <map literal>` / `let mut m = [k: v, ...]`
+    // (M0.8 E3-C tranche 3) — a map local: an insertion-ordered pair list
+    // seeded entry by entry through `__etchMapInsert`, the exact mechanics of
+    // the interpreter's map-literal eval (last-write-wins on duplicate keys).
+    // Without an annotation the key/value Zig types are inferred from the
+    // first entry. A key/value pair outside the map table fails loud.
+    const map_list_t: ?[]const u8 = blk: {
+        if (!let.type_annotation.isNone() and ast.typeNodeKind(let.type_annotation) == .map_type) {
+            break :blk mapAnnotationListType(ast, let.type_annotation) orelse return CodegenError.UnsupportedConstruct;
+        }
+        if (let.type_annotation.isNone() and ast.exprKind(let.value) == .map_lit) {
+            const ml = ast.map_lits.items[ast.exprData(let.value)];
+            if (ml.entries_len == 0) break :blk null; // un-annotated empty map → fail loud below
+            const entry = ast.map_entries.items[ml.entries_start];
+            break :blk mapZigType(inferExprZigType(ast, ctx, entry.key), inferExprZigType(ast, ctx, entry.value)) orelse return CodegenError.UnsupportedConstruct;
+        }
+        break :blk null;
+    };
+    if (map_list_t) |list_t| {
+        if (ast.exprKind(let.value) != .map_lit) return CodegenError.UnsupportedConstruct;
+        const ml = ast.map_lits.items[ast.exprData(let.value)];
+        try w.writeIndent();
+        try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
+        try w.ident(ast.strings.slice(let.name));
+        try w.print(": {s} = .empty;\n", .{list_t});
+        if (ml.entries_len > 0) {
+            const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
+            w.arena_used = true;
+            var i: u32 = 0;
+            while (i < ml.entries_len) : (i += 1) {
+                const entry = ast.map_entries.items[ml.entries_start + i];
+                try w.writeIndent();
+                try w.write("__etchMapInsert(&");
+                try w.ident(ast.strings.slice(let.name));
+                try w.print(", {s}, ", .{fa});
+                try emitExpr(w, ast, ctx, entry.key);
+                try w.write(", ");
+                try emitExpr(w, ast, ctx, entry.value);
+                try w.write(");\n");
+            }
+        }
+        try ctx.records.append(w.gpa, .{
+            .key = .{ .name = let.name },
+            .info = .{ .kind = .value, .zig_type = list_t, .is_mut = let.is_mut },
+        });
+        return;
+    }
+
     // Plain-value let. Try to infer the Zig type so the binding is annotated
     // when possible (helps Zig's int-literal coercion).
     const zig_t = inferZigType(ast, ctx, let.value, let.type_annotation);
@@ -2696,12 +2861,14 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         .match_expr => try emitMatch(w, ast, ctx, data),
         .array_lit => {
             // `[a, b, c]` → `[_]ELEM{ ... }`, `[v; n]` → `[_]ELEM{v} ** n`
-            // (M0.8 collections). E1 codegen emits fixed (stack) arrays only —
-            // the element type is inferred from the first element. Dynamic
-            // `T[]` / map / set codegen is deferred (heap, needs the arena
-            // model) and the interpreter is their reference execution.
+            // (M0.8 collections): the fixed (stack) array form — the element
+            // type is inferred from the first element. Dynamic `T[]` literals
+            // never reach this arm: they are routed at the `let` (the only
+            // place a slice annotation types them, M0.8 E3-C tranche 3). An
+            // empty literal outside that route has no type — fail loud. Set
+            // codegen is deferred with its interp runtime (no Set store yet).
             const al = ast.array_lits.items[data];
-            if (al.elements_len == 0) return CodegenError.UnsupportedConstruct; // empty array → dynamic, deferred
+            if (al.elements_len == 0) return CodegenError.UnsupportedConstruct;
             const first: NodeId = @bitCast(ast.extra.items[al.elements_start]);
             const elem_zig = inferExprZigType(ast, ctx, first);
             if (al.is_fill) {
@@ -2725,7 +2892,13 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // (`recv[lo..hi]`) (M0.8 collections). A range index lowers to a
             // Zig slice; an inclusive range adds 1 to the exclusive Zig bound.
             const ix = ast.index_exprs.items[data];
+            // A dynamic-array receiver (M0.8 E3-C tranche 3) indexes through
+            // its backing items slice; range-slicing a dynamic array (a fresh
+            // array in the interpreter) is deferred — fail loud.
+            const recv_is_dyn = dynArrayElemZig(inferExprZigType(ast, ctx, ix.receiver)) != null;
+            if (recv_is_dyn and ast.exprKind(ix.index) == .range) return CodegenError.UnsupportedConstruct;
             try emitExpr(w, ast, ctx, ix.receiver);
+            if (recv_is_dyn) try w.write(".items");
             if (ast.exprKind(ix.index) == .range) {
                 const r = ast.ranges.items[ast.exprData(ix.index)];
                 try w.write("[@as(usize, @intCast(");
@@ -2817,6 +2990,58 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // the struct, so Zig's `value.method(args)` / `Type.assoc(args)`
             // syntax resolves them directly.
             const mc = ast.method_calls.items[data];
+            // Builtin dynamic-array / map methods (M0.8 E3-C tranche 3 —
+            // minimal faithful subset, stdlib §13.2/§14.2), routed on the
+            // receiver's emitted declaration type. `push` / `insert` allocate
+            // on the frame arena and value as Zig `void` — sound in statement
+            // position (the resolver bounds them there); a value-position use
+            // fails loud downstream (`void` binding). `len` is the count as
+            // Etch `int`. Anything else is stdlib Phase 1+ → fail loud.
+            if (ast.exprKind(mc.receiver) != .path) {
+                const recv_zig = inferExprZigType(ast, ctx, mc.receiver);
+                if (dynArrayElemZig(recv_zig) != null) {
+                    const mname = ast.strings.slice(mc.method_name);
+                    if (std.mem.eql(u8, mname, "push") and mc.args_len == 1) {
+                        const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
+                        w.arena_used = true;
+                        try w.write("(");
+                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try w.print(").append({s}, ", .{fa});
+                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
+                        try w.write(") catch unreachable");
+                        return;
+                    }
+                    if (std.mem.eql(u8, mname, "len") and mc.args_len == 0) {
+                        try w.write("@as(i64, @intCast((");
+                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try w.write(").items.len))");
+                        return;
+                    }
+                    return CodegenError.UnsupportedConstruct;
+                }
+                if (mapKVZig(recv_zig) != null) {
+                    const mname = ast.strings.slice(mc.method_name);
+                    if (std.mem.eql(u8, mname, "insert") and mc.args_len == 2) {
+                        const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
+                        w.arena_used = true;
+                        try w.write("__etchMapInsert(&(");
+                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try w.print("), {s}, ", .{fa});
+                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
+                        try w.write(", ");
+                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + 1]));
+                        try w.write(")");
+                        return;
+                    }
+                    if (std.mem.eql(u8, mname, "len") and mc.args_len == 0) {
+                        try w.write("@as(i64, @intCast((");
+                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try w.write(").items.len))");
+                        return;
+                    }
+                    return CodegenError.UnsupportedConstruct;
+                }
+            }
             // Builtin string method (M0.8 sub-slice C tranche 1). `s.len()` →
             // Zig `(s).len` cast to `i64` (Etch `int`). Other string methods are
             // stdlib Phase 1+ → fail loud (the resolver already rejects them, so
@@ -3332,6 +3557,93 @@ fn optionalOf(zig_scalar: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, zig_scalar, p[0])) return p[1];
     }
     return null;
+}
+
+/// The Zig declaration type of an Etch dynamic-array local `E[]` (M0.8 E3-C
+/// tranche 3) — a frame-arena-backed list. The table is closed over the E1
+/// builtin element scalars (+ string); any other element type is deferred
+/// (fail loud). Static strings keep the emitter allocation-free and make the
+/// reverse lookup (`dynArrayElemZig`) exact.
+fn dynArrayZigType(elem_zig: []const u8) ?[]const u8 {
+    inline for (dyn_array_types) |p| {
+        if (std.mem.eql(u8, elem_zig, p[0])) return p[1];
+    }
+    return null;
+}
+
+/// Reverse of `dynArrayZigType`: the element Zig type of a dynamic-array
+/// local's declaration type, or `null` when the type is not one the emitter
+/// produced. Drives the method / index / for-in routing on a receiver's
+/// inferred type.
+fn dynArrayElemZig(zig_t: []const u8) ?[]const u8 {
+    inline for (dyn_array_types) |p| {
+        if (std.mem.eql(u8, zig_t, p[1])) return p[0];
+    }
+    return null;
+}
+
+const dyn_array_types = .{
+    .{ "i64", "std.ArrayListUnmanaged(i64)" },
+    .{ "f64", "std.ArrayListUnmanaged(f64)" },
+    .{ "bool", "std.ArrayListUnmanaged(bool)" },
+    .{ "[]const u8", "std.ArrayListUnmanaged([]const u8)" },
+};
+
+/// The Zig declaration type of an Etch map local `[K: V]` (M0.8 E3-C tranche
+/// 3) — an insertion-ordered key/value pair list, mirroring the interpreter's
+/// map store so iteration order (and therefore every differential) is
+/// byte-exact by construction. Keys are bounded to `int`/`bool`: string keys
+/// need content equality (Eq on strings is deferred with the same policy as
+/// tranche 1) and float keys are not hashable per stdlib §4.3 — both fail
+/// loud here, the interpreter staying the reference.
+fn mapZigType(key_zig: []const u8, value_zig: []const u8) ?[]const u8 {
+    inline for (map_types_table) |p| {
+        if (std.mem.eql(u8, key_zig, p[0]) and std.mem.eql(u8, value_zig, p[1])) return p[2];
+    }
+    return null;
+}
+
+/// Reverse of `mapZigType`: the (key, value) Zig types of a map local's
+/// declaration type, or `null`.
+fn mapKVZig(zig_t: []const u8) ?struct { key: []const u8, value: []const u8 } {
+    inline for (map_types_table) |p| {
+        if (std.mem.eql(u8, zig_t, p[2])) return .{ .key = p[0], .value = p[1] };
+    }
+    return null;
+}
+
+const map_types_table = .{
+    .{ "i64", "i64", "std.ArrayListUnmanaged(struct { key: i64, value: i64 })" },
+    .{ "i64", "f64", "std.ArrayListUnmanaged(struct { key: i64, value: f64 })" },
+    .{ "i64", "bool", "std.ArrayListUnmanaged(struct { key: i64, value: bool })" },
+    .{ "i64", "[]const u8", "std.ArrayListUnmanaged(struct { key: i64, value: []const u8 })" },
+    .{ "bool", "i64", "std.ArrayListUnmanaged(struct { key: bool, value: i64 })" },
+    .{ "bool", "f64", "std.ArrayListUnmanaged(struct { key: bool, value: f64 })" },
+    .{ "bool", "bool", "std.ArrayListUnmanaged(struct { key: bool, value: bool })" },
+    .{ "bool", "[]const u8", "std.ArrayListUnmanaged(struct { key: bool, value: []const u8 })" },
+};
+
+/// The list declaration type for a `T[]` slice annotation with a builtin
+/// scalar element (M0.8 E3-C tranche 3), or `null` (non-named / non-scalar
+/// element → the caller fails loud).
+fn sliceAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8 {
+    const at = ast.array_types.items[ast.typeNodeData(annotation)];
+    if (ast.typeNodeKind(at.elem) != .named) return null;
+    const named = ast.named_types.items[ast.typeNodeData(at.elem)];
+    const elem_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(named.name))) orelse return null;
+    return dynArrayZigType(elem_zig);
+}
+
+/// The list declaration type for a `[K: V]` map annotation (M0.8 E3-C tranche
+/// 3), or `null` when the key/value pair is outside the emitter's map table.
+fn mapAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8 {
+    const mt = ast.map_types.items[ast.typeNodeData(annotation)];
+    if (ast.typeNodeKind(mt.key) != .named or ast.typeNodeKind(mt.value) != .named) return null;
+    const knamed = ast.named_types.items[ast.typeNodeData(mt.key)];
+    const vnamed = ast.named_types.items[ast.typeNodeData(mt.value)];
+    const key_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(knamed.name))) orelse return null;
+    const value_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(vnamed.name))) orelse return null;
+    return mapZigType(key_zig, value_zig);
 }
 
 /// `true` if `name` is a declared `enum` (M0.8 E2 block 3 tranche B).
