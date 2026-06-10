@@ -2431,6 +2431,9 @@ const LocalCtx = struct {
     /// is in the manual archetype-walk fallback and component accesses
     /// lower to `<comp>_arr[slot].field`.
     query_components: ?[]const []const u8 = null,
+    /// Sequence counter for named-arg call blocks (M0.8 E4 — unique labels
+    /// for the source-order evaluation temporaries).
+    named_call_seq: u32 = 0,
     /// The global tag table, set when emitting a body that may contain a tag
     /// mutation (the arch-walk path). Used to resolve an `add_tag`/`remove_tag`
     /// path to its leaf bit (M0.8 E3). Null on the comptime-query path, where
@@ -3660,6 +3663,17 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // lowered to the anonymous struct above).
             const call = ast.call_exprs.items[data];
             const is_free_fn = ast.exprKind(call.callee) == .ident and ctx.lookup(ast.exprData(call.callee)) == null;
+            if (call.names_start != ast_mod.no_arg_names) {
+                // Named arguments (M0.8 E4 — the 2026-06-10 evaluation-order
+                // ruling): evaluate in SOURCE order into block temporaries,
+                // pass in parameter order. Free-fn callees only (the
+                // resolver bounds closures out).
+                if (!is_free_fn) return CodegenError.UnsupportedConstruct;
+                if (throwsCalleeDecl(ast, ctx, call) != null) return CodegenError.UnsupportedConstruct;
+                const decl = findFnDeclByName(ast, ast.exprData(call.callee)) orelse return CodegenError.UnsupportedConstruct;
+                try emitNamedFnCall(w, ast, ctx, call, decl);
+                return;
+            }
             if (is_free_fn) {
                 // A `throws` fn call in expression position (M0.8 E3-C
                 // tranche 2): the hidden out-param needs statement-level
@@ -3677,22 +3691,11 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 try w.write(".call");
             }
             try w.write("(");
-            if (call.names_start != ast_mod.no_arg_names) {
-                // Named arguments (M0.8 E4, §3.3): reorder to PARAMETER
-                // order at emission — the Zig call then evaluates its args
-                // left-to-right in parameter order, matching the
-                // interpreter's binding loop. Free-fn callees only (the
-                // resolver bounds closures out).
-                if (!is_free_fn) return CodegenError.UnsupportedConstruct;
-                const decl = findFnDeclByName(ast, ast.exprData(call.callee)) orelse return CodegenError.UnsupportedConstruct;
-                try emitBoundCallArgs(w, ast, ctx, call.args_start, call.args_len, call.names_start, decl.params_start, decl.params_len);
-            } else {
-                var i: u32 = 0;
-                while (i < call.args_len) : (i += 1) {
-                    if (i > 0) try w.write(", ");
-                    const arg: NodeId = @bitCast(ast.extra.items[call.args_start + i]);
-                    try emitExpr(w, ast, ctx, arg);
-                }
+            var i: u32 = 0;
+            while (i < call.args_len) : (i += 1) {
+                if (i > 0) try w.write(", ");
+                const arg: NodeId = @bitCast(ast.extra.items[call.args_start + i]);
+                try emitExpr(w, ast, ctx, arg);
             }
             try w.write(")");
         },
@@ -3838,6 +3841,28 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 try w.write(").len))");
                 return;
             }
+            if (mc.names_start != ast_mod.no_arg_names) {
+                // Named arguments (M0.8 E4 — the 2026-06-10 evaluation-order
+                // ruling): source-order temporaries, parameter-order pass.
+                // The receiver of a named-arg method call is bounded to the
+                // PURE shapes (`Type.assoc` path / ident / field access) so
+                // its position in the emitted block (after the temps) is
+                // unobservable; anything else fails loud (recorded bound).
+                const tname = if (ast.exprKind(mc.receiver) == .path)
+                    ast.strings.slice(ast.exprData(mc.receiver))
+                else
+                    inferExprZigType(ast, ctx, mc.receiver);
+                const decl = findImplMethodDecl(ast, tname, mc.method_name) orelse return CodegenError.UnsupportedConstruct;
+                switch (ast.exprKind(mc.receiver)) {
+                    .path, .ident => {},
+                    .field_access => {
+                        if (ast.field_accesses.items[ast.exprData(mc.receiver)].opt_chain) return CodegenError.UnsupportedConstruct;
+                    },
+                    else => return CodegenError.UnsupportedConstruct,
+                }
+                try emitNamedMethodCall(w, ast, ctx, mc, decl);
+                return;
+            }
             if (ast.exprKind(mc.receiver) == .path) {
                 // Associated fn: the receiver is a bare type name. A `Set.*`
                 // builtin call outside the `emitLet` set route (the only
@@ -3852,22 +3877,10 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             try w.write(".");
             try w.ident(ast.strings.slice(mc.method_name));
             try w.write("(");
-            if (mc.names_start != ast_mod.no_arg_names) {
-                // Named arguments (M0.8 E4, §3.3): resolve the declared
-                // method (the receiver's emitted type name → impl scan) and
-                // reorder to parameter order, like the free-fn path.
-                const tname = if (ast.exprKind(mc.receiver) == .path)
-                    ast.strings.slice(ast.exprData(mc.receiver))
-                else
-                    inferExprZigType(ast, ctx, mc.receiver);
-                const decl = findImplMethodDecl(ast, tname, mc.method_name) orelse return CodegenError.UnsupportedConstruct;
-                try emitBoundCallArgs(w, ast, ctx, mc.args_start, mc.args_len, mc.names_start, decl.params_start, decl.params_len);
-            } else {
-                var i: u32 = 0;
-                while (i < mc.args_len) : (i += 1) {
-                    if (i > 0) try w.write(", ");
-                    try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + i]));
-                }
+            var i: u32 = 0;
+            while (i < mc.args_len) : (i += 1) {
+                if (i > 0) try w.write(", ");
+                try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + i]));
             }
             try w.write(")");
         },
@@ -5099,17 +5112,61 @@ fn findImplMethodDecl(ast: *const AstArena, type_name: []const u8, method_name: 
     return null;
 }
 
-/// Emit a call's arguments in PARAMETER order through the shared §3.3
-/// binding (`callArgForParam` — the same algorithm the resolver validated
-/// and the interpreter binds with). An unbound parameter is a resolver-
-/// rejected program reaching emission — fail loud.
-fn emitBoundCallArgs(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, args_start: u32, args_len: u32, names_start: u32, params_start: u32, params_len: u32) CodegenError!void {
+/// Emit a named-arg free-fn call (M0.8 E4 — the 2026-06-10 evaluation-
+/// order ruling): a labeled block evaluates every argument in SOURCE order
+/// into temporaries, then calls with the temporaries in PARAMETER order
+/// (`callArgIndexForParam`, the shared binding). The interpreter's
+/// source-order evaluation loop mirrors this exactly.
+fn emitNamedFnCall(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, call: ast_mod.CallExpr, decl: ast_mod.FnDecl) CodegenError!void {
+    const seq = ctx.named_call_seq;
+    ctx.named_call_seq += 1;
+    try w.print("__na{d}: {{ ", .{seq});
+    var j: u32 = 0;
+    while (j < call.args_len) : (j += 1) {
+        try w.print("const __na{d}_{d} = ", .{ seq, j });
+        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[call.args_start + j]));
+        try w.write("; ");
+    }
+    try w.print("break :__na{d} ", .{seq});
+    try w.ident(ast.strings.slice(ast.exprData(call.callee)));
+    try w.write("(");
+    try emitNamedTempArgs(w, ast, seq, call.args_start, call.args_len, call.names_start, decl.params_start, decl.params_len);
+    try w.write("); }");
+}
+
+/// Method-call variant of `emitNamedFnCall`. The receiver (bounded to the
+/// pure shapes by the caller) is emitted inside the break line — after the
+/// temporaries, which is unobservable for a pure receiver.
+fn emitNamedMethodCall(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, mc: ast_mod.MethodCall, decl: ast_mod.FnDecl) CodegenError!void {
+    const seq = ctx.named_call_seq;
+    ctx.named_call_seq += 1;
+    try w.print("__na{d}: {{ ", .{seq});
+    var j: u32 = 0;
+    while (j < mc.args_len) : (j += 1) {
+        try w.print("const __na{d}_{d} = ", .{ seq, j });
+        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + j]));
+        try w.write("; ");
+    }
+    try w.print("break :__na{d} ", .{seq});
+    if (ast.exprKind(mc.receiver) == .path) {
+        try w.write(ast.strings.slice(ast.exprData(mc.receiver)));
+    } else {
+        try emitExpr(w, ast, ctx, mc.receiver);
+    }
+    try w.write(".");
+    try w.ident(ast.strings.slice(mc.method_name));
+    try w.write("(");
+    try emitNamedTempArgs(w, ast, seq, mc.args_start, mc.args_len, mc.names_start, decl.params_start, decl.params_len);
+    try w.write("); }");
+}
+
+fn emitNamedTempArgs(w: *Writer, ast: *const AstArena, seq: u32, args_start: u32, args_len: u32, names_start: u32, params_start: u32, params_len: u32) CodegenError!void {
     var i: u32 = 0;
     while (i < params_len) : (i += 1) {
         const p = ast.fn_params.items[params_start + i];
-        const arg = ast.callArgForParam(args_start, args_len, names_start, i, p.name) orelse return CodegenError.UnsupportedConstruct;
+        const idx = ast.callArgIndexForParam(args_start, args_len, names_start, i, p.name) orelse return CodegenError.UnsupportedConstruct;
         if (i > 0) try w.write(", ");
-        try emitExpr(w, ast, ctx, arg);
+        try w.print("__na{d}_{d}", .{ seq, idx });
     }
 }
 

@@ -1,10 +1,15 @@
-// Differential 66 — named call arguments (M0.8 E4, §3.3 — item-16 ruling).
-// The reorder is observable: score(b: 3, a: 2) must bind a=2, b=3 → 23
-// (32 under a positional mis-bind). Mixed positional + named on a struct
-// method. Byte-exact world state, both backends.
+// Differential 66 — named call arguments (M0.8 E4, §3.3 — item-16 ruling,
+// REPROVEN under the 2026-06-10 evaluation-order ruling).
+// Two observables: (1) BINDING — score(b: …, a: …) must bind a/b by name
+// → out += 23 per tick (32 under a positional mis-bind); (2) EVALUATION
+// ORDER — the two argument blocks append ordered digits into `seq`:
+// written order yields 32 (b's block first), parameter order would yield
+// 23. Mixed positional + named on a struct method. Byte-exact world
+// state, both backends.
 component Acc {
   out: int = 0
   mixed: int = 0
+  order: int = 0
 }
 
 struct V2 {
@@ -25,7 +30,16 @@ fn score(a: int, b: int) -> int {
 rule named_args(entity: Entity)
   when entity has Acc
 {
-  entity.get_mut(Acc).out += score(b: 3, a: 2)
+  let mut seq = 0
+  let r = score(b: {
+    seq = seq * 10 + 3
+    3
+  }, a: {
+    seq = seq * 10 + 2
+    2
+  })
+  entity.get_mut(Acc).out += r
+  entity.get_mut(Acc).order = seq
   let v = V2 { x: 5, y: 1 }
   entity.get_mut(Acc).mixed += v.weigh(2, offset: 7)
 }

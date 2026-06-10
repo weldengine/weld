@@ -1799,20 +1799,29 @@ pub const AstArena = struct {
     /// argument binds the parameter (the resolver reports E0203; downstream
     /// consumers fail loud).
     pub fn callArgForParam(self: *const AstArena, args_start: u32, args_len: u32, names_start: u32, param_idx: u32, param_name: StringId) ?NodeId {
+        const idx = self.callArgIndexForParam(args_start, args_len, names_start, param_idx, param_name) orelse return null;
+        return @bitCast(self.extra.items[args_start + idx]);
+    }
+
+    /// Index variant of `callArgForParam` — the SOURCE-ORDER index of the
+    /// argument bound to `param_idx` (M0.8 E4; the 2026-06-10 evaluation-
+    /// order ruling: arguments EVALUATE in written order, then BIND in
+    /// parameter order — both backends evaluate into source-order slots and
+    /// pass through this index).
+    pub fn callArgIndexForParam(self: *const AstArena, args_start: u32, args_len: u32, names_start: u32, param_idx: u32, param_name: StringId) ?u32 {
+        _ = args_start;
         if (names_start == no_arg_names) {
             if (param_idx >= args_len) return null;
-            return @bitCast(self.extra.items[args_start + param_idx]);
+            return param_idx;
         }
         const names = self.call_arg_names.items[names_start .. names_start + args_len];
         // Positional prefix (§3.3: positionals first).
         var n_positional: u32 = 0;
         while (n_positional < args_len and names[n_positional] == 0) n_positional += 1;
-        if (param_idx < n_positional) {
-            return @bitCast(self.extra.items[args_start + param_idx]);
-        }
+        if (param_idx < n_positional) return param_idx;
         var i: u32 = n_positional;
         while (i < args_len) : (i += 1) {
-            if (names[i] == param_name) return @bitCast(self.extra.items[args_start + i]);
+            if (names[i] == param_name) return i;
         }
         return null;
     }

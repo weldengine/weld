@@ -453,6 +453,11 @@ const StmtError = error{ OutOfMemory, RuntimeFailure };
 /// decision — flagged in the Review E3 bounds table.
 const or_bitset_threshold: usize = 8;
 
+/// Upper bound on call-argument count for the stack-allocated source-order
+/// evaluation buffer (M0.8 E4 named args). Far above any real signature;
+/// exceeding it fails loud.
+const max_call_args: usize = 64;
+
 /// Control-flow signal raised by `break` / `continue` (M0.8 loop/break).
 /// Carried on the interpreter (not as a return value) so it can cross
 /// expression↔statement boundaries — e.g. a `break` inside a `match` arm block
@@ -1755,16 +1760,22 @@ pub const Interpreter = struct {
         if (fndecl.params_len != call.args_len) return error.RuntimeFailure;
         var frame: Locals = .{};
         defer frame.deinit(self.gpa);
-        // Bind arguments in PARAMETER order (M0.8 E4 named arguments,
-        // §3.3 — `callArgForParam` is the shared binding; the emitted Zig
-        // call evaluates its reordered args left-to-right, so parameter
-        // order keeps the two backends' evaluation order identical).
+        // Evaluate arguments in SOURCE order, then bind in parameter order
+        // (M0.8 E4 named arguments — the 2026-06-10 evaluation-order
+        // ruling: written order keeps the call site self-contained; the
+        // codegen emits the same source-order temporaries).
+        var values: [max_call_args]Value = undefined;
+        if (call.args_len > max_call_args) return error.RuntimeFailure;
+        var j: u32 = 0;
+        while (j < call.args_len) : (j += 1) {
+            const arg: NodeId = @bitCast(self.ast.extra.items[call.args_start + j]);
+            values[j] = try self.evalExpr(world, caller_locals, arg);
+        }
         var i: u32 = 0;
         while (i < fndecl.params_len) : (i += 1) {
             const p = self.ast.fn_params.items[fndecl.params_start + i];
-            const arg = self.ast.callArgForParam(call.args_start, call.args_len, call.names_start, i, p.name) orelse return error.RuntimeFailure;
-            const av = try self.evalExpr(world, caller_locals, arg);
-            try frame.put(self.gpa, p.name, av, false);
+            const idx = self.ast.callArgIndexForParam(call.args_start, call.args_len, call.names_start, i, p.name) orelse return error.RuntimeFailure;
+            try frame.put(self.gpa, p.name, values[idx], false);
         }
         try self.execStmtRun(world, &frame, fndecl.body_start, fndecl.body_len);
         if (self.returning) {
@@ -2076,13 +2087,21 @@ pub const Interpreter = struct {
                 try frame.put(self.gpa, self_id, sv, method.self_kind == .by_mut);
             }
         }
-        // Parameter-order binding, same contract as `callFn` (M0.8 E4).
+        // Source-order evaluation, parameter-order binding — the same
+        // contract as `callFn` (the 2026-06-10 evaluation-order ruling).
+        // The receiver evaluated first (it is written first).
+        var values: [max_call_args]Value = undefined;
+        if (mc.args_len > max_call_args) return error.RuntimeFailure;
+        var j: u32 = 0;
+        while (j < mc.args_len) : (j += 1) {
+            const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start + j]);
+            values[j] = try self.evalExpr(world, caller_locals, arg);
+        }
         var i: u32 = 0;
         while (i < method.params_len) : (i += 1) {
             const p = self.ast.fn_params.items[method.params_start + i];
-            const arg = self.ast.callArgForParam(mc.args_start, mc.args_len, mc.names_start, i, p.name) orelse return error.RuntimeFailure;
-            const av = try self.evalExpr(world, caller_locals, arg);
-            try frame.put(self.gpa, p.name, av, false);
+            const idx = self.ast.callArgIndexForParam(mc.args_start, mc.args_len, mc.names_start, i, p.name) orelse return error.RuntimeFailure;
+            try frame.put(self.gpa, p.name, values[idx], false);
         }
         try self.execStmtRun(world, &frame, method.body_start, method.body_len);
         if (self.returning) {
