@@ -319,8 +319,15 @@ test "readBytesAsValue / writeValueAsBytes roundtrip on bool" {
 }
 
 test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
+    // Dedicated D-S4-ecs-bridge-panic proof (closed by M0.5 item 10): a type
+    // incoherence at the bridge is a recoverable typed error on EVERY kind
+    // branch — never a runtime `@panic`.
     var buf: [8]u8 = undefined;
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.int_, &buf, .{ .bool_ = true }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.bool_, &buf, .{ .int_ = 1 }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.f32_, &buf, .{ .bool_ = false }));
+    try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.float_, &buf, .{ .bool_ = true }));
+    try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.f64_, &buf, .{ .int_ = 7 }));
+    try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.i32_, &buf, .{ .float_ = 1.5 }));
+    try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.u32_, &buf, .{ .bool_ = false }));
 }
