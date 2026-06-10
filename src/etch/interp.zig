@@ -20,6 +20,7 @@ const diag_mod = @import("diagnostics.zig");
 const value_mod = @import("value.zig");
 const bridge_mod = @import("ecs_bridge.zig");
 const tags_mod = @import("tags.zig");
+const descriptor_mod = @import("descriptor.zig");
 
 const weld_core = @import("weld_core");
 const Registry = weld_core.ecs.registry.Registry;
@@ -494,6 +495,11 @@ pub const Interpreter = struct {
     /// Each entry is `?Value` — `null` = `none`, else the `some` payload.
     /// Reset at the rule-body boundary (rule-arena semantics).
     optionals: std.ArrayListUnmanaged(?Value) = .empty,
+    /// Level-B descriptors built at compile (M0.8 E4 — the interpreter's
+    /// build-structure side of the serialized-IR differential). No runtime
+    /// role: Level B never executes against the world (proof contract,
+    /// brief journal 2026-06-10).
+    descriptors: descriptor_mod.Descriptors = .{},
     /// Store backing runtime-produced strings (M0.8 sub-slice C tranche 1b):
     /// concat (and, 1c, interpolation) results, addressed by `Value
     /// .string_run`. Each entry is gpa-owned bytes. Reset at the rule-body
@@ -577,6 +583,7 @@ pub const Interpreter = struct {
         self.pending_tags.deinit(self.gpa);
         for (self.async_slots) |*slot| slot.deinit(self.gpa);
         self.gpa.free(self.async_slots);
+        self.descriptors.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -791,6 +798,13 @@ pub const Interpreter = struct {
             for (slots) |*slot| slot.* = .{};
             break :blk slots;
         } else &.{};
+
+        // Pass E — build the Level-B descriptors (M0.8 E4, build-structure
+        // side of the serialized-IR differential). Fail-loud on any
+        // expression the canonical renderer does not support.
+        var descriptors = try descriptor_mod.build(gpa, ast);
+        errdefer descriptors.deinit(gpa);
+
         return .{
             .gpa = gpa,
             .ast = ast,
@@ -806,6 +820,7 @@ pub const Interpreter = struct {
             .has_changed = any_changed,
             .has_async = any_async,
             .async_slots = async_slots,
+            .descriptors = descriptors,
         };
     }
 

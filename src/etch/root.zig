@@ -38,6 +38,13 @@ const interp = @import("interp.zig");
 /// without depending on the internal path layout.
 pub const codegen_zig = @import("zig_codegen/root.zig");
 
+/// Level-B descriptor surface (M0.8 E4) — typed domain descriptors
+/// (`etch-ast-ir.md` §3.5) + the canonical serializer backing the
+/// serialized-IR differential. The interpreter builds them at compile
+/// (`Interpreter.descriptors`); the differential harness serializes both
+/// backends through this surface.
+pub const descriptor = @import("descriptor.zig");
+
 /// Exposed at the module surface so out-of-tree spike tests that
 /// drive the lexer alone (without a full parser run) can construct
 /// one without depending on the internal path.
@@ -78,6 +85,22 @@ pub fn parseSource(gpa: std.mem.Allocator, source: []const u8) !parser.ParseResu
 /// diagnostic owns its `primary_message` slice.
 pub fn typeCheck(gpa: std.mem.Allocator, arena: *Ast, diags_out: *std.ArrayListUnmanaged(Diagnostic)) !void {
     try TypeChecker.check(gpa, arena, diags_out);
+}
+
+test "public API builds + serializes a Level-B data descriptor (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseSource(gpa,
+        \\struct Item { value: int }
+        \\data Db: Item { a: { value: 1 } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    var descs = try descriptor.build(gpa, &result.ast);
+    defer descs.deinit(gpa);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try descs.serialize(gpa, &out);
+    try std.testing.expect(out.items.len > 0);
 }
 
 test "public API parses an empty source successfully" {
