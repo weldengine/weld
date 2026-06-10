@@ -722,3 +722,87 @@ test "lowers block-body closures: statements in the call fn, return is the fn bo
     if (tree.errors.len != 0) std.debug.print("generated zig parse errors:\n{s}\n", .{out.items});
     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
 }
+
+test "lowers throwing closures with their own __err out-param, let call site re-raises (M0.8 E3-C tranche 6)" {
+    const gpa = std.testing.allocator;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  try {
+        \\    let risky = |x: int| {
+        \\      if x > 0 {
+        \\        throw Error { message: "boom", code: ErrorCode.invalid_arg }
+        \\      }
+        \\      x
+        \\    }
+        \\    let v = risky(1)
+        \\    entity.get_mut(Acc).n = v
+        \\  } catch err {
+        \\    entity.get_mut(Acc).n = 42
+        \\  }
+        \\}
+    , &out);
+    // The closure's call fn carries its own hidden out-param (the tranche-2
+    // throws-fn machinery verbatim); the throw stores and aborts with the
+    // zero default.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "fn call(x: i64, __err: *?Error) i64 {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "__err.* = Error{") != null);
+    // The sanctioned let call site declares the per-call error local, calls
+    // with the out-param, and re-raises into the enclosing try — where the
+    // interpreter's thrown signal crosses the closure boundary.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "var __terr_") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "const v = risky.call(1, &__terr_") != null);
+
+    // The generated Zig is syntactically valid (Zig's own parser).
+    const z = try gpa.dupeZ(u8, out.items);
+    defer gpa.free(z);
+    var tree = try std.zig.Ast.parse(gpa, z, .zig);
+    defer tree.deinit(gpa);
+    if (tree.errors.len != 0) std.debug.print("generated zig parse errors:\n{s}\n", .{out.items});
+    try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
+}
+
+test "throwing closure call outside a let initializer fails loud (M0.8 E3-C tranche 6)" {
+    const gpa = std.testing.allocator;
+    // Expression position needs the statement-level __terr sequencing —
+    // unsanctioned, fail loud (interpreter reference), mirroring the
+    // throws-fn rule.
+    var pr = try parser.parse(gpa,
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  try {
+        \\    let risky = |x: int| {
+        \\      if x > 0 {
+        \\        throw Error { message: "boom", code: ErrorCode.invalid_arg }
+        \\      }
+        \\      x
+        \\    }
+        \\    entity.get_mut(Acc).n = risky(1) + 1
+        \\  } catch err {
+        \\    entity.get_mut(Acc).n = 42
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(diag.Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try std.testing.expectError(
+        root.CodegenError.UnsupportedConstruct,
+        root.generateToBuffer(gpa, &pr.ast, "<test>", &out),
+    );
+}

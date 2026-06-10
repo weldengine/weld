@@ -573,6 +573,20 @@ fn throwsCalleeDecl(ast: *const AstArena, ctx: *const LocalCtx, call: ast_mod.Ca
     return if (decl.throws) decl else null;
 }
 
+/// The closure expression of a call whose callee is a closure-typed local
+/// with a THROWING body, or `null` (M0.8 E3-C tranche 6). The closure image
+/// of `throwsCalleeDecl`: such a closure's `call` fn carries its own hidden
+/// `__err` out-param, and the sanctioned call site re-raises at this level
+/// — the boundary where the interpreter's `thrown` crosses the closure
+/// call (`returning` does not; it is consumed inside the closure fn).
+fn throwingClosureCallee(ast: *const AstArena, ctx: *const LocalCtx, call: ast_mod.CallExpr) ?ast_mod.ClosureExpr {
+    if (ast.exprKind(call.callee) != .ident) return null;
+    const local = ctx.lookup(ast.exprData(call.callee)) orelse return null;
+    if (local.closure_node.isNone()) return null;
+    const ce = ast.closure_exprs.items[ast.exprData(local.closure_node)];
+    return if (exprCanThrow(ast, ce.body)) ce else null;
+}
+
 /// Whether a statement run can raise the throw signal at THIS level (M0.8
 /// E3-C tranche 2): a reachable `throw`, or a call of a `throws` fn. Drives
 /// (a) the try/catch plumbing elision — a throw-free try body emits inline,
@@ -718,6 +732,17 @@ fn exprCanThrow(ast: *const AstArena, expr: NodeId) bool {
         .loop_expr => {
             const lp = ast.loop_exprs.items[data];
             return stmtRunCanThrow(ast, lp.body_start, lp.body_len);
+        },
+        .closure => {
+            // A throwing-body closure marks the run can-throw at CREATION
+            // (M0.8 E3-C tranche 6) — over-approximate on purpose: creating
+            // never throws, but the sanctioned call site (a let in the same
+            // try body) re-raises into the enclosing try, so the plumbing is
+            // genuinely mutated. A created-but-never-called throwing closure
+            // is the documented exotic-miss family (loud `zig build` error,
+            // never a silent divergence).
+            const ce = ast.closure_exprs.items[data];
+            return exprCanThrow(ast, ce.body);
         },
         .string_interp => {
             const si = ast.string_interps.items[data];
@@ -2120,6 +2145,10 @@ const LocalInfo = struct {
     component_name: []const u8 = "",
     zig_type: []const u8 = "",
     is_mut: bool = false,
+    /// For a `value` bound to a closure literal, the closure expression
+    /// node (M0.8 E3-C tranche 6) — lets the call site see the body (a
+    /// throwing body rides the hidden `__err` out-param). `none` otherwise.
+    closure_node: NodeId = NodeId.none,
 };
 
 const LocalKey = union(enum) {
@@ -2707,6 +2736,36 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
             try emitThrowsCallCheck(w, ctx, call_idx);
             return;
         }
+        if (throwingClosureCallee(ast, ctx, call) != null) {
+            // `let x = throwing_closure(args…)` (M0.8 E3-C tranche 6) — the
+            // closure image of the sanctioned let-position `throws` call:
+            // same per-call error local, the hidden out-param rides the
+            // `call` method, same re-raise at THIS level — the boundary
+            // where the interpreter's `thrown` signal crosses the closure
+            // call. On a throwing run the binding holds the never-read zero
+            // default (the interpreter binds unit) and control transfers
+            // before any use — observably identical.
+            try w.printLine("var __terr_{d}: ?Error = null;", .{call_idx});
+            try w.writeIndent();
+            try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
+            try w.ident(ast.strings.slice(let.name));
+            try w.write(" = ");
+            try emitExpr(w, ast, ctx, call.callee);
+            try w.write(".call(");
+            var i: u32 = 0;
+            while (i < call.args_len) : (i += 1) {
+                if (i > 0) try w.write(", ");
+                try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[call.args_start + i]));
+            }
+            if (call.args_len > 0) try w.write(", ");
+            try w.print("&__terr_{d});\n", .{call_idx});
+            try ctx.records.append(w.gpa, .{
+                .key = .{ .name = let.name },
+                .info = .{ .kind = .value, .zig_type = "", .is_mut = let.is_mut },
+            });
+            try emitThrowsCallCheck(w, ctx, call_idx);
+            return;
+        }
     }
 
     // `let [mut] xs: T[] = <array literal>` (M0.8 E3-C tranche 3) — a dynamic
@@ -2895,7 +2954,12 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
 
     try ctx.records.append(w.gpa, .{
         .key = .{ .name = let.name },
-        .info = .{ .kind = .value, .zig_type = zig_t, .is_mut = let.is_mut },
+        .info = .{
+            .kind = .value,
+            .zig_type = zig_t,
+            .is_mut = let.is_mut,
+            .closure_node = if (value_kind == .closure) let.value else NodeId.none,
+        },
     });
 }
 
@@ -3180,16 +3244,19 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             if (ret_zig.len == 0) return CodegenError.UnsupportedConstruct;
             // The closure's `call` fn is a NEW fn boundary: the enclosing
             // try label / frame arena / `throws` out-param are not in scope
-            // inside it (a body `throw` fails loud until the throwing-closure
-            // stage wires the closure's own out-param).
+            // inside it. A THROWING body rides the closure's OWN hidden
+            // `__err` out-param — the tranche-2 throws-fn machinery verbatim
+            // (the sanctioned call site re-raises; thrown PROPAGATES through
+            // the closure boundary where returning is consumed inside).
+            const body_throws = exprCanThrow(ast, ce.body);
             const saved_try = ctx.try_label;
             const saved_arena = ctx.arena_param;
             const saved_throws = ctx.throws_fn;
             const saved_fn_ret = ctx.fn_ret_zig;
             ctx.try_label = null;
             ctx.arena_param = null;
-            ctx.throws_fn = false;
-            ctx.fn_ret_zig = ret_zig;
+            ctx.throws_fn = body_throws;
+            ctx.fn_ret_zig = if (std.mem.eql(u8, ret_zig, "void")) "" else ret_zig;
             try w.write("struct { ");
             for (captures.items) |c| {
                 try w.ident(ast.strings.slice(c.name));
@@ -3208,6 +3275,11 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 const p = ast.closure_params.items[ce.params_start + i];
                 try w.ident(ast.strings.slice(p.name));
                 try w.print(": {s}", .{closureParamZigType(ast, p)});
+            }
+            if (body_throws) {
+                if (!first) try w.write(", ");
+                first = false;
+                try w.write("__err: *?Error");
             }
             if (is_block) {
                 const body_blk = ast.block_exprs.items[ast.exprData(ce.body)];
@@ -3265,6 +3337,11 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 if (throwsCalleeDecl(ast, ctx, call) != null) return CodegenError.UnsupportedConstruct;
                 try w.ident(ast.strings.slice(ast.exprData(call.callee)));
             } else {
+                // A throwing-closure call needs the statement-level `__terr`
+                // sequencing — the sanctioned position is a `let`
+                // initializer; any nested position fails loud (M0.8 E3-C
+                // tranche 6, the throws-fn rule above mirrored).
+                if (throwingClosureCallee(ast, ctx, call) != null) return CodegenError.UnsupportedConstruct;
                 try emitExpr(w, ast, ctx, call.callee);
                 try w.write(".call");
             }
@@ -3992,7 +4069,13 @@ fn collectCapturesExpr(
                 try collectCapturesExpr(gpa, ast, ctx, bound, out, @bitCast(ast.extra.items[mc.args_start + i]));
             }
         },
-        .field_access => try collectCapturesExpr(gpa, ast, ctx, bound, out, ast.field_accesses.items[data].receiver),
+        .field_access => {
+            // `EnumName.variant` is an enum VALUE — nothing to capture
+            // (mirrors the emission's `enumValueName` route).
+            if (enumValueName(ast, expr) != null) return;
+            try collectCapturesExpr(gpa, ast, ctx, bound, out, ast.field_accesses.items[data].receiver);
+        },
+        .path => {},
         .index => {
             const ix = ast.index_exprs.items[data];
             try collectCapturesExpr(gpa, ast, ctx, bound, out, ix.receiver);

@@ -1,0 +1,21 @@
+component ThrowAcc {
+  out: int = 0
+}
+
+rule closure_thrown(entity: Entity)
+  when entity has ThrowAcc
+{
+  let acc = entity.get_mut(ThrowAcc)
+  try {
+    let risky = |x: int| {
+      if x > 0 {
+        throw Error { message: "boom", code: ErrorCode.invalid_arg }
+      }
+      x
+    }
+    let v = risky(1)
+    acc.out = v
+  } catch err {
+    acc.out = 42
+  }
+}
