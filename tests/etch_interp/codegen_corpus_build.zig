@@ -75,4 +75,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p56_closure_capture_value", .etch_path = "tests/etch_interp/programs/56_closure_capture_value.etch" },
     .{ .name = "p57_closure_block_return", .etch_path = "tests/etch_interp/programs/57_closure_block_return.etch" },
     .{ .name = "p58_closure_thrown_propagation", .etch_path = "tests/etch_interp/programs/58_closure_thrown_propagation.etch" },
+    .{ .name = "p59_resource_receiver", .etch_path = "tests/etch_interp/programs/59_resource_receiver.etch" },
 };

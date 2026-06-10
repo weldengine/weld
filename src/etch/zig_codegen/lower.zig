@@ -1476,11 +1476,11 @@ fn programUsesChanged(ast: *const AstArena) bool {
 /// at `stepOnce` start, drained in emit order), so the two backends agree.
 ///
 /// Scope: the observer is pure event-based. A combined event+entity form (a
-/// component `when` or tag filter on the observer) and the body's receiver-less
-/// resource write (`get_mut(R)`, D-S3-resource-receiver) are deferred — the
-/// former fails loud here, the latter in `emitStmt`; the interpreter is the
-/// reference for both, and the full byte-exact event differential closes in the
-/// sub-slice-C codegen tranche once resource-receiver codegen lands.
+/// component `when` or tag filter on the observer) is deferred and fails loud
+/// here; the interpreter is its reference. The body's receiver-less resource
+/// write is codegen-sound since M0.8 E3-C tranche 7 (D-S3-resource-receiver
+/// closed) — the byte-exact emit → observer → resource-write differential is
+/// `60_event_observer_resource`.
 /// Observer variant of the `emitRule` two-pass frame-arena classification
 /// (M0.8 E3-C tranche 1b) — returns whether the fn takes the conditional
 /// `fa` param. See `emitRule` for why the classification must be exact.
@@ -1691,8 +1691,6 @@ fn emitRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_t
 /// from archetypes that satisfy a strictly weaker predicate than the
 /// rule asked for.
 fn emitRuleAsComptimeQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, body_used: *const std.StringHashMapUnmanaged(void), arena: ?[]const u8) CodegenError!void {
-    _ = body_used;
-
     // Query tuple = full set of `has`-conjunction components, ordered as
     // emitted by `collectWhenInfo` (source order). Including unused-by-
     // body components ensures the predicate stays correct — `has A and
@@ -1706,7 +1704,13 @@ fn emitRuleAsComptimeQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleD
     }
     try w.write("});\n");
 
-    try w.line("while (__it.next()) |__row| {");
+    // A body that addresses no component slot (M0.8 E3-C tranche 7: an
+    // entity-bound rule whose body only touches resources) emits no
+    // `__row[...]` — discard the capture, Zig rejects an unused one. The
+    // field filter addresses `__row` directly and is folded into
+    // `body_used` by the caller.
+    const row_capture: []const u8 = if (body_used.count() == 0 and info.field_filter == null) "_" else "__row";
+    try w.printLine("while (__it.next()) |{s}| {{", .{row_capture});
     w.indentBy(1);
 
     // Field filter — emit as a continue guard, addressing the row by tuple
@@ -1832,6 +1836,15 @@ fn emitComponentSlot(w: *Writer, ctx: *LocalCtx, comp_name: []const u8) CodegenE
         }
     }
     try w.print("{s}_arr[slot]", .{comp_name});
+}
+
+/// Emit the read-position lowering of a receiver-less resource access (M0.8
+/// E3-C tranche 7): a `*const R` formed over the resource-store bytes through
+/// `getResource` — no dirty, the interpreter's `readResourceField` route. The
+/// buffer is chunk-aligned (Option A) so `@alignCast` is sound in ReleaseSafe;
+/// `<R>_id` is the rule fn's resource-gate local.
+fn emitResourceConstPtr(w: *Writer, rname: []const u8) CodegenError!void {
+    try w.print("@as(*const {s}, @ptrCast(@alignCast(world.resources.getResource({s}_id).?.ptr)))", .{ rname, rname });
 }
 
 /// Walk every statement in the rule body and add the component name of
@@ -2131,6 +2144,14 @@ fn emitRuleBodyQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, i
 const LocalKind = enum {
     value,
     component_alias,
+    /// A receiver-less `let s = get(R)` / `get_mut(R)` resource binding
+    /// (M0.8 E3-C tranche 7, D-S3-resource-receiver). Uses lower per access,
+    /// mirroring the interpreter's `Value.resource_ref`: a read forms a
+    /// `*const R` through `getResource` (no dirty — a read through a mutable
+    /// ref does not dirty), the write target forms a `*R` through
+    /// `getMutResource` (dirty set co-located with the write, the
+    /// interpreter's `writeResourceField` point).
+    resource_alias,
     /// A closure capture (M0.8 E3-C tranche 6): an outer binding snapshotted
     /// into a field of the generated closure struct. Inside the closure's
     /// `call` fn body the ident emits as `__self.<name>`.
@@ -2691,9 +2712,31 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
         // keep the file readable; subsequent uses of `h` resolve through
         // the local context.
         const mg = ast.method_gets.items[ast.exprData(let.value)];
-        // `let h = get(R)` binds a resource — codegen emission deferred to
-        // E3 (see emitExpr's method_get note, D-S3-resource-receiver).
-        if (mg.receiver.isNone()) return CodegenError.UnsupportedConstruct;
+        // `let s = get(R)` / `get_mut(R)` binds a resource alias (M0.8 E3-C
+        // tranche 7, D-S3-resource-receiver closed): like the component
+        // alias, the emitted code is a comment and each use lowers at its
+        // access site — reads through `getResource`, the write target
+        // through `getMutResource` — mirroring the interpreter's
+        // `Value.resource_ref { resource_id, mutable }`. The ref's
+        // mutability comes from the accessor (not `let mut`), as in the
+        // interpreter.
+        if (mg.receiver.isNone()) {
+            const rname = ast.strings.slice(mg.type_name);
+            try ctx.records.append(w.gpa, .{
+                .key = .{ .name = let.name },
+                .info = .{
+                    .kind = .resource_alias,
+                    .component_name = rname,
+                    .is_mut = value_kind == .method_get_mut,
+                },
+            });
+            try w.printLine("// let {s} = {s}({s})", .{
+                ast.strings.slice(let.name),
+                if (value_kind == .method_get_mut) "get_mut" else "get",
+                rname,
+            });
+            return;
+        }
         const cname = ast.strings.slice(mg.type_name);
         try ctx.records.append(w.gpa, .{
             .key = .{ .name = let.name },
@@ -2964,6 +3007,24 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
 }
 
 fn emitAssign(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, assign: ast_mod.AssignStmt) CodegenError!void {
+    // Resource-field write (M0.8 E3-C tranche 7) — `get_mut(R).f = …` direct
+    // or through a mutable `let s = get_mut(R)` alias: the write target is a
+    // `*R` formed through `getMutResource`, which sets the dirty bit
+    // co-located with the write — the same logical point as the
+    // interpreter's `writeResourceField` (a pure read never dirties), so
+    // `when resource R changed` gating is byte-exact by construction.
+    if (assignTargetResource(ast, ctx, assign.target)) |rname| {
+        const fa = ast.field_accesses.items[ast.exprData(assign.target)];
+        try w.writeIndent();
+        try w.print("@as(*{s}, @ptrCast(@alignCast(world.resources.getMutResource({s}_id).?.ptr))).", .{ rname, rname });
+        try w.ident(ast.strings.slice(fa.field_name));
+        try w.write(" ");
+        try w.write(assignOpText(assign.op));
+        try w.write(" ");
+        try emitExpr(w, ast, ctx, assign.value);
+        try w.write(";\n");
+        return;
+    }
     try w.writeIndent();
     try emitExpr(w, ast, ctx, assign.target);
     try w.write(" ");
@@ -2980,6 +3041,32 @@ fn emitAssign(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, assign: ast_mod.
         if (assignTargetComponent(ast, ctx, assign.target)) |cname| {
             try w.printLine("arch.markChanged(chunk, {s}_idx, slot, world.current_tick);", .{cname});
         }
+    }
+}
+
+/// The resource name a write targets, when `assign.target` is a resource-field
+/// write — receiver-less `get_mut(R).f` or a mutable `let s = get_mut(R)`
+/// alias (M0.8 E3-C tranche 7) — or null otherwise. A write through an
+/// immutable resource ref falls to the generic path, where the const-pointer
+/// read emission fails the Zig compile loudly (the interpreter likewise fails
+/// at runtime on `mutable == false` — never silently wrong).
+fn assignTargetResource(ast: *const AstArena, ctx: *const LocalCtx, target: NodeId) ?[]const u8 {
+    if (ast.exprKind(target) != .field_access) return null;
+    const fa = ast.field_accesses.items[ast.exprData(target)];
+    const recv = fa.receiver;
+    switch (ast.exprKind(recv)) {
+        .method_get_mut => {
+            const mg = ast.method_gets.items[ast.exprData(recv)];
+            if (!mg.receiver.isNone()) return null; // entity receiver → component write
+            return ast.strings.slice(mg.type_name);
+        },
+        .ident => {
+            if (ctx.lookup(ast.exprData(recv))) |local| {
+                if (local.kind == .resource_alias and local.is_mut) return local.component_name;
+            }
+            return null;
+        },
+        else => return null,
     }
 }
 
@@ -3108,6 +3195,9 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                         try w.ident(ast.strings.slice(name_id));
                     },
                     .component_alias => try emitComponentSlot(w, ctx, local.component_name),
+                    // Read through a resource alias (M0.8 E3-C tranche 7) —
+                    // the write target never reaches here (`emitAssign`).
+                    .resource_alias => try emitResourceConstPtr(w, local.component_name),
                 }
             } else {
                 // Unknown ident — type-checker should have caught this. Emit
@@ -3128,14 +3218,20 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         },
         .method_get, .method_get_mut => {
             const mg = ast.method_gets.items[data];
-            // Receiver-less `get(R)` / `get_mut(R)` resource access is parsed,
-            // type-checked, and executed by the interpreter (the S4 reference),
-            // but codegen emission is deferred: the resource store buffer is
-            // byte-aligned (`gpa.dupe(u8, …)`), so a typed `@as(*R,
-            // @alignCast(…))` would be unsound in ReleaseSafe. It lands with
-            // aligned resource storage at E3 (Level A complete in codegen).
-            // See the M0.8 journal (D-S3-resource-receiver).
-            if (mg.receiver.isNone()) return CodegenError.UnsupportedConstruct;
+            // Receiver-less `get(R)` / `get_mut(R)` in value (read) position
+            // (M0.8 E3-C tranche 7, D-S3-resource-receiver closed): a typed
+            // const pointer over the resource-store buffer via `getResource`
+            // — no dirty, exactly the interpreter's `readResourceField`
+            // route (a read through a mutable ref does not dirty; the write
+            // target is handled in `emitAssign`). The store buffer is
+            // chunk-aligned (Option A, `resources.zig`) so the `@alignCast`
+            // is sound in ReleaseSafe — ABI pointer identity, `etch-abi-zig.md`
+            // §3.1. `<R>_id` is in scope from the rule's resource gate (the
+            // resolver requires `resource R` in the when clause, E1213).
+            if (mg.receiver.isNone()) {
+                try emitResourceConstPtr(w, ast.strings.slice(mg.type_name));
+                return;
+            }
             try emitComponentSlot(w, ctx, ast.strings.slice(mg.type_name));
         },
         .match_expr => try emitMatch(w, ast, ctx, data),
@@ -4675,7 +4771,9 @@ fn receiverComponentName(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) ?[]
         .ident => blk: {
             const sid: StringId = data;
             if (ctx.lookup(sid)) |local| {
-                if (local.kind == .component_alias) break :blk local.component_name;
+                // A resource alias resolves field types the same way — the
+                // registry-backed decl lookup covers resource decls too.
+                if (local.kind == .component_alias or local.kind == .resource_alias) break :blk local.component_name;
                 // A struct-typed value local (M0.8 E2 block 3): its Zig type
                 // name is the struct name (Etch ↔ Zig types map 1:1), so the
                 // field's declared type resolves on that struct.

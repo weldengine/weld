@@ -174,11 +174,10 @@ test "lowers an @on_event observer to the bus drain (subscribe + poll), valid Zi
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(gpa);
     // A global producer emits A; the `@on_event(A)` observer (relay) drains A
-    // and re-emits B carrying the payload field. The body uses only codegen-
-    // sound constructs (emit + `event`-field access) — a world-state write
-    // (resource) is deferred to the sub-slice-C codegen tranche, so the
-    // byte-exact world-state event differential is interpreter-reference for
-    // now; this test validates the engraved drain contract cooks to valid Zig.
+    // and re-emits B carrying the payload field. This test validates the
+    // engraved drain contract cooks to valid Zig; the byte-exact world-state
+    // event differential (observer resource write, M0.8 E3-C tranche 7) is
+    // `60_event_observer_resource`.
     _ = try parseTypeCheckGen(gpa,
         \\event A { x: i32 = 0 }
         \\event B { y: i32 = 0 }
@@ -244,6 +243,52 @@ test "lowers `has T changed` to tick-based change-detection codegen (M0.8 E3)" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "arch.markChanged(chunk, Health_idx, slot, world.current_tick);") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "if (!(arch.changedTick(chunk, Health_idx, slot) > __last_run_react)) continue;") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "__last_run_react = world.current_tick;") != null);
+}
+
+test "lowers receiver-less get/get_mut resource access over the aligned store (M0.8 E3-C tranche 7)" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    // `bump` writes through a mutable alias; `mirror` reads through an
+    // immutable alias AND the direct form. The byte-exact runtime behaviour
+    // is the `59_resource_receiver` differential; this test pins the engraved
+    // lowering — reads form a `*const R` through `getResource` (no dirty,
+    // the interpreter's `readResourceField` route), the write target forms a
+    // `*R` through `getMutResource` (dirty co-located with the write, the
+    // interpreter's `writeResourceField` point), both `@alignCast`-sound on
+    // the chunk-aligned store (Option A).
+    _ = try parseTypeCheckGen(gpa,
+        \\component Out { v: int = 0 }
+        \\resource Score { points: int = 0 base: int = 7 }
+        \\rule bump(entity: Entity)
+        \\  when entity has Out and resource Score
+        \\{
+        \\  let s = get_mut(Score)
+        \\  s.points += 2
+        \\}
+        \\rule mirror(entity: Entity)
+        \\  when entity has Out and resource Score
+        \\{
+        \\  let r = get(Score)
+        \\  entity.get_mut(Out).v = r.points + get(Score).base
+        \\}
+    , &out);
+
+    // The generated Zig is syntactically valid (Zig's own parser).
+    const z = try gpa.dupeZ(u8, out.items);
+    defer gpa.free(z);
+    var tree = try std.zig.Ast.parse(gpa, z, .zig);
+    defer tree.deinit(gpa);
+    if (tree.errors.len != 0) std.debug.print("generated zig parse errors:\n{s}\n", .{out.items});
+    try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
+
+    // Write target: mut pointer through `getMutResource` (dirty at the write).
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "@as(*Score, @ptrCast(@alignCast(world.resources.getMutResource(Score_id).?.ptr))).points += 2;") != null);
+    // Reads: const pointer through `getResource` — alias and direct form.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "@as(*const Score, @ptrCast(@alignCast(world.resources.getResource(Score_id).?.ptr))).points") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "@as(*const Score, @ptrCast(@alignCast(world.resources.getResource(Score_id).?.ptr))).base") != null);
+    // No write route through `getMutResource` for the pure reads.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "getMutResource(Score_id).?.ptr))).base") == null);
 }
 
 test "emits the Error/ErrorCode prelude only when the program uses error handling (M0.8 E3-C tranche 2)" {

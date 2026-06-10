@@ -8,11 +8,27 @@
 //! Resource storage is byte-level: each entry holds a heap-allocated
 //! `[]u8` (size from the registry) plus a dirty flag. The Etch bridge
 //! reads or writes fields through the registry's `FieldDesc` offsets.
+//!
+//! Every buffer is over-aligned to `ChunkAlignment` (M0.8 E3-C, Option A)
+//! so generated code can form a typed `*R` over the bytes — `@alignCast`
+//! sound in ReleaseSafe, ABI pointer identity (`etch-abi-zig.md` §3.1).
+//! UNCONDITIONAL: one alignment regime for every resource buffer regardless
+//! of access path (two regimes by access path would reopen an
+//! interpreter/codegen divergence); byte-offset access works unchanged.
 
 const std = @import("std");
 const registry_mod = @import("registry.zig");
+const chunk_mod = @import("chunk.zig");
 
 const ComponentId = registry_mod.ComponentId;
+
+/// Alignment of every resource byte buffer. ≥ the largest POD field
+/// alignment (8, `etch-abi-zig.md` §3.1), pinned at comptime.
+pub const BufferAlignment: usize = chunk_mod.ChunkAlignment;
+
+comptime {
+    std.debug.assert(BufferAlignment >= 8);
+}
 
 /// Surfaced by `ResourceStore.addResource` and `removeResource`;
 /// the read paths (`getResource` / `getMutResource`) return `?[]u8`
@@ -24,7 +40,7 @@ pub const ResourceError = error{
 };
 
 const Entry = struct {
-    bytes: []u8,
+    bytes: []align(BufferAlignment) u8,
     /// Set by `getMutResource`; cleared by `tickBoundary`. Read by the
     /// `when resource T changed` filter (interpreter).
     dirty: bool,
@@ -48,13 +64,14 @@ pub const ResourceStore = struct {
     }
 
     /// Add a new resource. `init_bytes` is copied into a freshly allocated
-    /// buffer (length must match the registry's `componentSize(id)`).
-    /// Initial `dirty` is `false`. Adding an already-present resource
-    /// returns `error.DuplicateResource`.
+    /// buffer (length must match the registry's `componentSize(id)`),
+    /// over-aligned to `BufferAlignment`. Initial `dirty` is `false`.
+    /// Adding an already-present resource returns `error.DuplicateResource`.
     pub fn addResource(self: *ResourceStore, gpa: std.mem.Allocator, id: ComponentId, init_bytes: []const u8) ResourceError!void {
         if (self.entries.contains(id)) return ResourceError.DuplicateResource;
-        const buf = try gpa.dupe(u8, init_bytes);
+        const buf = try gpa.alignedAlloc(u8, comptime .fromByteUnits(BufferAlignment), init_bytes.len);
         errdefer gpa.free(buf);
+        @memcpy(buf, init_bytes);
         try self.entries.put(gpa, id, .{ .bytes = buf, .dirty = false });
     }
 
@@ -135,6 +152,19 @@ test "removing a resource clears its dirty bit" {
     try store.removeResource(gpa, 3);
     try std.testing.expect(!store.contains(3));
     try std.testing.expect(!store.isDirty(3));
+}
+
+test "resource buffers are chunk-aligned (M0.8 Option A)" {
+    const gpa = std.testing.allocator;
+    var store = ResourceStore.init();
+    defer store.deinit(gpa);
+
+    // An odd-sized init slice from an arbitrary (1-byte-aligned) source —
+    // the stored buffer must still come back over-aligned.
+    const bytes = [_]u8{ 1, 2, 3, 4, 5 };
+    try store.addResource(gpa, 9, bytes[0..]);
+    const got = store.getResource(9).?;
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(got.ptr) % BufferAlignment);
 }
 
 test "addResource rejects duplicate id" {
