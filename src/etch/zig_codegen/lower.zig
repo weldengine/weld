@@ -37,6 +37,7 @@ const ast_mod = @import("../ast.zig");
 const types_mod = @import("../types.zig");
 const tags_mod = @import("../tags.zig");
 const diag_mod = @import("../diagnostics.zig");
+const descriptor_mod = @import("../descriptor.zig");
 const emit_mod = @import("emit.zig");
 const type_map = @import("type_map.zig");
 const errors_mod = @import("errors.zig");
@@ -59,6 +60,9 @@ pub const GenerateStats = struct {
     /// Distinct `(component_name, ...)` tuples reached by rule when-clauses.
     /// Reported in the bench for the monomorphisation gate.
     distinct_signatures: u32 = 0,
+    /// `true` when the program emitted Level-B descriptors (M0.8 E4) — the
+    /// consolidated cook wires `Program.write_descriptors` for it.
+    has_descriptors: bool = false,
 };
 
 /// Emit the entire program. `source_path` is recorded in the file header.
@@ -238,6 +242,19 @@ pub fn generateFile(
     }
 
     try emitTick(&w, rule_emits.items, program_has_changed);
+
+    // Pass E — Level-B descriptors (M0.8 E4, emit-structure side of the
+    // serialized-IR differential). The construct walk here is the codegen's
+    // OWN, independent of `descriptor.build` (the interpreter side); only
+    // the expression-leaf rendering is shared (the ONE canonical renderer,
+    // proof contract item 3). Emitted as static typed values over the
+    // embedded `etch_descriptor` namespace plus a `writeDescriptors`
+    // serializer entry point — self-contained, weld_core-only imports kept.
+    if (programHasDataDecls(ast)) {
+        try emitDataDescriptors(&w, gpa, ast);
+        try emitDescriptorNamespace(&w);
+        stats.has_descriptors = true;
+    }
 
     stats.distinct_signatures = @intCast(sig_set.count());
     return stats;
@@ -1149,6 +1166,16 @@ fn emitRegister(w: *Writer, ast: *const AstArena, tag_table: *const tags_mod.Tag
     try w.line("/// generated files and breaks name-based lookup).");
     try w.line("pub fn register(world: *World, gpa: std.mem.Allocator) !void {");
     w.indentBy(1);
+
+    // A program with nothing to register (possible since M0.8 E4 — a pure
+    // Level-B program has no component/resource/event/tag) must still
+    // compile: discard the params instead of leaving them unused.
+    if (ast.component_decls.items.len == 0 and ast.resource_decls.items.len == 0 and
+        ast.event_decls.items.len == 0 and tag_table.leaf_count == 0)
+    {
+        try w.line("_ = world;");
+        try w.line("_ = gpa;");
+    }
 
     var i: u28 = 0;
     while (i < ast.items.len) : (i += 1) {
@@ -4611,6 +4638,89 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// Re-emit an Etch string literal's raw bytes as a valid Zig string literal
 /// (M0.8 sub-slice C tranche 1). Escapes the quote / backslash / common
 /// control bytes; any other non-printable byte becomes `\xHH`.
+/// `true` when the program declares at least one `data` table (M0.8 E4).
+fn programHasDataDecls(ast: *const AstArena) bool {
+    return ast.data_decls.items.len > 0;
+}
+
+/// Emit the static `data_descriptors` table + the `writeDescriptors`
+/// serializer entry point (M0.8 E4, emit-structure). Expression leaves are
+/// rendered by the SHARED canonical renderer (`descriptor.renderExprAlloc`)
+/// and embedded as Zig string literals; an unsupported expression fails
+/// loud as `UnsupportedConstruct` — never silently-wrong output.
+fn emitDataDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena) CodegenError!void {
+    try w.line("pub const data_descriptors = [_]etch_descriptor.Data{");
+    const kinds = ast.items.items(.kind);
+    const datas = ast.items.items(.data);
+    var i: u28 = 0;
+    while (i < ast.items.len) : (i += 1) {
+        if (kinds[i] != .data_decl) continue;
+        const decl = ast.data_decls.items[datas[i]];
+        try w.print("    .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+        try w.print(", .entry_type = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(decl.entry_type));
+        try w.line(", .entries = &[_]etch_descriptor.DataEntry{");
+        var e: u32 = 0;
+        while (e < decl.entries_len) : (e += 1) {
+            const entry = ast.data_entries.items[decl.entries_start + e];
+            try w.print("        .{{ .id = ", .{});
+            try emitZigStringLiteral(w, ast.strings.slice(entry.id));
+            try w.line(", .fields = &[_]etch_descriptor.DataField{");
+            var f: u32 = 0;
+            while (f < entry.fields_len) : (f += 1) {
+                const field = ast.struct_lit_fields.items[entry.fields_start + f];
+                const rendered = descriptor_mod.renderExprAlloc(gpa, ast, field.value) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+                };
+                defer gpa.free(rendered);
+                try w.print("            .{{ .name = ", .{});
+                try emitZigStringLiteral(w, if (field.name == 0) "" else ast.strings.slice(field.name));
+                try w.print(", .value = ", .{});
+                try emitZigStringLiteral(w, rendered);
+                try w.printLine(", .is_spread = {} }},", .{field.name == 0});
+            }
+            try w.line("        } },");
+        }
+        try w.line("    } },");
+    }
+    try w.line("};");
+    try w.blankLine();
+    try w.line("pub fn writeDescriptors(gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {");
+    try w.line("    for (data_descriptors) |d| try etch_descriptor.writeData(d, gpa, out);");
+    try w.line("}");
+    try w.blankLine();
+}
+
+/// Splice the shared `descriptor_types.zig` source into the generated file
+/// as a nested `etch_descriptor` namespace — the same bytes `weld_etch`
+/// compiles (single-source contract, see that file's header), so the
+/// serialized-IR differential compares one canonical serializer on both
+/// backends with no module dependency added to the cooked output. The
+/// file-level `//!` doc lines are dropped (illegal inside a struct body).
+fn emitDescriptorNamespace(w: *Writer) CodegenError!void {
+    const source = @embedFile("../descriptor_types.zig");
+    try w.line("pub const etch_descriptor = struct {");
+    var it = std.mem.splitScalar(u8, source, '\n');
+    while (it.next()) |line_bytes| {
+        const trimmed = std.mem.trimStart(u8, line_bytes, " \t");
+        // `//!` module doc lines are illegal inside a struct body; the
+        // `const std` import would be ambiguous against the generated
+        // file's own (container shadowing is an error) — the splice rides
+        // the enclosing file-scope `std`.
+        if (std.mem.startsWith(u8, trimmed, "//!")) continue;
+        if (std.mem.startsWith(u8, trimmed, "const std = @import")) continue;
+        if (line_bytes.len == 0) {
+            try w.blankLine();
+        } else {
+            try w.printLine("    {s}", .{line_bytes});
+        }
+    }
+    try w.line("};");
+    try w.blankLine();
+}
+
 fn emitZigStringLiteral(w: *Writer, bytes: []const u8) CodegenError!void {
     try w.write("\"");
     for (bytes) |c| {

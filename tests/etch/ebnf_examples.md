@@ -650,3 +650,49 @@ rule anon_struct_literals(entity: Entity)
   entity.get_mut(AnonAcc).out = q.x + q.y + b.p.x + b.k
 }
 ```
+
+## Data tables (E4)
+
+The `etch-grammar.md` §14 example, verbatim (struct + table + spread):
+
+```etch
+struct Item {
+  display_name: string
+  icon: AssetRef<Texture2D>
+  rarity: Rarity = .common
+  weight: float = 0.0
+  value: int = 0
+}
+
+data ItemDatabase: Item {
+  iron_sword: {
+    display_name: "Iron Sword",
+    icon: "icons/iron_sword",
+    rarity: .uncommon,
+    weight: 3.5, value: 50,
+  },
+  iron_sword_enchanted: {
+    ..ItemDatabase.iron_sword,
+    display_name: "Iron Sword +1",
+    value: 120,
+  },
+}
+```
+
+Entry forms: optional trailing commas (per entry and per field), entries
+without separating commas, cross-table spread:
+
+```etch
+data EnemyDatabase: EnemySpec {
+  goblin_base: { hp: 50, speed: 4.0, damage: 5.0 }
+  goblin_warrior: {
+    ..EnemyDatabase.goblin_base,
+    hp: 80,
+  },
+  goblin_shaman: { ..EnemyDatabase.goblin_base, damage: 12.5 }
+}
+
+data BossDatabase: EnemySpec {
+  goblin_king: { ..EnemyDatabase.goblin_warrior, hp: 400 },
+}
+```

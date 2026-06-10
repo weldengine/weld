@@ -78,4 +78,8 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p59_resource_receiver", .etch_path = "tests/etch_interp/programs/59_resource_receiver.etch" },
     .{ .name = "p60_event_observer_resource", .etch_path = "tests/etch_interp/programs/60_event_observer_resource.etch" },
     .{ .name = "p61_filter_two_components", .etch_path = "tests/etch_interp/programs/61_filter_two_components.etch" },
+    // Level-B programs (M0.8 E4): cooked + compiled like every program
+    // (the Sema proof), but diffed on the SERIALIZED IR by
+    // `levelb_ir_diff_test.zig` — they have no world-state sidecar.
+    .{ .name = "p62_data_table", .etch_path = "tests/etch_interp/programs/62_data_table.etch" },
 };

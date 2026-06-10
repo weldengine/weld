@@ -54,14 +54,20 @@ pub fn cookConsolidated(
 ) ConsolidateError!CookStats {
     try emitConsolidatedHeader(gpa, out);
 
+    // Per-input Level-B descriptor flags (M0.8 E4) — drive the
+    // `Program.write_descriptors` wiring in the programs table.
+    var descriptor_flags = try gpa.alloc(bool, inputs.len);
+    defer gpa.free(descriptor_flags);
+
     var totals: CookStats = .{};
-    for (inputs) |in| {
+    for (inputs, 0..) |in, idx| {
         const stats = try cookInto(gpa, in, out);
         totals.rules += stats.rules;
         totals.distinct_signatures += stats.distinct_signatures;
+        descriptor_flags[idx] = stats.has_descriptors;
     }
 
-    try emitProgramsTable(gpa, out, inputs);
+    try emitProgramsTable(gpa, out, inputs, descriptor_flags);
     return totals;
 }
 
@@ -90,7 +96,15 @@ fn emitConsolidatedHeader(gpa: std.mem.Allocator, buffer: *std.ArrayListUnmanage
     try buffer.appendSlice(gpa, header);
 }
 
-fn cookInto(gpa: std.mem.Allocator, in: NamedSource, buffer: *std.ArrayListUnmanaged(u8)) ConsolidateError!CookStats {
+/// Per-input cook result — the bench-facing `CookStats` numbers plus the
+/// Level-B descriptor flag consumed by the programs-table emission.
+const InputCook = struct {
+    rules: u32,
+    distinct_signatures: u32,
+    has_descriptors: bool,
+};
+
+fn cookInto(gpa: std.mem.Allocator, in: NamedSource, buffer: *std.ArrayListUnmanaged(u8)) ConsolidateError!InputCook {
     // Parse + type-check.
     var pr = parser.parse(gpa, in.source) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -132,7 +146,7 @@ fn cookInto(gpa: std.mem.Allocator, in: NamedSource, buffer: *std.ArrayListUnman
     try buffer.appendSlice(gpa, body_no_imports);
     try buffer.appendSlice(gpa, "};\n\n");
 
-    return .{ .rules = stats.rules, .distinct_signatures = stats.distinct_signatures };
+    return .{ .rules = stats.rules, .distinct_signatures = stats.distinct_signatures, .has_descriptors = stats.has_descriptors };
 }
 
 fn stripImports(body: []const u8) []const u8 {
@@ -167,19 +181,25 @@ fn stripImports(body: []const u8) []const u8 {
     return body[pos..];
 }
 
-fn emitProgramsTable(gpa: std.mem.Allocator, buffer: *std.ArrayListUnmanaged(u8), inputs: []const NamedSource) error{OutOfMemory}!void {
+fn emitProgramsTable(gpa: std.mem.Allocator, buffer: *std.ArrayListUnmanaged(u8), inputs: []const NamedSource, descriptor_flags: []const bool) error{OutOfMemory}!void {
     try buffer.appendSlice(gpa,
         \\pub const Program = struct {
         \\    name: []const u8,
         \\    register: *const fn (world: *World, gpa: std.mem.Allocator) anyerror!void,
         \\    tick: *const fn (world: *World, gpa: std.mem.Allocator) void,
+        \\    /// Level-B serialized-IR entry point (M0.8 E4) — emits the
+        \\    /// canonical descriptor dump. Null for Level-A-only programs.
+        \\    write_descriptors: ?*const fn (gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void = null,
         \\};
         \\
         \\pub const programs = [_]Program{
         \\
     );
-    for (inputs) |in| {
-        const line = try std.fmt.allocPrint(gpa, "    .{{ .name = \"{s}\", .register = &{s}.register, .tick = &{s}.tick }},\n", .{ in.name, in.name, in.name });
+    for (inputs, descriptor_flags) |in, has_descriptors| {
+        const line = if (has_descriptors)
+            try std.fmt.allocPrint(gpa, "    .{{ .name = \"{s}\", .register = &{s}.register, .tick = &{s}.tick, .write_descriptors = &{s}.writeDescriptors }},\n", .{ in.name, in.name, in.name, in.name })
+        else
+            try std.fmt.allocPrint(gpa, "    .{{ .name = \"{s}\", .register = &{s}.register, .tick = &{s}.tick }},\n", .{ in.name, in.name, in.name });
         defer gpa.free(line);
         try buffer.appendSlice(gpa, line);
     }

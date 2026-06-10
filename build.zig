@@ -1045,6 +1045,20 @@ pub fn build(b: *std.Build) void {
     );
     codegen_diff_step.dependOn(&codegen_diff_run.step);
 
+    // Level-B serialized-IR differential (M0.8 E4): interpreter-built
+    // descriptors vs cooked emit-structure, byte-identical canonical dumps.
+    const levelb_ir_diff_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/levelb_ir_diff_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    levelb_ir_diff_module.addImport("weld_core", core_module);
+    levelb_ir_diff_module.addImport("weld_etch", etch_module);
+    levelb_ir_diff_module.addImport("corpus_codegen", diff_codegen_module);
+    const levelb_ir_diff_test = b.addTest(.{ .root_module = levelb_ir_diff_module });
+    const levelb_ir_diff_run = b.addRunArtifact(levelb_ir_diff_test);
+    test_step.dependOn(&levelb_ir_diff_run.step);
+
     // Parity test: same corpus, runs interpreter + codegen back-to-back.
     const codegen_parity_module = b.createModule(.{
         .root_source_file = b.path("tests/etch_interp/codegen_parity_test.zig"),
