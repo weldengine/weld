@@ -167,6 +167,14 @@ pub const RuntimeErrorKind = enum {
     DivisionByZero,
     IntegerOverflow,
     UnsupportedExpr,
+    /// Bridge-level type incoherence (M0.8 E3-D, D-S4-runtime-report —
+    /// the typed-report home of `BridgeError.TypeMismatch`, closing the
+    /// D-S4-ecs-bridge-panic letter: the bridge returns the error, the
+    /// report carries the kind).
+    TypeMismatch,
+    /// An Etch `throw` that reached the rule top level uncaught (M0.8
+    /// E3-D). The span covers the thrown value expression.
+    UncaughtThrow,
 };
 
 // ─── Arithmetic helpers ──────────────────────────────────────────────────

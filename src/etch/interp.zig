@@ -39,6 +39,9 @@ const StringId = ast_mod.StringId;
 const Diagnostic = diag_mod.Diagnostic;
 const Value = value_mod.Value;
 const EntityId = value_mod.EntityId;
+const RuntimeError = value_mod.RuntimeError;
+const RuntimeErrorKind = value_mod.RuntimeErrorKind;
+const SourceSpan = @import("token.zig").SourceSpan;
 const Bridge = bridge_mod.Bridge;
 
 /// Counters surfaced by `Interpreter.run` per tick — informational
@@ -48,6 +51,14 @@ pub const RuntimeReport = struct {
     rules_evaluated: u64 = 0,
     rules_matched: u64 = 0,
     runtime_errors: u64 = 0,
+    /// Typed payload of the most recent runtime failure that carried one
+    /// (M0.8 E3-D, D-S4-runtime-report). Null when no failure occurred, or
+    /// when the failing site has no typed conversion yet — residual untyped
+    /// sites still bump `runtime_errors` and leave the previous payload in
+    /// place. Interp-only / informational, like the counters above: the
+    /// codegen runtime has no report counterpart, so the field is never a
+    /// differential-parity obligation.
+    last_error: ?RuntimeError = null,
 };
 
 const ResourceDep = struct {
@@ -469,6 +480,18 @@ pub const Interpreter = struct {
     thrown: bool = false,
     /// The value carried by the in-flight `throw`.
     thrown_value: Value = .{ .unit = {} },
+    /// Span of the in-flight `throw`'s value expression (M0.8 E3-D) —
+    /// harvested into an `UncaughtThrow` report entry when the throw reaches
+    /// the rule top level uncaught. Irrelevant once a `catch` consumes the
+    /// throw.
+    thrown_span: SourceSpan = .{ .byte_start = 0, .byte_end = 0 },
+    /// In-flight typed runtime-error payload (M0.8 E3-D,
+    /// D-S4-runtime-report). Zig errors carry no payload, so the typed
+    /// `RuntimeError` rides on `self` — the same sideband pattern as
+    /// `thrown_value` — set by `fail` at the raise site and harvested into
+    /// `RuntimeReport.last_error` at the body choke points. Raise sites
+    /// without a typed conversion leave it null (the report still counts).
+    pending_error: ?RuntimeError = null,
     /// Whether a `return` is unwinding to the enclosing `fn` boundary (M0.8 E2).
     /// Mirrors `thrown`: every statement-run / loop / block site that stops on a
     /// throw also stops on a return; the fn-call boundary consumes it.
@@ -910,6 +933,7 @@ pub const Interpreter = struct {
         self.control = .none;
         self.thrown = false;
         self.returning = false;
+        self.pending_error = null;
         var s: u32 = slot.cursor;
         while (s < rule.body_len) : (s += 1) {
             const stmt_id: NodeId = @bitCast(self.ast.extra.items[rule.body_start + s]);
@@ -929,6 +953,7 @@ pub const Interpreter = struct {
             };
             if (self.thrown) {
                 self.thrown = false;
+                self.pending_error = .{ .kind = .UncaughtThrow, .span = self.thrown_span };
                 return self.finishAsync(slot, report, true);
             }
             // A `break`/`continue`/`return` reaching the async rule top level
@@ -950,7 +975,7 @@ pub const Interpreter = struct {
     /// Complete a task (success or fail-loud), freeing its retained locals so
     /// the final slot deinit is a no-op.
     fn finishAsync(self: *Interpreter, slot: *AsyncSlot, report: *RuntimeReport, failed: bool) void {
-        if (failed) report.runtime_errors += 1;
+        if (failed) self.harvestError(report);
         slot.state = .done;
         slot.locals.deinit(self.gpa);
         slot.locals = .{};
@@ -1105,6 +1130,7 @@ pub const Interpreter = struct {
         self.control = .none; // defensive: each body starts with no pending signal
         self.thrown = false;
         self.returning = false;
+        self.pending_error = null;
 
         var s: u32 = 0;
         while (s < rule.body_len) : (s += 1) {
@@ -1113,7 +1139,7 @@ pub const Interpreter = struct {
             self.execStmt(world, &locals, stmt_id) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.RuntimeFailure => {
-                    report.runtime_errors += 1;
+                    self.harvestError(report);
                     return;
                 },
             };
@@ -1121,7 +1147,8 @@ pub const Interpreter = struct {
             // as a runtime error (the dev-build surfacing of an unhandled throw).
             if (self.thrown) {
                 self.thrown = false;
-                report.runtime_errors += 1;
+                self.pending_error = .{ .kind = .UncaughtThrow, .span = self.thrown_span };
+                self.harvestError(report);
                 return;
             }
             // A `break`/`continue` reaching the rule top level (outside any loop)
@@ -1139,6 +1166,24 @@ pub const Interpreter = struct {
                 break;
             }
         }
+    }
+
+    /// Raise a typed runtime failure (M0.8 E3-D, D-S4-runtime-report): record
+    /// the `(kind, span)` payload on the sideband and return the unwinding
+    /// error. Usage: `return self.fail(.DivisionByZero, self.ast.exprSpan(id))`.
+    fn fail(self: *Interpreter, kind: RuntimeErrorKind, span: SourceSpan) error{RuntimeFailure} {
+        self.pending_error = .{ .kind = kind, .span = span };
+        return error.RuntimeFailure;
+    }
+
+    /// Harvest a runtime failure into the report at a body choke point
+    /// (M0.8 E3-D): bump the counter and surface the typed payload when the
+    /// raise site recorded one. An untyped site leaves the previous
+    /// `last_error` in place (the counter still moves).
+    fn harvestError(self: *Interpreter, report: *RuntimeReport) void {
+        report.runtime_errors += 1;
+        if (self.pending_error) |pe| report.last_error = pe;
+        self.pending_error = null;
     }
 
     /// Run a contiguous statement run, stopping early if a control signal
@@ -1329,6 +1374,9 @@ pub const Interpreter = struct {
                 const t = self.ast.throw_stmts.items[data];
                 self.thrown_value = try self.evalExpr(world, locals, t.value);
                 self.thrown = true;
+                // Recorded for the uncaught-throw report entry (M0.8 E3-D);
+                // irrelevant when a `catch` consumes the throw.
+                self.thrown_span = self.ast.exprSpan(t.value);
             },
             .try_catch_stmt => {
                 // `try { ... } catch err { ... }` — run the try body; if it
@@ -1408,10 +1456,12 @@ pub const Interpreter = struct {
             switch (recv) {
                 .component_ref => |cref| {
                     if (!cref.mutable) return error.RuntimeFailure;
-                    const cur = Bridge.readComponentField(&world.registry, cref, world, field_name) catch return error.RuntimeFailure;
+                    const cur = Bridge.readComponentField(&world.registry, cref, world, field_name) catch |e|
+                        return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     const rhs = try self.evalExpr(world, locals, assign.value);
                     const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
-                    Bridge.writeComponentField(&world.registry, cref, world, field_name, new_v) catch return error.RuntimeFailure;
+                    Bridge.writeComponentField(&world.registry, cref, world, field_name, new_v) catch |e|
+                        return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     // Change detection (M0.8 E3): stamp `changed_tick = current_tick`
                     // so an `entity has T changed` rule sees this write. Gated on
                     // `has_changed` — a `changed`-free program never marks. Same
@@ -1421,10 +1471,12 @@ pub const Interpreter = struct {
                 },
                 .resource_ref => |rref| {
                     if (!rref.mutable) return error.RuntimeFailure;
-                    const cur = Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch return error.RuntimeFailure;
+                    const cur = Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch |e|
+                        return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     const rhs = try self.evalExpr(world, locals, assign.value);
                     const new_v = applyAssignOp(cur, assign.op, rhs) catch return error.RuntimeFailure;
-                    Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, new_v) catch return error.RuntimeFailure;
+                    Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, new_v) catch |e|
+                        return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     return;
                 },
                 // Struct field write (M0.8 E2 block 3) — `self.x = …` in a `mut
@@ -1916,8 +1968,10 @@ pub const Interpreter = struct {
                 const recv = try self.evalExpr(world, locals, fa.receiver);
                 const field_name = self.ast.strings.slice(fa.field_name);
                 switch (recv) {
-                    .component_ref => |cref| return Bridge.readComponentField(&world.registry, cref, world, field_name) catch error.RuntimeFailure,
-                    .resource_ref => |rref| return Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch error.RuntimeFailure,
+                    .component_ref => |cref| return Bridge.readComponentField(&world.registry, cref, world, field_name) catch |e|
+                        self.fail(bridgeFailureKind(e), self.ast.exprSpan(id)),
+                    .resource_ref => |rref| return Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch |e|
+                        self.fail(bridgeFailureKind(e), self.ast.exprSpan(id)),
                     // Struct field read (M0.8 E2 block 3) — `self.x` / `v.x`.
                     .struct_ref => |handle| {
                         for (self.structs.list.items[handle].fields.items) |f| {
@@ -1973,7 +2027,8 @@ pub const Interpreter = struct {
                     }
                 }
                 return switch (b.op) {
-                    .add, .sub, .mul, .div, .rem => binaryArith(b.op, lhs, rhs) catch return error.RuntimeFailure,
+                    .add, .sub, .mul, .div, .rem => binaryArith(b.op, lhs, rhs) catch
+                        return self.fail(arithFailureKind(b.op, lhs, rhs), self.ast.exprSpan(id)),
                     .eq, .neq, .lt, .gt, .le, .ge => binaryCompare(b.op, lhs, rhs) catch return error.RuntimeFailure,
                     .logical_and => {
                         if (lhs != .bool_ or rhs != .bool_) return error.RuntimeFailure;
@@ -2463,6 +2518,36 @@ fn applyAssignOp(cur: Value, op: ast_mod.AssignOp, rhs: Value) !Value {
         .div_assign => try binaryArith(.div, cur, rhs),
         .rem_assign => try binaryArith(.rem, cur, rhs),
     };
+}
+
+/// Map a bridge failure to a typed report kind (M0.8 E3-D): a bridge
+/// `TypeMismatch` keeps its identity in the report (the D-S4-ecs-bridge-panic
+/// letter — the bridge returns the error, the report carries the kind);
+/// every other bridge cause stays the generic UnsupportedExpr. OOM keeps the
+/// pre-existing collapse into the counted runtime failure (the bridge write
+/// paths do not allocate).
+fn bridgeFailureKind(err: anyerror) RuntimeErrorKind {
+    return switch (err) {
+        error.TypeMismatch => .TypeMismatch,
+        else => .UnsupportedExpr,
+    };
+}
+
+/// Classify a `binaryArith` failure into a typed report kind (M0.8 E3-D,
+/// D-S4-runtime-report). Integer `/` and `%` fail on a zero divisor
+/// (DivisionByZero) or on `i64.min / -1` (IntegerOverflow — the only other
+/// null path of `intDiv`); checked `+`/`-`/`*` fail on overflow only. Any
+/// operand-shape mismatch that slipped past the resolver stays the generic
+/// UnsupportedExpr.
+fn arithFailureKind(op: ast_mod.BinaryOp, a: Value, b: Value) RuntimeErrorKind {
+    if (a == .int_ and b == .int_) {
+        return switch (op) {
+            .div, .rem => if (b.int_ == 0) .DivisionByZero else .IntegerOverflow,
+            .add, .sub, .mul => .IntegerOverflow,
+            else => .UnsupportedExpr,
+        };
+    }
+    return .UnsupportedExpr;
 }
 
 fn binaryArith(op: ast_mod.BinaryOp, a: Value, b: Value) !Value {
@@ -4717,6 +4802,119 @@ test "runProgram force unwrap of none is a runtime failure (M0.8 E3-C tranche 4)
     _ = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
     const report = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+}
+
+test "runFor surfaces typed last_error with span on division by zero (D-S4-runtime-report)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // D-S4-runtime-report: the typed `RuntimeError` payload — kind plus the
+    // failing expression's span — reaches the caller through
+    // `RuntimeReport.last_error`, harvested by `execBody` (the sync choke
+    // point). The span assertion pins resolution from the raising NodeId,
+    // not a defaulted span.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule boom(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let d = 0
+        \\  let x = 1 / d
+        \\  entity.get_mut(Acc).out = x
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    const le = report.last_error orelse return error.TestExpectedTypedError;
+    try std.testing.expectEqual(RuntimeErrorKind.DivisionByZero, le.kind);
+    try std.testing.expectEqualStrings("1 / d", source[le.span.byte_start..le.span.byte_end]);
+}
+
+test "runFor surfaces UncaughtThrow with the thrown-value span (D-S4-runtime-report)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // An Etch `throw` reaching the rule top level uncaught is a counted
+    // runtime error (tranche 2); E3-D types it in the report. The span
+    // covers the thrown value expression.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule boom(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  throw Error { message: "kaboom", code: ErrorCode.io_fail }
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    const le = report.last_error orelse return error.TestExpectedTypedError;
+    try std.testing.expectEqual(RuntimeErrorKind.UncaughtThrow, le.kind);
+    const span_text = source[le.span.byte_start..le.span.byte_end];
+    try std.testing.expect(std.mem.indexOf(u8, span_text, "kaboom") != null);
+}
+
+test "async runtime failure surfaces typed last_error (D-S4-runtime-report)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The async choke point (`driveAsyncBody` → `finishAsync`) harvests the
+    // same typed payload as `execBody` — the task fails before its first
+    // suspension and the report carries the kind.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule boom()
+        \\  when resource Out
+        \\{
+        \\  let d = 0
+        \\  let x = 1 / d
+        \\  let r = get_mut(Out)
+        \\  r.n = x
+        \\  await wait(1)
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+    const le = report.last_error orelse return error.TestExpectedTypedError;
+    try std.testing.expectEqual(RuntimeErrorKind.DivisionByZero, le.kind);
 }
 
 test "runProgram anonymous struct literal via let annotation and field value (M0.8 E3-C tranche 8)" {
