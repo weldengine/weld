@@ -809,7 +809,15 @@ pub const CallExpr = struct {
     callee: NodeId,
     args_start: u32,
     args_len: u32,
+    /// Named-argument labels (M0.8 E4, §3.3 — item-16 ruling): a run of
+    /// `call_arg_names` parallel to the args (`0` = positional), or
+    /// `no_arg_names` when every argument is positional (the common case —
+    /// zero storage, byte-identical to the pre-E4 representation).
+    names_start: u32 = no_arg_names,
 };
+
+/// Sentinel for a call without named arguments.
+pub const no_arg_names: u32 = std.math.maxInt(u32);
 
 /// `receiver.method(args)` call expression (M0.8 E2 call mechanism,
 /// `etch-grammar.md` postfix_op §421). Args are a run of expr `NodeId` raw
@@ -817,6 +825,8 @@ pub const CallExpr = struct {
 /// 4-kind method dispatch (`etch-resolver-types.md §5`) is exercised in block 3
 /// once `impl` provides methods.
 pub const MethodCall = struct {
+    /// Named-argument labels (M0.8 E4, §3.3) — same encoding as `CallExpr`.
+    names_start: u32 = no_arg_names,
     receiver: NodeId,
     method_name: StringId,
     args_start: u32,
@@ -1292,6 +1302,10 @@ pub const AstArena = struct {
     method_calls: std.ArrayListUnmanaged(MethodCall) = .empty,
     struct_lits: std.ArrayListUnmanaged(StructLitExpr) = .empty,
     struct_lit_fields: std.ArrayListUnmanaged(StructLitField) = .empty,
+    /// Named-argument labels (M0.8 E4, §3.3): runs parallel to call arg
+    /// runs, `0` = positional slot. Referenced by `CallExpr.names_start` /
+    /// `MethodCall.names_start` (`no_arg_names` = all-positional call).
+    call_arg_names: std.ArrayListUnmanaged(StringId) = .empty,
     loop_exprs: std.ArrayListUnmanaged(LoopExpr) = .empty,
     string_interps: std.ArrayListUnmanaged(StringInterp) = .empty,
     block_exprs: std.ArrayListUnmanaged(BlockExpr) = .empty,
@@ -1428,6 +1442,7 @@ pub const AstArena = struct {
         self.method_calls.deinit(gpa);
         self.struct_lits.deinit(gpa);
         self.struct_lit_fields.deinit(gpa);
+        self.call_arg_names.deinit(gpa);
         self.loop_exprs.deinit(gpa);
         self.string_interps.deinit(gpa);
         self.block_exprs.deinit(gpa);
@@ -1723,22 +1738,65 @@ pub const AstArena = struct {
     }
 
     /// `args` is a slice of `NodeId.raw()` values (the call arguments),
-    /// bulk-appended to `arena.extra` as a contiguous run.
-    pub fn addCall(self: *AstArena, gpa: std.mem.Allocator, callee: NodeId, args: []const u32, span: SourceSpan) !NodeId {
+    /// bulk-appended to `arena.extra` as a contiguous run. `names` carries
+    /// the named-argument labels (M0.8 E4, §3.3) parallel to `args`
+    /// (`0` = positional); pass an empty slice for an all-positional call
+    /// (no `call_arg_names` storage, the pre-E4 representation).
+    pub fn addCall(self: *AstArena, gpa: std.mem.Allocator, callee: NodeId, args: []const u32, names: []const StringId, span: SourceSpan) !NodeId {
         const start: u32 = @intCast(self.extra.items.len);
         try self.extra.appendSlice(gpa, args);
+        var names_start: u32 = no_arg_names;
+        if (names.len != 0) {
+            std.debug.assert(names.len == args.len);
+            names_start = @intCast(self.call_arg_names.items.len);
+            try self.call_arg_names.appendSlice(gpa, names);
+        }
         const idx: u32 = @intCast(self.call_exprs.items.len);
-        try self.call_exprs.append(gpa, .{ .callee = callee, .args_start = start, .args_len = @intCast(args.len) });
+        try self.call_exprs.append(gpa, .{ .callee = callee, .args_start = start, .args_len = @intCast(args.len), .names_start = names_start });
         return try self.addExpr(gpa, .fn_call, idx, span);
     }
 
+    /// Resolve the argument expression bound to parameter `param_idx` of a
+    /// call (M0.8 E4 named arguments, §3.3): positionals bind in order, a
+    /// named argument binds the parameter carrying its name. ONE binding
+    /// algorithm consumed by the resolver, the interpreter, and the codegen
+    /// — identical semantics by construction. Returns `null` when no
+    /// argument binds the parameter (the resolver reports E0203; downstream
+    /// consumers fail loud).
+    pub fn callArgForParam(self: *const AstArena, args_start: u32, args_len: u32, names_start: u32, param_idx: u32, param_name: StringId) ?NodeId {
+        if (names_start == no_arg_names) {
+            if (param_idx >= args_len) return null;
+            return @bitCast(self.extra.items[args_start + param_idx]);
+        }
+        const names = self.call_arg_names.items[names_start .. names_start + args_len];
+        // Positional prefix (§3.3: positionals first).
+        var n_positional: u32 = 0;
+        while (n_positional < args_len and names[n_positional] == 0) n_positional += 1;
+        if (param_idx < n_positional) {
+            return @bitCast(self.extra.items[args_start + param_idx]);
+        }
+        var i: u32 = n_positional;
+        while (i < args_len) : (i += 1) {
+            if (names[i] == param_name) return @bitCast(self.extra.items[args_start + i]);
+        }
+        return null;
+    }
+
     /// `receiver.method(args)` (M0.8 E2 call mechanism). `args` is a slice of
-    /// expr `NodeId.raw()` values, bulk-appended to `arena.extra`.
-    pub fn addMethodCall(self: *AstArena, gpa: std.mem.Allocator, receiver: NodeId, method_name: StringId, args: []const u32, span: SourceSpan) !NodeId {
+    /// expr `NodeId.raw()` values, bulk-appended to `arena.extra`. `names`
+    /// carries the named-argument labels (M0.8 E4, §3.3) — empty for an
+    /// all-positional call, like `addCall`.
+    pub fn addMethodCall(self: *AstArena, gpa: std.mem.Allocator, receiver: NodeId, method_name: StringId, args: []const u32, names: []const StringId, span: SourceSpan) !NodeId {
         const start: u32 = @intCast(self.extra.items.len);
         try self.extra.appendSlice(gpa, args);
+        var names_start: u32 = no_arg_names;
+        if (names.len != 0) {
+            std.debug.assert(names.len == args.len);
+            names_start = @intCast(self.call_arg_names.items.len);
+            try self.call_arg_names.appendSlice(gpa, names);
+        }
         const idx: u32 = @intCast(self.method_calls.items.len);
-        try self.method_calls.append(gpa, .{ .receiver = receiver, .method_name = method_name, .args_start = start, .args_len = @intCast(args.len) });
+        try self.method_calls.append(gpa, .{ .receiver = receiver, .method_name = method_name, .args_start = start, .args_len = @intCast(args.len), .names_start = names_start });
         return try self.addExpr(gpa, .method_call, idx, span);
     }
 

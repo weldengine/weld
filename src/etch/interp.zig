@@ -1755,10 +1755,14 @@ pub const Interpreter = struct {
         if (fndecl.params_len != call.args_len) return error.RuntimeFailure;
         var frame: Locals = .{};
         defer frame.deinit(self.gpa);
+        // Bind arguments in PARAMETER order (M0.8 E4 named arguments,
+        // §3.3 — `callArgForParam` is the shared binding; the emitted Zig
+        // call evaluates its reordered args left-to-right, so parameter
+        // order keeps the two backends' evaluation order identical).
         var i: u32 = 0;
         while (i < fndecl.params_len) : (i += 1) {
             const p = self.ast.fn_params.items[fndecl.params_start + i];
-            const arg: NodeId = @bitCast(self.ast.extra.items[call.args_start + i]);
+            const arg = self.ast.callArgForParam(call.args_start, call.args_len, call.names_start, i, p.name) orelse return error.RuntimeFailure;
             const av = try self.evalExpr(world, caller_locals, arg);
             try frame.put(self.gpa, p.name, av, false);
         }
@@ -2072,10 +2076,11 @@ pub const Interpreter = struct {
                 try frame.put(self.gpa, self_id, sv, method.self_kind == .by_mut);
             }
         }
+        // Parameter-order binding, same contract as `callFn` (M0.8 E4).
         var i: u32 = 0;
         while (i < method.params_len) : (i += 1) {
             const p = self.ast.fn_params.items[method.params_start + i];
-            const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start + i]);
+            const arg = self.ast.callArgForParam(mc.args_start, mc.args_len, mc.names_start, i, p.name) orelse return error.RuntimeFailure;
             const av = try self.evalExpr(world, caller_locals, arg);
             try frame.put(self.gpa, p.name, av, false);
         }
@@ -2513,6 +2518,10 @@ pub const Interpreter = struct {
                 const handle = callee.closure;
                 const node = self.closures.list.items[handle].node;
                 const ce = self.ast.closure_exprs.items[self.ast.exprData(node)];
+                // Named args on a closure call are an M0.8 bound (item 16:
+                // declared fns + methods only) — the resolver rejects them
+                // (E0203); belt here.
+                if (call.names_start != ast_mod.no_arg_names) return error.RuntimeFailure;
                 if (ce.params_len != call.args_len) return error.RuntimeFailure;
                 var frame: Locals = .{};
                 defer frame.deinit(self.gpa);

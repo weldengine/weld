@@ -776,3 +776,46 @@ rule bare_condition(entity: Entity)
   entity.get_mut(Counter).value += 1
 }
 ```
+
+## Named call arguments (E4 — §3.3, item-16 ruling)
+
+The `etch-grammar.md` §8.2 routine example, VERBATIM (named arguments +
+soft-keyword label `type`, item 6):
+
+```etch
+routine BlacksmithDaily {
+  segment Working {
+    trigger: at 06:00 or after Sleeping
+    actions: use_smart_object("forge_anvil", type: .work)
+    until: at 12:00 or on_event MealCallReceived
+  }
+
+  segment Lunch {
+    trigger: at 12:00 or after Working
+    actions: go_to("tavern") then use_smart_object("tavern_bench", type: .eat)
+    until: at 13:00
+  }
+
+  segment Sleeping {
+    trigger: at 22:00
+    actions: go_to("bed") then idle(animation: "sleeping")
+    until: at 06:00
+  }
+
+  on_threat_detected -> CombatBehavior
+  on_dialogue_request -> pause_segment
+}
+```
+
+Mixed positional + named call arguments:
+
+```etch
+fn spawn_enemy(name: string, level: int, elite: bool) { }
+
+rule wave(entity: Entity)
+  when entity has Spawner
+{
+  spawn_enemy("goblin", level: 3, elite: false)
+  spawn_enemy(name: "orc", level: 5, elite: true)
+}
+```

@@ -36,6 +36,8 @@ pub const DiagnosticCode = enum {
 
     // ── Type errors (E0200-E0299) ──
     type_mismatch, // S3 — E0200 TypeMismatch
+    arg_count_mismatch, // M0.8 E4 — E0203 ArgCountMismatch (unfolded from E0200, E3 gate flag 5; also named-arg binding failures)
+    return_type_mismatch, // M0.8 E4 — E0204 ReturnTypeMismatch (unfolded from E0200, E3 gate flag 5)
     struct_field_missing, // M0.8 — E0208 StructFieldMissing
     ambiguous_type, // M0.8 — E0210 AmbiguousType
     ambiguous_trait_method, // M0.8 — E0211 AmbiguousTraitMethod
@@ -103,6 +105,8 @@ pub const DiagnosticCode = enum {
             .undefined_symbol => "E0102",
             .enum_variant_not_found => "E0105",
             .type_mismatch => "E0200",
+            .arg_count_mismatch => "E0203",
+            .return_type_mismatch => "E0204",
             .struct_field_missing => "E0208",
             .ambiguous_type => "E0210",
             .ambiguous_trait_method => "E0211",
@@ -156,6 +160,8 @@ pub const DiagnosticCode = enum {
             .undefined_symbol => "UndefinedSymbol",
             .enum_variant_not_found => "EnumVariantNotFound",
             .type_mismatch => "TypeMismatch",
+            .arg_count_mismatch => "ArgCountMismatch",
+            .return_type_mismatch => "ReturnTypeMismatch",
             .struct_field_missing => "StructFieldMissing",
             .ambiguous_type => "AmbiguousType",
             .ambiguous_trait_method => "AmbiguousTraitMethod",

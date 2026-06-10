@@ -1339,7 +1339,7 @@ pub const TypeChecker = struct {
         if (!decl.value.isNone()) {
             const vt = self.synthExpr(decl.value, &ctx);
             if (!decl.return_type.isNone() and ret_t == .builtin and vt == .builtin and !self.literalTypeFits(ret_t.builtin, decl.value, vt.builtin)) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(decl.value), "method '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
+                try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(decl.value), "method '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
             }
         }
     }
@@ -1481,7 +1481,7 @@ pub const TypeChecker = struct {
         if (!decl.value.isNone()) {
             const vt = self.synthExpr(decl.value, &ctx);
             if (!decl.return_type.isNone() and ret_t == .builtin and vt == .builtin and !self.literalTypeFits(ret_t.builtin, decl.value, vt.builtin)) {
-                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(decl.value), "function '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
+                try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(decl.value), "function '{s}' body value type does not match its declared return type", .{self.arena.strings.slice(decl.name)});
             }
         }
     }
@@ -1887,7 +1887,7 @@ pub const TypeChecker = struct {
                     const vt = self.synthExpr(value, ctx);
                     if (self.current_fn_return) |ret| {
                         if (ret == .builtin and vt == .builtin and !self.literalTypeFits(ret.builtin, value, vt.builtin)) {
-                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "return value type does not match the declared return type", .{});
+                            try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(value), "return value type does not match the declared return type", .{});
                         }
                     }
                 }
@@ -2372,8 +2372,15 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
         const ce = self.arena.closure_exprs.items[self.arena.exprData(callee_t.closure)];
+        // Named arguments on a closure call are an M0.8 bound (item-16
+        // scope: declared fns + methods; flagged for the gate) — the
+        // binding machinery targets declared signatures.
+        if (call.names_start != ast_mod.no_arg_names) {
+            try self.emit(.arg_count_mismatch, .error_, self.arena.exprSpan(id), "named arguments require a declared fn or method callee (M0.8 bound)", .{});
+            return ResolvedType.unknown;
+        }
         if (ce.params_len != call.args_len) {
-            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "closure called with {d} argument(s), expected {d}", .{ call.args_len, ce.params_len });
+            try self.emit(.arg_count_mismatch, .error_, self.arena.exprSpan(id), "closure called with {d} argument(s), expected {d}", .{ call.args_len, ce.params_len });
             return ResolvedType.unknown;
         }
         const ctx = ctx_opt orelse return ResolvedType.unknown;
@@ -2415,28 +2422,90 @@ pub const TypeChecker = struct {
         return ret;
     }
 
+    /// Validate a call's argument BINDING against a parameter-name list
+    /// (M0.8 E4 named arguments, §3.3 — item-16 ruling): arity (E0203),
+    /// every named label names a parameter, no parameter bound twice
+    /// (positionally or by name), every parameter bound at the end. Returns
+    /// false (after emitting E0203) when the binding is unsound — callers
+    /// skip the per-argument type checks to avoid cascades.
+    fn checkCallBinding(self: *TypeChecker, id: NodeId, args_start: u32, args_len: u32, names_start: u32, param_names: []const StringId, callee_kind: []const u8, callee_name: StringId) !bool {
+        _ = args_start;
+        if (param_names.len != args_len) {
+            try self.emit(.arg_count_mismatch, .error_, self.arena.exprSpan(id), "{s} '{s}' called with {d} argument(s), expected {d}", .{ callee_kind, self.arena.strings.slice(callee_name), args_len, param_names.len });
+            return false;
+        }
+        if (names_start == ast_mod.no_arg_names) return true;
+        const names = self.arena.call_arg_names.items[names_start .. names_start + args_len];
+        var n_positional: u32 = 0;
+        while (n_positional < args_len and names[n_positional] == 0) n_positional += 1;
+        var ok = true;
+        var i: u32 = n_positional;
+        while (i < args_len) : (i += 1) {
+            const label = names[i];
+            var param_idx: ?usize = null;
+            for (param_names, 0..) |pn, pi| {
+                if (pn == label) {
+                    param_idx = pi;
+                    break;
+                }
+            }
+            if (param_idx == null) {
+                try self.emit(.arg_count_mismatch, .error_, self.arena.exprSpan(id), "{s} '{s}' has no parameter named '{s}'", .{ callee_kind, self.arena.strings.slice(callee_name), self.arena.strings.slice(label) });
+                ok = false;
+                continue;
+            }
+            if (param_idx.? < n_positional) {
+                try self.emit(.arg_count_mismatch, .error_, self.arena.exprSpan(id), "parameter '{s}' of {s} '{s}' is already bound positionally", .{ self.arena.strings.slice(label), callee_kind, self.arena.strings.slice(callee_name) });
+                ok = false;
+                continue;
+            }
+            var j: u32 = n_positional;
+            while (j < i) : (j += 1) {
+                if (names[j] == label) {
+                    try self.emit(.arg_count_mismatch, .error_, self.arena.exprSpan(id), "parameter '{s}' of {s} '{s}' is bound twice", .{ self.arena.strings.slice(label), callee_kind, self.arena.strings.slice(callee_name) });
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        // Arity matches and every named arg bound a distinct non-positional
+        // parameter → by counting, every parameter is bound.
+        return ok;
+    }
+
+    /// Collect a callee's parameter names into a caller-owned buffer.
+    fn fnParamNames(self: *TypeChecker, params_start: u32, params_len: u32, buf: *std.ArrayListUnmanaged(StringId)) !void {
+        var i: u32 = 0;
+        while (i < params_len) : (i += 1) {
+            try buf.append(self.gpa, self.arena.fn_params.items[params_start + i].name);
+        }
+    }
+
     /// Type a free-function call `f(args)` to a top-level `fn` (M0.8 E2). Checks
-    /// arity then each argument against the declared parameter type; the result
-    /// is the declared return type (`unknown` for a void fn). Diagnostics reuse
-    /// E0200 (TypeMismatch), consistent with the sibling closure-call path.
+    /// the argument binding (named arguments per §3.3, M0.8 E4 — E0203) then
+    /// each bound argument against its declared parameter type; the result
+    /// is the declared return type (`unknown` for a void fn).
     fn synthFreeFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, item_id: NodeId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const decl = self.arena.fn_decls.items[self.arena.itemData(item_id)];
-        if (decl.params_len != call.args_len) {
-            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "function '{s}' called with {d} argument(s), expected {d}", .{ self.arena.strings.slice(decl.name), call.args_len, decl.params_len });
-            return if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
+        const ret: ResolvedType = if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
+        var pnames: std.ArrayListUnmanaged(StringId) = .empty;
+        defer pnames.deinit(self.gpa);
+        try self.fnParamNames(decl.params_start, decl.params_len, &pnames);
+        if (!try self.checkCallBinding(id, call.args_start, call.args_len, call.names_start, pnames.items, "function", decl.name)) {
+            return ret;
         }
         if (decl.generics_len > 0) return try self.synthGenericFnCall(id, call, decl, ctx_opt);
         var i: u32 = 0;
         while (i < decl.params_len) : (i += 1) {
             const p = self.arena.fn_params.items[decl.params_start + i];
             const ptype = self.namedTypeToResolved(p.type_node);
-            const arg: NodeId = @bitCast(self.arena.extra.items[call.args_start + i]);
+            const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, p.name) orelse continue;
             const arg_t = try self.synthExprE(arg, ctx_opt);
             if (ptype == .builtin and arg_t == .builtin and !self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of function '{s}'", .{self.arena.strings.slice(decl.name)});
             }
         }
-        return if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
+        return ret;
     }
 
     /// Type a call to a generic `fn` (M0.8 E2 block 4, `etch-resolver-types.md`
@@ -2451,10 +2520,13 @@ pub const TypeChecker = struct {
         var subst: std.AutoHashMapUnmanaged(StringId, ResolvedType) = .empty;
         defer subst.deinit(self.gpa);
 
+        var pnames: std.ArrayListUnmanaged(StringId) = .empty;
+        defer pnames.deinit(self.gpa);
+        try self.fnParamNames(decl.params_start, decl.params_len, &pnames);
         var i: u32 = 0;
         while (i < decl.params_len) : (i += 1) {
             const p = self.arena.fn_params.items[decl.params_start + i];
-            const arg: NodeId = @bitCast(self.arena.extra.items[call.args_start + i]);
+            const arg = self.arena.callArgForParam(call.args_start, call.args_len, call.names_start, i, p.name) orelse continue;
             const arg_t = try self.synthExprE(arg, ctx_opt);
             try self.unifyGeneric(decl, p.type_node, arg_t, &subst, self.arena.exprSpan(arg));
         }
@@ -2741,6 +2813,12 @@ pub const TypeChecker = struct {
             // user-overridable (stdlib §2.6), so the builtin route masks
             // any user `impl Set` rather than racing it.
             if (std.mem.eql(u8, self.arena.strings.slice(type_name), "Set")) {
+                // Builtin associated calls take positional args only (M0.8
+                // E4 item-16 bound: named args target declared signatures).
+                if (mc.names_start != ast_mod.no_arg_names) {
+                    try self.emit(.arg_count_mismatch, .error_, self.arena.exprSpan(id), "named arguments require a declared fn or method callee (M0.8 bound)", .{});
+                    return ResolvedType.unknown;
+                }
                 return try self.synthSetAssociated(id, mc, ctx_opt);
             }
             const method = self.lookupMethod(type_name, mc.method_name) orelse {
@@ -2755,6 +2833,16 @@ pub const TypeChecker = struct {
         }
 
         const raw_t = try self.synthExprE(mc.receiver, ctx_opt);
+
+        // Named arguments bind against DECLARED signatures (M0.8 E4 item-16
+        // bound): struct methods route through `checkMethodArgs` below;
+        // every builtin-method route (string / collections / ECS access)
+        // is positional-only — reject up front rather than silently
+        // ignoring the labels.
+        if (mc.names_start != ast_mod.no_arg_names and raw_t != .struct_t and raw_t != .unknown) {
+            try self.emit(.arg_count_mismatch, .error_, self.arena.exprSpan(id), "named arguments require a declared fn or method callee (M0.8 bound)", .{});
+            return ResolvedType.unknown;
+        }
 
         // `recv?.method(args)` — optional chain (M0.8 E3-C tranche 4, part1
         // §6.6): the method dispatches against the payload type and the
@@ -3087,15 +3175,17 @@ pub const TypeChecker = struct {
     /// `self` is not part of the argument list (it is the receiver).
     fn checkMethodArgs(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, method: ast_mod.FnDecl, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const ret: ResolvedType = if (method.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(method.return_type);
-        if (method.params_len != mc.args_len) {
-            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "method '{s}' called with {d} argument(s), expected {d}", .{ self.arena.strings.slice(mc.method_name), mc.args_len, method.params_len });
+        var pnames: std.ArrayListUnmanaged(StringId) = .empty;
+        defer pnames.deinit(self.gpa);
+        try self.fnParamNames(method.params_start, method.params_len, &pnames);
+        if (!try self.checkCallBinding(id, mc.args_start, mc.args_len, mc.names_start, pnames.items, "method", mc.method_name)) {
             return ret;
         }
         var i: u32 = 0;
         while (i < method.params_len) : (i += 1) {
             const p = self.arena.fn_params.items[method.params_start + i];
             const ptype = self.namedTypeToResolved(p.type_node);
-            const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start + i]);
+            const arg = self.arena.callArgForParam(mc.args_start, mc.args_len, mc.names_start, i, p.name) orelse continue;
             const arg_t = try self.synthExprE(arg, ctx_opt);
             if (ptype == .builtin and arg_t == .builtin and !self.literalTypeFits(ptype.builtin, arg, arg_t.builtin)) {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "argument type does not match the parameter type of method '{s}'", .{self.arena.strings.slice(mc.method_name)});
@@ -4446,7 +4536,7 @@ test "closure call arity, return typing, and non-callable (M0.8 closures)" {
     defer ok.deinit(gpa);
     try expectNoCode(ok.diagnostics.items, .type_mismatch);
 
-    // Wrong arity → E0200.
+    // Wrong arity → E0203 (unfolded from E0200, M0.8 E4 item 16).
     var arity = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\rule r(entity: Entity)
@@ -4457,7 +4547,7 @@ test "closure call arity, return typing, and non-callable (M0.8 closures)" {
         \\}
     );
     defer arity.deinit(gpa);
-    try expectAnyCode(arity.diagnostics.items, .type_mismatch);
+    try expectAnyCode(arity.diagnostics.items, .arg_count_mismatch);
 
     // Calling a non-closure → E0200.
     var noncallable = try parseAndCheck(gpa,
@@ -4547,7 +4637,7 @@ test "free-function call arity, arg, and return typing (M0.8 E2)" {
     defer ok.deinit(gpa);
     try expectNoCode(ok.diagnostics.items, .type_mismatch);
 
-    // Wrong arity → E0200.
+    // Wrong arity → E0203 (unfolded from E0200, M0.8 E4 item 16).
     var arity = try parseAndCheck(gpa,
         \\component C { out: int = 0 }
         \\fn double(x: int) -> int { x * 2 }
@@ -4558,7 +4648,7 @@ test "free-function call arity, arg, and return typing (M0.8 E2)" {
         \\}
     );
     defer arity.deinit(gpa);
-    try expectAnyCode(arity.diagnostics.items, .type_mismatch);
+    try expectAnyCode(arity.diagnostics.items, .arg_count_mismatch);
 
     // Argument type mismatch (float arg to an int param) → E0200.
     var argty = try parseAndCheck(gpa,
@@ -4573,12 +4663,13 @@ test "free-function call arity, arg, and return typing (M0.8 E2)" {
     defer argty.deinit(gpa);
     try expectAnyCode(argty.diagnostics.items, .type_mismatch);
 
-    // Body value type does not match the declared return type → E0200.
+    // Body value type does not match the declared return type → E0204
+    // (unfolded from E0200, M0.8 E4 item 16).
     var retty = try parseAndCheck(gpa,
         \\fn bad(x: int) -> bool { x * 2 }
     );
     defer retty.deinit(gpa);
-    try expectAnyCode(retty.diagnostics.items, .type_mismatch);
+    try expectAnyCode(retty.diagnostics.items, .return_type_mismatch);
 }
 
 test "struct inherent methods: dispatch, struct literal, and error cases (M0.8 E2 block 3)" {
@@ -4653,7 +4744,8 @@ test "struct inherent methods: dispatch, struct literal, and error cases (M0.8 E
     defer no_target.deinit(gpa);
     try expectAnyCode(no_target.diagnostics.items, .undefined_symbol);
 
-    // Argument-count mismatch on an associated fn → E0200.
+    // Argument-count mismatch on an associated fn → E0203 (unfolded from
+    // E0200, M0.8 E4 item 16).
     var arity = try parseAndCheck(gpa,
         \\struct V2 { x: int = 0 }
         \\impl V2 { fn make(a: int) -> V2 { V2 { x: a } } }
@@ -4665,7 +4757,7 @@ test "struct inherent methods: dispatch, struct literal, and error cases (M0.8 E
         \\}
     );
     defer arity.deinit(gpa);
-    try expectAnyCode(arity.diagnostics.items, .type_mismatch);
+    try expectAnyCode(arity.diagnostics.items, .arg_count_mismatch);
 }
 
 test "type-checker validates event declaration + emit (M0.8 E3)" {
@@ -5785,4 +5877,61 @@ test "when-surface: the differential-64 shapes check clean (M0.8 E4)" {
     defer result.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), result.parse_diags.len);
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
+}
+
+test "named args: binding failures are E0203, valid bindings clean (M0.8 E4 item 16)" {
+    const gpa = std.testing.allocator;
+    var ok = try parseAndCheck(gpa,
+        \\component Acc { out: int = 0 }
+        \\fn score(a: int, b: int) -> int { a * 10 + b }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  entity.get_mut(Acc).out = score(b: 3, a: 2)
+        \\  entity.get_mut(Acc).out += score(2, b: 3)
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    var bad = try parseAndCheck(gpa,
+        \\component Acc { out: int = 0 }
+        \\fn score(a: int, b: int) -> int { a * 10 + b }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let w = score(a: 1, nope: 2)
+        \\  let x = score(a: 1, a: 2)
+        \\  let y = score(1, a: 2)
+        \\  let z = score(b: 1)
+        \\}
+    );
+    defer bad.deinit(gpa);
+    var count: usize = 0;
+    for (bad.diagnostics.items) |d| {
+        if (d.code == .arg_count_mismatch) count += 1;
+    }
+    // unknown name, duplicate binding, positional re-bind, arity short.
+    try std.testing.expectEqual(@as(usize, 4), count);
+}
+
+test "named args: closure and builtin callees are an M0.8 bound, E0203 (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\component Acc { out: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let double = |x: int| x * 2
+        \\  let y = double(x: 5)
+        \\  let s = "abc"
+        \\  let n = s.len(pad: 1)
+        \\}
+    );
+    defer result.deinit(gpa);
+    var count: usize = 0;
+    for (result.diagnostics.items) |d| {
+        if (d.code == .arg_count_mismatch) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
 }

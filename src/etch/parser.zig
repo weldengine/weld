@@ -2849,8 +2849,7 @@ pub const Parser = struct {
                 },
                 // Call `callee(args)` (M0.8 closures, `etch-grammar.md`
                 // postfix_op §424). E1 resolves calls on closure-typed locals;
-                // positional args only (named args arrive with default-valued
-                // functions in E2).
+                // named arguments per §3.3 (M0.8 E4, item-16 ruling).
                 .lparen => {
                     _ = try self.advance(); // '('
                     // Call arguments re-enable struct literals (M0.8 E2 block 3)
@@ -2858,18 +2857,12 @@ pub const Parser = struct {
                     const saved = self.no_struct_lit;
                     self.no_struct_lit = false;
                     defer self.no_struct_lit = saved;
-                    var args: std.ArrayListUnmanaged(u32) = .empty;
-                    defer args.deinit(self.gpa);
-                    if (self.peek() != .rparen) {
-                        while (true) {
-                            const a = try self.parseExpr(0);
-                            try args.append(self.gpa, a.raw());
-                            if (!try self.match(.comma)) break;
-                        }
-                    }
+                    var buf: CallArgsBuf = .{};
+                    defer buf.deinit(self.gpa);
+                    try self.parseCallArgList(&buf);
                     const closing = try self.expect(.rparen, "expected ')' to close call arguments");
                     const recv_span = self.arena.exprSpan(expr);
-                    expr = try self.arena.addCall(self.gpa, expr, args.items, .{
+                    expr = try self.arena.addCall(self.gpa, expr, buf.args.items, buf.namesSlice(), .{
                         .byte_start = recv_span.byte_start,
                         .byte_end = closing.span.byte_end,
                     });
@@ -2916,6 +2909,51 @@ pub const Parser = struct {
         return expr;
     }
 
+    /// Buffered call-argument lists (M0.8 E4 named arguments, §3.3 —
+    /// item-16 ruling). `names` runs parallel to `args` (`0` = positional);
+    /// `any_named` selects whether the add-helper stores a names run.
+    const CallArgsBuf = struct {
+        args: std.ArrayListUnmanaged(u32) = .empty,
+        names: std.ArrayListUnmanaged(StringId) = .empty,
+        any_named: bool = false,
+
+        fn deinit(self: *CallArgsBuf, gpa: std.mem.Allocator) void {
+            self.args.deinit(gpa);
+            self.names.deinit(gpa);
+        }
+
+        fn namesSlice(self: *const CallArgsBuf) []const StringId {
+            return if (self.any_named) self.names.items else &.{};
+        }
+    };
+
+    /// Parse a §3.3 `arg_list` into `out` — `arg = expression | IDENT ":"
+    /// expression` (M0.8 E4, item-16 ruling). The label lookahead is
+    /// `(IDENT | soft keyword) ':'` — unambiguous, `:` heads no expression
+    /// continuation. Soft keywords double as labels per the S3 contextual
+    /// doctrine (item 6: minimum `type` — the §8.2 `type: .work` form).
+    /// §3.3 ordering rule enforced: once an argument is named, every
+    /// following argument must be named.
+    fn parseCallArgList(self: *Parser, out: *CallArgsBuf) ParseError!void {
+        if (self.peek() == .rparen) return;
+        while (true) {
+            var name: StringId = 0;
+            const labelish = self.peek() == .ident or self.peek() == .kw_type;
+            if (labelish and self.peekNext() == .colon) {
+                const name_tok = try self.advance();
+                _ = try self.advance(); // ':'
+                name = try self.internSlice(name_tok.span);
+                out.any_named = true;
+            } else if (out.any_named) {
+                return self.parseErr(self.peekSpan(), "positional arguments must precede named arguments (etch-grammar.md §3.3)");
+            }
+            const a = try self.parseExpr(0);
+            try out.args.append(self.gpa, a.raw());
+            try out.names.append(self.gpa, name);
+            if (!try self.match(.comma)) break;
+        }
+    }
+
     fn parseGetCall(self: *Parser, receiver: NodeId, kind: ast_mod.ExprKind) ParseError!NodeId {
         _ = try self.expect(.lparen, "expected '(' after get/get_mut");
         const type_tok = try self.expect(.type_ident, "expected component type inside get(T)");
@@ -2931,7 +2969,7 @@ pub const Parser = struct {
     /// Parse `receiver.method(args)` into the reserved `method_call` kind (M0.8
     /// E2 call mechanism, `etch-grammar.md` postfix_op §421). On entry the
     /// current token is the method-name identifier and the next is `(`.
-    /// Positional args only (named args are an E2 refinement). The dispatch
+    /// Named arguments per §3.3 (M0.8 E4, item-16 ruling). The dispatch
     /// (`etch-resolver-types.md §5`) lands in block 3 with `impl`.
     fn parseMethodCall(self: *Parser, receiver: NodeId) ParseError!NodeId {
         const name_tok = try self.advance(); // method name
@@ -2941,18 +2979,12 @@ pub const Parser = struct {
         const saved = self.no_struct_lit;
         self.no_struct_lit = false;
         defer self.no_struct_lit = saved;
-        var args: std.ArrayListUnmanaged(u32) = .empty;
-        defer args.deinit(self.gpa);
-        if (self.peek() != .rparen) {
-            while (true) {
-                const a = try self.parseExpr(0);
-                try args.append(self.gpa, a.raw());
-                if (!try self.match(.comma)) break;
-            }
-        }
+        var buf: CallArgsBuf = .{};
+        defer buf.deinit(self.gpa);
+        try self.parseCallArgList(&buf);
         const closing = try self.expect(.rparen, "expected ')' to close method-call arguments");
         const recv_span = self.arena.exprSpan(receiver);
-        return try self.arena.addMethodCall(self.gpa, receiver, method_name, args.items, .{
+        return try self.arena.addMethodCall(self.gpa, receiver, method_name, buf.args.items, buf.namesSlice(), .{
             .byte_start = recv_span.byte_start,
             .byte_end = closing.span.byte_end,
         });
@@ -4945,4 +4977,41 @@ test "parser keeps the body brace out of the §6 general filter (M0.8 E4)" {
     const rule = result.ast.rule_decls.items[0];
     try std.testing.expectEqual(ast_mod.WhenNodeKind.has, result.ast.when_nodes.items[rule.when_root].kind);
     try std.testing.expectEqual(@as(u32, 2), rule.body_len);
+}
+
+test "parser builds named call arguments + soft keyword label (M0.8 E4 item 16)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\fn use_smart_object(name: string, type_: int) { }
+        \\rule r(entity: Entity) when entity has C {
+        \\  use_smart_object("anvil", type: 1)
+        \\  score(2, b: 3)
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    // First call: one positional + one named (`type` keyword as label).
+    var found_named = false;
+    for (result.ast.call_exprs.items) |call| {
+        if (call.names_start == ast_mod.no_arg_names) continue;
+        found_named = true;
+        const names = result.ast.call_arg_names.items[call.names_start .. call.names_start + call.args_len];
+        try std.testing.expectEqual(@as(ast_mod.StringId, 0), names[0]);
+        try std.testing.expect(names[1] != 0);
+    }
+    try std.testing.expect(found_named);
+}
+
+test "parser rejects a positional argument after a named one (M0.8 E4 §3.3)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r(entity: Entity) when entity has C {
+        \\  f(a: 1, 2)
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
 }

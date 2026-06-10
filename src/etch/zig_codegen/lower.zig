@@ -3677,11 +3677,22 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 try w.write(".call");
             }
             try w.write("(");
-            var i: u32 = 0;
-            while (i < call.args_len) : (i += 1) {
-                if (i > 0) try w.write(", ");
-                const arg: NodeId = @bitCast(ast.extra.items[call.args_start + i]);
-                try emitExpr(w, ast, ctx, arg);
+            if (call.names_start != ast_mod.no_arg_names) {
+                // Named arguments (M0.8 E4, §3.3): reorder to PARAMETER
+                // order at emission — the Zig call then evaluates its args
+                // left-to-right in parameter order, matching the
+                // interpreter's binding loop. Free-fn callees only (the
+                // resolver bounds closures out).
+                if (!is_free_fn) return CodegenError.UnsupportedConstruct;
+                const decl = findFnDeclByName(ast, ast.exprData(call.callee)) orelse return CodegenError.UnsupportedConstruct;
+                try emitBoundCallArgs(w, ast, ctx, call.args_start, call.args_len, call.names_start, decl.params_start, decl.params_len);
+            } else {
+                var i: u32 = 0;
+                while (i < call.args_len) : (i += 1) {
+                    if (i > 0) try w.write(", ");
+                    const arg: NodeId = @bitCast(ast.extra.items[call.args_start + i]);
+                    try emitExpr(w, ast, ctx, arg);
+                }
             }
             try w.write(")");
         },
@@ -3841,10 +3852,22 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             try w.write(".");
             try w.ident(ast.strings.slice(mc.method_name));
             try w.write("(");
-            var i: u32 = 0;
-            while (i < mc.args_len) : (i += 1) {
-                if (i > 0) try w.write(", ");
-                try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + i]));
+            if (mc.names_start != ast_mod.no_arg_names) {
+                // Named arguments (M0.8 E4, §3.3): resolve the declared
+                // method (the receiver's emitted type name → impl scan) and
+                // reorder to parameter order, like the free-fn path.
+                const tname = if (ast.exprKind(mc.receiver) == .path)
+                    ast.strings.slice(ast.exprData(mc.receiver))
+                else
+                    inferExprZigType(ast, ctx, mc.receiver);
+                const decl = findImplMethodDecl(ast, tname, mc.method_name) orelse return CodegenError.UnsupportedConstruct;
+                try emitBoundCallArgs(w, ast, ctx, mc.args_start, mc.args_len, mc.names_start, decl.params_start, decl.params_len);
+            } else {
+                var i: u32 = 0;
+                while (i < mc.args_len) : (i += 1) {
+                    if (i > 0) try w.write(", ");
+                    try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start + i]));
+                }
             }
             try w.write(")");
         },
@@ -4994,6 +5017,50 @@ fn emitDescriptorNamespace(w: *Writer) CodegenError!void {
     try w.blankLine();
 }
 
+/// Find a top-level `fn` declaration by name (M0.8 E4 named-arg
+/// reordering). Top-level fn names are unique (E0101).
+fn findFnDeclByName(ast: *const AstArena, name: StringId) ?ast_mod.FnDecl {
+    for (ast.fn_decls.items) |decl| {
+        if (decl.name == name) return decl;
+    }
+    return null;
+}
+
+/// Find a declared method / associated fn on `type_name` across inherent
+/// and trait impls (M0.8 E4 named-arg reordering). Trait DEFAULT methods
+/// (not overridden by the impl) are not searched — a named-arg call on one
+/// fails loud at the caller (`UnsupportedConstruct`, recorded bound).
+fn findImplMethodDecl(ast: *const AstArena, type_name: []const u8, method_name: StringId) ?ast_mod.FnDecl {
+    const kinds = ast.items.items(.kind);
+    const datas = ast.items.items(.data);
+    var i: u28 = 0;
+    while (i < ast.items.len) : (i += 1) {
+        if (kinds[i] != .impl_decl) continue;
+        const impl = ast.impl_decls.items[datas[i]];
+        if (!std.mem.eql(u8, ast.strings.slice(impl.type_name), type_name)) continue;
+        var m: u32 = 0;
+        while (m < impl.methods_len) : (m += 1) {
+            const method = ast.impl_methods.items[impl.methods_start + m];
+            if (method.name == method_name and method.has_body) return method;
+        }
+    }
+    return null;
+}
+
+/// Emit a call's arguments in PARAMETER order through the shared §3.3
+/// binding (`callArgForParam` — the same algorithm the resolver validated
+/// and the interpreter binds with). An unbound parameter is a resolver-
+/// rejected program reaching emission — fail loud.
+fn emitBoundCallArgs(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, args_start: u32, args_len: u32, names_start: u32, params_start: u32, params_len: u32) CodegenError!void {
+    var i: u32 = 0;
+    while (i < params_len) : (i += 1) {
+        const p = ast.fn_params.items[params_start + i];
+        const arg = ast.callArgForParam(args_start, args_len, names_start, i, p.name) orelse return CodegenError.UnsupportedConstruct;
+        if (i > 0) try w.write(", ");
+        try emitExpr(w, ast, ctx, arg);
+    }
+}
+
 fn emitZigStringLiteral(w: *Writer, bytes: []const u8) CodegenError!void {
     try w.write("\"");
     for (bytes) |c| {
@@ -5113,7 +5180,13 @@ fn inferExprZigType(ast: *const AstArena, ctx: *LocalCtx, expr: NodeId) []const 
         .fn_call => "",
         // Struct literals (struct type) and method-call results (the method's
         // return type) are left to Zig inference (M0.8 E2 block 3).
-        .struct_lit => "",
+        .struct_lit => blk: {
+            // An explicit `T { … }` literal types as `T` (M0.8 E4 — drives
+            // the named-arg method lookup on struct-literal receivers /
+            // locals); the anonymous `.{ … }` form keeps "" (context-typed).
+            const sl = ast.struct_lits.items[data];
+            break :blk if (sl.type_name == 0) "" else ast.strings.slice(sl.type_name);
+        },
         .method_call => "",
         // A loop expression's value type is inferred by Zig from its break.
         .loop_expr => "",

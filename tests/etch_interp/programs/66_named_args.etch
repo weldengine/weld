@@ -1,0 +1,31 @@
+// Differential 66 — named call arguments (M0.8 E4, §3.3 — item-16 ruling).
+// The reorder is observable: score(b: 3, a: 2) must bind a=2, b=3 → 23
+// (32 under a positional mis-bind). Mixed positional + named on a struct
+// method. Byte-exact world state, both backends.
+component Acc {
+  out: int = 0
+  mixed: int = 0
+}
+
+struct V2 {
+  x: int = 0
+  y: int = 0
+}
+
+impl V2 {
+  fn weigh(self, factor: int, offset: int) -> int {
+    self.x * factor + self.y + offset
+  }
+}
+
+fn score(a: int, b: int) -> int {
+  a * 10 + b
+}
+
+rule named_args(entity: Entity)
+  when entity has Acc
+{
+  entity.get_mut(Acc).out += score(b: 3, a: 2)
+  let v = V2 { x: 5, y: 1 }
+  entity.get_mut(Acc).mixed += v.weigh(2, offset: 7)
+}

@@ -87,4 +87,5 @@ pub const programs = [_]CodegenProgram{
     // byte-exact world-state differentials on both emission paths.
     .{ .name = "p64_when_expr_surface", .etch_path = "tests/etch_interp/programs/64_when_expr_surface.etch" },
     .{ .name = "p65_when_expr_archwalk", .etch_path = "tests/etch_interp/programs/65_when_expr_archwalk.etch" },
+    .{ .name = "p66_named_args", .etch_path = "tests/etch_interp/programs/66_named_args.etch" },
 };
