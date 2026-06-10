@@ -59,6 +59,11 @@ pub const RuntimeReport = struct {
     /// codegen runtime has no report counterpart, so the field is never a
     /// differential-parity obligation.
     last_error: ?RuntimeError = null,
+    /// Root predicate evaluations against archetypes in the entity-bound
+    /// walk (M0.8 E3-D, D-S4-or-archetype) — the observable proving the
+    /// or-bitset short-cut: above the heuristic an `or` rule evaluates each
+    /// archetype once (at rescan), not once per archetype per tick.
+    predicate_archetype_evals: u64 = 0,
 };
 
 const ResourceDep = struct {
@@ -164,6 +169,18 @@ const RuleDesc = struct {
     /// resumes a later tick via its `AsyncSlot`, instead of running to
     /// completion every tick. Dispatched by `runAsyncRule` in `stepOnce`.
     is_async: bool,
+    /// True iff `predicate_pool` contains an `or_` node (M0.8 E3-D,
+    /// D-S4-or-archetype) — gates the cached-bitset archetype path in
+    /// `runRule` above the count heuristic.
+    uses_or: bool,
+    /// Cached bitset of matching archetype indices for an `or` rule
+    /// (M0.8 E3-D) — lazily extended over the `world.archetypes` tail by
+    /// `rescanOrBitset` (the `Query.maybeRescan` pattern). Unused below the
+    /// heuristic / for or-free rules.
+    matching_archetypes: std.DynamicBitSetUnmanaged = .{},
+    /// Number of archetypes seen by the most recent rescan. Compared against
+    /// `world.archetypes.items.len` on every bitset-path entry.
+    last_seen_archetype_count: usize = 0,
 
     fn deinit(self: *RuleDesc, gpa: std.mem.Allocator) void {
         gpa.free(self.predicate_pool);
@@ -172,6 +189,7 @@ const RuleDesc = struct {
         for (self.tag_predicates) |*tp| tp.deinit(gpa);
         gpa.free(self.tag_predicates);
         gpa.free(self.changed_filters);
+        self.matching_archetypes.deinit(gpa);
     }
 };
 
@@ -383,6 +401,14 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
 }
 
 const StmtError = error{ OutOfMemory, RuntimeFailure };
+
+/// Archetype-count heuristic gating the `or`-predicate cached-bitset path
+/// (M0.8 E3-D, D-S4-or-archetype): below it the direct walk is kept
+/// byte-identically (the differential corpus creates 1–3 archetypes and
+/// never pays the cache), above it an `or` rule scans only the archetype
+/// tail it has not seen. The value is a tuning constant, not a frozen
+/// decision — flagged in the Review E3 bounds table.
+const or_bitset_threshold: usize = 8;
 
 /// Control-flow signal raised by `break` / `continue` (M0.8 loop/break).
 /// Carried on the interpreter (not as a return value) so it can cross
@@ -820,7 +846,7 @@ pub const Interpreter = struct {
                 continue;
             }
             if (!resourceDepsSatisfied(world, rd.*)) continue;
-            try self.runRule(world, rd.*, report);
+            try self.runRule(world, rd, report);
             // Record the tick at which this rule ran — the baseline its next
             // `changed` filter compares against (M0.8 E3). `runRule` was passed
             // the pre-update value, so the filter saw the correct baseline.
@@ -831,49 +857,97 @@ pub const Interpreter = struct {
         try self.flushPendingTags(world);
     }
 
-    fn runRule(self: *Interpreter, world: *World, rd: RuleDesc, report: *RuntimeReport) !void {
+    fn runRule(self: *Interpreter, world: *World, rd: *RuleDesc, report: *RuntimeReport) !void {
         // `@on_event(T)` observer (M0.8 E3): fire once per event of type `T` in
         // the per-tick `EventStore`, in emit order, with the implicit `event`
         // binding injected. Takes precedence over entity/global dispatch.
         if (rd.event_type) |event_type| {
-            try self.runObserver(world, rd, event_type, report);
+            try self.runObserver(world, rd.*, event_type, report);
             return;
         }
         if (!rd.is_entity_bound) {
-            try self.execBody(world, rd, null, null, report);
+            try self.execBody(world, rd.*, null, null, report);
             report.rules_matched += 1;
             return;
         }
         var rule_matched = false;
-        for (world.archetypes.items) |arch| {
-            if (rd.predicate_root) |root| {
-                if (!evalPredicate(rd.predicate_pool, root, arch)) continue;
+        if (rd.uses_or and world.archetypes.items.len >= or_bitset_threshold) {
+            // D-S4-or-archetype (M0.8 E3-D): above the archetype-count
+            // heuristic, an `or` rule iterates a per-rule cached bitset of
+            // matching archetype indices instead of re-evaluating its
+            // predicate tree on every archetype every tick. Sound because an
+            // archetype's component set is immutable after creation (an
+            // add/remove transitions the entity to a DIFFERENT archetype) and
+            // `world.archetypes` is append-only with stable order — a cached
+            // verdict never goes stale; only the tail needs scanning
+            // (`Query.maybeRescan`, the Tier-0 precedent). Ascending index
+            // iteration preserves the direct walk's archetype order, so the
+            // interp↔codegen differential parity is untouched.
+            try self.rescanOrBitset(world, rd, report);
+            var it = rd.matching_archetypes.iterator(.{});
+            while (it.next()) |arch_idx| {
+                const arch = world.archetypes.items[arch_idx];
+                try self.iterateArchetype(world, rd, arch, &rule_matched, report);
             }
-            for (arch.chunks.items) |chunk| {
-                const ids = arch.entityIdsConst(chunk);
-                const count = chunk.header().entity_count;
-                var slot: u32 = 0;
-                while (slot < count) : (slot += 1) {
-                    if (!allFiltersPass(arch, chunk, rd.field_filters, slot)) continue;
-                    // The chunk array stores the core `EntityId` packed
-                    // struct; Etch's local `EntityId` is the raw u64 wire
-                    // form that lives inside `Value.entity_id`. The two
-                    // share the same 8-byte layout — `@bitCast` does the
-                    // conversion without touching bits.
-                    const entity_id: EntityId = @bitCast(ids[slot]);
-                    // Per-entity tag predicates (M0.8 E3) — applied after the
-                    // archetype-level predicate, like the field filter.
-                    if (rd.tag_predicates.len > 0 and !self.tagPredicatesPass(world, entity_id, rd.tag_predicates)) continue;
-                    // Per-entity `changed` filters (M0.8 E3) — the slot's
-                    // `changedTick(T)` must exceed the rule's `last_run_tick`.
-                    if (rd.changed_filters.len > 0 and !changedFiltersPass(arch, chunk, slot, rd.changed_filters, rd.last_run_tick)) continue;
-                    report.entities_iterated += 1;
-                    rule_matched = true;
-                    try self.execBody(world, rd, entity_id, null, report);
+        } else {
+            for (world.archetypes.items) |arch| {
+                if (rd.predicate_root) |root| {
+                    report.predicate_archetype_evals += 1;
+                    if (!evalPredicate(rd.predicate_pool, root, arch)) continue;
                 }
+                try self.iterateArchetype(world, rd, arch, &rule_matched, report);
             }
         }
         if (rule_matched) report.rules_matched += 1;
+    }
+
+    /// Walk one archetype's chunks/slots for an entity-bound rule — the
+    /// shared per-archetype body of both `runRule` paths (direct walk and
+    /// or-bitset, M0.8 E3-D).
+    fn iterateArchetype(self: *Interpreter, world: *World, rd: *const RuleDesc, arch: *DynamicArchetype, rule_matched: *bool, report: *RuntimeReport) !void {
+        for (arch.chunks.items) |chunk| {
+            const ids = arch.entityIdsConst(chunk);
+            const count = chunk.header().entity_count;
+            var slot: u32 = 0;
+            while (slot < count) : (slot += 1) {
+                if (!allFiltersPass(arch, chunk, rd.field_filters, slot)) continue;
+                // The chunk array stores the core `EntityId` packed
+                // struct; Etch's local `EntityId` is the raw u64 wire
+                // form that lives inside `Value.entity_id`. The two
+                // share the same 8-byte layout — `@bitCast` does the
+                // conversion without touching bits.
+                const entity_id: EntityId = @bitCast(ids[slot]);
+                // Per-entity tag predicates (M0.8 E3) — applied after the
+                // archetype-level predicate, like the field filter.
+                if (rd.tag_predicates.len > 0 and !self.tagPredicatesPass(world, entity_id, rd.tag_predicates)) continue;
+                // Per-entity `changed` filters (M0.8 E3) — the slot's
+                // `changedTick(T)` must exceed the rule's `last_run_tick`.
+                if (rd.changed_filters.len > 0 and !changedFiltersPass(arch, chunk, slot, rd.changed_filters, rd.last_run_tick)) continue;
+                report.entities_iterated += 1;
+                rule_matched.* = true;
+                try self.execBody(world, rd.*, entity_id, null, report);
+            }
+        }
+    }
+
+    /// Lazily extend an `or` rule's matching-archetype bitset over the tail
+    /// of `world.archetypes` (M0.8 E3-D, D-S4-or-archetype). Compared on
+    /// every entry; O(0) in the steady state, O(new archetypes) after a
+    /// growth (spawn into a new shape, tick-boundary tag flush). The
+    /// predicate is evaluated once per NEW archetype, never re-evaluated on
+    /// the cached ones.
+    fn rescanOrBitset(self: *Interpreter, world: *World, rd: *RuleDesc, report: *RuntimeReport) !void {
+        const total = world.archetypes.items.len;
+        if (total == rd.last_seen_archetype_count) return;
+        try rd.matching_archetypes.resize(self.gpa, total, false);
+        for (world.archetypes.items[rd.last_seen_archetype_count..], rd.last_seen_archetype_count..) |arch, i| {
+            if (rd.predicate_root) |root| {
+                report.predicate_archetype_evals += 1;
+                if (!evalPredicate(rd.predicate_pool, root, arch)) continue;
+            }
+            rd.matching_archetypes.set(i);
+        }
+        rd.last_seen_archetype_count = total;
     }
 
     /// Run an `@on_event(T)` observer (M0.8 E3): fire the body once per event of
@@ -2826,6 +2900,16 @@ fn compileRule(
     }
     const is_entity_bound = (entity_param_name != null) and has_component_ref;
 
+    // D-S4-or-archetype (M0.8 E3-D): an `or_` node anywhere in the pool
+    // makes the rule eligible for the cached-bitset archetype path.
+    var uses_or = false;
+    for (pool.items) |n| {
+        if (n.kind == .or_) {
+            uses_or = true;
+            break;
+        }
+    }
+
     // `@on_event(T)` observer (M0.8 E3): the event type name, or null. A
     // malformed annotation (caught + reported E1203 by the resolver) yields
     // null here → the rule degrades to a global/entity rule, no observer drain.
@@ -2848,6 +2932,7 @@ fn compileRule(
         .changed_filters = try changed_filters.toOwnedSlice(gpa),
         .last_run_tick = initial_tick,
         .is_async = rule.is_async,
+        .uses_or = uses_or,
     };
 }
 
@@ -4932,6 +5017,111 @@ test "async runtime failure surfaces typed last_error (D-S4-runtime-report)" {
     try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
     const le = report.last_error orelse return error.TestExpectedTypedError;
     try std.testing.expectEqual(RuntimeErrorKind.DivisionByZero, le.kind);
+}
+
+const or_archetype_test_source =
+    \\component Counter { value: int = 0 }
+    \\component A { x: int = 0 }
+    \\component B { x: int = 0 }
+    \\component F0 { x: int = 0 }
+    \\component F1 { x: int = 0 }
+    \\component F2 { x: int = 0 }
+    \\component F3 { x: int = 0 }
+    \\component F4 { x: int = 0 }
+    \\rule count(entity: Entity)
+    \\  when entity has Counter and (entity has A or entity has B)
+    \\{
+    \\  entity.get_mut(Counter).value += 1
+    \\}
+;
+
+fn readCounterI64(world: *World, counter_id: ComponentId, eid: CoreEntityId) i64 {
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    const idx = arch.componentIndex(counter_id).?;
+    const slot = arch.componentSlot(chunk, idx, loc.slot);
+    var v: i64 = 0;
+    @memcpy(std.mem.asBytes(&v), slot[0..@sizeOf(i64)]);
+    return v;
+}
+
+test "or predicate caches an archetype bitset above the count heuristic (D-S4-or-archetype)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var pr = try parser_mod.parse(gpa, or_archetype_test_source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const counter_id = world.registry.idOf("Counter").?;
+    const a_id = world.registry.idOf("A").?;
+    const b_id = world.registry.idOf("B").?;
+
+    // Materialise 8 distinct archetypes (== or_bitset_threshold): the bare
+    // Counter, the two matching shapes, and five fillers.
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{counter_id});
+    const e_a = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, a_id });
+    const e_b = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, b_id });
+    for ([_][]const u8{ "F0", "F1", "F2", "F3", "F4" }) |fname| {
+        const fid = world.registry.idOf(fname).?;
+        _ = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, fid });
+    }
+    try std.testing.expectEqual(@as(usize, 8), world.archetypes.items.len);
+
+    // Tick 1 — first bitset-path entry: the rescan evaluates the predicate
+    // once per archetype (full initial scan), then iterates the cache.
+    const r1 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 8), r1.predicate_archetype_evals);
+    try std.testing.expectEqual(@as(i64, 1), readCounterI64(&world, counter_id, e_a));
+    try std.testing.expectEqual(@as(i64, 1), readCounterI64(&world, counter_id, e_b));
+
+    // Tick 2 — steady state: zero re-evaluations (the cache short-cut), the
+    // matching entities still accumulate.
+    const r2 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r2.predicate_archetype_evals);
+    try std.testing.expectEqual(@as(i64, 2), readCounterI64(&world, counter_id, e_a));
+
+    // New archetype {Counter, A, B} — tick 3 rescans ONLY the tail (one
+    // evaluation) and the new entity matches (invalidation correctness).
+    const e_ab = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, a_id, b_id });
+    const r3 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), r3.predicate_archetype_evals);
+    try std.testing.expectEqual(@as(i64, 1), readCounterI64(&world, counter_id, e_ab));
+    try std.testing.expectEqual(@as(i64, 3), readCounterI64(&world, counter_id, e_a));
+}
+
+test "or predicate keeps the direct walk below the count heuristic (D-S4-or-archetype)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var pr = try parser_mod.parse(gpa, or_archetype_test_source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const counter_id = world.registry.idOf("Counter").?;
+    const a_id = world.registry.idOf("A").?;
+    const b_id = world.registry.idOf("B").?;
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{counter_id});
+    const e_a = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, a_id });
+    const e_b = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, b_id });
+    try std.testing.expectEqual(@as(usize, 3), world.archetypes.items.len);
+
+    // Below the heuristic the direct walk re-evaluates the predicate per
+    // archetype per tick — byte-identical to the pre-E3-D behaviour (the
+    // differential corpus never pays the cache).
+    const r1 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 3), r1.predicate_archetype_evals);
+    const r2 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 3), r2.predicate_archetype_evals);
+    try std.testing.expectEqual(@as(i64, 2), readCounterI64(&world, counter_id, e_a));
+    try std.testing.expectEqual(@as(i64, 2), readCounterI64(&world, counter_id, e_b));
 }
 
 test "runProgram anonymous struct literal via let annotation and field value (M0.8 E3-C tranche 8)" {
