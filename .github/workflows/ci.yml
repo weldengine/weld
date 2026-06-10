@@ -61,6 +61,15 @@ jobs:
       - name: zig build bindgen-verify
         run: zig build bindgen-verify
 
+      # M0.8 / E3-D — D-S5-synth100-proper proof: the standalone
+      # bench/fixtures/synth_100/ sub-project resolves the parent as a
+      # path dependency, cooks the committed 100-file corpus through the
+      # installed etch_cook artifact, and compiles it against weld_core.
+      # A nested cold build (~30 s) — one matrix leg is enough.
+      - name: zig build verify-synth-100
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        run: zig build verify-synth-100
+
   bench-ecs-smoke:
     strategy:
       fail-fast: false

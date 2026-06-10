@@ -190,6 +190,20 @@ pub fn build(b: *std.Build) void {
     const ex_step = b.step("run-example-triangle", "Build & run the triangle example sub-project");
     ex_step.dependOn(&ex_run.step);
 
+    // M0.8 / E3-D — `zig build verify-synth-100` builds the standalone
+    // `bench/fixtures/synth_100/` sub-project (D-S5-synth100-proper): a
+    // real path-dep package that cooks the committed corpus through the
+    // parent's `etch_cook` artifact and compiles it against
+    // `weld.module("weld_core")`. A nested cold build — kept OUT of the
+    // default `zig build test` (its own CI step, like the triangle).
+    const synth_verify = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build",
+    });
+    synth_verify.setCwd(b.path("bench/fixtures/synth_100"));
+    const synth_verify_step = b.step("verify-synth-100", "Build the synth_100 sub-project (nested zig build — the D-S5-synth100-proper proof)");
+    synth_verify_step.dependOn(&synth_verify.step);
+
     // M0.4 — Shader compiler tool: `zig build shaders` regenerates the
     // `.spv` from the `.glsl`. `zig build shaders-check` diffs vs
     // the committed ones (brief §Files + §CI).

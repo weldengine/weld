@@ -10,7 +10,7 @@ byte-identical files.
 | Path | Purpose |
 |---|---|
 | `scripts/000.etch … 099.etch` | 100 generated programs, committed for bench reproducibility. Each has 5–10 `component`s, 1 `resource`, and 3–5 `rule`s exercising arithmetic, `when` clauses with single- and multi-component filters, and the resource gate. |
-| `build.zig`, `build.zig.zon` | Minimal sub-project scaffold (placeholder — the real bench lives in the repo root). |
+| `build.zig`, `build.zig.zon` | Standalone sub-project: path dependency on the parent engine, cooks the corpus through the parent's `etch_cook` artifact, compiles it against `weld_core` (M0.8 E3-D, D-S5-synth100-proper). Verified by the repo-root `zig build verify-synth-100` step. The S5 bench keeps its own direct `zig build-exe` measurement path. |
 | `README.md` | This file. |
 
 ## Regenerating the corpus
