@@ -127,11 +127,16 @@ const RuleDesc = struct {
     predicate_pool: []PredicateNode,
     predicate_root: ?u32,
     resource_deps: []ResourceDep,
-    field_filter: ?FieldFilter,
-    /// Per-entity tag query predicates (M0.8 E3) — applied after `field_filter`
-    /// at iteration time, ANDed with the rest (same flat model as
-    /// `field_filter`; an `or`/`not` over a tag filter is the same documented
-    /// S4-debt imprecision the field filter carries — the differential uses
+    /// Per-entity field filters, one per `has T { field == value }` clause
+    /// (M0.8 E3-D, D-S4-multifilter — was a single overwrite-on-collision
+    /// slot). Flat-AND model: every filter must pass, regardless of its
+    /// position under `or`/`not` (the documented S4 imprecision, same as
+    /// `tag_predicates`).
+    field_filters: []FieldFilter,
+    /// Per-entity tag query predicates (M0.8 E3) — applied after the field
+    /// filters at iteration time, ANDed with the rest (same flat model as
+    /// `field_filters`; an `or`/`not` over a tag filter is the same documented
+    /// S4-debt imprecision the field filters carry — the differential uses
     /// AND only).
     tag_predicates: []TagPredicate,
     entity_param_name: ?StringId,
@@ -163,6 +168,7 @@ const RuleDesc = struct {
     fn deinit(self: *RuleDesc, gpa: std.mem.Allocator) void {
         gpa.free(self.predicate_pool);
         gpa.free(self.resource_deps);
+        gpa.free(self.field_filters);
         for (self.tag_predicates) |*tp| tp.deinit(gpa);
         gpa.free(self.tag_predicates);
         gpa.free(self.changed_filters);
@@ -848,9 +854,7 @@ pub const Interpreter = struct {
                 const count = chunk.header().entity_count;
                 var slot: u32 = 0;
                 while (slot < count) : (slot += 1) {
-                    if (rd.field_filter) |ff| {
-                        if (!filterPasses(arch, chunk, ff, slot)) continue;
-                    }
+                    if (!allFiltersPass(arch, chunk, rd.field_filters, slot)) continue;
                     // The chunk array stores the core `EntityId` packed
                     // struct; Etch's local `EntityId` is the raw u64 wire
                     // form that lives inside `Value.entity_id`. The two
@@ -2446,6 +2450,16 @@ fn evalPredicate(pool: []const PredicateNode, root: u32, arch: *const DynamicArc
     };
 }
 
+/// Whether every per-rule field filter passes for `(chunk, slot)` (M0.8 E3-D,
+/// D-S4-multifilter): flat-AND over the rule's `field_filters`. Trivially
+/// true for a filter-free rule.
+fn allFiltersPass(arch: *DynamicArchetype, chunk: *Chunk, filters: []const FieldFilter, slot: u32) bool {
+    for (filters) |ff| {
+        if (!filterPasses(arch, chunk, ff, slot)) return false;
+    }
+    return true;
+}
+
 fn filterPasses(arch: *DynamicArchetype, chunk: *Chunk, ff: FieldFilter, slot: u32) bool {
     const idx = arch.componentIndex(ff.component_id) orelse return false;
     const slot_bytes = arch.componentSlot(chunk, idx, slot);
@@ -2775,7 +2789,8 @@ fn compileRule(
     }
     var changed_filters: std.ArrayListUnmanaged(ComponentId) = .empty;
     errdefer changed_filters.deinit(gpa);
-    var field_filter: ?FieldFilter = null;
+    var field_filters: std.ArrayListUnmanaged(FieldFilter) = .empty;
+    errdefer field_filters.deinit(gpa);
     var predicate_root: ?u32 = null;
     var has_component_ref: bool = false;
 
@@ -2787,7 +2802,7 @@ fn compileRule(
         .tagset_id = tagset_id,
         .pool = &pool,
         .res_deps = &res_deps,
-        .filter = &field_filter,
+        .filters = &field_filters,
         .tag_preds = &tag_preds,
         .changed_filters = &changed_filters,
         .gpa = gpa,
@@ -2825,7 +2840,7 @@ fn compileRule(
         .predicate_pool = try pool.toOwnedSlice(gpa),
         .predicate_root = predicate_root,
         .resource_deps = try res_deps.toOwnedSlice(gpa),
-        .field_filter = field_filter,
+        .field_filters = try field_filters.toOwnedSlice(gpa),
         .tag_predicates = try tag_preds.toOwnedSlice(gpa),
         .entity_param_name = entity_param_name,
         .is_entity_bound = is_entity_bound,
@@ -2847,7 +2862,7 @@ const LowerWhenCtx = struct {
     tagset_id: ?ComponentId,
     pool: *std.ArrayListUnmanaged(PredicateNode),
     res_deps: *std.ArrayListUnmanaged(ResourceDep),
-    filter: *?FieldFilter,
+    filters: *std.ArrayListUnmanaged(FieldFilter),
     tag_preds: *std.ArrayListUnmanaged(TagPredicate),
     changed_filters: *std.ArrayListUnmanaged(ComponentId),
     gpa: std.mem.Allocator,
@@ -2896,12 +2911,14 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
             const fname = ast.strings.slice(node.field_name);
             const fd = ctx.registry.findField(id, fname) orelse return error.InvalidProgram;
             const v = evalConst(ast, node.filter_value) catch return error.InvalidProgram;
-            ctx.filter.* = .{
+            // One filter per `has T { … }` clause (M0.8 E3-D,
+            // D-S4-multifilter) — append, never overwrite.
+            try ctx.filters.append(ctx.gpa, .{
                 .component_id = id,
                 .field_offset = fd.offset,
                 .field_kind = fd.kind,
                 .expected_value = v,
-            };
+            });
             const idx: u32 = @intCast(ctx.pool.items.len);
             try ctx.pool.append(ctx.gpa, .{ .kind = .has, .component_id = id });
             ctx.has_component_ref.* = true;

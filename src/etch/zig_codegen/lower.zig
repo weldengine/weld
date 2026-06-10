@@ -1283,8 +1283,10 @@ const WhenInfo = struct {
     components: [][]const u8,
     /// Resource dependencies — name + must-be-changed flag.
     resource_deps: []ResourceDep,
-    /// Up to one field filter (S3 limitation per S4 brief debt).
-    field_filter: ?FieldFilter,
+    /// Per-entity field filters, one per `has T { field == value }` clause
+    /// (M0.8 E3-D, D-S4-multifilter — was a single overwrite-on-collision
+    /// slot). Flat-AND model, mirroring the interpreter's `field_filters`.
+    field_filters: []FieldFilter,
     /// True iff the when clause contains at least one component-side
     /// predicate (i.e. the rule iterates entities).
     has_component_ref: bool,
@@ -1641,7 +1643,7 @@ fn emitRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_t
     var body_used: std.StringHashMapUnmanaged(void) = .empty;
     defer body_used.deinit(w.gpa);
     try collectBodyComponents(w.gpa, ast, rule, &body_used);
-    if (info.field_filter) |ff| {
+    for (info.field_filters) |ff| {
         _ = try body_used.getOrPut(w.gpa, ff.component_name);
     }
     // A positive tag filter reads `TagSet_arr[slot].bits[..]` per entity, so
@@ -1709,13 +1711,14 @@ fn emitRuleAsComptimeQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleD
     // `__row[...]` — discard the capture, Zig rejects an unused one. The
     // field filter addresses `__row` directly and is folded into
     // `body_used` by the caller.
-    const row_capture: []const u8 = if (body_used.count() == 0 and info.field_filter == null) "_" else "__row";
+    const row_capture: []const u8 = if (body_used.count() == 0 and info.field_filters.len == 0) "_" else "__row";
     try w.printLine("while (__it.next()) |{s}| {{", .{row_capture});
     w.indentBy(1);
 
-    // Field filter — emit as a continue guard, addressing the row by tuple
-    // index for the filter's component.
-    if (info.field_filter) |ff| {
+    // Field filters — one continue guard per filter (M0.8 E3-D,
+    // D-S4-multifilter), addressing the row by tuple index for each
+    // filter's component.
+    for (info.field_filters) |ff| {
         const idx = indexOfComponent(info.components, ff.component_name) orelse return CodegenError.InternalCodegenBug;
         try w.writeIndent();
         try w.print("if (__row[{d}].", .{idx});
@@ -1778,7 +1781,7 @@ fn emitRuleAsArchWalk(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, 
     if (tag_mutating) {
         try w.line("const __entity = arch.entityIdsConst(chunk)[slot];");
     }
-    if (info.field_filter) |ff| {
+    for (info.field_filters) |ff| {
         try w.writeIndent();
         try w.print("if ({s}_arr[slot].", .{ff.component_name});
         try w.ident(ff.field_name);
@@ -4998,25 +5001,26 @@ fn collectWhenInfo(gpa: std.mem.Allocator, ast: *const AstArena, rule: ast_mod.R
         for (tag_filters.items) |*tf| gpa.free(tf.bits);
         tag_filters.deinit(gpa);
     }
-    var field_filter: ?FieldFilter = null;
+    var field_filters: std.ArrayListUnmanaged(FieldFilter) = .empty;
+    errdefer field_filters.deinit(gpa);
     var has_component_ref: bool = false;
     var has_or_or_not: bool = false;
     var changed_components: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer changed_components.deinit(gpa);
 
     if (rule.when_root != ast_mod.RuleDecl.none_when) {
-        // `walkWhen` populates components / resources / field filter and adds
+        // `walkWhen` populates components / resources / field filters and adds
         // "TagSet" to components for positive tag filters (fails loud on
         // negative tag ops). A second pass resolves the operand leaf bits for
         // the per-slot guards (M0.8 E3).
-        try walkWhen(gpa, ast, rule.when_root, &components, &seen_components, &res_deps, &field_filter, &has_component_ref, &has_or_or_not, &changed_components);
+        try walkWhen(gpa, ast, rule.when_root, &components, &seen_components, &res_deps, &field_filters, &has_component_ref, &has_or_or_not, &changed_components);
         try collectTagFilters(gpa, ast, tag_table, rule.when_root, &tag_filters);
     }
 
     return .{
         .components = try components.toOwnedSlice(gpa),
         .resource_deps = try res_deps.toOwnedSlice(gpa),
-        .field_filter = field_filter,
+        .field_filters = try field_filters.toOwnedSlice(gpa),
         .has_component_ref = has_component_ref,
         .has_or_or_not = has_or_or_not,
         .tag_filters = try tag_filters.toOwnedSlice(gpa),
@@ -5027,6 +5031,7 @@ fn collectWhenInfo(gpa: std.mem.Allocator, ast: *const AstArena, rule: ast_mod.R
 fn freeWhenInfo(gpa: std.mem.Allocator, info: *WhenInfo) void {
     gpa.free(info.components);
     gpa.free(info.resource_deps);
+    gpa.free(info.field_filters);
     for (info.tag_filters) |*tf| gpa.free(tf.bits);
     gpa.free(info.tag_filters);
     gpa.free(info.changed_components);
@@ -5039,7 +5044,7 @@ fn walkWhen(
     components: *std.ArrayListUnmanaged([]const u8),
     seen: *std.StringHashMapUnmanaged(void),
     res_deps: *std.ArrayListUnmanaged(ResourceDep),
-    filter: *?FieldFilter,
+    filters: *std.ArrayListUnmanaged(FieldFilter),
     has_component_ref: *bool,
     has_or_or_not: *bool,
     changed: *std.ArrayListUnmanaged([]const u8),
@@ -5047,17 +5052,17 @@ fn walkWhen(
     const node = ast.when_nodes.items[when_idx];
     switch (node.kind) {
         .logical_and => {
-            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not, changed);
-            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not, changed);
+            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed);
+            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed);
         },
         .logical_or => {
             has_or_or_not.* = true;
-            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not, changed);
-            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not, changed);
+            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed);
+            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed);
         },
         .logical_not => {
             has_or_or_not.* = true;
-            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filter, has_component_ref, has_or_or_not, changed);
+            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed);
         },
         .has => {
             const cname = ast.strings.slice(node.type_name);
@@ -5074,12 +5079,14 @@ fn walkWhen(
             // Infer the filter value's Zig type from the component field
             // declaration so the comparison emits the right literal style.
             const zig_t = fieldZigTypeOnComponent(ast, cname, fname) orelse "i64";
-            filter.* = .{
+            // One filter per `has T { … }` clause (M0.8 E3-D,
+            // D-S4-multifilter) — append, never overwrite.
+            try filters.append(gpa, .{
                 .component_name = cname,
                 .field_name = fname,
                 .value = node.filter_value,
                 .value_zig_type = zig_t,
-            };
+            });
         },
         .has_changed => {
             // `entity has T changed` (M0.8 E3): the `has T` archetype predicate

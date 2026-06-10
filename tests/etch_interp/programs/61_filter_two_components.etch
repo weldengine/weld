@@ -1,0 +1,17 @@
+component Health {
+  current: int = 0
+}
+
+component Shield {
+  armor: int = 0
+}
+
+component Marker {
+  hits: int = 0
+}
+
+rule update(entity: Entity)
+  when entity has Health { current == 50 } and entity has Shield { armor == 10 } and entity has Marker
+{
+  entity.get_mut(Marker).hits += 1
+}
