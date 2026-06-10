@@ -1540,6 +1540,72 @@ pub const TypeChecker = struct {
                     try self.validateTagPath(path_node, tf.op);
                 }
             },
+            .has_expr_filter => {
+                // `has T { expression }` (M0.8 E4 — the §6 general field
+                // filter, item-4 ruling). Component check identical to `.has`;
+                // the filter expression types in a FIELDS-ONLY scope (T's
+                // fields bound by name) and must be bool (E1211). An unknown
+                // name inside the filter surfaces as the regular E0102.
+                const tname_slice = self.arena.strings.slice(node.type_name);
+                if (self.symbols.get(node.type_name)) |sym| {
+                    if (sym.kind != .component) {
+                        try self.emit(.unknown_component_in_when, .error_, node.span, "'has' clause requires a component, '{s}' is a {s}", .{ tname_slice, @tagName(sym.kind) });
+                    } else {
+                        try ctx.components_in_when.put(self.gpa, node.type_name, {});
+                        const decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)];
+                        try self.checkWhenExprFilter(node, decl.fields_start, decl.fields_len);
+                    }
+                } else {
+                    try self.emit(.unknown_component_in_when, .error_, node.span, "unknown component '{s}' in when clause", .{tname_slice});
+                }
+            },
+            .resource_filter => {
+                // `resource T { expression }` (M0.8 E4 — §6). Resource check
+                // identical to `.resource`; same fields-only filter typing.
+                const tname_slice = self.arena.strings.slice(node.type_name);
+                if (self.symbols.get(node.type_name)) |sym| {
+                    if (sym.kind != .resource) {
+                        try self.emit(.resource_expected_in_when, .error_, node.span, "'resource' clause requires a resource, '{s}' is a {s}", .{ tname_slice, @tagName(sym.kind) });
+                    } else {
+                        try ctx.resources_in_when.put(self.gpa, node.type_name, {});
+                        const decl = self.arena.resource_decls.items[self.arena.itemData(sym.item_id)];
+                        try self.checkWhenExprFilter(node, decl.fields_start, decl.fields_len);
+                    }
+                } else {
+                    try self.emit(.resource_expected_in_when, .error_, node.span, "unknown resource '{s}' in when clause", .{tname_slice});
+                }
+            },
+            .expr_cond => {
+                // Bare expression condition (M0.8 E4 — the §6 last arm,
+                // item-4 ruling). Typed in the rule's own scope — params are
+                // already bound in `ctx.locals` when `collectWhen` runs — and
+                // must be bool. Component reads inside it require the
+                // component in the when clause (the regular accessibility
+                // check), so `entity has T and entity.get(T).f > 0` is the
+                // canonical shape.
+                const t = try self.synthExprE(node.filter_value, ctx);
+                if (t != .unknown and !(t == .builtin and t.builtin == .bool_)) {
+                    try self.emit(.type_mismatch, .error_, node.span, "a bare when condition must be a bool expression", .{});
+                }
+            },
+        }
+    }
+
+    /// Type a §6 general filter expression (`{ expression }` on `has T` /
+    /// `resource T`, M0.8 E4) in a FIELDS-ONLY scope: each field of the
+    /// filtered component/resource is bound by name to its declared type.
+    /// Non-bool filters are E1211 (the field-filter code family).
+    fn checkWhenExprFilter(self: *TypeChecker, node: ast_mod.WhenNode, fields_start: u32, fields_len: u32) !void {
+        var scratch: RuleCtx = .{};
+        defer scratch.deinit(self.gpa);
+        var f: u32 = 0;
+        while (f < fields_len) : (f += 1) {
+            const field = self.arena.fields.items[fields_start + f];
+            try scratch.locals.put(self.gpa, field.name, .{ .type_ = self.namedTypeToResolved(field.type_node), .is_mut = false });
+        }
+        const t = try self.synthExprE(node.filter_value, &scratch);
+        if (t != .unknown and !(t == .builtin and t.builtin == .bool_)) {
+            try self.emit(.invalid_field_filter, .error_, node.span, "a when filter expression must be bool", .{});
         }
     }
 
@@ -5653,4 +5719,70 @@ test "routine: E1527 action calling a non-void fn + E0102 unknown action (M0.8 E
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .action_invalid_return);
     try expectAnyCode(result.diagnostics.items, .undefined_symbol);
+}
+
+test "when-surface: non-bool general filter is E1211, fields-only scope (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\component Counter { value: int = 0 }
+        \\rule bad_type(entity: Entity)
+        \\  when entity has Counter { value + 1 }
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .invalid_field_filter);
+
+    var unknown = try parseAndCheck(gpa,
+        \\component Counter { value: int = 0 }
+        \\rule bad_name(entity: Entity)
+        \\  when entity has Counter { nope > 1 }
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+    );
+    defer unknown.deinit(gpa);
+    try expectAnyCode(unknown.diagnostics.items, .undefined_symbol);
+}
+
+test "when-surface: non-bool bare condition is E0200 (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\component Counter { value: int = 0 }
+        \\rule bad(entity: Entity)
+        \\  when entity has Counter and entity.get(Counter).value + 1
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .type_mismatch);
+}
+
+test "when-surface: the differential-64 shapes check clean (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\component Counter {
+        \\  value: int = 0
+        \\  limit: int = 10
+        \\}
+        \\resource Config {
+        \\  threshold: int = 2
+        \\  enabled: bool = true
+        \\}
+        \\rule r1(entity: Entity)
+        \\  when entity has Counter { value * 2 < limit }
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+        \\rule r2(entity: Entity)
+        \\  when resource Config { enabled and threshold < 3 } and entity has Counter and entity.get(Counter).value > 4
+        \\{
+        \\  entity.get_mut(Counter).value += 100
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
 }

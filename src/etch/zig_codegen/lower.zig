@@ -1332,6 +1332,31 @@ const WhenInfo = struct {
     /// per-slot `changedTick(T) > __last_run` continue guard in the arch walk.
     /// Non-empty forces the arch-walk path.
     changed_components: [][]const u8,
+    /// `has T { expression }` general filters (M0.8 E4 — §6, item-4 ruling).
+    /// Each emits a per-slot labeled-block guard binding the REFERENCED
+    /// fields of T from the row, then testing the expression. Fixed guard
+    /// order after the changed guards, mirroring the interpreter.
+    expr_filters: []ExprFilterInfo,
+    /// Bare expression conditions (M0.8 E4 — the §6 last arm). Each emits a
+    /// per-slot `if (!(expr)) continue;` guard through the body expression
+    /// emitter (entity machinery available), after the expr filters. For a
+    /// global rule the guard emits at the body top as `return`.
+    expr_conds: []NodeId,
+    /// `resource T { expression }` filters (M0.8 E4) — emitted as rule-top
+    /// gates next to the resource-dep gates they ride with.
+    resource_filters: []ResourceFilterInfo,
+};
+
+/// One §6 general field filter lowered for emission (M0.8 E4).
+const ExprFilterInfo = struct {
+    component_name: []const u8,
+    expr: NodeId,
+};
+
+/// One §6 resource expression filter lowered for emission (M0.8 E4).
+const ResourceFilterInfo = struct {
+    resource_name: []const u8,
+    expr: NodeId,
 };
 
 /// A positive tag-filter predicate lowered to its operand leaf bits — the
@@ -1578,6 +1603,8 @@ fn emitObserverRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDec
             try w.printLine("if (!world.resources.contains({s}_id)) return;", .{dep.name});
         }
     }
+    // `resource T { expression }` gates (M0.8 E4 — §6).
+    try emitResourceFilterGates(w, ast, info);
 
     // Drain: one body run per event of type `T`.
     try w.printLine("while (world.event_bus.poll({s}, ev_cursor) catch null) |event| {{", .{etype_name});
@@ -1678,10 +1705,13 @@ fn emitRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_t
             try w.printLine("if (!world.resources.contains({s}_id)) return;", .{dep.name});
         }
     }
+    // `resource T { expression }` gates (M0.8 E4 — §6): emitted next to the
+    // dep gates they ride with, mirroring the interpreter's rule-top check.
+    try emitResourceFilterGates(w, ast, info);
 
     if (!info.has_component_ref) {
         // Resource-only or no-when rule: body runs at most once per tick.
-        try emitRuleBodyOnce(w, ast, rule, arena);
+        try emitRuleBodyOnce(w, ast, rule, info, arena);
         w.indentBy(-1);
         try w.line("}");
         try w.blankLine();
@@ -1697,6 +1727,15 @@ fn emitRuleInner(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, tag_t
     try collectBodyComponents(w.gpa, ast, rule, &body_used);
     for (info.field_filters) |ff| {
         _ = try body_used.getOrPut(w.gpa, ff.component_name);
+    }
+    // §6 expression guards (M0.8 E4): a general filter addresses its
+    // component's row directly; a bare condition may read components through
+    // the entity machinery — both need their components materialized.
+    for (info.expr_filters) |ef| {
+        _ = try body_used.getOrPut(w.gpa, ef.component_name);
+    }
+    for (info.expr_conds) |cond| {
+        try walkExprForComponents(w.gpa, ast, cond, &body_used);
     }
     // A positive tag filter reads `TagSet_arr[slot].bits[..]` per entity, so
     // `TagSet` needs a per-slot pointer emitted (M0.8 E3). `collectWhenInfo`
@@ -2105,16 +2144,22 @@ fn emitArchPredicate(w: *Writer, ast: *const AstArena, when_idx: u32) CodegenErr
             try emitArchPredicate(w, ast, node.lhs);
             try w.write(")");
         },
-        .has, .has_with_filter, .has_changed => {
-            // `has T changed` shares the `has T` archetype predicate (the entity
-            // must own T); the per-slot change check is emitted in the body walk.
+        .has, .has_with_filter, .has_changed, .has_expr_filter => {
+            // `has T changed` / `has T { expression }` share the `has T`
+            // archetype predicate (the entity must own T); the per-slot
+            // change check / expression guard is emitted in the body walk.
             const cname = ast.strings.slice(node.type_name);
             try w.print("arch.hasComponent({s}_id)", .{cname});
         },
-        .resource, .resource_changed => {
-            // Resource gates are tested ahead of the archetype loop (in
-            // `emitRule`); inside the archetype predicate they evaluate to
-            // a constant `true`.
+        .resource, .resource_changed, .resource_filter => {
+            // Resource gates (incl. the §6 expression filter, M0.8 E4) are
+            // tested ahead of the archetype loop (in `emitRule`); inside the
+            // archetype predicate they evaluate to a constant `true`.
+            try w.write("true");
+        },
+        .expr_cond => {
+            // A bare expression condition (M0.8 E4) constrains no archetype;
+            // its per-slot guard is emitted in the body walk.
             try w.write("true");
         },
         // A positive tag filter requires the entity to carry `TagSet`; the
@@ -2133,12 +2178,15 @@ fn emitArchPredicate(w: *Writer, ast: *const AstArena, when_idx: u32) CodegenErr
 }
 
 /// Emit a rule body that does NOT iterate entities (resource-only rule).
-fn emitRuleBodyOnce(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, arena: ?[]const u8) CodegenError!void {
+fn emitRuleBodyOnce(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: WhenInfo, arena: ?[]const u8) CodegenError!void {
     // No component_ref → still need a (degenerate) LocalCtx for any
     // non-component locals the body might declare.
     var ctx: LocalCtx = .{ .arena_param = arena };
     defer ctx.deinit(w.gpa);
     try ctx.recordParams(w.gpa, ast, rule);
+    // Bare expression conditions on a GLOBAL rule (M0.8 E4 — §6): gate the
+    // single body run, mirroring the interpreter's once-per-tick check.
+    try emitWhenExprGuards(w, ast, &ctx, info, "return");
     var s: u32 = 0;
     while (s < rule.body_len) : (s += 1) {
         const stmt_raw = ast.extra.items[rule.body_start + s];
@@ -2160,6 +2208,11 @@ fn emitRuleBody(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, info: 
         });
     }
     try ctx.recordParams(w.gpa, ast, rule);
+
+    // §6 expression guards (M0.8 E4) — LAST in the per-slot guard order
+    // (after the field / tag / changed guards the arch walk emitted),
+    // mirroring the interpreter's `exprGuardsPass`.
+    try emitWhenExprGuards(w, ast, &ctx, info, "continue");
 
     var s: u32 = 0;
     while (s < rule.body_len) : (s += 1) {
@@ -2186,11 +2239,138 @@ fn emitRuleBodyQuery(w: *Writer, ast: *const AstArena, rule: ast_mod.RuleDecl, i
     }
     try ctx.recordParams(w.gpa, ast, rule);
 
+    // §6 expression guards (M0.8 E4) — after the field-filter guards the
+    // comptime-query path emitted, mirroring the interpreter.
+    try emitWhenExprGuards(w, ast, &ctx, info, "continue");
+
     var s: u32 = 0;
     while (s < rule.body_len) : (s += 1) {
         const stmt_raw = ast.extra.items[rule.body_start + s];
         const stmt_id: NodeId = @bitCast(stmt_raw);
         try emitStmt(w, ast, &ctx, stmt_id);
+    }
+}
+
+/// Emit the §6 expression guards (M0.8 E4 — item-4 ruling): one
+/// labeled-block guard per `has T { expression }` filter (the REFERENCED
+/// fields of T bound from the row, then the expression tested), then one
+/// `if (!(expr)) <exit>;` per bare condition through the body expression
+/// emitter. `exit` is `continue` in the per-slot paths and `return` for a
+/// global rule's once-per-tick gate.
+fn emitWhenExprGuards(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, info: WhenInfo, comptime exit: []const u8) CodegenError!void {
+    for (info.expr_filters, 0..) |ef, i| {
+        var idents: std.ArrayListUnmanaged(ast_mod.StringId) = .empty;
+        defer idents.deinit(w.gpa);
+        try collectExprIdentsBounded(w.gpa, ast, ef.expr, &idents);
+        try w.printLine("const __wf_ok_{d} = __wf_blk_{d}: {{", .{ i, i });
+        w.indentBy(1);
+        const saved_records = ctx.records.items.len;
+        for (idents.items) |name_id| {
+            const fname = ast.strings.slice(name_id);
+            const zig_t = fieldZigTypeOnComponent(ast, ef.component_name, fname) orelse return CodegenError.UnsupportedConstruct;
+            try w.writeIndent();
+            try w.write("const ");
+            try w.ident(fname);
+            try w.write(" = ");
+            if (ctx.query_components) |comps| {
+                const idx = indexOfComponent(comps, ef.component_name) orelse return CodegenError.InternalCodegenBug;
+                try w.print("__row[{d}].", .{idx});
+            } else {
+                try w.print("{s}_arr[slot].", .{ef.component_name});
+            }
+            try w.ident(fname);
+            try w.write(";\n");
+            try ctx.records.append(w.gpa, .{
+                .key = .{ .name = name_id },
+                .info = .{ .kind = .value, .zig_type = zig_t, .is_mut = false },
+            });
+        }
+        try w.writeIndent();
+        try w.print("break :__wf_blk_{d} (", .{i});
+        try emitExpr(w, ast, ctx, ef.expr);
+        try w.write(");\n");
+        ctx.records.shrinkRetainingCapacity(saved_records);
+        w.indentBy(-1);
+        try w.line("};");
+        try w.printLine("if (!__wf_ok_{d}) " ++ exit ++ ";", .{i});
+    }
+    for (info.expr_conds) |cond| {
+        try w.writeIndent();
+        try w.write("if (!(");
+        try emitExpr(w, ast, ctx, cond);
+        try w.write(")) " ++ exit ++ ";\n");
+    }
+}
+
+/// Emit the `resource T { expression }` gates (M0.8 E4 — §6) at the rule
+/// top: a typed read of the resource (the deps loop already emitted
+/// `<R>_id` and the contains gate), the REFERENCED fields bound as consts,
+/// the expression tested — `return` on failure (the whole rule is gated,
+/// mirroring the interpreter's `resourceExprFiltersPass`).
+fn emitResourceFilterGates(w: *Writer, ast: *const AstArena, info: WhenInfo) CodegenError!void {
+    for (info.resource_filters, 0..) |rf, i| {
+        var idents: std.ArrayListUnmanaged(ast_mod.StringId) = .empty;
+        defer idents.deinit(w.gpa);
+        try collectExprIdentsBounded(w.gpa, ast, rf.expr, &idents);
+        var ctx: LocalCtx = .{};
+        defer ctx.deinit(w.gpa);
+        try w.printLine("const __rf_ok_{d} = __rf_blk_{d}: {{", .{ i, i });
+        w.indentBy(1);
+        try w.printLine("const __rfp = @as(*const {s}, @ptrCast(@alignCast(world.resources.getResource({s}_id).?.ptr)));", .{ rf.resource_name, rf.resource_name });
+        for (idents.items) |name_id| {
+            const fname = ast.strings.slice(name_id);
+            const zig_t = fieldZigTypeOnComponent(ast, rf.resource_name, fname) orelse return CodegenError.UnsupportedConstruct;
+            try w.writeIndent();
+            try w.write("const ");
+            try w.ident(fname);
+            try w.write(" = __rfp.");
+            try w.ident(fname);
+            try w.write(";\n");
+            try ctx.records.append(w.gpa, .{
+                .key = .{ .name = name_id },
+                .info = .{ .kind = .value, .zig_type = zig_t, .is_mut = false },
+            });
+        }
+        try w.writeIndent();
+        try w.print("break :__rf_blk_{d} (", .{i});
+        try emitExpr(w, ast, &ctx, rf.expr);
+        try w.write(");\n");
+        w.indentBy(-1);
+        try w.line("};");
+        try w.printLine("if (!__rf_ok_{d}) return;", .{i});
+    }
+}
+
+/// Collect the identifiers referenced by a §6 filter expression (M0.8 E4),
+/// first-seen order (deterministic emission). Bounded to the expression
+/// kinds a fields-only filter can carry; anything else fails loud
+/// (`UnsupportedConstruct`) — never silently-wrong guard code.
+fn collectExprIdentsBounded(gpa: std.mem.Allocator, ast: *const AstArena, expr: NodeId, out: *std.ArrayListUnmanaged(ast_mod.StringId)) CodegenError!void {
+    const data = ast.exprData(expr);
+    switch (ast.exprKind(expr)) {
+        .ident => {
+            const name: ast_mod.StringId = data;
+            for (out.items) |existing| {
+                if (existing == name) return;
+            }
+            try out.append(gpa, name);
+        },
+        .int_lit, .float_lit, .bool_lit, .string_lit, .none_lit, .tag_path => {},
+        .binary => {
+            const bin = ast.binary_exprs.items[data];
+            try collectExprIdentsBounded(gpa, ast, bin.lhs, out);
+            try collectExprIdentsBounded(gpa, ast, bin.rhs, out);
+        },
+        .unary => try collectExprIdentsBounded(gpa, ast, ast.unary_exprs.items[data].operand, out),
+        .cast => try collectExprIdentsBounded(gpa, ast, ast.casts.items[data].operand, out),
+        .some_lit => try collectExprIdentsBounded(gpa, ast, @bitCast(data), out),
+        .field_access => try collectExprIdentsBounded(gpa, ast, ast.field_accesses.items[data].receiver, out),
+        .index => {
+            const ix = ast.index_exprs.items[data];
+            try collectExprIdentsBounded(gpa, ast, ix.receiver, out);
+            try collectExprIdentsBounded(gpa, ast, ix.index, out);
+        },
+        else => return CodegenError.UnsupportedConstruct,
     }
 }
 
@@ -5210,13 +5390,19 @@ fn collectWhenInfo(gpa: std.mem.Allocator, ast: *const AstArena, rule: ast_mod.R
     var has_or_or_not: bool = false;
     var changed_components: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer changed_components.deinit(gpa);
+    var expr_filters: std.ArrayListUnmanaged(ExprFilterInfo) = .empty;
+    errdefer expr_filters.deinit(gpa);
+    var expr_conds: std.ArrayListUnmanaged(NodeId) = .empty;
+    errdefer expr_conds.deinit(gpa);
+    var resource_filters: std.ArrayListUnmanaged(ResourceFilterInfo) = .empty;
+    errdefer resource_filters.deinit(gpa);
 
     if (rule.when_root != ast_mod.RuleDecl.none_when) {
         // `walkWhen` populates components / resources / field filters and adds
         // "TagSet" to components for positive tag filters (fails loud on
         // negative tag ops). A second pass resolves the operand leaf bits for
         // the per-slot guards (M0.8 E3).
-        try walkWhen(gpa, ast, rule.when_root, &components, &seen_components, &res_deps, &field_filters, &has_component_ref, &has_or_or_not, &changed_components);
+        try walkWhen(gpa, ast, rule.when_root, &components, &seen_components, &res_deps, &field_filters, &has_component_ref, &has_or_or_not, &changed_components, &expr_filters, &expr_conds, &resource_filters);
         try collectTagFilters(gpa, ast, tag_table, rule.when_root, &tag_filters);
     }
 
@@ -5228,6 +5414,9 @@ fn collectWhenInfo(gpa: std.mem.Allocator, ast: *const AstArena, rule: ast_mod.R
         .has_or_or_not = has_or_or_not,
         .tag_filters = try tag_filters.toOwnedSlice(gpa),
         .changed_components = try changed_components.toOwnedSlice(gpa),
+        .expr_filters = try expr_filters.toOwnedSlice(gpa),
+        .expr_conds = try expr_conds.toOwnedSlice(gpa),
+        .resource_filters = try resource_filters.toOwnedSlice(gpa),
     };
 }
 
@@ -5238,6 +5427,9 @@ fn freeWhenInfo(gpa: std.mem.Allocator, info: *WhenInfo) void {
     for (info.tag_filters) |*tf| gpa.free(tf.bits);
     gpa.free(info.tag_filters);
     gpa.free(info.changed_components);
+    gpa.free(info.expr_filters);
+    gpa.free(info.expr_conds);
+    gpa.free(info.resource_filters);
 }
 
 fn walkWhen(
@@ -5251,21 +5443,24 @@ fn walkWhen(
     has_component_ref: *bool,
     has_or_or_not: *bool,
     changed: *std.ArrayListUnmanaged([]const u8),
+    expr_filters: *std.ArrayListUnmanaged(ExprFilterInfo),
+    expr_conds: *std.ArrayListUnmanaged(NodeId),
+    resource_filters: *std.ArrayListUnmanaged(ResourceFilterInfo),
 ) !void {
     const node = ast.when_nodes.items[when_idx];
     switch (node.kind) {
         .logical_and => {
-            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed);
-            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed);
+            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed, expr_filters, expr_conds, resource_filters);
+            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed, expr_filters, expr_conds, resource_filters);
         },
         .logical_or => {
             has_or_or_not.* = true;
-            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed);
-            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed);
+            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed, expr_filters, expr_conds, resource_filters);
+            try walkWhen(gpa, ast, node.rhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed, expr_filters, expr_conds, resource_filters);
         },
         .logical_not => {
             has_or_or_not.* = true;
-            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed);
+            try walkWhen(gpa, ast, node.lhs, components, seen, res_deps, filters, has_component_ref, has_or_or_not, changed, expr_filters, expr_conds, resource_filters);
         },
         .has => {
             const cname = ast.strings.slice(node.type_name);
@@ -5309,6 +5504,27 @@ fn walkWhen(
         .resource_changed => {
             const rname = ast.strings.slice(node.type_name);
             try res_deps.append(gpa, .{ .name = rname, .must_be_changed = true });
+        },
+        .has_expr_filter => {
+            // `has T { expression }` (M0.8 E4 — §6 general filter): a `has T`
+            // component contribution + a per-slot expression guard.
+            const cname = ast.strings.slice(node.type_name);
+            const gop = try seen.getOrPut(gpa, cname);
+            if (!gop.found_existing) try components.append(gpa, cname);
+            has_component_ref.* = true;
+            try expr_filters.append(gpa, .{ .component_name = cname, .expr = node.filter_value });
+        },
+        .resource_filter => {
+            // `resource T { expression }` (M0.8 E4 — §6): a resource dep + a
+            // rule-top expression gate.
+            const rname = ast.strings.slice(node.type_name);
+            try res_deps.append(gpa, .{ .name = rname, .must_be_changed = false });
+            try resource_filters.append(gpa, .{ .resource_name = rname, .expr = node.filter_value });
+        },
+        .expr_cond => {
+            // Bare expression condition (M0.8 E4 — §6 last arm): a per-slot /
+            // rule-top guard through the body expression emitter.
+            try expr_conds.append(gpa, node.filter_value);
         },
         // A positive tag filter makes the rule entity-bound and requires the
         // entity to carry `TagSet` — add it to the components so the id +
@@ -5375,12 +5591,12 @@ fn collectComponents(
         .logical_not => {
             try collectComponents(gpa, ast, node.lhs, components, seen);
         },
-        .has, .has_with_filter, .has_changed => {
+        .has, .has_with_filter, .has_changed, .has_expr_filter => {
             const cname = ast.strings.slice(node.type_name);
             const gop = try seen.getOrPut(gpa, cname);
             if (!gop.found_existing) try components.append(gpa, cname);
         },
-        .resource, .resource_changed => {},
+        .resource, .resource_changed, .resource_filter, .expr_cond => {},
         // A positive tag filter contributes `TagSet` to the archetype
         // signature (the rule matches archetypes carrying it); a negative tag
         // op's codegen is deferred and already failed loud upstream (M0.8 E3).

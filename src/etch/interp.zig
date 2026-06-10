@@ -79,6 +79,32 @@ const FieldFilter = struct {
     expected_value: Value,
 };
 
+/// One field binding captured at lower time for a §6 general filter (M0.8
+/// E4): name + layout, so the guard evaluator can bind the field's current
+/// value into the filter expression's scope.
+const BoundField = struct {
+    name: StringId,
+    offset: u16,
+    kind: FieldKind,
+};
+
+/// One `has T { expression }` general filter (M0.8 E4 — item-4 ruling).
+/// Flat-AND with the other per-entity guards, mirroring the documented S4
+/// model the narrow field filters follow.
+const ExprFilter = struct {
+    component_id: ComponentId,
+    expr: NodeId,
+    fields: []BoundField,
+};
+
+/// One `resource T { expression }` filter (M0.8 E4) — gates the whole rule
+/// evaluation, like the resource deps it rides with.
+const ResourceExprFilter = struct {
+    resource_id: ComponentId,
+    expr: NodeId,
+    fields: []BoundField,
+};
+
 /// A per-entity tag query predicate compiled from a `.tag_filter` when-node
 /// (M0.8 E3). `bits` is the resolved leaf-bit set of the operand(s) — a single
 /// bit for `has_tag`/`has_no_tag`, the union of operand bits (leaves + expanded
@@ -161,6 +187,17 @@ const RuleDesc = struct {
     /// Per-entity, ANDed after the field filter and tag predicates (same flat
     /// model). Empty for a rule with no `changed` filter.
     changed_filters: []ComponentId,
+    /// `has T { expression }` general filters (M0.8 E4 — §6, item-4 ruling).
+    /// Per-entity, evaluated AFTER the changed filters (fixed order, mirrored
+    /// by the codegen guards), fields-only scope. Flat-AND.
+    expr_filters: []ExprFilter,
+    /// Bare expression conditions (M0.8 E4 — the §6 last arm). Per-entity for
+    /// an entity-bound rule (rule params in scope, entity bound); evaluated
+    /// once per tick for a global rule. Flat-AND, after `expr_filters`.
+    expr_conds: []NodeId,
+    /// `resource T { expression }` filters (M0.8 E4) — gate the whole rule
+    /// evaluation, alongside the resource deps.
+    resource_expr_filters: []ResourceExprFilter,
     /// The `current_tick` at which this rule last ran (`engine-ecs-internals.md`
     /// §5). A `changed` filter matches a slot iff `changedTick(slot) >
     /// last_run_tick`. Updated after each evaluation in `stepOnce`. Starts at
@@ -190,6 +227,11 @@ const RuleDesc = struct {
         for (self.tag_predicates) |*tp| tp.deinit(gpa);
         gpa.free(self.tag_predicates);
         gpa.free(self.changed_filters);
+        for (self.expr_filters) |ef| gpa.free(ef.fields);
+        gpa.free(self.expr_filters);
+        gpa.free(self.expr_conds);
+        for (self.resource_expr_filters) |rf| gpa.free(rf.fields);
+        gpa.free(self.resource_expr_filters);
         self.matching_archetypes.deinit(gpa);
     }
 };
@@ -873,6 +915,10 @@ pub const Interpreter = struct {
     }
 
     fn runRule(self: *Interpreter, world: *World, rd: *RuleDesc, report: *RuntimeReport) !void {
+        // `resource T { expression }` gates (M0.8 E4 — §6, item-4 ruling):
+        // checked once per rule evaluation, alongside the resource deps the
+        // filters ride with (the codegen emits the same rule-top gate).
+        if (rd.resource_expr_filters.len > 0 and !(try self.resourceExprFiltersPass(world, rd.*))) return;
         // `@on_event(T)` observer (M0.8 E3): fire once per event of type `T` in
         // the per-tick `EventStore`, in emit order, with the implicit `event`
         // binding injected. Takes precedence over entity/global dispatch.
@@ -881,6 +927,9 @@ pub const Interpreter = struct {
             return;
         }
         if (!rd.is_entity_bound) {
+            // Bare expression conditions on a GLOBAL rule (M0.8 E4): evaluated
+            // once per tick, rule params in scope (no entity binding).
+            if (rd.expr_conds.len > 0 and !(try self.exprGuardsPass(world, rd.*, null, null, null, 0))) return;
             try self.execBody(world, rd.*, null, null, report);
             report.rules_matched += 1;
             return;
@@ -938,6 +987,11 @@ pub const Interpreter = struct {
                 // Per-entity `changed` filters (M0.8 E3) — the slot's
                 // `changedTick(T)` must exceed the rule's `last_run_tick`.
                 if (rd.changed_filters.len > 0 and !changedFiltersPass(arch, chunk, slot, rd.changed_filters, rd.last_run_tick)) continue;
+                // §6 general filters + bare conditions (M0.8 E4): evaluated
+                // LAST in the per-entity guard order (fixed, mirrored by the
+                // codegen guards).
+                if ((rd.expr_filters.len > 0 or rd.expr_conds.len > 0) and
+                    !(try self.exprGuardsPass(world, rd.*, entity_id, arch, chunk, slot))) continue;
                 report.entities_iterated += 1;
                 rule_matched.* = true;
                 try self.execBody(world, rd.*, entity_id, null, report);
@@ -963,6 +1017,99 @@ pub const Interpreter = struct {
             rd.matching_archetypes.set(i);
         }
         rd.last_seen_archetype_count = total;
+    }
+
+    /// Evaluate the `resource T { expression }` gates of a rule (M0.8 E4):
+    /// each filter binds its resource's fields by name and must evaluate to
+    /// `true`. Rule-arena stores touched by the evaluation are reset before
+    /// returning (guard values never outlive the guard).
+    fn resourceExprFiltersPass(self: *Interpreter, world: *World, rd: RuleDesc) !bool {
+        var pass = true;
+        var locals: Locals = .{};
+        defer locals.deinit(self.gpa);
+        for (rd.resource_expr_filters) |rf| {
+            locals.map.clearRetainingCapacity();
+            const bytes = world.resources.getResource(rf.resource_id) orelse {
+                pass = false;
+                break;
+            };
+            for (rf.fields) |bf| {
+                const v = bridge_mod.readBytesAsValue(bf.kind, bytes[bf.offset .. bf.offset + @as(u16, @intCast(bf.kind.sizeBytes()))]);
+                try locals.put(self.gpa, bf.name, v, false);
+            }
+            if (!(try self.evalGuardExpr(world, &locals, rf.expr))) {
+                pass = false;
+                break;
+            }
+        }
+        self.resetGuardStores();
+        return pass;
+    }
+
+    /// Evaluate a rule's per-entity §6 guards (M0.8 E4): the general
+    /// `has T { expression }` filters (fields-only scope) then the bare
+    /// expression conditions (rule params in scope; `entity_id` bound for an
+    /// entity-bound rule, absent for a global one). Flat-AND; fixed order.
+    fn exprGuardsPass(self: *Interpreter, world: *World, rd: RuleDesc, entity_id: ?EntityId, arch: ?*DynamicArchetype, chunk: ?*Chunk, slot: u32) !bool {
+        var pass = true;
+        var locals: Locals = .{};
+        defer locals.deinit(self.gpa);
+        for (rd.expr_filters) |ef| {
+            locals.map.clearRetainingCapacity();
+            const a = arch.?;
+            const col = a.componentIndex(ef.component_id) orelse {
+                pass = false;
+                break;
+            };
+            const slot_bytes = a.componentSlot(chunk.?, col, slot);
+            for (ef.fields) |bf| {
+                const v = bridge_mod.readBytesAsValue(bf.kind, slot_bytes[bf.offset .. bf.offset + @as(u16, @intCast(bf.kind.sizeBytes()))]);
+                try locals.put(self.gpa, bf.name, v, false);
+            }
+            if (!(try self.evalGuardExpr(world, &locals, ef.expr))) {
+                pass = false;
+                break;
+            }
+        }
+        if (pass) {
+            const rule = self.ast.rule_decls.items[rd.rule_idx];
+            for (rd.expr_conds) |expr| {
+                locals.map.clearRetainingCapacity();
+                try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
+                if (!(try self.evalGuardExpr(world, &locals, expr))) {
+                    pass = false;
+                    break;
+                }
+            }
+        }
+        self.resetGuardStores();
+        return pass;
+    }
+
+    /// Evaluate one guard expression to a bool. The resolver guarantees the
+    /// bool type; a runtime failure inside a guard (defensive) reads as
+    /// no-match with the pending error dropped — guards are read-only.
+    fn evalGuardExpr(self: *Interpreter, world: *World, locals: *Locals, expr: NodeId) error{OutOfMemory}!bool {
+        const v = self.evalExpr(world, locals, expr) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.RuntimeFailure => {
+                self.pending_error = null;
+                return false;
+            },
+        };
+        return v == .bool_ and v.bool_;
+    }
+
+    /// Reset the rule-arena stores after a guard evaluation (M0.8 E4): guard
+    /// expressions may allocate (strings, collections); nothing they create
+    /// outlives the guard verdict, and the body starts from a clean arena
+    /// (its own boundary resets are unchanged).
+    fn resetGuardStores(self: *Interpreter) void {
+        self.collections.reset(self.gpa);
+        self.closures.reset(self.gpa);
+        self.structs.reset(self.gpa);
+        self.optionals.clearRetainingCapacity();
+        self.resetRunStrings();
     }
 
     /// Run an `@on_event(T)` observer (M0.8 E3): fire the body once per event of
@@ -2880,6 +3027,18 @@ fn compileRule(
     errdefer changed_filters.deinit(gpa);
     var field_filters: std.ArrayListUnmanaged(FieldFilter) = .empty;
     errdefer field_filters.deinit(gpa);
+    var expr_filters: std.ArrayListUnmanaged(ExprFilter) = .empty;
+    errdefer {
+        for (expr_filters.items) |ef| gpa.free(ef.fields);
+        expr_filters.deinit(gpa);
+    }
+    var expr_conds: std.ArrayListUnmanaged(NodeId) = .empty;
+    errdefer expr_conds.deinit(gpa);
+    var resource_expr_filters: std.ArrayListUnmanaged(ResourceExprFilter) = .empty;
+    errdefer {
+        for (resource_expr_filters.items) |rf| gpa.free(rf.fields);
+        resource_expr_filters.deinit(gpa);
+    }
     var predicate_root: ?u32 = null;
     var has_component_ref: bool = false;
 
@@ -2894,6 +3053,9 @@ fn compileRule(
         .filters = &field_filters,
         .tag_preds = &tag_preds,
         .changed_filters = &changed_filters,
+        .expr_filters = &expr_filters,
+        .expr_conds = &expr_conds,
+        .resource_expr_filters = &resource_expr_filters,
         .gpa = gpa,
         .has_component_ref = &has_component_ref,
     };
@@ -2945,6 +3107,9 @@ fn compileRule(
         .is_entity_bound = is_entity_bound,
         .event_type = event_type,
         .changed_filters = try changed_filters.toOwnedSlice(gpa),
+        .expr_filters = try expr_filters.toOwnedSlice(gpa),
+        .expr_conds = try expr_conds.toOwnedSlice(gpa),
+        .resource_expr_filters = try resource_expr_filters.toOwnedSlice(gpa),
         .last_run_tick = initial_tick,
         .is_async = rule.is_async,
         .uses_or = uses_or,
@@ -2965,9 +3130,52 @@ const LowerWhenCtx = struct {
     filters: *std.ArrayListUnmanaged(FieldFilter),
     tag_preds: *std.ArrayListUnmanaged(TagPredicate),
     changed_filters: *std.ArrayListUnmanaged(ComponentId),
+    expr_filters: *std.ArrayListUnmanaged(ExprFilter),
+    expr_conds: *std.ArrayListUnmanaged(NodeId),
+    resource_expr_filters: *std.ArrayListUnmanaged(ResourceExprFilter),
     gpa: std.mem.Allocator,
     has_component_ref: *bool,
 };
+
+/// Capture the field bindings of a component/resource declaration for a §6
+/// general filter (M0.8 E4): every declared field's `(name, offset, kind)`
+/// resolved through the registry. The declaration is located by name in the
+/// AST slab (`is_resource` picks the slab).
+fn captureBoundFields(ctx: *LowerWhenCtx, type_name: StringId, id: ComponentId, is_resource: bool) error{ OutOfMemory, InvalidProgram }![]BoundField {
+    const ast = ctx.ast;
+    var fields_start: u32 = 0;
+    var fields_len: u32 = 0;
+    var found = false;
+    if (is_resource) {
+        for (ast.resource_decls.items) |decl| {
+            if (decl.name == type_name) {
+                fields_start = decl.fields_start;
+                fields_len = decl.fields_len;
+                found = true;
+                break;
+            }
+        }
+    } else {
+        for (ast.component_decls.items) |decl| {
+            if (decl.name == type_name) {
+                fields_start = decl.fields_start;
+                fields_len = decl.fields_len;
+                found = true;
+                break;
+            }
+        }
+    }
+    if (!found) return error.InvalidProgram;
+    var out: std.ArrayListUnmanaged(BoundField) = .empty;
+    errdefer out.deinit(ctx.gpa);
+    var f: u32 = 0;
+    while (f < fields_len) : (f += 1) {
+        const field = ast.fields.items[fields_start + f];
+        const fd = ctx.registry.findField(id, ast.strings.slice(field.name)) orelse return error.InvalidProgram;
+        try out.append(ctx.gpa, .{ .name = field.name, .offset = fd.offset, .kind = fd.kind });
+    }
+    return try out.toOwnedSlice(ctx.gpa);
+}
 
 /// Recursively lower a `when` tree into a flat `PredicateNode` pool plus
 /// a list of resource deps, at most one field filter, and a list of tag
@@ -3049,6 +3257,39 @@ fn lowerWhen(ctx: *LowerWhenCtx, when_idx: u32) error{ OutOfMemory, InvalidProgr
             const tname = ast.strings.slice(node.type_name);
             const rid = ctx.bridge.resourceIdOf(tname) orelse return error.InvalidProgram;
             try ctx.res_deps.append(ctx.gpa, .{ .resource_id = rid, .must_be_changed = true });
+            return PredicateNode.no_child;
+        },
+        .has_expr_filter => {
+            // `has T { expression }` (M0.8 E4 — §6 general filter): the same
+            // `has T` archetype predicate as the narrow form, plus a
+            // per-entity expression guard with T's fields bound (fields-only
+            // scope, resolver-checked).
+            const tname = ast.strings.slice(node.type_name);
+            const id = ctx.bridge.componentIdOf(tname) orelse return error.InvalidProgram;
+            const fields = try captureBoundFields(ctx, node.type_name, id, false);
+            errdefer ctx.gpa.free(fields);
+            try ctx.expr_filters.append(ctx.gpa, .{ .component_id = id, .expr = node.filter_value, .fields = fields });
+            const idx: u32 = @intCast(ctx.pool.items.len);
+            try ctx.pool.append(ctx.gpa, .{ .kind = .has, .component_id = id });
+            ctx.has_component_ref.* = true;
+            return idx;
+        },
+        .resource_filter => {
+            // `resource T { expression }` (M0.8 E4 — §6): a resource dep plus
+            // a rule-level expression gate with T's fields bound.
+            const tname = ast.strings.slice(node.type_name);
+            const rid = ctx.bridge.resourceIdOf(tname) orelse return error.InvalidProgram;
+            try ctx.res_deps.append(ctx.gpa, .{ .resource_id = rid, .must_be_changed = false });
+            const fields = try captureBoundFields(ctx, node.type_name, rid, true);
+            errdefer ctx.gpa.free(fields);
+            try ctx.resource_expr_filters.append(ctx.gpa, .{ .resource_id = rid, .expr = node.filter_value, .fields = fields });
+            return PredicateNode.no_child;
+        },
+        .expr_cond => {
+            // Bare expression condition (M0.8 E4 — the §6 last arm). No
+            // archetype contribution; evaluated per entity (entity-bound
+            // rule) or once per tick (global rule).
+            try ctx.expr_conds.append(ctx.gpa, node.filter_value);
             return PredicateNode.no_child;
         },
         .tag_filter => {

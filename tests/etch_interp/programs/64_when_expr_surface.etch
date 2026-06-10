@@ -1,0 +1,31 @@
+// Differential 64 — §6 when-surface extension (M0.8 E4, item-4 ruling):
+// the general `has T { expression }` filter, the bare expression condition
+// arm, and the `resource T { expression }` gate — all on the comptime-query
+// emission path (AND-only when clauses). Byte-exact world state.
+component Counter {
+  value: int = 0
+  limit: int = 10
+}
+
+resource Config {
+  threshold: int = 2
+  enabled: bool = true
+}
+
+rule filter_general(entity: Entity)
+  when entity has Counter { value * 2 < limit }
+{
+  entity.get_mut(Counter).value += 1
+}
+
+rule bare_cond(entity: Entity)
+  when entity has Counter and entity.get(Counter).value > 4
+{
+  entity.get_mut(Counter).value += 100
+}
+
+rule resource_gated(entity: Entity)
+  when resource Config { enabled and threshold < 3 } and entity has Counter
+{
+  entity.get_mut(Counter).value += 10
+}

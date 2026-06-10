@@ -1,0 +1,17 @@
+// Differential 65 — §6 general filter on the ARCH-WALK emission path
+// (M0.8 E4): a `not` in the when clause forces the manual archetype walk,
+// so the expression guard must also hold there. Byte-exact world state.
+component Counter {
+  value: int = 0
+  limit: int = 10
+}
+
+component Extra {
+  x: int = 0
+}
+
+rule arch_gate(entity: Entity)
+  when entity has Counter { value < limit } and not entity has Extra
+{
+  entity.get_mut(Counter).value += 7
+}

@@ -1923,18 +1923,30 @@ pub const Parser = struct {
             const type_tok = try self.expect(.type_ident, "expected resource type after 'resource'");
             const type_name = try self.internSlice(type_tok.span);
             var kind = ast_mod.WhenNodeKind.resource;
+            var filter_value = NodeId.none;
             var end_byte = type_tok.span.byte_end;
             if (self.peek() == .kw_changed) {
                 const changed_tok = try self.advance();
                 kind = .resource_changed;
                 end_byte = changed_tok.span.byte_end;
+            } else if (self.peek() == .lbrace and self.braceOpensWhenFilter()) {
+                // `resource T { expression }` (M0.8 E4 — §6 general resource
+                // filter; mutually exclusive with `changed`, like `has`). The
+                // resource's fields are in scope inside the braces. The
+                // brace-vs-body ambiguity is resolved by the matching-brace
+                // scan (`braceOpensWhenFilter`).
+                _ = try self.advance(); // '{'
+                filter_value = try self.parseExpr(0);
+                const closing = try self.expect(.rbrace, "expected '}' to close resource filter");
+                end_byte = closing.span.byte_end;
+                kind = .resource_filter;
             }
             const node = ast_mod.WhenNode{
                 .kind = kind,
                 .entity_name = 0,
                 .type_name = type_name,
                 .field_name = 0,
-                .filter_value = NodeId.none,
+                .filter_value = filter_value,
                 .lhs = ast_mod.WhenNode.no_child,
                 .rhs = ast_mod.WhenNode.no_child,
                 .span = .{ .byte_start = start_span.byte_start, .byte_end = end_byte },
@@ -1943,7 +1955,31 @@ pub const Parser = struct {
             try self.arena.when_nodes.append(self.gpa, node);
             return idx;
         }
-        // `entity has T [{ field == value }]` or `entity tag_op tag_operand`.
+        // §6 last arm: a bare boolean expression condition (M0.8 E4). The
+        // structured `entity has …` / `entity tag_op …` arms are gated by
+        // lookahead — anything else (including an identifier followed by a
+        // postfix chain, a literal, `get(R)`, a paren that is not a when
+        // group, …) parses as an expression CAPPED below the logical
+        // operators (lbp(and)=3), so when-level `and`/`or` keep composing
+        // conditions (semantically identical for bool operands).
+        if (self.peek() != .ident or (self.peekNext() != .kw_has and !isTagOp(self.peekNext()))) {
+            const expr = try self.parseExpr(5);
+            const span = self.arena.exprSpan(expr);
+            const node = ast_mod.WhenNode{
+                .kind = .expr_cond,
+                .entity_name = 0,
+                .type_name = 0,
+                .field_name = 0,
+                .filter_value = expr,
+                .lhs = ast_mod.WhenNode.no_child,
+                .rhs = ast_mod.WhenNode.no_child,
+                .span = span,
+            };
+            const idx: u32 = @intCast(self.arena.when_nodes.items.len);
+            try self.arena.when_nodes.append(self.gpa, node);
+            return idx;
+        }
+        // `entity has T [{ filter }]` or `entity tag_op tag_operand`.
         const entity_tok = try self.expect(.ident, "expected entity binding in when clause");
         const entity_name = try self.internSlice(entity_tok.span);
         // `entity has_tag .path` / `entity has_any_tag [.a, .b]` (M0.8 E3 tag
@@ -1977,6 +2013,17 @@ pub const Parser = struct {
             const closing = try self.expect(.rbrace, "expected '}' to close has-with-filter");
             end_byte = closing.span.byte_end;
             kind = .has_with_filter;
+        } else if (self.peek() == .lbrace and self.braceOpensWhenFilter()) {
+            // `has T { expression }` (M0.8 E4 — §6 general field filter; the
+            // narrow `{ field == value }` fast path above keeps the delivered
+            // E3 representation byte-for-byte). T's fields are in scope
+            // inside the braces. The brace-vs-body ambiguity is resolved by
+            // the matching-brace scan (`braceOpensWhenFilter`).
+            _ = try self.advance(); // '{'
+            filter_value = try self.parseExpr(0);
+            const closing = try self.expect(.rbrace, "expected '}' to close has filter expression");
+            end_byte = closing.span.byte_end;
+            kind = .has_expr_filter;
         }
         const node = ast_mod.WhenNode{
             .kind = kind,
@@ -1991,6 +2038,38 @@ pub const Parser = struct {
         const idx: u32 = @intCast(self.arena.when_nodes.items.len);
         try self.arena.when_nodes.append(self.gpa, node);
         return idx;
+    }
+
+    /// Whether the `{` at the current token opens a §6 when-filter
+    /// expression rather than the construct body that follows the when
+    /// clause (M0.8 E4). Disambiguated by scanning a SCRATCH lexer from the
+    /// brace to its matching `}` and checking the next token: a filter
+    /// brace is always followed by `{` (the body / a composite's children),
+    /// `and`, or `or`; a body brace is followed by anything else (next
+    /// top-level construct, EOF, …). The scratch lexer's trivia side-lists
+    /// are throwaway — the main token stream is untouched.
+    fn braceOpensWhenFilter(self: *Parser) bool {
+        std.debug.assert(self.peek() == .lbrace);
+        var scratch = lexer_mod.Lexer.init(self.source);
+        scratch.pos = self.peekSpan().byte_start;
+        defer scratch.deinit(self.gpa);
+        var depth: u32 = 0;
+        while (true) {
+            const tok = scratch.next(self.gpa) catch return false;
+            switch (tok.kind) {
+                .lbrace => depth += 1,
+                .rbrace => {
+                    if (depth == 0) return false; // unbalanced — not a filter
+                    depth -= 1;
+                    if (depth == 0) {
+                        const after = scratch.next(self.gpa) catch return false;
+                        return after.kind == .lbrace or after.kind == .kw_and or after.kind == .kw_or;
+                    }
+                },
+                .eof => return false,
+                else => {},
+            }
+        }
     }
 
     /// True when `k` is one of the five tag query operator keywords (M0.8 E3).
@@ -4801,4 +4880,69 @@ test "parser recovers and a valid routine after a broken construct survives (M0.
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.routine_decls.items.len);
+}
+
+test "parser builds the §6 when-surface extension forms (M0.8 E4 item 4)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\component Counter { value: int = 0 }
+        \\resource Config { enabled: bool = true }
+        \\rule r1(entity: Entity)
+        \\  when entity has Counter { value * 2 < 10 }
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+        \\rule r2(entity: Entity)
+        \\  when entity has Counter and entity.get(Counter).value > 4
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+        \\rule r3(entity: Entity)
+        \\  when resource Config { enabled } and entity has Counter
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    // r1: a single has_expr_filter leaf (the general filter, NOT the body).
+    const r1 = result.ast.rule_decls.items[0];
+    const n1 = result.ast.when_nodes.items[r1.when_root];
+    try std.testing.expectEqual(ast_mod.WhenNodeKind.has_expr_filter, n1.kind);
+    try std.testing.expect(!n1.filter_value.isNone());
+    try std.testing.expectEqual(@as(u32, 1), r1.body_len);
+    // r2: and(has, expr_cond) — the bare arm capped below and/or.
+    const r2 = result.ast.rule_decls.items[1];
+    const n2 = result.ast.when_nodes.items[r2.when_root];
+    try std.testing.expectEqual(ast_mod.WhenNodeKind.logical_and, n2.kind);
+    try std.testing.expectEqual(ast_mod.WhenNodeKind.has, result.ast.when_nodes.items[n2.lhs].kind);
+    try std.testing.expectEqual(ast_mod.WhenNodeKind.expr_cond, result.ast.when_nodes.items[n2.rhs].kind);
+    // r3: and(resource_filter, has).
+    const r3 = result.ast.rule_decls.items[2];
+    const n3 = result.ast.when_nodes.items[r3.when_root];
+    try std.testing.expectEqual(ast_mod.WhenNodeKind.logical_and, n3.kind);
+    try std.testing.expectEqual(ast_mod.WhenNodeKind.resource_filter, result.ast.when_nodes.items[n3.lhs].kind);
+}
+
+test "parser keeps the body brace out of the §6 general filter (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    // `has Counter` directly followed by the rule body: the matching-brace
+    // scan sees the body's `}` followed by EOF → NOT a filter.
+    var result = try parse(gpa,
+        \\component Counter { value: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Counter
+        \\{
+        \\  let x = 1
+        \\  entity.get_mut(Counter).value += x
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    const rule = result.ast.rule_decls.items[0];
+    try std.testing.expectEqual(ast_mod.WhenNodeKind.has, result.ast.when_nodes.items[rule.when_root].kind);
+    try std.testing.expectEqual(@as(u32, 2), rule.body_len);
 }

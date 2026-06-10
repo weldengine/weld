@@ -739,3 +739,40 @@ routine GuardNight {
   }
 }
 ```
+
+## When-surface extension (E4 — §6 general filters + bare conditions)
+
+```etch
+component Health {
+  current: float = 100.0
+  max: float = 100.0
+}
+
+resource GameState {
+  difficulty: int = 1
+}
+
+rule flee_when_low(entity: Entity)
+  when entity has Health { current < max * 0.2 }
+{
+  entity.get_mut(Health).current += 1.0
+}
+
+rule hard_mode_only(entity: Entity)
+  when resource GameState { difficulty == 2 } and entity has Health
+{
+  entity.get_mut(Health).current -= 1.0
+}
+```
+
+```etch
+component Counter {
+  value: int = 0
+}
+
+rule bare_condition(entity: Entity)
+  when entity has Counter and entity.get(Counter).value > 4
+{
+  entity.get_mut(Counter).value += 1
+}
+```

@@ -83,4 +83,8 @@ pub const programs = [_]CodegenProgram{
     // `levelb_ir_diff_test.zig` — they have no world-state sidecar.
     .{ .name = "p62_data_table", .etch_path = "tests/etch_interp/programs/62_data_table.etch" },
     .{ .name = "p63_routine_daily", .etch_path = "tests/etch_interp/programs/63_routine_daily.etch" },
+    // §6 when-surface extension (M0.8 E4, item-4 ruling) — Level A,
+    // byte-exact world-state differentials on both emission paths.
+    .{ .name = "p64_when_expr_surface", .etch_path = "tests/etch_interp/programs/64_when_expr_surface.etch" },
+    .{ .name = "p65_when_expr_archwalk", .etch_path = "tests/etch_interp/programs/65_when_expr_archwalk.etch" },
 };

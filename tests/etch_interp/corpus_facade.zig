@@ -81,6 +81,8 @@ const p58 = @import("programs/58_closure_thrown_propagation.expected.zig");
 const p59 = @import("programs/59_resource_receiver.expected.zig");
 const p60 = @import("programs/60_event_observer_resource.expected.zig");
 const p61 = @import("programs/61_filter_two_components.expected.zig");
+const p64 = @import("programs/64_when_expr_surface.expected.zig");
+const p65 = @import("programs/65_when_expr_archwalk.expected.zig");
 
 /// Embedded list of the 20 differential corpus programs consumed by
 /// the S4 interpreter test and the S5 codegen parity test.
@@ -146,4 +148,6 @@ pub const programs = [_]Program{
     .{ .name = "59_resource_receiver", .source = @embedFile("programs/59_resource_receiver.etch"), .config = p59.config, .initial = p59.initial, .expected = p59.expected },
     .{ .name = "60_event_observer_resource", .source = @embedFile("programs/60_event_observer_resource.etch"), .config = p60.config, .initial = p60.initial, .expected = p60.expected },
     .{ .name = "61_filter_two_components", .source = @embedFile("programs/61_filter_two_components.etch"), .config = p61.config, .initial = p61.initial, .expected = p61.expected },
+    .{ .name = "64_when_expr_surface", .source = @embedFile("programs/64_when_expr_surface.etch"), .config = p64.config, .initial = p64.initial, .expected = p64.expected },
+    .{ .name = "65_when_expr_archwalk", .source = @embedFile("programs/65_when_expr_archwalk.etch"), .config = p65.config, .initial = p65.initial, .expected = p65.expected },
 };

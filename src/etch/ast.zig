@@ -477,6 +477,9 @@ pub const WhenNodeKind = enum {
     resource_changed, // resource T changed
     has_changed, // entity has T changed (M0.8 E3) — change-detection filter
     tag_filter, // entity has_tag .path (M0.8 E3) — `aux` indexes `tag_filters`
+    has_expr_filter, // entity has T { expression } (M0.8 E4 — §6 general filter; `filter_value` is the expr, fields of T in scope)
+    resource_filter, // resource T { expression } (M0.8 E4 — §6; fields of T in scope)
+    expr_cond, // bare expression condition (M0.8 E4 — §6 last arm; `filter_value` is the expr)
 };
 
 /// Side-slab entry for one node of the `when` boolean tree. Composite
