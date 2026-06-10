@@ -1,0 +1,29 @@
+event Damage {
+  amount: int = 0
+}
+
+component Out {
+  v: int = 0
+}
+
+resource Total {
+  sum: int = 0
+}
+
+rule produce() {
+  emit Damage { amount: 5 }
+  emit Damage { amount: 3 }
+}
+
+@on_event(Damage)
+rule absorb()
+  when resource Total
+{
+  get_mut(Total).sum = get(Total).sum * 2 + event.amount
+}
+
+rule read_back(entity: Entity)
+  when entity has Out and resource Total
+{
+  entity.get_mut(Out).v = get(Total).sum
+}
