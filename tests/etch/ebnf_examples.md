@@ -592,3 +592,29 @@ rule set_ops(entity: Entity)
   }
 }
 ```
+
+## Methods — `mut self` receiver mutated in place (E3 sub-slice C tranche 5)
+
+```etch
+component MutAcc { out: int = 0 }
+
+struct Cnt { v: int }
+
+impl Cnt {
+  fn bump(mut self, by: int) {
+    self.v += by
+  }
+
+  fn peek(self) -> int {
+    self.v
+  }
+}
+
+rule mutate_through_method(entity: Entity)
+  when entity has MutAcc
+{
+  let mut c = Cnt { v: 1 }
+  c.bump(41)
+  entity.get_mut(MutAcc).out = c.peek()
+}
+```

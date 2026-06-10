@@ -544,3 +544,40 @@ test "collection allocations require the frame arena: fn-body push fails loud (M
         root.generateToBuffer(gpa, &pr.ast, "<test>", &out),
     );
 }
+
+test "lowers mut-self methods to pointer receivers, mutation visible at the call site (M0.8 E3-C tranche 5)" {
+    const gpa = std.testing.allocator;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\struct Cnt { v: int = 0 }
+        \\impl Cnt {
+        \\  fn bump(mut self, by: int) { self.v += by }
+        \\  fn peek(self) -> int { self.v }
+        \\}
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let mut c = Cnt { v: 1 }
+        \\  c.bump(41)
+        \\  entity.get_mut(Acc).n = c.peek()
+        \\}
+    , &out);
+    // `mut self` → pointer receiver; plain `self` keeps the by-value shape.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "pub fn bump(self: *Cnt, by: i64) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "pub fn peek(self: Cnt) i64 {") != null);
+    // The receiver is a `var` binding, auto-referenced by Zig at the call
+    // site — the in-place mutation reaches the caller's `c`.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "var c = Cnt{ .v = 1 };") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "_ = c.bump(41);") != null);
+
+    // The generated Zig is syntactically valid (Zig's own parser).
+    const z = try gpa.dupeZ(u8, out.items);
+    defer gpa.free(z);
+    var tree = try std.zig.Ast.parse(gpa, z, .zig);
+    defer tree.deinit(gpa);
+    if (tree.errors.len != 0) std.debug.print("generated zig parse errors:\n{s}\n", .{out.items});
+    try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
+}

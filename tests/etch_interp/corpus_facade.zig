@@ -73,6 +73,7 @@ const p50 = @import("programs/50_map_insert_iterate.expected.zig");
 const p51 = @import("programs/51_optional_ops.expected.zig");
 const p52 = @import("programs/52_enum_shorthand_field.expected.zig");
 const p53 = @import("programs/53_set_ops.expected.zig");
+const p54 = @import("programs/54_mut_self_method.expected.zig");
 
 /// Embedded list of the 20 differential corpus programs consumed by
 /// the S4 interpreter test and the S5 codegen parity test.
@@ -130,4 +131,5 @@ pub const programs = [_]Program{
     .{ .name = "51_optional_ops", .source = @embedFile("programs/51_optional_ops.etch"), .config = p51.config, .initial = p51.initial, .expected = p51.expected },
     .{ .name = "52_enum_shorthand_field", .source = @embedFile("programs/52_enum_shorthand_field.etch"), .config = p52.config, .initial = p52.initial, .expected = p52.expected },
     .{ .name = "53_set_ops", .source = @embedFile("programs/53_set_ops.etch"), .config = p53.config, .initial = p53.initial, .expected = p53.expected },
+    .{ .name = "54_mut_self_method", .source = @embedFile("programs/54_mut_self_method.etch"), .config = p54.config, .initial = p54.initial, .expected = p54.expected },
 };

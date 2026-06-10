@@ -70,4 +70,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p51_optional_ops", .etch_path = "tests/etch_interp/programs/51_optional_ops.etch" },
     .{ .name = "p52_enum_shorthand_field", .etch_path = "tests/etch_interp/programs/52_enum_shorthand_field.etch" },
     .{ .name = "p53_set_ops", .etch_path = "tests/etch_interp/programs/53_set_ops.etch" },
+    .{ .name = "p54_mut_self_method", .etch_path = "tests/etch_interp/programs/54_mut_self_method.etch" },
 };

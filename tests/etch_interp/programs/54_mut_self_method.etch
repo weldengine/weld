@@ -1,0 +1,29 @@
+component MutAcc {
+  out: int = 0
+  peeked: int = 0
+}
+
+struct Cnt {
+  v: int
+}
+
+impl Cnt {
+  fn bump(mut self, by: int) {
+    self.v += by
+  }
+
+  fn peek(self) -> int {
+    self.v
+  }
+}
+
+rule mutate_through_method(entity: Entity)
+  when entity has MutAcc
+{
+  let acc = entity.get_mut(MutAcc)
+  let mut c = Cnt { v: 1 }
+  c.bump(40)
+  c.bump(1)
+  acc.out = c.v
+  acc.peeked = c.peek()
+}

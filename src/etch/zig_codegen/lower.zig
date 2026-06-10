@@ -1032,16 +1032,21 @@ fn implHasMethod(ast: *const AstArena, impl: ast_mod.ImplDecl, name: StringId) b
 }
 
 /// Emit one inherent `impl` method as a Zig `pub fn` member (M0.8 E2 block 3).
-/// A `self` (by-value) receiver lowers to `self: T`; an associated fn (no self)
-/// to a plain function. `mut self` needs a pointer receiver (`self: *T`) and an
-/// addressable call site — deferred (the interpreter is its reference), as are
-/// `async` / `throws` methods (E3). The body is a value-block (trailing
-/// expression → implicit `return`), shared with `emitFnDecl`'s shape.
+/// A `self` (by-value) receiver lowers to `self: T`; a `mut self` receiver to
+/// a pointer receiver `self: *T` (M0.8 E3-C tranche 5) — Zig auto-references
+/// the caller's `var` binding at the call site (the resolver's E0220 gate
+/// guarantees a mutable receiver), so the in-place mutation is visible to the
+/// caller at the same logical point as the interpreter's shared `struct_ref`
+/// handle. An associated fn (no self) lowers to a plain function. `async` /
+/// `throws` methods stay deferred (E3 gate). The body is a value-block
+/// (trailing expression → implicit `return`), shared with `emitFnDecl`'s
+/// shape. Bare `self` in value position (returned / passed on) would be a
+/// `*T` where the by-value shape has `T` — no M0.8 differential uses it;
+/// such a program fails loud at `zig build` of the cooked file.
 fn emitMethod(w: *Writer, ast: *const AstArena, struct_name: []const u8, method: ast_mod.FnDecl) CodegenError!void {
     if (method.generics_len > 0) return CodegenError.UnsupportedConstruct; // generic monomorphisation → Phase 2
     if (method.is_async) return CodegenError.UnsupportedConstruct; // async codegen → Phase 2
     if (method.throws) return CodegenError.UnsupportedConstruct; // throws codegen → E3 gate
-    if (method.self_kind == .by_mut) return CodegenError.UnsupportedConstruct; // mut-self pointer receiver → deferred
 
     var ctx: LocalCtx = .{};
     defer ctx.deinit(w.gpa);
@@ -1051,11 +1056,15 @@ fn emitMethod(w: *Writer, ast: *const AstArena, struct_name: []const u8, method:
     try w.ident(ast.strings.slice(method.name));
     try w.write("(");
     var wrote_param = false;
-    if (method.self_kind == .by_value) {
-        try w.print("self: {s}", .{struct_name});
+    if (method.self_kind != .none) {
+        // The LocalCtx record keys the pointee type for both receiver kinds:
+        // the method-call routing only needs to fall through to the user
+        // dispatch, and Zig auto-derefs `self.field` / `self.method()`
+        // through the pointer.
+        try w.print("self: {s}{s}", .{ if (method.self_kind == .by_mut) "*" else "", struct_name });
         wrote_param = true;
         if (ast.strings.find("self")) |sid| {
-            try ctx.records.append(w.gpa, .{ .key = .{ .name = sid }, .info = .{ .kind = .value, .zig_type = struct_name, .is_mut = false } });
+            try ctx.records.append(w.gpa, .{ .key = .{ .name = sid }, .info = .{ .kind = .value, .zig_type = struct_name, .is_mut = method.self_kind == .by_mut } });
         }
     }
     var p_i: u32 = 0;
