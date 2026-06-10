@@ -34,15 +34,16 @@ pub const BuildError = error{
     UnsupportedDescriptorExpr,
 };
 
-/// Owned set of Level-B descriptors built from one AST, in declaration
-/// order. Every string is gpa-owned (no arena borrows — the descriptors
-/// outlive nothing but the interpreter that holds them).
+/// Owned ordered sequence of Level-B descriptors built from one AST, in
+/// top-level declaration order ACROSS construct kinds (the engraved
+/// canonical-form rule). Every string is gpa-owned (no arena borrows —
+/// the descriptors outlive nothing but the interpreter that holds them).
 pub const Descriptors = struct {
-    data_tables: []types.Data = &.{},
+    items: []types.Descriptor = &.{},
 
     pub fn deinit(self: *Descriptors, gpa: std.mem.Allocator) void {
-        for (self.data_tables) |t| freeData(gpa, t);
-        gpa.free(self.data_tables);
+        for (self.items) |d| freeDescriptor(gpa, d);
+        gpa.free(self.items);
         self.* = .{};
     }
 
@@ -50,11 +51,37 @@ pub const Descriptors = struct {
     /// The Level-B differential compares these bytes against the cooked
     /// backend's `writeDescriptors` output.
     pub fn serialize(self: *const Descriptors, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
-        for (self.data_tables) |t| {
-            try types.writeData(t, gpa, out);
+        for (self.items) |d| {
+            try d.write(gpa, out);
         }
     }
 };
+
+fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
+    switch (d) {
+        .data => |t| freeData(gpa, t),
+        .routine => |r| freeRoutine(gpa, r),
+    }
+}
+
+fn freeRoutine(gpa: std.mem.Allocator, r: types.Routine) void {
+    gpa.free(r.name);
+    for (r.segments) |seg| {
+        gpa.free(seg.name);
+        for (seg.triggers) |t| gpa.free(t.value);
+        gpa.free(seg.triggers);
+        for (seg.actions) |a| gpa.free(a);
+        gpa.free(seg.actions);
+        for (seg.untils) |t| gpa.free(t.value);
+        gpa.free(seg.untils);
+    }
+    gpa.free(r.segments);
+    for (r.interrupts) |intr| {
+        gpa.free(intr.event);
+        gpa.free(intr.target);
+    }
+    gpa.free(r.interrupts);
+}
 
 fn freeData(gpa: std.mem.Allocator, t: types.Data) void {
     gpa.free(t.name);
@@ -74,21 +101,119 @@ fn freeData(gpa: std.mem.Allocator, t: types.Data) void {
 /// AST is expected validated (the type-checker ran clean) — `build` does
 /// not re-validate, it constructs.
 pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descriptors {
-    var tables: std.ArrayListUnmanaged(types.Data) = .empty;
+    var list: std.ArrayListUnmanaged(types.Descriptor) = .empty;
     errdefer {
-        for (tables.items) |t| freeData(gpa, t);
-        tables.deinit(gpa);
+        for (list.items) |d| freeDescriptor(gpa, d);
+        list.deinit(gpa);
     }
     const kinds = arena.items.items(.kind);
     const datas = arena.items.items(.data);
     var i: u28 = 0;
     while (i < arena.items.len) : (i += 1) {
         switch (kinds[i]) {
-            .data_decl => try tables.append(gpa, try buildData(gpa, arena, arena.data_decls.items[datas[i]])),
+            .data_decl => try list.append(gpa, .{ .data = try buildData(gpa, arena, arena.data_decls.items[datas[i]]) }),
+            .routine_decl => try list.append(gpa, .{ .routine = try buildRoutine(gpa, arena, arena.routine_decls.items[datas[i]]) }),
             else => {},
         }
     }
-    return .{ .data_tables = try tables.toOwnedSlice(gpa) };
+    return .{ .items = try list.toOwnedSlice(gpa) };
+}
+
+fn buildRoutine(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.RoutineDecl) BuildError!types.Routine {
+    var segments: std.ArrayListUnmanaged(types.RoutineSegment) = .empty;
+    errdefer {
+        for (segments.items) |seg| {
+            gpa.free(seg.name);
+            for (seg.triggers) |t| gpa.free(t.value);
+            gpa.free(seg.triggers);
+            for (seg.actions) |a| gpa.free(a);
+            gpa.free(seg.actions);
+            for (seg.untils) |t| gpa.free(t.value);
+            gpa.free(seg.untils);
+        }
+        segments.deinit(gpa);
+    }
+    var s: u32 = 0;
+    while (s < decl.segments_len) : (s += 1) {
+        const seg = arena.routine_segments.items[decl.segments_start + s];
+        const triggers = try buildTriggerRun(gpa, arena, seg.triggers_start, seg.triggers_len);
+        errdefer {
+            for (triggers) |t| gpa.free(t.value);
+            gpa.free(triggers);
+        }
+        const untils = try buildTriggerRun(gpa, arena, seg.untils_start, seg.untils_len);
+        errdefer {
+            for (untils) |t| gpa.free(t.value);
+            gpa.free(untils);
+        }
+        var actions: std.ArrayListUnmanaged([]const u8) = .empty;
+        errdefer {
+            for (actions.items) |a| gpa.free(a);
+            actions.deinit(gpa);
+        }
+        var a: u32 = 0;
+        while (a < seg.actions_len) : (a += 1) {
+            const action: NodeId = @bitCast(arena.extra.items[seg.actions_start + a]);
+            const rendered = try renderExprAlloc(gpa, arena, action);
+            errdefer gpa.free(rendered);
+            try actions.append(gpa, rendered);
+        }
+        const seg_name = try gpa.dupe(u8, arena.strings.slice(seg.name));
+        errdefer gpa.free(seg_name);
+        try segments.append(gpa, .{
+            .name = seg_name,
+            .triggers = triggers,
+            .actions = try actions.toOwnedSlice(gpa),
+            .untils = untils,
+        });
+    }
+    var interrupts: std.ArrayListUnmanaged(types.RoutineInterrupt) = .empty;
+    errdefer {
+        for (interrupts.items) |intr| {
+            gpa.free(intr.event);
+            gpa.free(intr.target);
+        }
+        interrupts.deinit(gpa);
+    }
+    var it: u32 = 0;
+    while (it < decl.interrupts_len) : (it += 1) {
+        const intr = arena.routine_interrupts.items[decl.interrupts_start + it];
+        const event = try gpa.dupe(u8, arena.strings.slice(intr.event_name));
+        errdefer gpa.free(event);
+        const target = try gpa.dupe(u8, arena.strings.slice(intr.target));
+        errdefer gpa.free(target);
+        try interrupts.append(gpa, .{ .event = event, .target = target, .is_pause = intr.is_pause });
+    }
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    errdefer gpa.free(name);
+    return .{
+        .name = name,
+        .segments = try segments.toOwnedSlice(gpa),
+        .interrupts = try interrupts.toOwnedSlice(gpa),
+    };
+}
+
+fn buildTriggerRun(gpa: std.mem.Allocator, arena: *const AstArena, start: u32, len: u32) BuildError![]types.RoutineTrigger {
+    var triggers: std.ArrayListUnmanaged(types.RoutineTrigger) = .empty;
+    errdefer {
+        for (triggers.items) |t| gpa.free(t.value);
+        triggers.deinit(gpa);
+    }
+    var t: u32 = 0;
+    while (t < len) : (t += 1) {
+        const trig = arena.routine_triggers.items[start + t];
+        const value = try gpa.dupe(u8, arena.strings.slice(trig.value));
+        errdefer gpa.free(value);
+        try triggers.append(gpa, .{
+            .kind = switch (trig.kind) {
+                .at_time => .at_time,
+                .after_segment => .after_segment,
+                .on_event => .on_event,
+            },
+            .value = value,
+        });
+    }
+    return try triggers.toOwnedSlice(gpa);
 }
 
 fn buildData(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.DataDecl) BuildError!types.Data {
@@ -176,6 +301,18 @@ pub fn renderExpr(gpa: std.mem.Allocator, arena: *const AstArena, id: NodeId, ou
             try out.appendSlice(gpa, arena.strings.slice(data));
         },
         .ident, .path => try out.appendSlice(gpa, arena.strings.slice(data)),
+        .fn_call => {
+            const call = arena.call_exprs.items[data];
+            try renderExpr(gpa, arena, call.callee, out);
+            try out.appendSlice(gpa, "(");
+            var i: u32 = 0;
+            while (i < call.args_len) : (i += 1) {
+                if (i != 0) try out.appendSlice(gpa, ", ");
+                const arg: NodeId = @bitCast(arena.extra.items[call.args_start + i]);
+                try renderExpr(gpa, arena, arg, out);
+            }
+            try out.appendSlice(gpa, ")");
+        },
         .field_access => {
             const fa = arena.field_accesses.items[data];
             if (fa.opt_chain) return error.UnsupportedDescriptorExpr;
@@ -349,7 +486,7 @@ test "descriptor build + serialize: data table golden form (M0.8 E4)" {
 
     var descs = try build(gpa, &pr.ast);
     defer descs.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 1), descs.data_tables.len);
+    try std.testing.expectEqual(@as(usize, 1), descs.items.len);
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(gpa);

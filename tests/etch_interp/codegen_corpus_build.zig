@@ -82,4 +82,5 @@ pub const programs = [_]CodegenProgram{
     // (the Sema proof), but diffed on the SERIALIZED IR by
     // `levelb_ir_diff_test.zig` — they have no world-state sidecar.
     .{ .name = "p62_data_table", .etch_path = "tests/etch_interp/programs/62_data_table.etch" },
+    .{ .name = "p63_routine_daily", .etch_path = "tests/etch_interp/programs/63_routine_daily.etch" },
 };

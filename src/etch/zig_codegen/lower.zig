@@ -250,8 +250,8 @@ pub fn generateFile(
     // proof contract item 3). Emitted as static typed values over the
     // embedded `etch_descriptor` namespace plus a `writeDescriptors`
     // serializer entry point — self-contained, weld_core-only imports kept.
-    if (programHasDataDecls(ast)) {
-        try emitDataDescriptors(&w, gpa, ast);
+    if (programHasLevelBDecls(ast)) {
+        try emitLevelBDescriptors(&w, gpa, ast);
         try emitDescriptorNamespace(&w);
         stats.has_descriptors = true;
     }
@@ -1435,6 +1435,21 @@ fn emitFnDecl(w: *Writer, ast: *const AstArena, decl: ast_mod.FnDecl) CodegenErr
         try w.line("_ = __err;");
     }
 
+    // An EMPTY fn body leaves every param unused (Level-B stub fns, M0.8
+    // E4 — first occurrence in the cooked corpus): discard them so the
+    // generated file compiles. Non-empty bodies keep Zig's unused-param
+    // check (a real unused param in real code should stay loud).
+    if (decl.body_len == 0 and decl.value.isNone()) {
+        p_i = 0;
+        while (p_i < decl.params_len) : (p_i += 1) {
+            const p = ast.fn_params.items[decl.params_start + p_i];
+            try w.writeIndent();
+            try w.write("_ = ");
+            try w.ident(ast.strings.slice(p.name));
+            try w.write(";\n");
+        }
+    }
+
     var s: u32 = 0;
     while (s < decl.body_len) : (s += 1) {
         try emitStmt(w, ast, &ctx, @bitCast(ast.extra.items[decl.body_start + s]));
@@ -1466,6 +1481,16 @@ fn fnBodyCanThrow(ast: *const AstArena, decl: ast_mod.FnDecl) bool {
 fn fnTypeZig(ast: *const AstArena, type_node: NodeId) []const u8 {
     const tnode = ast.named_types.items[ast.typeNodeData(type_node)];
     const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
+    // `string` params/returns lower to `[]const u8` — the same mapping the
+    // struct-field emitter delivers (M0.8 E3-C tranche 2). Before E4 this
+    // fell through to the raw-name fallback and emitted invalid Zig
+    // (`name: string`), violating the no-silently-wrong-output doctrine;
+    // first exercised by Level-B stub fns (flagged in the E4 journal). The
+    // ratified fn-body string-concat bound (no fn arena) is untouched —
+    // this maps the TYPE only.
+    if (std.mem.eql(u8, tname, "string")) return "[]const u8";
+    // Non-builtin names pass through verbatim: declared struct/enum types
+    // are emitted under their own names in the same generated file.
     return type_map.mapBuiltin(tname) orelse tname;
 }
 
@@ -4638,59 +4663,127 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// Re-emit an Etch string literal's raw bytes as a valid Zig string literal
 /// (M0.8 sub-slice C tranche 1). Escapes the quote / backslash / common
 /// control bytes; any other non-printable byte becomes `\xHH`.
-/// `true` when the program declares at least one `data` table (M0.8 E4).
-fn programHasDataDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0;
+/// `true` when the program declares at least one Level-B construct with a
+/// descriptor (M0.8 E4: `data`, `routine`).
+fn programHasLevelBDecls(ast: *const AstArena) bool {
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0;
 }
 
-/// Emit the static `data_descriptors` table + the `writeDescriptors`
-/// serializer entry point (M0.8 E4, emit-structure). Expression leaves are
-/// rendered by the SHARED canonical renderer (`descriptor.renderExprAlloc`)
-/// and embedded as Zig string literals; an unsupported expression fails
-/// loud as `UnsupportedConstruct` — never silently-wrong output.
-fn emitDataDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena) CodegenError!void {
-    try w.line("pub const data_descriptors = [_]etch_descriptor.Data{");
+/// Emit the static `descriptors` table (ONE ordered sequence across
+/// construct kinds — the engraved declaration-order rule) + the
+/// `writeDescriptors` serializer entry point (M0.8 E4, emit-structure).
+/// Expression leaves are rendered by the SHARED canonical renderer
+/// (`descriptor.renderExprAlloc`) and embedded as Zig string literals; an
+/// unsupported expression fails loud as `UnsupportedConstruct` — never
+/// silently-wrong output.
+fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena) CodegenError!void {
+    try w.line("pub const descriptors = [_]etch_descriptor.Descriptor{");
     const kinds = ast.items.items(.kind);
     const datas = ast.items.items(.data);
     var i: u28 = 0;
     while (i < ast.items.len) : (i += 1) {
-        if (kinds[i] != .data_decl) continue;
-        const decl = ast.data_decls.items[datas[i]];
-        try w.print("    .{{ .name = ", .{});
-        try emitZigStringLiteral(w, ast.strings.slice(decl.name));
-        try w.print(", .entry_type = ", .{});
-        try emitZigStringLiteral(w, ast.strings.slice(decl.entry_type));
-        try w.line(", .entries = &[_]etch_descriptor.DataEntry{");
-        var e: u32 = 0;
-        while (e < decl.entries_len) : (e += 1) {
-            const entry = ast.data_entries.items[decl.entries_start + e];
-            try w.print("        .{{ .id = ", .{});
-            try emitZigStringLiteral(w, ast.strings.slice(entry.id));
-            try w.line(", .fields = &[_]etch_descriptor.DataField{");
-            var f: u32 = 0;
-            while (f < entry.fields_len) : (f += 1) {
-                const field = ast.struct_lit_fields.items[entry.fields_start + f];
-                const rendered = descriptor_mod.renderExprAlloc(gpa, ast, field.value) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
-                };
-                defer gpa.free(rendered);
-                try w.print("            .{{ .name = ", .{});
-                try emitZigStringLiteral(w, if (field.name == 0) "" else ast.strings.slice(field.name));
-                try w.print(", .value = ", .{});
-                try emitZigStringLiteral(w, rendered);
-                try w.printLine(", .is_spread = {} }},", .{field.name == 0});
-            }
-            try w.line("        } },");
+        switch (kinds[i]) {
+            .data_decl => try emitDataDescriptor(w, gpa, ast, ast.data_decls.items[datas[i]]),
+            .routine_decl => try emitRoutineDescriptor(w, gpa, ast, ast.routine_decls.items[datas[i]]),
+            else => {},
         }
-        try w.line("    } },");
     }
     try w.line("};");
     try w.blankLine();
     try w.line("pub fn writeDescriptors(gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {");
-    try w.line("    for (data_descriptors) |d| try etch_descriptor.writeData(d, gpa, out);");
+    try w.line("    for (descriptors) |d| try d.write(gpa, out);");
     try w.line("}");
     try w.blankLine();
+}
+
+fn emitDataDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.DataDecl) CodegenError!void {
+    try w.print("    .{{ .data = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.print(", .entry_type = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.entry_type));
+    try w.line(", .entries = &[_]etch_descriptor.DataEntry{");
+    var e: u32 = 0;
+    while (e < decl.entries_len) : (e += 1) {
+        const entry = ast.data_entries.items[decl.entries_start + e];
+        try w.print("        .{{ .id = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(entry.id));
+        try w.line(", .fields = &[_]etch_descriptor.DataField{");
+        var f: u32 = 0;
+        while (f < entry.fields_len) : (f += 1) {
+            const field = ast.struct_lit_fields.items[entry.fields_start + f];
+            const rendered = try renderForEmit(gpa, ast, field.value);
+            defer gpa.free(rendered);
+            try w.print("            .{{ .name = ", .{});
+            try emitZigStringLiteral(w, if (field.name == 0) "" else ast.strings.slice(field.name));
+            try w.print(", .value = ", .{});
+            try emitZigStringLiteral(w, rendered);
+            try w.printLine(", .is_spread = {} }},", .{field.name == 0});
+        }
+        try w.line("        } },");
+    }
+    try w.line("    } } },");
+}
+
+fn emitRoutineDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.RoutineDecl) CodegenError!void {
+    try w.print("    .{{ .routine = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.line(", .segments = &[_]etch_descriptor.RoutineSegment{");
+    var s: u32 = 0;
+    while (s < decl.segments_len) : (s += 1) {
+        const seg = ast.routine_segments.items[decl.segments_start + s];
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(seg.name));
+        try w.line(", .triggers = &[_]etch_descriptor.RoutineTrigger{");
+        try emitTriggerRun(w, ast, seg.triggers_start, seg.triggers_len);
+        try w.line("        }, .actions = &[_][]const u8{");
+        var a: u32 = 0;
+        while (a < seg.actions_len) : (a += 1) {
+            const action: ast_mod.NodeId = @bitCast(ast.extra.items[seg.actions_start + a]);
+            const rendered = try renderForEmit(gpa, ast, action);
+            defer gpa.free(rendered);
+            try w.print("            ", .{});
+            try emitZigStringLiteral(w, rendered);
+            try w.line(",");
+        }
+        try w.line("        }, .untils = &[_]etch_descriptor.RoutineTrigger{");
+        try emitTriggerRun(w, ast, seg.untils_start, seg.untils_len);
+        try w.line("        } },");
+    }
+    try w.line("    }, .interrupts = &[_]etch_descriptor.RoutineInterrupt{");
+    var it: u32 = 0;
+    while (it < decl.interrupts_len) : (it += 1) {
+        const intr = ast.routine_interrupts.items[decl.interrupts_start + it];
+        try w.print("        .{{ .event = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(intr.event_name));
+        try w.print(", .target = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(intr.target));
+        try w.printLine(", .is_pause = {} }},", .{intr.is_pause});
+    }
+    try w.line("    } } },");
+}
+
+fn emitTriggerRun(w: *Writer, ast: *const AstArena, start: u32, len: u32) CodegenError!void {
+    var t: u32 = 0;
+    while (t < len) : (t += 1) {
+        const trig = ast.routine_triggers.items[start + t];
+        const kind_tag = switch (trig.kind) {
+            .at_time => "at_time",
+            .after_segment => "after_segment",
+            .on_event => "on_event",
+        };
+        try w.print("            .{{ .kind = .{s}, .value = ", .{kind_tag});
+        try emitZigStringLiteral(w, ast.strings.slice(trig.value));
+        try w.line(" },");
+    }
+}
+
+/// Render an expression through the SHARED canonical renderer, mapping its
+/// fail-loud error into the codegen error set.
+fn renderForEmit(gpa: std.mem.Allocator, ast: *const AstArena, id: ast_mod.NodeId) CodegenError![]u8 {
+    return descriptor_mod.renderExprAlloc(gpa, ast, id) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+    };
 }
 
 /// Splice the shared `descriptor_types.zig` source into the generated file

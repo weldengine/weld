@@ -696,3 +696,46 @@ data BossDatabase: EnemySpec {
   goblin_king: { ..EnemyDatabase.goblin_warrior, hp: 400 },
 }
 ```
+
+## Routines (E4)
+
+The `etch-grammar.md` §8.2 example, adapted to the delivered argument
+surface (named call arguments are a pending E2-deferral ruling — see the
+brief's 2026-06-10 STOP, item 16):
+
+```etch
+routine BlacksmithDaily {
+  segment Working {
+    trigger: at 06:00 or after Sleeping
+    actions: use_smart_object("forge_anvil")
+    until: at 12:00 or on_event MealCallReceived
+  }
+
+  segment Lunch {
+    trigger: at 12:00 or after Working
+    actions: go_to("tavern") then use_smart_object("tavern_bench")
+    until: at 13:00
+  }
+
+  segment Sleeping {
+    trigger: at 22:00
+    actions: go_to("bed") then idle("sleeping")
+    until: at 06:00
+  }
+
+  on_threat_detected -> CombatBehavior
+  on_dialogue_request -> pause_segment
+}
+```
+
+Trigger alternative chains and a single-segment routine:
+
+```etch
+routine GuardNight {
+  segment Patrol {
+    trigger: at 20:00 or at 02:00 or on_event AlarmRaised
+    actions: go_to("wall") then idle("watch")
+    until: at 06:00 or on_event ShiftOver
+  }
+}
+```

@@ -28,6 +28,7 @@ const LevelBProgram = struct {
 /// the world-state corpus facade (no sidecar — nothing executes).
 const programs = [_]LevelBProgram{
     .{ .name = "p62_data_table", .source = @embedFile("programs/62_data_table.etch") },
+    .{ .name = "p63_routine_daily", .source = @embedFile("programs/63_routine_daily.etch") },
 };
 
 test "level-b serialized IR: interpreter build == cooked emit, byte-identical" {

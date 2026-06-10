@@ -42,6 +42,55 @@ pub const DataField = struct {
     is_spread: bool,
 };
 
+/// Kind of one routine trigger alternative (`etch-grammar.md` §8.2).
+pub const RoutineTriggerKind = enum { at_time, after_segment, on_event };
+
+/// One routine trigger alternative. `value` holds the `DD:DD` time lexeme,
+/// the referenced segment name, or the event type name, per kind.
+pub const RoutineTrigger = struct {
+    kind: RoutineTriggerKind,
+    value: []const u8,
+};
+
+/// One routine segment, clauses in the §8.2 fixed order. Actions are
+/// canonical-rendered call expressions.
+pub const RoutineSegment = struct {
+    name: []const u8,
+    triggers: []const RoutineTrigger,
+    actions: []const []const u8,
+    untils: []const RoutineTrigger,
+};
+
+/// One `on_xxx -> target` routine interrupt.
+pub const RoutineInterrupt = struct {
+    event: []const u8,
+    target: []const u8,
+    is_pause: bool,
+};
+
+/// `routine` descriptor (`etch-ast-ir.md` §3.5: `Routine { segments }`).
+pub const Routine = struct {
+    name: []const u8,
+    segments: []const RoutineSegment,
+    interrupts: []const RoutineInterrupt,
+};
+
+/// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
+/// sequence per program so the canonical dump follows top-level
+/// declaration order across construct kinds (engraved form).
+pub const Descriptor = union(enum) {
+    data: Data,
+    routine: Routine,
+
+    /// Canonical serialization of one descriptor, dispatched on its kind.
+    pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+        switch (self) {
+            .data => |d| try writeData(d, gpa, out),
+            .routine => |r| try writeRoutine(r, gpa, out),
+        }
+    }
+};
+
 fn appendFmt(gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
     const line = try std.fmt.allocPrint(gpa, fmt, args);
     defer gpa.free(line);
@@ -64,6 +113,74 @@ pub fn writeData(d: Data, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u
         try out.appendSlice(gpa, "  }\n");
     }
     try out.appendSlice(gpa, "}\n");
+}
+
+fn triggerKindText(kind: RoutineTriggerKind) []const u8 {
+    return switch (kind) {
+        .at_time => "at",
+        .after_segment => "after",
+        .on_event => "on_event",
+    };
+}
+
+/// Canonical serialization of one `routine` descriptor.
+pub fn writeRoutine(r: Routine, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "routine {s} {{\n", .{r.name});
+    for (r.segments) |seg| {
+        try appendFmt(gpa, out, "  segment {s} {{\n", .{seg.name});
+        for (seg.triggers) |t| {
+            try appendFmt(gpa, out, "    trigger {s} {s}\n", .{ triggerKindText(t.kind), t.value });
+        }
+        for (seg.actions) |a| {
+            try appendFmt(gpa, out, "    action {s}\n", .{a});
+        }
+        for (seg.untils) |t| {
+            try appendFmt(gpa, out, "    until {s} {s}\n", .{ triggerKindText(t.kind), t.value });
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (r.interrupts) |intr| {
+        try appendFmt(gpa, out, "  interrupt {s} -> {s}\n", .{ intr.event, intr.target });
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+test "writeRoutine canonical form is stable" {
+    const gpa = std.testing.allocator;
+    const r: Routine = .{
+        .name = "BlacksmithDaily",
+        .segments = &.{
+            .{
+                .name = "Working",
+                .triggers = &.{
+                    .{ .kind = .at_time, .value = "06:00" },
+                    .{ .kind = .after_segment, .value = "Sleeping" },
+                },
+                .actions = &.{"use_smart_object(\"forge_anvil\")"},
+                .untils = &.{
+                    .{ .kind = .on_event, .value = "MealCallReceived" },
+                },
+            },
+        },
+        .interrupts = &.{
+            .{ .event = "on_dialogue_request", .target = "pause_segment", .is_pause = true },
+        },
+    };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try writeRoutine(r, gpa, &out);
+    try std.testing.expectEqualStrings(
+        \\routine BlacksmithDaily {
+        \\  segment Working {
+        \\    trigger at 06:00
+        \\    trigger after Sleeping
+        \\    action use_smart_object("forge_anvil")
+        \\    until on_event MealCallReceived
+        \\  }
+        \\  interrupt on_dialogue_request -> pause_segment
+        \\}
+        \\
+    , out.items);
 }
 
 test "writeData canonical form is stable" {
