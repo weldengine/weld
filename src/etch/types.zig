@@ -169,7 +169,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -201,9 +201,9 @@ fn containsUppercase(s: []const u8) bool {
 /// fn-targeting `@native` / `@shader_fn` are not modelled yet), so only
 /// `@custom` is accepted there; `event` joins with the `event` construct
 /// (M0.8 E3); other construct targets arrive with their constructs.
-/// `data` joins with the E4 data table (no builtin annotation targets it —
-/// only `.custom` is accepted there, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data };
+/// `data` / `routine` join with the E4 Level-B constructs (no builtin
+/// annotation targets them — only `.custom` is accepted, like `function`).
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -311,6 +311,7 @@ pub const TypeChecker = struct {
         try tc.validateTypeAliases();
         try tc.validateImpls();
         try tc.validateDataDecls();
+        try tc.validateRoutineDecls();
         try tc.buildTags();
         try tc.pass2Resolve();
     }
@@ -560,6 +561,127 @@ pub const TypeChecker = struct {
         try done.put(self.gpa, key, {});
     }
 
+    // ─── Routines (M0.8 E4, `etch-validation-ecs.md` §9) ─────────────────
+
+    /// Validate every `routine` once all symbols are known (M0.8 E4):
+    /// E1520 empty routine, E1521 duplicate segment names, E1522/E1523
+    /// malformed trigger/until times (HH < 24, MM < 60 — the only semantic
+    /// content left after the parse-enforced §8.2 forms), E1524 `after`
+    /// segment references, E1525 `on_event` event types, E1526 interrupt
+    /// targets (a declared behavior or `pause_segment`), E1527 action
+    /// return types (a routine action calls a void fn). The temporal-logic
+    /// heuristics (W1520/W1521) are deferred per validation-ecs §9.3
+    /// (Phase 2+).
+    fn validateRoutineDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .routine_decl) continue;
+            try self.validateRoutine(self.arena.routine_decls.items[datas[i]]);
+        }
+    }
+
+    fn validateRoutine(self: *TypeChecker, decl: ast_mod.RoutineDecl) !void {
+        const routine_name = self.arena.strings.slice(decl.name);
+        if (decl.segments_len == 0) {
+            const span = self.symbols.get(decl.name).?.item_id;
+            try self.emit(.routine_empty_segments, .error_, self.arena.itemSpan(span), "routine '{s}' has no segments", .{routine_name});
+        }
+        var seen_names: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer seen_names.deinit(self.gpa);
+        var s: u32 = 0;
+        while (s < decl.segments_len) : (s += 1) {
+            const seg = self.arena.routine_segments.items[decl.segments_start + s];
+            const gop = try seen_names.getOrPut(self.gpa, seg.name);
+            if (gop.found_existing) {
+                try self.emit(.duplicate_segment_name, .error_, seg.span, "duplicate segment name '{s}' in routine '{s}'", .{ self.arena.strings.slice(seg.name), routine_name });
+            }
+        }
+        s = 0;
+        while (s < decl.segments_len) : (s += 1) {
+            const seg = self.arena.routine_segments.items[decl.segments_start + s];
+            try self.validateTriggerRun(decl, seg.triggers_start, seg.triggers_len, .trigger_invalid);
+            try self.validateTriggerRun(decl, seg.untils_start, seg.untils_len, .until_invalid);
+            var a: u32 = 0;
+            while (a < seg.actions_len) : (a += 1) {
+                const action: NodeId = @bitCast(self.arena.extra.items[seg.actions_start + a]);
+                try self.validateRoutineAction(action);
+            }
+        }
+        var it: u32 = 0;
+        while (it < decl.interrupts_len) : (it += 1) {
+            const intr = self.arena.routine_interrupts.items[decl.interrupts_start + it];
+            if (intr.is_pause) continue;
+            if (self.symbols.get(intr.target)) |sym| {
+                if (sym.kind != .behavior_) {
+                    try self.emit(.interrupt_target_invalid, .error_, intr.span, "interrupt target '{s}' is not a behavior (or 'pause_segment')", .{self.arena.strings.slice(intr.target)});
+                }
+            } else {
+                try self.emit(.interrupt_target_invalid, .error_, intr.span, "interrupt target '{s}' references no declared behavior (or 'pause_segment')", .{self.arena.strings.slice(intr.target)});
+            }
+        }
+    }
+
+    /// Validate one trigger/until alternative run: `at HH:MM` time ranges
+    /// (E1522/E1523 per `code`), `after Segment` references (E1524),
+    /// `on_event T` event types (E1525).
+    fn validateTriggerRun(self: *TypeChecker, decl: ast_mod.RoutineDecl, start: u32, len: u32, code: DiagnosticCode) !void {
+        var t: u32 = 0;
+        while (t < len) : (t += 1) {
+            const trig = self.arena.routine_triggers.items[start + t];
+            switch (trig.kind) {
+                .at_time => {
+                    const lex = self.arena.strings.slice(trig.value); // "HH:MM" by lexing
+                    const hh = (lex[0] - '0') * 10 + (lex[1] - '0');
+                    const mm = (lex[3] - '0') * 10 + (lex[4] - '0');
+                    if (hh > 23 or mm > 59) {
+                        try self.emit(code, .error_, trig.span, "time literal '{s}' is out of range (hours 00-23, minutes 00-59)", .{lex});
+                    }
+                },
+                .after_segment => {
+                    var found = false;
+                    var s: u32 = 0;
+                    while (s < decl.segments_len) : (s += 1) {
+                        if (self.arena.routine_segments.items[decl.segments_start + s].name == trig.value) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        try self.emit(.segment_reference_not_found, .error_, trig.span, "'after {s}' references no segment of this routine", .{self.arena.strings.slice(trig.value)});
+                    }
+                },
+                .on_event => {
+                    if (self.symbols.get(trig.value)) |sym| {
+                        if (sym.kind != .event_) {
+                            try self.emit(.event_type_unknown, .error_, trig.span, "'on_event {s}': '{s}' is not an event", .{ self.arena.strings.slice(trig.value), self.arena.strings.slice(trig.value) });
+                        }
+                    } else {
+                        try self.emit(.event_type_unknown, .error_, trig.span, "'on_event {s}' references no declared event", .{self.arena.strings.slice(trig.value)});
+                    }
+                },
+            }
+        }
+    }
+
+    /// Validate one routine action (E1527 + the standard call checks): the
+    /// call is synthed with no rule context (arity / arg types / unknown
+    /// callee via the regular paths), then the callee fn must be void.
+    fn validateRoutineAction(self: *TypeChecker, action: NodeId) !void {
+        _ = try self.synthExprE(action, null);
+        // Parse enforced `fn_call`; resolve the callee's declared return.
+        const call = self.arena.call_exprs.items[self.arena.exprData(action)];
+        if (self.arena.exprKind(call.callee) != .ident) return;
+        const callee_name: StringId = self.arena.exprData(call.callee);
+        const sym = self.symbols.get(callee_name) orelse return; // E0102 already emitted by synth
+        if (sym.kind != .fn_) return;
+        const fn_decl = self.arena.fn_decls.items[self.arena.itemData(sym.item_id)];
+        if (!fn_decl.return_type.isNone()) {
+            try self.emit(.action_invalid_return, .error_, self.arena.exprSpan(action), "a routine action must call a void fn ('{s}' declares a return type)", .{self.arena.strings.slice(callee_name)});
+        }
+    }
+
     // ─── Pass 1 ──────────────────────────────────────────────────────────
 
     fn pass1Collect(self: *TypeChecker) !void {
@@ -667,6 +789,16 @@ pub const TypeChecker = struct {
                     const decl = self.arena.data_decls.items[data];
                     try self.registerSymbol(.data_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .data);
+                },
+                .routine_decl => {
+                    // A `routine` (M0.8 E4 Level B) registers its name; the
+                    // body (segments, triggers, interrupts, actions) is
+                    // validated in `validateRoutineDecls` once all symbols
+                    // are known (events / behaviors / action fns may be
+                    // declared after the routine).
+                    const decl = self.arena.routine_decls.items[data];
+                    try self.registerSymbol(.routine_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .routine);
                 },
                 else => {}, // forward-compatible: unknown items ignored
             }
@@ -5379,4 +5511,146 @@ test "data table: E0101 collision with another top-level symbol (M0.8 E4)" {
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .duplicate_symbol);
+}
+
+test "routine: a fully valid routine is clean (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\event MealCallReceived { }
+        \\fn go_to(place: string) { }
+        \\fn idle(anim: string) { }
+        \\routine BlacksmithDaily {
+        \\  segment Working {
+        \\    trigger: at 06:00 or after Sleeping
+        \\    actions: go_to("forge")
+        \\    until: at 12:00 or on_event MealCallReceived
+        \\  }
+        \\  segment Sleeping {
+        \\    trigger: at 22:00
+        \\    actions: go_to("bed") then idle("sleeping")
+        \\    until: at 06:00
+        \\  }
+        \\  on_dialogue_request -> pause_segment
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
+}
+
+test "routine: E1520 empty + E1521 duplicate segment names (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var empty = try parseAndCheck(gpa,
+        \\routine Empty { }
+    );
+    defer empty.deinit(gpa);
+    try expectAnyCode(empty.diagnostics.items, .routine_empty_segments);
+
+    var dup = try parseAndCheck(gpa,
+        \\fn go_to(place: string) { }
+        \\routine R {
+        \\  segment A { trigger: at 06:00
+        \\    actions: go_to("x")
+        \\    until: at 07:00 }
+        \\  segment A { trigger: at 08:00
+        \\    actions: go_to("y")
+        \\    until: at 09:00 }
+        \\}
+    );
+    defer dup.deinit(gpa);
+    try expectAnyCode(dup.diagnostics.items, .duplicate_segment_name);
+}
+
+test "routine: E1522 trigger / E1523 until time out of range (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\fn go_to(place: string) { }
+        \\routine R {
+        \\  segment A {
+        \\    trigger: at 25:00
+        \\    actions: go_to("x")
+        \\    until: at 12:75
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .trigger_invalid);
+    try expectAnyCode(result.diagnostics.items, .until_invalid);
+}
+
+test "routine: E1524 unknown 'after' segment reference (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\fn go_to(place: string) { }
+        \\routine R {
+        \\  segment A {
+        \\    trigger: after Missing
+        \\    actions: go_to("x")
+        \\    until: at 12:00
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .segment_reference_not_found);
+}
+
+test "routine: E1525 on_event references no declared event (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\fn go_to(place: string) { }
+        \\component NotAnEvent { x: float = 0.0 }
+        \\routine R {
+        \\  segment A {
+        \\    trigger: on_event Missing
+        \\    actions: go_to("x")
+        \\    until: on_event NotAnEvent
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    var count: usize = 0;
+    for (result.diagnostics.items) |d| {
+        if (d.code == .event_type_unknown) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "routine: E1526 interrupt target neither behavior nor pause_segment (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\fn go_to(place: string) { }
+        \\component Health { current: float = 0.0 }
+        \\routine R {
+        \\  segment A {
+        \\    trigger: at 06:00
+        \\    actions: go_to("x")
+        \\    until: at 12:00
+        \\  }
+        \\  on_threat -> Missing
+        \\  on_panic -> Health
+        \\}
+    );
+    defer result.deinit(gpa);
+    var count: usize = 0;
+    for (result.diagnostics.items) |d| {
+        if (d.code == .interrupt_target_invalid) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "routine: E1527 action calling a non-void fn + E0102 unknown action (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\fn returns_int() -> int { 42 }
+        \\routine R {
+        \\  segment A {
+        \\    trigger: at 06:00
+        \\    actions: returns_int() then unknown_fn()
+        \\    until: at 12:00
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .action_invalid_return);
+    try expectAnyCode(result.diagnostics.items, .undefined_symbol);
 }

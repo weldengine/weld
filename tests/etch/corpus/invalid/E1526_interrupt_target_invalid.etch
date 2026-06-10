@@ -1,0 +1,10 @@
+fn go_to(place: string) { }
+
+routine R {
+  segment A {
+    trigger: at 06:00
+    actions: go_to("x")
+    until: at 12:00
+  }
+  on_threat -> Missing
+}

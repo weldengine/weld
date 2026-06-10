@@ -1,0 +1,9 @@
+fn go_to(place: string) { }
+
+routine R {
+  segment A {
+    trigger: after Missing
+    actions: go_to("x")
+    until: at 12:00
+  }
+}

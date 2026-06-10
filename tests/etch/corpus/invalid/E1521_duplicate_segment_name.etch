@@ -1,0 +1,14 @@
+fn go_to(place: string) { }
+
+routine R {
+  segment A {
+    trigger: at 06:00
+    actions: go_to("x")
+    until: at 07:00
+  }
+  segment A {
+    trigger: at 08:00
+    actions: go_to("y")
+    until: at 09:00
+  }
+}

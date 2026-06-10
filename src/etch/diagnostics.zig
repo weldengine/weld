@@ -74,6 +74,16 @@ pub const DiagnosticCode = enum {
     resource_expected_in_when, // S3 — E1213 ResourceExpectedInWhen
     non_exhaustive_match, // M0.8 — E1230 NonExhaustiveMatch
 
+    // ── routine (E1520-E1539, M0.8 E4 — etch-validation-ecs.md §9) ──
+    routine_empty_segments, // M0.8 E4 — E1520 RoutineEmptySegments
+    duplicate_segment_name, // M0.8 E4 — E1521 DuplicateSegmentName
+    trigger_invalid, // M0.8 E4 — E1522 TriggerInvalid
+    until_invalid, // M0.8 E4 — E1523 UntilInvalid
+    segment_reference_not_found, // M0.8 E4 — E1524 SegmentReferenceNotFound
+    event_type_unknown, // M0.8 E4 — E1525 EventTypeUnknown
+    interrupt_target_invalid, // M0.8 E4 — E1526 InterruptTargetInvalid
+    action_invalid_return, // M0.8 E4 — E1527 ActionInvalidReturn
+
     // ── data tables (E1760-E1779, M0.8 E4 — etch-validation-ecs.md §22) ──
     data_empty_entries, // M0.8 E4 — E1760 DataEmptyEntries
     duplicate_entry_id, // M0.8 E4 — E1761 DuplicateEntryId
@@ -118,6 +128,14 @@ pub const DiagnosticCode = enum {
             .unknown_tag => "E1212",
             .resource_expected_in_when => "E1213",
             .non_exhaustive_match => "E1230",
+            .routine_empty_segments => "E1520",
+            .duplicate_segment_name => "E1521",
+            .trigger_invalid => "E1522",
+            .until_invalid => "E1523",
+            .segment_reference_not_found => "E1524",
+            .event_type_unknown => "E1525",
+            .interrupt_target_invalid => "E1526",
+            .action_invalid_return => "E1527",
             .data_empty_entries => "E1760",
             .duplicate_entry_id => "E1761",
             .entry_type_mismatch => "E1762",
@@ -163,6 +181,14 @@ pub const DiagnosticCode = enum {
             .unknown_tag => "UnknownTag",
             .resource_expected_in_when => "ResourceExpectedInWhen",
             .non_exhaustive_match => "NonExhaustiveMatch",
+            .routine_empty_segments => "RoutineEmptySegments",
+            .duplicate_segment_name => "DuplicateSegmentName",
+            .trigger_invalid => "TriggerInvalid",
+            .until_invalid => "UntilInvalid",
+            .segment_reference_not_found => "SegmentReferenceNotFound",
+            .event_type_unknown => "EventTypeUnknown",
+            .interrupt_target_invalid => "InterruptTargetInvalid",
+            .action_invalid_return => "ActionInvalidReturn",
             .data_empty_entries => "DataEmptyEntries",
             .duplicate_entry_id => "DuplicateEntryId",
             .entry_type_mismatch => "EntryTypeMismatch",
