@@ -74,6 +74,17 @@ pub const DiagnosticCode = enum {
     resource_expected_in_when, // S3 — E1213 ResourceExpectedInWhen
     non_exhaustive_match, // M0.8 — E1230 NonExhaustiveMatch
 
+    // ── data tables (E1760-E1779, M0.8 E4 — etch-validation-ecs.md §22) ──
+    data_empty_entries, // M0.8 E4 — E1760 DataEmptyEntries
+    duplicate_entry_id, // M0.8 E4 — E1761 DuplicateEntryId
+    entry_type_mismatch, // M0.8 E4 — E1762 EntryTypeMismatch
+    entry_field_unknown, // M0.8 E4 — E1763 EntryFieldUnknown
+    entry_field_type_invalid, // M0.8 E4 — E1764 EntryFieldTypeInvalid
+    entry_field_required_missing, // M0.8 E4 — E1765 EntryFieldRequiredMissing
+    spread_reference_not_found, // M0.8 E4 — E1766 SpreadReferenceNotFound
+    spread_cycle, // M0.8 E4 — E1767 SpreadCycle
+    id_invalid_format, // M0.8 E4 — E1768 IdInvalidFormat
+
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
@@ -107,6 +118,15 @@ pub const DiagnosticCode = enum {
             .unknown_tag => "E1212",
             .resource_expected_in_when => "E1213",
             .non_exhaustive_match => "E1230",
+            .data_empty_entries => "E1760",
+            .duplicate_entry_id => "E1761",
+            .entry_type_mismatch => "E1762",
+            .entry_field_unknown => "E1763",
+            .entry_field_type_invalid => "E1764",
+            .entry_field_required_missing => "E1765",
+            .spread_reference_not_found => "E1766",
+            .spread_cycle => "E1767",
+            .id_invalid_format => "E1768",
         };
     }
 
@@ -143,6 +163,15 @@ pub const DiagnosticCode = enum {
             .unknown_tag => "UnknownTag",
             .resource_expected_in_when => "ResourceExpectedInWhen",
             .non_exhaustive_match => "NonExhaustiveMatch",
+            .data_empty_entries => "DataEmptyEntries",
+            .duplicate_entry_id => "DuplicateEntryId",
+            .entry_type_mismatch => "EntryTypeMismatch",
+            .entry_field_unknown => "EntryFieldUnknown",
+            .entry_field_type_invalid => "EntryFieldTypeInvalid",
+            .entry_field_required_missing => "EntryFieldRequiredMissing",
+            .spread_reference_not_found => "SpreadReferenceNotFound",
+            .spread_cycle => "SpreadCycle",
+            .id_invalid_format => "IdInvalidFormat",
         };
     }
 };

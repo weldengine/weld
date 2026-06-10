@@ -1,0 +1,7 @@
+struct Item {
+  value: int
+}
+
+data Table: Item {
+  a: { },
+}

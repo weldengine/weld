@@ -1,0 +1,31 @@
+// Data table (M0.8 E4, etch-grammar.md §14): typed entries, defaults from
+// the entry struct, spread inheritance between entries (same table and
+// cross-table with the same entry type).
+enum Rarity {
+  common,
+  uncommon,
+  rare,
+}
+
+struct Item {
+  rarity: Rarity = .common
+  weight: float = 0.0
+  value: int
+}
+
+data ItemDatabase: Item {
+  iron_sword: {
+    rarity: .uncommon,
+    weight: 3.5,
+    value: 50,
+  },
+  iron_sword_enchanted: {
+    ..ItemDatabase.iron_sword,
+    value: 120,
+  },
+  pebble: { value: 0 },
+}
+
+data StarterChest: Item {
+  starter_sword: { ..ItemDatabase.iron_sword, value: 25 },
+}

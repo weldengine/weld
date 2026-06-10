@@ -1,0 +1,7 @@
+struct Item {
+  value: int = 0
+}
+
+data Table: Item {
+  a: { ..Table.missing },
+}

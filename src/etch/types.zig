@@ -169,7 +169,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -184,6 +184,16 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
     return (@as(u64, type_name) << 32) | @as(u64, method_name);
 }
 
+/// `true` if `s` contains an ASCII uppercase letter — an `E1768
+/// IdInvalidFormat` data-entry id check (ids are snake_case IDENTs,
+/// `etch-validation-ecs.md` §22.2; M0.8 E4).
+fn containsUppercase(s: []const u8) bool {
+    for (s) |c| {
+        if (c >= 'A' and c <= 'Z') return true;
+    }
+    return false;
+}
+
 /// Target categories the annotation-applicability check distinguishes
 /// (M0.8 D-S3-annot-applicability). E1 had `component` / `resource` / `rule`
 /// items and their `field`s; `function` joins with top-level `fn` (E2). No
@@ -191,7 +201,9 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
 /// fn-targeting `@native` / `@shader_fn` are not modelled yet), so only
 /// `@custom` is accepted there; `event` joins with the `event` construct
 /// (M0.8 E3); other construct targets arrive with their constructs.
-const AnnotTarget = enum { component, resource, rule, field, function, event };
+/// `data` joins with the E4 data table (no builtin annotation targets it —
+/// only `.custom` is accepted there, like `function`).
+const AnnotTarget = enum { component, resource, rule, field, function, event, data };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -298,6 +310,7 @@ pub const TypeChecker = struct {
         try tc.pass1Collect();
         try tc.validateTypeAliases();
         try tc.validateImpls();
+        try tc.validateDataDecls();
         try tc.buildTags();
         try tc.pass2Resolve();
     }
@@ -321,6 +334,230 @@ pub const TypeChecker = struct {
             }
             try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.target), "type alias '{s}' does not resolve to a known type", .{self.arena.strings.slice(decl.name)});
         }
+    }
+
+    // ─── Data tables (M0.8 E4, `etch-validation-ecs.md` §22) ─────────────
+
+    /// Identity of one `(table, entry)` pair for the spread graph.
+    const DataEntryRef = struct { table: u32, entry: u32 };
+
+    /// Validate every `data` table once all symbols are known (M0.8 E4):
+    /// E1760 empty table, E1761 duplicate entry ids, E1762 entry-type /
+    /// spread-type mismatch, E1763 unknown entry field, E1764 field value
+    /// type, E1765 required field missing (spread-less entries only — a
+    /// same-type spread chain provides every field of its source), E1766
+    /// spread reference, E1767 spread cycles (DFS), E1768 id format
+    /// (snake_case IDENT). Runs between pass 1 and pass 2 — entry values are
+    /// self-contained const-shaped expressions typed with no rule context.
+    fn validateDataDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .data_decl) continue;
+            const table_idx = datas[i];
+            try self.validateDataTable(table_idx);
+        }
+        // Spread cycle detection (E1767) over the cross-table entry graph,
+        // after per-entry validation so unresolved spreads are already
+        // reported (the DFS resolves quietly and skips them).
+        var visiting: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer visiting.deinit(self.gpa);
+        var done: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer done.deinit(self.gpa);
+        i = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .data_decl) continue;
+            const table_idx = datas[i];
+            const decl = self.arena.data_decls.items[table_idx];
+            var e: u32 = 0;
+            while (e < decl.entries_len) : (e += 1) {
+                try self.dataSpreadDfs(.{ .table = table_idx, .entry = decl.entries_start + e }, &visiting, &done);
+            }
+        }
+    }
+
+    fn validateDataTable(self: *TypeChecker, table_idx: u32) !void {
+        const decl = self.arena.data_decls.items[table_idx];
+        const table_name = self.arena.strings.slice(decl.name);
+        if (decl.entries_len == 0) {
+            try self.emit(.data_empty_entries, .error_, decl.entry_type_span, "data table '{s}' has no entries", .{table_name});
+        }
+        // Entry type: must resolve to a declared struct. Unknown → E0102;
+        // known-but-not-a-struct → E1762 (the table itself cannot conform).
+        var entry_struct: ?ast_mod.StructDecl = null;
+        if (self.symbols.get(decl.entry_type)) |sym| {
+            if (sym.kind == .struct_) {
+                entry_struct = self.arena.struct_decls.items[self.arena.itemData(sym.item_id)];
+            } else {
+                try self.emit(.entry_type_mismatch, .error_, decl.entry_type_span, "data entry type '{s}' is not a struct", .{self.arena.strings.slice(decl.entry_type)});
+            }
+        } else {
+            try self.emit(.undefined_symbol, .error_, decl.entry_type_span, "data entry type '{s}' does not resolve to a declared struct", .{self.arena.strings.slice(decl.entry_type)});
+        }
+
+        var seen_ids: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer seen_ids.deinit(self.gpa);
+        var e: u32 = 0;
+        while (e < decl.entries_len) : (e += 1) {
+            const entry = self.arena.data_entries.items[decl.entries_start + e];
+            const id_slice = self.arena.strings.slice(entry.id);
+            // E1768 — entry ids are snake_case IDENTs (`etch-validation-ecs.md`
+            // §22.2): a TYPE_IDENT-shaped id or any uppercase letter fails.
+            if (entry.id_pascal or containsUppercase(id_slice)) {
+                try self.emit(.id_invalid_format, .error_, entry.span, "data entry id '{s}' must be a snake_case identifier", .{id_slice});
+            }
+            const gop = try seen_ids.getOrPut(self.gpa, entry.id);
+            if (gop.found_existing) {
+                try self.emit(.duplicate_entry_id, .error_, entry.span, "duplicate data entry id '{s}' in table '{s}'", .{ id_slice, table_name });
+            }
+            var has_spread = false;
+            var f: u32 = 0;
+            while (f < entry.fields_len) : (f += 1) {
+                const field = self.arena.struct_lit_fields.items[entry.fields_start + f];
+                if (field.name == 0) {
+                    has_spread = true;
+                    _ = try self.resolveDataSpread(decl, field.value, true);
+                    continue;
+                }
+                try self.validateDataEntryField(decl, entry_struct, field);
+            }
+            // E1765 — required fields (no declared default) must be provided
+            // by a spread-less entry; a same-type spread chain (E1762-checked)
+            // provides every field of its source entry.
+            if (!has_spread) {
+                if (entry_struct) |sd| {
+                    var sf: u32 = 0;
+                    while (sf < sd.fields_len) : (sf += 1) {
+                        const sfield = self.arena.fields.items[sd.fields_start + sf];
+                        if (!sfield.default_value.isNone()) continue;
+                        var provided = false;
+                        f = 0;
+                        while (f < entry.fields_len) : (f += 1) {
+                            if (self.arena.struct_lit_fields.items[entry.fields_start + f].name == sfield.name) {
+                                provided = true;
+                                break;
+                            }
+                        }
+                        if (!provided) {
+                            try self.emit(.entry_field_required_missing, .error_, entry.span, "data entry '{s}' is missing required field '{s}' (no declared default)", .{ id_slice, self.arena.strings.slice(sfield.name) });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Validate one named field of a data entry against the declared entry
+    /// struct: E1763 unknown field, E1764 value type. Value typing mirrors
+    /// `checkStructLitAgainst` (check mode for `.variant` shorthands and
+    /// anonymous `.{ … }` values, synth otherwise).
+    fn validateDataEntryField(self: *TypeChecker, decl: ast_mod.DataDecl, entry_struct: ?ast_mod.StructDecl, field: ast_mod.StructLitField) !void {
+        const sd = entry_struct orelse return; // type already reported
+        var declared: ?ResolvedType = null;
+        var sf: u32 = 0;
+        while (sf < sd.fields_len) : (sf += 1) {
+            const sfield = self.arena.fields.items[sd.fields_start + sf];
+            if (sfield.name == field.name) {
+                declared = self.namedTypeToResolved(sfield.type_node);
+                break;
+            }
+        }
+        const d = declared orelse {
+            try self.emit(.entry_field_unknown, .error_, self.arena.exprSpan(field.value), "entry type '{s}' has no field '{s}'", .{ self.arena.strings.slice(decl.entry_type), self.arena.strings.slice(field.name) });
+            return;
+        };
+        const actual = blk: {
+            if (d == .enum_t and self.arena.exprKind(field.value) == .tag_path) {
+                break :blk try self.checkEnumShorthand(field.value, d.enum_t);
+            }
+            if (d == .struct_t and self.arena.exprKind(field.value) == .struct_lit) {
+                const inner_data = self.arena.exprData(field.value);
+                if (self.arena.struct_lits.items[inner_data].type_name == 0) {
+                    break :blk try self.checkStructLitAgainst(field.value, inner_data, d.struct_t, null);
+                }
+            }
+            break :blk try self.synthExprE(field.value, null);
+        };
+        const mismatch = switch (d) {
+            .builtin => |db| actual == .builtin and !self.literalTypeFits(db, field.value, actual.builtin),
+            .struct_t => |dn| actual == .struct_t and actual.struct_t != dn,
+            .enum_t => |dn| switch (actual) {
+                .enum_t => |an| an != dn,
+                .builtin => true,
+                else => false, // `.unknown` already reported upstream
+            },
+            else => false,
+        };
+        if (mismatch) {
+            try self.emit(.entry_field_type_invalid, .error_, self.arena.exprSpan(field.value), "data entry field '{s}' value type does not match its declared type", .{self.arena.strings.slice(field.name)});
+        }
+    }
+
+    /// Resolve a spread value `..Table.entry` to its `(table, entry)` pair.
+    /// With `emit_diags`, reports E1766 (shape / unknown table / unknown
+    /// entry) and E1762 (spread source table of a different entry type);
+    /// without, resolves quietly (the cycle DFS re-walks resolved edges).
+    fn resolveDataSpread(self: *TypeChecker, decl: ast_mod.DataDecl, value: NodeId, emit_diags: bool) !?DataEntryRef {
+        const span = self.arena.exprSpan(value);
+        if (self.arena.exprKind(value) != .field_access) {
+            if (emit_diags) try self.emit(.spread_reference_not_found, .error_, span, "spread must reference a data entry as 'Table.entry'", .{});
+            return null;
+        }
+        const fa = self.arena.field_accesses.items[self.arena.exprData(value)];
+        if (self.arena.exprKind(fa.receiver) != .path) {
+            if (emit_diags) try self.emit(.spread_reference_not_found, .error_, span, "spread must reference a data entry as 'Table.entry'", .{});
+            return null;
+        }
+        const src_table_name: StringId = self.arena.exprData(fa.receiver);
+        const sym = self.symbols.get(src_table_name) orelse {
+            if (emit_diags) try self.emit(.spread_reference_not_found, .error_, span, "spread references unknown data table '{s}'", .{self.arena.strings.slice(src_table_name)});
+            return null;
+        };
+        if (sym.kind != .data_) {
+            if (emit_diags) try self.emit(.spread_reference_not_found, .error_, span, "spread source '{s}' is not a data table", .{self.arena.strings.slice(src_table_name)});
+            return null;
+        }
+        const src_idx = self.arena.itemData(sym.item_id);
+        const src = self.arena.data_decls.items[src_idx];
+        if (src.entry_type != decl.entry_type) {
+            if (emit_diags) try self.emit(.entry_type_mismatch, .error_, span, "spread source table '{s}' has entry type '{s}', expected '{s}'", .{ self.arena.strings.slice(src_table_name), self.arena.strings.slice(src.entry_type), self.arena.strings.slice(decl.entry_type) });
+            return null;
+        }
+        var e: u32 = 0;
+        while (e < src.entries_len) : (e += 1) {
+            if (self.arena.data_entries.items[src.entries_start + e].id == fa.field_name) {
+                return .{ .table = src_idx, .entry = src.entries_start + e };
+            }
+        }
+        if (emit_diags) try self.emit(.spread_reference_not_found, .error_, span, "data table '{s}' has no entry '{s}'", .{ self.arena.strings.slice(src_table_name), self.arena.strings.slice(fa.field_name) });
+        return null;
+    }
+
+    /// DFS over the spread graph (E1767). `visiting` marks the current path
+    /// (a revisit is a cycle); `done` marks settled entries. Keys pack the
+    /// table slab index and the global entry index.
+    fn dataSpreadDfs(self: *TypeChecker, ref: DataEntryRef, visiting: *std.AutoHashMapUnmanaged(u64, void), done: *std.AutoHashMapUnmanaged(u64, void)) !void {
+        const key = (@as(u64, ref.table) << 32) | @as(u64, ref.entry);
+        if (done.contains(key)) return;
+        if (visiting.contains(key)) {
+            const entry = self.arena.data_entries.items[ref.entry];
+            try self.emit(.spread_cycle, .error_, entry.span, "data entry '{s}' participates in a spread cycle", .{self.arena.strings.slice(entry.id)});
+            return;
+        }
+        try visiting.put(self.gpa, key, {});
+        const decl = self.arena.data_decls.items[ref.table];
+        const entry = self.arena.data_entries.items[ref.entry];
+        var f: u32 = 0;
+        while (f < entry.fields_len) : (f += 1) {
+            const field = self.arena.struct_lit_fields.items[entry.fields_start + f];
+            if (field.name != 0) continue;
+            if (try self.resolveDataSpread(decl, field.value, false)) |next| {
+                try self.dataSpreadDfs(next, visiting, done);
+            }
+        }
+        _ = visiting.remove(key);
+        try done.put(self.gpa, key, {});
     }
 
     // ─── Pass 1 ──────────────────────────────────────────────────────────
@@ -421,6 +658,15 @@ pub const TypeChecker = struct {
                     // in `validateTypeAliases` once all symbols are known.
                     const decl = self.arena.type_alias_decls.items[data];
                     try self.registerSymbol(.type_alias, decl.name, item_id, span);
+                },
+                .data_decl => {
+                    // A `data` table (M0.8 E4 Level B) registers its name; the
+                    // table body (entries, spreads, entry-type conformance) is
+                    // validated in `validateDataDecls` once all symbols are
+                    // known (the entry type may be declared after the table).
+                    const decl = self.arena.data_decls.items[data];
+                    try self.registerSymbol(.data_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .data);
                 },
                 else => {}, // forward-compatible: unknown items ignored
             }
@@ -4931,4 +5177,206 @@ test "anonymous struct literal resolves in check mode, rejected without an expec
     );
     defer podcomp.deinit(gpa);
     try expectAnyCode(podcomp.diagnostics.items, .undefined_symbol);
+}
+
+test "data table: a fully valid table with spread is clean (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\enum Rarity { common, uncommon, rare }
+        \\struct Item {
+        \\  rarity: Rarity = .common
+        \\  weight: float = 0.0
+        \\  value: int
+        \\}
+        \\data ItemDatabase: Item {
+        \\  iron_sword: { rarity: .uncommon, weight: 3.5, value: 50 },
+        \\  iron_sword_enchanted: { ..ItemDatabase.iron_sword, value: 120 },
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
+}
+
+test "data table: E1760 empty entries + E0102 unknown entry type (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\data EmptyTable: Missing { }
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .data_empty_entries);
+    try expectAnyCode(result.diagnostics.items, .undefined_symbol);
+}
+
+test "data table: E1762 entry type is not a struct (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\component Health { current: float = 100.0 }
+        \\data BadTable: Health {
+        \\  a: { current: 1.0 },
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .entry_type_mismatch);
+}
+
+test "data table: E1761 duplicate entry id (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\struct Spec { value: int = 0 }
+        \\data Table: Spec {
+        \\  goblin: { value: 1 },
+        \\  goblin: { value: 2 },
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .duplicate_entry_id);
+}
+
+test "data table: E1763 unknown field + E1764 field value type (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\struct Spec { value: int = 0 }
+        \\data Table: Spec {
+        \\  a: { nope: 1 },
+        \\  b: { value: "wrong" },
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .entry_field_unknown);
+    try expectAnyCode(result.diagnostics.items, .entry_field_type_invalid);
+}
+
+test "data table: E1764 enum-typed field rejects a numeric value (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\enum Rarity { common, rare }
+        \\struct Spec { rarity: Rarity = .common }
+        \\data Table: Spec {
+        \\  a: { rarity: 3 },
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .entry_field_type_invalid);
+}
+
+test "data table: E0105 unknown enum variant in entry value (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\enum Rarity { common, rare }
+        \\struct Spec { rarity: Rarity = .common }
+        \\data Table: Spec {
+        \\  a: { rarity: .legendary },
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .enum_variant_not_found);
+}
+
+test "data table: E1765 required field missing, spread entry exempt (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\struct Spec { value: int }
+        \\data Table: Spec {
+        \\  a: { },
+        \\  b: { value: 1 },
+        \\  c: { ..Table.b },
+        \\}
+    );
+    defer result.deinit(gpa);
+    // Exactly one E1765 — entry `a` only; `c` inherits `value` via its spread.
+    var count: usize = 0;
+    for (result.diagnostics.items) |d| {
+        if (d.code == .entry_field_required_missing) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+}
+
+test "data table: E1766 spread reference forms (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\struct Spec { value: int = 0 }
+        \\data Table: Spec {
+        \\  a: { ..Table.missing },
+        \\  b: { ..Unknown.x },
+        \\  c: { ..1 + 2 },
+        \\}
+    );
+    defer result.deinit(gpa);
+    var count: usize = 0;
+    for (result.diagnostics.items) |d| {
+        if (d.code == .spread_reference_not_found) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+}
+
+test "data table: E1762 cross-table spread with a different entry type (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\struct SpecA { value: int = 0 }
+        \\struct SpecB { value: int = 0 }
+        \\data TableA: SpecA {
+        \\  a: { value: 1 },
+        \\}
+        \\data TableB: SpecB {
+        \\  b: { ..TableA.a },
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .entry_type_mismatch);
+}
+
+test "data table: E1767 spread cycle detected, acyclic chain clean (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\struct Spec { value: int = 0 }
+        \\data Table: Spec {
+        \\  a: { ..Table.b },
+        \\  b: { ..Table.a },
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .spread_cycle);
+
+    var ok = try parseAndCheck(gpa,
+        \\struct Spec { value: int = 0 }
+        \\data Table: Spec {
+        \\  base: { value: 1 },
+        \\  mid: { ..Table.base },
+        \\  top: { ..Table.mid },
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try expectNoCode(ok.diagnostics.items, .spread_cycle);
+}
+
+test "data table: E1768 id format (PascalCase and camelCase rejected) (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\struct Spec { value: int = 0 }
+        \\data Table: Spec {
+        \\  BadId: { value: 1 },
+        \\  badCamel: { value: 2 },
+        \\  good_id: { value: 3 },
+        \\}
+    );
+    defer result.deinit(gpa);
+    var count: usize = 0;
+    for (result.diagnostics.items) |d| {
+        if (d.code == .id_invalid_format) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "data table: E0101 collision with another top-level symbol (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\struct Spec { value: int = 0 }
+        \\component Table { x: float = 0.0 }
+        \\data Table: Spec {
+        \\  a: { value: 1 },
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .duplicate_symbol);
 }

@@ -1,0 +1,8 @@
+struct Item {
+  value: int = 0
+}
+
+data Table: Item {
+  goblin: { value: 1 },
+  goblin: { value: 2 },
+}

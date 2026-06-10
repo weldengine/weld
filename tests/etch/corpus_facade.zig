@@ -64,6 +64,8 @@ pub const valid = [_]Entry{
     .{ .name = "exprs/float_math.etch", .source = @embedFile("corpus/valid/exprs/float_math.etch") },
     .{ .name = "exprs/comparisons.etch", .source = @embedFile("corpus/valid/exprs/comparisons.etch") },
     .{ .name = "exprs/literals.etch", .source = @embedFile("corpus/valid/exprs/literals.etch") },
+
+    .{ .name = "data/item_database.etch", .source = @embedFile("corpus/valid/data/item_database.etch") },
 };
 
 /// Embedded list of the invalid S3 corpus fixtures. Each entry pins
@@ -83,4 +85,13 @@ pub const invalid = [_]InvalidEntry{
     .{ .name = "E1210_unknown_component_in_when.etch", .expected_code = "E1210", .source = @embedFile("corpus/invalid/E1210_unknown_component_in_when.etch") },
     .{ .name = "E1211_field_filter_type_mismatch.etch", .expected_code = "E1211", .source = @embedFile("corpus/invalid/E1211_field_filter_type_mismatch.etch") },
     .{ .name = "E1213_resource_expected_in_when.etch", .expected_code = "E1213", .source = @embedFile("corpus/invalid/E1213_resource_expected_in_when.etch") },
+    .{ .name = "E1760_data_empty_entries.etch", .expected_code = "E1760", .source = @embedFile("corpus/invalid/E1760_data_empty_entries.etch") },
+    .{ .name = "E1761_duplicate_entry_id.etch", .expected_code = "E1761", .source = @embedFile("corpus/invalid/E1761_duplicate_entry_id.etch") },
+    .{ .name = "E1762_entry_type_not_struct.etch", .expected_code = "E1762", .source = @embedFile("corpus/invalid/E1762_entry_type_not_struct.etch") },
+    .{ .name = "E1763_entry_field_unknown.etch", .expected_code = "E1763", .source = @embedFile("corpus/invalid/E1763_entry_field_unknown.etch") },
+    .{ .name = "E1764_entry_field_type_invalid.etch", .expected_code = "E1764", .source = @embedFile("corpus/invalid/E1764_entry_field_type_invalid.etch") },
+    .{ .name = "E1765_entry_field_required_missing.etch", .expected_code = "E1765", .source = @embedFile("corpus/invalid/E1765_entry_field_required_missing.etch") },
+    .{ .name = "E1766_spread_reference_not_found.etch", .expected_code = "E1766", .source = @embedFile("corpus/invalid/E1766_spread_reference_not_found.etch") },
+    .{ .name = "E1767_spread_cycle.etch", .expected_code = "E1767", .source = @embedFile("corpus/invalid/E1767_spread_cycle.etch") },
+    .{ .name = "E1768_id_invalid_format.etch", .expected_code = "E1768", .source = @embedFile("corpus/invalid/E1768_id_invalid_format.etch") },
 };
