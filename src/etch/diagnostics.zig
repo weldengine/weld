@@ -119,6 +119,17 @@ pub const DiagnosticCode = enum {
     choice_condition_not_bool, // M0.8 E4 — E1566 ChoiceConditionNotBool
     dialogue_event_type_unknown, // M0.8 E4 — E1567 EventTypeUnknown (dialogue emit)
 
+    // ── ability (E1580-E1599, M0.8 E4 — etch-validation-ecs.md §12, the
+    // items 12-15 ruling transposition onto the §8.5 grammar shape; E1585
+    // HandlerInvalidReturn and W1580 DuplicateHandler are RESERVED — the
+    // ruled shape has no handlers) ──
+    ability_empty, // M0.8 E4 — E1580 AbilityEmpty (neither property nor rule; transposed from AbilityEmptyHandlers)
+    cost_invalid, // M0.8 E4 — E1581 CostInvalid (cost key is not a numeric field of a declared resource)
+    cooldown_invalid, // M0.8 E4 — E1582 CooldownInvalid (non-numeric or negative-literal cooldown)
+    required_tags_unknown, // M0.8 E4 — E1583 RequiresTagsUnknown (keyed on the §8.5 name `tags_required`)
+    blocked_tags_unknown, // M0.8 E4 — E1584 RequiresNotTagsUnknown (keyed on the §8.5 name `tags_blocked`)
+    tags_required_blocked_conflict, // M0.8 E4 — E1586 TagsRequiredBlockedConflict
+
     // ── data tables (E1760-E1779, M0.8 E4 — etch-validation-ecs.md §22) ──
     data_empty_entries, // M0.8 E4 — E1760 DataEmptyEntries
     duplicate_entry_id, // M0.8 E4 — E1761 DuplicateEntryId
@@ -200,6 +211,12 @@ pub const DiagnosticCode = enum {
             .line_condition_not_bool => "E1565",
             .choice_condition_not_bool => "E1566",
             .dialogue_event_type_unknown => "E1567",
+            .ability_empty => "E1580",
+            .cost_invalid => "E1581",
+            .cooldown_invalid => "E1582",
+            .required_tags_unknown => "E1583",
+            .blocked_tags_unknown => "E1584",
+            .tags_required_blocked_conflict => "E1586",
             .data_empty_entries => "E1760",
             .duplicate_entry_id => "E1761",
             .entry_type_mismatch => "E1762",
@@ -282,6 +299,12 @@ pub const DiagnosticCode = enum {
             .line_condition_not_bool => "LineConditionNotBool",
             .choice_condition_not_bool => "ChoiceConditionNotBool",
             .dialogue_event_type_unknown => "EventTypeUnknown",
+            .ability_empty => "AbilityEmpty",
+            .cost_invalid => "CostInvalid",
+            .cooldown_invalid => "CooldownInvalid",
+            .required_tags_unknown => "RequiresTagsUnknown",
+            .blocked_tags_unknown => "RequiresNotTagsUnknown",
+            .tags_required_blocked_conflict => "TagsRequiredBlockedConflict",
             .data_empty_entries => "DataEmptyEntries",
             .duplicate_entry_id => "DuplicateEntryId",
             .entry_type_mismatch => "EntryTypeMismatch",

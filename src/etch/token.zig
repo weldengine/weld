@@ -87,6 +87,7 @@ pub const TokenKind = enum {
     kw_behavior, // behavior tree declaration (M0.8 E4 Level B gameplay)
     kw_quest, // quest declaration (M0.8 E4 Level B gameplay)
     kw_dialogue, // dialogue declaration (M0.8 E4 Level B gameplay)
+    kw_ability, // ability declaration (M0.8 E4 Level B gameplay)
     kw_branch, // quest/dialogue branch (M0.8 E4; the async T2/T3 `branch` statement stays out of M0.8 — explicit parse error)
     kw_sequence, // behavior composite type (M0.8 E4; the E6 top-level `sequence` construct stays out of scope — default top-level error)
     kw_after, // routine trigger `after Segment` (M0.8 E4; the §4.3 timer statement stays out of M0.8 — explicit parse error)
@@ -237,6 +238,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "behavior", .kind = .kw_behavior },
     .{ .lexeme = "quest", .kind = .kw_quest },
     .{ .lexeme = "dialogue", .kind = .kw_dialogue },
+    .{ .lexeme = "ability", .kind = .kw_ability },
     .{ .lexeme = "branch", .kind = .kw_branch },
     .{ .lexeme = "sequence", .kind = .kw_sequence },
     .{ .lexeme = "after", .kind = .kw_after },
@@ -271,7 +273,6 @@ pub const non_s3_keywords = [_][]const u8{
     "import",
     "const",
     "private",
-    "ability",
     "effect",
     "shader",
     "widget",

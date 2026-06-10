@@ -1,0 +1,5 @@
+// E1580 AbilityEmpty — an ability with neither a property nor an embedded
+// rule (transposed from AbilityEmptyHandlers per the items 12-15 ruling).
+
+ability Empty {
+}

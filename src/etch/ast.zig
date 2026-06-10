@@ -519,6 +519,40 @@ pub const DialogueDecl = struct {
     annotations_len: u32,
 };
 
+/// Kind of one ability property (`etch-grammar.md` §8.5 PATCHED, M0.8 E4
+/// items 12-15 ruling: the grammar shape WINS over the validation-ecs §12
+/// handler shape — E1585/W1580 are RESERVED, no handlers exist).
+pub const AbilityPropKind = enum { cost, cooldown, tags_required, tags_blocked, custom };
+
+/// One ability property. `cost` carries its `struct_literal_body` as a
+/// `(start, len)` run of `arena.struct_lit_fields` encoded in `value` via
+/// `cost_fields_start`/`cost_fields_len`; every other kind carries its
+/// expression in `value`.
+pub const AbilityProp = struct {
+    kind: AbilityPropKind,
+    name: StringId,
+    /// Expression NodeId for every kind except `cost` (where it is `none`).
+    value: NodeId,
+    cost_fields_start: u32,
+    cost_fields_len: u32,
+    span: SourceSpan,
+};
+
+/// Side-slab entry for an `ability` declaration (M0.8 E4 Level B, §8.5).
+/// The embedded `rule` lives in `rule_decls` but is NOT a top-level item —
+/// it is ability STRUCTURE (validated, never registered for ticking; the
+/// Level-B contract). `no_rule` when absent.
+pub const AbilityDecl = struct {
+    name: StringId,
+    props_start: u32,
+    props_len: u32,
+    rule_idx: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+
+    pub const no_rule: u32 = std.math.maxInt(u32);
+};
+
 /// Postfix tag query expression (§3.2 `tag_expr`, M0.8 E4): a receiver +
 /// a `tag_filters` entry (op + operand run, shared with the when-clause
 /// encoding).
@@ -1497,6 +1531,8 @@ pub const AstArena = struct {
     dialogue_emits: std.ArrayListUnmanaged(DialogueEmit) = .empty,
     dialogue_gotos: std.ArrayListUnmanaged(DialogueGoto) = .empty,
     dialogue_branches: std.ArrayListUnmanaged(DialogueBranch) = .empty,
+    ability_decls: std.ArrayListUnmanaged(AbilityDecl) = .empty,
+    ability_props: std.ArrayListUnmanaged(AbilityProp) = .empty,
     rule_decls: std.ArrayListUnmanaged(RuleDecl) = .empty,
     fn_decls: std.ArrayListUnmanaged(FnDecl) = .empty,
     struct_decls: std.ArrayListUnmanaged(StructDecl) = .empty,
@@ -1654,6 +1690,8 @@ pub const AstArena = struct {
         self.tag_query_exprs.deinit(gpa);
         self.loc_exprs.deinit(gpa);
         self.dialogue_decls.deinit(gpa);
+        self.ability_decls.deinit(gpa);
+        self.ability_props.deinit(gpa);
         self.dialogue_elems.deinit(gpa);
         self.dialogue_speakers.deinit(gpa);
         self.dialogue_lines.deinit(gpa);
@@ -2137,6 +2175,13 @@ pub const AstArena = struct {
     /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The
     /// caller appends elements to the dialogue slabs beforehand, passing
     /// the range in `decl`.
+    /// Append an `ability` declaration (M0.8 E4 Level B, §8.5).
+    pub fn addAbilityDecl(self: *AstArena, gpa: std.mem.Allocator, decl: AbilityDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.ability_decls.items.len);
+        try self.ability_decls.append(gpa, decl);
+        return try self.addItem(gpa, .ability_decl, idx, span);
+    }
+
     pub fn addDialogueDecl(self: *AstArena, gpa: std.mem.Allocator, decl: DialogueDecl, span: SourceSpan) !NodeId {
         const idx: u32 = @intCast(self.dialogue_decls.items.len);
         try self.dialogue_decls.append(gpa, decl);

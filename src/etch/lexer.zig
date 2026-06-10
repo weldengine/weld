@@ -442,13 +442,13 @@ test "lexer disambiguates integer vs float literal" {
 
 test "lexer flags unknown Etch keyword from full grammar as error_unknown_keyword" {
     const gpa = std.testing.allocator;
-    // `fn` graduated with the M0.8 E2 call mechanism, `quest` / `dialogue`
-    // with their E4 Level-B slices; `ability` and `scene` stay out of
-    // scope and lex as error_unknown_keyword.
-    var lex = Lexer.init("fn dialogue ability scene");
+    // `fn` graduated with the M0.8 E2 call mechanism, `dialogue` /
+    // `ability` with their E4 Level-B slices; `effect` and `scene` stay
+    // out of scope and lex as error_unknown_keyword.
+    var lex = Lexer.init("fn ability effect scene");
     defer lex.deinit(gpa);
     try expectKind(&lex, gpa, .kw_fn);
-    try expectKind(&lex, gpa, .kw_dialogue);
+    try expectKind(&lex, gpa, .kw_ability);
     try expectKind(&lex, gpa, .error_unknown_keyword);
     try expectKind(&lex, gpa, .error_unknown_keyword);
 }

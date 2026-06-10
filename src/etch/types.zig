@@ -169,7 +169,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -203,7 +203,7 @@ fn containsUppercase(s: []const u8) bool {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -316,6 +316,7 @@ pub const TypeChecker = struct {
         try tc.validateBehaviorDecls();
         try tc.validateQuestDecls();
         try tc.validateDialogueDecls();
+        try tc.validateAbilityDecls();
         try tc.pass2Resolve();
     }
 
@@ -977,6 +978,143 @@ pub const TypeChecker = struct {
         }
     }
 
+    // ─── Abilities (M0.8 E4, `etch-validation-ecs.md` §12 TRANSPOSED) ────
+
+    /// Validate every `ability` once all symbols are known and the tag
+    /// table is built (items 12-15 ruling: the §8.5 grammar shape WINS over
+    /// the validation-ecs §12 handler shape): E1580 empty ability (neither
+    /// property nor rule — transposed from AbilityEmptyHandlers), E1581
+    /// cost keys are numeric fields of a declared resource with numeric
+    /// values, E1582 cooldown numeric (a negative literal is rejected),
+    /// E1583/E1584 tag arrays against the tag table (keyed on the §8.5
+    /// names `tags_required` / `tags_blocked`), E1586 same tag required AND
+    /// blocked. E1585/W1580 are RESERVED (the ruled shape has no handlers).
+    /// The embedded rule validates through the NORMAL rule path
+    /// (`checkRule` — params, when machinery, accessibility gates; never
+    /// registered for ticking).
+    fn validateAbilityDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .ability_decl) continue;
+            try self.validateAbility(self.arena.ability_decls.items[datas[i]]);
+        }
+    }
+
+    fn validateAbility(self: *TypeChecker, decl: ast_mod.AbilityDecl) !void {
+        if (decl.props_len == 0 and decl.rule_idx == ast_mod.AbilityDecl.no_rule) {
+            const sym = self.symbols.get(decl.name).?;
+            try self.emit(.ability_empty, .error_, self.arena.itemSpan(sym.item_id), "ability '{s}' declares neither a property nor a rule", .{self.arena.strings.slice(decl.name)});
+        }
+        var ctx: RuleCtx = .{};
+        defer ctx.deinit(self.gpa);
+        // Tag-path texts of the two arrays, for the E1586 conflict check.
+        var required_paths: std.StringHashMapUnmanaged(void) = .empty;
+        defer {
+            var it = required_paths.keyIterator();
+            while (it.next()) |key| self.gpa.free(key.*);
+            required_paths.deinit(self.gpa);
+        }
+        var p: u32 = 0;
+        while (p < decl.props_len) : (p += 1) {
+            const prop = self.arena.ability_props.items[decl.props_start + p];
+            switch (prop.kind) {
+                .cost => try self.validateAbilityCost(prop, &ctx),
+                .cooldown => {
+                    const t = try self.synthExprE(prop.value, &ctx);
+                    const numeric = t == .builtin and t.builtin.isNumeric();
+                    const neg_literal = self.arena.exprKind(prop.value) == .unary and
+                        self.arena.unary_exprs.items[self.arena.exprData(prop.value)].op == .neg;
+                    if (!numeric or neg_literal) {
+                        try self.emit(.cooldown_invalid, .error_, prop.span, "cooldown must be a positive numeric expression", .{});
+                    }
+                },
+                .tags_required => try self.validateAbilityTagArray(prop, .tags_required, &required_paths),
+                .tags_blocked => try self.validateAbilityTagArray(prop, .tags_blocked, &required_paths),
+                .custom => _ = try self.synthExprE(prop.value, &ctx),
+            }
+        }
+        if (decl.rule_idx != ast_mod.AbilityDecl.no_rule) {
+            try self.checkRule(self.arena.rule_decls.items[decl.rule_idx]);
+        }
+    }
+
+    /// E1581 — every `cost:` key must name a NUMERIC field of a declared
+    /// resource (the cost is consumed from a resource pool at activation,
+    /// validation-ecs §12.2 transposed onto the §8.5 `struct_literal_body`
+    /// form); values must be numeric. Spread entries have no key — rejected.
+    fn validateAbilityCost(self: *TypeChecker, prop: ast_mod.AbilityProp, ctx: *RuleCtx) !void {
+        var f: u32 = 0;
+        while (f < prop.cost_fields_len) : (f += 1) {
+            const field = self.arena.struct_lit_fields.items[prop.cost_fields_start + f];
+            if (field.name == 0) {
+                try self.emit(.cost_invalid, .error_, prop.span, "cost entries must be 'key: value' pairs (no spread)", .{});
+                continue;
+            }
+            if (!self.resourceHasNumericField(field.name)) {
+                try self.emit(.cost_invalid, .error_, prop.span, "cost key '{s}' is not a numeric field of a declared resource", .{self.arena.strings.slice(field.name)});
+            }
+            const t = try self.synthExprE(field.value, ctx);
+            if (!(t == .builtin and t.builtin.isNumeric())) {
+                try self.emit(.cost_invalid, .error_, prop.span, "cost value for '{s}' must be numeric", .{self.arena.strings.slice(field.name)});
+            }
+        }
+    }
+
+    /// Whether ANY declared resource has a numeric field named `name`.
+    fn resourceHasNumericField(self: *TypeChecker, name: StringId) bool {
+        for (self.arena.resource_decls.items) |res| {
+            var f: u32 = 0;
+            while (f < res.fields_len) : (f += 1) {
+                const field = self.arena.fields.items[res.fields_start + f];
+                if (field.name != name) continue;
+                const t = self.namedTypeToResolved(field.type_node);
+                if (t == .builtin and t.builtin.isNumeric()) return true;
+            }
+        }
+        return false;
+    }
+
+    /// E1583/E1584 — every element of a `tags_required` / `tags_blocked`
+    /// array must be a tag path present in the tag table; E1586 — a path in
+    /// BOTH arrays is incoherent. `required_paths` accumulates the
+    /// `tags_required` path texts (owned by the caller) so the conflict
+    /// check is order-independent within one array kind ordering
+    /// (`tags_required` listed before `tags_blocked` in the corpus; a
+    /// blocked-before-required ordering is also caught — the map fills
+    /// from whichever array carries `.tags_required`).
+    fn validateAbilityTagArray(self: *TypeChecker, prop: ast_mod.AbilityProp, kind: ast_mod.AbilityPropKind, required_paths: *std.StringHashMapUnmanaged(void)) !void {
+        const al = self.arena.array_lits.items[self.arena.exprData(prop.value)];
+        const code: DiagnosticCode = if (kind == .tags_required) .required_tags_unknown else .blocked_tags_unknown;
+        var e: u32 = 0;
+        while (e < al.elements_len) : (e += 1) {
+            const path_node: NodeId = @bitCast(self.arena.extra.items[al.elements_start + e]);
+            const tp = self.arena.tag_paths.items[self.arena.exprData(path_node)];
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            defer buf.deinit(self.gpa);
+            var i: u32 = 0;
+            while (i < tp.segs_len) : (i += 1) {
+                if (i > 0) try buf.append(self.gpa, '.');
+                try buf.appendSlice(self.gpa, self.arena.strings.slice(self.arena.tag_path_segs.items[tp.segs_start + i]));
+            }
+            if (self.tag_table) |*table| {
+                if (table.lookup(buf.items) == null) {
+                    try self.emit(code, .error_, self.arena.exprSpan(path_node), "unknown tag path '.{s}' in {s}", .{ buf.items, @tagName(kind) });
+                    continue;
+                }
+            }
+            if (kind == .tags_required) {
+                const gop = try required_paths.getOrPut(self.gpa, buf.items);
+                if (!gop.found_existing) {
+                    gop.key_ptr.* = try self.gpa.dupe(u8, buf.items);
+                }
+            } else if (required_paths.contains(buf.items)) {
+                try self.emit(.tags_required_blocked_conflict, .error_, self.arena.exprSpan(path_node), "tag '.{s}' is both required and blocked", .{buf.items});
+            }
+        }
+    }
+
     // ─── Behaviors (M0.8 E4, `etch-validation-ecs.md` §8) ────────────────
 
     /// Validate every `behavior` once all symbols are known AND the tag
@@ -1315,6 +1453,14 @@ pub const TypeChecker = struct {
                     const decl = self.arena.dialogue_decls.items[data];
                     try self.registerSymbol(.dialogue_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .dialogue);
+                },
+                .ability_decl => {
+                    // An `ability` (M0.8 E4 Level B) registers its name; the
+                    // properties + embedded rule are validated in
+                    // `validateAbilityDecls` once all symbols are known.
+                    const decl = self.arena.ability_decls.items[data];
+                    try self.registerSymbol(.ability_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .ability);
                 },
                 .quest_decl => {
                     // A `quest` (M0.8 E4 Level B) registers its name; the body
@@ -6773,4 +6919,73 @@ test "dialogue: canonical dialogue checks clean, structural codes fire (M0.8 E4)
     );
     defer empty.deinit(gpa);
     try expectAnyCode(empty.diagnostics.items, .dialogue_empty);
+}
+
+test "ability: canonical ability checks clean, structural codes fire (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var ok = try parseAndCheck(gpa,
+        \\resource ManaPool { mana: float = 100.0 }
+        \\component Mana { current: float = 100.0 }
+        \\tags { character { status { alive, stunned, silenced } } }
+        \\ability Fireball {
+        \\  cost: { mana: 20.0 }
+        \\  cooldown: 3.0
+        \\  tags_required: [.character.status.alive]
+        \\  tags_blocked: [.character.status.stunned, .character.status.silenced]
+        \\  charges: 2
+        \\  rule activate(caster: Entity) when caster has Mana { current >= 20.0 } {
+        \\    caster.get_mut(Mana).current -= 20.0
+        \\  }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    var bad = try parseAndCheck(gpa,
+        \\resource ManaPool { mana: float = 100.0 }
+        \\tags { character { status { alive } } }
+        \\ability Bad {
+        \\  cost: { stamina: 5.0 }
+        \\  cooldown: true
+        \\  tags_required: [.character.status.alive, .character.status.missing]
+        \\  tags_blocked: [.character.status.alive]
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .cost_invalid);
+    try expectAnyCode(bad.diagnostics.items, .cooldown_invalid);
+    try expectAnyCode(bad.diagnostics.items, .required_tags_unknown);
+    try expectAnyCode(bad.diagnostics.items, .tags_required_blocked_conflict);
+
+    var neg = try parseAndCheck(gpa,
+        \\ability NegCooldown { cooldown: -1.0 }
+    );
+    defer neg.deinit(gpa);
+    try expectAnyCode(neg.diagnostics.items, .cooldown_invalid);
+
+    var blocked = try parseAndCheck(gpa,
+        \\ability BlockedUnknown { tags_blocked: [.character.status.missing] }
+    );
+    defer blocked.deinit(gpa);
+    try expectAnyCode(blocked.diagnostics.items, .blocked_tags_unknown);
+
+    var empty = try parseAndCheck(gpa,
+        \\ability Empty { }
+    );
+    defer empty.deinit(gpa);
+    try expectAnyCode(empty.diagnostics.items, .ability_empty);
+
+    // The embedded rule rides the NORMAL rule validation — a component
+    // access without its `has` gate fails like any rule body would.
+    var gated = try parseAndCheck(gpa,
+        \\component Mana { current: float = 100.0 }
+        \\ability Gated {
+        \\  rule activate(caster: Entity) {
+        \\    caster.get_mut(Mana).current -= 1.0
+        \\  }
+        \\}
+    );
+    defer gated.deinit(gpa);
+    try std.testing.expect(gated.diagnostics.items.len > 0);
 }

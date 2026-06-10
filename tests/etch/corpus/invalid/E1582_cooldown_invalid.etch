@@ -1,0 +1,7 @@
+// E1582 CooldownInvalid — a negative cooldown literal is rejected (the
+// numeric/positive transposition of the Duration rule; duration literals
+// are not in the M0.8 lexer).
+
+ability Dash {
+  cooldown: -1.5
+}

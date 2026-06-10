@@ -510,7 +510,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability => return,
                 else => _ = try self.advance(),
             }
         }
@@ -543,6 +543,7 @@ pub const Parser = struct {
             .kw_behavior => try self.parseBehaviorDecl(annotations),
             .kw_quest => try self.parseQuestDecl(annotations),
             .kw_dialogue => try self.parseDialogueDecl(annotations),
+            .kw_ability => try self.parseAbilityDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -556,7 +557,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -1104,6 +1105,18 @@ pub const Parser = struct {
         // consumed by `parseTopLevel`). `is_async` marks an `async rule` whose
         // body may `await` (M0.8 E3 sub-slice B).
         const kw_span = self.current.span;
+        const parsed = try self.parseRuleDeclInner(annotations, is_async);
+        _ = try self.arena.addItem(self.gpa, .rule_decl, parsed.idx, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = parsed.end_byte,
+        });
+    }
+
+    /// Parse a `rule` declaration into the `rule_decls` slab WITHOUT adding a
+    /// top-level item (M0.8 E4 §8.5: the ability-embedded rule is construct
+    /// STRUCTURE — validated through the normal rule path but never
+    /// registered for ticking; the top-level wrapper adds the item).
+    fn parseRuleDeclInner(self: *Parser, annotations: AnnotationRange, is_async: bool) ParseError!struct { idx: u32, end_byte: u32 } {
         _ = try self.advance(); // 'rule'
         const name_tok = try self.expect(.ident, "expected rule name (identifier)");
         const name_id = try self.internSlice(name_tok.span);
@@ -1149,10 +1162,7 @@ pub const Parser = struct {
             .annotations_len = annotations.len,
             .is_async = is_async,
         });
-        _ = try self.arena.addItem(self.gpa, .rule_decl, data_idx, .{
-            .byte_start = kw_span.byte_start,
-            .byte_end = closing.span.byte_end,
-        });
+        return .{ .idx = data_idx, .end_byte = closing.span.byte_end };
     }
 
     // ─── Functions (M0.8 E2 call mechanism) ──────────────────────────────
@@ -1894,6 +1904,105 @@ pub const Parser = struct {
             .span = .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end },
         });
         return idx;
+    }
+
+    /// Parse `ability TYPE_IDENT "{" {ability_property} [rule_decl] "}"`
+    /// (M0.8 E4 Level B, `etch-grammar.md` §8.5 — items 12-15 ruling: the
+    /// grammar shape WINS over the validation-ecs §12 handler shape; no
+    /// handlers, no property annotations). `cost` takes a
+    /// `struct_literal_body`, `tags_required` / `tags_blocked` take an
+    /// array literal of tag paths, everything else is `IDENT ":"
+    /// expression` (`cooldown` + the §17 custom-property extension mode).
+    /// The optional embedded rule is LAST and is parsed slab-only
+    /// (`parseRuleDeclInner` — never a top-level item).
+    fn parseAbilityDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'ability'
+        const name_tok = try self.expect(.type_ident, "expected ability name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start ability body");
+
+        var props: std.ArrayListUnmanaged(ast_mod.AbilityProp) = .empty;
+        defer props.deinit(self.gpa);
+        var rule_idx: u32 = ast_mod.AbilityDecl.no_rule;
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.peek() == .kw_rule) {
+                // `[rule_decl]` — 0..1, closes the body per §8.5.
+                const parsed = try self.parseRuleDeclInner(.{ .start = 0, .len = 0 }, false);
+                rule_idx = parsed.idx;
+                break;
+            }
+            const prop_tok = try self.expect(.ident, "expected ability property name or 'rule'");
+            const prop_name = try self.internSlice(prop_tok.span);
+            const prop_lexeme = self.sliceOf(prop_tok.span);
+            _ = try self.expect(.colon, "expected ':' after ability property name");
+            if (std.mem.eql(u8, prop_lexeme, "cost")) {
+                const body = try self.parseDataEntryBody();
+                try props.append(self.gpa, .{
+                    .kind = .cost,
+                    .name = prop_name,
+                    .value = NodeId.none,
+                    .cost_fields_start = body.fields_start,
+                    .cost_fields_len = body.fields_len,
+                    .span = .{ .byte_start = prop_tok.span.byte_start, .byte_end = body.end_byte },
+                });
+            } else if (std.mem.eql(u8, prop_lexeme, "tags_required") or std.mem.eql(u8, prop_lexeme, "tags_blocked")) {
+                const value = try self.parseAbilityTagArray();
+                try props.append(self.gpa, .{
+                    .kind = if (prop_lexeme[5] == 'r') .tags_required else .tags_blocked,
+                    .name = prop_name,
+                    .value = value,
+                    .cost_fields_start = 0,
+                    .cost_fields_len = 0,
+                    .span = .{ .byte_start = prop_tok.span.byte_start, .byte_end = self.arena.exprSpan(value).byte_end },
+                });
+            } else {
+                const value = try self.parseExpr(0);
+                try props.append(self.gpa, .{
+                    .kind = if (std.mem.eql(u8, prop_lexeme, "cooldown")) .cooldown else .custom,
+                    .name = prop_name,
+                    .value = value,
+                    .cost_fields_start = 0,
+                    .cost_fields_len = 0,
+                    .span = .{ .byte_start = prop_tok.span.byte_start, .byte_end = self.arena.exprSpan(value).byte_end },
+                });
+            }
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close ability body");
+
+        const props_start: u32 = @intCast(self.arena.ability_props.items.len);
+        try self.arena.ability_props.appendSlice(self.gpa, props.items);
+        _ = try self.arena.addAbilityDecl(self.gpa, .{
+            .name = name_id,
+            .props_start = props_start,
+            .props_len = @intCast(props.items.len),
+            .rule_idx = rule_idx,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse the `tags_required` / `tags_blocked` value: an array literal
+    /// whose elements are tag paths (`"[" [tag_path {"," tag_path} [","]]
+    /// "]"`, §8.5 + §3.2 `TAG_PATH`). Elements parse through
+    /// `parseTagPathExpr` — a non-tag-path element is a parse error here
+    /// (E1583/E1584 then validate the paths against the tag table).
+    fn parseAbilityTagArray(self: *Parser) ParseError!NodeId {
+        const open = try self.expect(.lbracket, "expected '[' to start the tag array");
+        var elems: std.ArrayListUnmanaged(u32) = .empty;
+        defer elems.deinit(self.gpa);
+        while (self.peek() != .rbracket and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const path = try self.parseTagPathExpr();
+            try elems.append(self.gpa, path.raw());
+            if (!try self.match(.comma)) break;
+        }
+        const closing = try self.expect(.rbracket, "expected ']' to close the tag array");
+        return try self.arena.addArrayLit(self.gpa, elems.items, false, NodeId.none, .{
+            .byte_start = open.span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
     }
 
     /// Parse `quest TYPE_IDENT "{" {quest_property} {quest_stage} "}"`
@@ -5950,4 +6059,52 @@ test "parser recovers and a valid dialogue after a broken construct survives (M0
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.dialogue_decls.items.len);
+}
+
+test "parser builds an ability with properties and embedded rule (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\ability Fireball {
+        \\  cost: { mana: 20 }
+        \\  cooldown: 3.0
+        \\  tags_required: [.character.status.alive]
+        \\  tags_blocked: [.character.status.stunned, .character.status.silenced]
+        \\  charges: 2
+        \\  rule activate(caster: Entity) when caster has Mana { current >= 20.0 } {
+        \\    caster.get_mut(Mana).current -= 20.0
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.ability_decls.items.len);
+    const decl = result.ast.ability_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 5), decl.props_len);
+    const props = result.ast.ability_props.items;
+    try std.testing.expectEqual(ast_mod.AbilityPropKind.cost, props[decl.props_start].kind);
+    try std.testing.expectEqual(@as(u32, 1), props[decl.props_start].cost_fields_len);
+    try std.testing.expectEqual(ast_mod.AbilityPropKind.cooldown, props[decl.props_start + 1].kind);
+    try std.testing.expectEqual(ast_mod.AbilityPropKind.tags_required, props[decl.props_start + 2].kind);
+    try std.testing.expectEqual(ast_mod.AbilityPropKind.tags_blocked, props[decl.props_start + 3].kind);
+    try std.testing.expectEqual(ast_mod.AbilityPropKind.custom, props[decl.props_start + 4].kind);
+    // The embedded rule landed in the slab but NOT as a top-level item.
+    try std.testing.expect(decl.rule_idx != ast_mod.AbilityDecl.no_rule);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.rule_decls.items.len);
+    const kinds = result.ast.items.items(.kind);
+    var rule_items: usize = 0;
+    for (0..result.ast.items.len) |i| {
+        if (kinds[i] == .rule_decl) rule_items += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), rule_items);
+}
+
+test "parser recovers and a valid ability after a broken construct survives (M0.8 E4 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\ability Dash { cooldown: 1.5 }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.ability_decls.items.len);
 }

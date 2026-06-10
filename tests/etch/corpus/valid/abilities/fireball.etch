@@ -1,0 +1,30 @@
+// Ability (M0.8 E4, etch-grammar.md §8.5 — items 12-15 ruling: the grammar
+// shape WINS): cost as struct_literal_body keyed on numeric resource
+// fields, cooldown expression, tag arrays against the tag table, a custom
+// property (the §17 extension mode), and the embedded `rule activate`
+// validated through the normal rule path.
+resource ManaPool {
+  mana: float = 100.0
+}
+
+component Mana {
+  current: float = 100.0
+}
+
+tags {
+  character {
+    status { alive, stunned, silenced }
+  }
+}
+
+ability Fireball {
+  cost: { mana: 20.0 }
+  cooldown: 3.0
+  tags_required: [.character.status.alive]
+  tags_blocked: [.character.status.stunned, .character.status.silenced]
+  charges: 2
+
+  rule activate(caster: Entity) when caster has Mana { current >= 20.0 } {
+    caster.get_mut(Mana).current -= 20.0
+  }
+}

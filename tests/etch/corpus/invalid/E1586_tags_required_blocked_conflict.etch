@@ -1,0 +1,13 @@
+// E1586 TagsRequiredBlockedConflict — the same tag both required and
+// blocked is incoherent.
+
+tags {
+  character {
+    status { alive }
+  }
+}
+
+ability Bad {
+  tags_required: [.character.status.alive]
+  tags_blocked: [.character.status.alive]
+}
