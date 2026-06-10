@@ -1,35 +1,24 @@
-//! `etch_cook` — standalone CLI that runs the S5 Etch → Zig codegen on a
-//! list of `.etch` source files and emits a single consolidated `.zig`
-//! file. Each input ends up in its own `pub const p<NN>_<name> = struct
-//! {...};` namespace; a `programs` array at the end maps program names to
-//! `(register, tick)` function pointers so the test harness dispatches by
-//! name without runtime parsing.
-//!
-//! The tool is invoked twice from `build.zig`:
-//! 1. Once for the 20 differential programs under `tests/etch_interp/programs/`
-//!    — producing `<wf>/corpus_codegen.zig` for `zig build test-codegen-diff`.
-//! 2. Once for the synthetic 100-file corpus under
-//!    `bench/fixtures/synth_100/scripts/` — producing the cooked input for
-//!    `zig build bench-etch-compile`.
+//! `etch_cook` — thin CLI shim over the consolidated cook library
+//! (`weld_etch.codegen_zig.consolidate`, M0.8 E3-D, D-S5-etchcook-inproc).
+//! The shim owns arg parsing and file I/O only; parse + type-check +
+//! codegen + namespace wrapping + the `programs` table all live in the
+//! library, which the bench harness consumes IN-PROCESS (no child process
+//! on the timed path). The CLI remains for the build-graph cooks
+//! (`b.addRunArtifact`): the 61-program differential corpus and the demo.
 //!
 //! CLI:
 //!     etch_cook --output <out.zig> <name1>=<path1.etch> [<name2>=<path2.etch> ...]
 //!
 //! Each input arg pairs a short alphanumeric **namespace name** (used as the
 //! Zig identifier of the nested struct) with the path to its source file.
-//! The first field of the emitted `Program` entries is the namespace name
-//! verbatim — that is what the test driver matches against the corpus
-//! facade's `program.name`. Output is written to `--output` (created /
-//! truncated). The tool exits with code 0 on success and 1 on the first
+//! Output is written to `--output` (created / truncated), plus a
+//! `<output>.stats` sidecar (rules + distinct signatures — Gate 4
+//! reporting). The tool exits with code 0 on success and 1 on the first
 //! input that fails parse/type-check/codegen.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const weld_etch = @import("weld_etch");
-const codegen = weld_etch.codegen_zig;
-const parser = weld_etch.parser;
-const types = weld_etch.types;
-const diag = weld_etch.diagnostics;
+const consolidate = weld_etch.codegen_zig.consolidate;
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -38,7 +27,9 @@ pub fn main(init: std.process.Init) !void {
     const argv = try init.minimal.args.toSlice(arena.allocator());
 
     var output: ?[]const u8 = null;
-    var inputs: std.ArrayListUnmanaged(InputSpec) = .empty;
+    var inputs: std.ArrayListUnmanaged(consolidate.NamedSource) = .empty;
+
+    const cwd = std.Io.Dir.cwd();
 
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
@@ -51,9 +42,14 @@ pub fn main(init: std.process.Init) !void {
         }
         // Positional arg: `<name>=<path>`
         const eq = std.mem.indexOfScalar(u8, a, '=') orelse return die(io, "input arg must be `<name>=<path>`");
+        const path = a[eq + 1 ..];
+        const source = readWholeFile(arena.allocator(), io, cwd, path) catch |err| {
+            std.debug.print("etch_cook: cannot read {s}: {s}\n", .{ path, @errorName(err) });
+            return err;
+        };
         try inputs.append(arena.allocator(), .{
             .name = a[0..eq],
-            .path = a[eq + 1 ..],
+            .source = source,
         });
     }
     if (output == null) return die(io, "missing --output");
@@ -62,36 +58,20 @@ pub fn main(init: std.process.Init) !void {
     var buffer: std.ArrayListUnmanaged(u8) = .empty;
     defer buffer.deinit(gpa);
 
-    try emitConsolidatedHeader(gpa, &buffer);
-
-    const cwd = std.Io.Dir.cwd();
-    var total_signatures: u32 = 0;
-    var total_rules: u32 = 0;
-    for (inputs.items) |in| {
-        const stats = try cookInto(gpa, io, cwd, in, &buffer);
-        total_signatures += stats.distinct_signatures;
-        total_rules += stats.rules;
-    }
-
-    try emitProgramsTable(gpa, &buffer, inputs.items);
+    const stats = try consolidate.cookConsolidated(gpa, inputs.items, &buffer);
 
     try writeOutput(io, cwd, output.?, buffer.items);
 
-    // Stats sidecar — consumed by the bench harness for Gate 4 reporting.
-    // One line per metric, key=value (whitespace-tolerant). The path
-    // mirrors the output with a `.stats` suffix so the bench knows where
-    // to look without an extra CLI flag.
+    // Stats sidecar — consumed for Gate 4 reporting. One line per metric,
+    // key=value (whitespace-tolerant). The path mirrors the output with a
+    // `.stats` suffix so consumers know where to look without an extra
+    // CLI flag.
     var stats_path_buf: [512]u8 = undefined;
     const stats_path = try std.fmt.bufPrint(&stats_path_buf, "{s}.stats", .{output.?});
     var stats_text: [128]u8 = undefined;
-    const stats_bytes = try std.fmt.bufPrint(&stats_text, "rules={d}\ndistinct_signatures={d}\n", .{ total_rules, total_signatures });
+    const stats_bytes = try std.fmt.bufPrint(&stats_text, "rules={d}\ndistinct_signatures={d}\n", .{ stats.rules, stats.distinct_signatures });
     try writeOutput(io, cwd, stats_path, stats_bytes);
 }
-
-const InputSpec = struct {
-    name: []const u8,
-    path: []const u8,
-};
 
 fn die(io: std.Io, msg: []const u8) error{InvalidArgs} {
     var b: [256]u8 = undefined;
@@ -100,139 +80,6 @@ fn die(io: std.Io, msg: []const u8) error{InvalidArgs} {
     w.print("etch_cook: {s}\n", .{msg}) catch {};
     w.flush() catch {};
     return error.InvalidArgs;
-}
-
-fn emitConsolidatedHeader(gpa: std.mem.Allocator, buffer: *std.ArrayListUnmanaged(u8)) !void {
-    const header =
-        \\// Auto-generated by tools/etch_cook — DO NOT EDIT
-        \\//
-        \\// Consolidated S5 codegen output: one nested namespace per input
-        \\// .etch program plus a `programs` table mapping names to
-        \\// `(register, tick)` function pointers. The test driver dispatches
-        \\// by name; the bench harness exercises every namespace through
-        \\// the standard Zig build pipeline.
-        \\
-        \\const std = @import("std");
-        \\const weld_core = @import("weld_core");
-        \\const World = weld_core.ecs.world.World;
-        \\const ComponentId = weld_core.ecs.registry.ComponentId;
-        \\const FieldDesc = weld_core.ecs.registry.FieldDesc;
-        \\const FieldKind = weld_core.ecs.registry.FieldKind;
-        \\const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
-        \\const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
-        \\const comptime_query = weld_core.ecs.comptime_query;
-        \\
-        \\
-    ;
-    try buffer.appendSlice(gpa, header);
-}
-
-fn cookInto(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, in: InputSpec, buffer: *std.ArrayListUnmanaged(u8)) !codegen.GenerateStats {
-    // Read the source from disk.
-    const source = readWholeFile(gpa, io, dir, in.path) catch |err| {
-        std.debug.print("etch_cook: cannot read {s}: {s}\n", .{ in.path, @errorName(err) });
-        return err;
-    };
-    defer gpa.free(source);
-
-    // Parse + type-check.
-    var pr = try parser.parse(gpa, source);
-    defer pr.deinit(gpa);
-    if (pr.diagnostics.len > 0) {
-        std.debug.print("etch_cook: {s}: parse diagnostic: {s}\n", .{ in.path, pr.diagnostics[0].primary_message });
-        return error.ParseFailed;
-    }
-    var diags: std.ArrayListUnmanaged(diag.Diagnostic) = .empty;
-    defer {
-        for (diags.items) |*d| d.deinit(gpa);
-        diags.deinit(gpa);
-    }
-    try types.TypeChecker.check(gpa, &pr.ast, &diags);
-    if (diags.items.len != 0) {
-        for (diags.items) |d| std.debug.print("etch_cook: {s}: type-check {s}: {s}\n", .{ in.path, d.code.code(), d.primary_message });
-        return error.TypeCheckFailed;
-    }
-
-    // Codegen body into a scratch buffer.
-    var body: std.ArrayListUnmanaged(u8) = .empty;
-    defer body.deinit(gpa);
-    const stats = try codegen.generateToBuffer(gpa, &pr.ast, in.path, &body);
-
-    // Strip the per-file imports — they are emitted once at the top of the
-    // consolidated file. The consolidated header above declares every
-    // import the generated body relies on.
-    const body_no_imports = stripImports(body.items);
-
-    // Wrap the program in a nested namespace named after the input.
-    const open_fmt = "pub const {s} = struct {{\n";
-    const open = try std.fmt.allocPrint(gpa, open_fmt, .{in.name});
-    defer gpa.free(open);
-    try buffer.appendSlice(gpa, open);
-    try buffer.appendSlice(gpa, body_no_imports);
-    try buffer.appendSlice(gpa, "};\n\n");
-
-    return stats;
-}
-
-fn stripImports(body: []const u8) []const u8 {
-    // Skip every leading line that begins with `//`, `const std =`, or
-    // `const weld_core =`, `const World =`, `const ComponentId =`,
-    // `const FieldDesc =`, `const FieldKind =`, `const DynamicArchetype =`,
-    // `const Chunk =`. The generated bodies start with these lines in a
-    // fixed order; everything after is the body proper.
-    var pos: usize = 0;
-    while (pos < body.len) {
-        // Eat blank lines.
-        while (pos < body.len and (body[pos] == '\n' or body[pos] == ' ' or body[pos] == '\t')) pos += 1;
-        if (pos >= body.len) break;
-        // Find end of current line.
-        var end = pos;
-        while (end < body.len and body[end] != '\n') end += 1;
-        const line = body[pos..end];
-        if (std.mem.startsWith(u8, line, "//") or
-            std.mem.startsWith(u8, line, "const std =") or
-            std.mem.startsWith(u8, line, "const weld_core =") or
-            std.mem.startsWith(u8, line, "const World =") or
-            std.mem.startsWith(u8, line, "const ComponentId =") or
-            std.mem.startsWith(u8, line, "const FieldDesc =") or
-            std.mem.startsWith(u8, line, "const FieldKind =") or
-            std.mem.startsWith(u8, line, "const DynamicArchetype =") or
-            std.mem.startsWith(u8, line, "const Chunk =") or
-            std.mem.startsWith(u8, line, "const comptime_query ="))
-        {
-            pos = if (end < body.len) end + 1 else end;
-            continue;
-        }
-        break;
-    }
-    return body[pos..];
-}
-
-fn emitProgramsTable(gpa: std.mem.Allocator, buffer: *std.ArrayListUnmanaged(u8), inputs: []const InputSpec) !void {
-    try buffer.appendSlice(gpa,
-        \\pub const Program = struct {
-        \\    name: []const u8,
-        \\    register: *const fn (world: *World, gpa: std.mem.Allocator) anyerror!void,
-        \\    tick: *const fn (world: *World, gpa: std.mem.Allocator) void,
-        \\};
-        \\
-        \\pub const programs = [_]Program{
-        \\
-    );
-    for (inputs) |in| {
-        const line = try std.fmt.allocPrint(gpa, "    .{{ .name = \"{s}\", .register = &{s}.register, .tick = &{s}.tick }},\n", .{ in.name, in.name, in.name });
-        defer gpa.free(line);
-        try buffer.appendSlice(gpa, line);
-    }
-    try buffer.appendSlice(gpa,
-        \\};
-        \\
-        \\pub fn lookupByName(name: []const u8) ?Program {
-        \\    for (programs) |p| if (std.mem.eql(u8, p.name, name)) return p;
-        \\    return null;
-        \\}
-        \\
-    );
 }
 
 fn readWholeFile(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) ![]u8 {

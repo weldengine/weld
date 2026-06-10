@@ -4,8 +4,12 @@
 //! `bench/fixtures/synth_100/scripts/` (cf. `briefs/S5-etch-codegen-zig.md`
 //! Acceptance criteria / Benchmarks):
 //!
-//!   (a) Codegen only — `etch_cook` over the 100 inputs into one
-//!       consolidated `.zig` file. Excludes the Zig compile.
+//!   (a) Codegen only — the consolidated cook over the 100 inputs into
+//!       one `.zig` file, run IN-PROCESS through the
+//!       `weld_etch.codegen_zig.consolidate` library (M0.8 E3-D,
+//!       D-S5-etchcook-inproc — formerly an `etch_cook` child process;
+//!       the first in-process measurement is a new protocol baseline,
+//!       the child-spawn overhead is gone). Excludes the Zig compile.
 //!   (b) Cold `zig build` — `.zig-cache` wiped before each iteration,
 //!       then a `zig build-exe` stub that imports the cooked module is
 //!       compiled. Measures the Zig compile only (the cook output is
@@ -23,8 +27,6 @@
 //! bench-etch-compile`):
 //!
 //!   - `bench/fixtures/synth_100/scripts/*.etch` — 100 corpus programs
-//!   - `zig-out/bin/etch_cook` — pre-built by `zig build` (the bench
-//!     depends on the install step so this exists)
 //!   - `zig-out/etch-bench/cooked.zig` — generated cook output (this dir
 //!     is created and re-used across iterations)
 //!   - `zig-out/etch-bench/stub.zig` — generated tiny driver referencing
@@ -35,6 +37,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const weld_etch = @import("weld_etch");
+const consolidate = weld_etch.codegen_zig.consolidate;
 
 const Corpus = struct {
     paths: []const []const u8,
@@ -64,7 +68,6 @@ const cooked_path: []const u8 = "zig-out/etch-bench/cooked.zig";
 const cooked_stats_path: []const u8 = "zig-out/etch-bench/cooked.zig.stats";
 const stub_path: []const u8 = "zig-out/etch-bench/stub.zig";
 const cache_dir: []const u8 = "zig-out/etch-bench/.zig-cache-bench";
-const cook_exe: []const u8 = "zig-out/bin/etch_cook";
 const core_root: []const u8 = "src/core/root.zig";
 const report_path: []const u8 = "bench/results/S5-codegen-zig.md";
 
@@ -110,18 +113,11 @@ pub fn main(init: std.process.Init) !void {
     var samples_c: std.ArrayListUnmanaged(Sample) = .empty;
     defer samples_c.deinit(gpa);
 
-    // Pre-build the cook args once — every iteration reuses them.
-    const cook_args = try buildCookArgs(gpa, paths.items);
-    defer {
-        for (cook_args) |a| gpa.free(a);
-        gpa.free(cook_args);
-    }
-
     // ─── Metric (a) — codegen only ──────────────────────────────────────
     {
         var i: u32 = 0;
         while (i < cfg.iterations) : (i += 1) {
-            const ns = try runCook(gpa, io, cook_args);
+            const ns = try runCookInProcess(gpa, io, cwd, paths.items);
             try samples_a.append(gpa, .{ .ns = ns });
             try stdout.print("  [a] iter {d}: {d:.3} ms\n", .{ i, @as(f64, @floatFromInt(ns)) / 1_000_000.0 });
             try stdout.flush();
@@ -135,7 +131,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Make sure a fresh cook output exists before metric (b) — otherwise
     // the first iteration's `zig build-exe` would have nothing to compile.
-    _ = try runCook(gpa, io, cook_args);
+    _ = try runCookInProcess(gpa, io, cwd, paths.items);
     try writeStub(gpa, io, cwd);
 
     // ─── Metric (b) — cold zig build ────────────────────────────────────
@@ -164,7 +160,7 @@ pub fn main(init: std.process.Init) !void {
             // Mutate the literal `0.5` ↔ `0.6` (round-trip per iteration so
             // the file content alternates without drift).
             try toggleLiteral(io, cwd, target_path, original, i);
-            _ = try runCook(gpa, io, cook_args);
+            _ = try runCookInProcess(gpa, io, cwd, paths.items);
             const ns = try runZigBuildExe(gpa, io);
             try samples_c.append(gpa, .{ .ns = ns });
             try stdout.print("  [c] iter {d}: {d:.3} ms\n", .{ i, @as(f64, @floatFromInt(ns)) / 1_000_000.0 });
@@ -198,30 +194,36 @@ fn lexLess(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == .lt;
 }
 
-fn buildCookArgs(gpa: std.mem.Allocator, paths: []const []const u8) ![][]const u8 {
-    var args: std.ArrayListUnmanaged([]const u8) = .empty;
-    try args.append(gpa, try gpa.dupe(u8, cook_exe));
-    try args.append(gpa, try gpa.dupe(u8, "--output"));
-    try args.append(gpa, try gpa.dupe(u8, cooked_path));
-    for (paths, 0..) |p, i| {
-        const arg = try std.fmt.allocPrint(gpa, "p{d:0>3}={s}", .{ i, p });
-        try args.append(gpa, arg);
-    }
-    return try args.toOwnedSlice(gpa);
-}
-
-fn runCook(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) !u64 {
-    _ = gpa;
-    var child = try std.process.spawn(io, .{
-        .argv = argv,
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    });
+/// Run the consolidated cook IN-PROCESS over the corpus (M0.8 E3-D,
+/// D-S5-etchcook-inproc): read the sources, cook through the
+/// `consolidate` library, write `cooked.zig` plus the `.stats` sidecar —
+/// the exact work the former `etch_cook` child process did, minus the
+/// process spawn/exit overhead. The timed region covers the full cycle
+/// (reads + cook + writes), matching metric (a)'s definition.
+fn runCookInProcess(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, paths: []const []const u8) !u64 {
     const t0 = std.Io.Clock.now(.awake, io);
-    const term = try child.wait(io);
+    var inputs: std.ArrayListUnmanaged(consolidate.NamedSource) = .empty;
+    defer {
+        for (inputs.items) |in| {
+            gpa.free(in.name);
+            gpa.free(in.source);
+        }
+        inputs.deinit(gpa);
+    }
+    for (paths, 0..) |p, i| {
+        const source = try readFile(gpa, io, cwd, p);
+        errdefer gpa.free(source);
+        const name = try std.fmt.allocPrint(gpa, "p{d:0>3}", .{i});
+        try inputs.append(gpa, .{ .name = name, .source = source });
+    }
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(gpa);
+    const stats = try consolidate.cookConsolidated(gpa, inputs.items, &buffer);
+    try writeFile(io, cwd, cooked_path, buffer.items);
+    var stats_text: [128]u8 = undefined;
+    const stats_bytes = try std.fmt.bufPrint(&stats_text, "rules={d}\ndistinct_signatures={d}\n", .{ stats.rules, stats.distinct_signatures });
+    try writeFile(io, cwd, cooked_stats_path, stats_bytes);
     const t1 = std.Io.Clock.now(.awake, io);
-    if (term != .exited or term.exited != 0) return error.CookFailed;
     return @intCast(@max(@as(i96, 0), t0.durationTo(t1).nanoseconds));
 }
 
@@ -468,7 +470,7 @@ fn emitReport(
     try appendFmt(gpa, &buf, "- Build mode: {s}\n", .{@tagName(builtin.mode)});
     try appendFmt(gpa, &buf, "- Host: {s}-{s}\n\n", .{ @tagName(builtin.cpu.arch), @tagName(builtin.os.tag) });
 
-    try appendFmt(gpa, &buf, "## Metric (a) — codegen only (`etch_cook` 100 inputs → 1 cooked.zig)\n\n", .{});
+    try appendFmt(gpa, &buf, "## Metric (a) — codegen only (in-process consolidated cook, 100 inputs → 1 cooked.zig)\n\n", .{});
     try appendFmt(gpa, &buf, "median {d:.3} ms · mean {d:.3} ms · stddev {d:.3} ms · p99 {d:.3} ms · max {d:.3} ms (N={d})\n\n", .{ a.median_ms, a.mean_ms, a.stddev_ms, a.p99_ms, a.max_ms, a.n });
 
     if (b_opt) |b| {

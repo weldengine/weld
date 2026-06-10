@@ -381,6 +381,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/etch/recovery_toplevel_test.zig", .etch = true },
         // M0.8 / E1 — EBNF harness: every ```etch example block parses clean.
         .{ .path = "tests/etch/ebnf_examples_test.zig", .etch = true },
+        // M0.8 / E3-D — D-S5-etchcook-inproc: the consolidated cook library.
+        .{ .path = "tests/etch/cook_consolidate_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
         // M0.3 — common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },
@@ -984,7 +986,11 @@ pub fn build(b: *std.Build) void {
     cook_diff_run.addArg("--output");
     const diff_codegen_path = cook_diff_run.addOutputFileArg("corpus_codegen.zig");
     for (codegen_corpus.programs) |p| {
-        cook_diff_run.addArg(b.fmt("{s}={s}", .{ p.name, p.etch_path }));
+        // `addPrefixedFileArg` content-tracks each `.etch` input in the Run
+        // step's cache manifest (M0.8 E3-D) — a raw `name=path` string arg
+        // is hashed by its bytes only, so a source edit would not
+        // invalidate the cached cook output.
+        cook_diff_run.addPrefixedFileArg(b.fmt("{s}=", .{p.name}), b.path(p.etch_path));
     }
 
     const diff_codegen_module = b.createModule(.{
@@ -1065,7 +1071,7 @@ pub fn build(b: *std.Build) void {
     const cook_demo_run = b.addRunArtifact(etch_cook_exe);
     cook_demo_run.addArg("--output");
     const demo_codegen_path = cook_demo_run.addOutputFileArg("cooked_demo.zig");
-    cook_demo_run.addArg("demo=bench/fixtures/demo_5_rules_codegen.etch");
+    cook_demo_run.addPrefixedFileArg("demo=", b.path("bench/fixtures/demo_5_rules_codegen.etch"));
 
     const cooked_demo_module = b.createModule(.{
         .root_source_file = demo_codegen_path,
@@ -1102,15 +1108,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // The bench consumes the consolidated cook IN-PROCESS through the
+    // codegen library (M0.8 E3-D, D-S5-etchcook-inproc) — no etch_cook
+    // child process on the timed path.
+    compile_bench_module.addImport("weld_etch", etch_module);
     const compile_bench_exe = b.addExecutable(.{
         .name = "etch-compile-bench",
         .root_module = compile_bench_module,
     });
     b.installArtifact(compile_bench_exe);
     const compile_bench_run = b.addRunArtifact(compile_bench_exe);
-    // Bench needs etch_cook on disk (path: zig-out/bin/etch_cook). Drive
-    // the install step before the bench runs.
-    compile_bench_run.step.dependOn(b.getInstallStep());
     if (b.args) |args| compile_bench_run.addArgs(args);
     const compile_bench_step = b.step(
         "bench-etch-compile",
