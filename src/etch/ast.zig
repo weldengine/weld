@@ -1037,6 +1037,59 @@ pub const DataDecl = struct {
     annotations_len: u32,
 };
 
+/// Kind of one routine trigger alternative (M0.8 E4, `etch-grammar.md`
+/// §8.2 `trigger_expr`): `at TIME_LITERAL` / `after IDENT` /
+/// `on_event TYPE_IDENT`. `or`-chains are stored as a flat run of
+/// alternatives in `arena.routine_triggers`.
+pub const RoutineTriggerKind = enum { at_time, after_segment, on_event };
+
+/// One routine trigger alternative. `value` holds, per kind: the interned
+/// `DD:DD` time lexeme / the referenced segment name / the event type name.
+pub const RoutineTrigger = struct {
+    kind: RoutineTriggerKind,
+    value: StringId,
+    span: SourceSpan,
+};
+
+/// One `segment IDENT { trigger: … actions: … until: … }` of a routine
+/// (M0.8 E4, §8.2 — the three clauses are mandatory, in that order).
+/// Triggers and untils are `(start, len)` runs of `arena.routine_triggers`;
+/// actions are a run of expression `NodeId` raw values in `arena.extra`
+/// (each a call per `routine_action = IDENT "(" [arg_list] ")"`).
+pub const RoutineSegment = struct {
+    name: StringId,
+    triggers_start: u32,
+    triggers_len: u32,
+    actions_start: u32, // index into `arena.extra`
+    actions_len: u32,
+    untils_start: u32,
+    untils_len: u32,
+    span: SourceSpan,
+};
+
+/// One `on_xxx -> target` routine interrupt (M0.8 E4, §8.2). `event_name`
+/// is the full `on_…` identifier; `target` is a behavior name or the
+/// `pause_segment` builtin (`is_pause`).
+pub const RoutineInterrupt = struct {
+    event_name: StringId,
+    target: StringId,
+    is_pause: bool,
+    span: SourceSpan,
+};
+
+/// Side-slab entry for a `routine` declaration (M0.8 E4 Level B, §8.2).
+/// Segments and interrupts live in `(start, len)` runs of
+/// `arena.routine_segments` / `arena.routine_interrupts`.
+pub const RoutineDecl = struct {
+    name: StringId,
+    segments_start: u32,
+    segments_len: u32,
+    interrupts_start: u32,
+    interrupts_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
 const NamedTypeNode = struct {
     name: StringId,
 };
@@ -1203,6 +1256,10 @@ pub const AstArena = struct {
     type_alias_decls: std.ArrayListUnmanaged(TypeAliasDecl) = .empty,
     data_decls: std.ArrayListUnmanaged(DataDecl) = .empty,
     data_entries: std.ArrayListUnmanaged(DataEntry) = .empty,
+    routine_decls: std.ArrayListUnmanaged(RoutineDecl) = .empty,
+    routine_segments: std.ArrayListUnmanaged(RoutineSegment) = .empty,
+    routine_triggers: std.ArrayListUnmanaged(RoutineTrigger) = .empty,
+    routine_interrupts: std.ArrayListUnmanaged(RoutineInterrupt) = .empty,
     rule_params: std.ArrayListUnmanaged(RuleParam) = .empty,
     fn_params: std.ArrayListUnmanaged(FnParam) = .empty,
     when_nodes: std.ArrayListUnmanaged(WhenNode) = .empty,
@@ -1337,6 +1394,10 @@ pub const AstArena = struct {
         self.type_alias_decls.deinit(gpa);
         self.data_decls.deinit(gpa);
         self.data_entries.deinit(gpa);
+        self.routine_decls.deinit(gpa);
+        self.routine_segments.deinit(gpa);
+        self.routine_triggers.deinit(gpa);
+        self.routine_interrupts.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
@@ -1730,6 +1791,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.data_decls.items.len);
         try self.data_decls.append(gpa, decl);
         return try self.addItem(gpa, .data_decl, idx, span);
+    }
+
+    /// `routine Name { segments + interrupts }` (M0.8 E4, `etch-grammar.md`
+    /// §8.2). The caller appends segments / triggers / interrupts to their
+    /// slabs beforehand, passing the ranges in `decl`.
+    pub fn addRoutineDecl(self: *AstArena, gpa: std.mem.Allocator, decl: RoutineDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.routine_decls.items.len);
+        try self.routine_decls.append(gpa, decl);
+        return try self.addItem(gpa, .routine_decl, idx, span);
     }
 
     /// `Type { f: v, … }` struct literal (M0.8 E2 block 3). `fields` is

@@ -503,7 +503,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine => return,
                 else => _ = try self.advance(),
             }
         }
@@ -532,6 +532,7 @@ pub const Parser = struct {
             .kw_event => try self.parseEventDecl(annotations),
             .kw_tags => try self.parseTagsDecl(annotations),
             .kw_data => try self.parseDataDecl(annotations),
+            .kw_routine => try self.parseRoutineDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -545,7 +546,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -1518,6 +1519,186 @@ pub const Parser = struct {
         };
     }
 
+    /// Parse `routine TYPE_IDENT "{" {routine_element} "}"` (M0.8 E4 Level B,
+    /// `etch-grammar.md` §8.2). Elements are segments (`segment Name { … }`)
+    /// and interrupts (`on_xxx -> target`), dispatched on the head
+    /// identifier: `segment` is a contextual keyword (the S3 sub-construct
+    /// doctrine); an interrupt head is lexically one IDENT starting `on_`
+    /// (the EBNF's `"on_" , IDENT` split is not lexable — E4 bound (f)).
+    /// Interrupt targets accept `ident | type_ident` (behavior names are
+    /// TYPE_IDENT-shaped — E4 bound (d)); `pause_segment` is matched by
+    /// lexeme. Direct slab appends stay contiguous: routine slabs are only
+    /// fed from routine context and routines do not nest.
+    fn parseRoutineDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'routine'
+        const name_tok = try self.expect(.type_ident, "expected routine name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start routine body");
+        const segments_start: u32 = @intCast(self.arena.routine_segments.items.len);
+        const interrupts_start: u32 = @intCast(self.arena.routine_interrupts.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.peek() != .ident) {
+                return self.parseErrFmt(self.peekSpan(), "expected 'segment' or an 'on_…' interrupt in routine body, got '{s}'", .{self.sliceOf(self.peekSpan())});
+            }
+            const head = self.sliceOf(self.peekSpan());
+            if (std.mem.eql(u8, head, "segment")) {
+                try self.parseRoutineSegment();
+            } else if (std.mem.startsWith(u8, head, "on_")) {
+                const ev_tok = try self.advance();
+                const ev_name = try self.internSlice(ev_tok.span);
+                _ = try self.expect(.arrow, "expected '->' after the routine interrupt event");
+                const target_tok = switch (self.peek()) {
+                    .ident, .type_ident => try self.advance(),
+                    else => return self.parseErr(self.peekSpan(), "expected an interrupt target (behavior name or 'pause_segment')"),
+                };
+                try self.arena.routine_interrupts.append(self.gpa, .{
+                    .event_name = ev_name,
+                    .target = try self.internSlice(target_tok.span),
+                    .is_pause = std.mem.eql(u8, self.sliceOf(target_tok.span), "pause_segment"),
+                    .span = .{ .byte_start = ev_tok.span.byte_start, .byte_end = target_tok.span.byte_end },
+                });
+            } else {
+                return self.parseErrFmt(self.peekSpan(), "expected 'segment' or an 'on_…' interrupt in routine body, got '{s}'", .{head});
+            }
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close routine body");
+        _ = try self.arena.addRoutineDecl(self.gpa, .{
+            .name = name_id,
+            .segments_start = segments_start,
+            .segments_len = @as(u32, @intCast(self.arena.routine_segments.items.len)) - segments_start,
+            .interrupts_start = interrupts_start,
+            .interrupts_len = @as(u32, @intCast(self.arena.routine_interrupts.items.len)) - interrupts_start,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse one `segment IDENT { trigger: … actions: … until: … }` (§8.2).
+    /// The three clauses are mandatory and ordered (the EBNF fixes the
+    /// order). Segment names accept `ident | type_ident` (the grammar's own
+    /// examples are PascalCase — E4 bound (d)).
+    fn parseRoutineSegment(self: *Parser) ParseError!void {
+        const kw = try self.advance(); // 'segment' (contextual)
+        const name_tok = switch (self.peek()) {
+            .ident, .type_ident => try self.advance(),
+            else => return self.parseErr(self.peekSpan(), "expected segment name after 'segment'"),
+        };
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start segment body");
+        try self.expectContextualKey("trigger");
+        const triggers = try self.parseTriggerAlternatives();
+        try self.expectContextualKey("actions");
+        const actions = try self.parseRoutineActions();
+        try self.expectContextualKey("until");
+        const untils = try self.parseTriggerAlternatives();
+        const closing = try self.expect(.rbrace, "expected '}' to close segment body");
+        try self.arena.routine_segments.append(self.gpa, .{
+            .name = name_id,
+            .triggers_start = triggers.start,
+            .triggers_len = triggers.len,
+            .actions_start = actions.start,
+            .actions_len = actions.len,
+            .untils_start = untils.start,
+            .untils_len = untils.len,
+            .span = .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end },
+        });
+    }
+
+    /// Expect a contextual segment-clause key (`trigger` / `actions` /
+    /// `until`) followed by its `:`.
+    fn expectContextualKey(self: *Parser, comptime key: []const u8) ParseError!void {
+        if (self.peek() != .ident or !std.mem.eql(u8, self.sliceOf(self.peekSpan()), key)) {
+            return self.parseErrFmt(self.peekSpan(), "expected '" ++ key ++ ":' (segment clauses are ordered: trigger, actions, until), got '{s}'", .{self.sliceOf(self.peekSpan())});
+        }
+        _ = try self.advance();
+        _ = try self.expect(.colon, "expected ':' after '" ++ key ++ "'");
+    }
+
+    const SlabRange = struct { start: u32, len: u32 };
+
+    /// Parse a §8.2 `trigger_expr` `or`-chain into a flat run of
+    /// `arena.routine_triggers` alternatives: `at TIME_LITERAL` /
+    /// `after IDENT` / `on_event TYPE_IDENT`. `at` and `on_event` are
+    /// contextual identifiers (`on_event` must stay an ident — graduating
+    /// it would break the `@on_event(T)` annotation parse, E4 bound (g));
+    /// `after` is the graduated `kw_after`.
+    fn parseTriggerAlternatives(self: *Parser) ParseError!SlabRange {
+        const start: u32 = @intCast(self.arena.routine_triggers.items.len);
+        while (true) {
+            switch (self.peek()) {
+                .kw_after => {
+                    const kw = try self.advance();
+                    const seg_tok = switch (self.peek()) {
+                        .ident, .type_ident => try self.advance(),
+                        else => return self.parseErr(self.peekSpan(), "expected a segment name after 'after'"),
+                    };
+                    try self.arena.routine_triggers.append(self.gpa, .{
+                        .kind = .after_segment,
+                        .value = try self.internSlice(seg_tok.span),
+                        .span = .{ .byte_start = kw.span.byte_start, .byte_end = seg_tok.span.byte_end },
+                    });
+                },
+                .ident => {
+                    const head = self.sliceOf(self.peekSpan());
+                    if (std.mem.eql(u8, head, "at")) {
+                        const kw = try self.advance();
+                        const time_tok = try self.expect(.time_literal, "expected a DD:DD time literal after 'at'");
+                        try self.arena.routine_triggers.append(self.gpa, .{
+                            .kind = .at_time,
+                            .value = try self.internSlice(time_tok.span),
+                            .span = .{ .byte_start = kw.span.byte_start, .byte_end = time_tok.span.byte_end },
+                        });
+                    } else if (std.mem.eql(u8, head, "on_event")) {
+                        const kw = try self.advance();
+                        const ev_tok = try self.expect(.type_ident, "expected an event type (TYPE_IDENT) after 'on_event'");
+                        try self.arena.routine_triggers.append(self.gpa, .{
+                            .kind = .on_event,
+                            .value = try self.internSlice(ev_tok.span),
+                            .span = .{ .byte_start = kw.span.byte_start, .byte_end = ev_tok.span.byte_end },
+                        });
+                    } else {
+                        return self.parseErrFmt(self.peekSpan(), "expected a trigger ('at DD:DD' | 'after Segment' | 'on_event EventType'), got '{s}'", .{head});
+                    }
+                },
+                else => return self.parseErrFmt(self.peekSpan(), "expected a trigger ('at DD:DD' | 'after Segment' | 'on_event EventType'), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            }
+            if (self.peek() != .kw_or) break;
+            _ = try self.advance(); // 'or'
+        }
+        return .{ .start = start, .len = @as(u32, @intCast(self.arena.routine_triggers.items.len)) - start };
+    }
+
+    /// Parse a §8.2 `routine_action_list` (`action { "then" action }`) into
+    /// a run of expression `NodeId`s in `arena.extra`. Each action must be a
+    /// call (`routine_action = IDENT "(" [arg_list] ")"`) — enforced on the
+    /// parsed expression's kind. Buffered commit: parsing an action's
+    /// arguments appends arg runs to `arena.extra`, which would interleave
+    /// with this run.
+    fn parseRoutineActions(self: *Parser) ParseError!SlabRange {
+        var temp: std.ArrayListUnmanaged(u32) = .empty;
+        defer temp.deinit(self.gpa);
+        while (true) {
+            if (self.peek() != .ident) {
+                return self.parseErrFmt(self.peekSpan(), "expected a routine action call 'fn_name(args)', got '{s}'", .{self.sliceOf(self.peekSpan())});
+            }
+            const action = try self.parseExpr(0);
+            if (self.arena.exprKind(action) != .fn_call) {
+                return self.parseErr(self.arena.exprSpan(action), "a routine action must be a call 'fn_name(args)' (etch-grammar.md §8.2)");
+            }
+            try temp.append(self.gpa, action.raw());
+            if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "then")) {
+                _ = try self.advance(); // 'then'
+                continue;
+            }
+            break;
+        }
+        const start: u32 = @intCast(self.arena.extra.items.len);
+        try self.arena.extra.appendSlice(self.gpa, temp.items);
+        return .{ .start = start, .len = @intCast(temp.items.len) };
+    }
+
     /// Parse `trait TYPE_IDENT "{" {trait_member} "}"` (M0.8 E2 block 3 tranche
     /// C, `etch-grammar.md` §5.9). `trait_member = function_signature` (abstract
     /// — no body, `has_body = false`) `| function_decl` (default body). Members
@@ -2267,6 +2448,13 @@ pub const Parser = struct {
     }
 
     fn parseStmt(self: *Parser) ParseError!NodeId {
+        if (self.peek() == .kw_after) {
+            // `after` graduated to a keyword for routine triggers (M0.8 E4);
+            // the §4.3 timer statement it also heads stays out of M0.8 —
+            // keep the fail-loud explicit (it lexed `error_unknown_keyword`
+            // before the graduation).
+            return self.parseErr(self.peekSpan(), "timer statements ('after ...') are not in M0.8 scope (Phase 2)");
+        }
         if (self.peek() == .kw_let) {
             return try self.parseLetStmt();
         }
@@ -4483,4 +4671,134 @@ test "parser recovers and a valid data after a broken construct survives (M0.8 E
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.data_decls.items.len);
+}
+
+test "parser builds a routine with segments + interrupts (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\routine BlacksmithDaily {
+        \\  segment Working {
+        \\    trigger: at 06:00 or after Sleeping
+        \\    actions: use_smart_object("forge_anvil")
+        \\    until: at 12:00 or on_event MealCallReceived
+        \\  }
+        \\  segment Sleeping {
+        \\    trigger: at 22:00
+        \\    actions: go_to("bed") then idle("sleeping")
+        \\    until: at 06:00
+        \\  }
+        \\  on_threat_detected -> CombatBehavior
+        \\  on_dialogue_request -> pause_segment
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.routine_decls.items.len);
+    const decl = result.ast.routine_decls.items[0];
+    try std.testing.expectEqualStrings("BlacksmithDaily", result.ast.strings.slice(decl.name));
+    try std.testing.expectEqual(@as(u32, 2), decl.segments_len);
+    try std.testing.expectEqual(@as(u32, 2), decl.interrupts_len);
+
+    const working = result.ast.routine_segments.items[decl.segments_start];
+    try std.testing.expectEqualStrings("Working", result.ast.strings.slice(working.name));
+    try std.testing.expectEqual(@as(u32, 2), working.triggers_len);
+    try std.testing.expectEqual(@as(u32, 1), working.actions_len);
+    try std.testing.expectEqual(@as(u32, 2), working.untils_len);
+    const t0 = result.ast.routine_triggers.items[working.triggers_start];
+    try std.testing.expectEqual(ast_mod.RoutineTriggerKind.at_time, t0.kind);
+    try std.testing.expectEqualStrings("06:00", result.ast.strings.slice(t0.value));
+    const t1 = result.ast.routine_triggers.items[working.triggers_start + 1];
+    try std.testing.expectEqual(ast_mod.RoutineTriggerKind.after_segment, t1.kind);
+    try std.testing.expectEqualStrings("Sleeping", result.ast.strings.slice(t1.value));
+    const until_alt = result.ast.routine_triggers.items[working.untils_start + 1];
+    try std.testing.expectEqual(ast_mod.RoutineTriggerKind.on_event, until_alt.kind);
+    try std.testing.expectEqualStrings("MealCallReceived", result.ast.strings.slice(until_alt.value));
+
+    // Second segment: two `then`-chained actions, each a fn_call.
+    const sleeping = result.ast.routine_segments.items[decl.segments_start + 1];
+    try std.testing.expectEqual(@as(u32, 2), sleeping.actions_len);
+    const a0: ast_mod.NodeId = @bitCast(result.ast.extra.items[sleeping.actions_start]);
+    try std.testing.expectEqual(ast_mod.ExprKind.fn_call, result.ast.exprKind(a0));
+
+    // Interrupts: behavior target then pause_segment.
+    const int0 = result.ast.routine_interrupts.items[decl.interrupts_start];
+    try std.testing.expectEqualStrings("on_threat_detected", result.ast.strings.slice(int0.event_name));
+    try std.testing.expect(!int0.is_pause);
+    const int1 = result.ast.routine_interrupts.items[decl.interrupts_start + 1];
+    try std.testing.expect(int1.is_pause);
+}
+
+test "parser rejects routine clause-order and shape violations (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    // `actions` before `trigger` — the §8.2 clause order is fixed.
+    var bad_order = try parse(gpa,
+        \\routine R {
+        \\  segment A {
+        \\    actions: go_to("x")
+        \\    trigger: at 06:00
+        \\    until: at 07:00
+        \\  }
+        \\}
+    );
+    defer bad_order.deinit(gpa);
+    try std.testing.expect(bad_order.diagnostics.len > 0);
+
+    // A non-call action is rejected at parse (routine_action = IDENT(args)).
+    var bad_action = try parse(gpa,
+        \\routine R {
+        \\  segment A {
+        \\    trigger: at 06:00
+        \\    actions: just_an_ident
+        \\    until: at 07:00
+        \\  }
+        \\}
+    );
+    defer bad_action.deinit(gpa);
+    try std.testing.expect(bad_action.diagnostics.len > 0);
+
+    // `at` requires a DD:DD time literal.
+    var bad_time = try parse(gpa,
+        \\routine R {
+        \\  segment A {
+        \\    trigger: at 6
+        \\    actions: go_to("x")
+        \\    until: at 07:00
+        \\  }
+        \\}
+    );
+    defer bad_time.deinit(gpa);
+    try std.testing.expect(bad_time.diagnostics.len > 0);
+}
+
+test "parser rejects the out-of-scope timer statement after kw_after graduation (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r(entity: Entity) when entity has Health {
+        \\  after 2.0 { }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+}
+
+test "parser recovers and a valid routine after a broken construct survives (M0.8 E4 lockstep)" {
+    const gpa = std.testing.allocator;
+    // The lockstep stop-set now lists `kw_routine`: a broken leading
+    // construct resyncs at the `routine` that follows, which lands in the AST.
+    var result = try parse(gpa,
+        \\@@@bad
+        \\routine Daily {
+        \\  segment A {
+        \\    trigger: at 06:00
+        \\    actions: go_to("forge")
+        \\    until: at 12:00
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.routine_decls.items.len);
 }

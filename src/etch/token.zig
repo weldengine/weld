@@ -32,6 +32,7 @@ pub const TokenKind = enum {
     float_literal,
     bool_literal, // true / false
     string_literal, // simple-quote only in S3 (no interpolation)
+    time_literal, // DD:DD in-game time (M0.8 E4 routine triggers, §1.4)
 
     // ── Keywords (S3 subset) ──
     kw_let,
@@ -82,6 +83,8 @@ pub const TokenKind = enum {
     kw_add_tag, // tag mutation (M0.8 E3 ECS layer — deferred structural change)
     kw_remove_tag, // tag mutation (M0.8 E3 ECS layer — deferred structural change)
     kw_data, // data table declaration (M0.8 E4 Level B gameplay)
+    kw_routine, // routine declaration (M0.8 E4 Level B gameplay)
+    kw_after, // routine trigger `after Segment` (M0.8 E4; the §4.3 timer statement stays out of M0.8 — explicit parse error)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -211,6 +214,8 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "add_tag", .kind = .kw_add_tag },
     .{ .lexeme = "remove_tag", .kind = .kw_remove_tag },
     .{ .lexeme = "data", .kind = .kw_data },
+    .{ .lexeme = "routine", .kind = .kw_routine },
+    .{ .lexeme = "after", .kind = .kw_after },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -243,7 +248,6 @@ pub const non_s3_keywords = [_][]const u8{
     "const",
     "private",
     "behavior",
-    "routine",
     "quest",
     "dialogue",
     "ability",
@@ -273,8 +277,9 @@ pub const non_s3_keywords = [_][]const u8{
     "branch",
     "spawn",
 
-    // ── Timers / lifecycle (out of S3; `emit` graduated with E3 ECS layer) ──
-    "after",
+    // ── Timers / lifecycle (out of S3; `emit` graduated with E3 ECS layer;
+    //    `after` graduated with E4 routine triggers — the §4.3 timer
+    //    statement keeps an explicit fail-loud parse error) ──
     "every",
     "after_unscaled",
     "quantize",

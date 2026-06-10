@@ -262,11 +262,27 @@ pub const Lexer = struct {
         return .{ .kind = kind, .span = span };
     }
 
+    fn isDigit(c: u8) bool {
+        return c >= '0' and c <= '9';
+    }
+
     fn lexNumber(self: *Lexer, start: u32) Token {
         // Consume integer part.
         while (self.pos < self.source.len) : (self.pos += 1) {
             const c = self.source[self.pos];
             if (!((c >= '0' and c <= '9') or c == '_')) break;
+        }
+        // TIME_LITERAL `DD:DD` (M0.8 E4 routine triggers, `etch-grammar.md`
+        // §1.4): exactly two digits, ':', exactly two digits, contiguous —
+        // the §1.4 greedy-lexer rule (like DURATION_LIT). `06:003` stays
+        // INT ':' INT; `6:00` (one digit) stays INT ':' INT.
+        if (self.pos - start == 2 and isDigit(self.source[start]) and isDigit(self.source[start + 1]) and
+            self.pos + 2 < self.source.len and self.source[self.pos] == ':' and
+            isDigit(self.source[self.pos + 1]) and isDigit(self.source[self.pos + 2]) and
+            (self.pos + 3 >= self.source.len or !isDigit(self.source[self.pos + 3])))
+        {
+            self.pos += 3;
+            return .{ .kind = .time_literal, .span = .{ .byte_start = start, .byte_end = self.pos } };
         }
         // Optional fractional part: only if `.` is followed by a digit.
         // `42.field` must lex as INT + DOT + IDENT, not FLOAT.
@@ -495,4 +511,22 @@ test "lexer accepts string literal with arbitrary UTF-8 inside" {
 fn expectKind(lex: *Lexer, gpa: std.mem.Allocator, kind: TokenKind) !void {
     const t = try lex.next(gpa);
     try std.testing.expectEqual(kind, t.kind);
+}
+
+test "lexer lexes DD:DD as a time literal, greedy-contiguous only (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var lex = Lexer.init("06:00 6:00 06:003 22:30");
+    // `06:00` → one time literal.
+    try expectKind(&lex, gpa, .time_literal);
+    // `6:00` — one digit before ':' → INT ':' INT.
+    try expectKind(&lex, gpa, .int_literal);
+    try expectKind(&lex, gpa, .colon);
+    try expectKind(&lex, gpa, .int_literal);
+    // `06:003` — three digits after ':' → INT ':' INT.
+    try expectKind(&lex, gpa, .int_literal);
+    try expectKind(&lex, gpa, .colon);
+    try expectKind(&lex, gpa, .int_literal);
+    // `22:30` → time literal again.
+    try expectKind(&lex, gpa, .time_literal);
+    try expectKind(&lex, gpa, .eof);
 }
