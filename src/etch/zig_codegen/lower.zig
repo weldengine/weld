@@ -150,6 +150,16 @@ pub fn generateFile(
         try emitMapGetPrelude(&w);
     }
 
+    // Set-insert + set-contains helpers (M0.8 E3-C tranche 3bis) — emitted
+    // iff the program makes a `Set.*` associated call (sets have NO literal,
+    // part1 §3.3 — the constructors are the only source of a set value).
+    // Same over-emission tolerance as the map helpers; set-free programs
+    // stay byte-identical.
+    if (programUsesSet(ast)) {
+        try emitSetInsertPrelude(&w);
+        try emitSetContainsPrelude(&w);
+    }
+
     // The builtin `TagSet` component (M0.8 E3): a fixed `[words]u64` bitfield,
     // one slot per entity carrying tags. Emitted as an `extern struct` so its
     // layout matches the registry's raw `words*8`-byte / align-8 component
@@ -408,6 +418,46 @@ fn emitMapGetPrelude(w: *Writer) CodegenError!void {
     try w.blankLine();
 }
 
+/// Emit the set-insert helper (M0.8 E3-C tranche 3bis, stdlib §15.2): one
+/// duck-typed fn shared by `s.insert(item)` and the `Set.from` seeding —
+/// scan-skip-or-append, the exact mechanics of the interpreter's set store,
+/// so element order is byte-exact by construction. `s` is a
+/// `*std.ArrayListUnmanaged(struct { item: T })`; `==` on the element bounds
+/// T to the scalar types the emitter's set table allows. Gated on the
+/// program containing a `Set.*` associated call (the only source of a set
+/// value in the M0.8 subset — sets have no literal).
+fn emitSetInsertPrelude(w: *Writer) CodegenError!void {
+    try w.line("fn __etchSetInsert(s: anytype, fa: std.mem.Allocator, item: anytype) void {");
+    w.indentBy(1);
+    try w.line("for (s.items) |p| {");
+    w.indentBy(1);
+    try w.line("if (p.item == item) return;");
+    w.indentBy(-1);
+    try w.line("}");
+    try w.line("s.append(fa, .{ .item = item }) catch unreachable;");
+    w.indentBy(-1);
+    try w.line("}");
+    try w.blankLine();
+}
+
+/// Emit the set-contains helper (M0.8 E3-C tranche 3bis, stdlib §15.2): the
+/// same insertion-ordered scan as `__etchSetInsert` (and the interpreter's
+/// set store) returning whether the element is present. Same gate as the
+/// insert helper.
+fn emitSetContainsPrelude(w: *Writer) CodegenError!void {
+    try w.line("fn __etchSetContains(s: anytype, item: anytype) bool {");
+    w.indentBy(1);
+    try w.line("for (s.items) |p| {");
+    w.indentBy(1);
+    try w.line("if (p.item == item) return true;");
+    w.indentBy(-1);
+    try w.line("}");
+    try w.line("return false;");
+    w.indentBy(-1);
+    try w.line("}");
+    try w.blankLine();
+}
+
 /// Whether the program references the builtin error machinery, so the
 /// `Error`/`ErrorCode` prelude must be emitted (M0.8 E3-C tranche 2). Scans:
 /// the throw / try-catch slabs, `throws` markers on fns and methods, `Error`
@@ -470,6 +520,35 @@ fn typeNodeNamesError(ast: *const AstArena, type_node: NodeId, err_id: ?StringId
         },
         else => return false,
     }
+}
+
+/// Whether the program creates any set value, so the `__etchSet*` prelude
+/// helpers must be emitted (M0.8 E3-C tranche 3bis). Sets have NO literal
+/// (part1 §3.3) — the only entry is a `Set.new`/`Set.from` associated call,
+/// so the scan is over method calls with a `.path` receiver named `Set`.
+fn programUsesSet(ast: *const AstArena) bool {
+    const set_id = ast.strings.find("Set") orelse return false;
+    for (ast.method_calls.items) |mc| {
+        if (ast.exprKind(mc.receiver) == .path and ast.exprData(mc.receiver) == set_id) return true;
+    }
+    return false;
+}
+
+/// The `Set.new`/`Set.from` associated-call shape of an expression, or `null`
+/// when it is not a `Set.*` call (M0.8 E3-C tranche 3bis). Drives the
+/// set-local route of `emitLet`; an out-of-shape `Set.*` call
+/// (`with_capacity`, wrong arity) was already resolver-rejected.
+const SetCall = union(enum) { new, from: NodeId };
+
+fn setCallOf(ast: *const AstArena, value: NodeId) ?SetCall {
+    if (ast.exprKind(value) != .method_call) return null;
+    const mc = ast.method_calls.items[ast.exprData(value)];
+    if (ast.exprKind(mc.receiver) != .path) return null;
+    if (!std.mem.eql(u8, ast.strings.slice(ast.exprData(mc.receiver)), "Set")) return null;
+    const mname = ast.strings.slice(mc.method_name);
+    if (std.mem.eql(u8, mname, "new") and mc.args_len == 0) return .new;
+    if (std.mem.eql(u8, mname, "from") and mc.args_len == 1) return .{ .from = @bitCast(ast.extra.items[mc.args_start]) };
+    return null;
 }
 
 /// The top-level `fn` declaration named `name`, or `null` (M0.8 E3-C
@@ -2686,6 +2765,63 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
         return;
     }
 
+    // `let [mut] s: Set<T> = Set.new() / Set.from([...])` (M0.8 E3-C tranche
+    // 3bis) — a set local: an insertion-ordered element list seeded through
+    // `__etchSetInsert` (scan-skip-or-append — duplicates collapse), the
+    // exact mechanics of the interpreter's set store. Sets have NO literal:
+    // the `Set.new`/`Set.from` associated calls routed here are the only
+    // supported initializers — any other set-valued initializer fails loud.
+    // Without an annotation the element Zig type is inferred from the first
+    // `Set.from` element (an un-annotated `Set.new()` has no element type).
+    const set_list_t: ?[]const u8 = blk: {
+        if (!let.type_annotation.isNone() and ast.typeNodeKind(let.type_annotation) == .set_type) {
+            break :blk setAnnotationListType(ast, let.type_annotation) orelse return CodegenError.UnsupportedConstruct;
+        }
+        if (let.type_annotation.isNone()) {
+            if (setCallOf(ast, let.value)) |call| {
+                if (call == .from and ast.exprKind(call.from) == .array_lit) {
+                    const al = ast.array_lits.items[ast.exprData(call.from)];
+                    if (!al.is_fill and al.elements_len > 0) {
+                        const first: NodeId = @bitCast(ast.extra.items[al.elements_start]);
+                        break :blk setZigType(inferExprZigType(ast, ctx, first)) orelse return CodegenError.UnsupportedConstruct;
+                    }
+                }
+                return CodegenError.UnsupportedConstruct;
+            }
+        }
+        break :blk null;
+    };
+    if (set_list_t) |list_t| {
+        const call = setCallOf(ast, let.value) orelse return CodegenError.UnsupportedConstruct;
+        try w.writeIndent();
+        try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
+        try w.ident(ast.strings.slice(let.name));
+        try w.print(": {s} = .empty;\n", .{list_t});
+        if (call == .from) {
+            if (ast.exprKind(call.from) != .array_lit) return CodegenError.UnsupportedConstruct;
+            const al = ast.array_lits.items[ast.exprData(call.from)];
+            if (al.is_fill) return CodegenError.UnsupportedConstruct;
+            if (al.elements_len > 0) {
+                const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
+                w.arena_used = true;
+                var i: u32 = 0;
+                while (i < al.elements_len) : (i += 1) {
+                    try w.writeIndent();
+                    try w.write("__etchSetInsert(&");
+                    try w.ident(ast.strings.slice(let.name));
+                    try w.print(", {s}, ", .{fa});
+                    try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[al.elements_start + i]));
+                    try w.write(");\n");
+                }
+            }
+        }
+        try ctx.records.append(w.gpa, .{
+            .key = .{ .name = let.name },
+            .info = .{ .kind = .value, .zig_type = list_t, .is_mut = let.is_mut },
+        });
+        return;
+    }
+
     // Plain-value let. Try to infer the Zig type so the binding is annotated
     // when possible (helps Zig's int-literal coercion).
     const zig_t = inferZigType(ast, ctx, let.value, let.type_annotation);
@@ -3112,6 +3248,41 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                     }
                     return CodegenError.UnsupportedConstruct;
                 }
+                // Builtin set methods (M0.8 E3-C tranche 3bis — minimal
+                // faithful subset, stdlib §15.2), routed on the emitted
+                // declaration type like arrays / maps. `insert` goes through
+                // the scan-skip-or-append prelude helper (statement position,
+                // Zig `void`); `contains` through the matching scan helper
+                // (→ bool); `len` is the element count as Etch `int`.
+                // Anything else is stdlib Phase 1+ → fail loud.
+                if (setElemZig(recv_zig) != null) {
+                    const mname = ast.strings.slice(mc.method_name);
+                    if (std.mem.eql(u8, mname, "insert") and mc.args_len == 1) {
+                        const fa = ctx.arena_param orelse return CodegenError.UnsupportedConstruct;
+                        w.arena_used = true;
+                        try w.write("__etchSetInsert(&(");
+                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try w.print("), {s}, ", .{fa});
+                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
+                        try w.write(")");
+                        return;
+                    }
+                    if (std.mem.eql(u8, mname, "contains") and mc.args_len == 1) {
+                        try w.write("__etchSetContains(");
+                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try w.write(", ");
+                        try emitExpr(w, ast, ctx, @bitCast(ast.extra.items[mc.args_start]));
+                        try w.write(")");
+                        return;
+                    }
+                    if (std.mem.eql(u8, mname, "len") and mc.args_len == 0) {
+                        try w.write("@as(i64, @intCast((");
+                        try emitExpr(w, ast, ctx, mc.receiver);
+                        try w.write(").items.len))");
+                        return;
+                    }
+                    return CodegenError.UnsupportedConstruct;
+                }
             }
             // Builtin string method (M0.8 sub-slice C tranche 1). `s.len()` →
             // Zig `(s).len` cast to `i64` (Etch `int`). Other string methods are
@@ -3129,8 +3300,13 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 return;
             }
             if (ast.exprKind(mc.receiver) == .path) {
-                // Associated fn: the receiver is a bare type name.
-                try w.write(ast.strings.slice(ast.exprData(mc.receiver)));
+                // Associated fn: the receiver is a bare type name. A `Set.*`
+                // builtin call outside the `emitLet` set route (the only
+                // supported position, M0.8 E3-C tranche 3bis) fails loud
+                // here rather than emitting an undeclared `Set`.
+                const tname = ast.strings.slice(ast.exprData(mc.receiver));
+                if (std.mem.eql(u8, tname, "Set")) return CodegenError.UnsupportedConstruct;
+                try w.write(tname);
             } else {
                 try emitExpr(w, ast, ctx, mc.receiver);
             }
@@ -3773,6 +3949,46 @@ fn mapAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8 {
     const key_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(knamed.name))) orelse return null;
     const value_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(vnamed.name))) orelse return null;
     return mapZigType(key_zig, value_zig);
+}
+
+/// The Zig declaration type of an Etch set local `Set<T>` (M0.8 E3-C tranche
+/// 3bis) — an insertion-ordered single-field element list, mirroring the
+/// interpreter's set store so element order (and therefore every
+/// differential) is byte-exact by construction. The `struct { item: T }`
+/// wrapper keeps the type distinct from the dyn-array list types — the
+/// method / index / for-in routing is keyed on the emitted declaration type.
+/// Elements are bounded to `int`/`bool`: string elements need content
+/// equality (deferred — the ratified tranche-3 map-key policy, interp
+/// reference) and float elements are resolver-rejected (E0601).
+fn setZigType(elem_zig: []const u8) ?[]const u8 {
+    inline for (set_types_table) |p| {
+        if (std.mem.eql(u8, elem_zig, p[0])) return p[1];
+    }
+    return null;
+}
+
+/// Reverse of `setZigType`: the element Zig type of a set local's
+/// declaration type, or `null`.
+fn setElemZig(zig_t: []const u8) ?[]const u8 {
+    inline for (set_types_table) |p| {
+        if (std.mem.eql(u8, zig_t, p[1])) return p[0];
+    }
+    return null;
+}
+
+const set_types_table = .{
+    .{ "i64", "std.ArrayListUnmanaged(struct { item: i64 })" },
+    .{ "bool", "std.ArrayListUnmanaged(struct { item: bool })" },
+};
+
+/// The list declaration type for a `Set<T>` annotation (M0.8 E3-C tranche
+/// 3bis), or `null` when the element is outside the emitter's set table.
+fn setAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8 {
+    const st = ast.set_types.items[ast.typeNodeData(annotation)];
+    if (ast.typeNodeKind(st.elem) != .named) return null;
+    const named = ast.named_types.items[ast.typeNodeData(st.elem)];
+    const elem_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(named.name))) orelse return null;
+    return setZigType(elem_zig);
 }
 
 /// The declared enum type name of struct field `field_name` on struct

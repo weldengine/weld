@@ -396,6 +396,51 @@ test "lowers dynamic-array and map locals to frame-arena lists, gating the map-i
     try std.testing.expect(std.mem.indexOf(u8, plain.items, "__etchMapInsert") == null);
 }
 
+test "lowers Set locals to frame-arena element lists, gating the set helpers (M0.8 E3-C tranche 3bis)" {
+    const gpa = std.testing.allocator;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let e: Set<int> = Set.new()
+        \\  let mut s = Set.from([1, 2, 2, 3])
+        \\  s.insert(4)
+        \\  let mut probe = 0
+        \\  if s.contains(2) { probe += 1 }
+        \\  entity.get_mut(Acc).n = s.len() + e.len() + probe
+        \\}
+    , &out);
+    // Annotated `Set.new()`: a distinct single-field element list, no seed.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "const e: std.ArrayListUnmanaged(struct { item: i64 }) = .empty;") != null);
+    // Un-annotated `Set.from`: element type inferred from the first element,
+    // seeded element by element through the dedup helper (2 collapses).
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "var s: std.ArrayListUnmanaged(struct { item: i64 }) = .empty;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "fn __etchSetInsert(s: anytype, fa: std.mem.Allocator, item: anytype) void {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "fn __etchSetContains(s: anytype, item: anytype) bool {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "__etchSetInsert(&s, fa, 1);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "__etchSetInsert(&(s), fa, 4)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "__etchSetContains(s, 2)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "@as(i64, @intCast((s).items.len))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "@as(i64, @intCast((e).items.len))") != null);
+
+    // A set-free program never emits the helpers (byte-identity belt).
+    var plain: std.ArrayListUnmanaged(u8) = .empty;
+    defer plain.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  entity.get_mut(Acc).n = 5
+        \\}
+    , &plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain.items, "__etchSet") == null);
+}
+
 test "lowers the Optional ops to orelse/.?/if-capture and gates the map-get helper (M0.8 E3-C tranche 4)" {
     const gpa = std.testing.allocator;
 

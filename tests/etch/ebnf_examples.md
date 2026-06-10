@@ -575,3 +575,20 @@ rule optional_ops(entity: Entity)
   entity.get_mut(OptAcc).out = a + b + c + d + e
 }
 ```
+
+## Sets — `Set.new()` / `Set.from([...])` builtin associated calls (E3 sub-slice C tranche 3bis)
+
+```etch
+component SetAcc { out: int = 0 }
+
+rule set_ops(entity: Entity)
+  when entity has SetAcc
+{
+  let empty: Set<int> = Set.new()
+  let mut s = Set.from([1, 2, 2, 3])
+  s.insert(4)
+  if s.contains(2) {
+    entity.get_mut(SetAcc).out = s.len() + empty.len()
+  }
+}
+```

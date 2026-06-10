@@ -69,4 +69,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p50_map_insert_iterate", .etch_path = "tests/etch_interp/programs/50_map_insert_iterate.etch" },
     .{ .name = "p51_optional_ops", .etch_path = "tests/etch_interp/programs/51_optional_ops.etch" },
     .{ .name = "p52_enum_shorthand_field", .etch_path = "tests/etch_interp/programs/52_enum_shorthand_field.etch" },
+    .{ .name = "p53_set_ops", .etch_path = "tests/etch_interp/programs/53_set_ops.etch" },
 };
