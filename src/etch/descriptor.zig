@@ -495,6 +495,21 @@ pub fn renderExpr(gpa: std.mem.Allocator, arena: *const AstArena, id: NodeId, ou
             try out.appendSlice(gpa, arena.strings.slice(data));
         },
         .ident, .path => try out.appendSlice(gpa, arena.strings.slice(data)),
+        .tag_query => {
+            const tq = arena.tag_query_exprs.items[data];
+            try renderExpr(gpa, arena, tq.receiver, out);
+            const tf = arena.tag_filters.items[tq.filter];
+            try out.appendSlice(gpa, " ");
+            try out.appendSlice(gpa, @tagName(tf.op));
+            try out.appendSlice(gpa, " ");
+            if (tf.operand_len > 1) try out.appendSlice(gpa, "[");
+            var oi: u32 = 0;
+            while (oi < tf.operand_len) : (oi += 1) {
+                if (oi != 0) try out.appendSlice(gpa, ", ");
+                try renderTagPath(gpa, arena, arena.tag_operands.items[tf.operand_start + oi], out);
+            }
+            if (tf.operand_len > 1) try out.appendSlice(gpa, "]");
+        },
         .fn_call => {
             const call = arena.call_exprs.items[data];
             try renderExpr(gpa, arena, call.callee, out);

@@ -1,0 +1,12 @@
+fn done() -> bool {
+  true
+}
+
+quest Q {
+  stage a {
+    objective main: done()
+  }
+  stage a {
+    objective main: done()
+  }
+}

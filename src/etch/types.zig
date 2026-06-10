@@ -169,7 +169,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -203,7 +203,7 @@ fn containsUppercase(s: []const u8) bool {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -314,6 +314,7 @@ pub const TypeChecker = struct {
         try tc.validateRoutineDecls();
         try tc.buildTags();
         try tc.validateBehaviorDecls();
+        try tc.validateQuestDecls();
         try tc.pass2Resolve();
     }
 
@@ -683,6 +684,185 @@ pub const TypeChecker = struct {
         }
     }
 
+    // ─── Quests (M0.8 E4, `etch-validation-ecs.md` §10) ──────────────────
+
+    /// Validate every `quest` once all symbols are known and the tag table
+    /// is built: E1540 empty quest, E1541 quest-wide duplicate stage names
+    /// (branch stages included), E1542 `requires` bool, E1543 objective
+    /// returns (bool, or a void-fn call), E1545 switch_branch targets,
+    /// E1546 empty branches, E1547 branch-when bare-arm bool, E1548 known
+    /// property types, E1550 handler emit event references, W1541 stages
+    /// whose objectives are all optional. E1544/E1549 are parse-enforced
+    /// (terminal sets — recorded). Expressions type in the ambient quest
+    /// scope — implicit `player: Entity` (item-5 ruling). W1540
+    /// (UnreachableBranch) is a deferred heuristic (recorded at the STOP).
+    fn validateQuestDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .quest_decl) continue;
+            try self.validateQuest(self.arena.quest_decls.items[datas[i]]);
+        }
+    }
+
+    fn validateQuest(self: *TypeChecker, decl: ast_mod.QuestDecl) !void {
+        var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
+        defer ctx.deinit(self.gpa);
+        if (self.arena.strings.find("player")) |player_id| {
+            try ctx.locals.put(self.gpa, player_id, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
+        }
+        // Properties: `requires` must be bool (E1542); the part2 §15 known
+        // properties type-check (E1548); unknown property names are open
+        // (extension modes) and synth freely.
+        var p: u32 = 0;
+        while (p < decl.properties_len) : (p += 1) {
+            const prop = self.arena.quest_properties.items[decl.properties_start + p];
+            const t = try self.synthExprE(prop.value, &ctx);
+            const pname = self.arena.strings.slice(prop.name);
+            if (prop.is_requires) {
+                if (t != .unknown and !(t == .builtin and t.builtin == .bool_)) {
+                    try self.emit(.quest_requires_not_bool, .error_, prop.span, "'requires' must be a bool expression", .{});
+                }
+            } else if (std.mem.eql(u8, pname, "display_name") or std.mem.eql(u8, pname, "description")) {
+                if (t != .unknown and !(t == .builtin and t.builtin == .string_)) {
+                    try self.emit(.property_invalid_type, .error_, prop.span, "quest property '{s}' must be a string", .{pname});
+                }
+            } else if (std.mem.eql(u8, pname, "required_level")) {
+                if (t != .unknown and !(t == .builtin and t.builtin.isInteger())) {
+                    try self.emit(.property_invalid_type, .error_, prop.span, "quest property 'required_level' must be an int", .{});
+                }
+            }
+        }
+        if (decl.stages_len == 0) {
+            const sym = self.symbols.get(decl.name).?;
+            try self.emit(.quest_empty_stages, .error_, self.arena.itemSpan(sym.item_id), "quest '{s}' has no stages", .{self.arena.strings.slice(decl.name)});
+        }
+        // Quest-wide name sets: stage names (E1541, branch stages included)
+        // and branch names (E1545 targets), collected up front.
+        var stage_names: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer stage_names.deinit(self.gpa);
+        var branch_names: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer branch_names.deinit(self.gpa);
+        var st: u32 = 0;
+        while (st < decl.stages_len) : (st += 1) {
+            try self.collectQuestNames(self.arena.extra.items[decl.stages_start + st], &stage_names, &branch_names, decl.name);
+        }
+        st = 0;
+        while (st < decl.stages_len) : (st += 1) {
+            try self.validateQuestStage(self.arena.extra.items[decl.stages_start + st], &ctx, &branch_names);
+        }
+    }
+
+    /// Collect stage / branch names quest-wide (recursive), emitting E1541
+    /// on a duplicate stage name as encountered.
+    fn collectQuestNames(self: *TypeChecker, stage_idx: u32, stage_names: *std.AutoHashMapUnmanaged(StringId, void), branch_names: *std.AutoHashMapUnmanaged(StringId, void), quest_name: StringId) !void {
+        const stage = self.arena.quest_stages.items[stage_idx];
+        const gop = try stage_names.getOrPut(self.gpa, stage.name);
+        if (gop.found_existing) {
+            try self.emit(.duplicate_stage_name, .error_, stage.span, "duplicate stage name '{s}' in quest '{s}'", .{ self.arena.strings.slice(stage.name), self.arena.strings.slice(quest_name) });
+        }
+        var e: u32 = 0;
+        while (e < stage.elems_len) : (e += 1) {
+            const elem = self.arena.quest_elems.items[stage.elems_start + e];
+            if (elem.kind != .branch) continue;
+            const branch = self.arena.quest_branches.items[elem.index];
+            try branch_names.put(self.gpa, branch.name, {});
+            var bs: u32 = 0;
+            while (bs < branch.stages_len) : (bs += 1) {
+                try self.collectQuestNames(self.arena.extra.items[branch.stages_start + bs], stage_names, branch_names, quest_name);
+            }
+        }
+    }
+
+    fn validateQuestStage(self: *TypeChecker, stage_idx: u32, ctx: *RuleCtx, branch_names: *const std.AutoHashMapUnmanaged(StringId, void)) (TypeError || error{OutOfMemory})!void {
+        const stage = self.arena.quest_stages.items[stage_idx];
+        var n_objectives: u32 = 0;
+        var has_main = false;
+        var e: u32 = 0;
+        while (e < stage.elems_len) : (e += 1) {
+            const elem = self.arena.quest_elems.items[stage.elems_start + e];
+            switch (elem.kind) {
+                .objective => {
+                    const obj = self.arena.quest_objectives.items[elem.index];
+                    n_objectives += 1;
+                    if (obj.modifier == .main) has_main = true;
+                    // E1543 — bool (true = complete), or a void-fn call
+                    // (emit-style completion; the behavior E1504 shape).
+                    if (self.arena.exprKind(obj.value) == .fn_call) {
+                        const call = self.arena.call_exprs.items[self.arena.exprData(obj.value)];
+                        if (self.arena.exprKind(call.callee) == .ident) {
+                            if (self.symbols.get(self.arena.exprData(call.callee))) |sym| {
+                                if (sym.kind == .fn_) {
+                                    _ = try self.synthExprE(obj.value, ctx);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    const t = try self.synthExprE(obj.value, ctx);
+                    if (t != .unknown and !(t == .builtin and t.builtin == .bool_)) {
+                        try self.emit(.objective_invalid_return, .error_, obj.span, "an objective must be a bool expression or a call to a declared fn", .{});
+                    }
+                },
+                .handler => {
+                    const h = self.arena.quest_handlers.items[elem.index];
+                    switch (h.kind) {
+                        .on_start, .on_complete => {
+                            if (h.payload_is_stmt) {
+                                // Emit payload: E1550 on an unknown event
+                                // reference, else the regular emit checks.
+                                const em = self.arena.emit_stmts.items[self.arena.stmtData(h.payload)];
+                                if (self.symbols.get(em.event_type)) |sym| {
+                                    if (sym.kind != .event_) {
+                                        try self.emit(.event_reference_not_found, .error_, h.span, "'{s}' is not an event", .{self.arena.strings.slice(em.event_type)});
+                                    } else {
+                                        try self.checkStmt(ctx, h.payload);
+                                    }
+                                } else {
+                                    try self.emit(.event_reference_not_found, .error_, h.span, "handler emits unknown event '{s}'", .{self.arena.strings.slice(em.event_type)});
+                                }
+                            } else {
+                                _ = try self.synthExprE(h.payload, ctx);
+                            }
+                        },
+                        .on_fail => {
+                            const t = try self.synthExprE(h.fail_cond, ctx);
+                            if (t != .unknown and !(t == .builtin and t.builtin == .bool_)) {
+                                try self.emit(.type_mismatch, .error_, h.span, "an on_fail condition must be a bool expression", .{});
+                            }
+                            if (h.fail_action == .switch_branch and !branch_names.contains(h.fail_branch)) {
+                                try self.emit(.switch_branch_target_not_found, .error_, h.span, "switch_branch target '{s}' is not a branch of this quest", .{self.arena.strings.slice(h.fail_branch)});
+                            }
+                        },
+                    }
+                },
+                .branch => {
+                    const branch = self.arena.quest_branches.items[elem.index];
+                    if (branch.stages_len == 0) {
+                        try self.emit(.branch_empty, .error_, branch.span, "branch '{s}' must have at least one stage", .{self.arena.strings.slice(branch.name)});
+                    }
+                    if (branch.when_root != ast_mod.RuleDecl.none_when) {
+                        try self.collectWhenConstruct(ctx, branch.when_root, .branch_condition_not_bool, "branch");
+                    }
+                    var bs: u32 = 0;
+                    while (bs < branch.stages_len) : (bs += 1) {
+                        try self.validateQuestStage(self.arena.extra.items[branch.stages_start + bs], ctx, branch_names);
+                    }
+                },
+                .statement => {
+                    const stmt: NodeId = @bitCast(elem.index);
+                    try self.checkStmt(ctx, stmt);
+                },
+            }
+        }
+        // W1541 — objectives present but none `main`: the stage can neither
+        // fail nor complete on a principal objective (validation-ecs §10.2).
+        if (n_objectives > 0 and !has_main) {
+            try self.emit(.no_main_objective, .warning, stage.span, "stage '{s}' has no 'main' objective (all optional)", .{self.arena.strings.slice(stage.name)});
+        }
+    }
+
     // ─── Behaviors (M0.8 E4, `etch-validation-ecs.md` §8) ────────────────
 
     /// Validate every `behavior` once all symbols are known AND the tag
@@ -714,7 +894,7 @@ pub const TypeChecker = struct {
         while (i < self.arena.items.len) : (i += 1) {
             if (kinds[i] != .behavior_decl) continue;
             const decl = self.arena.behavior_decls.items[datas[i]];
-            var ctx: RuleCtx = .{};
+            var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
             defer ctx.deinit(self.gpa);
             const entity_t: ResolvedType = .{ .builtin = .entity };
             if (self.arena.strings.find("self")) |self_id| try ctx.locals.put(self.gpa, self_id, .{ .type_ = entity_t, .is_mut = false });
@@ -880,25 +1060,30 @@ pub const TypeChecker = struct {
         return true;
     }
 
-    /// `collectWhen` specialization for behavior composites (M0.8 E4): the
-    /// same §6 arm checks, with the bare-expression arm's non-bool case
-    /// reported as the construct code E1505 (the rule path reports E0200).
-    fn collectWhenBehavior(self: *TypeChecker, ctx: *RuleCtx, idx: u32) !void {
+    /// `collectWhen` specialization for construct-level when clauses (M0.8
+    /// E4 — behavior composites, quest branches): the same §6 arm checks,
+    /// with the bare-expression arm's non-bool case reported as the
+    /// CONSTRUCT's code (`bare_code`; the rule path reports E0200).
+    fn collectWhenConstruct(self: *TypeChecker, ctx: *RuleCtx, idx: u32, comptime bare_code: DiagnosticCode, comptime what: []const u8) !void {
         const node = self.arena.when_nodes.items[idx];
         switch (node.kind) {
             .logical_and, .logical_or => {
-                try self.collectWhenBehavior(ctx, node.lhs);
-                try self.collectWhenBehavior(ctx, node.rhs);
+                try self.collectWhenConstruct(ctx, node.lhs, bare_code, what);
+                try self.collectWhenConstruct(ctx, node.rhs, bare_code, what);
             },
-            .logical_not => try self.collectWhenBehavior(ctx, node.lhs),
+            .logical_not => try self.collectWhenConstruct(ctx, node.lhs, bare_code, what),
             .expr_cond => {
                 const t = try self.synthExprE(node.filter_value, ctx);
                 if (t != .unknown and !(t == .builtin and t.builtin == .bool_)) {
-                    try self.emit(.behavior_when_clause_not_bool, .error_, node.span, "a composite when clause must be a bool expression", .{});
+                    try self.emit(bare_code, .error_, node.span, "a " ++ what ++ " when clause must be a bool expression", .{});
                 }
             },
             else => try self.collectWhen(ctx, idx),
         }
+    }
+
+    fn collectWhenBehavior(self: *TypeChecker, ctx: *RuleCtx, idx: u32) !void {
+        try self.collectWhenConstruct(ctx, idx, .behavior_when_clause_not_bool, "composite");
     }
 
     // ─── Pass 1 ──────────────────────────────────────────────────────────
@@ -1008,6 +1193,15 @@ pub const TypeChecker = struct {
                     const decl = self.arena.data_decls.items[data];
                     try self.registerSymbol(.data_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .data);
+                },
+                .quest_decl => {
+                    // A `quest` (M0.8 E4 Level B) registers its name; the body
+                    // (properties, stages, objectives, handlers, branches) is
+                    // validated in `validateQuestDecls` once all symbols are
+                    // known.
+                    const decl = self.arena.quest_decls.items[data];
+                    try self.registerSymbol(.quest_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .quest);
                 },
                 .behavior_decl => {
                     // A `behavior` (M0.8 E4 Level B) registers its name; the
@@ -1578,6 +1772,11 @@ pub const TypeChecker = struct {
     const RuleCtx = struct {
         components_in_when: std.AutoHashMapUnmanaged(StringId, void) = .empty,
         resources_in_when: std.AutoHashMapUnmanaged(StringId, void) = .empty,
+        /// Level-B ambient scopes (M0.8 E4 — behavior/quest/dialogue, the
+        /// item-5 ruling): component/resource accessibility is NOT gated on
+        /// a when clause there (the construct's Tier-1 runtime owns the
+        /// scheduling, no archetype query is derived). Rules keep the gate.
+        unrestricted_ecs_access: bool = false,
         /// Local variables in the rule body, keyed by name.
         locals: std.AutoHashMapUnmanaged(StringId, Local) = .empty,
 
@@ -2256,6 +2455,24 @@ pub const TypeChecker = struct {
                 try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "unknown identifier '{s}'", .{self.arena.strings.slice(name_id)});
                 return ResolvedType.unknown;
             },
+            .tag_query => {
+                // Postfix tag query (§3.2 `tag_expr`, M0.8 E4): the receiver
+                // must be an Entity (E0833 TagInvalidOperation), the operand
+                // paths must resolve in the global tag table (E1212-family
+                // via `validateTagPath`); the query is a bool. Evaluation is
+                // fail-loud in both backends (flagged bound).
+                const tq = self.arena.tag_query_exprs.items[data];
+                const recv_t = try self.synthExprE(tq.receiver, ctx_opt);
+                if (recv_t != .unknown and !(recv_t == .builtin and recv_t.builtin == .entity)) {
+                    try self.emit(.tag_invalid_operation, .error_, self.arena.exprSpan(id), "a tag query requires an Entity receiver", .{});
+                }
+                const tf = self.arena.tag_filters.items[tq.filter];
+                var oi: u32 = 0;
+                while (oi < tf.operand_len) : (oi += 1) {
+                    try self.validateTagPath(self.arena.tag_operands.items[tf.operand_start + oi], tf.op);
+                }
+                return .{ .builtin = .bool_ };
+            },
             .field_access => {
                 const fa = self.arena.field_accesses.items[data];
                 // `recv?.field` (M0.8 E3-C tranche 4): optional payloads are
@@ -2305,7 +2522,7 @@ pub const TypeChecker = struct {
                         return ResolvedType.unknown;
                     }
                     if (ctx_opt) |ctx| {
-                        if (!ctx.resources_in_when.contains(mg.type_name)) {
+                        if (!ctx.unrestricted_ecs_access and !ctx.resources_in_when.contains(mg.type_name)) {
                             try self.emit(.resource_expected_in_when, .error_, self.arena.exprSpan(id), "resource '{s}' is not accessible — add it to the rule's when clause", .{tname});
                         }
                     }
@@ -2327,7 +2544,7 @@ pub const TypeChecker = struct {
                     }
                 }
                 if (ctx_opt) |ctx| {
-                    if (!ctx.components_in_when.contains(mg.type_name)) {
+                    if (!ctx.unrestricted_ecs_access and !ctx.components_in_when.contains(mg.type_name)) {
                         try self.emit(.unknown_component_in_when, .error_, self.arena.exprSpan(id), "component '{s}' is not accessible — add it to the rule's when clause", .{tname});
                     }
                 }
@@ -6280,4 +6497,93 @@ test "behavior: E1502 unknown intrinsic targets + E1506 recursion (M0.8 E4)" {
     );
     defer acyclic.deinit(gpa);
     try expectNoCode(acyclic.diagnostics.items, .behavior_recursion);
+}
+
+test "quest: canonical quest with ambient player checks clean (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\component Health { current: float = 100.0 }
+        \\event DialogueStart { npc: int }
+        \\tags { quest { merchant_intro_done } }
+        \\fn interact_with(who: string) -> bool { true }
+        \\fn reward_xp(amount: int) { }
+        \\quest EscortMerchant {
+        \\  display_name: "Escorting the Merchant"
+        \\  required_level: 5
+        \\  requires: player has_tag .quest.merchant_intro_done
+        \\  stage talk {
+        \\    objective main: interact_with("merchant_01")
+        \\    on_complete: emit DialogueStart { npc: 1 }
+        \\  }
+        \\  stage wrap_up {
+        \\    objective main: player.get(Health).current > 0.0
+        \\    on_fail: player.get(Health).current <= 0.0 -> restart_stage
+        \\    on_complete: {
+        \\      reward_xp(500)
+        \\    }
+        \\    branch hard_path when player has Health { current < 10.0 } {
+        \\      stage survive {
+        \\        objective main: interact_with("medic")
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
+}
+
+test "quest: structural codes E1540/E1541/E1542/E1546/E1547/E1548 (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var empty = try parseAndCheck(gpa,
+        \\quest Q { }
+    );
+    defer empty.deinit(gpa);
+    try expectAnyCode(empty.diagnostics.items, .quest_empty_stages);
+
+    var bad = try parseAndCheck(gpa,
+        \\fn done() -> bool { true }
+        \\quest Q {
+        \\  display_name: 42
+        \\  requires: 1 + 2
+        \\  stage a {
+        \\    objective main: done()
+        \\    branch empty_branch when true { }
+        \\    branch bad_when when 1 + 2 {
+        \\      stage a {
+        \\        objective main: done()
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .property_invalid_type);
+    try expectAnyCode(bad.diagnostics.items, .quest_requires_not_bool);
+    try expectAnyCode(bad.diagnostics.items, .branch_empty);
+    try expectAnyCode(bad.diagnostics.items, .branch_condition_not_bool);
+    try expectAnyCode(bad.diagnostics.items, .duplicate_stage_name);
+}
+
+test "quest: E1543/E1545/E1550 reference codes + W1541 warning (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\fn check() -> bool { true }
+        \\quest Q {
+        \\  stage a {
+        \\    objective main: 42
+        \\    on_fail: check() -> switch_branch(missing_branch)
+        \\    on_complete: emit Unknown { x: 1 }
+        \\  }
+        \\  stage b {
+        \\    objective optional extra: check()
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .objective_invalid_return);
+    try expectAnyCode(result.diagnostics.items, .switch_branch_target_not_found);
+    try expectAnyCode(result.diagnostics.items, .event_reference_not_found);
+    try expectAnyCode(result.diagnostics.items, .no_main_objective);
 }

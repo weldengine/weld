@@ -1,0 +1,5 @@
+quest Q {
+  stage a {
+    objective main: 42
+  }
+}

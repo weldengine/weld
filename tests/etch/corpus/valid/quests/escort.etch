@@ -1,0 +1,48 @@
+// Quest (M0.8 E4, etch-grammar.md §8.3 PATCHED — items 7/8): properties
+// (incl. requires with a tag query), stages (sync + async), objectives
+// (greedy modifier-first, optional label), handlers (emit / block /
+// on_fail actions), a conditional branch, ambient player (item 5).
+component Health {
+  current: float = 100.0
+}
+
+event DialogueStart {
+  npc: int
+}
+
+tags {
+  quest {
+    merchant_intro_done
+  }
+}
+
+fn interact_with(who: string) -> bool {
+  true
+}
+
+fn reward_xp(amount: int) { }
+
+quest EscortMerchant {
+  display_name: "Escorting the Merchant"
+  required_level: 5
+  requires: player has_tag .quest.merchant_intro_done
+
+  stage talk {
+    objective main: interact_with("merchant_01")
+    on_complete: emit DialogueStart { npc: 1 }
+  }
+
+  async stage wrap_up {
+    objective main: player.get(Health).current > 0.0
+    objective optional bonus: interact_with("bonus_giver")
+    on_fail: player.get(Health).current <= 0.0 -> restart_stage
+    on_complete: {
+      reward_xp(500)
+    }
+    branch hard_path when player has Health { current < 10.0 } {
+      stage survive {
+        objective main: interact_with("medic")
+      }
+    }
+  }
+}

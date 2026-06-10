@@ -503,7 +503,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest => return,
                 else => _ = try self.advance(),
             }
         }
@@ -534,6 +534,7 @@ pub const Parser = struct {
             .kw_data => try self.parseDataDecl(annotations),
             .kw_routine => try self.parseRoutineDecl(annotations),
             .kw_behavior => try self.parseBehaviorDecl(annotations),
+            .kw_quest => try self.parseQuestDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -547,7 +548,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -768,7 +769,7 @@ pub const Parser = struct {
         // The top-level `tags { }` body is namespaces only (`tag_leaf` is not a
         // `declaration_body`); a bare leaf here surfaces as the `expected '{'`
         // mismatch inside `parseTagNamespace`.
-        while (self.peek() == .ident) {
+        while (self.peek() == .ident or token_mod.isKeywordToken(self.peek())) {
             try self.parseTagNamespace(ast_mod.TagNamespace.no_parent);
         }
         const closing = try self.expect(.rbrace, "expected '}' to close tags body");
@@ -796,7 +797,7 @@ pub const Parser = struct {
     /// sub-namespace, `IDENT ("," | "}")` starts a leaf list. A mixed body
     /// surfaces as the trailing `expected '}'` mismatch.
     fn parseTagNamespace(self: *Parser, parent: u32) ParseError!void {
-        const name_tok = try self.expect(.ident, "expected tag namespace name (identifier)");
+        const name_tok = try self.expectWord("expected tag namespace name (identifier)");
         const name_id = try self.internSlice(name_tok.span);
         _ = try self.expect(.lbrace, "expected '{' to start tag namespace body");
 
@@ -807,14 +808,17 @@ pub const Parser = struct {
             .span = name_tok.span,
         });
 
-        if (self.peek() == .ident and self.peekNext() == .lbrace) {
+        const word_head = self.peek() == .ident or token_mod.isKeywordToken(self.peek());
+        if (word_head and self.peekNext() == .lbrace) {
             // Sub-namespace mode: `tag_namespace { tag_namespace }` (no separator).
-            while (self.peek() == .ident) {
+            while (self.peek() == .ident or token_mod.isKeywordToken(self.peek())) {
                 try self.parseTagNamespace(my_idx);
             }
         } else {
-            // Leaf mode: `tag_leaf { "," tag_leaf } [ "," ]`.
-            while (self.peek() == .ident) {
+            // Leaf mode: `tag_leaf { "," tag_leaf } [ "," ]`. Leaf names
+            // accept keywords contextually, like namespace names (M0.8 E4 —
+            // graduated construct keywords stay legal tag words).
+            while (self.peek() == .ident or token_mod.isKeywordToken(self.peek())) {
                 const leaf_tok = try self.advance();
                 try self.arena.tag_leaves.append(self.gpa, .{
                     .name = try self.internSlice(leaf_tok.span),
@@ -1576,6 +1580,245 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
+    /// Parse `quest TYPE_IDENT "{" {quest_property} {quest_stage} "}"`
+    /// (M0.8 E4 Level B, `etch-grammar.md` §8.3 PATCHED — items 7/8).
+    /// Properties come first (`IDENT ":" expression`, incl. `requires`);
+    /// stages follow (`[async] stage IDENT { elements }`). `stage` /
+    /// `objective` / the handler heads are contextual identifiers (the S3
+    /// doctrine) — a statement starting with one of those identifiers
+    /// inside a stage is claimed by the construct form (journaled bound).
+    fn parseQuestDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'quest'
+        const name_tok = try self.expect(.type_ident, "expected quest name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start quest body");
+        const properties_start: u32 = @intCast(self.arena.quest_properties.items.len);
+        // Properties: `IDENT ":" expression` until the first stage head.
+        while (self.peek() == .ident and self.peekNext() == .colon and !std.mem.eql(u8, self.sliceOf(self.peekSpan()), "stage")) {
+            const prop_tok = try self.advance();
+            const prop_name = try self.internSlice(prop_tok.span);
+            _ = try self.advance(); // ':'
+            const value = try self.parseExpr(0);
+            try self.arena.quest_properties.append(self.gpa, .{
+                .name = prop_name,
+                .is_requires = std.mem.eql(u8, self.sliceOf(prop_tok.span), "requires"),
+                .value = value,
+                .span = .{ .byte_start = prop_tok.span.byte_start, .byte_end = self.arena.exprSpan(value).byte_end },
+            });
+        }
+        const properties_len = @as(u32, @intCast(self.arena.quest_properties.items.len)) - properties_start;
+        var stages: std.ArrayListUnmanaged(u32) = .empty;
+        defer stages.deinit(self.gpa);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            try stages.append(self.gpa, try self.parseQuestStage());
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close quest body");
+        const stages_start: u32 = @intCast(self.arena.extra.items.len);
+        try self.arena.extra.appendSlice(self.gpa, stages.items);
+        _ = try self.arena.addQuestDecl(self.gpa, .{
+            .name = name_id,
+            .properties_start = properties_start,
+            .properties_len = properties_len,
+            .stages_start = stages_start,
+            .stages_len = @intCast(stages.items.len),
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse one `[async] stage IDENT { quest_stage_element* }` (§8.3),
+    /// returning its `arena.quest_stages` index. Elements keep declaration
+    /// order across kinds in a buffered `quest_elems` run.
+    fn parseQuestStage(self: *Parser) ParseError!u32 {
+        const start_span = self.peekSpan();
+        var is_async = false;
+        if (self.peek() == .kw_async) {
+            _ = try self.advance();
+            is_async = true;
+        }
+        if (self.peek() != .ident or !std.mem.eql(u8, self.sliceOf(self.peekSpan()), "stage")) {
+            return self.parseErrFmt(self.peekSpan(), "expected 'stage' in quest body, got '{s}'", .{self.sliceOf(self.peekSpan())});
+        }
+        _ = try self.advance(); // 'stage'
+        const name_tok = switch (self.peek()) {
+            .ident, .type_ident => try self.advance(),
+            else => return self.parseErr(self.peekSpan(), "expected stage name after 'stage'"),
+        };
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start stage body");
+        var elems: std.ArrayListUnmanaged(ast_mod.QuestElem) = .empty;
+        defer elems.deinit(self.gpa);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.peek() == .kw_branch) {
+                try elems.append(self.gpa, .{ .kind = .branch, .index = try self.parseQuestBranch() });
+                continue;
+            }
+            if (self.peek() == .ident) {
+                const head = self.sliceOf(self.peekSpan());
+                if (std.mem.eql(u8, head, "objective")) {
+                    try elems.append(self.gpa, .{ .kind = .objective, .index = try self.parseQuestObjective() });
+                    continue;
+                }
+                if (std.mem.eql(u8, head, "on_start") or std.mem.eql(u8, head, "on_complete") or std.mem.eql(u8, head, "on_fail")) {
+                    try elems.append(self.gpa, .{ .kind = .handler, .index = try self.parseQuestHandler() });
+                    continue;
+                }
+            }
+            const stmt = try self.parseStmt();
+            try elems.append(self.gpa, .{ .kind = .statement, .index = stmt.raw() });
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close stage body");
+        const elems_start: u32 = @intCast(self.arena.quest_elems.items.len);
+        try self.arena.quest_elems.appendSlice(self.gpa, elems.items);
+        const idx: u32 = @intCast(self.arena.quest_stages.items.len);
+        try self.arena.quest_stages.append(self.gpa, .{
+            .name = name_id,
+            .is_async = is_async,
+            .elems_start = elems_start,
+            .elems_len = @intCast(elems.items.len),
+            .span = .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end },
+        });
+        return idx;
+    }
+
+    /// Parse `objective [main|optional] [label] ":" expression` (§8.3
+    /// PATCHED, item-7 ruling — greedy modifier-first: `objective main:`
+    /// reads `main` as the modifier; `objective optional bonus:` reads
+    /// modifier + label).
+    fn parseQuestObjective(self: *Parser) ParseError!u32 {
+        const kw = try self.advance(); // 'objective'
+        var modifier: ast_mod.QuestObjectiveModifier = .none;
+        if (self.peek() == .ident) {
+            const head = self.sliceOf(self.peekSpan());
+            if (std.mem.eql(u8, head, "main")) {
+                modifier = .main;
+                _ = try self.advance();
+            } else if (std.mem.eql(u8, head, "optional")) {
+                modifier = .optional;
+                _ = try self.advance();
+            }
+        }
+        var label: StringId = 0;
+        if (self.peek() == .ident and self.peekNext() == .colon) {
+            const label_tok = try self.advance();
+            label = try self.internSlice(label_tok.span);
+        }
+        _ = try self.expect(.colon, "expected ':' in objective (etch-grammar.md §8.3)");
+        const value = try self.parseExpr(0);
+        const idx: u32 = @intCast(self.arena.quest_objectives.items.len);
+        try self.arena.quest_objectives.append(self.gpa, .{
+            .modifier = modifier,
+            .label = label,
+            .value = value,
+            .span = .{ .byte_start = kw.span.byte_start, .byte_end = self.arena.exprSpan(value).byte_end },
+        });
+        return idx;
+    }
+
+    /// Parse one quest event handler (§8.3 PATCHED, item-8 ruling — the
+    /// colon is mandatory on every handler): `on_start ":" (emit | block)`,
+    /// `on_complete ":" (emit | block)`, `on_fail ":" expression "->"
+    /// (restart_stage | fail_quest | switch_branch "(" IDENT ")")`.
+    fn parseQuestHandler(self: *Parser) ParseError!u32 {
+        const kw = try self.advance(); // the handler head ident
+        const head = self.sliceOf(kw.span);
+        const kind: ast_mod.QuestHandlerKind = if (std.mem.eql(u8, head, "on_start"))
+            .on_start
+        else if (std.mem.eql(u8, head, "on_complete"))
+            .on_complete
+        else
+            .on_fail;
+        _ = try self.expect(.colon, "expected ':' after the quest handler head");
+        var payload = NodeId.none;
+        var payload_is_stmt = false;
+        var fail_cond = NodeId.none;
+        var fail_action: ast_mod.QuestFailAction = .fail_quest;
+        var fail_branch: StringId = 0;
+        var end_byte: u32 = kw.span.byte_end;
+        if (kind == .on_fail) {
+            fail_cond = try self.parseExpr(0);
+            _ = try self.expect(.arrow, "expected '->' after the on_fail condition");
+            const action_tok = try self.expect(.ident, "expected an on_fail action (restart_stage | fail_quest | switch_branch)");
+            const action = self.sliceOf(action_tok.span);
+            end_byte = action_tok.span.byte_end;
+            if (std.mem.eql(u8, action, "restart_stage")) {
+                fail_action = .restart_stage;
+            } else if (std.mem.eql(u8, action, "fail_quest")) {
+                fail_action = .fail_quest;
+            } else if (std.mem.eql(u8, action, "switch_branch")) {
+                fail_action = .switch_branch;
+                _ = try self.expect(.lparen, "expected '(' after switch_branch");
+                const target_tok = switch (self.peek()) {
+                    .ident, .type_ident => try self.advance(),
+                    else => return self.parseErr(self.peekSpan(), "expected a branch name in switch_branch(...)"),
+                };
+                fail_branch = try self.internSlice(target_tok.span);
+                const rp = try self.expect(.rparen, "expected ')' to close switch_branch(...)");
+                end_byte = rp.span.byte_end;
+            } else {
+                return self.parseErrFmt(action_tok.span, "unknown on_fail action '{s}' (restart_stage | fail_quest | switch_branch)", .{action});
+            }
+        } else if (self.peek() == .kw_emit) {
+            payload = try self.parseEmitStmt();
+            payload_is_stmt = true;
+            end_byte = self.arena.stmtSpan(payload).byte_end;
+        } else if (self.peek() == .lbrace) {
+            payload = try self.parseBlockExpr();
+            end_byte = self.arena.exprSpan(payload).byte_end;
+        } else {
+            return self.parseErr(self.peekSpan(), "expected an emit statement or a block after the quest handler ':'");
+        }
+        const idx: u32 = @intCast(self.arena.quest_handlers.items.len);
+        try self.arena.quest_handlers.append(self.gpa, .{
+            .kind = kind,
+            .payload = payload,
+            .payload_is_stmt = payload_is_stmt,
+            .fail_cond = fail_cond,
+            .fail_action = fail_action,
+            .fail_branch = fail_branch,
+            .span = .{ .byte_start = kw.span.byte_start, .byte_end = end_byte },
+        });
+        return idx;
+    }
+
+    /// Parse `branch IDENT [when] { quest_stage* }` (§8.3), returning its
+    /// `arena.quest_branches` index. Stage indices buffered (nesting).
+    fn parseQuestBranch(self: *Parser) ParseError!u32 {
+        const kw = try self.advance(); // 'branch'
+        const name_tok = switch (self.peek()) {
+            .ident, .type_ident => try self.advance(),
+            else => return self.parseErr(self.peekSpan(), "expected branch name after 'branch'"),
+        };
+        const name_id = try self.internSlice(name_tok.span);
+        var when_root: u32 = ast_mod.RuleDecl.none_when;
+        if (self.peek() == .kw_when) {
+            _ = try self.advance();
+            when_root = try self.parseWhenExpr();
+        }
+        _ = try self.expect(.lbrace, "expected '{' to start branch body");
+        var stages: std.ArrayListUnmanaged(u32) = .empty;
+        defer stages.deinit(self.gpa);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            try stages.append(self.gpa, try self.parseQuestStage());
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close branch body");
+        const stages_start: u32 = @intCast(self.arena.extra.items.len);
+        try self.arena.extra.appendSlice(self.gpa, stages.items);
+        const idx: u32 = @intCast(self.arena.quest_branches.items.len);
+        try self.arena.quest_branches.append(self.gpa, .{
+            .name = name_id,
+            .when_root = when_root,
+            .stages_start = stages_start,
+            .stages_len = @intCast(stages.items.len),
+            .span = .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end },
+        });
+        return idx;
+    }
+
     /// Parse `behavior TYPE_IDENT "{" bt_node "}"` (M0.8 E4 Level B,
     /// `etch-grammar.md` §8.1 PATCHED). The root accepts a leaf (`bt_leaf =
     /// bt_condition | bt_action`, item-1 ruling) — `E1500` enforces the
@@ -2142,6 +2385,16 @@ pub const Parser = struct {
         return idx;
     }
 
+    /// Expect an identifier-LIKE token: a plain ident or any keyword used
+    /// contextually as a word (M0.8 E4 — tag segments / namespace names may
+    /// spell graduated construct keywords like `quest` or `data`).
+    fn expectWord(self: *Parser, comptime msg: []const u8) ParseError!token_mod.Token {
+        if (self.peek() == .ident or token_mod.isKeywordToken(self.peek())) {
+            return try self.advance();
+        }
+        return self.parseErr(self.peekSpan(), msg);
+    }
+
     /// Whether the `{` at the current token opens a §6 when-filter
     /// expression rather than the construct body that follows the when
     /// clause (M0.8 E4). Disambiguated by scanning a SCRATCH lexer from the
@@ -2200,12 +2453,12 @@ pub const Parser = struct {
         const dot = try self.expect(.dot, "expected '.' to start a tag path");
         var segs: std.ArrayListUnmanaged(StringId) = .empty;
         defer segs.deinit(self.gpa);
-        const first = try self.expect(.ident, "expected tag segment after '.'");
+        const first = try self.expectWord("expected tag segment after '.'");
         try segs.append(self.gpa, try self.internSlice(first.span));
         var end_byte = first.span.byte_end;
         while (self.peek() == .dot) {
             _ = try self.advance();
-            const seg = try self.expect(.ident, "expected tag segment after '.'");
+            const seg = try self.expectWord("expected tag segment after '.'");
             try segs.append(self.gpa, try self.internSlice(seg.span));
             end_byte = seg.span.byte_end;
         }
@@ -2629,6 +2882,13 @@ pub const Parser = struct {
     }
 
     fn parseStmt(self: *Parser) ParseError!NodeId {
+        if (self.peek() == .kw_branch) {
+            // `branch` graduated to a keyword for quest/dialogue branches
+            // (M0.8 E4); its async-algebra statement form (T2/T3) stays out
+            // of M0.8 — keep the fail-loud explicit (it lexed
+            // `error_unknown_keyword` before the graduation).
+            return self.parseErr(self.peekSpan(), "the async 'branch' statement is not in M0.8 scope (T2/T3, Phase 2)");
+        }
         if (self.peek() == .kw_after) {
             // `after` graduated to a keyword for routine triggers (M0.8 E4);
             // the §4.3 timer statement it also heads stays out of M0.8 —
@@ -2993,6 +3253,34 @@ pub const Parser = struct {
                         },
                         else => return self.parseErrFmt(self.peekSpan(), "expected a method or field name after '?.' ('?.get'/'?.get_mut' are not in the M0.8 minimal subset)", .{}),
                     }
+                },
+                // Postfix tag query `expr tag_op operand` (§3.2 `tag_expr`,
+                // M0.8 E4). When-clause tag conditions keep their dedicated
+                // WhenNode path (gated ahead of the bare-expression arm);
+                // this expression form serves B-construct conditions
+                // (`requires: player has_tag .x`). Evaluation is fail-loud
+                // in both backends (flagged bound).
+                .kw_has_tag, .kw_has_no_tag, .kw_has_any_tag, .kw_has_all_tags, .kw_has_no_tags => {
+                    const op_tok = try self.advance();
+                    const op = tagOpFromToken(op_tok.kind);
+                    const operand = try self.parseTagOperandRun();
+                    const filter_idx: u32 = @intCast(self.arena.tag_filters.items.len);
+                    try self.arena.tag_filters.append(self.gpa, .{
+                        .op = op,
+                        .operand_start = operand.start,
+                        .operand_len = operand.len,
+                    });
+                    const end_byte = if (operand.len > 0)
+                        self.arena.exprSpan(self.arena.tag_operands.items[operand.start + operand.len - 1]).byte_end
+                    else
+                        op_tok.span.byte_end;
+                    const recv_span = self.arena.exprSpan(expr);
+                    const tq_idx: u32 = @intCast(self.arena.tag_query_exprs.items.len);
+                    try self.arena.tag_query_exprs.append(self.gpa, .{ .receiver = expr, .filter = filter_idx });
+                    expr = try self.arena.addExpr(self.gpa, .tag_query, tq_idx, .{
+                        .byte_start = recv_span.byte_start,
+                        .byte_end = end_byte,
+                    });
                 },
                 // Postfix `!` — force unwrap, panic on `none` (M0.8 E3-C
                 // tranche 4, part1 §6.6). `!=` lexes as one token (maximal
@@ -5182,4 +5470,92 @@ test "parser recovers and a valid behavior after a broken construct survives (M0
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.behavior_decls.items.len);
+}
+
+test "parser builds a quest with properties, stages, objectives, handlers, branches (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\quest EscortMerchant {
+        \\  display_name: "Escorting the Merchant"
+        \\  required_level: 5
+        \\  requires: player has_tag .quest.merchant_intro_done
+        \\  stage talk_to_merchant {
+        \\    objective main: interact_with("merchant_01")
+        \\    on_complete: emit DialogueStart { npc: 1 }
+        \\  }
+        \\  async stage escort {
+        \\    objective main: escort_distance("merchant_01")
+        \\    objective optional bonus: no_combat_for(5)
+        \\    on_fail: entity_died("merchant_01") -> fail_quest
+        \\    branch ambush_branch when player has Health {
+        \\      stage defeat_bandits {
+        \\        objective: kill_count(5)
+        \\        on_fail: out_of_time() -> switch_branch(ambush_branch)
+        \\      }
+        \\    }
+        \\  }
+        \\  stage return_back {
+        \\    objective main: interact_with("quest_giver")
+        \\    on_complete: {
+        \\      reward_xp(500)
+        \\      reward_gold(100)
+        \\    }
+        \\    on_start: emit StageStarted { id: 3 }
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.quest_decls.items.len);
+    const decl = result.ast.quest_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 3), decl.properties_len);
+    try std.testing.expect(result.ast.quest_properties.items[decl.properties_start + 2].is_requires);
+    try std.testing.expectEqual(@as(u32, 3), decl.stages_len);
+
+    // Stage 1: `objective main:` reads `main` as the MODIFIER (item-7
+    // greedy rule), no label; one emit handler.
+    const s1 = result.ast.quest_stages.items[result.ast.extra.items[decl.stages_start]];
+    try std.testing.expect(!s1.is_async);
+    const o1 = result.ast.quest_objectives.items[result.ast.quest_elems.items[s1.elems_start].index];
+    try std.testing.expectEqual(ast_mod.QuestObjectiveModifier.main, o1.modifier);
+    try std.testing.expectEqual(@as(ast_mod.StringId, 0), o1.label);
+
+    // Stage 2: async; `objective optional bonus:` = modifier + label; a
+    // branch with a when clause and a nested stage with switch_branch.
+    const s2 = result.ast.quest_stages.items[result.ast.extra.items[decl.stages_start + 1]];
+    try std.testing.expect(s2.is_async);
+    const o2 = result.ast.quest_objectives.items[result.ast.quest_elems.items[s2.elems_start + 1].index];
+    try std.testing.expectEqual(ast_mod.QuestObjectiveModifier.optional, o2.modifier);
+    try std.testing.expectEqualStrings("bonus", result.ast.strings.slice(o2.label));
+    const fail_h = result.ast.quest_handlers.items[result.ast.quest_elems.items[s2.elems_start + 2].index];
+    try std.testing.expectEqual(ast_mod.QuestHandlerKind.on_fail, fail_h.kind);
+    try std.testing.expectEqual(ast_mod.QuestFailAction.fail_quest, fail_h.fail_action);
+    const branch = result.ast.quest_branches.items[result.ast.quest_elems.items[s2.elems_start + 3].index];
+    try std.testing.expect(branch.when_root != ast_mod.RuleDecl.none_when);
+    try std.testing.expectEqual(@as(u32, 1), branch.stages_len);
+    const nested = result.ast.quest_stages.items[result.ast.extra.items[branch.stages_start]];
+    const nested_fail = result.ast.quest_handlers.items[result.ast.quest_elems.items[nested.elems_start + 1].index];
+    try std.testing.expectEqual(ast_mod.QuestFailAction.switch_branch, nested_fail.fail_action);
+    try std.testing.expectEqualStrings("ambush_branch", result.ast.strings.slice(nested_fail.fail_branch));
+
+    // Stage 3: a block on_complete (item-8 mandatory colon) + an emit
+    // on_start — handlers in declaration order.
+    const s3 = result.ast.quest_stages.items[result.ast.extra.items[decl.stages_start + 2]];
+    const block_h = result.ast.quest_handlers.items[result.ast.quest_elems.items[s3.elems_start + 1].index];
+    try std.testing.expectEqual(ast_mod.QuestHandlerKind.on_complete, block_h.kind);
+    try std.testing.expect(!block_h.payload_is_stmt);
+}
+
+test "parser recovers and a valid quest after a broken construct survives (M0.8 E4 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\quest Q { stage s { objective main: done() } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.quest_decls.items.len);
 }

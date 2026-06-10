@@ -70,13 +70,15 @@ pub const valid = [_]Entry{
     .{ .name = "routines/blacksmith_daily.etch", .source = @embedFile("corpus/valid/routines/blacksmith_daily.etch") },
 
     .{ .name = "behaviors/combat.etch", .source = @embedFile("corpus/valid/behaviors/combat.etch") },
+
+    .{ .name = "quests/escort.etch", .source = @embedFile("corpus/valid/quests/escort.etch") },
 };
 
 /// Embedded list of the invalid S3 corpus fixtures. Each entry pins
 /// an `.etch` file plus the diagnostic code (`E0xxx`) the corpus
 /// driver expects the parser / type-checker to emit.
 pub const invalid = [_]InvalidEntry{
-    .{ .name = "E0001_unsupported_quest.etch", .expected_code = "E0001", .source = @embedFile("corpus/invalid/E0001_unsupported_quest.etch") },
+    .{ .name = "E0001_unsupported_dialogue.etch", .expected_code = "E0001", .source = @embedFile("corpus/invalid/E0001_unsupported_dialogue.etch") },
     .{ .name = "E0001_unexpected_top_level.etch", .expected_code = "E0001", .source = @embedFile("corpus/invalid/E0001_unexpected_top_level.etch") },
     .{ .name = "E0101_duplicate_component.etch", .expected_code = "E0101", .source = @embedFile("corpus/invalid/E0101_duplicate_component.etch") },
     .{ .name = "E0102_unknown_field_type.etch", .expected_code = "E0102", .source = @embedFile("corpus/invalid/E0102_unknown_field_type.etch") },
@@ -89,6 +91,15 @@ pub const invalid = [_]InvalidEntry{
     .{ .name = "E1210_unknown_component_in_when.etch", .expected_code = "E1210", .source = @embedFile("corpus/invalid/E1210_unknown_component_in_when.etch") },
     .{ .name = "E1211_field_filter_type_mismatch.etch", .expected_code = "E1211", .source = @embedFile("corpus/invalid/E1211_field_filter_type_mismatch.etch") },
     .{ .name = "E1213_resource_expected_in_when.etch", .expected_code = "E1213", .source = @embedFile("corpus/invalid/E1213_resource_expected_in_when.etch") },
+    .{ .name = "E1540_quest_empty_stages.etch", .expected_code = "E1540", .source = @embedFile("corpus/invalid/E1540_quest_empty_stages.etch") },
+    .{ .name = "E1541_duplicate_stage_name.etch", .expected_code = "E1541", .source = @embedFile("corpus/invalid/E1541_duplicate_stage_name.etch") },
+    .{ .name = "E1542_quest_requires_not_bool.etch", .expected_code = "E1542", .source = @embedFile("corpus/invalid/E1542_quest_requires_not_bool.etch") },
+    .{ .name = "E1543_objective_invalid_return.etch", .expected_code = "E1543", .source = @embedFile("corpus/invalid/E1543_objective_invalid_return.etch") },
+    .{ .name = "E1545_switch_branch_target_not_found.etch", .expected_code = "E1545", .source = @embedFile("corpus/invalid/E1545_switch_branch_target_not_found.etch") },
+    .{ .name = "E1546_branch_empty.etch", .expected_code = "E1546", .source = @embedFile("corpus/invalid/E1546_branch_empty.etch") },
+    .{ .name = "E1547_branch_condition_not_bool.etch", .expected_code = "E1547", .source = @embedFile("corpus/invalid/E1547_branch_condition_not_bool.etch") },
+    .{ .name = "E1548_property_invalid_type.etch", .expected_code = "E1548", .source = @embedFile("corpus/invalid/E1548_property_invalid_type.etch") },
+    .{ .name = "E1550_event_reference_not_found.etch", .expected_code = "E1550", .source = @embedFile("corpus/invalid/E1550_event_reference_not_found.etch") },
     .{ .name = "E1760_data_empty_entries.etch", .expected_code = "E1760", .source = @embedFile("corpus/invalid/E1760_data_empty_entries.etch") },
     .{ .name = "E1761_duplicate_entry_id.etch", .expected_code = "E1761", .source = @embedFile("corpus/invalid/E1761_duplicate_entry_id.etch") },
     .{ .name = "E1762_entry_type_not_struct.etch", .expected_code = "E1762", .source = @embedFile("corpus/invalid/E1762_entry_type_not_struct.etch") },

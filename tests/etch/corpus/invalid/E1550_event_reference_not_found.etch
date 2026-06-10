@@ -1,0 +1,10 @@
+fn done() -> bool {
+  true
+}
+
+quest Q {
+  stage a {
+    objective main: done()
+    on_complete: emit Missing { x: 1 }
+  }
+}

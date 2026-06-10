@@ -241,6 +241,12 @@ pub const ExprKind = enum {
     /// `etch-grammar.md` §1.4 `interpolation = "{" , expression , "}"`).
     /// Data indexes `string_interps`.
     string_interp,
+    /// Postfix tag query `expression tag_op tag_operand` (§3.2 `tag_expr`,
+    /// M0.8 E4 — needed by B-construct conditions like quest `requires:
+    /// player has_tag .x`). Parse + resolve (bool); EVALUATION is fail-loud
+    /// in both backends (the negative-tag-op precedent — flagged bound).
+    /// Data indexes `tag_query_exprs`.
+    tag_query,
 };
 
 /// Closed enum of type-node kinds the parser can produce.
@@ -414,6 +420,14 @@ pub const TagFilter = struct {
     op: TagOp,
     operand_start: u32,
     operand_len: u32,
+};
+
+/// Postfix tag query expression (§3.2 `tag_expr`, M0.8 E4): a receiver +
+/// a `tag_filters` entry (op + operand run, shared with the when-clause
+/// encoding).
+pub const TagQueryExpr = struct {
+    receiver: NodeId,
+    filter: u32, // index into `tag_filters`
 };
 
 /// `add_tag` vs `remove_tag` mutation (M0.8 E3, `etch-grammar.md` §4.4 l.697).
@@ -1090,6 +1104,95 @@ pub const RoutineInterrupt = struct {
     span: SourceSpan,
 };
 
+/// One quest property (`IDENT ":" expression` / `requires ":" expression`,
+/// M0.8 E4, `etch-grammar.md` §8.3).
+pub const QuestProperty = struct {
+    name: StringId,
+    is_requires: bool,
+    value: NodeId, // expr
+    span: SourceSpan,
+};
+
+/// Objective modifier set (§8.3 PATCHED, item-7 ruling: `"objective" ,
+/// [ objective_modifier ] , [ IDENT ] , ":" , expression` — greedy
+/// modifier-first).
+pub const QuestObjectiveModifier = enum { none, main, optional };
+
+/// One `objective [modifier] [label]: expression` (M0.8 E4, §8.3).
+pub const QuestObjective = struct {
+    modifier: QuestObjectiveModifier,
+    label: StringId, // 0 = unlabeled
+    value: NodeId, // expr
+    span: SourceSpan,
+};
+
+/// Quest event-handler kinds (§8.3 PATCHED, item-8 ruling: the colon is
+/// mandatory on every handler — `on_complete` harmonized on the
+/// `on_start ":" ( emit_stmt | block )` form).
+pub const QuestHandlerKind = enum { on_start, on_complete, on_fail };
+
+/// The on_fail action set (§8.3 — terminal, parse-enforced; E1544 has no
+/// post-parse case).
+pub const QuestFailAction = enum { restart_stage, fail_quest, switch_branch };
+
+/// One quest event handler (M0.8 E4, §8.3). `on_start`/`on_complete`:
+/// `payload` is an emit statement (`payload_is_stmt`) or a block
+/// expression. `on_fail`: `fail_cond -> fail_action [(fail_branch)]`.
+pub const QuestHandler = struct {
+    kind: QuestHandlerKind,
+    payload: NodeId, // emit stmt / block expr; none for on_fail
+    payload_is_stmt: bool,
+    fail_cond: NodeId, // on_fail condition expr; none otherwise
+    fail_action: QuestFailAction,
+    fail_branch: StringId, // switch_branch target; 0 otherwise
+    span: SourceSpan,
+};
+
+/// Kind of one stage element (§8.3 `quest_stage_element`). Elements keep
+/// their DECLARATION ORDER across kinds via the `quest_elems` run.
+pub const QuestElemKind = enum { objective, handler, branch, statement };
+
+/// One stage element: `index` points into the kind's slab (`quest_objectives`
+/// / `quest_handlers` / `quest_branches`) or is the raw statement NodeId.
+pub const QuestElem = struct {
+    kind: QuestElemKind,
+    index: u32,
+};
+
+/// One `[async] stage IDENT { elements }` (M0.8 E4, §8.3). Elements are a
+/// `(start, len)` run of `arena.quest_elems` (buffered — nested branch
+/// stages interleave the pools otherwise).
+pub const QuestStage = struct {
+    name: StringId,
+    is_async: bool,
+    elems_start: u32,
+    elems_len: u32,
+    span: SourceSpan,
+};
+
+/// One `branch IDENT [when] { stages }` (M0.8 E4, §8.3). Stages are a run
+/// of `arena.extra` indices into `arena.quest_stages` (buffered).
+pub const QuestBranch = struct {
+    name: StringId,
+    when_root: u32, // RuleDecl.none_when if absent
+    stages_start: u32, // index into `arena.extra`
+    stages_len: u32,
+    span: SourceSpan,
+};
+
+/// Side-slab entry for a `quest` declaration (M0.8 E4 Level B, §8.3).
+/// Properties are a direct `quest_properties` run (parsed before any
+/// stage, no nesting); top-level stages are an `arena.extra` index run.
+pub const QuestDecl = struct {
+    name: StringId,
+    properties_start: u32,
+    properties_len: u32,
+    stages_start: u32, // index into `arena.extra`
+    stages_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
 /// Kind of one behavior-tree node (M0.8 E4, `etch-grammar.md` §8.1
 /// PATCHED: `bt_leaf = bt_condition | bt_action` — item-1 ruling).
 pub const BTNodeKind = enum { selector, sequence, condition, action };
@@ -1286,6 +1389,7 @@ pub const AstArena = struct {
     tag_filters: std.ArrayListUnmanaged(TagFilter) = .empty,
     tag_operands: std.ArrayListUnmanaged(NodeId) = .empty,
     tag_mutation_stmts: std.ArrayListUnmanaged(TagMutationStmt) = .empty,
+    tag_query_exprs: std.ArrayListUnmanaged(TagQueryExpr) = .empty,
     rule_decls: std.ArrayListUnmanaged(RuleDecl) = .empty,
     fn_decls: std.ArrayListUnmanaged(FnDecl) = .empty,
     struct_decls: std.ArrayListUnmanaged(StructDecl) = .empty,
@@ -1300,6 +1404,13 @@ pub const AstArena = struct {
     type_alias_decls: std.ArrayListUnmanaged(TypeAliasDecl) = .empty,
     data_decls: std.ArrayListUnmanaged(DataDecl) = .empty,
     data_entries: std.ArrayListUnmanaged(DataEntry) = .empty,
+    quest_decls: std.ArrayListUnmanaged(QuestDecl) = .empty,
+    quest_properties: std.ArrayListUnmanaged(QuestProperty) = .empty,
+    quest_stages: std.ArrayListUnmanaged(QuestStage) = .empty,
+    quest_elems: std.ArrayListUnmanaged(QuestElem) = .empty,
+    quest_objectives: std.ArrayListUnmanaged(QuestObjective) = .empty,
+    quest_handlers: std.ArrayListUnmanaged(QuestHandler) = .empty,
+    quest_branches: std.ArrayListUnmanaged(QuestBranch) = .empty,
     behavior_decls: std.ArrayListUnmanaged(BehaviorDecl) = .empty,
     bt_nodes: std.ArrayListUnmanaged(BTNode) = .empty,
     routine_decls: std.ArrayListUnmanaged(RoutineDecl) = .empty,
@@ -1433,6 +1544,7 @@ pub const AstArena = struct {
         self.tag_filters.deinit(gpa);
         self.tag_operands.deinit(gpa);
         self.tag_mutation_stmts.deinit(gpa);
+        self.tag_query_exprs.deinit(gpa);
         self.rule_decls.deinit(gpa);
         self.fn_decls.deinit(gpa);
         self.struct_decls.deinit(gpa);
@@ -1444,6 +1556,13 @@ pub const AstArena = struct {
         self.type_alias_decls.deinit(gpa);
         self.data_decls.deinit(gpa);
         self.data_entries.deinit(gpa);
+        self.quest_decls.deinit(gpa);
+        self.quest_properties.deinit(gpa);
+        self.quest_stages.deinit(gpa);
+        self.quest_elems.deinit(gpa);
+        self.quest_objectives.deinit(gpa);
+        self.quest_handlers.deinit(gpa);
+        self.quest_branches.deinit(gpa);
         self.behavior_decls.deinit(gpa);
         self.bt_nodes.deinit(gpa);
         self.routine_decls.deinit(gpa);
@@ -1896,6 +2015,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.data_decls.items.len);
         try self.data_decls.append(gpa, decl);
         return try self.addItem(gpa, .data_decl, idx, span);
+    }
+
+    /// `quest Name { properties + stages }` (M0.8 E4, `etch-grammar.md`
+    /// §8.3). The caller appends properties / stages / elements to their
+    /// slabs beforehand, passing the ranges in `decl`.
+    pub fn addQuestDecl(self: *AstArena, gpa: std.mem.Allocator, decl: QuestDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.quest_decls.items.len);
+        try self.quest_decls.append(gpa, decl);
+        return try self.addItem(gpa, .quest_decl, idx, span);
     }
 
     /// `behavior Name { bt_node }` (M0.8 E4, `etch-grammar.md` §8.1). The

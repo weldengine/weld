@@ -85,6 +85,8 @@ pub const TokenKind = enum {
     kw_data, // data table declaration (M0.8 E4 Level B gameplay)
     kw_routine, // routine declaration (M0.8 E4 Level B gameplay)
     kw_behavior, // behavior tree declaration (M0.8 E4 Level B gameplay)
+    kw_quest, // quest declaration (M0.8 E4 Level B gameplay)
+    kw_branch, // quest/dialogue branch (M0.8 E4; the async T2/T3 `branch` statement stays out of M0.8 — explicit parse error)
     kw_sequence, // behavior composite type (M0.8 E4; the E6 top-level `sequence` construct stays out of scope — default top-level error)
     kw_after, // routine trigger `after Segment` (M0.8 E4; the §4.3 timer statement stays out of M0.8 — explicit parse error)
 
@@ -158,6 +160,20 @@ pub const Token = struct {
     span: SourceSpan,
 };
 
+/// True when `k` is a keyword token (the contiguous `kw_let`…`kw_f64`
+/// block). Tag-path segments and tag-namespace names accept keywords
+/// CONTEXTUALLY (M0.8 E4): graduating a construct keyword (`quest`,
+/// `data`, …) must never break a tag hierarchy that uses the same word
+/// (`.quest.merchant_intro_done`).
+pub fn isKeywordToken(k: TokenKind) bool {
+    comptime {
+        // The range check rides the enum order — pin it.
+        std.debug.assert(@intFromEnum(TokenKind.kw_let) < @intFromEnum(TokenKind.kw_f64));
+    }
+    const v = @intFromEnum(k);
+    return v >= @intFromEnum(TokenKind.kw_let) and v <= @intFromEnum(TokenKind.kw_f64);
+}
+
 /// Map `[]const u8` → `TokenKind` for keywords. The lookup is a linear
 /// scan over a small static table — adequate for the S3 corpus (<200 LOC
 /// per file, every identifier hit is amortised by the parser's main work).
@@ -218,6 +234,8 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "data", .kind = .kw_data },
     .{ .lexeme = "routine", .kind = .kw_routine },
     .{ .lexeme = "behavior", .kind = .kw_behavior },
+    .{ .lexeme = "quest", .kind = .kw_quest },
+    .{ .lexeme = "branch", .kind = .kw_branch },
     .{ .lexeme = "sequence", .kind = .kw_sequence },
     .{ .lexeme = "after", .kind = .kw_after },
     .{ .lexeme = "true", .kind = .bool_literal },
@@ -251,7 +269,6 @@ pub const non_s3_keywords = [_][]const u8{
     "import",
     "const",
     "private",
-    "quest",
     "dialogue",
     "ability",
     "effect",
@@ -272,11 +289,11 @@ pub const non_s3_keywords = [_][]const u8{
     // ── Async machinery: `async` graduated with M0.8 E2 (`async fn` parsed;
     //    interp E3, codegen Phase 2); `await` graduated with M0.8 E3 sub-slice B
     //    (`async rule`/`async fn` + `await` interpreted, codegen Phase 2). The
-    //    concurrency algebra (`race`/`sync`/`branch`/`spawn`) stays reserved
-    //    (T2/T3, deferred — flagged for Review E3) ──
+    //    concurrency algebra (`race`/`sync`/`spawn`) stays reserved (T2/T3,
+    //    flagged for Review E3); `branch` graduated with the E4 quest slice
+    //    (its async statement form keeps an explicit fail-loud parse error) ──
     "race",
     "sync",
-    "branch",
     "spawn",
 
     // ── Timers / lifecycle (out of S3; `emit` graduated with E3 ECS layer;

@@ -85,6 +85,20 @@ pub const DiagnosticCode = enum {
     behavior_when_clause_not_bool, // M0.8 E4 — E1505 BehaviorWhenClauseNotBool
     behavior_recursion, // M0.8 E4 — E1506 BehaviorRecursion
 
+    // ── quest (E1540-E1559, M0.8 E4 — etch-validation-ecs.md §10) ──
+    quest_empty_stages, // M0.8 E4 — E1540 QuestEmptyStages
+    duplicate_stage_name, // M0.8 E4 — E1541 DuplicateStageName
+    quest_requires_not_bool, // M0.8 E4 — E1542 QuestRequiresNotBool
+    objective_invalid_return, // M0.8 E4 — E1543 ObjectiveInvalidReturn
+    on_fail_action_invalid, // M0.8 E4 — E1544 OnFailActionInvalid (parse-enforced terminal set; no post-parse case)
+    switch_branch_target_not_found, // M0.8 E4 — E1545 SwitchBranchTargetNotFound
+    branch_empty, // M0.8 E4 — E1546 BranchEmpty
+    branch_condition_not_bool, // M0.8 E4 — E1547 BranchConditionNotBool
+    property_invalid_type, // M0.8 E4 — E1548 PropertyInvalidType
+    objective_modifier_invalid, // M0.8 E4 — E1549 ObjectiveModifierInvalid (parse-enforced; no post-parse case)
+    event_reference_not_found, // M0.8 E4 — E1550 EventReferenceNotFound
+    no_main_objective, // M0.8 E4 — W1541 NoMainObjective (warning)
+
     // ── routine (E1520-E1539, M0.8 E4 — etch-validation-ecs.md §9) ──
     routine_empty_segments, // M0.8 E4 — E1520 RoutineEmptySegments
     duplicate_segment_name, // M0.8 E4 — E1521 DuplicateSegmentName
@@ -148,6 +162,18 @@ pub const DiagnosticCode = enum {
             .behavior_action_invalid_return => "E1504",
             .behavior_when_clause_not_bool => "E1505",
             .behavior_recursion => "E1506",
+            .quest_empty_stages => "E1540",
+            .duplicate_stage_name => "E1541",
+            .quest_requires_not_bool => "E1542",
+            .objective_invalid_return => "E1543",
+            .on_fail_action_invalid => "E1544",
+            .switch_branch_target_not_found => "E1545",
+            .branch_empty => "E1546",
+            .branch_condition_not_bool => "E1547",
+            .property_invalid_type => "E1548",
+            .objective_modifier_invalid => "E1549",
+            .event_reference_not_found => "E1550",
+            .no_main_objective => "W1541",
             .routine_empty_segments => "E1520",
             .duplicate_segment_name => "E1521",
             .trigger_invalid => "E1522",
@@ -210,6 +236,18 @@ pub const DiagnosticCode = enum {
             .behavior_action_invalid_return => "BehaviorActionInvalidReturn",
             .behavior_when_clause_not_bool => "BehaviorWhenClauseNotBool",
             .behavior_recursion => "BehaviorRecursion",
+            .quest_empty_stages => "QuestEmptyStages",
+            .duplicate_stage_name => "DuplicateStageName",
+            .quest_requires_not_bool => "QuestRequiresNotBool",
+            .objective_invalid_return => "ObjectiveInvalidReturn",
+            .on_fail_action_invalid => "OnFailActionInvalid",
+            .switch_branch_target_not_found => "SwitchBranchTargetNotFound",
+            .branch_empty => "BranchEmpty",
+            .branch_condition_not_bool => "BranchConditionNotBool",
+            .property_invalid_type => "PropertyInvalidType",
+            .objective_modifier_invalid => "ObjectiveModifierInvalid",
+            .event_reference_not_found => "EventReferenceNotFound",
+            .no_main_objective => "NoMainObjective",
             .routine_empty_segments => "RoutineEmptySegments",
             .duplicate_segment_name => "DuplicateSegmentName",
             .trigger_invalid => "TriggerInvalid",

@@ -1,0 +1,10 @@
+fn done() -> bool {
+  true
+}
+
+quest Q {
+  display_name: 42
+  stage a {
+    objective main: done()
+  }
+}

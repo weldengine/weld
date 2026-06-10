@@ -1,0 +1,10 @@
+fn done() -> bool {
+  true
+}
+
+quest Q {
+  requires: 1 + 2
+  stage a {
+    objective main: done()
+  }
+}
