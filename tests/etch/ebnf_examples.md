@@ -618,3 +618,21 @@ rule mutate_through_method(entity: Entity)
   entity.get_mut(MutAcc).out = c.peek()
 }
 ```
+
+## Anonymous struct literal — `.{ field: value }` against the expected type (E3 sub-slice C tranche 8)
+
+```etch
+component AnonAcc { out: int = 0 }
+
+struct Pt { x: int y: int }
+
+struct Box { p: Pt k: int }
+
+rule anon_struct_literals(entity: Entity)
+  when entity has AnonAcc
+{
+  let q: Pt = .{ x: 40, y: 2 }
+  let b = Box { p: .{ x: 7, y: 5 }, k: 30 }
+  entity.get_mut(AnonAcc).out = q.x + q.y + b.p.x + b.k
+}
+```

@@ -2991,6 +2991,15 @@ pub const Parser = struct {
                 // the surrounding context. Tag path literals with
                 // multiple segments (`.foo.bar`) remain out-of-scope.
                 const dot_span = (try self.advance()).span;
+                // Anonymous struct literal `.{ f: v, … }` (M0.8 E3-C tranche
+                // 8, `etch-grammar.md` §3.2): `type_name == 0` is the anon
+                // sentinel — the resolver supplies the type from the expected
+                // context (check mode, resolver-types §4). The dot prefix
+                // makes the form unambiguous in `if`/`while`/`for`/`match`
+                // heads, so `no_struct_lit` does not apply.
+                if (self.peek() == .lbrace) {
+                    return try self.parseStructLiteral(0, dot_span);
+                }
                 if (self.peek() != .ident) {
                     return self.parseErrFmt(self.peekSpan(), "expected identifier after '.', got '{s}'", .{self.sliceOf(self.peekSpan())});
                 }

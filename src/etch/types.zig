@@ -644,6 +644,14 @@ pub const TypeChecker = struct {
                     // ErrorCode` (same tranche). Checked against the AST enum
                     // slab (not the symbol table) so a later-declared enum is
                     // seen — pass 1 registers symbols incrementally.
+                } else if (origin == .struct_ and self.declaredStructName(resolved_name)) {
+                    // Struct-typed STRUCT fields unlock with the anonymous
+                    // `.{ … }` field-value context (M0.8 E3-C tranche 8) —
+                    // part1 §5.5 allows nested POD structs; the literal must
+                    // PROVIDE such a field (E0208, checked at the struct
+                    // literal) because it has no declared default the two
+                    // backends could agree on. Component / resource fields
+                    // stay builtin-POD-bounded (E1 ruling, unchanged).
                 } else if (self.symbols.get(resolved_name)) |sym| {
                     if (sym.kind == .rule) {
                         try self.emit(.undefined_symbol, .error_, tspan, "type '{s}' is not a component, resource, or builtin", .{tname});
@@ -678,6 +686,17 @@ pub const TypeChecker = struct {
     /// symbol table). Includes the synthetic builtin `ErrorCode`.
     fn declaredEnumName(self: *TypeChecker, name: StringId) bool {
         for (self.arena.enum_decls.items) |decl| {
+            if (decl.name == name) return true;
+        }
+        return false;
+    }
+
+    /// `true` if `name` is a declared `struct` (M0.8 E3-C tranche 8). Checked
+    /// against the AST struct slab (not the symbol table) so a later-declared
+    /// struct is seen — pass 1 registers symbols incrementally, mirroring
+    /// `declaredEnumName`.
+    fn declaredStructName(self: *TypeChecker, name: StringId) bool {
+        for (self.arena.struct_decls.items) |decl| {
             if (decl.name == name) return true;
         }
         return false;
@@ -1208,7 +1227,19 @@ pub const TypeChecker = struct {
                     if (declared.? == .map_t) try self.checkHashBound(declared.?.map_t.key, "map key type", "K: Hash", self.arena.typeNodeSpan(let.type_annotation));
                     if (declared.? == .set_t) try self.checkHashBound(declared.?.set_t, "set element type", "T: Hash", self.arena.typeNodeSpan(let.type_annotation));
                 }
-                const inferred = self.synthExpr(let.value, ctx);
+                // Anonymous `.{ … }` initializer against a struct annotation
+                // (M0.8 E3-C tranche 8): check mode — the annotation is the
+                // expected type (resolver-types §4), the same propagation as
+                // the tranche-4 field-value position.
+                const inferred = blk: {
+                    if (declared != null and declared.? == .struct_t and self.arena.exprKind(let.value) == .struct_lit) {
+                        const sl_data = self.arena.exprData(let.value);
+                        if (self.arena.struct_lits.items[sl_data].type_name == 0) {
+                            break :blk self.checkStructLitAgainst(let.value, sl_data, declared.?.struct_t, ctx) catch ResolvedType.unknown;
+                        }
+                    }
+                    break :blk self.synthExpr(let.value, ctx);
+                };
                 const final = if (declared) |d| blk: {
                     if (d == .builtin and inferred == .builtin and !self.literalTypeFits(d.builtin, let.value, inferred.builtin)) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(let.value), "let initializer type does not match declared type", .{});
@@ -2079,9 +2110,28 @@ pub const TypeChecker = struct {
 
     fn synthStructLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const sl = self.arena.struct_lits.items[data];
-        const sym = self.symbols.get(sl.type_name);
+        // Anonymous `.{ … }` in synth position (M0.8 E3-C tranche 8): the
+        // form is check-mode-ONLY (resolver-types §4) — without an expected
+        // type from the context there is no struct to resolve against. The
+        // wired contexts are the let annotation and the typed field value;
+        // fn-arg / return positions are not wired (no differential requires
+        // them) and land here.
+        if (sl.type_name == 0) {
+            try self.emit(.ambiguous_type, .error_, self.arena.exprSpan(id), "anonymous struct literal '.{{ … }}' needs an expected struct type from its context (let annotation or typed field value)", .{});
+            return ResolvedType.unknown;
+        }
+        return try self.checkStructLitAgainst(id, data, sl.type_name, ctx_opt);
+    }
+
+    /// Check a struct literal's fields against the declared struct
+    /// `struct_name` (M0.8 E2 block 3; split out in E3-C tranche 8 so the
+    /// anonymous `.{ … }` form checks through the same point with the name
+    /// supplied by its context — check mode, resolver-types §4).
+    fn checkStructLitAgainst(self: *TypeChecker, id: NodeId, data: u32, struct_name: StringId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const sl = self.arena.struct_lits.items[data];
+        const sym = self.symbols.get(struct_name);
         if (sym == null or sym.?.kind != .struct_) {
-            try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a struct type", .{self.arena.strings.slice(sl.type_name)});
+            try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "'{s}' is not a struct type", .{self.arena.strings.slice(struct_name)});
             return ResolvedType.unknown;
         }
         const decl = self.arena.struct_decls.items[self.arena.itemData(sym.?.item_id)];
@@ -2102,10 +2152,19 @@ pub const TypeChecker = struct {
             // the declared field type is the expected type, so a bare
             // `.variant` shorthand in field-value position resolves against
             // a declared enum field — the part1 §10.2 canonical form
-            // `Error { code: .io_fail }`.
+            // `Error { code: .io_fail }` — and an anonymous `.{ … }` value
+            // resolves against a declared struct field (tranche 8, the same
+            // propagation extended from the bare variant to the whole
+            // literal).
             const actual = blk: {
                 if (declared != null and declared.? == .enum_t and self.arena.exprKind(flit.value) == .tag_path) {
                     break :blk try self.checkEnumShorthand(flit.value, declared.?.enum_t);
+                }
+                if (declared != null and declared.? == .struct_t and self.arena.exprKind(flit.value) == .struct_lit) {
+                    const inner_data = self.arena.exprData(flit.value);
+                    if (self.arena.struct_lits.items[inner_data].type_name == 0) {
+                        break :blk try self.checkStructLitAgainst(flit.value, inner_data, declared.?.struct_t, ctx_opt);
+                    }
                 }
                 break :blk try self.synthExprE(flit.value, ctx_opt);
             };
@@ -2113,8 +2172,11 @@ pub const TypeChecker = struct {
                 if (d == .builtin and actual == .builtin and !self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "struct-literal field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
                 }
+                if (d == .struct_t and actual == .struct_t and d.struct_t != actual.struct_t) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "struct-literal field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
+                }
             } else {
-                try self.emit(.invalid_field_filter, .error_, self.arena.exprSpan(id), "struct '{s}' has no field '{s}'", .{ self.arena.strings.slice(sl.type_name), self.arena.strings.slice(flit.name) });
+                try self.emit(.invalid_field_filter, .error_, self.arena.exprSpan(id), "struct '{s}' has no field '{s}'", .{ self.arena.strings.slice(struct_name), self.arena.strings.slice(flit.name) });
             }
         }
         // A builtin-`Error` literal must provide `message` and `code` (part1
@@ -2122,7 +2184,7 @@ pub const TypeChecker = struct {
         // field). Bounded to `Error` — general struct-literal completeness
         // stays permissive (declared defaults fill omissions), but Error's
         // fields have no defaults the two backends could agree on.
-        if (sl.type_name == self.arena.error_type_name) {
+        if (struct_name == self.arena.error_type_name) {
             const required = [_][]const u8{ "message", "code" };
             for (required) |req| {
                 var provided = false;
@@ -2139,7 +2201,27 @@ pub const TypeChecker = struct {
                 }
             }
         }
-        return .{ .struct_t = sl.type_name };
+        // A struct-typed field must be provided (E0208, M0.8 E3-C tranche 8):
+        // like Error's fields, it has no declared default the two backends
+        // could agree on (the codegen's `.{}` default-fill and the interp's
+        // zero-fill would diverge on nested declared defaults).
+        var df_i: u32 = 0;
+        while (df_i < decl.fields_len) : (df_i += 1) {
+            const f = self.arena.fields.items[decl.fields_start + df_i];
+            if (self.namedTypeToResolved(f.type_node) != .struct_t) continue;
+            var provided = false;
+            var li: u32 = 0;
+            while (li < sl.fields_len) : (li += 1) {
+                if (self.arena.struct_lit_fields.items[sl.fields_start + li].name == f.name) {
+                    provided = true;
+                    break;
+                }
+            }
+            if (!provided) {
+                try self.emit(.struct_field_missing, .error_, self.arena.exprSpan(id), "struct-typed field '{s}' must be provided in the literal (no declared default)", .{self.arena.strings.slice(f.name)});
+            }
+        }
+        return .{ .struct_t = struct_name };
     }
 
     /// The user type name carried by a struct / component / resource type, or
@@ -4671,4 +4753,91 @@ test "type-checker rejects the out-of-subset Set surface (M0.8 E3-C tranche 3bis
         defer out.deinit(gpa);
         try std.testing.expect(out.diagnostics.items.len > 0);
     }
+}
+
+test "anonymous struct literal resolves in check mode, rejected without an expected type (M0.8 E3-C tranche 8)" {
+    const gpa = std.testing.allocator;
+
+    // The two wired contexts — let annotation and typed field value (the
+    // tranche-4 propagation extended to the whole literal) — plus the enum
+    // shorthand composing INSIDE an anonymous literal, and a struct-typed
+    // struct field (part1 §5.5 nested POD structs) carrying a nested anon.
+    var ok = try parseAndCheck(gpa,
+        \\enum Grade { low, high }
+        \\struct Pt { x: int y: int }
+        \\struct Spec { hp: int grade: Grade }
+        \\struct Box { p: Pt k: int }
+        \\component Probe { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Probe
+        \\{
+        \\  let q: Pt = .{ x: 40, y: 2 }
+        \\  let s: Spec = .{ hp: 1, grade: .high }
+        \\  let b = Box { p: .{ x: 7, y: 5 }, k: 30 }
+        \\  entity.get_mut(Probe).n = q.x + s.hp + b.p.y + b.k
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // No expected type — `.{ … }` is check-mode-only (resolver-types §4).
+    var bare = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let x = .{ a: 1 }
+        \\}
+    );
+    defer bare.deinit(gpa);
+    try expectAnyCode(bare.diagnostics.items, .ambiguous_type);
+
+    // A non-struct annotation does not supply a struct type.
+    var nonstruct = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let x: int = .{ a: 1 }
+        \\}
+    );
+    defer nonstruct.deinit(gpa);
+    try expectAnyCode(nonstruct.diagnostics.items, .ambiguous_type);
+
+    // Fn-arg position is NOT a wired context (no differential requires it).
+    var fnarg = try parseAndCheck(gpa,
+        \\struct Pt { x: int y: int }
+        \\fn takes(p: Pt) -> int { p.x }
+        \\rule r(entity: Entity) {
+        \\  let n = takes(.{ x: 1, y: 2 })
+        \\}
+    );
+    defer fnarg.deinit(gpa);
+    try expectAnyCode(fnarg.diagnostics.items, .ambiguous_type);
+
+    // An unknown field on the supplied struct type → the explicit-literal
+    // field check, through the same point.
+    var badfield = try parseAndCheck(gpa,
+        \\struct Pt { x: int y: int }
+        \\rule r(entity: Entity) {
+        \\  let q: Pt = .{ z: 1 }
+        \\}
+    );
+    defer badfield.deinit(gpa);
+    try expectAnyCode(badfield.diagnostics.items, .invalid_field_filter);
+
+    // A struct-typed field must be provided in the literal (E0208 — no
+    // declared default the two backends could agree on).
+    var missing = try parseAndCheck(gpa,
+        \\struct Pt { x: int y: int }
+        \\struct Box { p: Pt k: int }
+        \\rule r(entity: Entity) {
+        \\  let b = Box { k: 1 }
+        \\}
+    );
+    defer missing.deinit(gpa);
+    try expectAnyCode(missing.diagnostics.items, .struct_field_missing);
+
+    // POD non-regression: a struct-typed field on a COMPONENT stays
+    // rejected (E1 builtin-POD bound, unchanged by the struct unlock).
+    var podcomp = try parseAndCheck(gpa,
+        \\struct Pt { x: int y: int }
+        \\component Holder { p: Pt }
+    );
+    defer podcomp.deinit(gpa);
+    try expectAnyCode(podcomp.diagnostics.items, .undefined_symbol);
 }

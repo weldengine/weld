@@ -969,6 +969,20 @@ fn emitStructDecl(w: *Writer, ast: *const AstArena, data: u32) CodegenError!void
             try w.print(": {s} = @enumFromInt(0),\n", .{etch_type});
             continue;
         }
+        // Struct-typed field (M0.8 E3-C tranche 8, unlocked by the anonymous
+        // `.{ … }` field-value context — part1 §5.5 nested POD structs).
+        // `.{}` is a valid Zig default (every emitted struct field carries
+        // one) but is never observed: the resolver requires literal provision
+        // (E0208). A declared default is deferred (no const-eval struct path
+        // — interpreter reference). A nested string-carrying struct is not
+        // extern-compatible and fails loud at `zig build` of the cooked file.
+        if (isStructName(ast, resolved)) {
+            if (!f.default_value.isNone()) return CodegenError.UnsupportedConstruct;
+            try w.writeIndent();
+            try w.ident(fname);
+            try w.print(": {s} = .{{}},\n", .{etch_type});
+            continue;
+        }
         const zig_type = type_map.mapBuiltin(etch_type) orelse return CodegenError.NonPodComponent;
         try w.writeIndent();
         try w.ident(fname);
@@ -2831,6 +2845,32 @@ fn emitLet(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, let: ast_mod.LetStm
         return;
     }
 
+    // Anonymous `.{ … }` initializer (M0.8 E3-C tranche 8): the let
+    // annotation supplies the struct type — emitted as the qualified
+    // `TypeName{ … }`, byte-identical to the explicit form's emission (the
+    // binding stays un-annotated, like every struct-literal let). The
+    // resolver guarantees a named struct annotation (E0210 otherwise).
+    if (ast.exprKind(let.value) == .struct_lit) {
+        const sl = ast.struct_lits.items[ast.exprData(let.value)];
+        if (sl.type_name == 0) {
+            if (let.type_annotation.isNone() or ast.typeNodeKind(let.type_annotation) != .named) return CodegenError.UnsupportedConstruct;
+            const named = ast.named_types.items[ast.typeNodeData(let.type_annotation)];
+            const sname = ast.resolveTypeAliasName(named.name);
+            if (!isStructName(ast, sname)) return CodegenError.UnsupportedConstruct;
+            try w.writeIndent();
+            try w.print("{s} ", .{if (let.is_mut) "var" else "const"});
+            try w.ident(ast.strings.slice(let.name));
+            try w.write(" = ");
+            try emitStructLitAs(w, ast, ctx, sl, sname);
+            try w.write(";\n");
+            try ctx.records.append(w.gpa, .{
+                .key = .{ .name = let.name },
+                .info = .{ .kind = .value, .zig_type = "", .is_mut = let.is_mut },
+            });
+            return;
+        }
+    }
+
     // Plain-value let. Try to infer the Zig type so the binding is annotated
     // when possible (helps Zig's int-literal coercion).
     const zig_t = inferZigType(ast, ctx, let.value, let.type_annotation);
@@ -3146,35 +3186,13 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
         },
         .struct_lit => {
             // `T { f: v, … }` → Zig `T{ .f = v, … }` (M0.8 E2 block 3). The
-            // anonymous `.{ … }` form (`type_name == 0`) is deferred. Omitted
-            // fields fall back to the `extern struct` declared defaults.
+            // anonymous `.{ … }` form (`type_name == 0`, M0.8 E3-C tranche 8)
+            // is emitted by its typed context (let annotation / typed field
+            // value) through `emitStructLitAs` — the resolver rejects any
+            // other position (E0210); belt here.
             const sl = ast.struct_lits.items[data];
             if (sl.type_name == 0) return CodegenError.UnsupportedConstruct;
-            try w.print("{s}{{", .{ast.strings.slice(sl.type_name)});
-            var i: u32 = 0;
-            while (i < sl.fields_len) : (i += 1) {
-                const flit = ast.struct_lit_fields.items[sl.fields_start + i];
-                if (i > 0) try w.write(",");
-                try w.write(" .");
-                try w.ident(ast.strings.slice(flit.name));
-                try w.write(" = ");
-                // Bare `.variant` shorthand in field-value position (M0.8
-                // E3-C tranche 4, part1 §10.2): qualified `EnumName.variant`
-                // from the field's declared enum type — the same
-                // declared-type lookup as the interp's struct-literal
-                // resolution. A tag_path on a non-enum field has no Zig
-                // value — fail loud (the resolver already rejects it).
-                if (ast.exprKind(flit.value) == .tag_path) {
-                    // Expression-position `tag_path` data IS the variant
-                    // ident (multi-segment is a parse error there).
-                    const ename = structFieldEnumName(ast, sl.type_name, flit.name) orelse return CodegenError.UnsupportedConstruct;
-                    try w.print("{s}.", .{ename});
-                    try w.ident(ast.strings.slice(ast.exprData(flit.value)));
-                } else {
-                    try emitExpr(w, ast, ctx, flit.value);
-                }
-            }
-            try w.write(" }");
+            try emitStructLitAs(w, ast, ctx, sl, sl.type_name);
         },
         .method_call => {
             // `recv.method(args)` / `Type.assoc(args)` → Zig method / associated
@@ -4033,6 +4051,86 @@ fn isEnumName(ast: *const AstArena, name: StringId) bool {
         if (ast.enum_decls.items[ast.items.items(.data)[i]].name == name) return true;
     }
     return false;
+}
+
+/// `true` if `name` is a declared `struct` (M0.8 E3-C tranche 8).
+fn isStructName(ast: *const AstArena, name: StringId) bool {
+    var i: usize = 0;
+    while (i < ast.items.len) : (i += 1) {
+        if (ast.items.items(.kind)[i] != .struct_decl) continue;
+        if (ast.struct_decls.items[ast.items.items(.data)[i]].name == name) return true;
+    }
+    return false;
+}
+
+/// Emit a struct literal as the qualified Zig `TypeName{ .f = v, … }` (M0.8
+/// E2 block 3; split out in E3-C tranche 8 so the anonymous `.{ … }` form
+/// emits through the same point with the name supplied by its context — the
+/// same logical point as the resolver's check mode and the interp's
+/// `evalStructLitAs`). Omitted fields fall back to the `extern struct`
+/// declared defaults.
+fn emitStructLitAs(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, sl: ast_mod.StructLitExpr, type_name: StringId) CodegenError!void {
+    try w.print("{s}{{", .{ast.strings.slice(type_name)});
+    var i: u32 = 0;
+    while (i < sl.fields_len) : (i += 1) {
+        const flit = ast.struct_lit_fields.items[sl.fields_start + i];
+        if (i > 0) try w.write(",");
+        try w.write(" .");
+        try w.ident(ast.strings.slice(flit.name));
+        try w.write(" = ");
+        // Bare `.variant` shorthand in field-value position (M0.8
+        // E3-C tranche 4, part1 §10.2): qualified `EnumName.variant`
+        // from the field's declared enum type — the same
+        // declared-type lookup as the interp's struct-literal
+        // resolution. A tag_path on a non-enum field has no Zig
+        // value — fail loud (the resolver already rejects it).
+        if (ast.exprKind(flit.value) == .tag_path) {
+            // Expression-position `tag_path` data IS the variant
+            // ident (multi-segment is a parse error there).
+            const ename = structFieldEnumName(ast, type_name, flit.name) orelse return CodegenError.UnsupportedConstruct;
+            try w.print("{s}.", .{ename});
+            try w.ident(ast.strings.slice(ast.exprData(flit.value)));
+            continue;
+        }
+        // Anonymous `.{ … }` in field-value position (M0.8 E3-C tranche 8):
+        // qualified recursively from the field's declared struct type — the
+        // same declared-type lookup as the interp's resolution.
+        if (ast.exprKind(flit.value) == .struct_lit) {
+            const inner = ast.struct_lits.items[ast.exprData(flit.value)];
+            if (inner.type_name == 0) {
+                const sname = structFieldStructName(ast, type_name, flit.name) orelse return CodegenError.UnsupportedConstruct;
+                try emitStructLitAs(w, ast, ctx, inner, sname);
+                continue;
+            }
+        }
+        try emitExpr(w, ast, ctx, flit.value);
+    }
+    try w.write(" }");
+}
+
+/// The declared struct type name of struct field `field_name` on struct
+/// `type_name`, or `null` when the field is not struct-typed (M0.8 E3-C
+/// tranche 8) — drives the qualified emission of an anonymous `.{ … }`
+/// field value, mirroring `structFieldEnumName`.
+fn structFieldStructName(ast: *const AstArena, type_name: StringId, field_name: StringId) ?StringId {
+    var i: u28 = 0;
+    while (i < ast.items.len) : (i += 1) {
+        if (ast.items.items(.kind)[i] != .struct_decl) continue;
+        const sd = ast.struct_decls.items[ast.items.items(.data)[i]];
+        if (sd.name != type_name) continue;
+        var f_i: u32 = 0;
+        while (f_i < sd.fields_len) : (f_i += 1) {
+            const f = ast.fields.items[sd.fields_start + f_i];
+            if (f.name != field_name) continue;
+            if (ast.typeNodeKind(f.type_node) != .named) return null;
+            const named = ast.named_types.items[ast.typeNodeData(f.type_node)];
+            const resolved = ast.resolveTypeAliasName(named.name);
+            if (!isStructName(ast, resolved)) return null;
+            return resolved;
+        }
+        return null;
+    }
+    return null;
 }
 
 /// The enum type name if `expr` is an enum value `EnumName.variant` — a `.path`

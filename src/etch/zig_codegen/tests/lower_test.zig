@@ -581,3 +581,38 @@ test "lowers mut-self methods to pointer receivers, mutation visible at the call
     if (tree.errors.len != 0) std.debug.print("generated zig parse errors:\n{s}\n", .{out.items});
     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
 }
+
+test "lowers anonymous struct literals to qualified Zig literals from the expected type (M0.8 E3-C tranche 8)" {
+    const gpa = std.testing.allocator;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Acc { n: int = 0 }
+        \\struct Pt { x: int y: int }
+        \\struct Box { p: Pt k: int }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let q: Pt = .{ x: 40, y: 2 }
+        \\  let b = Box { p: .{ x: 7, y: 5 }, k: 30 }
+        \\  entity.get_mut(Acc).n = q.x + q.y + b.p.x + b.k
+        \\}
+    , &out);
+    // The let annotation qualifies the literal — byte-identical to the
+    // explicit form's emission (un-annotated binding).
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "const q = Pt{ .x = 40, .y = 2 };") != null);
+    // The declared field type qualifies the nested literal recursively.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "const b = Box{ .p = Pt{ .x = 7, .y = 5 }, .k = 30 };") != null);
+    // The struct-typed struct field declares with a `.{}` default (never
+    // observed — the resolver requires literal provision, E0208).
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "p: Pt = .{},") != null);
+
+    // The generated Zig is syntactically valid (Zig's own parser).
+    const z = try gpa.dupeZ(u8, out.items);
+    defer gpa.free(z);
+    var tree = try std.zig.Ast.parse(gpa, z, .zig);
+    defer tree.deinit(gpa);
+    if (tree.errors.len != 0) std.debug.print("generated zig parse errors:\n{s}\n", .{out.items});
+    try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
+}

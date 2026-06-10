@@ -996,8 +996,10 @@ pub const StructLitField = struct {
 
 /// `TYPE_IDENT "{" [field_init …] "}"` struct literal (M0.8 E2 block 3,
 /// `etch-grammar.md` §3.2 l.486). `type_name` is the explicit struct type; the
-/// anonymous `.{ … }` form (which needs the expected type from context) is
-/// deferred. Fields live in a `(start, len)` run of `arena.struct_lit_fields`.
+/// anonymous `.{ … }` form (M0.8 E3-C tranche 8) carries `type_name == 0` and
+/// resolves against the expected type from its context (check mode,
+/// `etch-resolver-types.md` §4). Fields live in a `(start, len)` run of
+/// `arena.struct_lit_fields`.
 pub const StructLitExpr = struct {
     type_name: StringId,
     fields_start: u32,

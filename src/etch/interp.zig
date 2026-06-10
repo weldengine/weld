@@ -1184,7 +1184,22 @@ pub const Interpreter = struct {
         switch (kind) {
             .let_stmt => {
                 const let = self.ast.let_stmts.items[data];
-                const v = try self.evalExpr(world, locals, let.value);
+                // Anonymous `.{ … }` initializer (M0.8 E3-C tranche 8): the
+                // let annotation supplies the struct type — the same logical
+                // point as the resolver's check mode and the codegen's
+                // qualified emission. The resolver guarantees a named struct
+                // annotation (E0210 otherwise); belt on the lookup.
+                const v = blk: {
+                    if (self.ast.exprKind(let.value) == .struct_lit) {
+                        const sl = self.ast.struct_lits.items[self.ast.exprData(let.value)];
+                        if (sl.type_name == 0) {
+                            if (let.type_annotation.isNone() or self.ast.typeNodeKind(let.type_annotation) != .named) return error.RuntimeFailure;
+                            const named = self.ast.named_types.items[self.ast.typeNodeData(let.type_annotation)];
+                            break :blk try self.evalStructLitAs(world, locals, sl, self.ast.resolveTypeAliasName(named.name));
+                        }
+                    }
+                    break :blk try self.evalExpr(world, locals, let.value);
+                };
                 try locals.put(self.gpa, let.name, v, let.is_mut or self.ast.exprKind(let.value) == .method_get_mut);
             },
             .assign_stmt => {
@@ -1503,6 +1518,77 @@ pub const Interpreter = struct {
         const variant: StringId = self.ast.exprData(value);
         const vidx = self.enumVariantIndexOf(edecl, variant) orelse return null;
         return Value{ .enum_value = .{ .type_name = ename, .variant = vidx } };
+    }
+
+    /// The declared-struct name of a field's `.named` type node, or null when
+    /// the field is not struct-typed (M0.8 E3-C tranche 8) — the same
+    /// declared-type lookup as `enumFieldShorthand`, for the anonymous
+    /// `.{ … }` field-value resolution.
+    fn structFieldTypeName(self: *Interpreter, f: ast_mod.Field) ?StringId {
+        if (self.ast.typeNodeKind(f.type_node) != .named) return null;
+        const named = self.ast.named_types.items[self.ast.typeNodeData(f.type_node)];
+        const sname = self.ast.resolveTypeAliasName(named.name);
+        if (self.struct_decls.get(sname) == null) return null;
+        return sname;
+    }
+
+    /// Materialize a struct literal as a fresh `type_name` value in the
+    /// rule-body struct store (M0.8 E2 block 3; split out in E3-C tranche 8 so
+    /// the anonymous `.{ … }` form evaluates through the same point with the
+    /// name supplied by its context — let annotation or typed field value,
+    /// the same logical point as the resolver's check mode and the codegen's
+    /// qualified emission). Every declared field is filled in declaration
+    /// order: the literal's value if given, else the field's const default
+    /// (matching the Zig codegen, which relies on the `extern struct`
+    /// default-fill). The handle is re-fetched after each field eval (a
+    /// nested struct literal may have grown the outer store vector).
+    fn evalStructLitAs(self: *Interpreter, world: *World, locals: *Locals, sl: ast_mod.StructLitExpr, type_name: StringId) StmtError!Value {
+        const decl = self.struct_decls.get(type_name) orelse return error.RuntimeFailure;
+        const handle = try self.structs.newStruct(self.gpa, type_name);
+        var fi: u32 = 0;
+        while (fi < decl.fields_len) : (fi += 1) {
+            const f = self.ast.fields.items[decl.fields_start + fi];
+            var provided: ?Value = null;
+            var li: u32 = 0;
+            while (li < sl.fields_len) : (li += 1) {
+                const flit = self.ast.struct_lit_fields.items[sl.fields_start + li];
+                if (flit.name == f.name) {
+                    // Bare `.variant` in field-value position (M0.8
+                    // E3-C tranche 4, part1 §10.2): resolved against
+                    // the declared field type — the decl's field
+                    // list is in hand at this site.
+                    if (self.ast.exprKind(flit.value) == .tag_path) {
+                        if (self.enumFieldShorthand(f, flit.value)) |ev| {
+                            provided = ev;
+                            break;
+                        }
+                    }
+                    // Anonymous `.{ … }` in field-value position (M0.8
+                    // E3-C tranche 8): resolved against the declared
+                    // struct field type, recursively.
+                    if (self.ast.exprKind(flit.value) == .struct_lit) {
+                        const inner = self.ast.struct_lits.items[self.ast.exprData(flit.value)];
+                        if (inner.type_name == 0) {
+                            const sname = self.structFieldTypeName(f) orelse return error.RuntimeFailure;
+                            provided = try self.evalStructLitAs(world, locals, inner, sname);
+                            break;
+                        }
+                    }
+                    provided = try self.evalExpr(world, locals, flit.value);
+                    break;
+                }
+            }
+            const fval = provided orelse blk: {
+                // A struct-typed field has no agreed default (the resolver
+                // requires literal provision, E0208) — belt against the
+                // zero-fill below silently standing in for one.
+                if (self.structFieldTypeName(f) != null) return error.RuntimeFailure;
+                if (f.default_value.isNone()) break :blk Value{ .int_ = 0 };
+                break :blk evalConst(self.ast, f.default_value) catch Value{ .int_ = 0 };
+            };
+            try self.structs.list.items[handle].fields.append(self.gpa, .{ .name = f.name, .value = fval });
+        }
+        return Value{ .struct_ref = handle };
     }
 
     /// Dispatch an instance method call on an already-evaluated receiver
@@ -2149,45 +2235,13 @@ pub const Interpreter = struct {
                 return try self.evalExpr(world, &frame, ce.body);
             },
             .struct_lit => {
-                // `T { f: v, … }` → materialize a fresh struct value in the
-                // rule-body struct store (M0.8 E2 block 3). Every declared field
-                // is filled in declaration order: the literal's value if given,
-                // else the field's const default (matching the Zig codegen,
-                // which relies on the `extern struct` default-fill). The handle
-                // is re-fetched after each field eval (a nested struct literal
-                // may have grown the outer store vector).
                 const sl = self.ast.struct_lits.items[data];
-                const decl = self.struct_decls.get(sl.type_name) orelse return error.RuntimeFailure;
-                const handle = try self.structs.newStruct(self.gpa, sl.type_name);
-                var fi: u32 = 0;
-                while (fi < decl.fields_len) : (fi += 1) {
-                    const f = self.ast.fields.items[decl.fields_start + fi];
-                    var provided: ?Value = null;
-                    var li: u32 = 0;
-                    while (li < sl.fields_len) : (li += 1) {
-                        const flit = self.ast.struct_lit_fields.items[sl.fields_start + li];
-                        if (flit.name == f.name) {
-                            // Bare `.variant` in field-value position (M0.8
-                            // E3-C tranche 4, part1 §10.2): resolved against
-                            // the declared field type — the decl's field
-                            // list is in hand at this site.
-                            if (self.ast.exprKind(flit.value) == .tag_path) {
-                                if (self.enumFieldShorthand(f, flit.value)) |ev| {
-                                    provided = ev;
-                                    break;
-                                }
-                            }
-                            provided = try self.evalExpr(world, locals, flit.value);
-                            break;
-                        }
-                    }
-                    const fval = provided orelse blk: {
-                        if (f.default_value.isNone()) break :blk Value{ .int_ = 0 };
-                        break :blk evalConst(self.ast, f.default_value) catch Value{ .int_ = 0 };
-                    };
-                    try self.structs.list.items[handle].fields.append(self.gpa, .{ .name = f.name, .value = fval });
-                }
-                return Value{ .struct_ref = handle };
+                // Anonymous `.{ … }` (`type_name == 0`, M0.8 E3-C tranche 8)
+                // only evaluates through a typed context (let annotation /
+                // typed field value) which supplies the name — the resolver
+                // rejects any other position (E0210); belt here.
+                if (sl.type_name == 0) return error.RuntimeFailure;
+                return try self.evalStructLitAs(world, locals, sl, sl.type_name);
             },
             .method_call => {
                 // `recv.method(args)` / `Type.assoc(args)` — dispatch in the
@@ -4594,4 +4648,51 @@ test "runProgram force unwrap of none is a runtime failure (M0.8 E3-C tranche 4)
     _ = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
     const report = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(u64, 1), report.runtime_errors);
+}
+
+test "runProgram anonymous struct literal via let annotation and field value (M0.8 E3-C tranche 8)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `.{ … }` end-to-end in the reference backend: the let annotation
+    // types `q` (40 + 2), the declared field type of `Box.p` types the
+    // nested literal (7 + 5 + 30). Sum: 84.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\struct Pt { x: int y: int }
+        \\struct Box { p: Pt k: int }
+        \\rule anon(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let q: Pt = .{ x: 40, y: 2 }
+        \\  let b = Box { p: .{ x: 7, y: 5 }, k: 30 }
+        \\  entity.get_mut(Acc).out = q.x + q.y + b.p.x + b.p.y + b.k
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var out: i64 = 0;
+    @memcpy(std.mem.asBytes(&out), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 84), out);
 }

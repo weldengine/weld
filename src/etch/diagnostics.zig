@@ -36,6 +36,8 @@ pub const DiagnosticCode = enum {
 
     // ── Type errors (E0200-E0299) ──
     type_mismatch, // S3 — E0200 TypeMismatch
+    struct_field_missing, // M0.8 — E0208 StructFieldMissing
+    ambiguous_type, // M0.8 — E0210 AmbiguousType
     ambiguous_trait_method, // M0.8 — E0211 AmbiguousTraitMethod
     incomplete_trait_impl, // M0.8 — E0214 IncompleteTraitImpl
     conditional_impl_condition_not_proven, // M0.8 — E0215 ConditionalImplConditionNotProven
@@ -79,6 +81,8 @@ pub const DiagnosticCode = enum {
             .undefined_symbol => "E0102",
             .enum_variant_not_found => "E0105",
             .type_mismatch => "E0200",
+            .struct_field_missing => "E0208",
+            .ambiguous_type => "E0210",
             .ambiguous_trait_method => "E0211",
             .incomplete_trait_impl => "E0214",
             .conditional_impl_condition_not_proven => "E0215",
@@ -112,6 +116,8 @@ pub const DiagnosticCode = enum {
             .undefined_symbol => "UndefinedSymbol",
             .enum_variant_not_found => "EnumVariantNotFound",
             .type_mismatch => "TypeMismatch",
+            .struct_field_missing => "StructFieldMissing",
+            .ambiguous_type => "AmbiguousType",
             .ambiguous_trait_method => "AmbiguousTraitMethod",
             .incomplete_trait_impl => "IncompleteTraitImpl",
             .conditional_impl_condition_not_proven => "ConditionalImplConditionNotProven",
