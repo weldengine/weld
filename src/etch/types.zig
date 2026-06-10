@@ -1201,6 +1201,11 @@ pub const TypeChecker = struct {
                 var declared: ?ResolvedType = null;
                 if (!let.type_annotation.isNone()) {
                     declared = self.namedTypeToResolved(let.type_annotation);
+                    // The literal and annotation paths are the only two gates
+                    // through which a `map_t` enters the program (fields and
+                    // params reject composite types) — the K: Hash bound is
+                    // checked at both.
+                    if (declared.? == .map_t) try self.checkMapKeyHashable(declared.?.map_t.key, self.arena.typeNodeSpan(let.type_annotation));
                 }
                 const inferred = self.synthExpr(let.value, ctx);
                 const final = if (declared) |d| blk: {
@@ -1687,6 +1692,16 @@ pub const TypeChecker = struct {
     /// not a builtin in E1) leaves the literal `unknown` (the interpreter still
     /// builds it from the runtime values; precise string-keyed map typing is a
     /// later refinement). Empty `[:]` stays `unknown` so the annotation types it.
+    /// stdlib §14 pins `K: Hash + Eq` on map keys, and the builtin Hash set
+    /// excludes float/f32/f64 (NaN != NaN, hash undefined — stdlib §4.3): a
+    /// float map key is an invalid program, rejected at the resolver so
+    /// NEITHER backend ever sees one (E0601 BoundNotSatisfied).
+    fn checkMapKeyHashable(self: *TypeChecker, key: BuiltinType, span: SourceSpan) !void {
+        if (key.isFloat()) {
+            try self.emit(.bound_not_satisfied, .error_, span, "map key type does not satisfy the 'K: Hash' bound (float/f32/f64 are not hashable); wrap the float in a struct with a custom Hash", .{});
+        }
+    }
+
     fn synthMapLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         _ = id;
         const ml = self.arena.map_lits.items[data];
@@ -1705,7 +1720,10 @@ pub const TypeChecker = struct {
             }
             if (key_bt) |kb| {
                 if (!self.literalTypeFits(kb, entry.key, kt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.key), "map keys must all have the same type", .{});
-            } else key_bt = kt.builtin;
+            } else {
+                key_bt = kt.builtin;
+                try self.checkMapKeyHashable(kt.builtin, self.arena.exprSpan(entry.key));
+            }
             if (val_bt) |vb| {
                 if (!self.literalTypeFits(vb, entry.value, vt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.value), "map values must all have the same type", .{});
             } else val_bt = vt.builtin;
@@ -4186,4 +4204,37 @@ test "type-checker checks collection method argument types (M0.8 E3-C tranche 3)
     );
     defer bad_insert.deinit(gpa);
     try expectAnyCode(bad_insert.diagnostics.items, .type_mismatch);
+}
+
+test "type-checker rejects float map keys at both gates (E0601, M0.8 E3-C tranche 4)" {
+    const gpa = std.testing.allocator;
+    // stdlib §14 pins `K: Hash + Eq` and §4.3 excludes float/f32/f64 from
+    // the builtin Hash set — a float map key is an INVALID program for both
+    // backends, not a codegen-only bound (2026-06-10 tranche-3 redressement).
+    var lit = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let m = [1.5: 10]
+        \\}
+    );
+    defer lit.deinit(gpa);
+    try expectAnyCode(lit.diagnostics.items, .bound_not_satisfied);
+
+    var ann = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let m: [f32: int] = [:]
+        \\}
+    );
+    defer ann.deinit(gpa);
+    try expectAnyCode(ann.diagnostics.items, .bound_not_satisfied);
+
+    // Hashable keys stay accepted (int here; string keys keep the ratified
+    // tranche-3 bound: interp reference, codegen fail-loud).
+    var ok = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let mut m = [1: 10]
+        \\  m.insert(2, 20)
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
