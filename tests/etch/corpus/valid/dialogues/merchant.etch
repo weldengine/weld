@@ -1,0 +1,37 @@
+// Dialogue (M0.8 E4, etch-grammar.md §8.4 PATCHED — items 10/11): speaker
+// lines (string + @loc forms, conditional), choices with conditions and
+// targets, branches, emit with the dialogue-only trailing condition,
+// transitions, ambient player (item 5).
+component Health {
+  current: float = 100.0
+}
+
+event OpenShopUI {
+  shop: int
+}
+
+tags {
+  social {
+    met_merchant
+  }
+}
+
+dialogue MerchantGreeting {
+  speaker "merchant" {
+    line: @loc:"Welcome to my shop, traveler!"
+    line: "You look hurt!" when player has Health { current < 50.0 }
+  }
+
+  choice {
+    @loc:"Show me your wares" -> show_wares
+    "Goodbye" when player.get(Health).current > 0.0 -> end
+  }
+
+  branch show_wares {
+    speaker "merchant" {
+      line: @loc:"greeting":"I have weapons and armor."
+    }
+    emit OpenShopUI { shop: 1 } when not player has_tag .social.met_merchant
+    -> end
+  }
+}

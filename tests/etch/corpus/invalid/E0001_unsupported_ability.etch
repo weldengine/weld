@@ -1,0 +1,12 @@
+// E0001 ParseError — `ability` is out of scope until its E4 slice lands;
+// the lexer flags it as `error_unknown_keyword`, which the parser raises
+// with an "UnsupportedConstructInS3" message. (Replaces the former
+// `dialogue` fixture: `dialogue` graduated with its M0.8 E4 slice.)
+
+ability Fireball {
+    cooldown: 3
+}
+
+component Filler {
+    v: int = 0
+}

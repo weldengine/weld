@@ -241,6 +241,10 @@ pub const ExprKind = enum {
     /// `etch-grammar.md` §1.4 `interpolation = "{" , expression , "}"`).
     /// Data indexes `string_interps`.
     string_interp,
+    /// Localized text `@loc…` (§3.2 `loc_expr`, M0.8 E4 — item-10 ruling:
+    /// STRUCTURAL parse only; the fingerprint/extraction model is E5 with
+    /// `locale`). Types as `string`. Data indexes `loc_exprs`.
+    loc_expr,
     /// Postfix tag query `expression tag_op tag_operand` (§3.2 `tag_expr`,
     /// M0.8 E4 — needed by B-construct conditions like quest `requires:
     /// player has_tag .x`). Parse + resolve (bool); EVALUATION is fail-loud
@@ -420,6 +424,99 @@ pub const TagFilter = struct {
     op: TagOp,
     operand_start: u32,
     operand_len: u32,
+};
+
+/// `@loc…` localized text (§3.2 `loc_expr`, M0.8 E4 — structural form
+/// only). Fingerprint form: `@loc[:"meaning"][|"desc"][@@id.path]:"text"`
+/// (`text` decoded; the optional metadata in `meaning` / `description` /
+/// `custom_id`, 0 = absent). Key form (`is_key_form`): `@loc("key.path",
+/// name: expr, …)` — `text` holds the key, args are a `struct_lit_fields`
+/// run (named pairs).
+pub const LocExpr = struct {
+    text: StringId,
+    meaning: StringId,
+    description: StringId,
+    custom_id: StringId,
+    is_key_form: bool,
+    args_start: u32,
+    args_len: u32,
+};
+
+/// One dialogue line (`line ":" (STRING_LITERAL | loc_expr) [when]`,
+/// §8.4 PATCHED — item 10).
+pub const DialogueLine = struct {
+    text: NodeId, // string_lit or loc_expr
+    when_root: u32, // RuleDecl.none_when if absent
+    span: SourceSpan,
+};
+
+/// One `speaker "id" { lines }` block (§8.4). Lines are a direct
+/// contiguous `dialogue_lines` run (no nesting inside a speaker).
+pub const DialogueSpeaker = struct {
+    id: StringId, // decoded string literal
+    lines_start: u32,
+    lines_len: u32,
+    span: SourceSpan,
+};
+
+/// One choice option (`(STRING | loc_expr) [when] "->" (IDENT | end)`).
+pub const DialogueOption = struct {
+    text: NodeId,
+    when_root: u32,
+    target: StringId, // 0 when `is_end`
+    is_end: bool,
+    span: SourceSpan,
+};
+
+/// One `choice { options }` block (§8.4). Options are a direct run of
+/// `dialogue_options` (no nesting inside a choice).
+pub const DialogueChoice = struct {
+    options_start: u32,
+    options_len: u32,
+    span: SourceSpan,
+};
+
+/// One `emit … [when ecs_condition]` dialogue element (§8.4 PATCHED —
+/// item 11: the trailing condition exists in dialogue-element position
+/// ONLY, a single §6 condition, not a full clause).
+pub const DialogueEmit = struct {
+    stmt: NodeId, // emit stmt
+    when_root: u32, // RuleDecl.none_when if absent
+    span: SourceSpan,
+};
+
+/// One `-> target` transition (`end` or a branch label).
+pub const DialogueGoto = struct {
+    target: StringId, // 0 when `is_end`
+    is_end: bool,
+    span: SourceSpan,
+};
+
+/// Kind of one dialogue element (§8.4), declaration order preserved.
+pub const DialogueElemKind = enum { speaker, choice, branch, emit, goto };
+
+/// One dialogue element: `index` points into the kind's slab.
+pub const DialogueElem = struct {
+    kind: DialogueElemKind,
+    index: u32,
+};
+
+/// One `branch IDENT { elements }` (§8.4) — elements recurse; the elems
+/// run is buffered into `dialogue_elems`.
+pub const DialogueBranch = struct {
+    name: StringId,
+    elems_start: u32,
+    elems_len: u32,
+    span: SourceSpan,
+};
+
+/// Side-slab entry for a `dialogue` declaration (M0.8 E4 Level B, §8.4).
+pub const DialogueDecl = struct {
+    name: StringId,
+    elems_start: u32,
+    elems_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
 };
 
 /// Postfix tag query expression (§3.2 `tag_expr`, M0.8 E4): a receiver +
@@ -1390,6 +1487,16 @@ pub const AstArena = struct {
     tag_operands: std.ArrayListUnmanaged(NodeId) = .empty,
     tag_mutation_stmts: std.ArrayListUnmanaged(TagMutationStmt) = .empty,
     tag_query_exprs: std.ArrayListUnmanaged(TagQueryExpr) = .empty,
+    loc_exprs: std.ArrayListUnmanaged(LocExpr) = .empty,
+    dialogue_decls: std.ArrayListUnmanaged(DialogueDecl) = .empty,
+    dialogue_elems: std.ArrayListUnmanaged(DialogueElem) = .empty,
+    dialogue_speakers: std.ArrayListUnmanaged(DialogueSpeaker) = .empty,
+    dialogue_lines: std.ArrayListUnmanaged(DialogueLine) = .empty,
+    dialogue_choices: std.ArrayListUnmanaged(DialogueChoice) = .empty,
+    dialogue_options: std.ArrayListUnmanaged(DialogueOption) = .empty,
+    dialogue_emits: std.ArrayListUnmanaged(DialogueEmit) = .empty,
+    dialogue_gotos: std.ArrayListUnmanaged(DialogueGoto) = .empty,
+    dialogue_branches: std.ArrayListUnmanaged(DialogueBranch) = .empty,
     rule_decls: std.ArrayListUnmanaged(RuleDecl) = .empty,
     fn_decls: std.ArrayListUnmanaged(FnDecl) = .empty,
     struct_decls: std.ArrayListUnmanaged(StructDecl) = .empty,
@@ -1545,6 +1652,16 @@ pub const AstArena = struct {
         self.tag_operands.deinit(gpa);
         self.tag_mutation_stmts.deinit(gpa);
         self.tag_query_exprs.deinit(gpa);
+        self.loc_exprs.deinit(gpa);
+        self.dialogue_decls.deinit(gpa);
+        self.dialogue_elems.deinit(gpa);
+        self.dialogue_speakers.deinit(gpa);
+        self.dialogue_lines.deinit(gpa);
+        self.dialogue_choices.deinit(gpa);
+        self.dialogue_options.deinit(gpa);
+        self.dialogue_emits.deinit(gpa);
+        self.dialogue_gotos.deinit(gpa);
+        self.dialogue_branches.deinit(gpa);
         self.rule_decls.deinit(gpa);
         self.fn_decls.deinit(gpa);
         self.struct_decls.deinit(gpa);
@@ -2015,6 +2132,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.data_decls.items.len);
         try self.data_decls.append(gpa, decl);
         return try self.addItem(gpa, .data_decl, idx, span);
+    }
+
+    /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The
+    /// caller appends elements to the dialogue slabs beforehand, passing
+    /// the range in `decl`.
+    pub fn addDialogueDecl(self: *AstArena, gpa: std.mem.Allocator, decl: DialogueDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.dialogue_decls.items.len);
+        try self.dialogue_decls.append(gpa, decl);
+        return try self.addItem(gpa, .dialogue_decl, idx, span);
     }
 
     /// `quest Name { properties + stages }` (M0.8 E4, `etch-grammar.md`

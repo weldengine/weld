@@ -1,0 +1,5 @@
+dialogue D {
+  choice {
+    "go" -> nowhere
+  }
+}

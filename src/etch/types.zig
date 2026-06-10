@@ -169,7 +169,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -203,7 +203,7 @@ fn containsUppercase(s: []const u8) bool {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -315,6 +315,7 @@ pub const TypeChecker = struct {
         try tc.buildTags();
         try tc.validateBehaviorDecls();
         try tc.validateQuestDecls();
+        try tc.validateDialogueDecls();
         try tc.pass2Resolve();
     }
 
@@ -863,6 +864,119 @@ pub const TypeChecker = struct {
         }
     }
 
+    // ─── Dialogues (M0.8 E4, `etch-validation-ecs.md` §11) ───────────────
+
+    /// Validate every `dialogue` once all symbols are known and the tag
+    /// table is built: E1560 empty dialogue, E1561 dialogue-wide duplicate
+    /// branch labels, E1562/E1564 goto / choice targets (a declared branch
+    /// or `end`), E1565/E1566 line / choice conditions (full §6 when
+    /// machinery, bare arm on the construct codes), E1567 emit event
+    /// references (the item-11 trailing condition validates through the
+    /// same when machinery). E1563 (SpeakerNotFound) is VACUOUS in E4
+    /// (scene/prefab context is E7; any string is referencable — recorded);
+    /// W1560/W1561 are deferred heuristics (recorded at the STOP). The
+    /// ambient scope injects `player: Entity` (item-5 ruling).
+    fn validateDialogueDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .dialogue_decl) continue;
+            try self.validateDialogue(self.arena.dialogue_decls.items[datas[i]]);
+        }
+    }
+
+    fn validateDialogue(self: *TypeChecker, decl: ast_mod.DialogueDecl) !void {
+        var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
+        defer ctx.deinit(self.gpa);
+        if (self.arena.strings.find("player")) |player_id| {
+            try ctx.locals.put(self.gpa, player_id, .{ .type_ = .{ .builtin = .entity }, .is_mut = false });
+        }
+        if (decl.elems_len == 0) {
+            const sym = self.symbols.get(decl.name).?;
+            try self.emit(.dialogue_empty, .error_, self.arena.itemSpan(sym.item_id), "dialogue '{s}' is empty", .{self.arena.strings.slice(decl.name)});
+        }
+        // Dialogue-wide branch label set (E1561 + the E1562/E1564 targets).
+        var labels: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer labels.deinit(self.gpa);
+        try self.collectDialogueLabels(decl.elems_start, decl.elems_len, &labels);
+        try self.validateDialogueElems(decl.elems_start, decl.elems_len, &ctx, &labels);
+    }
+
+    fn collectDialogueLabels(self: *TypeChecker, start: u32, len: u32, labels: *std.AutoHashMapUnmanaged(StringId, void)) !void {
+        var e: u32 = 0;
+        while (e < len) : (e += 1) {
+            const elem = self.arena.dialogue_elems.items[start + e];
+            if (elem.kind != .branch) continue;
+            const branch = self.arena.dialogue_branches.items[elem.index];
+            const gop = try labels.getOrPut(self.gpa, branch.name);
+            if (gop.found_existing) {
+                try self.emit(.duplicate_branch_label, .error_, branch.span, "duplicate branch label '{s}'", .{self.arena.strings.slice(branch.name)});
+            }
+            try self.collectDialogueLabels(branch.elems_start, branch.elems_len, labels);
+        }
+    }
+
+    fn validateDialogueElems(self: *TypeChecker, start: u32, len: u32, ctx: *RuleCtx, labels: *const std.AutoHashMapUnmanaged(StringId, void)) (TypeError || error{OutOfMemory})!void {
+        var e: u32 = 0;
+        while (e < len) : (e += 1) {
+            const elem = self.arena.dialogue_elems.items[start + e];
+            switch (elem.kind) {
+                .speaker => {
+                    const sp = self.arena.dialogue_speakers.items[elem.index];
+                    var l: u32 = 0;
+                    while (l < sp.lines_len) : (l += 1) {
+                        const line = self.arena.dialogue_lines.items[sp.lines_start + l];
+                        _ = try self.synthExprE(line.text, ctx);
+                        if (line.when_root != ast_mod.RuleDecl.none_when) {
+                            try self.collectWhenConstruct(ctx, line.when_root, .line_condition_not_bool, "line");
+                        }
+                    }
+                },
+                .choice => {
+                    const ch = self.arena.dialogue_choices.items[elem.index];
+                    var o: u32 = 0;
+                    while (o < ch.options_len) : (o += 1) {
+                        const opt = self.arena.dialogue_options.items[ch.options_start + o];
+                        _ = try self.synthExprE(opt.text, ctx);
+                        if (opt.when_root != ast_mod.RuleDecl.none_when) {
+                            try self.collectWhenConstruct(ctx, opt.when_root, .choice_condition_not_bool, "choice");
+                        }
+                        if (!opt.is_end and !labels.contains(opt.target)) {
+                            try self.emit(.choice_target_not_found, .error_, opt.span, "choice target '{s}' is not a branch of this dialogue", .{self.arena.strings.slice(opt.target)});
+                        }
+                    }
+                },
+                .branch => {
+                    const branch = self.arena.dialogue_branches.items[elem.index];
+                    try self.validateDialogueElems(branch.elems_start, branch.elems_len, ctx, labels);
+                },
+                .emit => {
+                    const em_elem = self.arena.dialogue_emits.items[elem.index];
+                    const em = self.arena.emit_stmts.items[self.arena.stmtData(em_elem.stmt)];
+                    if (self.symbols.get(em.event_type)) |sym| {
+                        if (sym.kind != .event_) {
+                            try self.emit(.dialogue_event_type_unknown, .error_, em_elem.span, "'{s}' is not an event", .{self.arena.strings.slice(em.event_type)});
+                        } else {
+                            try self.checkStmt(ctx, em_elem.stmt);
+                        }
+                    } else {
+                        try self.emit(.dialogue_event_type_unknown, .error_, em_elem.span, "dialogue emits unknown event '{s}'", .{self.arena.strings.slice(em.event_type)});
+                    }
+                    if (em_elem.when_root != ast_mod.RuleDecl.none_when) {
+                        try self.collectWhenConstruct(ctx, em_elem.when_root, .type_mismatch, "dialogue emit");
+                    }
+                },
+                .goto => {
+                    const g = self.arena.dialogue_gotos.items[elem.index];
+                    if (!g.is_end and !labels.contains(g.target)) {
+                        try self.emit(.branch_reference_not_found, .error_, g.span, "'-> {s}' references no branch of this dialogue", .{self.arena.strings.slice(g.target)});
+                    }
+                },
+            }
+        }
+    }
+
     // ─── Behaviors (M0.8 E4, `etch-validation-ecs.md` §8) ────────────────
 
     /// Validate every `behavior` once all symbols are known AND the tag
@@ -1193,6 +1307,14 @@ pub const TypeChecker = struct {
                     const decl = self.arena.data_decls.items[data];
                     try self.registerSymbol(.data_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .data);
+                },
+                .dialogue_decl => {
+                    // A `dialogue` (M0.8 E4 Level B) registers its name; the
+                    // graph (branch labels, targets, conditions, emits) is
+                    // validated in `validateDialogueDecls`.
+                    const decl = self.arena.dialogue_decls.items[data];
+                    try self.registerSymbol(.dialogue_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .dialogue);
                 },
                 .quest_decl => {
                     // A `quest` (M0.8 E4 Level B) registers its name; the body
@@ -2454,6 +2576,17 @@ pub const TypeChecker = struct {
                 }
                 try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(id), "unknown identifier '{s}'", .{self.arena.strings.slice(name_id)});
                 return ResolvedType.unknown;
+            },
+            .loc_expr => {
+                // `@loc…` (§3.2, M0.8 E4 — item 10): structurally a string.
+                // Key/fingerprint resolution (E1627) is E5 with `locale`;
+                // interpolation args type freely here.
+                const le = self.arena.loc_exprs.items[data];
+                var a: u32 = 0;
+                while (a < le.args_len) : (a += 1) {
+                    _ = try self.synthExprE(self.arena.struct_lit_fields.items[le.args_start + a].value, ctx_opt);
+                }
+                return .{ .builtin = .string_ };
             },
             .tag_query => {
                 // Postfix tag query (§3.2 `tag_expr`, M0.8 E4): the receiver
@@ -6586,4 +6719,58 @@ test "quest: E1543/E1545/E1550 reference codes + W1541 warning (M0.8 E4)" {
     try expectAnyCode(result.diagnostics.items, .switch_branch_target_not_found);
     try expectAnyCode(result.diagnostics.items, .event_reference_not_found);
     try expectAnyCode(result.diagnostics.items, .no_main_objective);
+}
+
+test "dialogue: canonical dialogue checks clean, structural codes fire (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var ok = try parseAndCheck(gpa,
+        \\component Health { current: float = 100.0 }
+        \\event OpenShopUI { shop: int }
+        \\tags { social { met_merchant } }
+        \\dialogue MerchantGreeting {
+        \\  speaker "merchant" {
+        \\    line: @loc:"Welcome!"
+        \\    line: "You're hurt!" when player has Health { current < 50.0 }
+        \\  }
+        \\  choice {
+        \\    @loc:"Show me your wares" -> show_wares
+        \\    "Goodbye" when player.get(Health).current > 0.0 -> end
+        \\  }
+        \\  branch show_wares {
+        \\    emit OpenShopUI { shop: 1 } when not player has_tag .social.met_merchant
+        \\    -> end
+        \\  }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    var bad = try parseAndCheck(gpa,
+        \\dialogue Bad {
+        \\  speaker "npc" {
+        \\    line: "x" when 1 + 2
+        \\  }
+        \\  choice {
+        \\    "a" when 3 + 4 -> nowhere
+        \\  }
+        \\  emit Missing { x: 1 }
+        \\  -> also_nowhere
+        \\  branch dup { -> end }
+        \\  branch dup { -> end }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .line_condition_not_bool);
+    try expectAnyCode(bad.diagnostics.items, .choice_condition_not_bool);
+    try expectAnyCode(bad.diagnostics.items, .choice_target_not_found);
+    try expectAnyCode(bad.diagnostics.items, .dialogue_event_type_unknown);
+    try expectAnyCode(bad.diagnostics.items, .branch_reference_not_found);
+    try expectAnyCode(bad.diagnostics.items, .duplicate_branch_label);
+
+    var empty = try parseAndCheck(gpa,
+        \\dialogue Empty { }
+    );
+    defer empty.deinit(gpa);
+    try expectAnyCode(empty.diagnostics.items, .dialogue_empty);
 }

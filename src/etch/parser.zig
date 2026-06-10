@@ -186,6 +186,13 @@ pub const Parser = struct {
     /// Rust). Reset inside delimited contexts (`( … )`, `[ … ]`, a `{ … }`
     /// block, a struct-literal field value) where a `{` is unambiguous again.
     no_struct_lit: bool = false,
+    /// True while parsing a when clause in a position NOT followed by a
+    /// construct-body brace (dialogue line / choice / emit conditions,
+    /// M0.8 E4): a `{` after `has T` / `resource T` is then unambiguously
+    /// the §6 filter. The matching-brace scan (`braceOpensWhenFilter`)
+    /// serves the braced positions (rules, behavior composites, quest
+    /// branches), where the construct body follows the clause.
+    when_brace_is_filter: bool = false,
 
     fn isActiveLabel(self: *const Parser, name: StringId) bool {
         for (self.active_labels.items) |l| {
@@ -503,7 +510,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue => return,
                 else => _ = try self.advance(),
             }
         }
@@ -535,6 +542,7 @@ pub const Parser = struct {
             .kw_routine => try self.parseRoutineDecl(annotations),
             .kw_behavior => try self.parseBehaviorDecl(annotations),
             .kw_quest => try self.parseQuestDecl(annotations),
+            .kw_dialogue => try self.parseDialogueDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -548,7 +556,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -1580,6 +1588,314 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
+    /// Parse `@loc…` (§3.2 `loc_expr`, M0.8 E4 — item-10 ruling). Two
+    /// forms: fingerprint `@loc[:"meaning"][|"desc"][@@id.path]:"text"`
+    /// (the LAST colon-string is the text; an earlier one is the meaning)
+    /// and key `@loc("key" {, IDENT ":" expression})`. Structural only —
+    /// the fingerprint model lands in E5 with `locale`.
+    fn parseLocExpr(self: *Parser) ParseError!NodeId {
+        const at_tok = try self.advance(); // '@'
+        if (self.peek() != .ident or !std.mem.eql(u8, self.sliceOf(self.peekSpan()), "loc")) {
+            return self.parseErrFmt(self.peekSpan(), "only '@loc' is legal in expression position, got '@{s}'", .{self.sliceOf(self.peekSpan())});
+        }
+        _ = try self.advance(); // 'loc'
+        if (self.peek() == .lparen) {
+            // Key form.
+            _ = try self.advance();
+            const key_tok = try self.expect(.string_literal, "expected the locale key string in @loc(...)");
+            const key = try self.internStringLiteral(key_tok.span);
+            var args: std.ArrayListUnmanaged(ast_mod.StructLitField) = .empty;
+            defer args.deinit(self.gpa);
+            while (try self.match(.comma)) {
+                const name_tok = try self.expect(.ident, "expected an interpolation name in @loc(...)");
+                const arg_name = try self.internSlice(name_tok.span);
+                _ = try self.expect(.colon, "expected ':' after the @loc interpolation name");
+                const value = try self.parseExpr(0);
+                try args.append(self.gpa, .{ .name = arg_name, .value = value });
+            }
+            const closing = try self.expect(.rparen, "expected ')' to close @loc(...)");
+            const args_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+            try self.arena.struct_lit_fields.appendSlice(self.gpa, args.items);
+            const idx: u32 = @intCast(self.arena.loc_exprs.items.len);
+            try self.arena.loc_exprs.append(self.gpa, .{
+                .text = key,
+                .meaning = 0,
+                .description = 0,
+                .custom_id = 0,
+                .is_key_form = true,
+                .args_start = args_start,
+                .args_len = @intCast(args.items.len),
+            });
+            return try self.arena.addExpr(self.gpa, .loc_expr, idx, .{
+                .byte_start = at_tok.span.byte_start,
+                .byte_end = closing.span.byte_end,
+            });
+        }
+        // Fingerprint form.
+        var meaning: StringId = 0;
+        var description: StringId = 0;
+        var custom_id: StringId = 0;
+        var text: StringId = 0;
+        var end_byte = at_tok.span.byte_end;
+        if (self.peek() == .colon) {
+            _ = try self.advance();
+            const s1_tok = try self.expect(.string_literal, "expected a string after ':' in @loc");
+            const s1 = try self.internStringLiteral(s1_tok.span);
+            end_byte = s1_tok.span.byte_end;
+            if (self.peek() == .colon or self.peek() == .pipe or (self.peek() == .at and self.peekNext() == .at)) {
+                meaning = s1; // an earlier colon-string is the meaning
+            } else {
+                text = s1; // the last (only) colon-string is the text
+            }
+        }
+        if (text == 0) {
+            if (self.peek() == .pipe) {
+                _ = try self.advance();
+                const d_tok = try self.expect(.string_literal, "expected the description string after '|' in @loc");
+                description = try self.internStringLiteral(d_tok.span);
+            }
+            if (self.peek() == .at and self.peekNext() == .at) {
+                _ = try self.advance();
+                _ = try self.advance();
+                var id_buf: std.ArrayListUnmanaged(u8) = .empty;
+                defer id_buf.deinit(self.gpa);
+                const first = try self.expectWord("expected the custom id after '@@' in @loc");
+                try id_buf.appendSlice(self.gpa, self.sliceOf(first.span));
+                while (self.peek() == .dot) {
+                    _ = try self.advance();
+                    const seg = try self.expectWord("expected a custom-id segment after '.' in @loc");
+                    try id_buf.append(self.gpa, '.');
+                    try id_buf.appendSlice(self.gpa, self.sliceOf(seg.span));
+                }
+                custom_id = try self.arena.strings.intern(self.gpa, id_buf.items);
+            }
+            _ = try self.expect(.colon, "expected ':' before the @loc text");
+            const t_tok = try self.expect(.string_literal, "expected the @loc text string");
+            text = try self.internStringLiteral(t_tok.span);
+            end_byte = t_tok.span.byte_end;
+        }
+        const idx: u32 = @intCast(self.arena.loc_exprs.items.len);
+        try self.arena.loc_exprs.append(self.gpa, .{
+            .text = text,
+            .meaning = meaning,
+            .description = description,
+            .custom_id = custom_id,
+            .is_key_form = false,
+            .args_start = 0,
+            .args_len = 0,
+        });
+        return try self.arena.addExpr(self.gpa, .loc_expr, idx, .{
+            .byte_start = at_tok.span.byte_start,
+            .byte_end = end_byte,
+        });
+    }
+
+    /// Parse `dialogue TYPE_IDENT "{" {dialogue_element} "}"` (M0.8 E4
+    /// Level B, `etch-grammar.md` §8.4 PATCHED — items 10/11). `speaker` /
+    /// `line` / `choice` / `end` are contextual identifiers; `branch` is
+    /// the graduated keyword.
+    fn parseDialogueDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'dialogue'
+        const name_tok = try self.expect(.type_ident, "expected dialogue name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start dialogue body");
+        const elems = try self.parseDialogueElems();
+        const closing = try self.expect(.rbrace, "expected '}' to close dialogue body");
+        _ = try self.arena.addDialogueDecl(self.gpa, .{
+            .name = name_id,
+            .elems_start = elems.start,
+            .elems_len = elems.len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse a `{ dialogue_element }` run up to the closing brace (shared
+    /// by the dialogue body and branch bodies), committed as a buffered
+    /// contiguous `dialogue_elems` run (branches nest).
+    fn parseDialogueElems(self: *Parser) ParseError!SlabRange {
+        var elems: std.ArrayListUnmanaged(ast_mod.DialogueElem) = .empty;
+        defer elems.deinit(self.gpa);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            switch (self.peek()) {
+                .kw_branch => {
+                    const kw = try self.advance();
+                    const bname_tok = switch (self.peek()) {
+                        .ident, .type_ident => try self.advance(),
+                        else => return self.parseErr(self.peekSpan(), "expected branch label after 'branch'"),
+                    };
+                    const bname = try self.internSlice(bname_tok.span);
+                    _ = try self.expect(.lbrace, "expected '{' to start branch body");
+                    const inner = try self.parseDialogueElems();
+                    const closing = try self.expect(.rbrace, "expected '}' to close branch body");
+                    const idx: u32 = @intCast(self.arena.dialogue_branches.items.len);
+                    try self.arena.dialogue_branches.append(self.gpa, .{
+                        .name = bname,
+                        .elems_start = inner.start,
+                        .elems_len = inner.len,
+                        .span = .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end },
+                    });
+                    try elems.append(self.gpa, .{ .kind = .branch, .index = idx });
+                },
+                .kw_emit => {
+                    const stmt = try self.parseEmitStmt();
+                    var when_root: u32 = ast_mod.RuleDecl.none_when;
+                    var end_byte = self.arena.stmtSpan(stmt).byte_end;
+                    if (self.peek() == .kw_when) {
+                        // Item-11 ruling: `emit_stmt [ "when" ecs_condition ]`
+                        // in dialogue-element position ONLY — one condition
+                        // (`not` included), no and/or chain.
+                        _ = try self.advance();
+                        const saved = self.when_brace_is_filter;
+                        self.when_brace_is_filter = true;
+                        defer self.when_brace_is_filter = saved;
+                        when_root = try self.parseWhenNot();
+                        end_byte = self.arena.when_nodes.items[when_root].span.byte_end;
+                    }
+                    const idx: u32 = @intCast(self.arena.dialogue_emits.items.len);
+                    try self.arena.dialogue_emits.append(self.gpa, .{
+                        .stmt = stmt,
+                        .when_root = when_root,
+                        .span = .{ .byte_start = self.arena.stmtSpan(stmt).byte_start, .byte_end = end_byte },
+                    });
+                    try elems.append(self.gpa, .{ .kind = .emit, .index = idx });
+                },
+                .arrow => {
+                    const arrow_tok = try self.advance();
+                    const goto = try self.parseDialogueTarget(arrow_tok.span);
+                    try elems.append(self.gpa, .{ .kind = .goto, .index = goto });
+                },
+                .ident => {
+                    const head = self.sliceOf(self.peekSpan());
+                    if (std.mem.eql(u8, head, "speaker")) {
+                        try elems.append(self.gpa, .{ .kind = .speaker, .index = try self.parseDialogueSpeaker() });
+                    } else if (std.mem.eql(u8, head, "choice")) {
+                        try elems.append(self.gpa, .{ .kind = .choice, .index = try self.parseDialogueChoice() });
+                    } else {
+                        return self.parseErrFmt(self.peekSpan(), "expected a dialogue element (speaker | choice | branch | emit | ->), got '{s}'", .{head});
+                    }
+                },
+                else => return self.parseErrFmt(self.peekSpan(), "expected a dialogue element (speaker | choice | branch | emit | ->), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            }
+        }
+        const start: u32 = @intCast(self.arena.dialogue_elems.items.len);
+        try self.arena.dialogue_elems.appendSlice(self.gpa, elems.items);
+        return .{ .start = start, .len = @intCast(elems.items.len) };
+    }
+
+    /// Parse a `-> ( IDENT | end )` target tail, returning the
+    /// `dialogue_gotos` index.
+    fn parseDialogueTarget(self: *Parser, arrow_span: token_mod.SourceSpan) ParseError!u32 {
+        const target_tok = switch (self.peek()) {
+            .ident, .type_ident => try self.advance(),
+            else => return self.parseErr(self.peekSpan(), "expected a branch label or 'end' after '->'"),
+        };
+        const is_end = std.mem.eql(u8, self.sliceOf(target_tok.span), "end");
+        const idx: u32 = @intCast(self.arena.dialogue_gotos.items.len);
+        try self.arena.dialogue_gotos.append(self.gpa, .{
+            .target = if (is_end) 0 else try self.internSlice(target_tok.span),
+            .is_end = is_end,
+            .span = .{ .byte_start = arrow_span.byte_start, .byte_end = target_tok.span.byte_end },
+        });
+        return idx;
+    }
+
+    /// Parse one line/option text per the item-10 PATCHED forms:
+    /// `STRING_LITERAL | loc_expr`.
+    fn parseDialogueText(self: *Parser) ParseError!NodeId {
+        if (self.peek() == .string_literal) {
+            const tok = try self.advance();
+            return try self.parseStringLiteralExpr(tok);
+        }
+        if (self.peek() == .at) {
+            return try self.parseLocExpr();
+        }
+        return self.parseErr(self.peekSpan(), "expected a string literal or @loc text (etch-grammar.md §8.4)");
+    }
+
+    fn parseDialogueSpeaker(self: *Parser) ParseError!u32 {
+        const kw = try self.advance(); // 'speaker'
+        const id_tok = try self.expect(.string_literal, "expected the speaker id string after 'speaker'");
+        const speaker_id = try self.internStringLiteral(id_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start speaker body");
+        const lines_start: u32 = @intCast(self.arena.dialogue_lines.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.peek() != .ident or !std.mem.eql(u8, self.sliceOf(self.peekSpan()), "line")) {
+                return self.parseErrFmt(self.peekSpan(), "expected 'line:' in speaker body, got '{s}'", .{self.sliceOf(self.peekSpan())});
+            }
+            const line_kw = try self.advance();
+            _ = try self.expect(.colon, "expected ':' after 'line'");
+            const text = try self.parseDialogueText();
+            var when_root: u32 = ast_mod.RuleDecl.none_when;
+            var end_byte = self.arena.exprSpan(text).byte_end;
+            if (self.peek() == .kw_when) {
+                _ = try self.advance();
+                const saved = self.when_brace_is_filter;
+                self.when_brace_is_filter = true;
+                defer self.when_brace_is_filter = saved;
+                when_root = try self.parseWhenExpr();
+                end_byte = self.arena.when_nodes.items[when_root].span.byte_end;
+            }
+            try self.arena.dialogue_lines.append(self.gpa, .{
+                .text = text,
+                .when_root = when_root,
+                .span = .{ .byte_start = line_kw.span.byte_start, .byte_end = end_byte },
+            });
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close speaker body");
+        const idx: u32 = @intCast(self.arena.dialogue_speakers.items.len);
+        try self.arena.dialogue_speakers.append(self.gpa, .{
+            .id = speaker_id,
+            .lines_start = lines_start,
+            .lines_len = @as(u32, @intCast(self.arena.dialogue_lines.items.len)) - lines_start,
+            .span = .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end },
+        });
+        return idx;
+    }
+
+    fn parseDialogueChoice(self: *Parser) ParseError!u32 {
+        const kw = try self.advance(); // 'choice'
+        _ = try self.expect(.lbrace, "expected '{' to start choice body");
+        const options_start: u32 = @intCast(self.arena.dialogue_options.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const text = try self.parseDialogueText();
+            var when_root: u32 = ast_mod.RuleDecl.none_when;
+            if (self.peek() == .kw_when) {
+                _ = try self.advance();
+                const saved = self.when_brace_is_filter;
+                self.when_brace_is_filter = true;
+                defer self.when_brace_is_filter = saved;
+                when_root = try self.parseWhenExpr();
+            }
+            const arrow_tok = try self.expect(.arrow, "expected '->' after the choice option text");
+            const target_tok = switch (self.peek()) {
+                .ident, .type_ident => try self.advance(),
+                else => return self.parseErr(self.peekSpan(), "expected a branch label or 'end' after '->'"),
+            };
+            const is_end = std.mem.eql(u8, self.sliceOf(target_tok.span), "end");
+            _ = arrow_tok;
+            try self.arena.dialogue_options.append(self.gpa, .{
+                .text = text,
+                .when_root = when_root,
+                .target = if (is_end) 0 else try self.internSlice(target_tok.span),
+                .is_end = is_end,
+                .span = .{ .byte_start = self.arena.exprSpan(text).byte_start, .byte_end = target_tok.span.byte_end },
+            });
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close choice body");
+        const idx: u32 = @intCast(self.arena.dialogue_choices.items.len);
+        try self.arena.dialogue_choices.append(self.gpa, .{
+            .options_start = options_start,
+            .options_len = @as(u32, @intCast(self.arena.dialogue_options.items.len)) - options_start,
+            .span = .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end },
+        });
+        return idx;
+    }
+
     /// Parse `quest TYPE_IDENT "{" {quest_property} {quest_stage} "}"`
     /// (M0.8 E4 Level B, `etch-grammar.md` §8.3 PATCHED — items 7/8).
     /// Properties come first (`IDENT ":" expression`, incl. `requires`);
@@ -2274,7 +2590,7 @@ pub const Parser = struct {
                 const changed_tok = try self.advance();
                 kind = .resource_changed;
                 end_byte = changed_tok.span.byte_end;
-            } else if (self.peek() == .lbrace and self.braceOpensWhenFilter()) {
+            } else if (self.peek() == .lbrace and (self.when_brace_is_filter or self.braceOpensWhenFilter())) {
                 // `resource T { expression }` (M0.8 E4 — §6 general resource
                 // filter; mutually exclusive with `changed`, like `has`). The
                 // resource's fields are in scope inside the braces. The
@@ -2358,7 +2674,7 @@ pub const Parser = struct {
             const closing = try self.expect(.rbrace, "expected '}' to close has-with-filter");
             end_byte = closing.span.byte_end;
             kind = .has_with_filter;
-        } else if (self.peek() == .lbrace and self.braceOpensWhenFilter()) {
+        } else if (self.peek() == .lbrace and (self.when_brace_is_filter or self.braceOpensWhenFilter())) {
             // `has T { expression }` (M0.8 E4 — §6 general field filter; the
             // narrow `{ field == value }` fast path above keeps the delivered
             // E3 representation byte-for-byte). T's fields are in scope
@@ -3765,6 +4081,12 @@ pub const Parser = struct {
                 self.no_struct_lit = saved;
                 _ = try self.expect(.rparen, "expected ')' to close parenthesized expression");
                 return inner;
+            },
+            .at => {
+                // `@loc…` localized text (§3.2 `loc_expr`, M0.8 E4 item 10 —
+                // structural parse; fingerprint/extraction = E5). The only
+                // `@…` form legal in expression position.
+                return try self.parseLocExpr();
             },
             .dot => {
                 // Enum variant shorthand `.foo` (e.g. annotation arg
@@ -5558,4 +5880,74 @@ test "parser recovers and a valid quest after a broken construct survives (M0.8 
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.quest_decls.items.len);
+}
+
+test "parser builds a dialogue with speakers, choices, branches, emit-when, gotos (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\dialogue MerchantGreeting {
+        \\  speaker "merchant" {
+        \\    line: @loc:"Welcome to my shop, traveler!"
+        \\    line: "You're back!" when player has Health
+        \\  }
+        \\  choice {
+        \\    @loc:"Show me your wares" -> show_wares
+        \\    "Goodbye" -> end
+        \\  }
+        \\  branch show_wares {
+        \\    speaker "merchant" {
+        \\      line: @loc:"meaning":"I have wares."
+        \\    }
+        \\    emit OpenShopUI { shop: 1 } when not player has_tag .met
+        \\    -> end
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.dialogue_decls.items.len);
+    const decl = result.ast.dialogue_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 3), decl.elems_len);
+    // Speaker: 2 lines — a loc text and a conditioned string text.
+    const sp_elem = result.ast.dialogue_elems.items[decl.elems_start];
+    try std.testing.expectEqual(ast_mod.DialogueElemKind.speaker, sp_elem.kind);
+    const sp = result.ast.dialogue_speakers.items[sp_elem.index];
+    try std.testing.expectEqualStrings("merchant", result.ast.strings.slice(sp.id));
+    try std.testing.expectEqual(@as(u32, 2), sp.lines_len);
+    const l0 = result.ast.dialogue_lines.items[sp.lines_start];
+    try std.testing.expectEqual(ast_mod.ExprKind.loc_expr, result.ast.exprKind(l0.text));
+    const l1 = result.ast.dialogue_lines.items[sp.lines_start + 1];
+    try std.testing.expect(l1.when_root != ast_mod.RuleDecl.none_when);
+    // Choice: loc option to a branch + string option to end.
+    const ch = result.ast.dialogue_choices.items[result.ast.dialogue_elems.items[decl.elems_start + 1].index];
+    try std.testing.expectEqual(@as(u32, 2), ch.options_len);
+    const o0 = result.ast.dialogue_options.items[ch.options_start];
+    try std.testing.expect(!o0.is_end);
+    try std.testing.expectEqualStrings("show_wares", result.ast.strings.slice(o0.target));
+    try std.testing.expect(result.ast.dialogue_options.items[ch.options_start + 1].is_end);
+    // Branch: speaker (meaning-form loc) + emit-when + goto end.
+    const br = result.ast.dialogue_branches.items[result.ast.dialogue_elems.items[decl.elems_start + 2].index];
+    try std.testing.expectEqual(@as(u32, 3), br.elems_len);
+    const inner_sp = result.ast.dialogue_speakers.items[result.ast.dialogue_elems.items[br.elems_start].index];
+    const inner_line = result.ast.dialogue_lines.items[inner_sp.lines_start];
+    const le = result.ast.loc_exprs.items[result.ast.exprData(inner_line.text)];
+    try std.testing.expectEqualStrings("meaning", result.ast.strings.slice(le.meaning));
+    try std.testing.expectEqualStrings("I have wares.", result.ast.strings.slice(le.text));
+    const em = result.ast.dialogue_emits.items[result.ast.dialogue_elems.items[br.elems_start + 1].index];
+    try std.testing.expect(em.when_root != ast_mod.RuleDecl.none_when);
+    try std.testing.expect(result.ast.dialogue_gotos.items[result.ast.dialogue_elems.items[br.elems_start + 2].index].is_end);
+}
+
+test "parser recovers and a valid dialogue after a broken construct survives (M0.8 E4 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\dialogue D { speaker "npc" { line: "hi" } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.dialogue_decls.items.len);
 }

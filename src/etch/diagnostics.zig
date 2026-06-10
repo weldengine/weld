@@ -109,6 +109,16 @@ pub const DiagnosticCode = enum {
     interrupt_target_invalid, // M0.8 E4 — E1526 InterruptTargetInvalid
     action_invalid_return, // M0.8 E4 — E1527 ActionInvalidReturn
 
+    // ── dialogue (E1560-E1579, M0.8 E4 — etch-validation-ecs.md §11) ──
+    dialogue_empty, // M0.8 E4 — E1560 DialogueEmpty
+    duplicate_branch_label, // M0.8 E4 — E1561 DuplicateBranchLabel
+    branch_reference_not_found, // M0.8 E4 — E1562 BranchReferenceNotFound
+    speaker_not_found, // M0.8 E4 — E1563 SpeakerNotFound (vacuous in E4: scene/prefab context is E7; any string is referencable — recorded)
+    choice_target_not_found, // M0.8 E4 — E1564 ChoiceTargetNotFound
+    line_condition_not_bool, // M0.8 E4 — E1565 LineConditionNotBool
+    choice_condition_not_bool, // M0.8 E4 — E1566 ChoiceConditionNotBool
+    dialogue_event_type_unknown, // M0.8 E4 — E1567 EventTypeUnknown (dialogue emit)
+
     // ── data tables (E1760-E1779, M0.8 E4 — etch-validation-ecs.md §22) ──
     data_empty_entries, // M0.8 E4 — E1760 DataEmptyEntries
     duplicate_entry_id, // M0.8 E4 — E1761 DuplicateEntryId
@@ -182,6 +192,14 @@ pub const DiagnosticCode = enum {
             .event_type_unknown => "E1525",
             .interrupt_target_invalid => "E1526",
             .action_invalid_return => "E1527",
+            .dialogue_empty => "E1560",
+            .duplicate_branch_label => "E1561",
+            .branch_reference_not_found => "E1562",
+            .speaker_not_found => "E1563",
+            .choice_target_not_found => "E1564",
+            .line_condition_not_bool => "E1565",
+            .choice_condition_not_bool => "E1566",
+            .dialogue_event_type_unknown => "E1567",
             .data_empty_entries => "E1760",
             .duplicate_entry_id => "E1761",
             .entry_type_mismatch => "E1762",
@@ -256,6 +274,14 @@ pub const DiagnosticCode = enum {
             .event_type_unknown => "EventTypeUnknown",
             .interrupt_target_invalid => "InterruptTargetInvalid",
             .action_invalid_return => "ActionInvalidReturn",
+            .dialogue_empty => "DialogueEmpty",
+            .duplicate_branch_label => "DuplicateBranchLabel",
+            .branch_reference_not_found => "BranchReferenceNotFound",
+            .speaker_not_found => "SpeakerNotFound",
+            .choice_target_not_found => "ChoiceTargetNotFound",
+            .line_condition_not_bool => "LineConditionNotBool",
+            .choice_condition_not_bool => "ChoiceConditionNotBool",
+            .dialogue_event_type_unknown => "EventTypeUnknown",
             .data_empty_entries => "DataEmptyEntries",
             .duplicate_entry_id => "DuplicateEntryId",
             .entry_type_mismatch => "EntryTypeMismatch",
