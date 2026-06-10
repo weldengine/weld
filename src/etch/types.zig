@@ -2054,6 +2054,18 @@ pub const TypeChecker = struct {
     /// value type. Fields may be omitted (the codegen / interpreter fill the
     /// struct's declared defaults). The result type is `.struct_t = T`. The
     /// anonymous `.{ … }` form (deferred) carries `type_name == 0`.
+    /// Resolve an enum-variant shorthand `.variant` against an expected enum
+    /// type — check mode, resolver-types §3.5/§4 (M0.8 E3-C tranche 4). In
+    /// expression position the parser stores the bare `tag_path` with the
+    /// variant ident as the expr data directly (multi-segment paths are a
+    /// parse error there). E0105 when the variant does not exist.
+    fn checkEnumShorthand(self: *TypeChecker, value: NodeId, enum_name: StringId) TypeError!ResolvedType {
+        const variant: StringId = self.arena.exprData(value);
+        if (self.enumVariantIndex(enum_name, variant) != null) return .{ .enum_t = enum_name };
+        try self.emit(.enum_variant_not_found, .error_, self.arena.exprSpan(value), "enum '{s}' has no variant '{s}'", .{ self.arena.strings.slice(enum_name), self.arena.strings.slice(variant) });
+        return ResolvedType.unknown;
+    }
+
     fn synthStructLit(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const sl = self.arena.struct_lits.items[data];
         const sym = self.symbols.get(sl.type_name);
@@ -2075,7 +2087,17 @@ pub const TypeChecker = struct {
                     break;
                 }
             }
-            const actual = try self.synthExprE(flit.value, ctx_opt);
+            // Check mode (resolver-types §4 + §3.5, M0.8 E3-C tranche 4):
+            // the declared field type is the expected type, so a bare
+            // `.variant` shorthand in field-value position resolves against
+            // a declared enum field — the part1 §10.2 canonical form
+            // `Error { code: .io_fail }`.
+            const actual = blk: {
+                if (declared != null and declared.? == .enum_t and self.arena.exprKind(flit.value) == .tag_path) {
+                    break :blk try self.checkEnumShorthand(flit.value, declared.?.enum_t);
+                }
+                break :blk try self.synthExprE(flit.value, ctx_opt);
+            };
             if (declared) |d| {
                 if (d == .builtin and actual == .builtin and !self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "struct-literal field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
@@ -4179,6 +4201,46 @@ test "type-checker resolves the builtin Error struct end-to-end (M0.8 E3-C tranc
     );
     defer ok.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+}
+
+test "struct-literal field values resolve the enum shorthand in check mode (M0.8 E3-C tranche 4)" {
+    const gpa = std.testing.allocator;
+    // The part1 §10.2 canonical form `Error { code: .io_fail }` plus a user
+    // enum field — the declared field type is the expected type (check
+    // mode, resolver-types §4 + §3.5).
+    var ok = try parseAndCheck(gpa,
+        \\enum Faction { red, blue }
+        \\struct Spec {
+        \\  hp: int
+        \\  faction: Faction
+        \\}
+        \\component Probe { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Probe
+        \\{
+        \\  let s = Spec { hp: 5, faction: .red }
+        \\  try {
+        \\    throw Error { message: "boom", code: .io_fail }
+        \\  } catch err {
+        \\    entity.get_mut(Probe).n = s.hp + err.message.len()
+        \\  }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // An unknown variant on the declared enum field → E0105.
+    var bad = try parseAndCheck(gpa,
+        \\enum Faction { red, blue }
+        \\struct Spec {
+        \\  faction: Faction
+        \\}
+        \\rule r(entity: Entity) {
+        \\  let s = Spec { faction: .green }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .enum_variant_not_found);
 }
 
 test "type-checker rejects throwing a non-Error value (M0.8 E3-C tranche 2)" {

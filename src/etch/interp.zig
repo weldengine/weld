@@ -1472,6 +1472,24 @@ pub const Interpreter = struct {
         return null;
     }
 
+    /// Resolve a bare `.variant` (1-segment `tag_path`) field value against
+    /// a declared enum-typed struct field at struct-literal evaluation
+    /// (M0.8 E3-C tranche 4, part1 §10.2) — the same declared-type lookup
+    /// as the resolver's check mode and the codegen's qualified emission.
+    /// `null` when the field is not enum-typed or the variant is unknown
+    /// (the resolver has already rejected those programs).
+    fn enumFieldShorthand(self: *Interpreter, f: ast_mod.Field, value: NodeId) ?Value {
+        if (self.ast.typeNodeKind(f.type_node) != .named) return null;
+        const named = self.ast.named_types.items[self.ast.typeNodeData(f.type_node)];
+        const ename = self.ast.resolveTypeAliasName(named.name);
+        const edecl = self.enum_decls.get(ename) orelse return null;
+        // Expression-position `tag_path` data IS the variant ident (the
+        // parser interns it directly; multi-segment is a parse error there).
+        const variant: StringId = self.ast.exprData(value);
+        const vidx = self.enumVariantIndexOf(edecl, variant) orelse return null;
+        return Value{ .enum_value = .{ .type_name = ename, .variant = vidx } };
+    }
+
     /// Dispatch an instance method call on an already-evaluated receiver
     /// value — §5.5 order: inherent / trait on user types, then the builtin
     /// string / collection subsets. Split from the `.method_call` arm so the
@@ -2059,6 +2077,16 @@ pub const Interpreter = struct {
                     while (li < sl.fields_len) : (li += 1) {
                         const flit = self.ast.struct_lit_fields.items[sl.fields_start + li];
                         if (flit.name == f.name) {
+                            // Bare `.variant` in field-value position (M0.8
+                            // E3-C tranche 4, part1 §10.2): resolved against
+                            // the declared field type — the decl's field
+                            // list is in hand at this site.
+                            if (self.ast.exprKind(flit.value) == .tag_path) {
+                                if (self.enumFieldShorthand(f, flit.value)) |ev| {
+                                    provided = ev;
+                                    break;
+                                }
+                            }
                             provided = try self.evalExpr(world, locals, flit.value);
                             break;
                         }

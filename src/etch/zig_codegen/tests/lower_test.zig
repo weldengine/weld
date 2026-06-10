@@ -443,6 +443,29 @@ test "lowers the Optional ops to orelse/.?/if-capture and gates the map-get help
     try std.testing.expect(std.mem.indexOf(u8, plain.items, "__etchMapGet") == null);
 }
 
+test "lowers the enum shorthand in field-value position to the qualified variant (M0.8 E3-C tranche 4)" {
+    const gpa = std.testing.allocator;
+    // The part1 §10.2 canonical form: a bare `.variant` field value emits
+    // qualified from the field's declared enum type.
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\enum Faction { red, blue }
+        \\struct Spec {
+        \\  hp: int
+        \\  faction: Faction
+        \\}
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let s = Spec { hp: 5, faction: .blue }
+        \\  entity.get_mut(Acc).n = s.hp
+        \\}
+    , &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "Spec{ .hp = 5, .faction = Faction.blue }") != null);
+}
+
 test "collection allocations require the frame arena: fn-body push fails loud (M0.8 E3-C tranche 3)" {
     const gpa = std.testing.allocator;
     // A fn body has no arena (§6.3 outparam model deferred) — a collection

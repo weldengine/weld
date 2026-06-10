@@ -71,6 +71,7 @@ const p48 = @import("programs/48_error_throw_catch.expected.zig");
 const p49 = @import("programs/49_dyn_array_push.expected.zig");
 const p50 = @import("programs/50_map_insert_iterate.expected.zig");
 const p51 = @import("programs/51_optional_ops.expected.zig");
+const p52 = @import("programs/52_enum_shorthand_field.expected.zig");
 
 /// Embedded list of the 20 differential corpus programs consumed by
 /// the S4 interpreter test and the S5 codegen parity test.
@@ -126,4 +127,5 @@ pub const programs = [_]Program{
     .{ .name = "49_dyn_array_push", .source = @embedFile("programs/49_dyn_array_push.etch"), .config = p49.config, .initial = p49.initial, .expected = p49.expected },
     .{ .name = "50_map_insert_iterate", .source = @embedFile("programs/50_map_insert_iterate.etch"), .config = p50.config, .initial = p50.initial, .expected = p50.expected },
     .{ .name = "51_optional_ops", .source = @embedFile("programs/51_optional_ops.etch"), .config = p51.config, .initial = p51.initial, .expected = p51.expected },
+    .{ .name = "52_enum_shorthand_field", .source = @embedFile("programs/52_enum_shorthand_field.etch"), .config = p52.config, .initial = p52.initial, .expected = p52.expected },
 };

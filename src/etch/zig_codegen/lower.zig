@@ -3013,7 +3013,21 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 try w.write(" .");
                 try w.ident(ast.strings.slice(flit.name));
                 try w.write(" = ");
-                try emitExpr(w, ast, ctx, flit.value);
+                // Bare `.variant` shorthand in field-value position (M0.8
+                // E3-C tranche 4, part1 §10.2): qualified `EnumName.variant`
+                // from the field's declared enum type — the same
+                // declared-type lookup as the interp's struct-literal
+                // resolution. A tag_path on a non-enum field has no Zig
+                // value — fail loud (the resolver already rejects it).
+                if (ast.exprKind(flit.value) == .tag_path) {
+                    // Expression-position `tag_path` data IS the variant
+                    // ident (multi-segment is a parse error there).
+                    const ename = structFieldEnumName(ast, sl.type_name, flit.name) orelse return CodegenError.UnsupportedConstruct;
+                    try w.print("{s}.", .{ename});
+                    try w.ident(ast.strings.slice(ast.exprData(flit.value)));
+                } else {
+                    try emitExpr(w, ast, ctx, flit.value);
+                }
             }
             try w.write(" }");
         },
@@ -3759,6 +3773,31 @@ fn mapAnnotationListType(ast: *const AstArena, annotation: NodeId) ?[]const u8 {
     const key_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(knamed.name))) orelse return null;
     const value_zig = type_map.mapBuiltin(ast.strings.slice(ast.resolveTypeAliasName(vnamed.name))) orelse return null;
     return mapZigType(key_zig, value_zig);
+}
+
+/// The declared enum type name of struct field `field_name` on struct
+/// `type_name`, or `null` when the field is not enum-typed (M0.8 E3-C
+/// tranche 4) — drives the qualified emission of a bare `.variant`
+/// field value (part1 §10.2).
+fn structFieldEnumName(ast: *const AstArena, type_name: StringId, field_name: StringId) ?[]const u8 {
+    var i: u28 = 0;
+    while (i < ast.items.len) : (i += 1) {
+        if (ast.items.items(.kind)[i] != .struct_decl) continue;
+        const sd = ast.struct_decls.items[ast.items.items(.data)[i]];
+        if (sd.name != type_name) continue;
+        var f_i: u32 = 0;
+        while (f_i < sd.fields_len) : (f_i += 1) {
+            const f = ast.fields.items[sd.fields_start + f_i];
+            if (f.name != field_name) continue;
+            if (ast.typeNodeKind(f.type_node) != .named) return null;
+            const named = ast.named_types.items[ast.typeNodeData(f.type_node)];
+            const resolved = ast.resolveTypeAliasName(named.name);
+            if (!isEnumName(ast, resolved)) return null;
+            return ast.strings.slice(resolved);
+        }
+        return null;
+    }
+    return null;
 }
 
 /// `true` if `name` is a declared `enum` (M0.8 E2 block 3 tranche B).
