@@ -4908,9 +4908,9 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// (M0.8 sub-slice C tranche 1). Escapes the quote / backslash / common
 /// control bytes; any other non-printable byte becomes `\xHH`.
 /// `true` when the program declares at least one Level-B construct with a
-/// descriptor (M0.8 E4: `data`, `routine`).
+/// descriptor (M0.8 E4: `data`, `routine`, `behavior`, `quest`, `dialogue`).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4931,6 +4931,7 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .routine_decl => try emitRoutineDescriptor(w, gpa, ast, ast.routine_decls.items[datas[i]]),
             .behavior_decl => try emitBehaviorDescriptor(w, gpa, ast, ast.behavior_decls.items[datas[i]]),
             .quest_decl => try emitQuestDescriptor(w, gpa, ast, ast.quest_decls.items[datas[i]]),
+            .dialogue_decl => try emitDialogueDescriptor(w, gpa, ast, ast.dialogue_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -5166,6 +5167,108 @@ fn emitQuestStageLiteral(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
         }
     }
     try w.write("} }");
+}
+
+fn emitDialogueDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.DialogueDecl) CodegenError!void {
+    try w.print("    .{{ .dialogue = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.write(", .elements = ");
+    try emitDialogueElementsLiteral(w, gpa, ast, decl.elems_start, decl.elems_len);
+    try w.line(" } },");
+}
+
+/// Emit one dialogue element run as a `&[_]DialogueElementDesc{…}` literal
+/// (recursive through branches; the codegen's OWN walk, texts via the
+/// SHARED canonical renderers — the Level-B proof-contract split).
+fn emitDialogueElementsLiteral(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, start: u32, len: u32) CodegenError!void {
+    try w.write("&[_]etch_descriptor.DialogueElementDesc{");
+    var e: u32 = 0;
+    while (e < len) : (e += 1) {
+        if (e != 0) try w.write(", ");
+        const elem = ast.dialogue_elems.items[start + e];
+        switch (elem.kind) {
+            .speaker => {
+                const sp = ast.dialogue_speakers.items[elem.index];
+                try w.write(".{ .speaker = .{ .id = ");
+                try emitZigStringLiteral(w, ast.strings.slice(sp.id));
+                try w.write(", .lines = &[_]etch_descriptor.DialogueLineDesc{");
+                var l: u32 = 0;
+                while (l < sp.lines_len) : (l += 1) {
+                    if (l != 0) try w.write(", ");
+                    const line = ast.dialogue_lines.items[sp.lines_start + l];
+                    const text = try renderDescExpr(gpa, ast, line.text);
+                    defer gpa.free(text);
+                    try w.write(".{ .text = ");
+                    try emitZigStringLiteral(w, text);
+                    try w.write(", .when = ");
+                    try emitDialogueWhen(w, gpa, ast, line.when_root);
+                    try w.write(" }");
+                }
+                try w.write("} } }");
+            },
+            .choice => {
+                const ch = ast.dialogue_choices.items[elem.index];
+                try w.write(".{ .choice = &[_]etch_descriptor.DialogueOptionDesc{");
+                var o: u32 = 0;
+                while (o < ch.options_len) : (o += 1) {
+                    if (o != 0) try w.write(", ");
+                    const opt = ast.dialogue_options.items[ch.options_start + o];
+                    const text = try renderDescExpr(gpa, ast, opt.text);
+                    defer gpa.free(text);
+                    try w.write(".{ .text = ");
+                    try emitZigStringLiteral(w, text);
+                    try w.write(", .when = ");
+                    try emitDialogueWhen(w, gpa, ast, opt.when_root);
+                    try w.write(", .target = ");
+                    try emitZigStringLiteral(w, if (opt.is_end) "end" else ast.strings.slice(opt.target));
+                    try w.write(" }");
+                }
+                try w.write("} }");
+            },
+            .branch => {
+                const branch = ast.dialogue_branches.items[elem.index];
+                try w.write(".{ .branch = .{ .name = ");
+                try emitZigStringLiteral(w, ast.strings.slice(branch.name));
+                try w.write(", .elements = ");
+                try emitDialogueElementsLiteral(w, gpa, ast, branch.elems_start, branch.elems_len);
+                try w.write(" } }");
+            },
+            .emit => {
+                const em = ast.dialogue_emits.items[elem.index];
+                const payload = descriptor_mod.renderStmtAlloc(gpa, ast, em.stmt) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+                };
+                defer gpa.free(payload);
+                try w.write(".{ .emit = .{ .payload = ");
+                try emitZigStringLiteral(w, payload);
+                try w.write(", .when = ");
+                try emitDialogueWhen(w, gpa, ast, em.when_root);
+                try w.write(" } }");
+            },
+            .goto => {
+                const g = ast.dialogue_gotos.items[elem.index];
+                try w.write(".{ .goto = ");
+                try emitZigStringLiteral(w, if (g.is_end) "end" else ast.strings.slice(g.target));
+                try w.write(" }");
+            },
+        }
+    }
+    try w.write("}");
+}
+
+/// Emit a dialogue when-condition string literal ("" when absent).
+fn emitDialogueWhen(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, when_root: u32) CodegenError!void {
+    if (when_root == ast_mod.RuleDecl.none_when) {
+        try w.write("\"\"");
+        return;
+    }
+    const when_text = descriptor_mod.renderWhenAlloc(gpa, ast, when_root) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+    };
+    defer gpa.free(when_text);
+    try emitZigStringLiteral(w, when_text);
 }
 
 /// Render an expression via the shared renderer, mapping the error set.

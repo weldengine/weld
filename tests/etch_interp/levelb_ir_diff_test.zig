@@ -31,6 +31,7 @@ const programs = [_]LevelBProgram{
     .{ .name = "p63_routine_daily", .source = @embedFile("programs/63_routine_daily.etch") },
     .{ .name = "p67_behavior_tree", .source = @embedFile("programs/67_behavior_tree.etch") },
     .{ .name = "p68_quest_escort", .source = @embedFile("programs/68_quest_escort.etch") },
+    .{ .name = "p69_dialogue_merchant", .source = @embedFile("programs/69_dialogue_merchant.etch") },
 };
 
 test "level-b serialized IR: interpreter build == cooked emit, byte-identical" {

@@ -897,3 +897,42 @@ quest TimedTrial {
   }
 }
 ```
+
+## Dialogues (E4 — §8.4 PATCHED, items 10/11)
+
+```etch
+dialogue MerchantGreeting {
+  speaker "merchant" {
+    line: @loc:"Welcome to my shop, traveler!"
+    line: "You look hurt!" when player has Health { current < 50.0 }
+  }
+
+  choice {
+    @loc:"Show me your wares" -> show_wares
+    "Goodbye" when player.get(Health).current > 0.0 -> end
+  }
+
+  branch show_wares {
+    speaker "merchant" {
+      line: @loc:"greeting":"I have weapons and armor."
+    }
+    emit OpenShopUI { shop: 1 } when not player has_tag .social.met_merchant
+    -> end
+  }
+}
+```
+
+The `@loc` forms — fingerprint with meaning / description / custom id, and
+the key form with named interpolation args (item 10):
+
+```etch
+dialogue LocForms {
+  speaker "npc" {
+    line: @loc:"farewell":"Goodbye!"
+    line: @loc|"shown when the shop closes":"We are closed."
+    line: @loc:"greeting"|"first contact"@@npc.intro:"Hello there."
+    line: @loc("npc.wares_count", count: 3)
+  }
+  -> end
+}
+```

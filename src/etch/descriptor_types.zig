@@ -147,6 +147,53 @@ pub const Quest = struct {
     stages: []const QuestStageDesc,
 };
 
+/// One dialogue line (text + optional condition, canonical texts).
+pub const DialogueLineDesc = struct {
+    text: []const u8,
+    when: []const u8,
+};
+
+/// One `speaker "id" { lines }` block.
+pub const DialogueSpeakerDesc = struct {
+    id: []const u8,
+    lines: []const DialogueLineDesc,
+};
+
+/// One choice option (`target` is `end` or a branch label).
+pub const DialogueOptionDesc = struct {
+    text: []const u8,
+    when: []const u8,
+    target: []const u8,
+};
+
+/// One dialogue emit (payload + the item-11 trailing condition).
+pub const DialogueEmitDesc = struct {
+    payload: []const u8,
+    when: []const u8,
+};
+
+/// One dialogue branch — elements recurse.
+pub const DialogueBranchDesc = struct {
+    name: []const u8,
+    elements: []const DialogueElementDesc,
+};
+
+/// One dialogue element, declaration order preserved.
+pub const DialogueElementDesc = union(enum) {
+    speaker: DialogueSpeakerDesc,
+    choice: []const DialogueOptionDesc,
+    branch: DialogueBranchDesc,
+    emit: DialogueEmitDesc,
+    goto: []const u8,
+};
+
+/// `dialogue` descriptor (`etch-ast-ir.md` §3.5 — the oriented graph as
+/// the ordered element list; transitions are `goto` / option targets).
+pub const Dialogue = struct {
+    name: []const u8,
+    elements: []const DialogueElementDesc,
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -155,6 +202,7 @@ pub const Descriptor = union(enum) {
     routine: Routine,
     behavior: Behavior,
     quest: Quest,
+    dialogue: Dialogue,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -163,6 +211,7 @@ pub const Descriptor = union(enum) {
             .routine => |r| try writeRoutine(r, gpa, out),
             .behavior => |b| try writeBehavior(b, gpa, out),
             .quest => |q| try writeQuest(q, gpa, out),
+            .dialogue => |d| try writeDialogue(d, gpa, out),
         }
     }
 };
@@ -304,6 +353,94 @@ fn writeQuestStage(stage: QuestStageDesc, depth: u32, gpa: std.mem.Allocator, ou
     }
     try writeIndent(depth, gpa, out);
     try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `dialogue` descriptor (branches recurse).
+pub fn writeDialogue(d: Dialogue, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "dialogue {s} {{\n", .{d.name});
+    for (d.elements) |elem| {
+        try writeDialogueElement(elem, 1, gpa, out);
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+fn writeDialogueElement(elem: DialogueElementDesc, depth: u32, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try writeIndent(depth, gpa, out);
+    switch (elem) {
+        .speaker => |sp| {
+            try appendFmt(gpa, out, "speaker \"{s}\" {{\n", .{sp.id});
+            for (sp.lines) |line| {
+                try writeIndent(depth + 1, gpa, out);
+                try appendFmt(gpa, out, "line {s}", .{line.text});
+                if (line.when.len != 0) try appendFmt(gpa, out, " when {s}", .{line.when});
+                try out.appendSlice(gpa, "\n");
+            }
+            try writeIndent(depth, gpa, out);
+            try out.appendSlice(gpa, "}\n");
+        },
+        .choice => |options| {
+            try out.appendSlice(gpa, "choice {\n");
+            for (options) |opt| {
+                try writeIndent(depth + 1, gpa, out);
+                try appendFmt(gpa, out, "option {s}", .{opt.text});
+                if (opt.when.len != 0) try appendFmt(gpa, out, " when {s}", .{opt.when});
+                try appendFmt(gpa, out, " -> {s}\n", .{opt.target});
+            }
+            try writeIndent(depth, gpa, out);
+            try out.appendSlice(gpa, "}\n");
+        },
+        .branch => |b| {
+            try appendFmt(gpa, out, "branch {s} {{\n", .{b.name});
+            for (b.elements) |inner| {
+                try writeDialogueElement(inner, depth + 1, gpa, out);
+            }
+            try writeIndent(depth, gpa, out);
+            try out.appendSlice(gpa, "}\n");
+        },
+        .emit => |em| {
+            try appendFmt(gpa, out, "{s}", .{em.payload});
+            if (em.when.len != 0) try appendFmt(gpa, out, " when {s}", .{em.when});
+            try out.appendSlice(gpa, "\n");
+        },
+        .goto => |target| try appendFmt(gpa, out, "goto {s}\n", .{target}),
+    }
+}
+
+test "writeDialogue canonical form is stable" {
+    const gpa = std.testing.allocator;
+    const d: Dialogue = .{
+        .name = "Greeting",
+        .elements = &.{
+            .{ .speaker = .{ .id = "merchant", .lines = &.{
+                .{ .text = "\"Welcome!\"", .when = "" },
+            } } },
+            .{ .choice = &.{
+                .{ .text = "\"Bye\"", .when = "", .target = "end" },
+            } },
+            .{ .branch = .{ .name = "wares", .elements = &.{
+                .{ .emit = .{ .payload = "emit OpenShopUI { shop: 1 }", .when = "(not x)" } },
+                .{ .goto = "end" },
+            } } },
+        },
+    };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try writeDialogue(d, gpa, &out);
+    try std.testing.expectEqualStrings(
+        \\dialogue Greeting {
+        \\  speaker "merchant" {
+        \\    line "Welcome!"
+        \\  }
+        \\  choice {
+        \\    option "Bye" -> end
+        \\  }
+        \\  branch wares {
+        \\    emit OpenShopUI { shop: 1 } when (not x)
+        \\    goto end
+        \\  }
+        \\}
+        \\
+    , out.items);
 }
 
 test "writeQuest canonical form is stable" {

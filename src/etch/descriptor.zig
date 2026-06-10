@@ -63,7 +63,46 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
         .routine => |r| freeRoutine(gpa, r),
         .behavior => |b| freeBehavior(gpa, b),
         .quest => |q| freeQuest(gpa, q),
+        .dialogue => |dlg| freeDialogue(gpa, dlg),
     }
+}
+
+fn freeDialogue(gpa: std.mem.Allocator, d: types.Dialogue) void {
+    gpa.free(d.name);
+    freeDialogueElements(gpa, d.elements);
+}
+
+fn freeDialogueElements(gpa: std.mem.Allocator, elements: []const types.DialogueElementDesc) void {
+    for (elements) |elem| {
+        switch (elem) {
+            .speaker => |sp| {
+                gpa.free(sp.id);
+                for (sp.lines) |line| {
+                    gpa.free(line.text);
+                    gpa.free(line.when);
+                }
+                gpa.free(sp.lines);
+            },
+            .choice => |options| {
+                for (options) |opt| {
+                    gpa.free(opt.text);
+                    gpa.free(opt.when);
+                    gpa.free(opt.target);
+                }
+                gpa.free(options);
+            },
+            .branch => |b| {
+                gpa.free(b.name);
+                freeDialogueElements(gpa, b.elements);
+            },
+            .emit => |em| {
+                gpa.free(em.payload);
+                gpa.free(em.when);
+            },
+            .goto => |target| gpa.free(target),
+        }
+    }
+    gpa.free(elements);
 }
 
 fn freeQuest(gpa: std.mem.Allocator, q: types.Quest) void {
@@ -165,6 +204,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .routine_decl => try list.append(gpa, .{ .routine = try buildRoutine(gpa, arena, arena.routine_decls.items[datas[i]]) }),
             .behavior_decl => try list.append(gpa, .{ .behavior = try buildBehavior(gpa, arena, arena.behavior_decls.items[datas[i]]) }),
             .quest_decl => try list.append(gpa, .{ .quest = try buildQuest(gpa, arena, arena.quest_decls.items[datas[i]]) }),
+            .dialogue_decl => try list.append(gpa, .{ .dialogue = try buildDialogue(gpa, arena, arena.dialogue_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -497,6 +537,104 @@ fn buildQuestStage(gpa: std.mem.Allocator, arena: *const AstArena, stage_idx: u3
     };
 }
 
+fn buildDialogue(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.DialogueDecl) BuildError!types.Dialogue {
+    const elements = try buildDialogueElements(gpa, arena, decl.elems_start, decl.elems_len);
+    errdefer freeDialogueElements(gpa, elements);
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    return .{ .name = name, .elements = elements };
+}
+
+fn buildDialogueElements(gpa: std.mem.Allocator, arena: *const AstArena, start: u32, len: u32) BuildError![]types.DialogueElementDesc {
+    var elements: std.ArrayListUnmanaged(types.DialogueElementDesc) = .empty;
+    errdefer {
+        const slice = elements.toOwnedSlice(gpa) catch &.{};
+        freeDialogueElements(gpa, slice);
+    }
+    var e: u32 = 0;
+    while (e < len) : (e += 1) {
+        const elem = arena.dialogue_elems.items[start + e];
+        switch (elem.kind) {
+            .speaker => {
+                const sp = arena.dialogue_speakers.items[elem.index];
+                var lines: std.ArrayListUnmanaged(types.DialogueLineDesc) = .empty;
+                errdefer {
+                    for (lines.items) |line| {
+                        gpa.free(line.text);
+                        gpa.free(line.when);
+                    }
+                    lines.deinit(gpa);
+                }
+                var l: u32 = 0;
+                while (l < sp.lines_len) : (l += 1) {
+                    const line = arena.dialogue_lines.items[sp.lines_start + l];
+                    const text = try renderExprAlloc(gpa, arena, line.text);
+                    errdefer gpa.free(text);
+                    const when_text = if (line.when_root == ast_mod.RuleDecl.none_when)
+                        try gpa.dupe(u8, "")
+                    else
+                        try renderWhenAlloc(gpa, arena, line.when_root);
+                    errdefer gpa.free(when_text);
+                    try lines.append(gpa, .{ .text = text, .when = when_text });
+                }
+                const id = try gpa.dupe(u8, arena.strings.slice(sp.id));
+                errdefer gpa.free(id);
+                try elements.append(gpa, .{ .speaker = .{ .id = id, .lines = try lines.toOwnedSlice(gpa) } });
+            },
+            .choice => {
+                const ch = arena.dialogue_choices.items[elem.index];
+                var options: std.ArrayListUnmanaged(types.DialogueOptionDesc) = .empty;
+                errdefer {
+                    for (options.items) |opt| {
+                        gpa.free(opt.text);
+                        gpa.free(opt.when);
+                        gpa.free(opt.target);
+                    }
+                    options.deinit(gpa);
+                }
+                var o: u32 = 0;
+                while (o < ch.options_len) : (o += 1) {
+                    const opt = arena.dialogue_options.items[ch.options_start + o];
+                    const text = try renderExprAlloc(gpa, arena, opt.text);
+                    errdefer gpa.free(text);
+                    const when_text = if (opt.when_root == ast_mod.RuleDecl.none_when)
+                        try gpa.dupe(u8, "")
+                    else
+                        try renderWhenAlloc(gpa, arena, opt.when_root);
+                    errdefer gpa.free(when_text);
+                    const target = try gpa.dupe(u8, if (opt.is_end) "end" else arena.strings.slice(opt.target));
+                    errdefer gpa.free(target);
+                    try options.append(gpa, .{ .text = text, .when = when_text, .target = target });
+                }
+                try elements.append(gpa, .{ .choice = try options.toOwnedSlice(gpa) });
+            },
+            .branch => {
+                const branch = arena.dialogue_branches.items[elem.index];
+                const inner = try buildDialogueElements(gpa, arena, branch.elems_start, branch.elems_len);
+                errdefer freeDialogueElements(gpa, inner);
+                const bname = try gpa.dupe(u8, arena.strings.slice(branch.name));
+                errdefer gpa.free(bname);
+                try elements.append(gpa, .{ .branch = .{ .name = bname, .elements = inner } });
+            },
+            .emit => {
+                const em = arena.dialogue_emits.items[elem.index];
+                const payload = try renderStmtAlloc(gpa, arena, em.stmt);
+                errdefer gpa.free(payload);
+                const when_text = if (em.when_root == ast_mod.RuleDecl.none_when)
+                    try gpa.dupe(u8, "")
+                else
+                    try renderWhenAlloc(gpa, arena, em.when_root);
+                errdefer gpa.free(when_text);
+                try elements.append(gpa, .{ .emit = .{ .payload = payload, .when = when_text } });
+            },
+            .goto => {
+                const g = arena.dialogue_gotos.items[elem.index];
+                try elements.append(gpa, .{ .goto = try gpa.dupe(u8, if (g.is_end) "end" else arena.strings.slice(g.target)) });
+            },
+        }
+    }
+    return try elements.toOwnedSlice(gpa);
+}
+
 /// Render a quest handler payload (M0.8 E4): on_start/on_complete carry an
 /// emit or a block; on_fail renders `<cond> -> <action>[(branch)]`.
 pub fn renderQuestHandlerPayloadAlloc(gpa: std.mem.Allocator, arena: *const AstArena, h: ast_mod.QuestHandler) BuildError![]u8 {
@@ -767,6 +905,39 @@ pub fn renderExpr(gpa: std.mem.Allocator, arena: *const AstArena, id: NodeId, ou
             try out.appendSlice(gpa, arena.strings.slice(data));
         },
         .ident, .path => try out.appendSlice(gpa, arena.strings.slice(data)),
+        .loc_expr => {
+            // `@loc…` canonical text (§3.2, item 10 — structural form).
+            const le = arena.loc_exprs.items[data];
+            try out.appendSlice(gpa, "@loc");
+            if (le.is_key_form) {
+                try out.appendSlice(gpa, "(");
+                try renderQuoted(gpa, arena.strings.slice(le.text), out);
+                var a: u32 = 0;
+                while (a < le.args_len) : (a += 1) {
+                    const arg = arena.struct_lit_fields.items[le.args_start + a];
+                    try out.appendSlice(gpa, ", ");
+                    try out.appendSlice(gpa, arena.strings.slice(arg.name));
+                    try out.appendSlice(gpa, ": ");
+                    try renderExpr(gpa, arena, arg.value, out);
+                }
+                try out.appendSlice(gpa, ")");
+                return;
+            }
+            if (le.meaning != 0) {
+                try out.appendSlice(gpa, ":");
+                try renderQuoted(gpa, arena.strings.slice(le.meaning), out);
+            }
+            if (le.description != 0) {
+                try out.appendSlice(gpa, "|");
+                try renderQuoted(gpa, arena.strings.slice(le.description), out);
+            }
+            if (le.custom_id != 0) {
+                try out.appendSlice(gpa, "@@");
+                try out.appendSlice(gpa, arena.strings.slice(le.custom_id));
+            }
+            try out.appendSlice(gpa, ":");
+            try renderQuoted(gpa, arena.strings.slice(le.text), out);
+        },
         .tag_query => {
             const tq = arena.tag_query_exprs.items[data];
             try renderExpr(gpa, arena, tq.receiver, out);
