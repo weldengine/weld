@@ -64,7 +64,18 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
         .behavior => |b| freeBehavior(gpa, b),
         .quest => |q| freeQuest(gpa, q),
         .dialogue => |dlg| freeDialogue(gpa, dlg),
+        .ability => |a| freeAbility(gpa, a),
     }
+}
+
+fn freeAbility(gpa: std.mem.Allocator, a: types.Ability) void {
+    gpa.free(a.name);
+    for (a.properties) |prop| {
+        gpa.free(prop.name);
+        gpa.free(prop.value);
+    }
+    gpa.free(a.properties);
+    gpa.free(a.rule);
 }
 
 fn freeDialogue(gpa: std.mem.Allocator, d: types.Dialogue) void {
@@ -205,6 +216,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .behavior_decl => try list.append(gpa, .{ .behavior = try buildBehavior(gpa, arena, arena.behavior_decls.items[datas[i]]) }),
             .quest_decl => try list.append(gpa, .{ .quest = try buildQuest(gpa, arena, arena.quest_decls.items[datas[i]]) }),
             .dialogue_decl => try list.append(gpa, .{ .dialogue = try buildDialogue(gpa, arena, arena.dialogue_decls.items[datas[i]]) }),
+            .ability_decl => try list.append(gpa, .{ .ability = try buildAbility(gpa, arena, arena.ability_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -633,6 +645,99 @@ fn buildDialogueElements(gpa: std.mem.Allocator, arena: *const AstArena, start: 
         }
     }
     return try elements.toOwnedSlice(gpa);
+}
+
+fn buildAbility(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.AbilityDecl) BuildError!types.Ability {
+    var props: std.ArrayListUnmanaged(types.AbilityPropDesc) = .empty;
+    errdefer {
+        for (props.items) |prop| {
+            gpa.free(prop.name);
+            gpa.free(prop.value);
+        }
+        props.deinit(gpa);
+    }
+    var p: u32 = 0;
+    while (p < decl.props_len) : (p += 1) {
+        const prop = arena.ability_props.items[decl.props_start + p];
+        const value = if (prop.kind == .cost)
+            try renderAbilityCostAlloc(gpa, arena, prop.cost_fields_start, prop.cost_fields_len)
+        else
+            try renderExprAlloc(gpa, arena, prop.value);
+        errdefer gpa.free(value);
+        const pname = try gpa.dupe(u8, arena.strings.slice(prop.name));
+        errdefer gpa.free(pname);
+        try props.append(gpa, .{ .name = pname, .value = value });
+    }
+    const rule_text = if (decl.rule_idx == ast_mod.AbilityDecl.no_rule)
+        try gpa.dupe(u8, "")
+    else
+        try renderAbilityRuleAlloc(gpa, arena, decl.rule_idx);
+    errdefer gpa.free(rule_text);
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    return .{ .name = name, .properties = try props.toOwnedSlice(gpa), .rule = rule_text };
+}
+
+/// Render an ability `cost:` struct_literal_body canonically:
+/// `{ key: value, ... }` (spread entries as `..expr`). SHARED by both
+/// backends (the proof-contract split).
+pub fn renderAbilityCostAlloc(gpa: std.mem.Allocator, arena: *const AstArena, fields_start: u32, fields_len: u32) BuildError![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, "{");
+    var f: u32 = 0;
+    while (f < fields_len) : (f += 1) {
+        const field = arena.struct_lit_fields.items[fields_start + f];
+        try out.appendSlice(gpa, if (f == 0) " " else ", ");
+        if (field.name == 0) {
+            try out.appendSlice(gpa, "..");
+        } else {
+            try out.appendSlice(gpa, arena.strings.slice(field.name));
+            try out.appendSlice(gpa, ": ");
+        }
+        try renderExpr(gpa, arena, field.value, &out);
+    }
+    try out.appendSlice(gpa, if (fields_len == 0) "}" else " }");
+    return try out.toOwnedSlice(gpa);
+}
+
+/// Render the ability-embedded rule canonically, single line:
+/// `rule name(p: T, ...) [when <when>] { stmt; stmt }`. Param types are
+/// bounded to NAMED type nodes (the E1 rule-param surface: scalar /
+/// Entity) — anything else fails loud. SHARED by both backends.
+pub fn renderAbilityRuleAlloc(gpa: std.mem.Allocator, arena: *const AstArena, rule_idx: u32) BuildError![]u8 {
+    const rule = arena.rule_decls.items[rule_idx];
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, "rule ");
+    try out.appendSlice(gpa, arena.strings.slice(rule.name));
+    try out.appendSlice(gpa, "(");
+    var p: u32 = 0;
+    while (p < rule.params_len) : (p += 1) {
+        const param = arena.rule_params.items[rule.params_start + p];
+        if (p != 0) try out.appendSlice(gpa, ", ");
+        try out.appendSlice(gpa, arena.strings.slice(param.name));
+        try out.appendSlice(gpa, ": ");
+        if (arena.typeNodeKind(param.type_node) != .named) return error.UnsupportedDescriptorExpr;
+        try out.appendSlice(gpa, arena.strings.slice(arena.named_types.items[arena.typeNodeData(param.type_node)].name));
+    }
+    try out.appendSlice(gpa, ")");
+    if (rule.when_root != ast_mod.RuleDecl.none_when) {
+        const when_text = try renderWhenAlloc(gpa, arena, rule.when_root);
+        defer gpa.free(when_text);
+        try out.appendSlice(gpa, " when ");
+        try out.appendSlice(gpa, when_text);
+    }
+    try out.appendSlice(gpa, " {");
+    var st: u32 = 0;
+    while (st < rule.body_len) : (st += 1) {
+        const stmt: NodeId = @bitCast(arena.extra.items[rule.body_start + st]);
+        const text = try renderStmtAlloc(gpa, arena, stmt);
+        defer gpa.free(text);
+        try out.appendSlice(gpa, if (st == 0) " " else "; ");
+        try out.appendSlice(gpa, text);
+    }
+    try out.appendSlice(gpa, if (rule.body_len == 0) "}" else " }");
+    return try out.toOwnedSlice(gpa);
 }
 
 /// Render a quest handler payload (M0.8 E4): on_start/on_complete carry an

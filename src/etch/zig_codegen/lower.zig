@@ -4908,9 +4908,9 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// (M0.8 sub-slice C tranche 1). Escapes the quote / backslash / common
 /// control bytes; any other non-printable byte becomes `\xHH`.
 /// `true` when the program declares at least one Level-B construct with a
-/// descriptor (M0.8 E4: `data`, `routine`, `behavior`, `quest`, `dialogue`).
+/// descriptor (M0.8 E4: the six Level-B gameplay constructs).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4932,6 +4932,7 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .behavior_decl => try emitBehaviorDescriptor(w, gpa, ast, ast.behavior_decls.items[datas[i]]),
             .quest_decl => try emitQuestDescriptor(w, gpa, ast, ast.quest_decls.items[datas[i]]),
             .dialogue_decl => try emitDialogueDescriptor(w, gpa, ast, ast.dialogue_decls.items[datas[i]]),
+            .ability_decl => try emitAbilityDescriptor(w, gpa, ast, ast.ability_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -5167,6 +5168,41 @@ fn emitQuestStageLiteral(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
         }
     }
     try w.write("} }");
+}
+
+fn emitAbilityDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.AbilityDecl) CodegenError!void {
+    try w.print("    .{{ .ability = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.line(", .properties = &[_]etch_descriptor.AbilityPropDesc{");
+    var p: u32 = 0;
+    while (p < decl.props_len) : (p += 1) {
+        const prop = ast.ability_props.items[decl.props_start + p];
+        const value = if (prop.kind == .cost)
+            descriptor_mod.renderAbilityCostAlloc(gpa, ast, prop.cost_fields_start, prop.cost_fields_len) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+            }
+        else
+            try renderDescExpr(gpa, ast, prop.value);
+        defer gpa.free(value);
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(prop.name));
+        try w.print(", .value = ", .{});
+        try emitZigStringLiteral(w, value);
+        try w.line(" },");
+    }
+    try w.write("    }, .rule = ");
+    if (decl.rule_idx == ast_mod.AbilityDecl.no_rule) {
+        try w.write("\"\"");
+    } else {
+        const rule_text = descriptor_mod.renderAbilityRuleAlloc(gpa, ast, decl.rule_idx) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        };
+        defer gpa.free(rule_text);
+        try emitZigStringLiteral(w, rule_text);
+    }
+    try w.line(" } },");
 }
 
 fn emitDialogueDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.DialogueDecl) CodegenError!void {

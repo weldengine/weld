@@ -194,6 +194,22 @@ pub const Dialogue = struct {
     elements: []const DialogueElementDesc,
 };
 
+/// One ability property (`name: rendered value`, §8.5 declaration order).
+pub const AbilityPropDesc = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// `ability` descriptor (`etch-ast-ir.md` §3.5 indicative shape transposed
+/// onto the PATCHED §8.5 grammar — items 12-15 ruling: properties +
+/// optional embedded rule). `rule` is the canonical single-line rule text
+/// ("" when absent).
+pub const Ability = struct {
+    name: []const u8,
+    properties: []const AbilityPropDesc,
+    rule: []const u8,
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -203,6 +219,7 @@ pub const Descriptor = union(enum) {
     behavior: Behavior,
     quest: Quest,
     dialogue: Dialogue,
+    ability: Ability,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -212,6 +229,7 @@ pub const Descriptor = union(enum) {
             .behavior => |b| try writeBehavior(b, gpa, out),
             .quest => |q| try writeQuest(q, gpa, out),
             .dialogue => |d| try writeDialogue(d, gpa, out),
+            .ability => |a| try writeAbility(a, gpa, out),
         }
     }
 };
@@ -404,6 +422,45 @@ fn writeDialogueElement(elem: DialogueElementDesc, depth: u32, gpa: std.mem.Allo
         },
         .goto => |target| try appendFmt(gpa, out, "goto {s}\n", .{target}),
     }
+}
+
+/// Canonical serialization of one `ability` descriptor.
+pub fn writeAbility(a: Ability, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "ability {s} {{\n", .{a.name});
+    for (a.properties) |prop| {
+        try writeIndent(1, gpa, out);
+        try appendFmt(gpa, out, "{s}: {s}\n", .{ prop.name, prop.value });
+    }
+    if (a.rule.len != 0) {
+        try writeIndent(1, gpa, out);
+        try appendFmt(gpa, out, "{s}\n", .{a.rule});
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+test "writeAbility canonical form is stable" {
+    const gpa = std.testing.allocator;
+    const a: Ability = .{
+        .name = "Fireball",
+        .properties = &.{
+            .{ .name = "cost", .value = "{ mana: 20.0 }" },
+            .{ .name = "cooldown", .value = "3.0" },
+            .{ .name = "tags_required", .value = "[.character.status.alive]" },
+        },
+        .rule = "rule activate(caster: Entity) { emit Boom { x: 1 } }",
+    };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try writeAbility(a, gpa, &out);
+    try std.testing.expectEqualStrings(
+        \\ability Fireball {
+        \\  cost: { mana: 20.0 }
+        \\  cooldown: 3.0
+        \\  tags_required: [.character.status.alive]
+        \\  rule activate(caster: Entity) { emit Boom { x: 1 } }
+        \\}
+        \\
+    , out.items);
 }
 
 test "writeDialogue canonical form is stable" {

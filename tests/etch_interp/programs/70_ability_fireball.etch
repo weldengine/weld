@@ -1,0 +1,30 @@
+// Level-B serialized-IR differential 70 (M0.8 E4): ability descriptor —
+// cost struct_literal_body keyed on a numeric resource field, cooldown
+// expression, tag arrays, a custom property (the §17 extension mode), and
+// the embedded `rule activate` (validated through the normal rule path,
+// never registered for ticking; rendered canonically single-line).
+resource ManaPool {
+  mana: float = 100.0
+}
+
+component Mana {
+  current: float = 100.0
+}
+
+tags {
+  character {
+    status { alive, stunned, silenced }
+  }
+}
+
+ability Fireball {
+  cost: { mana: 20.0 }
+  cooldown: 3.0
+  tags_required: [.character.status.alive]
+  tags_blocked: [.character.status.stunned, .character.status.silenced]
+  charges: 2
+
+  rule activate(caster: Entity) when caster has Mana { current >= 20.0 } {
+    caster.get_mut(Mana).current -= 20.0
+  }
+}

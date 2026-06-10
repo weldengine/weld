@@ -936,3 +936,31 @@ dialogue LocForms {
   -> end
 }
 ```
+
+## Abilities (E4 — §8.5, items 12-15 ruling)
+
+```etch
+ability Fireball {
+  cost: { mana: 20.0 }
+  cooldown: 3.0
+  tags_required: [.character.status.alive]
+  tags_blocked: [.character.status.stunned, .character.status.silenced]
+
+  rule activate(caster: Entity)
+    when caster has Mana { current >= 20.0 }
+  {
+    caster.get_mut(Mana).current -= 20.0
+    emit AbilityActivated { caster: caster }
+  }
+}
+```
+
+Custom properties (the §17 extension mode) and a property-only ability:
+
+```etch
+ability Dash {
+  cooldown: 1.5
+  charges: 2
+  range: 5.0
+}
+```

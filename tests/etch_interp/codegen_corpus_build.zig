@@ -91,4 +91,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p67_behavior_tree", .etch_path = "tests/etch_interp/programs/67_behavior_tree.etch" },
     .{ .name = "p68_quest_escort", .etch_path = "tests/etch_interp/programs/68_quest_escort.etch" },
     .{ .name = "p69_dialogue_merchant", .etch_path = "tests/etch_interp/programs/69_dialogue_merchant.etch" },
+    .{ .name = "p70_ability_fireball", .etch_path = "tests/etch_interp/programs/70_ability_fireball.etch" },
 };
