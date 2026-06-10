@@ -684,3 +684,41 @@ test "closure captures are bounded to POD scalars: string capture fails loud (M0
         root.generateToBuffer(gpa, &pr.ast, "<test>", &out),
     );
 }
+
+test "lowers block-body closures: statements in the call fn, return is the fn boundary (M0.8 E3-C tranche 6)" {
+    const gpa = std.testing.allocator;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    _ = try parseTypeCheckGen(gpa,
+        \\component Acc { n: int = 0 }
+        \\rule r(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let pick = |x: int| {
+        \\    if x > 3 {
+        \\      return 40
+        \\    }
+        \\    x
+        \\  }
+        \\  let v = pick(7)
+        \\  entity.get_mut(Acc).n = v + 2
+        \\}
+    , &out);
+    // The block's statements emit straight into the `call` fn: the internal
+    // `return` is the anonymous fn's own natural Zig boundary (the ratified
+    // E2 forward note — a return exits the closure, never the enclosing fn;
+    // nothing simulates a leak), the trailing value is the final return.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "struct { fn call(x: i64) i64 {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "return 40;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "return x;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "const v = pick.call(7);") != null);
+
+    // The generated Zig is syntactically valid (Zig's own parser).
+    const z = try gpa.dupeZ(u8, out.items);
+    defer gpa.free(z);
+    var tree = try std.zig.Ast.parse(gpa, z, .zig);
+    defer tree.deinit(gpa);
+    if (tree.errors.len != 0) std.debug.print("generated zig parse errors:\n{s}\n", .{out.items});
+    try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
+}

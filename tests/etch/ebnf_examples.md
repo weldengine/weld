@@ -271,6 +271,20 @@ rule closure_capture(entity: Entity)
 }
 ```
 
+```etch
+rule closure_block_return(entity: Entity)
+  when entity has Counter
+{
+  let pick = |x: int| {
+    if x > 3 {
+      return 40
+    }
+    x
+  }
+  entity.get_mut(Counter).value = pick(7) + 2
+}
+```
+
 ## Loop, break, continue
 
 ```etch

@@ -3149,13 +3149,17 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             // point as the interpreter's locals snapshot (§5.6 value capture)
             // — and the body reads them through the `__self` receiver. The
             // capture-free form stays the bare TYPE (namespace call); both
-            // shapes serve `callee.call(args)` at the call site. A block body
-            // is deferred (lifted with the block-body tranche-6 stage).
+            // shapes serve `callee.call(args)` at the call site. A BLOCK body
+            // emits its statements straight into the `call` fn — a `return`
+            // inside is the fn's own natural Zig boundary, the exact image of
+            // the interpreter's boundary-consume (a return exits the closure,
+            // never the enclosing fn — the ratified E2 forward note); the
+            // trailing value becomes the final `return`.
             const ce = ast.closure_exprs.items[data];
             var captures: std.ArrayListUnmanaged(Capture) = .empty;
             defer captures.deinit(w.gpa);
             try collectClosureCaptures(w.gpa, ast, ctx, ce, &captures);
-            if (ast.exprKind(ce.body) == .block_expr) return CodegenError.UnsupportedConstruct;
+            const is_block = ast.exprKind(ce.body) == .block_expr;
             const saved = ctx.records.items.len;
             var i: u32 = 0;
             while (i < ce.params_len) : (i += 1) {
@@ -3165,16 +3169,27 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
             for (captures.items) |c| {
                 try ctx.records.append(w.gpa, .{ .key = .{ .name = c.name }, .info = .{ .kind = .capture, .zig_type = c.zig_type, .is_mut = false } });
             }
-            const ret_zig = inferExprZigType(ast, ctx, ce.body);
+            const ret_zig = blk: {
+                if (!is_block) break :blk inferExprZigType(ast, ctx, ce.body);
+                const body_blk = ast.block_exprs.items[ast.exprData(ce.body)];
+                if (body_blk.value.isNone()) break :blk "void";
+                break :blk inferExprZigType(ast, ctx, body_blk.value);
+            };
             // A body whose Zig type is not inferable would emit a void fn
             // returning a value — fail loud instead (interpreter reference).
             if (ret_zig.len == 0) return CodegenError.UnsupportedConstruct;
             // The closure's `call` fn is a NEW fn boundary: the enclosing
-            // try label / frame arena are not in scope inside it.
+            // try label / frame arena / `throws` out-param are not in scope
+            // inside it (a body `throw` fails loud until the throwing-closure
+            // stage wires the closure's own out-param).
             const saved_try = ctx.try_label;
             const saved_arena = ctx.arena_param;
+            const saved_throws = ctx.throws_fn;
+            const saved_fn_ret = ctx.fn_ret_zig;
             ctx.try_label = null;
             ctx.arena_param = null;
+            ctx.throws_fn = false;
+            ctx.fn_ret_zig = ret_zig;
             try w.write("struct { ");
             for (captures.items) |c| {
                 try w.ident(ast.strings.slice(c.name));
@@ -3194,11 +3209,32 @@ fn emitExpr(w: *Writer, ast: *const AstArena, ctx: *LocalCtx, id: NodeId) Codege
                 try w.ident(ast.strings.slice(p.name));
                 try w.print(": {s}", .{closureParamZigType(ast, p)});
             }
-            try w.print(") {s} {{ return ", .{ret_zig});
-            try emitExpr(w, ast, ctx, ce.body);
-            try w.write("; } }");
+            if (is_block) {
+                const body_blk = ast.block_exprs.items[ast.exprData(ce.body)];
+                try w.print(") {s} {{\n", .{ret_zig});
+                w.indentBy(1);
+                var s: u32 = 0;
+                while (s < body_blk.body_len) : (s += 1) {
+                    try emitStmt(w, ast, ctx, @bitCast(ast.extra.items[body_blk.body_start + s]));
+                }
+                if (!body_blk.value.isNone()) {
+                    try w.writeIndent();
+                    try w.write("return ");
+                    try emitExpr(w, ast, ctx, body_blk.value);
+                    try w.write(";\n");
+                }
+                w.indentBy(-1);
+                try w.writeIndent();
+                try w.write("} }");
+            } else {
+                try w.print(") {s} {{ return ", .{ret_zig});
+                try emitExpr(w, ast, ctx, ce.body);
+                try w.write("; } }");
+            }
             ctx.try_label = saved_try;
             ctx.arena_param = saved_arena;
+            ctx.throws_fn = saved_throws;
+            ctx.fn_ret_zig = saved_fn_ret;
             ctx.records.items.len = saved;
             // Instantiate with the CURRENT outer values (the records are
             // restored first, so each name resolves to the outer binding).
