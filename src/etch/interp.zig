@@ -191,20 +191,25 @@ const MapPair = struct { key: Value, value: Value };
 /// Per-rule-body heap store for Etch collection values (M0.8 collections).
 /// Arrays are `ArrayListUnmanaged(Value)` addressed by the `u32` handle carried
 /// in `Value.array_ref`; maps are `ArrayListUnmanaged(MapPair)` (insertion
-/// order, keys unique) addressed by `Value.map_ref`. Reset at each rule-body
-/// boundary so collections created inside a body do not leak across
+/// order, keys unique) addressed by `Value.map_ref`; sets (M0.8 E3-C tranche
+/// 3bis) are `ArrayListUnmanaged(Value)` (insertion order, elements unique)
+/// addressed by `Value.set_ref` — the same insertion-ordered policy as maps,
+/// so the codegen mirror is byte-exact by construction. Reset at each
+/// rule-body boundary so collections created inside a body do not leak across
 /// invocations (rule-arena semantics, surface view of `etch-memory-model.md`
-/// §6). Sets have no E1 literal / constructor (their `Set.from` needs the call
-/// mechanism), so they are not stored yet.
+/// §6).
 const CollectionStore = struct {
     arrays: std.ArrayListUnmanaged(std.ArrayListUnmanaged(Value)) = .empty,
     maps: std.ArrayListUnmanaged(std.ArrayListUnmanaged(MapPair)) = .empty,
+    sets: std.ArrayListUnmanaged(std.ArrayListUnmanaged(Value)) = .empty,
 
     fn deinit(self: *CollectionStore, gpa: std.mem.Allocator) void {
         for (self.arrays.items) |*a| a.deinit(gpa);
         self.arrays.deinit(gpa);
         for (self.maps.items) |*m| m.deinit(gpa);
         self.maps.deinit(gpa);
+        for (self.sets.items) |*s| s.deinit(gpa);
+        self.sets.deinit(gpa);
     }
 
     /// Free every per-body collection, keeping the outer vectors' capacity.
@@ -213,6 +218,8 @@ const CollectionStore = struct {
         self.arrays.clearRetainingCapacity();
         for (self.maps.items) |*m| m.deinit(gpa);
         self.maps.clearRetainingCapacity();
+        for (self.sets.items) |*s| s.deinit(gpa);
+        self.sets.clearRetainingCapacity();
     }
 
     /// Allocate a fresh empty array, returning its handle.
@@ -226,6 +233,14 @@ const CollectionStore = struct {
     fn newMap(self: *CollectionStore, gpa: std.mem.Allocator) !u32 {
         const idx: u32 = @intCast(self.maps.items.len);
         try self.maps.append(gpa, .empty);
+        return idx;
+    }
+
+    /// Allocate a fresh empty set, returning its handle (M0.8 E3-C tranche
+    /// 3bis).
+    fn newSet(self: *CollectionStore, gpa: std.mem.Allocator) !u32 {
+        const idx: u32 = @intCast(self.sets.items.len);
+        try self.sets.append(gpa, .empty);
         return idx;
     }
 };
@@ -1554,6 +1569,37 @@ pub const Interpreter = struct {
                 }
                 return error.RuntimeFailure;
             },
+            .set_ref => |handle| {
+                // Builtin set methods (M0.8 E3-C tranche 3bis — minimal
+                // faithful subset of stdlib §15.2). `insert` is the same
+                // scan-skip-or-append as the `Set.from` seeding (its `bool`
+                // return is out of the subset — statement use only, the
+                // value here is unit); `contains` scans with `Value.eql`;
+                // `len` is the element count; any other §15 method is
+                // stdlib Phase 1+ → fail loud.
+                const mname = self.ast.strings.slice(mc.method_name);
+                if (std.mem.eql(u8, mname, "insert")) {
+                    if (mc.args_len != 1) return error.RuntimeFailure;
+                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+                    const v = try self.evalExpr(world, locals, arg);
+                    try self.setInsert(handle, v);
+                    return Value{ .unit = {} };
+                }
+                if (std.mem.eql(u8, mname, "contains")) {
+                    if (mc.args_len != 1) return error.RuntimeFailure;
+                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+                    const v = try self.evalExpr(world, locals, arg);
+                    for (self.collections.sets.items[handle].items) |existing| {
+                        if (existing.eql(v)) return Value{ .bool_ = true };
+                    }
+                    return Value{ .bool_ = false };
+                }
+                if (std.mem.eql(u8, mname, "len")) {
+                    if (mc.args_len != 0) return error.RuntimeFailure;
+                    return Value{ .int_ = @intCast(self.collections.sets.items[handle].items.len) };
+                }
+                return error.RuntimeFailure;
+            },
             .map_ref => |handle| {
                 // Builtin map methods (M0.8 E3-C tranche 3 — minimal
                 // faithful subset of stdlib §14.2). `insert` is
@@ -1592,6 +1638,50 @@ pub const Interpreter = struct {
             // interpreter cannot recover the type name from a bare ref).
             else => return error.RuntimeFailure,
         }
+    }
+
+    /// Evaluate a `Set.assoc(...)` builtin associated call (M0.8 E3-C tranche
+    /// 3bis, stdlib §15.1 — minimal faithful subset). `new` materializes an
+    /// empty set in the store; `from` seeds one from an array argument element
+    /// by element through the same scan-skip-or-append as `insert` (duplicates
+    /// collapse), so the insertion order the codegen mirrors is fixed by
+    /// construction. `with_capacity` (a generic call form) and anything else
+    /// is stdlib Phase 1+ → fail loud.
+    fn evalSetAssociated(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall) StmtError!Value {
+        const mname = self.ast.strings.slice(mc.method_name);
+        if (std.mem.eql(u8, mname, "new")) {
+            if (mc.args_len != 0) return error.RuntimeFailure;
+            const handle = try self.collections.newSet(self.gpa);
+            return Value{ .set_ref = handle };
+        }
+        if (std.mem.eql(u8, mname, "from")) {
+            if (mc.args_len != 1) return error.RuntimeFailure;
+            const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+            const av = try self.evalExpr(world, locals, arg);
+            if (av != .array_ref) return error.RuntimeFailure;
+            const handle = try self.collections.newSet(self.gpa);
+            var i: usize = 0;
+            while (i < self.collections.arrays.items[av.array_ref].items.len) : (i += 1) {
+                // Re-index the source array on every step (the set append
+                // cannot grow the arrays vector, but stay on the shared
+                // re-index discipline of the collection stores).
+                const v = self.collections.arrays.items[av.array_ref].items[i];
+                try self.setInsert(handle, v);
+            }
+            return Value{ .set_ref = handle };
+        }
+        return error.RuntimeFailure;
+    }
+
+    /// Scan-skip-or-append insert into the set store (M0.8 E3-C tranche 3bis):
+    /// the single mechanics shared by the `Set.from` seeding and `s.insert(x)`,
+    /// mirrored by the codegen's `__etchSetInsert` helper — element order is
+    /// byte-exact across the two backends by construction.
+    fn setInsert(self: *Interpreter, handle: u32, item: Value) !void {
+        for (self.collections.sets.items[handle].items) |existing| {
+            if (existing.eql(item)) return;
+        }
+        try self.collections.sets.items[handle].append(self.gpa, item);
     }
 
     fn callMethod(self: *Interpreter, world: *World, caller_locals: *Locals, method: ast_mod.FnDecl, mc: ast_mod.MethodCall, self_value: ?Value) StmtError!Value {
@@ -2109,6 +2199,13 @@ pub const Interpreter = struct {
                 const mc = self.ast.method_calls.items[data];
                 if (self.ast.exprKind(mc.receiver) == .path) {
                     const type_name = self.ast.exprData(mc.receiver);
+                    // Builtin-type associated calls (M0.8 E3-C tranche 3bis):
+                    // `Set.new()` / `Set.from([...])` route to the set store
+                    // BEFORE the user `impl` lookup — `Set` is a builtin
+                    // stdlib type and is not user-overridable (stdlib §2.6).
+                    if (std.mem.eql(u8, self.ast.strings.slice(type_name), "Set")) {
+                        return try self.evalSetAssociated(world, locals, mc);
+                    }
                     const method = self.methods.get(methodKey(type_name, mc.method_name)) orelse return error.RuntimeFailure;
                     return try self.callMethod(world, locals, method, mc, null);
                 }
@@ -3696,6 +3793,57 @@ test "runProgram map insert replaces and appends, len counts (M0.8 E3-C tranche 
     var total: i64 = 0;
     @memcpy(std.mem.asBytes(&total), slot[0..8]);
     try std.testing.expectEqual(@as(i64, 3065), total);
+}
+
+test "runProgram Set.new/Set.from + insert dedup, contains, len (M0.8 E3-C tranche 3bis)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The minimal §15 subset on a set: `Set.from([1, 2, 2, 3])` dedups to
+    // {1, 2, 3}; `insert(4)` appends, `insert(2)` is a no-op (scan-skip-or-
+    // append); `contains` hits on 2 and misses on 9; `len` counts 4 and the
+    // annotated `Set.new()` counts 0. out = 4 * 1000 + 0 * 100 + 10 + 0.
+    const source =
+        \\component Acc { out: int = 0 }
+        \\rule set_ops(entity: Entity)
+        \\  when entity has Acc
+        \\{
+        \\  let e: Set<int> = Set.new()
+        \\  let mut s = Set.from([1, 2, 2, 3])
+        \\  s.insert(4)
+        \\  s.insert(2)
+        \\  let mut probe = 0
+        \\  if s.contains(2) { probe += 10 }
+        \\  if s.contains(9) { probe += 1 }
+        \\  entity.get_mut(Acc).out = s.len() * 1000 + e.len() * 100 + probe
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Acc").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const loc = world.dynamicLocation(eid).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
+    var total: i64 = 0;
+    @memcpy(std.mem.asBytes(&total), slot[0..8]);
+    try std.testing.expectEqual(@as(i64, 4010), total);
 }
 
 test "runProgram closure captures an outer local by value (M0.8 closures)" {

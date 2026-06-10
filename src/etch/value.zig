@@ -80,6 +80,9 @@ pub const Value = union(enum) {
     /// Handle into the interpreter's per-rule-body map store (M0.8
     /// collections). Same lifetime rules as `array_ref`.
     map_ref: u32,
+    /// Handle into the interpreter's per-rule-body set store (M0.8 E3-C
+    /// tranche 3bis). Same lifetime rules as `array_ref`.
+    set_ref: u32,
     /// Handle into the interpreter's per-rule-body closure store (M0.8
     /// closures). Same lifetime rules as `array_ref`.
     closure: u32,
@@ -134,6 +137,7 @@ pub const Value = union(enum) {
             .range => false,
             .array_ref => false,
             .map_ref => false,
+            .set_ref => false, // set equality is not in the M0.8 minimal subset
             .closure => false,
             .struct_ref => false,
             .optional => false, // optional equality is not exercised in M0.8 (unwrap via if/while let)

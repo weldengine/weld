@@ -1201,11 +1201,12 @@ pub const TypeChecker = struct {
                 var declared: ?ResolvedType = null;
                 if (!let.type_annotation.isNone()) {
                     declared = self.namedTypeToResolved(let.type_annotation);
-                    // The literal and annotation paths are the only two gates
-                    // through which a `map_t` enters the program (fields and
-                    // params reject composite types) — the K: Hash bound is
-                    // checked at both.
-                    if (declared.? == .map_t) try self.checkMapKeyHashable(declared.?.map_t.key, self.arena.typeNodeSpan(let.type_annotation));
+                    // The literal/constructor and annotation paths are the
+                    // only two gates through which a `map_t` / `set_t` enters
+                    // the program (fields and params reject composite types)
+                    // — the Hash bound is checked at both.
+                    if (declared.? == .map_t) try self.checkHashBound(declared.?.map_t.key, "map key type", "K: Hash", self.arena.typeNodeSpan(let.type_annotation));
+                    if (declared.? == .set_t) try self.checkHashBound(declared.?.set_t, "set element type", "T: Hash", self.arena.typeNodeSpan(let.type_annotation));
                 }
                 const inferred = self.synthExpr(let.value, ctx);
                 const final = if (declared) |d| blk: {
@@ -1299,6 +1300,13 @@ pub const TypeChecker = struct {
                     var elem_t: ResolvedType = ResolvedType.unknown;
                     if (iter_t == .range) {
                         elem_t = .{ .builtin = iter_t.range };
+                    } else if (iter_t == .set_t) {
+                        // Set for-in is not delivered with the tranche-3bis
+                        // subset (no differential requires it) — rejected
+                        // here so NEITHER backend sees one, the established
+                        // out-of-subset policy. Must precede `elementType`,
+                        // which would otherwise bind the element.
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(f.iterable), "set for-in is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{});
                     } else if (iter_t.elementType()) |bt| {
                         // Array / slice iteration binds the element type (M0.8).
                         elem_t = .{ .builtin = bt };
@@ -1701,13 +1709,16 @@ pub const TypeChecker = struct {
     /// not a builtin in E1) leaves the literal `unknown` (the interpreter still
     /// builds it from the runtime values; precise string-keyed map typing is a
     /// later refinement). Empty `[:]` stays `unknown` so the annotation types it.
-    /// stdlib §14 pins `K: Hash + Eq` on map keys, and the builtin Hash set
-    /// excludes float/f32/f64 (NaN != NaN, hash undefined — stdlib §4.3): a
-    /// float map key is an invalid program, rejected at the resolver so
-    /// NEITHER backend ever sees one (E0601 BoundNotSatisfied).
-    fn checkMapKeyHashable(self: *TypeChecker, key: BuiltinType, span: SourceSpan) !void {
-        if (key.isFloat()) {
-            try self.emit(.bound_not_satisfied, .error_, span, "map key type does not satisfy the 'K: Hash' bound (float/f32/f64 are not hashable); wrap the float in a struct with a custom Hash", .{});
+    /// stdlib §14 / §15 pin `K: Hash + Eq` on map keys and `T: Hash + Eq` on
+    /// set elements, and the builtin Hash set excludes float/f32/f64 (NaN !=
+    /// NaN, hash undefined — stdlib §4.3): a float map key or set element is
+    /// an invalid program, rejected at the resolver so NEITHER backend ever
+    /// sees one (E0601 BoundNotSatisfied). Generalized from the tranche-4
+    /// `checkMapKeyHashable` for the tranche-3bis Set vertical — same code,
+    /// same wording family, `what`/`bound` carry the per-collection nouns.
+    fn checkHashBound(self: *TypeChecker, t: BuiltinType, comptime what: []const u8, comptime bound: []const u8, span: SourceSpan) !void {
+        if (t.isFloat()) {
+            try self.emit(.bound_not_satisfied, .error_, span, what ++ " does not satisfy the '" ++ bound ++ "' bound (float/f32/f64 are not hashable); wrap the float in a struct with a custom Hash", .{});
         }
     }
 
@@ -1731,7 +1742,7 @@ pub const TypeChecker = struct {
                 if (!self.literalTypeFits(kb, entry.key, kt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.key), "map keys must all have the same type", .{});
             } else {
                 key_bt = kt.builtin;
-                try self.checkMapKeyHashable(kt.builtin, self.arena.exprSpan(entry.key));
+                try self.checkHashBound(kt.builtin, "map key type", "K: Hash", self.arena.exprSpan(entry.key));
             }
             if (val_bt) |vb| {
                 if (!self.literalTypeFits(vb, entry.value, vt.builtin)) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(entry.value), "map values must all have the same type", .{});
@@ -2165,6 +2176,14 @@ pub const TypeChecker = struct {
                 return ResolvedType.unknown;
             }
             const type_name = self.arena.exprData(mc.receiver);
+            // Builtin-type associated calls (M0.8 E3-C tranche 3bis):
+            // `Set.new()` / `Set.from([...])`. Checked BEFORE the user
+            // `impl` lookup — `Set` is a builtin stdlib type and is not
+            // user-overridable (stdlib §2.6), so the builtin route masks
+            // any user `impl Set` rather than racing it.
+            if (std.mem.eql(u8, self.arena.strings.slice(type_name), "Set")) {
+                return try self.synthSetAssociated(id, mc, ctx_opt);
+            }
             const method = self.lookupMethod(type_name, mc.method_name) orelse {
                 try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no associated function '{s}' on type '{s}'", .{ method_slice, self.arena.strings.slice(type_name) });
                 return ResolvedType.unknown;
@@ -2192,6 +2211,47 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
         return try self.dispatchMethodOnType(id, mc, raw_t, ctx_opt);
+    }
+
+    /// Type a `Set.assoc(...)` builtin associated call (M0.8 E3-C tranche
+    /// 3bis, stdlib §15.1 — minimal faithful subset). `Set.new()` is
+    /// element-less: it synthesizes `unknown` and the let annotation types
+    /// the binding (the same policy as the empty map literal `[:]`).
+    /// `Set.from(arr)` takes its element type from the array argument;
+    /// stdlib §15 pins `T: Hash + Eq` and §4.3 excludes float/f32/f64 from
+    /// the builtin Hash set, so a float element is an invalid program for
+    /// BOTH backends (E0601 — the same redressement as map keys).
+    /// `with_capacity` (a generic call form) and anything else §15.1 is a
+    /// stdlib activation (Phase 1+).
+    fn synthSetAssociated(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const method_slice = self.arena.strings.slice(mc.method_name);
+        if (std.mem.eql(u8, method_slice, "new")) {
+            if (mc.args_len != 0) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'Set.new' takes no arguments", .{});
+            }
+            return ResolvedType.unknown; // element-less: the annotation types the binding
+        }
+        if (std.mem.eql(u8, method_slice, "from")) {
+            if (mc.args_len != 1) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "'Set.from' takes exactly one array argument", .{});
+                return ResolvedType.unknown;
+            }
+            const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+            const arg_t = try self.synthExprE(arg, ctx_opt);
+            const elem: BuiltinType = switch (arg_t) {
+                .array_fixed => |info| info.elem,
+                .array_dyn => |bt| bt,
+                .unknown => return ResolvedType.unknown,
+                else => {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "'Set.from' expects an array argument", .{});
+                    return ResolvedType.unknown;
+                },
+            };
+            try self.checkHashBound(elem, "set element type", "T: Hash", self.arena.exprSpan(arg));
+            return .{ .set_t = elem };
+        }
+        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "associated function '{s}' on 'Set' is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{method_slice});
+        return ResolvedType.unknown;
     }
 
     /// Dispatch an instance method call against an already-typed receiver
@@ -2286,6 +2346,48 @@ pub const TypeChecker = struct {
                 return ResolvedType{ .builtin = .int_ };
             }
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "map method '{s}' is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{method_slice});
+            return ResolvedType.unknown;
+        }
+
+        // Builtin set methods (M0.8 E3-C tranche 3bis — minimal faithful
+        // subset of stdlib §15.2). `insert(item)` (mut receiver, element-typed
+        // arg; its `bool` return is out of the subset — statement use only),
+        // `contains(item)` (→ bool) and `len()` (→ int). The §15.2 remainder
+        // (remove, clear, the set-algebra ops, iter) is a stdlib activation
+        // (Phase 1+).
+        if (recv_t == .set_t) {
+            if (std.mem.eql(u8, method_slice, "insert")) {
+                if (mc.args_len != 1) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "set method 'insert' takes exactly one argument", .{});
+                } else {
+                    const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+                    const arg_t = try self.synthExprE(arg, ctx_opt);
+                    if (arg_t == .builtin and !self.literalTypeFits(recv_t.set_t, arg, arg_t.builtin)) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "inserted item type does not match the set element type", .{});
+                    }
+                }
+                try self.checkMutCollectionReceiver(mc, ctx_opt);
+                return ResolvedType.unknown; // bool return is out of the subset
+            }
+            if (std.mem.eql(u8, method_slice, "contains")) {
+                if (mc.args_len != 1) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "set method 'contains' takes exactly one argument", .{});
+                } else {
+                    const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+                    const arg_t = try self.synthExprE(arg, ctx_opt);
+                    if (arg_t == .builtin and !self.literalTypeFits(recv_t.set_t, arg, arg_t.builtin)) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "item type does not match the set element type", .{});
+                    }
+                }
+                return ResolvedType{ .builtin = .bool_ };
+            }
+            if (std.mem.eql(u8, method_slice, "len")) {
+                if (mc.args_len != 0) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "set method 'len' takes no arguments", .{});
+                }
+                return ResolvedType{ .builtin = .int_ };
+            }
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "set method '{s}' is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{method_slice});
             return ResolvedType.unknown;
         }
 
@@ -4472,4 +4574,101 @@ test "type-checker rejects float map keys at both gates (E0601, M0.8 E3-C tranch
     );
     defer ok.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+}
+
+test "type-checker resolves the Set builtin associated calls + method subset (M0.8 E3-C tranche 3bis)" {
+    const gpa = std.testing.allocator;
+    // stdlib §15.1/§15.2 minimal subset: `Set.new()` is typed by the let
+    // annotation (empty-map-literal policy), `Set.from([...])` takes the
+    // element type from its array argument; `insert` (statement-only),
+    // `contains` (bool) and `len` (int) dispatch on `set_t`.
+    var ok = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let e: Set<int> = Set.new()
+        \\  let mut s = Set.from([1, 2, 2, 3])
+        \\  s.insert(4)
+        \\  let hit = s.contains(2)
+        \\  let n = s.len() + e.len()
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // The builtin route must not shadow user associated fns on other types:
+    // `Pt.origin()` still resolves through the user `impl` lookup.
+    var user = try parseAndCheck(gpa,
+        \\struct Pt { x: int = 0 }
+        \\impl Pt {
+        \\  fn origin() -> Pt { Pt { x: 0 } }
+        \\}
+        \\rule r(entity: Entity) {
+        \\  let p = Pt.origin()
+        \\  let v = p.x
+        \\}
+    );
+    defer user.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), user.diagnostics.items.len);
+}
+
+test "type-checker rejects float set elements at both gates (E0601, M0.8 E3-C tranche 3bis)" {
+    const gpa = std.testing.allocator;
+    // stdlib §15 pins `T: Hash + Eq` on set elements and §4.3 excludes
+    // float/f32/f64 from the builtin Hash set — a float set element is an
+    // INVALID program for both backends (the tranche-4 map-key redressement,
+    // generalized through `checkHashBound`).
+    var from = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let s = Set.from([1.5, 2.5])
+        \\}
+    );
+    defer from.deinit(gpa);
+    try expectAnyCode(from.diagnostics.items, .bound_not_satisfied);
+
+    var ann = try parseAndCheck(gpa,
+        \\rule r(entity: Entity) {
+        \\  let s: Set<f32> = Set.new()
+        \\}
+    );
+    defer ann.deinit(gpa);
+    try expectAnyCode(ann.diagnostics.items, .bound_not_satisfied);
+}
+
+test "type-checker rejects the out-of-subset Set surface (M0.8 E3-C tranche 3bis)" {
+    const gpa = std.testing.allocator;
+    // `with_capacity` (a generic call form), `remove` (§15.2 remainder), set
+    // for-in (no differential requires it), a non-array `from` argument, and
+    // `insert` on an immutable binding — each rejected at the resolver so
+    // NEITHER backend sees one (the established out-of-subset policy).
+    const cases = [_][]const u8{
+        \\rule r(entity: Entity) {
+        \\  let s = Set.with_capacity(8)
+        \\}
+        ,
+        \\rule r(entity: Entity) {
+        \\  let mut s = Set.from([1])
+        \\  s.remove(1)
+        \\}
+        ,
+        \\rule r(entity: Entity) {
+        \\  let mut s = Set.from([1])
+        \\  for x in s {
+        \\    let y = x
+        \\  }
+        \\}
+        ,
+        \\rule r(entity: Entity) {
+        \\  let s = Set.from(7)
+        \\}
+        ,
+        \\rule r(entity: Entity) {
+        \\  let s = Set.from([1])
+        \\  s.insert(2)
+        \\}
+        ,
+    };
+    for (cases) |source| {
+        var out = try parseAndCheck(gpa, source);
+        defer out.deinit(gpa);
+        try std.testing.expect(out.diagnostics.items.len > 0);
+    }
 }
