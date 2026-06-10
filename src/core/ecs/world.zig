@@ -32,7 +32,6 @@ const tick_mod = @import("tick.zig");
 
 const registry_mod = @import("registry.zig");
 const resources_mod = @import("resources.zig");
-const query_runtime_mod = @import("query_runtime.zig");
 const observers_mod = @import("observers.zig");
 // M0.2 / E3 — singleton-entity resource registry, distinct from the
 // M0.1 / S4 byte-keyed `ResourceStore` above (which the Etch
@@ -85,7 +84,6 @@ const ComponentDesc = registry_mod.ComponentDesc;
 const FieldDesc = registry_mod.FieldDesc;
 const FieldKind = registry_mod.FieldKind;
 const ResourceStore = resources_mod.ResourceStore;
-const RuntimeQuery = query_runtime_mod.RuntimeQuery;
 const EntityIdentityStore = entity_mod.EntityIdentityStore;
 
 /// Top-level ECS world — single archetype list, shared identity, shared
@@ -923,18 +921,6 @@ pub const World = struct {
     fn worldArchetypesSlice(ctx: *anyopaque) []const *Archetype {
         const w: *World = @ptrCast(@alignCast(ctx));
         return w.archetypes.items;
-    }
-
-    /// Build a runtime query against this world's archetypes. Mirrors
-    /// the pre-E2 entry point — `archetypes` is now the unified list,
-    /// so the runtime query iterates over every materialised
-    /// archetype.
-    pub fn query_dynamic(self: *World, includes: []const ComponentId, excludes: []const ComponentId) RuntimeQuery {
-        return .{
-            .includes = includes,
-            .excludes = excludes,
-            .archetypes = self.archetypes.items,
-        };
     }
 
     // ─── Resources ───────────────────────────────────────────────────────

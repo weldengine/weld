@@ -51,8 +51,6 @@ pub const registry = @import("registry.zig");
 pub const archetype_dynamic = @import("archetype_dynamic.zig");
 /// S4 — resource singleton store (Tier 0 placeholder until M0.2 ships the full surface).
 pub const resources = @import("resources.zig");
-/// S4 — runtime query path (untyped, walks archetypes by ComponentId set).
-pub const query_runtime = @import("query_runtime.zig");
 /// S5 — comptime-typed query consumed by the Etch → Zig codegen.
 pub const comptime_query = @import("comptime_query.zig");
 /// E6 — per-system command buffer for deferred structural mutations.
@@ -85,7 +83,7 @@ pub const Transform = world.Transform;
 pub const Velocity = world.Velocity;
 
 /// Byte-level archetype storage. Public for callers that walk
-/// archetypes directly (the bench, the runtime query path); typical
+/// archetypes directly (the bench, the Etch interpreter); typical
 /// consumers go through `World.queryFiltered` instead.
 pub const Archetype = world.Archetype;
 

@@ -147,6 +147,15 @@ comptime {
     // inline tests run alongside the rest of the ECS surface.
     _ = ecs.command_buffer;
     _ = ecs.observers;
+    // M0.8 / E3-D — pin the remaining ECS sub-files carrying inline
+    // tests. The D-S4-runtime-query investigation proved empirically
+    // that these four were silently skipped by `zig build test` (the
+    // same lazy-analysis trap that hid `query_runtime.zig`'s tests
+    // until the module was dropped as dead code).
+    _ = ecs.registry;
+    _ = ecs.resources;
+    _ = ecs.comptime_query;
+    _ = ecs.chunk;
     // M0.2 / E1 — pin the RTTI sub-files so their inline tests run.
     _ = rtti.type_info;
     _ = rtti.hash;
@@ -175,4 +184,16 @@ comptime {
     _ = platform.input.raw_state;
     _ = platform.input.win32_xinput;
     _ = platform.input.linux_evdev;
+}
+
+test "runtime-query abstraction stays dropped (D-S4-runtime-query)" {
+    // M0.8 E3-D: the S4 `RuntimeQuery` / `World.query_dynamic` surface was
+    // dropped — zero consumers materialised (the brief-sanctioned exit), the
+    // interpreter hot path iterates archetypes through its own predicate
+    // pool, and the abstraction could not express the E3 query surface
+    // (`or`/`not` trees, tag predicates, `changed` tick baselines). Guard
+    // the drop so the dead surface cannot silently come back.
+    const std = @import("std");
+    comptime std.debug.assert(!@hasDecl(ecs, "query_runtime"));
+    comptime std.debug.assert(!@hasDecl(ecs.world.World, "query_dynamic"));
 }
