@@ -4910,7 +4910,7 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// `true` when the program declares at least one Level-B construct with a
 /// descriptor (M0.8 E4: the six Level-B gameplay constructs).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4936,6 +4936,8 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .theme_decl => try emitThemeDescriptor(w, gpa, ast, ast.theme_decls.items[datas[i]]),
             .motion_decl => try emitMotionDescriptor(w, gpa, ast, ast.motion_decls.items[datas[i]]),
             .input_mapping_decl => try emitInputMappingDescriptor(w, gpa, ast, ast.input_mapping_decls.items[datas[i]]),
+            .widget_decl => try emitWidgetDescriptor(w, gpa, ast, ast.widget_decls.items[datas[i]]),
+            .locale_decl => try emitLocaleDescriptor(w, ast, ast.locale_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -5110,6 +5112,133 @@ fn emitOptRendered(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, nod
     const rendered = try renderForEmit(gpa, ast, node);
     defer gpa.free(rendered);
     try emitZigStringLiteral(w, rendered);
+}
+
+/// Emit-structure for a `widget` (M0.8 E5): the codegen's OWN walk; placement
+/// annotations / when / ui_tree head texts through the SHARED descriptor
+/// renderers (`buildWidgetAnnotations` / `renderWhenAlloc` / `renderUiCallAlloc`
+/// / `renderExprAlloc` / `buildForHead` / `renderStmtAlloc`) so the bytes match
+/// the interpreter dump (the proof-contract split). The recursive tree is
+/// emitted by `emitUiTreeLiteral` (the `emitDialogueElementsLiteral` precedent).
+fn emitWidgetDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.WidgetDecl) CodegenError!void {
+    try w.print("    .{{ .widget = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.print(", .annotations = ", .{});
+    const annotations = descriptor_mod.buildWidgetAnnotations(gpa, ast, decl) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+    };
+    defer gpa.free(annotations);
+    try emitZigStringLiteral(w, annotations);
+    try w.print(", .when = ", .{});
+    if (decl.when_root == ast_mod.RuleDecl.none_when) {
+        try emitZigStringLiteral(w, "");
+    } else {
+        const when_text = descriptor_mod.renderWhenAlloc(gpa, ast, decl.when_root) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        };
+        defer gpa.free(when_text);
+        try emitZigStringLiteral(w, when_text);
+    }
+    try w.line(", .params = &[_]etch_descriptor.WidgetParamDesc{");
+    var p: u32 = 0;
+    while (p < decl.params_len) : (p += 1) {
+        const param = ast.widget_params.items[decl.params_start + p];
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(param.name));
+        try w.print(", .type_name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(param.type_name));
+        try w.line(" },");
+    }
+    try w.print("    }}, .tree = ", .{});
+    try emitUiTreeLiteral(w, gpa, ast, decl.tree_start, decl.tree_len);
+    try w.line(" } },");
+}
+
+/// Emit a `(start, len)` ui_elems run as a `&[_]UiNodeDesc{…}` literal
+/// (RECURSIVE through children / if-else / for bodies; the codegen's OWN walk,
+/// head texts via the SHARED renderers).
+fn emitUiTreeLiteral(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, start: u32, len: u32) CodegenError!void {
+    try w.write("&[_]etch_descriptor.UiNodeDesc{");
+    var i: u32 = 0;
+    while (i < len) : (i += 1) {
+        if (i != 0) try w.write(", ");
+        try emitUiNodeLiteral(w, gpa, ast, ast.ui_elems.items[start + i]);
+    }
+    try w.write("}");
+}
+
+fn emitUiNodeLiteral(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, elem: ast_mod.UiElem) CodegenError!void {
+    switch (elem.kind) {
+        .widget_call => {
+            const wc = ast.ui_widget_calls.items[elem.index];
+            const head = descriptor_mod.renderUiCallAlloc(gpa, ast, wc.call) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+            };
+            defer gpa.free(head);
+            try w.write(".{ .kind = .call, .head = ");
+            try emitZigStringLiteral(w, head);
+            try w.write(", .children = ");
+            try emitUiTreeLiteral(w, gpa, ast, wc.children_start, wc.children_len);
+            try w.write(", .else_children = &[_]etch_descriptor.UiNodeDesc{} }");
+        },
+        .if_ => {
+            const uif = ast.ui_ifs.items[elem.index];
+            const head = try renderForEmit(gpa, ast, uif.cond);
+            defer gpa.free(head);
+            try w.write(".{ .kind = .if_, .head = ");
+            try emitZigStringLiteral(w, head);
+            try w.write(", .children = ");
+            try emitUiTreeLiteral(w, gpa, ast, uif.then_start, uif.then_len);
+            try w.write(", .else_children = ");
+            try emitUiTreeLiteral(w, gpa, ast, uif.else_start, uif.else_len);
+            try w.write(" }");
+        },
+        .for_ => {
+            const uf = ast.ui_fors.items[elem.index];
+            const head = descriptor_mod.buildForHead(gpa, ast, uf) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+            };
+            defer gpa.free(head);
+            try w.write(".{ .kind = .for_, .head = ");
+            try emitZigStringLiteral(w, head);
+            try w.write(", .children = ");
+            try emitUiTreeLiteral(w, gpa, ast, uf.body_start, uf.body_len);
+            try w.write(", .else_children = &[_]etch_descriptor.UiNodeDesc{} }");
+        },
+        .statement => {
+            const stmt: ast_mod.NodeId = @bitCast(elem.index);
+            const head = descriptor_mod.renderStmtAlloc(gpa, ast, stmt) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+            };
+            defer gpa.free(head);
+            try w.write(".{ .kind = .statement, .head = ");
+            try emitZigStringLiteral(w, head);
+            try w.write(", .children = &[_]etch_descriptor.UiNodeDesc{}, .else_children = &[_]etch_descriptor.UiNodeDesc{} }");
+        },
+    }
+}
+
+/// Emit-structure for a `locale` (M0.8 E5): a bare IDENT name + flat quoted
+/// `key = value` entries (the `emitThemeDescriptor` precedent).
+fn emitLocaleDescriptor(w: *Writer, ast: *const AstArena, decl: ast_mod.LocaleDecl) CodegenError!void {
+    try w.print("    .{{ .locale = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.line(", .entries = &[_]etch_descriptor.LocaleEntryDesc{");
+    var e: u32 = 0;
+    while (e < decl.entries_len) : (e += 1) {
+        const entry = ast.locale_entries.items[decl.entries_start + e];
+        try w.print("        .{{ .key = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(entry.key));
+        try w.print(", .value = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(entry.value));
+        try w.line(" },");
+    }
+    try w.line("    } } },");
 }
 
 fn emitRoutineDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.RoutineDecl) CodegenError!void {

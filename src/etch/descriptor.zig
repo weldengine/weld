@@ -68,6 +68,8 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
         .theme => |t| freeTheme(gpa, t),
         .motion => |m| freeMotion(gpa, m),
         .input_mapping => |im| freeInputMapping(gpa, im),
+        .widget => |w| freeWidget(gpa, w),
+        .locale => |l| freeLocale(gpa, l),
     }
 }
 
@@ -284,6 +286,8 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .theme_decl => try list.append(gpa, .{ .theme = try buildTheme(gpa, arena, arena.theme_decls.items[datas[i]]) }),
             .motion_decl => try list.append(gpa, .{ .motion = try buildMotion(gpa, arena, arena.motion_decls.items[datas[i]]) }),
             .input_mapping_decl => try list.append(gpa, .{ .input_mapping = try buildInputMapping(gpa, arena, arena.input_mapping_decls.items[datas[i]]) }),
+            .widget_decl => try list.append(gpa, .{ .widget = try buildWidget(gpa, arena, arena.widget_decls.items[datas[i]]) }),
+            .locale_decl => try list.append(gpa, .{ .locale = try buildLocale(gpa, arena, arena.locale_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -716,6 +720,234 @@ fn buildInputCombo(gpa: std.mem.Allocator, arena: *const AstArena, combo: ast_mo
     errdefer gpa.free(name);
     const type_name = try gpa.dupe(u8, if (combo.type_name == 0) "" else arena.strings.slice(combo.type_name));
     return .{ .name = name, .type_name = type_name, .sequence = sequence, .window = window };
+}
+
+// ── widget (M0.8 E5 Level B) ──────────────────────────────────────────────
+
+fn freeWidget(gpa: std.mem.Allocator, w: types.Widget) void {
+    gpa.free(w.name);
+    gpa.free(w.annotations);
+    gpa.free(w.when);
+    for (w.params) |p| {
+        gpa.free(p.name);
+        gpa.free(p.type_name);
+    }
+    gpa.free(w.params);
+    for (w.tree) |node| freeUiNode(gpa, node);
+    gpa.free(w.tree);
+}
+
+fn freeUiNode(gpa: std.mem.Allocator, node: types.UiNodeDesc) void {
+    gpa.free(node.head);
+    for (node.children) |child| freeUiNode(gpa, child);
+    gpa.free(node.children);
+    for (node.else_children) |child| freeUiNode(gpa, child);
+    gpa.free(node.else_children);
+}
+
+/// Build a `widget` descriptor (M0.8 E5): placement annotations + params +
+/// optional when clause + the recursive `ui_tree`. Mirrors `buildMotion`
+/// (multi-slice) + `buildBTNode` (recursive tree).
+fn buildWidget(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.WidgetDecl) BuildError!types.Widget {
+    const annotations = try buildWidgetAnnotations(gpa, arena, decl);
+    errdefer gpa.free(annotations);
+    const when_text = if (decl.when_root == ast_mod.RuleDecl.none_when)
+        try gpa.dupe(u8, "")
+    else
+        try renderWhenAlloc(gpa, arena, decl.when_root);
+    errdefer gpa.free(when_text);
+
+    var params: std.ArrayListUnmanaged(types.WidgetParamDesc) = .empty;
+    errdefer {
+        for (params.items) |pp| {
+            gpa.free(pp.name);
+            gpa.free(pp.type_name);
+        }
+        params.deinit(gpa);
+    }
+    var p: u32 = 0;
+    while (p < decl.params_len) : (p += 1) {
+        const param = arena.widget_params.items[decl.params_start + p];
+        const pname = try gpa.dupe(u8, arena.strings.slice(param.name));
+        errdefer gpa.free(pname);
+        const ptype = try gpa.dupe(u8, arena.strings.slice(param.type_name));
+        errdefer gpa.free(ptype);
+        try params.append(gpa, .{ .name = pname, .type_name = ptype });
+    }
+
+    const tree = try buildUiTree(gpa, arena, decl.tree_start, decl.tree_len);
+    errdefer {
+        for (tree) |node| freeUiNode(gpa, node);
+        gpa.free(tree);
+    }
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    errdefer gpa.free(name);
+    return .{
+        .name = name,
+        .annotations = annotations,
+        .when = when_text,
+        .params = try params.toOwnedSlice(gpa),
+        .tree = tree,
+    };
+}
+
+/// Space-join the placement-annotation names as `@name` (declaration order).
+/// `@screen` / `@worldspace` arrive as `.custom`-kind annotations distinguished
+/// by name; their args are structural and omitted from the Level-B descriptor.
+pub fn buildWidgetAnnotations(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.WidgetDecl) BuildError![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(gpa);
+    var i: u32 = 0;
+    while (i < decl.annotations_len) : (i += 1) {
+        const annot = arena.annot_pool.items[decl.annotations_extra + i];
+        if (i != 0) try buf.appendSlice(gpa, " ");
+        try buf.appendSlice(gpa, "@");
+        try buf.appendSlice(gpa, arena.strings.slice(annot.name));
+    }
+    return try buf.toOwnedSlice(gpa);
+}
+
+/// Build a `(start, len)` run of `ui_elems` into a `UiNodeDesc[]` (RECURSIVE —
+/// child runs build their own subtree, the `buildBTNode` / `buildDialogueElements`
+/// precedent).
+fn buildUiTree(gpa: std.mem.Allocator, arena: *const AstArena, start: u32, len: u32) BuildError![]types.UiNodeDesc {
+    var nodes: std.ArrayListUnmanaged(types.UiNodeDesc) = .empty;
+    errdefer {
+        for (nodes.items) |n| freeUiNode(gpa, n);
+        nodes.deinit(gpa);
+    }
+    var i: u32 = 0;
+    while (i < len) : (i += 1) {
+        try nodes.append(gpa, try buildUiNode(gpa, arena, arena.ui_elems.items[start + i]));
+    }
+    return try nodes.toOwnedSlice(gpa);
+}
+
+fn buildUiNode(gpa: std.mem.Allocator, arena: *const AstArena, elem: ast_mod.UiElem) BuildError!types.UiNodeDesc {
+    switch (elem.kind) {
+        .widget_call => {
+            const wc = arena.ui_widget_calls.items[elem.index];
+            const head = try renderUiCallAlloc(gpa, arena, wc.call);
+            errdefer gpa.free(head);
+            const children = try buildUiTree(gpa, arena, wc.children_start, wc.children_len);
+            errdefer {
+                for (children) |c| freeUiNode(gpa, c);
+                gpa.free(children);
+            }
+            return .{ .kind = .call, .head = head, .children = children, .else_children = try gpa.alloc(types.UiNodeDesc, 0) };
+        },
+        .if_ => {
+            const uif = arena.ui_ifs.items[elem.index];
+            const head = try renderExprAlloc(gpa, arena, uif.cond);
+            errdefer gpa.free(head);
+            const then_children = try buildUiTree(gpa, arena, uif.then_start, uif.then_len);
+            errdefer {
+                for (then_children) |c| freeUiNode(gpa, c);
+                gpa.free(then_children);
+            }
+            const else_children = try buildUiTree(gpa, arena, uif.else_start, uif.else_len);
+            return .{ .kind = .if_, .head = head, .children = then_children, .else_children = else_children };
+        },
+        .for_ => {
+            const uf = arena.ui_fors.items[elem.index];
+            const head = try buildForHead(gpa, arena, uf);
+            errdefer gpa.free(head);
+            const children = try buildUiTree(gpa, arena, uf.body_start, uf.body_len);
+            errdefer {
+                for (children) |c| freeUiNode(gpa, c);
+                gpa.free(children);
+            }
+            return .{ .kind = .for_, .head = head, .children = children, .else_children = try gpa.alloc(types.UiNodeDesc, 0) };
+        },
+        .statement => {
+            const stmt: NodeId = @bitCast(elem.index);
+            const head = try renderStmtAlloc(gpa, arena, stmt);
+            errdefer gpa.free(head);
+            return .{ .kind = .statement, .head = head, .children = try gpa.alloc(types.UiNodeDesc, 0), .else_children = try gpa.alloc(types.UiNodeDesc, 0) };
+        },
+    }
+}
+
+/// Render a `for` head (`var[, idx] in iterable`) to canonical text.
+pub fn buildForHead(gpa: std.mem.Allocator, arena: *const AstArena, uf: ast_mod.UiFor) BuildError![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(gpa);
+    try buf.appendSlice(gpa, arena.strings.slice(uf.var_name));
+    if (uf.index_name != 0) {
+        try buf.appendSlice(gpa, ", ");
+        try buf.appendSlice(gpa, arena.strings.slice(uf.index_name));
+    }
+    try buf.appendSlice(gpa, " in ");
+    try renderExpr(gpa, arena, uf.iterable, &buf);
+    return try buf.toOwnedSlice(gpa);
+}
+
+/// Render a `ui_widget_call` head (`callee(args)`) to canonical text. Mirrors
+/// the `renderExpr` `.fn_call` arm (callee + positional/named args through the
+/// SHARED `renderExpr`) but with a per-arg closure guard: an on-click closure
+/// argument renders as the `<closure>` presence marker (the `buildInputBind`
+/// precedent — the renderer rejects closures, never silently-wrong).
+pub fn renderUiCallAlloc(gpa: std.mem.Allocator, arena: *const AstArena, call_node: NodeId) BuildError![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(gpa);
+    const call = arena.call_exprs.items[arena.exprData(call_node)];
+    try renderExpr(gpa, arena, call.callee, &buf);
+    try buf.appendSlice(gpa, "(");
+    var i: u32 = 0;
+    while (i < call.args_len) : (i += 1) {
+        if (i != 0) try buf.appendSlice(gpa, ", ");
+        if (call.names_start != ast_mod.no_arg_names) {
+            const label = arena.call_arg_names.items[call.names_start + i];
+            if (label != 0) {
+                try buf.appendSlice(gpa, arena.strings.slice(label));
+                try buf.appendSlice(gpa, ": ");
+            }
+        }
+        const arg: NodeId = @bitCast(arena.extra.items[call.args_start + i]);
+        if (arena.exprKind(arg) == .closure) {
+            try buf.appendSlice(gpa, "<closure>");
+        } else {
+            try renderExpr(gpa, arena, arg, &buf);
+        }
+    }
+    try buf.appendSlice(gpa, ")");
+    return try buf.toOwnedSlice(gpa);
+}
+
+// ── locale (M0.8 E5 Level B) ──────────────────────────────────────────────
+
+fn freeLocale(gpa: std.mem.Allocator, l: types.Locale) void {
+    gpa.free(l.name);
+    for (l.entries) |e| {
+        gpa.free(e.key);
+        gpa.free(e.value);
+    }
+    gpa.free(l.entries);
+}
+
+/// Build a `locale` descriptor (M0.8 E5): flat `key = value` string entries (the
+/// `buildTheme` precedent, both sides decoded string-literal content).
+fn buildLocale(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.LocaleDecl) BuildError!types.Locale {
+    var entries: std.ArrayListUnmanaged(types.LocaleEntryDesc) = .empty;
+    errdefer {
+        for (entries.items) |e| {
+            gpa.free(e.key);
+            gpa.free(e.value);
+        }
+        entries.deinit(gpa);
+    }
+    var e: u32 = 0;
+    while (e < decl.entries_len) : (e += 1) {
+        const entry = arena.locale_entries.items[decl.entries_start + e];
+        const key = try gpa.dupe(u8, arena.strings.slice(entry.key));
+        errdefer gpa.free(key);
+        const value = try gpa.dupe(u8, arena.strings.slice(entry.value));
+        errdefer gpa.free(value);
+        try entries.append(gpa, .{ .key = key, .value = value });
+    }
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    errdefer gpa.free(name);
+    return .{ .name = name, .entries = try entries.toOwnedSlice(gpa) };
 }
 
 fn buildBehavior(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.BehaviorDecl) BuildError!types.Behavior {

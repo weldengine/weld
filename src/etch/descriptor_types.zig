@@ -295,6 +295,58 @@ pub const InputComboDesc = struct {
     window: []const u8, // rendered, "" if absent
 };
 
+/// `widget` descriptor (`etch-ast-ir.md` §3.5: `Widget { tree, bindings,
+/// annotations: @screen/@worldspace }`; M0.8 E5, `etch-grammar.md` §10.1). The
+/// recursive `ui_tree` is a slice of `UiNodeDesc`; `annotations` is the
+/// space-joined placement-annotation names (the meaningful Level-B bit — args
+/// are structural), `when` is the rendered optional `@worldspace` when clause.
+pub const Widget = struct {
+    name: []const u8,
+    annotations: []const u8, // "@screen" / "@worldspace" / both / "", space-joined
+    when: []const u8, // rendered when clause, "" if absent
+    params: []const WidgetParamDesc,
+    tree: []const UiNodeDesc,
+};
+
+/// One `widget` parameter (`name: type`, rendered to text).
+pub const WidgetParamDesc = struct {
+    name: []const u8,
+    type_name: []const u8,
+};
+
+/// Kind of one `ui_element` in the descriptor tree (§10.1 — `match` falls under
+/// `statement`, an ordinary match expression).
+pub const UiNodeKind = enum { call, if_, for_, statement };
+
+/// One `ui_element` rendered for the canonical dump (RECURSIVE — the behavior
+/// `BehaviorNode` precedent). `head` is the per-kind rendered text:
+///   `.call`      — `callee(args)` (on-click closures render as `<closure>`)
+///   `.if_`       — the rendered condition; `children` = then-tree, `else_children` = else-tree
+///   `.for_`      — `var[, idx] in iterable`; `children` = body
+///   `.statement` — the rendered statement; no children
+pub const UiNodeDesc = struct {
+    kind: UiNodeKind,
+    head: []const u8,
+    children: []const UiNodeDesc,
+    else_children: []const UiNodeDesc, // `.if_` only; empty otherwise
+};
+
+/// `locale` descriptor (`etch-ast-ir.md` §3.5: `Locale { code, entries }`;
+/// M0.8 E5, `etch-grammar.md` §10.4). `name` is the locale code (IDENT, bare —
+/// the motion precedent); `entries` are quoted `key = value` string pairs in
+/// declaration order. Fingerprint generation is the extractor tool's job
+/// (E5 ruling 5: deferred — Level B is declaration + IR only).
+pub const Locale = struct {
+    name: []const u8,
+    entries: []const LocaleEntryDesc,
+};
+
+/// One `locale` entry (`"key" = "value"`).
+pub const LocaleEntryDesc = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -308,6 +360,8 @@ pub const Descriptor = union(enum) {
     theme: Theme,
     motion: Motion,
     input_mapping: InputMapping,
+    widget: Widget,
+    locale: Locale,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -321,6 +375,8 @@ pub const Descriptor = union(enum) {
             .theme => |t| try writeTheme(t, gpa, out),
             .motion => |m| try writeMotion(m, gpa, out),
             .input_mapping => |im| try writeInputMapping(im, gpa, out),
+            .widget => |w| try writeWidget(w, gpa, out),
+            .locale => |l| try writeLocale(l, gpa, out),
         }
     }
 };
@@ -407,6 +463,70 @@ pub fn writeInputMapping(m: InputMapping, gpa: std.mem.Allocator, out: *std.Arra
         if (combo.sequence.len != 0) try appendFmt(gpa, out, "    sequence = {s}\n", .{combo.sequence});
         if (combo.window.len != 0) try appendFmt(gpa, out, "    window = {s}\n", .{combo.window});
         try out.appendSlice(gpa, "  }\n");
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `widget` descriptor (M0.8 E5): placement
+/// annotations, params, an optional when clause, then the recursive `ui_tree`
+/// (depth-indented — the behavior `writeBTNode` precedent).
+pub fn writeWidget(w: Widget, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "widget {s} {{\n", .{w.name});
+    if (w.annotations.len != 0) try appendFmt(gpa, out, "  annotations: {s}\n", .{w.annotations});
+    for (w.params) |p| {
+        try appendFmt(gpa, out, "  param {s}: {s}\n", .{ p.name, p.type_name });
+    }
+    if (w.when.len != 0) try appendFmt(gpa, out, "  when {s}\n", .{w.when});
+    for (w.tree) |node| {
+        try writeUiNode(node, 1, gpa, out);
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+fn writeUiNode(node: UiNodeDesc, depth: u32, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try writeIndent(depth, gpa, out);
+    switch (node.kind) {
+        .call => {
+            try appendFmt(gpa, out, "call {s}", .{node.head});
+            if (node.children.len != 0) {
+                try out.appendSlice(gpa, " {\n");
+                for (node.children) |child| try writeUiNode(child, depth + 1, gpa, out);
+                try writeIndent(depth, gpa, out);
+                try out.appendSlice(gpa, "}\n");
+            } else {
+                try out.appendSlice(gpa, "\n");
+            }
+        },
+        .if_ => {
+            try appendFmt(gpa, out, "if {s} {{\n", .{node.head});
+            for (node.children) |child| try writeUiNode(child, depth + 1, gpa, out);
+            try writeIndent(depth, gpa, out);
+            if (node.else_children.len != 0) {
+                try out.appendSlice(gpa, "} else {\n");
+                for (node.else_children) |child| try writeUiNode(child, depth + 1, gpa, out);
+                try writeIndent(depth, gpa, out);
+                try out.appendSlice(gpa, "}\n");
+            } else {
+                try out.appendSlice(gpa, "}\n");
+            }
+        },
+        .for_ => {
+            try appendFmt(gpa, out, "for {s} {{\n", .{node.head});
+            for (node.children) |child| try writeUiNode(child, depth + 1, gpa, out);
+            try writeIndent(depth, gpa, out);
+            try out.appendSlice(gpa, "}\n");
+        },
+        .statement => try appendFmt(gpa, out, "statement {s}\n", .{node.head}),
+    }
+}
+
+/// Canonical serialization of one `locale` descriptor (M0.8 E5): a bare IDENT
+/// code name (the motion precedent), then quoted `key = value` entries in
+/// declaration order.
+pub fn writeLocale(l: Locale, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "locale {s} {{\n", .{l.name});
+    for (l.entries) |e| {
+        try appendFmt(gpa, out, "  entry \"{s}\" = \"{s}\"\n", .{ e.key, e.value });
     }
     try out.appendSlice(gpa, "}\n");
 }

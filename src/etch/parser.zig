@@ -510,7 +510,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale => return,
                 else => _ = try self.advance(),
             }
         }
@@ -547,6 +547,8 @@ pub const Parser = struct {
             .kw_theme => try self.parseThemeDecl(annotations),
             .kw_motion => try self.parseMotionDecl(annotations),
             .kw_input_mapping => try self.parseInputMappingDecl(annotations),
+            .kw_widget => try self.parseWidgetDecl(annotations),
+            .kw_locale => try self.parseLocaleDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -560,7 +562,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -1950,6 +1952,239 @@ pub const Parser = struct {
     fn parseTypeName(self: *Parser) ParseError!StringId {
         const ty = try self.parseType();
         return try self.internSlice(self.arena.typeNodeSpan(ty));
+    }
+
+    /// Parse a `widget` declaration (M0.8 E5 Level B presentation,
+    /// `etch-grammar.md` §10.1: `widget_decl = "widget" TYPE_IDENT "(" [param_list]
+    /// ")" [when_clause] "{" ui_tree "}"`). TYPE_IDENT-named (the motion
+    /// precedent). The optional `[when_clause]` mirrors `impl`'s optional when
+    /// (default `when_brace_is_filter` — the body `{` is NOT a filter, resolved
+    /// by `braceOpensWhenFilter`'s matching-brace scan). The recursive `ui_tree`
+    /// is parsed by `parseUiTree`. `@screen`/`@worldspace` arrive as `.custom`
+    /// annotations validated in `validateWidget` (E1621). The `kw_widget` starter
+    /// is mirrored in `recoverToTopLevel`'s stop-set IN LOCKSTEP.
+    fn parseWidgetDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'widget'
+        const name_tok = try self.expect(.type_ident, "expected widget name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+
+        // `param_list` — inline `IDENT ":" type` loop (the rule/fn precedent;
+        // there is no shared helper).
+        _ = try self.expect(.lparen, "expected '(' to begin widget parameters");
+        const params_start: u32 = @intCast(self.arena.widget_params.items.len);
+        if (self.peek() != .rparen) {
+            while (true) {
+                const p_name = try self.expect(.ident, "expected parameter name");
+                _ = try self.expect(.colon, "expected ':' after parameter name");
+                const p_type = try self.parseTypeName();
+                try self.arena.widget_params.append(self.gpa, .{
+                    .name = try self.internSlice(p_name.span),
+                    .type_name = p_type,
+                });
+                if (!try self.match(.comma)) break;
+            }
+        }
+        _ = try self.expect(.rparen, "expected ')' to close widget parameters");
+        const params_len: u32 = @as(u32, @intCast(self.arena.widget_params.items.len)) - params_start;
+
+        // Optional `[when_clause]` (for `@worldspace`, §10.1) — the impl precedent.
+        var when_root: u32 = ast_mod.RuleDecl.none_when;
+        if (self.peek() == .kw_when) {
+            _ = try self.advance();
+            when_root = try self.parseWhenExpr();
+        }
+
+        _ = try self.expect(.lbrace, "expected '{' to start the widget body");
+        const saved = self.no_struct_lit;
+        self.no_struct_lit = false; // struct-literal args (`.{ … }`) legal in the body
+        defer self.no_struct_lit = saved;
+        const tree = try self.parseUiTree();
+        const closing = try self.expect(.rbrace, "expected '}' to close the widget body");
+        _ = try self.arena.addWidgetDecl(self.gpa, .{
+            .name = name_id,
+            .name_span = name_tok.span,
+            .when_root = when_root,
+            .params_start = params_start,
+            .params_len = params_len,
+            .tree_start = tree.start,
+            .tree_len = tree.len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse a `ui_tree` (`ui_element { ui_element }`, §10.1) into a contiguous
+    /// run of `arena.ui_elems`. Elements are buffered locally and committed in
+    /// one slice AFTER the run is parsed — child runs (widget-call children /
+    /// if-else / for bodies) flush their inner `ui_elems` first, so the
+    /// per-run indices never interleave (the `parseDialogueElems` idiom).
+    fn parseUiTree(self: *Parser) ParseError!SlabRange {
+        var elems: std.ArrayListUnmanaged(ast_mod.UiElem) = .empty;
+        defer elems.deinit(self.gpa);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            try elems.append(self.gpa, try self.parseUiElement());
+        }
+        const start: u32 = @intCast(self.arena.ui_elems.items.len);
+        try self.arena.ui_elems.appendSlice(self.gpa, elems.items);
+        return .{ .start = start, .len = @intCast(elems.items.len) };
+    }
+
+    /// Parse one `ui_element` (§10.1: `ui_widget_call | ui_control_flow |
+    /// statement`). `if`/`for` are the control-flow forms with `ui_tree` bodies;
+    /// `match` (the third §10.1 control-flow form, standard `match_arm`s) is an
+    /// ordinary `match` expression and falls through to `statement`. A
+    /// `ui_widget_call` is `IDENT "("` at the head (callee names that are
+    /// graduated keywords are rejected as plain idents — the standard
+    /// reserved-word fail-loud, corpus uses non-keyword element names).
+    fn parseUiElement(self: *Parser) ParseError!ast_mod.UiElem {
+        if (self.peek() == .kw_if) return try self.parseUiIf();
+        if (self.peek() == .kw_for) return try self.parseUiFor();
+        if (self.peek() == .ident and self.peekNext() == .lparen) return try self.parseUiWidgetCall();
+        const stmt = try self.parseStmt();
+        return .{ .kind = .statement, .index = stmt.raw() };
+    }
+
+    /// Parse a `ui_widget_call` (`IDENT "(" [arg_list] ")" [ "{" ui_tree "}" ]`).
+    /// The callee + args build a shared `.fn_call` node (positional + named args,
+    /// the `parseCallArgList` machinery); the optional children block recurses
+    /// into `parseUiTree`.
+    fn parseUiWidgetCall(self: *Parser) ParseError!ast_mod.UiElem {
+        const callee_tok = try self.advance(); // IDENT callee
+        const callee_id = try self.internSlice(callee_tok.span);
+        const callee_expr = try self.arena.addExpr(self.gpa, .path, callee_id, callee_tok.span);
+        _ = try self.expect(.lparen, "expected '(' after the widget element name");
+        var buf: CallArgsBuf = .{};
+        defer buf.deinit(self.gpa);
+        {
+            const saved = self.no_struct_lit;
+            self.no_struct_lit = false; // struct-literal / closure args legal in the parens
+            defer self.no_struct_lit = saved;
+            try self.parseCallArgList(&buf);
+        }
+        const rparen = try self.expect(.rparen, "expected ')' to close the widget element arguments");
+        const call = try self.arena.addCall(self.gpa, callee_expr, buf.args.items, buf.namesSlice(), .{
+            .byte_start = callee_tok.span.byte_start,
+            .byte_end = rparen.span.byte_end,
+        });
+        var children_start: u32 = 0;
+        var children_len: u32 = 0;
+        var end_byte = rparen.span.byte_end;
+        if (self.peek() == .lbrace) {
+            _ = try self.advance(); // '{'
+            const children = try self.parseUiTree();
+            const closing = try self.expect(.rbrace, "expected '}' to close the widget element children");
+            children_start = children.start;
+            children_len = children.len;
+            end_byte = closing.span.byte_end;
+        }
+        const idx: u32 = @intCast(self.arena.ui_widget_calls.items.len);
+        try self.arena.ui_widget_calls.append(self.gpa, .{
+            .call = call,
+            .children_start = children_start,
+            .children_len = children_len,
+            .span = .{ .byte_start = callee_tok.span.byte_start, .byte_end = end_byte },
+        });
+        return .{ .kind = .widget_call, .index = idx };
+    }
+
+    /// Parse a `ui_control_flow` `if` (`"if" expression "{" ui_tree "}" [ "else"
+    /// "{" ui_tree "}" ]`, §10.1). The head uses `parseExprNoStruct` so the
+    /// trailing `{` opens the then-branch body, not a struct literal.
+    fn parseUiIf(self: *Parser) ParseError!ast_mod.UiElem {
+        const kw_span = (try self.advance()).span; // 'if'
+        const cond = try self.parseExprNoStruct(0);
+        _ = try self.expect(.lbrace, "expected '{' to open the if branch (ui_tree)");
+        const then_tree = try self.parseUiTree();
+        var closing = try self.expect(.rbrace, "expected '}' to close the if branch");
+        var else_start: u32 = 0;
+        var else_len: u32 = 0;
+        if (self.peek() == .kw_else) {
+            _ = try self.advance(); // 'else'
+            _ = try self.expect(.lbrace, "expected '{' to open the else branch (ui_tree)");
+            const else_tree = try self.parseUiTree();
+            closing = try self.expect(.rbrace, "expected '}' to close the else branch");
+            else_start = else_tree.start;
+            else_len = else_tree.len;
+        }
+        const idx: u32 = @intCast(self.arena.ui_ifs.items.len);
+        try self.arena.ui_ifs.append(self.gpa, .{
+            .cond = cond,
+            .then_start = then_tree.start,
+            .then_len = then_tree.len,
+            .else_start = else_start,
+            .else_len = else_len,
+            .span = .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end },
+        });
+        return .{ .kind = .if_, .index = idx };
+    }
+
+    /// Parse a `ui_control_flow` `for` (`"for" IDENT [ "," IDENT ] "in" expression
+    /// "{" ui_tree "}"`, §10.1). The iterable head uses `parseExprNoStruct` so the
+    /// trailing `{` opens the body.
+    fn parseUiFor(self: *Parser) ParseError!ast_mod.UiElem {
+        const for_span = (try self.advance()).span; // 'for'
+        const var_tok = try self.expect(.ident, "expected loop variable after 'for'");
+        const var_name = try self.internSlice(var_tok.span);
+        var index_name: StringId = 0;
+        if (self.peek() == .comma) {
+            _ = try self.advance();
+            const idx_tok = try self.expect(.ident, "expected second binding after ',' in for");
+            index_name = try self.internSlice(idx_tok.span);
+        }
+        _ = try self.expect(.kw_in, "expected 'in' in for loop");
+        const iterable = try self.parseExprNoStruct(0);
+        _ = try self.expect(.lbrace, "expected '{' to open the for body (ui_tree)");
+        const body = try self.parseUiTree();
+        const closing = try self.expect(.rbrace, "expected '}' to close the for body");
+        const idx: u32 = @intCast(self.arena.ui_fors.items.len);
+        try self.arena.ui_fors.append(self.gpa, .{
+            .var_name = var_name,
+            .index_name = index_name,
+            .iterable = iterable,
+            .body_start = body.start,
+            .body_len = body.len,
+            .span = .{ .byte_start = for_span.byte_start, .byte_end = closing.span.byte_end },
+        });
+        return .{ .kind = .for_, .index = idx };
+    }
+
+    /// Parse a `locale` declaration (M0.8 E5 Level B presentation,
+    /// `etch-grammar.md` §10.4: `locale_decl = "locale" IDENT "{" {locale_entry}
+    /// "}"`, `locale_entry = STRING_LITERAL "=" STRING_LITERAL`). IDENT-named →
+    /// registers a symbol. Entries are flat key/value string pairs (the theme
+    /// precedent, with a STRING key + `=` + STRING value). The `kw_locale`
+    /// starter is mirrored in `recoverToTopLevel`'s stop-set IN LOCKSTEP.
+    fn parseLocaleDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'locale'
+        const name_tok = try self.expect(.ident, "expected locale code (identifier) after 'locale'");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start the locale body");
+        const entries_start: u32 = @intCast(self.arena.locale_entries.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const key_tok = try self.expect(.string_literal, "expected a locale entry key (string literal)");
+            _ = try self.expect(.eq, "expected '=' after the locale entry key");
+            const value_tok = try self.expect(.string_literal, "expected a locale entry value (string literal)");
+            try self.arena.locale_entries.append(self.gpa, .{
+                .key = try self.internStringLiteral(key_tok.span),
+                .value = try self.internStringLiteral(value_tok.span),
+                .span = key_tok.span,
+            });
+            _ = try self.match(.comma); // entries are newline-separated; tolerate an optional comma
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the locale body");
+        const entries_len: u32 = @as(u32, @intCast(self.arena.locale_entries.items.len)) - entries_start;
+        _ = try self.arena.addLocaleDecl(self.gpa, .{
+            .name = name_id,
+            .name_span = name_tok.span,
+            .entries_start = entries_start,
+            .entries_len = entries_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
     const DataEntryBody = struct {
@@ -6684,4 +6919,75 @@ test "parser recovers and a valid input_mapping after a broken construct survive
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.input_mapping_decls.items.len);
+}
+
+test "parser builds a widget with params, when clause, recursive ui_tree, and control flow (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\widget HealthBar(entity: Entity)
+        \\  when entity has Health
+        \\{
+        \\  container(direction: .horizontal, gap: 8) {
+        \\    progress_bar(value: ratio, width: 200, color: bar_color)
+        \\    text("hp")
+        \\    if low {
+        \\      text("danger", color: red)
+        \\    } else {
+        \\      text("ok")
+        \\    }
+        \\    for i, slot in slots {
+        \\      text("slot")
+        \\    }
+        \\    button("Heal", on_click: |_| heal())
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.widget_decls.items.len);
+    const decl = result.ast.widget_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 1), decl.params_len);
+    try std.testing.expect(decl.when_root != ast_mod.RuleDecl.none_when);
+    try std.testing.expectEqual(@as(u32, 1), decl.tree_len); // one root: the container
+    // container, progress_bar, text"hp", text"danger", text"ok", text"slot", button.
+    try std.testing.expectEqual(@as(usize, 7), result.ast.ui_widget_calls.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.ui_ifs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.ui_fors.items.len);
+}
+
+test "parser recovers and a valid widget after a broken construct survives (M0.8 E5 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\widget Panel() { text("hi") }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.widget_decls.items.len);
+}
+
+test "parser builds a locale with string key=value entries (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\locale fr {
+        \\  "fp_3f8a2b1c" = "Bonjour"
+        \\  "ui.menu.title" = "Menu Principal"
+        \\  "ui.menu.quit" = "Quitter"
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.locale_decls.items.len);
+    try std.testing.expectEqual(@as(u32, 3), result.ast.locale_decls.items[0].entries_len);
+}
+
+test "parser recovers and a valid locale after a broken construct survives (M0.8 E5 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\locale en { "k" = "v" }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.locale_decls.items.len);
 }

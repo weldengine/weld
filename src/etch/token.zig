@@ -96,6 +96,8 @@ pub const TokenKind = enum {
     kw_theme, // theme declaration (M0.8 E5 Level B presentation)
     kw_motion, // motion declaration (M0.8 E5 Level B presentation — state-based UI animation)
     kw_input_mapping, // input_mapping declaration (M0.8 E5 Level B presentation — STRICT, no execution)
+    kw_widget, // widget declaration (M0.8 E5 Level B presentation — recursive UI tree)
+    kw_locale, // locale declaration (M0.8 E5 Level B presentation — translation table)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -250,6 +252,8 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "theme", .kind = .kw_theme },
     .{ .lexeme = "motion", .kind = .kw_motion },
     .{ .lexeme = "input_mapping", .kind = .kw_input_mapping },
+    .{ .lexeme = "widget", .kind = .kw_widget },
+    .{ .lexeme = "locale", .kind = .kw_locale },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -283,13 +287,11 @@ pub const non_s3_keywords = [_][]const u8{
     "private",
     "effect",
     "shader",
-    "widget",
     "anim_graph",
     "audio_graph",
     "audio_score",
     "scene",
     "prefab",
-    "locale",
     "test",
     "override",
 

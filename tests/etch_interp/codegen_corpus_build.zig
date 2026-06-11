@@ -97,4 +97,6 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p71_theme_dark", .etch_path = "tests/etch_interp/programs/71_theme_dark.etch" },
     .{ .name = "p72_motion_ui", .etch_path = "tests/etch_interp/programs/72_motion_ui.etch" },
     .{ .name = "p73_input_mapping", .etch_path = "tests/etch_interp/programs/73_input_mapping.etch" },
+    .{ .name = "p74_widget_panel", .etch_path = "tests/etch_interp/programs/74_widget_panel.etch" },
+    .{ .name = "p75_locale_en", .etch_path = "tests/etch_interp/programs/75_locale_en.etch" },
 };

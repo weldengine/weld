@@ -169,7 +169,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -203,7 +203,7 @@ fn containsUppercase(s: []const u8) bool {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -320,6 +320,8 @@ pub const TypeChecker = struct {
         try tc.validateThemeDecls();
         try tc.validateMotionDecls();
         try tc.validateInputMappingDecls();
+        try tc.validateWidgetDecls();
+        try tc.validateLocaleDecls();
         try tc.pass2Resolve();
     }
 
@@ -646,6 +648,101 @@ pub const TypeChecker = struct {
             },
             else => null,
         };
+    }
+
+    fn validateWidgetDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .widget_decl) continue;
+            try self.validateWidget(self.arena.widget_decls.items[datas[i]]);
+        }
+    }
+
+    fn validateWidget(self: *TypeChecker, decl: ast_mod.WidgetDecl) !void {
+        // E1620 — the tree must contain at least one ui_element.
+        if (decl.tree_len == 0) {
+            try self.emit(.widget_empty_tree, .error_, decl.name_span, "widget '{s}' has an empty tree (at least one ui_element required)", .{self.arena.strings.slice(decl.name)});
+        }
+        // E1621 — `@screen` and `@worldspace` are `.custom`-kind annotations
+        // (NOT in AnnotationKind), distinguished by name; they are mutually
+        // exclusive. This is the ONLY enforced placement rule — a widget with
+        // no placement annotation is grammar-valid (E1622 RESERVED, ruling 9).
+        var has_screen = false;
+        var has_worldspace = false;
+        var conflict_span = decl.name_span;
+        var i: u32 = 0;
+        while (i < decl.annotations_len) : (i += 1) {
+            const annot = self.arena.annot_pool.items[decl.annotations_extra + i];
+            const aname = self.arena.strings.slice(annot.name);
+            if (std.mem.eql(u8, aname, "screen")) {
+                has_screen = true;
+                conflict_span = annot.span;
+            } else if (std.mem.eql(u8, aname, "worldspace")) {
+                has_worldspace = true;
+                conflict_span = annot.span;
+            }
+        }
+        if (has_screen and has_worldspace) {
+            try self.emit(.widget_screen_worldspace_conflict, .error_, conflict_span, "widget '{s}' has both @screen and @worldspace annotations (mutually exclusive)", .{self.arena.strings.slice(decl.name)});
+        }
+    }
+
+    fn validateLocaleDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .locale_decl) continue;
+            try self.validateLocale(self.arena.locale_decls.items[datas[i]]);
+        }
+    }
+
+    fn validateLocale(self: *TypeChecker, decl: ast_mod.LocaleDecl) !void {
+        const code = self.arena.strings.slice(decl.name);
+        // E1821 — the name must be a well-formed ISO-639 code (FORM check, not
+        // an embedded code table — E5 ruling 4).
+        if (!isValidLocaleCode(code)) {
+            try self.emit(.locale_code_invalid, .error_, decl.name_span, "locale code '{s}' is not a well-formed ISO-639 code (2-3 lowercase letters, optional regional variant)", .{code});
+        }
+        // E1820 — at least one entry.
+        if (decl.entries_len == 0) {
+            try self.emit(.locale_empty, .error_, decl.name_span, "locale '{s}' has no entries (at least one required)", .{code});
+            return;
+        }
+        // E1822 — keys unique within the locale.
+        var seen: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer seen.deinit(self.gpa);
+        var e: u32 = 0;
+        while (e < decl.entries_len) : (e += 1) {
+            const entry = self.arena.locale_entries.items[decl.entries_start + e];
+            const gop = try seen.getOrPut(self.gpa, entry.key);
+            if (gop.found_existing) {
+                try self.emit(.locale_duplicate_key, .error_, entry.span, "duplicate locale key '{s}'", .{self.arena.strings.slice(entry.key)});
+            }
+        }
+    }
+
+    /// ISO-639 FORM check (E5 ruling 4): a 2-3 lowercase-letter language subtag,
+    /// optionally followed by a `-` / `_` regional variant of exactly 2
+    /// uppercase letters (e.g. `en`, `fr`, `zh`, `pt_BR`, `zh-CN`). Validates the
+    /// SHAPE only — membership in an actual code table is the i18n / extractor
+    /// tool's job, NOT an embedded table here.
+    fn isValidLocaleCode(code: []const u8) bool {
+        var lang_len: usize = 0;
+        while (lang_len < code.len and code[lang_len] >= 'a' and code[lang_len] <= 'z') : (lang_len += 1) {}
+        if (lang_len < 2 or lang_len > 3) return false;
+        const rest = code[lang_len..];
+        if (rest.len == 0) return true;
+        // Optional regional variant: separator + exactly 2 uppercase letters.
+        if (rest[0] != '-' and rest[0] != '_') return false;
+        const region = rest[1..];
+        if (region.len != 2) return false;
+        for (region) |c| {
+            if (c < 'A' or c > 'Z') return false;
+        }
+        return true;
     }
 
     fn validateDataTable(self: *TypeChecker, table_idx: u32) !void {
@@ -1767,6 +1864,22 @@ pub const TypeChecker = struct {
                     const decl = self.arena.motion_decls.items[data];
                     try self.registerSymbol(.motion_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .motion);
+                },
+                .widget_decl => {
+                    // A `widget` (M0.8 E5 Level B) is TYPE_IDENT-named → it
+                    // registers a symbol; the ui_tree + the `@screen`/`@worldspace`
+                    // exclusivity (E1621) are validated in `validateWidgetDecls`.
+                    const decl = self.arena.widget_decls.items[data];
+                    try self.registerSymbol(.widget_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .widget);
+                },
+                .locale_decl => {
+                    // A `locale` (M0.8 E5 Level B) is IDENT-named → it registers a
+                    // symbol; entries + the ISO-639 code form are validated in
+                    // `validateLocaleDecls`.
+                    const decl = self.arena.locale_decls.items[data];
+                    try self.registerSymbol(.locale_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .locale);
                 },
                 else => {}, // forward-compatible: unknown items ignored
             }

@@ -191,6 +191,43 @@ pub const DiagnosticCode = enum {
     combo_timing_invalid, // M0.8 E5 — E1808 ComboTimingInvalid (window not a positive duration)
     empty_context, // M0.8 E5 — W1801 EmptyContext (RESERVED: context is a property, not a block)
 
+    // ── widget (E1620-E1628, M0.8 E5 — etch-grammar.md §10.1; E5 rulings 9/10:
+    // the grammar+part2 shape WINS (annotations are OPTIONAL — 2v1 over
+    // validation-ecs §15.2). Deliver E1620 WidgetEmptyTree + E1621
+    // ScreenWorldspaceConflict (the only enforced annotation rule — `@screen`
+    // and `@worldspace` are `.custom`-kind annotations, mutually exclusive,
+    // detected by name). RESERVED with rationale: E1622
+    // WidgetMissingScreenOrWorldspace (annotation OPTIONAL — a normal widget
+    // with no placement annotation is grammar-valid, so the "missing" check
+    // would wrongly reject — the motion-E1660 shape precedent, ruling 9).
+    // DEFERRED (no enum variant, the input_mapping-E1803 precedent): E1623
+    // WidgetChildTypeInvalid + E1628 FocusOrderConflict (child-type / focus
+    // catalogue = engine-ui.md, not attached), E1624 BindingTargetNotFound +
+    // E1625 BindingTypeIncompatible + E1626 OnClickInvalidReturn (`bind
+    // Component.field` has NO EBNF production — defer-structural, ruling 10;
+    // handler-return typing needs the UI module), E1627 LocKeyNotFound
+    // (vacuous — `@loc` key resolution = the `weld-extract-locale` extractor
+    // tool, deferred, ruling 5). The numeric slots E1623-E1628 are reserved in
+    // the catalogue (never reused); they get no enum variant here ──
+    widget_empty_tree, // M0.8 E5 — E1620 WidgetEmptyTree (no ui_element in the tree)
+    widget_screen_worldspace_conflict, // M0.8 E5 — E1621 WidgetScreenWorldspaceConflict (@screen and @worldspace both present)
+    widget_missing_screen_or_worldspace, // M0.8 E5 — E1622 WidgetMissingScreenOrWorldspace (RESERVED: placement annotation is optional, ruling 9)
+
+    // ── locale (E1820-E1822, M0.8 E5 — etch-grammar.md §10.4; E5 rulings 4/5/6:
+    // the grammar shape WINS (IDENT name, flat `STRING = STRING` entries).
+    // Deliver E1820 LocaleEmpty + E1821 LocaleCodeInvalid (an ISO-639 FORM
+    // check — 2-3 lowercase letters + an optional `_XX` / `-XX` regional
+    // variant, NOT an embedded code table, ruling 4) + E1822 DuplicateKey.
+    // Fingerprint generation is the `weld-extract-locale` tool's job (ruling 5:
+    // deferred — Level B is declaration + IR only). DEFERRED (no enum variant,
+    // the input_mapping-E1803 precedent): E1823 InterpolationVariableMismatch +
+    // E1824 PluralRuleInvalid + E1825 PluralOtherMissing (ICU plurals /
+    // interpolation = validation-ecs §27 Phase 3, ruling 6). Their slots are
+    // reserved in the catalogue (never reused) ──
+    locale_empty, // M0.8 E5 — E1820 LocaleEmpty (no entries)
+    locale_code_invalid, // M0.8 E5 — E1821 LocaleCodeInvalid (name is not a well-formed ISO-639 code)
+    locale_duplicate_key, // M0.8 E5 — E1822 DuplicateKey (duplicate translation key)
+
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
@@ -298,6 +335,12 @@ pub const DiagnosticCode = enum {
             .combo_action_ref_not_found => "E1807",
             .combo_timing_invalid => "E1808",
             .empty_context => "W1801",
+            .widget_empty_tree => "E1620",
+            .widget_screen_worldspace_conflict => "E1621",
+            .widget_missing_screen_or_worldspace => "E1622",
+            .locale_empty => "E1820",
+            .locale_code_invalid => "E1821",
+            .locale_duplicate_key => "E1822",
         };
     }
 
@@ -408,6 +451,12 @@ pub const DiagnosticCode = enum {
             .combo_action_ref_not_found => "ComboActionRefNotFound",
             .combo_timing_invalid => "ComboTimingInvalid",
             .empty_context => "EmptyContext",
+            .widget_empty_tree => "WidgetEmptyTree",
+            .widget_screen_worldspace_conflict => "WidgetScreenWorldspaceConflict",
+            .widget_missing_screen_or_worldspace => "WidgetMissingScreenOrWorldspace",
+            .locale_empty => "LocaleEmpty",
+            .locale_code_invalid => "LocaleCodeInvalid",
+            .locale_duplicate_key => "DuplicateKey",
         };
     }
 };

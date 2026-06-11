@@ -1109,3 +1109,51 @@ input_mapping "Gameplay" {
   }
 }
 ```
+
+## Widget (E5 — §10.1)
+
+The grammar §10.1 shape wins (E5 rulings 9/10): `widget TYPE_IDENT "(" [param_list]
+")" [when_clause] "{" ui_tree "}"`, with `ui_element = ui_widget_call |
+ui_control_flow | statement` (recursive), `ui_widget_call = IDENT "(" [arg_list]
+")" [ "{" ui_tree "}" ]`, and `ui_control_flow` covering `if … else`, `for … in`,
+and `match`. `@screen`/`@worldspace` are `.custom`-kind annotations, mutually
+exclusive (E1621); the placement annotation is OPTIONAL (E1622 RESERVED).
+`bind Component.field` has NO EBNF production (E1623-E1628 DEFERRED — part2
+binding examples are non-conform, kept out of the harness); `@loc` key resolution
+= the extractor tool (E1627 vacuous).
+
+```etch
+@screen(sort_order: 0)
+widget MainMenu() {
+  container(direction: .vertical, align: .center) {
+    text("My Game", font_size: 48)
+    button("Play", on_click: |_| open_screen(.character_select))
+    button("Quit", on_click: |_| quit())
+  }
+}
+
+@worldspace(billboard: true, max_distance: 30.0)
+widget EnemyHealthPlate(entity: Entity)
+  when entity has Health and entity has EnemyTag
+{
+  progress_bar(value: entity.get(Health).current / entity.get(Health).max, width: 80, height: 6, color: red)
+}
+```
+
+## Locale (E5 — §10.4)
+
+The grammar §10.4 shape wins (E5 ruling 4): `locale IDENT "{" { STRING_LITERAL "="
+STRING_LITERAL } "}"`. E1821 validates the locale-code FORM only (2-3 lowercase
+letters + an optional `_XX`/`-XX` regional variant — NOT an embedded code table).
+Fingerprint keys (`fp_*`) are produced by the `weld-extract-locale` tool —
+generation DEFERRED (E5 ruling 5); ICU plurals / interpolation are Phase 3
+(E1823-E1825 DEFERRED).
+
+```etch
+locale en {
+  "fp_3f8a2b1c" = "Welcome, traveler!"
+  "ui.menu.title" = "Main Menu"
+  "ui.menu.resume" = "Resume"
+  "ui.menu.quit" = "Quit"
+}
+```

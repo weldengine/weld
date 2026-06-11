@@ -1361,6 +1361,117 @@ pub const InputCombo = struct {
     span: SourceSpan,
 };
 
+/// Side-slab entry for a `widget` declaration (M0.8 E5 Level B presentation,
+/// `etch-grammar.md` §10.1: `widget_decl = "widget" TYPE_IDENT "(" [param_list]
+/// ")" [when_clause] "{" ui_tree "}"`). TYPE_IDENT-named → it registers a
+/// symbol (the motion precedent). The recursive `ui_tree` lives in a
+/// `(start, len)` run of `arena.ui_elems`. `@screen` / `@worldspace` arrive as
+/// `.custom` annotations (NOT in `AnnotationKind`) distinguished by name —
+/// their mutual exclusivity is E1621; the placement annotation is OPTIONAL
+/// (E1622 RESERVED, E5 ruling 9). `bind Component.field` has NO EBNF production
+/// (E1623-E1628 DEFERRED, E5 ruling 10); `@loc` key resolution = extractor
+/// tooling (E1627 vacuous, E5 ruling 5).
+pub const WidgetDecl = struct {
+    name: StringId, // TYPE_IDENT
+    name_span: SourceSpan, // for the diagnostics
+    when_root: u32, // RuleDecl.none_when if absent (for @worldspace, §10.1)
+    params_start: u32, // index into `arena.widget_params`
+    params_len: u32,
+    tree_start: u32, // index into `arena.ui_elems` (the root ui_tree run)
+    tree_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
+/// One `widget` parameter (`IDENT ":" type`, §10.1 `param_list`). The type is
+/// interned as its source TEXT (the input_mapping action/combo-type precedent);
+/// widget params are structural (rendered into the descriptor, never resolved —
+/// Level B).
+pub const WidgetParam = struct {
+    name: StringId,
+    type_name: StringId, // interned type TEXT
+};
+
+/// Kind of one `ui_element` (§10.1: `ui_element = ui_widget_call |
+/// ui_control_flow | statement`). `if_` / `for_` are the two control-flow forms
+/// with `ui_tree` bodies; `match` (the third §10.1 control-flow form, whose
+/// arms are standard `match_arm`s, NOT ui_trees) falls under `statement` since
+/// it is an ordinary `match` expression.
+pub const UiElemKind = enum { widget_call, if_, for_, statement };
+
+/// One `ui_element`: `index` is interpreted per `kind`. For `.widget_call` /
+/// `.if_` / `.for_` it indexes `arena.ui_widget_calls` / `arena.ui_ifs` /
+/// `arena.ui_fors`; for `.statement` it is the raw `NodeId` of the statement
+/// (`@bitCast`) — statements are already arena nodes, so no side slab is
+/// needed (the dialogue `(kind, index)` cell, specialised for the stmt reuse).
+pub const UiElem = struct {
+    kind: UiElemKind,
+    index: u32,
+};
+
+/// One `ui_widget_call` (`IDENT "(" [arg_list] ")" [ "{" ui_tree "}" ]`,
+/// §10.1). `call` is a `.fn_call` expr node (callee path + positional/named
+/// args, the shared call machinery); on-click closures among the args render
+/// as the `<closure>` presence marker (the input_mapping `output_mapping`
+/// precedent — the renderer rejects closures). The optional children block is a
+/// `(start, len)` run of `arena.ui_elems` (`children_len == 0` → leaf call).
+pub const UiWidgetCall = struct {
+    call: NodeId,
+    children_start: u32, // index into `arena.ui_elems`
+    children_len: u32,
+    span: SourceSpan,
+};
+
+/// One `ui_control_flow` `if` (`"if" expression "{" ui_tree "}" [ "else" "{"
+/// ui_tree "}" ]`, §10.1). The then/else bodies are `(start, len)` runs of
+/// `arena.ui_elems`; `else_len == 0` means no else branch.
+pub const UiIf = struct {
+    cond: NodeId,
+    then_start: u32,
+    then_len: u32,
+    else_start: u32,
+    else_len: u32,
+    span: SourceSpan,
+};
+
+/// One `ui_control_flow` `for` (`"for" IDENT [ "," IDENT ] "in" expression "{"
+/// ui_tree "}"`, §10.1). `index_name == 0` when the second binding is absent.
+/// The body is a `(start, len)` run of `arena.ui_elems`.
+pub const UiFor = struct {
+    var_name: StringId,
+    index_name: StringId, // `0` if no second binding
+    iterable: NodeId,
+    body_start: u32,
+    body_len: u32,
+    span: SourceSpan,
+};
+
+/// Side-slab entry for a `locale` declaration (M0.8 E5 Level B presentation,
+/// `etch-grammar.md` §10.4: `locale_decl = "locale" IDENT "{" {locale_entry}
+/// "}"`, `locale_entry = STRING_LITERAL "=" STRING_LITERAL`). IDENT-named → it
+/// registers a symbol. The `name` is the locale code (E1821 validates its
+/// ISO-639 FORM, not an embedded table — E5 ruling 4). Fingerprint generation
+/// is the `weld-extract-locale` tool's job (E5 ruling 5: deferred); ICU plurals
+/// / interpolation are Phase 3 (E1823-E1825 deferred, E5 ruling 6). Entries
+/// live in a `(start, len)` run of `arena.locale_entries`.
+pub const LocaleDecl = struct {
+    name: StringId, // IDENT (the locale code)
+    name_span: SourceSpan, // for the E1820/E1821 diagnostics
+    entries_start: u32, // index into `arena.locale_entries`
+    entries_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
+/// One `locale_entry` (`STRING_LITERAL "=" STRING_LITERAL`): a translation key
+/// bound to its translated text. Both sides are decoded string-literal content
+/// (the key is a fingerprint hash or a custom id; the value is the translation).
+pub const LocaleEntry = struct {
+    key: StringId,
+    value: StringId,
+    span: SourceSpan,
+};
+
 /// Kind of one routine trigger alternative (M0.8 E4, `etch-grammar.md`
 /// §8.2 `trigger_expr`): `at TIME_LITERAL` / `after IDENT` /
 /// `on_event TYPE_IDENT`. `or`-chains are stored as a flat run of
@@ -1724,6 +1835,14 @@ pub const AstArena = struct {
     input_actions: std.ArrayListUnmanaged(InputAction) = .empty,
     input_binds: std.ArrayListUnmanaged(InputBind) = .empty,
     input_combos: std.ArrayListUnmanaged(InputCombo) = .empty,
+    widget_decls: std.ArrayListUnmanaged(WidgetDecl) = .empty,
+    widget_params: std.ArrayListUnmanaged(WidgetParam) = .empty,
+    ui_elems: std.ArrayListUnmanaged(UiElem) = .empty,
+    ui_widget_calls: std.ArrayListUnmanaged(UiWidgetCall) = .empty,
+    ui_ifs: std.ArrayListUnmanaged(UiIf) = .empty,
+    ui_fors: std.ArrayListUnmanaged(UiFor) = .empty,
+    locale_decls: std.ArrayListUnmanaged(LocaleDecl) = .empty,
+    locale_entries: std.ArrayListUnmanaged(LocaleEntry) = .empty,
     quest_decls: std.ArrayListUnmanaged(QuestDecl) = .empty,
     quest_properties: std.ArrayListUnmanaged(QuestProperty) = .empty,
     quest_stages: std.ArrayListUnmanaged(QuestStage) = .empty,
@@ -1912,6 +2031,14 @@ pub const AstArena = struct {
         self.input_actions.deinit(gpa);
         self.input_binds.deinit(gpa);
         self.input_combos.deinit(gpa);
+        self.widget_decls.deinit(gpa);
+        self.widget_params.deinit(gpa);
+        self.ui_elems.deinit(gpa);
+        self.ui_widget_calls.deinit(gpa);
+        self.ui_ifs.deinit(gpa);
+        self.ui_fors.deinit(gpa);
+        self.locale_decls.deinit(gpa);
+        self.locale_entries.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
@@ -2386,6 +2513,25 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.input_mapping_decls.items.len);
         try self.input_mapping_decls.append(gpa, decl);
         return try self.addItem(gpa, .input_mapping_decl, idx, span);
+    }
+
+    /// `widget Name(params) [when …] { ui_tree }` (M0.8 E5 Level B,
+    /// `etch-grammar.md` §10.1). The caller appends the params and the recursive
+    /// `ui_tree` (ui_elems / ui_widget_calls / ui_ifs / ui_fors) to their slabs
+    /// beforehand, passing the ranges in `decl`.
+    pub fn addWidgetDecl(self: *AstArena, gpa: std.mem.Allocator, decl: WidgetDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.widget_decls.items.len);
+        try self.widget_decls.append(gpa, decl);
+        return try self.addItem(gpa, .widget_decl, idx, span);
+    }
+
+    /// `locale code { "key" = "value" }` (M0.8 E5 Level B, `etch-grammar.md`
+    /// §10.4). The caller appends the entries to `arena.locale_entries`
+    /// beforehand, passing the range in `decl`.
+    pub fn addLocaleDecl(self: *AstArena, gpa: std.mem.Allocator, decl: LocaleDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.locale_decls.items.len);
+        try self.locale_decls.append(gpa, decl);
+        return try self.addItem(gpa, .locale_decl, idx, span);
     }
 
     /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The
