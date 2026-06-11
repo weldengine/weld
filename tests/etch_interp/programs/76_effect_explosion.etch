@@ -1,0 +1,43 @@
+// Differential 76 — Level-B `effect` (M0.8 E6 render/VFX). VFX-only since v0.6
+// (gameplay buffs moved to `data : EffectDef`). Serialized-IR parity: the
+// interpreter BUILDS the effect descriptor, the cooked Zig EMITS it; both
+// serialize through the shared canonical serializer (`descriptor_types.zig`)
+// and must produce byte-identical dumps (LEVEL-B PROOF CONTRACT). The grammar
+// §9.2 shape: an optional `params { annotated_field }` block, `emitter`
+// sub-blocks of bare `IDENT: expr` properties (STRICT, no annotation — the
+// ability ruling-15 precedent; the part2 §19 example's `@unit(.seconds)` is
+// omitted, KB-patch at close), and `on Emitter.event { … }` handlers. The
+// structural validations DELIVER (E1600 EffectEmptyEmitters / E1601
+// DuplicateEmitterName / E1604 EmitterRefNotFound); the Ember-semantic ones
+// (E1602/E1603/E1605/E1606/W1600/W1601) are DEFERRED-no-variant (the renderer /
+// particle-event / GPU-param catalogues are not attached — Phase 2+). Param
+// types + defaults, emitter property values, and the handler body all flow
+// through the shared canonical renderer on both backends. No VFX executes.
+event VFXImpact {
+  intensity: float
+}
+
+effect Explosion {
+  params {
+    intensity: float = 1.0
+    color: Color = #FF6600
+  }
+
+  emitter Flash {
+    shape: point
+    burst: 1
+    lifetime: 0.1
+    size: 2.0
+  }
+
+  emitter Debris {
+    shape: sphere
+    burst: 50
+    lifetime: 1.5
+    gravity: -9.81
+  }
+
+  on Debris.collision {
+    emit VFXImpact { intensity: 1.0 }
+  }
+}

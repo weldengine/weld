@@ -1472,6 +1472,53 @@ pub const LocaleEntry = struct {
     span: SourceSpan,
 };
 
+/// Side-slab entry for an `effect` declaration (M0.8 E6 Level B VFX,
+/// `etch-grammar.md` §9.2: `effect_decl = "effect" TYPE_IDENT "{"
+/// [params_block] {emitter_decl} {effect_event_handler} "}"`). VFX-only since
+/// v0.6 (gameplay buffs moved to `data : EffectDef`). The optional
+/// `params { annotated_field }` block lives in a `(start, len)` run of the
+/// shared `arena.fields` (the component/resource field slab, reused via
+/// `parseField`); emitters and event handlers live in their own runs.
+pub const EffectDecl = struct {
+    name: StringId, // TYPE_IDENT
+    name_span: SourceSpan,
+    params_start: u32, // index into `arena.fields`
+    params_len: u32,
+    emitters_start: u32, // index into `arena.effect_emitters`
+    emitters_len: u32,
+    handlers_start: u32, // index into `arena.effect_event_handlers`
+    handlers_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
+/// One `emitter_decl` (`"emitter" IDENT "{" {emitter_property} "}"`, §9.2).
+/// `emitter_property = IDENT ":" expression` — bare name:expr pairs, STRICT
+/// no-annotation (the grammar production has no annotation slot; the ability
+/// ruling-15 precedent — the example's `@unit(.seconds) lifetime` is omitted,
+/// KB-patch part2 §19 at close). Properties live in a `(start, len)` run of
+/// `arena.struct_lit_fields` (name + value-expr, exactly `StructLitField`).
+pub const EffectEmitter = struct {
+    name: StringId, // IDENT
+    props_start: u32, // index into `arena.struct_lit_fields`
+    props_len: u32,
+    span: SourceSpan,
+};
+
+/// One `effect_event_handler` (`"on" IDENT "." IDENT block`, §9.2): reacts to
+/// a particle event (`on Debris.collision { … }`). `emitter` is the referenced
+/// emitter name (E1604 EmitterRefNotFound checks it resolves within the
+/// effect), `event` is the bare event ident (E1605 EmitterEventUnknown is
+/// DEFERRED — the Ember event catalogue is not attached). The body is a
+/// statement run in `arena.extra`, rendered to canonical text (never executed).
+pub const EffectEventHandler = struct {
+    emitter: StringId, // IDENT
+    event: StringId, // IDENT
+    body_start: u32, // statement run in `arena.extra`
+    body_len: u32,
+    span: SourceSpan,
+};
+
 /// Kind of one routine trigger alternative (M0.8 E4, `etch-grammar.md`
 /// §8.2 `trigger_expr`): `at TIME_LITERAL` / `after IDENT` /
 /// `on_event TYPE_IDENT`. `or`-chains are stored as a flat run of
@@ -1843,6 +1890,9 @@ pub const AstArena = struct {
     ui_fors: std.ArrayListUnmanaged(UiFor) = .empty,
     locale_decls: std.ArrayListUnmanaged(LocaleDecl) = .empty,
     locale_entries: std.ArrayListUnmanaged(LocaleEntry) = .empty,
+    effect_decls: std.ArrayListUnmanaged(EffectDecl) = .empty,
+    effect_emitters: std.ArrayListUnmanaged(EffectEmitter) = .empty,
+    effect_event_handlers: std.ArrayListUnmanaged(EffectEventHandler) = .empty,
     quest_decls: std.ArrayListUnmanaged(QuestDecl) = .empty,
     quest_properties: std.ArrayListUnmanaged(QuestProperty) = .empty,
     quest_stages: std.ArrayListUnmanaged(QuestStage) = .empty,
@@ -2039,6 +2089,9 @@ pub const AstArena = struct {
         self.ui_fors.deinit(gpa);
         self.locale_decls.deinit(gpa);
         self.locale_entries.deinit(gpa);
+        self.effect_decls.deinit(gpa);
+        self.effect_emitters.deinit(gpa);
+        self.effect_event_handlers.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
@@ -2532,6 +2585,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.locale_decls.items.len);
         try self.locale_decls.append(gpa, decl);
         return try self.addItem(gpa, .locale_decl, idx, span);
+    }
+
+    /// `effect Name { [params] {emitter} {handler} }` (M0.8 E6,
+    /// `etch-grammar.md` §9.2). The caller appends the params fields, emitters,
+    /// and event handlers to their slabs beforehand, passing the ranges in `decl`.
+    pub fn addEffectDecl(self: *AstArena, gpa: std.mem.Allocator, decl: EffectDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.effect_decls.items.len);
+        try self.effect_decls.append(gpa, decl);
+        return try self.addItem(gpa, .effect_decl, idx, span);
     }
 
     /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The

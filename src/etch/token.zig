@@ -98,6 +98,7 @@ pub const TokenKind = enum {
     kw_input_mapping, // input_mapping declaration (M0.8 E5 Level B presentation — STRICT, no execution)
     kw_widget, // widget declaration (M0.8 E5 Level B presentation — recursive UI tree)
     kw_locale, // locale declaration (M0.8 E5 Level B presentation — translation table)
+    kw_effect, // effect declaration (M0.8 E6 Level B VFX — emitters + event handlers, VFX-only since v0.6)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -254,6 +255,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "input_mapping", .kind = .kw_input_mapping },
     .{ .lexeme = "widget", .kind = .kw_widget },
     .{ .lexeme = "locale", .kind = .kw_locale },
+    .{ .lexeme = "effect", .kind = .kw_effect },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -285,7 +287,6 @@ pub const non_s3_keywords = [_][]const u8{
     "import",
     "const",
     "private",
-    "effect",
     "shader",
     "anim_graph",
     "audio_graph",

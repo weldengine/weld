@@ -228,6 +228,17 @@ pub const DiagnosticCode = enum {
     locale_code_invalid, // M0.8 E5 — E1821 LocaleCodeInvalid (name is not a well-formed ISO-639 code)
     locale_duplicate_key, // M0.8 E5 — E1822 DuplicateKey (duplicate translation key)
 
+    // ── effect (E1600/E1601/E1604, M0.8 E6 — etch-grammar.md §9.2, Level-B
+    //    VFX. The structural checks DELIVER; the Ember-semantic ones are
+    //    DEFERRED-no-variant: E1602 ParamTypeInvalid / E1603 SpawnRateInvalid /
+    //    E1605 EmitterEventUnknown / E1606 RendererInvalid / W1600
+    //    EffectNoRenderer / W1601 NestedEffectDepth all need the Ember catalogue
+    //    (renderers, particle-event names, GPU param types) which is not
+    //    attached — Phase 2+.) ──
+    effect_empty_emitters, // M0.8 E6 — E1600 EffectEmptyEmitters (no emitter)
+    duplicate_emitter_name, // M0.8 E6 — E1601 DuplicateEmitterName
+    emitter_ref_not_found, // M0.8 E6 — E1604 EmitterRefNotFound (on X.event where X is not an emitter of this effect)
+
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
@@ -341,6 +352,9 @@ pub const DiagnosticCode = enum {
             .locale_empty => "E1820",
             .locale_code_invalid => "E1821",
             .locale_duplicate_key => "E1822",
+            .effect_empty_emitters => "E1600",
+            .duplicate_emitter_name => "E1601",
+            .emitter_ref_not_found => "E1604",
         };
     }
 
@@ -457,6 +471,9 @@ pub const DiagnosticCode = enum {
             .locale_empty => "LocaleEmpty",
             .locale_code_invalid => "LocaleCodeInvalid",
             .locale_duplicate_key => "DuplicateKey",
+            .effect_empty_emitters => "EffectEmptyEmitters",
+            .duplicate_emitter_name => "DuplicateEmitterName",
+            .emitter_ref_not_found => "EmitterRefNotFound",
         };
     }
 };

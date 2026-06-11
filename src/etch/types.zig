@@ -169,7 +169,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -203,7 +203,7 @@ fn containsUppercase(s: []const u8) bool {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -322,6 +322,7 @@ pub const TypeChecker = struct {
         try tc.validateInputMappingDecls();
         try tc.validateWidgetDecls();
         try tc.validateLocaleDecls();
+        try tc.validateEffectDecls();
         try tc.pass2Resolve();
     }
 
@@ -743,6 +744,45 @@ pub const TypeChecker = struct {
             if (c < 'A' or c > 'Z') return false;
         }
         return true;
+    }
+
+    fn validateEffectDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .effect_decl) continue;
+            try self.validateEffect(self.arena.effect_decls.items[datas[i]]);
+        }
+    }
+
+    /// `effect` validations (M0.8 E6, `etch-validation-ecs.md` §13). DELIVER the
+    /// structural checks; the Ember-semantic ones (E1602/E1603/E1605/E1606/
+    /// W1600/W1601) are DEFERRED-no-variant (catalogue not attached).
+    fn validateEffect(self: *TypeChecker, decl: ast_mod.EffectDecl) !void {
+        // E1601 — emitter names unique within the effect; the set also backs E1604.
+        var emitters: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer emitters.deinit(self.gpa);
+        var e: u32 = 0;
+        while (e < decl.emitters_len) : (e += 1) {
+            const em = self.arena.effect_emitters.items[decl.emitters_start + e];
+            const gop = try emitters.getOrPut(self.gpa, em.name);
+            if (gop.found_existing) {
+                try self.emit(.duplicate_emitter_name, .error_, em.span, "duplicate emitter '{s}' in this effect", .{self.arena.strings.slice(em.name)});
+            }
+        }
+        // E1600 — at least one emitter required.
+        if (decl.emitters_len == 0) {
+            try self.emit(.effect_empty_emitters, .error_, decl.name_span, "effect '{s}' has no emitter (at least one required)", .{self.arena.strings.slice(decl.name)});
+        }
+        // E1604 — every `on Emitter.event` handler references a declared emitter.
+        var h: u32 = 0;
+        while (h < decl.handlers_len) : (h += 1) {
+            const handler = self.arena.effect_event_handlers.items[decl.handlers_start + h];
+            if (!emitters.contains(handler.emitter)) {
+                try self.emit(.emitter_ref_not_found, .error_, handler.span, "event handler references '{s}', which is not an emitter of this effect", .{self.arena.strings.slice(handler.emitter)});
+            }
+        }
     }
 
     fn validateDataTable(self: *TypeChecker, table_idx: u32) !void {
@@ -1880,6 +1920,14 @@ pub const TypeChecker = struct {
                     const decl = self.arena.locale_decls.items[data];
                     try self.registerSymbol(.locale_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .locale);
+                },
+                .effect_decl => {
+                    // An `effect` (M0.8 E6 Level B VFX) is TYPE_IDENT-named → it
+                    // registers a symbol; emitters / handlers / the ≥1-emitter
+                    // rule are validated in `validateEffectDecls`.
+                    const decl = self.arena.effect_decls.items[data];
+                    try self.registerSymbol(.effect_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .effect);
                 },
                 else => {}, // forward-compatible: unknown items ignored
             }

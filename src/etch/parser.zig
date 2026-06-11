@@ -510,7 +510,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect => return,
                 else => _ = try self.advance(),
             }
         }
@@ -549,6 +549,7 @@ pub const Parser = struct {
             .kw_input_mapping => try self.parseInputMappingDecl(annotations),
             .kw_widget => try self.parseWidgetDecl(annotations),
             .kw_locale => try self.parseLocaleDecl(annotations),
+            .kw_effect => try self.parseEffectDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -562,7 +563,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -2185,6 +2186,132 @@ pub const Parser = struct {
             .annotations_extra = annotations.start,
             .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// `effect_decl = "effect" TYPE_IDENT "{" [params_block] {emitter_decl}
+    /// {effect_event_handler} "}"` (M0.8 E6, `etch-grammar.md` §9.2). VFX-only
+    /// since v0.6. `params`/`emitter`/`on` are CONTEXTUAL idents (matched by
+    /// lexeme — `effect` is the only graduated keyword). The optional params
+    /// block reuses `parseField` (the canonical `annotated_field` consumer)
+    /// into the shared `arena.fields` run; emitters and handlers follow the
+    /// grammar order (all emitters, then all handlers).
+    fn parseEffectDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'effect'
+        const name_tok = try self.expect(.type_ident, "expected effect name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start the effect body");
+
+        // Optional `params { annotated_field }` block (shared with shader /
+        // anim_graph / audio_graph — `parseField` into `arena.fields`).
+        const params_start: u32 = @intCast(self.arena.fields.items.len);
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "params")) {
+            _ = try self.advance(); // 'params'
+            _ = try self.expect(.lbrace, "expected '{' to start the effect params block");
+            while (self.peek() != .rbrace and self.peek() != .eof) {
+                try self.surfaceTokenErrors();
+                const field_annotations = try self.parseAnnotations();
+                try self.parseField(field_annotations);
+                _ = try self.match(.comma);
+            }
+            _ = try self.expect(.rbrace, "expected '}' to close the effect params block");
+        }
+        const params_len: u32 = @as(u32, @intCast(self.arena.fields.items.len)) - params_start;
+
+        // `{ emitter_decl }` — at least one is required (E1600 EffectEmptyEmitters).
+        const emitters_start: u32 = @intCast(self.arena.effect_emitters.items.len);
+        while (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "emitter")) {
+            try self.surfaceTokenErrors();
+            try self.parseEffectEmitter();
+        }
+        const emitters_len: u32 = @as(u32, @intCast(self.arena.effect_emitters.items.len)) - emitters_start;
+
+        // `{ effect_event_handler }` — `on Emitter.event { block }`.
+        const handlers_start: u32 = @intCast(self.arena.effect_event_handlers.items.len);
+        while (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "on")) {
+            try self.surfaceTokenErrors();
+            try self.parseEffectEventHandler();
+        }
+        const handlers_len: u32 = @as(u32, @intCast(self.arena.effect_event_handlers.items.len)) - handlers_start;
+
+        const closing = try self.expect(.rbrace, "expected '}' to close the effect body");
+        _ = try self.arena.addEffectDecl(self.gpa, .{
+            .name = name_id,
+            .name_span = name_tok.span,
+            .params_start = params_start,
+            .params_len = params_len,
+            .emitters_start = emitters_start,
+            .emitters_len = emitters_len,
+            .handlers_start = handlers_start,
+            .handlers_len = handlers_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// `emitter_decl = "emitter" IDENT "{" {emitter_property} "}"` where
+    /// `emitter_property = IDENT ":" expression` (§9.2). Properties are
+    /// newline-separated bare `name: expr` pairs — STRICT, no annotation slot
+    /// (the ability ruling-15 precedent; a leading `@` fails loud at the
+    /// property-name `expect`). Stored as `StructLitField` (name + value-expr).
+    fn parseEffectEmitter(self: *Parser) ParseError!void {
+        const start_span = self.peekSpan();
+        _ = try self.advance(); // 'emitter'
+        // Emitter names are TYPE_IDENT-shaped in practice (`Flash`, `Debris`)
+        // where the grammar says IDENT — the ratified E4 `ident | type_ident`
+        // name-position deviation (journal deviation (d)).
+        const name_tok = switch (self.peek()) {
+            .ident, .type_ident => try self.advance(),
+            else => return self.parseErr(self.peekSpan(), "expected emitter name (identifier) after 'emitter'"),
+        };
+        _ = try self.expect(.lbrace, "expected '{' to start the emitter body");
+        const props_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const pname = try self.expect(.ident, "expected an emitter property name (identifier)");
+            _ = try self.expect(.colon, "expected ':' after the emitter property name");
+            const value = try self.parseExpr(0);
+            try self.arena.struct_lit_fields.append(self.gpa, .{ .name = try self.internSlice(pname.span), .value = value });
+            _ = try self.match(.comma); // properties are newline-separated; tolerate an optional comma
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the emitter body");
+        const props_len: u32 = @as(u32, @intCast(self.arena.struct_lit_fields.items.len)) - props_start;
+        try self.arena.effect_emitters.append(self.gpa, .{
+            .name = try self.internSlice(name_tok.span),
+            .props_start = props_start,
+            .props_len = props_len,
+            .span = .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end },
+        });
+    }
+
+    /// `effect_event_handler = "on" IDENT "." IDENT block` (§9.2): the body is
+    /// a statement run (`parseStmtRun`, the rule-body precedent), rendered to
+    /// canonical text and never executed (Level B).
+    fn parseEffectEventHandler(self: *Parser) ParseError!void {
+        const start_span = self.peekSpan();
+        _ = try self.advance(); // 'on'
+        // `on Debris.collision` — the emitter ref is TYPE_IDENT-shaped, the
+        // event name IDENT-shaped; accept either at both (the ratified E4
+        // name-position deviation (d)).
+        const emitter_tok = switch (self.peek()) {
+            .ident, .type_ident => try self.advance(),
+            else => return self.parseErr(self.peekSpan(), "expected an emitter name (identifier) after 'on'"),
+        };
+        _ = try self.expect(.dot, "expected '.' between the emitter name and the event name");
+        const event_tok = switch (self.peek()) {
+            .ident, .type_ident => try self.advance(),
+            else => return self.parseErr(self.peekSpan(), "expected an event name (identifier) after '.'"),
+        };
+        _ = try self.expect(.lbrace, "expected '{' to start the event handler body");
+        const body = try self.parseStmtRun();
+        const closing = try self.expect(.rbrace, "expected '}' to close the event handler body");
+        try self.arena.effect_event_handlers.append(self.gpa, .{
+            .emitter = try self.internSlice(emitter_tok.span),
+            .event = try self.internSlice(event_tok.span),
+            .body_start = body.start,
+            .body_len = body.len,
+            .span = .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end },
+        });
     }
 
     const DataEntryBody = struct {
@@ -6990,4 +7117,46 @@ test "parser recovers and a valid locale after a broken construct survives (M0.8
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.locale_decls.items.len);
+}
+
+test "parser builds an effect with params, emitters, and an event handler (M0.8 E6)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\effect Explosion {
+        \\  params {
+        \\    intensity: float = 1.0
+        \\    color: Color = #FF6600
+        \\  }
+        \\  emitter Flash {
+        \\    shape: point
+        \\    burst: 1
+        \\    lifetime: 0.1
+        \\  }
+        \\  emitter Debris {
+        \\    burst: 50
+        \\    gravity: -9.81
+        \\  }
+        \\  on Debris.collision {
+        \\    emit VFXImpact { position: [0, 0, 0] }
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.effect_decls.items.len);
+    const decl = result.ast.effect_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 2), decl.params_len);
+    try std.testing.expectEqual(@as(u32, 2), decl.emitters_len);
+    try std.testing.expectEqual(@as(u32, 1), decl.handlers_len);
+}
+
+test "parser recovers and a valid effect after a broken construct survives (M0.8 E6 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\effect Spark { emitter S { burst: 1 } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.effect_decls.items.len);
 }

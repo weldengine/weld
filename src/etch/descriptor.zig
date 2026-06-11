@@ -70,6 +70,7 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
         .input_mapping => |im| freeInputMapping(gpa, im),
         .widget => |w| freeWidget(gpa, w),
         .locale => |l| freeLocale(gpa, l),
+        .effect => |e| freeEffect(gpa, e),
     }
 }
 
@@ -288,6 +289,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .input_mapping_decl => try list.append(gpa, .{ .input_mapping = try buildInputMapping(gpa, arena, arena.input_mapping_decls.items[datas[i]]) }),
             .widget_decl => try list.append(gpa, .{ .widget = try buildWidget(gpa, arena, arena.widget_decls.items[datas[i]]) }),
             .locale_decl => try list.append(gpa, .{ .locale = try buildLocale(gpa, arena, arena.locale_decls.items[datas[i]]) }),
+            .effect_decl => try list.append(gpa, .{ .effect = try buildEffect(gpa, arena, arena.effect_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -948,6 +950,152 @@ fn buildLocale(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.Loc
     const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
     errdefer gpa.free(name);
     return .{ .name = name, .entries = try entries.toOwnedSlice(gpa) };
+}
+
+/// Render an `annotated_field` type to canonical text (named types only — the
+/// `renderAbilityRuleAlloc` precedent; a generic/compound type fails loud).
+/// SHARED by both backends so a params-block field renders identically.
+pub fn renderFieldTypeAlloc(gpa: std.mem.Allocator, arena: *const AstArena, type_node: NodeId) BuildError![]u8 {
+    if (arena.typeNodeKind(type_node) != .named) return error.UnsupportedDescriptorExpr;
+    return try gpa.dupe(u8, arena.strings.slice(arena.named_types.items[arena.typeNodeData(type_node)].name));
+}
+
+/// Render a statement run (a `(start, len)` slice of `arena.extra`) to "; "-joined
+/// canonical text (the `renderAbilityRuleAlloc` body precedent). SHARED by both
+/// backends so an effect event-handler body renders identically.
+pub fn renderStmtRunAlloc(gpa: std.mem.Allocator, arena: *const AstArena, body_start: u32, body_len: u32) BuildError![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var st: u32 = 0;
+    while (st < body_len) : (st += 1) {
+        const stmt: NodeId = @bitCast(arena.extra.items[body_start + st]);
+        const text = try renderStmtAlloc(gpa, arena, stmt);
+        defer gpa.free(text);
+        if (st != 0) try out.appendSlice(gpa, "; ");
+        try out.appendSlice(gpa, text);
+    }
+    return try out.toOwnedSlice(gpa);
+}
+
+fn freeEffect(gpa: std.mem.Allocator, e: types.Effect) void {
+    gpa.free(e.name);
+    for (e.params) |p| {
+        gpa.free(p.name);
+        gpa.free(p.type_name);
+        gpa.free(p.default);
+    }
+    gpa.free(e.params);
+    for (e.emitters) |em| {
+        gpa.free(em.name);
+        for (em.props) |pr| {
+            gpa.free(pr.name);
+            gpa.free(pr.value);
+        }
+        gpa.free(em.props);
+    }
+    gpa.free(e.emitters);
+    for (e.handlers) |h| {
+        gpa.free(h.emitter);
+        gpa.free(h.event);
+        gpa.free(h.body);
+    }
+    gpa.free(e.handlers);
+}
+
+/// Build an `effect` descriptor (M0.8 E6): optional annotated params, emitters
+/// of bare `name: value` properties, and `on Emitter.event { body }` handlers.
+/// All values flow through the shared canonical renderer (byte-identical with
+/// the codegen emit side).
+fn buildEffect(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.EffectDecl) BuildError!types.Effect {
+    var params: std.ArrayListUnmanaged(types.EffectParamDesc) = .empty;
+    errdefer {
+        for (params.items) |p| {
+            gpa.free(p.name);
+            gpa.free(p.type_name);
+            gpa.free(p.default);
+        }
+        params.deinit(gpa);
+    }
+    var pi: u32 = 0;
+    while (pi < decl.params_len) : (pi += 1) {
+        const field = arena.fields.items[decl.params_start + pi];
+        const pname = try gpa.dupe(u8, arena.strings.slice(field.name));
+        errdefer gpa.free(pname);
+        const ptype = try renderFieldTypeAlloc(gpa, arena, field.type_node);
+        errdefer gpa.free(ptype);
+        const pdefault = if (field.default_value.isNone())
+            try gpa.dupe(u8, "")
+        else
+            try renderExprAlloc(gpa, arena, field.default_value);
+        errdefer gpa.free(pdefault);
+        try params.append(gpa, .{ .name = pname, .type_name = ptype, .default = pdefault });
+    }
+
+    var emitters: std.ArrayListUnmanaged(types.EffectEmitterDesc) = .empty;
+    errdefer {
+        for (emitters.items) |em| {
+            gpa.free(em.name);
+            for (em.props) |pr| {
+                gpa.free(pr.name);
+                gpa.free(pr.value);
+            }
+            gpa.free(em.props);
+        }
+        emitters.deinit(gpa);
+    }
+    var ei: u32 = 0;
+    while (ei < decl.emitters_len) : (ei += 1) {
+        const em = arena.effect_emitters.items[decl.emitters_start + ei];
+        var props: std.ArrayListUnmanaged(types.EffectPropDesc) = .empty;
+        errdefer {
+            for (props.items) |pr| {
+                gpa.free(pr.name);
+                gpa.free(pr.value);
+            }
+            props.deinit(gpa);
+        }
+        var fi: u32 = 0;
+        while (fi < em.props_len) : (fi += 1) {
+            const prop = arena.struct_lit_fields.items[em.props_start + fi];
+            const value = try renderExprAlloc(gpa, arena, prop.value);
+            errdefer gpa.free(value);
+            const pname = try gpa.dupe(u8, arena.strings.slice(prop.name));
+            try props.append(gpa, .{ .name = pname, .value = value });
+        }
+        const ename = try gpa.dupe(u8, arena.strings.slice(em.name));
+        errdefer gpa.free(ename);
+        try emitters.append(gpa, .{ .name = ename, .props = try props.toOwnedSlice(gpa) });
+    }
+
+    var handlers: std.ArrayListUnmanaged(types.EffectHandlerDesc) = .empty;
+    errdefer {
+        for (handlers.items) |h| {
+            gpa.free(h.emitter);
+            gpa.free(h.event);
+            gpa.free(h.body);
+        }
+        handlers.deinit(gpa);
+    }
+    var hi: u32 = 0;
+    while (hi < decl.handlers_len) : (hi += 1) {
+        const h = arena.effect_event_handlers.items[decl.handlers_start + hi];
+        const body = try renderStmtRunAlloc(gpa, arena, h.body_start, h.body_len);
+        errdefer gpa.free(body);
+        const emitter = try gpa.dupe(u8, arena.strings.slice(h.emitter));
+        errdefer gpa.free(emitter);
+        const event = try gpa.dupe(u8, arena.strings.slice(h.event));
+        errdefer gpa.free(event);
+        try handlers.append(gpa, .{ .emitter = emitter, .event = event, .body = body });
+    }
+
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    errdefer gpa.free(name);
+    return .{
+        .name = name,
+        .params = try params.toOwnedSlice(gpa),
+        .emitters = try emitters.toOwnedSlice(gpa),
+        .handlers = try handlers.toOwnedSlice(gpa),
+    };
 }
 
 fn buildBehavior(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.BehaviorDecl) BuildError!types.Behavior {

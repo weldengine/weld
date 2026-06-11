@@ -4910,7 +4910,7 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// `true` when the program declares at least one Level-B construct with a
 /// descriptor (M0.8 E4: the six Level-B gameplay constructs).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4938,6 +4938,7 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .input_mapping_decl => try emitInputMappingDescriptor(w, gpa, ast, ast.input_mapping_decls.items[datas[i]]),
             .widget_decl => try emitWidgetDescriptor(w, gpa, ast, ast.widget_decls.items[datas[i]]),
             .locale_decl => try emitLocaleDescriptor(w, ast, ast.locale_decls.items[datas[i]]),
+            .effect_decl => try emitEffectDescriptor(w, gpa, ast, ast.effect_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -5041,6 +5042,76 @@ fn emitMotionDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena
         try emitZigStringLiteral(w, if (tr.target_wildcard) "*" else ast.strings.slice(tr.target));
         try w.print(", .animator = ", .{});
         try emitZigStringLiteral(w, animator);
+        try w.line(" },");
+    }
+    try w.line("    } } },");
+}
+
+/// Emit-structure for an `effect` (M0.8 E6 Level B VFX): the codegen's OWN walk
+/// over params / emitters / handlers; param types via the SHARED
+/// `renderFieldTypeAlloc`, prop values + param defaults via `renderForEmit`,
+/// handler bodies via the SHARED `renderStmtRunAlloc` — byte-identical with the
+/// interp `buildEffect`. Proof-contract split (build vs emit, one renderer).
+fn emitEffectDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.EffectDecl) CodegenError!void {
+    try w.print("    .{{ .effect = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.line(", .params = &[_]etch_descriptor.EffectParamDesc{");
+    var pi: u32 = 0;
+    while (pi < decl.params_len) : (pi += 1) {
+        const field = ast.fields.items[decl.params_start + pi];
+        const ptype = descriptor_mod.renderFieldTypeAlloc(gpa, ast, field.type_node) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        };
+        defer gpa.free(ptype);
+        const pdefault = if (field.default_value.isNone())
+            try gpa.dupe(u8, "")
+        else
+            try renderForEmit(gpa, ast, field.default_value);
+        defer gpa.free(pdefault);
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(field.name));
+        try w.print(", .type_name = ", .{});
+        try emitZigStringLiteral(w, ptype);
+        try w.print(", .default = ", .{});
+        try emitZigStringLiteral(w, pdefault);
+        try w.line(" },");
+    }
+    try w.line("    }, .emitters = &[_]etch_descriptor.EffectEmitterDesc{");
+    var ei: u32 = 0;
+    while (ei < decl.emitters_len) : (ei += 1) {
+        const em = ast.effect_emitters.items[decl.emitters_start + ei];
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(em.name));
+        try w.line(", .props = &[_]etch_descriptor.EffectPropDesc{");
+        var fi: u32 = 0;
+        while (fi < em.props_len) : (fi += 1) {
+            const prop = ast.struct_lit_fields.items[em.props_start + fi];
+            const value = try renderForEmit(gpa, ast, prop.value);
+            defer gpa.free(value);
+            try w.print("            .{{ .name = ", .{});
+            try emitZigStringLiteral(w, ast.strings.slice(prop.name));
+            try w.print(", .value = ", .{});
+            try emitZigStringLiteral(w, value);
+            try w.line(" },");
+        }
+        try w.line("        } },");
+    }
+    try w.line("    }, .handlers = &[_]etch_descriptor.EffectHandlerDesc{");
+    var hi: u32 = 0;
+    while (hi < decl.handlers_len) : (hi += 1) {
+        const h = ast.effect_event_handlers.items[decl.handlers_start + hi];
+        const body = descriptor_mod.renderStmtRunAlloc(gpa, ast, h.body_start, h.body_len) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        };
+        defer gpa.free(body);
+        try w.print("        .{{ .emitter = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(h.emitter));
+        try w.print(", .event = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(h.event));
+        try w.print(", .body = ", .{});
+        try emitZigStringLiteral(w, body);
         try w.line(" },");
     }
     try w.line("    } } },");

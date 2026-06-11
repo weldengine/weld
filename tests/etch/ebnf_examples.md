@@ -1157,3 +1157,33 @@ locale en {
   "ui.menu.quit" = "Quit"
 }
 ```
+
+## Effect (E6 — §9.2)
+
+VFX-only since v0.6: `effect_decl = "effect" TYPE_IDENT "{" [params_block]
+{emitter_decl} {effect_event_handler} "}"`. The optional `params` block holds
+annotated fields; `emitter` sub-blocks carry bare `IDENT: expr` properties
+(STRICT, no annotation — the ability ruling-15 precedent); `on Emitter.event {
+block }` handlers react to particle events. Emitter names are TYPE_IDENT-shaped
+(the ratified `ident | type_ident` name-position deviation).
+
+```etch
+effect Explosion {
+  params {
+    intensity: float = 1.0
+    color: Color = #FF6600
+  }
+  emitter Flash {
+    shape: point
+    burst: 1
+    lifetime: 0.1
+  }
+  emitter Debris {
+    burst: 50
+    gravity: -9.81
+  }
+  on Debris.collision {
+    emit VFXImpact { intensity: 1.0 }
+  }
+}
+```

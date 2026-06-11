@@ -99,4 +99,6 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p73_input_mapping", .etch_path = "tests/etch_interp/programs/73_input_mapping.etch" },
     .{ .name = "p74_widget_panel", .etch_path = "tests/etch_interp/programs/74_widget_panel.etch" },
     .{ .name = "p75_locale_en", .etch_path = "tests/etch_interp/programs/75_locale_en.etch" },
+    // Level-B render/animation/audio/cinematic (M0.8 E6).
+    .{ .name = "p76_effect_explosion", .etch_path = "tests/etch_interp/programs/76_effect_explosion.etch" },
 };

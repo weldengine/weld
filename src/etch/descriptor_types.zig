@@ -347,6 +347,48 @@ pub const LocaleEntryDesc = struct {
     value: []const u8,
 };
 
+/// `effect` descriptor (`etch-ast-ir.md` §3.5: `Effect { params, emitters,
+/// event_handlers }`; M0.8 E6, `etch-grammar.md` §9.2, Level-B VFX-only). The
+/// optional `params` block is annotated fields (`name: type [= default]`);
+/// emitters carry bare `name: value` properties (STRICT, no annotation — the
+/// ability ruling-15 precedent); handlers are `on Emitter.event { body }` with
+/// the body rendered to canonical text (never executed — Ember semantics are
+/// Phase 2+). All field/property/body values flow through the shared canonical
+/// renderer on both backends.
+pub const Effect = struct {
+    name: []const u8,
+    params: []const EffectParamDesc,
+    emitters: []const EffectEmitterDesc,
+    handlers: []const EffectHandlerDesc,
+};
+
+/// One `effect` params-block field (`name: type [= default]`, rendered).
+pub const EffectParamDesc = struct {
+    name: []const u8,
+    type_name: []const u8,
+    default: []const u8, // "" if no `= default`
+};
+
+/// One `emitter` (`name` + its bare `name: value` properties).
+pub const EffectEmitterDesc = struct {
+    name: []const u8,
+    props: []const EffectPropDesc,
+};
+
+/// One emitter property (`name: rendered-value`).
+pub const EffectPropDesc = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// One `on Emitter.event { body }` handler; `body` is the "; "-joined rendered
+/// statement run (the rule-body precedent).
+pub const EffectHandlerDesc = struct {
+    emitter: []const u8,
+    event: []const u8,
+    body: []const u8,
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -362,6 +404,7 @@ pub const Descriptor = union(enum) {
     input_mapping: InputMapping,
     widget: Widget,
     locale: Locale,
+    effect: Effect,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -377,6 +420,7 @@ pub const Descriptor = union(enum) {
             .input_mapping => |im| try writeInputMapping(im, gpa, out),
             .widget => |w| try writeWidget(w, gpa, out),
             .locale => |l| try writeLocale(l, gpa, out),
+            .effect => |e| try writeEffect(e, gpa, out),
         }
     }
 };
@@ -527,6 +571,30 @@ pub fn writeLocale(l: Locale, gpa: std.mem.Allocator, out: *std.ArrayListUnmanag
     try appendFmt(gpa, out, "locale {s} {{\n", .{l.name});
     for (l.entries) |e| {
         try appendFmt(gpa, out, "  entry \"{s}\" = \"{s}\"\n", .{ e.key, e.value });
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `effect` descriptor (M0.8 E6): params,
+/// then emitters with their bare properties, then `on Emitter.event` handlers.
+pub fn writeEffect(e: Effect, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "effect {s} {{\n", .{e.name});
+    for (e.params) |p| {
+        if (p.default.len == 0) {
+            try appendFmt(gpa, out, "  param {s}: {s}\n", .{ p.name, p.type_name });
+        } else {
+            try appendFmt(gpa, out, "  param {s}: {s} = {s}\n", .{ p.name, p.type_name, p.default });
+        }
+    }
+    for (e.emitters) |em| {
+        try appendFmt(gpa, out, "  emitter {s} {{\n", .{em.name});
+        for (em.props) |pr| {
+            try appendFmt(gpa, out, "    {s}: {s}\n", .{ pr.name, pr.value });
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (e.handlers) |h| {
+        try appendFmt(gpa, out, "  on {s}.{s} {{ {s} }}\n", .{ h.emitter, h.event, h.body });
     }
     try out.appendSlice(gpa, "}\n");
 }
