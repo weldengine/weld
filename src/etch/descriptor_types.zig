@@ -389,6 +389,25 @@ pub const EffectHandlerDesc = struct {
     body: []const u8,
 };
 
+/// `audio_graph` descriptor (`etch-ast-ir.md` §3.5: `AudioGraph { nodes,
+/// connections }`; M0.8 E6, `etch-grammar.md` §12.2, Level-B DSP). Declaration-
+/// only: the optional annotated params, the DSP node-building statements
+/// rendered "; "-joined (the rule-body precedent), and the mandatory `output`
+/// sink expression — all canonical text, never executed.
+pub const AudioGraph = struct {
+    name: []const u8,
+    params: []const AudioGraphParamDesc,
+    body: []const u8, // "; "-joined rendered statements ("" if none)
+    output: []const u8, // rendered output(expr) sink
+};
+
+/// One `audio_graph` params-block field (`name: type [= default]`, rendered).
+pub const AudioGraphParamDesc = struct {
+    name: []const u8,
+    type_name: []const u8,
+    default: []const u8, // "" if no `= default`
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -405,6 +424,7 @@ pub const Descriptor = union(enum) {
     widget: Widget,
     locale: Locale,
     effect: Effect,
+    audio_graph: AudioGraph,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -421,6 +441,7 @@ pub const Descriptor = union(enum) {
             .widget => |w| try writeWidget(w, gpa, out),
             .locale => |l| try writeLocale(l, gpa, out),
             .effect => |e| try writeEffect(e, gpa, out),
+            .audio_graph => |ag| try writeAudioGraph(ag, gpa, out),
         }
     }
 };
@@ -596,6 +617,24 @@ pub fn writeEffect(e: Effect, gpa: std.mem.Allocator, out: *std.ArrayListUnmanag
     for (e.handlers) |h| {
         try appendFmt(gpa, out, "  on {s}.{s} {{ {s} }}\n", .{ h.emitter, h.event, h.body });
     }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `audio_graph` descriptor (M0.8 E6): params,
+/// then the "; "-joined DSP statements (if any), then the mandatory output sink.
+pub fn writeAudioGraph(ag: AudioGraph, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "audio_graph {s} {{\n", .{ag.name});
+    for (ag.params) |p| {
+        if (p.default.len == 0) {
+            try appendFmt(gpa, out, "  param {s}: {s}\n", .{ p.name, p.type_name });
+        } else {
+            try appendFmt(gpa, out, "  param {s}: {s} = {s}\n", .{ p.name, p.type_name, p.default });
+        }
+    }
+    if (ag.body.len != 0) {
+        try appendFmt(gpa, out, "  body {{ {s} }}\n", .{ag.body});
+    }
+    try appendFmt(gpa, out, "  output({s})\n", .{ag.output});
     try out.appendSlice(gpa, "}\n");
 }
 

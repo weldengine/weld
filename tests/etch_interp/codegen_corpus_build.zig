@@ -101,4 +101,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p75_locale_en", .etch_path = "tests/etch_interp/programs/75_locale_en.etch" },
     // Level-B render/animation/audio/cinematic (M0.8 E6).
     .{ .name = "p76_effect_explosion", .etch_path = "tests/etch_interp/programs/76_effect_explosion.etch" },
+    .{ .name = "p77_audio_graph_laser", .etch_path = "tests/etch_interp/programs/77_audio_graph_laser.etch" },
 };

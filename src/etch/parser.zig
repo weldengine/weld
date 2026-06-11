@@ -510,7 +510,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph => return,
                 else => _ = try self.advance(),
             }
         }
@@ -550,6 +550,7 @@ pub const Parser = struct {
             .kw_widget => try self.parseWidgetDecl(annotations),
             .kw_locale => try self.parseLocaleDecl(annotations),
             .kw_effect => try self.parseEffectDecl(annotations),
+            .kw_audio_graph => try self.parseAudioGraphDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -563,7 +564,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -2312,6 +2313,69 @@ pub const Parser = struct {
             .body_len = body.len,
             .span = .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end },
         });
+    }
+
+    /// `audio_graph_decl = "audio_graph" TYPE_IDENT "{" [params_block]
+    /// {statement} audio_output "}"` (M0.8 E6, `etch-grammar.md` §12.2). The
+    /// DSP node-building statements run until the MANDATORY `output(expr)` sink
+    /// (`output` is a contextual ident, the sink recognised by the `output (`
+    /// two-token lookahead). A missing sink is a parse error (E1700 RESERVED);
+    /// the grammar's single `audio_output` makes multiple sinks impossible
+    /// (E1701 RESERVED).
+    fn parseAudioGraphDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'audio_graph'
+        const name_tok = try self.expect(.type_ident, "expected audio_graph name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start the audio_graph body");
+
+        const params_start: u32 = @intCast(self.arena.fields.items.len);
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "params")) {
+            _ = try self.advance(); // 'params'
+            _ = try self.expect(.lbrace, "expected '{' to start the audio_graph params block");
+            while (self.peek() != .rbrace and self.peek() != .eof) {
+                try self.surfaceTokenErrors();
+                const field_annotations = try self.parseAnnotations();
+                try self.parseField(field_annotations);
+                _ = try self.match(.comma);
+            }
+            _ = try self.expect(.rbrace, "expected '}' to close the audio_graph params block");
+        }
+        const params_len: u32 = @as(u32, @intCast(self.arena.fields.items.len)) - params_start;
+
+        // DSP node-building statements, up to the mandatory `output(expr)` sink.
+        var stmts: std.ArrayListUnmanaged(u32) = .empty;
+        defer stmts.deinit(self.gpa);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "output") and self.peekNext() == .lparen) break;
+            try self.surfaceTokenErrors();
+            try stmts.append(self.gpa, (try self.parseStmt()).raw());
+        }
+        const body_start: u32 = @intCast(self.arena.extra.items.len);
+        try self.arena.extra.appendSlice(self.gpa, stmts.items);
+        const body_len: u32 = @intCast(stmts.items.len);
+
+        // Mandatory `output(expr)` sink (absence ⇒ parse error, E1700 RESERVED).
+        if (self.peek() != .ident or !std.mem.eql(u8, self.sliceOf(self.peekSpan()), "output")) {
+            return self.parseErrFmt(self.peekSpan(), "expected the mandatory 'output(...)' sink in the audio_graph body, got '{s}'", .{self.sliceOf(self.peekSpan())});
+        }
+        _ = try self.advance(); // 'output'
+        _ = try self.expect(.lparen, "expected '(' after 'output'");
+        const output = try self.parseExpr(0);
+        _ = try self.expect(.rparen, "expected ')' to close 'output(...)'");
+
+        const closing = try self.expect(.rbrace, "expected '}' to close the audio_graph body");
+        _ = try self.arena.addAudioGraphDecl(self.gpa, .{
+            .name = name_id,
+            .name_span = name_tok.span,
+            .params_start = params_start,
+            .params_len = params_len,
+            .body_start = body_start,
+            .body_len = body_len,
+            .output = output,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
     const DataEntryBody = struct {
@@ -7159,4 +7223,47 @@ test "parser recovers and a valid effect after a broken construct survives (M0.8
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.effect_decls.items.len);
+}
+
+test "parser builds an audio_graph with params, statements, and the output sink (M0.8 E6)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\audio_graph LaserBlast {
+        \\  params {
+        \\    charge: float = 0.0
+        \\  }
+        \\  let base = wave_player("samples/laser_base.wav")
+        \\  let synth = oscillator(charge)
+        \\  output(mix(base, synth))
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.audio_graph_decls.items.len);
+    const decl = result.ast.audio_graph_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 1), decl.params_len);
+    try std.testing.expectEqual(@as(u32, 2), decl.body_len);
+    try std.testing.expect(!decl.output.isNone());
+}
+
+test "parser rejects an audio_graph missing the mandatory output sink (M0.8 E6)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\audio_graph Silent {
+        \\  let base = wave_player("x.wav")
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+}
+
+test "parser recovers and a valid audio_graph after a broken construct survives (M0.8 E6 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\audio_graph Tone { output(oscillator(440.0)) }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.audio_graph_decls.items.len);
 }

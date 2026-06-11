@@ -1187,3 +1187,23 @@ effect Explosion {
   }
 }
 ```
+
+## Audio graph (E6 — §12.2)
+
+`audio_graph_decl = "audio_graph" TYPE_IDENT "{" [params_block] {statement}
+audio_output "}"` with `audio_output = "output" "(" expression ")"`. The DSP
+node-building statements run up to the MANDATORY `output(expr)` sink (`output` is
+a contextual ident; the sink is recognised by the `output (` lookahead). A
+missing sink is a parse error (E1700 RESERVED); the single sink makes multiple
+outputs impossible (E1701 RESERVED).
+
+```etch
+audio_graph LaserBlast {
+  params {
+    charge: float = 0.0
+  }
+  let base = wave_player("samples/laser_base.wav")
+  let synth = oscillator(charge)
+  output(mix(base, synth))
+}
+```

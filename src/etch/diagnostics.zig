@@ -239,6 +239,16 @@ pub const DiagnosticCode = enum {
     duplicate_emitter_name, // M0.8 E6 — E1601 DuplicateEmitterName
     emitter_ref_not_found, // M0.8 E6 — E1604 EmitterRefNotFound (on X.event where X is not an emitter of this effect)
 
+    // ── audio_graph (E1700/E1701, M0.8 E6 — etch-grammar.md §12.2, Level-B
+    //    audio. Both RESERVED-with-variant: the grammar's single mandatory
+    //    `output(...)` sink makes "no output" a parse error and "multiple
+    //    outputs" impossible, so neither check ever fires. The DSP-semantic
+    //    codes E1702-E1706/W1700 (node catalogue, connection types, asset refs,
+    //    feedback DAG) are DEFERRED-no-variant — the Pulse catalogue is not
+    //    attached, Phase 2+.) ──
+    audio_graph_no_output, // M0.8 E6 — E1700 AudioGraphNoOutput (RESERVED: output is parser-mandatory)
+    audio_graph_multiple_outputs, // M0.8 E6 — E1701 MultipleOutputs (RESERVED: the grammar has a single sink)
+
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
@@ -355,6 +365,8 @@ pub const DiagnosticCode = enum {
             .effect_empty_emitters => "E1600",
             .duplicate_emitter_name => "E1601",
             .emitter_ref_not_found => "E1604",
+            .audio_graph_no_output => "E1700",
+            .audio_graph_multiple_outputs => "E1701",
         };
     }
 
@@ -474,6 +486,8 @@ pub const DiagnosticCode = enum {
             .effect_empty_emitters => "EffectEmptyEmitters",
             .duplicate_emitter_name => "DuplicateEmitterName",
             .emitter_ref_not_found => "EmitterRefNotFound",
+            .audio_graph_no_output => "AudioGraphNoOutput",
+            .audio_graph_multiple_outputs => "MultipleOutputs",
         };
     }
 };

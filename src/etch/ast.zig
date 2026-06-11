@@ -1519,6 +1519,27 @@ pub const EffectEventHandler = struct {
     span: SourceSpan,
 };
 
+/// Side-slab entry for an `audio_graph` declaration (M0.8 E6 Level B audio,
+/// `etch-grammar.md` §12.2: `audio_graph_decl = "audio_graph" TYPE_IDENT "{"
+/// [params_block] {statement} audio_output "}"`; `audio_output = "output" "("
+/// expression ")"`). The optional params block is a `(start, len)` run of the
+/// shared `arena.fields`; the DSP node-building statements are a run of
+/// `arena.extra` (rendered to canonical text, never executed); `output` is the
+/// mandatory sink expression (its absence is a parse error — E1700/E1701 stay
+/// RESERVED-with-variant, the structure makes "no output" / "multiple outputs"
+/// impossible).
+pub const AudioGraphDecl = struct {
+    name: StringId, // TYPE_IDENT
+    name_span: SourceSpan,
+    params_start: u32, // index into `arena.fields`
+    params_len: u32,
+    body_start: u32, // statement run in `arena.extra`
+    body_len: u32,
+    output: NodeId, // the `output(expr)` sink expression
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
 /// Kind of one routine trigger alternative (M0.8 E4, `etch-grammar.md`
 /// §8.2 `trigger_expr`): `at TIME_LITERAL` / `after IDENT` /
 /// `on_event TYPE_IDENT`. `or`-chains are stored as a flat run of
@@ -1893,6 +1914,7 @@ pub const AstArena = struct {
     effect_decls: std.ArrayListUnmanaged(EffectDecl) = .empty,
     effect_emitters: std.ArrayListUnmanaged(EffectEmitter) = .empty,
     effect_event_handlers: std.ArrayListUnmanaged(EffectEventHandler) = .empty,
+    audio_graph_decls: std.ArrayListUnmanaged(AudioGraphDecl) = .empty,
     quest_decls: std.ArrayListUnmanaged(QuestDecl) = .empty,
     quest_properties: std.ArrayListUnmanaged(QuestProperty) = .empty,
     quest_stages: std.ArrayListUnmanaged(QuestStage) = .empty,
@@ -2092,6 +2114,7 @@ pub const AstArena = struct {
         self.effect_decls.deinit(gpa);
         self.effect_emitters.deinit(gpa);
         self.effect_event_handlers.deinit(gpa);
+        self.audio_graph_decls.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
@@ -2594,6 +2617,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.effect_decls.items.len);
         try self.effect_decls.append(gpa, decl);
         return try self.addItem(gpa, .effect_decl, idx, span);
+    }
+
+    /// `audio_graph Name { [params] {statement} output(expr) }` (M0.8 E6,
+    /// `etch-grammar.md` §12.2). The caller appends the params fields and body
+    /// statements to their slabs beforehand, passing the ranges + sink in `decl`.
+    pub fn addAudioGraphDecl(self: *AstArena, gpa: std.mem.Allocator, decl: AudioGraphDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.audio_graph_decls.items.len);
+        try self.audio_graph_decls.append(gpa, decl);
+        return try self.addItem(gpa, .audio_graph_decl, idx, span);
     }
 
     /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The

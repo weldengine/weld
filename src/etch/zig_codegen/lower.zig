@@ -4910,7 +4910,7 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// `true` when the program declares at least one Level-B construct with a
 /// descriptor (M0.8 E4: the six Level-B gameplay constructs).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0 or ast.audio_graph_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4939,6 +4939,7 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .widget_decl => try emitWidgetDescriptor(w, gpa, ast, ast.widget_decls.items[datas[i]]),
             .locale_decl => try emitLocaleDescriptor(w, ast, ast.locale_decls.items[datas[i]]),
             .effect_decl => try emitEffectDescriptor(w, gpa, ast, ast.effect_decls.items[datas[i]]),
+            .audio_graph_decl => try emitAudioGraphDescriptor(w, gpa, ast, ast.audio_graph_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -5115,6 +5116,49 @@ fn emitEffectDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena
         try w.line(" },");
     }
     try w.line("    } } },");
+}
+
+/// Emit-structure for an `audio_graph` (M0.8 E6 Level B audio): the codegen's
+/// OWN walk over params / statements / output; param types via the SHARED
+/// `renderFieldTypeAlloc`, the body via the SHARED `renderStmtRunAlloc`, the
+/// output + defaults via `renderForEmit` — byte-identical with `buildAudioGraph`.
+fn emitAudioGraphDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.AudioGraphDecl) CodegenError!void {
+    try w.print("    .{{ .audio_graph = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.line(", .params = &[_]etch_descriptor.AudioGraphParamDesc{");
+    var pi: u32 = 0;
+    while (pi < decl.params_len) : (pi += 1) {
+        const field = ast.fields.items[decl.params_start + pi];
+        const ptype = descriptor_mod.renderFieldTypeAlloc(gpa, ast, field.type_node) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        };
+        defer gpa.free(ptype);
+        const pdefault = if (field.default_value.isNone())
+            try gpa.dupe(u8, "")
+        else
+            try renderForEmit(gpa, ast, field.default_value);
+        defer gpa.free(pdefault);
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(field.name));
+        try w.print(", .type_name = ", .{});
+        try emitZigStringLiteral(w, ptype);
+        try w.print(", .default = ", .{});
+        try emitZigStringLiteral(w, pdefault);
+        try w.line(" },");
+    }
+    const body = descriptor_mod.renderStmtRunAlloc(gpa, ast, decl.body_start, decl.body_len) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+    };
+    defer gpa.free(body);
+    const output = try renderForEmit(gpa, ast, decl.output);
+    defer gpa.free(output);
+    try w.print("    }}, .body = ", .{});
+    try emitZigStringLiteral(w, body);
+    try w.print(", .output = ", .{});
+    try emitZigStringLiteral(w, output);
+    try w.line(" } },");
 }
 
 /// Emit-structure for an `input_mapping` (M0.8 E5 Level B STRICT): the codegen's

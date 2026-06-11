@@ -41,6 +41,7 @@ const programs = [_]LevelBProgram{
     .{ .name = "p75_locale_en", .source = @embedFile("programs/75_locale_en.etch") },
     // M0.8 E6 Level-B render/animation/audio/cinematic.
     .{ .name = "p76_effect_explosion", .source = @embedFile("programs/76_effect_explosion.etch") },
+    .{ .name = "p77_audio_graph_laser", .source = @embedFile("programs/77_audio_graph_laser.etch") },
 };
 
 test "level-b serialized IR: interpreter build == cooked emit, byte-identical" {

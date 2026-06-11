@@ -169,7 +169,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_, audio_graph_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -203,7 +203,7 @@ fn containsUppercase(s: []const u8) bool {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -1928,6 +1928,18 @@ pub const TypeChecker = struct {
                     const decl = self.arena.effect_decls.items[data];
                     try self.registerSymbol(.effect_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .effect);
+                },
+                .audio_graph_decl => {
+                    // An `audio_graph` (M0.8 E6 Level B audio) is TYPE_IDENT-named
+                    // → it registers a symbol; the body is declaration-only
+                    // (rendered, never executed). All §19 checks are
+                    // RESERVED-with-variant (E1700/E1701 — output is
+                    // parser-mandatory and single) or DEFERRED-no-variant (the
+                    // Pulse DSP catalogue is not attached), so there is no
+                    // validate pass.
+                    const decl = self.arena.audio_graph_decls.items[data];
+                    try self.registerSymbol(.audio_graph_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .audio_graph);
                 },
                 else => {}, // forward-compatible: unknown items ignored
             }

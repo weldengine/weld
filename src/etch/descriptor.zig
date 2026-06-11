@@ -71,6 +71,7 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
         .widget => |w| freeWidget(gpa, w),
         .locale => |l| freeLocale(gpa, l),
         .effect => |e| freeEffect(gpa, e),
+        .audio_graph => |ag| freeAudioGraph(gpa, ag),
     }
 }
 
@@ -290,6 +291,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .widget_decl => try list.append(gpa, .{ .widget = try buildWidget(gpa, arena, arena.widget_decls.items[datas[i]]) }),
             .locale_decl => try list.append(gpa, .{ .locale = try buildLocale(gpa, arena, arena.locale_decls.items[datas[i]]) }),
             .effect_decl => try list.append(gpa, .{ .effect = try buildEffect(gpa, arena, arena.effect_decls.items[datas[i]]) }),
+            .audio_graph_decl => try list.append(gpa, .{ .audio_graph = try buildAudioGraph(gpa, arena, arena.audio_graph_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -1095,6 +1097,60 @@ fn buildEffect(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.Eff
         .params = try params.toOwnedSlice(gpa),
         .emitters = try emitters.toOwnedSlice(gpa),
         .handlers = try handlers.toOwnedSlice(gpa),
+    };
+}
+
+fn freeAudioGraph(gpa: std.mem.Allocator, ag: types.AudioGraph) void {
+    gpa.free(ag.name);
+    for (ag.params) |p| {
+        gpa.free(p.name);
+        gpa.free(p.type_name);
+        gpa.free(p.default);
+    }
+    gpa.free(ag.params);
+    gpa.free(ag.body);
+    gpa.free(ag.output);
+}
+
+/// Build an `audio_graph` descriptor (M0.8 E6): optional annotated params, the
+/// DSP statements rendered "; "-joined, and the mandatory output sink — all
+/// through the shared canonical renderers (byte-identical with the emit side).
+fn buildAudioGraph(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.AudioGraphDecl) BuildError!types.AudioGraph {
+    var params: std.ArrayListUnmanaged(types.AudioGraphParamDesc) = .empty;
+    errdefer {
+        for (params.items) |p| {
+            gpa.free(p.name);
+            gpa.free(p.type_name);
+            gpa.free(p.default);
+        }
+        params.deinit(gpa);
+    }
+    var pi: u32 = 0;
+    while (pi < decl.params_len) : (pi += 1) {
+        const field = arena.fields.items[decl.params_start + pi];
+        const pname = try gpa.dupe(u8, arena.strings.slice(field.name));
+        errdefer gpa.free(pname);
+        const ptype = try renderFieldTypeAlloc(gpa, arena, field.type_node);
+        errdefer gpa.free(ptype);
+        const pdefault = if (field.default_value.isNone())
+            try gpa.dupe(u8, "")
+        else
+            try renderExprAlloc(gpa, arena, field.default_value);
+        errdefer gpa.free(pdefault);
+        try params.append(gpa, .{ .name = pname, .type_name = ptype, .default = pdefault });
+    }
+
+    const body = try renderStmtRunAlloc(gpa, arena, decl.body_start, decl.body_len);
+    errdefer gpa.free(body);
+    const output = try renderExprAlloc(gpa, arena, decl.output);
+    errdefer gpa.free(output);
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    errdefer gpa.free(name);
+    return .{
+        .name = name,
+        .params = try params.toOwnedSlice(gpa),
+        .body = body,
+        .output = output,
     };
 }
 
