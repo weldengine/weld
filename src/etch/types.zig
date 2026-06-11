@@ -2718,6 +2718,7 @@ pub const TypeChecker = struct {
             .int_lit => return .{ .builtin = .int_ },
             .float_lit => return .{ .builtin = .float_ },
             .duration_lit => return .{ .builtin = .duration },
+            .color_lit => return .{ .builtin = .color },
             .bool_lit => return .{ .builtin = .bool_ },
             .string_lit => return ResolvedType{ .builtin = .string_ },
             // Interpolated string `"a {x} b"` (M0.8 E3-C tranche 1c, stdlib

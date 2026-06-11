@@ -968,27 +968,52 @@ ability Dash {
 ## Themes (E5 — §10.2)
 
 The grammar shape wins (E5 ruling 1): a string name + untyped `key: expression`
-entries (widget-kind -> style, or a global variable).
+entries (widget-kind -> style, or a global variable). `COLOR_LITERAL` (§1.4
+l.211, 6 or 8 hex) is produced (M0.8 E5 — the DURATION_LIT-precedent lift), so
+bare `#RRGGBB[AA]` parses.
 
 ```etch
 theme "dark" {
-  window: Styles.window_dark
-  panel: Styles.panel_dark
-  text_color: "#DFE1E5"
-  accent: "#2E6BBF"
+  text_color: #DFE1E5
+  text_color_secondary: #8E9196
+  accent: #2E6BBF
   font: "Inter"
   font_mono: "JetBrains Mono"
+  base_size: 14
 }
 ```
 
-Bare `#RRGGBB` color literals are out of M0.8 (color_lit reserved-unproduced,
-the DURATION_LIT precedent); colors use legal string values:
+The §10.2 canonical `StyleDef` / `data Styles` block (color literals, nested
+pseudo-state bodies, and a spread). Nested struct values use the anonymous
+`.{ … }` form (§3.2) — the §10.2 doc shorthand writes them bare `{ … }`, which
+is non-conform (a block, not a struct literal); flagged for the gate, the
+top-level data-entry bodies stay bare per `struct_literal_body`:
 
 ```etch
-theme "light" {
-  text_color: "#1E1F22"
-  background: "#F5F5F5"
-  surface: "#FFFFFF"
-  base_size: 14
+struct StyleDef {
+  background: Color?
+  color: Color?
+  padding: Padding?
+  border_radius: int?
+  font_size: int?
+
+  hover: PseudoStateStyleDef?
+  pressed: PseudoStateStyleDef?
+  disabled: PseudoStateStyleDef?
+  focused: PseudoStateStyleDef?
+}
+
+data Styles: StyleDef {
+  button_primary: {
+    background: #2E6BBF, color: #FFFFFF, padding: .{ vertical: 8, horizontal: 16 },
+    border_radius: 6, font_size: 16,
+    hover: .{ background: #3A7ED5 },
+    pressed: .{ background: #245AA0 },
+  },
+  button_danger: {
+    ..Styles.button_primary,
+    background: #FF4400,
+    hover: .{ background: #FF6633 },
+  },
 }
 ```

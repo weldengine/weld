@@ -156,6 +156,7 @@ pub const Lexer = struct {
                     }
                     return .{ .kind = .question, .span = .{ .byte_start = start, .byte_end = self.pos } };
                 },
+                '#' => return self.lexColor(start),
                 '"' => return self.lexString(start),
                 '0'...'9' => return self.lexNumber(start),
                 'a'...'z', 'A'...'Z', '_' => return self.lexIdent(start),
@@ -270,6 +271,10 @@ pub const Lexer = struct {
         return c >= '0' and c <= '9';
     }
 
+    fn isHexDigit(c: u8) bool {
+        return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+    }
+
     fn lexNumber(self: *Lexer, start: u32) Token {
         // Consume integer part.
         while (self.pos < self.source.len) : (self.pos += 1) {
@@ -343,6 +348,24 @@ pub const Lexer = struct {
             self.pos += 1;
         }
         // Unterminated string: surface as error_byte at the opening quote.
+        return .{ .kind = .error_byte, .span = .{ .byte_start = start, .byte_end = self.pos } };
+    }
+
+    /// `COLOR_LITERAL = "#" HEX_DIGIT{6} [HEX_DIGIT{2}]` (`etch-grammar.md`
+    /// §1.4 l.211) — exactly 6 (RGB) or 8 (RGBA) hex digits; the
+    /// DURATION_LIT-precedent §1.4 literal lift (M0.8 E5). A `#` followed by
+    /// any other count of hex digits is `error_byte` over the run (the parser
+    /// surfaces it); a color followed by a non-hex char lexes as the color
+    /// then that char (e.g. `#FFFFFFz` → color + ident).
+    fn lexColor(self: *Lexer, start: u32) Token {
+        self.pos += 1; // '#'
+        var n: u32 = 0;
+        while (self.pos < self.source.len and isHexDigit(self.source[self.pos])) : (self.pos += 1) {
+            n += 1;
+        }
+        if (n == 6 or n == 8) {
+            return .{ .kind = .color_literal, .span = .{ .byte_start = start, .byte_end = self.pos } };
+        }
         return .{ .kind = .error_byte, .span = .{ .byte_start = start, .byte_end = self.pos } };
     }
 
@@ -561,5 +584,19 @@ test "lexer lexes FLOAT 's' as a duration literal, greedy-contiguous only (M0.8 
     try expectKind(&lex, gpa, .float_literal);
     try expectKind(&lex, gpa, .ident);
     try expectKind(&lex, gpa, .float_literal);
+    try expectKind(&lex, gpa, .ident);
+}
+
+test "lexer lexes COLOR_LITERAL as 6 or 8 hex digits only (M0.8 E5, §1.4)" {
+    const gpa = std.testing.allocator;
+    // `#2E6BBF` (6) and `#12345678` (8) are colors; `#FFF` (3) and `#1234567`
+    // (7) are malformed → error_byte; `#FFFFFFz` is a 6-hex color then `z`.
+    var lex = Lexer.init("#2E6BBF #12345678 #FFF #1234567 #FFFFFFz");
+    defer lex.deinit(gpa);
+    try expectKind(&lex, gpa, .color_literal);
+    try expectKind(&lex, gpa, .color_literal);
+    try expectKind(&lex, gpa, .error_byte);
+    try expectKind(&lex, gpa, .error_byte);
+    try expectKind(&lex, gpa, .color_literal);
     try expectKind(&lex, gpa, .ident);
 }
