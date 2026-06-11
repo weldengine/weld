@@ -205,7 +205,7 @@ pub const Parser = struct {
     /// break value follows.
     fn canStartExpr(kind: TokenKind) bool {
         return switch (kind) {
-            .int_literal, .float_literal, .bool_literal, .string_literal, .ident, .type_ident, .lparen, .lbracket, .pipe, .minus, .kw_not, .kw_match, .kw_loop, .kw_get, .kw_get_mut, .kw_event, .dot => true,
+            .int_literal, .float_literal, .duration_literal, .bool_literal, .string_literal, .ident, .type_ident, .lparen, .lbracket, .pipe, .minus, .kw_not, .kw_match, .kw_loop, .kw_get, .kw_get_mut, .kw_event, .dot => true,
             else => false,
         };
     }
@@ -4131,6 +4131,16 @@ pub const Parser = struct {
                 const tok = try self.advance();
                 const id = try self.internSlice(tok.span);
                 return try self.arena.addExpr(self.gpa, .float_lit, id, tok.span);
+            },
+            .duration_literal => {
+                // DURATION_LIT (M0.8 E4 gate fix, §1.4 / §3.2 literal). The
+                // expr carries the full lexeme (`3.0s`); it types as
+                // `Duration`. EVALUATION is fail-loud in BOTH backends (the
+                // tag_query precedent) — duration runtime semantics are
+                // Tier-1/E5+ material, Level B needs the canonical text.
+                const tok = try self.advance();
+                const id = try self.internSlice(tok.span);
+                return try self.arena.addExpr(self.gpa, .duration_lit, id, tok.span);
             },
             .bool_literal => {
                 const tok = try self.advance();

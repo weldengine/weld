@@ -994,7 +994,7 @@ pub fn renderExprAlloc(gpa: std.mem.Allocator, arena: *const AstArena, id: NodeI
 pub fn renderExpr(gpa: std.mem.Allocator, arena: *const AstArena, id: NodeId, out: *std.ArrayListUnmanaged(u8)) BuildError!void {
     const data = arena.exprData(id);
     switch (arena.exprKind(id)) {
-        .int_lit, .float_lit, .bool_lit => try out.appendSlice(gpa, arena.strings.slice(data)),
+        .int_lit, .float_lit, .duration_lit, .bool_lit => try out.appendSlice(gpa, arena.strings.slice(data)),
         .string_lit => try renderQuoted(gpa, arena.strings.slice(data), out),
         .none_lit => try out.appendSlice(gpa, "none"),
         .some_lit => {

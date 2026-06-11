@@ -33,6 +33,7 @@ pub const TokenKind = enum {
     bool_literal, // true / false
     string_literal, // simple-quote only in S3 (no interpolation)
     time_literal, // DD:DD in-game time (M0.8 E4 routine triggers, §1.4)
+    duration_literal, // FLOAT "s" duration (M0.8 E4 gate fix, §1.4 — greedy-contiguous)
 
     // ── Keywords (S3 subset) ──
     kw_let,

@@ -262,6 +262,10 @@ pub const Lexer = struct {
         return .{ .kind = kind, .span = span };
     }
 
+    fn isIdentChar(c: u8) bool {
+        return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+    }
+
     fn isDigit(c: u8) bool {
         return c >= '0' and c <= '9';
     }
@@ -297,6 +301,18 @@ pub const Lexer = struct {
                     if (!((c >= '0' and c <= '9') or c == '_')) break;
                 }
             }
+        }
+        // DURATION_LIT `FLOAT "s"` (M0.8 E4 gate fix, `etch-grammar.md` §1.4):
+        // the greedy-lexer rule — a float immediately followed by a lone `s`
+        // (no identifier character after it) is one duration token. FLOAT
+        // only per the EBNF: `3s` stays INT + IDENT; `0.3 s` (space) stays
+        // FLOAT + IDENT; `0.3sec` stays FLOAT + IDENT (the `06:003` time
+        // boundary precedent).
+        if (is_float and self.pos < self.source.len and self.source[self.pos] == 's' and
+            (self.pos + 1 >= self.source.len or !isIdentChar(self.source[self.pos + 1])))
+        {
+            self.pos += 1;
+            return .{ .kind = .duration_literal, .span = .{ .byte_start = start, .byte_end = self.pos } };
         }
         return .{
             .kind = if (is_float) .float_literal else .int_literal,
@@ -530,4 +546,20 @@ test "lexer lexes DD:DD as a time literal, greedy-contiguous only (M0.8 E4)" {
     // `22:30` → time literal again.
     try expectKind(&lex, gpa, .time_literal);
     try expectKind(&lex, gpa, .eof);
+}
+
+test "lexer lexes FLOAT 's' as a duration literal, greedy-contiguous only (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    // `0.3s` → one DURATION_LIT; `3s` stays INT + IDENT (FLOAT-only per
+    // §1.4); `0.3 s` (space) and `0.3sec` (ident continues) stay FLOAT +
+    // IDENT — the greedy-boundary rule.
+    var lex = Lexer.init("0.3s 3s 0.3 s 0.3sec");
+    defer lex.deinit(gpa);
+    try expectKind(&lex, gpa, .duration_literal);
+    try expectKind(&lex, gpa, .int_literal);
+    try expectKind(&lex, gpa, .ident);
+    try expectKind(&lex, gpa, .float_literal);
+    try expectKind(&lex, gpa, .ident);
+    try expectKind(&lex, gpa, .float_literal);
+    try expectKind(&lex, gpa, .ident);
 }

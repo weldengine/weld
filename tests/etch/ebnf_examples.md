@@ -942,7 +942,7 @@ dialogue LocForms {
 ```etch
 ability Fireball {
   cost: { mana: 20.0 }
-  cooldown: 3.0
+  cooldown: 3.0s
   tags_required: [.character.status.alive]
   tags_blocked: [.character.status.stunned, .character.status.silenced]
 

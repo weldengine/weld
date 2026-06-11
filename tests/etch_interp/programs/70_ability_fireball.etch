@@ -1,6 +1,6 @@
 // Level-B serialized-IR differential 70 (M0.8 E4): ability descriptor —
-// cost struct_literal_body keyed on a numeric resource field, cooldown
-// expression, tag arrays, a custom property (the §17 extension mode), and
+// cost struct_literal_body keyed on a numeric resource field, cooldown as
+// a DURATION_LIT (§1.4 — the gate-fix lift), tag arrays, a custom property (the §17 extension mode), and
 // the embedded `rule activate` (validated through the normal rule path,
 // never registered for ticking; rendered canonically single-line).
 resource ManaPool {
@@ -19,7 +19,7 @@ tags {
 
 ability Fireball {
   cost: { mana: 20.0 }
-  cooldown: 3.0
+  cooldown: 3.0s
   tags_required: [.character.status.alive]
   tags_blocked: [.character.status.stunned, .character.status.silenced]
   charges: 2

@@ -1022,12 +1022,16 @@ pub const TypeChecker = struct {
             switch (prop.kind) {
                 .cost => try self.validateAbilityCost(prop, &ctx),
                 .cooldown => {
+                    // E1582 — Duration positive (§12.2), transposed: a
+                    // DURATION_LIT or a positive numeric expression; a
+                    // negative literal is rejected (duration lexemes are
+                    // unsigned, so the unary-minus check covers both).
                     const t = try self.synthExprE(prop.value, &ctx);
-                    const numeric = t == .builtin and t.builtin.isNumeric();
+                    const numeric = t == .builtin and (t.builtin.isNumeric() or t.builtin == .duration);
                     const neg_literal = self.arena.exprKind(prop.value) == .unary and
                         self.arena.unary_exprs.items[self.arena.exprData(prop.value)].op == .neg;
                     if (!numeric or neg_literal) {
-                        try self.emit(.cooldown_invalid, .error_, prop.span, "cooldown must be a positive numeric expression", .{});
+                        try self.emit(.cooldown_invalid, .error_, prop.span, "cooldown must be a positive duration or numeric expression", .{});
                     }
                 },
                 .tags_required => try self.validateAbilityTagArray(prop, .tags_required, &required_paths),
@@ -2678,6 +2682,7 @@ pub const TypeChecker = struct {
         switch (kind) {
             .int_lit => return .{ .builtin = .int_ },
             .float_lit => return .{ .builtin = .float_ },
+            .duration_lit => return .{ .builtin = .duration },
             .bool_lit => return .{ .builtin = .bool_ },
             .string_lit => return ResolvedType{ .builtin = .string_ },
             // Interpolated string `"a {x} b"` (M0.8 E3-C tranche 1c, stdlib
@@ -6927,9 +6932,10 @@ test "ability: canonical ability checks clean, structural codes fire (M0.8 E4)" 
         \\resource ManaPool { mana: float = 100.0 }
         \\component Mana { current: float = 100.0 }
         \\tags { character { status { alive, stunned, silenced } } }
+        \\ability Dash { cooldown: 1.5 }
         \\ability Fireball {
         \\  cost: { mana: 20.0 }
-        \\  cooldown: 3.0
+        \\  cooldown: 3.0s
         \\  tags_required: [.character.status.alive]
         \\  tags_blocked: [.character.status.stunned, .character.status.silenced]
         \\  charges: 2
