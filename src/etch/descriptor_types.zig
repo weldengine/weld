@@ -210,6 +210,21 @@ pub const Ability = struct {
     rule: []const u8,
 };
 
+/// `theme` descriptor (`etch-ast-ir.md` §3.5: `Theme { tokens }`; M0.8 E5,
+/// `etch-grammar.md` §10.2). `name` is the decoded string-literal name;
+/// `entries` are `key = rendered-value` pairs in declaration order (the
+/// grammar shape — E5 ruling 1, untyped `key: expression`).
+pub const Theme = struct {
+    name: []const u8,
+    entries: []const ThemeEntry,
+};
+
+/// One `theme` entry: a key bound to the canonical rendering of its value.
+pub const ThemeEntry = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -220,6 +235,7 @@ pub const Descriptor = union(enum) {
     quest: Quest,
     dialogue: Dialogue,
     ability: Ability,
+    theme: Theme,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -230,6 +246,7 @@ pub const Descriptor = union(enum) {
             .quest => |q| try writeQuest(q, gpa, out),
             .dialogue => |d| try writeDialogue(d, gpa, out),
             .ability => |a| try writeAbility(a, gpa, out),
+            .theme => |t| try writeTheme(t, gpa, out),
         }
     }
 };
@@ -254,6 +271,17 @@ pub fn writeData(d: Data, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u
             }
         }
         try out.appendSlice(gpa, "  }\n");
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `theme` descriptor. The name is wrapped in
+/// plain quotes (the dialogue speaker-id precedent — simple string names, no
+/// re-escaping); entries follow declaration order.
+pub fn writeTheme(t: Theme, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "theme \"{s}\" {{\n", .{t.name});
+    for (t.entries) |e| {
+        try appendFmt(gpa, out, "  entry {s} = {s}\n", .{ e.key, e.value });
     }
     try out.appendSlice(gpa, "}\n");
 }

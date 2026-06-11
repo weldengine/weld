@@ -1195,6 +1195,33 @@ pub const DataDecl = struct {
     annotations_len: u32,
 };
 
+/// Side-slab entry for a `theme` declaration (M0.8 E5 Level B presentation,
+/// `etch-grammar.md` §10.2: `theme_decl = "theme" STRING_LITERAL "{"
+/// {theme_entry} "}"`, `theme_entry = IDENT ":" expression`). The grammar
+/// shape WINS over the validation-ecs §16.1 typed-token shape (E5 ruling 1):
+/// entries are `key: expression` pairs (a widget-kind → style mapping or a
+/// global variable), the name is a string literal. Entries live in a
+/// `(start, len)` run of `arena.theme_entries`.
+pub const ThemeDecl = struct {
+    name: StringId, // decoded STRING_LITERAL content
+    name_span: SourceSpan, // for the E1640 ThemeEmpty diagnostic
+    entries_start: u32, // index into `arena.theme_entries`
+    entries_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
+/// One `theme_entry` (`IDENT ":" expression`): a key bound to a value
+/// expression, rendered canonically into the descriptor. M0.8 does not
+/// resolve the value (no §16 code requires it — the typed-token shape with
+/// types/defaults is the rejected validation-ecs shape; E1642/E1643 are
+/// RESERVED, E5 ruling 1).
+pub const ThemeEntry = struct {
+    key: StringId,
+    value: NodeId,
+    span: SourceSpan,
+};
+
 /// Kind of one routine trigger alternative (M0.8 E4, `etch-grammar.md`
 /// §8.2 `trigger_expr`): `at TIME_LITERAL` / `after IDENT` /
 /// `on_event TYPE_IDENT`. `or`-chains are stored as a flat run of
@@ -1547,6 +1574,8 @@ pub const AstArena = struct {
     type_alias_decls: std.ArrayListUnmanaged(TypeAliasDecl) = .empty,
     data_decls: std.ArrayListUnmanaged(DataDecl) = .empty,
     data_entries: std.ArrayListUnmanaged(DataEntry) = .empty,
+    theme_decls: std.ArrayListUnmanaged(ThemeDecl) = .empty,
+    theme_entries: std.ArrayListUnmanaged(ThemeEntry) = .empty,
     quest_decls: std.ArrayListUnmanaged(QuestDecl) = .empty,
     quest_properties: std.ArrayListUnmanaged(QuestProperty) = .empty,
     quest_stages: std.ArrayListUnmanaged(QuestStage) = .empty,
@@ -1724,6 +1753,8 @@ pub const AstArena = struct {
         self.routine_segments.deinit(gpa);
         self.routine_triggers.deinit(gpa);
         self.routine_interrupts.deinit(gpa);
+        self.theme_decls.deinit(gpa);
+        self.theme_entries.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
@@ -2170,6 +2201,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.data_decls.items.len);
         try self.data_decls.append(gpa, decl);
         return try self.addItem(gpa, .data_decl, idx, span);
+    }
+
+    /// `theme "name" { entries }` (M0.8 E5 Level B, `etch-grammar.md` §10.2).
+    /// The caller appends entries to `arena.theme_entries` beforehand,
+    /// passing the range in `decl`.
+    pub fn addThemeDecl(self: *AstArena, gpa: std.mem.Allocator, decl: ThemeDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.theme_decls.items.len);
+        try self.theme_decls.append(gpa, decl);
+        return try self.addItem(gpa, .theme_decl, idx, span);
     }
 
     /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The

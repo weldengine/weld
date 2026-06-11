@@ -92,4 +92,7 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p68_quest_escort", .etch_path = "tests/etch_interp/programs/68_quest_escort.etch" },
     .{ .name = "p69_dialogue_merchant", .etch_path = "tests/etch_interp/programs/69_dialogue_merchant.etch" },
     .{ .name = "p70_ability_fireball", .etch_path = "tests/etch_interp/programs/70_ability_fireball.etch" },
+    // Level-B presentation (M0.8 E5): serialized-IR diffs, no world-state
+    // sidecar (nothing executes).
+    .{ .name = "p71_theme_dark", .etch_path = "tests/etch_interp/programs/71_theme_dark.etch" },
 };

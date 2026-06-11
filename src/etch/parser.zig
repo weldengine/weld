@@ -510,7 +510,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme => return,
                 else => _ = try self.advance(),
             }
         }
@@ -544,6 +544,7 @@ pub const Parser = struct {
             .kw_quest => try self.parseQuestDecl(annotations),
             .kw_dialogue => try self.parseDialogueDecl(annotations),
             .kw_ability => try self.parseAbilityDecl(annotations),
+            .kw_theme => try self.parseThemeDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -557,7 +558,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -1494,6 +1495,46 @@ pub const Parser = struct {
             .name = name_id,
             .entry_type = entry_type,
             .entry_type_span = type_tok.span,
+            .entries_start = entries_start,
+            .entries_len = entries_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse `theme STRING_LITERAL "{" {theme_entry} "}"` (M0.8 E5 Level B,
+    /// `etch-grammar.md` §10.2). The name is a string literal (the grammar
+    /// shape — E5 ruling 1, NOT the validation-ecs §16.1 TYPE_IDENT); entries
+    /// are `IDENT ":" expression` pairs. `no_struct_lit` is cleared for the
+    /// body so an inline `.{ … }` style value parses. Theme slabs are fed
+    /// only from theme context (themes do not nest) → contiguous appends.
+    fn parseThemeDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'theme'
+        const name_tok = try self.expect(.string_literal, "expected theme name (string literal) after 'theme'");
+        const name_id = try self.internStringLiteral(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start the theme body");
+        const saved = self.no_struct_lit;
+        self.no_struct_lit = false;
+        defer self.no_struct_lit = saved;
+        const entries_start: u32 = @intCast(self.arena.theme_entries.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const key_tok = try self.expect(.ident, "expected theme entry key (identifier)");
+            _ = try self.expect(.colon, "expected ':' after the theme entry key");
+            const value = try self.parseExpr(0);
+            try self.arena.theme_entries.append(self.gpa, .{
+                .key = try self.internSlice(key_tok.span),
+                .value = value,
+                .span = key_tok.span,
+            });
+            _ = try self.match(.comma); // entries are newline-separated; tolerate an optional comma
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the theme body");
+        const entries_len: u32 = @as(u32, @intCast(self.arena.theme_entries.items.len)) - entries_start;
+        _ = try self.arena.addThemeDecl(self.gpa, .{
+            .name = name_id,
+            .name_span = name_tok.span,
             .entries_start = entries_start,
             .entries_len = entries_len,
             .annotations_extra = annotations.start,
@@ -6117,4 +6158,30 @@ test "parser recovers and a valid ability after a broken construct survives (M0.
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.ability_decls.items.len);
+}
+
+test "parser builds a theme with string name and key:expr entries (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\theme "dark" {
+        \\  window: Styles.window_dark
+        \\  font: "Inter"
+        \\  base_size: 14
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.theme_decls.items.len);
+    try std.testing.expectEqual(@as(u32, 3), result.ast.theme_decls.items[0].entries_len);
+}
+
+test "parser recovers and a valid theme after a broken construct survives (M0.8 E5 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\theme "dark" { font: "Inter" }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.theme_decls.items.len);
 }

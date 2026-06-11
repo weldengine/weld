@@ -92,6 +92,7 @@ pub const TokenKind = enum {
     kw_branch, // quest/dialogue branch (M0.8 E4; the async T2/T3 `branch` statement stays out of M0.8 — explicit parse error)
     kw_sequence, // behavior composite type (M0.8 E4; the E6 top-level `sequence` construct stays out of scope — default top-level error)
     kw_after, // routine trigger `after Segment` (M0.8 E4; the §4.3 timer statement stays out of M0.8 — explicit parse error)
+    kw_theme, // theme declaration (M0.8 E5 Level B presentation)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -243,6 +244,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "branch", .kind = .kw_branch },
     .{ .lexeme = "sequence", .kind = .kw_sequence },
     .{ .lexeme = "after", .kind = .kw_after },
+    .{ .lexeme = "theme", .kind = .kw_theme },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -277,7 +279,6 @@ pub const non_s3_keywords = [_][]const u8{
     "effect",
     "shader",
     "widget",
-    "theme",
     "motion",
     "anim_graph",
     "audio_graph",

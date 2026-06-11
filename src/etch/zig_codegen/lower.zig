@@ -4933,6 +4933,7 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .quest_decl => try emitQuestDescriptor(w, gpa, ast, ast.quest_decls.items[datas[i]]),
             .dialogue_decl => try emitDialogueDescriptor(w, gpa, ast, ast.dialogue_decls.items[datas[i]]),
             .ability_decl => try emitAbilityDescriptor(w, gpa, ast, ast.ability_decls.items[datas[i]]),
+            .theme_decl => try emitThemeDescriptor(w, gpa, ast, ast.theme_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -4968,6 +4969,28 @@ fn emitDataDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, 
             try w.printLine(", .is_spread = {} }},", .{field.name == 0});
         }
         try w.line("        } },");
+    }
+    try w.line("    } } },");
+}
+
+/// Emit-structure for a `theme` (M0.8 E5): the codegen's OWN walk of the
+/// theme entries, expression values rendered through the SHARED canonical
+/// renderer (`renderForEmit`) and embedded as Zig string literals — the
+/// proof-contract split (same renderer, two backends).
+fn emitThemeDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.ThemeDecl) CodegenError!void {
+    try w.print("    .{{ .theme = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.line(", .entries = &[_]etch_descriptor.ThemeEntry{");
+    var e: u32 = 0;
+    while (e < decl.entries_len) : (e += 1) {
+        const entry = ast.theme_entries.items[decl.entries_start + e];
+        const rendered = try renderForEmit(gpa, ast, entry.value);
+        defer gpa.free(rendered);
+        try w.print("        .{{ .key = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(entry.key));
+        try w.print(", .value = ", .{});
+        try emitZigStringLiteral(w, rendered);
+        try w.line(" },");
     }
     try w.line("    } } },");
 }

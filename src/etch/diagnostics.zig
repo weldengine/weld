@@ -141,6 +141,16 @@ pub const DiagnosticCode = enum {
     spread_cycle, // M0.8 E4 — E1767 SpreadCycle
     id_invalid_format, // M0.8 E4 — E1768 IdInvalidFormat
 
+    // ── theme (E1640-E1645, M0.8 E5 — etch-grammar.md §10.2; the E5 ruling 1:
+    // the grammar `theme STRING_LITERAL { IDENT ":" expression }` shape WINS
+    // over the validation-ecs §16.1 typed-token shape, so E1642
+    // TokenTypeInvalid / E1643 TokenDefaultMissing are RESERVED — the grammar
+    // entries are untyped `key: expr` with no defaults) ──
+    theme_empty, // M0.8 E5 — E1640 ThemeEmpty (no entries)
+    duplicate_token_name, // M0.8 E5 — E1641 DuplicateTokenName (duplicate entry key)
+    token_type_invalid, // M0.8 E5 — E1642 TokenTypeInvalid (RESERVED: no typed tokens in the grammar shape)
+    token_default_missing, // M0.8 E5 — E1643 TokenDefaultMissing (RESERVED: no token defaults in the grammar shape)
+
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
@@ -226,6 +236,10 @@ pub const DiagnosticCode = enum {
             .spread_reference_not_found => "E1766",
             .spread_cycle => "E1767",
             .id_invalid_format => "E1768",
+            .theme_empty => "E1640",
+            .duplicate_token_name => "E1641",
+            .token_type_invalid => "E1642",
+            .token_default_missing => "E1643",
         };
     }
 
@@ -314,6 +328,10 @@ pub const DiagnosticCode = enum {
             .spread_reference_not_found => "SpreadReferenceNotFound",
             .spread_cycle => "SpreadCycle",
             .id_invalid_format => "IdInvalidFormat",
+            .theme_empty => "ThemeEmpty",
+            .duplicate_token_name => "DuplicateTokenName",
+            .token_type_invalid => "TokenTypeInvalid",
+            .token_default_missing => "TokenDefaultMissing",
         };
     }
 };

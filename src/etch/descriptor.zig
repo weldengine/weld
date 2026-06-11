@@ -65,7 +65,17 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
         .quest => |q| freeQuest(gpa, q),
         .dialogue => |dlg| freeDialogue(gpa, dlg),
         .ability => |a| freeAbility(gpa, a),
+        .theme => |t| freeTheme(gpa, t),
     }
+}
+
+fn freeTheme(gpa: std.mem.Allocator, t: types.Theme) void {
+    gpa.free(t.name);
+    for (t.entries) |e| {
+        gpa.free(e.key);
+        gpa.free(e.value);
+    }
+    gpa.free(t.entries);
 }
 
 fn freeAbility(gpa: std.mem.Allocator, a: types.Ability) void {
@@ -217,6 +227,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .quest_decl => try list.append(gpa, .{ .quest = try buildQuest(gpa, arena, arena.quest_decls.items[datas[i]]) }),
             .dialogue_decl => try list.append(gpa, .{ .dialogue = try buildDialogue(gpa, arena, arena.dialogue_decls.items[datas[i]]) }),
             .ability_decl => try list.append(gpa, .{ .ability = try buildAbility(gpa, arena, arena.ability_decls.items[datas[i]]) }),
+            .theme_decl => try list.append(gpa, .{ .theme = try buildTheme(gpa, arena, arena.theme_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -371,6 +382,28 @@ fn buildData(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.DataD
         .entry_type = entry_type,
         .entries = try entries.toOwnedSlice(gpa),
     };
+}
+
+fn buildTheme(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.ThemeDecl) BuildError!types.Theme {
+    var entries: std.ArrayListUnmanaged(types.ThemeEntry) = .empty;
+    errdefer {
+        for (entries.items) |e| {
+            gpa.free(e.key);
+            gpa.free(e.value);
+        }
+        entries.deinit(gpa);
+    }
+    var e: u32 = 0;
+    while (e < decl.entries_len) : (e += 1) {
+        const entry = arena.theme_entries.items[decl.entries_start + e];
+        const value = try renderExprAlloc(gpa, arena, entry.value);
+        errdefer gpa.free(value);
+        const key = try gpa.dupe(u8, arena.strings.slice(entry.key));
+        errdefer gpa.free(key);
+        try entries.append(gpa, .{ .key = key, .value = value });
+    }
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    return .{ .name = name, .entries = try entries.toOwnedSlice(gpa) };
 }
 
 fn buildBehavior(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.BehaviorDecl) BuildError!types.Behavior {

@@ -203,7 +203,7 @@ fn containsUppercase(s: []const u8) bool {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -317,6 +317,7 @@ pub const TypeChecker = struct {
         try tc.validateQuestDecls();
         try tc.validateDialogueDecls();
         try tc.validateAbilityDecls();
+        try tc.validateThemeDecls();
         try tc.pass2Resolve();
     }
 
@@ -378,6 +379,40 @@ pub const TypeChecker = struct {
             var e: u32 = 0;
             while (e < decl.entries_len) : (e += 1) {
                 try self.dataSpreadDfs(.{ .table = table_idx, .entry = decl.entries_start + e }, &visiting, &done);
+            }
+        }
+    }
+
+    // ─── Theme (M0.8 E5, `etch-grammar.md` §10.2) ────────────────────────
+
+    /// Validate every `theme` (M0.8 E5 Level B presentation): E1640 empty
+    /// (no entries), E1641 duplicate entry key. The grammar shape (string
+    /// name, untyped `key: expression` entries) WINS over validation-ecs
+    /// §16.1 (E5 ruling 1); E1642 TokenTypeInvalid / E1643 TokenDefaultMissing
+    /// are RESERVED (no typed tokens / defaults exist in the grammar shape).
+    /// Entry values are structural — no §16 code requires resolution.
+    /// `@custom` is the only valid annotation (validateAnnotations).
+    fn validateThemeDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .theme_decl) continue;
+            const decl = self.arena.theme_decls.items[datas[i]];
+            try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .theme);
+            if (decl.entries_len == 0) {
+                try self.emit(.theme_empty, .error_, decl.name_span, "theme '{s}' has no entries (at least one required)", .{self.arena.strings.slice(decl.name)});
+                continue;
+            }
+            var seen: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+            defer seen.deinit(self.gpa);
+            var e: u32 = 0;
+            while (e < decl.entries_len) : (e += 1) {
+                const entry = self.arena.theme_entries.items[decl.entries_start + e];
+                const gop = try seen.getOrPut(self.gpa, entry.key);
+                if (gop.found_existing) {
+                    try self.emit(.duplicate_token_name, .error_, entry.span, "duplicate theme entry key '{s}'", .{self.arena.strings.slice(entry.key)});
+                }
             }
         }
     }
@@ -6225,6 +6260,36 @@ test "data table: E1760 empty entries + E0102 unknown entry type (M0.8 E4)" {
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .data_empty_entries);
     try expectAnyCode(result.diagnostics.items, .undefined_symbol);
+}
+
+test "theme: E1640 empty + valid control (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var empty = try parseAndCheck(gpa,
+        \\theme "dark" { }
+    );
+    defer empty.deinit(gpa);
+    try expectAnyCode(empty.diagnostics.items, .theme_empty);
+
+    var ok = try parseAndCheck(gpa,
+        \\theme "dark" {
+        \\  font: "Inter"
+        \\  base_size: 14
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+}
+
+test "theme: E1641 duplicate entry key (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\theme "dark" {
+        \\  font: "Inter"
+        \\  font: "Roboto"
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .duplicate_token_name);
 }
 
 test "data table: E1762 entry type is not a struct (M0.8 E4)" {

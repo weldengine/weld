@@ -964,3 +964,31 @@ ability Dash {
   range: 5.0
 }
 ```
+
+## Themes (E5 — §10.2)
+
+The grammar shape wins (E5 ruling 1): a string name + untyped `key: expression`
+entries (widget-kind -> style, or a global variable).
+
+```etch
+theme "dark" {
+  window: Styles.window_dark
+  panel: Styles.panel_dark
+  text_color: "#DFE1E5"
+  accent: "#2E6BBF"
+  font: "Inter"
+  font_mono: "JetBrains Mono"
+}
+```
+
+Bare `#RRGGBB` color literals are out of M0.8 (color_lit reserved-unproduced,
+the DURATION_LIT precedent); colors use legal string values:
+
+```etch
+theme "light" {
+  text_color: "#1E1F22"
+  background: "#F5F5F5"
+  surface: "#FFFFFF"
+  base_size: 14
+}
+```
