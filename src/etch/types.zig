@@ -203,7 +203,7 @@ fn containsUppercase(s: []const u8) bool {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -319,6 +319,7 @@ pub const TypeChecker = struct {
         try tc.validateAbilityDecls();
         try tc.validateThemeDecls();
         try tc.validateMotionDecls();
+        try tc.validateInputMappingDecls();
         try tc.pass2Resolve();
     }
 
@@ -512,6 +513,139 @@ pub const TypeChecker = struct {
         if (a.kind == .stagger) {
             try self.validateMotionAnimator(a.inner, span);
         }
+    }
+
+    // ─── Input mapping (M0.8 E5 Level B STRICT, `etch-grammar.md` §16) ────
+
+    /// Modifier catalogue (`etch-grammar.md` §16 l.1752) — E1804 ModifierTypeUnknown.
+    const input_modifiers = [_][]const u8{
+        "threshold",     "deadzone",         "deadzone_radial", "sensitivity",
+        "invert",        "clamp",            "linear_ramp",     "negate_when_held",
+        "swizzle",       "to_world_space",   "smooth",          "stick_emulated",
+        "axis_emulated", "quantize_to_grid",
+    };
+
+    /// Trigger catalogue (`etch-grammar.md` §16 l.1754) — E1805 TriggerTypeUnknown.
+    const input_triggers = [_][]const u8{
+        "on_press", "on_release", "on_hold", "on_tap", "on_double_tap", "on_chord",
+    };
+
+    const InputCatalog = enum { modifier, trigger };
+
+    fn isInCatalog(comptime catalog: []const []const u8, name: []const u8) bool {
+        for (catalog) |e| {
+            if (std.mem.eql(u8, e, name)) return true;
+        }
+        return false;
+    }
+
+    /// Validate every `input_mapping` (M0.8 E5 Level B STRICT — NO input
+    /// execution): E1800 MappingEmpty (no action AND no combo), E1801
+    /// DuplicateActionName, E1804/E1805 modifier/trigger arrays vs the §16
+    /// catalogues, E1806 PriorityInvalid (non-negative INT_LITERAL — the
+    /// accepted surface is the §16 EBNF; the permissive parse only enables clean
+    /// diagnostics), E1808 ComboTimingInvalid (window = positive duration, the
+    /// motion-duration precedent). E1802/W1801/E1807 RESERVED, E1803 DEFERRED
+    /// (the diagnostics catalogue carries the rationale). `context` (a tag path),
+    /// `consume_input`, bind sources, modifier/trigger expr args, and combo
+    /// `sequence` tokens are STRUCTURAL — never resolved (no §25 code requires
+    /// it; pass2 does not walk input_mapping). STRING-named → no symbol.
+    fn validateInputMappingDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .input_mapping_decl) continue;
+            try self.validateInputMapping(self.arena.input_mapping_decls.items[datas[i]]);
+        }
+    }
+
+    fn validateInputMapping(self: *TypeChecker, decl: ast_mod.InputMappingDecl) !void {
+        try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .input_mapping);
+        if (decl.actions_len == 0 and decl.combos_len == 0) {
+            try self.emit(.mapping_empty, .error_, decl.name_span, "input_mapping '{s}' declares no action and no combo", .{self.arena.strings.slice(decl.name)});
+        }
+        // E1806 — priority is a non-negative INT_LITERAL (a negative parses as
+        // `unary .neg`, not `.int_lit`, so it is caught by the kind check).
+        if (!decl.priority.isNone() and self.arena.exprKind(decl.priority) != .int_lit) {
+            try self.emit(.priority_invalid, .error_, self.arena.exprSpan(decl.priority), "priority must be a non-negative integer literal (etch-grammar.md §16: priority : INT_LITERAL)", .{});
+        }
+        // E1801 — duplicate action names; E1804/E1805 per bind.
+        var seen: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer seen.deinit(self.gpa);
+        var a: u32 = 0;
+        while (a < decl.actions_len) : (a += 1) {
+            const action = self.arena.input_actions.items[decl.actions_start + a];
+            const gop = try seen.getOrPut(self.gpa, action.name);
+            if (gop.found_existing) {
+                try self.emit(.duplicate_action_name, .error_, action.span, "duplicate input action '{s}'", .{self.arena.strings.slice(action.name)});
+            }
+            var b: u32 = 0;
+            while (b < action.binds_len) : (b += 1) {
+                const bind = self.arena.input_binds.items[action.binds_start + b];
+                if (!bind.modifiers.isNone()) try self.validateInputCatalogArray(bind.modifiers, .modifier);
+                if (!bind.triggers.isNone()) try self.validateInputCatalogArray(bind.triggers, .trigger);
+            }
+        }
+        // E1808 — combo window is a positive duration (the motion-duration
+        // precedent). E1807 RESERVED: the §16 `sequence` tokens are structural.
+        var c: u32 = 0;
+        while (c < decl.combos_len) : (c += 1) {
+            const combo = self.arena.input_combos.items[decl.combos_start + c];
+            if (!combo.window.isNone()) {
+                var ctx: RuleCtx = .{};
+                defer ctx.deinit(self.gpa);
+                const t = try self.synthExprE(combo.window, &ctx);
+                const numeric = t == .builtin and (t.builtin.isNumeric() or t.builtin == .duration);
+                const neg = self.arena.exprKind(combo.window) == .unary and
+                    self.arena.unary_exprs.items[self.arena.exprData(combo.window)].op == .neg;
+                if (!numeric or neg) {
+                    try self.emit(.combo_timing_invalid, .error_, combo.span, "combo window must be a positive duration", .{});
+                }
+            }
+        }
+    }
+
+    /// E1804/E1805 — each element of a `modifiers`/`triggers` array_literal must
+    /// be a catalogue entry, identified by the element's name (a bare ident, or
+    /// the callee of a `name(args)` form like `deadzone_radial(0.15)`). The
+    /// elements are NOT synthesized (modifier/trigger names are not declared
+    /// symbols — synthesizing would emit a spurious E0102; the structural name
+    /// is checked against the §16 catalogue).
+    fn validateInputCatalogArray(self: *TypeChecker, node: NodeId, catalog: InputCatalog) !void {
+        if (self.arena.exprKind(node) != .array_lit) return; // not an array — nothing to catalogue-check
+        const al = self.arena.array_lits.items[self.arena.exprData(node)];
+        if (al.is_fill) return;
+        var i: u32 = 0;
+        while (i < al.elements_len) : (i += 1) {
+            const elem: NodeId = @bitCast(self.arena.extra.items[al.elements_start + i]);
+            const name_opt = self.inputCatalogElementName(elem);
+            const known = if (name_opt) |name| switch (catalog) {
+                .modifier => isInCatalog(&input_modifiers, name),
+                .trigger => isInCatalog(&input_triggers, name),
+            } else false;
+            if (!known) {
+                switch (catalog) {
+                    .modifier => try self.emit(.modifier_type_unknown, .error_, self.arena.exprSpan(elem), "unknown input modifier (expected one of the etch-grammar.md §16 modifiers)", .{}),
+                    .trigger => try self.emit(.trigger_type_unknown, .error_, self.arena.exprSpan(elem), "unknown input trigger (expected one of the etch-grammar.md §16 triggers)", .{}),
+                }
+            }
+        }
+    }
+
+    /// The catalogue name of a modifier/trigger array element: a bare ident
+    /// (`invert`, `on_press`) or the callee of a call (`deadzone(0.2)`,
+    /// `on_hold(0.1s)`). Anything else → `null` (unknown).
+    fn inputCatalogElementName(self: *TypeChecker, elem: NodeId) ?[]const u8 {
+        return switch (self.arena.exprKind(elem)) {
+            .ident => self.arena.strings.slice(self.arena.exprData(elem)),
+            .fn_call => blk: {
+                const call = self.arena.call_exprs.items[self.arena.exprData(elem)];
+                if (self.arena.exprKind(call.callee) != .ident) break :blk null;
+                break :blk self.arena.strings.slice(self.arena.exprData(call.callee));
+            },
+            else => null,
+        };
     }
 
     fn validateDataTable(self: *TypeChecker, table_idx: u32) !void {
@@ -6462,6 +6596,95 @@ test "motion: E1665 negative-literal duration (M0.8 E5)" {
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .transition_duration_invalid);
+}
+
+test "input_mapping: valid control parses + checks clean (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var ok = try parseAndCheck(gpa,
+        \\input_mapping "Gameplay" {
+        \\  context: .gameplay
+        \\  priority: 100
+        \\  consume_input: true
+        \\  action move: Vec2 {
+        \\    bind gamepad_left_stick { modifiers: [deadzone_radial(0.15)] }
+        \\  }
+        \\  action jump: trigger {
+        \\    bind gamepad_button_a { triggers: [on_press] }
+        \\  }
+        \\  combo hadouken: trigger {
+        \\    sequence: [.move_down, .move_forward, .action_attack]
+        \\    window: 0.4s
+        \\  }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+}
+
+test "input_mapping: E1800 empty (only properties) (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\input_mapping "Empty" { context: .gameplay priority: 0 }
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .mapping_empty);
+}
+
+test "input_mapping: E1801 duplicate action name (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\input_mapping "M" {
+        \\  action fire: trigger { bind mouse_left { triggers: [on_press] } }
+        \\  action fire: trigger { bind mouse_right { triggers: [on_press] } }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .duplicate_action_name);
+}
+
+test "input_mapping: E1804 unknown modifier (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\input_mapping "M" {
+        \\  action move: Vec2 { bind gamepad_left_stick { modifiers: [not_a_modifier(0.1)] } }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .modifier_type_unknown);
+}
+
+test "input_mapping: E1805 unknown trigger (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\input_mapping "M" {
+        \\  action jump: trigger { bind key_space { triggers: [on_levitate] } }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .trigger_type_unknown);
+}
+
+test "input_mapping: E1806 non-int priority (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\input_mapping "M" {
+        \\  priority: 1.5
+        \\  action jump: trigger { bind key_space { triggers: [on_press] } }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .priority_invalid);
+}
+
+test "input_mapping: E1808 non-positive combo window (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\input_mapping "M" {
+        \\  combo c: trigger { sequence: [.a, .b] window: -0.4s }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .combo_timing_invalid);
 }
 
 test "data table: E1762 entry type is not a struct (M0.8 E4)" {

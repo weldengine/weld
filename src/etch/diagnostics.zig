@@ -171,6 +171,26 @@ pub const DiagnosticCode = enum {
     initial_state_not_found, // M0.8 E5 — E1667 InitialStateNotFound (RESERVED: no `initial` clause in the grammar)
     motion_initial_missing, // M0.8 E5 — E1668 MotionInitialMissing (RESERVED: no `initial` clause in the grammar)
 
+    // ── input_mapping (E1800-E1808 + W1801, M0.8 E5 — etch-grammar.md §16,
+    // Level-B STRICT; E5 rulings 7/8: the grammar shape WINS (context is a
+    // PROPERTY, not a named block). RESERVED with rationale: E1802
+    // DuplicateContextName + W1801 EmptyContext (no context BLOCKS in the
+    // grammar — context is a property), E1807 ComboActionRefNotFound (the §16
+    // `sequence: [tokens]` shape has NO `.previous_action(.x)` action-ref form
+    // — the ability E1585 precedent; sequence tokens are structural input
+    // tokens, their catalogue = Input module Phase 1, consistent with the
+    // E1803 deferral). E1803 InvalidBinding is DEFERRED (input_source catalogue
+    // = engine-input-system.md, not attached — ruling 8) — not added ──
+    mapping_empty, // M0.8 E5 — E1800 MappingEmpty (no action and no combo)
+    duplicate_action_name, // M0.8 E5 — E1801 DuplicateActionName
+    duplicate_context_name, // M0.8 E5 — E1802 DuplicateContextName (RESERVED: context is a property, not a block)
+    modifier_type_unknown, // M0.8 E5 — E1804 ModifierTypeUnknown (vs the §16 l.1752 catalogue)
+    trigger_type_unknown, // M0.8 E5 — E1805 TriggerTypeUnknown (vs the §16 l.1754 catalogue)
+    priority_invalid, // M0.8 E5 — E1806 PriorityInvalid (not a non-negative INT_LITERAL)
+    combo_action_ref_not_found, // M0.8 E5 — E1807 ComboActionRefNotFound (RESERVED: no action-ref form in the §16 combo shape)
+    combo_timing_invalid, // M0.8 E5 — E1808 ComboTimingInvalid (window not a positive duration)
+    empty_context, // M0.8 E5 — W1801 EmptyContext (RESERVED: context is a property, not a block)
+
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
@@ -269,6 +289,15 @@ pub const DiagnosticCode = enum {
             .transition_easing_unknown => "E1666",
             .initial_state_not_found => "E1667",
             .motion_initial_missing => "E1668",
+            .mapping_empty => "E1800",
+            .duplicate_action_name => "E1801",
+            .duplicate_context_name => "E1802",
+            .modifier_type_unknown => "E1804",
+            .trigger_type_unknown => "E1805",
+            .priority_invalid => "E1806",
+            .combo_action_ref_not_found => "E1807",
+            .combo_timing_invalid => "E1808",
+            .empty_context => "W1801",
         };
     }
 
@@ -370,6 +399,15 @@ pub const DiagnosticCode = enum {
             .transition_easing_unknown => "TransitionEasingUnknown",
             .initial_state_not_found => "InitialStateNotFound",
             .motion_initial_missing => "MotionInitialMissing",
+            .mapping_empty => "MappingEmpty",
+            .duplicate_action_name => "DuplicateActionName",
+            .duplicate_context_name => "DuplicateContextName",
+            .modifier_type_unknown => "ModifierTypeUnknown",
+            .trigger_type_unknown => "TriggerTypeUnknown",
+            .priority_invalid => "PriorityInvalid",
+            .combo_action_ref_not_found => "ComboActionRefNotFound",
+            .combo_timing_invalid => "ComboTimingInvalid",
+            .empty_context => "EmptyContext",
         };
     }
 };

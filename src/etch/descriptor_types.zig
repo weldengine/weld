@@ -256,6 +256,45 @@ pub const MotionTransitionDesc = struct {
     animator: []const u8,
 };
 
+/// `input_mapping` descriptor (`etch-ast-ir.md` §3.5: `InputMapping { actions,
+/// combos, contexts }`; M0.8 E5, `etch-grammar.md` §16, Level-B STRICT). The
+/// grammar shape WINS (E5 ruling 7): `context`/`priority`/`consume_input` are
+/// properties (rendered text, `""` if absent). No input executes.
+pub const InputMapping = struct {
+    name: []const u8,
+    context: []const u8, // rendered tag-path, "" if absent
+    priority: []const u8, // rendered, "" if absent
+    consume_input: []const u8, // rendered, "" if absent
+    actions: []const InputActionDesc,
+    combos: []const InputComboDesc,
+};
+
+/// One input action: name + optional type + optional output + binds.
+pub const InputActionDesc = struct {
+    name: []const u8,
+    type_name: []const u8, // "" if no `: type`
+    output: []const u8, // "" if no `output: type`
+    binds: []const InputBindDesc,
+};
+
+/// One bind: source + the three optional bind-options as rendered text.
+/// `output_mapping` is a closure → presence-marked `"<closure>"` (the renderer
+/// rejects closures, the data-closure precedent — never silently-wrong).
+pub const InputBindDesc = struct {
+    source: []const u8,
+    modifiers: []const u8, // rendered array, "" if absent
+    triggers: []const u8, // rendered array, "" if absent
+    output_mapping: []const u8, // "<closure>" if present, "" if absent
+};
+
+/// One combo: name + type + the structural `sequence` tokens + window.
+pub const InputComboDesc = struct {
+    name: []const u8,
+    type_name: []const u8,
+    sequence: []const u8, // rendered array, "" if absent
+    window: []const u8, // rendered, "" if absent
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -268,6 +307,7 @@ pub const Descriptor = union(enum) {
     ability: Ability,
     theme: Theme,
     motion: Motion,
+    input_mapping: InputMapping,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -280,6 +320,7 @@ pub const Descriptor = union(enum) {
             .ability => |a| try writeAbility(a, gpa, out),
             .theme => |t| try writeTheme(t, gpa, out),
             .motion => |m| try writeMotion(m, gpa, out),
+            .input_mapping => |im| try writeInputMapping(im, gpa, out),
         }
     }
 };
@@ -334,6 +375,38 @@ pub fn writeMotion(m: Motion, gpa: std.mem.Allocator, out: *std.ArrayListUnmanag
     }
     for (m.transitions) |tr| {
         try appendFmt(gpa, out, "  transition {s} -> {s}: {s}\n", .{ tr.source, tr.target, tr.animator });
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `input_mapping` descriptor: properties, then
+/// actions (each with its type / output / binds), then combos. Optional fields
+/// are emitted only when present (`""` → line omitted) — both backends compute
+/// presence identically, so the dump stays byte-identical.
+pub fn writeInputMapping(m: InputMapping, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "input_mapping \"{s}\" {{\n", .{m.name});
+    if (m.context.len != 0) try appendFmt(gpa, out, "  context = {s}\n", .{m.context});
+    if (m.priority.len != 0) try appendFmt(gpa, out, "  priority = {s}\n", .{m.priority});
+    if (m.consume_input.len != 0) try appendFmt(gpa, out, "  consume_input = {s}\n", .{m.consume_input});
+    for (m.actions) |act| {
+        try appendFmt(gpa, out, "  action {s} {{\n", .{act.name});
+        if (act.type_name.len != 0) try appendFmt(gpa, out, "    type = {s}\n", .{act.type_name});
+        if (act.output.len != 0) try appendFmt(gpa, out, "    output = {s}\n", .{act.output});
+        for (act.binds) |bind| {
+            try appendFmt(gpa, out, "    bind {s} {{\n", .{bind.source});
+            if (bind.modifiers.len != 0) try appendFmt(gpa, out, "      modifiers = {s}\n", .{bind.modifiers});
+            if (bind.triggers.len != 0) try appendFmt(gpa, out, "      triggers = {s}\n", .{bind.triggers});
+            if (bind.output_mapping.len != 0) try appendFmt(gpa, out, "      output_mapping = {s}\n", .{bind.output_mapping});
+            try out.appendSlice(gpa, "    }\n");
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (m.combos) |combo| {
+        try appendFmt(gpa, out, "  combo {s} {{\n", .{combo.name});
+        if (combo.type_name.len != 0) try appendFmt(gpa, out, "    type = {s}\n", .{combo.type_name});
+        if (combo.sequence.len != 0) try appendFmt(gpa, out, "    sequence = {s}\n", .{combo.sequence});
+        if (combo.window.len != 0) try appendFmt(gpa, out, "    window = {s}\n", .{combo.window});
+        try out.appendSlice(gpa, "  }\n");
     }
     try out.appendSlice(gpa, "}\n");
 }

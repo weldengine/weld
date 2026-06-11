@@ -510,7 +510,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping => return,
                 else => _ = try self.advance(),
             }
         }
@@ -546,6 +546,7 @@ pub const Parser = struct {
             .kw_ability => try self.parseAbilityDecl(annotations),
             .kw_theme => try self.parseThemeDecl(annotations),
             .kw_motion => try self.parseMotionDecl(annotations),
+            .kw_input_mapping => try self.parseInputMappingDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -559,7 +560,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -1739,6 +1740,216 @@ pub const Parser = struct {
         const idx: u32 = @intCast(self.arena.motion_animators.items.len);
         try self.arena.motion_animators.append(self.gpa, a);
         return idx;
+    }
+
+    /// Parse `input_mapping STRING_LITERAL "{" {property} {action} {combo} "}"`
+    /// (M0.8 E5 Level B STRICT — NO input execution, `etch-grammar.md` §16).
+    /// `context`/`priority`/`consume_input`/`action`/`combo` are CONTEXTUAL
+    /// sub-keywords (the S3 sub-construct doctrine — never reserved); `context`
+    /// is a PROPERTY (E5 ruling 7, NOT a named block). Dispatched on the head
+    /// ident; the strict EBNF grouping (`{property} {action} {combo}`) is
+    /// accepted as a superset (any order) — no code enforces the grouping.
+    /// STRING-named → no symbol (the theme precedent). Slabs are fed only from
+    /// input_mapping context (mappings do not nest) → contiguous appends.
+    fn parseInputMappingDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'input_mapping'
+        const name_tok = try self.expect(.string_literal, "expected input_mapping name (string literal) after 'input_mapping'");
+        const name_id = try self.internStringLiteral(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start the input_mapping body");
+
+        var context: NodeId = NodeId.none;
+        var priority: NodeId = NodeId.none;
+        var consume_input: NodeId = NodeId.none;
+        const actions_start: u32 = @intCast(self.arena.input_actions.items.len);
+        const combos_start: u32 = @intCast(self.arena.input_combos.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.peek() != .ident) {
+                return self.parseErrFmt(self.peekSpan(), "expected a property, 'action', or 'combo' in the input_mapping body, got '{s}'", .{self.sliceOf(self.peekSpan())});
+            }
+            const head = self.sliceOf(self.peekSpan());
+            if (std.mem.eql(u8, head, "context")) {
+                _ = try self.advance();
+                _ = try self.expect(.colon, "expected ':' after 'context'");
+                context = try self.parseExpr(0);
+            } else if (std.mem.eql(u8, head, "priority")) {
+                _ = try self.advance();
+                _ = try self.expect(.colon, "expected ':' after 'priority'");
+                // Parse-permissive (any expr) so E1806 can diagnose cleanly; the
+                // ACCEPTED surface is still the §16 EBNF `priority: INT_LITERAL`
+                // (E1806 rejects everything that is not a non-negative int).
+                priority = try self.parseExpr(0);
+            } else if (std.mem.eql(u8, head, "consume_input")) {
+                _ = try self.advance();
+                _ = try self.expect(.colon, "expected ':' after 'consume_input'");
+                consume_input = try self.parseExpr(0);
+            } else if (std.mem.eql(u8, head, "action")) {
+                try self.parseInputAction();
+            } else if (std.mem.eql(u8, head, "combo")) {
+                try self.parseInputCombo();
+            } else {
+                return self.parseErrFmt(self.peekSpan(), "expected a property ('context'|'priority'|'consume_input'), 'action', or 'combo', got '{s}'", .{head});
+            }
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the input_mapping body");
+        const actions_len: u32 = @as(u32, @intCast(self.arena.input_actions.items.len)) - actions_start;
+        const combos_len: u32 = @as(u32, @intCast(self.arena.input_combos.items.len)) - combos_start;
+        _ = try self.arena.addInputMappingDecl(self.gpa, .{
+            .name = name_id,
+            .name_span = name_tok.span,
+            .context = context,
+            .priority = priority,
+            .consume_input = consume_input,
+            .actions_start = actions_start,
+            .actions_len = actions_len,
+            .combos_start = combos_start,
+            .combos_len = combos_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse `"action" IDENT [":" type] "{" ["output" ":" type] {input_bind} "}"`.
+    fn parseInputAction(self: *Parser) ParseError!void {
+        const kw = try self.advance(); // 'action' (contextual)
+        const name_tok = try self.expect(.ident, "expected action name (identifier) after 'action'");
+        var type_name: StringId = 0;
+        if (self.peek() == .colon) {
+            _ = try self.advance();
+            type_name = try self.parseTypeName();
+        }
+        _ = try self.expect(.lbrace, "expected '{' to start the action body");
+        var output_name: StringId = 0;
+        const binds_start: u32 = @intCast(self.arena.input_binds.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "output")) {
+                _ = try self.advance();
+                _ = try self.expect(.colon, "expected ':' after 'output'");
+                output_name = try self.parseTypeName();
+            } else if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "bind")) {
+                try self.parseInputBind();
+            } else {
+                return self.parseErrFmt(self.peekSpan(), "expected 'output:' or 'bind' in the action body, got '{s}'", .{self.sliceOf(self.peekSpan())});
+            }
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the action body");
+        const binds_len: u32 = @as(u32, @intCast(self.arena.input_binds.items.len)) - binds_start;
+        try self.arena.input_actions.append(self.gpa, .{
+            .name = try self.internSlice(name_tok.span),
+            .type_name = type_name,
+            .output_name = output_name,
+            .binds_start = binds_start,
+            .binds_len = binds_len,
+            .span = .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end },
+        });
+    }
+
+    /// Parse `"bind" input_source [input_bind_options]` (§16). `input_source =
+    /// IDENT {"." IDENT}` is parsed MANUALLY (not `parseExpr`) — the trailing
+    /// `{` opens the bind options, not a struct literal. The non-conform §16
+    /// example form `bind keys [array]` is not in the EBNF (secondary finding
+    /// (a) — corpus uses conform binds; a stray `[` after the source surfaces
+    /// as a parse error). Options (any order, optional commas): modifiers /
+    /// triggers (array_literal) + output_mapping (closure).
+    fn parseInputBind(self: *Parser) ParseError!void {
+        const kw = try self.advance(); // 'bind' (contextual)
+        const first = try self.expect(.ident, "expected an input source (identifier) after 'bind'");
+        var end_byte = first.span.byte_end;
+        while (self.peek() == .dot) {
+            _ = try self.advance(); // '.'
+            const seg = try self.expect(.ident, "expected an identifier after '.' in the input source");
+            end_byte = seg.span.byte_end;
+        }
+        const source = try self.internSlice(.{ .byte_start = first.span.byte_start, .byte_end = end_byte });
+        var modifiers: NodeId = NodeId.none;
+        var triggers: NodeId = NodeId.none;
+        var output_mapping: NodeId = NodeId.none;
+        var span_end = end_byte;
+        if (self.peek() == .lbrace) {
+            _ = try self.advance(); // '{'
+            while (self.peek() != .rbrace and self.peek() != .eof) {
+                try self.surfaceTokenErrors();
+                if (self.peek() != .ident) {
+                    return self.parseErrFmt(self.peekSpan(), "expected 'modifiers'/'triggers'/'output_mapping' in the bind options, got '{s}'", .{self.sliceOf(self.peekSpan())});
+                }
+                const opt = self.sliceOf(self.peekSpan());
+                if (std.mem.eql(u8, opt, "modifiers")) {
+                    _ = try self.advance();
+                    _ = try self.expect(.colon, "expected ':' after 'modifiers'");
+                    modifiers = try self.parseExpr(0);
+                } else if (std.mem.eql(u8, opt, "triggers")) {
+                    _ = try self.advance();
+                    _ = try self.expect(.colon, "expected ':' after 'triggers'");
+                    triggers = try self.parseExpr(0);
+                } else if (std.mem.eql(u8, opt, "output_mapping")) {
+                    _ = try self.advance();
+                    _ = try self.expect(.colon, "expected ':' after 'output_mapping'");
+                    output_mapping = try self.parseExpr(0);
+                } else {
+                    return self.parseErrFmt(self.peekSpan(), "unknown bind option '{s}' (expected 'modifiers'/'triggers'/'output_mapping')", .{opt});
+                }
+                _ = try self.match(.comma); // tolerate an optional comma between options
+            }
+            const close = try self.expect(.rbrace, "expected '}' to close the bind options");
+            span_end = close.span.byte_end;
+        }
+        try self.arena.input_binds.append(self.gpa, .{
+            .source = source,
+            .modifiers = modifiers,
+            .triggers = triggers,
+            .output_mapping = output_mapping,
+            .span = .{ .byte_start = kw.span.byte_start, .byte_end = span_end },
+        });
+    }
+
+    /// Parse `"combo" IDENT ":" type "{" "sequence" ":" array_literal "window"
+    /// ":" expression "}"` (§16). `sequence` / `window` are contextual keys.
+    /// Sequence elements are STRUCTURAL input tokens — NOT action references
+    /// (E1807 RESERVED, the §16 shape has no action-ref form).
+    fn parseInputCombo(self: *Parser) ParseError!void {
+        const kw = try self.advance(); // 'combo' (contextual)
+        const name_tok = try self.expect(.ident, "expected combo name (identifier) after 'combo'");
+        _ = try self.expect(.colon, "expected ':' after the combo name");
+        const type_name = try self.parseTypeName();
+        _ = try self.expect(.lbrace, "expected '{' to start the combo body");
+        var sequence: NodeId = NodeId.none;
+        var window: NodeId = NodeId.none;
+        // `sequence` is the graduated `kw_sequence` keyword (behavior composite),
+        // matched by token kind here; `window` is a contextual ident.
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.peek() == .kw_sequence) {
+                _ = try self.advance();
+                _ = try self.expect(.colon, "expected ':' after 'sequence'");
+                sequence = try self.parseExpr(0);
+            } else if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "window")) {
+                _ = try self.advance();
+                _ = try self.expect(.colon, "expected ':' after 'window'");
+                window = try self.parseExpr(0);
+            } else {
+                return self.parseErrFmt(self.peekSpan(), "expected 'sequence:' or 'window:' in the combo body, got '{s}'", .{self.sliceOf(self.peekSpan())});
+            }
+            _ = try self.match(.comma); // tolerate an optional comma
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the combo body");
+        try self.arena.input_combos.append(self.gpa, .{
+            .name = try self.internSlice(name_tok.span),
+            .type_name = type_name,
+            .sequence = sequence,
+            .window = window,
+            .span = .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end },
+        });
+    }
+
+    /// Parse a `type` and intern its source TEXT (for the structural descriptor
+    /// — input_mapping action/combo/output types are simple named types:
+    /// `Vec2` / `trigger` / `bool`; `parseBaseType` accepts the lowercase-ident
+    /// form `trigger`).
+    fn parseTypeName(self: *Parser) ParseError!StringId {
+        const ty = try self.parseType();
+        return try self.internSlice(self.arena.typeNodeSpan(ty));
     }
 
     const DataEntryBody = struct {
@@ -6432,4 +6643,45 @@ test "parser recovers and a valid motion after a broken construct survives (M0.8
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.motion_decls.items.len);
+}
+
+test "parser builds an input_mapping with properties, actions, binds, and a combo (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\input_mapping "Gameplay" {
+        \\  context: .gameplay
+        \\  priority: 100
+        \\  consume_input: true
+        \\  action move: Vec2 {
+        \\    bind gamepad_left_stick { modifiers: [deadzone_radial(0.15)] }
+        \\  }
+        \\  action jump: trigger {
+        \\    bind gamepad_button_a { triggers: [on_press] }
+        \\    bind key_space { triggers: [on_press] }
+        \\  }
+        \\  combo hadouken: trigger {
+        \\    sequence: [.move_down, .move_down_forward, .move_forward, .action_attack]
+        \\    window: 0.4s
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.input_mapping_decls.items.len);
+    const decl = result.ast.input_mapping_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 2), decl.actions_len);
+    try std.testing.expectEqual(@as(u32, 1), decl.combos_len);
+    // move has 1 bind, jump has 2 → 3 binds total.
+    try std.testing.expectEqual(@as(usize, 3), result.ast.input_binds.items.len);
+}
+
+test "parser recovers and a valid input_mapping after a broken construct survives (M0.8 E5 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\input_mapping "Menu" { action confirm: trigger { bind key_enter { triggers: [on_press] } } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.input_mapping_decls.items.len);
 }

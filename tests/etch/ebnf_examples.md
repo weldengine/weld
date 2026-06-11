@@ -1071,3 +1071,41 @@ motion AttentionPulse {
   }
 }
 ```
+
+## Input mapping (E5 — §16, Level-B STRICT)
+
+The grammar §16 shape wins (E5 ruling 7): `context`/`priority`/`consume_input`
+are PROPERTIES (not blocks), `action IDENT [: type] { [output: type] {bind} }`,
+`bind input_source [{ modifiers/triggers/output_mapping }]` with `input_source =
+IDENT {"." IDENT}`, and `combo IDENT : type { sequence: [...] window: expr }`.
+Binds are §16-conform `bind <source> { … }` — the `bind keys [array]` doc form is
+non-conform with the EBNF (not in the harness). Combo `sequence` tokens are
+structural (E1807 RESERVED — no action-ref form in the §16 shape).
+
+```etch
+input_mapping "Gameplay" {
+  context: .gameplay
+  priority: 100
+  consume_input: true
+
+  action move: Vec2 {
+    bind gamepad_left_stick { modifiers: [deadzone_radial(0.15)] }
+    bind mouse_motion { modifiers: [sensitivity(0.5)] }
+  }
+
+  action jump: trigger {
+    bind gamepad_button_a { triggers: [on_press] }
+    bind key_space { triggers: [on_press] }
+  }
+
+  action sprint: bool {
+    bind gamepad_left_stick_click
+    bind key_shift
+  }
+
+  combo hadouken: trigger {
+    sequence: [.move_down, .move_down_forward, .move_forward, .action_attack]
+    window: 0.4s
+  }
+}
+```

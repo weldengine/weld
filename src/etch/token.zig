@@ -95,6 +95,7 @@ pub const TokenKind = enum {
     kw_after, // routine trigger `after Segment` (M0.8 E4; the §4.3 timer statement stays out of M0.8 — explicit parse error)
     kw_theme, // theme declaration (M0.8 E5 Level B presentation)
     kw_motion, // motion declaration (M0.8 E5 Level B presentation — state-based UI animation)
+    kw_input_mapping, // input_mapping declaration (M0.8 E5 Level B presentation — STRICT, no execution)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -248,6 +249,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "after", .kind = .kw_after },
     .{ .lexeme = "theme", .kind = .kw_theme },
     .{ .lexeme = "motion", .kind = .kw_motion },
+    .{ .lexeme = "input_mapping", .kind = .kw_input_mapping },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -287,7 +289,6 @@ pub const non_s3_keywords = [_][]const u8{
     "audio_score",
     "scene",
     "prefab",
-    "input_mapping",
     "locale",
     "test",
     "override",

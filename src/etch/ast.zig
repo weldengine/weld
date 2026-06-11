@@ -1301,6 +1301,66 @@ pub const MotionKeyframe = struct {
     fields_len: u32,
 };
 
+/// Side-slab entry for an `input_mapping` declaration (M0.8 E5 Level B STRICT
+/// — NO input execution, `etch-grammar.md` §16: `input_mapping STRING_LITERAL
+/// "{" {property} {action} {combo} "}"`). The grammar shape WINS (E5 ruling 7):
+/// `context` is a PROPERTY (not a named block — E1802/W1801 RESERVED), priority
+/// / consume_input are properties. STRING-named → no symbol (the theme
+/// precedent). Properties are stored as 0/1 expression NodeIds; actions / combos
+/// in `(start, len)` runs of their slabs.
+pub const InputMappingDecl = struct {
+    name: StringId, // decoded STRING_LITERAL content
+    name_span: SourceSpan,
+    context: NodeId, // TAG_PATH expr, `NodeId.none` if absent
+    priority: NodeId, // expr (validated INT via E1806), `NodeId.none` if absent
+    consume_input: NodeId, // BOOL expr (structural), `NodeId.none` if absent
+    actions_start: u32, // index into `arena.input_actions`
+    actions_len: u32,
+    combos_start: u32, // index into `arena.input_combos`
+    combos_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
+/// One `input_action` (`"action" IDENT [":" type] "{" ["output" ":" type]
+/// {input_bind} "}"`, §16). `type_name` / `output_name` are the interned type
+/// TEXT (the type node's source span — `0` when absent). Binds run in
+/// `arena.input_binds`.
+pub const InputAction = struct {
+    name: StringId,
+    type_name: StringId, // `0` if no `: type`
+    output_name: StringId, // `0` if no `output: type`
+    binds_start: u32, // index into `arena.input_binds`
+    binds_len: u32,
+    span: SourceSpan,
+};
+
+/// One `input_bind` (`"bind" input_source [input_bind_options]`, §16).
+/// `input_source = IDENT {"." IDENT}` is interned as its source TEXT
+/// (e.g. `gamepad_left_stick.x`). The three options are 0/1 each:
+/// `modifiers`/`triggers` are array_literal exprs (validated against the §16
+/// catalogues, E1804/E1805), `output_mapping` is a closure (presence-marked in
+/// the descriptor — the renderer rejects closures, the data-closure precedent).
+pub const InputBind = struct {
+    source: StringId, // input_source text
+    modifiers: NodeId, // array_literal expr, `NodeId.none` if absent
+    triggers: NodeId, // array_literal expr, `NodeId.none` if absent
+    output_mapping: NodeId, // closure expr, `NodeId.none` if absent
+    span: SourceSpan,
+};
+
+/// One `input_combo` (`"combo" IDENT ":" type "{" "sequence" ":" array_literal
+/// "window" ":" expression "}"`, §16). The `sequence` elements are STRUCTURAL
+/// input tokens — NOT action references (E1807 RESERVED, E5 ruling: the §16
+/// shape has no action-ref form; the token catalogue = Input module Phase 1).
+pub const InputCombo = struct {
+    name: StringId,
+    type_name: StringId, // interned type TEXT
+    sequence: NodeId, // array_literal expr
+    window: NodeId, // expr (validated positive duration via E1808)
+    span: SourceSpan,
+};
+
 /// Kind of one routine trigger alternative (M0.8 E4, `etch-grammar.md`
 /// §8.2 `trigger_expr`): `at TIME_LITERAL` / `after IDENT` /
 /// `on_event TYPE_IDENT`. `or`-chains are stored as a flat run of
@@ -1660,6 +1720,10 @@ pub const AstArena = struct {
     motion_transitions: std.ArrayListUnmanaged(MotionTransition) = .empty,
     motion_animators: std.ArrayListUnmanaged(MotionAnimator) = .empty,
     motion_keyframes: std.ArrayListUnmanaged(MotionKeyframe) = .empty,
+    input_mapping_decls: std.ArrayListUnmanaged(InputMappingDecl) = .empty,
+    input_actions: std.ArrayListUnmanaged(InputAction) = .empty,
+    input_binds: std.ArrayListUnmanaged(InputBind) = .empty,
+    input_combos: std.ArrayListUnmanaged(InputCombo) = .empty,
     quest_decls: std.ArrayListUnmanaged(QuestDecl) = .empty,
     quest_properties: std.ArrayListUnmanaged(QuestProperty) = .empty,
     quest_stages: std.ArrayListUnmanaged(QuestStage) = .empty,
@@ -1844,6 +1908,10 @@ pub const AstArena = struct {
         self.motion_transitions.deinit(gpa);
         self.motion_animators.deinit(gpa);
         self.motion_keyframes.deinit(gpa);
+        self.input_mapping_decls.deinit(gpa);
+        self.input_actions.deinit(gpa);
+        self.input_binds.deinit(gpa);
+        self.input_combos.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
@@ -2309,6 +2377,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.motion_decls.items.len);
         try self.motion_decls.append(gpa, decl);
         return try self.addItem(gpa, .motion_decl, idx, span);
+    }
+
+    /// `input_mapping "name" { properties actions combos }` (M0.8 E5 Level B
+    /// STRICT, `etch-grammar.md` §16). The caller appends the actions / binds /
+    /// combos to their slabs beforehand, passing the ranges in `decl`.
+    pub fn addInputMappingDecl(self: *AstArena, gpa: std.mem.Allocator, decl: InputMappingDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.input_mapping_decls.items.len);
+        try self.input_mapping_decls.append(gpa, decl);
+        return try self.addItem(gpa, .input_mapping_decl, idx, span);
     }
 
     /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The

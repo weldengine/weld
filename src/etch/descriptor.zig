@@ -67,7 +67,41 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
         .ability => |a| freeAbility(gpa, a),
         .theme => |t| freeTheme(gpa, t),
         .motion => |m| freeMotion(gpa, m),
+        .input_mapping => |im| freeInputMapping(gpa, im),
     }
+}
+
+fn freeInputMapping(gpa: std.mem.Allocator, m: types.InputMapping) void {
+    gpa.free(m.name);
+    gpa.free(m.context);
+    gpa.free(m.priority);
+    gpa.free(m.consume_input);
+    for (m.actions) |act| freeInputAction(gpa, act);
+    gpa.free(m.actions);
+    for (m.combos) |c| freeInputCombo(gpa, c);
+    gpa.free(m.combos);
+}
+
+fn freeInputAction(gpa: std.mem.Allocator, act: types.InputActionDesc) void {
+    gpa.free(act.name);
+    gpa.free(act.type_name);
+    gpa.free(act.output);
+    for (act.binds) |bd| freeInputBind(gpa, bd);
+    gpa.free(act.binds);
+}
+
+fn freeInputBind(gpa: std.mem.Allocator, bd: types.InputBindDesc) void {
+    gpa.free(bd.source);
+    gpa.free(bd.modifiers);
+    gpa.free(bd.triggers);
+    gpa.free(bd.output_mapping);
+}
+
+fn freeInputCombo(gpa: std.mem.Allocator, c: types.InputComboDesc) void {
+    gpa.free(c.name);
+    gpa.free(c.type_name);
+    gpa.free(c.sequence);
+    gpa.free(c.window);
 }
 
 fn freeTheme(gpa: std.mem.Allocator, t: types.Theme) void {
@@ -249,6 +283,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .ability_decl => try list.append(gpa, .{ .ability = try buildAbility(gpa, arena, arena.ability_decls.items[datas[i]]) }),
             .theme_decl => try list.append(gpa, .{ .theme = try buildTheme(gpa, arena, arena.theme_decls.items[datas[i]]) }),
             .motion_decl => try list.append(gpa, .{ .motion = try buildMotion(gpa, arena, arena.motion_decls.items[datas[i]]) }),
+            .input_mapping_decl => try list.append(gpa, .{ .input_mapping = try buildInputMapping(gpa, arena, arena.input_mapping_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -590,6 +625,97 @@ fn renderMotionFieldsBody(gpa: std.mem.Allocator, arena: *const AstArena, fields
         try renderExpr(gpa, arena, field.value, out);
     }
     try out.appendSlice(gpa, " }");
+}
+
+/// Render an optional expression: `""` when absent, else the shared canonical
+/// rendering (M0.8 E5 input_mapping properties / bind options / combo fields).
+fn renderOptExprAlloc(gpa: std.mem.Allocator, arena: *const AstArena, node: NodeId) BuildError![]u8 {
+    if (node.isNone()) return try gpa.dupe(u8, "");
+    return try renderExprAlloc(gpa, arena, node);
+}
+
+/// Build an `input_mapping` descriptor (M0.8 E5 Level B STRICT): properties +
+/// actions (binds) + combos. `output_mapping` (a closure) is presence-marked
+/// `"<closure>"` — the renderer rejects closures (the data-closure precedent),
+/// so the body is structurally noted, never silently-wrong.
+fn buildInputMapping(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.InputMappingDecl) BuildError!types.InputMapping {
+    const context = try renderOptExprAlloc(gpa, arena, decl.context);
+    errdefer gpa.free(context);
+    const priority = try renderOptExprAlloc(gpa, arena, decl.priority);
+    errdefer gpa.free(priority);
+    const consume_input = try renderOptExprAlloc(gpa, arena, decl.consume_input);
+    errdefer gpa.free(consume_input);
+
+    var actions: std.ArrayListUnmanaged(types.InputActionDesc) = .empty;
+    errdefer {
+        for (actions.items) |act| freeInputAction(gpa, act);
+        actions.deinit(gpa);
+    }
+    var a: u32 = 0;
+    while (a < decl.actions_len) : (a += 1) {
+        try actions.append(gpa, try buildInputAction(gpa, arena, arena.input_actions.items[decl.actions_start + a]));
+    }
+
+    var combos: std.ArrayListUnmanaged(types.InputComboDesc) = .empty;
+    errdefer {
+        for (combos.items) |c| freeInputCombo(gpa, c);
+        combos.deinit(gpa);
+    }
+    var c: u32 = 0;
+    while (c < decl.combos_len) : (c += 1) {
+        try combos.append(gpa, try buildInputCombo(gpa, arena, arena.input_combos.items[decl.combos_start + c]));
+    }
+
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    errdefer gpa.free(name);
+    return .{
+        .name = name,
+        .context = context,
+        .priority = priority,
+        .consume_input = consume_input,
+        .actions = try actions.toOwnedSlice(gpa),
+        .combos = try combos.toOwnedSlice(gpa),
+    };
+}
+
+fn buildInputAction(gpa: std.mem.Allocator, arena: *const AstArena, action: ast_mod.InputAction) BuildError!types.InputActionDesc {
+    var binds: std.ArrayListUnmanaged(types.InputBindDesc) = .empty;
+    errdefer {
+        for (binds.items) |bd| freeInputBind(gpa, bd);
+        binds.deinit(gpa);
+    }
+    var b: u32 = 0;
+    while (b < action.binds_len) : (b += 1) {
+        try binds.append(gpa, try buildInputBind(gpa, arena, arena.input_binds.items[action.binds_start + b]));
+    }
+    const name = try gpa.dupe(u8, arena.strings.slice(action.name));
+    errdefer gpa.free(name);
+    const type_name = try gpa.dupe(u8, if (action.type_name == 0) "" else arena.strings.slice(action.type_name));
+    errdefer gpa.free(type_name);
+    const output = try gpa.dupe(u8, if (action.output_name == 0) "" else arena.strings.slice(action.output_name));
+    return .{ .name = name, .type_name = type_name, .output = output, .binds = try binds.toOwnedSlice(gpa) };
+}
+
+fn buildInputBind(gpa: std.mem.Allocator, arena: *const AstArena, bind: ast_mod.InputBind) BuildError!types.InputBindDesc {
+    const modifiers = try renderOptExprAlloc(gpa, arena, bind.modifiers);
+    errdefer gpa.free(modifiers);
+    const triggers = try renderOptExprAlloc(gpa, arena, bind.triggers);
+    errdefer gpa.free(triggers);
+    const output_mapping = try gpa.dupe(u8, if (bind.output_mapping.isNone()) "" else "<closure>");
+    errdefer gpa.free(output_mapping);
+    const source = try gpa.dupe(u8, arena.strings.slice(bind.source));
+    return .{ .source = source, .modifiers = modifiers, .triggers = triggers, .output_mapping = output_mapping };
+}
+
+fn buildInputCombo(gpa: std.mem.Allocator, arena: *const AstArena, combo: ast_mod.InputCombo) BuildError!types.InputComboDesc {
+    const sequence = try renderOptExprAlloc(gpa, arena, combo.sequence);
+    errdefer gpa.free(sequence);
+    const window = try renderOptExprAlloc(gpa, arena, combo.window);
+    errdefer gpa.free(window);
+    const name = try gpa.dupe(u8, arena.strings.slice(combo.name));
+    errdefer gpa.free(name);
+    const type_name = try gpa.dupe(u8, if (combo.type_name == 0) "" else arena.strings.slice(combo.type_name));
+    return .{ .name = name, .type_name = type_name, .sequence = sequence, .window = window };
 }
 
 fn buildBehavior(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.BehaviorDecl) BuildError!types.Behavior {

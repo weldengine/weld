@@ -4910,7 +4910,7 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// `true` when the program declares at least one Level-B construct with a
 /// descriptor (M0.8 E4: the six Level-B gameplay constructs).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4935,6 +4935,7 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .ability_decl => try emitAbilityDescriptor(w, gpa, ast, ast.ability_decls.items[datas[i]]),
             .theme_decl => try emitThemeDescriptor(w, gpa, ast, ast.theme_decls.items[datas[i]]),
             .motion_decl => try emitMotionDescriptor(w, gpa, ast, ast.motion_decls.items[datas[i]]),
+            .input_mapping_decl => try emitInputMappingDescriptor(w, gpa, ast, ast.input_mapping_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -5041,6 +5042,74 @@ fn emitMotionDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena
         try w.line(" },");
     }
     try w.line("    } } },");
+}
+
+/// Emit-structure for an `input_mapping` (M0.8 E5 Level B STRICT): the codegen's
+/// OWN walk; properties / bind options / combo fields through the SHARED
+/// `renderForEmit` (empty when absent — mirrors `buildInputMapping`),
+/// `output_mapping` presence-marked `"<closure>"`. Proof-contract split.
+fn emitInputMappingDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.InputMappingDecl) CodegenError!void {
+    try w.print("    .{{ .input_mapping = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.print(", .context = ", .{});
+    try emitOptRendered(w, gpa, ast, decl.context);
+    try w.print(", .priority = ", .{});
+    try emitOptRendered(w, gpa, ast, decl.priority);
+    try w.print(", .consume_input = ", .{});
+    try emitOptRendered(w, gpa, ast, decl.consume_input);
+    try w.line(", .actions = &[_]etch_descriptor.InputActionDesc{");
+    var a: u32 = 0;
+    while (a < decl.actions_len) : (a += 1) {
+        const action = ast.input_actions.items[decl.actions_start + a];
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(action.name));
+        try w.print(", .type_name = ", .{});
+        try emitZigStringLiteral(w, if (action.type_name == 0) "" else ast.strings.slice(action.type_name));
+        try w.print(", .output = ", .{});
+        try emitZigStringLiteral(w, if (action.output_name == 0) "" else ast.strings.slice(action.output_name));
+        try w.line(", .binds = &[_]etch_descriptor.InputBindDesc{");
+        var b: u32 = 0;
+        while (b < action.binds_len) : (b += 1) {
+            const bind = ast.input_binds.items[action.binds_start + b];
+            try w.print("            .{{ .source = ", .{});
+            try emitZigStringLiteral(w, ast.strings.slice(bind.source));
+            try w.print(", .modifiers = ", .{});
+            try emitOptRendered(w, gpa, ast, bind.modifiers);
+            try w.print(", .triggers = ", .{});
+            try emitOptRendered(w, gpa, ast, bind.triggers);
+            try w.print(", .output_mapping = ", .{});
+            try emitZigStringLiteral(w, if (bind.output_mapping.isNone()) "" else "<closure>");
+            try w.line(" },");
+        }
+        try w.line("        } },");
+    }
+    try w.line("    }, .combos = &[_]etch_descriptor.InputComboDesc{");
+    var c: u32 = 0;
+    while (c < decl.combos_len) : (c += 1) {
+        const combo = ast.input_combos.items[decl.combos_start + c];
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(combo.name));
+        try w.print(", .type_name = ", .{});
+        try emitZigStringLiteral(w, if (combo.type_name == 0) "" else ast.strings.slice(combo.type_name));
+        try w.print(", .sequence = ", .{});
+        try emitOptRendered(w, gpa, ast, combo.sequence);
+        try w.print(", .window = ", .{});
+        try emitOptRendered(w, gpa, ast, combo.window);
+        try w.line(" },");
+    }
+    try w.line("    } } },");
+}
+
+/// Emit an optional expression's rendered text as a Zig string literal —
+/// `""` when absent, else `renderForEmit` (mirrors `descriptor.renderOptExprAlloc`).
+fn emitOptRendered(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, node: ast_mod.NodeId) CodegenError!void {
+    if (node.isNone()) {
+        try emitZigStringLiteral(w, "");
+        return;
+    }
+    const rendered = try renderForEmit(gpa, ast, node);
+    defer gpa.free(rendered);
+    try emitZigStringLiteral(w, rendered);
 }
 
 fn emitRoutineDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.RoutineDecl) CodegenError!void {

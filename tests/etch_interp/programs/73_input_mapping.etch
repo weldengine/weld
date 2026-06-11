@@ -1,0 +1,41 @@
+// Differential 73 — Level-B `input_mapping` (M0.8 E5 presentation, STRICT —
+// NO input execution). Serialized-IR parity: the interpreter BUILDS the
+// descriptor, the cooked Zig EMITS it; both serialize through the shared
+// canonical serializer and must produce byte-identical dumps (LEVEL-B PROOF
+// CONTRACT). The grammar §16 shape WINS (E5 ruling 7): `context` is a
+// PROPERTY (not a block — E1802/W1801 RESERVED); the combo `sequence` tokens
+// are STRUCTURAL input tokens, NOT action references (E1807 RESERVED). Binds
+// are §16-conform (`bind <source> { … }`) — the `bind keys [array]` example
+// form is non-conform with the EBNF (corpus stays conform). Exercises:
+// the three properties, actions with/without a `: type`, binds with and
+// without options, modifier/trigger catalogue entries (E1804/E1805 clean),
+// and a combo (E1808 clean). No rule executes.
+input_mapping "Gameplay" {
+  context: .gameplay
+  priority: 100
+  consume_input: true
+
+  action move: Vec2 {
+    bind gamepad_left_stick { modifiers: [deadzone_radial(0.15)] }
+  }
+
+  action look: Vec2 {
+    bind gamepad_right_stick { modifiers: [deadzone_radial(0.1), sensitivity(2.0)] }
+    bind mouse_motion { modifiers: [sensitivity(0.5)] }
+  }
+
+  action jump: trigger {
+    bind gamepad_button_a { triggers: [on_press] }
+    bind key_space { triggers: [on_press] }
+  }
+
+  action sprint: bool {
+    bind gamepad_left_stick_click
+    bind key_shift
+  }
+
+  combo hadouken: trigger {
+    sequence: [.move_down, .move_down_forward, .move_forward, .action_attack]
+    window: 0.4s
+  }
+}

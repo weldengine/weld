@@ -36,6 +36,7 @@ const programs = [_]LevelBProgram{
     // M0.8 E5 Level-B presentation.
     .{ .name = "p71_theme_dark", .source = @embedFile("programs/71_theme_dark.etch") },
     .{ .name = "p72_motion_ui", .source = @embedFile("programs/72_motion_ui.etch") },
+    .{ .name = "p73_input_mapping", .source = @embedFile("programs/73_input_mapping.etch") },
 };
 
 test "level-b serialized IR: interpreter build == cooked emit, byte-identical" {

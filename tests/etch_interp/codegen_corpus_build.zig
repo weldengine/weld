@@ -96,4 +96,5 @@ pub const programs = [_]CodegenProgram{
     // sidecar (nothing executes).
     .{ .name = "p71_theme_dark", .etch_path = "tests/etch_interp/programs/71_theme_dark.etch" },
     .{ .name = "p72_motion_ui", .etch_path = "tests/etch_interp/programs/72_motion_ui.etch" },
+    .{ .name = "p73_input_mapping", .etch_path = "tests/etch_interp/programs/73_input_mapping.etch" },
 };
