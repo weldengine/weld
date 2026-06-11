@@ -66,6 +66,7 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
         .dialogue => |dlg| freeDialogue(gpa, dlg),
         .ability => |a| freeAbility(gpa, a),
         .theme => |t| freeTheme(gpa, t),
+        .motion => |m| freeMotion(gpa, m),
     }
 }
 
@@ -76,6 +77,25 @@ fn freeTheme(gpa: std.mem.Allocator, t: types.Theme) void {
         gpa.free(e.value);
     }
     gpa.free(t.entries);
+}
+
+fn freeMotion(gpa: std.mem.Allocator, m: types.Motion) void {
+    gpa.free(m.name);
+    for (m.states) |st| {
+        gpa.free(st.name);
+        for (st.fields) |f| {
+            gpa.free(f.name);
+            gpa.free(f.value);
+        }
+        gpa.free(st.fields);
+    }
+    gpa.free(m.states);
+    for (m.transitions) |tr| {
+        gpa.free(tr.source);
+        gpa.free(tr.target);
+        gpa.free(tr.animator);
+    }
+    gpa.free(m.transitions);
 }
 
 fn freeAbility(gpa: std.mem.Allocator, a: types.Ability) void {
@@ -228,6 +248,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .dialogue_decl => try list.append(gpa, .{ .dialogue = try buildDialogue(gpa, arena, arena.dialogue_decls.items[datas[i]]) }),
             .ability_decl => try list.append(gpa, .{ .ability = try buildAbility(gpa, arena, arena.ability_decls.items[datas[i]]) }),
             .theme_decl => try list.append(gpa, .{ .theme = try buildTheme(gpa, arena, arena.theme_decls.items[datas[i]]) }),
+            .motion_decl => try list.append(gpa, .{ .motion = try buildMotion(gpa, arena, arena.motion_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -404,6 +425,171 @@ fn buildTheme(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.Them
     }
     const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
     return .{ .name = name, .entries = try entries.toOwnedSlice(gpa) };
+}
+
+/// Build a `motion` descriptor (M0.8 E5): states with canonical-rendered
+/// property fields + transitions with flat-text animators. Mirrors `buildData`
+/// (states ↔ entries+fields) and `buildRoutine` (transitions ↔ interrupts).
+fn buildMotion(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.MotionDecl) BuildError!types.Motion {
+    var states: std.ArrayListUnmanaged(types.MotionStateDesc) = .empty;
+    errdefer {
+        for (states.items) |st| {
+            gpa.free(st.name);
+            for (st.fields) |f| {
+                gpa.free(f.name);
+                gpa.free(f.value);
+            }
+            gpa.free(st.fields);
+        }
+        states.deinit(gpa);
+    }
+    var s: u32 = 0;
+    while (s < decl.states_len) : (s += 1) {
+        const st = arena.motion_states.items[decl.states_start + s];
+        const fields = try buildMotionFields(gpa, arena, st.fields_start, st.fields_len);
+        errdefer {
+            for (fields) |f| {
+                gpa.free(f.name);
+                gpa.free(f.value);
+            }
+            gpa.free(fields);
+        }
+        const name = try gpa.dupe(u8, arena.strings.slice(st.name));
+        errdefer gpa.free(name);
+        try states.append(gpa, .{ .name = name, .fields = fields });
+    }
+
+    var transitions: std.ArrayListUnmanaged(types.MotionTransitionDesc) = .empty;
+    errdefer {
+        for (transitions.items) |tr| {
+            gpa.free(tr.source);
+            gpa.free(tr.target);
+            gpa.free(tr.animator);
+        }
+        transitions.deinit(gpa);
+    }
+    var t: u32 = 0;
+    while (t < decl.transitions_len) : (t += 1) {
+        const tr = arena.motion_transitions.items[decl.transitions_start + t];
+        const source = try dupMotionEndpoint(gpa, arena, tr.source, tr.source_wildcard);
+        errdefer gpa.free(source);
+        const target = try dupMotionEndpoint(gpa, arena, tr.target, tr.target_wildcard);
+        errdefer gpa.free(target);
+        const animator = try renderMotionAnimatorAlloc(gpa, arena, tr.animator);
+        errdefer gpa.free(animator);
+        try transitions.append(gpa, .{ .source = source, .target = target, .animator = animator });
+    }
+
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    errdefer gpa.free(name);
+    return .{
+        .name = name,
+        .states = try states.toOwnedSlice(gpa),
+        .transitions = try transitions.toOwnedSlice(gpa),
+    };
+}
+
+/// Render a `struct_literal_body` field run into a `MotionFieldDesc[]` (each
+/// value through the SHARED canonical renderer). Spread fields (`name == 0`)
+/// render as the `..` marker (the `data` precedent).
+fn buildMotionFields(gpa: std.mem.Allocator, arena: *const AstArena, fields_start: u32, fields_len: u32) BuildError![]types.MotionFieldDesc {
+    var fields: std.ArrayListUnmanaged(types.MotionFieldDesc) = .empty;
+    errdefer {
+        for (fields.items) |f| {
+            gpa.free(f.name);
+            gpa.free(f.value);
+        }
+        fields.deinit(gpa);
+    }
+    var f: u32 = 0;
+    while (f < fields_len) : (f += 1) {
+        const field = arena.struct_lit_fields.items[fields_start + f];
+        const value = try renderExprAlloc(gpa, arena, field.value);
+        errdefer gpa.free(value);
+        const name = try gpa.dupe(u8, if (field.name == 0) ".." else arena.strings.slice(field.name));
+        try fields.append(gpa, .{ .name = name, .value = value });
+    }
+    return try fields.toOwnedSlice(gpa);
+}
+
+/// Duplicate a transition endpoint — `"*"` for the wildcard, else the state name.
+fn dupMotionEndpoint(gpa: std.mem.Allocator, arena: *const AstArena, name: ast_mod.StringId, wildcard: bool) BuildError![]u8 {
+    return try gpa.dupe(u8, if (wildcard) "*" else arena.strings.slice(name));
+}
+
+/// Render a `motion_animator` (RECURSIVE via `stagger`) to canonical flat
+/// text — used by BOTH backends (interp build + codegen emit) so the bytes
+/// are identical (the proof contract). Forms (`etch-grammar.md` §10.3):
+///   `animate(<dur>[, <easing>])`
+///   `keyframes [ <t>: { <fields> }[, …] ] over <dur>[, <easing>]`
+///   `stagger(<delay>, <inner>)`
+pub fn renderMotionAnimatorAlloc(gpa: std.mem.Allocator, arena: *const AstArena, animator_idx: u32) BuildError![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(gpa);
+    try renderMotionAnimator(gpa, arena, animator_idx, &buf);
+    return try buf.toOwnedSlice(gpa);
+}
+
+fn renderMotionAnimator(gpa: std.mem.Allocator, arena: *const AstArena, animator_idx: u32, out: *std.ArrayListUnmanaged(u8)) BuildError!void {
+    const a = arena.motion_animators.items[animator_idx];
+    switch (a.kind) {
+        .animate => {
+            try out.appendSlice(gpa, "animate(");
+            try renderExpr(gpa, arena, a.duration, out);
+            if (!a.easing.isNone()) {
+                try out.appendSlice(gpa, ", ");
+                try renderExpr(gpa, arena, a.easing, out);
+            }
+            try out.appendSlice(gpa, ")");
+        },
+        .keyframes => {
+            try out.appendSlice(gpa, "keyframes [ ");
+            var k: u32 = 0;
+            while (k < a.keyframes_len) : (k += 1) {
+                if (k != 0) try out.appendSlice(gpa, ", ");
+                const kf = arena.motion_keyframes.items[a.keyframes_start + k];
+                try renderExpr(gpa, arena, kf.time, out);
+                try out.appendSlice(gpa, ": ");
+                try renderMotionFieldsBody(gpa, arena, kf.fields_start, kf.fields_len, out);
+            }
+            try out.appendSlice(gpa, " ] over ");
+            try renderExpr(gpa, arena, a.duration, out);
+            if (!a.easing.isNone()) {
+                try out.appendSlice(gpa, ", ");
+                try renderExpr(gpa, arena, a.easing, out);
+            }
+        },
+        .stagger => {
+            try out.appendSlice(gpa, "stagger(");
+            try renderExpr(gpa, arena, a.duration, out);
+            try out.appendSlice(gpa, ", ");
+            try renderMotionAnimator(gpa, arena, a.inner, out);
+            try out.appendSlice(gpa, ")");
+        },
+    }
+}
+
+/// Render a keyframe `struct_literal_body` as inline `{ a: x, b: y }` (the
+/// `renderExpr` struct-lit form, mirrored for a raw field run).
+fn renderMotionFieldsBody(gpa: std.mem.Allocator, arena: *const AstArena, fields_start: u32, fields_len: u32, out: *std.ArrayListUnmanaged(u8)) BuildError!void {
+    if (fields_len == 0) {
+        try out.appendSlice(gpa, "{}");
+        return;
+    }
+    try out.appendSlice(gpa, "{ ");
+    var f: u32 = 0;
+    while (f < fields_len) : (f += 1) {
+        if (f != 0) try out.appendSlice(gpa, ", ");
+        const field = arena.struct_lit_fields.items[fields_start + f];
+        if (field.name == 0) {
+            try out.appendSlice(gpa, "..");
+        } else {
+            try out.appendSlice(gpa, arena.strings.slice(field.name));
+            try out.appendSlice(gpa, ": ");
+        }
+        try renderExpr(gpa, arena, field.value, out);
+    }
+    try out.appendSlice(gpa, " }");
 }
 
 fn buildBehavior(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.BehaviorDecl) BuildError!types.Behavior {

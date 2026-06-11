@@ -151,6 +151,26 @@ pub const DiagnosticCode = enum {
     token_type_invalid, // M0.8 E5 — E1642 TokenTypeInvalid (RESERVED: no typed tokens in the grammar shape)
     token_default_missing, // M0.8 E5 — E1643 TokenDefaultMissing (RESERVED: no token defaults in the grammar shape)
 
+    // ── motion (E1660-E1668, M0.8 E5 — etch-grammar.md §10.3; E5 ruling 2:
+    // the grammar `motion TYPE_IDENT { [states {…}] transitions {…} }` shape
+    // WINS over the validation-ecs §17 shape. RESERVED with rationale:
+    // E1660 (the grammar makes the `states` block optional, so the relaxed
+    // ≥1 check would reject a grammar-valid stateless motion), E1662/E1663
+    // (state-field typing + cross-state interpolation consistency are a
+    // Kinesis Phase-1 semantic, not a declarative M0.8 validation — part2's
+    // own canonical example violates E1663), E1667/E1668 (the grammar has no
+    // `initial` clause). W1660/W1661 (heuristic Phase-3 warnings) are
+    // DEFERRED per validation-ecs §27, not reserved (the W1640 precedent) ──
+    motion_empty_states, // M0.8 E5 — E1660 MotionEmptyStates (RESERVED: states block optional in the grammar)
+    motion_duplicate_state_name, // M0.8 E5 — E1661 DuplicateStateName (duplicate state name)
+    state_field_type_invalid, // M0.8 E5 — E1662 StateFieldTypeInvalid (RESERVED: field typing needs resolution — Kinesis Phase-1)
+    state_field_inconsistent, // M0.8 E5 — E1663 StateFieldInconsistent (RESERVED: cross-state consistency — Kinesis Phase-1)
+    transition_state_not_found, // M0.8 E5 — E1664 TransitionStateNotFound (source/target not a declared state)
+    transition_duration_invalid, // M0.8 E5 — E1665 TransitionDurationInvalid (non-numeric or negative-literal duration)
+    transition_easing_unknown, // M0.8 E5 — E1666 TransitionEasingUnknown (easing not in the part2 §22 catalog)
+    initial_state_not_found, // M0.8 E5 — E1667 InitialStateNotFound (RESERVED: no `initial` clause in the grammar)
+    motion_initial_missing, // M0.8 E5 — E1668 MotionInitialMissing (RESERVED: no `initial` clause in the grammar)
+
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
@@ -240,6 +260,15 @@ pub const DiagnosticCode = enum {
             .duplicate_token_name => "E1641",
             .token_type_invalid => "E1642",
             .token_default_missing => "E1643",
+            .motion_empty_states => "E1660",
+            .motion_duplicate_state_name => "E1661",
+            .state_field_type_invalid => "E1662",
+            .state_field_inconsistent => "E1663",
+            .transition_state_not_found => "E1664",
+            .transition_duration_invalid => "E1665",
+            .transition_easing_unknown => "E1666",
+            .initial_state_not_found => "E1667",
+            .motion_initial_missing => "E1668",
         };
     }
 
@@ -332,6 +361,15 @@ pub const DiagnosticCode = enum {
             .duplicate_token_name => "DuplicateTokenName",
             .token_type_invalid => "TokenTypeInvalid",
             .token_default_missing => "TokenDefaultMissing",
+            .motion_empty_states => "MotionEmptyStates",
+            .motion_duplicate_state_name => "DuplicateStateName",
+            .state_field_type_invalid => "StateFieldTypeInvalid",
+            .state_field_inconsistent => "StateFieldInconsistent",
+            .transition_state_not_found => "TransitionStateNotFound",
+            .transition_duration_invalid => "TransitionDurationInvalid",
+            .transition_easing_unknown => "TransitionEasingUnknown",
+            .initial_state_not_found => "InitialStateNotFound",
+            .motion_initial_missing => "MotionInitialMissing",
         };
     }
 };

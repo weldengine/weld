@@ -94,6 +94,7 @@ pub const TokenKind = enum {
     kw_sequence, // behavior composite type (M0.8 E4; the E6 top-level `sequence` construct stays out of scope — default top-level error)
     kw_after, // routine trigger `after Segment` (M0.8 E4; the §4.3 timer statement stays out of M0.8 — explicit parse error)
     kw_theme, // theme declaration (M0.8 E5 Level B presentation)
+    kw_motion, // motion declaration (M0.8 E5 Level B presentation — state-based UI animation)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -246,6 +247,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "sequence", .kind = .kw_sequence },
     .{ .lexeme = "after", .kind = .kw_after },
     .{ .lexeme = "theme", .kind = .kw_theme },
+    .{ .lexeme = "motion", .kind = .kw_motion },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -280,7 +282,6 @@ pub const non_s3_keywords = [_][]const u8{
     "effect",
     "shader",
     "widget",
-    "motion",
     "anim_graph",
     "audio_graph",
     "audio_score",

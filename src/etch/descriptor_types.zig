@@ -225,6 +225,37 @@ pub const ThemeEntry = struct {
     value: []const u8,
 };
 
+/// `motion` descriptor (`etch-ast-ir.md` §3.5: `Motion { states, transitions }`;
+/// M0.8 E5, `etch-grammar.md` §10.3). State field values are
+/// canonical-rendered; transition animators are pre-rendered to FLAT
+/// canonical text (E5 ruling 3: keyframes / easings stay at the descriptor,
+/// E6 `anim_graph` not prefigured — the descriptor stays flat).
+pub const Motion = struct {
+    name: []const u8,
+    states: []const MotionStateDesc,
+    transitions: []const MotionTransitionDesc,
+};
+
+/// One `motion` state: a name + its animatable property fields.
+pub const MotionStateDesc = struct {
+    name: []const u8,
+    fields: []const MotionFieldDesc,
+};
+
+/// One state property field (`name = rendered value`).
+pub const MotionFieldDesc = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// One `motion` transition: `source -> target` + the flat-text animator.
+/// `source` / `target` are a state name or `"*"` (the wildcard).
+pub const MotionTransitionDesc = struct {
+    source: []const u8,
+    target: []const u8,
+    animator: []const u8,
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -236,6 +267,7 @@ pub const Descriptor = union(enum) {
     dialogue: Dialogue,
     ability: Ability,
     theme: Theme,
+    motion: Motion,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -247,6 +279,7 @@ pub const Descriptor = union(enum) {
             .dialogue => |d| try writeDialogue(d, gpa, out),
             .ability => |a| try writeAbility(a, gpa, out),
             .theme => |t| try writeTheme(t, gpa, out),
+            .motion => |m| try writeMotion(m, gpa, out),
         }
     }
 };
@@ -282,6 +315,25 @@ pub fn writeTheme(t: Theme, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged
     try appendFmt(gpa, out, "theme \"{s}\" {{\n", .{t.name});
     for (t.entries) |e| {
         try appendFmt(gpa, out, "  entry {s} = {s}\n", .{ e.key, e.value });
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `motion` descriptor: states (each with its
+/// property fields) then transitions, declaration order. Animators are
+/// pre-rendered flat canonical text (the ability-rule / behavior-payload
+/// precedent — complex sub-structures render to text, descriptor types stay flat).
+pub fn writeMotion(m: Motion, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "motion {s} {{\n", .{m.name});
+    for (m.states) |st| {
+        try appendFmt(gpa, out, "  state {s} {{\n", .{st.name});
+        for (st.fields) |f| {
+            try appendFmt(gpa, out, "    field {s} = {s}\n", .{ f.name, f.value });
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (m.transitions) |tr| {
+        try appendFmt(gpa, out, "  transition {s} -> {s}: {s}\n", .{ tr.source, tr.target, tr.animator });
     }
     try out.appendSlice(gpa, "}\n");
 }

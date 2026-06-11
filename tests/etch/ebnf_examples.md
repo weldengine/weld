@@ -1017,3 +1017,57 @@ data Styles: StyleDef {
   },
 }
 ```
+
+## Motion (E5 — §10.3)
+
+The grammar §10.3 shape wins (E5 ruling 2): an optional `states { … }` block
+(state = `IDENT : struct_literal_body`), a mandatory `transitions { … }` block
+(`source -> target : animator`, `*` wildcard sources/targets), and the three
+animator forms — `animate(dur [, easing])`, `keyframes [ t: {…} … ] over dur
+[, easing]`, and the recursive `stagger(delay, animator)`. There is NO
+`initial` clause (E1667/E1668 RESERVED).
+
+```etch
+motion MenuPanel {
+  states {
+    hidden:  { translate_y: 50, opacity: 0, scale: 0.95 }
+    visible: { translate_y: 0,  opacity: 1, scale: 1.0 }
+    pressed: { scale: 0.97 }
+  }
+  transitions {
+    hidden -> visible: animate(0.3s, ease_out_back)
+    visible -> hidden: animate(0.2s, ease_in)
+    * -> pressed:      animate(0.1s)
+    pressed -> *:      animate(0.15s)
+  }
+}
+```
+
+The staggered-list and keyframes forms (the recursive `stagger` wrapping an
+`animate`, and a `keyframes … over` track with COLOR_LITERAL field values):
+
+```etch
+motion ListItemReveal {
+  states {
+    initial: { opacity: 0, translate_x: 30, scale: 0.8 }
+    visible: { opacity: 1, translate_x: 0,  scale: 1.0 }
+  }
+  transitions {
+    initial -> visible: stagger(0.04s, animate(0.2s, ease_out_back))
+  }
+}
+
+motion AttentionPulse {
+  states {
+    idle:    { scale: 1.0, color: #FFFFFF }
+    pulsing: { scale: 1.0, color: #FFFFFF }
+  }
+  transitions {
+    idle -> pulsing: keyframes [
+      0.0: { scale: 1.0, color: #FFFFFF }
+      0.5: { scale: 1.2, color: #FFD700 }
+      1.0: { scale: 1.0, color: #FFFFFF }
+    ] over 0.6s, ease_in_out
+  }
+}
+```

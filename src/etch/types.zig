@@ -169,7 +169,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -203,7 +203,7 @@ fn containsUppercase(s: []const u8) bool {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -318,6 +318,7 @@ pub const TypeChecker = struct {
         try tc.validateDialogueDecls();
         try tc.validateAbilityDecls();
         try tc.validateThemeDecls();
+        try tc.validateMotionDecls();
         try tc.pass2Resolve();
     }
 
@@ -414,6 +415,102 @@ pub const TypeChecker = struct {
                     try self.emit(.duplicate_token_name, .error_, entry.span, "duplicate theme entry key '{s}'", .{self.arena.strings.slice(entry.key)});
                 }
             }
+        }
+    }
+
+    // ─── Motion (M0.8 E5, `etch-grammar.md` §10.3) ───────────────────────
+
+    /// Easing catalogue (`etch-reference-part2.md` §22 "Easings disponibles").
+    /// E1666 TransitionEasingUnknown checks the easing identifier against this
+    /// closed set — read from the spec, NOT guessed: the validation-ecs §17
+    /// illustrative list "{…, custom_bezier, …}" is not exhaustive, part2 §22
+    /// is the canonical enumeration of available easings.
+    const motion_easings = [_][]const u8{
+        "linear",          "ease_in",       "ease_out",        "ease_in_out",
+        "ease_in_quad",    "ease_out_quad", "ease_in_cubic",   "ease_out_cubic",
+        "ease_in_back",    "ease_out_back", "ease_in_elastic", "ease_out_elastic",
+        "ease_out_bounce", "spring",
+    };
+
+    fn isKnownEasing(name: []const u8) bool {
+        for (motion_easings) |e| {
+            if (std.mem.eql(u8, e, name)) return true;
+        }
+        return false;
+    }
+
+    /// Validate every `motion` (M0.8 E5 Level B presentation): E1661 duplicate
+    /// state name, E1664 transition source/target not a declared state, E1665
+    /// transition duration not a positive numeric/duration, E1666 unknown
+    /// easing. E1660/E1662/E1663/E1667/E1668 are RESERVED (E5 ruling 2 — the
+    /// diagnostics catalogue carries the rationale). State / keyframe field
+    /// values are STRUCTURAL — never resolved (no §17 code requires it; the
+    /// canonical text is the proof artifact). The grammar §10.3 shape WINS
+    /// over the validation-ecs §17 shape.
+    fn validateMotionDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .motion_decl) continue;
+            try self.validateMotion(self.arena.motion_decls.items[datas[i]]);
+        }
+    }
+
+    fn validateMotion(self: *TypeChecker, decl: ast_mod.MotionDecl) !void {
+        // E1661 — duplicate state names; the set also backs E1664.
+        var states: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer states.deinit(self.gpa);
+        var s: u32 = 0;
+        while (s < decl.states_len) : (s += 1) {
+            const st = self.arena.motion_states.items[decl.states_start + s];
+            const gop = try states.getOrPut(self.gpa, st.name);
+            if (gop.found_existing) {
+                try self.emit(.motion_duplicate_state_name, .error_, st.span, "duplicate motion state '{s}'", .{self.arena.strings.slice(st.name)});
+            }
+        }
+        // Transitions: E1664 source/target reference a declared state (or `*`);
+        // E1665/E1666 on the animator (recursive through `stagger`).
+        var t: u32 = 0;
+        while (t < decl.transitions_len) : (t += 1) {
+            const tr = self.arena.motion_transitions.items[decl.transitions_start + t];
+            if (!tr.source_wildcard and !states.contains(tr.source)) {
+                try self.emit(.transition_state_not_found, .error_, tr.span, "transition source '{s}' is not a declared motion state", .{self.arena.strings.slice(tr.source)});
+            }
+            if (!tr.target_wildcard and !states.contains(tr.target)) {
+                try self.emit(.transition_state_not_found, .error_, tr.span, "transition target '{s}' is not a declared motion state", .{self.arena.strings.slice(tr.target)});
+            }
+            try self.validateMotionAnimator(tr.animator, tr.span);
+        }
+    }
+
+    /// Validate one animator (recursive through `stagger`). E1665 — the
+    /// duration (animate 1st arg / keyframes over-duration / stagger delay)
+    /// must be a positive numeric or duration expression (the ability cooldown
+    /// E1582 precedent: `synthExprE` types it, a negative literal is rejected;
+    /// Level-A reference validated, never executed). E1666 — the easing
+    /// (animate 2nd arg / keyframes trailing) must be an identifier in the
+    /// part2 §22 catalogue; it is NOT synthesized (easing names are not
+    /// declared symbols — synthesizing would emit a spurious E0102).
+    fn validateMotionAnimator(self: *TypeChecker, animator_idx: u32, span: SourceSpan) !void {
+        const a = self.arena.motion_animators.items[animator_idx];
+        var ctx: RuleCtx = .{};
+        defer ctx.deinit(self.gpa);
+        const dur_t = try self.synthExprE(a.duration, &ctx);
+        const dur_numeric = dur_t == .builtin and (dur_t.builtin.isNumeric() or dur_t.builtin == .duration);
+        const dur_neg = self.arena.exprKind(a.duration) == .unary and
+            self.arena.unary_exprs.items[self.arena.exprData(a.duration)].op == .neg;
+        if (!dur_numeric or dur_neg) {
+            try self.emit(.transition_duration_invalid, .error_, span, "motion transition duration must be a positive duration or numeric expression", .{});
+        }
+        if (!a.easing.isNone()) {
+            const is_ident = self.arena.exprKind(a.easing) == .ident;
+            if (!is_ident or !isKnownEasing(self.arena.strings.slice(self.arena.exprData(a.easing)))) {
+                try self.emit(.transition_easing_unknown, .error_, span, "unknown easing function (expected one of the etch-reference-part2 §22 easings)", .{});
+            }
+        }
+        if (a.kind == .stagger) {
+            try self.validateMotionAnimator(a.inner, span);
         }
     }
 
@@ -1528,6 +1625,14 @@ pub const TypeChecker = struct {
                     const decl = self.arena.routine_decls.items[data];
                     try self.registerSymbol(.routine_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .routine);
+                },
+                .motion_decl => {
+                    // A `motion` (M0.8 E5 Level B) is TYPE_IDENT-named → it
+                    // registers a symbol; the states / transitions / animators
+                    // are validated in `validateMotionDecls`.
+                    const decl = self.arena.motion_decls.items[data];
+                    try self.registerSymbol(.motion_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .motion);
                 },
                 else => {}, // forward-compatible: unknown items ignored
             }
@@ -6291,6 +6396,72 @@ test "theme: E1641 duplicate entry key (M0.8 E5)" {
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .duplicate_token_name);
+}
+
+test "motion: valid control parses + checks clean (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var ok = try parseAndCheck(gpa,
+        \\motion MenuPanel {
+        \\  states {
+        \\    hidden:  { translate_y: 50, opacity: 0, scale: 0.95 }
+        \\    visible: { translate_y: 0,  opacity: 1, scale: 1.0 }
+        \\  }
+        \\  transitions {
+        \\    hidden -> visible: animate(0.3s, ease_out_back)
+        \\    * -> hidden:       stagger(0.04s, animate(0.2s, ease_in))
+        \\  }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+}
+
+test "motion: E1661 duplicate state name (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\motion M {
+        \\  states { a: { scale: 1.0 } a: { scale: 0.9 } }
+        \\  transitions { a -> a: animate(0.1s) }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .motion_duplicate_state_name);
+}
+
+test "motion: E1664 transition references an undeclared state (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\motion M {
+        \\  states { a: { scale: 1.0 } }
+        \\  transitions { a -> ghost: animate(0.1s) }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .transition_state_not_found);
+}
+
+test "motion: E1666 unknown easing (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\motion M {
+        \\  states { a: { scale: 1.0 } }
+        \\  transitions { a -> a: animate(0.1s, not_an_easing) }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .transition_easing_unknown);
+}
+
+test "motion: E1665 negative-literal duration (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\motion M {
+        \\  states { a: { scale: 1.0 } }
+        \\  transitions { a -> a: animate(-0.1s) }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .transition_duration_invalid);
 }
 
 test "data table: E1762 entry type is not a struct (M0.8 E4)" {

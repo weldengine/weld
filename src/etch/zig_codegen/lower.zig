@@ -4910,7 +4910,7 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// `true` when the program declares at least one Level-B construct with a
 /// descriptor (M0.8 E4: the six Level-B gameplay constructs).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4934,6 +4934,7 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .dialogue_decl => try emitDialogueDescriptor(w, gpa, ast, ast.dialogue_decls.items[datas[i]]),
             .ability_decl => try emitAbilityDescriptor(w, gpa, ast, ast.ability_decls.items[datas[i]]),
             .theme_decl => try emitThemeDescriptor(w, gpa, ast, ast.theme_decls.items[datas[i]]),
+            .motion_decl => try emitMotionDescriptor(w, gpa, ast, ast.motion_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -4990,6 +4991,53 @@ fn emitThemeDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena,
         try emitZigStringLiteral(w, ast.strings.slice(entry.key));
         try w.print(", .value = ", .{});
         try emitZigStringLiteral(w, rendered);
+        try w.line(" },");
+    }
+    try w.line("    } } },");
+}
+
+/// Emit-structure for a `motion` (M0.8 E5): the codegen's OWN walk of states
+/// (field values through the SHARED `renderForEmit`) and transitions
+/// (animators through the SHARED `descriptor_mod.renderMotionAnimatorAlloc`) —
+/// the proof-contract split (same renderers, two backends, byte-identical).
+fn emitMotionDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.MotionDecl) CodegenError!void {
+    try w.print("    .{{ .motion = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.line(", .states = &[_]etch_descriptor.MotionStateDesc{");
+    var s: u32 = 0;
+    while (s < decl.states_len) : (s += 1) {
+        const st = ast.motion_states.items[decl.states_start + s];
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(st.name));
+        try w.line(", .fields = &[_]etch_descriptor.MotionFieldDesc{");
+        var f: u32 = 0;
+        while (f < st.fields_len) : (f += 1) {
+            const field = ast.struct_lit_fields.items[st.fields_start + f];
+            const rendered = try renderForEmit(gpa, ast, field.value);
+            defer gpa.free(rendered);
+            try w.print("            .{{ .name = ", .{});
+            try emitZigStringLiteral(w, if (field.name == 0) ".." else ast.strings.slice(field.name));
+            try w.print(", .value = ", .{});
+            try emitZigStringLiteral(w, rendered);
+            try w.line(" },");
+        }
+        try w.line("        } },");
+    }
+    try w.line("    }, .transitions = &[_]etch_descriptor.MotionTransitionDesc{");
+    var t: u32 = 0;
+    while (t < decl.transitions_len) : (t += 1) {
+        const tr = ast.motion_transitions.items[decl.transitions_start + t];
+        const animator = descriptor_mod.renderMotionAnimatorAlloc(gpa, ast, tr.animator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        };
+        defer gpa.free(animator);
+        try w.print("        .{{ .source = ", .{});
+        try emitZigStringLiteral(w, if (tr.source_wildcard) "*" else ast.strings.slice(tr.source));
+        try w.print(", .target = ", .{});
+        try emitZigStringLiteral(w, if (tr.target_wildcard) "*" else ast.strings.slice(tr.target));
+        try w.print(", .animator = ", .{});
+        try emitZigStringLiteral(w, animator);
         try w.line(" },");
     }
     try w.line("    } } },");

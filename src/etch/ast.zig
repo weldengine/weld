@@ -1222,6 +1222,85 @@ pub const ThemeEntry = struct {
     span: SourceSpan,
 };
 
+/// Side-slab entry for a `motion` declaration (M0.8 E5 Level B presentation,
+/// `etch-grammar.md` §10.3: `motion_decl = "motion" TYPE_IDENT "{"
+/// [motion_states] motion_transitions "}"`). The grammar shape WINS (E5
+/// ruling 2): the `states { … }` block is OPTIONAL (E1660 RESERVED — the
+/// grammar makes it optional, so the relaxed ≥1 check would reject a
+/// grammar-valid stateless motion), there is NO `initial` clause (E1667/E1668
+/// RESERVED), and transitions are `source -> target : animator`. States and
+/// transitions live in `(start, len)` runs of `arena.motion_states` /
+/// `arena.motion_transitions` (fed only from motion context — motions do not
+/// nest — so the runs stay contiguous).
+pub const MotionDecl = struct {
+    name: StringId, // TYPE_IDENT
+    name_span: SourceSpan, // for the diagnostics
+    states_start: u32, // index into `arena.motion_states`
+    states_len: u32,
+    transitions_start: u32, // index into `arena.motion_transitions`
+    transitions_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
+/// One `motion_state` (`IDENT ":" struct_literal_body`): a named set of
+/// animatable property fields. Fields live in a contiguous run of
+/// `arena.struct_lit_fields` (the data-entry body parser, reused). Field
+/// values are STRUCTURAL — rendered canonically, never resolved/typed
+/// (E1662 StateFieldTypeInvalid / E1663 StateFieldInconsistent RESERVED —
+/// field typing + cross-state interpolation consistency are a Kinesis
+/// Phase-1 semantic, not a declarative M0.8 validation; E5 ruling 2).
+pub const MotionState = struct {
+    name: StringId,
+    fields_start: u32, // index into `arena.struct_lit_fields`
+    fields_len: u32,
+    span: SourceSpan,
+};
+
+/// One `motion_transition` (`(IDENT|"*") "->" (IDENT|"*") ":" motion_animator`,
+/// §10.3). `source_wildcard` / `target_wildcard` mark the `*` form (the name
+/// fields are then unused). `animator` indexes `arena.motion_animators` (the
+/// top of a possibly recursive `stagger` chain).
+pub const MotionTransition = struct {
+    source: StringId, // valid iff !source_wildcard
+    source_wildcard: bool, // "*"
+    target: StringId, // valid iff !target_wildcard
+    target_wildcard: bool, // "*"
+    animator: u32, // index into `arena.motion_animators`
+    span: SourceSpan,
+};
+
+/// Animator head kind (`etch-grammar.md` §10.3 `motion_animator`).
+pub const MotionAnimatorKind = enum { animate, keyframes, stagger };
+
+/// One `motion_animator` (RECURSIVE via `stagger`), §10.3:
+///   `animate(expr [, expr])`                — duration + optional easing
+///   `keyframes [ {kf} ] over expr [, expr]` — keyframes + over-duration + opt easing
+///   `stagger(expr, motion_animator)`        — delay + inner animator (recursive)
+/// Keyframes / easings stay at the descriptor (rendered to flat text) — E6
+/// `anim_graph` is NOT prefigured (E5 ruling 3).
+pub const MotionAnimator = struct {
+    kind: MotionAnimatorKind,
+    /// animate: duration ; keyframes: over-duration ; stagger: delay.
+    duration: NodeId,
+    /// optional easing (animate 2nd arg / keyframes trailing) — `NodeId.none` if absent.
+    easing: NodeId,
+    /// keyframes only: a `(start, len)` run of `arena.motion_keyframes`.
+    keyframes_start: u32,
+    keyframes_len: u32,
+    /// stagger only: index into `arena.motion_animators` (the inner animator).
+    inner: u32,
+    span: SourceSpan,
+};
+
+/// One `motion_keyframe` (`expression ":" struct_literal_body`, §10.3): a
+/// time point bound to a property body. Fields run in `arena.struct_lit_fields`.
+pub const MotionKeyframe = struct {
+    time: NodeId,
+    fields_start: u32, // index into `arena.struct_lit_fields`
+    fields_len: u32,
+};
+
 /// Kind of one routine trigger alternative (M0.8 E4, `etch-grammar.md`
 /// §8.2 `trigger_expr`): `at TIME_LITERAL` / `after IDENT` /
 /// `on_event TYPE_IDENT`. `or`-chains are stored as a flat run of
@@ -1576,6 +1655,11 @@ pub const AstArena = struct {
     data_entries: std.ArrayListUnmanaged(DataEntry) = .empty,
     theme_decls: std.ArrayListUnmanaged(ThemeDecl) = .empty,
     theme_entries: std.ArrayListUnmanaged(ThemeEntry) = .empty,
+    motion_decls: std.ArrayListUnmanaged(MotionDecl) = .empty,
+    motion_states: std.ArrayListUnmanaged(MotionState) = .empty,
+    motion_transitions: std.ArrayListUnmanaged(MotionTransition) = .empty,
+    motion_animators: std.ArrayListUnmanaged(MotionAnimator) = .empty,
+    motion_keyframes: std.ArrayListUnmanaged(MotionKeyframe) = .empty,
     quest_decls: std.ArrayListUnmanaged(QuestDecl) = .empty,
     quest_properties: std.ArrayListUnmanaged(QuestProperty) = .empty,
     quest_stages: std.ArrayListUnmanaged(QuestStage) = .empty,
@@ -1755,6 +1839,11 @@ pub const AstArena = struct {
         self.routine_interrupts.deinit(gpa);
         self.theme_decls.deinit(gpa);
         self.theme_entries.deinit(gpa);
+        self.motion_decls.deinit(gpa);
+        self.motion_states.deinit(gpa);
+        self.motion_transitions.deinit(gpa);
+        self.motion_animators.deinit(gpa);
+        self.motion_keyframes.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
@@ -2210,6 +2299,16 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.theme_decls.items.len);
         try self.theme_decls.append(gpa, decl);
         return try self.addItem(gpa, .theme_decl, idx, span);
+    }
+
+    /// `motion Name { [states { … }] transitions { … } }` (M0.8 E5 Level B,
+    /// `etch-grammar.md` §10.3). The caller appends the states / transitions /
+    /// animators / keyframes to their slabs beforehand, passing the ranges in
+    /// `decl`.
+    pub fn addMotionDecl(self: *AstArena, gpa: std.mem.Allocator, decl: MotionDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.motion_decls.items.len);
+        try self.motion_decls.append(gpa, decl);
+        return try self.addItem(gpa, .motion_decl, idx, span);
     }
 
     /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The

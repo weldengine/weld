@@ -510,7 +510,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion => return,
                 else => _ = try self.advance(),
             }
         }
@@ -545,6 +545,7 @@ pub const Parser = struct {
             .kw_dialogue => try self.parseDialogueDecl(annotations),
             .kw_ability => try self.parseAbilityDecl(annotations),
             .kw_theme => try self.parseThemeDecl(annotations),
+            .kw_motion => try self.parseMotionDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -558,7 +559,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -1540,6 +1541,204 @@ pub const Parser = struct {
             .annotations_extra = annotations.start,
             .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse `motion TYPE_IDENT "{" [motion_states] motion_transitions "}"`
+    /// (M0.8 E5 Level B, `etch-grammar.md` §10.3). `states` / `transitions`
+    /// are contextual sub-keywords (the S3 sub-construct doctrine — never
+    /// reserved): the `states { … }` block is OPTIONAL, `transitions { … }`
+    /// is mandatory. State bodies reuse `parseDataEntryBody`
+    /// (`struct_literal_body`). Motion slabs are fed only from motion context
+    /// (motions do not nest) → contiguous appends.
+    fn parseMotionDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'motion'
+        const name_tok = try self.expect(.type_ident, "expected motion name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start the motion body");
+
+        // Optional `states { motion_state }` block (E5 ruling 2: states are
+        // optional, E1660 RESERVED).
+        const states_start: u32 = @intCast(self.arena.motion_states.items.len);
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "states")) {
+            _ = try self.advance(); // 'states'
+            _ = try self.expect(.lbrace, "expected '{' to start the motion states block");
+            while (self.peek() != .rbrace and self.peek() != .eof) {
+                try self.surfaceTokenErrors();
+                const sname = try self.expect(.ident, "expected a state name (identifier) in the motion states block");
+                _ = try self.expect(.colon, "expected ':' after the motion state name");
+                const body = try self.parseDataEntryBody();
+                try self.arena.motion_states.append(self.gpa, .{
+                    .name = try self.internSlice(sname.span),
+                    .fields_start = body.fields_start,
+                    .fields_len = body.fields_len,
+                    .span = .{ .byte_start = sname.span.byte_start, .byte_end = body.end_byte },
+                });
+            }
+            _ = try self.expect(.rbrace, "expected '}' to close the motion states block");
+        }
+        const states_len: u32 = @as(u32, @intCast(self.arena.motion_states.items.len)) - states_start;
+
+        // Mandatory `transitions { motion_transition }` block.
+        if (self.peek() != .ident or !std.mem.eql(u8, self.sliceOf(self.peekSpan()), "transitions")) {
+            return self.parseErrFmt(self.peekSpan(), "expected 'transitions' block in the motion body, got '{s}'", .{self.sliceOf(self.peekSpan())});
+        }
+        _ = try self.advance(); // 'transitions'
+        _ = try self.expect(.lbrace, "expected '{' to start the motion transitions block");
+        const transitions_start: u32 = @intCast(self.arena.motion_transitions.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            try self.parseMotionTransition();
+        }
+        _ = try self.expect(.rbrace, "expected '}' to close the motion transitions block");
+        const transitions_len: u32 = @as(u32, @intCast(self.arena.motion_transitions.items.len)) - transitions_start;
+
+        const closing = try self.expect(.rbrace, "expected '}' to close the motion body");
+        _ = try self.arena.addMotionDecl(self.gpa, .{
+            .name = name_id,
+            .name_span = name_tok.span,
+            .states_start = states_start,
+            .states_len = states_len,
+            .transitions_start = transitions_start,
+            .transitions_len = transitions_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse one `motion_transition` (`(IDENT|"*") "->" (IDENT|"*") ":"
+    /// motion_animator`, §10.3). The animator is parsed (and appended to
+    /// `arena.motion_animators`) before the transition is committed, so the
+    /// `motion_transitions` run stays contiguous.
+    fn parseMotionTransition(self: *Parser) ParseError!void {
+        const start_span = self.peekSpan();
+        var source: StringId = 0;
+        var source_wildcard = false;
+        switch (self.peek()) {
+            .star => {
+                _ = try self.advance();
+                source_wildcard = true;
+            },
+            .ident => source = try self.internSlice((try self.advance()).span),
+            else => return self.parseErrFmt(self.peekSpan(), "expected a transition source (state name or '*'), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+        }
+        _ = try self.expect(.arrow, "expected '->' between the transition source and target");
+        var target: StringId = 0;
+        var target_wildcard = false;
+        switch (self.peek()) {
+            .star => {
+                _ = try self.advance();
+                target_wildcard = true;
+            },
+            .ident => target = try self.internSlice((try self.advance()).span),
+            else => return self.parseErrFmt(self.peekSpan(), "expected a transition target (state name or '*'), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+        }
+        _ = try self.expect(.colon, "expected ':' after the transition target");
+        const animator = try self.parseMotionAnimator();
+        const end = self.arena.motion_animators.items[animator].span.byte_end;
+        try self.arena.motion_transitions.append(self.gpa, .{
+            .source = source,
+            .source_wildcard = source_wildcard,
+            .target = target,
+            .target_wildcard = target_wildcard,
+            .animator = animator,
+            .span = .{ .byte_start = start_span.byte_start, .byte_end = end },
+        });
+    }
+
+    /// Parse a `motion_animator` (`etch-grammar.md` §10.3, RECURSIVE via
+    /// `stagger`). `animate` / `keyframes` / `stagger` / `over` are contextual
+    /// sub-keywords. Parenthesized argument expressions use `parseExpr`; the
+    /// UNPARENTHESIZED trailing `keyframes … over EXPR [, EXPR]` expressions
+    /// use `parseUnary` (primary + postfix, NO binary continuation) so the
+    /// animator never swallows a following `*`-headed transition — the §10.3
+    /// `{motion_transition}` list has no separator (the `no_struct_lit` /
+    /// `braceOpensWhenFilter` local-disambiguation class). Returns the index
+    /// of the appended `MotionAnimator`; a `stagger`'s inner animator is parsed
+    /// (and appended) BEFORE the outer one, so indices stay self-consistent.
+    fn parseMotionAnimator(self: *Parser) ParseError!u32 {
+        if (self.peek() != .ident) {
+            return self.parseErrFmt(self.peekSpan(), "expected an animator ('animate' | 'keyframes' | 'stagger'), got '{s}'", .{self.sliceOf(self.peekSpan())});
+        }
+        const head = self.sliceOf(self.peekSpan());
+        if (std.mem.eql(u8, head, "animate")) {
+            const kw = try self.advance(); // 'animate'
+            _ = try self.expect(.lparen, "expected '(' after 'animate'");
+            const duration = try self.parseExpr(0);
+            var easing: NodeId = NodeId.none;
+            if (try self.match(.comma)) easing = try self.parseExpr(0);
+            const close = try self.expect(.rparen, "expected ')' to close 'animate(...)'");
+            return self.appendMotionAnimator(.{
+                .kind = .animate,
+                .duration = duration,
+                .easing = easing,
+                .keyframes_start = 0,
+                .keyframes_len = 0,
+                .inner = 0,
+                .span = .{ .byte_start = kw.span.byte_start, .byte_end = close.span.byte_end },
+            });
+        } else if (std.mem.eql(u8, head, "keyframes")) {
+            const kw = try self.advance(); // 'keyframes'
+            _ = try self.expect(.lbracket, "expected '[' after 'keyframes'");
+            const kf_start: u32 = @intCast(self.arena.motion_keyframes.items.len);
+            while (self.peek() != .rbracket and self.peek() != .eof) {
+                try self.surfaceTokenErrors();
+                const time = try self.parseExpr(0);
+                _ = try self.expect(.colon, "expected ':' after a keyframe time");
+                const body = try self.parseDataEntryBody();
+                try self.arena.motion_keyframes.append(self.gpa, .{
+                    .time = time,
+                    .fields_start = body.fields_start,
+                    .fields_len = body.fields_len,
+                });
+                _ = try self.match(.comma); // keyframes are newline-separated; tolerate an optional comma
+            }
+            _ = try self.expect(.rbracket, "expected ']' to close the keyframes list");
+            const kf_len: u32 = @as(u32, @intCast(self.arena.motion_keyframes.items.len)) - kf_start;
+            if (self.peek() != .ident or !std.mem.eql(u8, self.sliceOf(self.peekSpan()), "over")) {
+                return self.parseErrFmt(self.peekSpan(), "expected 'over' after the keyframes list, got '{s}'", .{self.sliceOf(self.peekSpan())});
+            }
+            _ = try self.advance(); // 'over'
+            const duration = try self.parseUnary();
+            var easing: NodeId = NodeId.none;
+            var end = self.arena.exprSpan(duration).byte_end;
+            if (try self.match(.comma)) {
+                easing = try self.parseUnary();
+                end = self.arena.exprSpan(easing).byte_end;
+            }
+            return self.appendMotionAnimator(.{
+                .kind = .keyframes,
+                .duration = duration,
+                .easing = easing,
+                .keyframes_start = kf_start,
+                .keyframes_len = kf_len,
+                .inner = 0,
+                .span = .{ .byte_start = kw.span.byte_start, .byte_end = end },
+            });
+        } else if (std.mem.eql(u8, head, "stagger")) {
+            const kw = try self.advance(); // 'stagger'
+            _ = try self.expect(.lparen, "expected '(' after 'stagger'");
+            const delay = try self.parseExpr(0);
+            _ = try self.expect(.comma, "expected ',' between the stagger delay and its inner animator");
+            const inner = try self.parseMotionAnimator(); // RECURSION — appended first
+            const close = try self.expect(.rparen, "expected ')' to close 'stagger(...)'");
+            return self.appendMotionAnimator(.{
+                .kind = .stagger,
+                .duration = delay,
+                .easing = NodeId.none,
+                .keyframes_start = 0,
+                .keyframes_len = 0,
+                .inner = inner,
+                .span = .{ .byte_start = kw.span.byte_start, .byte_end = close.span.byte_end },
+            });
+        }
+        return self.parseErrFmt(self.peekSpan(), "expected an animator ('animate' | 'keyframes' | 'stagger'), got '{s}'", .{head});
+    }
+
+    fn appendMotionAnimator(self: *Parser, a: ast_mod.MotionAnimator) ParseError!u32 {
+        const idx: u32 = @intCast(self.arena.motion_animators.items.len);
+        try self.arena.motion_animators.append(self.gpa, a);
+        return idx;
     }
 
     const DataEntryBody = struct {
@@ -6194,4 +6393,43 @@ test "parser recovers and a valid theme after a broken construct survives (M0.8 
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.theme_decls.items.len);
+}
+
+test "parser builds a motion with states, wildcard transitions, and recursive animators (M0.8 E5)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\motion MenuPanel {
+        \\  states {
+        \\    hidden:  { translate_y: 50, opacity: 0, scale: 0.95 }
+        \\    visible: { translate_y: 0,  opacity: 1, scale: 1.0 }
+        \\    pressed: { scale: 0.97 }
+        \\  }
+        \\  transitions {
+        \\    hidden -> visible: animate(0.3s, ease_out_back)
+        \\    * -> pressed:      animate(0.1s)
+        \\    visible -> hidden: stagger(0.04s, animate(0.2s, ease_out_back))
+        \\    pressed -> *:      keyframes [ 0.0: { scale: 1.0 } 1.0: { scale: 1.2 } ] over 0.6s, ease_in_out
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.motion_decls.items.len);
+    const decl = result.ast.motion_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 3), decl.states_len);
+    try std.testing.expectEqual(@as(u32, 4), decl.transitions_len);
+    // The wildcard source of `* -> pressed` and the stagger's inner animator
+    // both land: 4 top-level animators + 1 inner (stagger) = 5 total.
+    try std.testing.expectEqual(@as(usize, 5), result.ast.motion_animators.items.len);
+}
+
+test "parser recovers and a valid motion after a broken construct survives (M0.8 E5 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\motion Pulse { transitions { idle -> idle: animate(0.1s) } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.motion_decls.items.len);
 }
