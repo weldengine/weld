@@ -398,6 +398,9 @@ pub fn build(b: *std.Build) void {
         // M0.8 / E7 — AST stable interface freeze: ≥20 Level-1 entry points
         // (§10.3.1). Compilation is the cross-phase invariant.
         .{ .path = "tests/etch/ast_stable_interface.zig", .etch = true, .dedicated_step = "test-ast-stable" },
+        // M0.8 / E7 — interpreter hot-reload: edit rule body → AST swap →
+        // behaviour change on the same live world, measured < 500 ms.
+        .{ .path = "tests/etch/hot_reload_test.zig", .etch = true, .dedicated_step = "test-hot-reload" },
         // M0.8 / E3-D — D-S5-etchcook-inproc: the consolidated cook library.
         .{ .path = "tests/etch/cook_consolidate_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },

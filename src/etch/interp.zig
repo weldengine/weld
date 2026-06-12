@@ -702,19 +702,26 @@ pub const Interpreter = struct {
         // its raw bytes as bits.
         var tagset_id: ?ComponentId = null;
         if (tag_table.leaf_count > 0) {
-            const size: u16 = @intCast(tag_table.words() * 8);
-            const zeroed = try gpa.alloc(u8, size);
-            defer gpa.free(zeroed);
-            @memset(zeroed, 0);
-            const id = try world.registry.registerComponentRaw(gpa, .{
-                .name = "TagSet",
-                .size = size,
-                .alignment = 8,
-                .default_bytes = zeroed,
-                .fields = &.{},
-            });
-            try bridge.mapComponent(gpa, "TagSet", id);
-            tagset_id = id;
+            // Idempotent on a hot-reload re-compile (M0.8 E7): reuse the
+            // already-registered `TagSet` instead of erroring DuplicateComponent.
+            if (world.registry.idOf("TagSet")) |existing| {
+                try bridge.mapComponent(gpa, "TagSet", existing);
+                tagset_id = existing;
+            } else {
+                const size: u16 = @intCast(tag_table.words() * 8);
+                const zeroed = try gpa.alloc(u8, size);
+                defer gpa.free(zeroed);
+                @memset(zeroed, 0);
+                const id = try world.registry.registerComponentRaw(gpa, .{
+                    .name = "TagSet",
+                    .size = size,
+                    .alignment = 8,
+                    .default_bytes = zeroed,
+                    .fields = &.{},
+                });
+                try bridge.mapComponent(gpa, "TagSet", id);
+                tagset_id = id;
+            }
         }
 
         // Pass B — compile rules. Need the registry to resolve field
@@ -2952,9 +2959,15 @@ fn compileResource(
     decl: ast_mod.ResourceDecl,
 ) !void {
     const name = ast.strings.slice(decl.name);
+    // On a hot-reload re-compile (M0.8 E7) the resource is already registered
+    // AND already lives in the resource store with its current value — adding
+    // it again would reset it to defaults. Seed the store only on first compile.
+    const pre_existing = world.registry.idOf(name) != null;
     const id = try compileTypeDecl(gpa, ast, world, bridge, name, decl.fields_start, decl.fields_len, .resource);
-    const default_bytes = world.registry.componentDefaultBytes(id);
-    try world.addResource(gpa, id, default_bytes);
+    if (!pre_existing) {
+        const default_bytes = world.registry.componentDefaultBytes(id);
+        try world.addResource(gpa, id, default_bytes);
+    }
 }
 
 const RegKind = enum { component, resource };
@@ -3004,6 +3017,21 @@ fn compileTypeDecl(
         const fd = fields.items[f_i];
         const slot = default_buf[fd.offset .. fd.offset + @as(u16, @intCast(fd.kind.sizeBytes()))];
         try bridge_mod.writeValueAsBytes(fd.kind, slot, v);
+    }
+
+    // Idempotent re-registration (M0.8 E7 hot-reload). A second Interpreter
+    // compiled on the SAME world — an AST swap, e.g. edit a rule body and
+    // re-compile — re-visits the unchanged component/resource decls. Reuse the
+    // existing id instead of erroring `DuplicateComponent`, so the live world
+    // state (entities, component bytes, resource values) survives the swap.
+    // The hot-reload contract is a rule-body edit with the declarations
+    // UNCHANGED; a layout-changing reload (archetype migration) is Phase 2+.
+    if (world.registry.idOf(name)) |existing_id| {
+        switch (reg_kind) {
+            .component => try bridge.mapComponent(gpa, name, existing_id),
+            .resource => try bridge.mapResource(gpa, name, existing_id),
+        }
+        return existing_id;
     }
 
     const id = try world.registry.registerComponentRaw(gpa, .{
