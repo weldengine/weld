@@ -50,6 +50,7 @@ pub const DiagnosticCode = enum {
     // ── ECS access errors (E0300-E0399) ──
     resource_expected_component_given, // M0.8 — E0301 ResourceExpectedComponentGiven
     component_expected_resource_given, // M0.8 — E0302 ComponentExpectedResourceGiven
+    resource_field_unknown, // M0.8 E7 — E0303 ResourceFieldUnknown (scene `resources` block field check)
 
     // ── Annotation errors (E0500-E0599) ──
     annotation_misapplied, // M0.8 — E0502 AnnotationMisapplied
@@ -322,6 +323,26 @@ pub const DiagnosticCode = enum {
     non_shader_fn_called_from_shader, // M0.8 E6 — E0421 NonShaderFnCalledFromShader (RESERVED: GPU-builtin table deferred)
     shader_stage_missing, // M0.8 E6 — E1610 ShaderStageMissing (RESERVED: fragment is parser-mandatory)
     shader_fragment_requires_vertex, // M0.8 E6 — E1611 ShaderFragmentRequiresVertex (RESERVED: fragment-without-vertex is the normal minimal shader)
+    // ── M0.8 E7 Level C — scene (§23) + prefab (§24) validations ──
+    scene_empty_entities, // M0.8 E7 — E1780 SceneEmptyEntities
+    duplicate_entity_name, // M0.8 E7 — E1781 DuplicateEntityName
+    duplicate_uuid, // M0.8 E7 — E1782 DuplicateUUID (intra-file)
+    scene_component_type_unknown, // M0.8 E7 — E1783 ComponentTypeUnknown
+    scene_component_field_unknown, // M0.8 E7 — E1784 ComponentFieldUnknown
+    scene_component_field_type_invalid, // M0.8 E7 — E1785 ComponentFieldTypeInvalid
+    prefab_ref_not_found, // M0.8 E7 — E1786 PrefabRefNotFound (intra-file prefab-name set)
+    parent_not_found, // M0.8 E7 — E1787 ParentNotFound
+    parent_cycle, // M0.8 E7 — E1788 ParentCycle
+    scene_resource_type_unknown, // M0.8 E7 — E1789 ResourceTypeUnknown
+    orphan_entity, // M0.8 E7 — W1780 OrphanEntity (warning)
+    prefab_empty, // M0.8 E7 — E1790 PrefabEmpty
+    prefab_base_not_found, // M0.8 E7 — E1791 PrefabBaseNotFound (intra-file)
+    prefab_cycle, // M0.8 E7 — E1792 PrefabCycle
+    prefab_component_type_unknown, // M0.8 E7 — E1793 PrefabComponentTypeUnknown
+    prefab_component_field_unknown, // M0.8 E7 — E1794 PrefabComponentFieldUnknown
+    prefab_component_field_type_invalid, // M0.8 E7 — E1795 PrefabComponentFieldTypeInvalid
+    prefab_component_redefined, // M0.8 E7 — E1796 PrefabComponentRedefined (RESERVED: variant/base component-shape merge is M0.9 runtime)
+    prefab_remove_base_component, // M0.8 E7 — W1790 PrefabRemoveBaseComponent (RESERVED: no `remove` syntax in the §24.1 grammar)
 
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
@@ -343,6 +364,7 @@ pub const DiagnosticCode = enum {
             .closure_cannot_mutate_capture => "E0221",
             .resource_expected_component_given => "E0301",
             .component_expected_resource_given => "E0302",
+            .resource_field_unknown => "E0303",
             .annotation_misapplied => "E0502",
             .bound_not_satisfied => "E0601",
             .generic_type_annotation_required => "E0603",
@@ -477,6 +499,25 @@ pub const DiagnosticCode = enum {
             .non_shader_fn_called_from_shader => "E0421",
             .shader_stage_missing => "E1610",
             .shader_fragment_requires_vertex => "E1611",
+            .scene_empty_entities => "E1780",
+            .duplicate_entity_name => "E1781",
+            .duplicate_uuid => "E1782",
+            .scene_component_type_unknown => "E1783",
+            .scene_component_field_unknown => "E1784",
+            .scene_component_field_type_invalid => "E1785",
+            .prefab_ref_not_found => "E1786",
+            .parent_not_found => "E1787",
+            .parent_cycle => "E1788",
+            .scene_resource_type_unknown => "E1789",
+            .orphan_entity => "W1780",
+            .prefab_empty => "E1790",
+            .prefab_base_not_found => "E1791",
+            .prefab_cycle => "E1792",
+            .prefab_component_type_unknown => "E1793",
+            .prefab_component_field_unknown => "E1794",
+            .prefab_component_field_type_invalid => "E1795",
+            .prefab_component_redefined => "E1796",
+            .prefab_remove_base_component => "W1790",
         };
     }
 
@@ -500,6 +541,7 @@ pub const DiagnosticCode = enum {
             .closure_cannot_mutate_capture => "ClosureCannotMutateCapture",
             .resource_expected_component_given => "ResourceExpectedComponentGiven",
             .component_expected_resource_given => "ComponentExpectedResourceGiven",
+            .resource_field_unknown => "ResourceFieldUnknown",
             .annotation_misapplied => "AnnotationMisapplied",
             .bound_not_satisfied => "BoundNotSatisfied",
             .generic_type_annotation_required => "GenericTypeAnnotationRequired",
@@ -634,6 +676,25 @@ pub const DiagnosticCode = enum {
             .non_shader_fn_called_from_shader => "NonShaderFnCalledFromShader",
             .shader_stage_missing => "ShaderStageMissing",
             .shader_fragment_requires_vertex => "ShaderFragmentRequiresVertex",
+            .scene_empty_entities => "SceneEmptyEntities",
+            .duplicate_entity_name => "DuplicateEntityName",
+            .duplicate_uuid => "DuplicateUUID",
+            .scene_component_type_unknown => "ComponentTypeUnknown",
+            .scene_component_field_unknown => "ComponentFieldUnknown",
+            .scene_component_field_type_invalid => "ComponentFieldTypeInvalid",
+            .prefab_ref_not_found => "PrefabRefNotFound",
+            .parent_not_found => "ParentNotFound",
+            .parent_cycle => "ParentCycle",
+            .scene_resource_type_unknown => "ResourceTypeUnknown",
+            .orphan_entity => "OrphanEntity",
+            .prefab_empty => "PrefabEmpty",
+            .prefab_base_not_found => "PrefabBaseNotFound",
+            .prefab_cycle => "PrefabCycle",
+            .prefab_component_type_unknown => "PrefabComponentTypeUnknown",
+            .prefab_component_field_unknown => "PrefabComponentFieldUnknown",
+            .prefab_component_field_type_invalid => "PrefabComponentFieldTypeInvalid",
+            .prefab_component_redefined => "PrefabComponentRedefined",
+            .prefab_remove_base_component => "PrefabRemoveBaseComponent",
         };
     }
 };

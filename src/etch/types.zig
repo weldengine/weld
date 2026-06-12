@@ -232,7 +232,7 @@ fn numericLitValue(arena: *const AstArena, expr_id: NodeId) ?f64 {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph, shader };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph, shader, scene, prefab };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -357,6 +357,8 @@ pub const TypeChecker = struct {
         try tc.validateSequenceDecls();
         try tc.validateAnimGraphDecls();
         try tc.validateShaderDecls();
+        try tc.validateSceneDecls();
+        try tc.validatePrefabDecls();
         try tc.pass2Resolve();
     }
 
@@ -1167,6 +1169,357 @@ pub const TypeChecker = struct {
             .loop_expr => try self.emit(.shader_mode_violation, .error_, self.arena.exprSpan(expr), "shader mode: `loop` is not supported on the GPU", .{}),
             .method_get, .method_get_mut => try self.emit(.shader_mode_violation, .error_, self.arena.exprSpan(expr), "shader mode: ECS access is not supported in a shader body", .{}),
             else => {},
+        }
+    }
+
+    // ── M0.8 E7 Level C — scene (§23) + prefab (§24) validations ──────────
+    // Serialization-only (parse + validation + descriptor); runtime
+    // instantiation is M0.9. DELIVER the structural / reference / field-name +
+    // field-type checks over the single-file compilation unit. RESERVED-with-
+    // variant: E1796 PrefabComponentRedefined (variant/base component-shape
+    // MERGE is M0.9 runtime — the variant's components are already validated
+    // against the component RTTI here) + W1790 PrefabRemoveBaseComponent (no
+    // `remove` syntax in the §24.1 grammar — grammar-wins, inexpressible).
+    // DEFERRED: cross-FILE project-graph refs (E1782/E1786/E1791 only resolve
+    // within the arena passed to `check`); the W1780 full "no Transform/Tier-1
+    // component" heuristic (the Tier-1 catalogue is not attached) — the
+    // conservative "no components at all" form is delivered.
+
+    /// Collect the names of every `prefab` declaration in the compilation unit
+    /// (prefabs are STRING-named — no symbol; cross-references go through this
+    /// in-file set). Caller owns the returned map.
+    fn collectPrefabNames(self: *TypeChecker) !std.AutoHashMapUnmanaged(StringId, void) {
+        var names: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        errdefer names.deinit(self.gpa);
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .prefab_decl) continue;
+            try names.put(self.gpa, self.arena.prefab_decls.items[datas[i]].name, {});
+        }
+        return names;
+    }
+
+    /// Check one component/resource-instance field (`name: value`) against the
+    /// declared field run (over `arena.fields`): `code_unknown` if the field is
+    /// absent; `code_type` (when non-null) if a builtin/struct/enum value type
+    /// mismatches. Mirrors `validateDataEntryField` — synthExprE with null ctx;
+    /// check-mode for `.variant` shorthand + anonymous `.{ }` values. Permissive
+    /// on non-builtin declared types (no false positives on Vec3-from-array).
+    fn checkInstanceField(self: *TypeChecker, owner: []const u8, decl_fields_start: u32, decl_fields_len: u32, field: ast_mod.StructLitField, code_unknown: DiagnosticCode, code_type: ?DiagnosticCode) !void {
+        if (field.name == 0) return; // spread — not produced in component/resource bodies
+        var declared: ?ResolvedType = null;
+        var f: u32 = 0;
+        while (f < decl_fields_len) : (f += 1) {
+            const df = self.arena.fields.items[decl_fields_start + f];
+            if (df.name == field.name) {
+                declared = self.namedTypeToResolved(df.type_node);
+                break;
+            }
+        }
+        const d = declared orelse {
+            try self.emit(code_unknown, .error_, self.arena.exprSpan(field.value), "'{s}' has no field '{s}'", .{ owner, self.arena.strings.slice(field.name) });
+            return;
+        };
+        const tcode = code_type orelse return; // field-name-only check (resources)
+        const actual = blk: {
+            if (d == .enum_t and self.arena.exprKind(field.value) == .tag_path) {
+                break :blk try self.checkEnumShorthand(field.value, d.enum_t);
+            }
+            if (d == .struct_t and self.arena.exprKind(field.value) == .struct_lit) {
+                const inner_data = self.arena.exprData(field.value);
+                if (self.arena.struct_lits.items[inner_data].type_name == 0) {
+                    break :blk try self.checkStructLitAgainst(field.value, inner_data, d.struct_t, null);
+                }
+            }
+            break :blk try self.synthExprE(field.value, null);
+        };
+        const mismatch = switch (d) {
+            .builtin => |db| actual == .builtin and !self.literalTypeFits(db, field.value, actual.builtin),
+            .struct_t => |dn| actual == .struct_t and actual.struct_t != dn,
+            .enum_t => |dn| switch (actual) {
+                .enum_t => |an| an != dn,
+                .builtin => true,
+                else => false,
+            },
+            else => false,
+        };
+        if (mismatch) {
+            try self.emit(tcode, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{self.arena.strings.slice(field.name)});
+        }
+    }
+
+    /// Resolve a `component_instance` against the component RTTI: `code_type`
+    /// if the type is not a declared component, then per-field checks.
+    fn checkComponentInstance(self: *TypeChecker, ci: ast_mod.ComponentInstance, code_type: DiagnosticCode, code_field: DiagnosticCode, code_field_type: DiagnosticCode) !void {
+        const sym = self.symbols.get(ci.type_name);
+        if (sym == null or sym.?.kind != .component) {
+            try self.emit(code_type, .error_, ci.span, "'{s}' is not a declared component", .{self.arena.strings.slice(ci.type_name)});
+            return;
+        }
+        const decl = self.arena.component_decls.items[self.arena.itemData(sym.?.item_id)];
+        const owner = self.arena.strings.slice(ci.type_name);
+        var f: u32 = 0;
+        while (f < ci.fields_len) : (f += 1) {
+            try self.checkInstanceField(owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], code_field, code_field_type);
+        }
+    }
+
+    /// Resolve a `resources { … }` entry against the resource RTTI: E1789 if not
+    /// a declared resource; E0303 per unknown field (no resource-field-type code).
+    fn checkResourceInstance(self: *TypeChecker, ci: ast_mod.ComponentInstance) !void {
+        const sym = self.symbols.get(ci.type_name);
+        if (sym == null or sym.?.kind != .resource) {
+            try self.emit(.scene_resource_type_unknown, .error_, ci.span, "'{s}' is not a declared resource", .{self.arena.strings.slice(ci.type_name)});
+            return;
+        }
+        const decl = self.arena.resource_decls.items[self.arena.itemData(sym.?.item_id)];
+        const owner = self.arena.strings.slice(ci.type_name);
+        var f: u32 = 0;
+        while (f < ci.fields_len) : (f += 1) {
+            try self.checkInstanceField(owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], .resource_field_unknown, null);
+        }
+    }
+
+    /// Validate a `component_field_override` (`Type.field = value`): E1783 if the
+    /// component type is unknown, E1784 if the field is absent, E1785 on a type
+    /// mismatch.
+    fn checkFieldOverride(self: *TypeChecker, fo: ast_mod.FieldOverride) !void {
+        const sym = self.symbols.get(fo.type_name);
+        if (sym == null or sym.?.kind != .component) {
+            try self.emit(.scene_component_type_unknown, .error_, fo.span, "'{s}' is not a declared component", .{self.arena.strings.slice(fo.type_name)});
+            return;
+        }
+        const decl = self.arena.component_decls.items[self.arena.itemData(sym.?.item_id)];
+        try self.checkInstanceField(self.arena.strings.slice(fo.type_name), decl.fields_start, decl.fields_len, .{ .name = fo.field, .value = fo.value }, .scene_component_field_unknown, .scene_component_field_type_invalid);
+    }
+
+    fn validateSceneDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var prefab_names = try self.collectPrefabNames();
+        defer prefab_names.deinit(self.gpa);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .scene_decl) continue;
+            try self.validateScene(self.arena.scene_decls.items[datas[i]], &prefab_names);
+        }
+    }
+
+    fn validateScene(self: *TypeChecker, decl: ast_mod.SceneDecl, prefab_names: *const std.AutoHashMapUnmanaged(StringId, void)) !void {
+        try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .scene);
+
+        // E1780 — a scene needs at least one entity or instance.
+        if (decl.children_len == 0) {
+            try self.emit(.scene_empty_entities, .error_, decl.name_span, "scene '{s}' has no entity or instance (at least one required)", .{self.arena.strings.slice(decl.name)});
+        }
+
+        // Identity sets (entity + instance names, and uuids) back E1781 / E1782
+        // / E1787; the per-entity parent edges feed the E1788 cycle DFS.
+        var names: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer names.deinit(self.gpa);
+        var uuids: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer uuids.deinit(self.gpa);
+        var ident_to_local: std.AutoHashMapUnmanaged(StringId, usize) = .empty;
+        defer ident_to_local.deinit(self.gpa);
+        var ent_names: std.ArrayListUnmanaged(StringId) = .empty;
+        defer ent_names.deinit(self.gpa);
+        var ent_spans: std.ArrayListUnmanaged(SourceSpan) = .empty;
+        defer ent_spans.deinit(self.gpa);
+        var ent_parent: std.ArrayListUnmanaged(StringId) = .empty; // 0 = none
+        defer ent_parent.deinit(self.gpa);
+
+        // Identity pass: build the entity local list + ident → local map.
+        var c: u32 = 0;
+        while (c < decl.children_len) : (c += 1) {
+            const child = self.arena.scene_children.items[decl.children_start + c];
+            if (child.kind != .entity) continue;
+            const e = self.arena.scene_entities.items[child.index];
+            const local = ent_names.items.len;
+            try ent_names.append(self.gpa, e.name);
+            try ent_spans.append(self.gpa, e.span);
+            try ent_parent.append(self.gpa, e.parent);
+            try ident_to_local.put(self.gpa, e.name, local);
+            if (e.uuid != 0) try ident_to_local.put(self.gpa, e.uuid, local);
+        }
+
+        // Main pass: dup names/uuids, components, prefab refs, orphan warning.
+        c = 0;
+        while (c < decl.children_len) : (c += 1) {
+            const child = self.arena.scene_children.items[decl.children_start + c];
+            switch (child.kind) {
+                .entity => {
+                    const e = self.arena.scene_entities.items[child.index];
+                    if ((try names.getOrPut(self.gpa, e.name)).found_existing) {
+                        try self.emit(.duplicate_entity_name, .error_, e.span, "duplicate entity/instance name '{s}'", .{self.arena.strings.slice(e.name)});
+                    }
+                    if (e.uuid != 0 and (try uuids.getOrPut(self.gpa, e.uuid)).found_existing) {
+                        try self.emit(.duplicate_uuid, .error_, e.span, "duplicate uuid '{s}'", .{self.arena.strings.slice(e.uuid)});
+                    }
+                    if (e.components_len == 0) {
+                        try self.emit(.orphan_entity, .warning, e.span, "entity '{s}' has no components", .{self.arena.strings.slice(e.name)});
+                    }
+                    var f: u32 = 0;
+                    while (f < e.components_len) : (f += 1) {
+                        try self.checkComponentInstance(self.arena.component_instances.items[e.components_start + f], .scene_component_type_unknown, .scene_component_field_unknown, .scene_component_field_type_invalid);
+                    }
+                },
+                .instance => {
+                    const inst = self.arena.scene_instances.items[child.index];
+                    if ((try names.getOrPut(self.gpa, inst.instance_name)).found_existing) {
+                        try self.emit(.duplicate_entity_name, .error_, inst.span, "duplicate entity/instance name '{s}'", .{self.arena.strings.slice(inst.instance_name)});
+                    }
+                    if (inst.uuid != 0 and (try uuids.getOrPut(self.gpa, inst.uuid)).found_existing) {
+                        try self.emit(.duplicate_uuid, .error_, inst.span, "duplicate uuid '{s}'", .{self.arena.strings.slice(inst.uuid)});
+                    }
+                    if (!prefab_names.contains(inst.prefab_name)) {
+                        try self.emit(.prefab_ref_not_found, .error_, inst.span, "instance references prefab '{s}', which is not declared in this compilation unit", .{self.arena.strings.slice(inst.prefab_name)});
+                    }
+                    var m: u32 = 0;
+                    while (m < inst.members_len) : (m += 1) {
+                        const mem = self.arena.scene_instance_members.items[inst.members_start + m];
+                        switch (mem.kind) {
+                            .component => try self.checkComponentInstance(self.arena.component_instances.items[mem.index], .scene_component_type_unknown, .scene_component_field_unknown, .scene_component_field_type_invalid),
+                            .field_override => try self.checkFieldOverride(self.arena.field_overrides.items[mem.index]),
+                        }
+                    }
+                },
+            }
+        }
+
+        // E1789 / E0303 — `resources { … }` entries are RESOURCES.
+        var r: u32 = 0;
+        while (r < decl.resources_len) : (r += 1) {
+            try self.checkResourceInstance(self.arena.component_instances.items[decl.resources_start + r]);
+        }
+
+        // E1787 — every parent ref resolves to an entity name/uuid in the scene.
+        // E1788 — the parent hierarchy is acyclic (color DFS over the functional
+        // graph: each entity has ≤1 parent).
+        const n = ent_names.items.len;
+        var parent_pos = try self.gpa.alloc(?usize, n);
+        defer self.gpa.free(parent_pos);
+        var li: usize = 0;
+        while (li < n) : (li += 1) {
+            const par = ent_parent.items[li];
+            if (par == 0) {
+                parent_pos[li] = null;
+                continue;
+            }
+            if (ident_to_local.get(par)) |target| {
+                parent_pos[li] = target;
+            } else {
+                parent_pos[li] = null;
+                try self.emit(.parent_not_found, .error_, ent_spans.items[li], "entity parent '{s}' is not an entity name or uuid in this scene", .{self.arena.strings.slice(par)});
+            }
+        }
+        var color = try self.gpa.alloc(u8, n); // 0 white, 1 gray, 2 black
+        defer self.gpa.free(color);
+        @memset(color, 0);
+        var path: std.ArrayListUnmanaged(usize) = .empty;
+        defer path.deinit(self.gpa);
+        var start: usize = 0;
+        while (start < n) : (start += 1) {
+            if (color[start] != 0) continue;
+            path.clearRetainingCapacity();
+            var cur: ?usize = start;
+            while (cur) |ci| {
+                if (color[ci] == 1) {
+                    try self.emit(.parent_cycle, .error_, ent_spans.items[ci], "entity '{s}' is part of a parent cycle", .{self.arena.strings.slice(ent_names.items[ci])});
+                    break;
+                }
+                if (color[ci] == 2) break;
+                color[ci] = 1;
+                try path.append(self.gpa, ci);
+                cur = parent_pos[ci];
+            }
+            for (path.items) |p| color[p] = 2;
+        }
+    }
+
+    fn validatePrefabDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        // Collect every prefab decl + a name → local-index map (prefabs are
+        // STRING-named: this in-file map backs E1791 + the E1792 cycle DFS).
+        var decls: std.ArrayListUnmanaged(ast_mod.PrefabDecl) = .empty;
+        defer decls.deinit(self.gpa);
+        var name_to_local: std.AutoHashMapUnmanaged(StringId, usize) = .empty;
+        defer name_to_local.deinit(self.gpa);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .prefab_decl) continue;
+            const decl = self.arena.prefab_decls.items[datas[i]];
+            try name_to_local.put(self.gpa, decl.name, decls.items.len);
+            try decls.append(self.gpa, decl);
+        }
+        // Per-decl structural + reference + component validation.
+        for (decls.items) |decl| {
+            try self.validatePrefab(decl, &name_to_local);
+        }
+        // E1792 — the `of`/`extends` relation graph is acyclic (color DFS;
+        // each prefab has ≤1 relation parent).
+        const n = decls.items.len;
+        var parent_pos = try self.gpa.alloc(?usize, n);
+        defer self.gpa.free(parent_pos);
+        for (decls.items, 0..) |decl, idx| {
+            if (decl.relation == .none) {
+                parent_pos[idx] = null;
+            } else {
+                parent_pos[idx] = name_to_local.get(decl.relation_target); // null = base not found (E1791 already emitted)
+            }
+        }
+        var color = try self.gpa.alloc(u8, n);
+        defer self.gpa.free(color);
+        @memset(color, 0);
+        var path: std.ArrayListUnmanaged(usize) = .empty;
+        defer path.deinit(self.gpa);
+        var start: usize = 0;
+        while (start < n) : (start += 1) {
+            if (color[start] != 0) continue;
+            path.clearRetainingCapacity();
+            var cur: ?usize = start;
+            while (cur) |ci| {
+                if (color[ci] == 1) {
+                    try self.emit(.prefab_cycle, .error_, decls.items[ci].name_span, "prefab '{s}' is part of an of/extends cycle", .{self.arena.strings.slice(decls.items[ci].name)});
+                    break;
+                }
+                if (color[ci] == 2) break;
+                color[ci] = 1;
+                try path.append(self.gpa, ci);
+                cur = parent_pos[ci];
+            }
+            for (path.items) |p| color[p] = 2;
+        }
+    }
+
+    fn validatePrefab(self: *TypeChecker, decl: ast_mod.PrefabDecl, prefab_names: *const std.AutoHashMapUnmanaged(StringId, usize)) !void {
+        try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .prefab);
+
+        // E1790 — a prefab needs at least one component (across its entities).
+        var total_components: u32 = 0;
+        var e: u32 = 0;
+        while (e < decl.entities_len) : (e += 1) {
+            total_components += self.arena.scene_entities.items[decl.entities_start + e].components_len;
+        }
+        if (total_components == 0) {
+            try self.emit(.prefab_empty, .error_, decl.name_span, "prefab '{s}' has no component (at least one required)", .{self.arena.strings.slice(decl.name)});
+        }
+
+        // E1791 — the of/extends base must be a declared (in-file) prefab.
+        if (decl.relation != .none and !prefab_names.contains(decl.relation_target)) {
+            try self.emit(.prefab_base_not_found, .error_, decl.name_span, "prefab '{s}' extends/of '{s}', which is not declared in this compilation unit", .{ self.arena.strings.slice(decl.name), self.arena.strings.slice(decl.relation_target) });
+        }
+
+        // E1793/E1794/E1795 — component instances in the prefab's entities.
+        e = 0;
+        while (e < decl.entities_len) : (e += 1) {
+            const ent = self.arena.scene_entities.items[decl.entities_start + e];
+            var f: u32 = 0;
+            while (f < ent.components_len) : (f += 1) {
+                try self.checkComponentInstance(self.arena.component_instances.items[ent.components_start + f], .prefab_component_type_unknown, .prefab_component_field_unknown, .prefab_component_field_type_invalid);
+            }
         }
     }
 
@@ -5192,6 +5545,150 @@ test "type-checker emits E0101 on duplicate component declaration" {
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .duplicate_symbol);
+}
+
+// ── M0.8 E7 Level C — scene / prefab validation tests ─────────────────────
+
+test "scene + prefab: a well-formed scene and prefab type-check clean (M0.8 E7)" {
+    const gpa = std.testing.allocator;
+    var result = try parseAndCheck(gpa,
+        \\component Health { current: float = 100.0 }
+        \\resource GameMode { max_players: int = 4 }
+        \\prefab "WallTorch" { entity "root" { Health { current: 50.0 } } }
+        \\scene "Village" {
+        \\  version: 3
+        \\  resources { GameMode { max_players: 4 } }
+        \\  entity "Hero" { uuid: "u1" Health { current: 80.0 } }
+        \\  entity "Child" { parent: "Hero" Health { current: 10.0 } }
+        \\  instance of "WallTorch" "Torch_01" { Health { current: 5.0 } }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
+}
+
+test "scene E1780: an empty scene is rejected" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa, "scene \"S\" { }");
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .scene_empty_entities);
+}
+
+test "scene E1781/E1782: duplicate entity name and uuid" {
+    const gpa = std.testing.allocator;
+    var r1 = try parseAndCheck(gpa,
+        \\component Health { current: float = 1.0 }
+        \\scene "S" { entity "Hero" { Health {} } entity "Hero" { Health {} } }
+    );
+    defer r1.deinit(gpa);
+    try expectAnyCode(r1.diagnostics.items, .duplicate_entity_name);
+    var r2 = try parseAndCheck(gpa,
+        \\component Health { current: float = 1.0 }
+        \\scene "S" { entity "A" { uuid: "x" Health {} } entity "B" { uuid: "x" Health {} } }
+    );
+    defer r2.deinit(gpa);
+    try expectAnyCode(r2.diagnostics.items, .duplicate_uuid);
+}
+
+test "scene E1783/E1784/E1785: component type + field-name + field-type checks" {
+    const gpa = std.testing.allocator;
+    var r1 = try parseAndCheck(gpa, "scene \"S\" { entity \"A\" { Nonexistent {} } }");
+    defer r1.deinit(gpa);
+    try expectAnyCode(r1.diagnostics.items, .scene_component_type_unknown);
+    var r2 = try parseAndCheck(gpa,
+        \\component Health { current: float = 1.0 }
+        \\scene "S" { entity "A" { Health { bogus: 1.0 } } }
+    );
+    defer r2.deinit(gpa);
+    try expectAnyCode(r2.diagnostics.items, .scene_component_field_unknown);
+    var r3 = try parseAndCheck(gpa,
+        \\component Health { current: float = 1.0 }
+        \\scene "S" { entity "A" { Health { current: "oops" } } }
+    );
+    defer r3.deinit(gpa);
+    try expectAnyCode(r3.diagnostics.items, .scene_component_field_type_invalid);
+}
+
+test "scene E1786/E1787/E1788: prefab ref, parent ref, parent cycle" {
+    const gpa = std.testing.allocator;
+    var r1 = try parseAndCheck(gpa, "scene \"S\" { instance of \"Ghost\" \"g\" { } }");
+    defer r1.deinit(gpa);
+    try expectAnyCode(r1.diagnostics.items, .prefab_ref_not_found);
+    var r2 = try parseAndCheck(gpa,
+        \\component Health { current: float = 1.0 }
+        \\scene "S" { entity "A" { parent: "Nobody" Health {} } }
+    );
+    defer r2.deinit(gpa);
+    try expectAnyCode(r2.diagnostics.items, .parent_not_found);
+    var r3 = try parseAndCheck(gpa,
+        \\component Health { current: float = 1.0 }
+        \\scene "S" { entity "A" { parent: "B" Health {} } entity "B" { parent: "A" Health {} } }
+    );
+    defer r3.deinit(gpa);
+    try expectAnyCode(r3.diagnostics.items, .parent_cycle);
+}
+
+test "scene E1789/E0303: resources block type + field checks" {
+    const gpa = std.testing.allocator;
+    var r1 = try parseAndCheck(gpa,
+        \\component Health { current: float = 1.0 }
+        \\scene "S" { resources { Health { current: 1.0 } } entity "A" { Health {} } }
+    );
+    defer r1.deinit(gpa);
+    try expectAnyCode(r1.diagnostics.items, .scene_resource_type_unknown);
+    var r2 = try parseAndCheck(gpa,
+        \\component Health { current: float = 1.0 }
+        \\resource GameMode { max_players: int = 4 }
+        \\scene "S" { resources { GameMode { bogus: 1 } } entity "A" { Health {} } }
+    );
+    defer r2.deinit(gpa);
+    try expectAnyCode(r2.diagnostics.items, .resource_field_unknown);
+}
+
+test "scene W1780: an entity with no components warns" {
+    const gpa = std.testing.allocator;
+    var r = try parseAndCheck(gpa, "scene \"S\" { entity \"A\" { } }");
+    defer r.deinit(gpa);
+    try expectAnyCode(r.diagnostics.items, .orphan_entity);
+}
+
+test "prefab E1790/E1791/E1792: empty, base-not-found, cycle" {
+    const gpa = std.testing.allocator;
+    var r1 = try parseAndCheck(gpa, "prefab \"P\" { entity \"root\" { } }");
+    defer r1.deinit(gpa);
+    try expectAnyCode(r1.diagnostics.items, .prefab_empty);
+    var r2 = try parseAndCheck(gpa,
+        \\component Health { current: float = 1.0 }
+        \\prefab "P" of "Ghost" { entity "root" { Health {} } }
+    );
+    defer r2.deinit(gpa);
+    try expectAnyCode(r2.diagnostics.items, .prefab_base_not_found);
+    var r3 = try parseAndCheck(gpa,
+        \\component Health { current: float = 1.0 }
+        \\prefab "A" of "B" { entity "r" { Health {} } }
+        \\prefab "B" of "A" { entity "r" { Health {} } }
+    );
+    defer r3.deinit(gpa);
+    try expectAnyCode(r3.diagnostics.items, .prefab_cycle);
+}
+
+test "prefab E1793/E1794/E1795: component type + field-name + field-type checks" {
+    const gpa = std.testing.allocator;
+    var r1 = try parseAndCheck(gpa, "prefab \"P\" { entity \"root\" { Nonexistent {} } }");
+    defer r1.deinit(gpa);
+    try expectAnyCode(r1.diagnostics.items, .prefab_component_type_unknown);
+    var r2 = try parseAndCheck(gpa,
+        \\component Health { current: float = 1.0 }
+        \\prefab "P" { entity "root" { Health { bogus: 1.0 } } }
+    );
+    defer r2.deinit(gpa);
+    try expectAnyCode(r2.diagnostics.items, .prefab_component_field_unknown);
+    var r3 = try parseAndCheck(gpa,
+        \\component Health { current: float = 1.0 }
+        \\prefab "P" { entity "root" { Health { current: "oops" } } }
+    );
+    defer r3.deinit(gpa);
+    try expectAnyCode(r3.diagnostics.items, .prefab_component_field_type_invalid);
 }
 
 test "type-checker emits E0102 on field referencing unknown type" {
