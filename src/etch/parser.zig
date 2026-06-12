@@ -510,7 +510,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score => return,
                 else => _ = try self.advance(),
             }
         }
@@ -551,6 +551,7 @@ pub const Parser = struct {
             .kw_locale => try self.parseLocaleDecl(annotations),
             .kw_effect => try self.parseEffectDecl(annotations),
             .kw_audio_graph => try self.parseAudioGraphDecl(annotations),
+            .kw_audio_score => try self.parseAudioScoreDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -564,7 +565,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -2376,6 +2377,154 @@ pub const Parser = struct {
             .annotations_extra = annotations.start,
             .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// `audio_score_decl = "audio_score" STRING_LITERAL "{" {audio_score_element}
+    /// "}"` (M0.8 E6, `etch-grammar.md` §12.1). STRING-named (the
+    /// `theme`/`input_mapping` precedent). `score_property`s (`tempo`/`IDENT ":"
+    /// expression`, STRICT no annotation) are BUFFERED and committed contiguously
+    /// at the end — sections/stems also write `struct_lit_fields` during the
+    /// element loop, so a contiguous score-prop run requires the buffer.
+    fn parseAudioScoreDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'audio_score'
+        const name_tok = try self.expect(.string_literal, "expected audio_score name (string literal)");
+        const name_id = try self.internStringLiteral(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start the audio_score body");
+
+        const sections_start: u32 = @intCast(self.arena.audio_score_sections.items.len);
+        const stems_start: u32 = @intCast(self.arena.audio_score_stems.items.len);
+        var score_props: std.ArrayListUnmanaged(ast_mod.StructLitField) = .empty;
+        defer score_props.deinit(self.gpa);
+
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "section")) {
+                try self.parseAudioScoreSection();
+            } else if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "stems")) {
+                try self.parseAudioScoreStems();
+            } else {
+                // score_property = IDENT ":" expression (tempo included; STRICT,
+                // no annotation slot — a leading '@' fails loud at the key expect).
+                const key = try self.expect(.ident, "expected a score property name, 'section', or 'stems'");
+                _ = try self.expect(.colon, "expected ':' after the score property name");
+                const value = try self.parseExpr(0);
+                try score_props.append(self.gpa, .{ .name = try self.internSlice(key.span), .value = value });
+                _ = try self.match(.comma);
+            }
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the audio_score body");
+
+        const props_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        try self.arena.struct_lit_fields.appendSlice(self.gpa, score_props.items);
+        _ = try self.arena.addAudioScoreDecl(self.gpa, .{
+            .name = name_id,
+            .name_span = name_tok.span,
+            .props_start = props_start,
+            .props_len = @intCast(score_props.items.len),
+            .sections_start = sections_start,
+            .sections_len = @as(u32, @intCast(self.arena.audio_score_sections.items.len)) - sections_start,
+            .stems_start = stems_start,
+            .stems_len = @as(u32, @intCast(self.arena.audio_score_stems.items.len)) - stems_start,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// `score_section = "section" IDENT "{" {score_section_prop} "}"` (§12.1).
+    /// Plain `key ":" expression` props (clips / loop[kw_loop] / intro /
+    /// one_shot / transition_points) go to a `struct_lit_fields` run;
+    /// `can_transition_to ":" "[" IDENT {"," IDENT} "]"` → a section-name target
+    /// run; `on_finish ":" "->" IDENT` → one target on the section. Section names
+    /// + targets are TYPE_IDENT-shaped (the ratified `ident | type_ident`
+    /// name-position deviation).
+    fn parseAudioScoreSection(self: *Parser) ParseError!void {
+        const start_span = self.peekSpan();
+        _ = try self.advance(); // 'section'
+        const name_tok = switch (self.peek()) {
+            .ident, .type_ident => try self.advance(),
+            else => return self.parseErr(self.peekSpan(), "expected a section name (identifier) after 'section'"),
+        };
+        _ = try self.expect(.lbrace, "expected '{' to start the section body");
+        const props_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        const targets_start: u32 = @intCast(self.arena.audio_score_targets.items.len);
+        var on_finish: StringId = 0;
+        var has_on_finish = false;
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.peek() == .kw_loop) {
+                const loop_tok = try self.advance(); // 'loop' (kw_loop token kind)
+                _ = try self.expect(.colon, "expected ':' after 'loop'");
+                const value = try self.parseExpr(0);
+                try self.arena.struct_lit_fields.append(self.gpa, .{ .name = try self.internSlice(loop_tok.span), .value = value });
+            } else {
+                const key_tok = try self.expect(.ident, "expected a section property name");
+                const key = self.sliceOf(key_tok.span);
+                if (std.mem.eql(u8, key, "can_transition_to")) {
+                    _ = try self.expect(.colon, "expected ':' after 'can_transition_to'");
+                    _ = try self.expect(.lbracket, "expected '[' to start the can_transition_to list");
+                    while (self.peek() != .rbracket and self.peek() != .eof) {
+                        const ref = switch (self.peek()) {
+                            .ident, .type_ident => try self.advance(),
+                            else => return self.parseErr(self.peekSpan(), "expected a section name (identifier) in can_transition_to"),
+                        };
+                        try self.arena.audio_score_targets.append(self.gpa, try self.internSlice(ref.span));
+                        if (!try self.match(.comma)) break;
+                    }
+                    _ = try self.expect(.rbracket, "expected ']' to close the can_transition_to list");
+                } else if (std.mem.eql(u8, key, "on_finish")) {
+                    _ = try self.expect(.colon, "expected ':' after 'on_finish'");
+                    _ = try self.expect(.arrow, "expected '->' after 'on_finish:'");
+                    const target = switch (self.peek()) {
+                        .ident, .type_ident => try self.advance(),
+                        else => return self.parseErr(self.peekSpan(), "expected a section name (identifier) after 'on_finish: ->'"),
+                    };
+                    on_finish = try self.internSlice(target.span);
+                    has_on_finish = true;
+                } else {
+                    _ = try self.expect(.colon, "expected ':' after the section property name");
+                    const value = try self.parseExpr(0);
+                    try self.arena.struct_lit_fields.append(self.gpa, .{ .name = try self.internSlice(key_tok.span), .value = value });
+                }
+            }
+            _ = try self.match(.comma);
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the section body");
+        try self.arena.audio_score_sections.append(self.gpa, .{
+            .name = try self.internSlice(name_tok.span),
+            .props_start = props_start,
+            .props_len = @as(u32, @intCast(self.arena.struct_lit_fields.items.len)) - props_start,
+            .can_transition_start = targets_start,
+            .can_transition_len = @as(u32, @intCast(self.arena.audio_score_targets.items.len)) - targets_start,
+            .on_finish = on_finish,
+            .has_on_finish = has_on_finish,
+            .span = .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end },
+        });
+    }
+
+    /// `score_stems_block = "stems" "{" {score_stem} "}"`, `score_stem = IDENT
+    /// ":" struct_literal_body` (§12.1). Stem bodies reuse `parseDataEntryBody`.
+    fn parseAudioScoreStems(self: *Parser) ParseError!void {
+        _ = try self.advance(); // 'stems'
+        _ = try self.expect(.lbrace, "expected '{' to start the stems block");
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const start_span = self.peekSpan();
+            const name_tok = switch (self.peek()) {
+                .ident, .type_ident => try self.advance(),
+                else => return self.parseErr(self.peekSpan(), "expected a stem name (identifier)"),
+            };
+            _ = try self.expect(.colon, "expected ':' after the stem name");
+            const body = try self.parseDataEntryBody();
+            try self.arena.audio_score_stems.append(self.gpa, .{
+                .name = try self.internSlice(name_tok.span),
+                .body_start = body.fields_start,
+                .body_len = body.fields_len,
+                .span = .{ .byte_start = start_span.byte_start, .byte_end = body.end_byte },
+            });
+            _ = try self.match(.comma);
+        }
+        _ = try self.expect(.rbrace, "expected '}' to close the stems block");
     }
 
     const DataEntryBody = struct {
@@ -7266,4 +7415,54 @@ test "parser recovers and a valid audio_graph after a broken construct survives 
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.audio_graph_decls.items.len);
+}
+
+test "parser builds an audio_score with tempo, sections, and stems (M0.8 E6)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\audio_score "exploration" {
+        \\  tempo: 90
+        \\  section Calm {
+        \\    clips: ["music/calm_a.ogg", "music/calm_b.ogg"]
+        \\    loop: true
+        \\    can_transition_to: [Tension, Combat]
+        \\    transition_points: [.bar_end]
+        \\  }
+        \\  section Tension {
+        \\    intro: "music/tension_intro.ogg"
+        \\    on_finish: -> Combat
+        \\  }
+        \\  section Combat {
+        \\    loop: "music/combat_loop.ogg"
+        \\  }
+        \\  stems {
+        \\    bass: { clip: "music/bass.ogg", always_active: true }
+        \\    drums: { clip: "music/drums.ogg" }
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.audio_score_decls.items.len);
+    const decl = result.ast.audio_score_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 1), decl.props_len);
+    try std.testing.expectEqual(@as(u32, 3), decl.sections_len);
+    try std.testing.expectEqual(@as(u32, 2), decl.stems_len);
+    // section Calm: can_transition_to lists two targets.
+    const calm = result.ast.audio_score_sections.items[decl.sections_start];
+    try std.testing.expectEqual(@as(u32, 2), calm.can_transition_len);
+    // section Tension: on_finish -> Combat.
+    const tension = result.ast.audio_score_sections.items[decl.sections_start + 1];
+    try std.testing.expect(tension.has_on_finish);
+}
+
+test "parser recovers and a valid audio_score after a broken construct survives (M0.8 E6 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\audio_score "theme" { tempo: 120 section A { loop: true } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.audio_score_decls.items.len);
 }

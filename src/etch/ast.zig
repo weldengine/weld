@@ -1540,6 +1540,57 @@ pub const AudioGraphDecl = struct {
     annotations_len: u32,
 };
 
+/// Side-slab entry for an `audio_score` declaration (M0.8 E6 Level B audio,
+/// `etch-grammar.md` §12.1: `audio_score_decl = "audio_score" STRING_LITERAL
+/// "{" {audio_score_element} "}"`). STRING-named (the `theme`/`input_mapping`
+/// precedent — referenced by string, NOT a symbol). `score_property`s
+/// (`tempo`/`IDENT ":" expression`, STRICT no annotation — the ability
+/// ruling-15 precedent) are a `(start, len)` run of `arena.struct_lit_fields`;
+/// sections and stems live in their own runs.
+pub const AudioScoreDecl = struct {
+    name: StringId, // STRING_LITERAL content
+    name_span: SourceSpan,
+    props_start: u32, // score_property run in `arena.struct_lit_fields`
+    props_len: u32,
+    sections_start: u32, // index into `arena.audio_score_sections`
+    sections_len: u32,
+    stems_start: u32, // index into `arena.audio_score_stems`
+    stems_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
+/// One `score_section` (`"section" IDENT "{" {score_section_prop} "}"`, §12.1).
+/// The plain `key ":" expression` props (clips / loop / intro / one_shot /
+/// transition_points) are a `struct_lit_fields` run; `can_transition_to` is
+/// parsed specially into a `(start, len)` run of `arena.audio_score_targets`
+/// (section-name IDENTs — E1726 checks they resolve); `on_finish "->" IDENT`
+/// is one more such target (`on_finish` valid iff `has_on_finish`). E1725
+/// SectionDurationInvalid stays RESERVED (the grammar §12.1 shape has no
+/// `duration` prop — the validation-ecs §20 `duration` is the earlier shape).
+pub const AudioScoreSection = struct {
+    name: StringId, // IDENT (section name)
+    props_start: u32, // plain props run in `arena.struct_lit_fields`
+    props_len: u32,
+    can_transition_start: u32, // can_transition_to targets in `arena.audio_score_targets`
+    can_transition_len: u32,
+    on_finish: StringId, // `on_finish "->" IDENT` target (valid iff has_on_finish)
+    has_on_finish: bool,
+    span: SourceSpan,
+};
+
+/// One `score_stem` (`IDENT ":" struct_literal_body`, §12.1): a stem name bound
+/// to a property body (`{ clip: "...", always_active: true }`). The body fields
+/// are a `struct_lit_fields` run. E1724 StemActiveUnknown stays RESERVED (the
+/// grammar §12.1 shape has no `stems_active` — sections reference via
+/// `can_transition_to`, not a stem-activation list).
+pub const AudioScoreStem = struct {
+    name: StringId, // IDENT (stem name)
+    body_start: u32, // struct_literal_body fields run in `arena.struct_lit_fields`
+    body_len: u32,
+    span: SourceSpan,
+};
+
 /// Kind of one routine trigger alternative (M0.8 E4, `etch-grammar.md`
 /// §8.2 `trigger_expr`): `at TIME_LITERAL` / `after IDENT` /
 /// `on_event TYPE_IDENT`. `or`-chains are stored as a flat run of
@@ -1915,6 +1966,10 @@ pub const AstArena = struct {
     effect_emitters: std.ArrayListUnmanaged(EffectEmitter) = .empty,
     effect_event_handlers: std.ArrayListUnmanaged(EffectEventHandler) = .empty,
     audio_graph_decls: std.ArrayListUnmanaged(AudioGraphDecl) = .empty,
+    audio_score_decls: std.ArrayListUnmanaged(AudioScoreDecl) = .empty,
+    audio_score_sections: std.ArrayListUnmanaged(AudioScoreSection) = .empty,
+    audio_score_stems: std.ArrayListUnmanaged(AudioScoreStem) = .empty,
+    audio_score_targets: std.ArrayListUnmanaged(StringId) = .empty,
     quest_decls: std.ArrayListUnmanaged(QuestDecl) = .empty,
     quest_properties: std.ArrayListUnmanaged(QuestProperty) = .empty,
     quest_stages: std.ArrayListUnmanaged(QuestStage) = .empty,
@@ -2115,6 +2170,10 @@ pub const AstArena = struct {
         self.effect_emitters.deinit(gpa);
         self.effect_event_handlers.deinit(gpa);
         self.audio_graph_decls.deinit(gpa);
+        self.audio_score_decls.deinit(gpa);
+        self.audio_score_sections.deinit(gpa);
+        self.audio_score_stems.deinit(gpa);
+        self.audio_score_targets.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
@@ -2626,6 +2685,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.audio_graph_decls.items.len);
         try self.audio_graph_decls.append(gpa, decl);
         return try self.addItem(gpa, .audio_graph_decl, idx, span);
+    }
+
+    /// `audio_score "name" { {element} }` (M0.8 E6, `etch-grammar.md` §12.1).
+    /// The caller appends the score properties, sections, and stems to their
+    /// slabs beforehand, passing the ranges in `decl`.
+    pub fn addAudioScoreDecl(self: *AstArena, gpa: std.mem.Allocator, decl: AudioScoreDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.audio_score_decls.items.len);
+        try self.audio_score_decls.append(gpa, decl);
+        return try self.addItem(gpa, .audio_score_decl, idx, span);
     }
 
     /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The

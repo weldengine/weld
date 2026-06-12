@@ -1207,3 +1207,32 @@ audio_graph LaserBlast {
   output(mix(base, synth))
 }
 ```
+
+## Audio score (E6 — §12.1)
+
+`audio_score_decl = "audio_score" STRING_LITERAL "{" {audio_score_element} "}"`.
+STRING-named. `score_property`s (`tempo: 90` — STRICT, no annotation), `section`s
+(plain `key: value` props + `can_transition_to: [IDENT, …]` + `on_finish: ->
+IDENT`), and a `stems { IDENT: { … } }` block. Section names + targets are
+TYPE_IDENT-shaped (the ratified name-position deviation).
+
+```etch
+audio_score "exploration" {
+  tempo: 90
+  section Calm {
+    clips: ["music/calm_a.ogg", "music/calm_b.ogg"]
+    loop: true
+    can_transition_to: [Tension, Combat]
+  }
+  section Tension {
+    intro: "music/tension_intro.ogg"
+    on_finish: -> Combat
+  }
+  section Combat {
+    loop: "music/combat_loop.ogg"
+  }
+  stems {
+    bass: { clip: "music/bass.ogg", always_active: true }
+  }
+}
+```

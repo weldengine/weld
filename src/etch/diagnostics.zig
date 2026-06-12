@@ -249,6 +249,22 @@ pub const DiagnosticCode = enum {
     audio_graph_no_output, // M0.8 E6 — E1700 AudioGraphNoOutput (RESERVED: output is parser-mandatory)
     audio_graph_multiple_outputs, // M0.8 E6 — E1701 MultipleOutputs (RESERVED: the grammar has a single sink)
 
+    // ── audio_score (E1720-E1728, M0.8 E6 — etch-grammar.md §12.1, Level-B
+    //    audio. The validation-ecs §20 codes are reshaped onto the grammar
+    //    shape: E1720 means "no section AND no stems", E1726 is rekeyed onto
+    //    can_transition_to / on_finish section targets. E1724 StemActiveUnknown
+    //    (no `stems_active` in this shape) + E1725 SectionDurationInvalid (no
+    //    `duration` prop) are RESERVED-with-variant. E1723 StemAssetInvalid /
+    //    E1727 TransitionPointInvalid / W1720 / W1721 are DEFERRED-no-variant
+    //    (asset + transition-point catalogues, heuristics — Phase 2+). ──
+    score_no_sections, // M0.8 E6 — E1720 ScoreNoSections (reshaped: no section AND no stems)
+    duplicate_section_name, // M0.8 E6 — E1721 DuplicateSectionName
+    duplicate_stem_name, // M0.8 E6 — E1722 DuplicateStemName
+    stem_active_unknown, // M0.8 E6 — E1724 StemActiveUnknown (RESERVED: no stems_active in the §12.1 shape)
+    section_duration_invalid, // M0.8 E6 — E1725 SectionDurationInvalid (RESERVED: no duration prop in the §12.1 shape)
+    score_transition_from_not_found, // M0.8 E6 — E1726 TransitionFromNotFound (rekeyed onto can_transition_to / on_finish targets)
+    tempo_invalid, // M0.8 E6 — E1728 TempoInvalid (tempo must be a positive int)
+
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
@@ -367,6 +383,13 @@ pub const DiagnosticCode = enum {
             .emitter_ref_not_found => "E1604",
             .audio_graph_no_output => "E1700",
             .audio_graph_multiple_outputs => "E1701",
+            .score_no_sections => "E1720",
+            .duplicate_section_name => "E1721",
+            .duplicate_stem_name => "E1722",
+            .stem_active_unknown => "E1724",
+            .section_duration_invalid => "E1725",
+            .score_transition_from_not_found => "E1726",
+            .tempo_invalid => "E1728",
         };
     }
 
@@ -488,6 +511,13 @@ pub const DiagnosticCode = enum {
             .emitter_ref_not_found => "EmitterRefNotFound",
             .audio_graph_no_output => "AudioGraphNoOutput",
             .audio_graph_multiple_outputs => "MultipleOutputs",
+            .score_no_sections => "ScoreNoSections",
+            .duplicate_section_name => "DuplicateSectionName",
+            .duplicate_stem_name => "DuplicateStemName",
+            .stem_active_unknown => "StemActiveUnknown",
+            .section_duration_invalid => "SectionDurationInvalid",
+            .score_transition_from_not_found => "TransitionFromNotFound",
+            .tempo_invalid => "TempoInvalid",
         };
     }
 };

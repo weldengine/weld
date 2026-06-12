@@ -4910,7 +4910,7 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// `true` when the program declares at least one Level-B construct with a
 /// descriptor (M0.8 E4: the six Level-B gameplay constructs).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0 or ast.audio_graph_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0 or ast.audio_graph_decls.items.len > 0 or ast.audio_score_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4940,6 +4940,7 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .locale_decl => try emitLocaleDescriptor(w, ast, ast.locale_decls.items[datas[i]]),
             .effect_decl => try emitEffectDescriptor(w, gpa, ast, ast.effect_decls.items[datas[i]]),
             .audio_graph_decl => try emitAudioGraphDescriptor(w, gpa, ast, ast.audio_graph_decls.items[datas[i]]),
+            .audio_score_decl => try emitAudioScoreDescriptor(w, gpa, ast, ast.audio_score_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -5159,6 +5160,63 @@ fn emitAudioGraphDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstA
     try w.print(", .output = ", .{});
     try emitZigStringLiteral(w, output);
     try w.line(" } },");
+}
+
+/// Emit one `ScorePropDesc` array's entries (`.{ .name = .., .value = .. },`),
+/// SHARED by the audio_score score props / section props / stem bodies. The
+/// caller opens and closes the `&[_]etch_descriptor.ScorePropDesc{ … }` literal.
+fn emitScorePropEntries(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, start: u32, len: u32) CodegenError!void {
+    var i: u32 = 0;
+    while (i < len) : (i += 1) {
+        const field = ast.struct_lit_fields.items[start + i];
+        const value = try renderForEmit(gpa, ast, field.value);
+        defer gpa.free(value);
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, if (field.name == 0) ".." else ast.strings.slice(field.name));
+        try w.print(", .value = ", .{});
+        try emitZigStringLiteral(w, value);
+        try w.line(" },");
+    }
+}
+
+/// Emit-structure for an `audio_score` (M0.8 E6 Level B audio): the codegen's
+/// OWN walk over score props / sections / stems through the SHARED
+/// `renderForEmit` + `emitScorePropEntries` — byte-identical with `buildAudioScore`.
+fn emitAudioScoreDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.AudioScoreDecl) CodegenError!void {
+    try w.print("    .{{ .audio_score = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.line(", .props = &[_]etch_descriptor.ScorePropDesc{");
+    try emitScorePropEntries(w, gpa, ast, decl.props_start, decl.props_len);
+    try w.line("    }, .sections = &[_]etch_descriptor.AudioScoreSectionDesc{");
+    var s: u32 = 0;
+    while (s < decl.sections_len) : (s += 1) {
+        const sec = ast.audio_score_sections.items[decl.sections_start + s];
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(sec.name));
+        try w.line(", .props = &[_]etch_descriptor.ScorePropDesc{");
+        try emitScorePropEntries(w, gpa, ast, sec.props_start, sec.props_len);
+        try w.line("        }, .can_transition_to = &[_][]const u8{");
+        var t: u32 = 0;
+        while (t < sec.can_transition_len) : (t += 1) {
+            try w.print("            ", .{});
+            try emitZigStringLiteral(w, ast.strings.slice(ast.audio_score_targets.items[sec.can_transition_start + t]));
+            try w.line(",");
+        }
+        try w.print("        }}, .on_finish = ", .{});
+        try emitZigStringLiteral(w, if (sec.has_on_finish) ast.strings.slice(sec.on_finish) else "");
+        try w.line(" },");
+    }
+    try w.line("    }, .stems = &[_]etch_descriptor.AudioScoreStemDesc{");
+    var st: u32 = 0;
+    while (st < decl.stems_len) : (st += 1) {
+        const stem = ast.audio_score_stems.items[decl.stems_start + st];
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(stem.name));
+        try w.line(", .fields = &[_]etch_descriptor.ScorePropDesc{");
+        try emitScorePropEntries(w, gpa, ast, stem.body_start, stem.body_len);
+        try w.line("        } },");
+    }
+    try w.line("    } } },");
 }
 
 /// Emit-structure for an `input_mapping` (M0.8 E5 Level B STRICT): the codegen's

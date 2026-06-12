@@ -408,6 +408,39 @@ pub const AudioGraphParamDesc = struct {
     default: []const u8, // "" if no `= default`
 };
 
+/// `audio_score` descriptor (`etch-ast-ir.md` §3.5: `AudioScore { sections,
+/// stems, transitions }`; M0.8 E6, `etch-grammar.md` §12.1, Level-B adaptive
+/// music). STRING-named. Score properties (`tempo` + others), sections (plain
+/// `key: value` props + the `can_transition_to` section list + the `on_finish`
+/// target), and stems (a `key: value` body) — all canonical text, never played.
+pub const AudioScore = struct {
+    name: []const u8, // the STRING_LITERAL name
+    props: []const ScorePropDesc,
+    sections: []const AudioScoreSectionDesc,
+    stems: []const AudioScoreStemDesc,
+};
+
+/// One rendered `key: value` property (score property / section prop / stem
+/// body field — the shape is shared).
+pub const ScorePropDesc = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// One `audio_score` section: plain props + transition targets + on_finish.
+pub const AudioScoreSectionDesc = struct {
+    name: []const u8,
+    props: []const ScorePropDesc,
+    can_transition_to: []const []const u8, // section names ("[]" if none)
+    on_finish: []const u8, // "" if no on_finish
+};
+
+/// One `audio_score` stem: a name + its rendered `key: value` body.
+pub const AudioScoreStemDesc = struct {
+    name: []const u8,
+    fields: []const ScorePropDesc,
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -425,6 +458,7 @@ pub const Descriptor = union(enum) {
     locale: Locale,
     effect: Effect,
     audio_graph: AudioGraph,
+    audio_score: AudioScore,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -442,6 +476,7 @@ pub const Descriptor = union(enum) {
             .locale => |l| try writeLocale(l, gpa, out),
             .effect => |e| try writeEffect(e, gpa, out),
             .audio_graph => |ag| try writeAudioGraph(ag, gpa, out),
+            .audio_score => |asc| try writeAudioScore(asc, gpa, out),
         }
     }
 };
@@ -635,6 +670,42 @@ pub fn writeAudioGraph(ag: AudioGraph, gpa: std.mem.Allocator, out: *std.ArrayLi
         try appendFmt(gpa, out, "  body {{ {s} }}\n", .{ag.body});
     }
     try appendFmt(gpa, out, "  output({s})\n", .{ag.output});
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `audio_score` descriptor (M0.8 E6): score
+/// properties, then sections (plain props + can_transition_to + on_finish),
+/// then stems with their bodies.
+pub fn writeAudioScore(asc: AudioScore, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "audio_score \"{s}\" {{\n", .{asc.name});
+    for (asc.props) |p| {
+        try appendFmt(gpa, out, "  {s}: {s}\n", .{ p.name, p.value });
+    }
+    for (asc.sections) |sec| {
+        try appendFmt(gpa, out, "  section {s} {{\n", .{sec.name});
+        for (sec.props) |p| {
+            try appendFmt(gpa, out, "    {s}: {s}\n", .{ p.name, p.value });
+        }
+        if (sec.can_transition_to.len != 0) {
+            try out.appendSlice(gpa, "    can_transition_to: [");
+            for (sec.can_transition_to, 0..) |t, idx| {
+                if (idx != 0) try out.appendSlice(gpa, ", ");
+                try out.appendSlice(gpa, t);
+            }
+            try out.appendSlice(gpa, "]\n");
+        }
+        if (sec.on_finish.len != 0) {
+            try appendFmt(gpa, out, "    on_finish: -> {s}\n", .{sec.on_finish});
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (asc.stems) |stem| {
+        try appendFmt(gpa, out, "  stem {s} {{\n", .{stem.name});
+        for (stem.fields) |f| {
+            try appendFmt(gpa, out, "    {s}: {s}\n", .{ f.name, f.value });
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
     try out.appendSlice(gpa, "}\n");
 }
 

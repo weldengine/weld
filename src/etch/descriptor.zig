@@ -72,6 +72,7 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
         .locale => |l| freeLocale(gpa, l),
         .effect => |e| freeEffect(gpa, e),
         .audio_graph => |ag| freeAudioGraph(gpa, ag),
+        .audio_score => |asc| freeAudioScore(gpa, asc),
     }
 }
 
@@ -292,6 +293,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .locale_decl => try list.append(gpa, .{ .locale = try buildLocale(gpa, arena, arena.locale_decls.items[datas[i]]) }),
             .effect_decl => try list.append(gpa, .{ .effect = try buildEffect(gpa, arena, arena.effect_decls.items[datas[i]]) }),
             .audio_graph_decl => try list.append(gpa, .{ .audio_graph = try buildAudioGraph(gpa, arena, arena.audio_graph_decls.items[datas[i]]) }),
+            .audio_score_decl => try list.append(gpa, .{ .audio_score = try buildAudioScore(gpa, arena, arena.audio_score_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -1151,6 +1153,132 @@ fn buildAudioGraph(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod
         .params = try params.toOwnedSlice(gpa),
         .body = body,
         .output = output,
+    };
+}
+
+/// Render a `struct_lit_fields` run as `[]ScorePropDesc` (`key: rendered`). SHARED
+/// by audio_score's score props, section props, and stem bodies. A spread field
+/// (`name == 0`) renders its key as `..` (the motion/data precedent).
+fn buildScorePropDescs(gpa: std.mem.Allocator, arena: *const AstArena, start: u32, len: u32) BuildError![]types.ScorePropDesc {
+    var list: std.ArrayListUnmanaged(types.ScorePropDesc) = .empty;
+    errdefer {
+        for (list.items) |p| {
+            gpa.free(p.name);
+            gpa.free(p.value);
+        }
+        list.deinit(gpa);
+    }
+    var i: u32 = 0;
+    while (i < len) : (i += 1) {
+        const field = arena.struct_lit_fields.items[start + i];
+        const value = try renderExprAlloc(gpa, arena, field.value);
+        errdefer gpa.free(value);
+        const name = try gpa.dupe(u8, if (field.name == 0) ".." else arena.strings.slice(field.name));
+        try list.append(gpa, .{ .name = name, .value = value });
+    }
+    return try list.toOwnedSlice(gpa);
+}
+
+fn freeScorePropDescs(gpa: std.mem.Allocator, props: []const types.ScorePropDesc) void {
+    for (props) |p| {
+        gpa.free(p.name);
+        gpa.free(p.value);
+    }
+    gpa.free(props);
+}
+
+fn freeAudioScore(gpa: std.mem.Allocator, asc: types.AudioScore) void {
+    gpa.free(asc.name);
+    freeScorePropDescs(gpa, asc.props);
+    for (asc.sections) |sec| {
+        gpa.free(sec.name);
+        freeScorePropDescs(gpa, sec.props);
+        for (sec.can_transition_to) |t| gpa.free(t);
+        gpa.free(sec.can_transition_to);
+        gpa.free(sec.on_finish);
+    }
+    gpa.free(asc.sections);
+    for (asc.stems) |stem| {
+        gpa.free(stem.name);
+        freeScorePropDescs(gpa, stem.fields);
+    }
+    gpa.free(asc.stems);
+}
+
+/// Build an `audio_score` descriptor (M0.8 E6): score properties, sections
+/// (plain props + can_transition_to targets + on_finish), and stems — all
+/// rendered through the shared canonical renderers (byte-identical with emit).
+fn buildAudioScore(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.AudioScoreDecl) BuildError!types.AudioScore {
+    const props = try buildScorePropDescs(gpa, arena, decl.props_start, decl.props_len);
+    errdefer freeScorePropDescs(gpa, props);
+
+    var sections: std.ArrayListUnmanaged(types.AudioScoreSectionDesc) = .empty;
+    errdefer {
+        for (sections.items) |sec| {
+            gpa.free(sec.name);
+            freeScorePropDescs(gpa, sec.props);
+            for (sec.can_transition_to) |t| gpa.free(t);
+            gpa.free(sec.can_transition_to);
+            gpa.free(sec.on_finish);
+        }
+        sections.deinit(gpa);
+    }
+    var s: u32 = 0;
+    while (s < decl.sections_len) : (s += 1) {
+        const sec = arena.audio_score_sections.items[decl.sections_start + s];
+        const sprops = try buildScorePropDescs(gpa, arena, sec.props_start, sec.props_len);
+        errdefer freeScorePropDescs(gpa, sprops);
+        var cts: std.ArrayListUnmanaged([]const u8) = .empty;
+        errdefer {
+            for (cts.items) |t| gpa.free(t);
+            cts.deinit(gpa);
+        }
+        var t: u32 = 0;
+        while (t < sec.can_transition_len) : (t += 1) {
+            const tname = try gpa.dupe(u8, arena.strings.slice(arena.audio_score_targets.items[sec.can_transition_start + t]));
+            errdefer gpa.free(tname);
+            try cts.append(gpa, tname);
+        }
+        const on_finish = if (sec.has_on_finish)
+            try gpa.dupe(u8, arena.strings.slice(sec.on_finish))
+        else
+            try gpa.dupe(u8, "");
+        errdefer gpa.free(on_finish);
+        const sname = try gpa.dupe(u8, arena.strings.slice(sec.name));
+        errdefer gpa.free(sname);
+        try sections.append(gpa, .{
+            .name = sname,
+            .props = sprops,
+            .can_transition_to = try cts.toOwnedSlice(gpa),
+            .on_finish = on_finish,
+        });
+    }
+
+    var stems: std.ArrayListUnmanaged(types.AudioScoreStemDesc) = .empty;
+    errdefer {
+        for (stems.items) |stem| {
+            gpa.free(stem.name);
+            freeScorePropDescs(gpa, stem.fields);
+        }
+        stems.deinit(gpa);
+    }
+    var st: u32 = 0;
+    while (st < decl.stems_len) : (st += 1) {
+        const stem = arena.audio_score_stems.items[decl.stems_start + st];
+        const fields = try buildScorePropDescs(gpa, arena, stem.body_start, stem.body_len);
+        errdefer freeScorePropDescs(gpa, fields);
+        const sname = try gpa.dupe(u8, arena.strings.slice(stem.name));
+        errdefer gpa.free(sname);
+        try stems.append(gpa, .{ .name = sname, .fields = fields });
+    }
+
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    errdefer gpa.free(name);
+    return .{
+        .name = name,
+        .props = props,
+        .sections = try sections.toOwnedSlice(gpa),
+        .stems = try stems.toOwnedSlice(gpa),
     };
 }
 

@@ -203,7 +203,7 @@ fn containsUppercase(s: []const u8) bool {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -323,6 +323,7 @@ pub const TypeChecker = struct {
         try tc.validateWidgetDecls();
         try tc.validateLocaleDecls();
         try tc.validateEffectDecls();
+        try tc.validateAudioScoreDecls();
         try tc.pass2Resolve();
     }
 
@@ -781,6 +782,85 @@ pub const TypeChecker = struct {
             const handler = self.arena.effect_event_handlers.items[decl.handlers_start + h];
             if (!emitters.contains(handler.emitter)) {
                 try self.emit(.emitter_ref_not_found, .error_, handler.span, "event handler references '{s}', which is not an emitter of this effect", .{self.arena.strings.slice(handler.emitter)});
+            }
+        }
+    }
+
+    fn validateAudioScoreDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .audio_score_decl) continue;
+            try self.validateAudioScore(self.arena.audio_score_decls.items[datas[i]]);
+        }
+    }
+
+    /// `audio_score` validations (M0.8 E6, `etch-validation-ecs.md` §20 reshaped
+    /// onto the grammar §12.1 shape — grammar wins). DELIVER E1720 (reshaped:
+    /// "no section AND no stems"), E1721 DuplicateSectionName, E1722
+    /// DuplicateStemName, E1726 (rekeyed onto can_transition_to / on_finish
+    /// section-name targets), E1728 TempoInvalid. RESERVED-with-variant: E1724
+    /// StemActiveUnknown (no `stems_active` in this shape) / E1725
+    /// SectionDurationInvalid (no `duration` prop). DEFERRED-no-variant: E1723 /
+    /// E1727 / W1720 / W1721 (asset + transition-point catalogues, heuristics).
+    fn validateAudioScore(self: *TypeChecker, decl: ast_mod.AudioScoreDecl) !void {
+        try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .audio_score);
+
+        // E1720 — a score needs at least one section OR one stem.
+        if (decl.sections_len == 0 and decl.stems_len == 0) {
+            try self.emit(.score_no_sections, .error_, decl.name_span, "audio_score '{s}' has no section and no stems (at least one required)", .{self.arena.strings.slice(decl.name)});
+        }
+
+        // E1721 — section names unique; the set also backs E1726.
+        var sections: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer sections.deinit(self.gpa);
+        var s: u32 = 0;
+        while (s < decl.sections_len) : (s += 1) {
+            const sec = self.arena.audio_score_sections.items[decl.sections_start + s];
+            const gop = try sections.getOrPut(self.gpa, sec.name);
+            if (gop.found_existing) {
+                try self.emit(.duplicate_section_name, .error_, sec.span, "duplicate audio_score section '{s}'", .{self.arena.strings.slice(sec.name)});
+            }
+        }
+
+        // E1726 — every can_transition_to / on_finish target references a
+        // declared section.
+        s = 0;
+        while (s < decl.sections_len) : (s += 1) {
+            const sec = self.arena.audio_score_sections.items[decl.sections_start + s];
+            var t: u32 = 0;
+            while (t < sec.can_transition_len) : (t += 1) {
+                const target = self.arena.audio_score_targets.items[sec.can_transition_start + t];
+                if (!sections.contains(target)) {
+                    try self.emit(.score_transition_from_not_found, .error_, sec.span, "can_transition_to references '{s}', which is not a section of this audio_score", .{self.arena.strings.slice(target)});
+                }
+            }
+            if (sec.has_on_finish and !sections.contains(sec.on_finish)) {
+                try self.emit(.score_transition_from_not_found, .error_, sec.span, "on_finish references '{s}', which is not a section of this audio_score", .{self.arena.strings.slice(sec.on_finish)});
+            }
+        }
+
+        // E1722 — stem names unique.
+        var stems: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer stems.deinit(self.gpa);
+        var st: u32 = 0;
+        while (st < decl.stems_len) : (st += 1) {
+            const stem = self.arena.audio_score_stems.items[decl.stems_start + st];
+            const gop = try stems.getOrPut(self.gpa, stem.name);
+            if (gop.found_existing) {
+                try self.emit(.duplicate_stem_name, .error_, stem.span, "duplicate audio_score stem '{s}'", .{self.arena.strings.slice(stem.name)});
+            }
+        }
+
+        // E1728 — `tempo` (if present) must be a positive integer literal (BPM).
+        var p: u32 = 0;
+        while (p < decl.props_len) : (p += 1) {
+            const prop = self.arena.struct_lit_fields.items[decl.props_start + p];
+            if (std.mem.eql(u8, self.arena.strings.slice(prop.name), "tempo")) {
+                if (self.arena.exprKind(prop.value) != .int_lit) {
+                    try self.emit(.tempo_invalid, .error_, decl.name_span, "audio_score tempo must be a positive integer (BPM)", .{});
+                }
             }
         }
     }
