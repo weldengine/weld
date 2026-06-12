@@ -1,0 +1,22 @@
+component Out {
+  v: int = 0
+}
+
+resource Score {
+  points: int = 0
+  base: int = 7
+}
+
+rule bump(entity: Entity)
+  when entity has Out and resource Score
+{
+  let s = get_mut(Score)
+  s.points += 2
+}
+
+rule mirror(entity: Entity)
+  when entity has Out and resource Score
+{
+  let r = get(Score)
+  entity.get_mut(Out).v = r.points + get(Score).base
+}

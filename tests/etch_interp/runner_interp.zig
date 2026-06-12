@@ -2,7 +2,7 @@
 //!
 //! Implements the `Runner` contract consumed by `diff_runner.zig`:
 //!   pub fn setup(gpa, world, source) !Runner
-//!   pub fn step(self: *Runner, world) !void
+//!   pub fn step(self: *Runner, gpa, world) !void
 //!   pub fn finalize(self: *Runner, gpa, world) void
 
 const std = @import("std");
@@ -29,13 +29,15 @@ pub const Runner = struct {
     pub fn setup(gpa: std.mem.Allocator, world: *World, name: []const u8, source: []const u8) !Runner {
         _ = name; // interpreter does not need program names — it compiles from source.
         var pr = try weld_etch.parser.parse(gpa, source);
-        if (pr.diagnostic) |d| {
-            var dd = d;
-            std.debug.print("parse diagnostic: {s}\n", .{dd.primary_message});
-            dd.deinit(gpa);
-            pr.ast.deinit(gpa);
+        if (pr.diagnostics.len > 0) {
+            std.debug.print("parse diagnostic: {s}\n", .{pr.diagnostics[0].primary_message});
+            pr.deinit(gpa);
             return error.ParseFailed;
         }
+        // Clean parse: the diagnostics slice is empty; free it now (a no-op
+        // on a zero-length slice). The arena moves into `ast_box` below, so
+        // it must not be freed here.
+        gpa.free(pr.diagnostics);
         errdefer pr.ast.deinit(gpa);
 
         var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
@@ -59,7 +61,11 @@ pub const Runner = struct {
         return .{ .ast = ast_box, .interp = interp, .report = .{} };
     }
 
-    pub fn step(self: *Runner, world: *World) !void {
+    pub fn step(self: *Runner, gpa: std.mem.Allocator, world: *World) !void {
+        // The interpreter owns its own gpa (stored at compile time); the
+        // harness gpa is part of the shared `step(gpa, world)` contract with
+        // the codegen runner (which threads it into `tick`) but unused here.
+        _ = gpa;
         try self.interp.stepOnce(world, &self.report);
         world.tickBoundary();
     }

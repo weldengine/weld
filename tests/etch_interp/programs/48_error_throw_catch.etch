@@ -1,0 +1,46 @@
+component Acc {
+  caught_code: int = 0
+  msg_len: int = 0
+  fn_code: int = 0
+  ok_val: int = 0
+}
+
+fn risky(n: int) throws -> int {
+  if n > 2 {
+    throw Error { message: "too big", code: ErrorCode.invalid_arg }
+  }
+  return n * 10
+}
+
+rule direct_throw(entity: Entity)
+  when entity has Acc
+{
+  let acc = entity.get_mut(Acc)
+  let limit = 3
+  try {
+    throw Error { message: "limit is {limit}", code: ErrorCode.network_timeout }
+  } catch err {
+    acc.caught_code = match err.code {
+      ErrorCode.network_timeout => 7,
+      _ => 1,
+    }
+    acc.msg_len = err.message.len()
+  }
+}
+
+rule fn_throw(entity: Entity)
+  when entity has Acc
+{
+  let acc = entity.get_mut(Acc)
+  try {
+    let ok = risky(2)
+    acc.ok_val = ok
+    let boom = risky(5)
+    acc.ok_val = boom
+  } catch err {
+    acc.fn_code = match err.code {
+      ErrorCode.invalid_arg => 9,
+      _ => 2,
+    }
+  }
+}

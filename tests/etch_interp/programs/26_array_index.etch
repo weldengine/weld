@@ -1,0 +1,15 @@
+// M0.8 collections: a fixed-size array literal indexed by a constant. The
+// interpreter materializes the array in its rule-body collection store; the
+// cooked Zig emits a stack `[_]i64{...}` indexed the same way. Both must read
+// element 1 (20), keeping the differential byte-exact. This is the `arr[i]`
+// consumer the scoped collections line entails (cf. brief §Notes scope).
+component Acc {
+  out: int = 0
+}
+
+rule pick(entity: Entity)
+  when entity has Acc
+{
+  let arr = [10, 20, 30]
+  entity.get_mut(Acc).out = arr[1]
+}

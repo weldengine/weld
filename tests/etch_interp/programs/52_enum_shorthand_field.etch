@@ -1,0 +1,31 @@
+component ShorthandAcc {
+  spec_val: int = 0
+  err_val: int = 0
+}
+
+enum Faction { red, blue, green }
+
+struct Spec {
+  hp: int
+  faction: Faction
+}
+
+rule shorthand_field(entity: Entity)
+  when entity has ShorthandAcc
+{
+  let acc = entity.get_mut(ShorthandAcc)
+  let s = Spec { hp: 7, faction: .blue }
+  acc.spec_val = s.hp + match s.faction {
+    Faction.red => 100,
+    Faction.blue => 200,
+    Faction.green => 300,
+  }
+  try {
+    throw Error { message: "io down", code: .io_fail }
+  } catch err {
+    acc.err_val = match err.code {
+      ErrorCode.io_fail => 42,
+      _ => 1,
+    }
+  }
+}

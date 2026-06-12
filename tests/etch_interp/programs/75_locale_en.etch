@@ -1,0 +1,25 @@
+// Differential 75 — Level-B `locale` (M0.8 E5 presentation, closes @loc staging).
+// Serialized-IR parity: the interpreter BUILDS the locale descriptors, the
+// cooked Zig EMITS them; both serialize through the shared canonical serializer
+// and must produce byte-identical dumps (LEVEL-B PROOF CONTRACT). The grammar
+// §10.4 shape WINS (E5 ruling 4): an IDENT code name + flat `STRING = STRING`
+// entries. E1821 validates the locale-code FORM only (2-3 lowercase letters +
+// an optional `_XX`/`-XX` regional variant — NOT an embedded code table). The
+// fingerprint keys (`fp_*`) are produced by the `weld-extract-locale` tool —
+// generation is DEFERRED (E5 ruling 5: Level B is declaration + IR only); ICU
+// plurals / interpolation are Phase 3 (E1823-E1825 DEFERRED). The two locales
+// pin the bare code name, fingerprint + custom-id keys, and the regional
+// variant form (`en_GB`). Entry values are STRUCTURAL string text. No rule
+// executes.
+locale en {
+  "fp_3f8a2b1c" = "Welcome, traveler!"
+  "ui.menu.title" = "Main Menu"
+  "ui.menu.resume" = "Resume"
+  "ui.menu.quit" = "Quit"
+  "shop.greeting" = "Hello, what can I do for you?"
+}
+
+locale en_GB {
+  "ui.menu.title" = "Main Menu"
+  "ui.colour" = "Colour"
+}

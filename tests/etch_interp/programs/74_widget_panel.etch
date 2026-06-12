@@ -1,0 +1,38 @@
+// Differential 74 — Level-B `widget` (M0.8 E5 presentation).
+// Serialized-IR parity: the interpreter BUILDS the widget descriptors, the
+// cooked Zig EMITS them; both serialize through the shared canonical
+// serializer and must produce byte-identical dumps (LEVEL-B PROOF CONTRACT).
+// The grammar §10.1 shape WINS (E5 rulings 9/10): annotations are OPTIONAL —
+// only the `@screen`/`@worldspace` exclusivity is enforced (E1621), the missing
+// placement annotation is grammar-valid (E1622 RESERVED). `bind Component.field`
+// has NO EBNF production (E1623-E1628 DEFERRED — part2 binding examples are
+// non-conform, the corpus stays in legal forms); `@loc` key resolution is the
+// extractor tool's job (E1627 vacuous). The recursive `ui_tree` covers nested
+// widget calls, a `let` statement, if/else and for control flow, on-click
+// closures (rendered `<closure>`) and named args; a second `@worldspace` widget
+// pins the optional `when` clause path. Widget body expressions are STRUCTURAL
+// — parsed + canonically rendered, never resolved (pass2 does not walk a
+// widget). No rule executes.
+@screen(sort_order: 0)
+widget MainMenu(visible: bool, slots: int) {
+  container(direction: .vertical, align: .center, gap: 8) {
+    let title_scale = 1.0
+    text("My Game", font_size: 48, scale: title_scale)
+    button("Play", on_click: |_| start_game())
+    if visible {
+      button("Continue", on_click: |_| resume_game())
+    } else {
+      text("No save", color: gray)
+    }
+    for i, slot in slots {
+      text("slot")
+    }
+  }
+}
+
+@worldspace(billboard: true, max_distance: 30.0)
+widget EnemyPlate(entity: Entity)
+  when entity has Health
+{
+  progress_bar(value: 0.5, width: 80, height: 6, color: red)
+}

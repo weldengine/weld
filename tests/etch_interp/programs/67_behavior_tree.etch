@@ -1,0 +1,49 @@
+// Differential 67 — Level-B `behavior` (M0.8 E4).
+// Serialized-IR parity on the recursive BT descriptor: composites with a
+// §6 general-filter when clause, the item-2 action forms (let / call /
+// emit), ambient self/target in payload texts, and cross-construct
+// references (run_routine / run_behavior). Mixed with a routine to pin the
+// cross-kind declaration order. Nothing executes against the world.
+component Health {
+  current: float = 100.0
+  max: float = 100.0
+}
+
+event Fled {
+  who: int
+}
+
+fn find_cover(threat: int) -> int {
+  threat + 1
+}
+
+fn move_to(spot: int) { }
+
+fn attack_melee(power: int) { }
+
+routine IdleDaily {
+  segment Idle {
+    trigger: at 06:00
+    actions: move_to(0)
+    until: at 22:00
+  }
+}
+
+behavior Patrol {
+  sequence {
+    action: run_routine(IdleDaily)
+  }
+}
+
+behavior CombatBehavior {
+  selector {
+    sequence when self has Health { current < max * 0.2 } {
+      action: let cover = find_cover(7)
+      action: move_to(cover)
+      action: emit Fled { who: 1 }
+    }
+    condition: self.get(Health).current > 0.0
+    action: attack_melee(3)
+    action: run_behavior(Patrol)
+  }
+}

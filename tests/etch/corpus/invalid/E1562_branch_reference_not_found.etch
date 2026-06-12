@@ -1,0 +1,6 @@
+dialogue D {
+  speaker "npc" {
+    line: "hi"
+  }
+  -> nowhere
+}

@@ -1,0 +1,12 @@
+// E1583 RequiresTagsUnknown — a tags_required path absent from the tag
+// table (keyed on the §8.5 name).
+
+tags {
+  character {
+    status { alive }
+  }
+}
+
+ability Bad {
+  tags_required: [.character.status.flying]
+}

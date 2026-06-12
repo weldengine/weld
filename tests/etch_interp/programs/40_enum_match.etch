@@ -1,0 +1,28 @@
+// M0.8 E2 block 3 tranche B: a C-like `enum` with a value form and an
+// exhaustive `match`. `Difficulty.hard` is an enum value (a `.path` receiver +
+// a variant field); the `match` covers every variant (no `_` arm needed —
+// exhaustiveness is proven from the variant set, §12.4). Both backends must
+// agree byte-exact: the interpreter compares the scrutinee's `(enum, variant)`
+// against each arm; the cooked Zig emits `Difficulty` as `enum(i32)` and an
+// if-else chain on `== Difficulty.variant`. The enum is an intermediate local;
+// the diff is on the int field `out`. out = 3 (Difficulty.hard arm).
+enum Difficulty {
+  easy,
+  normal,
+  hard,
+}
+
+component Acc {
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has Acc
+{
+  let d = Difficulty.hard
+  entity.get_mut(Acc).out = match d {
+    Difficulty.easy => 1,
+    Difficulty.normal => 2,
+    Difficulty.hard => 3,
+  }
+}

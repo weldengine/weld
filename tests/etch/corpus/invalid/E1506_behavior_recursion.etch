@@ -1,0 +1,11 @@
+behavior A {
+  selector {
+    action: run_behavior(B)
+  }
+}
+
+behavior B {
+  selector {
+    action: run_behavior(A)
+  }
+}

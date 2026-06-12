@@ -38,6 +38,13 @@ const interp = @import("interp.zig");
 /// without depending on the internal path layout.
 pub const codegen_zig = @import("zig_codegen/root.zig");
 
+/// Level-B descriptor surface (M0.8 E4) — typed domain descriptors
+/// (`etch-ast-ir.md` §3.5) + the canonical serializer backing the
+/// serialized-IR differential. The interpreter builds them at compile
+/// (`Interpreter.descriptors`); the differential harness serializes both
+/// backends through this surface.
+pub const descriptor = @import("descriptor.zig");
+
 /// Exposed at the module surface so out-of-tree spike tests that
 /// drive the lexer alone (without a full parser run) can construct
 /// one without depending on the internal path.
@@ -63,9 +70,78 @@ pub const Interpreter = interp.Interpreter;
 /// interpreter internals.
 pub const RuntimeReport = interp.RuntimeReport;
 
+// ───────────────────────────────────────────────────────────────────────────
+// AST stable interface — Level 1 (frozen cross-phase)
+//
+// Mirrors `etch-parser.md` §10.3.1 "Interface contract stable cross-phase".
+// M0.8 (the full v0.6 grammar) settles every Item/Stmt/Expr/TypeNode kind
+// variant, so the public AST surface is frozen HERE: the Phase 1 / S0 parser
+// rewrite (recursive-descent → LR(1)) must preserve this surface byte-for-byte
+// so the ~5000 lines of consumers (interpreter, codegen, ECS bridge, validate,
+// LS) compile unchanged.
+//
+// FROZEN — Level 1 (a removal/rename is a breaking change forbidden Phase 0 →
+// Phase 1; ADDING an enum variant or an accessor is non-breaking):
+//
+//   • Discrimination enums — `ItemKind`, `StmtKind`, `ExprKind`,
+//     `TypeNodeKind`, `BinaryOp`, `UnaryOp`, `AssignOp`, `NodeCategory`.
+//   • Node handle / intern — `NodeId` (packed struct(u32){ category, index };
+//     `.none`, `.isNone()`, `.raw()`), `StringId` (= u32).
+//   • Span value — `SourceSpan { byte_start: u32, byte_end: u32 }`.
+//   • Accessors on `Ast` (= AstArena), all `pub`: the per-category
+//     kind/data/span triplets (`itemKind`/`itemData`/`itemSpan`,
+//     `stmtKind`/…, `exprKind`/…, `typeNodeKind`/…), `isEmpty()`, the
+//     `items`/`stmts`/`exprs`/`type_nodes` SoA columns, the `strings` intern
+//     pool (`strings.slice(id)` → []const u8, `.find`, `.intern`), and
+//     `docCommentsOf`/`leadingCommentsOf`.
+//
+// NOT frozen — Level 2 (Phase 1 may mutate freely): the `NodeId` 4+28-bit
+// packing, the `MultiArrayList` column layout, the `extra` slabs, the `add*`
+// builder methods (parser-side writes, not consumer reads).
+//
+// NOTE — §10.3.1 drift (KB-patch at M0.8 close): the spec prose names an
+// idealized single `NodeKind` (~150 variants) + a `LiteralKind` + four tagged
+// unions (`TopLevelDecl`/`Expression`/`Statement`/`Type`). The delivered AST is
+// a tabular SoA instead: the FOUR per-category kind enums above are the
+// discriminators, `NodeId` is the universal handle, literals are variants of
+// `ExprKind`, and consumers discriminate via `arena.<cat>Kind(id)` +
+// `arena.<cat>Data(id)` (no union switch). The contract above is the REAL
+// frozen surface; §10.3.1 is to be re-aligned to the SoA reality at the close.
+//
+// Guard: `tests/etch/ast_stable_interface.zig` exercises ≥20 distinct Level-1
+// entry points; its COMPILATION is the invariant. A Phase 1 change that breaks
+// it blocks the LR transition and demands an explicit AST-API semver bump.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Frozen Level-1 discriminator for top-level declarations.
+pub const ItemKind = ast.ItemKind;
+/// Frozen Level-1 discriminator for statements.
+pub const StmtKind = ast.StmtKind;
+/// Frozen Level-1 discriminator for expressions (literals are variants here).
+pub const ExprKind = ast.ExprKind;
+/// Frozen Level-1 discriminator for type nodes.
+pub const TypeNodeKind = ast.TypeNodeKind;
+/// Frozen Level-1 binary-operator tag.
+pub const BinaryOp = ast.BinaryOp;
+/// Frozen Level-1 unary-operator tag.
+pub const UnaryOp = ast.UnaryOp;
+/// Frozen Level-1 assignment-operator tag.
+pub const AssignOp = ast.AssignOp;
+/// Frozen Level-1 node category selecting which kind enum / table applies.
+pub const NodeCategory = ast.NodeCategory;
+/// Frozen Level-1 universal node handle (packed struct(u32){ category, index }).
+pub const NodeId = ast.NodeId;
+/// Frozen Level-1 opaque string-intern handle (= u32).
+pub const StringId = ast.StringId;
+/// Frozen Level-1 span value — the return type of every `Ast` span accessor.
+pub const SourceSpan = @import("token.zig").SourceSpan;
+
 /// Parse a full Etch source file. The returned `ParseResult` owns its
-/// `AstArena` — call `result.ast.deinit(gpa)` when done. The diagnostic
-/// (if any) owns its `primary_message` slice — call `diag.deinit(gpa)`.
+/// `AstArena` and its `diagnostics` slice — call `result.deinit(gpa)`
+/// when done (or move `ast` / `diagnostics` out and free them yourself).
+/// With the M0.8 top-level recovery sync-point the result may carry
+/// several diagnostics (one per broken construct); an empty slice means a
+/// clean parse.
 pub fn parseSource(gpa: std.mem.Allocator, source: []const u8) !parser.ParseResult {
     return try parser.parse(gpa, source);
 }
@@ -77,11 +153,27 @@ pub fn typeCheck(gpa: std.mem.Allocator, arena: *Ast, diags_out: *std.ArrayListU
     try TypeChecker.check(gpa, arena, diags_out);
 }
 
+test "public API builds + serializes a Level-B data descriptor (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var result = try parseSource(gpa,
+        \\struct Item { value: int }
+        \\data Db: Item { a: { value: 1 } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    var descs = try descriptor.build(gpa, &result.ast);
+    defer descs.deinit(gpa);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try descs.serialize(gpa, &out);
+    try std.testing.expect(out.items.len > 0);
+}
+
 test "public API parses an empty source successfully" {
     const gpa = std.testing.allocator;
     var result = try parseSource(gpa, "");
-    defer result.ast.deinit(gpa);
-    try std.testing.expect(result.diagnostic == null);
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len == 0);
     try std.testing.expect(result.ast.isEmpty());
 }
 
@@ -95,8 +187,8 @@ test "public API parses and type-checks a minimal component + rule" {
         \\  entity.get_mut(Health).current += 1.0
         \\}
     );
-    defer result.ast.deinit(gpa);
-    try std.testing.expect(result.diagnostic == null);
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len == 0);
 
     var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
     defer {

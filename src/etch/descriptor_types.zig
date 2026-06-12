@@ -1,0 +1,1431 @@
+//! Level-B descriptor types + canonical serialization (M0.8 E4–E6).
+//!
+//! SELF-CONTAINED BY CONTRACT: this file imports `std` only. It is compiled
+//! twice from the same source bytes — (1) imported by `weld_etch`
+//! (`descriptor.zig`, the interpreter build-structure side) and (2) embedded
+//! verbatim into the consolidated codegen output as a nested namespace
+//! (`zig_codegen/consolidate.zig`, the emit-structure side). Single source,
+//! two compilations, no module dependency — so the cooked file keeps its
+//! weld_core-only import surface and the serialized-IR differential compares
+//! one canonical form produced by the same serializer on both backends.
+//!
+//! Canonical serialization form (engraved at the E4 launch, M0.8 brief
+//! journal 2026-06-10): line-oriented indented text dump, declaration order
+//! only (never hash order), named fields in fixed descriptor-schema order,
+//! expression leaves pre-rendered to canonical text by ONE renderer
+//! (`descriptor.zig`), LF endings, two-space indent. An internal proof tool,
+//! not a public file format.
+
+const std = @import("std");
+
+/// `data` table descriptor (`etch-ast-ir.md` §3.5: `Data { entry_type,
+/// entries }`). Strings are caller-owned slices; the cooked emit-structure
+/// side points them at static string literals.
+pub const Data = struct {
+    name: []const u8,
+    entry_type: []const u8,
+    entries: []const DataEntry,
+};
+
+/// One validated `data` entry, fields in declaration order.
+pub const DataEntry = struct {
+    id: []const u8,
+    fields: []const DataField,
+};
+
+/// One field initializer of a data entry. `value` is the canonical rendering
+/// of the value expression; a spread (`..Table.entry`) carries the rendered
+/// reference in `value` with `is_spread = true` and an empty `name`.
+pub const DataField = struct {
+    name: []const u8,
+    value: []const u8,
+    is_spread: bool,
+};
+
+/// Kind of one routine trigger alternative (`etch-grammar.md` §8.2).
+pub const RoutineTriggerKind = enum { at_time, after_segment, on_event };
+
+/// One routine trigger alternative. `value` holds the `DD:DD` time lexeme,
+/// the referenced segment name, or the event type name, per kind.
+pub const RoutineTrigger = struct {
+    kind: RoutineTriggerKind,
+    value: []const u8,
+};
+
+/// One routine segment, clauses in the §8.2 fixed order. Actions are
+/// canonical-rendered call expressions.
+pub const RoutineSegment = struct {
+    name: []const u8,
+    triggers: []const RoutineTrigger,
+    actions: []const []const u8,
+    untils: []const RoutineTrigger,
+};
+
+/// One `on_xxx -> target` routine interrupt.
+pub const RoutineInterrupt = struct {
+    event: []const u8,
+    target: []const u8,
+    is_pause: bool,
+};
+
+/// `routine` descriptor (`etch-ast-ir.md` §3.5: `Routine { segments }`).
+pub const Routine = struct {
+    name: []const u8,
+    segments: []const RoutineSegment,
+    interrupts: []const RoutineInterrupt,
+};
+
+/// Kind of one behavior-tree descriptor node (§8.1).
+pub const BehaviorNodeKind = enum { selector, sequence, condition, action };
+
+/// One behavior-tree node (M0.8 E4, `etch-ast-ir.md` §3.5: `Behavior {
+/// root }` tree). `when` / `payload` are canonical-rendered texts ("" when
+/// absent); `children` recurse for composites. NOTE (item-2 ruling): an
+/// action `let` binds for later actions of its composite — the binding's
+/// runtime SCOPE is pinned by Cortex Phase 1+, the descriptor carries the
+/// structure only.
+pub const BehaviorNode = struct {
+    kind: BehaviorNodeKind,
+    when: []const u8,
+    payload: []const u8,
+    children: []const BehaviorNode,
+};
+
+/// `behavior` descriptor (§3.5: `Behavior { root: BTNodeId }`).
+pub const Behavior = struct {
+    name: []const u8,
+    root: BehaviorNode,
+};
+
+/// One quest property (`name = rendered value`).
+pub const QuestPropDesc = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// One quest objective (modifier/label may be empty).
+pub const QuestObjectiveDesc = struct {
+    modifier: []const u8,
+    label: []const u8,
+    value: []const u8,
+};
+
+/// One quest handler. `payload` is the canonical text: an emit / a block
+/// for on_start/on_complete, `<cond> -> <action>[(branch)]` for on_fail.
+pub const QuestHandlerDesc = struct {
+    kind: []const u8,
+    payload: []const u8,
+};
+
+/// One quest branch — recursive stages.
+pub const QuestBranchDesc = struct {
+    name: []const u8,
+    when: []const u8,
+    stages: []const QuestStageDesc,
+};
+
+/// One stage element, DECLARATION ORDER preserved across kinds.
+pub const QuestElementDesc = union(enum) {
+    objective: QuestObjectiveDesc,
+    handler: QuestHandlerDesc,
+    branch: QuestBranchDesc,
+    statement: []const u8,
+};
+
+/// One `[async] stage` with its ordered elements.
+pub const QuestStageDesc = struct {
+    name: []const u8,
+    is_async: bool,
+    elements: []const QuestElementDesc,
+};
+
+/// `quest` descriptor (`etch-ast-ir.md` §3.5 — handlers live per stage in
+/// the PATCHED §8.3 grammar; the §3.5 principal shape is indicative).
+pub const Quest = struct {
+    name: []const u8,
+    properties: []const QuestPropDesc,
+    stages: []const QuestStageDesc,
+};
+
+/// One dialogue line (text + optional condition, canonical texts).
+pub const DialogueLineDesc = struct {
+    text: []const u8,
+    when: []const u8,
+};
+
+/// One `speaker "id" { lines }` block.
+pub const DialogueSpeakerDesc = struct {
+    id: []const u8,
+    lines: []const DialogueLineDesc,
+};
+
+/// One choice option (`target` is `end` or a branch label).
+pub const DialogueOptionDesc = struct {
+    text: []const u8,
+    when: []const u8,
+    target: []const u8,
+};
+
+/// One dialogue emit (payload + the item-11 trailing condition).
+pub const DialogueEmitDesc = struct {
+    payload: []const u8,
+    when: []const u8,
+};
+
+/// One dialogue branch — elements recurse.
+pub const DialogueBranchDesc = struct {
+    name: []const u8,
+    elements: []const DialogueElementDesc,
+};
+
+/// One dialogue element, declaration order preserved.
+pub const DialogueElementDesc = union(enum) {
+    speaker: DialogueSpeakerDesc,
+    choice: []const DialogueOptionDesc,
+    branch: DialogueBranchDesc,
+    emit: DialogueEmitDesc,
+    goto: []const u8,
+};
+
+/// `dialogue` descriptor (`etch-ast-ir.md` §3.5 — the oriented graph as
+/// the ordered element list; transitions are `goto` / option targets).
+pub const Dialogue = struct {
+    name: []const u8,
+    elements: []const DialogueElementDesc,
+};
+
+/// One ability property (`name: rendered value`, §8.5 declaration order).
+pub const AbilityPropDesc = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// `ability` descriptor (`etch-ast-ir.md` §3.5 indicative shape transposed
+/// onto the PATCHED §8.5 grammar — items 12-15 ruling: properties +
+/// optional embedded rule). `rule` is the canonical single-line rule text
+/// ("" when absent).
+pub const Ability = struct {
+    name: []const u8,
+    properties: []const AbilityPropDesc,
+    rule: []const u8,
+};
+
+/// `theme` descriptor (`etch-ast-ir.md` §3.5: `Theme { tokens }`; M0.8 E5,
+/// `etch-grammar.md` §10.2). `name` is the decoded string-literal name;
+/// `entries` are `key = rendered-value` pairs in declaration order (the
+/// grammar shape — E5 ruling 1, untyped `key: expression`).
+pub const Theme = struct {
+    name: []const u8,
+    entries: []const ThemeEntry,
+};
+
+/// One `theme` entry: a key bound to the canonical rendering of its value.
+pub const ThemeEntry = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+/// `motion` descriptor (`etch-ast-ir.md` §3.5: `Motion { states, transitions }`;
+/// M0.8 E5, `etch-grammar.md` §10.3). State field values are
+/// canonical-rendered; transition animators are pre-rendered to FLAT
+/// canonical text (E5 ruling 3: keyframes / easings stay at the descriptor,
+/// E6 `anim_graph` not prefigured — the descriptor stays flat).
+pub const Motion = struct {
+    name: []const u8,
+    states: []const MotionStateDesc,
+    transitions: []const MotionTransitionDesc,
+};
+
+/// One `motion` state: a name + its animatable property fields.
+pub const MotionStateDesc = struct {
+    name: []const u8,
+    fields: []const MotionFieldDesc,
+};
+
+/// One state property field (`name = rendered value`).
+pub const MotionFieldDesc = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// One `motion` transition: `source -> target` + the flat-text animator.
+/// `source` / `target` are a state name or `"*"` (the wildcard).
+pub const MotionTransitionDesc = struct {
+    source: []const u8,
+    target: []const u8,
+    animator: []const u8,
+};
+
+/// `input_mapping` descriptor (`etch-ast-ir.md` §3.5: `InputMapping { actions,
+/// combos, contexts }`; M0.8 E5, `etch-grammar.md` §16, Level-B STRICT). The
+/// grammar shape WINS (E5 ruling 7): `context`/`priority`/`consume_input` are
+/// properties (rendered text, `""` if absent). No input executes.
+pub const InputMapping = struct {
+    name: []const u8,
+    context: []const u8, // rendered tag-path, "" if absent
+    priority: []const u8, // rendered, "" if absent
+    consume_input: []const u8, // rendered, "" if absent
+    actions: []const InputActionDesc,
+    combos: []const InputComboDesc,
+};
+
+/// One input action: name + optional type + optional output + binds.
+pub const InputActionDesc = struct {
+    name: []const u8,
+    type_name: []const u8, // "" if no `: type`
+    output: []const u8, // "" if no `output: type`
+    binds: []const InputBindDesc,
+};
+
+/// One bind: source + the three optional bind-options as rendered text.
+/// `output_mapping` is a closure → presence-marked `"<closure>"` (the renderer
+/// rejects closures, the data-closure precedent — never silently-wrong).
+pub const InputBindDesc = struct {
+    source: []const u8,
+    modifiers: []const u8, // rendered array, "" if absent
+    triggers: []const u8, // rendered array, "" if absent
+    output_mapping: []const u8, // "<closure>" if present, "" if absent
+};
+
+/// One combo: name + type + the structural `sequence` tokens + window.
+pub const InputComboDesc = struct {
+    name: []const u8,
+    type_name: []const u8,
+    sequence: []const u8, // rendered array, "" if absent
+    window: []const u8, // rendered, "" if absent
+};
+
+/// `widget` descriptor (`etch-ast-ir.md` §3.5: `Widget { tree, bindings,
+/// annotations: @screen/@worldspace }`; M0.8 E5, `etch-grammar.md` §10.1). The
+/// recursive `ui_tree` is a slice of `UiNodeDesc`; `annotations` is the
+/// space-joined placement-annotation names (the meaningful Level-B bit — args
+/// are structural), `when` is the rendered optional `@worldspace` when clause.
+pub const Widget = struct {
+    name: []const u8,
+    annotations: []const u8, // "@screen" / "@worldspace" / both / "", space-joined
+    when: []const u8, // rendered when clause, "" if absent
+    params: []const WidgetParamDesc,
+    tree: []const UiNodeDesc,
+};
+
+/// One `widget` parameter (`name: type`, rendered to text).
+pub const WidgetParamDesc = struct {
+    name: []const u8,
+    type_name: []const u8,
+};
+
+/// Kind of one `ui_element` in the descriptor tree (§10.1 — `match` falls under
+/// `statement`, an ordinary match expression).
+pub const UiNodeKind = enum { call, if_, for_, statement };
+
+/// One `ui_element` rendered for the canonical dump (RECURSIVE — the behavior
+/// `BehaviorNode` precedent). `head` is the per-kind rendered text:
+///   `.call`      — `callee(args)` (on-click closures render as `<closure>`)
+///   `.if_`       — the rendered condition; `children` = then-tree, `else_children` = else-tree
+///   `.for_`      — `var[, idx] in iterable`; `children` = body
+///   `.statement` — the rendered statement; no children
+pub const UiNodeDesc = struct {
+    kind: UiNodeKind,
+    head: []const u8,
+    children: []const UiNodeDesc,
+    else_children: []const UiNodeDesc, // `.if_` only; empty otherwise
+};
+
+/// `locale` descriptor (`etch-ast-ir.md` §3.5: `Locale { code, entries }`;
+/// M0.8 E5, `etch-grammar.md` §10.4). `name` is the locale code (IDENT, bare —
+/// the motion precedent); `entries` are quoted `key = value` string pairs in
+/// declaration order. Fingerprint generation is the extractor tool's job
+/// (E5 ruling 5: deferred — Level B is declaration + IR only).
+pub const Locale = struct {
+    name: []const u8,
+    entries: []const LocaleEntryDesc,
+};
+
+/// One `locale` entry (`"key" = "value"`).
+pub const LocaleEntryDesc = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+/// `effect` descriptor (`etch-ast-ir.md` §3.5: `Effect { params, emitters,
+/// event_handlers }`; M0.8 E6, `etch-grammar.md` §9.2, Level-B VFX-only). The
+/// optional `params` block is annotated fields (`name: type [= default]`);
+/// emitters carry bare `name: value` properties (STRICT, no annotation — the
+/// ability ruling-15 precedent); handlers are `on Emitter.event { body }` with
+/// the body rendered to canonical text (never executed — Ember semantics are
+/// Phase 2+). All field/property/body values flow through the shared canonical
+/// renderer on both backends.
+pub const Effect = struct {
+    name: []const u8,
+    params: []const EffectParamDesc,
+    emitters: []const EffectEmitterDesc,
+    handlers: []const EffectHandlerDesc,
+};
+
+/// One `effect` params-block field (`name: type [= default]`, rendered).
+pub const EffectParamDesc = struct {
+    name: []const u8,
+    type_name: []const u8,
+    default: []const u8, // "" if no `= default`
+};
+
+/// One `emitter` (`name` + its bare `name: value` properties).
+pub const EffectEmitterDesc = struct {
+    name: []const u8,
+    props: []const EffectPropDesc,
+};
+
+/// One emitter property (`name: rendered-value`).
+pub const EffectPropDesc = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// One `on Emitter.event { body }` handler; `body` is the "; "-joined rendered
+/// statement run (the rule-body precedent).
+pub const EffectHandlerDesc = struct {
+    emitter: []const u8,
+    event: []const u8,
+    body: []const u8,
+};
+
+/// `audio_graph` descriptor (`etch-ast-ir.md` §3.5: `AudioGraph { nodes,
+/// connections }`; M0.8 E6, `etch-grammar.md` §12.2, Level-B DSP). Declaration-
+/// only: the optional annotated params, the DSP node-building statements
+/// rendered "; "-joined (the rule-body precedent), and the mandatory `output`
+/// sink expression — all canonical text, never executed.
+pub const AudioGraph = struct {
+    name: []const u8,
+    params: []const AudioGraphParamDesc,
+    body: []const u8, // "; "-joined rendered statements ("" if none)
+    output: []const u8, // rendered output(expr) sink
+};
+
+/// One `audio_graph` params-block field (`name: type [= default]`, rendered).
+pub const AudioGraphParamDesc = struct {
+    name: []const u8,
+    type_name: []const u8,
+    default: []const u8, // "" if no `= default`
+};
+
+/// `audio_score` descriptor (`etch-ast-ir.md` §3.5: `AudioScore { sections,
+/// stems, transitions }`; M0.8 E6, `etch-grammar.md` §12.1, Level-B adaptive
+/// music). STRING-named. Score properties (`tempo` + others), sections (plain
+/// `key: value` props + the `can_transition_to` section list + the `on_finish`
+/// target), and stems (a `key: value` body) — all canonical text, never played.
+pub const AudioScore = struct {
+    name: []const u8, // the STRING_LITERAL name
+    props: []const ScorePropDesc,
+    sections: []const AudioScoreSectionDesc,
+    stems: []const AudioScoreStemDesc,
+};
+
+/// One rendered `key: value` property (score property / section prop / stem
+/// body field — the shape is shared).
+pub const ScorePropDesc = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// One `audio_score` section: plain props + transition targets + on_finish.
+pub const AudioScoreSectionDesc = struct {
+    name: []const u8,
+    props: []const ScorePropDesc,
+    can_transition_to: []const []const u8, // section names ("[]" if none)
+    on_finish: []const u8, // "" if no on_finish
+};
+
+/// One `audio_score` stem: a name + its rendered `key: value` body.
+pub const AudioScoreStemDesc = struct {
+    name: []const u8,
+    fields: []const ScorePropDesc,
+};
+
+/// `sequence` descriptor (`etch-ast-ir.md` §3.5: `Sequence { tracks, duration,
+/// fps }`; M0.8 E6, `etch-grammar.md` §13, Level-B cinematic). TYPE_IDENT-named.
+/// Properties (`duration`/`fps`, reusing `ScorePropDesc`), the `on_start` /
+/// `on_finish` rendered emit statements, and tracks of keyframes — all canonical
+/// text, never run.
+pub const Sequence = struct {
+    name: []const u8,
+    props: []const ScorePropDesc,
+    on_start: []const u8, // rendered emit stmt ("" if absent)
+    on_finish: []const u8, // rendered emit stmt ("" if absent)
+    tracks: []const SequenceTrackDesc,
+};
+
+/// One `sequence` track: name + optional `on` binding + type + keyframes.
+pub const SequenceTrackDesc = struct {
+    name: []const u8,
+    target: []const u8, // `on "..."` binding ("" if absent)
+    track_type: []const u8,
+    keyframes: []const SequenceKeyframeDesc,
+};
+
+/// One `sequence` keyframe: rendered `time: value` (value = struct body / call /
+/// emit / play, pre-rendered by the shared keyframe renderer).
+pub const SequenceKeyframeDesc = struct {
+    time: []const u8,
+    value: []const u8,
+};
+
+/// `anim_graph` descriptor (`etch-ast-ir.md` §3.5: `AnimGraph { states,
+/// transitions, layers, params }`; M0.8 E6, `etch-grammar.md` §11, Level-B
+/// animation). The grammar shape: state-nested transitions, additive-only
+/// layers. Each state's body (clip / motion_matching / chooser / warping /
+/// distance_matching / blend_space_2d) is pre-rendered to one canonical text
+/// string; transitions carry a rendered when clause. No animation runs.
+pub const AnimGraph = struct {
+    name: []const u8,
+    params: []const AnimGraphParamDesc,
+    states: []const AnimStateDesc,
+    layers: []const AnimLayerDesc,
+};
+
+/// One `anim_graph` params-block field (`name: type [= default]`, rendered).
+pub const AnimGraphParamDesc = struct {
+    name: []const u8,
+    type_name: []const u8,
+    default: []const u8, // "" if no `= default`
+};
+
+/// One `anim_graph` state: name + the rendered body + transitions + on_finish.
+pub const AnimStateDesc = struct {
+    name: []const u8,
+    body: []const u8, // the rendered animation body source
+    transitions: []const AnimTransitionDesc,
+    on_finish: []const u8, // "" if no on_finish
+};
+
+/// One state-nested transition: `-> target` + the rendered when clause.
+pub const AnimTransitionDesc = struct {
+    target: []const u8,
+    when: []const u8, // "" if no when clause
+};
+
+/// One `anim_graph` layer: name + additive flag + its `on … : play …` props.
+pub const AnimLayerDesc = struct {
+    name: []const u8,
+    additive: bool,
+    props: []const AnimLayerPropDesc,
+};
+
+/// One layer prop: rendered `on` condition + clip + the on_bones mask names.
+pub const AnimLayerPropDesc = struct {
+    condition: []const u8,
+    clip: []const u8,
+    bones: []const []const u8,
+};
+
+/// `shader` descriptor (`etch-ast-ir.md` §3.5; M0.8 E6, `etch-grammar.md` §9.1,
+/// Level-B render). Params (uniforms), then the optional vertex + mandatory
+/// fragment stages each pre-rendered to one canonical `head(params) -> Ret {
+/// body }` string. Bodies are shader-mode-validated (resolver §15) but never
+/// executed — SPIR-V/MSL/DXIL emission is Phase 2+. No compute stage (the ruling).
+pub const Shader = struct {
+    name: []const u8,
+    params: []const ShaderParamDesc,
+    has_vertex: bool,
+    vertex: []const u8, // rendered `vertex(...) -> T { ... }` ("" if has_vertex == false)
+    fragment: []const u8, // rendered `fragment(...) -> T { ... }`
+};
+
+/// One `shader` params-block uniform (`name: type [= default]`, rendered).
+pub const ShaderParamDesc = struct {
+    name: []const u8,
+    type_name: []const u8,
+    default: []const u8, // "" if no `= default`
+};
+
+// ── M0.8 E7 Level C — scene / prefab descriptors (`etch-ast-ir.md` §3.5) ──
+// Serialization-only IR. Expression / statement leaves are pre-rendered to
+// canonical text by the shared `descriptor.zig` renderers — the byte-identical
+// proof contract (both backends render the same leaves the same way).
+
+/// One component-instance field (`name: value`), value pre-rendered by renderExpr.
+pub const ComponentFieldDesc = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// One `component_instance` (`Type { f: v, … }`) — entity / instance /
+/// resources bodies.
+pub const ComponentInstanceDesc = struct {
+    type_name: []const u8,
+    fields: []const ComponentFieldDesc,
+};
+
+/// One `component_field_override` (`Type.field = value`) — instance bodies only.
+pub const FieldOverrideDesc = struct {
+    type_name: []const u8,
+    field: []const u8,
+    value: []const u8,
+};
+
+/// One scene/prefab `entity "Name" { [uuid] [parent] component* }`.
+pub const SceneEntityDesc = struct {
+    name: []const u8,
+    uuid: []const u8, // "" if absent
+    parent: []const u8, // "" if absent
+    components: []const ComponentInstanceDesc,
+};
+
+/// One scene `instance of "Type" "Name" { [uuid] (component | override)* }`.
+pub const SceneInstanceDesc = struct {
+    prefab: []const u8,
+    name: []const u8,
+    uuid: []const u8, // "" if absent
+    components: []const ComponentInstanceDesc,
+    overrides: []const FieldOverrideDesc,
+};
+
+/// `scene` descriptor (`etch-ast-ir.md` §3.5: `Scene { entities, resources }`).
+/// STRING-named. Entities and instances are dumped in their respective
+/// declaration order (each list built by iterating the AST `scene_children`).
+pub const Scene = struct {
+    name: []const u8,
+    version: []const u8, // rendered INT_LITERAL ("" if absent)
+    metadata: []const ComponentFieldDesc, // metadata struct body (empty if absent)
+    resources: []const ComponentInstanceDesc,
+    entities: []const SceneEntityDesc,
+    instances: []const SceneInstanceDesc,
+};
+
+/// Prefab relation kind (§15: `of` = variant, `extends` = extension).
+pub const PrefabRelationDesc = enum { none, of, extends };
+
+/// `prefab` descriptor (`etch-ast-ir.md` §3.5: `Prefab { base?, overrides,
+/// extensions }`). STRING-named. `on_attach`/`on_detach` are rendered statement
+/// runs (extends only). `requires` are the requires-clause type idents.
+pub const Prefab = struct {
+    name: []const u8,
+    relation: PrefabRelationDesc,
+    base: []const u8, // of/extends target ("" if none)
+    requires: []const []const u8,
+    version: []const u8, // "" if absent
+    metadata: []const ComponentFieldDesc,
+    entities: []const SceneEntityDesc,
+    on_attach: []const u8, // rendered stmt run ("" if absent)
+    on_detach: []const u8, // "" if absent
+};
+
+/// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
+/// sequence per program so the canonical dump follows top-level
+/// declaration order across construct kinds (engraved form).
+pub const Descriptor = union(enum) {
+    data: Data,
+    routine: Routine,
+    behavior: Behavior,
+    quest: Quest,
+    dialogue: Dialogue,
+    ability: Ability,
+    theme: Theme,
+    motion: Motion,
+    input_mapping: InputMapping,
+    widget: Widget,
+    locale: Locale,
+    effect: Effect,
+    audio_graph: AudioGraph,
+    audio_score: AudioScore,
+    sequence: Sequence,
+    anim_graph: AnimGraph,
+    shader: Shader,
+    scene: Scene,
+    prefab: Prefab,
+
+    /// Canonical serialization of one descriptor, dispatched on its kind.
+    pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+        switch (self) {
+            .data => |d| try writeData(d, gpa, out),
+            .routine => |r| try writeRoutine(r, gpa, out),
+            .behavior => |b| try writeBehavior(b, gpa, out),
+            .quest => |q| try writeQuest(q, gpa, out),
+            .dialogue => |d| try writeDialogue(d, gpa, out),
+            .ability => |a| try writeAbility(a, gpa, out),
+            .theme => |t| try writeTheme(t, gpa, out),
+            .motion => |m| try writeMotion(m, gpa, out),
+            .input_mapping => |im| try writeInputMapping(im, gpa, out),
+            .widget => |w| try writeWidget(w, gpa, out),
+            .locale => |l| try writeLocale(l, gpa, out),
+            .effect => |e| try writeEffect(e, gpa, out),
+            .audio_graph => |ag| try writeAudioGraph(ag, gpa, out),
+            .audio_score => |asc| try writeAudioScore(asc, gpa, out),
+            .sequence => |seq| try writeSequence(seq, gpa, out),
+            .anim_graph => |ag| try writeAnimGraph(ag, gpa, out),
+            .shader => |sh| try writeShader(sh, gpa, out),
+            .scene => |sc| try writeScene(sc, gpa, out),
+            .prefab => |pf| try writePrefab(pf, gpa, out),
+        }
+    }
+};
+
+fn appendFmt(gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
+    const line = try std.fmt.allocPrint(gpa, fmt, args);
+    defer gpa.free(line);
+    try out.appendSlice(gpa, line);
+}
+
+/// Canonical serialization of one `data` descriptor.
+pub fn writeData(d: Data, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "data {s} {{\n", .{d.name});
+    try appendFmt(gpa, out, "  entry_type: {s}\n", .{d.entry_type});
+    for (d.entries) |e| {
+        try appendFmt(gpa, out, "  entry {s} {{\n", .{e.id});
+        for (e.fields) |f| {
+            if (f.is_spread) {
+                try appendFmt(gpa, out, "    spread {s}\n", .{f.value});
+            } else {
+                try appendFmt(gpa, out, "    field {s} = {s}\n", .{ f.name, f.value });
+            }
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `theme` descriptor. The name is wrapped in
+/// plain quotes (the dialogue speaker-id precedent — simple string names, no
+/// re-escaping); entries follow declaration order.
+pub fn writeTheme(t: Theme, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "theme \"{s}\" {{\n", .{t.name});
+    for (t.entries) |e| {
+        try appendFmt(gpa, out, "  entry {s} = {s}\n", .{ e.key, e.value });
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `motion` descriptor: states (each with its
+/// property fields) then transitions, declaration order. Animators are
+/// pre-rendered flat canonical text (the ability-rule / behavior-payload
+/// precedent — complex sub-structures render to text, descriptor types stay flat).
+pub fn writeMotion(m: Motion, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "motion {s} {{\n", .{m.name});
+    for (m.states) |st| {
+        try appendFmt(gpa, out, "  state {s} {{\n", .{st.name});
+        for (st.fields) |f| {
+            try appendFmt(gpa, out, "    field {s} = {s}\n", .{ f.name, f.value });
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (m.transitions) |tr| {
+        try appendFmt(gpa, out, "  transition {s} -> {s}: {s}\n", .{ tr.source, tr.target, tr.animator });
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `input_mapping` descriptor: properties, then
+/// actions (each with its type / output / binds), then combos. Optional fields
+/// are emitted only when present (`""` → line omitted) — both backends compute
+/// presence identically, so the dump stays byte-identical.
+pub fn writeInputMapping(m: InputMapping, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "input_mapping \"{s}\" {{\n", .{m.name});
+    if (m.context.len != 0) try appendFmt(gpa, out, "  context = {s}\n", .{m.context});
+    if (m.priority.len != 0) try appendFmt(gpa, out, "  priority = {s}\n", .{m.priority});
+    if (m.consume_input.len != 0) try appendFmt(gpa, out, "  consume_input = {s}\n", .{m.consume_input});
+    for (m.actions) |act| {
+        try appendFmt(gpa, out, "  action {s} {{\n", .{act.name});
+        if (act.type_name.len != 0) try appendFmt(gpa, out, "    type = {s}\n", .{act.type_name});
+        if (act.output.len != 0) try appendFmt(gpa, out, "    output = {s}\n", .{act.output});
+        for (act.binds) |bind| {
+            try appendFmt(gpa, out, "    bind {s} {{\n", .{bind.source});
+            if (bind.modifiers.len != 0) try appendFmt(gpa, out, "      modifiers = {s}\n", .{bind.modifiers});
+            if (bind.triggers.len != 0) try appendFmt(gpa, out, "      triggers = {s}\n", .{bind.triggers});
+            if (bind.output_mapping.len != 0) try appendFmt(gpa, out, "      output_mapping = {s}\n", .{bind.output_mapping});
+            try out.appendSlice(gpa, "    }\n");
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (m.combos) |combo| {
+        try appendFmt(gpa, out, "  combo {s} {{\n", .{combo.name});
+        if (combo.type_name.len != 0) try appendFmt(gpa, out, "    type = {s}\n", .{combo.type_name});
+        if (combo.sequence.len != 0) try appendFmt(gpa, out, "    sequence = {s}\n", .{combo.sequence});
+        if (combo.window.len != 0) try appendFmt(gpa, out, "    window = {s}\n", .{combo.window});
+        try out.appendSlice(gpa, "  }\n");
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `widget` descriptor (M0.8 E5): placement
+/// annotations, params, an optional when clause, then the recursive `ui_tree`
+/// (depth-indented — the behavior `writeBTNode` precedent).
+pub fn writeWidget(w: Widget, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "widget {s} {{\n", .{w.name});
+    if (w.annotations.len != 0) try appendFmt(gpa, out, "  annotations: {s}\n", .{w.annotations});
+    for (w.params) |p| {
+        try appendFmt(gpa, out, "  param {s}: {s}\n", .{ p.name, p.type_name });
+    }
+    if (w.when.len != 0) try appendFmt(gpa, out, "  when {s}\n", .{w.when});
+    for (w.tree) |node| {
+        try writeUiNode(node, 1, gpa, out);
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+fn writeUiNode(node: UiNodeDesc, depth: u32, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try writeIndent(depth, gpa, out);
+    switch (node.kind) {
+        .call => {
+            try appendFmt(gpa, out, "call {s}", .{node.head});
+            if (node.children.len != 0) {
+                try out.appendSlice(gpa, " {\n");
+                for (node.children) |child| try writeUiNode(child, depth + 1, gpa, out);
+                try writeIndent(depth, gpa, out);
+                try out.appendSlice(gpa, "}\n");
+            } else {
+                try out.appendSlice(gpa, "\n");
+            }
+        },
+        .if_ => {
+            try appendFmt(gpa, out, "if {s} {{\n", .{node.head});
+            for (node.children) |child| try writeUiNode(child, depth + 1, gpa, out);
+            try writeIndent(depth, gpa, out);
+            if (node.else_children.len != 0) {
+                try out.appendSlice(gpa, "} else {\n");
+                for (node.else_children) |child| try writeUiNode(child, depth + 1, gpa, out);
+                try writeIndent(depth, gpa, out);
+                try out.appendSlice(gpa, "}\n");
+            } else {
+                try out.appendSlice(gpa, "}\n");
+            }
+        },
+        .for_ => {
+            try appendFmt(gpa, out, "for {s} {{\n", .{node.head});
+            for (node.children) |child| try writeUiNode(child, depth + 1, gpa, out);
+            try writeIndent(depth, gpa, out);
+            try out.appendSlice(gpa, "}\n");
+        },
+        .statement => try appendFmt(gpa, out, "statement {s}\n", .{node.head}),
+    }
+}
+
+/// Canonical serialization of one `locale` descriptor (M0.8 E5): a bare IDENT
+/// code name (the motion precedent), then quoted `key = value` entries in
+/// declaration order.
+pub fn writeLocale(l: Locale, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "locale {s} {{\n", .{l.name});
+    for (l.entries) |e| {
+        try appendFmt(gpa, out, "  entry \"{s}\" = \"{s}\"\n", .{ e.key, e.value });
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `effect` descriptor (M0.8 E6): params,
+/// then emitters with their bare properties, then `on Emitter.event` handlers.
+pub fn writeEffect(e: Effect, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "effect {s} {{\n", .{e.name});
+    for (e.params) |p| {
+        if (p.default.len == 0) {
+            try appendFmt(gpa, out, "  param {s}: {s}\n", .{ p.name, p.type_name });
+        } else {
+            try appendFmt(gpa, out, "  param {s}: {s} = {s}\n", .{ p.name, p.type_name, p.default });
+        }
+    }
+    for (e.emitters) |em| {
+        try appendFmt(gpa, out, "  emitter {s} {{\n", .{em.name});
+        for (em.props) |pr| {
+            try appendFmt(gpa, out, "    {s}: {s}\n", .{ pr.name, pr.value });
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (e.handlers) |h| {
+        try appendFmt(gpa, out, "  on {s}.{s} {{ {s} }}\n", .{ h.emitter, h.event, h.body });
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `audio_graph` descriptor (M0.8 E6): params,
+/// then the "; "-joined DSP statements (if any), then the mandatory output sink.
+pub fn writeAudioGraph(ag: AudioGraph, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "audio_graph {s} {{\n", .{ag.name});
+    for (ag.params) |p| {
+        if (p.default.len == 0) {
+            try appendFmt(gpa, out, "  param {s}: {s}\n", .{ p.name, p.type_name });
+        } else {
+            try appendFmt(gpa, out, "  param {s}: {s} = {s}\n", .{ p.name, p.type_name, p.default });
+        }
+    }
+    if (ag.body.len != 0) {
+        try appendFmt(gpa, out, "  body {{ {s} }}\n", .{ag.body});
+    }
+    try appendFmt(gpa, out, "  output({s})\n", .{ag.output});
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `audio_score` descriptor (M0.8 E6): score
+/// properties, then sections (plain props + can_transition_to + on_finish),
+/// then stems with their bodies.
+pub fn writeAudioScore(asc: AudioScore, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "audio_score \"{s}\" {{\n", .{asc.name});
+    for (asc.props) |p| {
+        try appendFmt(gpa, out, "  {s}: {s}\n", .{ p.name, p.value });
+    }
+    for (asc.sections) |sec| {
+        try appendFmt(gpa, out, "  section {s} {{\n", .{sec.name});
+        for (sec.props) |p| {
+            try appendFmt(gpa, out, "    {s}: {s}\n", .{ p.name, p.value });
+        }
+        if (sec.can_transition_to.len != 0) {
+            try out.appendSlice(gpa, "    can_transition_to: [");
+            for (sec.can_transition_to, 0..) |t, idx| {
+                if (idx != 0) try out.appendSlice(gpa, ", ");
+                try out.appendSlice(gpa, t);
+            }
+            try out.appendSlice(gpa, "]\n");
+        }
+        if (sec.on_finish.len != 0) {
+            try appendFmt(gpa, out, "    on_finish: -> {s}\n", .{sec.on_finish});
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (asc.stems) |stem| {
+        try appendFmt(gpa, out, "  stem {s} {{\n", .{stem.name});
+        for (stem.fields) |f| {
+            try appendFmt(gpa, out, "    {s}: {s}\n", .{ f.name, f.value });
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `sequence` descriptor (M0.8 E6): properties,
+/// on_start / on_finish emits, then tracks with their keyframes.
+pub fn writeSequence(seq: Sequence, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "sequence {s} {{\n", .{seq.name});
+    for (seq.props) |p| {
+        try appendFmt(gpa, out, "  {s}: {s}\n", .{ p.name, p.value });
+    }
+    if (seq.on_start.len != 0) {
+        try appendFmt(gpa, out, "  on_start: {s}\n", .{seq.on_start});
+    }
+    if (seq.on_finish.len != 0) {
+        try appendFmt(gpa, out, "  on_finish: {s}\n", .{seq.on_finish});
+    }
+    for (seq.tracks) |tr| {
+        if (tr.target.len != 0) {
+            try appendFmt(gpa, out, "  track {s} on \"{s}\": {s} {{\n", .{ tr.name, tr.target, tr.track_type });
+        } else {
+            try appendFmt(gpa, out, "  track {s}: {s} {{\n", .{ tr.name, tr.track_type });
+        }
+        for (tr.keyframes) |kf| {
+            try appendFmt(gpa, out, "    {s}: {s}\n", .{ kf.time, kf.value });
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `anim_graph` descriptor (M0.8 E6): params,
+/// states (rendered body + transitions + on_finish), then additive-aware layers.
+pub fn writeAnimGraph(ag: AnimGraph, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "anim_graph {s} {{\n", .{ag.name});
+    for (ag.params) |p| {
+        if (p.default.len == 0) {
+            try appendFmt(gpa, out, "  param {s}: {s}\n", .{ p.name, p.type_name });
+        } else {
+            try appendFmt(gpa, out, "  param {s}: {s} = {s}\n", .{ p.name, p.type_name, p.default });
+        }
+    }
+    for (ag.states) |st| {
+        try appendFmt(gpa, out, "  state {s} {{\n", .{st.name});
+        try appendFmt(gpa, out, "    body: {s}\n", .{st.body});
+        for (st.transitions) |tr| {
+            if (tr.when.len != 0) {
+                try appendFmt(gpa, out, "    transition -> {s} when {s}\n", .{ tr.target, tr.when });
+            } else {
+                try appendFmt(gpa, out, "    transition -> {s}\n", .{tr.target});
+            }
+        }
+        if (st.on_finish.len != 0) {
+            try appendFmt(gpa, out, "    on_finish -> {s}\n", .{st.on_finish});
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (ag.layers) |ly| {
+        if (ly.additive) {
+            try appendFmt(gpa, out, "  layer {s} additive {{\n", .{ly.name});
+        } else {
+            try appendFmt(gpa, out, "  layer {s} {{\n", .{ly.name});
+        }
+        for (ly.props) |p| {
+            try appendFmt(gpa, out, "    on {s}: play {s}", .{ p.condition, p.clip });
+            if (p.bones.len != 0) {
+                try out.appendSlice(gpa, " on_bones(");
+                for (p.bones, 0..) |b, idx| {
+                    if (idx != 0) try out.appendSlice(gpa, ", ");
+                    try out.appendSlice(gpa, b);
+                }
+                try out.appendSlice(gpa, ")");
+            }
+            try out.appendSlice(gpa, "\n");
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `shader` descriptor (M0.8 E6): uniforms, then
+/// the optional vertex + mandatory fragment stages (each pre-rendered).
+pub fn writeShader(sh: Shader, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "shader {s} {{\n", .{sh.name});
+    for (sh.params) |p| {
+        if (p.default.len == 0) {
+            try appendFmt(gpa, out, "  param {s}: {s}\n", .{ p.name, p.type_name });
+        } else {
+            try appendFmt(gpa, out, "  param {s}: {s} = {s}\n", .{ p.name, p.type_name, p.default });
+        }
+    }
+    if (sh.has_vertex) {
+        try appendFmt(gpa, out, "  {s}\n", .{sh.vertex});
+    }
+    try appendFmt(gpa, out, "  {s}\n", .{sh.fragment});
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `component_instance` line (`<indent>component
+/// Type { f1: v1, f2: v2 }`), shared by scene + prefab dumps.
+fn writeComponentInstanceDesc(ci: ComponentInstanceDesc, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), indent: []const u8) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "{s}component {s} {{", .{ indent, ci.type_name });
+    if (ci.fields.len == 0) {
+        try out.appendSlice(gpa, "}\n");
+        return;
+    }
+    for (ci.fields, 0..) |f, idx| {
+        if (idx != 0) try out.appendSlice(gpa, ",");
+        try appendFmt(gpa, out, " {s}: {s}", .{ f.name, f.value });
+    }
+    try out.appendSlice(gpa, " }\n");
+}
+
+/// Canonical serialization of one `scene` descriptor (M0.8 E7 Level C): version,
+/// metadata, resources, then entities and instances in declaration order.
+pub fn writeScene(sc: Scene, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "scene \"{s}\" {{\n", .{sc.name});
+    if (sc.version.len != 0) try appendFmt(gpa, out, "  version: {s}\n", .{sc.version});
+    for (sc.metadata) |m| try appendFmt(gpa, out, "  metadata {s}: {s}\n", .{ m.name, m.value });
+    for (sc.resources) |r| try writeComponentInstanceDesc(r, gpa, out, "  ");
+    for (sc.entities) |e| {
+        try appendFmt(gpa, out, "  entity \"{s}\" {{\n", .{e.name});
+        if (e.uuid.len != 0) try appendFmt(gpa, out, "    uuid: \"{s}\"\n", .{e.uuid});
+        if (e.parent.len != 0) try appendFmt(gpa, out, "    parent: \"{s}\"\n", .{e.parent});
+        for (e.components) |c| try writeComponentInstanceDesc(c, gpa, out, "    ");
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (sc.instances) |inst| {
+        try appendFmt(gpa, out, "  instance of \"{s}\" \"{s}\" {{\n", .{ inst.prefab, inst.name });
+        if (inst.uuid.len != 0) try appendFmt(gpa, out, "    uuid: \"{s}\"\n", .{inst.uuid});
+        for (inst.components) |c| try writeComponentInstanceDesc(c, gpa, out, "    ");
+        for (inst.overrides) |o| try appendFmt(gpa, out, "    override {s}.{s} = {s}\n", .{ o.type_name, o.field, o.value });
+        try out.appendSlice(gpa, "  }\n");
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `prefab` descriptor (M0.8 E7 Level C):
+/// relation header, requires, version, metadata, entities, on_attach/on_detach.
+pub fn writePrefab(pf: Prefab, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    switch (pf.relation) {
+        .none => try appendFmt(gpa, out, "prefab \"{s}\" {{\n", .{pf.name}),
+        .of => try appendFmt(gpa, out, "prefab \"{s}\" of \"{s}\" {{\n", .{ pf.name, pf.base }),
+        .extends => try appendFmt(gpa, out, "prefab \"{s}\" extends \"{s}\" {{\n", .{ pf.name, pf.base }),
+    }
+    if (pf.requires.len != 0) {
+        try out.appendSlice(gpa, "  requires");
+        for (pf.requires, 0..) |req, idx| {
+            try appendFmt(gpa, out, "{s} {s}", .{ if (idx != 0) "," else "", req });
+        }
+        try out.appendSlice(gpa, "\n");
+    }
+    if (pf.version.len != 0) try appendFmt(gpa, out, "  version: {s}\n", .{pf.version});
+    for (pf.metadata) |m| try appendFmt(gpa, out, "  metadata {s}: {s}\n", .{ m.name, m.value });
+    for (pf.entities) |e| {
+        try appendFmt(gpa, out, "  entity \"{s}\" {{\n", .{e.name});
+        if (e.uuid.len != 0) try appendFmt(gpa, out, "    uuid: \"{s}\"\n", .{e.uuid});
+        if (e.parent.len != 0) try appendFmt(gpa, out, "    parent: \"{s}\"\n", .{e.parent});
+        for (e.components) |c| try writeComponentInstanceDesc(c, gpa, out, "    ");
+        try out.appendSlice(gpa, "  }\n");
+    }
+    if (pf.on_attach.len != 0) try appendFmt(gpa, out, "  on_attach: {s}\n", .{pf.on_attach});
+    if (pf.on_detach.len != 0) try appendFmt(gpa, out, "  on_detach: {s}\n", .{pf.on_detach});
+    try out.appendSlice(gpa, "}\n");
+}
+
+fn triggerKindText(kind: RoutineTriggerKind) []const u8 {
+    return switch (kind) {
+        .at_time => "at",
+        .after_segment => "after",
+        .on_event => "on_event",
+    };
+}
+
+/// Canonical serialization of one `routine` descriptor.
+pub fn writeRoutine(r: Routine, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "routine {s} {{\n", .{r.name});
+    for (r.segments) |seg| {
+        try appendFmt(gpa, out, "  segment {s} {{\n", .{seg.name});
+        for (seg.triggers) |t| {
+            try appendFmt(gpa, out, "    trigger {s} {s}\n", .{ triggerKindText(t.kind), t.value });
+        }
+        for (seg.actions) |a| {
+            try appendFmt(gpa, out, "    action {s}\n", .{a});
+        }
+        for (seg.untils) |t| {
+            try appendFmt(gpa, out, "    until {s} {s}\n", .{ triggerKindText(t.kind), t.value });
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (r.interrupts) |intr| {
+        try appendFmt(gpa, out, "  interrupt {s} -> {s}\n", .{ intr.event, intr.target });
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `behavior` descriptor (recursive tree).
+pub fn writeBehavior(b: Behavior, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "behavior {s} {{\n", .{b.name});
+    try writeBTNode(b.root, 1, gpa, out);
+    try out.appendSlice(gpa, "}\n");
+}
+
+fn writeBTNode(node: BehaviorNode, depth: u32, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    var d: u32 = 0;
+    while (d < depth) : (d += 1) try out.appendSlice(gpa, "  ");
+    switch (node.kind) {
+        .selector, .sequence => {
+            try out.appendSlice(gpa, if (node.kind == .selector) "selector" else "sequence");
+            if (node.when.len != 0) {
+                try appendFmt(gpa, out, " when {s}", .{node.when});
+            }
+            try out.appendSlice(gpa, " {\n");
+            for (node.children) |child| {
+                try writeBTNode(child, depth + 1, gpa, out);
+            }
+            d = 0;
+            while (d < depth) : (d += 1) try out.appendSlice(gpa, "  ");
+            try out.appendSlice(gpa, "}\n");
+        },
+        .condition => try appendFmt(gpa, out, "condition {s}\n", .{node.payload}),
+        .action => try appendFmt(gpa, out, "action {s}\n", .{node.payload}),
+    }
+}
+
+/// Canonical serialization of one `quest` descriptor (stages recurse
+/// through branches).
+pub fn writeQuest(q: Quest, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "quest {s} {{\n", .{q.name});
+    for (q.properties) |prop| {
+        try appendFmt(gpa, out, "  property {s} = {s}\n", .{ prop.name, prop.value });
+    }
+    for (q.stages) |stage| {
+        try writeQuestStage(stage, 1, gpa, out);
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+fn writeIndent(depth: u32, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    var d: u32 = 0;
+    while (d < depth) : (d += 1) try out.appendSlice(gpa, "  ");
+}
+
+fn writeQuestStage(stage: QuestStageDesc, depth: u32, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try writeIndent(depth, gpa, out);
+    try appendFmt(gpa, out, "stage {s}{s} {{\n", .{ stage.name, if (stage.is_async) " async" else "" });
+    for (stage.elements) |elem| {
+        switch (elem) {
+            .objective => |o| {
+                try writeIndent(depth + 1, gpa, out);
+                try out.appendSlice(gpa, "objective");
+                if (o.modifier.len != 0) try appendFmt(gpa, out, " {s}", .{o.modifier});
+                if (o.label.len != 0) try appendFmt(gpa, out, " {s}", .{o.label});
+                try appendFmt(gpa, out, ": {s}\n", .{o.value});
+            },
+            .handler => |h| {
+                try writeIndent(depth + 1, gpa, out);
+                try appendFmt(gpa, out, "{s}: {s}\n", .{ h.kind, h.payload });
+            },
+            .branch => |b| {
+                try writeIndent(depth + 1, gpa, out);
+                try out.appendSlice(gpa, "branch ");
+                try out.appendSlice(gpa, b.name);
+                if (b.when.len != 0) try appendFmt(gpa, out, " when {s}", .{b.when});
+                try out.appendSlice(gpa, " {\n");
+                for (b.stages) |inner| {
+                    try writeQuestStage(inner, depth + 2, gpa, out);
+                }
+                try writeIndent(depth + 1, gpa, out);
+                try out.appendSlice(gpa, "}\n");
+            },
+            .statement => |text| {
+                try writeIndent(depth + 1, gpa, out);
+                try appendFmt(gpa, out, "statement {s}\n", .{text});
+            },
+        }
+    }
+    try writeIndent(depth, gpa, out);
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `dialogue` descriptor (branches recurse).
+pub fn writeDialogue(d: Dialogue, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "dialogue {s} {{\n", .{d.name});
+    for (d.elements) |elem| {
+        try writeDialogueElement(elem, 1, gpa, out);
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+fn writeDialogueElement(elem: DialogueElementDesc, depth: u32, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try writeIndent(depth, gpa, out);
+    switch (elem) {
+        .speaker => |sp| {
+            try appendFmt(gpa, out, "speaker \"{s}\" {{\n", .{sp.id});
+            for (sp.lines) |line| {
+                try writeIndent(depth + 1, gpa, out);
+                try appendFmt(gpa, out, "line {s}", .{line.text});
+                if (line.when.len != 0) try appendFmt(gpa, out, " when {s}", .{line.when});
+                try out.appendSlice(gpa, "\n");
+            }
+            try writeIndent(depth, gpa, out);
+            try out.appendSlice(gpa, "}\n");
+        },
+        .choice => |options| {
+            try out.appendSlice(gpa, "choice {\n");
+            for (options) |opt| {
+                try writeIndent(depth + 1, gpa, out);
+                try appendFmt(gpa, out, "option {s}", .{opt.text});
+                if (opt.when.len != 0) try appendFmt(gpa, out, " when {s}", .{opt.when});
+                try appendFmt(gpa, out, " -> {s}\n", .{opt.target});
+            }
+            try writeIndent(depth, gpa, out);
+            try out.appendSlice(gpa, "}\n");
+        },
+        .branch => |b| {
+            try appendFmt(gpa, out, "branch {s} {{\n", .{b.name});
+            for (b.elements) |inner| {
+                try writeDialogueElement(inner, depth + 1, gpa, out);
+            }
+            try writeIndent(depth, gpa, out);
+            try out.appendSlice(gpa, "}\n");
+        },
+        .emit => |em| {
+            try appendFmt(gpa, out, "{s}", .{em.payload});
+            if (em.when.len != 0) try appendFmt(gpa, out, " when {s}", .{em.when});
+            try out.appendSlice(gpa, "\n");
+        },
+        .goto => |target| try appendFmt(gpa, out, "goto {s}\n", .{target}),
+    }
+}
+
+/// Canonical serialization of one `ability` descriptor.
+pub fn writeAbility(a: Ability, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "ability {s} {{\n", .{a.name});
+    for (a.properties) |prop| {
+        try writeIndent(1, gpa, out);
+        try appendFmt(gpa, out, "{s}: {s}\n", .{ prop.name, prop.value });
+    }
+    if (a.rule.len != 0) {
+        try writeIndent(1, gpa, out);
+        try appendFmt(gpa, out, "{s}\n", .{a.rule});
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+test "writeAbility canonical form is stable" {
+    const gpa = std.testing.allocator;
+    const a: Ability = .{
+        .name = "Fireball",
+        .properties = &.{
+            .{ .name = "cost", .value = "{ mana: 20.0 }" },
+            .{ .name = "cooldown", .value = "3.0" },
+            .{ .name = "tags_required", .value = "[.character.status.alive]" },
+        },
+        .rule = "rule activate(caster: Entity) { emit Boom { x: 1 } }",
+    };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try writeAbility(a, gpa, &out);
+    try std.testing.expectEqualStrings(
+        \\ability Fireball {
+        \\  cost: { mana: 20.0 }
+        \\  cooldown: 3.0
+        \\  tags_required: [.character.status.alive]
+        \\  rule activate(caster: Entity) { emit Boom { x: 1 } }
+        \\}
+        \\
+    , out.items);
+}
+
+test "writeDialogue canonical form is stable" {
+    const gpa = std.testing.allocator;
+    const d: Dialogue = .{
+        .name = "Greeting",
+        .elements = &.{
+            .{ .speaker = .{ .id = "merchant", .lines = &.{
+                .{ .text = "\"Welcome!\"", .when = "" },
+            } } },
+            .{ .choice = &.{
+                .{ .text = "\"Bye\"", .when = "", .target = "end" },
+            } },
+            .{ .branch = .{ .name = "wares", .elements = &.{
+                .{ .emit = .{ .payload = "emit OpenShopUI { shop: 1 }", .when = "(not x)" } },
+                .{ .goto = "end" },
+            } } },
+        },
+    };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try writeDialogue(d, gpa, &out);
+    try std.testing.expectEqualStrings(
+        \\dialogue Greeting {
+        \\  speaker "merchant" {
+        \\    line "Welcome!"
+        \\  }
+        \\  choice {
+        \\    option "Bye" -> end
+        \\  }
+        \\  branch wares {
+        \\    emit OpenShopUI { shop: 1 } when (not x)
+        \\    goto end
+        \\  }
+        \\}
+        \\
+    , out.items);
+}
+
+test "writeQuest canonical form is stable" {
+    const gpa = std.testing.allocator;
+    const q: Quest = .{
+        .name = "Escort",
+        .properties = &.{
+            .{ .name = "required_level", .value = "5" },
+        },
+        .stages = &.{
+            .{ .name = "talk", .is_async = false, .elements = &.{
+                .{ .objective = .{ .modifier = "main", .label = "", .value = "interact_with(\"m\")" } },
+                .{ .handler = .{ .kind = "on_fail", .payload = "died() -> fail_quest" } },
+                .{ .branch = .{ .name = "alt", .when = "true", .stages = &.{
+                    .{ .name = "inner", .is_async = true, .elements = &.{} },
+                } } },
+            } },
+        },
+    };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try writeQuest(q, gpa, &out);
+    try std.testing.expectEqualStrings(
+        \\quest Escort {
+        \\  property required_level = 5
+        \\  stage talk {
+        \\    objective main: interact_with("m")
+        \\    on_fail: died() -> fail_quest
+        \\    branch alt when true {
+        \\      stage inner async {
+        \\      }
+        \\    }
+        \\  }
+        \\}
+        \\
+    , out.items);
+}
+
+test "writeBehavior canonical form is stable" {
+    const gpa = std.testing.allocator;
+    const b: Behavior = .{
+        .name = "CombatBehavior",
+        .root = .{
+            .kind = .selector,
+            .when = "",
+            .payload = "",
+            .children = &.{
+                .{ .kind = .sequence, .when = "self has Health { (current < (max * 0.2)) }", .payload = "", .children = &.{
+                    .{ .kind = .action, .when = "", .payload = "let cover = find_cover(target)", .children = &.{} },
+                } },
+                .{ .kind = .condition, .when = "", .payload = "(hp > 0)", .children = &.{} },
+            },
+        },
+    };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try writeBehavior(b, gpa, &out);
+    try std.testing.expectEqualStrings(
+        \\behavior CombatBehavior {
+        \\  selector {
+        \\    sequence when self has Health { (current < (max * 0.2)) } {
+        \\      action let cover = find_cover(target)
+        \\    }
+        \\    condition (hp > 0)
+        \\  }
+        \\}
+        \\
+    , out.items);
+}
+
+test "writeRoutine canonical form is stable" {
+    const gpa = std.testing.allocator;
+    const r: Routine = .{
+        .name = "BlacksmithDaily",
+        .segments = &.{
+            .{
+                .name = "Working",
+                .triggers = &.{
+                    .{ .kind = .at_time, .value = "06:00" },
+                    .{ .kind = .after_segment, .value = "Sleeping" },
+                },
+                .actions = &.{"use_smart_object(\"forge_anvil\")"},
+                .untils = &.{
+                    .{ .kind = .on_event, .value = "MealCallReceived" },
+                },
+            },
+        },
+        .interrupts = &.{
+            .{ .event = "on_dialogue_request", .target = "pause_segment", .is_pause = true },
+        },
+    };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try writeRoutine(r, gpa, &out);
+    try std.testing.expectEqualStrings(
+        \\routine BlacksmithDaily {
+        \\  segment Working {
+        \\    trigger at 06:00
+        \\    trigger after Sleeping
+        \\    action use_smart_object("forge_anvil")
+        \\    until on_event MealCallReceived
+        \\  }
+        \\  interrupt on_dialogue_request -> pause_segment
+        \\}
+        \\
+    , out.items);
+}
+
+test "writeData canonical form is stable" {
+    const gpa = std.testing.allocator;
+    const d: Data = .{
+        .name = "ItemDatabase",
+        .entry_type = "Item",
+        .entries = &.{
+            .{ .id = "iron_sword", .fields = &.{
+                .{ .name = "value", .value = "50", .is_spread = false },
+            } },
+            .{ .id = "iron_sword_enchanted", .fields = &.{
+                .{ .name = "", .value = "ItemDatabase.iron_sword", .is_spread = true },
+                .{ .name = "value", .value = "120", .is_spread = false },
+            } },
+        },
+    };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(gpa);
+    try writeData(d, gpa, &out);
+    try std.testing.expectEqualStrings(
+        \\data ItemDatabase {
+        \\  entry_type: Item
+        \\  entry iron_sword {
+        \\    field value = 50
+        \\  }
+        \\  entry iron_sword_enchanted {
+        \\    spread ItemDatabase.iron_sword
+        \\    field value = 120
+        \\  }
+        \\}
+        \\
+    , out.items);
+}

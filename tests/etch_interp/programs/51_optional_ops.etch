@@ -1,0 +1,27 @@
+component OptAcc {
+  popped: int = 0
+  map_hit: int = 0
+  map_miss: int = 0
+  chained: int = 0
+  matched: int = 0
+}
+
+rule optional_ops(entity: Entity)
+  when entity has OptAcc
+{
+  let acc = entity.get_mut(OptAcc)
+  let mut xs: int[] = [10, 20]
+  let a = xs.pop() ?? -1
+  let b = xs.pop()!
+  let c = xs.pop() ?? -1
+  acc.popped = a + b + c
+  let mut m = [1: 100, 2: 200]
+  acc.map_hit = m[1] ?? 0
+  acc.map_miss = m[9] ?? 7
+  let s: string? = some("hello")
+  acc.chained = s?.len() ?? 0
+  acc.matched = match m[2] {
+    some(x) => x + 1,
+    none => 0,
+  }
+}

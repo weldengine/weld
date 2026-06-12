@@ -1,0 +1,21 @@
+tags {
+  unit {
+    status { tagged }
+  }
+}
+
+component Counter {
+  value: int = 0
+}
+
+rule mark(entity: Entity)
+  when entity has Counter
+{
+  entity.add_tag(.unit.status.tagged)
+}
+
+rule count(entity: Entity)
+  when entity has Counter and entity has_tag .unit.status.tagged
+{
+  entity.get_mut(Counter).value += 1
+}

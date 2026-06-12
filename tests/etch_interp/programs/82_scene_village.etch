@@ -1,0 +1,39 @@
+// Differential 82 — Level-C `scene` (M0.8 E7, serialization-only). The
+// interpreter BUILDS the scene descriptor, the cooked Zig EMITS it; both
+// serialize through the shared canonical serializer (`descriptor_types.zig`)
+// and must produce byte-identical dumps (LEVEL-C PROOF CONTRACT). Runtime
+// instantiation is M0.9, not this milestone. Component / resource / prefab
+// declarations precede the scene so every reference resolves (E1783/E1786/
+// E1789 clean) and every entity carries a component (no W1780). Legal forms:
+// entity name mandatory; per-field overrides only in instance bodies.
+component Health { current: float = 100.0, max: float = 100.0 }
+component Transform { x: float = 0.0, y: float = 0.0, z: float = 0.0 }
+resource GameMode { max_players: int = 4 }
+
+prefab "WallTorch" {
+  entity "root" {
+    Transform { x: 10.0 }
+    Health { current: 50.0 }
+  }
+}
+
+scene "Village" {
+  version: 3
+  metadata: { author: "level_designer_01" }
+  resources {
+    GameMode { max_players: 4 }
+  }
+  entity "Hero" {
+    uuid: "u1"
+    Transform { x: 1.0, y: 0.0, z: 3.0 }
+    Health { current: 80.0, max: 100.0 }
+  }
+  entity "Child" {
+    parent: "Hero"
+    Transform { y: 2.0 }
+  }
+  instance of "WallTorch" "Torch_01" {
+    Transform { x: 20.0 }
+    Health.current = 25.0
+  }
+}

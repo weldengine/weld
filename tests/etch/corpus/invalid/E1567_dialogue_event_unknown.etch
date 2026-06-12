@@ -1,0 +1,4 @@
+dialogue D {
+  emit Missing { x: 1 }
+  -> end
+}

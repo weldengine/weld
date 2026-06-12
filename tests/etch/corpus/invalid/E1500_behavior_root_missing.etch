@@ -1,0 +1,5 @@
+fn act() { }
+
+behavior B {
+  action: act()
+}

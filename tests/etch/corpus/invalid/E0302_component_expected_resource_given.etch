@@ -1,0 +1,11 @@
+// `entity.get(T)` accesses a component; `Score` is a resource, so this must
+// surface E0302 ComponentExpectedResourceGiven (M0.8 D-S3-resource-receiver).
+// The resource form is the receiver-less `get(Score)`.
+component Health { current: float = 100.0 }
+resource Score { points: i32 = 0 }
+
+rule tick(entity: Entity)
+    when entity has Health
+{
+    let s = entity.get(Score)
+}

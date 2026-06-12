@@ -32,7 +32,6 @@ const tick_mod = @import("tick.zig");
 
 const registry_mod = @import("registry.zig");
 const resources_mod = @import("resources.zig");
-const query_runtime_mod = @import("query_runtime.zig");
 const observers_mod = @import("observers.zig");
 // M0.2 / E3 — singleton-entity resource registry, distinct from the
 // M0.1 / S4 byte-keyed `ResourceStore` above (which the Etch
@@ -85,7 +84,6 @@ const ComponentDesc = registry_mod.ComponentDesc;
 const FieldDesc = registry_mod.FieldDesc;
 const FieldKind = registry_mod.FieldKind;
 const ResourceStore = resources_mod.ResourceStore;
-const RuntimeQuery = query_runtime_mod.RuntimeQuery;
 const EntityIdentityStore = entity_mod.EntityIdentityStore;
 
 /// Top-level ECS world — single archetype list, shared identity, shared
@@ -741,6 +739,40 @@ pub const World = struct {
         });
     }
 
+    /// M0.8 E3 — apply a single tag-bit mutation (`etch-grammar.md` §4.4): the
+    /// deferred-structural-change primitive shared by the Etch interpreter's
+    /// tag queue and the codegen command buffer's `set_tag`/`clear_tag`.
+    /// `tagset_id` is the registered `TagSet` component — a `[words]u64`
+    /// bitfield, one slot per tagged entity. If the entity already has
+    /// `TagSet`, the bit is flipped in place (no structural change); if it
+    /// lacks one and `set` is true, `TagSet` is added (an archetype transition)
+    /// with the bit set; clearing a bit on an entity without `TagSet` is a
+    /// no-op. A stale handle is dropped silently (the entity despawned before
+    /// the deferred flush). Call only at a flush point, never mid-iteration.
+    pub fn applyTagMutation(
+        self: *World,
+        gpa: std.mem.Allocator,
+        entity: EntityId,
+        tagset_id: ComponentId,
+        bit_index: u32,
+        set: bool,
+    ) !void {
+        const loc = self.entity_locations.get(entity) orelse return;
+        const arch = self.archetypes.items[loc.archetype_idx];
+        if (arch.componentIndex(tagset_id)) |col| {
+            const chunk = arch.chunks.items[loc.chunk_idx];
+            const bytes = arch.componentSlot(chunk, col, loc.slot);
+            setTagBit(bytes, bit_index, set);
+        } else if (set) {
+            const size = self.registry.componentSize(tagset_id);
+            const buf = try gpa.alloc(u8, size);
+            defer gpa.free(buf);
+            @memset(buf, 0);
+            setTagBit(buf, bit_index, true);
+            try self.addComponentDynamic(gpa, entity, tagset_id, buf);
+        }
+    }
+
     /// Remove component `T` from `entity`. Routes through the source
     /// archetype's `TransitionCache.remove`. The destination archetype
     /// is the source's signature minus `cid`. Component data for the
@@ -891,18 +923,6 @@ pub const World = struct {
         return w.archetypes.items;
     }
 
-    /// Build a runtime query against this world's archetypes. Mirrors
-    /// the pre-E2 entry point — `archetypes` is now the unified list,
-    /// so the runtime query iterates over every materialised
-    /// archetype.
-    pub fn query_dynamic(self: *World, includes: []const ComponentId, excludes: []const ComponentId) RuntimeQuery {
-        return .{
-            .includes = includes,
-            .excludes = excludes,
-            .archetypes = self.archetypes.items,
-        };
-    }
-
     // ─── Resources ───────────────────────────────────────────────────────
 
     /// Add a resource. `init_bytes` is duplicated by the store.
@@ -926,3 +946,18 @@ pub const World = struct {
         return total;
     }
 };
+
+/// Set or clear a single bit in a `TagSet`'s raw `[words]u64` bytes (M0.8 E3).
+/// The bit index maps to word `bit / 64`, position `bit % 64`.
+fn setTagBit(bytes: []u8, bit: u32, set: bool) void {
+    const off: usize = @as(usize, bit / 64) * 8;
+    var word: u64 = 0;
+    @memcpy(std.mem.asBytes(&word), bytes[off .. off + 8]);
+    const mask = @as(u64, 1) << @intCast(bit % 64);
+    if (set) {
+        word |= mask;
+    } else {
+        word &= ~mask;
+    }
+    @memcpy(bytes[off .. off + 8], std.mem.asBytes(&word));
+}

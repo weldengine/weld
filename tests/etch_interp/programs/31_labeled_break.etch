@@ -1,0 +1,21 @@
+// M0.8 loop/break: a labeled outer loop exited from an inner loop via
+// `break outer`. The interpreter propagates the labeled break out of the inner
+// loop (control left set) until the labeled loop consumes it; the cooked Zig
+// emits `outer: while (true) { while (true) { ...; break :outer; } }`. Both
+// write 7 before exiting, keeping the differential byte-exact.
+component Acc {
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has Acc
+{
+  let mut found = 0
+  outer: loop {
+    loop {
+      found = 7
+      break outer
+    }
+  }
+  entity.get_mut(Acc).out = found
+}

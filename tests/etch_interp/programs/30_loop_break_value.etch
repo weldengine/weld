@@ -1,0 +1,17 @@
+// M0.8 loop/break: a `loop` used as an expression whose value is the operand
+// of its `break`. The interpreter runs the body until the break fires and
+// returns the break value; the cooked Zig emits a value-carrying
+// `while (true) { break 42; }`. Both yield 42, keeping the differential
+// byte-exact.
+component Acc {
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has Acc
+{
+  let x = loop {
+    break 42
+  }
+  entity.get_mut(Acc).out = x
+}

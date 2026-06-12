@@ -34,6 +34,25 @@ pub const ComponentRef = struct {
     mutable: bool,
 };
 
+/// A handle to a resource's backing bytes in the world `ResourceStore`.
+/// The interpreter resolves receiver-less `get(T)` / `get_mut(T)` into one
+/// of these (D-S3-resource-receiver). `mutable = false` for `get(T)`, `true`
+/// for `get_mut(T)`. Unlike `ComponentRef` there is no chunk / slot — a
+/// resource is a world singleton keyed by `resource_id`.
+pub const ResourceRef = struct {
+    resource_id: u32,
+    mutable: bool,
+};
+
+/// A `start..end` / `start..=end` range value (M0.8 v0.6 foundations).
+/// Integer bounds; `for-in` iterates `[start, end)` (exclusive) or
+/// `[start, end]` (inclusive).
+pub const RangeVal = struct {
+    start: i64,
+    end: i64,
+    inclusive: bool,
+};
+
 /// Runtime tag for the S3 primitive value set. Mirrors `BuiltinType` in
 /// `src/etch/types.zig` but only carries the values the interpreter touches.
 pub const Value = union(enum) {
@@ -41,8 +60,46 @@ pub const Value = union(enum) {
     float_: f64,
     bool_: bool,
     string_id: u32,
+    /// Handle into the interpreter's per-rule-body runtime-string store (M0.8
+    /// sub-slice C tranche 1b). A string PRODUCED at runtime (concat — and,
+    /// 1c, interpolation) cannot be a `string_id` (the AST string table is
+    /// immutable input), so it lives as owned bytes in `Interpreter
+    /// .run_strings`, reset at the rule-body boundary (rule-arena semantics,
+    /// `etch-memory-model.md` §2). Same lifetime rules as `array_ref`.
+    string_run: u32,
     entity_id: EntityId,
     component_ref: ComponentRef,
+    resource_ref: ResourceRef,
+    range: RangeVal,
+    /// Handle into the interpreter's per-rule-body collection store (M0.8
+    /// collections). Arrays / maps / sets are heap-managed and cannot live
+    /// inline in this stack union, so a runtime collection value is a `u32`
+    /// index resolved against `Interpreter.collections`. Invalidated at the
+    /// rule-body boundary (rule-arena semantics).
+    array_ref: u32,
+    /// Handle into the interpreter's per-rule-body map store (M0.8
+    /// collections). Same lifetime rules as `array_ref`.
+    map_ref: u32,
+    /// Handle into the interpreter's per-rule-body set store (M0.8 E3-C
+    /// tranche 3bis). Same lifetime rules as `array_ref`.
+    set_ref: u32,
+    /// Handle into the interpreter's per-rule-body closure store (M0.8
+    /// closures). Same lifetime rules as `array_ref`.
+    closure: u32,
+    /// Handle into the interpreter's per-rule-body struct store (M0.8 E2 block
+    /// 3). A struct value is a by-value aggregate; the handle resolves against
+    /// `Interpreter.structs`. Same lifetime rules as `array_ref` (reset at the
+    /// rule-body boundary).
+    struct_ref: u32,
+    /// Handle into the interpreter's per-rule-body optional store (M0.8 E2 block
+    /// 5). An `Optional<T>` value resolves against `Interpreter.optionals` to a
+    /// `?Value` (`null` = `none`, else the `some` payload). Same lifetime rules
+    /// as `array_ref` (reset at the rule-body boundary).
+    optional: u32,
+    /// A C-like enum value (M0.8 E2 block 3 tranche B). Carries the enum type
+    /// name (interned `StringId`) and the variant's declaration-order index.
+    /// Value-typed: compared by `(type_name, variant)` equality.
+    enum_value: EnumValue,
     unit,
 
     pub fn fromInt(x: i64) Value {
@@ -73,11 +130,27 @@ pub const Value = union(enum) {
             .float_ => |a| a == other.float_,
             .bool_ => |a| a == other.bool_,
             .string_id => |a| a == other.string_id,
+            .string_run => false, // string equality is not in the M0.8 minimal subset (Eq/Ord deferred)
             .entity_id => |a| a == other.entity_id,
             .component_ref => false,
+            .resource_ref => false,
+            .range => false,
+            .array_ref => false,
+            .map_ref => false,
+            .set_ref => false, // set equality is not in the M0.8 minimal subset
+            .closure => false,
+            .struct_ref => false,
+            .optional => false, // optional equality is not exercised in M0.8 (unwrap via if/while let)
+            .enum_value => |a| a.type_name == other.enum_value.type_name and a.variant == other.enum_value.variant,
             .unit => true,
         };
     }
+};
+
+/// Payload of a C-like enum `Value` (M0.8 E2 block 3 tranche B).
+pub const EnumValue = struct {
+    type_name: u32,
+    variant: u32,
 };
 
 /// Typed sum carrying a `SourceSpan` resolved from the AST `NodeId` that
@@ -94,6 +167,14 @@ pub const RuntimeErrorKind = enum {
     DivisionByZero,
     IntegerOverflow,
     UnsupportedExpr,
+    /// Bridge-level type incoherence (M0.8 E3-D, D-S4-runtime-report —
+    /// the typed-report home of `BridgeError.TypeMismatch`, closing the
+    /// D-S4-ecs-bridge-panic letter: the bridge returns the error, the
+    /// report carries the kind).
+    TypeMismatch,
+    /// An Etch `throw` that reached the rule top level uncaught (M0.8
+    /// E3-D). The span covers the thrown value expression.
+    UncaughtThrow,
 };
 
 // ─── Arithmetic helpers ──────────────────────────────────────────────────

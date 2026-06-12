@@ -40,6 +40,55 @@ const p17 = @import("programs/17_resource_changed_dirty.expected.zig");
 const p18 = @import("programs/18_resource_changed_clean.expected.zig");
 const p19 = @import("programs/19_rule_order_sees_mutation.expected.zig");
 const p20 = @import("programs/20_rule_order_sees_previous.expected.zig");
+const p21 = @import("programs/21_cast_int_to_float.expected.zig");
+const p22 = @import("programs/22_type_alias_field.expected.zig");
+const p23 = @import("programs/23_assert_guard.expected.zig");
+const p24 = @import("programs/24_match_dispatch.expected.zig");
+const p25 = @import("programs/25_for_range_sum.expected.zig");
+const p26 = @import("programs/26_array_index.expected.zig");
+const p27 = @import("programs/27_array_slice.expected.zig");
+const p28 = @import("programs/28_for_array_sum.expected.zig");
+const p29 = @import("programs/29_closure_apply.expected.zig");
+const p30 = @import("programs/30_loop_break_value.expected.zig");
+const p31 = @import("programs/31_labeled_break.expected.zig");
+const p32 = @import("programs/32_block_expr_value.expected.zig");
+const p33 = @import("programs/33_if_else.expected.zig");
+const p34 = @import("programs/34_while_sum.expected.zig");
+const p35 = @import("programs/35_match_block_arm.expected.zig");
+const p36 = @import("programs/36_loop_if_break.expected.zig");
+const p37 = @import("programs/37_match_stmt_control.expected.zig");
+const p38 = @import("programs/38_fn_free_call.expected.zig");
+const p39 = @import("programs/39_struct_method.expected.zig");
+const p40 = @import("programs/40_enum_match.expected.zig");
+const p41 = @import("programs/41_trait_method.expected.zig");
+const p42 = @import("programs/42_optional_if_let.expected.zig");
+const p43 = @import("programs/43_tag_filter_mutation.expected.zig");
+const p44 = @import("programs/44_changed_filter.expected.zig");
+const p45 = @import("programs/45_string_len.expected.zig");
+const p46 = @import("programs/46_string_concat.expected.zig");
+const p47 = @import("programs/47_string_interp.expected.zig");
+const p48 = @import("programs/48_error_throw_catch.expected.zig");
+const p49 = @import("programs/49_dyn_array_push.expected.zig");
+const p50 = @import("programs/50_map_insert_iterate.expected.zig");
+const p51 = @import("programs/51_optional_ops.expected.zig");
+const p52 = @import("programs/52_enum_shorthand_field.expected.zig");
+const p53 = @import("programs/53_set_ops.expected.zig");
+const p54 = @import("programs/54_mut_self_method.expected.zig");
+const p55 = @import("programs/55_anon_struct_literal.expected.zig");
+const p56 = @import("programs/56_closure_capture_value.expected.zig");
+const p57 = @import("programs/57_closure_block_return.expected.zig");
+const p58 = @import("programs/58_closure_thrown_propagation.expected.zig");
+const p59 = @import("programs/59_resource_receiver.expected.zig");
+const p60 = @import("programs/60_event_observer_resource.expected.zig");
+const p61 = @import("programs/61_filter_two_components.expected.zig");
+const p64 = @import("programs/64_when_expr_surface.expected.zig");
+const p65 = @import("programs/65_when_expr_archwalk.expected.zig");
+const p66 = @import("programs/66_named_args.expected.zig");
+// M0.8 E7 — full-grammar TOTAL codegen integration (Level-A byte-exact; the
+// file's B/C constructs cook to descriptors, only RefProbe ticks).
+const p84 = @import("programs/84_reference_500_codegen.expected.zig");
+// M0.8 E7 — bare match-arm binding (`match x { n => … }`), byte-exact.
+const p85 = @import("programs/85_match_binding.expected.zig");
 
 /// Embedded list of the 20 differential corpus programs consumed by
 /// the S4 interpreter test and the S5 codegen parity test.
@@ -64,4 +113,50 @@ pub const programs = [_]Program{
     .{ .name = "18_resource_changed_clean", .source = @embedFile("programs/18_resource_changed_clean.etch"), .config = p18.config, .initial = p18.initial, .expected = p18.expected },
     .{ .name = "19_rule_order_sees_mutation", .source = @embedFile("programs/19_rule_order_sees_mutation.etch"), .config = p19.config, .initial = p19.initial, .expected = p19.expected },
     .{ .name = "20_rule_order_sees_previous", .source = @embedFile("programs/20_rule_order_sees_previous.etch"), .config = p20.config, .initial = p20.initial, .expected = p20.expected },
+    .{ .name = "21_cast_int_to_float", .source = @embedFile("programs/21_cast_int_to_float.etch"), .config = p21.config, .initial = p21.initial, .expected = p21.expected },
+    .{ .name = "22_type_alias_field", .source = @embedFile("programs/22_type_alias_field.etch"), .config = p22.config, .initial = p22.initial, .expected = p22.expected },
+    .{ .name = "23_assert_guard", .source = @embedFile("programs/23_assert_guard.etch"), .config = p23.config, .initial = p23.initial, .expected = p23.expected },
+    .{ .name = "24_match_dispatch", .source = @embedFile("programs/24_match_dispatch.etch"), .config = p24.config, .initial = p24.initial, .expected = p24.expected },
+    .{ .name = "25_for_range_sum", .source = @embedFile("programs/25_for_range_sum.etch"), .config = p25.config, .initial = p25.initial, .expected = p25.expected },
+    .{ .name = "26_array_index", .source = @embedFile("programs/26_array_index.etch"), .config = p26.config, .initial = p26.initial, .expected = p26.expected },
+    .{ .name = "27_array_slice", .source = @embedFile("programs/27_array_slice.etch"), .config = p27.config, .initial = p27.initial, .expected = p27.expected },
+    .{ .name = "28_for_array_sum", .source = @embedFile("programs/28_for_array_sum.etch"), .config = p28.config, .initial = p28.initial, .expected = p28.expected },
+    .{ .name = "29_closure_apply", .source = @embedFile("programs/29_closure_apply.etch"), .config = p29.config, .initial = p29.initial, .expected = p29.expected },
+    .{ .name = "30_loop_break_value", .source = @embedFile("programs/30_loop_break_value.etch"), .config = p30.config, .initial = p30.initial, .expected = p30.expected },
+    .{ .name = "31_labeled_break", .source = @embedFile("programs/31_labeled_break.etch"), .config = p31.config, .initial = p31.initial, .expected = p31.expected },
+    .{ .name = "32_block_expr_value", .source = @embedFile("programs/32_block_expr_value.etch"), .config = p32.config, .initial = p32.initial, .expected = p32.expected },
+    .{ .name = "33_if_else", .source = @embedFile("programs/33_if_else.etch"), .config = p33.config, .initial = p33.initial, .expected = p33.expected },
+    .{ .name = "34_while_sum", .source = @embedFile("programs/34_while_sum.etch"), .config = p34.config, .initial = p34.initial, .expected = p34.expected },
+    .{ .name = "35_match_block_arm", .source = @embedFile("programs/35_match_block_arm.etch"), .config = p35.config, .initial = p35.initial, .expected = p35.expected },
+    .{ .name = "36_loop_if_break", .source = @embedFile("programs/36_loop_if_break.etch"), .config = p36.config, .initial = p36.initial, .expected = p36.expected },
+    .{ .name = "37_match_stmt_control", .source = @embedFile("programs/37_match_stmt_control.etch"), .config = p37.config, .initial = p37.initial, .expected = p37.expected },
+    .{ .name = "38_fn_free_call", .source = @embedFile("programs/38_fn_free_call.etch"), .config = p38.config, .initial = p38.initial, .expected = p38.expected },
+    .{ .name = "39_struct_method", .source = @embedFile("programs/39_struct_method.etch"), .config = p39.config, .initial = p39.initial, .expected = p39.expected },
+    .{ .name = "40_enum_match", .source = @embedFile("programs/40_enum_match.etch"), .config = p40.config, .initial = p40.initial, .expected = p40.expected },
+    .{ .name = "41_trait_method", .source = @embedFile("programs/41_trait_method.etch"), .config = p41.config, .initial = p41.initial, .expected = p41.expected },
+    .{ .name = "42_optional_if_let", .source = @embedFile("programs/42_optional_if_let.etch"), .config = p42.config, .initial = p42.initial, .expected = p42.expected },
+    .{ .name = "43_tag_filter_mutation", .source = @embedFile("programs/43_tag_filter_mutation.etch"), .config = p43.config, .initial = p43.initial, .expected = p43.expected },
+    .{ .name = "44_changed_filter", .source = @embedFile("programs/44_changed_filter.etch"), .config = p44.config, .initial = p44.initial, .expected = p44.expected },
+    .{ .name = "45_string_len", .source = @embedFile("programs/45_string_len.etch"), .config = p45.config, .initial = p45.initial, .expected = p45.expected },
+    .{ .name = "46_string_concat", .source = @embedFile("programs/46_string_concat.etch"), .config = p46.config, .initial = p46.initial, .expected = p46.expected },
+    .{ .name = "47_string_interp", .source = @embedFile("programs/47_string_interp.etch"), .config = p47.config, .initial = p47.initial, .expected = p47.expected },
+    .{ .name = "48_error_throw_catch", .source = @embedFile("programs/48_error_throw_catch.etch"), .config = p48.config, .initial = p48.initial, .expected = p48.expected },
+    .{ .name = "49_dyn_array_push", .source = @embedFile("programs/49_dyn_array_push.etch"), .config = p49.config, .initial = p49.initial, .expected = p49.expected },
+    .{ .name = "50_map_insert_iterate", .source = @embedFile("programs/50_map_insert_iterate.etch"), .config = p50.config, .initial = p50.initial, .expected = p50.expected },
+    .{ .name = "51_optional_ops", .source = @embedFile("programs/51_optional_ops.etch"), .config = p51.config, .initial = p51.initial, .expected = p51.expected },
+    .{ .name = "52_enum_shorthand_field", .source = @embedFile("programs/52_enum_shorthand_field.etch"), .config = p52.config, .initial = p52.initial, .expected = p52.expected },
+    .{ .name = "53_set_ops", .source = @embedFile("programs/53_set_ops.etch"), .config = p53.config, .initial = p53.initial, .expected = p53.expected },
+    .{ .name = "54_mut_self_method", .source = @embedFile("programs/54_mut_self_method.etch"), .config = p54.config, .initial = p54.initial, .expected = p54.expected },
+    .{ .name = "55_anon_struct_literal", .source = @embedFile("programs/55_anon_struct_literal.etch"), .config = p55.config, .initial = p55.initial, .expected = p55.expected },
+    .{ .name = "56_closure_capture_value", .source = @embedFile("programs/56_closure_capture_value.etch"), .config = p56.config, .initial = p56.initial, .expected = p56.expected },
+    .{ .name = "57_closure_block_return", .source = @embedFile("programs/57_closure_block_return.etch"), .config = p57.config, .initial = p57.initial, .expected = p57.expected },
+    .{ .name = "58_closure_thrown_propagation", .source = @embedFile("programs/58_closure_thrown_propagation.etch"), .config = p58.config, .initial = p58.initial, .expected = p58.expected },
+    .{ .name = "59_resource_receiver", .source = @embedFile("programs/59_resource_receiver.etch"), .config = p59.config, .initial = p59.initial, .expected = p59.expected },
+    .{ .name = "60_event_observer_resource", .source = @embedFile("programs/60_event_observer_resource.etch"), .config = p60.config, .initial = p60.initial, .expected = p60.expected },
+    .{ .name = "61_filter_two_components", .source = @embedFile("programs/61_filter_two_components.etch"), .config = p61.config, .initial = p61.initial, .expected = p61.expected },
+    .{ .name = "64_when_expr_surface", .source = @embedFile("programs/64_when_expr_surface.etch"), .config = p64.config, .initial = p64.initial, .expected = p64.expected },
+    .{ .name = "65_when_expr_archwalk", .source = @embedFile("programs/65_when_expr_archwalk.etch"), .config = p65.config, .initial = p65.initial, .expected = p65.expected },
+    .{ .name = "66_named_args", .source = @embedFile("programs/66_named_args.etch"), .config = p66.config, .initial = p66.initial, .expected = p66.expected },
+    .{ .name = "84_reference_500_codegen", .source = @embedFile("programs/84_reference_500_codegen.etch"), .config = p84.config, .initial = p84.initial, .expected = p84.expected },
+    .{ .name = "85_match_binding", .source = @embedFile("programs/85_match_binding.etch"), .config = p85.config, .initial = p85.initial, .expected = p85.expected },
 };

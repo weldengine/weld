@@ -1,0 +1,12 @@
+// E0001 ParseError — `effect` is out of scope in M0.8 E4 (the §9.2 VFX
+// construct); the lexer flags it as `error_unknown_keyword`, which the
+// parser raises with an "UnsupportedConstructInS3" message. (Replaces the
+// former `ability` fixture: `ability` graduated with its M0.8 E4 slice.)
+
+effect Explosion {
+    radius: 5.0
+}
+
+component Filler {
+    v: int = 0
+}

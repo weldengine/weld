@@ -1,0 +1,37 @@
+// Differential 71 — Level-B `theme` (M0.8 E5 presentation).
+// Serialized-IR parity: the interpreter BUILDS the theme descriptors, the
+// cooked Zig EMITS them; both serialize through the shared canonical
+// serializer and must produce byte-identical dumps (LEVEL-B PROOF CONTRACT).
+// The grammar shape WINS (E5 ruling 1): a string name + untyped `key: expr`
+// entries (widget-kind -> style, or a global variable). COLOR_LITERAL (§1.4)
+// flows parse -> Color type -> shared canonical render through BOTH backends
+// (eval fail-loud both sides; Level B needs only the canonical text). No rule
+// executes; mixed with a data table to pin the ordered cross-kind dump.
+struct StyleDef {
+  background: string
+  color: string
+}
+
+data Styles: StyleDef {
+  window_dark: { background: "#1E1F22", color: "#DFE1E5" },
+  panel_dark: { background: "#2B2D31", color: "#DFE1E5" },
+}
+
+theme "dark" {
+  window: Styles.window_dark
+  panel: Styles.panel_dark
+  text_color: #DFE1E5
+  text_color_secondary: #8E9196
+  accent: #2E6BBF
+  font: "Inter"
+  font_mono: "JetBrains Mono"
+  base_size: 14
+  scale: 1.0
+}
+
+theme "light" {
+  text_color: #1E1F22
+  background: #F5F5F5
+  surface: #FFFFFF
+  font: "Inter"
+}

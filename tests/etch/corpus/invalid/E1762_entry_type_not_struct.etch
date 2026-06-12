@@ -1,0 +1,7 @@
+component Health {
+  current: float = 100.0
+}
+
+data Table: Health {
+  a: { current: 1.0 },
+}

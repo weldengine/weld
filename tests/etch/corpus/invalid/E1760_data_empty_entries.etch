@@ -1,0 +1,5 @@
+struct Item {
+  value: int = 0
+}
+
+data EmptyTable: Item { }

@@ -1,0 +1,21 @@
+// M0.8 control flow: conditional loop exit — an `if`-guarded `break` inside a
+// `loop` body (one of the two E1 loop/break deferrals, unblocked by block-1's
+// `if` + block expressions). The interpreter runs the body until the guarded
+// break fires; the cooked Zig emits `while (true) { if (cond) { break; } ... }`.
+// Breaks when i reaches 5 → s = 0 + 1 + 2 + 3 + 4 = 10.
+component Acc {
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has Acc
+{
+  let mut i = 0
+  let mut s = 0
+  loop {
+    if i >= 5 { break }
+    s += i
+    i += 1
+  }
+  entity.get_mut(Acc).out = s
+}

@@ -1,0 +1,14 @@
+fn done() -> bool {
+  true
+}
+
+quest Q {
+  stage a {
+    objective main: done()
+    branch b when 1 + 2 {
+      stage c {
+        objective main: done()
+      }
+    }
+  }
+}

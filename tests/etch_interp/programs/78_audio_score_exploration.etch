@@ -1,0 +1,40 @@
+// Differential 78 — Level-B `audio_score` (M0.8 E6 audio / adaptive music).
+// Serialized-IR parity: the interpreter BUILDS the audio_score descriptor, the
+// cooked Zig EMITS it; both serialize through the shared canonical serializer
+// (`descriptor_types.zig`) and must produce byte-identical dumps (LEVEL-B PROOF
+// CONTRACT). The grammar §12.1 shape WINS over validation-ecs §20: STRING-named,
+// `score_property`s (bare `tempo: 90` — STRICT, the ability ruling-15 precedent,
+// the example's `@unit(.bpm)` omitted, KB-patch part2 §25 at close), `section`s
+// (plain `key: value` props + the `can_transition_to` section list + the
+// `on_finish "->" IDENT` target), and a `stems` block. DELIVER: E1720 (reshaped
+// "no section AND no stems"), E1721 DuplicateSectionName, E1722 DuplicateStemName,
+// E1726 (rekeyed onto can_transition_to / on_finish targets — every target is a
+// declared section here), E1728 TempoInvalid. RESERVED: E1724 StemActiveUnknown /
+// E1725 SectionDurationInvalid (no stems_active / duration in this shape).
+// DEFERRED: E1723 / E1727 / W1720 / W1721 (asset + transition-point catalogues,
+// heuristics — `transition_points` omitted). Section names + targets are
+// TYPE_IDENT-shaped (the ratified name-position deviation). No music plays.
+audio_score "exploration" {
+  tempo: 90
+
+  section Calm {
+    clips: ["music/explore_calm_a.ogg", "music/explore_calm_b.ogg"]
+    loop: true
+    can_transition_to: [Tension, Combat]
+  }
+
+  section Tension {
+    intro: "music/tension_intro.ogg"
+    loop: "music/tension_loop.ogg"
+    on_finish: -> Combat
+  }
+
+  section Combat {
+    loop: "music/combat_loop.ogg"
+  }
+
+  stems {
+    bass: { clip: "music/combat_bass.ogg", always_active: true }
+    drums: { clip: "music/combat_drums.ogg" }
+  }
+}

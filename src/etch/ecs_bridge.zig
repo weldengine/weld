@@ -21,6 +21,7 @@ const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
 const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
 const ResourceStore = weld_core.ecs.resources.ResourceStore;
 const CoreEntityId = weld_core.ecs.entity.EntityId;
+const Tick = weld_core.ecs.tick.Tick;
 
 // Module-private aliases shadowing the value module — `EntityId`,
 // `Value`, `ComponentRef` are not exported because no external caller
@@ -152,6 +153,20 @@ pub const Bridge = struct {
         const slot_bytes = arch.componentSlot(chunk, idx, ref.slot);
         const field_bytes = slot_bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
         try writeValueAsBytes(field.kind, field_bytes, v);
+    }
+
+    /// Stamp `ref`'s slot as modified at `tick` — writes the `changed_tick`
+    /// sidecar + sets the dirty bit (M0.8 E3 change detection,
+    /// `engine-ecs-internals.md` §5). Called by the interpreter right after a
+    /// `writeComponentField` when the program uses `changed` filters. This is
+    /// the SAME logical point (post component write) at which the codegen emits
+    /// `markChanged`, so the stamped tick is identical across backends → the
+    /// `changed` differential is byte-exact by construction.
+    pub fn markComponentChanged(world: *World, ref: ComponentRef, tick: Tick) void {
+        const chunk: *Chunk = @ptrCast(@alignCast(ref.chunk_ptr));
+        const arch = world.dynamicArchetype(chunk.header().archetype_id);
+        const idx = arch.componentIndex(ref.component_id) orelse return;
+        arch.markChanged(chunk, idx, ref.slot, tick);
     }
 
     // ─── Resource access ─────────────────────────────────────────────────
@@ -304,8 +319,15 @@ test "readBytesAsValue / writeValueAsBytes roundtrip on bool" {
 }
 
 test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
+    // Dedicated D-S4-ecs-bridge-panic proof (closed by M0.5 item 10): a type
+    // incoherence at the bridge is a recoverable typed error on EVERY kind
+    // branch — never a runtime `@panic`.
     var buf: [8]u8 = undefined;
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.int_, &buf, .{ .bool_ = true }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.bool_, &buf, .{ .int_ = 1 }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.f32_, &buf, .{ .bool_ = false }));
+    try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.float_, &buf, .{ .bool_ = true }));
+    try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.f64_, &buf, .{ .int_ = 7 }));
+    try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.i32_, &buf, .{ .float_ = 1.5 }));
+    try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.u32_, &buf, .{ .bool_ = false }));
 }

@@ -1,0 +1,22 @@
+// Differential 77 — Level-B `audio_graph` (M0.8 E6 audio/DSP). Serialized-IR
+// parity: the interpreter BUILDS the audio_graph descriptor, the cooked Zig
+// EMITS it; both serialize through the shared canonical serializer
+// (`descriptor_types.zig`) and must produce byte-identical dumps (LEVEL-B PROOF
+// CONTRACT). The grammar §12.2 shape: an optional `params { annotated_field }`
+// block, a run of DSP node-building `let` statements, and the MANDATORY
+// `output(expr)` sink (its absence is a parse error — E1700 AudioGraphNoOutput
+// stays RESERVED-with-variant; the single sink makes E1701 MultipleOutputs
+// impossible too). The Pulse DSP semantics (node-type catalogue, connection
+// types, asset refs, feedback DAG) are Phase 2+: E1702-E1706/W1700
+// DEFERRED-no-variant. The statements + output flow through the shared
+// canonical renderer (`.fn_call` arm) on both backends. No DSP runs.
+audio_graph LaserBlast {
+  params {
+    charge: float = 0.0
+  }
+
+  let base = wave_player("samples/laser_base.wav")
+  let synth = oscillator(charge)
+
+  output(mix(base, synth))
+}

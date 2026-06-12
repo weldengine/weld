@@ -24,10 +24,15 @@ const SourceSpan = token.SourceSpan;
 pub const Lexer = struct {
     source: []const u8,
     pos: u32 = 0,
-    /// Byte spans of every `//`, `/* */`, and `///` comment encountered.
-    /// Not attached to AST nodes in S3 — kept as a parallel slab for
-    /// Phase 0.2's `TriviaMap`.
+    /// Byte spans of every plain `//` line comment and `/* */` block
+    /// comment encountered, in source order. Consumed by the parser's
+    /// `TriviaMap` post-pass (M0.8 D-S3-trivia).
     comment_spans: std.ArrayListUnmanaged(SourceSpan) = .empty,
+    /// Byte spans of every `///` doc comment, in source order. Kept
+    /// separate from `comment_spans` (M0.8 D-S3-doccomment) so the parser
+    /// can attach them to declaration nodes as semantic doc comments rather
+    /// than discardable trivia.
+    doc_comment_spans: std.ArrayListUnmanaged(SourceSpan) = .empty,
 
     pub fn init(source: []const u8) Lexer {
         return .{ .source = source };
@@ -35,6 +40,7 @@ pub const Lexer = struct {
 
     pub fn deinit(self: *Lexer, gpa: std.mem.Allocator) void {
         self.comment_spans.deinit(gpa);
+        self.doc_comment_spans.deinit(gpa);
     }
 
     /// Produce the next token. Comments and whitespace are skipped
@@ -63,18 +69,48 @@ pub const Lexer = struct {
                     return self.singleOrCompound(start, .slash, .slash_eq);
                 },
                 '+' => return self.singleOrCompound(start, .plus, .plus_eq),
-                '-' => return self.singleOrCompound(start, .minus, .minus_eq),
+                '-' => {
+                    // `-` / `-=` / `->` (fn return type arrow, M0.8 E2).
+                    self.pos += 1;
+                    if (self.pos < self.source.len) {
+                        if (self.source[self.pos] == '=') {
+                            self.pos += 1;
+                            return .{ .kind = .minus_eq, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                        }
+                        if (self.source[self.pos] == '>') {
+                            self.pos += 1;
+                            return .{ .kind = .arrow, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                        }
+                    }
+                    return .{ .kind = .minus, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                },
                 '*' => return self.singleOrCompound(start, .star, .star_eq),
                 '%' => return self.singleOrCompound(start, .percent, .percent_eq),
-                '=' => return self.singleOrCompound(start, .eq, .eq_eq),
+                '=' => {
+                    // `=` / `==` / `=>` (fat arrow for match arms, M0.8).
+                    self.pos += 1;
+                    if (self.pos < self.source.len) {
+                        if (self.source[self.pos] == '=') {
+                            self.pos += 1;
+                            return .{ .kind = .eq_eq, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                        }
+                        if (self.source[self.pos] == '>') {
+                            self.pos += 1;
+                            return .{ .kind = .fat_arrow, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                        }
+                    }
+                    return .{ .kind = .eq, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                },
                 '!' => {
                     self.pos += 1;
                     if (self.pos < self.source.len and self.source[self.pos] == '=') {
                         self.pos += 1;
                         return .{ .kind = .bang_eq, .span = .{ .byte_start = start, .byte_end = self.pos } };
                     }
-                    // `!` postfix isn't in the S3 operator set — fall through to error.
-                    return .{ .kind = .error_byte, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                    // Bare `!` — the postfix force-unwrap operator (M0.8 E3-C
+                    // tranche 4, part1 §6.6). `!=` is handled above by maximal
+                    // munch, so this never splits a comparison.
+                    return .{ .kind = .bang, .span = .{ .byte_start = start, .byte_end = self.pos } };
                 },
                 '<' => return self.singleOrCompound(start, .lt, .lt_eq),
                 '>' => return self.singleOrCompound(start, .gt, .gt_eq),
@@ -82,10 +118,45 @@ pub const Lexer = struct {
                 ')' => return self.consumeOne(.rparen),
                 '{' => return self.consumeOne(.lbrace),
                 '}' => return self.consumeOne(.rbrace),
+                '[' => return self.consumeOne(.lbracket),
+                ']' => return self.consumeOne(.rbracket),
+                ';' => return self.consumeOne(.semicolon),
+                '|' => return self.consumeOne(.pipe),
                 ':' => return self.consumeOne(.colon),
                 ',' => return self.consumeOne(.comma),
-                '.' => return self.consumeOne(.dot),
+                '.' => {
+                    // `.` / `..` / `..=` (range operators, M0.8). `lexNumber`
+                    // only treats `.` as a decimal point when a digit follows,
+                    // so `0..10` already lexes the `0` as an int before here.
+                    self.pos += 1;
+                    if (self.pos < self.source.len and self.source[self.pos] == '.') {
+                        self.pos += 1;
+                        if (self.pos < self.source.len and self.source[self.pos] == '=') {
+                            self.pos += 1;
+                            return .{ .kind = .dotdot_eq, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                        }
+                        return .{ .kind = .dotdot, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                    }
+                    return .{ .kind = .dot, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                },
                 '@' => return self.consumeOne(.at),
+                // `?` / `?.` / `??` — the optional type suffix `T?` plus the
+                // optional-chain and null-coalesce operators (M0.8 E3-C
+                // tranche 4, part1 §6.6). Maximal munch: `?.` and `??` never
+                // appear in type positions, so the longest match is safe.
+                '?' => {
+                    self.pos += 1;
+                    if (self.pos < self.source.len and self.source[self.pos] == '.') {
+                        self.pos += 1;
+                        return .{ .kind = .question_dot, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                    }
+                    if (self.pos < self.source.len and self.source[self.pos] == '?') {
+                        self.pos += 1;
+                        return .{ .kind = .question_question, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                    }
+                    return .{ .kind = .question, .span = .{ .byte_start = start, .byte_end = self.pos } };
+                },
+                '#' => return self.lexColor(start),
                 '"' => return self.lexString(start),
                 '0'...'9' => return self.lexNumber(start),
                 'a'...'z', 'A'...'Z', '_' => return self.lexIdent(start),
@@ -129,11 +200,22 @@ pub const Lexer = struct {
 
     fn skipLineComment(self: *Lexer, gpa: std.mem.Allocator) !void {
         const start = self.pos;
-        // Either `//` or `///` (doc comment). The brief lexes `///` as a
-        // regular comment in S3 (doc-comments map deferred Phase 0.2).
+        // Distinguish a `///` doc comment from a plain `//` line comment
+        // (M0.8 D-S3-doccomment): exactly three slashes followed by a
+        // non-slash is a doc comment; `////`+ is a plain comment (Rust
+        // convention). Doc spans feed the per-node doc map, plain comments
+        // the trivia slab.
+        const is_doc = self.pos + 2 < self.source.len and
+            self.source[self.pos + 2] == '/' and
+            (self.pos + 3 >= self.source.len or self.source[self.pos + 3] != '/');
         self.pos += 2;
         while (self.pos < self.source.len and self.source[self.pos] != '\n') : (self.pos += 1) {}
-        try self.comment_spans.append(gpa, .{ .byte_start = start, .byte_end = self.pos });
+        const span: SourceSpan = .{ .byte_start = start, .byte_end = self.pos };
+        if (is_doc) {
+            try self.doc_comment_spans.append(gpa, span);
+        } else {
+            try self.comment_spans.append(gpa, span);
+        }
     }
 
     fn skipBlockComment(self: *Lexer, gpa: std.mem.Allocator) !void {
@@ -181,11 +263,35 @@ pub const Lexer = struct {
         return .{ .kind = kind, .span = span };
     }
 
+    fn isIdentChar(c: u8) bool {
+        return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+    }
+
+    fn isDigit(c: u8) bool {
+        return c >= '0' and c <= '9';
+    }
+
+    fn isHexDigit(c: u8) bool {
+        return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+    }
+
     fn lexNumber(self: *Lexer, start: u32) Token {
         // Consume integer part.
         while (self.pos < self.source.len) : (self.pos += 1) {
             const c = self.source[self.pos];
             if (!((c >= '0' and c <= '9') or c == '_')) break;
+        }
+        // TIME_LITERAL `DD:DD` (M0.8 E4 routine triggers, `etch-grammar.md`
+        // §1.4): exactly two digits, ':', exactly two digits, contiguous —
+        // the §1.4 greedy-lexer rule (like DURATION_LIT). `06:003` stays
+        // INT ':' INT; `6:00` (one digit) stays INT ':' INT.
+        if (self.pos - start == 2 and isDigit(self.source[start]) and isDigit(self.source[start + 1]) and
+            self.pos + 2 < self.source.len and self.source[self.pos] == ':' and
+            isDigit(self.source[self.pos + 1]) and isDigit(self.source[self.pos + 2]) and
+            (self.pos + 3 >= self.source.len or !isDigit(self.source[self.pos + 3])))
+        {
+            self.pos += 3;
+            return .{ .kind = .time_literal, .span = .{ .byte_start = start, .byte_end = self.pos } };
         }
         // Optional fractional part: only if `.` is followed by a digit.
         // `42.field` must lex as INT + DOT + IDENT, not FLOAT.
@@ -200,6 +306,18 @@ pub const Lexer = struct {
                     if (!((c >= '0' and c <= '9') or c == '_')) break;
                 }
             }
+        }
+        // DURATION_LIT `FLOAT "s"` (M0.8 E4 gate fix, `etch-grammar.md` §1.4):
+        // the greedy-lexer rule — a float immediately followed by a lone `s`
+        // (no identifier character after it) is one duration token. FLOAT
+        // only per the EBNF: `3s` stays INT + IDENT; `0.3 s` (space) stays
+        // FLOAT + IDENT; `0.3sec` stays FLOAT + IDENT (the `06:003` time
+        // boundary precedent).
+        if (is_float and self.pos < self.source.len and self.source[self.pos] == 's' and
+            (self.pos + 1 >= self.source.len or !isIdentChar(self.source[self.pos + 1])))
+        {
+            self.pos += 1;
+            return .{ .kind = .duration_literal, .span = .{ .byte_start = start, .byte_end = self.pos } };
         }
         return .{
             .kind = if (is_float) .float_literal else .int_literal,
@@ -230,6 +348,24 @@ pub const Lexer = struct {
             self.pos += 1;
         }
         // Unterminated string: surface as error_byte at the opening quote.
+        return .{ .kind = .error_byte, .span = .{ .byte_start = start, .byte_end = self.pos } };
+    }
+
+    /// `COLOR_LITERAL = "#" HEX_DIGIT{6} [HEX_DIGIT{2}]` (`etch-grammar.md`
+    /// §1.4 l.211) — exactly 6 (RGB) or 8 (RGBA) hex digits; the
+    /// DURATION_LIT-precedent §1.4 literal lift (M0.8 E5). A `#` followed by
+    /// any other count of hex digits is `error_byte` over the run (the parser
+    /// surfaces it); a color followed by a non-hex char lexes as the color
+    /// then that char (e.g. `#FFFFFFz` → color + ident).
+    fn lexColor(self: *Lexer, start: u32) Token {
+        self.pos += 1; // '#'
+        var n: u32 = 0;
+        while (self.pos < self.source.len and isHexDigit(self.source[self.pos])) : (self.pos += 1) {
+            n += 1;
+        }
+        if (n == 6 or n == 8) {
+            return .{ .kind = .color_literal, .span = .{ .byte_start = start, .byte_end = self.pos } };
+        }
         return .{ .kind = .error_byte, .span = .{ .byte_start = start, .byte_end = self.pos } };
     }
 
@@ -295,16 +431,31 @@ test "lexer skips line and block comments, records spans in comment_spans" {
     try std.testing.expectEqualStrings("// header", src[lex.comment_spans.items[0].byte_start..lex.comment_spans.items[0].byte_end]);
 }
 
-test "lexer skips triple-slash doc comments like line comments" {
+test "lexer routes triple-slash doc comments to doc_comment_spans (D-S3-doccomment)" {
     const gpa = std.testing.allocator;
-    var lex = Lexer.init("/// doc\nlet x = 1");
+    const src = "/// doc\nlet x = 1";
+    var lex = Lexer.init(src);
     defer lex.deinit(gpa);
     try expectKind(&lex, gpa, .kw_let);
     try expectKind(&lex, gpa, .ident);
     try expectKind(&lex, gpa, .eq);
     try expectKind(&lex, gpa, .int_literal);
     try expectKind(&lex, gpa, .eof);
-    try std.testing.expectEqual(@as(usize, 1), lex.comment_spans.items.len);
+    // The `///` is a doc comment, not a plain trivia comment.
+    try std.testing.expectEqual(@as(usize, 1), lex.doc_comment_spans.items.len);
+    try std.testing.expectEqual(@as(usize, 0), lex.comment_spans.items.len);
+    const d = lex.doc_comment_spans.items[0];
+    try std.testing.expectEqualStrings("/// doc", src[d.byte_start..d.byte_end]);
+}
+
+test "lexer distinguishes //, ///, //// comment kinds (D-S3-doccomment)" {
+    const gpa = std.testing.allocator;
+    // `//` plain, `///` doc, `////` plain (4+ slashes is not a doc comment).
+    var lex = Lexer.init("// plain\n/// doc\n//// also plain\nlet x = 1");
+    defer lex.deinit(gpa);
+    while ((try lex.next(gpa)).kind != .eof) {}
+    try std.testing.expectEqual(@as(usize, 1), lex.doc_comment_spans.items.len);
+    try std.testing.expectEqual(@as(usize, 2), lex.comment_spans.items.len);
 }
 
 test "lexer rejects invalid UTF-8 with error_utf8" {
@@ -330,11 +481,42 @@ test "lexer disambiguates integer vs float literal" {
 
 test "lexer flags unknown Etch keyword from full grammar as error_unknown_keyword" {
     const gpa = std.testing.allocator;
-    var lex = Lexer.init("fn enum behavior");
+    // `fn` graduated with the M0.8 E2 call mechanism, `ability` with its E4
+    // Level-B slice; the whole E6 render/anim/audio/cinematic family graduated,
+    // and `scene`/`prefab` graduated with the E7 Level-C scene slice (the last
+    // two construct keywords of the v0.6 grammar). The remaining reserved
+    // top-level keyword is `import` (module system, Phase 1+).
+    var lex = Lexer.init("fn ability import");
     defer lex.deinit(gpa);
+    try expectKind(&lex, gpa, .kw_fn);
+    try expectKind(&lex, gpa, .kw_ability);
     try expectKind(&lex, gpa, .error_unknown_keyword);
-    try expectKind(&lex, gpa, .error_unknown_keyword);
-    try expectKind(&lex, gpa, .error_unknown_keyword);
+}
+
+test "lexer recognizes the M0.8 E7 scene + prefab keywords (graduated from reserved)" {
+    const gpa = std.testing.allocator;
+    var lex = Lexer.init("scene prefab");
+    defer lex.deinit(gpa);
+    try expectKind(&lex, gpa, .kw_scene);
+    try expectKind(&lex, gpa, .kw_prefab);
+    try expectKind(&lex, gpa, .eof);
+}
+
+test "lexer recognizes the M0.8 E2 keywords and the `->` arrow" {
+    const gpa = std.testing.allocator;
+    var lex = Lexer.init("async fn f() -> int { return throws }");
+    defer lex.deinit(gpa);
+    try expectKind(&lex, gpa, .kw_async);
+    try expectKind(&lex, gpa, .kw_fn);
+    try expectKind(&lex, gpa, .ident); // f
+    try expectKind(&lex, gpa, .lparen);
+    try expectKind(&lex, gpa, .rparen);
+    try expectKind(&lex, gpa, .arrow); // ->
+    try expectKind(&lex, gpa, .kw_int);
+    try expectKind(&lex, gpa, .lbrace);
+    try expectKind(&lex, gpa, .kw_return);
+    try expectKind(&lex, gpa, .kw_throws);
+    try expectKind(&lex, gpa, .rbrace);
 }
 
 test "lexer handles compound operators and keywords" {
@@ -379,4 +561,52 @@ test "lexer accepts string literal with arbitrary UTF-8 inside" {
 fn expectKind(lex: *Lexer, gpa: std.mem.Allocator, kind: TokenKind) !void {
     const t = try lex.next(gpa);
     try std.testing.expectEqual(kind, t.kind);
+}
+
+test "lexer lexes DD:DD as a time literal, greedy-contiguous only (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    var lex = Lexer.init("06:00 6:00 06:003 22:30");
+    // `06:00` → one time literal.
+    try expectKind(&lex, gpa, .time_literal);
+    // `6:00` — one digit before ':' → INT ':' INT.
+    try expectKind(&lex, gpa, .int_literal);
+    try expectKind(&lex, gpa, .colon);
+    try expectKind(&lex, gpa, .int_literal);
+    // `06:003` — three digits after ':' → INT ':' INT.
+    try expectKind(&lex, gpa, .int_literal);
+    try expectKind(&lex, gpa, .colon);
+    try expectKind(&lex, gpa, .int_literal);
+    // `22:30` → time literal again.
+    try expectKind(&lex, gpa, .time_literal);
+    try expectKind(&lex, gpa, .eof);
+}
+
+test "lexer lexes FLOAT 's' as a duration literal, greedy-contiguous only (M0.8 E4)" {
+    const gpa = std.testing.allocator;
+    // `0.3s` → one DURATION_LIT; `3s` stays INT + IDENT (FLOAT-only per
+    // §1.4); `0.3 s` (space) and `0.3sec` (ident continues) stay FLOAT +
+    // IDENT — the greedy-boundary rule.
+    var lex = Lexer.init("0.3s 3s 0.3 s 0.3sec");
+    defer lex.deinit(gpa);
+    try expectKind(&lex, gpa, .duration_literal);
+    try expectKind(&lex, gpa, .int_literal);
+    try expectKind(&lex, gpa, .ident);
+    try expectKind(&lex, gpa, .float_literal);
+    try expectKind(&lex, gpa, .ident);
+    try expectKind(&lex, gpa, .float_literal);
+    try expectKind(&lex, gpa, .ident);
+}
+
+test "lexer lexes COLOR_LITERAL as 6 or 8 hex digits only (M0.8 E5, §1.4)" {
+    const gpa = std.testing.allocator;
+    // `#2E6BBF` (6) and `#12345678` (8) are colors; `#FFF` (3) and `#1234567`
+    // (7) are malformed → error_byte; `#FFFFFFz` is a 6-hex color then `z`.
+    var lex = Lexer.init("#2E6BBF #12345678 #FFF #1234567 #FFFFFFz");
+    defer lex.deinit(gpa);
+    try expectKind(&lex, gpa, .color_literal);
+    try expectKind(&lex, gpa, .color_literal);
+    try expectKind(&lex, gpa, .error_byte);
+    try expectKind(&lex, gpa, .error_byte);
+    try expectKind(&lex, gpa, .color_literal);
+    try expectKind(&lex, gpa, .ident);
 }

@@ -3,10 +3,17 @@
     .version = "0.0.0",
     .fingerprint = 0x1f9eb7bdbd1fcc68, // local — synth_100 sub-project
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .weld = .{
+            // Path local — Phase 0 monolithic repo (cf. engine-spec.md §3.5),
+            // three levels up from bench/fixtures/synth_100/.
+            .path = "../../..",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "README.md",
+        "scripts",
     },
 }

@@ -1,0 +1,14 @@
+// M0.8 v0.6 foundation: a `type` alias used as a component field type. The
+// interpreter and the cooked Zig must both lay `x` out as the underlying f64
+// (alias resolved), so the differential stays byte-exact.
+type Meters = float
+
+component Position {
+  x: Meters = 0.0
+}
+
+rule advance(entity: Entity)
+  when entity has Position
+{
+  entity.get_mut(Position).x += 2.5
+}

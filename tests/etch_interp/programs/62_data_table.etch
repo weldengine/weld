@@ -1,0 +1,40 @@
+// Differential 62 — Level-B `data` table (M0.8 E4).
+// Serialized-IR parity: the interpreter BUILDS the descriptors, the cooked
+// Zig EMITS them; both serialize through the shared canonical serializer
+// and must produce byte-identical dumps (LEVEL-B PROOF CONTRACT, brief
+// journal 2026-06-10). No rule executes — Level B never touches the world.
+enum Rarity {
+  common,
+  uncommon,
+  rare,
+}
+
+struct Item {
+  rarity: Rarity
+  weight: float = 0.0
+  display_name: string
+  value: int
+}
+
+data ItemDatabase: Item {
+  iron_sword: {
+    rarity: .uncommon,
+    weight: 3.5,
+    display_name: "Iron Sword",
+    value: 50,
+  },
+  iron_sword_enchanted: {
+    ..ItemDatabase.iron_sword,
+    display_name: "Iron Sword +1",
+    value: 120,
+  },
+  pebble: {
+    rarity: .common,
+    display_name: "Pebble",
+    value: 0,
+  },
+}
+
+data StarterLoot: Item {
+  starter_sword: { ..ItemDatabase.iron_sword, value: 25 },
+}

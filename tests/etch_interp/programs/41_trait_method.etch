@@ -1,0 +1,36 @@
+// M0.8 E2 block 3 tranche C: a `trait` with an abstract method + a default-
+// bodied method, implemented for a user `struct`. `base` is abstract (the impl
+// provides it); `doubled` has a default body that calls `self.base()` (the
+// impl does NOT override it). The rule calls `n.doubled()` — trait dispatch
+// (§5.5: inherent miss → trait), resolving `doubled` to the trait default,
+// which dispatches `base` to the impl. Both backends must agree byte-exact: the
+// interpreter keys `(N, base)`/`(N, doubled)` in its trait-method table; the
+// cooked Zig emits both as `pub fn` members of `N` (the default `doubled`
+// emitted because the impl leaves it un-overridden). out = base(21) * 2 = 42.
+trait Doubler {
+  fn base(self) -> int
+  fn doubled(self) -> int {
+    self.base() * 2
+  }
+}
+
+struct N {
+  v: int = 0
+}
+
+impl Doubler for N {
+  fn base(self) -> int {
+    self.v
+  }
+}
+
+component Acc {
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has Acc
+{
+  let n = N { v: 21 }
+  entity.get_mut(Acc).out = n.doubled()
+}

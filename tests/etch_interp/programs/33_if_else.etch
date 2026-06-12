@@ -1,0 +1,25 @@
+// M0.8 control flow: `if`/`else` as an expression (value position, with an
+// else-if chain) and as a statement (side-effect, value discarded). The
+// interpreter selects the matching branch and evaluates its block value; the
+// cooked Zig emits `if (cond) <value> else ...` (value position, with a
+// concrete `let` type so the comptime-int branches coerce) and
+// `if (cond) { ... } else { ... }` (statement position). level = 2 →
+// category = 20 (the `lvl < 3` arm) → out = 20; category > 15 → flag = 1.
+component C {
+  level: int = 2
+  flag: int = 0
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has C
+{
+  let lvl = entity.get(C).level
+  let category = if lvl < 1 { 10 } else if lvl < 3 { 20 } else { 30 }
+  entity.get_mut(C).out = category
+  if category > 15 {
+    entity.get_mut(C).flag = 1
+  } else {
+    entity.get_mut(C).flag = 0
+  }
+}

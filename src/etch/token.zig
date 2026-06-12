@@ -32,6 +32,9 @@ pub const TokenKind = enum {
     float_literal,
     bool_literal, // true / false
     string_literal, // simple-quote only in S3 (no interpolation)
+    time_literal, // DD:DD in-game time (M0.8 E4 routine triggers, §1.4)
+    duration_literal, // FLOAT "s" duration (M0.8 E4 gate fix, §1.4 — greedy-contiguous)
+    color_literal, // "#" + 6 or 8 hex (M0.8 E5, §1.4 l.211 — the DURATION_LIT-precedent literal lift)
 
     // ── Keywords (S3 subset) ──
     kw_let,
@@ -47,6 +50,61 @@ pub const TokenKind = enum {
     kw_changed,
     kw_get,
     kw_get_mut,
+    kw_as, // cast operator (M0.8 v0.6 foundations)
+    kw_type, // top-level type alias (M0.8 v0.6 foundations)
+    kw_assert, // assert statement (M0.8 v0.6 foundations)
+    kw_match, // match expression (M0.8 v0.6 foundations)
+    kw_for, // for-in loop (M0.8 v0.6 foundations)
+    kw_in, // for-in loop (M0.8 v0.6 foundations)
+    kw_loop, // loop expression (M0.8 loop/break)
+    kw_break, // break [label] [value] (M0.8 loop/break)
+    kw_continue, // continue [label] (M0.8 loop/break)
+    kw_if, // if/else expression + statement (M0.8 control-flow completion)
+    kw_else,
+    kw_while, // while loop statement (M0.8 control-flow completion)
+    kw_throw, // throw expression (M0.8 error handling)
+    kw_try, // try { } catch (M0.8 error handling)
+    kw_catch, // try { } catch IDENT { } (M0.8 error handling)
+    kw_fn, // top-level fn declaration (M0.8 E2 call mechanism)
+    kw_return, // return [expr] (M0.8 E2 call mechanism)
+    kw_throws, // fn throws marker (M0.8 E2 call mechanism)
+    kw_async, // async fn (parsed E2; interp E3, codegen Phase 2)
+    kw_await, // await <target> (M0.8 E3 sub-slice B; interp-only, codegen Phase 2)
+    kw_struct, // struct declaration (M0.8 E2 block 3 declaration layer)
+    kw_impl, // impl block (M0.8 E2 block 3 declaration layer)
+    kw_enum, // enum declaration (M0.8 E2 block 3 tranche B)
+    kw_trait, // trait declaration (M0.8 E2 block 3 tranche C)
+    kw_event, // event declaration (M0.8 E3 ECS layer)
+    kw_emit, // emit statement (M0.8 E3 ECS layer)
+    kw_tags, // tags hierarchical declaration (M0.8 E3 ECS layer)
+    kw_has_tag, // tag query operator (M0.8 E3 ECS layer)
+    kw_has_no_tag, // tag query operator (M0.8 E3 ECS layer)
+    kw_has_any_tag, // tag query operator (M0.8 E3 ECS layer)
+    kw_has_all_tags, // tag query operator (M0.8 E3 ECS layer)
+    kw_has_no_tags, // tag query operator (M0.8 E3 ECS layer)
+    kw_add_tag, // tag mutation (M0.8 E3 ECS layer — deferred structural change)
+    kw_remove_tag, // tag mutation (M0.8 E3 ECS layer — deferred structural change)
+    kw_data, // data table declaration (M0.8 E4 Level B gameplay)
+    kw_routine, // routine declaration (M0.8 E4 Level B gameplay)
+    kw_behavior, // behavior tree declaration (M0.8 E4 Level B gameplay)
+    kw_quest, // quest declaration (M0.8 E4 Level B gameplay)
+    kw_dialogue, // dialogue declaration (M0.8 E4 Level B gameplay)
+    kw_ability, // ability declaration (M0.8 E4 Level B gameplay)
+    kw_branch, // quest/dialogue branch (M0.8 E4; the async T2/T3 `branch` statement stays out of M0.8 — explicit parse error)
+    kw_sequence, // behavior composite type (M0.8 E4) + the E6 top-level `sequence` cinematic construct (matched by token kind in parseTopLevel — the input_combo precedent)
+    kw_after, // routine trigger `after Segment` (M0.8 E4; the §4.3 timer statement stays out of M0.8 — explicit parse error)
+    kw_theme, // theme declaration (M0.8 E5 Level B presentation)
+    kw_motion, // motion declaration (M0.8 E5 Level B presentation — state-based UI animation)
+    kw_input_mapping, // input_mapping declaration (M0.8 E5 Level B presentation — STRICT, no execution)
+    kw_widget, // widget declaration (M0.8 E5 Level B presentation — recursive UI tree)
+    kw_locale, // locale declaration (M0.8 E5 Level B presentation — translation table)
+    kw_effect, // effect declaration (M0.8 E6 Level B VFX — emitters + event handlers, VFX-only since v0.6)
+    kw_audio_graph, // audio_graph declaration (M0.8 E6 Level B audio — DSP node graph, mandatory output sink)
+    kw_audio_score, // audio_score declaration (M0.8 E6 Level B audio — adaptive music, STRING-named, sections + stems)
+    kw_anim_graph, // anim_graph declaration (M0.8 E6 Level B animation — skeletal state machine, states + layers)
+    kw_shader, // shader declaration (M0.8 E6 Level B render — vertex/fragment stages, shader-mode body validation)
+    kw_scene, // scene declaration (M0.8 E7 Level C — STRING-named scene graph, entity/instance decls)
+    kw_prefab, // prefab declaration (M0.8 E7 Level C — STRING-named, of/extends relation, requires + on_attach/on_detach hooks)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -75,14 +133,26 @@ pub const TokenKind = enum {
     gt,
     lt_eq,
     gt_eq,
+    fat_arrow, // => (match arm, M0.8 v0.6 foundations)
+    arrow, // -> (fn return type, M0.8 E2 call mechanism)
+    dotdot, // .. exclusive range (M0.8 v0.6 foundations)
+    dotdot_eq, // ..= inclusive range (M0.8 v0.6 foundations)
     lparen,
     rparen,
     lbrace,
     rbrace,
+    lbracket, // [ — array / map literals, indexing (M0.8 collections)
+    rbracket, // ]
+    semicolon, // ; — array fill literal `[v; n]` (M0.8 collections)
+    pipe, // | — closure delimiter `|a| e` (M0.8 closures; bitwise-or is out of E1)
     colon,
     comma,
     dot,
     at,
+    question, // ? — optional type suffix `T?` (M0.8 E2 block 5)
+    question_dot, // ?. — optional chain (M0.8 E3-C tranche 4, part1 §6.6)
+    question_question, // ?? — null coalesce (M0.8 E3-C tranche 4, part1 §6.6)
+    bang, // ! postfix — force unwrap (M0.8 E3-C tranche 4, part1 §6.6)
 
     // ── End / error ──
     eof,
@@ -92,9 +162,9 @@ pub const TokenKind = enum {
     /// Invalid UTF-8 continuation byte. The parser emits `E0001` with
     /// the precise byte offset.
     error_utf8,
-    /// Lexed an identifier that matches an Etch keyword outside the S3
-    /// subset (e.g. `fn`, `enum`, `behavior`). The parser turns these
-    /// into `E0001 UnsupportedConstructInS3` at use site.
+    /// Lexed an identifier that matches an Etch keyword still outside the
+    /// supported subset (e.g. `behavior`, `event`, `quest`). The parser turns
+    /// these into `E0001 UnsupportedConstructInS3` at use site.
     error_unknown_keyword,
 };
 
@@ -105,6 +175,20 @@ pub const Token = struct {
     kind: TokenKind,
     span: SourceSpan,
 };
+
+/// True when `k` is a keyword token (the contiguous `kw_let`…`kw_f64`
+/// block). Tag-path segments and tag-namespace names accept keywords
+/// CONTEXTUALLY (M0.8 E4): graduating a construct keyword (`quest`,
+/// `data`, …) must never break a tag hierarchy that uses the same word
+/// (`.quest.merchant_intro_done`).
+pub fn isKeywordToken(k: TokenKind) bool {
+    comptime {
+        // The range check rides the enum order — pin it.
+        std.debug.assert(@intFromEnum(TokenKind.kw_let) < @intFromEnum(TokenKind.kw_f64));
+    }
+    const v = @intFromEnum(k);
+    return v >= @intFromEnum(TokenKind.kw_let) and v <= @intFromEnum(TokenKind.kw_f64);
+}
 
 /// Map `[]const u8` → `TokenKind` for keywords. The lookup is a linear
 /// scan over a small static table — adequate for the S3 corpus (<200 LOC
@@ -129,6 +213,61 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "changed", .kind = .kw_changed },
     .{ .lexeme = "get", .kind = .kw_get },
     .{ .lexeme = "get_mut", .kind = .kw_get_mut },
+    .{ .lexeme = "as", .kind = .kw_as },
+    .{ .lexeme = "type", .kind = .kw_type },
+    .{ .lexeme = "assert", .kind = .kw_assert },
+    .{ .lexeme = "match", .kind = .kw_match },
+    .{ .lexeme = "for", .kind = .kw_for },
+    .{ .lexeme = "in", .kind = .kw_in },
+    .{ .lexeme = "loop", .kind = .kw_loop },
+    .{ .lexeme = "break", .kind = .kw_break },
+    .{ .lexeme = "continue", .kind = .kw_continue },
+    .{ .lexeme = "if", .kind = .kw_if },
+    .{ .lexeme = "else", .kind = .kw_else },
+    .{ .lexeme = "while", .kind = .kw_while },
+    .{ .lexeme = "throw", .kind = .kw_throw },
+    .{ .lexeme = "try", .kind = .kw_try },
+    .{ .lexeme = "catch", .kind = .kw_catch },
+    .{ .lexeme = "fn", .kind = .kw_fn },
+    .{ .lexeme = "return", .kind = .kw_return },
+    .{ .lexeme = "throws", .kind = .kw_throws },
+    .{ .lexeme = "async", .kind = .kw_async },
+    .{ .lexeme = "await", .kind = .kw_await },
+    .{ .lexeme = "struct", .kind = .kw_struct },
+    .{ .lexeme = "impl", .kind = .kw_impl },
+    .{ .lexeme = "enum", .kind = .kw_enum },
+    .{ .lexeme = "trait", .kind = .kw_trait },
+    .{ .lexeme = "event", .kind = .kw_event },
+    .{ .lexeme = "emit", .kind = .kw_emit },
+    .{ .lexeme = "tags", .kind = .kw_tags },
+    .{ .lexeme = "has_tag", .kind = .kw_has_tag },
+    .{ .lexeme = "has_no_tag", .kind = .kw_has_no_tag },
+    .{ .lexeme = "has_any_tag", .kind = .kw_has_any_tag },
+    .{ .lexeme = "has_all_tags", .kind = .kw_has_all_tags },
+    .{ .lexeme = "has_no_tags", .kind = .kw_has_no_tags },
+    .{ .lexeme = "add_tag", .kind = .kw_add_tag },
+    .{ .lexeme = "remove_tag", .kind = .kw_remove_tag },
+    .{ .lexeme = "data", .kind = .kw_data },
+    .{ .lexeme = "routine", .kind = .kw_routine },
+    .{ .lexeme = "behavior", .kind = .kw_behavior },
+    .{ .lexeme = "quest", .kind = .kw_quest },
+    .{ .lexeme = "dialogue", .kind = .kw_dialogue },
+    .{ .lexeme = "ability", .kind = .kw_ability },
+    .{ .lexeme = "branch", .kind = .kw_branch },
+    .{ .lexeme = "sequence", .kind = .kw_sequence },
+    .{ .lexeme = "after", .kind = .kw_after },
+    .{ .lexeme = "theme", .kind = .kw_theme },
+    .{ .lexeme = "motion", .kind = .kw_motion },
+    .{ .lexeme = "input_mapping", .kind = .kw_input_mapping },
+    .{ .lexeme = "widget", .kind = .kw_widget },
+    .{ .lexeme = "locale", .kind = .kw_locale },
+    .{ .lexeme = "effect", .kind = .kw_effect },
+    .{ .lexeme = "audio_graph", .kind = .kw_audio_graph },
+    .{ .lexeme = "audio_score", .kind = .kw_audio_score },
+    .{ .lexeme = "anim_graph", .kind = .kw_anim_graph },
+    .{ .lexeme = "shader", .kind = .kw_shader },
+    .{ .lexeme = "scene", .kind = .kw_scene },
+    .{ .lexeme = "prefab", .kind = .kw_prefab },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -154,41 +293,40 @@ pub const s3_keywords = [_]KeywordEntry{
 /// would collide with legitimate identifier names like `state`, `event`,
 /// `priority`.
 pub const non_s3_keywords = [_][]const u8{
-    // ── Top-level constructs (26 of 29 from EBNF v0.6) ──
-    "fn",          "struct",       "enum",        "trait",          "impl",
-    "event",       "tags",         "import",      "const",          "type",
-    "private",     "behavior",     "routine",     "quest",          "dialogue",
-    "ability",     "effect",       "shader",      "widget",         "theme",
-    "motion",      "anim_graph",   "audio_graph", "audio_score",    "sequence",
-    "data",        "scene",        "prefab",      "input_mapping",  "locale",
-    "test",        "override",
+    // ── Top-level constructs still out of scope (`fn` graduated with M0.8 E2
+    //    call mechanism; `struct` / `impl` / `enum` / `trait` with E2 block 3;
+    //    `event` + `tags` with E3 ECS layer; `data` with E4 Level B gameplay;
+    //    `scene` + `prefab` graduated with E7 Level C — the last two construct
+    //    keywords of the v0.6 grammar) ──
+    "import",
+    "const",
+    "private",
+    "test",
+    "override",
 
-    // ── Control flow (out of S3 rule body) ──
-        "if",          "else",           "for",
-    "in",          "while",        "break",       "continue",       "loop",
-    "match",       "return",
+    // ── Async machinery: `async` graduated with M0.8 E2 (`async fn` parsed;
+    //    interp E3, codegen Phase 2); `await` graduated with M0.8 E3 sub-slice B
+    //    (`async rule`/`async fn` + `await` interpreted, codegen Phase 2). The
+    //    concurrency algebra (`race`/`sync`/`spawn`) stays reserved (T2/T3,
+    //    flagged for Review E3); `branch` graduated with the E4 quest slice
+    //    (its async statement form keeps an explicit fail-loud parse error) ──
+    "race",
+    "sync",
+    "spawn",
 
-    // ── Async machinery (out of S3) ──
-          "async",       "await",          "race",
-    "sync",        "branch",       "spawn",
+    // ── Timers / lifecycle (out of S3; `emit` graduated with E3 ECS layer;
+    //    `after` graduated with E4 routine triggers — the §4.3 timer
+    //    statement keeps an explicit fail-loud parse error) ──
+    "every",
+    "after_unscaled",
+    "quantize",
 
-    // ── Error handling (out of S3) ──
-          "try",            "catch",
-    "throws",      "throw",        "assert",
-
-    // ── Tag operators (out of S3) ──
-         "has_tag",        "has_no_tag",
-    "has_any_tag", "has_all_tags", "has_no_tags", "add_tag",        "remove_tag",
-
-    // ── Timers / emit / lifecycle (out of S3) ──
-    "emit",        "after",        "every",       "after_unscaled", "quantize",
-
-    // Note: `as`, `where`, `self`, `none`, `some` are intentionally NOT
-    // listed — they appear in legitimate identifier-shaped positions in
-    // S3 annotation args (e.g. `@pause_group(.none)`). The S3 parser
-    // accepts them as plain identifiers; their grammar-level uses (cast,
-    // generic bound, impl self param, Optional construction) only show
-    // up in constructs already rejected at the top level.
+    // Note: `where`, `self`, `none`, `some` are intentionally NOT listed —
+    // they appear in legitimate identifier-shaped positions in S3 annotation
+    // args (e.g. `@pause_group(.none)`). The S3 parser accepts them as plain
+    // identifiers; their grammar-level uses (generic bound, impl self param,
+    // Optional construction) only show up in constructs rejected at the top
+    // level. `as` graduated to a real keyword with the M0.8 cast operator.
 };
 
 test "non_s3_keywords does not collide with s3_keywords" {

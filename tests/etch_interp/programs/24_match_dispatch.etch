@@ -1,0 +1,14 @@
+// M0.8 v0.6 foundation: `match` expression dispatching on an int scrutinee
+// with literal arms and a wildcard. The interpreter and the cooked Zig
+// (a labeled block with an if-else chain) must select the same arm, keeping
+// the differential byte-exact.
+component C {
+  sel: int = 1
+  out: int = 0
+}
+
+rule pick(entity: Entity)
+  when entity has C
+{
+  entity.get_mut(C).out = match entity.get(C).sel { 0 => 100, 1 => 200, _ => 999 }
+}

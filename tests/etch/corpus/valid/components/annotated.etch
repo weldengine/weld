@@ -1,6 +1,8 @@
-// Components decorated with every S3-recognised annotation kind. The S3
-// type-checker accepts unknown annotation arg shapes (applicability is
-// deferred Phase 0.2), so the diverse arg patterns here all parse.
+// Components decorated with the S3-recognised annotations, each on a
+// target it is actually valid for. M0.8 enforces annotation applicability
+// (D-S3-annot-applicability, cf. `etch-resolver-types.md` §13.2), so
+// `@requires`/`@storage`/`@save` sit on the component itself while
+// `@hidden`/`@range`/`@readonly`/`@replicated` sit on fields.
 
 @requires(Transform)
 component Light {
@@ -20,14 +22,9 @@ component Achievement {
     unlock_tick: u32 = 0
 }
 
-@replicated(predicted)
 component Predicted {
+    @replicated(predicted)
     flag: bool = false
-}
-
-@networked
-component Networked {
-    seq_no: u32 = 0
 }
 
 @storage(sparse)

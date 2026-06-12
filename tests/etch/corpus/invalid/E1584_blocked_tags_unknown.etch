@@ -1,0 +1,12 @@
+// E1584 RequiresNotTagsUnknown — a tags_blocked path absent from the tag
+// table (keyed on the §8.5 name).
+
+tags {
+  character {
+    status { alive }
+  }
+}
+
+ability Bad {
+  tags_blocked: [.character.status.rooted]
+}

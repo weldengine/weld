@@ -190,6 +190,20 @@ pub fn build(b: *std.Build) void {
     const ex_step = b.step("run-example-triangle", "Build & run the triangle example sub-project");
     ex_step.dependOn(&ex_run.step);
 
+    // M0.8 / E3-D — `zig build verify-synth-100` builds the standalone
+    // `bench/fixtures/synth_100/` sub-project (D-S5-synth100-proper): a
+    // real path-dep package that cooks the committed corpus through the
+    // parent's `etch_cook` artifact and compiles it against
+    // `weld.module("weld_core")`. A nested cold build — kept OUT of the
+    // default `zig build test` (its own CI step, like the triangle).
+    const synth_verify = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build",
+    });
+    synth_verify.setCwd(b.path("bench/fixtures/synth_100"));
+    const synth_verify_step = b.step("verify-synth-100", "Build the synth_100 sub-project (nested zig build — the D-S5-synth100-proper proof)");
+    synth_verify_step.dependOn(&synth_verify.step);
+
     // M0.4 — Shader compiler tool: `zig build shaders` regenerates the
     // `.spv` from the `.glsl`. `zig build shaders-check` diffs vs
     // the committed ones (brief §Files + §CI).
@@ -376,6 +390,24 @@ pub fn build(b: *std.Build) void {
         // M0.5 item 8 — Etch idents that collide with Zig keywords must
         // codegen to parseable (escaped) Zig. RED before the lower.zig fix.
         .{ .path = "tests/etch/keyword_ident_test.zig", .etch = true },
+        // M0.8 / E1 — top-level recovery sync-point (ParseResult.diagnostics
+        // slice + resync at the next top-level keyword).
+        .{ .path = "tests/etch/recovery_toplevel_test.zig", .etch = true },
+        // M0.8 / E1 — EBNF harness: every ```etch example block parses clean.
+        .{ .path = "tests/etch/ebnf_examples_test.zig", .etch = true },
+        // M0.8 / E7 — AST stable interface freeze: ≥20 Level-1 entry points
+        // (§10.3.1). Compilation is the cross-phase invariant.
+        .{ .path = "tests/etch/ast_stable_interface.zig", .etch = true, .dedicated_step = "test-ast-stable" },
+        // M0.8 / E7 — interpreter hot-reload: edit rule body → AST swap →
+        // behaviour change on the same live world, measured < 500 ms.
+        .{ .path = "tests/etch/hot_reload_test.zig", .etch = true, .dedicated_step = "test-hot-reload" },
+        // M0.8 / E7 — full-grammar 500+ line integration reference: parse
+        // < 50 ms + type-check clean + Level-A interpret.
+        .{ .path = "tests/etch/reference_500_test.zig", .etch = true, .dedicated_step = "test-ref500" },
+        // M0.8 / E7 — TIME_LITERAL §3.2 expression arm wired (builtin Time §2.2).
+        .{ .path = "tests/etch/time_literal_test.zig", .etch = true, .dedicated_step = "test-time-lit" },
+        // M0.8 / E3-D — D-S5-etchcook-inproc: the consolidated cook library.
+        .{ .path = "tests/etch/cook_consolidate_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
         // M0.3 — common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },
@@ -979,7 +1011,11 @@ pub fn build(b: *std.Build) void {
     cook_diff_run.addArg("--output");
     const diff_codegen_path = cook_diff_run.addOutputFileArg("corpus_codegen.zig");
     for (codegen_corpus.programs) |p| {
-        cook_diff_run.addArg(b.fmt("{s}={s}", .{ p.name, p.etch_path }));
+        // `addPrefixedFileArg` content-tracks each `.etch` input in the Run
+        // step's cache manifest (M0.8 E3-D) — a raw `name=path` string arg
+        // is hashed by its bytes only, so a source edit would not
+        // invalidate the cached cook output.
+        cook_diff_run.addPrefixedFileArg(b.fmt("{s}=", .{p.name}), b.path(p.etch_path));
     }
 
     const diff_codegen_module = b.createModule(.{
@@ -1020,6 +1056,20 @@ pub fn build(b: *std.Build) void {
     );
     codegen_diff_step.dependOn(&codegen_diff_run.step);
 
+    // Level-B serialized-IR differential (M0.8 E4): interpreter-built
+    // descriptors vs cooked emit-structure, byte-identical canonical dumps.
+    const levelb_ir_diff_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch_interp/levelb_ir_diff_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    levelb_ir_diff_module.addImport("weld_core", core_module);
+    levelb_ir_diff_module.addImport("weld_etch", etch_module);
+    levelb_ir_diff_module.addImport("corpus_codegen", diff_codegen_module);
+    const levelb_ir_diff_test = b.addTest(.{ .root_module = levelb_ir_diff_module });
+    const levelb_ir_diff_run = b.addRunArtifact(levelb_ir_diff_test);
+    test_step.dependOn(&levelb_ir_diff_run.step);
+
     // Parity test: same corpus, runs interpreter + codegen back-to-back.
     const codegen_parity_module = b.createModule(.{
         .root_source_file = b.path("tests/etch_interp/codegen_parity_test.zig"),
@@ -1033,7 +1083,16 @@ pub fn build(b: *std.Build) void {
     codegen_parity_module.addImport("runner_interp", etch_interp_runner_module);
     codegen_parity_module.addImport("runner_codegen", codegen_runner_module);
     const codegen_parity_test = b.addTest(.{ .root_module = codegen_parity_module });
-    test_step.dependOn(&b.addRunArtifact(codegen_parity_test).step);
+    const codegen_parity_run = b.addRunArtifact(codegen_parity_test);
+    test_step.dependOn(&codegen_parity_run.step);
+    // M0.8 E7 — `zig build test-ref500-codegen` runs the interp↔codegen parity
+    // suite, which includes program 84 (the full-grammar TOTAL codegen
+    // integration: cook whole-file + Sema-compile + Level-A byte-exact).
+    const ref500_codegen_step = b.step(
+        "test-ref500-codegen",
+        "Run the interp↔codegen parity suite (incl. the full-grammar codegen integration, program 84)",
+    );
+    ref500_codegen_step.dependOn(&codegen_parity_run.step);
 
     // ----------------------------------------- S5 etch_synth tool ------------
 
@@ -1060,7 +1119,7 @@ pub fn build(b: *std.Build) void {
     const cook_demo_run = b.addRunArtifact(etch_cook_exe);
     cook_demo_run.addArg("--output");
     const demo_codegen_path = cook_demo_run.addOutputFileArg("cooked_demo.zig");
-    cook_demo_run.addArg("demo=bench/fixtures/demo_5_rules_codegen.etch");
+    cook_demo_run.addPrefixedFileArg("demo=", b.path("bench/fixtures/demo_5_rules_codegen.etch"));
 
     const cooked_demo_module = b.createModule(.{
         .root_source_file = demo_codegen_path,
@@ -1097,15 +1156,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // The bench consumes the consolidated cook IN-PROCESS through the
+    // codegen library (M0.8 E3-D, D-S5-etchcook-inproc) — no etch_cook
+    // child process on the timed path.
+    compile_bench_module.addImport("weld_etch", etch_module);
     const compile_bench_exe = b.addExecutable(.{
         .name = "etch-compile-bench",
         .root_module = compile_bench_module,
     });
     b.installArtifact(compile_bench_exe);
     const compile_bench_run = b.addRunArtifact(compile_bench_exe);
-    // Bench needs etch_cook on disk (path: zig-out/bin/etch_cook). Drive
-    // the install step before the bench runs.
-    compile_bench_run.step.dependOn(b.getInstallStep());
     if (b.args) |args| compile_bench_run.addArgs(args);
     const compile_bench_step = b.step(
         "bench-etch-compile",

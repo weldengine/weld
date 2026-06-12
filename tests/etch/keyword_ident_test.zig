@@ -17,9 +17,8 @@ const etch = @import("weld_etch");
 
 fn codegenZig(gpa: std.mem.Allocator, src: []const u8, out: *std.ArrayListUnmanaged(u8)) !void {
     var pr = try etch.parseSource(gpa, src);
-    defer pr.ast.deinit(gpa);
-    defer if (pr.diagnostic) |*d| d.deinit(gpa);
-    try std.testing.expect(pr.diagnostic == null);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
 
     var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
     defer {

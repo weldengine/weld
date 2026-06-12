@@ -1,0 +1,43 @@
+// Differential 63 — Level-B `routine` (M0.8 E4).
+// Serialized-IR parity: trigger alternatives (at / after / on_event),
+// then-chained actions through the canonical renderer, until clauses, and
+// interrupts (pause_segment — behavior targets await the `behavior`
+// construct). Mixed with a `data` table to pin the cross-kind declaration
+// order of the canonical dump. Nothing executes against the world.
+event MealCallReceived { }
+
+fn use_smart_object(name: string) { }
+fn go_to(place: string) { }
+fn idle(anim: string) { }
+
+struct Spot {
+  label: string
+  capacity: int = 1
+}
+
+routine BlacksmithDaily {
+  segment Working {
+    trigger: at 06:00 or after Sleeping
+    actions: use_smart_object("forge_anvil")
+    until: at 12:00 or on_event MealCallReceived
+  }
+
+  segment Lunch {
+    trigger: at 12:00 or after Working
+    actions: go_to("tavern") then use_smart_object("tavern_bench")
+    until: at 13:00
+  }
+
+  segment Sleeping {
+    trigger: at 22:00
+    actions: go_to("bed") then idle("sleeping")
+    until: at 06:00
+  }
+
+  on_dialogue_request -> pause_segment
+}
+
+data Spots: Spot {
+  forge_anvil: { label: "Forge anvil" },
+  tavern_bench: { label: "Tavern bench", capacity: 4 },
+}

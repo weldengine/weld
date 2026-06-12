@@ -131,10 +131,9 @@ fn runOnce(gpa: std.mem.Allocator, io: std.Io, source: []const u8, lexer_ns: ?*u
     // Parser pass (independent — parse() drives its own lexer).
     const t_parse_start = nowNs(io);
     var pr = try etch.parseSource(gpa, source);
-    defer pr.ast.deinit(gpa);
-    defer if (pr.diagnostic) |*d| d.deinit(gpa);
+    defer pr.deinit(gpa);
     const parse_ns = deltaNs(t_parse_start, nowNs(io));
-    if (pr.diagnostic) |_| return error.UnexpectedParseDiagnostic;
+    if (pr.diagnostics.len > 0) return error.UnexpectedParseDiagnostic;
 
     // Type-check pass.
     const t_type_start = nowNs(io);

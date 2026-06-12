@@ -1,0 +1,5 @@
+dialogue D {
+  speaker "npc" {
+    line: "hi" when 1 + 2
+  }
+}

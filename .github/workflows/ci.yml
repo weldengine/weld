@@ -29,7 +29,14 @@ jobs:
     # CI restructuring (job split / bench separation / Windows cache
     # investigation) is queued for M0.2 — cf. brief journal entry
     # 2026-05-21 18:00 "CI debt to investigate seriously in M0.2".
-    timeout-minutes: 20
+    # M0.8 close — ReleaseSafe budget raised to 40 min: the M0.8 suite
+    # added the 01-85 differential corpus (program 84 cooks a 1132-line
+    # file through Sema + build-obj in ReleaseSafe), the 50-pass ref500
+    # parse bench, and the 81-block EBNF harness; both ReleaseSafe legs
+    # now exceed the 20-min budget set at M0.1 (Debug still fits). The
+    # proper CI restructuring (job split / bench separation / caching)
+    # remains queued and is tracked at the M0.8 close.
+    timeout-minutes: ${{ matrix.mode == 'ReleaseSafe' && 40 || 20 }}
     steps:
       - uses: actions/checkout@v6
 
@@ -60,6 +67,15 @@ jobs:
       # blocks the merge.
       - name: zig build bindgen-verify
         run: zig build bindgen-verify
+
+      # M0.8 / E3-D — D-S5-synth100-proper proof: the standalone
+      # bench/fixtures/synth_100/ sub-project resolves the parent as a
+      # path dependency, cooks the committed 100-file corpus through the
+      # installed etch_cook artifact, and compiles it against weld_core.
+      # A nested cold build (~30 s) — one matrix leg is enough.
+      - name: zig build verify-synth-100
+        if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
+        run: zig build verify-synth-100
 
   bench-ecs-smoke:
     strategy:

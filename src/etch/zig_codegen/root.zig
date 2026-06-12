@@ -3,16 +3,21 @@
 //! `weld_etch.codegen_zig` with a stable entry point ... plus minimal error
 //! type `CodegenError`".
 //!
-//! Three entry points:
+//! Entry points:
 //! - `generateToBuffer(gpa, ast, source_path, &out_buffer)` — render the
 //!   generated Zig source into a caller-owned buffer. Used by unit tests
 //!   and by callers that want full control over the output sink.
 //! - `generateToPath(gpa, source_path, source, output_dir, cache_dir)` —
 //!   end-to-end: parse + type-check + lower + write file. Skips the write
 //!   step on cache-hit (per-file xxHash cache).
-//! - `cookTree(gpa, inputs, output_dir, cache_dir)` — drive the generation
-//!   over a slice of input files; used by the bench harness and the
-//!   `zig build run-demo-etch-codegen` step.
+//! - `cookTree(gpa, inputs, output_dir, cache_dir)` — drive the per-file
+//!   generation over a slice of input files. Published S5 surface with no
+//!   current in-tree consumer — the bench harness and the build-graph
+//!   cooks consume the CONSOLIDATED pipeline below.
+//! - `consolidate.cookConsolidated(gpa, named_sources, &out)` — render N
+//!   in-memory sources into one consolidated `.zig` (M0.8 E3-D,
+//!   D-S5-etchcook-inproc). The `etch_cook` CLI is a thin shim over it;
+//!   the bench harness calls it in-process.
 
 const std = @import("std");
 const ast_mod = @import("../ast.zig");
@@ -30,6 +35,9 @@ pub const errors = @import("errors.zig");
 pub const type_map = @import("type_map.zig");
 /// Low-level Zig output writer used by `lower`.
 pub const emit = @import("emit.zig");
+/// Consolidated N-sources → one-file cook (M0.8 E3-D, D-S5-etchcook-inproc
+/// — the library home of the `etch_cook` pipeline).
+pub const consolidate = @import("consolidate.zig");
 
 // Pull the dedicated `tests/` files into the module's import graph so
 // `zig build test` picks them up. The brief locates these tests under
@@ -101,14 +109,8 @@ pub fn generateToPath(
     }
 
     var pr = try parser_mod.parse(gpa, source);
-    defer {
-        if (pr.diagnostic) |*d| {
-            var dd = d.*;
-            dd.deinit(gpa);
-        }
-        pr.ast.deinit(gpa);
-    }
-    if (pr.diagnostic != null) return PipelineError.ParseFailed;
+    defer pr.deinit(gpa);
+    if (pr.diagnostics.len > 0) return PipelineError.ParseFailed;
 
     var diags: std.ArrayListUnmanaged(diag_mod.Diagnostic) = .empty;
     defer {

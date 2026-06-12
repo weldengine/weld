@@ -1,0 +1,9 @@
+// `@config` is a resource lifecycle annotation (serialized in scene files,
+// not in saves — cf. RTTI `Lifecycle`, `engine-spec.md` §2.9). Applied to a
+// component it must surface E0502 AnnotationMisapplied
+// (M0.8 D-S3-annot-applicability, `etch-resolver-types.md` §13.2).
+@config
+component Health {
+    current: float = 100.0
+    max: float = 100.0
+}

@@ -1,0 +1,19 @@
+// M0.8 collections: a `for-in` over an array (the Iterator's base consumer),
+// accumulating into a mutable local then writing it to a component field. The
+// interpreter iterates the store-backed array; the cooked Zig emits a native
+// `for (arr) |x|` loop. Both must sum to 100, keeping the differential
+// byte-exact.
+component Acc {
+  out: int = 0
+}
+
+rule sum(entity: Entity)
+  when entity has Acc
+{
+  let arr = [10, 20, 30, 40]
+  let mut s = 0
+  for x in arr {
+    s += x
+  }
+  entity.get_mut(Acc).out = s
+}

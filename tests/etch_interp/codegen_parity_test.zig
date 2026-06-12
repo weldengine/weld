@@ -10,7 +10,7 @@ const driver = @import("diff_runner");
 const interp_runner = @import("runner_interp");
 const codegen_runner = @import("runner_codegen");
 
-test "codegen result matches interpreter result on all 20 corpus programs" {
+test "codegen result matches interpreter result on all corpus programs" {
     const gpa = std.testing.allocator;
     inline for (corpus.programs) |p| {
         driver.runProgram(gpa, interp_runner.Runner, p.name, p.source, p.config, p.initial, p.expected) catch |err| {

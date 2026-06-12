@@ -1,0 +1,16 @@
+component RetAcc {
+  out: int = 0
+}
+
+rule closure_block_return(entity: Entity)
+  when entity has RetAcc
+{
+  let pick = |x: int| {
+    if x > 3 {
+      return 40
+    }
+    x
+  }
+  let v = pick(7)
+  entity.get_mut(RetAcc).out = v + 2
+}

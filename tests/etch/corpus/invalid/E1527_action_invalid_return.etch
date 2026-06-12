@@ -1,0 +1,11 @@
+fn returns_int() -> int {
+  42
+}
+
+routine R {
+  segment A {
+    trigger: at 06:00
+    actions: returns_int()
+    until: at 12:00
+  }
+}

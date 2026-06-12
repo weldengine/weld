@@ -1,0 +1,18 @@
+// M0.8 v0.6 foundation: a `for-in` over an exclusive range, accumulating
+// into a mutable local then writing it to a component field. The interpreter
+// and the cooked Zig (`while` over an i64 counter) must agree, keeping the
+// differential byte-exact — this is the entailed consumer that gives ranges
+// a real test.
+component Acc {
+  total: int = 0
+}
+
+rule sum(entity: Entity)
+  when entity has Acc
+{
+  let mut s = 0
+  for i in 0..5 {
+    s += i
+  }
+  entity.get_mut(Acc).total = s
+}

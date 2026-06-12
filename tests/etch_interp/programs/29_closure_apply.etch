@@ -1,0 +1,15 @@
+// M0.8 closures: a capture-free closure bound to a local and invoked. The
+// interpreter builds a closure value (empty captured env) and evaluates the
+// body in a call frame; the cooked Zig emits an anonymous `struct { fn call }`
+// and a `double.call(21)`. Both must yield 42, keeping the differential
+// byte-exact.
+component Acc {
+  out: int = 0
+}
+
+rule apply(entity: Entity)
+  when entity has Acc
+{
+  let double = |x: int| x * 2
+  entity.get_mut(Acc).out = double(21)
+}

@@ -1,0 +1,47 @@
+// Differential 72 — Level-B `motion` (M0.8 E5 presentation).
+// Serialized-IR parity: the interpreter BUILDS the motion descriptors, the
+// cooked Zig EMITS them; both serialize through the shared canonical
+// serializer and must produce byte-identical dumps (LEVEL-B PROOF CONTRACT).
+// The grammar §10.3 shape WINS (E5 ruling 2): the `states { … }` block is
+// optional, there is NO `initial` clause, transitions are
+// `source -> target : animator`. Exercises ALL THREE animator forms
+// (animate / keyframes / stagger — recursive), wildcard sources and targets,
+// and COLOR_LITERAL (§1.4) state/keyframe-field values flowing through the
+// shared canonical renderer on both backends. No rule executes.
+motion MenuPanel {
+  states {
+    hidden:  { translate_y: 50, opacity: 0, scale: 0.95 }
+    visible: { translate_y: 0,  opacity: 1, scale: 1.0 }
+    pressed: { scale: 0.97 }
+  }
+  transitions {
+    hidden -> visible: animate(0.3s, ease_out_back)
+    visible -> hidden: animate(0.2s, ease_in)
+    * -> pressed:      animate(0.1s)
+    pressed -> *:      animate(0.15s)
+  }
+}
+
+motion ListItemReveal {
+  states {
+    initial: { opacity: 0, translate_x: 30, scale: 0.8 }
+    visible: { opacity: 1, translate_x: 0,  scale: 1.0 }
+  }
+  transitions {
+    initial -> visible: stagger(0.04s, animate(0.2s, ease_out_back))
+  }
+}
+
+motion AttentionPulse {
+  states {
+    idle:    { scale: 1.0, color: #FFFFFF }
+    pulsing: { scale: 1.0, color: #FFFFFF }
+  }
+  transitions {
+    idle -> pulsing: keyframes [
+      0.0: { scale: 1.0, color: #FFFFFF }
+      0.5: { scale: 1.2, color: #FFD700 }
+      1.0: { scale: 1.0, color: #FFFFFF }
+    ] over 0.6s, ease_in_out
+  }
+}

@@ -1,0 +1,10 @@
+// E1581 CostInvalid — the cost key 'stamina' is not a numeric field of any
+// declared resource.
+
+resource ManaPool {
+  mana: float = 100.0
+}
+
+ability Bad {
+  cost: { stamina: 5.0 }
+}

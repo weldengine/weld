@@ -1,0 +1,8 @@
+dialogue D {
+  branch dup {
+    -> end
+  }
+  branch dup {
+    -> end
+  }
+}
