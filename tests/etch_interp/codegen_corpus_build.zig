@@ -104,4 +104,5 @@ pub const programs = [_]CodegenProgram{
     .{ .name = "p77_audio_graph_laser", .etch_path = "tests/etch_interp/programs/77_audio_graph_laser.etch" },
     .{ .name = "p78_audio_score_exploration", .etch_path = "tests/etch_interp/programs/78_audio_score_exploration.etch" },
     .{ .name = "p79_sequence_intro", .etch_path = "tests/etch_interp/programs/79_sequence_intro.etch" },
+    .{ .name = "p80_anim_graph_locomotion", .etch_path = "tests/etch_interp/programs/80_anim_graph_locomotion.etch" },
 };

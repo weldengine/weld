@@ -169,7 +169,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_, audio_graph_, sequence_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_, audio_graph_, sequence_, anim_graph_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -232,7 +232,7 @@ fn numericLitValue(arena: *const AstArena, expr_id: NodeId) ?f64 {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -354,6 +354,7 @@ pub const TypeChecker = struct {
         try tc.validateEffectDecls();
         try tc.validateAudioScoreDecls();
         try tc.validateSequenceDecls();
+        try tc.validateAnimGraphDecls();
         try tc.pass2Resolve();
     }
 
@@ -979,6 +980,119 @@ pub const TypeChecker = struct {
                         try self.emit(.event_track_event_unknown, .error_, kf.span, "keyframe emits '{s}', which is not a declared event", .{self.arena.strings.slice(em.event_type)});
                     }
                 }
+            }
+        }
+    }
+
+    /// The `anim_graph` param type catalogue (`etch-validation-ecs.md` §18.2 E1695,
+    /// the common set inlined — the open `…` is treated as this fixed list for
+    /// M0.8). All resolve to a `.named` type node.
+    fn isKnownAnimParamType(self: *TypeChecker, type_node: NodeId) bool {
+        if (self.arena.typeNodeKind(type_node) != .named) return false;
+        const name = self.arena.strings.slice(self.arena.named_types.items[self.arena.typeNodeData(type_node)].name);
+        const cat = [_][]const u8{ "bool", "float", "int", "i32", "u32", "f32", "f64", "Vec2", "Vec3", "Vec4", "Trajectory" };
+        for (cat) |c| {
+            if (std.mem.eql(u8, name, c)) return true;
+        }
+        return false;
+    }
+
+    fn validateAnimGraphDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .anim_graph_decl) continue;
+            try self.validateAnimGraph(self.arena.anim_graph_decls.items[datas[i]]);
+        }
+    }
+
+    /// `anim_graph` validations (M0.8 E6, `etch-validation-ecs.md` §18, grammar
+    /// §11 shape). DELIVER E1680 AnimGraphEmptyStates, E1681 DuplicateStateName,
+    /// E1682 StateBodyMissing (body_count == 0), E1683 StateBodyInvalid
+    /// (body_count > 1), E1689 TransitionToNotFound (transition + on_finish
+    /// targets), E1690 TransitionConditionNotBool (the §6 when-clause machinery
+    /// over a params scope), E1695 ParamTypeInvalid (catalogue), W1680
+    /// UnreachableState, W1681 DeadendState. RESERVED-with-variant (grammar shape
+    /// makes them inexpressible): E1688 TransitionFromNotFound (from = enclosing
+    /// state), E1691 TransitionDurationInvalid (no transition duration), E1692
+    /// InitialStateMissing (initial = first declared state), E1694 LayerBlendInvalid
+    /// (additive-flag only), W1682 RedundantWildcardTransition (no `*`).
+    /// DEFERRED-no-variant: E1684/E1685/E1686/E1687 (clip/db/clip/bone assets),
+    /// E1693 LayerMaskInvalid (Kinesis bone mask).
+    fn validateAnimGraph(self: *TypeChecker, decl: ast_mod.AnimGraphDecl) !void {
+        // E1695 + a params scope for the transition when-clause typing (E1690).
+        var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
+        defer ctx.deinit(self.gpa);
+        var pi: u32 = 0;
+        while (pi < decl.params_len) : (pi += 1) {
+            const f = self.arena.fields.items[decl.params_start + pi];
+            if (!self.isKnownAnimParamType(f.type_node)) {
+                try self.emit(.anim_param_type_invalid, .error_, self.arena.typeNodeSpan(f.type_node), "anim_graph parameter type is not in the supported set (bool / int / float / Vec2-4 / Trajectory)", .{});
+            }
+            // Populate the scope (unknown-resolved params stay `.unknown`, which
+            // the §6 machinery tolerates — no spurious undefined-symbol error).
+            try ctx.locals.put(self.gpa, f.name, .{ .type_ = self.namedTypeToResolved(f.type_node), .is_mut = false });
+        }
+
+        // E1680 — at least one state.
+        if (decl.states_len == 0) {
+            try self.emit(.anim_graph_empty_states, .error_, decl.name_span, "anim_graph '{s}' has no state (at least one required)", .{self.arena.strings.slice(decl.name)});
+            return;
+        }
+
+        // E1681 — state names unique; the set backs E1689 + W1680.
+        var states: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer states.deinit(self.gpa);
+        var s: u32 = 0;
+        while (s < decl.states_len) : (s += 1) {
+            const st = self.arena.anim_states.items[decl.states_start + s];
+            const gop = try states.getOrPut(self.gpa, st.name);
+            if (gop.found_existing) {
+                try self.emit(.anim_duplicate_state_name, .error_, st.span, "duplicate anim_graph state '{s}'", .{self.arena.strings.slice(st.name)});
+            }
+        }
+
+        // E1682/E1683/E1689/E1690/W1681 per state; collect reached targets for W1680.
+        var reached: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer reached.deinit(self.gpa);
+        s = 0;
+        while (s < decl.states_len) : (s += 1) {
+            const st = self.arena.anim_states.items[decl.states_start + s];
+            if (st.body_count == 0) {
+                try self.emit(.anim_state_body_missing, .error_, st.span, "anim_graph state '{s}' has no body (clip / motion_matching / chooser / warping / distance_matching / blend_space_2d)", .{self.arena.strings.slice(st.name)});
+            } else if (st.body_count > 1) {
+                try self.emit(.anim_state_body_invalid, .error_, st.span, "anim_graph state '{s}' has more than one animation body source", .{self.arena.strings.slice(st.name)});
+            }
+            var t: u32 = 0;
+            while (t < st.transitions_len) : (t += 1) {
+                const tr = self.arena.anim_transitions.items[st.transitions_start + t];
+                if (!states.contains(tr.target)) {
+                    try self.emit(.anim_transition_to_not_found, .error_, tr.span, "transition target '{s}' is not a declared anim_graph state", .{self.arena.strings.slice(tr.target)});
+                }
+                try reached.put(self.gpa, tr.target, {});
+                if (tr.when_root != ast_mod.RuleDecl.none_when) {
+                    try self.collectWhenConstruct(&ctx, tr.when_root, .anim_transition_condition_not_bool, "anim_graph transition");
+                }
+            }
+            if (st.has_on_finish) {
+                if (!states.contains(st.on_finish)) {
+                    try self.emit(.anim_transition_to_not_found, .error_, st.span, "on_finish target '{s}' is not a declared anim_graph state", .{self.arena.strings.slice(st.on_finish)});
+                }
+                try reached.put(self.gpa, st.on_finish, {});
+            }
+            // W1681 — a state with no outgoing transition and no on_finish.
+            if (st.transitions_len == 0 and !st.has_on_finish) {
+                try self.emit(.anim_deadend_state, .warning, st.span, "anim_graph state '{s}' has no outgoing transition", .{self.arena.strings.slice(st.name)});
+            }
+        }
+
+        // W1680 — a non-initial state (initial = first declared) reached by nothing.
+        s = 1;
+        while (s < decl.states_len) : (s += 1) {
+            const st = self.arena.anim_states.items[decl.states_start + s];
+            if (!reached.contains(st.name)) {
+                try self.emit(.anim_unreachable_state, .warning, st.span, "anim_graph state '{s}' is not the initial state and is not a transition target", .{self.arena.strings.slice(st.name)});
             }
         }
     }
@@ -2134,6 +2248,14 @@ pub const TypeChecker = struct {
                     const decl = self.arena.sequence_decls.items[data];
                     try self.registerSymbol(.sequence_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .sequence);
+                },
+                .anim_graph_decl => {
+                    // An `anim_graph` (M0.8 E6 Level B animation) is TYPE_IDENT-named
+                    // → it registers a symbol; states / transitions / layers / the
+                    // §18 checks run in `validateAnimGraphDecls`.
+                    const decl = self.arena.anim_graph_decls.items[data];
+                    try self.registerSymbol(.anim_graph_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .anim_graph);
                 },
                 .audio_graph_decl => {
                     // An `audio_graph` (M0.8 E6 Level B audio) is TYPE_IDENT-named

@@ -469,6 +469,54 @@ pub const SequenceKeyframeDesc = struct {
     value: []const u8,
 };
 
+/// `anim_graph` descriptor (`etch-ast-ir.md` §3.5: `AnimGraph { states,
+/// transitions, layers, params }`; M0.8 E6, `etch-grammar.md` §11, Level-B
+/// animation). The grammar shape: state-nested transitions, additive-only
+/// layers. Each state's body (clip / motion_matching / chooser / warping /
+/// distance_matching / blend_space_2d) is pre-rendered to one canonical text
+/// string; transitions carry a rendered when clause. No animation runs.
+pub const AnimGraph = struct {
+    name: []const u8,
+    params: []const AnimGraphParamDesc,
+    states: []const AnimStateDesc,
+    layers: []const AnimLayerDesc,
+};
+
+/// One `anim_graph` params-block field (`name: type [= default]`, rendered).
+pub const AnimGraphParamDesc = struct {
+    name: []const u8,
+    type_name: []const u8,
+    default: []const u8, // "" if no `= default`
+};
+
+/// One `anim_graph` state: name + the rendered body + transitions + on_finish.
+pub const AnimStateDesc = struct {
+    name: []const u8,
+    body: []const u8, // the rendered animation body source
+    transitions: []const AnimTransitionDesc,
+    on_finish: []const u8, // "" if no on_finish
+};
+
+/// One state-nested transition: `-> target` + the rendered when clause.
+pub const AnimTransitionDesc = struct {
+    target: []const u8,
+    when: []const u8, // "" if no when clause
+};
+
+/// One `anim_graph` layer: name + additive flag + its `on … : play …` props.
+pub const AnimLayerDesc = struct {
+    name: []const u8,
+    additive: bool,
+    props: []const AnimLayerPropDesc,
+};
+
+/// One layer prop: rendered `on` condition + clip + the on_bones mask names.
+pub const AnimLayerPropDesc = struct {
+    condition: []const u8,
+    clip: []const u8,
+    bones: []const []const u8,
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -488,6 +536,7 @@ pub const Descriptor = union(enum) {
     audio_graph: AudioGraph,
     audio_score: AudioScore,
     sequence: Sequence,
+    anim_graph: AnimGraph,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -507,6 +556,7 @@ pub const Descriptor = union(enum) {
             .audio_graph => |ag| try writeAudioGraph(ag, gpa, out),
             .audio_score => |asc| try writeAudioScore(asc, gpa, out),
             .sequence => |seq| try writeSequence(seq, gpa, out),
+            .anim_graph => |ag| try writeAnimGraph(ag, gpa, out),
         }
     }
 };
@@ -760,6 +810,55 @@ pub fn writeSequence(seq: Sequence, gpa: std.mem.Allocator, out: *std.ArrayListU
         }
         for (tr.keyframes) |kf| {
             try appendFmt(gpa, out, "    {s}: {s}\n", .{ kf.time, kf.value });
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `anim_graph` descriptor (M0.8 E6): params,
+/// states (rendered body + transitions + on_finish), then additive-aware layers.
+pub fn writeAnimGraph(ag: AnimGraph, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "anim_graph {s} {{\n", .{ag.name});
+    for (ag.params) |p| {
+        if (p.default.len == 0) {
+            try appendFmt(gpa, out, "  param {s}: {s}\n", .{ p.name, p.type_name });
+        } else {
+            try appendFmt(gpa, out, "  param {s}: {s} = {s}\n", .{ p.name, p.type_name, p.default });
+        }
+    }
+    for (ag.states) |st| {
+        try appendFmt(gpa, out, "  state {s} {{\n", .{st.name});
+        try appendFmt(gpa, out, "    body: {s}\n", .{st.body});
+        for (st.transitions) |tr| {
+            if (tr.when.len != 0) {
+                try appendFmt(gpa, out, "    transition -> {s} when {s}\n", .{ tr.target, tr.when });
+            } else {
+                try appendFmt(gpa, out, "    transition -> {s}\n", .{tr.target});
+            }
+        }
+        if (st.on_finish.len != 0) {
+            try appendFmt(gpa, out, "    on_finish -> {s}\n", .{st.on_finish});
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (ag.layers) |ly| {
+        if (ly.additive) {
+            try appendFmt(gpa, out, "  layer {s} additive {{\n", .{ly.name});
+        } else {
+            try appendFmt(gpa, out, "  layer {s} {{\n", .{ly.name});
+        }
+        for (ly.props) |p| {
+            try appendFmt(gpa, out, "    on {s}: play {s}", .{ p.condition, p.clip });
+            if (p.bones.len != 0) {
+                try out.appendSlice(gpa, " on_bones(");
+                for (p.bones, 0..) |b, idx| {
+                    if (idx != 0) try out.appendSlice(gpa, ", ");
+                    try out.appendSlice(gpa, b);
+                }
+                try out.appendSlice(gpa, ")");
+            }
+            try out.appendSlice(gpa, "\n");
         }
         try out.appendSlice(gpa, "  }\n");
     }

@@ -1642,6 +1642,90 @@ pub const SequenceKeyframe = struct {
     span: SourceSpan,
 };
 
+/// Side-slab entry for an `anim_graph` declaration (M0.8 E6 Level B animation,
+/// `etch-grammar.md` §11: `anim_graph_decl = "anim_graph" TYPE_IDENT "{"
+/// [params_block] {anim_state} {anim_layer} "}"`). The grammar shape WINS (the
+/// ratified 2-against-1 calls): transitions are STATE-NESTED (no `from`/
+/// `duration`/`*` — `from` = the enclosing state, `initial` = first declared
+/// state), layers carry only an `additive` flag (no `mask`/blend enum).
+pub const AnimGraphDecl = struct {
+    name: StringId, // TYPE_IDENT
+    name_span: SourceSpan,
+    params_start: u32, // index into `arena.fields`
+    params_len: u32,
+    states_start: u32, // index into `arena.anim_states`
+    states_len: u32,
+    layers_start: u32, // index into `arena.anim_layers`
+    layers_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
+/// The single animation-source body of an `anim_state` (E1682 requires exactly
+/// one; E1683 rejects >1). `transition` / `on_finish` props are edges, not bodies.
+pub const AnimBodyKind = enum { none, clip, blend_space_2d, motion_matching, chooser, warping, distance_matching };
+
+/// One `anim_state` (`"state" IDENT "{" {anim_state_prop} "}"`, §11). Exactly one
+/// body source + edges. `.clip` uses `clip_path` (+ `clip_loop`); the sub-block
+/// bodies (`blend_space_2d`/`motion_matching`/`warping`/`distance_matching`) use a
+/// `key: value` run in `arena.struct_lit_fields`; `.chooser` uses an
+/// `arena.anim_chooser_rules` run.
+pub const AnimState = struct {
+    name: StringId, // IDENT
+    body_kind: AnimBodyKind, // the LAST body source seen (the only one if body_count == 1)
+    body_count: u32, // number of body-source props (E1682 == 0, E1683 > 1)
+    clip_path: StringId, // `.clip`: the STRING_LITERAL content ; 0 otherwise
+    clip_loop: bool, // `.clip`: trailing "loop"
+    body_props_start: u32, // sub-block `key: value` run in `arena.struct_lit_fields`
+    body_props_len: u32,
+    chooser_start: u32, // `.chooser`: index into `arena.anim_chooser_rules`
+    chooser_len: u32,
+    transitions_start: u32, // index into `arena.anim_transitions`
+    transitions_len: u32,
+    on_finish: StringId, // `on_finish "->" IDENT` target ; valid iff has_on_finish
+    has_on_finish: bool,
+    span: SourceSpan,
+};
+
+/// One state-nested `transition "->" IDENT [when_clause]` (§11). `target` is the
+/// destination state (E1689); `when_root` is the §6 when-clause (E1690 checks it
+/// is bool over the params), `RuleDecl.none_when` if absent.
+pub const AnimTransition = struct {
+    target: StringId, // IDENT
+    when_root: u32, // when_clause root (RuleDecl.none_when if absent)
+    span: SourceSpan,
+};
+
+/// One `chooser_rule` (`"{" ["when" expression ","] "clip" ":" STRING "}"` or
+/// `"{" "fallback" "," "clip" ":" STRING "}"`, §11). The `when` is a plain
+/// EXPRESSION (not a when_clause); rendered structurally (E1686 clip-asset
+/// validation is DEFERRED).
+pub const AnimChooserRule = struct {
+    when_expr: NodeId, // optional `when expression` (NodeId.none if fallback/absent)
+    is_fallback: bool,
+    clip: StringId, // the STRING_LITERAL content
+};
+
+/// One `anim_layer` (`"layer" IDENT ["additive"] "{" {anim_layer_prop} "}"`, §11).
+/// The ratified shape: only the `additive` flag (no `mask`/blend enum — E1693/
+/// E1694 RESERVED/DEFERRED).
+pub const AnimLayer = struct {
+    name: StringId, // IDENT
+    additive: bool,
+    props_start: u32, // index into `arena.anim_layer_props`
+    props_len: u32,
+    span: SourceSpan,
+};
+
+/// One `anim_layer_prop` (`"on" expression ":" "play" STRING ["on_bones" "(" …
+/// ")"]`, §11). `on_bones` masks are a `(start, len)` run of `arena.anim_layer_bones`.
+pub const AnimLayerProp = struct {
+    condition: NodeId, // `"on" expression`
+    clip: StringId, // `"play" STRING` content
+    bones_start: u32, // index into `arena.anim_layer_bones`
+    bones_len: u32,
+};
+
 /// Kind of one routine trigger alternative (M0.8 E4, `etch-grammar.md`
 /// §8.2 `trigger_expr`): `at TIME_LITERAL` / `after IDENT` /
 /// `on_event TYPE_IDENT`. `or`-chains are stored as a flat run of
@@ -2024,6 +2108,13 @@ pub const AstArena = struct {
     sequence_decls: std.ArrayListUnmanaged(SequenceDecl) = .empty,
     sequence_tracks: std.ArrayListUnmanaged(SequenceTrack) = .empty,
     sequence_keyframes: std.ArrayListUnmanaged(SequenceKeyframe) = .empty,
+    anim_graph_decls: std.ArrayListUnmanaged(AnimGraphDecl) = .empty,
+    anim_states: std.ArrayListUnmanaged(AnimState) = .empty,
+    anim_transitions: std.ArrayListUnmanaged(AnimTransition) = .empty,
+    anim_chooser_rules: std.ArrayListUnmanaged(AnimChooserRule) = .empty,
+    anim_layers: std.ArrayListUnmanaged(AnimLayer) = .empty,
+    anim_layer_props: std.ArrayListUnmanaged(AnimLayerProp) = .empty,
+    anim_layer_bones: std.ArrayListUnmanaged(StringId) = .empty,
     quest_decls: std.ArrayListUnmanaged(QuestDecl) = .empty,
     quest_properties: std.ArrayListUnmanaged(QuestProperty) = .empty,
     quest_stages: std.ArrayListUnmanaged(QuestStage) = .empty,
@@ -2231,6 +2322,13 @@ pub const AstArena = struct {
         self.sequence_decls.deinit(gpa);
         self.sequence_tracks.deinit(gpa);
         self.sequence_keyframes.deinit(gpa);
+        self.anim_graph_decls.deinit(gpa);
+        self.anim_states.deinit(gpa);
+        self.anim_transitions.deinit(gpa);
+        self.anim_chooser_rules.deinit(gpa);
+        self.anim_layers.deinit(gpa);
+        self.anim_layer_props.deinit(gpa);
+        self.anim_layer_bones.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
@@ -2760,6 +2858,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.sequence_decls.items.len);
         try self.sequence_decls.append(gpa, decl);
         return try self.addItem(gpa, .sequence_decl, idx, span);
+    }
+
+    /// `anim_graph Name { [params] {state} {layer} }` (M0.8 E6, §11). The caller
+    /// appends params / states / transitions / chooser rules / layers to their
+    /// slabs beforehand, passing the ranges in `decl`.
+    pub fn addAnimGraphDecl(self: *AstArena, gpa: std.mem.Allocator, decl: AnimGraphDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.anim_graph_decls.items.len);
+        try self.anim_graph_decls.append(gpa, decl);
+        return try self.addItem(gpa, .anim_graph_decl, idx, span);
     }
 
     /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The

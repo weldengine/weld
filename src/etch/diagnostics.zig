@@ -283,6 +283,31 @@ pub const DiagnosticCode = enum {
     sequence_duration_invalid, // M0.8 E6 — E1750 DurationInvalid (duration must be positive)
     empty_track, // M0.8 E6 — W1740 EmptyTrack (track with no keyframe)
 
+    // ── anim_graph (E1680-E1695 + W1680-W1682, M0.8 E6 — etch-grammar.md §11,
+    //    Level-B animation. The grammar 2-against-1 shape (state-nested
+    //    transitions, additive-only layers) makes several codes RESERVED: E1688
+    //    TransitionFromNotFound (from = enclosing state), E1691
+    //    TransitionDurationInvalid (no transition duration), E1692
+    //    InitialStateMissing (initial = first declared state), E1694
+    //    LayerBlendInvalid (additive flag only), W1682
+    //    RedundantWildcardTransition (no `*`). DEFERRED-no-variant: E1684/E1685/
+    //    E1686/E1687 (clip / motion-db / chooser-clip / warping-bone assets),
+    //    E1693 LayerMaskInvalid (Kinesis bone mask). ──
+    anim_graph_empty_states, // M0.8 E6 — E1680 AnimGraphEmptyStates
+    anim_duplicate_state_name, // M0.8 E6 — E1681 DuplicateStateName (anim_graph state; cf. E1661 motion)
+    anim_state_body_missing, // M0.8 E6 — E1682 StateBodyMissing (no animation body source)
+    anim_state_body_invalid, // M0.8 E6 — E1683 StateBodyInvalid (more than one body source)
+    anim_transition_from_not_found, // M0.8 E6 — E1688 TransitionFromNotFound (RESERVED: from = enclosing state)
+    anim_transition_to_not_found, // M0.8 E6 — E1689 TransitionToNotFound (transition / on_finish target)
+    anim_transition_condition_not_bool, // M0.8 E6 — E1690 TransitionConditionNotBool
+    anim_transition_duration_invalid, // M0.8 E6 — E1691 TransitionDurationInvalid (RESERVED: no transition duration in §11)
+    anim_initial_state_missing, // M0.8 E6 — E1692 InitialStateMissing (RESERVED: initial = first declared state)
+    anim_layer_blend_invalid, // M0.8 E6 — E1694 LayerBlendInvalid (RESERVED: additive flag only in §11)
+    anim_param_type_invalid, // M0.8 E6 — E1695 ParamTypeInvalid
+    anim_unreachable_state, // M0.8 E6 — W1680 UnreachableState
+    anim_deadend_state, // M0.8 E6 — W1681 DeadendState
+    anim_redundant_wildcard_transition, // M0.8 E6 — W1682 RedundantWildcardTransition (RESERVED: no `*` in §11)
+
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
@@ -418,6 +443,20 @@ pub const DiagnosticCode = enum {
             .fps_invalid => "E1749",
             .sequence_duration_invalid => "E1750",
             .empty_track => "W1740",
+            .anim_graph_empty_states => "E1680",
+            .anim_duplicate_state_name => "E1681",
+            .anim_state_body_missing => "E1682",
+            .anim_state_body_invalid => "E1683",
+            .anim_transition_from_not_found => "E1688",
+            .anim_transition_to_not_found => "E1689",
+            .anim_transition_condition_not_bool => "E1690",
+            .anim_transition_duration_invalid => "E1691",
+            .anim_initial_state_missing => "E1692",
+            .anim_layer_blend_invalid => "E1694",
+            .anim_param_type_invalid => "E1695",
+            .anim_unreachable_state => "W1680",
+            .anim_deadend_state => "W1681",
+            .anim_redundant_wildcard_transition => "W1682",
         };
     }
 
@@ -556,6 +595,20 @@ pub const DiagnosticCode = enum {
             .fps_invalid => "FPSInvalid",
             .sequence_duration_invalid => "DurationInvalid",
             .empty_track => "EmptyTrack",
+            .anim_graph_empty_states => "AnimGraphEmptyStates",
+            .anim_duplicate_state_name => "DuplicateStateName",
+            .anim_state_body_missing => "StateBodyMissing",
+            .anim_state_body_invalid => "StateBodyInvalid",
+            .anim_transition_from_not_found => "TransitionFromNotFound",
+            .anim_transition_to_not_found => "TransitionToNotFound",
+            .anim_transition_condition_not_bool => "TransitionConditionNotBool",
+            .anim_transition_duration_invalid => "TransitionDurationInvalid",
+            .anim_initial_state_missing => "InitialStateMissing",
+            .anim_layer_blend_invalid => "LayerBlendInvalid",
+            .anim_param_type_invalid => "ParamTypeInvalid",
+            .anim_unreachable_state => "UnreachableState",
+            .anim_deadend_state => "DeadendState",
+            .anim_redundant_wildcard_transition => "RedundantWildcardTransition",
         };
     }
 };

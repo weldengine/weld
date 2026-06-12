@@ -1261,3 +1261,43 @@ sequence IntroCinematic {
   }
 }
 ```
+
+## Anim graph (E6 — §11)
+
+`anim_graph_decl = "anim_graph" TYPE_IDENT "{" [params_block] {anim_state}
+{anim_layer} "}"`. The grammar shape wins: state-nested transitions (no
+`from`/`duration`/`*`), additive-only layers, chooser `rules`, warping
+`orientation`/`stride_scale`, `search_rate` a legal FLOAT. State bodies: clip
+(+ loop), blend_space_2d, motion_matching, chooser, warping, distance_matching.
+
+```etch
+anim_graph HumanoidLocomotion {
+  params {
+    speed: float = 0.0
+    is_grounded: bool = true
+  }
+  state Idle {
+    clip: "anims/idle" loop
+    transition -> Locomotion when speed > 0.1
+  }
+  state Locomotion {
+    motion_matching {
+      database: "anims/locomotion_db"
+      blend_time: 0.2s
+    }
+    transition -> Idle when speed < 0.05
+  }
+  state Attack {
+    chooser {
+      rules: [
+        { when speed > 5.0, clip: "anims/sword_strong" }
+        { fallback, clip: "anims/punch" }
+      ]
+    }
+    on_finish: -> Idle
+  }
+  layer Aim additive {
+    on is_grounded: play "anims/aim" on_bones("spine", "head")
+  }
+}
+```

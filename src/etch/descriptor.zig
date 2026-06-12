@@ -74,6 +74,7 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
         .audio_graph => |ag| freeAudioGraph(gpa, ag),
         .audio_score => |asc| freeAudioScore(gpa, asc),
         .sequence => |seq| freeSequence(gpa, seq),
+        .anim_graph => |ag| freeAnimGraph(gpa, ag),
     }
 }
 
@@ -296,6 +297,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .audio_graph_decl => try list.append(gpa, .{ .audio_graph = try buildAudioGraph(gpa, arena, arena.audio_graph_decls.items[datas[i]]) }),
             .audio_score_decl => try list.append(gpa, .{ .audio_score = try buildAudioScore(gpa, arena, arena.audio_score_decls.items[datas[i]]) }),
             .sequence_decl => try list.append(gpa, .{ .sequence = try buildSequence(gpa, arena, arena.sequence_decls.items[datas[i]]) }),
+            .anim_graph_decl => try list.append(gpa, .{ .anim_graph = try buildAnimGraph(gpa, arena, arena.anim_graph_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -1406,6 +1408,236 @@ fn buildSequence(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.S
         .on_start = on_start,
         .on_finish = on_finish,
         .tracks = try tracks.toOwnedSlice(gpa),
+    };
+}
+
+/// Render an `anim_state` body (clip / blend_space_2d / motion_matching /
+/// chooser / warping / distance_matching) to one canonical text string. SHARED
+/// by both backends so the body renders identically. Sub-block `key: value`
+/// props + chooser rules flow through the shared expression renderer.
+pub fn renderAnimStateBodyAlloc(gpa: std.mem.Allocator, arena: *const AstArena, state: ast_mod.AnimState) BuildError![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(gpa);
+    switch (state.body_kind) {
+        .none => {},
+        .clip => {
+            try out.appendSlice(gpa, "clip \"");
+            try out.appendSlice(gpa, arena.strings.slice(state.clip_path));
+            try out.appendSlice(gpa, "\"");
+            if (state.clip_loop) try out.appendSlice(gpa, " loop");
+        },
+        .blend_space_2d, .motion_matching, .warping, .distance_matching => {
+            const head = switch (state.body_kind) {
+                .blend_space_2d => "blend_space_2d",
+                .motion_matching => "motion_matching",
+                .warping => "warping",
+                .distance_matching => "distance_matching",
+                else => unreachable,
+            };
+            try out.appendSlice(gpa, head);
+            try out.appendSlice(gpa, " { ");
+            var f: u32 = 0;
+            while (f < state.body_props_len) : (f += 1) {
+                if (f != 0) try out.appendSlice(gpa, ", ");
+                const field = arena.struct_lit_fields.items[state.body_props_start + f];
+                try out.appendSlice(gpa, if (field.name == 0) ".." else arena.strings.slice(field.name));
+                try out.appendSlice(gpa, ": ");
+                try renderExpr(gpa, arena, field.value, &out);
+            }
+            try out.appendSlice(gpa, " }");
+        },
+        .chooser => {
+            try out.appendSlice(gpa, "chooser { rules: [ ");
+            var r: u32 = 0;
+            while (r < state.chooser_len) : (r += 1) {
+                if (r != 0) try out.appendSlice(gpa, ", ");
+                const rule = arena.anim_chooser_rules.items[state.chooser_start + r];
+                try out.appendSlice(gpa, "{ ");
+                if (rule.is_fallback) {
+                    try out.appendSlice(gpa, "fallback, ");
+                } else if (!rule.when_expr.isNone()) {
+                    try out.appendSlice(gpa, "when ");
+                    try renderExpr(gpa, arena, rule.when_expr, &out);
+                    try out.appendSlice(gpa, ", ");
+                }
+                try out.appendSlice(gpa, "clip: \"");
+                try out.appendSlice(gpa, arena.strings.slice(rule.clip));
+                try out.appendSlice(gpa, "\" }");
+            }
+            try out.appendSlice(gpa, " ] }");
+        },
+    }
+    return try out.toOwnedSlice(gpa);
+}
+
+fn freeAnimGraph(gpa: std.mem.Allocator, ag: types.AnimGraph) void {
+    gpa.free(ag.name);
+    for (ag.params) |p| {
+        gpa.free(p.name);
+        gpa.free(p.type_name);
+        gpa.free(p.default);
+    }
+    gpa.free(ag.params);
+    for (ag.states) |st| {
+        gpa.free(st.name);
+        gpa.free(st.body);
+        for (st.transitions) |tr| {
+            gpa.free(tr.target);
+            gpa.free(tr.when);
+        }
+        gpa.free(st.transitions);
+        gpa.free(st.on_finish);
+    }
+    gpa.free(ag.states);
+    for (ag.layers) |ly| {
+        gpa.free(ly.name);
+        for (ly.props) |p| {
+            gpa.free(p.condition);
+            gpa.free(p.clip);
+            for (p.bones) |b| gpa.free(b);
+            gpa.free(p.bones);
+        }
+        gpa.free(ly.props);
+    }
+    gpa.free(ag.layers);
+}
+
+/// Build an `anim_graph` descriptor (M0.8 E6): params, states (rendered body +
+/// transitions + on_finish), and layers — all through the shared canonical
+/// renderers (byte-identical with the codegen emit side).
+fn buildAnimGraph(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.AnimGraphDecl) BuildError!types.AnimGraph {
+    var params: std.ArrayListUnmanaged(types.AnimGraphParamDesc) = .empty;
+    errdefer {
+        for (params.items) |p| {
+            gpa.free(p.name);
+            gpa.free(p.type_name);
+            gpa.free(p.default);
+        }
+        params.deinit(gpa);
+    }
+    var pi: u32 = 0;
+    while (pi < decl.params_len) : (pi += 1) {
+        const f = arena.fields.items[decl.params_start + pi];
+        const pname = try gpa.dupe(u8, arena.strings.slice(f.name));
+        errdefer gpa.free(pname);
+        const ptype = try renderFieldTypeAlloc(gpa, arena, f.type_node);
+        errdefer gpa.free(ptype);
+        const pdefault = if (f.default_value.isNone())
+            try gpa.dupe(u8, "")
+        else
+            try renderExprAlloc(gpa, arena, f.default_value);
+        errdefer gpa.free(pdefault);
+        try params.append(gpa, .{ .name = pname, .type_name = ptype, .default = pdefault });
+    }
+
+    var states: std.ArrayListUnmanaged(types.AnimStateDesc) = .empty;
+    errdefer {
+        for (states.items) |st| {
+            gpa.free(st.name);
+            gpa.free(st.body);
+            for (st.transitions) |tr| {
+                gpa.free(tr.target);
+                gpa.free(tr.when);
+            }
+            gpa.free(st.transitions);
+            gpa.free(st.on_finish);
+        }
+        states.deinit(gpa);
+    }
+    var s: u32 = 0;
+    while (s < decl.states_len) : (s += 1) {
+        const st = arena.anim_states.items[decl.states_start + s];
+        const body = try renderAnimStateBodyAlloc(gpa, arena, st);
+        errdefer gpa.free(body);
+        var trs: std.ArrayListUnmanaged(types.AnimTransitionDesc) = .empty;
+        errdefer {
+            for (trs.items) |tr| {
+                gpa.free(tr.target);
+                gpa.free(tr.when);
+            }
+            trs.deinit(gpa);
+        }
+        var t: u32 = 0;
+        while (t < st.transitions_len) : (t += 1) {
+            const tr = arena.anim_transitions.items[st.transitions_start + t];
+            const target = try gpa.dupe(u8, arena.strings.slice(tr.target));
+            errdefer gpa.free(target);
+            const when = if (tr.when_root == ast_mod.RuleDecl.none_when)
+                try gpa.dupe(u8, "")
+            else
+                try renderWhenAlloc(gpa, arena, tr.when_root);
+            errdefer gpa.free(when);
+            try trs.append(gpa, .{ .target = target, .when = when });
+        }
+        const on_finish = if (st.has_on_finish)
+            try gpa.dupe(u8, arena.strings.slice(st.on_finish))
+        else
+            try gpa.dupe(u8, "");
+        errdefer gpa.free(on_finish);
+        const sname = try gpa.dupe(u8, arena.strings.slice(st.name));
+        errdefer gpa.free(sname);
+        try states.append(gpa, .{ .name = sname, .body = body, .transitions = try trs.toOwnedSlice(gpa), .on_finish = on_finish });
+    }
+
+    var layers: std.ArrayListUnmanaged(types.AnimLayerDesc) = .empty;
+    errdefer {
+        for (layers.items) |ly| {
+            gpa.free(ly.name);
+            for (ly.props) |p| {
+                gpa.free(p.condition);
+                gpa.free(p.clip);
+                for (p.bones) |b| gpa.free(b);
+                gpa.free(p.bones);
+            }
+            gpa.free(ly.props);
+        }
+        layers.deinit(gpa);
+    }
+    var l: u32 = 0;
+    while (l < decl.layers_len) : (l += 1) {
+        const ly = arena.anim_layers.items[decl.layers_start + l];
+        var props: std.ArrayListUnmanaged(types.AnimLayerPropDesc) = .empty;
+        errdefer {
+            for (props.items) |p| {
+                gpa.free(p.condition);
+                gpa.free(p.clip);
+                for (p.bones) |b| gpa.free(b);
+                gpa.free(p.bones);
+            }
+            props.deinit(gpa);
+        }
+        var p: u32 = 0;
+        while (p < ly.props_len) : (p += 1) {
+            const lp = arena.anim_layer_props.items[ly.props_start + p];
+            const cond = try renderExprAlloc(gpa, arena, lp.condition);
+            errdefer gpa.free(cond);
+            const clip = try gpa.dupe(u8, arena.strings.slice(lp.clip));
+            errdefer gpa.free(clip);
+            var bones: std.ArrayListUnmanaged([]const u8) = .empty;
+            errdefer {
+                for (bones.items) |b| gpa.free(b);
+                bones.deinit(gpa);
+            }
+            var b: u32 = 0;
+            while (b < lp.bones_len) : (b += 1) {
+                const bn = try gpa.dupe(u8, arena.strings.slice(arena.anim_layer_bones.items[lp.bones_start + b]));
+                errdefer gpa.free(bn);
+                try bones.append(gpa, bn);
+            }
+            try props.append(gpa, .{ .condition = cond, .clip = clip, .bones = try bones.toOwnedSlice(gpa) });
+        }
+        const lname = try gpa.dupe(u8, arena.strings.slice(ly.name));
+        errdefer gpa.free(lname);
+        try layers.append(gpa, .{ .name = lname, .additive = ly.additive, .props = try props.toOwnedSlice(gpa) });
+    }
+
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    errdefer gpa.free(name);
+    return .{
+        .name = name,
+        .params = try params.toOwnedSlice(gpa),
+        .states = try states.toOwnedSlice(gpa),
+        .layers = try layers.toOwnedSlice(gpa),
     };
 }
 

@@ -510,7 +510,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score, .kw_sequence => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score, .kw_sequence, .kw_anim_graph => return,
                 else => _ = try self.advance(),
             }
         }
@@ -553,6 +553,7 @@ pub const Parser = struct {
             .kw_audio_graph => try self.parseAudioGraphDecl(annotations),
             .kw_audio_score => try self.parseAudioScoreDecl(annotations),
             .kw_sequence => try self.parseSequenceDecl(annotations),
+            .kw_anim_graph => try self.parseAnimGraphDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -566,7 +567,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score | sequence), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score | sequence | anim_graph), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -2664,6 +2665,288 @@ pub const Parser = struct {
         }
         try self.arena.sequence_keyframes.append(self.gpa, kf);
         _ = try self.match(.comma);
+    }
+
+    /// `anim_graph_decl = "anim_graph" TYPE_IDENT "{" [params_block] {anim_state}
+    /// {anim_layer} "}"` (M0.8 E6, §11). The grammar shape wins (state-nested
+    /// transitions, additive-only layers). `state`/`layer` are CONTEXTUAL idents.
+    fn parseAnimGraphDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'anim_graph'
+        const name_tok = try self.expect(.type_ident, "expected anim_graph name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start the anim_graph body");
+
+        const params_start: u32 = @intCast(self.arena.fields.items.len);
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "params")) {
+            _ = try self.advance(); // 'params'
+            _ = try self.expect(.lbrace, "expected '{' to start the anim_graph params block");
+            while (self.peek() != .rbrace and self.peek() != .eof) {
+                try self.surfaceTokenErrors();
+                const field_annotations = try self.parseAnnotations();
+                try self.parseField(field_annotations);
+                _ = try self.match(.comma);
+            }
+            _ = try self.expect(.rbrace, "expected '}' to close the anim_graph params block");
+        }
+        const params_len: u32 = @as(u32, @intCast(self.arena.fields.items.len)) - params_start;
+
+        const states_start: u32 = @intCast(self.arena.anim_states.items.len);
+        while (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "state")) {
+            try self.surfaceTokenErrors();
+            try self.parseAnimState();
+        }
+        const states_len: u32 = @as(u32, @intCast(self.arena.anim_states.items.len)) - states_start;
+
+        const layers_start: u32 = @intCast(self.arena.anim_layers.items.len);
+        while (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "layer")) {
+            try self.surfaceTokenErrors();
+            try self.parseAnimLayer();
+        }
+        const layers_len: u32 = @as(u32, @intCast(self.arena.anim_layers.items.len)) - layers_start;
+
+        const closing = try self.expect(.rbrace, "expected '}' to close the anim_graph body");
+        _ = try self.arena.addAnimGraphDecl(self.gpa, .{
+            .name = name_id,
+            .name_span = name_tok.span,
+            .params_start = params_start,
+            .params_len = params_len,
+            .states_start = states_start,
+            .states_len = states_len,
+            .layers_start = layers_start,
+            .layers_len = layers_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse a `{ IDENT ":" expression … }` sub-block (the motion_matching /
+    /// warping / distance_matching bodies) into a `struct_lit_fields` run.
+    fn parseAnimKeyExprBlock(self: *Parser) ParseError!struct { start: u32, len: u32 } {
+        _ = try self.expect(.lbrace, "expected '{' to start the body sub-block");
+        const start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const pk = try self.expect(.ident, "expected a property name in the body sub-block");
+            _ = try self.expect(.colon, "expected ':' after the property name");
+            const val = try self.parseExpr(0);
+            try self.arena.struct_lit_fields.append(self.gpa, .{ .name = try self.internSlice(pk.span), .value = val });
+            _ = try self.match(.comma);
+        }
+        _ = try self.expect(.rbrace, "expected '}' to close the body sub-block");
+        return .{ .start = start, .len = @as(u32, @intCast(self.arena.struct_lit_fields.items.len)) - start };
+    }
+
+    /// `anim_state = "state" IDENT "{" {anim_state_prop} "}"` (§11). Exactly one
+    /// body source (E1682/E1683 validate the count) + transition/on_finish edges.
+    fn parseAnimState(self: *Parser) ParseError!void {
+        const start_span = self.peekSpan();
+        _ = try self.advance(); // 'state'
+        const name_tok = switch (self.peek()) {
+            .ident, .type_ident => try self.advance(),
+            else => return self.parseErr(self.peekSpan(), "expected a state name (identifier) after 'state'"),
+        };
+        _ = try self.expect(.lbrace, "expected '{' to start the state body");
+
+        var body_kind: ast_mod.AnimBodyKind = .none;
+        var body_count: u32 = 0;
+        var clip_path: StringId = 0;
+        var clip_loop = false;
+        var body_props_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        var body_props_len: u32 = 0;
+        const chooser_start: u32 = @intCast(self.arena.anim_chooser_rules.items.len);
+        const transitions_start: u32 = @intCast(self.arena.anim_transitions.items.len);
+        var on_finish: StringId = 0;
+        var has_on_finish = false;
+
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const key_tok = try self.expect(.ident, "expected a state property (clip / motion_matching / chooser / warping / distance_matching / blend_space_2d / transition / on_finish)");
+            const key = self.sliceOf(key_tok.span);
+            if (std.mem.eql(u8, key, "clip")) {
+                _ = try self.expect(.colon, "expected ':' after 'clip'");
+                const path = try self.expect(.string_literal, "expected a clip path (string literal)");
+                clip_path = try self.internStringLiteral(path.span);
+                if (self.peek() == .kw_loop) { // `loop` lexes as kw_loop (the M0.8 loop expression keyword)
+                    _ = try self.advance();
+                    clip_loop = true;
+                }
+                body_kind = .clip;
+                body_count += 1;
+            } else if (std.mem.eql(u8, key, "blend_space_2d")) {
+                _ = try self.expect(.colon, "expected ':' after 'blend_space_2d'");
+                const body = try self.parseDataEntryBody();
+                body_props_start = body.fields_start;
+                body_props_len = body.fields_len;
+                body_kind = .blend_space_2d;
+                body_count += 1;
+            } else if (std.mem.eql(u8, key, "motion_matching")) {
+                const block = try self.parseAnimKeyExprBlock();
+                body_props_start = block.start;
+                body_props_len = block.len;
+                body_kind = .motion_matching;
+                body_count += 1;
+            } else if (std.mem.eql(u8, key, "warping")) {
+                const block = try self.parseAnimKeyExprBlock();
+                body_props_start = block.start;
+                body_props_len = block.len;
+                body_kind = .warping;
+                body_count += 1;
+            } else if (std.mem.eql(u8, key, "distance_matching")) {
+                const block = try self.parseAnimKeyExprBlock();
+                body_props_start = block.start;
+                body_props_len = block.len;
+                body_kind = .distance_matching;
+                body_count += 1;
+            } else if (std.mem.eql(u8, key, "chooser")) {
+                _ = try self.expect(.lbrace, "expected '{' to start the chooser body");
+                const rules_kw = try self.expect(.ident, "expected 'rules' in the chooser body");
+                if (!std.mem.eql(u8, self.sliceOf(rules_kw.span), "rules")) {
+                    return self.parseErr(rules_kw.span, "expected 'rules' in the chooser body");
+                }
+                _ = try self.expect(.colon, "expected ':' after 'rules'");
+                _ = try self.expect(.lbracket, "expected '[' to start the chooser rules list");
+                while (self.peek() != .rbracket and self.peek() != .eof) {
+                    try self.surfaceTokenErrors();
+                    try self.parseAnimChooserRule();
+                    _ = try self.match(.comma);
+                }
+                _ = try self.expect(.rbracket, "expected ']' to close the chooser rules list");
+                _ = try self.expect(.rbrace, "expected '}' to close the chooser body");
+                body_kind = .chooser;
+                body_count += 1;
+            } else if (std.mem.eql(u8, key, "transition")) {
+                _ = try self.expect(.arrow, "expected '->' after 'transition'");
+                const target = switch (self.peek()) {
+                    .ident, .type_ident => try self.advance(),
+                    else => return self.parseErr(self.peekSpan(), "expected a target state (identifier) after 'transition ->'"),
+                };
+                var when_root: u32 = ast_mod.RuleDecl.none_when;
+                if (self.peek() == .kw_when) {
+                    _ = try self.advance();
+                    when_root = try self.parseWhenExpr();
+                }
+                try self.arena.anim_transitions.append(self.gpa, .{
+                    .target = try self.internSlice(target.span),
+                    .when_root = when_root,
+                    .span = key_tok.span,
+                });
+            } else if (std.mem.eql(u8, key, "on_finish")) {
+                _ = try self.expect(.colon, "expected ':' after 'on_finish'");
+                _ = try self.expect(.arrow, "expected '->' after 'on_finish:'");
+                const target = switch (self.peek()) {
+                    .ident, .type_ident => try self.advance(),
+                    else => return self.parseErr(self.peekSpan(), "expected a target state (identifier) after 'on_finish: ->'"),
+                };
+                on_finish = try self.internSlice(target.span);
+                has_on_finish = true;
+            } else {
+                return self.parseErrFmt(key_tok.span, "unknown state property '{s}'", .{key});
+            }
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the state body");
+        try self.arena.anim_states.append(self.gpa, .{
+            .name = try self.internSlice(name_tok.span),
+            .body_kind = body_kind,
+            .body_count = body_count,
+            .clip_path = clip_path,
+            .clip_loop = clip_loop,
+            .body_props_start = body_props_start,
+            .body_props_len = body_props_len,
+            .chooser_start = chooser_start,
+            .chooser_len = @as(u32, @intCast(self.arena.anim_chooser_rules.items.len)) - chooser_start,
+            .transitions_start = transitions_start,
+            .transitions_len = @as(u32, @intCast(self.arena.anim_transitions.items.len)) - transitions_start,
+            .on_finish = on_finish,
+            .has_on_finish = has_on_finish,
+            .span = .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end },
+        });
+    }
+
+    /// `chooser_rule = "{" ["when" expression ","] "clip" ":" STRING "}" | "{"
+    /// "fallback" "," "clip" ":" STRING "}"` (§11).
+    fn parseAnimChooserRule(self: *Parser) ParseError!void {
+        _ = try self.expect(.lbrace, "expected '{' to start a chooser rule");
+        var when_expr: NodeId = NodeId.none;
+        var is_fallback = false;
+        if (self.peek() == .kw_when) {
+            _ = try self.advance(); // 'when'
+            when_expr = try self.parseExpr(0);
+            _ = try self.expect(.comma, "expected ',' after the chooser rule condition");
+        } else if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "fallback")) {
+            _ = try self.advance(); // 'fallback'
+            is_fallback = true;
+            _ = try self.expect(.comma, "expected ',' after 'fallback'");
+        }
+        const clip_kw = try self.expect(.ident, "expected 'clip' in the chooser rule");
+        if (!std.mem.eql(u8, self.sliceOf(clip_kw.span), "clip")) {
+            return self.parseErr(clip_kw.span, "expected 'clip' in the chooser rule");
+        }
+        _ = try self.expect(.colon, "expected ':' after 'clip'");
+        const path = try self.expect(.string_literal, "expected a clip path (string literal)");
+        _ = try self.expect(.rbrace, "expected '}' to close the chooser rule");
+        try self.arena.anim_chooser_rules.append(self.gpa, .{
+            .when_expr = when_expr,
+            .is_fallback = is_fallback,
+            .clip = try self.internStringLiteral(path.span),
+        });
+    }
+
+    /// `anim_layer = "layer" IDENT ["additive"] "{" {anim_layer_prop} "}"`,
+    /// `anim_layer_prop = "on" expression ":" "play" STRING ["on_bones" "(" … ")"]` (§11).
+    fn parseAnimLayer(self: *Parser) ParseError!void {
+        const start_span = self.peekSpan();
+        _ = try self.advance(); // 'layer'
+        const name_tok = switch (self.peek()) {
+            .ident, .type_ident => try self.advance(),
+            else => return self.parseErr(self.peekSpan(), "expected a layer name (identifier) after 'layer'"),
+        };
+        var additive = false;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "additive")) {
+            _ = try self.advance();
+            additive = true;
+        }
+        _ = try self.expect(.lbrace, "expected '{' to start the layer body");
+        const props_start: u32 = @intCast(self.arena.anim_layer_props.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const on_kw = try self.expect(.ident, "expected 'on' to start a layer rule");
+            if (!std.mem.eql(u8, self.sliceOf(on_kw.span), "on")) {
+                return self.parseErr(on_kw.span, "expected 'on' to start a layer rule");
+            }
+            const cond = try self.parseExpr(0);
+            _ = try self.expect(.colon, "expected ':' after the layer condition");
+            const play_kw = try self.expect(.ident, "expected 'play' in the layer rule");
+            if (!std.mem.eql(u8, self.sliceOf(play_kw.span), "play")) {
+                return self.parseErr(play_kw.span, "expected 'play' in the layer rule");
+            }
+            const clip_tok = try self.expect(.string_literal, "expected a clip path (string literal) after 'play'");
+            const bones_start: u32 = @intCast(self.arena.anim_layer_bones.items.len);
+            if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "on_bones")) {
+                _ = try self.advance(); // 'on_bones'
+                _ = try self.expect(.lparen, "expected '(' after 'on_bones'");
+                while (true) {
+                    const b = try self.expect(.string_literal, "expected a bone name (string literal)");
+                    try self.arena.anim_layer_bones.append(self.gpa, try self.internStringLiteral(b.span));
+                    if (!try self.match(.comma)) break;
+                }
+                _ = try self.expect(.rparen, "expected ')' to close 'on_bones(...)'");
+            }
+            try self.arena.anim_layer_props.append(self.gpa, .{
+                .condition = cond,
+                .clip = try self.internStringLiteral(clip_tok.span),
+                .bones_start = bones_start,
+                .bones_len = @as(u32, @intCast(self.arena.anim_layer_bones.items.len)) - bones_start,
+            });
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the layer body");
+        try self.arena.anim_layers.append(self.gpa, .{
+            .name = try self.internSlice(name_tok.span),
+            .additive = additive,
+            .props_start = props_start,
+            .props_len = @as(u32, @intCast(self.arena.anim_layer_props.items.len)) - props_start,
+            .span = .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end },
+        });
     }
 
     const DataEntryBody = struct {
@@ -7647,4 +7930,67 @@ test "parser recovers and a valid sequence after a broken construct survives (M0
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.sequence_decls.items.len);
+}
+
+test "parser builds an anim_graph with params, state bodies, transitions, and a layer (M0.8 E6)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\anim_graph HumanoidLocomotion {
+        \\  params {
+        \\    speed: float = 0.0
+        \\    is_grounded: bool = true
+        \\  }
+        \\  state Idle {
+        \\    clip: "anims/idle" loop
+        \\    transition -> Locomotion when speed > 0.1
+        \\  }
+        \\  state Locomotion {
+        \\    motion_matching {
+        \\      database: "anims/locomotion_db"
+        \\      blend_time: 0.2s
+        \\    }
+        \\    transition -> Idle when speed < 0.05
+        \\  }
+        \\  state Attack {
+        \\    chooser {
+        \\      rules: [
+        \\        { when speed > 5.0, clip: "anims/sword_strong" }
+        \\        { fallback, clip: "anims/punch" }
+        \\      ]
+        \\    }
+        \\    on_finish: -> Idle
+        \\  }
+        \\  layer Aim additive {
+        \\    on is_grounded: play "anims/aim" on_bones("spine", "head")
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.anim_graph_decls.items.len);
+    const decl = result.ast.anim_graph_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 2), decl.params_len);
+    try std.testing.expectEqual(@as(u32, 3), decl.states_len);
+    try std.testing.expectEqual(@as(u32, 1), decl.layers_len);
+    // Idle: clip body + 1 transition.
+    const idle = result.ast.anim_states.items[decl.states_start];
+    try std.testing.expectEqual(ast_mod.AnimBodyKind.clip, idle.body_kind);
+    try std.testing.expect(idle.clip_loop);
+    try std.testing.expectEqual(@as(u32, 1), idle.transitions_len);
+    // Attack: chooser body (2 rules) + on_finish.
+    const attack = result.ast.anim_states.items[decl.states_start + 2];
+    try std.testing.expectEqual(ast_mod.AnimBodyKind.chooser, attack.body_kind);
+    try std.testing.expectEqual(@as(u32, 2), attack.chooser_len);
+    try std.testing.expect(attack.has_on_finish);
+}
+
+test "parser recovers and a valid anim_graph after a broken construct survives (M0.8 E6 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\anim_graph Loco { state Idle { clip: "a/idle" } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.anim_graph_decls.items.len);
 }

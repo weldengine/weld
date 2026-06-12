@@ -4910,7 +4910,7 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// `true` when the program declares at least one Level-B construct with a
 /// descriptor (M0.8 E4: the six Level-B gameplay constructs).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0 or ast.audio_graph_decls.items.len > 0 or ast.audio_score_decls.items.len > 0 or ast.sequence_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0 or ast.audio_graph_decls.items.len > 0 or ast.audio_score_decls.items.len > 0 or ast.sequence_decls.items.len > 0 or ast.anim_graph_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4942,6 +4942,7 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .audio_graph_decl => try emitAudioGraphDescriptor(w, gpa, ast, ast.audio_graph_decls.items[datas[i]]),
             .audio_score_decl => try emitAudioScoreDescriptor(w, gpa, ast, ast.audio_score_decls.items[datas[i]]),
             .sequence_decl => try emitSequenceDescriptor(w, gpa, ast, ast.sequence_decls.items[datas[i]]),
+            .anim_graph_decl => try emitAnimGraphDescriptor(w, gpa, ast, ast.anim_graph_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -5275,6 +5276,102 @@ fn emitSequenceDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAre
             try w.print(", .value = ", .{});
             try emitZigStringLiteral(w, value);
             try w.line(" },");
+        }
+        try w.line("        } },");
+    }
+    try w.line("    } } },");
+}
+
+/// Emit-structure for an `anim_graph` (M0.8 E6 Level B animation): the codegen's
+/// OWN walk over params / states / transitions / layers through the SHARED
+/// `renderAnimStateBodyAlloc` (state bodies), `renderWhenAlloc` (transition when
+/// clauses), `renderFieldTypeAlloc` + `renderForEmit` — byte-identical with
+/// `buildAnimGraph`.
+fn emitAnimGraphDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.AnimGraphDecl) CodegenError!void {
+    try w.print("    .{{ .anim_graph = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.line(", .params = &[_]etch_descriptor.AnimGraphParamDesc{");
+    var pi: u32 = 0;
+    while (pi < decl.params_len) : (pi += 1) {
+        const f = ast.fields.items[decl.params_start + pi];
+        const ptype = descriptor_mod.renderFieldTypeAlloc(gpa, ast, f.type_node) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        };
+        defer gpa.free(ptype);
+        const pdefault = if (f.default_value.isNone())
+            try gpa.dupe(u8, "")
+        else
+            try renderForEmit(gpa, ast, f.default_value);
+        defer gpa.free(pdefault);
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(f.name));
+        try w.print(", .type_name = ", .{});
+        try emitZigStringLiteral(w, ptype);
+        try w.print(", .default = ", .{});
+        try emitZigStringLiteral(w, pdefault);
+        try w.line(" },");
+    }
+    try w.line("    }, .states = &[_]etch_descriptor.AnimStateDesc{");
+    var s: u32 = 0;
+    while (s < decl.states_len) : (s += 1) {
+        const st = ast.anim_states.items[decl.states_start + s];
+        const body = descriptor_mod.renderAnimStateBodyAlloc(gpa, ast, st) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        };
+        defer gpa.free(body);
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(st.name));
+        try w.print(", .body = ", .{});
+        try emitZigStringLiteral(w, body);
+        try w.line(", .transitions = &[_]etch_descriptor.AnimTransitionDesc{");
+        var t: u32 = 0;
+        while (t < st.transitions_len) : (t += 1) {
+            const tr = ast.anim_transitions.items[st.transitions_start + t];
+            const when = if (tr.when_root == ast_mod.RuleDecl.none_when)
+                try gpa.dupe(u8, "")
+            else
+                descriptor_mod.renderWhenAlloc(gpa, ast, tr.when_root) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+                };
+            defer gpa.free(when);
+            try w.print("            .{{ .target = ", .{});
+            try emitZigStringLiteral(w, ast.strings.slice(tr.target));
+            try w.print(", .when = ", .{});
+            try emitZigStringLiteral(w, when);
+            try w.line(" },");
+        }
+        try w.print("        }}, .on_finish = ", .{});
+        try emitZigStringLiteral(w, if (st.has_on_finish) ast.strings.slice(st.on_finish) else "");
+        try w.line(" },");
+    }
+    try w.line("    }, .layers = &[_]etch_descriptor.AnimLayerDesc{");
+    var l: u32 = 0;
+    while (l < decl.layers_len) : (l += 1) {
+        const ly = ast.anim_layers.items[decl.layers_start + l];
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(ly.name));
+        try w.print(", .additive = {}", .{ly.additive});
+        try w.line(", .props = &[_]etch_descriptor.AnimLayerPropDesc{");
+        var p: u32 = 0;
+        while (p < ly.props_len) : (p += 1) {
+            const lp = ast.anim_layer_props.items[ly.props_start + p];
+            const cond = try renderForEmit(gpa, ast, lp.condition);
+            defer gpa.free(cond);
+            try w.print("            .{{ .condition = ", .{});
+            try emitZigStringLiteral(w, cond);
+            try w.print(", .clip = ", .{});
+            try emitZigStringLiteral(w, ast.strings.slice(lp.clip));
+            try w.line(", .bones = &[_][]const u8{");
+            var b: u32 = 0;
+            while (b < lp.bones_len) : (b += 1) {
+                try w.print("                ", .{});
+                try emitZigStringLiteral(w, ast.strings.slice(ast.anim_layer_bones.items[lp.bones_start + b]));
+                try w.line(",");
+            }
+            try w.line("            } },");
         }
         try w.line("        } },");
     }

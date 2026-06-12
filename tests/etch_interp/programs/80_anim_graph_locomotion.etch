@@ -1,0 +1,55 @@
+// Differential 80 — Level-B `anim_graph` (M0.8 E6 skeletal animation, the
+// heaviest construct). Serialized-IR parity: the interpreter BUILDS the
+// anim_graph descriptor, the cooked Zig EMITS it; both serialize through the
+// shared canonical serializer (`descriptor_types.zig`) and must produce
+// byte-identical dumps (LEVEL-B PROOF CONTRACT). The grammar §11 shape WINS
+// (the ratified 2-against-1 calls): transitions are STATE-NESTED (no
+// `from`/`duration`/`*` — `from` = the enclosing state, `initial` = first
+// declared state), layers carry only an `additive` flag (no `mask`/blend enum),
+// the chooser field is `rules`, warping fields are `orientation`/`stride_scale`,
+// and `search_rate` uses a legal FLOAT (no §1.4 `10Hz` frequency literal).
+// Exercises every state body source (clip + loop, motion_matching, chooser with
+// when/fallback rules) + an additive layer with on_bones. DELIVER: E1680
+// AnimGraphEmptyStates / E1681 DuplicateStateName / E1682 StateBodyMissing /
+// E1683 StateBodyInvalid / E1689 TransitionToNotFound / E1690
+// TransitionConditionNotBool (the §6 when-clause machinery over a params scope)
+// / E1695 ParamTypeInvalid / W1680 UnreachableState / W1681 DeadendState.
+// RESERVED (grammar-shape-inapplicable): E1688 / E1691 / E1692 / E1694 / W1682.
+// DEFERRED (assets + Kinesis): E1684 / E1685 / E1686 / E1687 / E1693. No
+// animation runs — the descriptor is the Level-B output. Every state is
+// reachable and non-deadend (no warning fires).
+anim_graph HumanoidLocomotion {
+  params {
+    speed: float = 0.0
+    is_grounded: bool = true
+  }
+
+  state Idle {
+    clip: "anims/idle" loop
+    transition -> Locomotion when speed > 0.1
+    transition -> Attack when speed > 5.0
+  }
+
+  state Locomotion {
+    motion_matching {
+      database: "anims/locomotion_db"
+      search_rate: 10.0
+      blend_time: 0.2s
+    }
+    transition -> Idle when speed < 0.05
+  }
+
+  state Attack {
+    chooser {
+      rules: [
+        { when speed > 5.0, clip: "anims/sword_strong" }
+        { fallback, clip: "anims/punch" }
+      ]
+    }
+    on_finish: -> Idle
+  }
+
+  layer Aim additive {
+    on is_grounded: play "anims/aim" on_bones("spine", "head")
+  }
+}
