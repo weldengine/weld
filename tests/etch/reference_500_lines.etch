@@ -1,0 +1,1131 @@
+// ============================================================================
+// reference_500_lines.etch — M0.8 E7 full-grammar v0.6 integration reference.
+//
+// One file exercising EVERY v0.6 construct in a single coherent namespace:
+//   • Level-A foundations: component / resource / rule / when / cast / assert /
+//     match / ranges / for-in / arrays / maps / slicing / closures / loop /
+//     break / continue / error-handling / struct / enum / trait / impl /
+//     generics / Optional / string interpolation / collections / Set / methods /
+//     anonymous struct literals / events / emit / tags / @on_event observer /
+//     `changed` filter / named call arguments / async.
+//   • The 17 E4-E6 domain constructs: data, routine, behavior, quest, dialogue,
+//     ability, theme, motion, input_mapping, widget, locale, effect,
+//     audio_graph, audio_score, sequence, anim_graph, shader.
+//   • The 2 Level-C constructs: scene, prefab (all three relation forms).
+//
+// All forms are drawn verbatim/adapted from the proven type-check-clean corpus
+// (tests/etch_interp/programs/*.etch) + the parse-clean EBNF harness
+// (tests/etch/ebnf_examples.md). The whole file PARSES (< 50 ms) + TYPE-CHECKS
+// clean; the Level-A behaviour is INTERPRETED (the RefProbe rule ticks the live
+// world). It is NOT cooked: the generic + async fragments are codegen
+// `UnsupportedConstruct` (the milestone invariant). The byte-exact
+// interp↔codegen + B/C codegen-compiles proofs are carried by the per-construct
+// differential corpus (programs 01-83). See tests/etch/reference_500_test.zig.
+// ============================================================================
+
+// ── Tags (one merged hierarchy; cross-block fusion is exercised by the
+//    per-construct tags blocks below resolving against these leaves). ──
+tags {
+  unit {
+    status { alive, dead, stunned }
+    team { red, blue }
+  }
+  quest {
+    merchant_intro_done
+  }
+  social {
+    met_merchant
+  }
+  character {
+    status { alive, stunned, silenced }
+  }
+}
+
+// ── Enums ──
+enum Rarity {
+  common,
+  uncommon,
+  rare,
+}
+
+enum Difficulty {
+  easy,
+  normal,
+  hard,
+}
+
+enum Holder<T> {
+  present,
+  absent,
+}
+
+// ── Type aliases ──
+type Meters = float
+type Score = int
+
+// ── Structs + traits + impls ──
+struct V2 {
+  x: int = 0
+  y: int = 0
+}
+
+impl V2 {
+  fn weigh(self, factor: int, offset: int) -> int {
+    self.x * factor + self.y + offset
+  }
+  fn sum(self) -> int {
+    self.x + self.y
+  }
+}
+
+struct Item {
+  rarity: Rarity
+  weight: float = 0.0
+  display_name: string
+  value: int
+}
+
+struct Cnt {
+  v: int = 0
+}
+
+impl Cnt {
+  fn bump(mut self, by: int) {
+    self.v += by
+  }
+  fn peek(self) -> int {
+    self.v
+  }
+}
+
+struct Pt {
+  x: int = 0
+  y: int = 0
+}
+
+struct Box {
+  p: Pt
+  k: int = 0
+}
+
+struct N {
+  v: int = 0
+}
+
+trait Doubler {
+  fn base(self) -> int
+  fn doubled(self) -> int {
+    self.base() * 2
+  }
+}
+
+impl Doubler for N {
+  fn base(self) -> int {
+    self.v
+  }
+}
+
+trait Comparable {
+  fn cmp(self, other: int) -> int
+}
+
+// ── Generics: a generic struct, a generic inherent impl, a generic fn, and a
+//    generic enum. (Bound-free + comparison-free so the WHOLE file type-checks:
+//    the resolver has no Ord/Comparable lowering for `>=` on a bare `T`.) ──
+struct Pair<T> {
+  a: T
+  b: T
+}
+
+impl<T> Pair<T> {
+  fn first(self) -> T {
+    self.a
+  }
+}
+
+fn identity<T>(value: T) -> T {
+  value
+}
+
+// ── Components ──
+component Health {
+  current: float = 100.0
+  max: float = 100.0
+}
+
+@save
+component Position {
+  x: float = 0.0
+  y: float = 0.0
+}
+
+component Counter {
+  value: int = 0
+  limit: int = 10
+}
+
+component Acc {
+  out: int = 0
+  mixed: int = 0
+  order: int = 0
+}
+
+component OptAcc {
+  out: int = 0
+}
+
+component SetAcc {
+  out: int = 0
+}
+
+component MutAcc {
+  out: int = 0
+}
+
+component AnonAcc {
+  out: int = 0
+}
+
+component Mana {
+  current: float = 100.0
+}
+
+component EnemyTag {
+  marked: bool = true
+}
+
+component Transform {
+  x: float = 0.0
+  y: float = 0.0
+  z: float = 0.0
+}
+
+component Weapon {
+  damage: float = 10.0
+}
+
+// RefProbe is the isolated interp probe: only `ref_probe_tick` touches it, so
+// the Level-A interpret assertion (ticks == N) is deterministic.
+component RefProbe {
+  ticks: int = 0
+}
+
+// ── Resources ──
+resource GameMode {
+  max_players: int = 4
+}
+
+@config
+resource GraphicsSettings {
+  resolution_scale: f32 = 1.0
+}
+
+resource Config {
+  threshold: int = 2
+  enabled: bool = true
+}
+
+resource GameState {
+  difficulty: int = 1
+}
+
+resource DamageTally {
+  total: int = 0
+}
+
+resource Quest {
+  stage: int = 0
+}
+
+resource ManaPool {
+  mana: float = 100.0
+}
+
+// ── Events ──
+event DamageDealt {
+  amount: int = 0
+  crit: bool = false
+}
+
+event Fled {
+  who: int = 0
+}
+
+event MealCallReceived { }
+
+event DialogueStart {
+  npc: int = 0
+}
+
+event OpenShopUI {
+  shop: int = 0
+}
+
+event VFXImpact {
+  intensity: float = 0.0
+}
+
+event CutsceneStarted {
+  id: int = 0
+}
+
+event CutsceneFinished {
+  id: int = 0
+}
+
+event SeqDialogueLine {
+  line: int = 0
+}
+
+event QuestStarted { }
+
+// ── Free functions (incl. the action functions the gameplay constructs call). ──
+fn use_smart_object(name: string) { }
+fn go_to(place: string) { }
+fn idle(anim: string) { }
+fn find_cover(threat: int) -> int {
+  threat + 1
+}
+fn move_to(spot: int) { }
+fn attack_melee(power: int) { }
+fn interact_with(who: string) -> bool {
+  true
+}
+fn reward_xp(amount: int) { }
+fn first_positive(a: int, b: int) -> int? {
+  if a > 0 { some(a) } else if b > 0 { some(b) } else { none }
+}
+
+// ============================================================================
+// Level-A rules — when surface, expressions, control flow, collections,
+// closures, error handling, generics, optionals, events, tags, observer,
+// change detection, named arguments. (Renamed uniquely; dormant at interp
+// unless their component is spawned — only RefProbe is.)
+// ============================================================================
+
+rule ra_heal(entity: Entity)
+  when entity has Health
+{
+  entity.get_mut(Health).current += 1.0
+}
+
+rule ra_tick(entity: Entity, dt: float)
+  when entity has Health and entity has Position
+{
+  let h = entity.get(Health)
+}
+
+rule ra_frozen(entity: Entity)
+  when entity has Health and not entity has Position
+{
+  let c = entity.get(Health).current
+}
+
+rule ra_either(entity: Entity)
+  when entity has Health or entity has Position
+{
+  let x = 0
+}
+
+rule ra_filtered(entity: Entity)
+  when entity has Counter { value == 0 }
+{
+  entity.get_mut(Counter).value = 1
+}
+
+rule ra_resource_gate()
+  when resource GameMode
+{
+  let m = get(GameMode).max_players
+}
+
+rule ra_resource_changed()
+  when resource GameMode changed
+{
+  let mode = get_mut(GameMode)
+}
+
+rule ra_promote(entity: Entity)
+  when entity has Counter and entity has Position
+{
+  let n = entity.get(Counter).value
+  entity.get_mut(Position).x = n as float
+}
+
+rule ra_guard(entity: Entity)
+  when entity has Health
+{
+  assert(entity.get(Health).current > 0.0, "must be alive")
+}
+
+rule ra_classify(entity: Entity)
+  when entity has Counter
+{
+  let v = entity.get(Counter).value
+  entity.get_mut(Counter).value = match v { 0 => 10, 1 => 20, _ => 0 }
+}
+
+rule ra_pick_bind(entity: Entity)
+  when entity has Counter
+{
+  entity.get_mut(Counter).value = match entity.get(Counter).value { 0 => 1, _ => 2 }
+}
+
+rule ra_sum_range(entity: Entity)
+  when entity has Counter
+{
+  let mut s = 0
+  for i in 0..10 {
+    s += i
+  }
+  entity.get_mut(Counter).value = s
+}
+
+rule ra_sum_inclusive(entity: Entity)
+  when entity has Counter
+{
+  let mut s = 0
+  for i in 0..=5 {
+    s += i
+  }
+  entity.get_mut(Counter).value = s
+}
+
+rule ra_array_index(entity: Entity)
+  when entity has Counter
+{
+  let arr = [10, 20, 30]
+  entity.get_mut(Counter).value = arr[1]
+}
+
+rule ra_array_slice(entity: Entity)
+  when entity has Counter
+{
+  let arr = [1, 2, 3, 4]
+  let s = arr[1..3]
+  entity.get_mut(Counter).value = s[0]
+}
+
+rule ra_array_fill(entity: Entity)
+  when entity has Counter
+{
+  let buf = [0; 8]
+  entity.get_mut(Counter).value = buf[0]
+}
+
+rule ra_for_array(entity: Entity)
+  when entity has Counter
+{
+  let xs = [1, 2, 3]
+  let mut total = 0
+  for x in xs {
+    total += x
+  }
+  entity.get_mut(Counter).value = total
+}
+
+rule ra_map_sum(entity: Entity)
+  when entity has Counter
+{
+  let m = [1: 10, 2: 20]
+  let mut s = 0
+  for k, v in m {
+    s += v
+  }
+  entity.get_mut(Counter).value = s
+}
+
+rule ra_empty_map(entity: Entity)
+  when entity has Counter
+{
+  let m: [int: int] = [:]
+  entity.get_mut(Counter).value = 0
+}
+
+rule ra_closure_apply(entity: Entity)
+  when entity has Counter
+{
+  let double = |x: int| x * 2
+  entity.get_mut(Counter).value = double(21)
+}
+
+rule ra_closure_capture(entity: Entity)
+  when entity has Counter
+{
+  let factor = 3
+  let scale = |x: int| x * factor
+  entity.get_mut(Counter).value = scale(5)
+}
+
+rule ra_closure_block(entity: Entity)
+  when entity has Counter
+{
+  let pick = |x: int| {
+    if x > 3 {
+      return 40
+    }
+    x
+  }
+  entity.get_mut(Counter).value = pick(7) + 2
+}
+
+rule ra_loop_break(entity: Entity)
+  when entity has Counter
+{
+  let x = loop {
+    break 42
+  }
+  entity.get_mut(Counter).value = x
+}
+
+rule ra_labeled_break(entity: Entity)
+  when entity has Counter
+{
+  let mut found = 0
+  outer: loop {
+    loop {
+      found = 7
+      break outer
+    }
+  }
+  entity.get_mut(Counter).value = found
+}
+
+rule ra_try_catch(entity: Entity)
+  when entity has Counter
+{
+  let mut x = 0
+  try {
+    throw Error { message: "boom", code: ErrorCode.io_fail }
+  } catch err {
+    x = err.message.len()
+  }
+  entity.get_mut(Counter).value = x
+}
+
+rule ra_enum_match(entity: Entity)
+  when entity has Counter
+{
+  let d = Difficulty.hard
+  entity.get_mut(Counter).value = match d {
+    Difficulty.easy => 1,
+    .normal => 2,
+    Difficulty.hard => 3,
+  }
+}
+
+rule ra_trait_use(entity: Entity)
+  when entity has Counter
+{
+  let n = N { v: 21 }
+  entity.get_mut(Counter).value = n.doubled()
+}
+
+rule ra_generic_use(entity: Entity)
+  when entity has Counter
+{
+  let chosen = identity(2)
+  entity.get_mut(Counter).value = chosen
+}
+
+rule ra_generic_impl(entity: Entity)
+  when entity has Counter
+{
+  let p = Pair { a: 7, b: 8 }
+  entity.get_mut(Counter).value = p.first()
+}
+
+rule ra_optionals(entity: Entity)
+  when entity has Counter
+{
+  let chosen: int? = first_positive(0, 9)
+  let mut total = 0
+  if let x = chosen {
+    total += x
+  } else {
+    total = -1
+  }
+  while let y = (if total < 3 { some(total) } else { none }) {
+    total += 1
+  }
+  entity.get_mut(Counter).value = total
+}
+
+rule ra_string_interp(entity: Entity)
+  when entity has Acc
+{
+  let who = "weld"
+  let msg = "hi {who}, n={1 + 2}, literal brace: \{x}"
+  entity.get_mut(Acc).out = msg.len()
+}
+
+rule ra_optional_ops(entity: Entity)
+  when entity has OptAcc
+{
+  let mut xs: int[] = [10, 20]
+  let a = xs.pop() ?? -1
+  let b = xs.pop()!
+  let mut m = [1: 100, 2: 200]
+  let c = m[1] ?? 0
+  let s: string? = some("hello")
+  let d = s?.len() ?? 0
+  let e = match m[2] {
+    some(x) => x + 1,
+    none => 0,
+  }
+  entity.get_mut(OptAcc).out = a + b + c + d + e
+}
+
+rule ra_set_ops(entity: Entity)
+  when entity has SetAcc
+{
+  let empty: Set<int> = Set.new()
+  let mut s = Set.from([1, 2, 2, 3])
+  s.insert(4)
+  if s.contains(2) {
+    entity.get_mut(SetAcc).out = s.len() + empty.len()
+  }
+}
+
+rule ra_method_mut(entity: Entity)
+  when entity has MutAcc
+{
+  let mut c = Cnt { v: 1 }
+  c.bump(41)
+  entity.get_mut(MutAcc).out = c.peek()
+}
+
+rule ra_anon_struct(entity: Entity)
+  when entity has AnonAcc
+{
+  let q: Pt = .{ x: 40, y: 2 }
+  let b = Box { p: .{ x: 7, y: 5 }, k: 30 }
+  entity.get_mut(AnonAcc).out = q.x + q.y + b.p.x + b.k
+}
+
+rule ra_deal_damage(entity: Entity)
+  when entity has Health
+{
+  emit DamageDealt { amount: 25, crit: true }
+}
+
+rule ra_tag_ops(entity: Entity)
+  when entity has Counter
+  and entity has_tag .unit.status.alive
+  and entity has_no_tag .unit.status.dead
+  and entity has_any_tag [.unit.team.red, .unit.team.blue]
+  and entity has_all_tags [.unit.status.alive, .unit.status.stunned]
+{
+  entity.add_tag(.unit.status.stunned)
+  entity.remove_tag(.unit.status.alive)
+}
+
+rule filter_general(entity: Entity)
+  when entity has Counter { value * 2 < limit }
+{
+  entity.get_mut(Counter).value += 1
+}
+
+rule bare_cond(entity: Entity)
+  when entity has Counter and entity.get(Counter).value > 4
+{
+  entity.get_mut(Counter).value += 100
+}
+
+rule resource_gated(entity: Entity)
+  when resource Config { enabled and threshold < 3 } and entity has Counter
+{
+  entity.get_mut(Counter).value += 10
+}
+
+rule named_args(entity: Entity)
+  when entity has Acc
+{
+  let mut seq = 0
+  let r = score(b: {
+    seq = seq * 10 + 3
+    3
+  }, a: {
+    seq = seq * 10 + 2
+    2
+  })
+  entity.get_mut(Acc).out += r
+  entity.get_mut(Acc).order = seq
+  let v = V2 { x: 5, y: 1 }
+  entity.get_mut(Acc).mixed += v.weigh(2, offset: 7)
+}
+
+fn score(a: int, b: int) -> int {
+  a * 10 + b
+}
+
+rule ra_when_low(entity: Entity)
+  when entity has Health { current < max * 0.2 }
+{
+  entity.get_mut(Health).current += 1.0
+}
+
+rule ra_hard_mode(entity: Entity)
+  when resource GameState { difficulty == 2 } and entity has Health
+{
+  entity.get_mut(Health).current -= 1.0
+}
+
+// @on_event observer — drains DamageDealt into a resource tally.
+@on_event(DamageDealt)
+rule absorb_damage()
+  when resource DamageTally
+{
+  let t = get_mut(DamageTally)
+  t.total += event.amount
+}
+
+// `changed` filter on a component.
+rule react_changed(entity: Entity)
+  when entity has Counter and entity has Health changed
+{
+  entity.get_mut(Counter).value += 1
+}
+
+// async rule — suspends at `await`, resumes on a later tick (interp only).
+async rule intro_sequence()
+  when resource Quest
+{
+  let q = get_mut(Quest)
+  q.stage = 1
+  await wait(2)
+  await global_event(QuestStarted)
+  let done = get_mut(Quest)
+  done.stage = 2
+}
+
+// The isolated interpret probe: increments once per tick (asserted == N).
+rule ref_probe_tick(entity: Entity)
+  when entity has RefProbe
+{
+  entity.get_mut(RefProbe).ticks += 1
+}
+
+// ============================================================================
+// E4 gameplay constructs — data, routine, behavior, quest, dialogue, ability.
+// ============================================================================
+
+data ItemDatabase: Item {
+  iron_sword: {
+    rarity: .uncommon,
+    weight: 3.5,
+    display_name: "Iron Sword",
+    value: 50,
+  },
+  iron_sword_enchanted: {
+    ..ItemDatabase.iron_sword,
+    display_name: "Iron Sword +1",
+    value: 120,
+  },
+  pebble: {
+    rarity: .common,
+    display_name: "Pebble",
+    value: 0,
+  },
+}
+
+routine IdleDaily {
+  segment Idle {
+    trigger: at 06:00
+    actions: move_to(0)
+    until: at 22:00
+  }
+}
+
+routine BlacksmithDaily {
+  segment Working {
+    trigger: at 06:00 or after Sleeping
+    actions: use_smart_object("forge_anvil")
+    until: at 12:00 or on_event MealCallReceived
+  }
+  segment Lunch {
+    trigger: at 12:00 or after Working
+    actions: go_to("tavern") then use_smart_object("tavern_bench")
+    until: at 13:00
+  }
+  segment Sleeping {
+    trigger: at 22:00
+    actions: go_to("bed") then idle("sleeping")
+    until: at 06:00
+  }
+  on_threat_detected -> CombatBehavior
+  on_dialogue_request -> pause_segment
+}
+
+behavior Patrol {
+  sequence {
+    action: run_routine(IdleDaily)
+  }
+}
+
+behavior CombatBehavior {
+  selector {
+    sequence when self has Health { current < max * 0.2 } {
+      action: let cover = find_cover(7)
+      action: move_to(cover)
+      action: emit Fled { who: 1 }
+    }
+    condition: self.get(Health).current > 0.0
+    action: attack_melee(3)
+    action: run_behavior(Patrol)
+  }
+}
+
+quest EscortMerchant {
+  display_name: "Escorting the Merchant"
+  required_level: 5
+  requires: player has_tag .quest.merchant_intro_done
+
+  stage talk {
+    objective main: interact_with("merchant_01")
+    on_complete: emit DialogueStart { npc: 1 }
+  }
+
+  async stage wrap_up {
+    objective main: player.get(Health).current > 0.0
+    objective optional bonus: interact_with("bonus_giver")
+    on_fail: player.get(Health).current <= 0.0 -> restart_stage
+    on_complete: {
+      reward_xp(500)
+    }
+    branch hard_path when player has Health { current < 10.0 } {
+      stage survive {
+        objective main: interact_with("medic")
+      }
+    }
+  }
+}
+
+dialogue MerchantGreeting {
+  speaker "merchant" {
+    line: @loc:"Welcome to my shop, traveler!"
+    line: "You look hurt!" when player has Health { current < 50.0 }
+  }
+
+  choice {
+    @loc:"Show me your wares" -> show_wares
+    "Goodbye" when player.get(Health).current > 0.0 -> end
+  }
+
+  branch show_wares {
+    speaker "merchant" {
+      line: @loc:"greeting":"I have weapons and armor."
+    }
+    emit OpenShopUI { shop: 1 } when not player has_tag .social.met_merchant
+    -> end
+  }
+}
+
+ability Fireball {
+  cost: { mana: 20.0 }
+  cooldown: 3.0s
+  tags_required: [.character.status.alive]
+  tags_blocked: [.character.status.stunned, .character.status.silenced]
+  charges: 2
+
+  rule activate(caster: Entity) when caster has Mana { current >= 20.0 } {
+    caster.get_mut(Mana).current -= 20.0
+  }
+}
+
+// ============================================================================
+// E5 presentation constructs — theme, motion, input_mapping, widget, locale.
+// ============================================================================
+
+struct StyleDef {
+  background: string
+  color: string
+}
+
+data Styles: StyleDef {
+  window_dark: { background: "#1E1F22", color: "#DFE1E5" },
+  panel_dark: { background: "#2B2D31", color: "#DFE1E5" },
+}
+
+theme "dark" {
+  window: Styles.window_dark
+  panel: Styles.panel_dark
+  text_color: #DFE1E5
+  text_color_secondary: #8E9196
+  accent: #2E6BBF
+  font: "Inter"
+  base_size: 14
+  scale: 1.0
+}
+
+theme "light" {
+  text_color: #1E1F22
+  background: #F5F5F5
+  font: "Inter"
+}
+
+motion MenuPanel {
+  states {
+    hidden:  { translate_y: 50, opacity: 0, scale: 0.95 }
+    visible: { translate_y: 0,  opacity: 1, scale: 1.0 }
+    pressed: { scale: 0.97 }
+  }
+  transitions {
+    hidden -> visible: animate(0.3s, ease_out_back)
+    visible -> hidden: animate(0.2s, ease_in)
+    * -> pressed:      animate(0.1s)
+    pressed -> *:      animate(0.15s)
+  }
+}
+
+motion AttentionPulse {
+  states {
+    idle:    { scale: 1.0, color: #FFFFFF }
+    pulsing: { scale: 1.0, color: #FFFFFF }
+  }
+  transitions {
+    idle -> pulsing: keyframes [
+      0.0: { scale: 1.0, color: #FFFFFF }
+      0.5: { scale: 1.2, color: #FFD700 }
+      1.0: { scale: 1.0, color: #FFFFFF }
+    ] over 0.6s, ease_in_out
+  }
+}
+
+input_mapping "Gameplay" {
+  context: .gameplay
+  priority: 100
+  consume_input: true
+
+  action move: Vec2 {
+    bind gamepad_left_stick { modifiers: [deadzone_radial(0.15)] }
+  }
+
+  action jump: trigger {
+    bind gamepad_button_a { triggers: [on_press] }
+    bind key_space { triggers: [on_press] }
+  }
+
+  action sprint: bool {
+    bind gamepad_left_stick_click
+    bind key_shift
+  }
+
+  combo hadouken: trigger {
+    sequence: [.move_down, .move_down_forward, .move_forward, .action_attack]
+    window: 0.4s
+  }
+}
+
+@screen(sort_order: 0)
+widget MainMenu(visible: bool, slots: int) {
+  container(direction: .vertical, align: .center, gap: 8) {
+    let title_scale = 1.0
+    text("My Game", font_size: 48, scale: title_scale)
+    button("Play", on_click: |_| start_game())
+    if visible {
+      button("Continue", on_click: |_| resume_game())
+    } else {
+      text("No save", color: gray)
+    }
+    for i, slot in slots {
+      text("slot")
+    }
+  }
+}
+
+@worldspace(billboard: true, max_distance: 30.0)
+widget EnemyPlate(entity: Entity)
+  when entity has Health
+{
+  progress_bar(value: 0.5, width: 80, height: 6, color: red)
+}
+
+locale en {
+  "fp_3f8a2b1c" = "Welcome, traveler!"
+  "ui.menu.title" = "Main Menu"
+  "ui.menu.resume" = "Resume"
+  "ui.menu.quit" = "Quit"
+}
+
+locale en_GB {
+  "ui.menu.title" = "Main Menu"
+  "ui.colour" = "Colour"
+}
+
+// ============================================================================
+// E6 render / audio / animation / cinematic constructs.
+// ============================================================================
+
+effect Explosion {
+  params {
+    intensity: float = 1.0
+    color: Color = #FF6600
+  }
+  emitter Flash {
+    shape: point
+    burst: 1
+    lifetime: 0.1
+    size: 2.0
+  }
+  emitter Debris {
+    shape: sphere
+    burst: 50
+    lifetime: 1.5
+    gravity: -9.81
+  }
+  on Debris.collision {
+    emit VFXImpact { intensity: 1.0 }
+  }
+}
+
+audio_graph LaserBlast {
+  params {
+    charge: float = 0.0
+  }
+  let base = wave_player("samples/laser_base.wav")
+  let synth = oscillator(charge)
+  output(mix(base, synth))
+}
+
+audio_score "exploration" {
+  tempo: 90
+  section Calm {
+    clips: ["music/explore_calm_a.ogg", "music/explore_calm_b.ogg"]
+    loop: true
+    can_transition_to: [Tension, Combat]
+  }
+  section Tension {
+    intro: "music/tension_intro.ogg"
+    on_finish: -> Combat
+  }
+  section Combat {
+    loop: "music/combat_loop.ogg"
+  }
+  stems {
+    bass: { clip: "music/combat_bass.ogg", always_active: true }
+  }
+}
+
+sequence IntroCinematic {
+  duration: 15.0
+  fps: 30.0
+  on_start: emit CutsceneStarted { id: 1 }
+  on_finish: emit CutsceneFinished { id: 1 }
+
+  track Camera on "@local_camera": CameraTrack {
+    0.0s: { position: [0, 0, 0] }
+    5.0s: move_to(target)
+    10.0s: { position: [10, 0, 0] }
+  }
+
+  track Dialogue: EventTrack {
+    2.0s: emit SeqDialogueLine { line: 1 }
+    8.0s: play "vo/intro.ogg"
+  }
+}
+
+anim_graph HumanoidLocomotion {
+  params {
+    speed: float = 0.0
+    is_grounded: bool = true
+  }
+
+  state Idle {
+    clip: "anims/idle" loop
+    transition -> Locomotion when speed > 0.1
+    transition -> Attack when speed > 5.0
+  }
+
+  state Locomotion {
+    motion_matching {
+      database: "anims/locomotion_db"
+      search_rate: 10.0
+      blend_time: 0.2s
+    }
+    transition -> Idle when speed < 0.05
+  }
+
+  state Attack {
+    chooser {
+      rules: [
+        { when speed > 5.0, clip: "anims/sword_strong" }
+        { fallback, clip: "anims/punch" }
+      ]
+    }
+    on_finish: -> Idle
+  }
+
+  layer Aim additive {
+    on is_grounded: play "anims/aim" on_bones("spine", "head")
+  }
+}
+
+shader StandardPBR {
+  params {
+    base_color: Color = #FFFFFF
+    metallic: float = 0.0
+    roughness: float = 0.5
+  }
+
+  vertex(input: VSInput) -> VSOutput {
+    let world_pos = model_matrix * input.position
+    return VSOutput { position: view_proj_matrix * world_pos, uv: input.uv }
+  }
+
+  fragment(input: VSOutput) -> Color {
+    let albedo = sample(base_color_texture, input.uv) * base_color
+    pbr_shade(albedo, metallic, roughness)
+  }
+}
+
+// ============================================================================
+// E7 Level-C constructs — scene + prefab (all three relation forms).
+// ============================================================================
+
+prefab "WallTorch" {
+  version: 1
+  entity "root" {
+    Transform { x: 1.0 }
+    Health { current: 50.0 }
+  }
+}
+
+prefab "WallTorch_Blue" of "WallTorch" {
+  entity "root" {
+    Health { current: 75.0 }
+  }
+}
+
+prefab "CombatModule" extends "WallTorch" requires Health, Transform {
+  entity "root" {
+    Weapon { damage: 20.0 }
+  }
+  on_attach {
+    let bonus = 50
+  }
+  on_detach {
+    let penalty = 50
+  }
+}
+
+scene "Village" {
+  version: 3
+  metadata: { author: "level_designer_01" }
+  resources {
+    GameMode { max_players: 4 }
+  }
+  entity "Hero" {
+    uuid: "u1"
+    Transform { x: 1.0, y: 0.0, z: 3.0 }
+    Health { current: 80.0, max: 100.0 }
+  }
+  entity "Child" {
+    parent: "Hero"
+    Transform { y: 2.0 }
+  }
+  instance of "WallTorch" "Torch_01" {
+    Transform { x: 20.0 }
+    Health.current = 25.0
+  }
+}

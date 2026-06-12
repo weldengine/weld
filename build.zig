@@ -401,6 +401,9 @@ pub fn build(b: *std.Build) void {
         // M0.8 / E7 — interpreter hot-reload: edit rule body → AST swap →
         // behaviour change on the same live world, measured < 500 ms.
         .{ .path = "tests/etch/hot_reload_test.zig", .etch = true, .dedicated_step = "test-hot-reload" },
+        // M0.8 / E7 — full-grammar 500+ line integration reference: parse
+        // < 50 ms + type-check clean + Level-A interpret.
+        .{ .path = "tests/etch/reference_500_test.zig", .etch = true, .dedicated_step = "test-ref500" },
         // M0.8 / E3-D — D-S5-etchcook-inproc: the consolidated cook library.
         .{ .path = "tests/etch/cook_consolidate_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
