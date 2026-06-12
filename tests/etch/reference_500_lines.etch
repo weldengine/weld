@@ -368,7 +368,7 @@ rule ra_classify(entity: Entity)
 rule ra_pick_bind(entity: Entity)
   when entity has Counter
 {
-  entity.get_mut(Counter).value = match entity.get(Counter).value { 0 => 1, _ => 2 }
+  entity.get_mut(Counter).value = match entity.get(Counter).value { n => n + 1 }
 }
 
 rule ra_sum_range(entity: Entity)

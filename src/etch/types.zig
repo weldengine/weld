@@ -5210,7 +5210,20 @@ pub const TypeChecker = struct {
         while (i < m.arms_len) : (i += 1) {
             const arm = self.arena.match_arms.items[m.arms_start + i];
             switch (arm.pattern_kind) {
-                .wildcard, .binding => has_catch_all = true,
+                .wildcard => has_catch_all = true,
+                .binding => {
+                    has_catch_all = true;
+                    // A bare binding `n => …` binds the scrutinee value for its
+                    // arm body — the SAME flat per-rule local scoping as
+                    // `some(v) =>` above (M0.8 E7, Guy's gate amendment). The
+                    // interpreter (interp.zig match `.binding`) and codegen
+                    // (lower.zig `emitMatch` `.binding`) already bind it; the
+                    // type-checker must too, else the body's use of `n` is
+                    // `E0102 UnknownSymbol`.
+                    if (ctx_opt) |ctx| {
+                        try ctx.locals.put(self.gpa, arm.pattern_payload, .{ .type_ = scrut_t, .is_mut = false });
+                    }
+                },
                 .literal => {
                     const lit: NodeId = @bitCast(arm.pattern_payload);
                     const lit_t = try self.synthExprE(lit, ctx_opt);

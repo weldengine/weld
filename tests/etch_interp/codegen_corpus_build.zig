@@ -113,4 +113,6 @@ pub const programs = [_]CodegenProgram{
     // Sema-compiles (codegen-compiles proof for every construct in one unit);
     // the Level-A behaviour is byte-exact interp↔codegen via corpus_facade.
     .{ .name = "p84_reference_500_codegen", .etch_path = "tests/etch_interp/programs/84_reference_500_codegen.etch" },
+    // M0.8 E7 — bare match-arm binding byte-exact (Guy's gate amendment).
+    .{ .name = "p85_match_binding", .etch_path = "tests/etch_interp/programs/85_match_binding.etch" },
 };

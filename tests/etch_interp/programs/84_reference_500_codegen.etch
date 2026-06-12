@@ -1,8 +1,8 @@
 // ============================================================================
 // Differential 84 — full-grammar v0.6 TOTAL codegen integration (M0.8 E7).
 //
-// This is `reference_500_lines.etch` MINUS the three codegen-`UnsupportedConstruct`
-// fragments (async rule, generics, Set — the milestone-long codegen deferrals).
+// This is `reference_500_lines.etch` MINUS the codegen-`UnsupportedConstruct`
+// fragments (the milestone-long codegen deferrals — see the EXCLUDED list).
 // What remains COOKS whole-file → Sema-compiles → and the Level-A behaviour is
 // byte-exact interp↔codegen on the world state after N ticks (the RefProbe rule).
 // This is the TOTAL codegen integration the per-construct corpus (01-83, separate
@@ -10,12 +10,14 @@
 // + scene/prefab cooked together in ONE unit (the AC l.152 spirit; Guy's ruling 1).
 //
 // Constructs present: Level-A foundations (component/resource/rule/when/cast/
-// assert/match/ranges/for-in/arrays/maps/slicing/closures/loop/break/continue/
-// error-handling/struct/enum/trait/impl/Optional/string-interp/methods/anon-struct/
-// events/emit/tags/@on_event/changed/named-args) + the 17 E4-E6 constructs + scene
-// + 3 prefab relation forms. EXCLUDED (codegen-deferred, see reference_500_lines.etch
-// for the parse+interp coverage of these): `async rule`, generics (struct/impl/fn),
-// `Set`. Seeding only a `RefProbe` entity isolates the Level-A assertion.
+// assert/match incl. bare-binding arm/ranges/for-in/arrays/maps/slicing/closures/
+// loop/break/continue/error-handling/struct/enum/trait/impl/Optional/string-interp/
+// Set/methods/anon-struct/events/emit/tags/@on_event/changed/named-args) + the 17
+// E4-E6 constructs + scene + 3 prefab relation forms. EXCLUDED (codegen Phase-2 gaps,
+// parse+interp-covered in reference_500_lines.etch): `async rule`, generics
+// (struct/impl/fn monomorphization), Optional-RETURN fn type, negative tag ops in
+// `when` (has_no_tag/has_no_tags), `for k,v in <map>` iteration. Seeding only a
+// `RefProbe` entity isolates the Level-A assertion.
 // ============================================================================
 
 // ── Tags (one merged hierarchy; cross-block fusion is exercised by the
@@ -143,6 +145,10 @@ component Acc {
 }
 
 component OptAcc {
+  out: int = 0
+}
+
+component SetAcc {
   out: int = 0
 }
 
@@ -315,7 +321,7 @@ rule ra_classify(entity: Entity)
 rule ra_pick_bind(entity: Entity)
   when entity has Counter
 {
-  entity.get_mut(Counter).value = match entity.get(Counter).value { 0 => 1, _ => 2 }
+  entity.get_mut(Counter).value = match entity.get(Counter).value { n => n + 1 }
 }
 
 rule ra_sum_range(entity: Entity)
@@ -480,6 +486,17 @@ rule ra_optional_ops(entity: Entity)
     none => 0,
   }
   entity.get_mut(OptAcc).out = a + b + c + d + e
+}
+
+rule ra_set_ops(entity: Entity)
+  when entity has SetAcc
+{
+  let empty: Set<int> = Set.new()
+  let mut s = Set.from([1, 2, 2, 3])
+  s.insert(4)
+  if s.contains(2) {
+    entity.get_mut(SetAcc).out = s.len() + empty.len()
+  }
 }
 
 rule ra_method_mut(entity: Entity)

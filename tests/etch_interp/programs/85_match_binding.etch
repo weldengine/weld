@@ -1,0 +1,16 @@
+// Differential 85 — bare match-arm binding (`match x { n => … }`), M0.8 E7
+// (Guy's gate amendment: ruling 3 superseded → DELIVER, not requalify). It is a
+// pure Level-A v0.6 grammar pattern with NO missing dependency. The bound `n`
+// scopes into the arm body in ALL THREE backends: the resolver scopes it (the
+// `synthMatch` `.binding` fix — mirrors `some(v) =>`), the interpreter binds it
+// (interp `.binding`), the codegen emits a Zig capture (`emitMatch` `.binding`).
+// Byte-exact world state both backends: value 0 -> 4 over 4 ticks (`n + 1`/tick).
+component Counter {
+  value: int = 0
+}
+
+rule inc_via_binding(entity: Entity)
+  when entity has Counter
+{
+  entity.get_mut(Counter).value = match entity.get(Counter).value { n => n + 1 }
+}
