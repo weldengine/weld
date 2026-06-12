@@ -1195,6 +1195,138 @@ pub const DataDecl = struct {
     annotations_len: u32,
 };
 
+// ── M0.8 E7 Level C — scene / prefab (`etch-grammar.md` §15) ──────────────
+// Serialization-only (parse + validation + descriptor); runtime instantiation
+// is M0.9 (`engine-scene-serialization.md`). `scene`/`prefab` are STRING-named
+// (the `audio_score`/`theme` precedent — referenced by string, no symbol).
+
+/// One `component_instance` (`TYPE_IDENT struct_literal_body`, §15 l.1609) —
+/// used in entity bodies, instance bodies, and the `resources` block. Mirrors
+/// `DataEntry`: a TYPE_IDENT-keyed body whose fields are a `(start, len)` run
+/// of `arena.struct_lit_fields` (via `parseDataEntryBody`).
+pub const ComponentInstance = struct {
+    type_name: StringId, // TYPE_IDENT (component / resource type)
+    fields_start: u32, // index into `arena.struct_lit_fields`
+    fields_len: u32,
+    span: SourceSpan,
+};
+
+/// One `component_field_override` (`TYPE_IDENT "." IDENT "=" expression`,
+/// §15 l.1610) — `instance_decl` bodies only (the grammar's `entity_decl` body
+/// is `{ component_instance }` with no override form; a prefab variant
+/// re-declares whole components instead).
+pub const FieldOverride = struct {
+    type_name: StringId, // TYPE_IDENT (component)
+    field: StringId, // IDENT
+    value: NodeId, // expression (RHS)
+    span: SourceSpan,
+};
+
+/// Kind of one `instance_decl` body member (`component_instance |
+/// component_field_override`, §15 l.1606). The `QuestElem` discriminated-pointer
+/// pattern — preserves declaration order across the two kinds.
+pub const InstanceMemberKind = enum { component, field_override };
+/// One `instance_decl` body member — a discriminated index into either
+/// `arena.component_instances` or `arena.field_overrides` (declaration order).
+pub const InstanceMember = struct {
+    kind: InstanceMemberKind,
+    index: u32, // into `arena.component_instances` | `arena.field_overrides`
+};
+
+/// One `entity_decl` (§15 l.1598) — used by BOTH `scene_decl` and `prefab_decl`.
+/// `uuid`/`parent` are optional STRING_LITERALs (0 = absent). The name is
+/// mandatory (grammar `entity STRING_LITERAL`; the doc's anonymous `entity {`
+/// form is a shorthand — corpus uses legal forms). Components are a direct run
+/// of `arena.component_instances` (the body closes before the next sibling — the
+/// `SequenceTrack`→keyframes precedent).
+pub const SceneEntity = struct {
+    name: StringId, // STRING_LITERAL content
+    uuid: StringId, // 0 if absent
+    parent: StringId, // 0 if absent
+    components_start: u32, // index into `arena.component_instances`
+    components_len: u32,
+    span: SourceSpan,
+};
+
+/// One `instance_decl` (§15 l.1604): `instance of "Type" "Name" { … }`. Members
+/// interleave `component_instance | component_field_override` → a buffered run of
+/// `arena.scene_instance_members` (the `quest_elems` precedent — both kinds feed
+/// shared pools).
+pub const SceneInstance = struct {
+    prefab_name: StringId, // STRING_LITERAL after `of`
+    instance_name: StringId, // STRING_LITERAL
+    uuid: StringId, // 0 if absent
+    members_start: u32, // index into `arena.scene_instance_members`
+    members_len: u32,
+    span: SourceSpan,
+};
+
+/// Kind of one top-level `scene` child (`entity_decl | instance_decl`, §15 l.1592).
+pub const SceneChildKind = enum { entity, instance };
+/// One top-level `scene` child — a discriminated index into either
+/// `arena.scene_entities` or `arena.scene_instances` (declaration order).
+pub const SceneChild = struct {
+    kind: SceneChildKind,
+    index: u32, // into `arena.scene_entities` | `arena.scene_instances`
+};
+
+/// Side-slab entry for a `scene` declaration (§15 l.1588). STRING-named.
+/// `version` is the optional INT_LITERAL expr (`NodeId.none` if absent).
+/// `metadata` is the optional `metadata: struct_literal_body` (a
+/// `struct_lit_fields` run, valid iff `has_metadata`). `resources` is the
+/// `resources { component_instance }` block (a `component_instances` run).
+/// `children` interleave entity|instance → a buffered run of `arena.scene_children`.
+pub const SceneDecl = struct {
+    name: StringId, // STRING_LITERAL content
+    name_span: SourceSpan,
+    version: NodeId, // INT_LITERAL expr, `NodeId.none` if absent
+    has_metadata: bool,
+    metadata_start: u32, // struct_lit_fields run (valid iff has_metadata)
+    metadata_len: u32,
+    resources_start: u32, // index into `arena.component_instances`
+    resources_len: u32,
+    children_start: u32, // index into `arena.scene_children`
+    children_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
+/// Prefab relation (§15 l.1629): `of` = exclusive variant (static inheritance),
+/// `extends` = additive extension (dynamic composition). `none` when standalone.
+/// `requires` / `on_attach` / `on_detach` are valid only with `extends` (l.1635 /
+/// l.1640 / l.1645 — a VALIDATION, not parse).
+pub const PrefabRelation = enum { none, of, extends };
+
+/// Side-slab entry for a `prefab` declaration (§15 l.1618). STRING-named.
+/// `relation` + `relation_target` carry `of "X"` / `extends "X"` (target 0 if
+/// none). `requires` is a `(start, len)` run of `arena.prefab_requires`
+/// (TYPE_IDENT StringIds — the `audio_score_targets` precedent). `entities` is a
+/// direct run of `arena.scene_entities` (REUSED — the prefab body is
+/// `{ entity_decl }`, no instances). `on_attach`/`on_detach` are optional
+/// statement runs in `arena.extra` (the `parseStmtRun` precedent).
+pub const PrefabDecl = struct {
+    name: StringId, // STRING_LITERAL content
+    name_span: SourceSpan,
+    relation: PrefabRelation,
+    relation_target: StringId, // STRING_LITERAL after of/extends (0 if none)
+    requires_start: u32, // index into `arena.prefab_requires`
+    requires_len: u32,
+    version: NodeId, // INT_LITERAL expr, `NodeId.none` if absent
+    has_metadata: bool,
+    metadata_start: u32, // struct_lit_fields run (valid iff has_metadata)
+    metadata_len: u32,
+    entities_start: u32, // index into `arena.scene_entities`
+    entities_len: u32,
+    has_on_attach: bool,
+    on_attach_start: u32, // statement run in `arena.extra`
+    on_attach_len: u32,
+    has_on_detach: bool,
+    on_detach_start: u32, // statement run in `arena.extra`
+    on_detach_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
 /// Side-slab entry for a `theme` declaration (M0.8 E5 Level B presentation,
 /// `etch-grammar.md` §10.2: `theme_decl = "theme" STRING_LITERAL "{"
 /// {theme_entry} "}"`, `theme_entry = IDENT ":" expression`). The grammar
@@ -2149,6 +2281,17 @@ pub const AstArena = struct {
     anim_layer_props: std.ArrayListUnmanaged(AnimLayerProp) = .empty,
     anim_layer_bones: std.ArrayListUnmanaged(StringId) = .empty,
     shader_decls: std.ArrayListUnmanaged(ShaderDecl) = .empty,
+    // M0.8 E7 Level C — scene / prefab side-tables. `scene_entities` is shared
+    // by scene and prefab (the `entity_decl` body is identical in both).
+    scene_decls: std.ArrayListUnmanaged(SceneDecl) = .empty,
+    scene_children: std.ArrayListUnmanaged(SceneChild) = .empty,
+    scene_entities: std.ArrayListUnmanaged(SceneEntity) = .empty,
+    scene_instances: std.ArrayListUnmanaged(SceneInstance) = .empty,
+    scene_instance_members: std.ArrayListUnmanaged(InstanceMember) = .empty,
+    component_instances: std.ArrayListUnmanaged(ComponentInstance) = .empty,
+    field_overrides: std.ArrayListUnmanaged(FieldOverride) = .empty,
+    prefab_decls: std.ArrayListUnmanaged(PrefabDecl) = .empty,
+    prefab_requires: std.ArrayListUnmanaged(StringId) = .empty,
     quest_decls: std.ArrayListUnmanaged(QuestDecl) = .empty,
     quest_properties: std.ArrayListUnmanaged(QuestProperty) = .empty,
     quest_stages: std.ArrayListUnmanaged(QuestStage) = .empty,
@@ -2364,6 +2507,15 @@ pub const AstArena = struct {
         self.anim_layer_props.deinit(gpa);
         self.anim_layer_bones.deinit(gpa);
         self.shader_decls.deinit(gpa);
+        self.scene_decls.deinit(gpa);
+        self.scene_children.deinit(gpa);
+        self.scene_entities.deinit(gpa);
+        self.scene_instances.deinit(gpa);
+        self.scene_instance_members.deinit(gpa);
+        self.component_instances.deinit(gpa);
+        self.field_overrides.deinit(gpa);
+        self.prefab_decls.deinit(gpa);
+        self.prefab_requires.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
@@ -2911,6 +3063,22 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.shader_decls.items.len);
         try self.shader_decls.append(gpa, decl);
         return try self.addItem(gpa, .shader_decl, idx, span);
+    }
+
+    /// `scene "Name" { … }` (M0.8 E7 Level C, §15). The caller appends all child
+    /// runs (resources, entities, instances, children) to their slabs first,
+    /// passing the ranges in `decl`.
+    pub fn addSceneDecl(self: *AstArena, gpa: std.mem.Allocator, decl: SceneDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.scene_decls.items.len);
+        try self.scene_decls.append(gpa, decl);
+        return try self.addItem(gpa, .scene_decl, idx, span);
+    }
+
+    /// `prefab "Name" [of|extends "X"] [requires …] { … }` (M0.8 E7 Level C, §15).
+    pub fn addPrefabDecl(self: *AstArena, gpa: std.mem.Allocator, decl: PrefabDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.prefab_decls.items.len);
+        try self.prefab_decls.append(gpa, decl);
+        return try self.addItem(gpa, .prefab_decl, idx, span);
     }
 
     /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The

@@ -510,7 +510,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score, .kw_sequence, .kw_anim_graph, .kw_shader => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score, .kw_sequence, .kw_anim_graph, .kw_shader, .kw_scene, .kw_prefab => return,
                 else => _ = try self.advance(),
             }
         }
@@ -555,6 +555,8 @@ pub const Parser = struct {
             .kw_sequence => try self.parseSequenceDecl(annotations),
             .kw_anim_graph => try self.parseAnimGraphDecl(annotations),
             .kw_shader => try self.parseShaderDecl(annotations),
+            .kw_scene => try self.parseSceneDecl(annotations),
+            .kw_prefab => try self.parsePrefabDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -568,7 +570,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score | sequence | anim_graph | shader), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score | sequence | anim_graph | shader | scene | prefab), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -3030,6 +3032,342 @@ pub const Parser = struct {
             .body_start = body.start,
             .body_len = body.len,
         };
+    }
+
+    // ── M0.8 E7 Level C — scene / prefab (`etch-grammar.md` §15) ───────────
+    // STRING-named (the audio_score/theme precedent). Sub-keywords (`of`,
+    // `extends`, `requires`, `version`, `metadata`, `resources`, `entity`,
+    // `instance`, `uuid`, `parent`, `on_attach`, `on_detach`) stay CONTEXTUAL
+    // idents matched by lexeme (the E6 doctrine — never keyword tokens). Relation
+    // / requires / hook legality (`of` vs `extends`) is VALIDATION, not parse —
+    // parse permissively, fail loud later.
+
+    /// `scene_decl = "scene" STRING_LITERAL "{" [version] [metadata] [resources]
+    /// {entity_decl | instance_decl} "}"` (§15 l.1588). The optional leading
+    /// props are guarded heads (the motion-state idiom); the heterogeneous
+    /// children are buffered (the quest-elem precedent) — entities and instances
+    /// interleave the shared slabs.
+    fn parseSceneDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'scene'
+        const name_tok = try self.expect(.string_literal, "expected scene name (string literal)");
+        const name_id = try self.internStringLiteral(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start the scene body");
+
+        var version: NodeId = NodeId.none;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "version") and self.peekNext() == .colon) {
+            _ = try self.advance(); // 'version'
+            _ = try self.advance(); // ':'
+            version = try self.parseExpr(0);
+        }
+        var has_metadata = false;
+        var metadata_start: u32 = 0;
+        var metadata_len: u32 = 0;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "metadata") and self.peekNext() == .colon) {
+            _ = try self.advance(); // 'metadata'
+            _ = try self.advance(); // ':'
+            const body = try self.parseDataEntryBody();
+            has_metadata = true;
+            metadata_start = body.fields_start;
+            metadata_len = body.fields_len;
+        }
+
+        const resources_start: u32 = @intCast(self.arena.component_instances.items.len);
+        var resources_len: u32 = 0;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "resources")) {
+            _ = try self.advance(); // 'resources'
+            _ = try self.expect(.lbrace, "expected '{' to start the resources block");
+            while (self.peek() != .rbrace and self.peek() != .eof) {
+                try self.surfaceTokenErrors();
+                _ = try self.parseComponentInstance();
+                resources_len += 1;
+            }
+            _ = try self.expect(.rbrace, "expected '}' to close the resources block");
+        }
+
+        var children: std.ArrayListUnmanaged(ast_mod.SceneChild) = .empty;
+        defer children.deinit(self.gpa);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.peek() != .ident) {
+                return self.parseErrFmt(self.peekSpan(), "expected 'entity' or 'instance' in scene body, got '{s}'", .{self.sliceOf(self.peekSpan())});
+            }
+            const head = self.sliceOf(self.peekSpan());
+            if (std.mem.eql(u8, head, "entity")) {
+                const idx = try self.parseSceneEntity();
+                try children.append(self.gpa, .{ .kind = .entity, .index = idx });
+            } else if (std.mem.eql(u8, head, "instance")) {
+                const idx = try self.parseSceneInstance();
+                try children.append(self.gpa, .{ .kind = .instance, .index = idx });
+            } else {
+                return self.parseErrFmt(self.peekSpan(), "expected 'entity' or 'instance' in scene body, got '{s}'", .{head});
+            }
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the scene body");
+
+        const children_start: u32 = @intCast(self.arena.scene_children.items.len);
+        try self.arena.scene_children.appendSlice(self.gpa, children.items);
+        _ = try self.arena.addSceneDecl(self.gpa, .{
+            .name = name_id,
+            .name_span = name_tok.span,
+            .version = version,
+            .has_metadata = has_metadata,
+            .metadata_start = metadata_start,
+            .metadata_len = metadata_len,
+            .resources_start = resources_start,
+            .resources_len = resources_len,
+            .children_start = children_start,
+            .children_len = @intCast(children.items.len),
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// `prefab_decl = "prefab" STRING_LITERAL [prefab_relation] [requires_clause]
+    /// "{" [version] [metadata] {entity_decl} [on_attach] [on_detach] "}"`
+    /// (§15 l.1618).
+    fn parsePrefabDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'prefab'
+        const name_tok = try self.expect(.string_literal, "expected prefab name (string literal)");
+        const name_id = try self.internStringLiteral(name_tok.span);
+
+        var relation: ast_mod.PrefabRelation = .none;
+        var relation_target: StringId = 0;
+        if (self.peek() == .ident) {
+            const head = self.sliceOf(self.peekSpan());
+            if (std.mem.eql(u8, head, "of")) {
+                _ = try self.advance();
+                const t = try self.expect(.string_literal, "expected a base prefab name (string literal) after 'of'");
+                relation = .of;
+                relation_target = try self.internStringLiteral(t.span);
+            } else if (std.mem.eql(u8, head, "extends")) {
+                _ = try self.advance();
+                const t = try self.expect(.string_literal, "expected a base prefab name (string literal) after 'extends'");
+                relation = .extends;
+                relation_target = try self.internStringLiteral(t.span);
+            }
+        }
+
+        const requires_start: u32 = @intCast(self.arena.prefab_requires.items.len);
+        var requires_len: u32 = 0;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "requires")) {
+            _ = try self.advance(); // 'requires'
+            const first = try self.expect(.type_ident, "expected a component type (TYPE_IDENT) after 'requires'");
+            try self.arena.prefab_requires.append(self.gpa, try self.internSlice(first.span));
+            requires_len += 1;
+            while (try self.match(.comma)) {
+                const t = try self.expect(.type_ident, "expected a component type (TYPE_IDENT) after ','");
+                try self.arena.prefab_requires.append(self.gpa, try self.internSlice(t.span));
+                requires_len += 1;
+            }
+        }
+
+        _ = try self.expect(.lbrace, "expected '{' to start the prefab body");
+
+        var version: NodeId = NodeId.none;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "version") and self.peekNext() == .colon) {
+            _ = try self.advance(); // 'version'
+            _ = try self.advance(); // ':'
+            version = try self.parseExpr(0);
+        }
+        var has_metadata = false;
+        var metadata_start: u32 = 0;
+        var metadata_len: u32 = 0;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "metadata") and self.peekNext() == .colon) {
+            _ = try self.advance(); // 'metadata'
+            _ = try self.advance(); // ':'
+            const body = try self.parseDataEntryBody();
+            has_metadata = true;
+            metadata_start = body.fields_start;
+            metadata_len = body.fields_len;
+        }
+
+        const entities_start: u32 = @intCast(self.arena.scene_entities.items.len);
+        var entities_len: u32 = 0;
+        while (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "entity")) {
+            try self.surfaceTokenErrors();
+            _ = try self.parseSceneEntity();
+            entities_len += 1;
+        }
+
+        var has_on_attach = false;
+        var on_attach_start: u32 = 0;
+        var on_attach_len: u32 = 0;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "on_attach")) {
+            _ = try self.advance(); // 'on_attach'
+            _ = try self.expect(.lbrace, "expected '{' to start the on_attach block");
+            const run = try self.parseStmtRun();
+            _ = try self.expect(.rbrace, "expected '}' to close the on_attach block");
+            has_on_attach = true;
+            on_attach_start = run.start;
+            on_attach_len = run.len;
+        }
+        var has_on_detach = false;
+        var on_detach_start: u32 = 0;
+        var on_detach_len: u32 = 0;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "on_detach")) {
+            _ = try self.advance(); // 'on_detach'
+            _ = try self.expect(.lbrace, "expected '{' to start the on_detach block");
+            const run = try self.parseStmtRun();
+            _ = try self.expect(.rbrace, "expected '}' to close the on_detach block");
+            has_on_detach = true;
+            on_detach_start = run.start;
+            on_detach_len = run.len;
+        }
+
+        const closing = try self.expect(.rbrace, "expected '}' to close the prefab body");
+        _ = try self.arena.addPrefabDecl(self.gpa, .{
+            .name = name_id,
+            .name_span = name_tok.span,
+            .relation = relation,
+            .relation_target = relation_target,
+            .requires_start = requires_start,
+            .requires_len = requires_len,
+            .version = version,
+            .has_metadata = has_metadata,
+            .metadata_start = metadata_start,
+            .metadata_len = metadata_len,
+            .entities_start = entities_start,
+            .entities_len = entities_len,
+            .has_on_attach = has_on_attach,
+            .on_attach_start = on_attach_start,
+            .on_attach_len = on_attach_len,
+            .has_on_detach = has_on_detach,
+            .on_detach_start = on_detach_start,
+            .on_detach_len = on_detach_len,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// `entity_decl = "entity" STRING_LITERAL "{" [uuid] [parent]
+    /// {component_instance} "}"` (§15 l.1598). Shared by scene + prefab bodies.
+    /// Appends one `SceneEntity`, returns its index. Components append directly
+    /// (the body closes before the next sibling — contiguous run).
+    fn parseSceneEntity(self: *Parser) ParseError!u32 {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'entity'
+        const name_tok = try self.expect(.string_literal, "expected entity name (string literal)");
+        _ = try self.expect(.lbrace, "expected '{' to start the entity body");
+        var uuid: StringId = 0;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "uuid") and self.peekNext() == .colon) {
+            _ = try self.advance(); // 'uuid'
+            _ = try self.advance(); // ':'
+            const u = try self.expect(.string_literal, "expected a uuid string literal");
+            uuid = try self.internStringLiteral(u.span);
+        }
+        var parent: StringId = 0;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "parent") and self.peekNext() == .colon) {
+            _ = try self.advance(); // 'parent'
+            _ = try self.advance(); // ':'
+            const p = try self.expect(.string_literal, "expected a parent string literal");
+            parent = try self.internStringLiteral(p.span);
+        }
+        const components_start: u32 = @intCast(self.arena.component_instances.items.len);
+        var components_len: u32 = 0;
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            _ = try self.parseComponentInstance();
+            components_len += 1;
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the entity body");
+        const idx: u32 = @intCast(self.arena.scene_entities.items.len);
+        try self.arena.scene_entities.append(self.gpa, .{
+            .name = try self.internStringLiteral(name_tok.span),
+            .uuid = uuid,
+            .parent = parent,
+            .components_start = components_start,
+            .components_len = components_len,
+            .span = .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end },
+        });
+        return idx;
+    }
+
+    /// `instance_decl = "instance" "of" STRING_LITERAL STRING_LITERAL "{" [uuid]
+    /// {component_instance | component_field_override} "}"` (§15 l.1604). Members
+    /// interleave the two kinds → buffered `InstanceMember` run (the quest-elem
+    /// precedent). Appends one `SceneInstance`, returns its index.
+    fn parseSceneInstance(self: *Parser) ParseError!u32 {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'instance'
+        if (self.peek() != .ident or !std.mem.eql(u8, self.sliceOf(self.peekSpan()), "of")) {
+            return self.parseErr(self.peekSpan(), "expected 'of' after 'instance'");
+        }
+        _ = try self.advance(); // 'of'
+        const prefab_tok = try self.expect(.string_literal, "expected prefab name (string literal) after 'instance of'");
+        const inst_name_tok = try self.expect(.string_literal, "expected instance name (string literal)");
+        _ = try self.expect(.lbrace, "expected '{' to start the instance body");
+        var uuid: StringId = 0;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "uuid") and self.peekNext() == .colon) {
+            _ = try self.advance(); // 'uuid'
+            _ = try self.advance(); // ':'
+            const u = try self.expect(.string_literal, "expected a uuid string literal");
+            uuid = try self.internStringLiteral(u.span);
+        }
+        var members: std.ArrayListUnmanaged(ast_mod.InstanceMember) = .empty;
+        defer members.deinit(self.gpa);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.peek() != .type_ident) {
+                return self.parseErrFmt(self.peekSpan(), "expected a component instance ('Type {{ … }}') or a per-field override ('Type.field = …') in the instance body, got '{s}'", .{self.sliceOf(self.peekSpan())});
+            }
+            // TYPE_IDENT "." → field override; TYPE_IDENT "{" → component instance.
+            if (self.peekNext() == .dot) {
+                const idx = try self.parseFieldOverride();
+                try members.append(self.gpa, .{ .kind = .field_override, .index = idx });
+            } else {
+                const idx = try self.parseComponentInstance();
+                try members.append(self.gpa, .{ .kind = .component, .index = idx });
+            }
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the instance body");
+        const members_start: u32 = @intCast(self.arena.scene_instance_members.items.len);
+        try self.arena.scene_instance_members.appendSlice(self.gpa, members.items);
+        const idx: u32 = @intCast(self.arena.scene_instances.items.len);
+        try self.arena.scene_instances.append(self.gpa, .{
+            .prefab_name = try self.internStringLiteral(prefab_tok.span),
+            .instance_name = try self.internStringLiteral(inst_name_tok.span),
+            .uuid = uuid,
+            .members_start = members_start,
+            .members_len = @intCast(members.items.len),
+            .span = .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end },
+        });
+        return idx;
+    }
+
+    /// `component_instance = TYPE_IDENT struct_literal_body` (§15 l.1609). Appends
+    /// one `ComponentInstance`, returns its index. The body reuses
+    /// `parseDataEntryBody` (the canonical struct_literal_body parser).
+    fn parseComponentInstance(self: *Parser) ParseError!u32 {
+        const type_tok = try self.expect(.type_ident, "expected a component type (TYPE_IDENT)");
+        const body = try self.parseDataEntryBody();
+        const idx: u32 = @intCast(self.arena.component_instances.items.len);
+        try self.arena.component_instances.append(self.gpa, .{
+            .type_name = try self.internSlice(type_tok.span),
+            .fields_start = body.fields_start,
+            .fields_len = body.fields_len,
+            .span = .{ .byte_start = type_tok.span.byte_start, .byte_end = body.end_byte },
+        });
+        return idx;
+    }
+
+    /// `component_field_override = TYPE_IDENT "." IDENT "=" expression` (§15 l.1610).
+    /// `instance_decl` bodies only. Appends one `FieldOverride`, returns its index.
+    fn parseFieldOverride(self: *Parser) ParseError!u32 {
+        const type_tok = try self.expect(.type_ident, "expected a component type (TYPE_IDENT)");
+        _ = try self.expect(.dot, "expected '.' in a per-field override");
+        const field_tok = try self.expect(.ident, "expected a field name after '.'");
+        _ = try self.expect(.eq, "expected '=' in a per-field override");
+        const value = try self.parseExpr(0);
+        const idx: u32 = @intCast(self.arena.field_overrides.items.len);
+        try self.arena.field_overrides.append(self.gpa, .{
+            .type_name = try self.internSlice(type_tok.span),
+            .field = try self.internSlice(field_tok.span),
+            .value = value,
+            .span = .{ .byte_start = type_tok.span.byte_start, .byte_end = self.arena.exprSpan(value).byte_end },
+        });
+        return idx;
     }
 
     const DataEntryBody = struct {
@@ -8132,4 +8470,108 @@ test "parser recovers and a valid shader after a broken construct survives (M0.8
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.shader_decls.items.len);
+}
+
+// ── M0.8 E7 Level C — scene / prefab parser tests ─────────────────────────
+
+test "parser parses a scene with version, metadata, resources, entity, instance (M0.8 E7)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\scene "Village" {
+        \\  version: 3
+        \\  metadata: { author: "level_designer_01" }
+        \\  resources {
+        \\    GameMode { max_players: 4 }
+        \\  }
+        \\  entity "DirectionalLight" {
+        \\    uuid: "7b3e2f1a"
+        \\    Transform { position: [10, 2, 0] }
+        \\    DirectionalLight { color: #FFE0C0, illuminance: 100000.0 }
+        \\  }
+        \\  entity "Player_Spawn" {
+        \\    parent: "DirectionalLight"
+        \\    Transform { position: [0, 0, 3] }
+        \\  }
+        \\  instance of "WallTorch" "Torch_North_01" {
+        \\    uuid: "a8c9d0e1"
+        \\    Transform { position: [10, 2, 0] }
+        \\    Light.intensity = 1500.0
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.scene_decls.items.len);
+    const sc = result.ast.scene_decls.items[0];
+    try std.testing.expect(!sc.version.isNone());
+    try std.testing.expect(sc.has_metadata);
+    try std.testing.expectEqual(@as(u32, 1), sc.resources_len); // GameMode
+    try std.testing.expectEqual(@as(u32, 3), sc.children_len); // 2 entities + 1 instance
+    try std.testing.expectEqual(@as(usize, 2), result.ast.scene_entities.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.scene_instances.items.len);
+    // The instance carries one component_instance member + one field_override.
+    try std.testing.expectEqual(@as(usize, 1), result.ast.field_overrides.items.len);
+}
+
+test "parser parses prefab autonomous, of-variant, and extends with requires + hooks (M0.8 E7)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\prefab "WallTorch" {
+        \\  version: 1
+        \\  entity "root" {
+        \\    Transform {}
+        \\    Light { color: #FF8833, intensity: 2000.0 }
+        \\  }
+        \\}
+        \\prefab "WallTorch_Blue" of "WallTorch" {
+        \\  entity "root" {
+        \\    Light { color: #3366FF }
+        \\  }
+        \\}
+        \\prefab "CombatModule" extends "BaseCharacter" requires Health, Transform {
+        \\  entity "root" {
+        \\    Weapon { damage: 10 }
+        \\  }
+        \\  on_attach {
+        \\    emit ExtensionAttached { kind: 1 }
+        \\  }
+        \\  on_detach {
+        \\    emit ExtensionDetached { kind: 1 }
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 3), result.ast.prefab_decls.items.len);
+    const standalone = result.ast.prefab_decls.items[0];
+    try std.testing.expectEqual(ast_mod.PrefabRelation.none, standalone.relation);
+    const variant = result.ast.prefab_decls.items[1];
+    try std.testing.expectEqual(ast_mod.PrefabRelation.of, variant.relation);
+    const extension = result.ast.prefab_decls.items[2];
+    try std.testing.expectEqual(ast_mod.PrefabRelation.extends, extension.relation);
+    try std.testing.expectEqual(@as(u32, 2), extension.requires_len); // Health, Transform
+    try std.testing.expect(extension.has_on_attach);
+    try std.testing.expect(extension.has_on_detach);
+}
+
+test "parser recovers and a valid scene after a broken construct survives (M0.8 E7 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\scene "S" { entity "e" { Transform {} } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.scene_decls.items.len);
+}
+
+test "parser recovers and a valid prefab after a broken construct survives (M0.8 E7 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\prefab "P" { entity "root" { Transform {} } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.prefab_decls.items.len);
 }
