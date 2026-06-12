@@ -4910,7 +4910,7 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// `true` when the program declares at least one Level-B construct with a
 /// descriptor (M0.8 E4: the six Level-B gameplay constructs).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0 or ast.audio_graph_decls.items.len > 0 or ast.audio_score_decls.items.len > 0 or ast.sequence_decls.items.len > 0 or ast.anim_graph_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0 or ast.audio_graph_decls.items.len > 0 or ast.audio_score_decls.items.len > 0 or ast.sequence_decls.items.len > 0 or ast.anim_graph_decls.items.len > 0 or ast.shader_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4943,6 +4943,7 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .audio_score_decl => try emitAudioScoreDescriptor(w, gpa, ast, ast.audio_score_decls.items[datas[i]]),
             .sequence_decl => try emitSequenceDescriptor(w, gpa, ast, ast.sequence_decls.items[datas[i]]),
             .anim_graph_decl => try emitAnimGraphDescriptor(w, gpa, ast, ast.anim_graph_decls.items[datas[i]]),
+            .shader_decl => try emitShaderDescriptor(w, gpa, ast, ast.shader_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -5376,6 +5377,56 @@ fn emitAnimGraphDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAr
         try w.line("        } },");
     }
     try w.line("    } } },");
+}
+
+/// Emit-structure for a `shader` (M0.8 E6 Level B render): the codegen's OWN
+/// walk over uniforms + the optional vertex + mandatory fragment stages through
+/// the SHARED `renderShaderStageAlloc` + `renderFieldTypeAlloc` / `renderForEmit`
+/// — byte-identical with `buildShader`.
+fn emitShaderDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.ShaderDecl) CodegenError!void {
+    try w.print("    .{{ .shader = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.line(", .params = &[_]etch_descriptor.ShaderParamDesc{");
+    var pi: u32 = 0;
+    while (pi < decl.params_len) : (pi += 1) {
+        const f = ast.fields.items[decl.params_start + pi];
+        const ptype = descriptor_mod.renderFieldTypeAlloc(gpa, ast, f.type_node) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        };
+        defer gpa.free(ptype);
+        const pdefault = if (f.default_value.isNone())
+            try gpa.dupe(u8, "")
+        else
+            try renderForEmit(gpa, ast, f.default_value);
+        defer gpa.free(pdefault);
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(f.name));
+        try w.print(", .type_name = ", .{});
+        try emitZigStringLiteral(w, ptype);
+        try w.print(", .default = ", .{});
+        try emitZigStringLiteral(w, pdefault);
+        try w.line(" },");
+    }
+    try w.print("    }}, .has_vertex = {}", .{decl.has_vertex});
+    const vertex = if (decl.has_vertex)
+        descriptor_mod.renderShaderStageAlloc(gpa, ast, "vertex", decl.vertex) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        }
+    else
+        try gpa.dupe(u8, "");
+    defer gpa.free(vertex);
+    const fragment = descriptor_mod.renderShaderStageAlloc(gpa, ast, "fragment", decl.fragment) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+    };
+    defer gpa.free(fragment);
+    try w.print(", .vertex = ", .{});
+    try emitZigStringLiteral(w, vertex);
+    try w.print(", .fragment = ", .{});
+    try emitZigStringLiteral(w, fragment);
+    try w.line(" } },");
 }
 
 /// Emit-structure for an `input_mapping` (M0.8 E5 Level B STRICT): the codegen's

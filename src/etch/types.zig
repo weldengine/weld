@@ -169,7 +169,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_, audio_graph_, sequence_, anim_graph_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_, audio_graph_, sequence_, anim_graph_, shader_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -232,7 +232,7 @@ fn numericLitValue(arena: *const AstArena, expr_id: NodeId) ?f64 {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph, shader };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -251,6 +251,7 @@ fn annotationAppliesTo(kind: ast_mod.AnnotationKind, target: AnnotTarget) bool {
         .on_event => target == .rule,
         .unit, .range, .hidden, .readonly, .replicated => target == .field,
         .networked => target == .event,
+        .shader_fn => target == .function,
         .loc => false,
     };
 }
@@ -355,6 +356,7 @@ pub const TypeChecker = struct {
         try tc.validateAudioScoreDecls();
         try tc.validateSequenceDecls();
         try tc.validateAnimGraphDecls();
+        try tc.validateShaderDecls();
         try tc.pass2Resolve();
     }
 
@@ -1094,6 +1096,77 @@ pub const TypeChecker = struct {
             if (!reached.contains(st.name)) {
                 try self.emit(.anim_unreachable_state, .warning, st.span, "anim_graph state '{s}' is not the initial state and is not a transition target", .{self.arena.strings.slice(st.name)});
             }
+        }
+    }
+
+    fn validateShaderDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .shader_decl) continue;
+            try self.validateShader(self.arena.shader_decls.items[datas[i]]);
+        }
+    }
+
+    /// `shader` SHADER-MODE validation (M0.8 E6, resolver §15). The `fragment`
+    /// stage is parser-mandatory and `vertex` optional, so E1610 ShaderStageMissing
+    /// + E1611 ShaderFragmentRequiresVertex are RESERVED (never fire); E1612-E1616
+    /// + W1610 are DEFERRED (the GPU param/input-type catalogues are not attached,
+    /// Phase 2+). The stage bodies are walked in SHADER MODE: a STRUCTURAL pass
+    /// (§15.3) that flags the §15.2 GPU-incompatible CONSTRUCTS with the single
+    /// representative E0400 ShaderModeViolation — it does NOT resolve symbols
+    /// (shader bodies reference undeclared GPU builtins; a synthExpr-based check
+    /// would false-positive E0102). E0420 ShaderRecursion (call-graph DFS) +
+    /// E0421 NonShaderFnCalledFromShader (GPU-builtin table) are RESERVED — their
+    /// emission is deferred. SPIR-V/MSL/DXIL emission is out of scope; eval of a
+    /// shader body is fail-loud both backends (the descriptor is the Level-B output).
+    fn validateShader(self: *TypeChecker, decl: ast_mod.ShaderDecl) !void {
+        if (decl.has_vertex) try self.checkShaderBody(decl.vertex.body_start, decl.vertex.body_len);
+        try self.checkShaderBody(decl.fragment.body_start, decl.fragment.body_len);
+    }
+
+    /// Walk a shader stage body, flagging GPU-incompatible constructs (E0400).
+    fn checkShaderBody(self: *TypeChecker, body_start: u32, body_len: u32) !void {
+        var i: u32 = 0;
+        while (i < body_len) : (i += 1) {
+            const stmt: NodeId = @bitCast(self.arena.extra.items[body_start + i]);
+            try self.checkShaderStmt(stmt);
+        }
+    }
+
+    fn checkShaderStmt(self: *TypeChecker, stmt: NodeId) !void {
+        const kind = self.arena.stmtKind(stmt);
+        const data = self.arena.stmtData(stmt);
+        switch (kind) {
+            .while_stmt => try self.emit(.shader_mode_violation, .error_, self.arena.stmtSpan(stmt), "shader mode: unbounded `while` loops are not supported on the GPU", .{}),
+            .for_stmt => try self.emit(.shader_mode_violation, .error_, self.arena.stmtSpan(stmt), "shader mode: `for` loops with a non-const bound are not supported on the GPU", .{}),
+            .try_catch_stmt => try self.emit(.shader_mode_violation, .error_, self.arena.stmtSpan(stmt), "shader mode: `try`/`catch` is not supported on the GPU", .{}),
+            .throw_stmt => try self.emit(.shader_mode_violation, .error_, self.arena.stmtSpan(stmt), "shader mode: `throw` is not supported on the GPU", .{}),
+            .emit_stmt => try self.emit(.shader_mode_violation, .error_, self.arena.stmtSpan(stmt), "shader mode: `emit` is not supported in a shader body", .{}),
+            .tag_mutation_stmt => try self.emit(.shader_mode_violation, .error_, self.arena.stmtSpan(stmt), "shader mode: tag mutation is not supported in a shader body", .{}),
+            .let_stmt => try self.checkShaderBoundExpr(self.arena.let_stmts.items[data].value),
+            .assign_stmt => try self.checkShaderBoundExpr(self.arena.assign_stmts.items[data].value),
+            .expr_stmt => try self.checkShaderBoundExpr(@bitCast(data)),
+            .return_stmt => {
+                const value: NodeId = @bitCast(data);
+                if (!value.isNone()) try self.checkShaderBoundExpr(value);
+            },
+            else => {},
+        }
+    }
+
+    /// Flag a bound value's top-level GPU-incompatible expression kind (the
+    /// representative E0400 walk is shallow for M0.8 — deep expression recursion,
+    /// like the recursion-DFS E0420 and the GPU-builtin-table E0421, is deferred).
+    fn checkShaderBoundExpr(self: *TypeChecker, expr: NodeId) !void {
+        switch (self.arena.exprKind(expr)) {
+            .string_lit, .string_interp => try self.emit(.shader_mode_violation, .error_, self.arena.exprSpan(expr), "shader mode: string types are not supported on the GPU", .{}),
+            .map_lit => try self.emit(.shader_mode_violation, .error_, self.arena.exprSpan(expr), "shader mode: map types are not supported on the GPU", .{}),
+            .await_expr => try self.emit(.shader_mode_violation, .error_, self.arena.exprSpan(expr), "shader mode: `await` is not supported on the GPU", .{}),
+            .loop_expr => try self.emit(.shader_mode_violation, .error_, self.arena.exprSpan(expr), "shader mode: `loop` is not supported on the GPU", .{}),
+            .method_get, .method_get_mut => try self.emit(.shader_mode_violation, .error_, self.arena.exprSpan(expr), "shader mode: ECS access is not supported in a shader body", .{}),
+            else => {},
         }
     }
 
@@ -2256,6 +2329,14 @@ pub const TypeChecker = struct {
                     const decl = self.arena.anim_graph_decls.items[data];
                     try self.registerSymbol(.anim_graph_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .anim_graph);
+                },
+                .shader_decl => {
+                    // A `shader` (M0.8 E6 Level B render) is TYPE_IDENT-named → it
+                    // registers a symbol; the vertex/fragment bodies are
+                    // shader-mode-validated in `validateShaderDecls` (resolver §15).
+                    const decl = self.arena.shader_decls.items[data];
+                    try self.registerSymbol(.shader_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .shader);
                 },
                 .audio_graph_decl => {
                     // An `audio_graph` (M0.8 E6 Level B audio) is TYPE_IDENT-named

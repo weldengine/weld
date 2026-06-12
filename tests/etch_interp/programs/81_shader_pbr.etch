@@ -1,0 +1,34 @@
+// Differential 81 — Level-B `shader` (M0.8 E6 render, the structurally-new
+// construct). Serialized-IR parity: the interpreter BUILDS the shader
+// descriptor, the cooked Zig EMITS it; both serialize through the shared
+// canonical serializer (`descriptor_types.zig`) and must produce byte-identical
+// dumps (LEVEL-B PROOF CONTRACT). The grammar §9.1 shape: `[params_block]
+// [vertex_fn] fragment_fn` — NO compute stage (the ruling); `fragment` is
+// parser-mandatory, `vertex` optional. The vertex + fragment bodies are
+// validated in SHADER MODE (resolver §15): the §15.2 GPU-incompatible
+// constructs (string / map / await / ECS access / loops / emit / tag mutation)
+// would raise the representative E0400 ShaderModeViolation — this body is
+// GPU-compatible, so none fires. E0420 ShaderRecursion (call-graph DFS) + E0421
+// NonShaderFnCalledFromShader (GPU-builtin table) are RESERVED; E1610
+// ShaderStageMissing + E1611 ShaderFragmentRequiresVertex are RESERVED (the
+// fragment is parser-mandatory, fragment-without-vertex is the normal minimal
+// shader); E1612-E1616 + W1610 are DEFERRED (catalogues not attached). The
+// bodies render to canonical TEXT (the `return` arm gap-fill) — SPIR-V/MSL/DXIL
+// emission and shader-body EVAL are out of scope (fail-loud both backends).
+shader StandardPBR {
+  params {
+    base_color: Color = #FFFFFF
+    metallic: float = 0.0
+    roughness: float = 0.5
+  }
+
+  vertex(input: VSInput) -> VSOutput {
+    let world_pos = model_matrix * input.position
+    return VSOutput { position: view_proj_matrix * world_pos, uv: input.uv }
+  }
+
+  fragment(input: VSOutput) -> Color {
+    let albedo = sample(base_color_texture, input.uv) * base_color
+    pbr_shade(albedo, metallic, roughness)
+  }
+}

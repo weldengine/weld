@@ -517,6 +517,26 @@ pub const AnimLayerPropDesc = struct {
     bones: []const []const u8,
 };
 
+/// `shader` descriptor (`etch-ast-ir.md` §3.5; M0.8 E6, `etch-grammar.md` §9.1,
+/// Level-B render). Params (uniforms), then the optional vertex + mandatory
+/// fragment stages each pre-rendered to one canonical `head(params) -> Ret {
+/// body }` string. Bodies are shader-mode-validated (resolver §15) but never
+/// executed — SPIR-V/MSL/DXIL emission is Phase 2+. No compute stage (the ruling).
+pub const Shader = struct {
+    name: []const u8,
+    params: []const ShaderParamDesc,
+    has_vertex: bool,
+    vertex: []const u8, // rendered `vertex(...) -> T { ... }` ("" if has_vertex == false)
+    fragment: []const u8, // rendered `fragment(...) -> T { ... }`
+};
+
+/// One `shader` params-block uniform (`name: type [= default]`, rendered).
+pub const ShaderParamDesc = struct {
+    name: []const u8,
+    type_name: []const u8,
+    default: []const u8, // "" if no `= default`
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -537,6 +557,7 @@ pub const Descriptor = union(enum) {
     audio_score: AudioScore,
     sequence: Sequence,
     anim_graph: AnimGraph,
+    shader: Shader,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -557,6 +578,7 @@ pub const Descriptor = union(enum) {
             .audio_score => |asc| try writeAudioScore(asc, gpa, out),
             .sequence => |seq| try writeSequence(seq, gpa, out),
             .anim_graph => |ag| try writeAnimGraph(ag, gpa, out),
+            .shader => |sh| try writeShader(sh, gpa, out),
         }
     }
 };
@@ -862,6 +884,24 @@ pub fn writeAnimGraph(ag: AnimGraph, gpa: std.mem.Allocator, out: *std.ArrayList
         }
         try out.appendSlice(gpa, "  }\n");
     }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `shader` descriptor (M0.8 E6): uniforms, then
+/// the optional vertex + mandatory fragment stages (each pre-rendered).
+pub fn writeShader(sh: Shader, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "shader {s} {{\n", .{sh.name});
+    for (sh.params) |p| {
+        if (p.default.len == 0) {
+            try appendFmt(gpa, out, "  param {s}: {s}\n", .{ p.name, p.type_name });
+        } else {
+            try appendFmt(gpa, out, "  param {s}: {s} = {s}\n", .{ p.name, p.type_name, p.default });
+        }
+    }
+    if (sh.has_vertex) {
+        try appendFmt(gpa, out, "  {s}\n", .{sh.vertex});
+    }
+    try appendFmt(gpa, out, "  {s}\n", .{sh.fragment});
     try out.appendSlice(gpa, "}\n");
 }
 

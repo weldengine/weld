@@ -1301,3 +1301,27 @@ anim_graph HumanoidLocomotion {
   }
 }
 ```
+
+## Shader (E6 — §9.1)
+
+`shader_decl = "shader" TYPE_IDENT "{" [params_block] [vertex_fn] fragment_fn
+"}"`. No compute stage (the ruling); `fragment` is mandatory, `vertex` optional.
+The stage bodies are validated in shader mode (resolver §15) and rendered to
+canonical text — SPIR-V emission is Phase 2+.
+
+```etch
+shader StandardPBR {
+  params {
+    base_color: Color = #FFFFFF
+    metallic: float = 0.0
+  }
+  vertex(input: VSInput) -> VSOutput {
+    let world_pos = model_matrix * input.position
+    return VSOutput { position: view_proj_matrix * world_pos, uv: input.uv }
+  }
+  fragment(input: VSOutput) -> Color {
+    let albedo = sample(base_color_texture, input.uv) * base_color
+    pbr_shade(albedo, metallic)
+  }
+}
+```

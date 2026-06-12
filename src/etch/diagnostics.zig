@@ -308,6 +308,21 @@ pub const DiagnosticCode = enum {
     anim_deadend_state, // M0.8 E6 — W1681 DeadendState
     anim_redundant_wildcard_transition, // M0.8 E6 — W1682 RedundantWildcardTransition (RESERVED: no `*` in §11)
 
+    // ── shader (E0400 + E0420/E0421 + E1610/E1611, M0.8 E6 — etch-grammar.md
+    //    §9.1 + resolver §15, Level-B render. E0400 ShaderModeViolation is the
+    //    single representative for the whole §15.2 GPU-incompatible family
+    //    (DELIVER). E0420 ShaderRecursion (call-graph DFS) + E0421
+    //    NonShaderFnCalledFromShader (GPU-builtin table) are RESERVED — emission
+    //    deferred. E1610 ShaderStageMissing + E1611 ShaderFragmentRequiresVertex
+    //    are RESERVED (fragment is parser-mandatory, vertex optional → both
+    //    inexpressible). E1612-E1616 + W1610 (param/input/compute types) are
+    //    DEFERRED-no-variant (catalogues not attached; no compute — the ruling). ──
+    shader_mode_violation, // M0.8 E6 — E0400 ShaderModeViolation (the §15.2 representative)
+    shader_recursion, // M0.8 E6 — E0420 ShaderRecursion (RESERVED: call-graph DFS deferred)
+    non_shader_fn_called_from_shader, // M0.8 E6 — E0421 NonShaderFnCalledFromShader (RESERVED: GPU-builtin table deferred)
+    shader_stage_missing, // M0.8 E6 — E1610 ShaderStageMissing (RESERVED: fragment is parser-mandatory)
+    shader_fragment_requires_vertex, // M0.8 E6 — E1611 ShaderFragmentRequiresVertex (RESERVED: fragment-without-vertex is the normal minimal shader)
+
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
@@ -457,6 +472,11 @@ pub const DiagnosticCode = enum {
             .anim_unreachable_state => "W1680",
             .anim_deadend_state => "W1681",
             .anim_redundant_wildcard_transition => "W1682",
+            .shader_mode_violation => "E0400",
+            .shader_recursion => "E0420",
+            .non_shader_fn_called_from_shader => "E0421",
+            .shader_stage_missing => "E1610",
+            .shader_fragment_requires_vertex => "E1611",
         };
     }
 
@@ -609,6 +629,11 @@ pub const DiagnosticCode = enum {
             .anim_unreachable_state => "UnreachableState",
             .anim_deadend_state => "DeadendState",
             .anim_redundant_wildcard_transition => "RedundantWildcardTransition",
+            .shader_mode_violation => "ShaderModeViolation",
+            .shader_recursion => "ShaderRecursion",
+            .non_shader_fn_called_from_shader => "NonShaderFnCalledFromShader",
+            .shader_stage_missing => "ShaderStageMissing",
+            .shader_fragment_requires_vertex => "ShaderFragmentRequiresVertex",
         };
     }
 };

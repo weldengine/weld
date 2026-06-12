@@ -75,6 +75,7 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
         .audio_score => |asc| freeAudioScore(gpa, asc),
         .sequence => |seq| freeSequence(gpa, seq),
         .anim_graph => |ag| freeAnimGraph(gpa, ag),
+        .shader => |sh| freeShader(gpa, sh),
     }
 }
 
@@ -298,6 +299,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .audio_score_decl => try list.append(gpa, .{ .audio_score = try buildAudioScore(gpa, arena, arena.audio_score_decls.items[datas[i]]) }),
             .sequence_decl => try list.append(gpa, .{ .sequence = try buildSequence(gpa, arena, arena.sequence_decls.items[datas[i]]) }),
             .anim_graph_decl => try list.append(gpa, .{ .anim_graph = try buildAnimGraph(gpa, arena, arena.anim_graph_decls.items[datas[i]]) }),
+            .shader_decl => try list.append(gpa, .{ .shader = try buildShader(gpa, arena, arena.shader_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -1641,6 +1643,97 @@ fn buildAnimGraph(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.
     };
 }
 
+/// Render one shader stage (`head(params) -> Ret { body }`) to canonical text.
+/// SHARED by both backends (byte-identical). Param + return types are named
+/// (the renderAbilityRuleAlloc precedent); the body uses the shared `renderStmt`
+/// ("; "-joined; the `.return_stmt` arm gap-filled for vertex/fragment returns).
+pub fn renderShaderStageAlloc(gpa: std.mem.Allocator, arena: *const AstArena, head: []const u8, stage: ast_mod.ShaderStage) BuildError![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, head);
+    try out.appendSlice(gpa, "(");
+    var p: u32 = 0;
+    while (p < stage.params_len) : (p += 1) {
+        const param = arena.rule_params.items[stage.params_start + p];
+        if (p != 0) try out.appendSlice(gpa, ", ");
+        try out.appendSlice(gpa, arena.strings.slice(param.name));
+        try out.appendSlice(gpa, ": ");
+        if (arena.typeNodeKind(param.type_node) != .named) return error.UnsupportedDescriptorExpr;
+        try out.appendSlice(gpa, arena.strings.slice(arena.named_types.items[arena.typeNodeData(param.type_node)].name));
+    }
+    try out.appendSlice(gpa, ") -> ");
+    if (arena.typeNodeKind(stage.return_type) != .named) return error.UnsupportedDescriptorExpr;
+    try out.appendSlice(gpa, arena.strings.slice(arena.named_types.items[arena.typeNodeData(stage.return_type)].name));
+    try out.appendSlice(gpa, " { ");
+    var st: u32 = 0;
+    while (st < stage.body_len) : (st += 1) {
+        const stmt: NodeId = @bitCast(arena.extra.items[stage.body_start + st]);
+        if (st != 0) try out.appendSlice(gpa, "; ");
+        try renderStmt(gpa, arena, stmt, &out);
+    }
+    try out.appendSlice(gpa, " }");
+    return try out.toOwnedSlice(gpa);
+}
+
+fn freeShader(gpa: std.mem.Allocator, sh: types.Shader) void {
+    gpa.free(sh.name);
+    for (sh.params) |p| {
+        gpa.free(p.name);
+        gpa.free(p.type_name);
+        gpa.free(p.default);
+    }
+    gpa.free(sh.params);
+    gpa.free(sh.vertex);
+    gpa.free(sh.fragment);
+}
+
+/// Build a `shader` descriptor (M0.8 E6): uniforms + the optional vertex +
+/// mandatory fragment stages, each rendered through the shared
+/// `renderShaderStageAlloc` (byte-identical with the codegen emit side).
+fn buildShader(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.ShaderDecl) BuildError!types.Shader {
+    var params: std.ArrayListUnmanaged(types.ShaderParamDesc) = .empty;
+    errdefer {
+        for (params.items) |p| {
+            gpa.free(p.name);
+            gpa.free(p.type_name);
+            gpa.free(p.default);
+        }
+        params.deinit(gpa);
+    }
+    var pi: u32 = 0;
+    while (pi < decl.params_len) : (pi += 1) {
+        const f = arena.fields.items[decl.params_start + pi];
+        const pname = try gpa.dupe(u8, arena.strings.slice(f.name));
+        errdefer gpa.free(pname);
+        const ptype = try renderFieldTypeAlloc(gpa, arena, f.type_node);
+        errdefer gpa.free(ptype);
+        const pdefault = if (f.default_value.isNone())
+            try gpa.dupe(u8, "")
+        else
+            try renderExprAlloc(gpa, arena, f.default_value);
+        errdefer gpa.free(pdefault);
+        try params.append(gpa, .{ .name = pname, .type_name = ptype, .default = pdefault });
+    }
+
+    const vertex = if (decl.has_vertex)
+        try renderShaderStageAlloc(gpa, arena, "vertex", decl.vertex)
+    else
+        try gpa.dupe(u8, "");
+    errdefer gpa.free(vertex);
+    const fragment = try renderShaderStageAlloc(gpa, arena, "fragment", decl.fragment);
+    errdefer gpa.free(fragment);
+
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    errdefer gpa.free(name);
+    return .{
+        .name = name,
+        .params = try params.toOwnedSlice(gpa),
+        .has_vertex = decl.has_vertex,
+        .vertex = vertex,
+        .fragment = fragment,
+    };
+}
+
 fn buildBehavior(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.BehaviorDecl) BuildError!types.Behavior {
     const root = try buildBTNode(gpa, arena, decl.root);
     errdefer freeBTNode(gpa, root);
@@ -2093,6 +2186,16 @@ fn renderStmt(gpa: std.mem.Allocator, arena: *const AstArena, stmt: NodeId, out:
                 else => return error.UnsupportedDescriptorExpr,
             });
             try renderExpr(gpa, arena, a.value, out);
+        },
+        .return_stmt => {
+            // M0.8 E6 gap-fill: shader vertex/fragment bodies use explicit
+            // `return <expr>`. `return_stmt`'s data is the value NodeId.
+            try out.appendSlice(gpa, "return");
+            const value: NodeId = @bitCast(arena.stmtData(stmt));
+            if (!value.isNone()) {
+                try out.appendSlice(gpa, " ");
+                try renderExpr(gpa, arena, value, out);
+            }
         },
         else => return error.UnsupportedDescriptorExpr,
     }

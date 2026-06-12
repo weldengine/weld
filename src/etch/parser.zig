@@ -510,7 +510,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score, .kw_sequence, .kw_anim_graph => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score, .kw_sequence, .kw_anim_graph, .kw_shader => return,
                 else => _ = try self.advance(),
             }
         }
@@ -554,6 +554,7 @@ pub const Parser = struct {
             .kw_audio_score => try self.parseAudioScoreDecl(annotations),
             .kw_sequence => try self.parseSequenceDecl(annotations),
             .kw_anim_graph => try self.parseAnimGraphDecl(annotations),
+            .kw_shader => try self.parseShaderDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -567,7 +568,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score | sequence | anim_graph), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score | sequence | anim_graph | shader), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -2947,6 +2948,88 @@ pub const Parser = struct {
             .props_len = @as(u32, @intCast(self.arena.anim_layer_props.items.len)) - props_start,
             .span = .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end },
         });
+    }
+
+    /// `shader_decl = "shader" TYPE_IDENT "{" [params_block] [vertex_fn]
+    /// fragment_fn "}"` (M0.8 E6, §9.1). NO compute (the ruling). `fragment` is
+    /// parser-mandatory; `vertex` optional. `params`/`vertex`/`fragment` are
+    /// CONTEXTUAL idents.
+    fn parseShaderDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'shader'
+        const name_tok = try self.expect(.type_ident, "expected shader name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start the shader body");
+
+        const params_start: u32 = @intCast(self.arena.fields.items.len);
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "params")) {
+            _ = try self.advance(); // 'params'
+            _ = try self.expect(.lbrace, "expected '{' to start the shader params block");
+            while (self.peek() != .rbrace and self.peek() != .eof) {
+                try self.surfaceTokenErrors();
+                const field_annotations = try self.parseAnnotations();
+                try self.parseField(field_annotations);
+                _ = try self.match(.comma);
+            }
+            _ = try self.expect(.rbrace, "expected '}' to close the shader params block");
+        }
+        const params_len: u32 = @as(u32, @intCast(self.arena.fields.items.len)) - params_start;
+
+        var has_vertex = false;
+        var vertex: ast_mod.ShaderStage = .{ .params_start = 0, .params_len = 0, .return_type = NodeId.none, .body_start = 0, .body_len = 0 };
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "vertex")) {
+            vertex = try self.parseShaderStage();
+            has_vertex = true;
+        }
+        if (self.peek() != .ident or !std.mem.eql(u8, self.sliceOf(self.peekSpan()), "fragment")) {
+            return self.parseErrFmt(self.peekSpan(), "expected a 'fragment' stage in the shader body, got '{s}'", .{self.sliceOf(self.peekSpan())});
+        }
+        const fragment = try self.parseShaderStage();
+
+        const closing = try self.expect(.rbrace, "expected '}' to close the shader body");
+        _ = try self.arena.addShaderDecl(self.gpa, .{
+            .name = name_id,
+            .name_span = name_tok.span,
+            .params_start = params_start,
+            .params_len = params_len,
+            .has_vertex = has_vertex,
+            .vertex = vertex,
+            .fragment = fragment,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// `vertex_fn` / `fragment_fn = IDENT "(" param_list ")" "->" type block`
+    /// (§9.1). Params reuse the `rule_params` slab (`name: type`); the body is a
+    /// statement run (`parseStmtRun`). The caller has verified the leading ident.
+    fn parseShaderStage(self: *Parser) ParseError!ast_mod.ShaderStage {
+        _ = try self.advance(); // 'vertex' / 'fragment'
+        _ = try self.expect(.lparen, "expected '(' to begin the shader stage parameters");
+        const params_start: u32 = @intCast(self.arena.rule_params.items.len);
+        if (self.peek() != .rparen) {
+            while (true) {
+                const p_name = try self.expect(.ident, "expected a shader stage parameter name");
+                _ = try self.expect(.colon, "expected ':' after the parameter name");
+                const p_type = try self.parseType();
+                try self.arena.rule_params.append(self.gpa, .{ .name = try self.internSlice(p_name.span), .type_node = p_type });
+                if (!try self.match(.comma)) break;
+            }
+        }
+        _ = try self.expect(.rparen, "expected ')' to close the shader stage parameters");
+        const params_len: u32 = @as(u32, @intCast(self.arena.rule_params.items.len)) - params_start;
+        _ = try self.expect(.arrow, "expected '->' before the shader stage return type");
+        const return_type = try self.parseType();
+        _ = try self.expect(.lbrace, "expected '{' to start the shader stage body");
+        const body = try self.parseStmtRun();
+        _ = try self.expect(.rbrace, "expected '}' to close the shader stage body");
+        return .{
+            .params_start = params_start,
+            .params_len = params_len,
+            .return_type = return_type,
+            .body_start = body.start,
+            .body_len = body.len,
+        };
     }
 
     const DataEntryBody = struct {
@@ -7993,4 +8076,60 @@ test "parser recovers and a valid anim_graph after a broken construct survives (
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.anim_graph_decls.items.len);
+}
+
+test "parser builds a shader with params, optional vertex, and mandatory fragment (M0.8 E6)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\shader StandardPBR {
+        \\  params {
+        \\    base_color: Color = #FFFFFF
+        \\    metallic: float = 0.0
+        \\  }
+        \\  vertex(input: VSInput) -> VSOutput {
+        \\    let world_pos = model_matrix * input.position
+        \\    return VSOutput { position: view_proj_matrix * world_pos, uv: input.uv }
+        \\  }
+        \\  fragment(input: VSOutput) -> Color {
+        \\    let albedo = sample(base_color_texture, input.uv) * base_color
+        \\    pbr_shade(albedo, metallic)
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.shader_decls.items.len);
+    const decl = result.ast.shader_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 2), decl.params_len);
+    try std.testing.expect(decl.has_vertex);
+    try std.testing.expectEqual(@as(u32, 1), decl.vertex.params_len);
+    try std.testing.expectEqual(@as(u32, 1), decl.fragment.params_len);
+    try std.testing.expect(decl.vertex.body_len > 0);
+    try std.testing.expect(decl.fragment.body_len > 0);
+}
+
+test "parser: a fragment-only shader is valid (vertex optional, M0.8 E6)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\shader Unlit {
+        \\  fragment(input: VSOutput) -> Color {
+        \\    base_color
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.shader_decls.items.len);
+    try std.testing.expect(!result.ast.shader_decls.items[0].has_vertex);
+}
+
+test "parser recovers and a valid shader after a broken construct survives (M0.8 E6 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\shader Flat { fragment(i: VSOutput) -> Color { base_color } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.shader_decls.items.len);
 }

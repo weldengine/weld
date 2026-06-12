@@ -1726,6 +1726,37 @@ pub const AnimLayerProp = struct {
     bones_len: u32,
 };
 
+/// One shader stage (`vertex_fn` / `fragment_fn`, `etch-grammar.md` §9.1:
+/// `"vertex" "(" param_list ")" "->" type block`). Params live in a
+/// `(start, len)` run of the shared `arena.rule_params` (the `name: type`
+/// param shape); the body is a statement run in `arena.extra`, validated in
+/// SHADER MODE (resolver §15) and rendered to canonical text (never executed —
+/// SPIR-V emission is Phase 2+).
+pub const ShaderStage = struct {
+    params_start: u32, // index into `arena.rule_params`
+    params_len: u32,
+    return_type: NodeId, // the `-> type`
+    body_start: u32, // statement run in `arena.extra`
+    body_len: u32,
+};
+
+/// Side-slab entry for a `shader` declaration (M0.8 E6 Level B render,
+/// `etch-grammar.md` §9.1: `shader_decl = "shader" TYPE_IDENT "{" [params_block]
+/// [vertex_fn] fragment_fn "}"`). The ruling: NO compute stage (dropped); the
+/// `fragment` stage is parser-mandatory, `vertex` optional. `params { … }`
+/// (uniforms) live in `arena.fields` and are NOT shader-mode.
+pub const ShaderDecl = struct {
+    name: StringId, // TYPE_IDENT
+    name_span: SourceSpan,
+    params_start: u32, // index into `arena.fields`
+    params_len: u32,
+    has_vertex: bool,
+    vertex: ShaderStage, // valid iff has_vertex
+    fragment: ShaderStage,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
 /// Kind of one routine trigger alternative (M0.8 E4, `etch-grammar.md`
 /// §8.2 `trigger_expr`): `at TIME_LITERAL` / `after IDENT` /
 /// `on_event TYPE_IDENT`. `or`-chains are stored as a flat run of
@@ -1973,6 +2004,7 @@ pub const AnnotationKind = enum {
     id,
     loc,
     on_event,
+    shader_fn, // M0.8 E6 — @shader_fn: a function callable from shader bodies (resolver §15.4)
 
     pub fn fromName(name: []const u8) AnnotationKind {
         if (std.mem.eql(u8, name, "phase")) return .phase;
@@ -1994,6 +2026,7 @@ pub const AnnotationKind = enum {
         if (std.mem.eql(u8, name, "id")) return .id;
         if (std.mem.eql(u8, name, "loc")) return .loc;
         if (std.mem.eql(u8, name, "on_event")) return .on_event;
+        if (std.mem.eql(u8, name, "shader_fn")) return .shader_fn;
         return .custom;
     }
 };
@@ -2115,6 +2148,7 @@ pub const AstArena = struct {
     anim_layers: std.ArrayListUnmanaged(AnimLayer) = .empty,
     anim_layer_props: std.ArrayListUnmanaged(AnimLayerProp) = .empty,
     anim_layer_bones: std.ArrayListUnmanaged(StringId) = .empty,
+    shader_decls: std.ArrayListUnmanaged(ShaderDecl) = .empty,
     quest_decls: std.ArrayListUnmanaged(QuestDecl) = .empty,
     quest_properties: std.ArrayListUnmanaged(QuestProperty) = .empty,
     quest_stages: std.ArrayListUnmanaged(QuestStage) = .empty,
@@ -2329,6 +2363,7 @@ pub const AstArena = struct {
         self.anim_layers.deinit(gpa);
         self.anim_layer_props.deinit(gpa);
         self.anim_layer_bones.deinit(gpa);
+        self.shader_decls.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
@@ -2867,6 +2902,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.anim_graph_decls.items.len);
         try self.anim_graph_decls.append(gpa, decl);
         return try self.addItem(gpa, .anim_graph_decl, idx, span);
+    }
+
+    /// `shader Name { [params] [vertex] fragment }` (M0.8 E6, §9.1). The caller
+    /// appends the params + the stage params (rule_params) + the stage bodies
+    /// (extra) beforehand, passing the ranges in `decl`.
+    pub fn addShaderDecl(self: *AstArena, gpa: std.mem.Allocator, decl: ShaderDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.shader_decls.items.len);
+        try self.shader_decls.append(gpa, decl);
+        return try self.addItem(gpa, .shader_decl, idx, span);
     }
 
     /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The

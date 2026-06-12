@@ -102,6 +102,7 @@ pub const TokenKind = enum {
     kw_audio_graph, // audio_graph declaration (M0.8 E6 Level B audio — DSP node graph, mandatory output sink)
     kw_audio_score, // audio_score declaration (M0.8 E6 Level B audio — adaptive music, STRING-named, sections + stems)
     kw_anim_graph, // anim_graph declaration (M0.8 E6 Level B animation — skeletal state machine, states + layers)
+    kw_shader, // shader declaration (M0.8 E6 Level B render — vertex/fragment stages, shader-mode body validation)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -262,6 +263,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "audio_graph", .kind = .kw_audio_graph },
     .{ .lexeme = "audio_score", .kind = .kw_audio_score },
     .{ .lexeme = "anim_graph", .kind = .kw_anim_graph },
+    .{ .lexeme = "shader", .kind = .kw_shader },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -293,7 +295,6 @@ pub const non_s3_keywords = [_][]const u8{
     "import",
     "const",
     "private",
-    "shader",
     "scene",
     "prefab",
     "test",
