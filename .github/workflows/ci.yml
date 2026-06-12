@@ -29,7 +29,14 @@ jobs:
     # CI restructuring (job split / bench separation / Windows cache
     # investigation) is queued for M0.2 — cf. brief journal entry
     # 2026-05-21 18:00 "CI debt to investigate seriously in M0.2".
-    timeout-minutes: 20
+    # M0.8 close — ReleaseSafe budget raised to 40 min: the M0.8 suite
+    # added the 01-85 differential corpus (program 84 cooks a 1132-line
+    # file through Sema + build-obj in ReleaseSafe), the 50-pass ref500
+    # parse bench, and the 81-block EBNF harness; both ReleaseSafe legs
+    # now exceed the 20-min budget set at M0.1 (Debug still fits). The
+    # proper CI restructuring (job split / bench separation / caching)
+    # remains queued and is tracked at the M0.8 close.
+    timeout-minutes: ${{ matrix.mode == 'ReleaseSafe' && 40 || 20 }}
     steps:
       - uses: actions/checkout@v6
 
