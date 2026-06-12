@@ -35,6 +35,12 @@ pub const BuiltinType = enum {
     vec3,
     color,
     duration,
+    /// `Time` (§2.2 builtin, M0.8 E7). The expression type of a `TIME_LITERAL`
+    /// (`HH:MM`, §1.4 / §3.2 literal) — the DURATION/COLOR-precedent lift.
+    /// EVALUATION is fail-loud in both backends (time runtime semantics are
+    /// Tier-1/E5+); like `duration`/`string_` it is NOT in `fromName`, so it
+    /// stays a literal-expression type, not a component/resource field type.
+    time,
     /// `string` (M0.8 sub-slice C tranche 1). A first-class expression type so
     /// `"lit"` / concat / `.len()` resolve, but deliberately NOT in `fromName`
     /// — `string` stays rejected as a component/resource field type (POD /
@@ -3892,6 +3898,7 @@ pub const TypeChecker = struct {
             .int_lit => return .{ .builtin = .int_ },
             .float_lit => return .{ .builtin = .float_ },
             .duration_lit => return .{ .builtin = .duration },
+            .time_lit => return .{ .builtin = .time },
             .color_lit => return .{ .builtin = .color },
             .bool_lit => return .{ .builtin = .bool_ },
             .string_lit => return ResolvedType{ .builtin = .string_ },

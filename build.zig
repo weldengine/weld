@@ -404,6 +404,8 @@ pub fn build(b: *std.Build) void {
         // M0.8 / E7 — full-grammar 500+ line integration reference: parse
         // < 50 ms + type-check clean + Level-A interpret.
         .{ .path = "tests/etch/reference_500_test.zig", .etch = true, .dedicated_step = "test-ref500" },
+        // M0.8 / E7 — TIME_LITERAL §3.2 expression arm wired (builtin Time §2.2).
+        .{ .path = "tests/etch/time_literal_test.zig", .etch = true, .dedicated_step = "test-time-lit" },
         // M0.8 / E3-D — D-S5-etchcook-inproc: the consolidated cook library.
         .{ .path = "tests/etch/cook_consolidate_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
@@ -1081,7 +1083,16 @@ pub fn build(b: *std.Build) void {
     codegen_parity_module.addImport("runner_interp", etch_interp_runner_module);
     codegen_parity_module.addImport("runner_codegen", codegen_runner_module);
     const codegen_parity_test = b.addTest(.{ .root_module = codegen_parity_module });
-    test_step.dependOn(&b.addRunArtifact(codegen_parity_test).step);
+    const codegen_parity_run = b.addRunArtifact(codegen_parity_test);
+    test_step.dependOn(&codegen_parity_run.step);
+    // M0.8 E7 — `zig build test-ref500-codegen` runs the interp↔codegen parity
+    // suite, which includes program 84 (the full-grammar TOTAL codegen
+    // integration: cook whole-file + Sema-compile + Level-A byte-exact).
+    const ref500_codegen_step = b.step(
+        "test-ref500-codegen",
+        "Run the interp↔codegen parity suite (incl. the full-grammar codegen integration, program 84)",
+    );
+    ref500_codegen_step.dependOn(&codegen_parity_run.step);
 
     // ----------------------------------------- S5 etch_synth tool ------------
 

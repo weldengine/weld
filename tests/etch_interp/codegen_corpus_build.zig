@@ -109,4 +109,8 @@ pub const programs = [_]CodegenProgram{
     // Level-C scene/prefab (M0.8 E7).
     .{ .name = "p82_scene_village", .etch_path = "tests/etch_interp/programs/82_scene_village.etch" },
     .{ .name = "p83_prefab_walltorch", .etch_path = "tests/etch_interp/programs/83_prefab_walltorch.etch" },
+    // M0.8 E7 — full-grammar TOTAL codegen integration: the whole file cooks +
+    // Sema-compiles (codegen-compiles proof for every construct in one unit);
+    // the Level-A behaviour is byte-exact interp↔codegen via corpus_facade.
+    .{ .name = "p84_reference_500_codegen", .etch_path = "tests/etch_interp/programs/84_reference_500_codegen.etch" },
 };

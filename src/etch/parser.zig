@@ -6011,6 +6011,18 @@ pub const Parser = struct {
                 const id = try self.internSlice(tok.span);
                 return try self.arena.addExpr(self.gpa, .duration_lit, id, tok.span);
             },
+            .time_literal => {
+                // TIME_LITERAL (M0.8 E7 gate, §1.4 / §3.2 literal — the
+                // DURATION_LIT-precedent lift; builtin `Time` §2.2). The expr
+                // carries the full `HH:MM` lexeme; it types as `Time`.
+                // EVALUATION is fail-loud in BOTH backends (the duration/color
+                // precedent) — time runtime semantics are Tier-1/E5+ material;
+                // Level B needs the canonical text. (Routine `at HH:MM` triggers
+                // keep their own dedicated parse path, unchanged.)
+                const tok = try self.advance();
+                const id = try self.internSlice(tok.span);
+                return try self.arena.addExpr(self.gpa, .time_lit, id, tok.span);
+            },
             .color_literal => {
                 // COLOR_LITERAL (M0.8 E5, §1.4 l.211 / §3.2 literal — the
                 // DURATION_LIT-precedent lift, E5 ruling). The expr carries the

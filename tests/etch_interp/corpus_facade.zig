@@ -84,6 +84,9 @@ const p61 = @import("programs/61_filter_two_components.expected.zig");
 const p64 = @import("programs/64_when_expr_surface.expected.zig");
 const p65 = @import("programs/65_when_expr_archwalk.expected.zig");
 const p66 = @import("programs/66_named_args.expected.zig");
+// M0.8 E7 — full-grammar TOTAL codegen integration (Level-A byte-exact; the
+// file's B/C constructs cook to descriptors, only RefProbe ticks).
+const p84 = @import("programs/84_reference_500_codegen.expected.zig");
 
 /// Embedded list of the 20 differential corpus programs consumed by
 /// the S4 interpreter test and the S5 codegen parity test.
@@ -152,4 +155,5 @@ pub const programs = [_]Program{
     .{ .name = "64_when_expr_surface", .source = @embedFile("programs/64_when_expr_surface.etch"), .config = p64.config, .initial = p64.initial, .expected = p64.expected },
     .{ .name = "65_when_expr_archwalk", .source = @embedFile("programs/65_when_expr_archwalk.etch"), .config = p65.config, .initial = p65.initial, .expected = p65.expected },
     .{ .name = "66_named_args", .source = @embedFile("programs/66_named_args.etch"), .config = p66.config, .initial = p66.initial, .expected = p66.expected },
+    .{ .name = "84_reference_500_codegen", .source = @embedFile("programs/84_reference_500_codegen.etch"), .config = p84.config, .initial = p84.initial, .expected = p84.expected },
 };
