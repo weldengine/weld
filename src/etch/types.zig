@@ -169,7 +169,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_, audio_graph_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_, audio_graph_, sequence_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -194,6 +194,35 @@ fn containsUppercase(s: []const u8) bool {
     return false;
 }
 
+/// The `sequence_track` type catalogue (`etch-validation-ecs.md` §21.2, inlined
+/// — small + fixed). Backs E1742 TrackTypeUnknown (M0.8 E6).
+fn isKnownTrackType(name: []const u8) bool {
+    const catalogue = [_][]const u8{ "ComponentTrack", "TransformTrack", "CameraTrack", "AnimationTrack", "EventTrack", "FadeTrack", "SubSequenceTrack" };
+    for (catalogue) |c| {
+        if (std.mem.eql(u8, name, c)) return true;
+    }
+    return false;
+}
+
+/// Parse a `DURATION_LIT` expr's seconds at VALIDATION time (`DURATION_LIT =
+/// FLOAT_LITERAL "s"`, §1.4 — single `s` suffix). Distinct from the deferred
+/// RUNTIME duration eval (fail-loud both backends). `null` if not a duration
+/// literal. Backs E1744 KeyframeOutOfRange + E1745 KeyframesUnordered (M0.8 E6).
+fn durationLitSeconds(arena: *const AstArena, expr_id: NodeId) ?f64 {
+    if (arena.exprKind(expr_id) != .duration_lit) return null;
+    const lex = arena.strings.slice(arena.exprData(expr_id));
+    if (lex.len < 2 or lex[lex.len - 1] != 's') return null;
+    return std.fmt.parseFloat(f64, lex[0 .. lex.len - 1]) catch null;
+}
+
+/// Parse an int / float literal expr's numeric value at validation time. `null`
+/// if not a numeric literal. Backs E1749 FPSInvalid + E1750 DurationInvalid.
+fn numericLitValue(arena: *const AstArena, expr_id: NodeId) ?f64 {
+    const k = arena.exprKind(expr_id);
+    if (k != .int_lit and k != .float_lit) return null;
+    return std.fmt.parseFloat(f64, arena.strings.slice(arena.exprData(expr_id))) catch null;
+}
+
 /// Target categories the annotation-applicability check distinguishes
 /// (M0.8 D-S3-annot-applicability). E1 had `component` / `resource` / `rule`
 /// items and their `field`s; `function` joins with top-level `fn` (E2). No
@@ -203,7 +232,7 @@ fn containsUppercase(s: []const u8) bool {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -324,6 +353,7 @@ pub const TypeChecker = struct {
         try tc.validateLocaleDecls();
         try tc.validateEffectDecls();
         try tc.validateAudioScoreDecls();
+        try tc.validateSequenceDecls();
         try tc.pass2Resolve();
     }
 
@@ -860,6 +890,94 @@ pub const TypeChecker = struct {
             if (std.mem.eql(u8, self.arena.strings.slice(prop.name), "tempo")) {
                 if (self.arena.exprKind(prop.value) != .int_lit) {
                     try self.emit(.tempo_invalid, .error_, decl.name_span, "audio_score tempo must be a positive integer (BPM)", .{});
+                }
+            }
+        }
+    }
+
+    fn validateSequenceDecls(self: *TypeChecker) !void {
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        var i: u28 = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .sequence_decl) continue;
+            try self.validateSequence(self.arena.sequence_decls.items[datas[i]]);
+        }
+    }
+
+    /// `sequence` validations (M0.8 E6, `etch-validation-ecs.md` §21). DELIVER
+    /// E1740 SequenceNoTracks, E1741 DuplicateTrackName, E1742 TrackTypeUnknown
+    /// (catalogue inlined), E1744 KeyframeOutOfRange + E1745 KeyframesUnordered
+    /// (keyframe DURATION_LIT seconds, validation-time parse — distinct from the
+    /// deferred RUNTIME duration eval), E1746 EventTrackEventUnknown, E1749
+    /// FPSInvalid, E1750 DurationInvalid, W1740 EmptyTrack. RESERVED-with-variant:
+    /// E1748 SubSequenceRefInvalid (the grammar §13 has no sub-sequence-ref
+    /// production — grammar-wins, so it can never fire). DEFERRED-no-variant:
+    /// E1743 TrackTargetNotFound (scene/binding resolution is E7), E1747
+    /// AnimationTrackClipInvalid (asset), W1741 OverlappingTracks (heuristic).
+    fn validateSequence(self: *TypeChecker, decl: ast_mod.SequenceDecl) !void {
+        // E1749 fps + E1750 duration positivity; capture duration (seconds) for E1744.
+        var duration_secs: ?f64 = null;
+        var p: u32 = 0;
+        while (p < decl.props_len) : (p += 1) {
+            const prop = self.arena.struct_lit_fields.items[decl.props_start + p];
+            const pname = self.arena.strings.slice(prop.name);
+            if (std.mem.eql(u8, pname, "duration")) {
+                const v = numericLitValue(self.arena, prop.value);
+                if (v == null or v.? <= 0) {
+                    try self.emit(.sequence_duration_invalid, .error_, decl.name_span, "sequence duration must be a positive number", .{});
+                } else duration_secs = v;
+            } else if (std.mem.eql(u8, pname, "fps")) {
+                const v = numericLitValue(self.arena, prop.value);
+                if (v == null or v.? <= 0) {
+                    try self.emit(.fps_invalid, .error_, decl.name_span, "sequence fps must be a positive number", .{});
+                }
+            }
+        }
+
+        // E1740 — at least one track.
+        if (decl.tracks_len == 0) {
+            try self.emit(.sequence_no_tracks, .error_, decl.name_span, "sequence '{s}' has no track (at least one required)", .{self.arena.strings.slice(decl.name)});
+        }
+
+        var tracks: std.AutoHashMapUnmanaged(StringId, void) = .empty;
+        defer tracks.deinit(self.gpa);
+        var t: u32 = 0;
+        while (t < decl.tracks_len) : (t += 1) {
+            const track = self.arena.sequence_tracks.items[decl.tracks_start + t];
+            // E1741 — unique track names.
+            const gop = try tracks.getOrPut(self.gpa, track.name);
+            if (gop.found_existing) {
+                try self.emit(.duplicate_track_name, .error_, track.span, "duplicate sequence track '{s}'", .{self.arena.strings.slice(track.name)});
+            }
+            // E1742 — track type in the §21.2 catalogue.
+            if (!isKnownTrackType(self.arena.strings.slice(track.track_type))) {
+                try self.emit(.track_type_unknown, .error_, track.span, "unknown sequence track type '{s}'", .{self.arena.strings.slice(track.track_type)});
+            }
+            // W1740 — empty track.
+            if (track.keyframes_len == 0) {
+                try self.emit(.empty_track, .warning, track.span, "sequence track '{s}' has no keyframe", .{self.arena.strings.slice(track.name)});
+            }
+            // Keyframes: E1744 range, E1745 chronological order, E1746 event ref.
+            var prev: ?f64 = null;
+            var k: u32 = 0;
+            while (k < track.keyframes_len) : (k += 1) {
+                const kf = self.arena.sequence_keyframes.items[track.keyframes_start + k];
+                if (durationLitSeconds(self.arena, kf.time)) |secs| {
+                    if (duration_secs) |d| {
+                        if (secs > d) try self.emit(.keyframe_out_of_range, .error_, kf.span, "keyframe time exceeds the sequence duration", .{});
+                    }
+                    if (prev) |pv| {
+                        if (secs < pv) try self.emit(.keyframes_unordered, .error_, kf.span, "sequence keyframes must be in chronological order", .{});
+                    }
+                    prev = secs;
+                }
+                if (kf.kind == .emit) {
+                    const em = self.arena.emit_stmts.items[self.arena.stmtData(kf.value)];
+                    const sym = self.symbols.get(em.event_type);
+                    if (sym == null or sym.?.kind != .event_) {
+                        try self.emit(.event_track_event_unknown, .error_, kf.span, "keyframe emits '{s}', which is not a declared event", .{self.arena.strings.slice(em.event_type)});
+                    }
                 }
             }
         }
@@ -2008,6 +2126,14 @@ pub const TypeChecker = struct {
                     const decl = self.arena.effect_decls.items[data];
                     try self.registerSymbol(.effect_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .effect);
+                },
+                .sequence_decl => {
+                    // A `sequence` (M0.8 E6 Level B cinematic) is TYPE_IDENT-named
+                    // → it registers a symbol; tracks / keyframes / the §21
+                    // checks run in `validateSequenceDecls`.
+                    const decl = self.arena.sequence_decls.items[data];
+                    try self.registerSymbol(.sequence_, decl.name, item_id, span);
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .sequence);
                 },
                 .audio_graph_decl => {
                     // An `audio_graph` (M0.8 E6 Level B audio) is TYPE_IDENT-named

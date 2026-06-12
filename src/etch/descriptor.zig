@@ -73,6 +73,7 @@ fn freeDescriptor(gpa: std.mem.Allocator, d: types.Descriptor) void {
         .effect => |e| freeEffect(gpa, e),
         .audio_graph => |ag| freeAudioGraph(gpa, ag),
         .audio_score => |asc| freeAudioScore(gpa, asc),
+        .sequence => |seq| freeSequence(gpa, seq),
     }
 }
 
@@ -294,6 +295,7 @@ pub fn build(gpa: std.mem.Allocator, arena: *const AstArena) BuildError!Descript
             .effect_decl => try list.append(gpa, .{ .effect = try buildEffect(gpa, arena, arena.effect_decls.items[datas[i]]) }),
             .audio_graph_decl => try list.append(gpa, .{ .audio_graph = try buildAudioGraph(gpa, arena, arena.audio_graph_decls.items[datas[i]]) }),
             .audio_score_decl => try list.append(gpa, .{ .audio_score = try buildAudioScore(gpa, arena, arena.audio_score_decls.items[datas[i]]) }),
+            .sequence_decl => try list.append(gpa, .{ .sequence = try buildSequence(gpa, arena, arena.sequence_decls.items[datas[i]]) }),
             else => {},
         }
     }
@@ -1279,6 +1281,131 @@ fn buildAudioScore(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod
         .props = props,
         .sections = try sections.toOwnedSlice(gpa),
         .stems = try stems.toOwnedSlice(gpa),
+    };
+}
+
+/// Render a `sequence_keyframe` value to canonical text (struct body / call /
+/// emit / play). SHARED by both backends so a keyframe renders identically.
+pub fn renderSequenceKeyframeValueAlloc(gpa: std.mem.Allocator, arena: *const AstArena, kf_idx: u32) BuildError![]u8 {
+    const kf = arena.sequence_keyframes.items[kf_idx];
+    switch (kf.kind) {
+        .struct_body => {
+            var out: std.ArrayListUnmanaged(u8) = .empty;
+            errdefer out.deinit(gpa);
+            try out.appendSlice(gpa, "{ ");
+            var i: u32 = 0;
+            while (i < kf.fields_len) : (i += 1) {
+                if (i != 0) try out.appendSlice(gpa, ", ");
+                const field = arena.struct_lit_fields.items[kf.fields_start + i];
+                try out.appendSlice(gpa, if (field.name == 0) ".." else arena.strings.slice(field.name));
+                try out.appendSlice(gpa, ": ");
+                try renderExpr(gpa, arena, field.value, &out);
+            }
+            try out.appendSlice(gpa, " }");
+            return try out.toOwnedSlice(gpa);
+        },
+        .call => return try renderExprAlloc(gpa, arena, kf.value),
+        .emit => return try renderStmtAlloc(gpa, arena, kf.value),
+        .play => {
+            var out: std.ArrayListUnmanaged(u8) = .empty;
+            errdefer out.deinit(gpa);
+            try out.appendSlice(gpa, "play \"");
+            try out.appendSlice(gpa, arena.strings.slice(kf.play_path));
+            try out.appendSlice(gpa, "\"");
+            return try out.toOwnedSlice(gpa);
+        },
+    }
+}
+
+fn freeSequence(gpa: std.mem.Allocator, seq: types.Sequence) void {
+    gpa.free(seq.name);
+    freeScorePropDescs(gpa, seq.props);
+    gpa.free(seq.on_start);
+    gpa.free(seq.on_finish);
+    for (seq.tracks) |tr| {
+        gpa.free(tr.name);
+        gpa.free(tr.target);
+        gpa.free(tr.track_type);
+        for (tr.keyframes) |kf| {
+            gpa.free(kf.time);
+            gpa.free(kf.value);
+        }
+        gpa.free(tr.keyframes);
+    }
+    gpa.free(seq.tracks);
+}
+
+/// Build a `sequence` descriptor (M0.8 E6): properties, on_start/on_finish
+/// emits, and tracks of keyframes — all through the shared canonical renderers
+/// (byte-identical with the codegen emit side).
+fn buildSequence(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.SequenceDecl) BuildError!types.Sequence {
+    const props = try buildScorePropDescs(gpa, arena, decl.props_start, decl.props_len);
+    errdefer freeScorePropDescs(gpa, props);
+    const on_start = if (decl.on_start.isNone())
+        try gpa.dupe(u8, "")
+    else
+        try renderStmtAlloc(gpa, arena, decl.on_start);
+    errdefer gpa.free(on_start);
+    const on_finish = if (decl.on_finish.isNone())
+        try gpa.dupe(u8, "")
+    else
+        try renderStmtAlloc(gpa, arena, decl.on_finish);
+    errdefer gpa.free(on_finish);
+
+    var tracks: std.ArrayListUnmanaged(types.SequenceTrackDesc) = .empty;
+    errdefer {
+        for (tracks.items) |tr| {
+            gpa.free(tr.name);
+            gpa.free(tr.target);
+            gpa.free(tr.track_type);
+            for (tr.keyframes) |kf| {
+                gpa.free(kf.time);
+                gpa.free(kf.value);
+            }
+            gpa.free(tr.keyframes);
+        }
+        tracks.deinit(gpa);
+    }
+    var t: u32 = 0;
+    while (t < decl.tracks_len) : (t += 1) {
+        const track = arena.sequence_tracks.items[decl.tracks_start + t];
+        var kfs: std.ArrayListUnmanaged(types.SequenceKeyframeDesc) = .empty;
+        errdefer {
+            for (kfs.items) |kf| {
+                gpa.free(kf.time);
+                gpa.free(kf.value);
+            }
+            kfs.deinit(gpa);
+        }
+        var k: u32 = 0;
+        while (k < track.keyframes_len) : (k += 1) {
+            const kf_idx = track.keyframes_start + k;
+            const time = try renderExprAlloc(gpa, arena, arena.sequence_keyframes.items[kf_idx].time);
+            errdefer gpa.free(time);
+            const value = try renderSequenceKeyframeValueAlloc(gpa, arena, kf_idx);
+            errdefer gpa.free(value);
+            try kfs.append(gpa, .{ .time = time, .value = value });
+        }
+        const tname = try gpa.dupe(u8, arena.strings.slice(track.name));
+        errdefer gpa.free(tname);
+        const target = if (track.has_target)
+            try gpa.dupe(u8, arena.strings.slice(track.target))
+        else
+            try gpa.dupe(u8, "");
+        errdefer gpa.free(target);
+        const ttype = try gpa.dupe(u8, arena.strings.slice(track.track_type));
+        errdefer gpa.free(ttype);
+        try tracks.append(gpa, .{ .name = tname, .target = target, .track_type = ttype, .keyframes = try kfs.toOwnedSlice(gpa) });
+    }
+
+    const name = try gpa.dupe(u8, arena.strings.slice(decl.name));
+    errdefer gpa.free(name);
+    return .{
+        .name = name,
+        .props = props,
+        .on_start = on_start,
+        .on_finish = on_finish,
+        .tracks = try tracks.toOwnedSlice(gpa),
     };
 }
 

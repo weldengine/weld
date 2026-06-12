@@ -1,0 +1,38 @@
+// Differential 79 — Level-B `sequence` (M0.8 E6 cinematic / sequencer).
+// Serialized-IR parity: the interpreter BUILDS the sequence descriptor, the
+// cooked Zig EMITS it; both serialize through the shared canonical serializer
+// (`descriptor_types.zig`) and must produce byte-identical dumps (LEVEL-B PROOF
+// CONTRACT). The grammar §13 shape WINS (both refs said STRING_LITERAL name →
+// TYPE_IDENT). COMPLETE: `on_start` / `on_finish` are emit statements (the §13
+// patched form, ruling 1). Tracks are `track IDENT [on STRING] : TYPE_IDENT {
+// keyframe* }`; keyframes are `DURATION_LIT ":" (struct_body | call | emit |
+// "play" STRING)`. DELIVER: E1740 SequenceNoTracks, E1741 DuplicateTrackName,
+// E1742 TrackTypeUnknown (catalogue inlined), E1744 KeyframeOutOfRange + E1745
+// KeyframesUnordered (DURATION_LIT seconds parsed at validation time — distinct
+// from the deferred runtime duration eval), E1746 EventTrackEventUnknown (the
+// emit keyframe references a declared event), E1749 FPSInvalid, E1750
+// DurationInvalid, W1740 EmptyTrack. RESERVED: E1748 SubSequenceRefInvalid (the
+// §13 track has no sub-sequence-ref production — grammar-wins). DEFERRED: E1743
+// TrackTargetNotFound (scene/binding = E7), E1747 (asset), W1741 (heuristic).
+// No keyframe executes. The events are declared so E1746 + the emit renders resolve.
+event CutsceneStarted { id: int }
+event CutsceneFinished { id: int }
+event DialogueStart { line: int }
+
+sequence IntroCinematic {
+  duration: 15.0
+  fps: 30.0
+  on_start: emit CutsceneStarted { id: 1 }
+  on_finish: emit CutsceneFinished { id: 1 }
+
+  track Camera on "@local_camera": CameraTrack {
+    0.0s: { position: [0, 0, 0] }
+    5.0s: move_to(target)
+    10.0s: { position: [10, 0, 0] }
+  }
+
+  track Dialogue: EventTrack {
+    2.0s: emit DialogueStart { line: 1 }
+    8.0s: play "vo/intro.ogg"
+  }
+}

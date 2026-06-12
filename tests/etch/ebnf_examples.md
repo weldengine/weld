@@ -1236,3 +1236,28 @@ audio_score "exploration" {
   }
 }
 ```
+
+## Sequence (E6 — §13)
+
+`sequence_decl = "sequence" TYPE_IDENT "{" {sequence_property} {sequence_track}
+"}"`. `sequence` is matched at top level by token kind (it doubles as the E4
+behavior composite). COMPLETE: `on_start` / `on_finish` are emit statements.
+Tracks are `track IDENT ["on" STRING] ":" TYPE_IDENT "{" keyframe* "}"`;
+keyframes are `DURATION_LIT ":" (struct_body | call | emit | "play" STRING)`.
+
+```etch
+sequence IntroCinematic {
+  duration: 15.0
+  fps: 30.0
+  on_start: emit CutsceneStarted { id: 1 }
+  on_finish: emit CutsceneFinished { id: 1 }
+  track Camera on "@local_camera": CameraTrack {
+    0.0s: { position: [0, 0, 0] }
+    5.0s: move_to(target)
+  }
+  track Dialogue: EventTrack {
+    2.0s: emit DialogueStart { line: 1 }
+    8.0s: play "vo/intro.ogg"
+  }
+}
+```

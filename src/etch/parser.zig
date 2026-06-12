@@ -510,7 +510,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score => return,
+                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score, .kw_sequence => return,
                 else => _ = try self.advance(),
             }
         }
@@ -552,6 +552,7 @@ pub const Parser = struct {
             .kw_effect => try self.parseEffectDecl(annotations),
             .kw_audio_graph => try self.parseAudioGraphDecl(annotations),
             .kw_audio_score => try self.parseAudioScoreDecl(annotations),
+            .kw_sequence => try self.parseSequenceDecl(annotations),
             .kw_async => {
                 // `async fn` (M0.8 E2) and `async rule` (M0.8 E3 sub-slice B):
                 // the two top-level `async` constructs. `kw_async` is already in
@@ -565,7 +566,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score | sequence), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -2525,6 +2526,144 @@ pub const Parser = struct {
             _ = try self.match(.comma);
         }
         _ = try self.expect(.rbrace, "expected '}' to close the stems block");
+    }
+
+    /// `sequence_decl = "sequence" TYPE_IDENT "{" {sequence_property}
+    /// {sequence_track} "}"` (M0.8 E6, `etch-grammar.md` §13). `sequence` is the
+    /// graduated `kw_sequence` (it doubles as the E4 behavior composite) —
+    /// matched at top level by TOKEN KIND (the input_combo precedent). COMPLETE:
+    /// `on_start` / `on_finish` are emit statements (the §13 patched form, ruling
+    /// 1). Properties are BUFFERED + committed contiguously (tracks' keyframe
+    /// bodies also write `struct_lit_fields` during the loop).
+    fn parseSequenceDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        const kw_span = self.current.span;
+        _ = try self.advance(); // 'sequence'
+        const name_tok = try self.expect(.type_ident, "expected sequence name (TYPE_IDENT)");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.lbrace, "expected '{' to start the sequence body");
+
+        const tracks_start: u32 = @intCast(self.arena.sequence_tracks.items.len);
+        var props: std.ArrayListUnmanaged(ast_mod.StructLitField) = .empty;
+        defer props.deinit(self.gpa);
+        var on_start: NodeId = NodeId.none;
+        var on_finish: NodeId = NodeId.none;
+
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "track")) {
+                try self.parseSequenceTrack();
+                continue;
+            }
+            const key_tok = try self.expect(.ident, "expected a sequence property, 'on_start'/'on_finish', or 'track'");
+            const key = self.sliceOf(key_tok.span);
+            _ = try self.expect(.colon, "expected ':' after the sequence property name");
+            if (std.mem.eql(u8, key, "on_start")) {
+                on_start = try self.parseStmt();
+            } else if (std.mem.eql(u8, key, "on_finish")) {
+                on_finish = try self.parseStmt();
+            } else {
+                const value = try self.parseExpr(0);
+                try props.append(self.gpa, .{ .name = try self.internSlice(key_tok.span), .value = value });
+            }
+            _ = try self.match(.comma);
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the sequence body");
+
+        const props_start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        try self.arena.struct_lit_fields.appendSlice(self.gpa, props.items);
+        _ = try self.arena.addSequenceDecl(self.gpa, .{
+            .name = name_id,
+            .name_span = name_tok.span,
+            .props_start = props_start,
+            .props_len = @intCast(props.items.len),
+            .on_start = on_start,
+            .on_finish = on_finish,
+            .tracks_start = tracks_start,
+            .tracks_len = @as(u32, @intCast(self.arena.sequence_tracks.items.len)) - tracks_start,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// `sequence_track = "track" IDENT ["on" STRING_LITERAL] ":" TYPE_IDENT "{"
+    /// {sequence_keyframe} "}"` (§13). Track names are TYPE_IDENT-shaped in
+    /// practice (the ratified name-position deviation). `on` is a contextual ident.
+    fn parseSequenceTrack(self: *Parser) ParseError!void {
+        const start_span = self.peekSpan();
+        _ = try self.advance(); // 'track'
+        const name_tok = switch (self.peek()) {
+            .ident, .type_ident => try self.advance(),
+            else => return self.parseErr(self.peekSpan(), "expected a track name (identifier) after 'track'"),
+        };
+        var target: StringId = 0;
+        var has_target = false;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "on")) {
+            _ = try self.advance(); // 'on'
+            const tgt = try self.expect(.string_literal, "expected a binding target (string literal) after 'on'");
+            target = try self.internStringLiteral(tgt.span);
+            has_target = true;
+        }
+        _ = try self.expect(.colon, "expected ':' after the track name/binding");
+        const type_tok = try self.expect(.type_ident, "expected a track type (TYPE_IDENT)");
+        _ = try self.expect(.lbrace, "expected '{' to start the track body");
+        const keyframes_start: u32 = @intCast(self.arena.sequence_keyframes.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            try self.parseSequenceKeyframe();
+        }
+        const closing = try self.expect(.rbrace, "expected '}' to close the track body");
+        try self.arena.sequence_tracks.append(self.gpa, .{
+            .name = try self.internSlice(name_tok.span),
+            .target = target,
+            .has_target = has_target,
+            .track_type = try self.internSlice(type_tok.span),
+            .keyframes_start = keyframes_start,
+            .keyframes_len = @as(u32, @intCast(self.arena.sequence_keyframes.items.len)) - keyframes_start,
+            .span = .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end },
+        });
+    }
+
+    /// `sequence_keyframe = DURATION_LIT ":" (struct_literal_body |
+    /// sequence_action)` where `sequence_action = IDENT "(" [arg_list] ")" |
+    /// emit_stmt | "play" STRING_LITERAL` (§13).
+    fn parseSequenceKeyframe(self: *Parser) ParseError!void {
+        const start_span = self.peekSpan();
+        const time = try self.parseExpr(0); // DURATION_LIT
+        _ = try self.expect(.colon, "expected ':' after the keyframe time");
+        var kf: ast_mod.SequenceKeyframe = .{
+            .time = time,
+            .kind = .struct_body,
+            .fields_start = 0,
+            .fields_len = 0,
+            .value = NodeId.none,
+            .play_path = 0,
+            .span = undefined,
+        };
+        if (self.peek() == .lbrace) {
+            const body = try self.parseDataEntryBody();
+            kf.kind = .struct_body;
+            kf.fields_start = body.fields_start;
+            kf.fields_len = body.fields_len;
+            kf.span = .{ .byte_start = start_span.byte_start, .byte_end = body.end_byte };
+        } else if (self.peek() == .kw_emit) {
+            const stmt = try self.parseStmt();
+            kf.kind = .emit;
+            kf.value = stmt;
+            kf.span = .{ .byte_start = start_span.byte_start, .byte_end = self.arena.stmtSpan(stmt).byte_end };
+        } else if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "play")) {
+            _ = try self.advance(); // 'play'
+            const path = try self.expect(.string_literal, "expected a string literal after 'play'");
+            kf.kind = .play;
+            kf.play_path = try self.internStringLiteral(path.span);
+            kf.span = .{ .byte_start = start_span.byte_start, .byte_end = path.span.byte_end };
+        } else {
+            const expr = try self.parseExpr(0); // IDENT "(" [arg_list] ")"
+            kf.kind = .call;
+            kf.value = expr;
+            kf.span = .{ .byte_start = start_span.byte_start, .byte_end = self.arena.exprSpan(expr).byte_end };
+        }
+        try self.arena.sequence_keyframes.append(self.gpa, kf);
+        _ = try self.match(.comma);
     }
 
     const DataEntryBody = struct {
@@ -7465,4 +7604,47 @@ test "parser recovers and a valid audio_score after a broken construct survives 
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.audio_score_decls.items.len);
+}
+
+test "parser builds a sequence with properties, on_start/finish, tracks, and keyframes (M0.8 E6)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\sequence IntroCinematic {
+        \\  duration: 15.0
+        \\  fps: 30.0
+        \\  on_start: emit CutsceneStarted { id: 1 }
+        \\  on_finish: emit CutsceneFinished { id: 1 }
+        \\  track Camera on "@local_camera": CameraTrack {
+        \\    0.0s: { position: [0, 0, 0] }
+        \\    2.0s: move_to(target)
+        \\  }
+        \\  track Dialogue: EventTrack {
+        \\    1.0s: emit DialogueStart { npc: "merchant" }
+        \\    3.0s: play "vo/intro.ogg"
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.sequence_decls.items.len);
+    const decl = result.ast.sequence_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 2), decl.props_len); // duration + fps
+    try std.testing.expect(!decl.on_start.isNone());
+    try std.testing.expect(!decl.on_finish.isNone());
+    try std.testing.expectEqual(@as(u32, 2), decl.tracks_len);
+    // Camera track binds a target and has 2 keyframes.
+    const cam = result.ast.sequence_tracks.items[decl.tracks_start];
+    try std.testing.expect(cam.has_target);
+    try std.testing.expectEqual(@as(u32, 2), cam.keyframes_len);
+}
+
+test "parser recovers and a valid sequence after a broken construct survives (M0.8 E6 lockstep)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\@@@bad
+        \\sequence Intro { track T: EventTrack { 0.0s: emit Go {} } }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.sequence_decls.items.len);
 }

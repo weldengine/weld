@@ -91,7 +91,7 @@ pub const TokenKind = enum {
     kw_dialogue, // dialogue declaration (M0.8 E4 Level B gameplay)
     kw_ability, // ability declaration (M0.8 E4 Level B gameplay)
     kw_branch, // quest/dialogue branch (M0.8 E4; the async T2/T3 `branch` statement stays out of M0.8 — explicit parse error)
-    kw_sequence, // behavior composite type (M0.8 E4; the E6 top-level `sequence` construct stays out of scope — default top-level error)
+    kw_sequence, // behavior composite type (M0.8 E4) + the E6 top-level `sequence` cinematic construct (matched by token kind in parseTopLevel — the input_combo precedent)
     kw_after, // routine trigger `after Segment` (M0.8 E4; the §4.3 timer statement stays out of M0.8 — explicit parse error)
     kw_theme, // theme declaration (M0.8 E5 Level B presentation)
     kw_motion, // motion declaration (M0.8 E5 Level B presentation — state-based UI animation)

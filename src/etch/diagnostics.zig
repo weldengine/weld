@@ -265,6 +265,24 @@ pub const DiagnosticCode = enum {
     score_transition_from_not_found, // M0.8 E6 — E1726 TransitionFromNotFound (rekeyed onto can_transition_to / on_finish targets)
     tempo_invalid, // M0.8 E6 — E1728 TempoInvalid (tempo must be a positive int)
 
+    // ── sequence (E1740-E1750 + W1740, M0.8 E6 — etch-grammar.md §13, Level-B
+    //    cinematic. DELIVER the structural + keyframe-time checks (DURATION_LIT
+    //    seconds parsed at validation time). E1748 SubSequenceRefInvalid is
+    //    RESERVED-with-variant: the grammar §13 sequence_track has no
+    //    sub-sequence-ref production (grammar-wins), so it can never fire. E1743
+    //    TrackTargetNotFound (scene/binding = E7), E1747 AnimationTrackClipInvalid
+    //    (asset), W1741 OverlappingTracks (heuristic) are DEFERRED-no-variant. ──
+    sequence_no_tracks, // M0.8 E6 — E1740 SequenceNoTracks
+    duplicate_track_name, // M0.8 E6 — E1741 DuplicateTrackName
+    track_type_unknown, // M0.8 E6 — E1742 TrackTypeUnknown (catalogue inlined)
+    keyframe_out_of_range, // M0.8 E6 — E1744 KeyframeOutOfRange (keyframe time > sequence duration)
+    keyframes_unordered, // M0.8 E6 — E1745 KeyframesUnordered (not chronological)
+    event_track_event_unknown, // M0.8 E6 — E1746 EventTrackEventUnknown (emit keyframe references an undeclared event)
+    subsequence_ref_invalid, // M0.8 E6 — E1748 SubSequenceRefInvalid (RESERVED: §13 has no sub-sequence-ref production)
+    fps_invalid, // M0.8 E6 — E1749 FPSInvalid (fps must be positive)
+    sequence_duration_invalid, // M0.8 E6 — E1750 DurationInvalid (duration must be positive)
+    empty_track, // M0.8 E6 — W1740 EmptyTrack (track with no keyframe)
+
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
@@ -390,6 +408,16 @@ pub const DiagnosticCode = enum {
             .section_duration_invalid => "E1725",
             .score_transition_from_not_found => "E1726",
             .tempo_invalid => "E1728",
+            .sequence_no_tracks => "E1740",
+            .duplicate_track_name => "E1741",
+            .track_type_unknown => "E1742",
+            .keyframe_out_of_range => "E1744",
+            .keyframes_unordered => "E1745",
+            .event_track_event_unknown => "E1746",
+            .subsequence_ref_invalid => "E1748",
+            .fps_invalid => "E1749",
+            .sequence_duration_invalid => "E1750",
+            .empty_track => "W1740",
         };
     }
 
@@ -518,6 +546,16 @@ pub const DiagnosticCode = enum {
             .section_duration_invalid => "SectionDurationInvalid",
             .score_transition_from_not_found => "TransitionFromNotFound",
             .tempo_invalid => "TempoInvalid",
+            .sequence_no_tracks => "SequenceNoTracks",
+            .duplicate_track_name => "DuplicateTrackName",
+            .track_type_unknown => "TrackTypeUnknown",
+            .keyframe_out_of_range => "KeyframeOutOfRange",
+            .keyframes_unordered => "KeyframesUnordered",
+            .event_track_event_unknown => "EventTrackEventUnknown",
+            .subsequence_ref_invalid => "SubSequenceRefInvalid",
+            .fps_invalid => "FPSInvalid",
+            .sequence_duration_invalid => "DurationInvalid",
+            .empty_track => "EmptyTrack",
         };
     }
 };

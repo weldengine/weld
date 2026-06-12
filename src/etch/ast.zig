@@ -1591,6 +1591,57 @@ pub const AudioScoreStem = struct {
     span: SourceSpan,
 };
 
+/// Side-slab entry for a `sequence` declaration (M0.8 E6 Level B cinematic,
+/// `etch-grammar.md` §13: `sequence_decl = "sequence" TYPE_IDENT "{"
+/// {sequence_property} {sequence_track} "}"`). TYPE_IDENT-named (grammar wins —
+/// both refs said STRING_LITERAL). `sequence_property`s (`IDENT ":" expression`,
+/// e.g. `duration: 15.0` / `fps: 30.0`) are a BUFFERED `struct_lit_fields` run
+/// (tracks also write that slab); `on_start` / `on_finish` are emit statements
+/// (the §13 patched form, COMPLETE — both emit-only).
+pub const SequenceDecl = struct {
+    name: StringId, // TYPE_IDENT
+    name_span: SourceSpan,
+    props_start: u32, // sequence_property run in `arena.struct_lit_fields`
+    props_len: u32,
+    on_start: NodeId, // emit stmt (`NodeId.none` if absent)
+    on_finish: NodeId, // emit stmt (`NodeId.none` if absent)
+    tracks_start: u32, // index into `arena.sequence_tracks`
+    tracks_len: u32,
+    annotations_extra: u32,
+    annotations_len: u32,
+};
+
+/// One `sequence_track` (`"track" IDENT ["on" STRING_LITERAL] ":" TYPE_IDENT "{"
+/// {sequence_keyframe} "}"`, §13). `track_type` ∈ the §21.2 catalogue (E1742);
+/// the optional `on STRING` is the binding target (E1743 TrackTargetNotFound is
+/// DEFERRED — scene/binding resolution is E7).
+pub const SequenceTrack = struct {
+    name: StringId, // IDENT (track name)
+    target: StringId, // `on STRING` binding (valid iff has_target)
+    has_target: bool,
+    track_type: StringId, // TYPE_IDENT
+    keyframes_start: u32, // index into `arena.sequence_keyframes`
+    keyframes_len: u32,
+    span: SourceSpan,
+};
+
+/// Kind of a `sequence_keyframe` value (`struct_literal_body | sequence_action`,
+/// §13). `sequence_action = IDENT "(" [arg_list] ")" | emit_stmt | "play"
+/// STRING_LITERAL`.
+pub const SequenceKeyframeKind = enum { struct_body, call, emit, play };
+
+/// One `sequence_keyframe` (`DURATION_LIT ":" (...)`, §13). `time` is the
+/// DURATION_LIT expr (E1744 range / E1745 ordering use its parsed seconds).
+pub const SequenceKeyframe = struct {
+    time: NodeId, // DURATION_LIT expr
+    kind: SequenceKeyframeKind,
+    fields_start: u32, // `.struct_body`: struct_lit_fields run
+    fields_len: u32,
+    value: NodeId, // `.call`: fn_call expr ; `.emit`: emit stmt ; else `NodeId.none`
+    play_path: StringId, // `.play`: the STRING_LITERAL content ; 0 otherwise
+    span: SourceSpan,
+};
+
 /// Kind of one routine trigger alternative (M0.8 E4, `etch-grammar.md`
 /// §8.2 `trigger_expr`): `at TIME_LITERAL` / `after IDENT` /
 /// `on_event TYPE_IDENT`. `or`-chains are stored as a flat run of
@@ -1970,6 +2021,9 @@ pub const AstArena = struct {
     audio_score_sections: std.ArrayListUnmanaged(AudioScoreSection) = .empty,
     audio_score_stems: std.ArrayListUnmanaged(AudioScoreStem) = .empty,
     audio_score_targets: std.ArrayListUnmanaged(StringId) = .empty,
+    sequence_decls: std.ArrayListUnmanaged(SequenceDecl) = .empty,
+    sequence_tracks: std.ArrayListUnmanaged(SequenceTrack) = .empty,
+    sequence_keyframes: std.ArrayListUnmanaged(SequenceKeyframe) = .empty,
     quest_decls: std.ArrayListUnmanaged(QuestDecl) = .empty,
     quest_properties: std.ArrayListUnmanaged(QuestProperty) = .empty,
     quest_stages: std.ArrayListUnmanaged(QuestStage) = .empty,
@@ -2174,6 +2228,9 @@ pub const AstArena = struct {
         self.audio_score_sections.deinit(gpa);
         self.audio_score_stems.deinit(gpa);
         self.audio_score_targets.deinit(gpa);
+        self.sequence_decls.deinit(gpa);
+        self.sequence_tracks.deinit(gpa);
+        self.sequence_keyframes.deinit(gpa);
         self.rule_params.deinit(gpa);
         self.fn_params.deinit(gpa);
         self.when_nodes.deinit(gpa);
@@ -2694,6 +2751,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.audio_score_decls.items.len);
         try self.audio_score_decls.append(gpa, decl);
         return try self.addItem(gpa, .audio_score_decl, idx, span);
+    }
+
+    /// `sequence Name { {property} {track} }` (M0.8 E6, `etch-grammar.md` §13).
+    /// The caller appends the properties, tracks, and keyframes to their slabs
+    /// beforehand, passing the ranges + on_start/on_finish in `decl`.
+    pub fn addSequenceDecl(self: *AstArena, gpa: std.mem.Allocator, decl: SequenceDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.sequence_decls.items.len);
+        try self.sequence_decls.append(gpa, decl);
+        return try self.addItem(gpa, .sequence_decl, idx, span);
     }
 
     /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The

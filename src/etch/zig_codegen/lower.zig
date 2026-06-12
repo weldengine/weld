@@ -4910,7 +4910,7 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// `true` when the program declares at least one Level-B construct with a
 /// descriptor (M0.8 E4: the six Level-B gameplay constructs).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0 or ast.audio_graph_decls.items.len > 0 or ast.audio_score_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0 or ast.audio_graph_decls.items.len > 0 or ast.audio_score_decls.items.len > 0 or ast.sequence_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4941,6 +4941,7 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .effect_decl => try emitEffectDescriptor(w, gpa, ast, ast.effect_decls.items[datas[i]]),
             .audio_graph_decl => try emitAudioGraphDescriptor(w, gpa, ast, ast.audio_graph_decls.items[datas[i]]),
             .audio_score_decl => try emitAudioScoreDescriptor(w, gpa, ast, ast.audio_score_decls.items[datas[i]]),
+            .sequence_decl => try emitSequenceDescriptor(w, gpa, ast, ast.sequence_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -5214,6 +5215,67 @@ fn emitAudioScoreDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstA
         try emitZigStringLiteral(w, ast.strings.slice(stem.name));
         try w.line(", .fields = &[_]etch_descriptor.ScorePropDesc{");
         try emitScorePropEntries(w, gpa, ast, stem.body_start, stem.body_len);
+        try w.line("        } },");
+    }
+    try w.line("    } } },");
+}
+
+/// Emit-structure for a `sequence` (M0.8 E6 Level B cinematic): the codegen's
+/// OWN walk over props / on_start / on_finish / tracks / keyframes through the
+/// SHARED `renderStmtAlloc` (emits), `renderSequenceKeyframeValueAlloc`
+/// (keyframe values), `renderForEmit` (times) — byte-identical with `buildSequence`.
+fn emitSequenceDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.SequenceDecl) CodegenError!void {
+    try w.print("    .{{ .sequence = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.line(", .props = &[_]etch_descriptor.ScorePropDesc{");
+    try emitScorePropEntries(w, gpa, ast, decl.props_start, decl.props_len);
+    const on_start = if (decl.on_start.isNone())
+        try gpa.dupe(u8, "")
+    else
+        descriptor_mod.renderStmtAlloc(gpa, ast, decl.on_start) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        };
+    defer gpa.free(on_start);
+    const on_finish = if (decl.on_finish.isNone())
+        try gpa.dupe(u8, "")
+    else
+        descriptor_mod.renderStmtAlloc(gpa, ast, decl.on_finish) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        };
+    defer gpa.free(on_finish);
+    try w.print("    }}, .on_start = ", .{});
+    try emitZigStringLiteral(w, on_start);
+    try w.print(", .on_finish = ", .{});
+    try emitZigStringLiteral(w, on_finish);
+    try w.line(", .tracks = &[_]etch_descriptor.SequenceTrackDesc{");
+    var t: u32 = 0;
+    while (t < decl.tracks_len) : (t += 1) {
+        const track = ast.sequence_tracks.items[decl.tracks_start + t];
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(track.name));
+        try w.print(", .target = ", .{});
+        try emitZigStringLiteral(w, if (track.has_target) ast.strings.slice(track.target) else "");
+        try w.print(", .track_type = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(track.track_type));
+        try w.line(", .keyframes = &[_]etch_descriptor.SequenceKeyframeDesc{");
+        var k: u32 = 0;
+        while (k < track.keyframes_len) : (k += 1) {
+            const kf_idx = track.keyframes_start + k;
+            const time = try renderForEmit(gpa, ast, ast.sequence_keyframes.items[kf_idx].time);
+            defer gpa.free(time);
+            const value = descriptor_mod.renderSequenceKeyframeValueAlloc(gpa, ast, kf_idx) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+            };
+            defer gpa.free(value);
+            try w.print("            .{{ .time = ", .{});
+            try emitZigStringLiteral(w, time);
+            try w.print(", .value = ", .{});
+            try emitZigStringLiteral(w, value);
+            try w.line(" },");
+        }
         try w.line("        } },");
     }
     try w.line("    } } },");

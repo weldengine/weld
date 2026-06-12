@@ -441,6 +441,34 @@ pub const AudioScoreStemDesc = struct {
     fields: []const ScorePropDesc,
 };
 
+/// `sequence` descriptor (`etch-ast-ir.md` §3.5: `Sequence { tracks, duration,
+/// fps }`; M0.8 E6, `etch-grammar.md` §13, Level-B cinematic). TYPE_IDENT-named.
+/// Properties (`duration`/`fps`, reusing `ScorePropDesc`), the `on_start` /
+/// `on_finish` rendered emit statements, and tracks of keyframes — all canonical
+/// text, never run.
+pub const Sequence = struct {
+    name: []const u8,
+    props: []const ScorePropDesc,
+    on_start: []const u8, // rendered emit stmt ("" if absent)
+    on_finish: []const u8, // rendered emit stmt ("" if absent)
+    tracks: []const SequenceTrackDesc,
+};
+
+/// One `sequence` track: name + optional `on` binding + type + keyframes.
+pub const SequenceTrackDesc = struct {
+    name: []const u8,
+    target: []const u8, // `on "..."` binding ("" if absent)
+    track_type: []const u8,
+    keyframes: []const SequenceKeyframeDesc,
+};
+
+/// One `sequence` keyframe: rendered `time: value` (value = struct body / call /
+/// emit / play, pre-rendered by the shared keyframe renderer).
+pub const SequenceKeyframeDesc = struct {
+    time: []const u8,
+    value: []const u8,
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -459,6 +487,7 @@ pub const Descriptor = union(enum) {
     effect: Effect,
     audio_graph: AudioGraph,
     audio_score: AudioScore,
+    sequence: Sequence,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -477,6 +506,7 @@ pub const Descriptor = union(enum) {
             .effect => |e| try writeEffect(e, gpa, out),
             .audio_graph => |ag| try writeAudioGraph(ag, gpa, out),
             .audio_score => |asc| try writeAudioScore(asc, gpa, out),
+            .sequence => |seq| try writeSequence(seq, gpa, out),
         }
     }
 };
@@ -703,6 +733,33 @@ pub fn writeAudioScore(asc: AudioScore, gpa: std.mem.Allocator, out: *std.ArrayL
         try appendFmt(gpa, out, "  stem {s} {{\n", .{stem.name});
         for (stem.fields) |f| {
             try appendFmt(gpa, out, "    {s}: {s}\n", .{ f.name, f.value });
+        }
+        try out.appendSlice(gpa, "  }\n");
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `sequence` descriptor (M0.8 E6): properties,
+/// on_start / on_finish emits, then tracks with their keyframes.
+pub fn writeSequence(seq: Sequence, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "sequence {s} {{\n", .{seq.name});
+    for (seq.props) |p| {
+        try appendFmt(gpa, out, "  {s}: {s}\n", .{ p.name, p.value });
+    }
+    if (seq.on_start.len != 0) {
+        try appendFmt(gpa, out, "  on_start: {s}\n", .{seq.on_start});
+    }
+    if (seq.on_finish.len != 0) {
+        try appendFmt(gpa, out, "  on_finish: {s}\n", .{seq.on_finish});
+    }
+    for (seq.tracks) |tr| {
+        if (tr.target.len != 0) {
+            try appendFmt(gpa, out, "  track {s} on \"{s}\": {s} {{\n", .{ tr.name, tr.target, tr.track_type });
+        } else {
+            try appendFmt(gpa, out, "  track {s}: {s} {{\n", .{ tr.name, tr.track_type });
+        }
+        for (tr.keyframes) |kf| {
+            try appendFmt(gpa, out, "    {s}: {s}\n", .{ kf.time, kf.value });
         }
         try out.appendSlice(gpa, "  }\n");
     }
