@@ -70,6 +70,72 @@ pub const Interpreter = interp.Interpreter;
 /// interpreter internals.
 pub const RuntimeReport = interp.RuntimeReport;
 
+// ───────────────────────────────────────────────────────────────────────────
+// AST stable interface — Level 1 (frozen cross-phase)
+//
+// Mirrors `etch-parser.md` §10.3.1 "Interface contract stable cross-phase".
+// M0.8 (the full v0.6 grammar) settles every Item/Stmt/Expr/TypeNode kind
+// variant, so the public AST surface is frozen HERE: the Phase 1 / S0 parser
+// rewrite (recursive-descent → LR(1)) must preserve this surface byte-for-byte
+// so the ~5000 lines of consumers (interpreter, codegen, ECS bridge, validate,
+// LS) compile unchanged.
+//
+// FROZEN — Level 1 (a removal/rename is a breaking change forbidden Phase 0 →
+// Phase 1; ADDING an enum variant or an accessor is non-breaking):
+//
+//   • Discrimination enums — `ItemKind`, `StmtKind`, `ExprKind`,
+//     `TypeNodeKind`, `BinaryOp`, `UnaryOp`, `AssignOp`, `NodeCategory`.
+//   • Node handle / intern — `NodeId` (packed struct(u32){ category, index };
+//     `.none`, `.isNone()`, `.raw()`), `StringId` (= u32).
+//   • Span value — `SourceSpan { byte_start: u32, byte_end: u32 }`.
+//   • Accessors on `Ast` (= AstArena), all `pub`: the per-category
+//     kind/data/span triplets (`itemKind`/`itemData`/`itemSpan`,
+//     `stmtKind`/…, `exprKind`/…, `typeNodeKind`/…), `isEmpty()`, the
+//     `items`/`stmts`/`exprs`/`type_nodes` SoA columns, the `strings` intern
+//     pool (`strings.slice(id)` → []const u8, `.find`, `.intern`), and
+//     `docCommentsOf`/`leadingCommentsOf`.
+//
+// NOT frozen — Level 2 (Phase 1 may mutate freely): the `NodeId` 4+28-bit
+// packing, the `MultiArrayList` column layout, the `extra` slabs, the `add*`
+// builder methods (parser-side writes, not consumer reads).
+//
+// NOTE — §10.3.1 drift (KB-patch at M0.8 close): the spec prose names an
+// idealized single `NodeKind` (~150 variants) + a `LiteralKind` + four tagged
+// unions (`TopLevelDecl`/`Expression`/`Statement`/`Type`). The delivered AST is
+// a tabular SoA instead: the FOUR per-category kind enums above are the
+// discriminators, `NodeId` is the universal handle, literals are variants of
+// `ExprKind`, and consumers discriminate via `arena.<cat>Kind(id)` +
+// `arena.<cat>Data(id)` (no union switch). The contract above is the REAL
+// frozen surface; §10.3.1 is to be re-aligned to the SoA reality at the close.
+//
+// Guard: `tests/etch/ast_stable_interface.zig` exercises ≥20 distinct Level-1
+// entry points; its COMPILATION is the invariant. A Phase 1 change that breaks
+// it blocks the LR transition and demands an explicit AST-API semver bump.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Frozen Level-1 discriminator for top-level declarations.
+pub const ItemKind = ast.ItemKind;
+/// Frozen Level-1 discriminator for statements.
+pub const StmtKind = ast.StmtKind;
+/// Frozen Level-1 discriminator for expressions (literals are variants here).
+pub const ExprKind = ast.ExprKind;
+/// Frozen Level-1 discriminator for type nodes.
+pub const TypeNodeKind = ast.TypeNodeKind;
+/// Frozen Level-1 binary-operator tag.
+pub const BinaryOp = ast.BinaryOp;
+/// Frozen Level-1 unary-operator tag.
+pub const UnaryOp = ast.UnaryOp;
+/// Frozen Level-1 assignment-operator tag.
+pub const AssignOp = ast.AssignOp;
+/// Frozen Level-1 node category selecting which kind enum / table applies.
+pub const NodeCategory = ast.NodeCategory;
+/// Frozen Level-1 universal node handle (packed struct(u32){ category, index }).
+pub const NodeId = ast.NodeId;
+/// Frozen Level-1 opaque string-intern handle (= u32).
+pub const StringId = ast.StringId;
+/// Frozen Level-1 span value — the return type of every `Ast` span accessor.
+pub const SourceSpan = @import("token.zig").SourceSpan;
+
 /// Parse a full Etch source file. The returned `ParseResult` owns its
 /// `AstArena` and its `diagnostics` slice — call `result.deinit(gpa)`
 /// when done (or move `ast` / `diagnostics` out and free them yourself).

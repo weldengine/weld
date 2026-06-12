@@ -395,6 +395,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/etch/recovery_toplevel_test.zig", .etch = true },
         // M0.8 / E1 — EBNF harness: every ```etch example block parses clean.
         .{ .path = "tests/etch/ebnf_examples_test.zig", .etch = true },
+        // M0.8 / E7 — AST stable interface freeze: ≥20 Level-1 entry points
+        // (§10.3.1). Compilation is the cross-phase invariant.
+        .{ .path = "tests/etch/ast_stable_interface.zig", .etch = true, .dedicated_step = "test-ast-stable" },
         // M0.8 / E3-D — D-S5-etchcook-inproc: the consolidated cook library.
         .{ .path = "tests/etch/cook_consolidate_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
