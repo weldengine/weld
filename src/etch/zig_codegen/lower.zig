@@ -4910,7 +4910,7 @@ fn enumPatternTypeName(ast: *const AstArena, ctx: *LocalCtx, pat: ast_mod.EnumPa
 /// `true` when the program declares at least one Level-B construct with a
 /// descriptor (M0.8 E4: the six Level-B gameplay constructs).
 fn programHasLevelBDecls(ast: *const AstArena) bool {
-    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0 or ast.audio_graph_decls.items.len > 0 or ast.audio_score_decls.items.len > 0 or ast.sequence_decls.items.len > 0 or ast.anim_graph_decls.items.len > 0 or ast.shader_decls.items.len > 0;
+    return ast.data_decls.items.len > 0 or ast.routine_decls.items.len > 0 or ast.behavior_decls.items.len > 0 or ast.quest_decls.items.len > 0 or ast.dialogue_decls.items.len > 0 or ast.ability_decls.items.len > 0 or ast.theme_decls.items.len > 0 or ast.motion_decls.items.len > 0 or ast.input_mapping_decls.items.len > 0 or ast.widget_decls.items.len > 0 or ast.locale_decls.items.len > 0 or ast.effect_decls.items.len > 0 or ast.audio_graph_decls.items.len > 0 or ast.audio_score_decls.items.len > 0 or ast.sequence_decls.items.len > 0 or ast.anim_graph_decls.items.len > 0 or ast.shader_decls.items.len > 0 or ast.scene_decls.items.len > 0 or ast.prefab_decls.items.len > 0;
 }
 
 /// Emit the static `descriptors` table (ONE ordered sequence across
@@ -4944,6 +4944,8 @@ fn emitLevelBDescriptors(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAren
             .sequence_decl => try emitSequenceDescriptor(w, gpa, ast, ast.sequence_decls.items[datas[i]]),
             .anim_graph_decl => try emitAnimGraphDescriptor(w, gpa, ast, ast.anim_graph_decls.items[datas[i]]),
             .shader_decl => try emitShaderDescriptor(w, gpa, ast, ast.shader_decls.items[datas[i]]),
+            .scene_decl => try emitSceneDescriptor(w, gpa, ast, ast.scene_decls.items[datas[i]]),
+            .prefab_decl => try emitPrefabDescriptor(w, gpa, ast, ast.prefab_decls.items[datas[i]]),
             else => {},
         }
     }
@@ -5281,6 +5283,167 @@ fn emitSequenceDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstAre
         try w.line("        } },");
     }
     try w.line("    } } },");
+}
+
+// ── M0.8 E7 Level C — scene / prefab emit-structure (byte-identical with the
+//    interp `descriptor.zig buildScene`/`buildPrefab` — same shared renderers) ──
+
+/// Emit a `struct_lit_fields` run as `ComponentFieldDesc` literals (metadata or a
+/// component body). Mirrors `buildComponentFields`.
+fn emitComponentFieldEntries(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, start: u32, len: u32) CodegenError!void {
+    var f: u32 = 0;
+    while (f < len) : (f += 1) {
+        const fl = ast.struct_lit_fields.items[start + f];
+        const value = try renderForEmit(gpa, ast, fl.value);
+        defer gpa.free(value);
+        try w.print("        .{{ .name = ", .{});
+        try emitZigStringLiteral(w, if (fl.name == 0) ".." else ast.strings.slice(fl.name));
+        try w.print(", .value = ", .{});
+        try emitZigStringLiteral(w, value);
+        try w.line(" },");
+    }
+}
+
+/// Emit a run of `component_instances` as `ComponentInstanceDesc` literals.
+/// Mirrors `buildComponentInstanceRun`.
+fn emitComponentInstanceEntries(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, start: u32, len: u32) CodegenError!void {
+    var i: u32 = 0;
+    while (i < len) : (i += 1) {
+        const ci = ast.component_instances.items[start + i];
+        try w.print("        .{{ .type_name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(ci.type_name));
+        try w.line(", .fields = &[_]etch_descriptor.ComponentFieldDesc{");
+        try emitComponentFieldEntries(w, gpa, ast, ci.fields_start, ci.fields_len);
+        try w.line("        } },");
+    }
+}
+
+/// Emit one `SceneEntityDesc` literal. Mirrors `buildSceneEntity`.
+fn emitSceneEntity(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, e: ast_mod.SceneEntity) CodegenError!void {
+    try w.print("        .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(e.name));
+    try w.print(", .uuid = ", .{});
+    try emitZigStringLiteral(w, if (e.uuid == 0) "" else ast.strings.slice(e.uuid));
+    try w.print(", .parent = ", .{});
+    try emitZigStringLiteral(w, if (e.parent == 0) "" else ast.strings.slice(e.parent));
+    try w.line(", .components = &[_]etch_descriptor.ComponentInstanceDesc{");
+    try emitComponentInstanceEntries(w, gpa, ast, e.components_start, e.components_len);
+    try w.line("        } },");
+}
+
+/// Emit one `SceneInstanceDesc` literal. Mirrors `buildSceneInstance`: component
+/// members then override members, each filtered in member declaration order.
+fn emitSceneInstance(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, inst: ast_mod.SceneInstance) CodegenError!void {
+    try w.print("        .{{ .prefab = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(inst.prefab_name));
+    try w.print(", .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(inst.instance_name));
+    try w.print(", .uuid = ", .{});
+    try emitZigStringLiteral(w, if (inst.uuid == 0) "" else ast.strings.slice(inst.uuid));
+    try w.line(", .components = &[_]etch_descriptor.ComponentInstanceDesc{");
+    var m: u32 = 0;
+    while (m < inst.members_len) : (m += 1) {
+        const mem = ast.scene_instance_members.items[inst.members_start + m];
+        if (mem.kind == .component) try emitComponentInstanceEntries(w, gpa, ast, mem.index, 1);
+    }
+    try w.line("        }, .overrides = &[_]etch_descriptor.FieldOverrideDesc{");
+    m = 0;
+    while (m < inst.members_len) : (m += 1) {
+        const mem = ast.scene_instance_members.items[inst.members_start + m];
+        if (mem.kind != .field_override) continue;
+        const fo = ast.field_overrides.items[mem.index];
+        const value = try renderForEmit(gpa, ast, fo.value);
+        defer gpa.free(value);
+        try w.print("            .{{ .type_name = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(fo.type_name));
+        try w.print(", .field = ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(fo.field));
+        try w.print(", .value = ", .{});
+        try emitZigStringLiteral(w, value);
+        try w.line(" },");
+    }
+    try w.line("        } },");
+}
+
+/// Emit-structure for a `scene` (M0.8 E7 Level C). Entities and instances are
+/// emitted in `scene_children` declaration order, each filtered into its array
+/// (matching `buildScene`).
+fn emitSceneDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.SceneDecl) CodegenError!void {
+    try w.print("    .{{ .scene = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    const version = if (decl.version.isNone()) try gpa.dupe(u8, "") else try renderForEmit(gpa, ast, decl.version);
+    defer gpa.free(version);
+    try w.print(", .version = ", .{});
+    try emitZigStringLiteral(w, version);
+    try w.line(", .metadata = &[_]etch_descriptor.ComponentFieldDesc{");
+    if (decl.has_metadata) try emitComponentFieldEntries(w, gpa, ast, decl.metadata_start, decl.metadata_len);
+    try w.line("    }, .resources = &[_]etch_descriptor.ComponentInstanceDesc{");
+    try emitComponentInstanceEntries(w, gpa, ast, decl.resources_start, decl.resources_len);
+    try w.line("    }, .entities = &[_]etch_descriptor.SceneEntityDesc{");
+    var c: u32 = 0;
+    while (c < decl.children_len) : (c += 1) {
+        const child = ast.scene_children.items[decl.children_start + c];
+        if (child.kind == .entity) try emitSceneEntity(w, gpa, ast, ast.scene_entities.items[child.index]);
+    }
+    try w.line("    }, .instances = &[_]etch_descriptor.SceneInstanceDesc{");
+    c = 0;
+    while (c < decl.children_len) : (c += 1) {
+        const child = ast.scene_children.items[decl.children_start + c];
+        if (child.kind == .instance) try emitSceneInstance(w, gpa, ast, ast.scene_instances.items[child.index]);
+    }
+    try w.line("    } } },");
+}
+
+/// Emit-structure for a `prefab` (M0.8 E7 Level C). Mirrors `buildPrefab`.
+fn emitPrefabDescriptor(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, decl: ast_mod.PrefabDecl) CodegenError!void {
+    const rel_tag = switch (decl.relation) {
+        .none => "none",
+        .of => "of",
+        .extends => "extends",
+    };
+    try w.print("    .{{ .prefab = .{{ .name = ", .{});
+    try emitZigStringLiteral(w, ast.strings.slice(decl.name));
+    try w.print(", .relation = .{s}, .base = ", .{rel_tag});
+    try emitZigStringLiteral(w, if (decl.relation_target == 0) "" else ast.strings.slice(decl.relation_target));
+    try w.line(", .requires = &[_][]const u8{");
+    var ri: u32 = 0;
+    while (ri < decl.requires_len) : (ri += 1) {
+        try w.print("        ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(ast.prefab_requires.items[decl.requires_start + ri]));
+        try w.line(",");
+    }
+    const version = if (decl.version.isNone()) try gpa.dupe(u8, "") else try renderForEmit(gpa, ast, decl.version);
+    defer gpa.free(version);
+    try w.print("    }}, .version = ", .{});
+    try emitZigStringLiteral(w, version);
+    try w.line(", .metadata = &[_]etch_descriptor.ComponentFieldDesc{");
+    if (decl.has_metadata) try emitComponentFieldEntries(w, gpa, ast, decl.metadata_start, decl.metadata_len);
+    try w.line("    }, .entities = &[_]etch_descriptor.SceneEntityDesc{");
+    var e: u32 = 0;
+    while (e < decl.entities_len) : (e += 1) {
+        try emitSceneEntity(w, gpa, ast, ast.scene_entities.items[decl.entities_start + e]);
+    }
+    const on_attach = if (decl.has_on_attach)
+        (descriptor_mod.renderStmtRunAlloc(gpa, ast, decl.on_attach_start, decl.on_attach_len) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        })
+    else
+        try gpa.dupe(u8, "");
+    defer gpa.free(on_attach);
+    const on_detach = if (decl.has_on_detach)
+        (descriptor_mod.renderStmtRunAlloc(gpa, ast, decl.on_detach_start, decl.on_detach_len) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedDescriptorExpr => return error.UnsupportedConstruct,
+        })
+    else
+        try gpa.dupe(u8, "");
+    defer gpa.free(on_detach);
+    try w.print("    }}, .on_attach = ", .{});
+    try emitZigStringLiteral(w, on_attach);
+    try w.print(", .on_detach = ", .{});
+    try emitZigStringLiteral(w, on_detach);
+    try w.line(" } },");
 }
 
 /// Emit-structure for an `anim_graph` (M0.8 E6 Level B animation): the codegen's

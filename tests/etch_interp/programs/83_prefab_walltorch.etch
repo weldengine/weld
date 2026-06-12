@@ -1,0 +1,37 @@
+// Differential 83 — Level-C `prefab` (M0.8 E7, serialization-only). Covers all
+// three relation forms: autonomous, `of` variant (static inheritance), and
+// `extends` extension (dynamic composition) with `requires` + on_attach /
+// on_detach hooks. The interpreter BUILDS the prefab descriptors, the cooked
+// Zig EMITS them; both serialize byte-identical through the shared canonical
+// serializer (LEVEL-C PROOF CONTRACT). Component declarations precede so every
+// component reference resolves; each prefab carries a component (no E1790) and
+// the of/extends bases resolve in-file (E1791) with no cycle (E1792).
+component Health { current: float = 100.0, max: float = 100.0 }
+component Transform { x: float = 0.0 }
+component Weapon { damage: float = 10.0 }
+
+prefab "WallTorch" {
+  version: 1
+  entity "root" {
+    Transform { x: 1.0 }
+    Health { current: 50.0 }
+  }
+}
+
+prefab "WallTorch_Blue" of "WallTorch" {
+  entity "root" {
+    Health { current: 75.0 }
+  }
+}
+
+prefab "CombatModule" extends "WallTorch" requires Health, Transform {
+  entity "root" {
+    Weapon { damage: 20.0 }
+  }
+  on_attach {
+    let bonus = 50
+  }
+  on_detach {
+    let penalty = 50
+  }
+}

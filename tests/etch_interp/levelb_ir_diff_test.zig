@@ -46,6 +46,9 @@ const programs = [_]LevelBProgram{
     .{ .name = "p79_sequence_intro", .source = @embedFile("programs/79_sequence_intro.etch") },
     .{ .name = "p80_anim_graph_locomotion", .source = @embedFile("programs/80_anim_graph_locomotion.etch") },
     .{ .name = "p81_shader_pbr", .source = @embedFile("programs/81_shader_pbr.etch") },
+    // M0.8 E7 Level-C scene/prefab.
+    .{ .name = "p82_scene_village", .source = @embedFile("programs/82_scene_village.etch") },
+    .{ .name = "p83_prefab_walltorch", .source = @embedFile("programs/83_prefab_walltorch.etch") },
 };
 
 test "level-b serialized IR: interpreter build == cooked emit, byte-identical" {

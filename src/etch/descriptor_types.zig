@@ -537,6 +537,78 @@ pub const ShaderParamDesc = struct {
     default: []const u8, // "" if no `= default`
 };
 
+// ── M0.8 E7 Level C — scene / prefab descriptors (`etch-ast-ir.md` §3.5) ──
+// Serialization-only IR. Expression / statement leaves are pre-rendered to
+// canonical text by the shared `descriptor.zig` renderers — the byte-identical
+// proof contract (both backends render the same leaves the same way).
+
+/// One component-instance field (`name: value`), value pre-rendered by renderExpr.
+pub const ComponentFieldDesc = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// One `component_instance` (`Type { f: v, … }`) — entity / instance /
+/// resources bodies.
+pub const ComponentInstanceDesc = struct {
+    type_name: []const u8,
+    fields: []const ComponentFieldDesc,
+};
+
+/// One `component_field_override` (`Type.field = value`) — instance bodies only.
+pub const FieldOverrideDesc = struct {
+    type_name: []const u8,
+    field: []const u8,
+    value: []const u8,
+};
+
+/// One scene/prefab `entity "Name" { [uuid] [parent] component* }`.
+pub const SceneEntityDesc = struct {
+    name: []const u8,
+    uuid: []const u8, // "" if absent
+    parent: []const u8, // "" if absent
+    components: []const ComponentInstanceDesc,
+};
+
+/// One scene `instance of "Type" "Name" { [uuid] (component | override)* }`.
+pub const SceneInstanceDesc = struct {
+    prefab: []const u8,
+    name: []const u8,
+    uuid: []const u8, // "" if absent
+    components: []const ComponentInstanceDesc,
+    overrides: []const FieldOverrideDesc,
+};
+
+/// `scene` descriptor (`etch-ast-ir.md` §3.5: `Scene { entities, resources }`).
+/// STRING-named. Entities and instances are dumped in their respective
+/// declaration order (each list built by iterating the AST `scene_children`).
+pub const Scene = struct {
+    name: []const u8,
+    version: []const u8, // rendered INT_LITERAL ("" if absent)
+    metadata: []const ComponentFieldDesc, // metadata struct body (empty if absent)
+    resources: []const ComponentInstanceDesc,
+    entities: []const SceneEntityDesc,
+    instances: []const SceneInstanceDesc,
+};
+
+/// Prefab relation kind (§15: `of` = variant, `extends` = extension).
+pub const PrefabRelationDesc = enum { none, of, extends };
+
+/// `prefab` descriptor (`etch-ast-ir.md` §3.5: `Prefab { base?, overrides,
+/// extensions }`). STRING-named. `on_attach`/`on_detach` are rendered statement
+/// runs (extends only). `requires` are the requires-clause type idents.
+pub const Prefab = struct {
+    name: []const u8,
+    relation: PrefabRelationDesc,
+    base: []const u8, // of/extends target ("" if none)
+    requires: []const []const u8,
+    version: []const u8, // "" if absent
+    metadata: []const ComponentFieldDesc,
+    entities: []const SceneEntityDesc,
+    on_attach: []const u8, // rendered stmt run ("" if absent)
+    on_detach: []const u8, // "" if absent
+};
+
 /// One Level-B descriptor, tagged by construct kind. Kept as ONE ordered
 /// sequence per program so the canonical dump follows top-level
 /// declaration order across construct kinds (engraved form).
@@ -558,6 +630,8 @@ pub const Descriptor = union(enum) {
     sequence: Sequence,
     anim_graph: AnimGraph,
     shader: Shader,
+    scene: Scene,
+    prefab: Prefab,
 
     /// Canonical serialization of one descriptor, dispatched on its kind.
     pub fn write(self: Descriptor, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
@@ -579,6 +653,8 @@ pub const Descriptor = union(enum) {
             .sequence => |seq| try writeSequence(seq, gpa, out),
             .anim_graph => |ag| try writeAnimGraph(ag, gpa, out),
             .shader => |sh| try writeShader(sh, gpa, out),
+            .scene => |sc| try writeScene(sc, gpa, out),
+            .prefab => |pf| try writePrefab(pf, gpa, out),
         }
     }
 };
@@ -902,6 +978,74 @@ pub fn writeShader(sh: Shader, gpa: std.mem.Allocator, out: *std.ArrayListUnmana
         try appendFmt(gpa, out, "  {s}\n", .{sh.vertex});
     }
     try appendFmt(gpa, out, "  {s}\n", .{sh.fragment});
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `component_instance` line (`<indent>component
+/// Type { f1: v1, f2: v2 }`), shared by scene + prefab dumps.
+fn writeComponentInstanceDesc(ci: ComponentInstanceDesc, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), indent: []const u8) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "{s}component {s} {{", .{ indent, ci.type_name });
+    if (ci.fields.len == 0) {
+        try out.appendSlice(gpa, "}\n");
+        return;
+    }
+    for (ci.fields, 0..) |f, idx| {
+        if (idx != 0) try out.appendSlice(gpa, ",");
+        try appendFmt(gpa, out, " {s}: {s}", .{ f.name, f.value });
+    }
+    try out.appendSlice(gpa, " }\n");
+}
+
+/// Canonical serialization of one `scene` descriptor (M0.8 E7 Level C): version,
+/// metadata, resources, then entities and instances in declaration order.
+pub fn writeScene(sc: Scene, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    try appendFmt(gpa, out, "scene \"{s}\" {{\n", .{sc.name});
+    if (sc.version.len != 0) try appendFmt(gpa, out, "  version: {s}\n", .{sc.version});
+    for (sc.metadata) |m| try appendFmt(gpa, out, "  metadata {s}: {s}\n", .{ m.name, m.value });
+    for (sc.resources) |r| try writeComponentInstanceDesc(r, gpa, out, "  ");
+    for (sc.entities) |e| {
+        try appendFmt(gpa, out, "  entity \"{s}\" {{\n", .{e.name});
+        if (e.uuid.len != 0) try appendFmt(gpa, out, "    uuid: \"{s}\"\n", .{e.uuid});
+        if (e.parent.len != 0) try appendFmt(gpa, out, "    parent: \"{s}\"\n", .{e.parent});
+        for (e.components) |c| try writeComponentInstanceDesc(c, gpa, out, "    ");
+        try out.appendSlice(gpa, "  }\n");
+    }
+    for (sc.instances) |inst| {
+        try appendFmt(gpa, out, "  instance of \"{s}\" \"{s}\" {{\n", .{ inst.prefab, inst.name });
+        if (inst.uuid.len != 0) try appendFmt(gpa, out, "    uuid: \"{s}\"\n", .{inst.uuid});
+        for (inst.components) |c| try writeComponentInstanceDesc(c, gpa, out, "    ");
+        for (inst.overrides) |o| try appendFmt(gpa, out, "    override {s}.{s} = {s}\n", .{ o.type_name, o.field, o.value });
+        try out.appendSlice(gpa, "  }\n");
+    }
+    try out.appendSlice(gpa, "}\n");
+}
+
+/// Canonical serialization of one `prefab` descriptor (M0.8 E7 Level C):
+/// relation header, requires, version, metadata, entities, on_attach/on_detach.
+pub fn writePrefab(pf: Prefab, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+    switch (pf.relation) {
+        .none => try appendFmt(gpa, out, "prefab \"{s}\" {{\n", .{pf.name}),
+        .of => try appendFmt(gpa, out, "prefab \"{s}\" of \"{s}\" {{\n", .{ pf.name, pf.base }),
+        .extends => try appendFmt(gpa, out, "prefab \"{s}\" extends \"{s}\" {{\n", .{ pf.name, pf.base }),
+    }
+    if (pf.requires.len != 0) {
+        try out.appendSlice(gpa, "  requires");
+        for (pf.requires, 0..) |req, idx| {
+            try appendFmt(gpa, out, "{s} {s}", .{ if (idx != 0) "," else "", req });
+        }
+        try out.appendSlice(gpa, "\n");
+    }
+    if (pf.version.len != 0) try appendFmt(gpa, out, "  version: {s}\n", .{pf.version});
+    for (pf.metadata) |m| try appendFmt(gpa, out, "  metadata {s}: {s}\n", .{ m.name, m.value });
+    for (pf.entities) |e| {
+        try appendFmt(gpa, out, "  entity \"{s}\" {{\n", .{e.name});
+        if (e.uuid.len != 0) try appendFmt(gpa, out, "    uuid: \"{s}\"\n", .{e.uuid});
+        if (e.parent.len != 0) try appendFmt(gpa, out, "    parent: \"{s}\"\n", .{e.parent});
+        for (e.components) |c| try writeComponentInstanceDesc(c, gpa, out, "    ");
+        try out.appendSlice(gpa, "  }\n");
+    }
+    if (pf.on_attach.len != 0) try appendFmt(gpa, out, "  on_attach: {s}\n", .{pf.on_attach});
+    if (pf.on_detach.len != 0) try appendFmt(gpa, out, "  on_detach: {s}\n", .{pf.on_detach});
     try out.appendSlice(gpa, "}\n");
 }
 
