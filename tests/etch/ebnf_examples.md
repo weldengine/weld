@@ -1325,3 +1325,72 @@ shader StandardPBR {
   }
 }
 ```
+
+## Scene (E7 — §15 Level C)
+
+`scene_decl = "scene" STRING_LITERAL "{" [version] [metadata] [resources]
+{entity_decl | instance_decl} "}"`. Serialization-only (parse + validation +
+descriptor); runtime instantiation is M0.9. Entity names are mandatory; per-field
+overrides (`Component.field = value`) appear only in instance bodies.
+
+```etch
+scene "Village" {
+  version: 3
+  metadata: { author: "level_designer_01" }
+  resources {
+    GameMode { max_players: 4 }
+  }
+  entity "Hero" {
+    uuid: "u1"
+    Transform { x: 1.0, y: 0.0, z: 3.0 }
+    Health { current: 80.0, max: 100.0 }
+  }
+  entity "Child" {
+    parent: "Hero"
+    Transform { y: 2.0 }
+  }
+  instance of "WallTorch" "Torch_01" {
+    Transform { x: 20.0 }
+    Light.intensity = 1500.0
+  }
+}
+```
+
+## Prefab (E7 — §15 Level C)
+
+`prefab_decl = "prefab" STRING_LITERAL [prefab_relation] [requires_clause] "{"
+[version] [metadata] {entity_decl} [on_attach] [on_detach] "}"`. Three relation
+forms: autonomous, `of` (variant — static inheritance), `extends` (extension —
+dynamic composition, with `requires` + on_attach/on_detach).
+
+```etch
+prefab "WallTorch" {
+  version: 1
+  entity "root" {
+    Transform { x: 1.0 }
+    Light { color: #FF8833, intensity: 2000.0 }
+  }
+}
+```
+
+```etch
+prefab "WallTorch_Blue" of "WallTorch" {
+  entity "root" {
+    Light { color: #3366FF }
+  }
+}
+```
+
+```etch
+prefab "CombatModule" extends "BaseCharacter" requires Health, Transform {
+  entity "root" {
+    Weapon { damage: 20.0 }
+  }
+  on_attach {
+    let bonus = 50
+  }
+  on_detach {
+    let penalty = 50
+  }
+}
+```
