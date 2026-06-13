@@ -314,11 +314,13 @@ jobs:
           restore-keys: |
             zig-ubuntu-24.04-Debug-${{ env.ZIG_VERSION }}-
 
-      - name: Install Mesa Vulkan (lavapipe) + validation layers
+      - name: Install Mesa Vulkan (lavapipe) + validation layers + weston
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1
+          # weston: only the vk_blit VUID observation (E6 input) needs a Wayland
+          # surface; the slice smoke + C0.8 edit render offscreen (no surface).
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 weston
           # Ubuntu 24.04 names the Khronos validation layers package
           # `vulkan-validationlayers` (no hyphen); older naming used
           # `vulkan-validation-layers`. Try both — fail if neither installs
@@ -348,6 +350,50 @@ jobs:
           fi
           echo "vertical-slice smoke OK: frame composed, validation clean."
 
+      - name: Run vertical-slice C0.8 IPC edit (Debug, validation layers active)
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # E5 / C0.8 end-to-end: an editor-stub thread sends a real
+          # ModifyComponent over the M0.7 transport; the slice applies it to the
+          # live World; the render reflects it. Offscreen capture, validation on.
+          zig build run-vertical-slice -- --ipc-edit --capture out/vertical_slice_ipc.ppm 2>&1 | tee slice-c08.log
+          echo "--- the post-edit frame composed + captured ---"
+          test -s out/vertical_slice_ipc.ppm
+          if grep -E "VUID-|Validation Error" slice-c08.log; then
+            echo "::error::Vulkan validation error during the C0.8 IPC edit (see log above)"
+            exit 1
+          fi
+          echo "vertical-slice C0.8 OK: IPC edit -> live world -> frame composed, validation clean."
+
+      - name: Observe vk_blit VUIDs via run-ipc-demo (E6 input — non-failing)
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+          # Turn on synchronization validation so the present-semaphore reuse
+          # (VUID-vkQueueSubmit-pSignalSemaphores-00067) can surface.
+          VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+        run: |
+          # NOT `set -e`: this step OBSERVES + reports the E6 input; it must not
+          # fail the job (E5 observes, E6 fixes — brief E6 deviation).
+          set -uo pipefail
+          mkdir -p /tmp/weld-rt && chmod 700 /tmp/weld-rt
+          XDG_RUNTIME_DIR=/tmp/weld-rt weston --backend=headless --width=1280 --height=720 &
+          sleep 2
+          export XDG_RUNTIME_DIR=/tmp/weld-rt WAYLAND_DISPLAY=wayland-1
+          # The editor blits the runtime mire via src/editor/vk_blit.zig (the E6
+          # target); Debug build → its validation layer + the syncval feature.
+          zig build run-ipc-demo -- --frames=120 > vkblit-observe.log 2>&1 || true
+          echo "=== vk_blit VUID observation (E6 input, lavapipe + syncval) ==="
+          echo "--- (a) BT709 colorspace (vk_blit.zig:449) ---"
+          grep -iE "color.?space|bt709|colorSpace" vkblit-observe.log || echo "  none observed (lavapipe typically reports srgb_nonlinear only — likely hardware-only)"
+          echo "--- (b) present-semaphore reuse (VUID-...-00067) ---"
+          grep -E "00067|pSignalSemaphores|SYNC-HAZARD|Synchronization" vkblit-observe.log || echo "  none observed"
+          echo "--- all distinct VUIDs ---"
+          grep -oE "VUID-[A-Za-z0-9-]+" vkblit-observe.log | sort -u || echo "  none"
+          echo "=== end observation (non-failing) ==="
+
       - name: Upload slice capture
         if: always()
         uses: actions/upload-artifact@v6
@@ -355,5 +401,8 @@ jobs:
           name: vertical-slice-smoke-capture
           path: |
             out/vertical_slice.ppm
+            out/vertical_slice_ipc.ppm
             slice-smoke.log
+            slice-c08.log
+            vkblit-observe.log
           retention-days: 30

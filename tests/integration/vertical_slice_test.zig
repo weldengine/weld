@@ -30,6 +30,7 @@ const assets = @import("weld_asset_pipeline");
 const slice = @import("slice");
 
 const sim = slice.sim;
+const ipc_loop = slice.ipc_loop;
 
 const World = weld_core.ecs.world.World;
 const EntityId = weld_core.ecs.entity.EntityId;
@@ -156,4 +157,26 @@ test "vertical slice input: SPACE toggles pause, gating the sim (M0.3)" {
     try std.testing.expect(!control.paused);
     control.stepIfRunning(&world, gpa);
     try std.testing.expectEqual(@as(i64, 1), readCounterTicks(&world, 0)); // advanced
+}
+
+test "vertical slice IPC: ModifyComponent over M0.7 applies to the live world (C0.8)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    try sim.bootAndSpawn(&world, gpa);
+
+    const before = sim.readPosition(&world, 0);
+    const new_x: f32 = before[0] + 7.5;
+    const msg = ipc_loop.buildF32Edit(&world, 0, "Position", "x", new_x).?;
+
+    // The editor-stub sends a real ModifyComponent over the real M0.7 transport
+    // (AF_UNIX socket + framing); the slice's runtime-side decodes it and
+    // applies it to the LIVE World via the diff_runner write path. This is the
+    // C0.8 semantic loop end-to-end — assertable headless on every platform
+    // (socket-only; the visual reflection is the lavapipe smoke + hardware).
+    try ipc_loop.runOneEdit(gpa, &world, msg);
+
+    const after = sim.readPosition(&world, 0);
+    try std.testing.expectApproxEqAbs(new_x, after[0], 1e-6); // edited field changed
+    try std.testing.expectApproxEqAbs(before[1], after[1], 1e-6); // sibling field untouched
 }

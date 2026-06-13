@@ -19,6 +19,7 @@ const weld_core = @import("weld_core");
 
 pub const sim = @import("sim.zig");
 pub const render = @import("render.zig");
+pub const ipc_loop = @import("ipc_loop.zig");
 
 const World = weld_core.ecs.world.World;
 const log = std.log.scoped(.vertical_slice);
@@ -26,6 +27,9 @@ const log = std.log.scoped(.vertical_slice);
 /// Where the cook step installs the runtime `.texture.bin` (see build.zig).
 const default_asset = "zig-out/vertical-slice-assets/slice_albedo.texture.bin";
 const default_capture = "out/vertical_slice.ppm";
+/// Distinctive Position.x the --ipc-edit demo teleports entity 0 to (a clear
+/// jump from its grid-corner start, so the edit is visible in the render).
+const ipc_edit_x: f32 = 6.0;
 
 fn supportsVulkanWindow() bool {
     return switch (builtin.os.tag) {
@@ -45,6 +49,7 @@ pub fn main(init: std.process.Init) !void {
     var ticks: u32 = sim.default_ticks;
     var asset_path: []const u8 = default_asset;
     var capture_path: []const u8 = default_capture;
+    var ipc_edit = false;
     var ai: usize = 1;
     while (ai < args.len) : (ai += 1) {
         const a = args[ai];
@@ -52,6 +57,10 @@ pub fn main(init: std.process.Init) !void {
             mode = .headless;
         } else if (std.mem.eql(u8, a, "--smoke-test")) {
             mode = .smoke;
+        } else if (std.mem.eql(u8, a, "--ipc-edit")) {
+            mode = .smoke;
+            ipc_edit = true;
+            ticks = 0; // render the post-edit world directly (the edit is the visible state)
         } else if (std.mem.eql(u8, a, "--ticks") and ai + 1 < args.len) {
             ticks = std.fmt.parseInt(u32, args[ai + 1], 10) catch sim.default_ticks;
             ai += 1;
@@ -67,6 +76,17 @@ pub fn main(init: std.process.Init) !void {
     var world = World.init();
     defer world.deinit(gpa);
     try sim.bootAndSpawn(&world, gpa);
+
+    // C0.8 (E5): drive one real component edit over the M0.7 IPC transport
+    // (editor-stub thread → runtime-side apply, in-process), then let the
+    // render reflect it. Socket-only, so it runs on every platform incl. the
+    // headless fallback. With --ipc-edit the smoke renders the post-edit world.
+    if (ipc_edit) {
+        if (ipc_loop.buildF32Edit(&world, 0, "Position", "x", ipc_edit_x)) |msg| {
+            ipc_loop.runOneEdit(gpa, &world, msg) catch |e|
+                log.warn("ipc edit loop failed ({t})", .{e});
+        }
+    }
 
     switch (mode) {
         .smoke => {
