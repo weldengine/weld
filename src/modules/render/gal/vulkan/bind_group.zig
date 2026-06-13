@@ -115,7 +115,9 @@ pub fn createGroup(
         .flags = .empty,
         .max_sets = 1,
         .pool_size_count = @intCast(pool_sizes.items.len),
-        .p_pool_sizes = pool_sizes.items.ptr,
+        // `items.ptr` is a `[*]T` many-pointer; the vk field is `*const T`
+        // (pointer to the first of `pool_size_count` contiguous entries).
+        .p_pool_sizes = @ptrCast(pool_sizes.items.ptr),
     };
     const pool = device.vk_device.createDescriptorPool(&pool_ci, null) catch return error.BackendInternal;
     errdefer device.vk_device.destroyDescriptorPool(pool, null);
@@ -146,6 +148,17 @@ pub fn createGroup(
         try buffer_infos.ensureTotalCapacity(device.allocator, descriptor.entries.len);
         try image_infos.ensureTotalCapacity(device.allocator, descriptor.entries.len);
 
+        // Valid zero-initialized dummies for the WriteDescriptorSet union
+        // members NOT selected by each write's `descriptor_type`.
+        // `vkUpdateDescriptorSets` reads only the member matching the type, but
+        // some validation layers defensively inspect ALL union pointers — so
+        // the unused ones point at real (ignored) structs rather than
+        // `undefined` garbage. Lifetime: function scope, outliving the
+        // `updateDescriptorSets` call below.
+        const dummy_image: vk.DescriptorImageInfo = .{ .sampler = .null, .image_view = .null, .image_layout = .undefined };
+        const dummy_buffer: vk.DescriptorBufferInfo = .{ .buffer = .null, .offset = 0, .range = 0 };
+        const dummy_texel: vk.BufferView = .null;
+
         for (descriptor.entries) |e| {
             switch (e.resource) {
                 .buffer => |b| {
@@ -162,9 +175,9 @@ pub fn createGroup(
                         .dst_array_element = 0,
                         .descriptor_count = 1,
                         .descriptor_type = .uniform_buffer,
-                        .p_image_info = undefined,
+                        .p_image_info = &dummy_image,
                         .p_buffer_info = @ptrCast(&buffer_infos.items[buffer_infos.items.len - 1]),
-                        .p_texel_buffer_view = undefined,
+                        .p_texel_buffer_view = &dummy_texel,
                     });
                 },
                 .texture_view => |v| {
@@ -182,8 +195,8 @@ pub fn createGroup(
                         .descriptor_count = 1,
                         .descriptor_type = .sampled_image,
                         .p_image_info = @ptrCast(&image_infos.items[image_infos.items.len - 1]),
-                        .p_buffer_info = undefined,
-                        .p_texel_buffer_view = undefined,
+                        .p_buffer_info = &dummy_buffer,
+                        .p_texel_buffer_view = &dummy_texel,
                     });
                 },
                 .sampler => |s| {
@@ -200,8 +213,8 @@ pub fn createGroup(
                         .descriptor_count = 1,
                         .descriptor_type = .sampler,
                         .p_image_info = @ptrCast(&image_infos.items[image_infos.items.len - 1]),
-                        .p_buffer_info = undefined,
-                        .p_texel_buffer_view = undefined,
+                        .p_buffer_info = &dummy_buffer,
+                        .p_texel_buffer_view = &dummy_texel,
                     });
                 },
             }
