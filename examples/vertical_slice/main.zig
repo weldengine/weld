@@ -1,92 +1,110 @@
-//! M0.9 vertical slice — headless host (E3).
+//! M0.9 vertical slice — host entry (E4).
 //!
-//! Option A (E3 ruling, brief Blockers #1): this host SPAWNS the 100 entities
-//! via the canonical Phase 0 host-spawn pattern (the `demo_etch_codegen` /
-//! `diff_runner` Etch↔ECS bridge), using the POD component types declared in
-//! `gameplay.etch`, then ticks the five cooked Etch rules at a fixed 60 Hz
-//! timestep. There is NO rendering (arrives in E4) and NO scene instantiation:
-//! the `*.scene.etch` / `*.prefab.etch` are authored + cross-file validated
-//! (E2-B), NOT loaded — runtime scene loading is the Phase 1 Scene
-//! Serialization deliverable.
+//! Boots the ECS world + cooked Etch gameplay (sim.zig), then dispatches on
+//! platform + flags:
+//!   - default (Vulkan-capable + window): `render.runInteractive` — windowed
+//!     forward render of the live scene, M0.3 input (SPACE toggles pause)
+//!     driving the sim.
+//!   - `--smoke-test`: `render.runSmoke` — headless offscreen render of the
+//!     final state → PPM capture (CI lavapipe; "the frame composes").
+//!   - `--headless` (or no Vulkan window backend, e.g. macOS Phase 0): pure
+//!     60 Hz sim loop, prints the E3 OK line. No GPU.
+//!
+//! `sim` + `render` are re-exported so the integration test (which imports this
+//! module as `slice`) reaches the pure helpers and `render.composeNull`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const weld_core = @import("weld_core");
-const cooked = @import("cooked_slice");
+
+pub const sim = @import("sim.zig");
+pub const render = @import("render.zig");
 
 const World = weld_core.ecs.world.World;
-const ComponentId = weld_core.ecs.registry.ComponentId;
+const log = std.log.scoped(.vertical_slice);
 
-/// The slice spawns exactly 100 entities (C0.8 / brief E3).
-pub const entity_count: u32 = 100;
-/// Fixed 60 Hz timestep.
-pub const fixed_dt: f32 = 1.0 / 60.0;
-/// Default headless tick budget (≥ 120 per the brief's integration test).
-pub const default_ticks: u32 = 120;
+/// Where the cook step installs the runtime `.texture.bin` (see build.zig).
+const default_asset = "zig-out/vertical-slice-assets/slice_albedo.texture.bin";
+const default_capture = "out/vertical_slice.ppm";
 
-/// Authored cross-file Etch content, embedded (same-directory `@embedFile`) so
-/// the integration test can run `validateProject` over it WITHOUT loading or
-/// instantiating it. These exercise E2-B (cross-file scene→prefab + prefab `of`
-/// base resolution) and E2-A (triple-quote text); they are never spawned.
-pub const scene_etch = @embedFile("world.scene.etch");
-pub const mob_prefab_etch = @embedFile("mob.prefab.etch");
-pub const elite_prefab_etch = @embedFile("elite.prefab.etch");
-
-/// The component-id set every slice entity carries (all five cooked rules fire
-/// on each). Valid only after `cooked.gameplay.register` has run.
-pub fn sliceComponentIds(world: *World) [5]ComponentId {
-    return .{
-        world.registry.idOf("Counter").?,
-        world.registry.idOf("Position").?,
-        world.registry.idOf("Velocity").?,
-        world.registry.idOf("Health").?,
-        world.registry.idOf("Energy").?,
+fn supportsVulkanWindow() bool {
+    return switch (builtin.os.tag) {
+        .windows, .linux => true,
+        else => false,
     };
 }
 
-/// Register the cooked gameplay components/rules and spawn `entity_count`
-/// entities. Shared by the host `main` and the headless integration test.
-pub fn bootAndSpawn(world: *World, gpa: std.mem.Allocator) !void {
-    try cooked.gameplay.register(world, gpa);
-    const comps = sliceComponentIds(world);
-    var i: u32 = 0;
-    while (i < entity_count) : (i += 1) {
-        _ = try world.spawnDynamic(gpa, &comps);
-    }
-}
-
-/// One fixed-timestep simulation step — dispatch the five cooked Etch rules.
-pub fn step(world: *World, gpa: std.mem.Allocator) void {
-    cooked.gameplay.tick(world, gpa);
-}
+const Mode = enum { auto, headless, smoke };
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
-
-    // Optional `--ticks N` (default 120); the entity count is fixed at 100.
-    var ticks: u32 = default_ticks;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+
+    var mode: Mode = .auto;
+    var ticks: u32 = sim.default_ticks;
+    var asset_path: []const u8 = default_asset;
+    var capture_path: []const u8 = default_capture;
     var ai: usize = 1;
     while (ai < args.len) : (ai += 1) {
-        if (std.mem.eql(u8, args[ai], "--ticks") and ai + 1 < args.len) {
-            ticks = std.fmt.parseInt(u32, args[ai + 1], 10) catch default_ticks;
+        const a = args[ai];
+        if (std.mem.eql(u8, a, "--headless")) {
+            mode = .headless;
+        } else if (std.mem.eql(u8, a, "--smoke-test")) {
+            mode = .smoke;
+        } else if (std.mem.eql(u8, a, "--ticks") and ai + 1 < args.len) {
+            ticks = std.fmt.parseInt(u32, args[ai + 1], 10) catch sim.default_ticks;
+            ai += 1;
+        } else if (std.mem.eql(u8, a, "--asset") and ai + 1 < args.len) {
+            asset_path = args[ai + 1];
+            ai += 1;
+        } else if (std.mem.eql(u8, a, "--capture") and ai + 1 < args.len) {
+            capture_path = args[ai + 1];
             ai += 1;
         }
     }
 
     var world = World.init();
     defer world.deinit(gpa);
+    try sim.bootAndSpawn(&world, gpa);
 
-    try bootAndSpawn(&world, gpa);
+    switch (mode) {
+        .smoke => {
+            if (supportsVulkanWindow()) {
+                render.runSmoke(gpa, io, &world, asset_path, ticks, capture_path) catch |e| {
+                    log.warn("smoke render failed ({t}); falling back to headless sim", .{e});
+                    try runHeadless(&world, gpa, io, ticks);
+                };
+            } else {
+                try runHeadless(&world, gpa, io, ticks);
+            }
+        },
+        .headless => try runHeadless(&world, gpa, io, ticks),
+        .auto => {
+            if (supportsVulkanWindow()) {
+                render.runInteractive(gpa, io, &world, asset_path) catch |e| {
+                    log.warn("interactive render failed ({t}); falling back to headless sim", .{e});
+                    try runHeadless(&world, gpa, io, ticks);
+                };
+            } else {
+                try runHeadless(&world, gpa, io, ticks);
+            }
+        },
+    }
+}
+
+/// Pure 60 Hz simulation loop (no GPU) — the E3 behaviour, used on macOS dev
+/// and as the render fallback.
+fn runHeadless(world: *World, gpa: std.mem.Allocator, io: std.Io, ticks: u32) !void {
     var t: u32 = 0;
-    while (t < ticks) : (t += 1) step(&world, gpa);
+    while (t < ticks) : (t += 1) sim.step(world, gpa);
 
     var out_buf: [256]u8 = undefined;
     var out_w = std.Io.File.stdout().writer(io, &out_buf);
     const out = &out_w.interface;
     try out.print(
         "vertical-slice headless OK | entities={d} ticks={d} dt={d:.5}\n",
-        .{ entity_count, ticks, fixed_dt },
+        .{ sim.entity_count, ticks, sim.fixed_dt },
     );
     try out.flush();
 }

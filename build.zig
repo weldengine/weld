@@ -1174,30 +1174,65 @@ pub fn build(b: *std.Build) void {
     });
     cooked_slice_module.addImport("weld_core", core_module);
 
-    const slice_host_module = b.createModule(.{
+    // M0.9 / E4 — the slice gains a Vulkan forward renderer + an M0.6-cooked
+    // texture asset + M0.3 input. The host module (main.zig) file-imports
+    // sim.zig / render.zig / math.zig, so its named deps (core/render/assets/
+    // cooked) cover all three files.
+    const slice_module = b.createModule(.{
         .root_source_file = b.path("examples/vertical_slice/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    slice_host_module.addImport("weld_core", core_module);
-    slice_host_module.addImport("cooked_slice", cooked_slice_module);
+    slice_module.addImport("weld_core", core_module);
+    slice_module.addImport("weld_render", render_module);
+    slice_module.addImport("weld_asset_pipeline", asset_pipeline_module);
+    slice_module.addImport("cooked_slice", cooked_slice_module);
     const slice_exe = b.addExecutable(.{
         .name = "vertical-slice",
-        .root_module = slice_host_module,
+        .root_module = slice_module,
     });
     b.installArtifact(slice_exe);
+
+    // E4 — cook the slice's single source asset (PNG → .texture.bin) through
+    // the real M0.6 pipeline, installed to a stable path the runtime Loader
+    // reads (zig-out/vertical-slice-assets/slice_albedo.texture.bin).
+    const cook_assets_module = b.createModule(.{
+        .root_source_file = b.path("examples/vertical_slice/cook_assets.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cook_assets_module.addImport("weld_asset_pipeline", asset_pipeline_module);
+    const cook_assets_exe = b.addExecutable(.{
+        .name = "cook-vertical-slice-assets",
+        .root_module = cook_assets_module,
+    });
+    const cook_assets_run = b.addRunArtifact(cook_assets_exe);
+    cook_assets_run.addFileArg(b.path("examples/vertical_slice/assets/slice_albedo.png"));
+    const slice_albedo_bin = cook_assets_run.addOutputFileArg("slice_albedo.texture.bin");
+    const install_slice_assets = b.addInstallFileWithDir(
+        slice_albedo_bin,
+        .{ .custom = "vertical-slice-assets" },
+        "slice_albedo.texture.bin",
+    );
+    const cook_assets_step = b.step(
+        "cook-vertical-slice-assets",
+        "Cook the M0.9 slice's source asset (PNG → .texture.bin) via M0.6",
+    );
+    cook_assets_step.dependOn(&install_slice_assets.step);
+
     const slice_run = b.addRunArtifact(slice_exe);
     slice_run.step.dependOn(b.getInstallStep());
+    slice_run.step.dependOn(&install_slice_assets.step);
     if (b.args) |args| slice_run.addArgs(args);
     const slice_run_step = b.step(
         "run-vertical-slice",
-        "Run the M0.9 headless vertical slice (100 entities, 5 Etch rules @ 60 Hz)",
+        "Run the M0.9 vertical slice (windowed render; --smoke-test / --headless)",
     );
     slice_run_step.dependOn(&slice_run.step);
 
-    // Headless integration test (sim + E2-B cross-file validation). Reuses the
-    // host module (boot/spawn/step helpers + embedded *.etch content) and links
-    // weld_core / weld_etch.
+    // Integration test: imports the slice module (sim + render via re-export) +
+    // weld_etch (E2-B validateProject) + weld_asset_pipeline (in-memory asset
+    // cook+load verify). composeNull exercises the render path cross-platform.
     const slice_test_module = b.createModule(.{
         .root_source_file = b.path("tests/integration/vertical_slice_test.zig"),
         .target = target,
@@ -1205,13 +1240,14 @@ pub fn build(b: *std.Build) void {
     });
     slice_test_module.addImport("weld_core", core_module);
     slice_test_module.addImport("weld_etch", etch_module);
-    slice_test_module.addImport("slice", slice_host_module);
+    slice_test_module.addImport("weld_asset_pipeline", asset_pipeline_module);
+    slice_test_module.addImport("slice", slice_module);
     const slice_test = b.addTest(.{ .root_module = slice_test_module });
     const slice_test_run = b.addRunArtifact(slice_test);
     test_step.dependOn(&slice_test_run.step);
     const slice_test_step = b.step(
         "test-vertical-slice",
-        "Run the M0.9 vertical slice headless integration test",
+        "Run the M0.9 vertical slice integration test",
     );
     slice_test_step.dependOn(&slice_test_run.step);
 

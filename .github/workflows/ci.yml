@@ -286,3 +286,67 @@ jobs:
             out/smoke_test.ppm
             test-output.txt
           retention-days: 30
+
+  vertical-slice-smoke:
+    # M0.9 / E4 — vertical-slice render smoke. The slice's `--smoke-test` path
+    # renders the live ECS scene OFFSCREEN (no window/swapchain) into an RGBA8
+    # target via the full GAL forward path (depth, instancing, uniform +
+    # sampled-texture bind groups, the `copyBufferToTexture` upload) and
+    # captures a PPM. A Debug build turns on the GAL validation layers, so a
+    # barrier/usage error surfaces in the log and fails the job. No weston
+    # needed (offscreen — no Wayland surface). This asserts "the frame composes,
+    # validation-clean"; visual correctness is hardware-validated.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: weldengine/setup-zig@v0.1.0
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Restore Zig cache (Debug)
+        uses: actions/cache@v5
+        with:
+          path: .zig-cache
+          key: zig-ubuntu-24.04-Debug-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-ubuntu-24.04-Debug-${{ env.ZIG_VERSION }}-
+
+      - name: Install Mesa Vulkan (lavapipe) + validation layers
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers \
+            libvulkan1 \
+            vulkan-validation-layers
+
+      - name: Run vertical-slice smoke (Debug, validation layers active)
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # Default `zig build` = Debug → render.zig enable_validation = true →
+          # the validation layers load. Offscreen render → no surface/weston.
+          zig build run-vertical-slice -- --smoke-test --capture out/vertical_slice.ppm 2>&1 | tee slice-smoke.log
+          echo "--- a frame was composed + captured ---"
+          test -s out/vertical_slice.ppm
+          echo "--- validation-clean (no Vulkan VUID / Validation Error) ---"
+          if grep -E "VUID-|Validation Error" slice-smoke.log; then
+            echo "::error::Vulkan validation error during the vertical-slice smoke (see log above)"
+            exit 1
+          fi
+          echo "vertical-slice smoke OK: frame composed, validation clean."
+
+      - name: Upload slice capture
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: vertical-slice-smoke-capture
+          path: |
+            out/vertical_slice.ppm
+            slice-smoke.log
+          retention-days: 30
