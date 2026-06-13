@@ -596,6 +596,9 @@ pub fn build(b: *std.Build) void {
     // S6 viewport blit pipeline embeds pre-compiled SPIR-V via the
     // shared `shaders` facade — the same module the S2 spike uses.
     editor_module.addImport("shaders", shaders_module);
+    // M0.9 / E6 — the viewport blit (vk_blit.zig) renders through the public
+    // GAL (gal.Device) instead of raw Vulkan.
+    editor_module.addImport("weld_render", render_module);
     const editor_exe = b.addExecutable(.{
         .name = "weld-editor",
         .root_module = editor_module,
