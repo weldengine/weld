@@ -92,6 +92,10 @@ const p85 = @import("programs/85_match_binding.expected.zig");
 // M0.9 E2-A — triple-quote `"""…"""` multiline string + §1.4 common-indent
 // strip + `.len()`, byte-exact across interp ↔ codegen.
 const p86 = @import("programs/86_triple_quote_multiline.expected.zig");
+// M0.9 E2-A — triple-quote with a MULTI-LINE interpolation: the §1.4 dedent
+// touches only the literal segments, never the interpolation's inner bytes
+// (E2 review item 3). Byte-exact across interp ↔ codegen.
+const p87 = @import("programs/87_triple_quote_multiline_interp.expected.zig");
 
 /// Embedded list of the 20 differential corpus programs consumed by
 /// the S4 interpreter test and the S5 codegen parity test.
@@ -163,4 +167,5 @@ pub const programs = [_]Program{
     .{ .name = "84_reference_500_codegen", .source = @embedFile("programs/84_reference_500_codegen.etch"), .config = p84.config, .initial = p84.initial, .expected = p84.expected },
     .{ .name = "85_match_binding", .source = @embedFile("programs/85_match_binding.etch"), .config = p85.config, .initial = p85.initial, .expected = p85.expected },
     .{ .name = "86_triple_quote_multiline", .source = @embedFile("programs/86_triple_quote_multiline.etch"), .config = p86.config, .initial = p86.initial, .expected = p86.expected },
+    .{ .name = "87_triple_quote_multiline_interp", .source = @embedFile("programs/87_triple_quote_multiline_interp.etch"), .config = p87.config, .initial = p87.initial, .expected = p87.expected },
 };

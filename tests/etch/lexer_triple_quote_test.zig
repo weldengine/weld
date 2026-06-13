@@ -126,3 +126,45 @@ test "triple quote with interpolation lowers to string_interp" {
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
     try std.testing.expect(firstExprKind(&result.ast, .string_interp));
 }
+
+fn firstStringInterpId(arena: *const etch.Ast) ?etch.NodeId {
+    var i: usize = 0;
+    while (i < arena.exprs.len) : (i += 1) {
+        const id: etch.NodeId = .{ .category = .expr, .index = @intCast(i) };
+        if (arena.exprKind(id) == .string_interp) return id;
+    }
+    return null;
+}
+
+test "triple quote multiline interpolation dedents literals only, not expression bytes (§1.4)" {
+    const gpa = std.testing.allocator;
+    // Both literal lines share a 4-space indent (stripped). The interpolation
+    // `{1 +\n      2}` spans two lines, its inner `2` indented 6 — those bytes
+    // are EXPRESSION source, consumed by the embedded-expr sub-parser. They
+    // must never be dedented nor land in a literal segment: the walk jumps the
+    // whole `{…}` via the sub-parser's resume offset.
+    const src =
+        \\rule r() {
+        \\  let x = """
+        \\    before {1 +
+        \\      2} after
+        \\    """
+        \\}
+    ;
+    var result = try etch.parseSource(gpa, src);
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    const id = firstStringInterpId(&result.ast) orelse return error.NoStringInterp;
+    const row = result.ast.exprData(id);
+    const si = result.ast.string_interps.items[row];
+    try std.testing.expectEqual(@as(u32, 1), si.n_exprs);
+    // Segment 0 — the literal before the interpolation: opening-fence newline +
+    // "before " with the 4-space common indent stripped.
+    const seg0 = result.ast.strings.slice(result.ast.extra.items[si.segs_start]);
+    try std.testing.expectEqualStrings("\nbefore ", seg0);
+    // Segment 1 — the literal after the interpolation: " after" + newline + the
+    // closing-fence line dedented to empty. It does NOT contain the
+    // interpolation's inner `      2` bytes (those are expression source).
+    const seg1 = result.ast.strings.slice(result.ast.extra.items[si.segs_start + 1]);
+    try std.testing.expectEqualStrings(" after\n", seg1);
+}
