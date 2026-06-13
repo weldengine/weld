@@ -1394,3 +1394,15 @@ prefab "CombatModule" extends "BaseCharacter" requires Health, Transform {
   }
 }
 ```
+
+## Triple-quote multiline strings (M0.9 / E2-A — §1.4)
+
+```etch
+rule announce() {
+  let banner = """
+      Welcome to Weld
+      ===============
+      """
+  let greeting = """Hello, {banner}"""
+}
+```

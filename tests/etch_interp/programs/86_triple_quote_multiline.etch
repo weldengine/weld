@@ -1,0 +1,12 @@
+component Acc {
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has Acc
+{
+  entity.get_mut(Acc).out = """
+    line one
+    line two
+    """.len()
+}

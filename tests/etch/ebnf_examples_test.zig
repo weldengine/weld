@@ -15,8 +15,10 @@ const weld_etch = @import("weld_etch");
 
 const examples_md = @embedFile("ebnf_examples.md");
 
-/// Minimum number of example blocks the corpus must contain (brief §E7).
-const min_blocks: usize = 30;
+/// Minimum number of example blocks the corpus must contain. Raised to 82 at
+/// M0.9 / E2-A (the triple-quote block strictly increases the count vs the
+/// M0.8 close of 81), pinning the new block against accidental removal.
+const min_blocks: usize = 82;
 
 /// Iterates the fenced ```etch blocks of a markdown document, yielding the raw
 /// source between each opening ```` ```etch ```` fence and its closing ```` ``` ````.

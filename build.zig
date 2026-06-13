@@ -408,6 +408,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/etch/time_literal_test.zig", .etch = true, .dedicated_step = "test-time-lit" },
         // M0.8 / E3-D — D-S5-etchcook-inproc: the consolidated cook library.
         .{ .path = "tests/etch/cook_consolidate_test.zig", .etch = true },
+        // M0.9 / E2-A — triple-quote `"""…"""` multiline string lexer token
+        // + §1.4 common-indent strip at parse.
+        .{ .path = "tests/etch/lexer_triple_quote_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
         // M0.3 — common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },

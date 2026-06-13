@@ -425,6 +425,122 @@ pub const Parser = struct {
         return try self.arena.addExpr(self.gpa, .string_interp, row, tok.span);
     }
 
+    /// Common leading indentation (count of space/tab chars) shared by every
+    /// non-blank line of `body`, per `etch-grammar.md` §1.4 ("l'indentation
+    /// commune des lignes est retirée au parsing"). Blank lines (empty, or
+    /// whitespace/`\r` only) do not constrain the minimum. Returns 0 when
+    /// there is no common indent or no non-blank line.
+    fn commonIndentOf(body: []const u8) u32 {
+        var min_indent: ?u32 = null;
+        var line_start: usize = 0;
+        var i: usize = 0;
+        while (i <= body.len) : (i += 1) {
+            if (i == body.len or body[i] == '\n') {
+                const line = body[line_start..i];
+                var ws: u32 = 0;
+                while (ws < line.len and (line[ws] == ' ' or line[ws] == '\t')) : (ws += 1) {}
+                var blank = true;
+                for (line) |ch| {
+                    if (ch != ' ' and ch != '\t' and ch != '\r') {
+                        blank = false;
+                        break;
+                    }
+                }
+                if (!blank) {
+                    min_indent = if (min_indent) |m| @min(m, ws) else ws;
+                }
+                line_start = i + 1;
+            }
+        }
+        return min_indent orelse 0;
+    }
+
+    /// Parse a `multiline_string_literal` token (`"""…"""`) into a `string_lit`
+    /// or `string_interp` node — the triple-quote counterpart of
+    /// `parseStringLiteralExpr` (M0.9 E2-A, `etch-grammar.md` §1.4). Two
+    /// differences from the single-line form: the body is the span minus the
+    /// `"""` fences, and the §1.4 common indentation is stripped from each line
+    /// as the literal segments are emitted. Interpolation reuses the exact
+    /// single-line machinery — the embedded `{expr}` spans are computed from
+    /// ORIGINAL file offsets (`body_abs + i`), which the dedent (a filter on
+    /// emitted literal bytes only) leaves untouched.
+    fn parseMultilineStringLiteralExpr(self: *Parser, tok: Token) ParseError!NodeId {
+        const raw = self.sliceOf(tok.span);
+        // The lexer only emits this kind for a closed `"""…"""`; guard anyway.
+        if (raw.len < 6 or !std.mem.startsWith(u8, raw, "\"\"\"") or !std.mem.endsWith(u8, raw, "\"\"\"")) {
+            const id = try self.arena.strings.intern(self.gpa, raw);
+            return try self.arena.addExpr(self.gpa, .string_lit, id, tok.span);
+        }
+        const body = raw[3 .. raw.len - 3];
+        const indent = commonIndentOf(body);
+        const body_abs: u32 = tok.span.byte_start + 3; // file offset of body[0]
+        const limit: u32 = tok.span.byte_end - 3; // file offset of the closing """
+
+        var segs: std.ArrayListUnmanaged(u32) = .empty;
+        defer segs.deinit(self.gpa);
+        var exprs: std.ArrayListUnmanaged(u32) = .empty;
+        defer exprs.deinit(self.gpa);
+        var seg_bytes: std.ArrayListUnmanaged(u8) = .empty;
+        defer seg_bytes.deinit(self.gpa);
+
+        var i: u32 = 0;
+        var at_line_start = true; // body[0] begins the first content line
+        var skip_left: u32 = indent;
+        while (i < body.len) {
+            const c = body[i];
+            // §1.4 dedent: drop up to `indent` leading ws at each line start.
+            if (at_line_start and skip_left > 0 and (c == ' ' or c == '\t')) {
+                skip_left -= 1;
+                i += 1;
+                continue;
+            }
+            at_line_start = false;
+            if (c == '\\' and i + 1 < body.len) {
+                try appendEscaped(self.gpa, &seg_bytes, body[i + 1]);
+                i += 2;
+                continue;
+            }
+            if (c == '{') {
+                const sid = try self.arena.strings.intern(self.gpa, seg_bytes.items);
+                try segs.append(self.gpa, sid);
+                seg_bytes.clearRetainingCapacity();
+                const embedded = try self.parseEmbeddedExpr(body_abs + i + 1, limit);
+                try exprs.append(self.gpa, embedded.node.raw());
+                i = embedded.resume_at - body_abs;
+                continue;
+            }
+            if (c == '\n') {
+                try seg_bytes.append(self.gpa, '\n');
+                i += 1;
+                at_line_start = true;
+                skip_left = indent;
+                continue;
+            }
+            try seg_bytes.append(self.gpa, c);
+            i += 1;
+        }
+
+        // Plain (no interpolation): one interned segment → string_lit.
+        if (exprs.items.len == 0) {
+            const id = try self.arena.strings.intern(self.gpa, seg_bytes.items);
+            return try self.arena.addExpr(self.gpa, .string_lit, id, tok.span);
+        }
+        // Interpolated: flush the trailing segment, build string_interp.
+        const last_sid = try self.arena.strings.intern(self.gpa, seg_bytes.items);
+        try segs.append(self.gpa, last_sid);
+        const segs_start: u32 = @intCast(self.arena.extra.items.len);
+        try self.arena.extra.appendSlice(self.gpa, segs.items);
+        const exprs_start: u32 = @intCast(self.arena.extra.items.len);
+        try self.arena.extra.appendSlice(self.gpa, exprs.items);
+        const row: u32 = @intCast(self.arena.string_interps.items.len);
+        try self.arena.string_interps.append(self.gpa, .{
+            .segs_start = segs_start,
+            .exprs_start = exprs_start,
+            .n_exprs = @intCast(exprs.items.len),
+        });
+        return try self.arena.addExpr(self.gpa, .string_interp, row, tok.span);
+    }
+
     const EmbeddedExpr = struct {
         node: NodeId,
         /// File offset just past the matching `}` — where the outer
@@ -6041,6 +6157,10 @@ pub const Parser = struct {
             .string_literal => {
                 const tok = try self.advance();
                 return try self.parseStringLiteralExpr(tok);
+            },
+            .multiline_string_literal => {
+                const tok = try self.advance();
+                return try self.parseMultilineStringLiteralExpr(tok);
             },
             .ident => {
                 // `none` / `some(x)` optional literals (M0.8 E2 block 5,
