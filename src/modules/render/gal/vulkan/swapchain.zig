@@ -62,26 +62,37 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
     const formats = device.physical_device.getPhysicalDeviceSurfaceFormatsKHR(device.surface, device.allocator) catch return error.SurfaceLost;
     defer device.allocator.free(formats);
 
-    // Preferable format selection (request match if possible).
-    var chosen: ?vk.SurfaceFormatKHR = null;
+    // Format + colorspace selection. The GAL always presents in the core
+    // `srgb_nonlinear` colorspace (`conv.colorSpace`) — never the surface's
+    // first-reported colorspace, which on some drivers (e.g. lavapipe) is an
+    // extended `*_EXT` value that trips
+    // VUID-VkSwapchainCreateInfoKHR-imageColorSpace-parameter without
+    // `VK_EXT_swapchain_colorspace`. So pick a SURFACE PAIR carrying that
+    // colorspace, preferring the requested pixel format, then BGRA8_UNORM,
+    // then any `srgb_nonlinear` pair. A last resort (no `srgb_nonlinear` pair
+    // at all — the spec effectively precludes this) forces the colorspace on
+    // the first reported format.
+    const present_cs = conv.colorSpace();
     const want = conv.textureFormat(descriptor.format);
+    var chosen_format: ?vk.Format = null;
     for (formats) |f| {
+        if (f.color_space != present_cs) continue;
         if (f.format == want) {
-            chosen = f;
+            chosen_format = want;
             break;
         }
+        if (chosen_format == null and f.format == .b8g8r8a8_unorm) chosen_format = f.format;
     }
-    if (chosen == null) {
-        // Fallback: first available BGRA8.
+    if (chosen_format == null) {
         for (formats) |f| {
-            if (f.format == .b8g8r8a8_unorm) {
-                chosen = f;
+            if (f.color_space == present_cs) {
+                chosen_format = f.format;
                 break;
             }
         }
     }
-    if (chosen == null and formats.len > 0) chosen = formats[0];
-    const fmt = chosen orelse return error.Unsupported;
+    if (chosen_format == null and formats.len > 0) chosen_format = formats[0].format;
+    const fmt_format = chosen_format orelse return error.Unsupported;
 
     var min_image_count = caps.min_image_count + 1;
     if (descriptor.min_image_count > min_image_count) min_image_count = descriptor.min_image_count;
@@ -109,8 +120,8 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
         .flags = .empty,
         .surface = device.surface,
         .min_image_count = min_image_count,
-        .image_format = fmt.format,
-        .image_color_space = fmt.color_space,
+        .image_format = fmt_format,
+        .image_color_space = present_cs,
         .image_extent = extent,
         .image_array_layers = 1,
         .image_usage = image_usage,
@@ -136,7 +147,7 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
             .flags = .empty,
             .image = img,
             .view_type = ._2d,
-            .format = fmt.format,
+            .format = fmt_format,
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{
                 .aspect_mask = .{ .color = true },
@@ -159,7 +170,7 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
         var i: usize = 0;
         while (i < registered) : (i += 1) _ = device.texture_views.remove(view_handles[i].inner);
     }
-    const swap_format = conv.textureFormatFromVk(fmt.format);
+    const swap_format = conv.textureFormatFromVk(fmt_format);
     for (views, 0..) |v, i| {
         view_handles[i] = try texture_mod.adoptSwapchainView(device, v, extent.width, extent.height, swap_format);
         registered = i + 1;
@@ -169,7 +180,7 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
     try device.swapchains.put(device.allocator, id, .{
         .vk_swapchain = sc,
         .surface = device.surface,
-        .format = conv.textureFormatFromVk(fmt.format),
+        .format = conv.textureFormatFromVk(fmt_format),
         .extent = extent,
         .images = images,
         .image_views = views,
@@ -192,6 +203,19 @@ pub fn getImageView(
     };
     std.debug.assert(image_index < entry.view_handles.len);
     return entry.view_handles[image_index];
+}
+
+/// Number of images in the swapchain (the driver may give more than the
+/// requested `min_image_count`). Lets a caller size per-image resources —
+/// e.g. one present-completion semaphore per image, indexed by the
+/// `acquireNextImage` result, which avoids re-signalling a binary semaphore
+/// still pending on a prior present (VUID-vkQueueSubmit-pSignalSemaphores-00067).
+pub fn getImageCount(device: *Device, handle: types.SwapchainHandle) u32 {
+    const entry = device.swapchains.get(handle.inner) orelse {
+        log.debug("getImageCount: unknown swapchain handle {x}", .{handle.inner});
+        unreachable;
+    };
+    return @intCast(entry.view_handles.len);
 }
 
 /// Frees the swapchain + its views + the image array. No-op if invalid.

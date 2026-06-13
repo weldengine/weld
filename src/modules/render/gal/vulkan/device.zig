@@ -473,6 +473,12 @@ pub const Device = struct {
         return swap.getImageView(self, handle, image_index);
     }
 
+    /// Number of images in the swapchain — for sizing per-image resources
+    /// (e.g. one present-completion semaphore per image).
+    pub fn getSwapchainImageCount(self: *Device, handle: types.SwapchainHandle) u32 {
+        return swap.getImageCount(self, handle);
+    }
+
     pub fn acquireNextImage(
         self: *Device,
         handle: types.SwapchainHandle,
