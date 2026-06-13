@@ -318,10 +318,17 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            mesa-vulkan-drivers \
-            libvulkan1 \
-            vulkan-validation-layers
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1
+          # Ubuntu 24.04 names the Khronos validation layers package
+          # `vulkan-validationlayers` (no hyphen); older naming used
+          # `vulkan-validation-layers`. Try both — fail if neither installs
+          # (validation MUST be active for this job to mean anything).
+          sudo apt-get install -y --no-install-recommends vulkan-validationlayers \
+            || sudo apt-get install -y --no-install-recommends vulkan-validation-layers
+          # Guard: the smoke is only meaningful with the layer present. Fail
+          # loudly rather than silently rendering without validation.
+          ls /usr/share/vulkan/explicit_layer.d/ | grep -iq validation \
+            || { echo "::error::Khronos validation layer manifest not found after install"; exit 1; }
 
       - name: Run vertical-slice smoke (Debug, validation layers active)
         env:
