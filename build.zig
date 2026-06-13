@@ -1155,6 +1155,66 @@ pub fn build(b: *std.Build) void {
     );
     demo_codegen_step.dependOn(&demo_codegen_run.step);
 
+    // ----------------------- M0.9 / E3 vertical slice (run-vertical-slice) --
+    // Headless slice: cook examples/vertical_slice/gameplay.etch (POD
+    // components + 5 rules) → cooked module; the host (main.zig) spawns 100
+    // entities (Option A host-spawn, brief Blockers #1) and ticks the rules at
+    // a fixed 60 Hz timestep. The *.scene.etch / *.prefab.etch are NOT cooked
+    // here — they are authored content cross-file validated by the integration
+    // test (E2-B), not loaded (Phase 1 Scene Serialization).
+    const cook_slice_run = b.addRunArtifact(etch_cook_exe);
+    cook_slice_run.addArg("--output");
+    const slice_codegen_path = cook_slice_run.addOutputFileArg("cooked_vertical_slice.zig");
+    cook_slice_run.addPrefixedFileArg("gameplay=", b.path("examples/vertical_slice/gameplay.etch"));
+
+    const cooked_slice_module = b.createModule(.{
+        .root_source_file = slice_codegen_path,
+        .target = target,
+        .optimize = optimize,
+    });
+    cooked_slice_module.addImport("weld_core", core_module);
+
+    const slice_host_module = b.createModule(.{
+        .root_source_file = b.path("examples/vertical_slice/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    slice_host_module.addImport("weld_core", core_module);
+    slice_host_module.addImport("cooked_slice", cooked_slice_module);
+    const slice_exe = b.addExecutable(.{
+        .name = "vertical-slice",
+        .root_module = slice_host_module,
+    });
+    b.installArtifact(slice_exe);
+    const slice_run = b.addRunArtifact(slice_exe);
+    slice_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| slice_run.addArgs(args);
+    const slice_run_step = b.step(
+        "run-vertical-slice",
+        "Run the M0.9 headless vertical slice (100 entities, 5 Etch rules @ 60 Hz)",
+    );
+    slice_run_step.dependOn(&slice_run.step);
+
+    // Headless integration test (sim + E2-B cross-file validation). Reuses the
+    // host module (boot/spawn/step helpers + embedded *.etch content) and links
+    // weld_core / weld_etch.
+    const slice_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/integration/vertical_slice_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    slice_test_module.addImport("weld_core", core_module);
+    slice_test_module.addImport("weld_etch", etch_module);
+    slice_test_module.addImport("slice", slice_host_module);
+    const slice_test = b.addTest(.{ .root_module = slice_test_module });
+    const slice_test_run = b.addRunArtifact(slice_test);
+    test_step.dependOn(&slice_test_run.step);
+    const slice_test_step = b.step(
+        "test-vertical-slice",
+        "Run the M0.9 vertical slice headless integration test",
+    );
+    slice_test_step.dependOn(&slice_test_run.step);
+
     // ----------------------------- S5 compile-time bench (3 metrics) -------
 
     const compile_bench_module = b.createModule(.{
