@@ -411,6 +411,9 @@ pub fn build(b: *std.Build) void {
         // M0.9 / E2-A — triple-quote `"""…"""` multiline string lexer token
         // + §1.4 common-indent strip at parse.
         .{ .path = "tests/etch/lexer_triple_quote_test.zig", .etch = true },
+        // M0.9 / E2-B — cross-file scene/prefab validation (E1782 cross-scene,
+        // E1786 cross-file prefab ref, E1791 cross-file prefab base).
+        .{ .path = "tests/etch/crossfile_scene_prefab_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
         // M0.3 — common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },
