@@ -1,9 +1,10 @@
 # Vertical slice — M0.9 (Phase 0 closure)
 
 End-to-end demo that exercises the existing Phase 0 engine bricks together. As of
-**E4** the slice **renders**: ECS + Etch gameplay (E3) is drawn through the GAL
-Vulkan forward path, fed by an M0.6-cooked texture and driven by M0.3 input. The
-IPC editor-stub loop arrives in E5.
+**E5** the slice closes **C0.8**: ECS + Etch gameplay (E3) is drawn through the GAL
+Vulkan forward path (E4, M0.6-cooked texture + M0.3 input), and a component edit
+sent over the **M0.7 IPC transport** is applied to the live world and reflected in
+the render (E5).
 
 ## What it does
 
@@ -25,6 +26,15 @@ IPC editor-stub loop arrives in E5.
 - **Input** (M0.3): the host pumps window events into the `InputRawState`
   resource each frame; **SPACE toggles pause**, gating the simulation — an
   observable input effect.
+- **IPC component edit** (`ipc_loop.zig`, M0.7 — closes C0.8): an editor-stub
+  thread sends a real `ModifyComponent` over the real M0.7 transport (AF_UNIX
+  socket + framing); the slice's runtime-side decodes it and applies it to the
+  **live World** via the `diff_runner` write path (`field_offset` + `new_value`
+  → the component slot); the E4 render reflects the edit. The slice IS the C0.8
+  runtime (World + renderer) — this does NOT use `src/runtime` (whose mire/echo
+  ack are the C0.4 transport-test stubs). The socket loop is headless, so the
+  C0.8 *semantic* loop is asserted in `zig build test` on every platform; the
+  *visual* reflection is the lavapipe smoke + hardware.
 - **Authored content** (`world.scene.etch`, `mob.prefab.etch`,
   `elite.prefab.etch`): a multi-file scene/prefab graph exercising the M0.9
   cross-file validation (E2-B) + triple-quote strings (E2-A). Authored +
@@ -37,6 +47,7 @@ zig build run-vertical-slice                 # windowed render (Linux/Windows); 
 zig build run-vertical-slice -- --smoke-test # offscreen render → PPM capture (out/vertical_slice.ppm)
 zig build run-vertical-slice -- --headless   # pure 60 Hz sim loop, no GPU
 zig build run-vertical-slice -- --ticks 600  # custom tick budget
+zig build run-vertical-slice -- --ipc-edit   # C0.8: edit a component over M0.7 IPC, then render it
 zig build cook-vertical-slice-assets         # cook the source PNG → .texture.bin (M0.6)
 zig build test-vertical-slice                # integration test (also in `zig build test`)
 ```
