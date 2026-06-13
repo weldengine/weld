@@ -13,7 +13,24 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Single source of truth for the toolchain version. Used by setup-zig AND
+  # baked into the Zig build-cache key below — a toolchain bump rotates the
+  # cache automatically. The build.zig minor-version guard still enforces the
+  # 0.16.x invariant on the local toolchain.
+  ZIG_VERSION: "0.16.0"
+
 jobs:
+  # M0.9 / E1 — test-category matrix. The 4 cells carry stable, nominative
+  # check names that branch protection requires by name (Guy applies the
+  # repo settings — out of Claude Code's hands):
+  #   - build-and-test (ubuntu-24.04, Debug)
+  #   - build-and-test (ubuntu-24.04, ReleaseSafe)
+  #   - build-and-test (windows-2025, Debug)
+  #   - build-and-test (windows-2025, ReleaseSafe)
+  # Required-by-name closes the M0.8 post-mortem gap where a leg cancelled by
+  # timeout (neutral state) was not blocking the merge: a required check that
+  # is neutral/cancelled is NOT "success", so the merge is blocked.
   build-and-test:
     strategy:
       fail-fast: false
@@ -36,6 +53,10 @@ jobs:
     # now exceed the 20-min budget set at M0.1 (Debug still fits). The
     # proper CI restructuring (job split / bench separation / caching)
     # remains queued and is tracked at the M0.8 close.
+    # M0.9 / E1 — the CI restructuring above is now delivered: bench split
+    # to bench.yml, Zig build cache added below. The 40/20 min budgets are
+    # kept as cold-cache headroom — a cache miss (zon change / eviction)
+    # still pays the full build cost; warm runs land well under budget.
     timeout-minutes: ${{ matrix.mode == 'ReleaseSafe' && 40 || 20 }}
     steps:
       - uses: actions/checkout@v6
@@ -49,16 +70,51 @@ jobs:
       # enforces the 0.16.x invariant on the local toolchain.
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: ${{ env.ZIG_VERSION }}
+
+      # M0.9 / E1 — Zig build cache, keyed on (os, optimize mode, zig
+      # version, build.zig.zon hash) exactly per the brief. The local
+      # `.zig-cache` holds the mode-specific incremental compilation
+      # outputs that dominate CI wall-time on the ReleaseSafe legs — hence
+      # the key includes `matrix.mode`. The restore-keys fallback lets a
+      # build.zig.zon change still seed from the previous zon's cache and
+      # rebuild incrementally rather than cold. Zig's cache is content-
+      # hashed and self-invalidating: a restored cache never yields a stale
+      # build. setup-zig's own (global) cache is left at its default — this
+      # step adds the mode-keyed local cache it does not cover.
+      - name: Restore Zig cache
+        id: zig-cache
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-
 
       - name: zig fmt --check
         run: zig fmt --check src tests build.zig
 
+      # M0.9 / E1 — `zig build` and `zig build test` are timed individually
+      # (bash $SECONDS) and the elapsed values handed to the timing report
+      # step via $GITHUB_ENV. Combined with the cache hit/miss recorded
+      # below, the archived artifact lets the cache optimisation be
+      # validated by measurement (cold run = cache miss = "before";
+      # warm run = cache hit = "after"), not presumed.
       - name: zig build
-        run: zig build -Doptimize=${{ matrix.mode }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          s=$SECONDS
+          zig build -Doptimize=${{ matrix.mode }}
+          echo "BUILD_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
       - name: zig build test
-        run: zig build test -Doptimize=${{ matrix.mode }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          s=$SECONDS
+          zig build test -Doptimize=${{ matrix.mode }}
+          echo "TEST_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
       # M0.2 / E5 — bindgen-verify gate. Regenerates the Vulkan +
       # Wayland bindings and asserts `git diff --quiet` on
@@ -77,25 +133,37 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
         run: zig build verify-synth-100
 
-  bench-ecs-smoke:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, windows-2025]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
+      # M0.9 / E1 — CI wall-time + cache hit/miss measurement, archived as
+      # an artifact (measurement deliverable, not a gate). `always()` so a
+      # failing build/test leg still publishes whatever it measured.
+      - name: Write CI timing report
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="ci-timing-${{ matrix.os }}-${{ matrix.mode }}.txt"
+          {
+            echo "cell=build-and-test (${{ matrix.os }}, ${{ matrix.mode }})"
+            echo "os=${{ matrix.os }}"
+            echo "mode=${{ matrix.mode }}"
+            echo "zig_version=${{ env.ZIG_VERSION }}"
+            echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}"
+            echo "cache_hit=${{ steps.zig-cache.outputs.cache-hit || 'false' }}"
+            echo "build_seconds=${BUILD_SECONDS:-NA}"
+            echo "test_seconds=${TEST_SECONDS:-NA}"
+            echo "run_id=${{ github.run_id }}"
+            echo "run_attempt=${{ github.run_attempt }}"
+            echo "sha=${{ github.sha }}"
+          } > "$report"
+          cat "$report"
 
-      - uses: mlugg/setup-zig@v2
+      - name: Upload CI timing artifact
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          version: 0.16.0
-
-      # Compile-and-run sanity for the S1 ECS bench. The full bench gate
-      # (≤ 1.0 ms median ReleaseSafe on the M4 Pro reference) is checked
-      # locally on Guy's machine, not in CI — see briefs/S1-mini-ecs.md.
-      - name: zig build bench-ecs -- --smoke
-        run: zig build bench-ecs -Doptimize=ReleaseSafe -- --smoke
+          name: ci-timing-${{ matrix.os }}-${{ matrix.mode }}
+          path: ci-timing-${{ matrix.os }}-${{ matrix.mode }}.txt
+          retention-days: 30
 
   runtime-smoke-test:
     # M0.4 § Scope Post-Review — first application of the runtime
@@ -113,7 +181,19 @@ jobs:
 
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: ${{ env.ZIG_VERSION }}
+
+      # M0.9 / E1 — same Zig build cache as build-and-test. This job
+      # `needs: build-and-test`, so the ubuntu-24.04/ReleaseSafe cell has
+      # already saved its cache by the time this job starts; the matching
+      # key warms this ReleaseSafe build even on the first push.
+      - name: Restore Zig cache
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_VERSION }}-
 
       - name: Install weston + Mesa Vulkan software drivers
         run: |

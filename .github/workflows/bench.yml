@@ -1,0 +1,64 @@
+name: Bench
+
+# Benchmark jobs, split out of the CI (test) workflow at M0.9 / E1 — debt
+# tracked since M0.1 ("CI debt to investigate seriously in M0.2") and due at
+# the M0.8 close. ci.yml now carries only test-category jobs; this workflow
+# carries benchmarks. The full perf gates (S1 ≤ 62 µs etc.) are validated
+# locally on the reference machine under the thermal-aware protocol, NOT in
+# CI — this is the compile-and-run smoke that keeps the bench harness building
+# and executing on every PR.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Single source of truth for the toolchain version — also keys the Zig
+  # build cache below (cf. ci.yml).
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  bench-ecs-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      # Pinned to 0.16.0 exact — the action takes `0.16.x` literally and
+      # 404s on the mirrors. Same rationale as ci.yml.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      # M0.9 / E1 — Zig build cache keyed on (os, optimize mode, zig version,
+      # build.zig.zon hash). The bench builds in ReleaseSafe and shares the
+      # exact key scheme with ci.yml's ReleaseSafe cells, so the warm cache
+      # is reused repo-wide (GitHub caches are repository-scoped, not
+      # workflow-scoped). The Zig cache is content-hashed and self-
+      # invalidating, so a restored cache never produces a stale build.
+      - name: Restore Zig cache
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: zig-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-${{ matrix.os }}-ReleaseSafe-${{ env.ZIG_VERSION }}-
+
+      # Compile-and-run sanity for the S1 ECS bench. The full bench gate
+      # (≤ 62 µs median ReleaseSafe on the M4 Pro reference) is checked
+      # locally on Guy's machine, not in CI — see briefs/S1-mini-ecs.md.
+      - name: zig build bench-ecs -- --smoke
+        run: zig build bench-ecs -Doptimize=ReleaseSafe -- --smoke
