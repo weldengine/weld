@@ -303,13 +303,11 @@ pub const Renderer = struct {
     /// per-instance world offset (x, y, 0). Sets `instance_count`.
     pub fn setInstancesFromWorld(self: *Renderer, device: anytype, world: *World) !void {
         const mapped = try device.mapBuffer(self.instance_vb);
-        // Capacity from the REAL mapped buffer (usize), clamped to it — no u32
-        // multiply that could overflow, and never writes past the buffer.
+        // Clamp the write to entity_count, the configured max, AND the real
+        // mapped-buffer capacity — all in usize, so no u32 multiply that could
+        // overflow and never a write past the buffer.
         const capacity = mapped.len / @sizeOf(Instance);
-        const n = @min(@as(usize, sim.entity_count), capacity);
-        log.info("vertical-slice: instances n={d} entity_count={d} max={d} mapped_len={d} cap={d}", .{
-            n, sim.entity_count, self.max_instances, mapped.len, capacity,
-        });
+        const n = @min(@min(@as(usize, sim.entity_count), @as(usize, self.max_instances)), capacity);
         const slots = @as([*]Instance, @ptrCast(@alignCast(mapped.ptr)))[0..n];
         var i: usize = 0;
         while (i < n) : (i += 1) {
