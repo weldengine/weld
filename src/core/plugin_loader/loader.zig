@@ -123,14 +123,21 @@ pub const PluginHandle = struct {
 /// dlopen/LoadLibraryA via `_dlOpen`/`_dlClose`).
 pub const Loader = struct {
     gpa: std.mem.Allocator,
-    plugins: std.ArrayListUnmanaged(PluginHandle) = .empty,
+    /// Pointer-stable storage: each handle is heap-boxed so the
+    /// `*PluginHandle` returned by `loadPlugin` stays valid for the
+    /// lifetime of the `Loader`. E7/M0.9 fix — the prior
+    /// `ArrayListUnmanaged(PluginHandle)` returned an interior pointer
+    /// (`&items[len-1]`) that a subsequent `loadPlugin` could dangle by
+    /// reallocating the backing buffer, contradicting the
+    /// `PluginHandle` "stable for the lifetime of the Loader" promise.
+    plugins: std.ArrayListUnmanaged(*PluginHandle) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) Loader {
         return .{ .gpa = gpa };
     }
 
     pub fn deinit(self: *Loader) void {
-        for (self.plugins.items) |*handle| {
+        for (self.plugins.items) |handle| {
             if (handle.state == .loaded) {
                 if (handle.desc.callbacks.on_shutdown) |cb| {
                     cb(@ptrCast(&api_mod.stub_api));
@@ -140,6 +147,7 @@ pub const Loader = struct {
                 }
             }
             self.gpa.free(handle.path);
+            self.gpa.destroy(handle);
         }
         self.plugins.deinit(self.gpa);
         self.* = undefined;
@@ -217,12 +225,19 @@ pub const Loader = struct {
 
         const owned_path = try self.gpa.dupe(u8, path);
         errdefer self.gpa.free(owned_path);
-        try self.plugins.append(self.gpa, .{
+
+        // Heap-box the handle so the returned pointer survives later
+        // `loadPlugin` calls (the list stores pointers, not values —
+        // see the `plugins` field doc).
+        const handle = try self.gpa.create(PluginHandle);
+        errdefer self.gpa.destroy(handle);
+        handle.* = .{
             .path = owned_path,
             .dyn_handle = dyn_handle,
             .desc = plugin_desc,
             .state = .loaded,
-        });
+        };
+        try self.plugins.append(self.gpa, handle);
 
         // Call `on_load` lifecycle if provided.
         if (plugin_desc.callbacks.on_load) |cb| {
@@ -235,7 +250,7 @@ pub const Loader = struct {
             }
         }
 
-        return &self.plugins.items[self.plugins.items.len - 1];
+        return handle;
     }
 
     /// Unloads a previously loaded plugin. Calls `on_shutdown`,
