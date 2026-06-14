@@ -54,7 +54,11 @@ pub const default_worker_count: usize = 4;
 /// fails with `error.TooManyChunks`.
 pub const per_worker_capacity: usize = worker_mod.DequeCapacity;
 
-/// Errors surfaced by `Scheduler.init`, `start`, and `dispatch`.
+/// Errors surfaced by the fallible `Scheduler` methods: `init` /
+/// `initWithWorkerCount` and `start` (thread-spawn failures),
+/// `dispatch` / `dispatchBatch` (`TooManyChunks` on chunk-count
+/// overflow), and `snapshotStats` (`OutOfMemory`). The set is the
+/// union of `std.Thread.SpawnError` and `TooManyChunks`.
 pub const SchedulerError = error{
     OutOfMemory,
     TooManyChunks,
@@ -170,7 +174,7 @@ pub const Scheduler = struct {
         };
     }
 
-    pub fn start(self: *Scheduler) !void {
+    pub fn start(self: *Scheduler) SchedulerError!void {
         for (self.workers, 0..) |*w, i| {
             w.thread = try std.Thread.spawn(.{}, workerMain, .{ self, @as(u32, @intCast(i)) });
         }
@@ -207,11 +211,13 @@ pub const Scheduler = struct {
     /// the bench, the scheduler tests, and by `JobBuilder.addJob`
     /// when a system has nothing else to bundle into the same level.
     ///
-    /// Panics when `query.chunkCount() > workers.len * per_worker_capacity`
-    /// — the caller is expected to size queries against the
-    /// scheduler's max throughput (E7 will tighten this with the
-    /// C0.1 1 M case).
-    pub fn dispatch(self: *Scheduler, query: anytype, comptime Body: anytype, args: anytype) void {
+    /// Returns `error.TooManyChunks` when
+    /// `query.chunkCount() > workers.len * per_worker_capacity` — the
+    /// caller is expected to size queries against the scheduler's max
+    /// throughput. E7 (M0.9) replaced the prior `std.debug.assert`
+    /// (compiled out in ReleaseFast → out-of-bounds write on overflow)
+    /// with this explicit, build-mode-independent error return.
+    pub fn dispatch(self: *Scheduler, query: anytype, comptime Body: anytype, args: anytype) SchedulerError!void {
         const ChunkPtrType = @TypeOf(query.chunkAt(0));
         const ArgsType = @TypeOf(args);
 
@@ -232,7 +238,7 @@ pub const Scheduler = struct {
         var ctx_storage = args;
 
         const n = query.chunkCount();
-        std.debug.assert(n <= self.jobs.len);
+        if (n > self.jobs.len) return error.TooManyChunks;
 
         const trampoline_fn: TrampolineFn = &Trampoline.call;
         for (0..n) |i| {
@@ -256,8 +262,12 @@ pub const Scheduler = struct {
     /// `incoming` is copied into the scheduler's internal `jobs`
     /// slice before the wave is published, so the caller's slice can
     /// be freed or reused as soon as `dispatchBatch` returns.
-    pub fn dispatchBatch(self: *Scheduler, incoming: []const Job) void {
-        std.debug.assert(incoming.len <= self.jobs.len);
+    ///
+    /// Returns `error.TooManyChunks` when
+    /// `incoming.len > workers.len * per_worker_capacity` (same
+    /// build-mode-independent bound as `dispatch`).
+    pub fn dispatchBatch(self: *Scheduler, incoming: []const Job) SchedulerError!void {
+        if (incoming.len > self.jobs.len) return error.TooManyChunks;
         @memcpy(self.jobs[0..incoming.len], incoming);
         self.publishWaveAndWait(@intCast(incoming.len));
     }

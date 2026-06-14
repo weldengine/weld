@@ -54,14 +54,14 @@ test "scheduler.dispatch does zero allocations across a full dispatch cycle" {
     // Warm up — first dispatch may incur first-touch effects that
     // are not the steady-state contract. Subsequent dispatches must
     // be alloc-free.
-    sched.dispatch(&query, nopBody, .{});
+    try sched.dispatch(&query, nopBody, .{});
 
     // Give workers time to park before the measured dispatch.
     std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
 
     // Now run one fully-instrumented dispatch cycle.
     const before = counting.snapshot();
-    sched.dispatch(&query, nopBody, .{});
+    try sched.dispatch(&query, nopBody, .{});
     const after = counting.snapshot();
     const delta = CountingAllocator.delta(after, before);
 

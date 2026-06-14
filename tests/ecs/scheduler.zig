@@ -150,7 +150,7 @@ test "idle workers sleep instead of busy-yielding" {
     // First dispatch — wake every worker, give them work, drain to
     // completion. After this, workers will hit the idle path and
     // park on `work_available`.
-    sched.dispatch(&query, idleBody, .{});
+    try sched.dispatch(&query, idleBody, .{});
 
     // Give workers time to reach the parked path. The dispatch
     // returns when `pending_count == 0`, so workers may still be in
@@ -168,7 +168,7 @@ test "idle workers sleep instead of busy-yielding" {
 
     // Second dispatch — workers wake from their parked state. The
     // parks_completed counter must have advanced.
-    sched.dispatch(&query, idleBody, .{});
+    try sched.dispatch(&query, idleBody, .{});
 
     std.Io.sleep(io, .fromMilliseconds(500), .awake) catch {};
 

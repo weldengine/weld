@@ -637,7 +637,7 @@ pub const SystemScheduler = struct {
                 try sys.run(ctx);
             }
             if (builder.jobs.items.len > 0) {
-                jobs.dispatchBatch(builder.jobs.items);
+                try jobs.dispatchBatch(builder.jobs.items);
             }
             // End-of-level barrier is implicit — `dispatchBatch`
             // blocks until pending_count reaches zero.
