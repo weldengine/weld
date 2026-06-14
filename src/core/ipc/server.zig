@@ -9,7 +9,7 @@
 //! S6 lifecycle:
 //!   1. `IpcServer.init(gpa)`
 //!   2. `server.listen(socket_path)` — binds and starts accepting.
-//!   3. (editor spawns runtime via `platform.process.spawn_process`,
+//!   3. (editor spawns runtime via `platform.process.spawnProcess`,
 //!      passing the socket path + shm name + editor PID)
 //!   4. `server.acceptOne()` — blocks until the runtime connects.
 //!   5. `server.recvHello(...)` — reads `ProtocolHello` from the

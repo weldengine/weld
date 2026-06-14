@@ -118,7 +118,7 @@ fn spawnAndHandshake(
     defer gpa.free(snap_arg);
     const argv = [_][]const u8{ runtime_exe, socket_arg, shm_arg, pid_arg, snap_arg };
 
-    const proc = try platform_process.spawn_process(gpa, runtime_exe, &argv);
+    const proc = try platform_process.spawnProcess(gpa, runtime_exe, &argv);
     try server.acceptOne();
 
     var hello_buf: [framing.frameSizeOf(messages.ProtocolHello)]u8 = undefined;
@@ -132,7 +132,7 @@ fn spawnAndHandshake(
 fn reap(io: std.Io, proc: *platform_process.Process) void {
     var attempts: usize = 0;
     while (attempts < 200) : (attempts += 1) {
-        if (platform_process.wait_nonblock(proc) catch null) |_| return;
+        if (platform_process.waitNonblock(proc) catch null) |_| return;
         sleepMs(io, 10);
     }
 }
@@ -243,7 +243,7 @@ test "editor close → runtime detects EOF + exits clean code 0" {
     var exit_code: ?i32 = null;
     var poll: usize = 0;
     while (poll < 200) : (poll += 1) {
-        if (try platform_process.wait_nonblock(&sp.proc)) |code| {
+        if (try platform_process.waitNonblock(&sp.proc)) |code| {
             exit_code = code;
             break;
         }

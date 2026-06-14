@@ -123,7 +123,7 @@ fn spawnRuntime(
     defer gpa.free(pid_arg);
     const argv = [_][]const u8{ "zig-out/bin/weld-runtime", socket_arg, shm_arg, pid_arg };
 
-    const proc = try platform_process.spawn_process(gpa, "zig-out/bin/weld-runtime", &argv);
+    const proc = try platform_process.spawnProcess(gpa, "zig-out/bin/weld-runtime", &argv);
     try server.acceptOne();
 
     // 5 s recv timeout on the accepted socket (engine-zig-conventions §13).
@@ -151,7 +151,7 @@ fn teardown(server: *ipc.server.IpcServer, proc: *platform_process.Process) void
     _ = server.connection().recvMessage(messages.ShutdownAck, &sa_buf) catch {};
     var attempts: usize = 0;
     while (attempts < 50) : (attempts += 1) {
-        if (platform_process.wait_nonblock(proc) catch null) |_| break;
+        if (platform_process.waitNonblock(proc) catch null) |_| break;
         sleepMs(10);
     }
 }

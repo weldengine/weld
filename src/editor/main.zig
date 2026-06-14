@@ -184,7 +184,7 @@ pub fn main(init: std.process.Init) !void {
         for (spawn_argv.items[1..]) |a| std.debug.print(" {s}", .{a});
         std.debug.print("\n[editor] waiting for runtime to connect on {s} ...\n", .{socket_path});
     } else {
-        proc_opt = try platform_process.spawn_process(gpa, runtime_path, spawn_argv.items);
+        proc_opt = try platform_process.spawnProcess(gpa, runtime_path, spawn_argv.items);
     }
 
     try server.acceptOne();
@@ -196,7 +196,7 @@ pub fn main(init: std.process.Init) !void {
         try server.sendHelloAck(true, "");
     } else |_| {
         try server.sendHelloAck(false, "protocol mismatch");
-        if (proc_opt) |*p| _ = try platform_process.wait_nonblock(p);
+        if (proc_opt) |*p| _ = try platform_process.waitNonblock(p);
         return error.HandshakeRejected;
     }
 
@@ -269,7 +269,7 @@ pub fn main(init: std.process.Init) !void {
         // Give the runtime a beat to flush its exit path before
         // we reap.
         sleepMs(20);
-        _ = try platform_process.wait_nonblock(p);
+        _ = try platform_process.waitNonblock(p);
     }
     std.debug.print("editor stub: ipc demo completed cleanly\n", .{});
 }
