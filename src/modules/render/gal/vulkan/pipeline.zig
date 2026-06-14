@@ -114,14 +114,29 @@ pub fn createRender(
         .preserve_attachment_count = 0,
         .p_preserve_attachments = undefined,
     };
+    // External subpass dependency — MUST match the executing render pass
+    // built by `render_pass.zig` (same SUBPASS_EXTERNAL→0 color-attachment-output
+    // dependency). This template render pass is used only for pipeline
+    // compatibility; if its `dependencyCount` differs from the executing pass,
+    // the draw trips VUID-vkCmdDrawIndexed-renderPass-02684 (render passes
+    // incompatible). Kept identical to render_pass.zig. Frozen by E7 (C0.5).
+    const external_dep: vk.SubpassDependency = .{
+        .src_subpass = vk.SUBPASS_EXTERNAL,
+        .dst_subpass = 0,
+        .src_stage_mask = .{ .color_attachment_output = true },
+        .dst_stage_mask = .{ .color_attachment_output = true },
+        .src_access_mask = .empty,
+        .dst_access_mask = .{ .color_attachment_write = true },
+        .dependency_flags = .empty,
+    };
     const rp_ci: vk.RenderPassCreateInfo = .{
         .flags = .empty,
         .attachment_count = n_attach,
         .p_attachments = if (n_attach > 0) @ptrCast(&attachments) else undefined,
         .subpass_count = 1,
         .p_subpasses = @ptrCast(&subpass),
-        .dependency_count = 0,
-        .p_dependencies = undefined,
+        .dependency_count = 1,
+        .p_dependencies = @ptrCast(&external_dep),
     };
     const rp = device.vk_device.createRenderPass(&rp_ci, null) catch return error.PipelineCreationFailed;
     errdefer device.vk_device.destroyRenderPass(rp, null);
