@@ -36,16 +36,30 @@ const World = world_mod.World;
 /// Errors surfaced by `setResource` / `removeResource`. Read paths
 /// return `null` instead of failing through this set.
 pub const ResourceError = error{
-    /// The world's registry refused to register the resource
-    /// component or the marker (out of ids, name collision).
-    RegistrationFailed,
     /// `spawnDynamicWithValues` failed to allocate the singleton
-    /// entity's slot. Underlying allocator surfaced.
+    /// entity's slot, or an internal hashmap grow failed. Underlying
+    /// allocator surfaced.
     OutOfMemory,
-    /// Other ECS-internal allocation / identity error propagated
-    /// from the world.
+    /// Other ECS-internal allocation / identity error propagated from
+    /// the world (e.g. a `getMut` / `dynamicLocation` miss on the
+    /// freshly-spawned singleton entity).
     EcsError,
+    /// `removeResource`'s despawn hit a stale entity handle — the
+    /// singleton entity was already despawned out-of-band. Propagated
+    /// from `World.despawn` (`WorldError`).
+    StaleEntityHandle,
 };
+
+/// Collapse an ECS-internal error from the `World` write path into the
+/// `ResourceError` contract: `OutOfMemory` passes through; every other
+/// allocation / identity error (e.g. `DuplicateComponent` from the
+/// component registry) becomes `EcsError`.
+fn mapWorldErr(e: anyerror) ResourceError {
+    return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.EcsError,
+    };
+}
 
 /// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Insert or update the singleton resource of type `T`. On the
@@ -57,7 +71,7 @@ pub fn setResource(
     world: *World,
     gpa: std.mem.Allocator,
     value: anytype,
-) !void {
+) ResourceError!void {
     const T = @TypeOf(value);
     // Build the RTTI TypeInfo at comptime as a POD gate — fails
     // compilation if `T` is not POD.
@@ -74,8 +88,8 @@ pub fn setResource(
 
     // First-time set — register both the resource type and the
     // marker, then spawn the singleton entity.
-    const cid_t = try world.ensureComponentRegistered(gpa, T);
-    const cid_marker = try world.ensureComponentRegistered(gpa, ResourceMarker);
+    const cid_t = world.ensureComponentRegistered(gpa, T) catch |e| return mapWorldErr(e);
+    const cid_marker = world.ensureComponentRegistered(gpa, ResourceMarker) catch |e| return mapWorldErr(e);
 
     var local_value: T = value;
     var marker: ResourceMarker = .{};
@@ -84,14 +98,14 @@ pub fn setResource(
 
     const cids = [_]u32{ cid_t, cid_marker };
     const payloads = [_][]const u8{ value_bytes, marker_bytes };
-    const eid = try world.spawnDynamicWithValues(gpa, &cids, &payloads);
+    const eid = world.spawnDynamicWithValues(gpa, &cids, &payloads) catch |e| return mapWorldErr(e);
 
     // Mark the resource archetype singleton so user queries skip
     // it (cf. `Query.maybeRescan` + `ComptimeQuery.next` checks).
     const loc = world.dynamicLocation(eid) orelse return error.EcsError;
     world.dynamicArchetype(loc.archetype_idx).is_singleton = true;
 
-    try world.singleton_resources.register(gpa, tid, eid);
+    world.singleton_resources.register(gpa, tid, eid) catch |e| return mapWorldErr(e);
 }
 
 /// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
@@ -125,7 +139,7 @@ pub fn hasResource(world: *const World, comptime T: type) bool {
 /// Drop the resource of type `T`. Despawns the singleton entity
 /// and clears the `(TypeId → EntityId)` binding. No-op when the
 /// resource has not been set.
-pub fn removeResource(world: *World, gpa: std.mem.Allocator, comptime T: type) !void {
+pub fn removeResource(world: *World, gpa: std.mem.Allocator, comptime T: type) ResourceError!void {
     const tid: TypeId = comptime rtti.computeTypeId(T);
     const eid = world.singleton_resources.lookup(tid) orelse return;
     try world.despawn(gpa, eid);
