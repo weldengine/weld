@@ -150,8 +150,8 @@ pub const Error = error{
 pub const NativeHandles = backend.NativeHandles;
 
 /// Public Window handle — five-method front-end above the per-OS
-/// backend (`create`, `destroy`, `pollEvent`, `nativeHandles`,
-/// `getDimensions`).
+/// backend (`create`, `destroy`, `close`, `pollEvent`,
+/// `nativeHandles`).
 pub const Window = struct {
     impl: backend.Backend,
 
