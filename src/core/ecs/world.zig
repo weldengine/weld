@@ -495,7 +495,7 @@ pub const World = struct {
     /// pointer is observable by a `Changed<T>` query whose
     /// `last_run_tick < current_tick`. Returns `null` for stale handles
     /// or missing components.
-    pub fn get_mut(self: *World, comptime T: type, entity: EntityId) ?*T {
+    pub fn getMut(self: *World, comptime T: type, entity: EntityId) ?*T {
         if (!self.identity.isLive(entity)) return null;
         const loc = self.entity_locations.get(entity) orelse return null;
         const cid = self.registry.idOf(@typeName(T)) orelse return null;

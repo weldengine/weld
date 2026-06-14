@@ -11,7 +11,7 @@
 //! resource archetype so user queries never see the entity.
 //!
 //! Change detection reuses the M0.1 tick-based mechanism:
-//! `getResourceMut` returns `world.get_mut(T, entity)` which
+//! `getResourceMut` returns `world.getMut(T, entity)` which
 //! auto-marks `changed_tick = current_tick` on the resource's
 //! slot. `resourceChanged(T, since)` reads back that tick.
 //!
@@ -65,7 +65,7 @@ fn mapWorldErr(e: anyerror) ResourceError {
 /// Insert or update the singleton resource of type `T`. On the
 /// first call for `T`, spawns a dedicated entity holding
 /// `[T, ResourceMarker]` and marks its archetype singleton. On
-/// subsequent calls, writes the new value through `get_mut`
+/// subsequent calls, writes the new value through `getMut`
 /// (auto-marks `changed_tick`).
 pub fn setResource(
     world: *World,
@@ -81,7 +81,7 @@ pub fn setResource(
     if (world.singleton_resources.lookup(tid)) |eid| {
         // Update path — the entity already exists, just write the
         // new value via the change-detection-aware mutator.
-        const ptr = world.get_mut(T, eid) orelse return error.EcsError;
+        const ptr = world.getMut(T, eid) orelse return error.EcsError;
         ptr.* = value;
         return;
     }
@@ -125,7 +125,7 @@ pub fn getResource(world: *const World, comptime T: type) ?*const T {
 pub fn getResourceMut(world: *World, comptime T: type) ?*T {
     const tid: TypeId = comptime rtti.computeTypeId(T);
     const eid = world.singleton_resources.lookup(tid) orelse return null;
-    return world.get_mut(T, eid);
+    return world.getMut(T, eid);
 }
 
 /// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)

@@ -12,7 +12,7 @@
 //! - `added_tick[N][capacity]u32` — per-component, per-slot tick of
 //!   first attachment to the entity.
 //! - `changed_tick[N][capacity]u32` — per-component, per-slot tick of
-//!   last modification (set by `World.get_mut(T)`).
+//!   last modification (set by `World.getMut(T)`).
 //! - `dirty_bitset[ceil(capacity/64)]u64` — single per-chunk bitset,
 //!   reset by `World.beginFrame`; lets queries skip whole chunks
 //!   without per-slot inspection.

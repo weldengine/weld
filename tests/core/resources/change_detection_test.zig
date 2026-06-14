@@ -3,7 +3,7 @@
 //! Reuses the M0.1 tick-based mechanism (`World.current_tick` +
 //! per-archetype `changed_ticks`). `getResourceMut` auto-marks
 //! `changed_tick = current_tick` on the resource's slot via
-//! `world.get_mut`, then `resourceChanged(T, since_tick)` reads
+//! `world.getMut`, then `resourceChanged(T, since_tick)` reads
 //! the tick back.
 
 const std = @import("std");
