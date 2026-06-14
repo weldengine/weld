@@ -73,11 +73,13 @@ pub const required_methods = [_]RequiredMethod{
     .{ .name = "destroySwapchain", .purpose = "Frees the swapchain" },
     .{ .name = "acquireNextImage", .purpose = "Acquires the swapchain's next image index" },
     .{ .name = "getSwapchainImageView", .purpose = "Returns the stable TextureViewHandle for a swapchain image (pre-allocated at init)" },
+    .{ .name = "getSwapchainImageCount", .purpose = "Returns the swapchain's image count (sizes per-image sync arrays; cross-backend, added E7/M0.9)" },
     .{ .name = "present", .purpose = "Presents the current image" },
 
     // Queue & command recording
     .{ .name = "getQueue", .purpose = "Gets a Queue (graphics/compute/transfer)" },
     .{ .name = "createCommandEncoder", .purpose = "Starts recording a command buffer" },
+    .{ .name = "destroyCommandEncoder", .purpose = "Frees a CommandEncoder — mandatory, paired with createCommandEncoder (added E7/M0.9)" },
     .{ .name = "submit", .purpose = "Submits a finished CommandEncoder to the graphics queue (cf. SubmitDescriptor)" },
 
     // Capture (M0.5 item 2)
@@ -233,6 +235,10 @@ const TestShape = struct {
         _ = .{ self, h, image_index };
         return .{};
     }
+    pub fn getSwapchainImageCount(self: *TestShape, h: types.SwapchainHandle) u32 {
+        _ = .{ self, h };
+        return 0;
+    }
     pub fn present(self: *TestShape, h: types.SwapchainHandle, image_index: u32, wait_semaphores: []const types.SemaphoreHandle) types.Error!void {
         _ = .{ self, h, image_index, wait_semaphores };
     }
@@ -243,6 +249,9 @@ const TestShape = struct {
     pub fn createCommandEncoder(self: *TestShape, label: ?[]const u8) types.Error!*CommandEncoderStub {
         _ = .{ self, label };
         return undefined;
+    }
+    pub fn destroyCommandEncoder(self: *TestShape, encoder: *CommandEncoderStub) void {
+        _ = .{ self, encoder };
     }
     pub fn submit(self: *TestShape, encoder: *CommandEncoderStub, descriptor: types.SubmitDescriptor) types.Error!void {
         _ = .{ self, encoder, descriptor };
