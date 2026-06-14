@@ -393,11 +393,17 @@ jobs:
             exit 1
           fi
           echo "  absent — bug (a) resorbed."
-          echo "--- (b) present-semaphore reuse (VUID-...-00067) — observed only, hardware-validated ---"
-          # NON-failing: software present on lavapipe is synchronous, so this
-          # hazard does not surface here; the per-image-semaphore fix is verified
-          # by construction + hardware (no false green from a lavapipe pass).
-          grep -E "00067|pSignalSemaphores|SYNC-HAZARD" vkblit.log || echo "  not observed on lavapipe (expected — hardware-only)"
+          echo "--- sync-validation WRITE_AFTER_READ hazard — MUST be absent (render-pass external dependency) ---"
+          if grep -E "SYNC-HAZARD" vkblit.log; then
+            echo "::error::E6 regression — render-pass/acquire SYNC-HAZARD fires (GAL render-pass external subpass dependency missing)"
+            exit 1
+          fi
+          echo "  absent — the GAL render-pass external subpass dependency holds under syncval."
+          echo "--- (b) present-semaphore reuse (VUID-...-00067) — hardware-only, observed only ---"
+          # NON-failing: software present on lavapipe is synchronous, so 00067
+          # does not surface here; the per-image-semaphore fix is verified by
+          # construction + hardware (no false green from a lavapipe pass).
+          grep -E "00067|pSignalSemaphores" vkblit.log || echo "  not observed on lavapipe (expected — hardware-only)"
           echo "=== end E6 blit validation ==="
 
       - name: Upload slice capture

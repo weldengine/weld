@@ -129,14 +129,33 @@ pub fn begin(device: *Device, descriptor: types.RenderPassDescriptor) types.Erro
         .p_preserve_attachments = undefined,
     };
 
+    // External subpass dependency: synchronize the render pass's image-layout
+    // transition (a write at the color-attachment-output stage) with any prior
+    // external access to the same image — notably a swapchain image just
+    // returned by `vkAcquireNextImageKHR`, whose present-engine read must
+    // complete before the render pass writes it. Without it,
+    // synchronization-validation reports a WRITE_AFTER_READ hazard at submit.
+    // The raw editor blit carried this dependency; the GAL render pass must
+    // too, for every swapchain consumer (and it is harmless for offscreen
+    // targets). Frozen by E7 (C0.5).
+    const external_dep: vk.SubpassDependency = .{
+        .src_subpass = vk.SUBPASS_EXTERNAL,
+        .dst_subpass = 0,
+        .src_stage_mask = .{ .color_attachment_output = true },
+        .dst_stage_mask = .{ .color_attachment_output = true },
+        .src_access_mask = .empty,
+        .dst_access_mask = .{ .color_attachment_write = true },
+        .dependency_flags = .empty,
+    };
+
     const rp_ci: vk.RenderPassCreateInfo = .{
         .flags = .empty,
         .attachment_count = n_attach,
         .p_attachments = if (n_attach > 0) @ptrCast(&attachments) else undefined,
         .subpass_count = 1,
         .p_subpasses = @ptrCast(&subpass),
-        .dependency_count = 0,
-        .p_dependencies = undefined,
+        .dependency_count = 1,
+        .p_dependencies = @ptrCast(&external_dep),
     };
     const rp = device.vk_device.createRenderPass(&rp_ci, null) catch return error.BackendInternal;
     errdefer device.vk_device.destroyRenderPass(rp, null);
