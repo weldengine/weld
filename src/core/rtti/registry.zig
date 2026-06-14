@@ -7,9 +7,13 @@
 //! returns `error.SchemaMismatch`.
 //!
 //! Storage is unmanaged — the `Allocator` is provided to `init` and
-//! threaded through `register` internally. The `gpa` field is kept
-//! private; consumers pass their world / module context through the
-//! `Registry` API, not the underlying allocator.
+//! threaded through `register` internally. The `gpa`, `types`, and
+//! `name_index` fields are implementation detail and are NOT part of
+//! the frozen public contract: Zig has no field-level visibility, so
+//! they are technically reachable, but consumers must go through the
+//! `Registry` methods only (`register` / `lookup` / `lookupByName` /
+//! `count`). The internal container types may change in Phase 1+
+//! without a `*_PROTOCOL_VERSION` bump.
 //!
 //! `lookup` and `lookupByName` return pointers into the `types`
 //! hashmap. These pointers are stable until the next `register` call
