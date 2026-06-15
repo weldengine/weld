@@ -509,7 +509,9 @@ pub const Device = struct {
         return cmd_mod.create(self, label);
     }
 
-    /// Vulkan-specific helper to free a CommandEncoder.
+    /// Frees a CommandEncoder. A required GAL interface method
+    /// (`interface.required_methods`, E7/M0.9), paired with
+    /// `createCommandEncoder` — every consumer must call it.
     pub fn destroyCommandEncoder(self: *Device, encoder: *cmd_mod.CommandEncoder) void {
         cmd_mod.destroy(self, encoder);
     }

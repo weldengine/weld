@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Comptime check of the GAL contract — Phase 0 / M0.4.
 //!
 //! Pattern inspired by Mach sysgpu (`engine-mach-reference.md` §2): no

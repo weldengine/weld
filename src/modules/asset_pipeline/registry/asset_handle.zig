@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! `AssetHandle` — the 64-bit typed, generation-checked asset reference.
 //!
 //! Layout frozen day 1 (M0.6, brief §Scope). `packed struct(u64)` fixes the

@@ -261,9 +261,9 @@ pub const Device = struct {
         _ = .{ self, encoder, descriptor };
     }
 
-    /// Null-specific helper to free a CommandEncoder allocated by
-    /// `createCommandEncoder`. Not in the formal Phase 0 interface
-    /// — the caller knows it because it passed the allocator to the Device.
+    /// Frees a CommandEncoder allocated by `createCommandEncoder`. A
+    /// required GAL interface method (`interface.required_methods`, E7/M0.9),
+    /// paired with `createCommandEncoder` — every consumer must call it.
     pub fn destroyCommandEncoder(self: *Device, encoder: *stubs.CommandEncoder) void {
         self.allocator.destroy(encoder);
     }

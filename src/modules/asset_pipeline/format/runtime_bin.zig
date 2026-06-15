@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Runtime `.<type>.bin` zero-copy container — the 40-byte header and its
 //! read / write / validate helpers.
 //!

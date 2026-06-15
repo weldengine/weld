@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! GAL frame-capture helper — Phase 0 / M0.5 (item 2).
 //!
 //! Reads back an already-rendered color texture into host memory and writes

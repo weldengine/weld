@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! GAL public types — Phase 0 / M0.4.
 //!
 //! Public surface of the GPU Abstraction Layer (cf. `engine-render.md` §3).

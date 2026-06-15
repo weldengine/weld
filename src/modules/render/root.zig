@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Render module — Phase 0 / M0.4.
 //!
 //! Public entry point of the Render module (Tier 1). Re-exposes the two
@@ -8,6 +10,15 @@
 //! Phase 1+: adds V-Buffer, Radiance GI, post-process, etc. The public
 //! surface stays stable — it is the contract frozen on day 1 (brief
 //! §Notes decision 1).
+
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// Version of the frozen RenderModule (Tier-1, exercised) public surface
+/// — the `gal` + `render_graph` + `shader_pipeline` + `instancing`
+/// namespaces. The GAL cross-backend contract has its own finer-grained
+/// `WELD_GAL_PROTOCOL_VERSION` (gal/root.zig). Bumped on any breaking
+/// change — a tracked migration, not a freeze failure (the
+/// `*_PROTOCOL_VERSION` rule, generalized from `WELD_IPC_PROTOCOL_VERSION`).
+pub const WELD_RENDER_PROTOCOL_VERSION: u32 = 1;
 
 // Re-export of the GAL submodule.
 

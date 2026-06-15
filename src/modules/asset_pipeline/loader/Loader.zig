@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Async runtime asset loader + lifecycle (M0.6 / E5).
 //!
 //! Loads a cooked `.<type>.bin` off the main thread and tracks its lifetime
