@@ -29,10 +29,13 @@
 //!
 //! Bitsets are `[N]bool` arrays for clarity — at <512 bytes total
 //! (256+256+256 = 768 bytes for the keyboard alone), the memory cost
-//! is irrelevant compared to the readability win of `state.keyboard
-//! .pressed[KeyCode.a]` over `state.keyboard.pressed & (1 << KeyCode.a)`.
-//! The brief gates "pressed bitset (256 scancodes)" — `[256]bool` is a
-//! literal interpretation.
+//! is irrelevant compared to the readability win of a direct
+//! `state.keyboard.pressed[scancode]` index over a packed-bitset
+//! shift-and-mask. The brief gates "pressed bitset (256 scancodes)" —
+//! `[256]bool` keyed by **raw scancode** is the literal interpretation.
+//! Logical-key access in Phase 0 is `window.Event.code` (the frozen
+//! `KeyCode` contract); a KeyCode-keyed steady-state view is the
+//! Phase-1 Input Tier-1 mapping layer (`engine-input-system.md`).
 
 const std = @import("std");
 const window = @import("../window.zig");
@@ -40,9 +43,13 @@ const keycode = @import("keycode.zig");
 
 /// Keyboard state — physical key press/release tracking.
 pub const KeyboardState = extern struct {
-    /// 1 if the physical key is currently held. Indexed by the
-    /// `KeyCode` enum's @intFromEnum value (or by raw scancode — they
-    /// share the same `u8` codomain).
+    /// 1 if the physical key is currently held. Indexed by the **raw OS
+    /// scancode** (`ev.scancode & 0xFF`), NOT by the `KeyCode` enum — the
+    /// two do not share a codomain (the same logical key has different
+    /// scancodes on Win32 vs evdev). This is the raw hardware layer: for
+    /// logical-key input read `window.Event.code` (the frozen `KeyCode`
+    /// contract); cross-backend logical-key steady-state querying is the
+    /// Phase-1 Input Tier-1 mapping layer (`engine-input-system.md`).
     pressed: [256]bool = [_]bool{false} ** 256,
     /// 1 on the frame the key transitioned from up to down (rising edge).
     /// Cleared at the start of each frame.
