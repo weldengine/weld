@@ -424,7 +424,7 @@ pub const Archetype = struct {
     }
 
     /// Read the `changed_tick[comp_idx][slot]` value — the tick of
-    /// the most recent write via `World.get_mut(T)` (or `markChanged`).
+    /// the most recent write via `World.getMut(T)` (or `markChanged`).
     pub fn changedTick(self: *const Archetype, chunk: *const Chunk, comp_idx: usize, slot: u32) Tick {
         const col = chunk.changedTickColumnConst(&self.layout, comp_idx);
         return col[slot];

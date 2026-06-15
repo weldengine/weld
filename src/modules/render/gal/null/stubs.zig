@@ -62,14 +62,11 @@ pub const CommandEncoder = struct {
 
     pub fn copyBufferToTexture(
         self: *CommandEncoder,
-        src: types.BufferHandle,
-        src_offset: u64,
-        dst: types.TextureHandle,
-        mip: u32,
-        layer: u32,
-        size: [3]u32,
+        source: types.ImageCopyBuffer,
+        dest: types.ImageCopyTexture,
+        copy_size: types.Extent3D,
     ) void {
-        _ = .{ self, src, src_offset, dst, mip, layer, size };
+        _ = .{ self, source, dest, copy_size };
     }
 
     pub fn copyTextureToBuffer(

@@ -1,0 +1,22 @@
+// M0.9 vertical slice — scene. Authored content, cross-file VALIDATED via E2-B;
+// NOT instantiated (runtime scene loading is Phase 1). Instance-only: each
+// `instance of` resolves its prefab CROSS-FILE (E1786 clean) against
+// mob.prefab.etch / elite.prefab.etch — the cross-file instance resolution the
+// slice exercises. The `description` is a triple-quote multiline string (E2-A).
+// UUIDs are unique (no E1782).
+scene "World" {
+  version: 1
+  metadata: {
+    description: """
+      Vertical slice demo world.
+      Entity spawning is driven by the Zig host (the Phase 0 host-spawn
+      pattern); this scene is validated cross-file, not loaded (Phase 1).
+      """
+  }
+  instance of "Mob" "mob_01" {
+    uuid: "5f3e2a10-0000-4000-8000-000000000001"
+  }
+  instance of "EliteMob" "elite_01" {
+    uuid: "5f3e2a10-0000-4000-8000-000000000002"
+  }
+}

@@ -3,7 +3,7 @@
 //! and its POSIX shm regions (`/weld-shm-<role>-<pid>`); a `kill -9`
 //! of the editor leaves both behind, named with the dead editor's PID.
 //! The next editor calls `reapOrphans` at startup to remove any such
-//! orphan whose embedded PID is no longer alive (`process.is_alive`).
+//! orphan whose embedded PID is no longer alive (`process.isAlive`).
 //!
 //! Safety: an endpoint is removed **only** when its PID is dead, so a
 //! second editor running concurrently (live PID) never has its
@@ -98,7 +98,7 @@ fn reapSocketOrphans() void {
     while (sys.readdir(d)) |ent| {
         const name = std.mem.sliceTo(&ent.d_name, 0);
         const pid = pidFromSocketName(name) orelse continue;
-        if (process.is_alive(pid)) continue;
+        if (process.isAlive(pid)) continue;
         var buf: [320]u8 = undefined;
         const full = std.fmt.bufPrintZ(&buf, "/tmp/{s}", .{name}) catch continue;
         _ = sys.unlink(full.ptr);
@@ -111,7 +111,7 @@ fn reapShmOrphans() void {
     while (sys.readdir(d)) |ent| {
         const name = std.mem.sliceTo(&ent.d_name, 0);
         const pid = pidFromShmName(name) orelse continue;
-        if (process.is_alive(pid)) continue;
+        if (process.isAlive(pid)) continue;
         // `shm_unlink` takes the name as passed to `shm_open` (leading
         // slash), which maps to `/dev/shm/<name>` on Linux.
         var buf: [320]u8 = undefined;
@@ -146,11 +146,11 @@ test "reapOrphans removes a dead-pid socket and keeps a live-pid one" {
     if (comptime !is_posix) return error.SkipZigTest;
 
     // A PID far above any real one — `kill(pid, 0)` returns ESRCH, so
-    // `is_alive` is false. Deterministic on Linux + macOS.
+    // `isAlive` is false. Deterministic on Linux + macOS.
     const dead_pid: process.Pid = 0x7FFF_FFFF;
     const my_pid = getpid();
-    try std.testing.expect(!process.is_alive(dead_pid));
-    try std.testing.expect(process.is_alive(my_pid));
+    try std.testing.expect(!process.isAlive(dead_pid));
+    try std.testing.expect(process.isAlive(my_pid));
 
     var dead_buf: [64]u8 = undefined;
     var live_buf: [64]u8 = undefined;

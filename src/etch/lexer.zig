@@ -157,7 +157,19 @@ pub const Lexer = struct {
                     return .{ .kind = .question, .span = .{ .byte_start = start, .byte_end = self.pos } };
                 },
                 '#' => return self.lexColor(start),
-                '"' => return self.lexString(start),
+                '"' => {
+                    // Triple-quote `"""…"""` multiline string (M0.9 E2-A,
+                    // `etch-grammar.md` §1.4): three contiguous quotes open a
+                    // newline-spanning literal closed by the next `"""` — the
+                    // DURATION/COLOR greedy-contiguous precedent. A lone or
+                    // double `"` falls through to the single-line `lexString`.
+                    if (self.pos + 2 < self.source.len and
+                        self.source[self.pos + 1] == '"' and self.source[self.pos + 2] == '"')
+                    {
+                        return self.lexMultilineString(start);
+                    }
+                    return self.lexString(start);
+                },
                 '0'...'9' => return self.lexNumber(start),
                 'a'...'z', 'A'...'Z', '_' => return self.lexIdent(start),
                 else => {
@@ -348,6 +360,38 @@ pub const Lexer = struct {
             self.pos += 1;
         }
         // Unterminated string: surface as error_byte at the opening quote.
+        return .{ .kind = .error_byte, .span = .{ .byte_start = start, .byte_end = self.pos } };
+    }
+
+    /// `multiline_string = '"""' { multiline_char | interpolation } '"""'`
+    /// (`etch-grammar.md` §1.4): a triple-quote literal that spans newlines
+    /// (unlike `lexString`) until the next contiguous `"""`. The greedy-
+    /// contiguous open/close mirrors the DURATION_LIT / COLOR_LITERAL lift.
+    /// The lexer keeps the full raw span; the parser owns escape decoding,
+    /// interpolation, and the §1.4 common-indent strip (M0.9 E2-A).
+    fn lexMultilineString(self: *Lexer, start: u32) Token {
+        self.pos += 3; // opening """
+        while (self.pos < self.source.len) {
+            const c = self.source[self.pos];
+            // Closing """ — three contiguous quotes.
+            if (c == '"' and self.pos + 2 < self.source.len and
+                self.source[self.pos + 1] == '"' and self.source[self.pos + 2] == '"')
+            {
+                self.pos += 3;
+                return .{ .kind = .multiline_string_literal, .span = .{ .byte_start = start, .byte_end = self.pos } };
+            }
+            // Backslash escape — pass through verbatim (parser decodes), so a
+            // `\"` never closes the literal (mirrors `lexString`).
+            if (c == '\\') {
+                self.pos += 1;
+                if (self.pos < self.source.len) self.pos += 1;
+                continue;
+            }
+            // Newlines and arbitrary bytes (incl. lone/double quotes and UTF-8
+            // continuation bytes) are part of the literal — advance one byte.
+            self.pos += 1;
+        }
+        // Unterminated triple-quote: error_byte at the opening (lexString precedent).
         return .{ .kind = .error_byte, .span = .{ .byte_start = start, .byte_end = self.pos } };
     }
 

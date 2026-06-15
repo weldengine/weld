@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Protocol-level constants and invariants for the Weld editor↔runtime IPC.
 //!
 //! Wire format reference: `engine-ipc.md` §3.1 (framing) and §5
@@ -45,6 +47,11 @@ pub const MAGIC: u32 = 0x57454C44;
 /// An S6/M0.2 editor and an M0.7 runtime are strictly incompatible —
 /// expected behavior, no negotiation. Cf.
 /// `briefs/M0.7-ipc-scm-rights-windows-fuzz.md`.
+///
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9). This is the
+/// `*_PROTOCOL_VERSION` template generalized to the other Tier-0/1
+/// interfaces in M0.9. Keep value 3 (last bump M0.7, 2→3); a Phase-1+
+/// wire change is a tracked bump, not a silent edit.
 pub const WELD_IPC_PROTOCOL_VERSION: u16 = 3;
 
 /// Maximum payload size in bytes (`payload_len` ceiling per

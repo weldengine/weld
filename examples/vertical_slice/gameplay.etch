@@ -1,0 +1,51 @@
+// M0.9 vertical slice — gameplay (cooked to Zig via the Etch↔ECS codegen).
+//
+// Option A (E3 ruling): the Zig host spawns the entities via the canonical
+// Phase 0 host-spawn + Etch-rule pattern (the demo_etch_codegen / diff_runner
+// bridge), using the POD component types declared HERE; these five rules drive
+// the headless 60 Hz simulation. NO scene instantiation (Phase 1) and NO
+// rendering (arrives in E4).
+
+component Counter { ticks: int = 0 }
+component Position { x: float = 0.0, y: float = 0.0 }
+component Velocity { dx: float = 1.0, dy: float = 0.5 }
+component Health { current: float = 100.0, max: float = 200.0 }
+component Energy { value: float = 50.0 }
+
+// 1 — advance the per-entity tick counter (the "simulation ran" witness).
+rule advance_clock(entity: Entity)
+  when entity has Counter
+{
+  entity.get_mut(Counter).ticks += 1
+}
+
+// 2 — integrate position by a per-tick velocity delta.
+rule integrate_motion(entity: Entity)
+  when entity has Position and entity has Velocity
+{
+  entity.get_mut(Position).x += entity.get(Velocity).dx
+  entity.get_mut(Position).y += entity.get(Velocity).dy
+}
+
+// 3 — passive health regeneration.
+rule regen_health(entity: Entity)
+  when entity has Health
+{
+  entity.get_mut(Health).current += 0.5
+}
+
+// 4 — passive energy drain.
+rule drain_energy(entity: Entity)
+  when entity has Energy
+{
+  entity.get_mut(Energy).value -= 0.25
+}
+
+// 5 — clamp health to its maximum.
+rule clamp_health(entity: Entity)
+  when entity has Health
+{
+  if entity.get(Health).current > entity.get(Health).max {
+    entity.get_mut(Health).current = entity.get(Health).max
+  }
+}

@@ -6,11 +6,11 @@
 //!
 //! - `test "Changed<T> returns only entities whose component changed
 //!   since last run"` — build a `Query(.{Health}, .{Changed(Health)})`,
-//!   tick the world, write to one entity via `get_mut`, leave the
+//!   tick the world, write to one entity via `getMut`, leave the
 //!   other untouched. The query body counts only the modified
 //!   entity.
-//! - `test "get_mut auto-marks changed_tick to current world tick"` —
-//!   write through `world.get_mut(T, entity)`, then read
+//! - `test "getMut auto-marks changed_tick to current world tick"` —
+//!   write through `world.getMut(T, entity)`, then read
 //!   `archetype.changedTick(chunk, col, slot)` and assert it equals
 //!   `world.current_tick`.
 //! - `test "dirty bitset skip on a fully clean chunk avoids per-entity
@@ -83,7 +83,7 @@ test "Changed<T> returns only entities whose component changed since last run" {
 
     // Frame 1 — mutate one entity, leave the other alone.
     world.beginFrame();
-    world.get_mut(Health, modified).?.current = 42.0;
+    world.getMut(Health, modified).?.current = 42.0;
 
     var counter: ChangedCounter = .{};
     q.forEachChunk(countChangedHealth, .{ &q, &counter });
@@ -99,7 +99,7 @@ test "Changed<T> returns only entities whose component changed since last run" {
     try std.testing.expectEqual(@as(u32, 0), counter2.matched);
 }
 
-test "get_mut auto-marks changed_tick to current world tick" {
+test "getMut auto-marks changed_tick to current world tick" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -113,8 +113,8 @@ test "get_mut auto-marks changed_tick to current world tick" {
     world.beginFrame();
     const tick_before_write = world.current_tick;
 
-    // Write through get_mut and confirm the sidecar caught it.
-    world.get_mut(Health, e).?.current = 13.0;
+    // Write through getMut and confirm the sidecar caught it.
+    world.getMut(Health, e).?.current = 13.0;
 
     const loc = world.dynamicLocation(e).?;
     const arch = world.dynamicArchetype(loc.archetype_idx);
@@ -178,6 +178,6 @@ test "dirty bitset skip on a fully clean chunk avoids per-entity inspection" {
 
     // Sanity check: once a write happens, the bitset flips dirty and
     // the chunk-level skip stops dropping that chunk.
-    world.get_mut(Health, e1).?.current = 1.0;
+    world.getMut(Health, e1).?.current = 1.0;
     try std.testing.expect(!arch.isChunkClean(chunk));
 }

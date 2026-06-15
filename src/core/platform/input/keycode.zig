@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Normalized keyboard scancode enum — common to Win32 and Wayland backends.
 //!
 //! Phase 0.3 / M0.3 deliverable. Documented in the M0.3 brief and

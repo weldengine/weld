@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! M0.2 / E6 — fundamental C types for the Tier 3 plugin API and
 //! the plugin descriptor.
 //!
@@ -16,6 +18,10 @@
 
 const std = @import("std");
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9). This semver
+/// triple IS the PluginLoader's `*_PROTOCOL_VERSION` axis — the C0.5
+/// versioning rule reuses it rather than minting a separate constant
+/// (MAJOR = binary break, MINOR = additive, PATCH = fix).
 /// Major version of the Weld plugin API. Incremented on every
 /// binary break (function removal / rename, signature change,
 /// struct layout change). Cf. `engine-c-api.md` §1.1.

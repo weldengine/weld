@@ -1,5 +1,5 @@
-//! Process tests — `platform.process.spawn_process` + `wait_nonblock`
-//! + `is_alive` against the real `/bin/true` and `/bin/sleep` binaries
+//! Process tests — `platform.process.spawnProcess` + `waitNonblock`
+//! + `isAlive` against the real `/bin/true` and `/bin/sleep` binaries
 //! (POSIX-gated). Plus `quoteArg` — the M0.7 / E3 Windows command-line
 //! quoter — tested cross-platform (no Windows needed) via golden cases
 //! and a round-trip through a reference `CommandLineToArgvW` parser.
@@ -30,20 +30,20 @@ fn sleepMs(ms: u64) void {
 // `/bin/true` on Linux). `/bin/sleep` is canonical on both.
 const true_path = if (builtin.os.tag == .macos) "/usr/bin/true" else "/bin/true";
 
-test "spawn true(1) and reap with wait_nonblock returns exit 0" {
+test "spawn true(1) and reap with waitNonblock returns exit 0" {
     if (!is_posix) return error.SkipZigTest;
 
     const gpa = std.testing.allocator;
     const argv = [_][]const u8{true_path};
 
-    var proc = try process.spawn_process(gpa, true_path, &argv);
+    var proc = try process.spawnProcess(gpa, true_path, &argv);
 
     // Poll up to ~1 s for the child to exit. /bin/true is near-
     // instant; the loop bound exists to keep the test from hanging
     // if the binary is missing or the spawn fails silently.
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
-        if (try process.wait_nonblock(&proc)) |code| {
+        if (try process.waitNonblock(&proc)) |code| {
             try std.testing.expectEqual(@as(i32, 0), code);
             return;
         }
@@ -54,17 +54,17 @@ test "spawn true(1) and reap with wait_nonblock returns exit 0" {
 
 extern "c" fn getpid() i32;
 
-test "is_alive returns true for current pid, false for impossible pid" {
+test "isAlive returns true for current pid, false for impossible pid" {
     if (!is_posix) return error.SkipZigTest;
 
     // The current process always passes — `kill(pid, 0)` is a no-op
-    // for the calling process. Using `getpid()` avoids `is_alive(1)`
+    // for the calling process. Using `getpid()` avoids `isAlive(1)`
     // which raises `EPERM` on macOS (launchd is permission-gated).
     const self_pid = getpid();
-    try std.testing.expect(process.is_alive(self_pid));
+    try std.testing.expect(process.isAlive(self_pid));
     // PID very high — kernel reserves the lower range. 999_999 is not
     // a valid live process on any sane developer machine.
-    try std.testing.expect(!process.is_alive(999_999));
+    try std.testing.expect(!process.isAlive(999_999));
 }
 
 test "spawn-then-kill terminates a long-running child" {
@@ -73,7 +73,7 @@ test "spawn-then-kill terminates a long-running child" {
     const gpa = std.testing.allocator;
     const argv = [_][]const u8{ "/bin/sleep", "30" };
 
-    var proc = try process.spawn_process(gpa, "/bin/sleep", &argv);
+    var proc = try process.spawnProcess(gpa, "/bin/sleep", &argv);
     // Give the child a moment to actually become alive in the kernel
     // table — without this, `kill(pid, SIGKILL)` can race against
     // the spawn returning before the child is reapable on macOS.
@@ -83,13 +83,13 @@ test "spawn-then-kill terminates a long-running child" {
 
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
-        if (try process.wait_nonblock(&proc)) |_| return;
+        if (try process.waitNonblock(&proc)) |_| return;
         sleepMs(10);
     }
     return error.ChildNeverDied;
 }
 
-test "spawn_process runs a Windows binary and reaps exit 0" {
+test "spawnProcess runs a Windows binary and reaps exit 0" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     // Anti-regression for the M0.7 / E3 addendum: the first real Windows
     // run hit `CreateProcessW` → `error.SpawnFailed`. Exercise the path
@@ -98,10 +98,10 @@ test "spawn_process runs a Windows binary and reaps exit 0" {
     const exe = "C:\\Windows\\System32\\cmd.exe";
     const argv = [_][]const u8{ exe, "/c", "exit 0" };
 
-    var proc = try process.spawn_process(gpa, exe, &argv);
+    var proc = try process.spawnProcess(gpa, exe, &argv);
     var attempts: usize = 0;
     while (attempts < 200) : (attempts += 1) {
-        if (try process.wait_nonblock(&proc)) |code| {
+        if (try process.waitNonblock(&proc)) |code| {
             try std.testing.expectEqual(@as(i32, 0), code);
             return;
         }

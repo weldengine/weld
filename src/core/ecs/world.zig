@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Tier 0 root `World` — owns the unified archetype list, the M0.1 / E1
 //! generational identity store, the runtime registry, and the resource
 //! store. M0.1 / E2 collapsed the S1 (single hardcoded archetype) and S4
@@ -99,7 +101,7 @@ pub const World = struct {
     /// Monotonic frame counter. Incremented by `beginFrame()` at the
     /// start of each tick; written into every spawn / migration's
     /// `added_tick` + `changed_tick` sidecars and into every
-    /// `get_mut(T)` auto-mark. Reads happen from `Query.last_run_tick`
+    /// `getMut(T)` auto-mark. Reads happen from `Query.last_run_tick`
     /// comparisons.
     current_tick: Tick,
 
@@ -120,15 +122,27 @@ pub const World = struct {
     /// Single `EntityId → Location` map covering every spawn path.
     entity_locations: std.AutoHashMapUnmanaged(EntityId, Location),
 
-    /// Resource store keyed by `ComponentId`.
+    /// **Runtime, `ComponentId`-keyed** resource store (M0.1 / S4) —
+    /// the resource backend the **Etch** subsystem requires: the
+    /// tree-walking interpreter and the Zig codegen resolve resource
+    /// names → `ComponentId` and access raw bytes at runtime (neither
+    /// has a comptime type to hand to a typed API). Also driven by the
+    /// Etch differential corpus + bench. Canonical for all
+    /// runtime/dynamic resource access.
     resources: ResourceStore,
 
-    /// M0.2 / E3 — singleton-entity resource registry. Maps
-    /// `rtti.TypeId → EntityId` for the resources spawned via
-    /// `src/core/resources/`. Lives alongside the M0.1 / S4
-    /// `resources: ResourceStore` byte map (still consumed by the
-    /// Etch interpreter) — the two stores are independent until a
-    /// later milestone unifies them.
+    /// M0.2 / E3 — **comptime-`TypeId`-keyed** singleton-entity resource
+    /// registry (`rtti.TypeId → EntityId`) for resources set via
+    /// `src/core/resources/` (`setResource(T)` / `getResourceMut(T)`).
+    /// Canonical for the comptime-typed host / slice / test API, and the
+    /// only path with query-exclusion (resources are real entities).
+    ///
+    /// This and `resources` above are **NOT duplication**: they are two
+    /// models for two disjoint consumers — a runtime/byte path (Etch)
+    /// and a comptime/typed path (host). Phase 0 freezes **both** (C0.5).
+    /// The true unification (a typed path for the interpreter, or a
+    /// runtime-id path for this registry) needs Etch capabilities absent
+    /// in Phase 0 and is deferred to a Phase-1 milestone.
     singleton_resources: singleton_resources_mod.ResourceRegistry = .{},
 
     /// M0.2 / E4 — heterogeneous event bus. Owns the per-event-type
@@ -495,7 +509,7 @@ pub const World = struct {
     /// pointer is observable by a `Changed<T>` query whose
     /// `last_run_tick < current_tick`. Returns `null` for stale handles
     /// or missing components.
-    pub fn get_mut(self: *World, comptime T: type, entity: EntityId) ?*T {
+    pub fn getMut(self: *World, comptime T: type, entity: EntityId) ?*T {
         if (!self.identity.isLive(entity)) return null;
         const loc = self.entity_locations.get(entity) orelse return null;
         const cid = self.registry.idOf(@typeName(T)) orelse return null;

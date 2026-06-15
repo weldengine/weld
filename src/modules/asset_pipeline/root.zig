@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Asset Pipeline module (Tier 1) — public entry point.
 //!
 //! M0.6 delivers the minimal Phase 0 pipeline in staged gates. E1 ships the
@@ -14,6 +16,15 @@
 //! Dependencies: `core` (E5 loader consumes the Tier 0 job system) and, from
 //! E2, `foundation` (the SIMD kernels). No `weld_etch` dependency
 //! (brief §Out-of-scope).
+
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// Version of the frozen AssetPipeline (Tier-1, exercised) public surface —
+/// AssetHandle/Registry, AssetType, RuntimeHeader, the intermediate doc
+/// model, importers/cookers/cache, and the `Loader` verbs + pinned error
+/// sets. DISTINCT from `format.current_version` (on-disk header layout) and
+/// `AssetDoc.version` (on-disk schema). Bumped on any breaking change — a
+/// tracked migration, not a freeze failure (the `*_PROTOCOL_VERSION` rule).
+pub const WELD_ASSET_PIPELINE_PROTOCOL_VERSION: u32 = 1;
 
 /// On-disk format surfaces: `AssetType`, the runtime `.bin` header, the
 /// intermediate `.asset.etch` document model + reader/writer.

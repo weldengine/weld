@@ -82,18 +82,131 @@ pub const CommandEncoder = struct {
         self.cb.cmdCopyBuffer(src_buf, dst_buf, &.{region});
     }
 
+    /// Copy a host-visible buffer region into a texture. WebGPU canonical
+    /// shape (source/dest/copy_size triple) — the buffer→texture mirror of
+    /// `copyTextureToBuffer`. `source.bytes_per_row` is honored when
+    /// non-zero; otherwise Vulkan tight-packs the row stride from the image
+    /// extent. RGBA8 (4 bpp) is assumed for the byte→pixel conversion of
+    /// `bytes_per_row`, matching `copyTextureToBuffer`. The destination
+    /// texture must have been created with `usage.copy_dst = true`.
+    ///
+    /// LAYOUT CONTRACT — DIVERGES from `copyTextureToBuffer` (internal
+    /// barriers, by necessity). `copyTextureToBuffer` emits no barriers
+    /// because its render-target *source* is positioned in
+    /// `.transfer_src_optimal` by the producing render pass's `final_layout`.
+    /// An upload *destination* has no such hook: a freshly-created texture is
+    /// in `.undefined` (no prior render pass to carry a `final_layout`), and
+    /// the Phase 0 GAL surface exposes no encoder-level barrier
+    /// (`RenderPassEncoder.barrier` / `ComputePassEncoder.barrier` are
+    /// pass-scoped no-ops). The buffer→image asymmetry therefore forces this
+    /// function to emit its own transitions: `.undefined → .transfer_dst_optimal`
+    /// before the copy, then `.transfer_dst_optimal → .shader_read_only_optimal`
+    /// after, so the destination is immediately samplable. `.undefined` as the
+    /// pre-copy old layout discards prior contents — correct for a full-region
+    /// upload. Phase 1+ (when an encoder-level barrier + layout tracker lands)
+    /// may revisit this to let callers batch the transitions; until then the
+    /// internal barriers keep the upload path self-contained and
+    /// validation-clean.
     pub fn copyBufferToTexture(
         self: *CommandEncoder,
-        src: types.BufferHandle,
-        src_offset: u64,
-        dst: types.TextureHandle,
-        mip: u32,
-        layer: u32,
-        size: [3]u32,
+        source: types.ImageCopyBuffer,
+        dest: types.ImageCopyTexture,
+        copy_size: types.Extent3D,
     ) void {
-        _ = .{ self, src, src_offset, dst, mip, layer, size };
-        // Phase 0: not implemented on the Vulkan side, silent no-op. Phase 1+
-        // via `vkCmdCopyBufferToImage` + layout transitions.
+        const src_buf = buffer_mod.lookup(self.device, source.buffer) orelse return;
+        const dst_img = texture_mod.lookupImage(self.device, dest.texture) orelse return;
+
+        const aspect_mask: vk.ImageAspectFlags = switch (dest.aspect) {
+            .all, .color => .{ .color = true },
+            .depth => .{ .depth = true },
+            .stencil => .{ .stencil = true },
+        };
+
+        // Subresource the copy + both barriers operate on. layer_count = 1
+        // matches the Phase 0 single-layer assumption of the neighbor.
+        const sub_range: vk.ImageSubresourceRange = .{
+            .aspect_mask = aspect_mask,
+            .base_mip_level = dest.mip_level,
+            .level_count = 1,
+            .base_array_layer = 0,
+            .layer_count = 1,
+        };
+
+        // (1) Pre-copy: UNDEFINED → TRANSFER_DST_OPTIMAL. The `.undefined`
+        // old layout discards prior contents (correct for a full upload).
+        const to_dst: vk.ImageMemoryBarrier = .{
+            .src_access_mask = .empty,
+            .dst_access_mask = .{ .transfer_write = true },
+            .old_layout = .undefined,
+            .new_layout = .transfer_dst_optimal,
+            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .image = dst_img,
+            .subresource_range = sub_range,
+        };
+        self.cb.cmdPipelineBarrier(
+            .{ .top_of_pipe = true },
+            .{ .transfer = true },
+            .empty,
+            &.{},
+            &.{},
+            &.{to_dst},
+        );
+
+        // WebGPU `bytesPerRow` is bytes; Vulkan `buffer_row_length` is
+        // pixels. RGBA8 (4 bpp) assumed; 0 lets Vulkan tight-pack (mirror of
+        // copyTextureToBuffer).
+        const row_length: u32 = if (source.bytes_per_row == 0) 0 else source.bytes_per_row / 4;
+
+        const region: vk.BufferImageCopy = .{
+            .buffer_offset = source.offset,
+            .buffer_row_length = row_length,
+            .buffer_image_height = source.rows_per_image,
+            .image_subresource = .{
+                .aspect_mask = aspect_mask,
+                .mip_level = dest.mip_level,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+            .image_offset = .{
+                .x = @intCast(dest.origin.x),
+                .y = @intCast(dest.origin.y),
+                .z = @intCast(dest.origin.z),
+            },
+            .image_extent = .{
+                .width = copy_size.width,
+                .height = copy_size.height,
+                .depth = copy_size.depth_or_array_layers,
+            },
+        };
+
+        self.cb.cmdCopyBufferToImage(
+            src_buf,
+            dst_img,
+            .transfer_dst_optimal,
+            &.{region},
+        );
+
+        // (2) Post-copy: TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL so
+        // the destination is immediately samplable by a fragment shader.
+        const to_read: vk.ImageMemoryBarrier = .{
+            .src_access_mask = .{ .transfer_write = true },
+            .dst_access_mask = .{ .shader_read = true },
+            .old_layout = .transfer_dst_optimal,
+            .new_layout = .shader_read_only_optimal,
+            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .image = dst_img,
+            .subresource_range = sub_range,
+        };
+        self.cb.cmdPipelineBarrier(
+            .{ .transfer = true },
+            .{ .fragment_shader = true },
+            .empty,
+            &.{},
+            &.{},
+            &.{to_read},
+        );
     }
 
     /// Copy a texture region into a host-visible buffer. WebGPU canonical
@@ -178,20 +291,27 @@ pub const RenderPassEncoder = struct {
     parent: *CommandEncoder,
     device: *Device,
     cb: *vk.CommandBuffer,
+    /// Layout of the pipeline most recently bound via `setPipeline` — the
+    /// minimal state machine `cmdBindDescriptorSets` needs (it binds sets
+    /// against a pipeline layout). `.null` until a pipeline is bound; read by
+    /// `setBindGroup`, which skips cleanly while it is `.null` rather than
+    /// assuming an implicit "last pipeline is current".
+    current_pipeline_layout: vk.PipelineLayout = .null,
 
     pub fn setPipeline(self: *RenderPassEncoder, pipeline: types.RenderPipelineHandle) void {
         const entry = pipeline_mod.lookup(self.device, pipeline) orelse return;
         self.cb.cmdBindPipeline(.graphics, entry.pipeline);
+        self.current_pipeline_layout = entry.pipeline_layout;
     }
 
     pub fn setBindGroup(self: *RenderPassEncoder, slot: u32, group: types.BindGroupHandle) void {
         const set = bind_mod.lookupSet(self.device, group) orelse return;
-        // To bind correctly we need the pipeline_layout — Phase 0
-        // pattern: the caller called setPipeline just before, we assume
-        // the last bound pipeline is still current. Phase 1+:
-        // track the current layout via a state machine.
-        _ = .{ slot, set };
-        // Phase 0: no effective binding without a tracker — call site no-op.
+        // The layout comes from the currently-bound pipeline, recorded by
+        // `setPipeline`. GUARD: if no pipeline was bound first, skip cleanly —
+        // never bind against a null layout, and never assume an implicit "the
+        // last pipeline is current".
+        if (self.current_pipeline_layout == .null) return;
+        self.cb.cmdBindDescriptorSets(.graphics, self.current_pipeline_layout, slot, &.{set}, &.{});
     }
 
     pub fn setVertexBuffer(self: *RenderPassEncoder, slot: u32, buffer: types.BufferHandle, offset: u64) void {

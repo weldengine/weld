@@ -1,0 +1,10 @@
+// M0.9 vertical slice — variant prefab. The `of "Mob"` base lives in
+// mob.prefab.etch: E2-B resolves it CROSS-FILE (E1791 clean) — this is the
+// cross-file prefab-base resolution the slice exercises. The `Health` reference
+// is E1793 under validateProject (cross-file type-import = Phase 1 resolver
+// pass-1) — expected, documented Phase-0 behaviour (cf. brief Blockers #2).
+prefab "EliteMob" of "Mob" {
+  entity "body" {
+    Health { current: 250.0, max: 300.0 }
+  }
+}

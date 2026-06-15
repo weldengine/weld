@@ -301,6 +301,25 @@ pub const TypeChecker = struct {
     /// `let` re-declaring a name removes it (it is body-owned from there).
     /// `null` outside a closure body. Saved/restored around nested typing.
     closure_captures: ?*std.AutoHashMapUnmanaged(StringId, void) = null,
+    /// Cross-file project context (M0.9 E2-B). `null` in single-file mode (the
+    /// M0.8 behaviour: E1782/E1786/E1791 resolve against per-file sets). When
+    /// set (via `checkProject`), those three scene/prefab reference + UUID
+    /// checks resolve against the byte-keyed PROJECT indexes instead, so a
+    /// prefab or UUID defined in another project file is in scope.
+    project: ?*const ProjectContext = null,
+
+    /// Byte-keyed cross-file indexes for project-level scene/prefab validation
+    /// (M0.9 E2-B). StringIds are per-arena, so cross-file resolution keys on
+    /// the interned string BYTES. `prefabs` holds every prefab name declared
+    /// anywhere in the project (read-only during checks); `uuids` is the shared
+    /// cross-scene UUID tracker, mutated as each file's scenes are visited — a
+    /// second occurrence of a UUID is E1782. Both sets' keys reference the
+    /// arenas' string pools, which `root.validateProject` keeps alive for the
+    /// duration of the checks.
+    pub const ProjectContext = struct {
+        prefabs: *const std.StringHashMapUnmanaged(void),
+        uuids: *std.StringHashMapUnmanaged(void),
+    };
 
     /// One `impl Trait for Type [when …]` (M0.8 E2 block 3 tranche C).
     /// `methods_start`/`methods_len` index `arena.impl_methods` (the
@@ -332,6 +351,19 @@ pub const TypeChecker = struct {
     }
 
     pub fn check(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic)) !void {
+        return runCheck(gpa, arena, diagnostics, null);
+    }
+
+    /// Cross-file variant (M0.9 E2-B): identical passes to `check`, but the
+    /// scene/prefab reference + UUID checks (E1782/E1786/E1791) resolve against
+    /// `project` — the byte-keyed global prefab index + shared cross-scene UUID
+    /// tracker — instead of the per-file sets. Driven by `root.validateProject`
+    /// once per project file, with one shared `ProjectContext`.
+    pub fn checkProject(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic), project: *const ProjectContext) !void {
+        return runCheck(gpa, arena, diagnostics, project);
+    }
+
+    fn runCheck(gpa: std.mem.Allocator, arena: *AstArena, diagnostics: *std.ArrayListUnmanaged(Diagnostic), project: ?*const ProjectContext) !void {
         // Builtin `Error` / `ErrorCode` declarations (M0.8 E3-C tranche 2,
         // part1 §10.2) join the arena before pass 1 so they register like
         // ordinary declarations. Every interp / codegen driver runs through
@@ -341,6 +373,7 @@ pub const TypeChecker = struct {
             .gpa = gpa,
             .arena = arena,
             .diagnostics = diagnostics,
+            .project = project,
         };
         defer tc.deinit();
         try tc.pass1Collect();
@@ -1301,6 +1334,29 @@ pub const TypeChecker = struct {
         try self.checkInstanceField(self.arena.strings.slice(fo.type_name), decl.fields_start, decl.fields_len, .{ .name = fo.field, .value = fo.value }, .scene_component_field_unknown, .scene_component_field_type_invalid);
     }
 
+    /// E1782 helper — record `uuid_id` as seen, returning whether it was
+    /// already present. In project mode (M0.9 E2-B) the shared byte-keyed
+    /// cross-scene tracker is consulted (a UUID reused across scenes or files
+    /// is a duplicate); in single-file mode the per-scene `local` set keeps the
+    /// M0.8 intra-scene semantics.
+    fn uuidSeen(self: *TypeChecker, local: *std.AutoHashMapUnmanaged(StringId, void), uuid_id: StringId) !bool {
+        if (self.project) |proj| {
+            return (try proj.uuids.getOrPut(self.gpa, self.arena.strings.slice(uuid_id))).found_existing;
+        }
+        return (try local.getOrPut(self.gpa, uuid_id)).found_existing;
+    }
+
+    /// E1786 / E1791 helper — is `name_id` a known prefab? In project mode the
+    /// byte-keyed PROJECT prefab index is consulted (a prefab declared in any
+    /// project file is in scope); in single-file mode the per-file `local` set
+    /// keeps the M0.8 compilation-unit semantics. `local` is `anytype` because
+    /// the scene caller passes a `…(StringId, void)` set and the prefab caller
+    /// a `…(StringId, usize)` name→index map — both answer `.contains`.
+    fn prefabKnown(self: *TypeChecker, local: anytype, name_id: StringId) bool {
+        if (self.project) |proj| return proj.prefabs.contains(self.arena.strings.slice(name_id));
+        return local.contains(name_id);
+    }
+
     fn validateSceneDecls(self: *TypeChecker) !void {
         const kinds = self.arena.items.items(.kind);
         const datas = self.arena.items.items(.data);
@@ -1360,7 +1416,7 @@ pub const TypeChecker = struct {
                     if ((try names.getOrPut(self.gpa, e.name)).found_existing) {
                         try self.emit(.duplicate_entity_name, .error_, e.span, "duplicate entity/instance name '{s}'", .{self.arena.strings.slice(e.name)});
                     }
-                    if (e.uuid != 0 and (try uuids.getOrPut(self.gpa, e.uuid)).found_existing) {
+                    if (e.uuid != 0 and try self.uuidSeen(&uuids, e.uuid)) {
                         try self.emit(.duplicate_uuid, .error_, e.span, "duplicate uuid '{s}'", .{self.arena.strings.slice(e.uuid)});
                     }
                     if (e.components_len == 0) {
@@ -1376,11 +1432,15 @@ pub const TypeChecker = struct {
                     if ((try names.getOrPut(self.gpa, inst.instance_name)).found_existing) {
                         try self.emit(.duplicate_entity_name, .error_, inst.span, "duplicate entity/instance name '{s}'", .{self.arena.strings.slice(inst.instance_name)});
                     }
-                    if (inst.uuid != 0 and (try uuids.getOrPut(self.gpa, inst.uuid)).found_existing) {
+                    if (inst.uuid != 0 and try self.uuidSeen(&uuids, inst.uuid)) {
                         try self.emit(.duplicate_uuid, .error_, inst.span, "duplicate uuid '{s}'", .{self.arena.strings.slice(inst.uuid)});
                     }
-                    if (!prefab_names.contains(inst.prefab_name)) {
-                        try self.emit(.prefab_ref_not_found, .error_, inst.span, "instance references prefab '{s}', which is not declared in this compilation unit", .{self.arena.strings.slice(inst.prefab_name)});
+                    if (!self.prefabKnown(prefab_names, inst.prefab_name)) {
+                        if (self.project != null) {
+                            try self.emit(.prefab_ref_not_found, .error_, inst.span, "instance references prefab '{s}', which is not declared in the project", .{self.arena.strings.slice(inst.prefab_name)});
+                        } else {
+                            try self.emit(.prefab_ref_not_found, .error_, inst.span, "instance references prefab '{s}', which is not declared in this compilation unit", .{self.arena.strings.slice(inst.prefab_name)});
+                        }
                     }
                     var m: u32 = 0;
                     while (m < inst.members_len) : (m += 1) {
@@ -1513,9 +1573,15 @@ pub const TypeChecker = struct {
             try self.emit(.prefab_empty, .error_, decl.name_span, "prefab '{s}' has no component (at least one required)", .{self.arena.strings.slice(decl.name)});
         }
 
-        // E1791 — the of/extends base must be a declared (in-file) prefab.
-        if (decl.relation != .none and !prefab_names.contains(decl.relation_target)) {
-            try self.emit(.prefab_base_not_found, .error_, decl.name_span, "prefab '{s}' extends/of '{s}', which is not declared in this compilation unit", .{ self.arena.strings.slice(decl.name), self.arena.strings.slice(decl.relation_target) });
+        // E1791 — the of/extends base must be a declared prefab. Single-file:
+        // in this compilation unit. Project mode (M0.9 E2-B): anywhere in the
+        // project's prefab index.
+        if (decl.relation != .none and !self.prefabKnown(prefab_names, decl.relation_target)) {
+            if (self.project != null) {
+                try self.emit(.prefab_base_not_found, .error_, decl.name_span, "prefab '{s}' extends/of '{s}', which is not declared in the project", .{ self.arena.strings.slice(decl.name), self.arena.strings.slice(decl.relation_target) });
+            } else {
+                try self.emit(.prefab_base_not_found, .error_, decl.name_span, "prefab '{s}' extends/of '{s}', which is not declared in this compilation unit", .{ self.arena.strings.slice(decl.name), self.arena.strings.slice(decl.relation_target) });
+            }
         }
 
         // E1793/E1794/E1795 — component instances in the prefab's entities.

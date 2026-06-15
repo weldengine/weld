@@ -1,0 +1,11 @@
+// M0.9 vertical slice — base prefab. Authored content, cross-file VALIDATED via
+// E2-B; NOT instantiated (runtime scene/prefab loading is the Phase 1 Scene
+// Serialization deliverable). It references the `Health` component type
+// declared in gameplay.etch; cross-file TYPE-IMPORT resolution is a Phase 1
+// resolver-pass-1 deliverable, so `validateProject` reports E1793 here —
+// expected, documented Phase-0 behaviour, not a defect (cf. brief Blockers #2).
+prefab "Mob" {
+  entity "body" {
+    Health { current: 100.0, max: 200.0 }
+  }
+}

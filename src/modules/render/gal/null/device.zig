@@ -207,6 +207,17 @@ pub const Device = struct {
         return .{ .inner = self.handles.next_id() };
     }
 
+    /// Null stub mirror of `Device.getSwapchainImageCount` (cross-backend
+    /// parity, E7/M0.9). The Null backend tracks no per-swapchain state,
+    /// so it reports the Phase-0 default double-buffer count
+    /// (`SwapchainDescriptor.min_image_count`'s default of 2) — enough for
+    /// the comptime interface check and headless smoke tests; the Null
+    /// backend never performs a real present.
+    pub fn getSwapchainImageCount(self: *Device, handle: types.SwapchainHandle) u32 {
+        _ = .{ self, handle };
+        return 2;
+    }
+
     pub fn acquireNextImage(
         self: *Device,
         handle: types.SwapchainHandle,
@@ -250,9 +261,9 @@ pub const Device = struct {
         _ = .{ self, encoder, descriptor };
     }
 
-    /// Null-specific helper to free a CommandEncoder allocated by
-    /// `createCommandEncoder`. Not in the formal Phase 0 interface
-    /// — the caller knows it because it passed the allocator to the Device.
+    /// Frees a CommandEncoder allocated by `createCommandEncoder`. A
+    /// required GAL interface method (`interface.required_methods`, E7/M0.9),
+    /// paired with `createCommandEncoder` — every consumer must call it.
     pub fn destroyCommandEncoder(self: *Device, encoder: *stubs.CommandEncoder) void {
         self.allocator.destroy(encoder);
     }

@@ -13,7 +13,24 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Single source of truth for the toolchain version. Used by setup-zig AND
+  # baked into the Zig build-cache key below — a toolchain bump rotates the
+  # cache automatically. The build.zig minor-version guard still enforces the
+  # 0.16.x invariant on the local toolchain.
+  ZIG_VERSION: "0.16.0"
+
 jobs:
+  # M0.9 / E1 — test-category matrix. The 4 cells carry stable, nominative
+  # check names that branch protection requires by name (Guy applies the
+  # repo settings — out of Claude Code's hands):
+  #   - build-and-test (ubuntu-24.04, Debug)
+  #   - build-and-test (ubuntu-24.04, ReleaseSafe)
+  #   - build-and-test (windows-2025, Debug)
+  #   - build-and-test (windows-2025, ReleaseSafe)
+  # Required-by-name closes the M0.8 post-mortem gap where a leg cancelled by
+  # timeout (neutral state) was not blocking the merge: a required check that
+  # is neutral/cancelled is NOT "success", so the merge is blocked.
   build-and-test:
     strategy:
       fail-fast: false
@@ -36,29 +53,73 @@ jobs:
     # now exceed the 20-min budget set at M0.1 (Debug still fits). The
     # proper CI restructuring (job split / bench separation / caching)
     # remains queued and is tracked at the M0.8 close.
+    # M0.9 / E1 — the CI restructuring above is now delivered: bench split
+    # to bench.yml, Zig build cache added below. The 40/20 min budgets are
+    # kept as cold-cache headroom — a cache miss (zon change / eviction)
+    # still pays the full build cost; warm runs land well under budget.
     timeout-minutes: ${{ matrix.mode == 'ReleaseSafe' && 40 || 20 }}
     steps:
       - uses: actions/checkout@v6
 
-      # Brief specifies `version: 0.16.x` for patch fluidity. As of v2 of
-      # this action, that syntax is taken literally and resolves to
+      # Action versions pinned to the engine-development-workflow.md §7.3
+      # whitelist (M0.9 / E1 decision): weldengine/setup-zig@v0.1.0 (exact
+      # tag, not a floating @v0 — manual bumps), actions/cache@v5,
+      # actions/upload-artifact@v6, actions/checkout@v6. All Node 24 /
+      # runner ≥ 2.327.1.
+      # Brief specifies `version: 0.16.x` for patch fluidity, but the
+      # setup-zig action takes that syntax literally and resolves to
       # zig-...-0.16.x.tar.xz on the mirrors (404 everywhere). Pinned to
       # 0.16.0 exact until the action supports semver ranges or we switch
       # to `version-file: build.zig.zon`. Tracked as an acted deviation in
       # briefs/S0-bootstrap.md. The build.zig minor-version guard still
       # enforces the 0.16.x invariant on the local toolchain.
-      - uses: mlugg/setup-zig@v2
+      - uses: weldengine/setup-zig@v0.1.0
         with:
-          version: 0.16.0
+          version: ${{ env.ZIG_VERSION }}
+
+      # M0.9 / E1 — Zig build cache, keyed on (os, optimize mode, zig
+      # version, build.zig.zon hash) exactly per the brief. The local
+      # `.zig-cache` holds the mode-specific incremental compilation
+      # outputs that dominate CI wall-time on the ReleaseSafe legs — hence
+      # the key includes `matrix.mode`. The restore-keys fallback lets a
+      # build.zig.zon change still seed from the previous zon's cache and
+      # rebuild incrementally rather than cold. Zig's cache is content-
+      # hashed and self-invalidating: a restored cache never yields a stale
+      # build. setup-zig's own (global) cache is left at its default — this
+      # step adds the mode-keyed local cache it does not cover.
+      - name: Restore Zig cache
+        id: zig-cache
+        uses: actions/cache@v5
+        with:
+          path: .zig-cache
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-
 
       - name: zig fmt --check
         run: zig fmt --check src tests build.zig
 
+      # M0.9 / E1 — `zig build` and `zig build test` are timed individually
+      # (bash $SECONDS) and the elapsed values handed to the timing report
+      # step via $GITHUB_ENV. Combined with the cache hit/miss recorded
+      # below, the archived artifact lets the cache optimisation be
+      # validated by measurement (cold run = cache miss = "before";
+      # warm run = cache hit = "after"), not presumed.
       - name: zig build
-        run: zig build -Doptimize=${{ matrix.mode }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          s=$SECONDS
+          zig build -Doptimize=${{ matrix.mode }}
+          echo "BUILD_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
       - name: zig build test
-        run: zig build test -Doptimize=${{ matrix.mode }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          s=$SECONDS
+          zig build test -Doptimize=${{ matrix.mode }}
+          echo "TEST_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
       # M0.2 / E5 — bindgen-verify gate. Regenerates the Vulkan +
       # Wayland bindings and asserts `git diff --quiet` on
@@ -77,25 +138,37 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
         run: zig build verify-synth-100
 
-  bench-ecs-smoke:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, windows-2025]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
+      # M0.9 / E1 — CI wall-time + cache hit/miss measurement, archived as
+      # an artifact (measurement deliverable, not a gate). `always()` so a
+      # failing build/test leg still publishes whatever it measured.
+      - name: Write CI timing report
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="ci-timing-${{ matrix.os }}-${{ matrix.mode }}.txt"
+          {
+            echo "cell=build-and-test (${{ matrix.os }}, ${{ matrix.mode }})"
+            echo "os=${{ matrix.os }}"
+            echo "mode=${{ matrix.mode }}"
+            echo "zig_version=${{ env.ZIG_VERSION }}"
+            echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}"
+            echo "cache_hit=${{ steps.zig-cache.outputs.cache-hit || 'false' }}"
+            echo "build_seconds=${BUILD_SECONDS:-NA}"
+            echo "test_seconds=${TEST_SECONDS:-NA}"
+            echo "run_id=${{ github.run_id }}"
+            echo "run_attempt=${{ github.run_attempt }}"
+            echo "sha=${{ github.sha }}"
+          } > "$report"
+          cat "$report"
 
-      - uses: mlugg/setup-zig@v2
+      - name: Upload CI timing artifact
+        if: always()
+        uses: actions/upload-artifact@v6
         with:
-          version: 0.16.0
-
-      # Compile-and-run sanity for the S1 ECS bench. The full bench gate
-      # (≤ 1.0 ms median ReleaseSafe on the M4 Pro reference) is checked
-      # locally on Guy's machine, not in CI — see briefs/S1-mini-ecs.md.
-      - name: zig build bench-ecs -- --smoke
-        run: zig build bench-ecs -Doptimize=ReleaseSafe -- --smoke
+          name: ci-timing-${{ matrix.os }}-${{ matrix.mode }}
+          path: ci-timing-${{ matrix.os }}-${{ matrix.mode }}.txt
+          retention-days: 30
 
   runtime-smoke-test:
     # M0.4 § Scope Post-Review — first application of the runtime
@@ -111,9 +184,21 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: mlugg/setup-zig@v2
+      - uses: weldengine/setup-zig@v0.1.0
         with:
-          version: 0.16.0
+          version: ${{ env.ZIG_VERSION }}
+
+      # M0.9 / E1 — same Zig build cache as build-and-test. This job
+      # `needs: build-and-test`, so the ubuntu-24.04/ReleaseSafe cell has
+      # already saved its cache by the time this job starts; the matching
+      # key warms this ReleaseSafe build even on the first push.
+      - name: Restore Zig cache
+        uses: actions/cache@v5
+        with:
+          path: .zig-cache
+          key: zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-ubuntu-24.04-ReleaseSafe-${{ env.ZIG_VERSION }}-
 
       - name: Install weston + Mesa Vulkan software drivers
         run: |
@@ -194,10 +279,142 @@ jobs:
 
       - name: Upload capture artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: runtime-smoke-test-capture
           path: |
             out/smoke_test.ppm
             test-output.txt
+          retention-days: 30
+
+  vertical-slice-smoke:
+    # M0.9 / E4 — vertical-slice render smoke. The slice's `--smoke-test` path
+    # renders the live ECS scene OFFSCREEN (no window/swapchain) into an RGBA8
+    # target via the full GAL forward path (depth, instancing, uniform +
+    # sampled-texture bind groups, the `copyBufferToTexture` upload) and
+    # captures a PPM. A Debug build turns on the GAL validation layers, so a
+    # barrier/usage error surfaces in the log and fails the job. No weston
+    # needed (offscreen — no Wayland surface). This asserts "the frame composes,
+    # validation-clean"; visual correctness is hardware-validated.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: weldengine/setup-zig@v0.1.0
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Restore Zig cache (Debug)
+        uses: actions/cache@v5
+        with:
+          path: .zig-cache
+          key: zig-ubuntu-24.04-Debug-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-ubuntu-24.04-Debug-${{ env.ZIG_VERSION }}-
+
+      - name: Install Mesa Vulkan (lavapipe) + validation layers + weston
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # weston: only the vk_blit VUID observation (E6 input) needs a Wayland
+          # surface; the slice smoke + C0.8 edit render offscreen (no surface).
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 weston
+          # Ubuntu 24.04 names the Khronos validation layers package
+          # `vulkan-validationlayers` (no hyphen); older naming used
+          # `vulkan-validation-layers`. Try both — fail if neither installs
+          # (validation MUST be active for this job to mean anything).
+          sudo apt-get install -y --no-install-recommends vulkan-validationlayers \
+            || sudo apt-get install -y --no-install-recommends vulkan-validation-layers
+          # Guard: the smoke is only meaningful with the layer present. Fail
+          # loudly rather than silently rendering without validation.
+          ls /usr/share/vulkan/explicit_layer.d/ | grep -iq validation \
+            || { echo "::error::Khronos validation layer manifest not found after install"; exit 1; }
+
+      - name: Run vertical-slice smoke (Debug, validation layers active)
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # Default `zig build` = Debug → render.zig enable_validation = true →
+          # the validation layers load. Offscreen render → no surface/weston.
+          zig build run-vertical-slice -- --smoke-test --capture out/vertical_slice.ppm 2>&1 | tee slice-smoke.log
+          echo "--- a frame was composed + captured ---"
+          test -s out/vertical_slice.ppm
+          echo "--- validation-clean (no Vulkan VUID / Validation Error) ---"
+          if grep -E "VUID-|Validation Error" slice-smoke.log; then
+            echo "::error::Vulkan validation error during the vertical-slice smoke (see log above)"
+            exit 1
+          fi
+          echo "vertical-slice smoke OK: frame composed, validation clean."
+
+      - name: Run vertical-slice C0.8 IPC edit (Debug, validation layers active)
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # E5 / C0.8 end-to-end: an editor-stub thread sends a real
+          # ModifyComponent over the M0.7 transport; the slice applies it to the
+          # live World; the render reflects it. Offscreen capture, validation on.
+          zig build run-vertical-slice -- --ipc-edit --capture out/vertical_slice_ipc.ppm 2>&1 | tee slice-c08.log
+          echo "--- the post-edit frame composed + captured ---"
+          test -s out/vertical_slice_ipc.ppm
+          if grep -E "VUID-|Validation Error" slice-c08.log; then
+            echo "::error::Vulkan validation error during the C0.8 IPC edit (see log above)"
+            exit 1
+          fi
+          echo "vertical-slice C0.8 OK: IPC edit -> live world -> frame composed, validation clean."
+
+      - name: Assert vk_blit GAL blit is validation-clean (E6 — colorspace VUID absent)
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+          # Sync validation on so the present-semaphore reuse
+          # (VUID-vkQueueSubmit-pSignalSemaphores-00067) would surface if present.
+          VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+        run: |
+          set -uo pipefail
+          mkdir -p /tmp/weld-rt && chmod 700 /tmp/weld-rt
+          XDG_RUNTIME_DIR=/tmp/weld-rt weston --backend=headless --width=1280 --height=720 &
+          sleep 2
+          export XDG_RUNTIME_DIR=/tmp/weld-rt WAYLAND_DISPLAY=wayland-1
+          # The editor blits the runtime mire via the E6-consolidated
+          # src/editor/vk_blit.zig (now on the GAL); Debug build → GAL
+          # validation layer + syncval feature.
+          zig build run-ipc-demo -- --frames=120 > vkblit.log 2>&1 || true
+          echo "=== vk_blit GAL blit on lavapipe (E6) ==="
+          echo "--- distinct VUIDs ---"
+          grep -oE "VUID-[A-Za-z0-9-]+" vkblit.log | sort -u || echo "  (none)"
+          echo "--- (a) colorspace — MUST be absent (E6 fix) ---"
+          if grep -iE "imageColorSpace|color.?space|VUID-VkSwapchainCreateInfoKHR-imageColorSpace" vkblit.log; then
+            echo "::error::E6 regression — vk_blit swapchain colorspace VUID still fires (bug (a) not resorbed)"
+            exit 1
+          fi
+          echo "  absent — bug (a) resorbed."
+          echo "--- sync-validation WRITE_AFTER_READ hazard — MUST be absent (render-pass external dependency) ---"
+          if grep -E "SYNC-HAZARD" vkblit.log; then
+            echo "::error::E6 regression — render-pass/acquire SYNC-HAZARD fires (GAL render-pass external subpass dependency missing)"
+            exit 1
+          fi
+          echo "  absent — the GAL render-pass external subpass dependency holds under syncval."
+          echo "--- (b) present-semaphore reuse (VUID-...-00067) — hardware-only, observed only ---"
+          # NON-failing: software present on lavapipe is synchronous, so 00067
+          # does not surface here; the per-image-semaphore fix is verified by
+          # construction + hardware (no false green from a lavapipe pass).
+          grep -E "00067|pSignalSemaphores" vkblit.log || echo "  not observed on lavapipe (expected — hardware-only)"
+          echo "=== end E6 blit validation ==="
+
+      - name: Upload slice capture
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: vertical-slice-smoke-capture
+          path: |
+            out/vertical_slice.ppm
+            out/vertical_slice_ipc.ppm
+            slice-smoke.log
+            slice-c08.log
+            vkblit.log
           retention-days: 30

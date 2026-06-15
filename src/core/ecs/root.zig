@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Public API surface of the M0.1 ECS — canonical entry point for
 //! consumers (Tier 1 modules, the runtime executable, the editor IPC
 //! layer, the Etch codegen, end-user code).
@@ -25,6 +27,14 @@
 //! of the M0.1 contract. Consumers reading from them outside of
 //! tests should expect breakage on later milestones.
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// Version of the frozen ECS Tier-0 public surface (World verbs,
+/// EntityId/ComponentId layout, Query/CommandBuffer/SystemScheduler
+/// signatures, and the byte-keyed `resources` store). Bumped on any
+/// breaking change — a tracked migration, not a freeze failure (the
+/// `*_PROTOCOL_VERSION` rule, generalized from `WELD_IPC_PROTOCOL_VERSION`).
+pub const WELD_ECS_PROTOCOL_VERSION: u32 = 1;
+
 // ─── Sub-module re-exports — keeps `weld_core.ecs.<file>.<symbol>` reachable ──
 
 /// E1 — generational identity store (`EntityIdentityStore`, `EntityId`).
@@ -49,7 +59,11 @@ pub const scheduler = @import("scheduler.zig");
 pub const registry = @import("registry.zig");
 /// S4 — deprecated re-export of `Archetype` under the legacy `DynamicArchetype` name.
 pub const archetype_dynamic = @import("archetype_dynamic.zig");
-/// S4 — resource singleton store (Tier 0 placeholder until M0.2 ships the full surface).
+/// S4 — runtime, `ComponentId`-keyed byte resource store: the permanent Etch
+/// resource backend (interpreter + codegen + bridge), NOT superseded by the
+/// M0.2 singleton-entity system in `src/core/resources/`. The two coexist as
+/// two models for two consumers (cf. the dual-resource doc on `World.resources`
+/// / `World.singleton_resources` in world.zig).
 pub const resources = @import("resources.zig");
 /// S5 — comptime-typed query consumed by the Etch → Zig codegen.
 pub const comptime_query = @import("comptime_query.zig");

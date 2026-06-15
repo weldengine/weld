@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Async runtime asset loader + lifecycle (M0.6 / E5).
 //!
 //! Loads a cooked `.<type>.bin` off the main thread and tracks its lifetime
@@ -151,8 +153,15 @@ pub fn finish(self: *Loader, gpa: std.mem.Allocator, raw: Raw) FinishError!Asset
     return handle;
 }
 
-/// Blocking convenience: `beginLoad` + `wait` + `finish`.
-pub fn load(self: *Loader, gpa: std.mem.Allocator, io: std.Io, path: []const u8) !AssetHandle {
+/// Blocking convenience: `beginLoad` + `wait` + `finish`. The error set
+/// is the explicit named union of its three steps — `std.Io.ConcurrentError`
+/// (worker spawn), `LoadError` (the async read: `ReadFailed` /
+/// `ShortBuffer` / `BadMagic` / `OutOfMemory`) and `FinishError`
+/// (`UnknownAssetType` / `OutOfMemory`). **Pinned**, not inferred, so the
+/// frozen contract cannot silently widen when a callee's set changes; a
+/// Phase-1 change is a `WELD_ASSET_PIPELINE_PROTOCOL_VERSION` bump
+/// (cf. C0.5).
+pub fn load(self: *Loader, gpa: std.mem.Allocator, io: std.Io, path: []const u8) (std.Io.ConcurrentError || LoadError || FinishError)!AssetHandle {
     var pending = try self.beginLoad(gpa, io, path);
     const raw = try pending.wait(io);
     return self.finish(gpa, raw);
@@ -193,8 +202,19 @@ pub fn unload(self: *Loader, gpa: std.mem.Allocator, handle: AssetHandle) Regist
 }
 
 /// Hot-reload: re-read `path` and swap the payload in place. The handle,
-/// generation, and refcount are preserved.
-pub fn reload(self: *Loader, gpa: std.mem.Allocator, io: std.Io, handle: AssetHandle, path: []const u8) !void {
+/// generation, and refcount are preserved. Returns `error.StaleHandle`
+/// when `handle` is no longer alive; otherwise surfaces `LoadError` from
+/// the re-read (`readBin`) plus `OutOfMemory` from the payload-map
+/// insert. **Pinned** named set `LoadError || error{StaleHandle}` (see
+/// `load`): a Phase-1 change is a `WELD_ASSET_PIPELINE_PROTOCOL_VERSION`
+/// bump (cf. C0.5).
+///
+/// Known Phase-0 limitation: the re-read `.bin`'s `asset_type` is not
+/// re-validated against the slot's `AssetHandle.type_tag`, so reloading
+/// from a `.bin` of a different category serves a mismatched payload
+/// under the old handle. A typed `error.AssetTypeMismatch` is the
+/// additive Phase-1 fix.
+pub fn reload(self: *Loader, gpa: std.mem.Allocator, io: std.Io, handle: AssetHandle, path: []const u8) (LoadError || error{StaleHandle})!void {
     if (!self.registry.isAlive(handle)) return error.StaleHandle;
     const raw = try readBin(gpa, io, self.dir, path);
     if (self.payloads.getPtr(handle.index)) |p| {

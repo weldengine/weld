@@ -44,6 +44,14 @@ pub const PollError = queue_mod.PollError;
 /// Per-drain drop warning threshold.
 pub const DROPS_WARN_THRESHOLD = bus_mod.DROPS_WARN_THRESHOLD;
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// Version of the frozen EventBus Tier-0 public surface (register/emit/
+/// subscribe/poll/drainAtBoundary/queueCount + EventCursor/Lifetime/
+/// BusError/PollError/DROPS_WARN_THRESHOLD). Bumped on any breaking change
+/// — a tracked migration, not a freeze failure (the `*_PROTOCOL_VERSION`
+/// rule, generalized from `WELD_IPC_PROTOCOL_VERSION`).
+pub const WELD_EVENTS_PROTOCOL_VERSION: u32 = 1;
+
 comptime {
     // Lazy analysis guard — force eager analysis of every
     // events sub-file so inline tests are picked up by

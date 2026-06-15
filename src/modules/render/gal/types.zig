@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! GAL public types — Phase 0 / M0.4.
 //!
 //! Public surface of the GPU Abstraction Layer (cf. `engine-render.md` §3).
@@ -273,7 +275,9 @@ pub const TextureAspect = enum(u8) {
     stencil,
 };
 
-/// Source of a texture → buffer copy (WebGPU canonical).
+/// The texture endpoint of an image↔buffer copy (WebGPU canonical).
+/// It is the SOURCE in `copyTextureToBuffer` and the DESTINATION in
+/// `copyBufferToTexture` (the E4 reverse direction).
 pub const ImageCopyTexture = struct {
     texture: TextureHandle,
     mip_level: u32 = 0,
@@ -281,7 +285,9 @@ pub const ImageCopyTexture = struct {
     aspect: TextureAspect = .color,
 };
 
-/// Destination of a texture → buffer copy (WebGPU canonical).
+/// The buffer endpoint of an image↔buffer copy (WebGPU canonical).
+/// It is the DESTINATION in `copyTextureToBuffer` and the SOURCE in
+/// `copyBufferToTexture` (the E4 reverse direction).
 /// `bytes_per_row` must be aligned per the backend's constraints
 /// (Vulkan: 256 bytes typical). `rows_per_image` only applies to
 /// 3D / array textures; ignored for simple 2D ones.

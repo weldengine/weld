@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! M0.1 / E6 — per-system command buffer.
 //!
 //! Records deferred structural mutations (`spawn`, `despawn`,

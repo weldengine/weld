@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! M0.1 / E5b system scheduler — phase pipeline + implicit DAG +
 //! concurrent intra-phase dispatch.
 //!
@@ -637,7 +639,7 @@ pub const SystemScheduler = struct {
                 try sys.run(ctx);
             }
             if (builder.jobs.items.len > 0) {
-                jobs.dispatchBatch(builder.jobs.items);
+                try jobs.dispatchBatch(builder.jobs.items);
             }
             // End-of-level barrier is implicit — `dispatchBatch`
             // blocks until pending_count reaches zero.

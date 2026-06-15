@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! `IpcClient` — runtime-side wrapper around the IPC stack.
 //!
 //! Mirrors `IpcServer` but does not own a listening socket. The
@@ -25,7 +27,7 @@ const transport = @import("transport.zig");
 /// Re-exports `connection.Error` — closed set of IPC connection errors.
 pub const Error = conn_mod.Error;
 
-/// Editor-side IPC client — holds the connected socket + the
+/// Runtime-side IPC client — holds the connected socket + the
 /// versioned connection state machine.
 pub const IpcClient = struct {
     gpa: std.mem.Allocator,

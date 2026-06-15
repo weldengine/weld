@@ -473,6 +473,12 @@ pub const Device = struct {
         return swap.getImageView(self, handle, image_index);
     }
 
+    /// Number of images in the swapchain — for sizing per-image resources
+    /// (e.g. one present-completion semaphore per image).
+    pub fn getSwapchainImageCount(self: *Device, handle: types.SwapchainHandle) u32 {
+        return swap.getImageCount(self, handle);
+    }
+
     pub fn acquireNextImage(
         self: *Device,
         handle: types.SwapchainHandle,
@@ -503,7 +509,9 @@ pub const Device = struct {
         return cmd_mod.create(self, label);
     }
 
-    /// Vulkan-specific helper to free a CommandEncoder.
+    /// Frees a CommandEncoder. A required GAL interface method
+    /// (`interface.required_methods`, E7/M0.9), paired with
+    /// `createCommandEncoder` — every consumer must call it.
     pub fn destroyCommandEncoder(self: *Device, encoder: *cmd_mod.CommandEncoder) void {
         cmd_mod.destroy(self, encoder);
     }

@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Frozen `AssetType` enum — the category tag shared by the runtime
 //! `.<type>.bin` header (`asset_type` field) and `AssetHandle.type_tag`.
 //!

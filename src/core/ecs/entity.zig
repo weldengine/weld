@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Generational entity identity for the Tier 0 ECS.
 //!
 //! `EntityId` packs a u32 slot index and a u32 generation tag into a 64-bit

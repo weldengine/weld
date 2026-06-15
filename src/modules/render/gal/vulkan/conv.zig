@@ -71,6 +71,20 @@ pub fn presentMode(mode: types.PresentMode) vk.PresentModeKHR {
     };
 }
 
+/// The colorspace the GAL swapchain presents in. Phase 0 always uses the
+/// core, universally-supported `VK_COLOR_SPACE_SRGB_NONLINEAR_KHR`: the
+/// swapchain selects a surface `(format, colorspace)` pair carrying this
+/// colorspace rather than blind-copying the surface's first-reported one,
+/// which on some drivers (e.g. lavapipe) is an extended `*_EXT` colorspace
+/// that trips `VUID-VkSwapchainCreateInfoKHR-imageColorSpace-parameter`
+/// unless `VK_EXT_swapchain_colorspace` is enabled (it is not, in Phase 0).
+/// Wide-gamut / HDR presentation is Phase 1+ — it would add a GAL colorspace
+/// enum + a `SwapchainDescriptor` field and map them here. Until then this is
+/// the single, frozen presentation-colorspace contract for the GAL swapchain.
+pub fn colorSpace() vk.ColorSpaceKHR {
+    return .srgb_nonlinear;
+}
+
 /// Map GAL `PrimitiveTopology` → Vulkan `PrimitiveTopology`.
 pub fn primitiveTopology(topo: types.PrimitiveTopology) vk.PrimitiveTopology {
     return switch (topo) {

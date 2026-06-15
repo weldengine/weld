@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! `IpcServer` — editor-side wrapper around the IPC stack.
 //!
 //! Owns the listening socket, accepts exactly one runtime client,
@@ -9,14 +11,14 @@
 //! S6 lifecycle:
 //!   1. `IpcServer.init(gpa)`
 //!   2. `server.listen(socket_path)` — binds and starts accepting.
-//!   3. (editor spawns runtime via `platform.process.spawn_process`,
+//!   3. (editor spawns runtime via `platform.process.spawnProcess`,
 //!      passing the socket path + shm name + editor PID)
 //!   4. `server.acceptOne()` — blocks until the runtime connects.
 //!   5. `server.recvHello(...)` — reads `ProtocolHello` from the
 //!      runtime, validates the protocol version.
 //!   6. `server.sendHelloAck(accepted, reason)`.
 //!   7. From here the editor uses `server.connection()` to send /
-//!      receive any of the 13 message types.
+//!      receive any of the 23 catalogue message types.
 //!   8. `server.deinit()` — closes the accepted client + listener
 //!      + unlinks the socket path on POSIX.
 
@@ -31,7 +33,7 @@ const transport = @import("transport.zig");
 /// Re-exports `connection.Error` — closed set of IPC connection errors.
 pub const Error = conn_mod.Error;
 
-/// Runtime-side IPC server — owns the listening socket, the accepted
+/// Editor-side IPC server — owns the listening socket, the accepted
 /// client socket once present, and the versioned connection state.
 pub const IpcServer = struct {
     gpa: std.mem.Allocator,

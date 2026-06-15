@@ -36,6 +36,14 @@ pub const testing = struct {
 /// Platform namespace — window, Vulkan, process control, plus the M0.3
 /// commun layer (fs, time, threading, dynamic_lib, once).
 pub const platform = struct {
+    /// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+    /// Version of the frozen PlatformLayer Tier-0 surface (window/process/
+    /// fs/time/threading/dynamic_lib/once). EXCLUDES `vk` (bindgen-generated,
+    /// versioned by the bindgen system) and `input` (covered by
+    /// `WELD_INPUT_PROTOCOL_VERSION`). Bumped on any breaking change — a
+    /// tracked migration, not a freeze failure (the `*_PROTOCOL_VERSION` rule).
+    pub const WELD_PLATFORM_PROTOCOL_VERSION: u32 = 1;
+
     pub const window = @import("platform/window.zig");
     pub const vk = @import("platform/vk.zig");
     pub const process = @import("platform/process.zig");

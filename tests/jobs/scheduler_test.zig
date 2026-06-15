@@ -50,7 +50,7 @@ test "split-over-chunks dispatch covers every chunk" {
 
     var query = try world.query(gpa);
     defer query.deinit(gpa);
-    sched.dispatch(&query, recordVisit, .{&ctx});
+    try sched.dispatch(&query, recordVisit, .{&ctx});
 
     try std.testing.expectEqual(@as(u32, @intCast(chunk_count)), counter.load(.acquire));
     try std.testing.expect(!archetype_id_mismatch.load(.acquire));
@@ -94,7 +94,7 @@ test "scheduler returns only after all work is done" {
     var query = try world.query(gpa);
     defer query.deinit(gpa);
     const expected: u32 = @intCast(query.chunkCount());
-    sched.dispatch(&query, slowJob, .{&ctx});
+    try sched.dispatch(&query, slowJob, .{&ctx});
 
     // After dispatch returns, every chunk must have been processed. No
     // spurious early return.

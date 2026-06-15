@@ -1,12 +1,14 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Minimal process control surface used by the S6 editor stub to
 //! spawn / monitor / kill the runtime stub. Tier 0 — `engine-
 //! platform.md` §4 (Process section) defines a wider API; S6 fills
 //! only the four entry points the brief calls out:
 //!
-//!   - `spawn_process(path, argv) !Process`
-//!   - `wait_nonblock(proc) !?i32`
+//!   - `spawnProcess(path, argv) !Process`
+//!   - `waitNonblock(proc) !?i32`
 //!   - `kill(proc) !void`
-//!   - `is_alive(pid) bool`
+//!   - `isAlive(pid) bool`
 //!
 //! The rest of the surface (stdout/stderr piping, env passing,
 //! redirection, working directory) lands in Phase 0.3 alongside
@@ -20,7 +22,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// Error set surfaced by `spawn` / `wait_nonblock` / `kill`.
+/// Error set surfaced by `spawn` / `waitNonblock` / `kill`.
 pub const Error = error{
     SpawnFailed,
     WaitFailed,
@@ -29,7 +31,7 @@ pub const Error = error{
 } || std.mem.Allocator.Error;
 
 /// OS-native process identifier — signed on POSIX, unsigned on
-/// Windows. Used by `spawn` / `wait_nonblock` / `kill` to track a
+/// Windows. Used by `spawn` / `waitNonblock` / `kill` to track a
 /// child runtime process.
 pub const Pid = switch (builtin.os.tag) {
     .linux, .macos => i32,
@@ -203,10 +205,10 @@ fn utf8ToUtf16Z(gpa: std.mem.Allocator, s: []const u8) error{ InvalidArgument, O
 
 /// Spawns a child process running `path` with the supplied
 /// `argv`. The caller's environment is inherited as-is. The
-/// returned `Process` must be passed to `wait_nonblock` /
+/// returned `Process` must be passed to `waitNonblock` /
 /// `kill` for cleanup; on POSIX the child becomes a zombie
 /// until reaped.
-pub fn spawn_process(
+pub fn spawnProcess(
     gpa: std.mem.Allocator,
     path: []const u8,
     argv: []const []const u8,
@@ -287,18 +289,18 @@ pub fn spawn_process(
                 return error.SpawnFailed;
             }
             // The primary-thread handle is unused; close it now. The
-            // process handle is retained for `wait_nonblock` / `kill`.
+            // process handle is retained for `waitNonblock` / `kill`.
             if (pi.hThread) |h| _ = win.CloseHandle(h);
             return .{ .pid = pi.dwProcessId, .handle = pi.hProcess };
         },
-        else => @compileError("spawn_process: unsupported OS"),
+        else => @compileError("spawnProcess: unsupported OS"),
     }
 }
 
 /// Polls without blocking. Returns `null` if the child is still
 /// alive, or its exit code if it has terminated. Reaps zombies on
-/// POSIX so subsequent `is_alive(pid)` calls don't lie.
-pub fn wait_nonblock(proc: *Process) Error!?i32 {
+/// POSIX so subsequent `isAlive(pid)` calls don't lie.
+pub fn waitNonblock(proc: *Process) Error!?i32 {
     switch (builtin.os.tag) {
         .linux, .macos => {
             var status: i32 = 0;
@@ -319,12 +321,12 @@ pub fn wait_nonblock(proc: *Process) Error!?i32 {
             proc.handle = null;
             return @intCast(code);
         },
-        else => @compileError("wait_nonblock: unsupported OS"),
+        else => @compileError("waitNonblock: unsupported OS"),
     }
 }
 
 /// Sends SIGKILL (POSIX) or `TerminateProcess` (Windows). Does not
-/// wait; caller follows up with `wait_nonblock` to reap.
+/// wait; caller follows up with `waitNonblock` to reap.
 pub fn kill(proc: *Process) Error!void {
     switch (builtin.os.tag) {
         .linux, .macos => {
@@ -342,7 +344,7 @@ pub fn kill(proc: *Process) Error!void {
 /// session. Implemented via `kill(pid, 0)` on POSIX (signal 0
 /// performs the error checks of `kill` without sending a signal) and
 /// `OpenProcess(SYNCHRONIZE)` on Windows.
-pub fn is_alive(pid: Pid) bool {
+pub fn isAlive(pid: Pid) bool {
     switch (builtin.os.tag) {
         .linux, .macos => return posix.kill(pid, 0) == 0,
         .windows => {
@@ -351,9 +353,9 @@ pub fn is_alive(pid: Pid) bool {
             _ = win.CloseHandle(h);
             return true;
         },
-        else => @compileError("is_alive: unsupported OS"),
+        else => @compileError("isAlive: unsupported OS"),
     }
 }
 
 // Runtime tests live in `tests/ipc/process.zig` — see that file
-// for spawn + reap + is_alive + kill coverage.
+// for spawn + reap + isAlive + kill coverage.

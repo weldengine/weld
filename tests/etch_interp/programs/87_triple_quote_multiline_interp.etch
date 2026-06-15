@@ -1,0 +1,13 @@
+component Acc {
+  out: int = 0
+}
+
+rule run(entity: Entity)
+  when entity has Acc
+{
+  let n = 2
+  entity.get_mut(Acc).out = """
+    before {1 +
+      n} after
+    """.len()
+}

@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! GAL escape hatches pre-wired day 1 (brief §Scope + §Notes decision 1).
 //!
 //! Three concepts whose absence in Phase 0 would force a Phase 1+ refactor:

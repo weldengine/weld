@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Linux evdev gamepad polling.
 //!
 //! Phase 0.3 / M0.3 deliverable — minimal implementation. Documented
@@ -114,9 +116,12 @@ pub fn scanDevices(gpa: std.mem.Allocator) usize {
 /// Phase 0 stub — the full EV_KEY / EV_ABS parsing is Phase 1+. This
 /// function is exposed so the Window backend mainloop has a stable
 /// callsite; lighting it up does not require API changes downstream.
-pub fn pollAllSlots(state: *raw_state.InputRawState) void {
+/// The `gpa` parameter mirrors `win32_xinput.pollAllSlots` so a
+/// cross-OS mainloop binds a single signature (B12 / E7) — unused here
+/// (the Linux stub tracks no devices in Phase 0).
+pub fn pollAllSlots(gpa: std.mem.Allocator, state: *raw_state.InputRawState) void {
     if (comptime builtin.os.tag != .linux) return;
-    _ = state;
+    _ = .{ gpa, state };
     // No devices tracked Phase 0 — the wl_pointer / wl_keyboard paths
     // cover the main keyboard + mouse via the compositor, which is the
     // common case. Real gamepad support fleshes out from `scanDevices`

@@ -153,6 +153,78 @@ pub fn typeCheck(gpa: std.mem.Allocator, arena: *Ast, diags_out: *std.ArrayListU
     try TypeChecker.check(gpa, arena, diags_out);
 }
 
+/// One source file of a multi-file Etch project, fed to `validateProject`.
+/// `name` is the caller's label (path); the validator does not interpret it.
+pub const ProjectFile = struct {
+    name: []const u8,
+    source: []const u8,
+};
+
+/// Cross-file scene/prefab validation (M0.9 E2-B). Parses every project file,
+/// builds the byte-keyed global prefab-name index and a shared cross-scene
+/// UUID tracker, then type-checks each file with that project context so the
+/// three cross-file diagnostics resolve across the whole set:
+///   - `E1786 PrefabRefNotFound` — `instance of "X"` where no project file
+///     declares prefab `X`.
+///   - `E1791 PrefabBaseNotFound` — `prefab "Y" of/extends "Z"` where no
+///     project file declares prefab `Z`.
+///   - `E1782 DuplicateUUID` (cross-scene) — the same entity/instance UUID in
+///     two scenes (same or different file).
+///
+/// Every file's parse + type-check diagnostics accumulate in `diags_out`
+/// (caller-owned; each owns its `primary_message`). Bounded to the E2-B sizing
+/// guard — enumerate files, index prefab names + scene UUIDs, resolve the three
+/// references. No general dependency graph, no watch mode, no incremental
+/// invalidation.
+pub fn validateProject(
+    gpa: std.mem.Allocator,
+    files: []const ProjectFile,
+    diags_out: *std.ArrayListUnmanaged(Diagnostic),
+) !void {
+    // Parse every file up front; the arenas stay alive for the whole pass so
+    // the byte-keyed indexes below can reference their interned strings.
+    var asts: std.ArrayListUnmanaged(Ast) = .empty;
+    defer {
+        for (asts.items) |*a| a.deinit(gpa);
+        asts.deinit(gpa);
+    }
+    try asts.ensureTotalCapacity(gpa, files.len);
+    for (files) |f| {
+        const pr = try parser.parse(gpa, f.source);
+        // Move each parse diagnostic into diags_out (its gpa-owned message
+        // transfers), then free only the now-vacated backing slice — never
+        // `pr.deinit`, which would double-free the arena we keep below.
+        for (pr.diagnostics) |d| try diags_out.append(gpa, d);
+        gpa.free(pr.diagnostics);
+        asts.appendAssumeCapacity(pr.ast);
+    }
+
+    // Global byte-keyed prefab-name index (E1786 / E1791). Keys reference the
+    // arenas' string pools; the maps free before the arenas (LIFO defers).
+    var prefabs: std.StringHashMapUnmanaged(void) = .empty;
+    defer prefabs.deinit(gpa);
+    for (asts.items) |*a| {
+        const kinds = a.items.items(.kind);
+        const datas = a.items.items(.data);
+        var i: usize = 0;
+        while (i < a.items.len) : (i += 1) {
+            if (kinds[i] != .prefab_decl) continue;
+            const decl = a.prefab_decls.items[datas[i]];
+            try prefabs.put(gpa, a.strings.slice(decl.name), {});
+        }
+    }
+
+    // Shared cross-scene UUID tracker (E1782): the first occurrence of a UUID
+    // is recorded, a later one is the duplicate.
+    var uuids: std.StringHashMapUnmanaged(void) = .empty;
+    defer uuids.deinit(gpa);
+
+    const ctx: TypeChecker.ProjectContext = .{ .prefabs = &prefabs, .uuids = &uuids };
+    for (asts.items) |*a| {
+        try TypeChecker.checkProject(gpa, a, diags_out, &ctx);
+    }
+}
+
 test "public API builds + serializes a Level-B data descriptor (M0.8 E4)" {
     const gpa = std.testing.allocator;
     var result = try parseSource(gpa,

@@ -1,3 +1,13 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//! Frozen PlatformLayer window surface: `Window`, `Event`, `Desc`, `Error`,
+//! `KeyCode` (re-export), `MouseButton`, `MonitorInfo`, `QueryError`,
+//! `enumerateMonitors`, `currentMonitor`. EXCEPTION — `NativeHandles` /
+//! `Window.nativeHandles` are FROZEN-but-transient (the Phase-0.4 GAL
+//! absorbs surface creation; see the `NativeHandles` doc). The
+//! `classAtom`/`classOpenCount` accessors are test-support diagnostics, not
+//! part of the frozen contract. Covered by `WELD_PLATFORM_PROTOCOL_VERSION`
+//! (and the input variants by `WELD_INPUT_PROTOCOL_VERSION`).
+//!
 //! Public `Window` interface for the S2 spike. Tier 0 from S2 onward —
 //! the surface defined here (`create`, `destroy`, `close`, `resize` event
 //! delivery, `dpi_changed` event delivery) is stable. Phase 0.3 extends
@@ -13,8 +23,10 @@
 //!                                       engine buildable on macOS while
 //!                                       S2 is in progress)
 //!
-//! The brief deliberately scopes this surface tight: no input handling,
-//! no focus, no minimize/restore, no multi-monitor. Those land in 0.3.
+//! S2 scoped this surface tight (windowing only). M0.3 then added the
+//! input/focus/minimize-restore/multi-monitor surface that is now part of
+//! the frozen contract: the `Event` union's key/mouse/focus/minimize/dpi
+//! variants, plus `MonitorInfo` + `enumerateMonitors`/`currentMonitor`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -145,13 +157,15 @@ pub const Error = error{
 /// returns an empty struct.
 ///
 /// Not part of the long-term Tier 0 surface — the Phase 0.4 GAL absorbs
-/// surface creation behind a backend-agnostic API. Kept here for the S2
-/// spike binary, which is the only consumer.
+/// surface creation behind a backend-agnostic API. Its consumer is the
+/// render GAL's Vulkan surface creation
+/// (`src/modules/render/gal/vulkan/surface.zig`). FROZEN-but-transient:
+/// slated for Phase-0.4 GAL re-evaluation, not a permanent contract.
 pub const NativeHandles = backend.NativeHandles;
 
 /// Public Window handle — five-method front-end above the per-OS
-/// backend (`create`, `destroy`, `pollEvent`, `nativeHandles`,
-/// `getDimensions`).
+/// backend (`create`, `destroy`, `close`, `pollEvent`,
+/// `nativeHandles`).
 pub const Window = struct {
     impl: backend.Backend,
 

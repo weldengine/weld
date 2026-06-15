@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Filesystem helpers — VFS scheme resolver + `mmapFile`.
 //!
 //! Phase 0.3 / M0.3 deliverable. Documented in `engine-platform.md` §4

@@ -408,6 +408,12 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/etch/time_literal_test.zig", .etch = true, .dedicated_step = "test-time-lit" },
         // M0.8 / E3-D — D-S5-etchcook-inproc: the consolidated cook library.
         .{ .path = "tests/etch/cook_consolidate_test.zig", .etch = true },
+        // M0.9 / E2-A — triple-quote `"""…"""` multiline string lexer token
+        // + §1.4 common-indent strip at parse.
+        .{ .path = "tests/etch/lexer_triple_quote_test.zig", .etch = true },
+        // M0.9 / E2-B — cross-file scene/prefab validation (E1782 cross-scene,
+        // E1786 cross-file prefab ref, E1791 cross-file prefab base).
+        .{ .path = "tests/etch/crossfile_scene_prefab_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
         // M0.3 — common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },
@@ -590,6 +596,9 @@ pub fn build(b: *std.Build) void {
     // S6 viewport blit pipeline embeds pre-compiled SPIR-V via the
     // shared `shaders` facade — the same module the S2 spike uses.
     editor_module.addImport("shaders", shaders_module);
+    // M0.9 / E6 — the viewport blit (vk_blit.zig) renders through the public
+    // GAL (gal.Device) instead of raw Vulkan.
+    editor_module.addImport("weld_render", render_module);
     const editor_exe = b.addExecutable(.{
         .name = "weld-editor",
         .root_module = editor_module,
@@ -1148,6 +1157,102 @@ pub fn build(b: *std.Build) void {
         "Run the S5 codegen demo (cooks demo_5_rules_codegen.etch, runs 10 ticks)",
     );
     demo_codegen_step.dependOn(&demo_codegen_run.step);
+
+    // ----------------------- M0.9 / E3 vertical slice (run-vertical-slice) --
+    // Headless slice: cook examples/vertical_slice/gameplay.etch (POD
+    // components + 5 rules) → cooked module; the host (main.zig) spawns 100
+    // entities (Option A host-spawn, brief Blockers #1) and ticks the rules at
+    // a fixed 60 Hz timestep. The *.scene.etch / *.prefab.etch are NOT cooked
+    // here — they are authored content cross-file validated by the integration
+    // test (E2-B), not loaded (Phase 1 Scene Serialization).
+    const cook_slice_run = b.addRunArtifact(etch_cook_exe);
+    cook_slice_run.addArg("--output");
+    const slice_codegen_path = cook_slice_run.addOutputFileArg("cooked_vertical_slice.zig");
+    cook_slice_run.addPrefixedFileArg("gameplay=", b.path("examples/vertical_slice/gameplay.etch"));
+
+    const cooked_slice_module = b.createModule(.{
+        .root_source_file = slice_codegen_path,
+        .target = target,
+        .optimize = optimize,
+    });
+    cooked_slice_module.addImport("weld_core", core_module);
+
+    // M0.9 / E4 — the slice gains a Vulkan forward renderer + an M0.6-cooked
+    // texture asset + M0.3 input. The host module (main.zig) file-imports
+    // sim.zig / render.zig / math.zig, so its named deps (core/render/assets/
+    // cooked) cover all three files.
+    const slice_module = b.createModule(.{
+        .root_source_file = b.path("examples/vertical_slice/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    slice_module.addImport("weld_core", core_module);
+    slice_module.addImport("weld_render", render_module);
+    slice_module.addImport("weld_asset_pipeline", asset_pipeline_module);
+    slice_module.addImport("cooked_slice", cooked_slice_module);
+    const slice_exe = b.addExecutable(.{
+        .name = "vertical-slice",
+        .root_module = slice_module,
+    });
+    b.installArtifact(slice_exe);
+
+    // E4 — cook the slice's single source asset (PNG → .texture.bin) through
+    // the real M0.6 pipeline, installed to a stable path the runtime Loader
+    // reads (zig-out/vertical-slice-assets/slice_albedo.texture.bin).
+    const cook_assets_module = b.createModule(.{
+        .root_source_file = b.path("examples/vertical_slice/cook_assets.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cook_assets_module.addImport("weld_asset_pipeline", asset_pipeline_module);
+    const cook_assets_exe = b.addExecutable(.{
+        .name = "cook-vertical-slice-assets",
+        .root_module = cook_assets_module,
+    });
+    const cook_assets_run = b.addRunArtifact(cook_assets_exe);
+    cook_assets_run.addFileArg(b.path("examples/vertical_slice/assets/slice_albedo.png"));
+    const slice_albedo_bin = cook_assets_run.addOutputFileArg("slice_albedo.texture.bin");
+    const install_slice_assets = b.addInstallFileWithDir(
+        slice_albedo_bin,
+        .{ .custom = "vertical-slice-assets" },
+        "slice_albedo.texture.bin",
+    );
+    const cook_assets_step = b.step(
+        "cook-vertical-slice-assets",
+        "Cook the M0.9 slice's source asset (PNG → .texture.bin) via M0.6",
+    );
+    cook_assets_step.dependOn(&install_slice_assets.step);
+
+    const slice_run = b.addRunArtifact(slice_exe);
+    slice_run.step.dependOn(b.getInstallStep());
+    slice_run.step.dependOn(&install_slice_assets.step);
+    if (b.args) |args| slice_run.addArgs(args);
+    const slice_run_step = b.step(
+        "run-vertical-slice",
+        "Run the M0.9 vertical slice (windowed render; --smoke-test / --headless)",
+    );
+    slice_run_step.dependOn(&slice_run.step);
+
+    // Integration test: imports the slice module (sim + render via re-export) +
+    // weld_etch (E2-B validateProject) + weld_asset_pipeline (in-memory asset
+    // cook+load verify). composeNull exercises the render path cross-platform.
+    const slice_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/integration/vertical_slice_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    slice_test_module.addImport("weld_core", core_module);
+    slice_test_module.addImport("weld_etch", etch_module);
+    slice_test_module.addImport("weld_asset_pipeline", asset_pipeline_module);
+    slice_test_module.addImport("slice", slice_module);
+    const slice_test = b.addTest(.{ .root_module = slice_test_module });
+    const slice_test_run = b.addRunArtifact(slice_test);
+    test_step.dependOn(&slice_test_run.step);
+    const slice_test_step = b.step(
+        "test-vertical-slice",
+        "Run the M0.9 vertical slice integration test",
+    );
+    slice_test_step.dependOn(&slice_test_run.step);
 
     // ----------------------------- S5 compile-time bench (3 metrics) -------
 

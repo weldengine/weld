@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Catalogue of the IPC messages, defined as `extern struct` POD per
 //! `engine-ipc.md` §3.2 + brief § Scope. Every payload is written/read
 //! byte-for-byte across the socket, preceded by an 8-byte
