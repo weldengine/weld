@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Worker thread loop. Each worker owns a Chase-Lev deque and runs a tight
 //! loop: pop from its own deque, then try to steal from peers in a fixed
 //! rotation, then yield if both fail. The scheduler holds the trampoline

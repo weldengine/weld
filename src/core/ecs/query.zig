@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Comptime-typed multi-archetype query.
 //!
 //! M0.1 / E3 extends the E2 single-archetype view with `With(T)`,

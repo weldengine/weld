@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! M0.1 / E5a work-stealing scheduler.
 //!
 //! Dynamic worker pool — `worker_count = std.Thread.getCpuCount() catch 4`
@@ -41,6 +43,13 @@ const Job = worker_mod.Job;
 const TrampolineFn = worker_mod.TrampolineFn;
 const Worker = worker_mod.Worker;
 const WorkerStats = worker_mod.WorkerStats;
+
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// Version of the frozen Job-system Tier-0 public surface (Scheduler
+/// methods, SchedulerError, Job/TrampolineFn/Deque shapes). Bumped on
+/// any breaking change — a tracked migration, not a freeze failure (the
+/// `*_PROTOCOL_VERSION` rule, generalized from `WELD_IPC_PROTOCOL_VERSION`).
+pub const WELD_JOBS_PROTOCOL_VERSION: u32 = 1;
 
 /// Fallback worker count used when `std.Thread.getCpuCount` returns
 /// an error (no /proc/cpuinfo, Wasm sandbox, etc.). Matches the S1

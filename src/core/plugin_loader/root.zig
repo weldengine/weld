@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Public surface of the M0.2 / E6 plugin loader skeleton.
 //!
 //! Tier 0 component that loads Tier 3 plugin shared libraries

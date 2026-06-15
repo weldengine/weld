@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! XInput gamepad polling for the Win32 platform layer.
 //!
 //! Phase 0.3 / M0.3 deliverable — minimal implementation. Documented

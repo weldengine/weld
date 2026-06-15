@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Transport interface for the Weld editor↔runtime IPC.
 //!
 //! Two channels share this surface: a Unix domain socket on Linux /

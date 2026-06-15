@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Tier 0 runtime component registry — assigns a stable `ComponentId` to
 //! every component (or resource) type known to the engine, plus enough
 //! metadata for the rest of the ECS (dynamic archetype storage, runtime

@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Tier 0 root `World` — owns the unified archetype list, the M0.1 / E1
 //! generational identity store, the runtime registry, and the resource
 //! store. M0.1 / E2 collapsed the S1 (single hardcoded archetype) and S4
@@ -99,7 +101,7 @@ pub const World = struct {
     /// Monotonic frame counter. Incremented by `beginFrame()` at the
     /// start of each tick; written into every spawn / migration's
     /// `added_tick` + `changed_tick` sidecars and into every
-    /// `get_mut(T)` auto-mark. Reads happen from `Query.last_run_tick`
+    /// `getMut(T)` auto-mark. Reads happen from `Query.last_run_tick`
     /// comparisons.
     current_tick: Tick,
 

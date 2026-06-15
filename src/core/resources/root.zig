@@ -34,6 +34,13 @@ pub const ResourceMarker = registry_mod.ResourceMarker;
 /// `removeResource`).
 pub const ResourceError = api_mod.ResourceError;
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// Version of the frozen Resources (M0.2 singleton-entity) Tier-0 public
+/// surface (ResourceError + the set/get/getMut/has/remove/changed fns).
+/// Bumped on any breaking change — a tracked migration, not a freeze
+/// failure (the `*_PROTOCOL_VERSION` rule, generalized from `WELD_IPC_PROTOCOL_VERSION`).
+pub const WELD_RESOURCES_PROTOCOL_VERSION: u32 = 1;
+
 // -- Flat function surface ---------------------------------------------
 
 /// Insert or update the singleton resource of type `T`.

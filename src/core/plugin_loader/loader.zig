@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! M0.2 / E6 — Tier 0 plugin loader skeleton.
 //!
 //! Loads a `.so` / `.dll` / `.dylib`, resolves the

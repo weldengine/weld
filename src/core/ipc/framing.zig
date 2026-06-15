@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Framing layer for the Weld editor↔runtime IPC.
 //!
 //! Each frame on the wire is laid out as:

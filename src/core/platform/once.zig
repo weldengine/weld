@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Once-init primitive — tri-state CAS on `std.atomic.Value(u32)`.
 //!
 //! Zig 0.16.0 has **no** `std.once` / `std.Thread.Once` primitive (verified

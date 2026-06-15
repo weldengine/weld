@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Chase-Lev work-stealing deque (Chase & Lev, SPAA 2005), with the C11
 //! memory orderings refined by Lê, Pop, Cohen, Nardelli (PPoPP 2013).
 //!

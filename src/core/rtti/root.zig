@@ -30,6 +30,13 @@ pub const comptime_builder = builder_mod;
 /// Runtime registry that indexes `TypeInfo` by `TypeId` / `type_name`.
 pub const registry = registry_mod;
 
+/// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+/// Version of the frozen RTTI Tier-0 public surface (TypeId/SchemaHash,
+/// FieldDesc/TypeInfo, the builder + hash fns, the Registry API). Bumped
+/// on any breaking change — a tracked migration, not a freeze failure (the
+/// `*_PROTOCOL_VERSION` rule, generalized from `WELD_IPC_PROTOCOL_VERSION`).
+pub const WELD_RTTI_PROTOCOL_VERSION: u32 = 1;
+
 // -- Flat type surface -------------------------------------------------
 
 /// Stable 32-bit identity of a registered type (cf. `type_info.zig`).

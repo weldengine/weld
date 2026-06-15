@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Time primitives — `sleepPrecise(ns)` + monotonic `now()` for the Weld
 //! platform layer.
 //!

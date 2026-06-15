@@ -1,3 +1,5 @@
+//! FROZEN — see engine-phase-0-criteria.md C0.5 (M0.9)
+//!
 //! Tier 0 resource store — singleton storage indexed by `ComponentId`.
 //! Each resource carries a `dirty` flag set by `getMutResource` and cleared
 //! by `tickBoundary`. Used by the `when resource T changed` filter (see
