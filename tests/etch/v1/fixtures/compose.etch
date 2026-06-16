@@ -1,0 +1,12 @@
+// M1.0.0 — full `and` / `or` / `not` composition of ecs_conditions:
+// `Core and (A or B) and not Bad`.
+component Core { hit: int = 0 }
+component A { x: int = 0 }
+component B { x: int = 0 }
+component Bad { x: int = 0 }
+
+rule visit(entity: Entity)
+  when entity has Core and (entity has A or entity has B) and not entity has Bad
+{
+  entity.get_mut(Core).hit += 1
+}

@@ -1,0 +1,12 @@
+// M1.0.0 — value field-filter, equality form (`{ field == value }`):
+// visits only entities whose `Filt.level` equals the literal.
+component Filt {
+  level: int = 0
+  hit: int = 0
+}
+
+rule visit(entity: Entity)
+  when entity has Filt { level == 5 }
+{
+  entity.get_mut(Filt).hit += 1
+}
