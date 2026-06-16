@@ -60,10 +60,11 @@ pub const RuntimeReport = struct {
     /// codegen runtime has no report counterpart, so the field is never a
     /// differential-parity obligation.
     last_error: ?RuntimeError = null,
-    /// Root predicate evaluations against archetypes in the entity-bound
-    /// walk (M0.8 E3-D, D-S4-or-archetype) — the observable proving the
-    /// or-bitset short-cut: above the heuristic an `or` rule evaluates each
-    /// archetype once (at rescan), not once per archetype per tick.
+    /// Root predicate evaluations against archetypes during matching-set
+    /// rescans (M1.0.0 — generalised from the M0.8 D-S4-or-archetype counter).
+    /// The observable proving the cached selection: every entity-bound rule
+    /// evaluates each archetype once (at rescan, when it first appears), not
+    /// once per archetype per tick.
     predicate_archetype_evals: u64 = 0,
 };
 
@@ -207,14 +208,13 @@ const RuleDesc = struct {
     /// resumes a later tick via its `AsyncSlot`, instead of running to
     /// completion every tick. Dispatched by `runAsyncRule` in `stepOnce`.
     is_async: bool,
-    /// True iff `predicate_pool` contains an `or_` node (M0.8 E3-D,
-    /// D-S4-or-archetype) — gates the cached-bitset archetype path in
-    /// `runRule` above the count heuristic.
-    uses_or: bool,
-    /// Cached bitset of matching archetype indices for an `or` rule
-    /// (M0.8 E3-D) — lazily extended over the `world.archetypes` tail by
-    /// `rescanOrBitset` (the `Query.maybeRescan` pattern). Unused below the
-    /// heuristic / for or-free rules.
+    /// Cached bitset of matching archetype indices (M1.0.0 — generalised from
+    /// the M0.8 D-S4-or-archetype `or`-only path to every entity-bound rule).
+    /// This is the interpreter-side materialisation of the rule's
+    /// `archetype_set` (brief AD-1): lazily extended over the
+    /// `world.archetypes` tail by `rescanMatching` (the `Query.maybeRescan`
+    /// pattern). Drives the rule's entity selection, replacing the per-tick
+    /// global archetype walk.
     matching_archetypes: std.DynamicBitSetUnmanaged = .{},
     /// Number of archetypes seen by the most recent rescan. Compared against
     /// `world.archetypes.items.len` on every bitset-path entry.
@@ -444,14 +444,6 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
 }
 
 const StmtError = error{ OutOfMemory, RuntimeFailure };
-
-/// Archetype-count heuristic gating the `or`-predicate cached-bitset path
-/// (M0.8 E3-D, D-S4-or-archetype): below it the direct walk is kept
-/// byte-identically (the differential corpus creates 1–3 archetypes and
-/// never pays the cache), above it an `or` rule scans only the archetype
-/// tail it has not seen. The value is a tuning constant, not a frozen
-/// decision — flagged in the Review E3 bounds table.
-const or_bitset_threshold: usize = 8;
 
 /// Upper bound on call-argument count for the stack-allocated source-order
 /// evaluation buffer (M0.8 E4 named args). Far above any real signature;
@@ -947,32 +939,24 @@ pub const Interpreter = struct {
             return;
         }
         var rule_matched = false;
-        if (rd.uses_or and world.archetypes.items.len >= or_bitset_threshold) {
-            // D-S4-or-archetype (M0.8 E3-D): above the archetype-count
-            // heuristic, an `or` rule iterates a per-rule cached bitset of
-            // matching archetype indices instead of re-evaluating its
-            // predicate tree on every archetype every tick. Sound because an
-            // archetype's component set is immutable after creation (an
-            // add/remove transitions the entity to a DIFFERENT archetype) and
-            // `world.archetypes` is append-only with stable order — a cached
-            // verdict never goes stale; only the tail needs scanning
-            // (`Query.maybeRescan`, the Tier-0 precedent). Ascending index
-            // iteration preserves the direct walk's archetype order, so the
-            // interp↔codegen differential parity is untouched.
-            try self.rescanOrBitset(world, rd, report);
-            var it = rd.matching_archetypes.iterator(.{});
-            while (it.next()) |arch_idx| {
-                const arch = world.archetypes.items[arch_idx];
-                try self.iterateArchetype(world, rd, arch, &rule_matched, report);
-            }
-        } else {
-            for (world.archetypes.items) |arch| {
-                if (rd.predicate_root) |root| {
-                    report.predicate_archetype_evals += 1;
-                    if (!evalPredicate(rd.predicate_pool, root, arch)) continue;
-                }
-                try self.iterateArchetype(world, rd, arch, &rule_matched, report);
-            }
+        // M1.0.0 — every entity-bound rule's selection is driven by its cached
+        // matching-archetype set (the interpreter-side materialisation of the
+        // rule's `archetype_set`; cf. brief AD-1). `rescanMatching` lazily
+        // extends the set over the `world.archetypes` tail (the
+        // `Query.maybeRescan` option-β pattern, `engine-ecs-internals.md §4`):
+        // O(0) in the steady state, O(new archetypes) after a spawn into a new
+        // shape. This replaces the per-tick global linear re-evaluation of the
+        // predicate tree. Sound because an archetype's component set is
+        // immutable after creation (an add/remove transitions the entity to a
+        // DIFFERENT archetype) and `world.archetypes` is append-only with stable
+        // order — a cached verdict never goes stale. Ascending-index iteration
+        // preserves the historical direct-walk order, so the interp↔codegen
+        // differential parity is untouched.
+        try self.rescanMatching(world, rd, report);
+        var it = rd.matching_archetypes.iterator(.{});
+        while (it.next()) |arch_idx| {
+            const arch = world.archetypes.items[arch_idx];
+            try self.iterateArchetype(world, rd, arch, &rule_matched, report);
         }
         if (rule_matched) report.rules_matched += 1;
     }
@@ -1011,13 +995,16 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Lazily extend an `or` rule's matching-archetype bitset over the tail
-    /// of `world.archetypes` (M0.8 E3-D, D-S4-or-archetype). Compared on
-    /// every entry; O(0) in the steady state, O(new archetypes) after a
-    /// growth (spawn into a new shape, tick-boundary tag flush). The
-    /// predicate is evaluated once per NEW archetype, never re-evaluated on
-    /// the cached ones.
-    fn rescanOrBitset(self: *Interpreter, world: *World, rd: *RuleDesc, report: *RuntimeReport) !void {
+    /// Lazily extend a rule's matching-archetype set over the tail of
+    /// `world.archetypes` (M1.0.0 — generalises the M0.8 D-S4-or-archetype path
+    /// to every entity-bound rule). Compared on every entry; O(0) in the steady
+    /// state, O(new archetypes) after a growth (spawn into a new shape,
+    /// tick-boundary tag flush). The predicate is evaluated once per NEW
+    /// archetype, never re-evaluated on the cached ones. A rule with no
+    /// archetype-side predicate (`predicate_root == null` — e.g. a
+    /// negative-tag-only `when`) matches every archetype: the per-entity filters
+    /// carry the selection, exactly as the historical direct walk did.
+    fn rescanMatching(self: *Interpreter, world: *World, rd: *RuleDesc, report: *RuntimeReport) !void {
         const total = world.archetypes.items.len;
         if (total == rd.last_seen_archetype_count) return;
         try rd.matching_archetypes.resize(self.gpa, total, false);
@@ -3133,16 +3120,6 @@ fn compileRule(
     }
     const is_entity_bound = (entity_param_name != null) and has_component_ref;
 
-    // D-S4-or-archetype (M0.8 E3-D): an `or_` node anywhere in the pool
-    // makes the rule eligible for the cached-bitset archetype path.
-    var uses_or = false;
-    for (pool.items) |n| {
-        if (n.kind == .or_) {
-            uses_or = true;
-            break;
-        }
-    }
-
     // `@on_event(T)` observer (M0.8 E3): the event type name, or null. A
     // malformed annotation (caught + reported E1203 by the resolver) yields
     // null here → the rule degrades to a global/entity rule, no observer drain.
@@ -3168,7 +3145,6 @@ fn compileRule(
         .resource_expr_filters = try resource_expr_filters.toOwnedSlice(gpa),
         .last_run_tick = initial_tick,
         .is_async = rule.is_async,
-        .uses_or = uses_or,
     };
 }
 
@@ -5358,7 +5334,7 @@ fn readCounterI64(world: *World, counter_id: ComponentId, eid: CoreEntityId) i64
     return v;
 }
 
-test "or predicate caches an archetype bitset above the count heuristic (D-S4-or-archetype)" {
+test "every entity-bound rule caches its matching-archetype set, rescanning only the tail (M1.0.0)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -5373,8 +5349,8 @@ test "or predicate caches an archetype bitset above the count heuristic (D-S4-or
     const a_id = world.registry.idOf("A").?;
     const b_id = world.registry.idOf("B").?;
 
-    // Materialise 8 distinct archetypes (== or_bitset_threshold): the bare
-    // Counter, the two matching shapes, and five fillers.
+    // Materialise 8 distinct archetypes: the bare Counter, the two matching
+    // shapes, and five fillers.
     _ = try world.spawnDynamic(gpa, &[_]ComponentId{counter_id});
     const e_a = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, a_id });
     const e_b = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, b_id });
@@ -5384,14 +5360,14 @@ test "or predicate caches an archetype bitset above the count heuristic (D-S4-or
     }
     try std.testing.expectEqual(@as(usize, 8), world.archetypes.items.len);
 
-    // Tick 1 — first bitset-path entry: the rescan evaluates the predicate
-    // once per archetype (full initial scan), then iterates the cache.
+    // Tick 1 — first entry: the rescan evaluates the predicate once per
+    // archetype (full initial scan), then iterates the cache.
     const r1 = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(u64, 8), r1.predicate_archetype_evals);
     try std.testing.expectEqual(@as(i64, 1), readCounterI64(&world, counter_id, e_a));
     try std.testing.expectEqual(@as(i64, 1), readCounterI64(&world, counter_id, e_b));
 
-    // Tick 2 — steady state: zero re-evaluations (the cache short-cut), the
+    // Tick 2 — steady state: zero re-evaluations (the cached set), the
     // matching entities still accumulate.
     const r2 = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(u64, 0), r2.predicate_archetype_evals);
@@ -5406,7 +5382,7 @@ test "or predicate caches an archetype bitset above the count heuristic (D-S4-or
     try std.testing.expectEqual(@as(i64, 3), readCounterI64(&world, counter_id, e_a));
 }
 
-test "or predicate keeps the direct walk below the count heuristic (D-S4-or-archetype)" {
+test "the cached matching set replaces the per-tick walk at any archetype count (M1.0.0)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -5425,13 +5401,15 @@ test "or predicate keeps the direct walk below the count heuristic (D-S4-or-arch
     const e_b = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, b_id });
     try std.testing.expectEqual(@as(usize, 3), world.archetypes.items.len);
 
-    // Below the heuristic the direct walk re-evaluates the predicate per
-    // archetype per tick — byte-identical to the pre-E3-D behaviour (the
-    // differential corpus never pays the cache).
+    // M1.0.0 — the cached matching set is universal, at ANY archetype count:
+    // tick 1 scans all 3 archetypes once, then steady-state ticks re-evaluate
+    // nothing (this small-world case re-walked the predicate every tick under
+    // the M0.8 below-heuristic direct walk — the global linear scan removed by
+    // this milestone).
     const r1 = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(u64, 3), r1.predicate_archetype_evals);
     const r2 = try interp.runFor(&world, 1);
-    try std.testing.expectEqual(@as(u64, 3), r2.predicate_archetype_evals);
+    try std.testing.expectEqual(@as(u64, 0), r2.predicate_archetype_evals);
     try std.testing.expectEqual(@as(i64, 2), readCounterI64(&world, counter_id, e_a));
     try std.testing.expectEqual(@as(i64, 2), readCounterI64(&world, counter_id, e_b));
 }
