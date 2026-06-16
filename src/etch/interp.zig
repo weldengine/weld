@@ -219,6 +219,13 @@ const RuleDesc = struct {
     /// Number of archetypes seen by the most recent rescan. Compared against
     /// `world.archetypes.items.len` on every bitset-path entry.
     last_seen_archetype_count: usize = 0,
+    /// Entities this rule matched in the most recent tick it ran (M1.0.0
+    /// observable). Reset at the top of `runRule`'s entity-bound path,
+    /// incremented per matched entity in `iterateArchetype`.
+    /// `RuntimeReport.entities_iterated` is the program-wide sum; this is the
+    /// per-rule breakdown surfaced by `Interpreter.ruleMatchedEntities`.
+    /// Interp-only / informational, never a differential-parity obligation.
+    matched_entities: u64 = 0,
 
     fn deinit(self: *RuleDesc, gpa: std.mem.Allocator) void {
         gpa.free(self.predicate_pool);
@@ -880,6 +887,25 @@ pub const Interpreter = struct {
         return report;
     }
 
+    /// Number of compiled rules in the program (M1.0.0 observable — pairs with
+    /// `ruleName` / `ruleMatchedEntities` to log a per-rule matched-entity
+    /// breakdown).
+    pub fn ruleCount(self: *const Interpreter) usize {
+        return self.rule_descs.len;
+    }
+
+    /// Source name of rule `idx` (M1.0.0 observable).
+    pub fn ruleName(self: *const Interpreter, idx: usize) []const u8 {
+        return self.ast.strings.slice(self.rule_descs[idx].name);
+    }
+
+    /// Entities matched by rule `idx` in the most recent tick it ran (M1.0.0
+    /// observable). `RuntimeReport.entities_iterated` is the program-wide sum;
+    /// this is the per-rule breakdown. Interp-only / informational.
+    pub fn ruleMatchedEntities(self: *const Interpreter, idx: usize) u64 {
+        return self.rule_descs[idx].matched_entities;
+    }
+
     pub fn stepOnce(self: *Interpreter, world: *World, report: *RuntimeReport) !void {
         // Advance `current_tick` (and clear the dirty bitsets) at the start of
         // the tick when change detection is live, so a write this tick stamps
@@ -939,6 +965,10 @@ pub const Interpreter = struct {
             return;
         }
         var rule_matched = false;
+        // Per-rule matched-entity count for this tick (M1.0.0 observable) — the
+        // per-rule breakdown of `report.entities_iterated`. Reset before the
+        // walk; incremented per matched entity in `iterateArchetype`.
+        rd.matched_entities = 0;
         // M1.0.0 — every entity-bound rule's selection is driven by its cached
         // matching-archetype set (the interpreter-side materialisation of the
         // rule's `archetype_set`; cf. brief AD-1). `rescanMatching` lazily
@@ -962,9 +992,8 @@ pub const Interpreter = struct {
     }
 
     /// Walk one archetype's chunks/slots for an entity-bound rule — the
-    /// shared per-archetype body of both `runRule` paths (direct walk and
-    /// or-bitset, M0.8 E3-D).
-    fn iterateArchetype(self: *Interpreter, world: *World, rd: *const RuleDesc, arch: *DynamicArchetype, rule_matched: *bool, report: *RuntimeReport) !void {
+    /// per-archetype body of the cached-matching-set selection (M1.0.0).
+    fn iterateArchetype(self: *Interpreter, world: *World, rd: *RuleDesc, arch: *DynamicArchetype, rule_matched: *bool, report: *RuntimeReport) !void {
         for (arch.chunks.items) |chunk| {
             const ids = arch.entityIdsConst(chunk);
             const count = chunk.header().entity_count;
@@ -989,6 +1018,7 @@ pub const Interpreter = struct {
                 if ((rd.expr_filters.len > 0 or rd.expr_conds.len > 0) and
                     !(try self.exprGuardsPass(world, rd.*, entity_id, arch, chunk, slot))) continue;
                 report.entities_iterated += 1;
+                rd.matched_entities += 1;
                 rule_matched.* = true;
                 try self.execBody(world, rd.*, entity_id, null, report);
             }
