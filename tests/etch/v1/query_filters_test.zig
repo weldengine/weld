@@ -240,7 +240,69 @@ test "compose and or not" {
     _ = e_ab;
 }
 
-test "never-matches becomes dynamic" {
+test "compose or union" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var loaded = try load(gpa, &world, @embedFile("fixtures/or_union.etch"));
+    defer loaded.deinit(gpa);
+
+    const mark = cid(&world, "Mark");
+    const a = cid(&world, "A");
+    const b = cid(&world, "B");
+
+    // when: Mark and (A or B) — two DNF terms {Mark,A}, {Mark,B}.
+    const e_ma = try world.spawnDynamic(gpa, &[_]ComponentId{ mark, a }); // term 1
+    const e_mb = try world.spawnDynamic(gpa, &[_]ComponentId{ mark, b }); // term 2
+    const e_mab = try world.spawnDynamic(gpa, &[_]ComponentId{ mark, a, b }); // both terms
+    const e_m = try world.spawnDynamic(gpa, &[_]ComponentId{mark}); // neither → no match
+    const e_ab = try world.spawnDynamic(gpa, &[_]ComponentId{ a, b }); // no Mark → no match
+
+    const report = try loaded.interp.runFor(&world, 1);
+
+    // Hand-computed union: {Mark,A}, {Mark,B}, {Mark,A,B} = 3 distinct entities.
+    // The {Mark,A,B} entity satisfies BOTH disjuncts but is dispatched ONCE —
+    // hit == 1, not 2 (the union's k-way merge collapses the duplicate).
+    try std.testing.expectEqual(@as(u64, 3), report.entities_iterated);
+    try std.testing.expectEqual(@as(u64, 3), matchedByName(&loaded.interp, "visit"));
+    try std.testing.expectEqual(@as(i64, 1), readI64(&world, e_ma, "Mark", "hit"));
+    try std.testing.expectEqual(@as(i64, 1), readI64(&world, e_mb, "Mark", "hit"));
+    try std.testing.expectEqual(@as(i64, 1), readI64(&world, e_mab, "Mark", "hit"));
+    try std.testing.expectEqual(@as(i64, 0), readI64(&world, e_m, "Mark", "hit"));
+    _ = e_ab;
+}
+
+test "non-structural predicate" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var loaded = try load(gpa, &world, @embedFile("fixtures/non_structural.etch"));
+    defer loaded.deinit(gpa);
+
+    const lvl = cid(&world, "Lvl");
+    // Three entities in the SAME {Lvl} archetype, differing only in `v`.
+    const e3 = try world.spawnDynamic(gpa, &[_]ComponentId{lvl});
+    const e7 = try world.spawnDynamic(gpa, &[_]ComponentId{lvl});
+    const e20 = try world.spawnDynamic(gpa, &[_]ComponentId{lvl});
+    writeI64(&world, e3, "Lvl", "v", 3);
+    writeI64(&world, e7, "Lvl", "v", 7);
+    writeI64(&world, e20, "Lvl", "v", 20);
+
+    const report = try loaded.interp.runFor(&world, 1);
+
+    // `has Lvl` selects the {Lvl} archetype; the bare `entity.get(Lvl).v > 5`
+    // narrows per-entity. The three entities share an archetype, so the bare
+    // condition CANNOT be an archetype filter — only the per-entity evaluation
+    // can differentiate v=3 (out) from v=7, v=20 (in).
+    try std.testing.expectEqual(@as(u64, 2), report.entities_iterated);
+    try std.testing.expectEqual(@as(i64, 0), readI64(&world, e3, "Lvl", "hit"));
+    try std.testing.expectEqual(@as(i64, 1), readI64(&world, e7, "Lvl", "hit"));
+    try std.testing.expectEqual(@as(i64, 1), readI64(&world, e20, "Lvl", "hit"));
+}
+
+test "dynamic archetype appears" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -257,8 +319,8 @@ test "never-matches becomes dynamic" {
     const r0 = try loaded.interp.runFor(&world, 2);
     try std.testing.expectEqual(@as(u64, 0), r0.entities_iterated);
 
-    // A matching archetype appears dynamically — the lazy tail rescan of the
-    // cached matching set picks it up and the new entity matches.
+    // A matching archetype appears dynamically — the dynamic query's lazy tail
+    // rescan (option β) picks it up and the new entity matches.
     const e_rare = try world.spawnDynamic(gpa, &[_]ComponentId{rare});
     const r1 = try loaded.interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(u64, 1), r1.entities_iterated);
