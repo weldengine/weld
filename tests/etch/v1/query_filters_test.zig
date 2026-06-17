@@ -24,18 +24,27 @@ const ComponentId = weld_core.ecs.registry.ComponentId;
 /// Parse + type-check a fixture, asserting a clean front-end, then compile the
 /// interpreter against `world`. The returned `ParseResult` and `Interpreter`
 /// are owned by the caller (deinit in reverse order of return).
+///
+/// The `ParseResult` is **heap-allocated** so its `AstArena` keeps a stable
+/// address: `Interpreter.compile` stores `&pr.ast`, and the interpreter
+/// dereferences it on every tick. Returning the struct by value would move a
+/// by-value `pr`, leaving `interp.ast` dangling at the dead frame — a latent
+/// use-after-free that only the stable heap address avoids.
 const Loaded = struct {
-    pr: etch.parser.ParseResult,
+    pr: *etch.parser.ParseResult,
     interp: etch.Interpreter,
 
     fn deinit(self: *Loaded, gpa: std.mem.Allocator) void {
         self.interp.deinit();
         self.pr.deinit(gpa);
+        gpa.destroy(self.pr);
     }
 };
 
 fn load(gpa: std.mem.Allocator, world: *World, source: []const u8) !Loaded {
-    var pr = try etch.parseSource(gpa, source);
+    const pr = try gpa.create(etch.parser.ParseResult);
+    errdefer gpa.destroy(pr);
+    pr.* = try etch.parseSource(gpa, source);
     errdefer pr.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
 
