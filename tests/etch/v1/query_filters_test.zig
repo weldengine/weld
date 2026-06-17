@@ -363,4 +363,6 @@ test "observable per-rule matched counts over mixed-filter rules" {
     try std.testing.expectEqual(@as(u64, 3), matchedByName(&loaded.interp, "r_has")); // e1,e2,e5
     try std.testing.expectEqual(@as(u64, 2), matchedByName(&loaded.interp, "r_not")); // e1,e5
     try std.testing.expectEqual(@as(u64, 2), matchedByName(&loaded.interp, "r_field")); // e4,e5
+    try std.testing.expectEqual(@as(u64, 2), matchedByName(&loaded.interp, "r_or")); // e2,e5
+    try std.testing.expectEqual(@as(u64, 2), matchedByName(&loaded.interp, "r_expr")); // e4,e5
 }

@@ -1,9 +1,12 @@
-// M1.0.0 observable — several mixed-filter rules in one program. The harness
-// runs one tick over a seeded world and logs each rule's matched-entity count,
-// which must equal the hand-computed expectation:
-//   r_has   (has Core)                 -> e1, e2, e5         = 3
-//   r_not   (Core and not Flag)        -> e1, e5             = 2
-//   r_field (Lvl { v > 10 })           -> e4, e5             = 2
+// M1.0.0 observable — several mixed-filter rules in one program, covering
+// every filter form. The harness runs one tick over a seeded world and logs
+// each rule's matched-entity count, which must equal the hand-computed
+// expectation:
+//   r_has   (has Core)                       -> e1, e2, e5     = 3
+//   r_not   (Core and not Flag)              -> e1, e5         = 2
+//   r_field (Lvl { v > 10 })                 -> e4, e5         = 2
+//   r_or    (Core and (Flag or Lvl))         -> e2, e5         = 2
+//   r_expr  (Lvl and get(Lvl).v > 10, bare)  -> e4, e5         = 2
 component Core { hit: int = 0 }
 component Flag { x: int = 0 }
 component Lvl {
@@ -25,6 +28,18 @@ rule r_not(entity: Entity)
 
 rule r_field(entity: Entity)
   when entity has Lvl { v > 10 }
+{
+  entity.get_mut(Lvl).hit += 1
+}
+
+rule r_or(entity: Entity)
+  when entity has Core and (entity has Flag or entity has Lvl)
+{
+  entity.get_mut(Core).hit += 1
+}
+
+rule r_expr(entity: Entity)
+  when entity has Lvl and entity.get(Lvl).v > 10
 {
   entity.get_mut(Lvl).hit += 1
 }
