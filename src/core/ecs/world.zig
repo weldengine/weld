@@ -64,6 +64,10 @@ pub const WorldError = entity_mod.WorldError;
 /// scheduler tests can declare typed `*Chunk` bodies without spelling
 /// out the comptime filter tuple.
 pub const Query = query_mod.Query(&.{ Transform, Velocity }, .{});
+/// Runtime, `ComponentId`-keyed query type (M1.0.0). Re-exported so the Etch
+/// interpreter (which holds resolved ids, not Zig types) can name the return
+/// type of `World.queryDynamic` without reaching into `query.zig`.
+pub const DynamicQuery = query_mod.DynamicQuery;
 /// Public alias for the byte-level archetype so the bench / tests do
 /// not need to know about the deprecated `archetype_dynamic` shim.
 pub const Archetype = archetype_mod.Archetype;
@@ -935,6 +939,47 @@ pub const World = struct {
     fn worldArchetypesSlice(ctx: *anyopaque) []const *Archetype {
         const w: *World = @ptrCast(@alignCast(ctx));
         return w.archetypes.items;
+    }
+
+    /// Build a runtime, `ComponentId`-keyed dynamic query (M1.0.0) — the
+    /// selection primitive the Etch interpreter routes rule entity selection
+    /// through. The interpreter resolves `when` components to `ComponentId`s
+    /// (no Zig type to hand to the comptime `queryFiltered`), so it needs an
+    /// id-keyed entry point. Matches a single conjunctive term: archetypes
+    /// containing every id in `with_ids` and none in `without_ids`, reusing
+    /// `archetypeMatches` + the shared option-β lazy re-scan
+    /// (`query.rescanNewArchetypes`) — the same matcher and rescan body as the
+    /// comptime `Query`. The query owns copies of the id sets; callers
+    /// `defer q.deinit(gpa)`.
+    ///
+    /// `last_seen_archetype_count` starts at 0: the first `maybeRescan` (the
+    /// interpreter calls it at the top of each rule run) does the initial full
+    /// scan through the very same shared path as every later tail rescan — no
+    /// separate initial-scan loop to keep in sync.
+    ///
+    /// Additive to the World API. The C0.5 freeze covers the Tier-0 ↔ Tier-1
+    /// module interfaces, not internal `World` methods, so this does not
+    /// breach it.
+    pub fn queryDynamic(
+        self: *World,
+        gpa: std.mem.Allocator,
+        with_ids: []const ComponentId,
+        without_ids: []const ComponentId,
+    ) !query_mod.DynamicQuery {
+        const with_copy = try gpa.dupe(ComponentId, with_ids);
+        errdefer gpa.free(with_copy);
+        const without_copy = try gpa.dupe(ComponentId, without_ids);
+        errdefer gpa.free(without_copy);
+
+        return .{
+            .with_ids = with_copy,
+            .without_ids = without_copy,
+            .archetype_view = .{
+                .ctx = @ptrCast(self),
+                .archetypes_slice = &worldArchetypesSlice,
+            },
+            .rescan_gpa = gpa,
+        };
     }
 
     // ─── Resources ───────────────────────────────────────────────────────
