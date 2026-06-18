@@ -5228,6 +5228,292 @@ fn readResourceInt(world: *World, id: ComponentId) i64 {
     return value;
 }
 
+/// Write the first `int` (`i64`) field of `comp_id` on `entity` directly —
+/// bypassing the interpreter and WITHOUT stamping `changed_tick` (test setup;
+/// seeds a per-slot selector / field-filter input). The selector fields are
+/// `int`, not `i32`: a `{ field == 1 }` field-filter compares against an `int`
+/// literal, and the type-checker rejects an `i32` field as a mismatch (E1211,
+/// no implicit coercion). Mirrors `readCounterValue`'s first-field convention.
+fn writeI64Field(world: *World, comp_id: ComponentId, entity: CoreEntityId, value: i64) void {
+    const loc = world.dynamicLocation(entity).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    const cidx = arch.componentIndex(comp_id).?;
+    const cslot = arch.componentSlot(chunk, cidx, loc.slot);
+    const v: i64 = value;
+    @memcpy(cslot[0..@sizeOf(i64)], std.mem.asBytes(&v));
+}
+
+/// Read the `changed_tick` change-detection sidecar of `comp_id`'s slot on
+/// `entity` (test helper) — the value a `changed` filter compares against
+/// `last_run_tick` (`engine-ecs-internals.md` §5). Surfaces the spawn-tick
+/// stamp and the migration-preserved tick directly, without going through a
+/// rule.
+fn readChangedTick(world: *World, comp_id: ComponentId, entity: CoreEntityId) Tick {
+    const loc = world.dynamicLocation(entity).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    const cidx = arch.componentIndex(comp_id).?;
+    return arch.changedTick(chunk, cidx, loc.slot);
+}
+
+test "runProgram changed fires per-slot intra-archetype (M1.0.1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The per-slot case the M0.8 E3 test does NOT cover: there, entity A carried
+    // an extra `Marked` component so A and B sat in DIFFERENT archetypes (the
+    // `changed` granularity proven was inter-archetype). Here both entities share
+    // the SAME archetype {Health, Counter, Sel}; `damage` writes Health only for
+    // the slot whose `Sel.on == 1` (a per-entity field-filter, not a structural
+    // one), so only that slot's `changed_tick` advances this tick. `react`
+    // (`has Health changed`) must fire for the modified slot ALONE.
+    const source =
+        \\component Health { current: i32 = 100 }
+        \\component Counter { value: i32 = 0 }
+        \\component Sel { on: int = 0 }
+        \\rule damage(entity: Entity)
+        \\  when entity has Health and entity has Sel { on == 1 }
+        \\{
+        \\  entity.get_mut(Health).current -= 1
+        \\}
+        \\rule react(entity: Entity)
+        \\  when entity has Counter and entity has Health changed
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try std.testing.expect(interp.has_changed);
+
+    const health_id = world.registry.idOf("Health").?;
+    const counter_id = world.registry.idOf("Counter").?;
+    const sel_id = world.registry.idOf("Sel").?;
+    // Both entities are spawned with the SAME component set → SAME archetype.
+    const a = try world.spawnDynamic(gpa, &[_]ComponentId{ health_id, counter_id, sel_id });
+    const b = try world.spawnDynamic(gpa, &[_]ComponentId{ health_id, counter_id, sel_id });
+    writeI64Field(&world, sel_id, a, 1); // A is selected; B keeps Sel.on == 0.
+
+    // Machine-check the intra-archetype premise: A and B share one archetype, so
+    // the differentiation below can only be per-slot, never per-archetype.
+    try std.testing.expectEqual(
+        world.dynamicLocation(a).?.archetype_idx,
+        world.dynamicLocation(b).?.archetype_idx,
+    );
+
+    const report = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // A's Health changes every tick → react fires every tick → 3.
+    // B's Health never changes (same archetype, untouched slot) → 0.
+    try std.testing.expectEqual(@as(i32, 3), readCounterValue(&world, counter_id, a));
+    try std.testing.expectEqual(@as(i32, 0), readCounterValue(&world, counter_id, b));
+}
+
+test "runProgram changed combined with a field-filter (M1.0.1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A rule carrying BOTH a `changed` filter (`Health changed`) and a value
+    // field-filter (`Gate { open == 1 }`) fires only when BOTH hold. `damage`
+    // changes Health only for `Active` carriers, so the `changed` half is
+    // controllable per entity; the field-filter half gates on `Gate.open`.
+    // Three entities isolate the conjunction:
+    //   - both:     Active + Gate.open=1 → Health changes AND open==1 → fires.
+    //   - nochange: Gate.open=1, no Active → open==1 but Health unchanged → no.
+    //   - noopen:   Active + Gate.open=0 → Health changes but open==0 → no.
+    const source =
+        \\component Health { current: i32 = 100 }
+        \\component Counter { value: i32 = 0 }
+        \\component Gate { open: int = 0 }
+        \\component Active { v: int = 0 }
+        \\rule damage(entity: Entity)
+        \\  when entity has Health and entity has Active
+        \\{
+        \\  entity.get_mut(Health).current -= 1
+        \\}
+        \\rule react(entity: Entity)
+        \\  when entity has Counter and entity has Health changed and entity has Gate { open == 1 }
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const health_id = world.registry.idOf("Health").?;
+    const counter_id = world.registry.idOf("Counter").?;
+    const gate_id = world.registry.idOf("Gate").?;
+    const active_id = world.registry.idOf("Active").?;
+    const both = try world.spawnDynamic(gpa, &[_]ComponentId{ health_id, counter_id, gate_id, active_id });
+    const nochange = try world.spawnDynamic(gpa, &[_]ComponentId{ health_id, counter_id, gate_id });
+    const noopen = try world.spawnDynamic(gpa, &[_]ComponentId{ health_id, counter_id, gate_id, active_id });
+    writeI64Field(&world, gate_id, both, 1);
+    writeI64Field(&world, gate_id, nochange, 1);
+    // `noopen` keeps Gate.open == 0.
+
+    const report = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    try std.testing.expectEqual(@as(i32, 3), readCounterValue(&world, counter_id, both));
+    try std.testing.expectEqual(@as(i32, 0), readCounterValue(&world, counter_id, nochange));
+    try std.testing.expectEqual(@as(i32, 0), readCounterValue(&world, counter_id, noopen));
+}
+
+test "runProgram changed_tick travels across archetype migration (M1.0.1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The change tick is set at tick 1, a quiet tick (2) follows with no write,
+    // THEN the entity is migrated to another archetype. If migration reset the
+    // surviving Health column's `changed_tick` to the migration's `current_tick`
+    // (2), the assertion below would see 2; preservation keeps it at 1. `react`
+    // also must not spuriously re-fire across the boundary.
+    const source =
+        \\component Health { current: i32 = 100 }
+        \\component Counter { value: i32 = 0 }
+        \\component Active { on: int = 0 }
+        \\rule damage(entity: Entity)
+        \\  when entity has Health and entity has Active { on == 1 }
+        \\{
+        \\  entity.get_mut(Health).current -= 1
+        \\}
+        \\rule react(entity: Entity)
+        \\  when entity has Counter and entity has Health changed
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const health_id = world.registry.idOf("Health").?;
+    const counter_id = world.registry.idOf("Counter").?;
+    const active_id = world.registry.idOf("Active").?;
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{ health_id, counter_id, active_id });
+    writeI64Field(&world, active_id, e, 1); // damage writes Health while on == 1.
+
+    // Tick 1: damage writes Health → changed_tick = 1; react fires → Counter 1.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i32, 1), readCounterValue(&world, counter_id, e));
+    try std.testing.expectEqual(@as(Tick, 1), readChangedTick(&world, health_id, e));
+
+    // Quiet tick 2: disable damage (on = 0), so Health is NOT written this tick.
+    // current_tick advances to 2 while Health.changed_tick stays 1.
+    writeI64Field(&world, active_id, e, 0);
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i32, 1), readCounterValue(&world, counter_id, e));
+    try std.testing.expectEqual(@as(Tick, 1), readChangedTick(&world, health_id, e));
+
+    // Migrate: drop `Active` → archetype {Health, Counter}. The migration runs at
+    // current_tick = 2, but the surviving Health column must keep changed_tick 1.
+    try world.removeComponentDynamic(gpa, e, active_id);
+    try std.testing.expectEqual(@as(Tick, 1), readChangedTick(&world, health_id, e));
+
+    // Tick 3 after the migration: Health was not re-written, so the preserved
+    // stale tick (1) does not satisfy `changed` (1 > last_run 2 is false) →
+    // react does not spuriously fire. Counter stays 1.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i32, 1), readCounterValue(&world, counter_id, e));
+    try std.testing.expectEqual(@as(Tick, 1), readChangedTick(&world, health_id, e));
+}
+
+test "runProgram changed on a freshly-spawned entity uses the spawn tick (M1.0.1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The spawn-tick stamp is applied at slot allocation from `World.current_tick`
+    // (`engine-ecs-internals.md` §5). An entity spawned AFTER the world has begun
+    // ticking is stamped with the live tick, not the initial tick — and because a
+    // `changed` filter is strict (`changed_tick > last_run_tick`), a brand-new,
+    // never-modified entity is NOT seen as changed on the next tick its rule runs.
+    const source =
+        \\component Health { current: i32 = 100 }
+        \\component Counter { value: i32 = 0 }
+        \\rule react(entity: Entity)
+        \\  when entity has Counter and entity has Health changed
+        \\{
+        \\  entity.get_mut(Counter).value += 1
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try std.testing.expect(interp.has_changed);
+
+    const health_id = world.registry.idOf("Health").?;
+    const counter_id = world.registry.idOf("Counter").?;
+
+    // Tick once with no entities so `current_tick` advances to 1 (react's
+    // last_run_tick advances to 1 too).
+    _ = try interp.runFor(&world, 1);
+
+    // Spawn NOW, at current_tick == 1: the spawn-tick stamp is 1 (the live tick),
+    // not the initial tick (0).
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{ health_id, counter_id });
+    try std.testing.expectEqual(@as(Tick, 1), readChangedTick(&world, health_id, e));
+
+    // Tick 2: react evaluates the fresh entity with last_run_tick 1. Its Health
+    // changed_tick is the spawn tick (1), and 1 > 1 is false → react does not
+    // fire. A fresh spawn is not, by itself, a change.
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expectEqual(@as(i32, 0), readCounterValue(&world, counter_id, e));
+    try std.testing.expectEqual(@as(Tick, 1), readChangedTick(&world, health_id, e));
+}
+
 test "async rule suspends at await wait(N) and resumes N ticks later (M0.8 E3 sub-slice B)" {
     const gpa = std.testing.allocator;
     var world = World.init();
