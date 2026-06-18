@@ -1,0 +1,23 @@
+// M1.0.1 — per-slot intra-archetype change detection.
+//
+// Two entities share the SAME {Health, Counter, Sel} archetype. `damage`
+// writes Health only for the slot whose `Sel.on == 1` (a per-entity
+// field-filter, not a structural marker), so only that slot's Health
+// `changed_tick` advances this tick. `react` (`has Health changed`) records a
+// hit for the modified slot ALONE — proving per-slot granularity inside one
+// archetype, the case the M0.8 E3 inter-archetype test does not cover.
+component Health { current: i32 = 100 }
+component Counter { hit: int = 0 }
+component Sel { on: int = 0 }
+
+rule damage(entity: Entity)
+  when entity has Health and entity has Sel { on == 1 }
+{
+  entity.get_mut(Health).current -= 1
+}
+
+rule react(entity: Entity)
+  when entity has Counter and entity has Health changed
+{
+  entity.get_mut(Counter).hit += 1
+}
