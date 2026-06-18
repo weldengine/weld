@@ -327,7 +327,12 @@ test "writeValueAsBytes returns TypeMismatch on an incompatible value tag" {
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.bool_, &buf, .{ .int_ = 1 }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.f32_, &buf, .{ .bool_ = false }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.float_, &buf, .{ .bool_ = true }));
-    try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.f64_, &buf, .{ .int_ = 7 }));
+    // Float kinds (.float_/.f64_/.f32_) intentionally accept an int Value via
+    // `@floatFromInt` (see `writeValueAsBytes` above), so an int is NOT an
+    // incompatible tag for `.f64_` — probe it with a genuinely incompatible tag
+    // (`.bool_`). (M1.0.1 wire-in: this assertion previously used `.int_ = 7`,
+    // which the int→float coercion accepts, so it never matched the impl.)
+    try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.f64_, &buf, .{ .bool_ = true }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.i32_, &buf, .{ .float_ = 1.5 }));
     try std.testing.expectError(error.TypeMismatch, writeValueAsBytes(.u32_, &buf, .{ .bool_ = false }));
 }

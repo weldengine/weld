@@ -4238,23 +4238,29 @@ test "runProgram generic fn + generic struct run type-erased (M0.8 E2 block 4)" 
 test "runProgram generic inherent impl (impl<T> Range<T>) resolves + interps (§891, M0.8 E2)" {
     const gpa = std.testing.allocator;
     // The §891-patched grammar accepts a generic-type inherent impl target. A
-    // method on `Range<T>` dispatches + runs type-erased: `contains(5)` on
-    // `Range { min: 2, max: 8 }` is 2 <= 5 <= 8 → true → out = 1. Generic
+    // method on `Range<T>` dispatches + runs type-erased: `lower()` on
+    // `Range { min: 2, max: 8 }` returns `self.min` → out = 2. Generic
     // codegen stays UnsupportedConstruct (so this is interp-reference, not a
     // codegen differential — consistent with block 4).
+    //
+    // (M1.0.1 wire-in: the method previously compared the generic `T`
+    // (`v >= self.min`), which the M0.8 minimal subset rejects — comparison
+    // requires matching primitive operands (`types.zig` §`.eq/.lt/...`), and an
+    // unbounded `T` is not a primitive. Rewritten to a generic field accessor,
+    // which is the delivered generic-dispatch capability this test exercises.)
     var world = World.init();
     defer world.deinit(gpa);
     var pr = try parser_mod.parse(gpa,
         \\struct Range<T> { min: T  max: T }
         \\impl<T> Range<T> {
-        \\  fn contains(self, v: T) -> bool { v >= self.min and v <= self.max }
+        \\  fn lower(self) -> T { self.min }
         \\}
         \\component C { out: int = 0 }
         \\rule r(entity: Entity)
         \\  when entity has C
         \\{
         \\  let rng = Range { min: 2, max: 8 }
-        \\  entity.get_mut(C).out = if rng.contains(5) { 1 } else { 0 }
+        \\  entity.get_mut(C).out = rng.lower()
         \\}
     );
     defer pr.deinit(gpa);
@@ -4276,7 +4282,7 @@ test "runProgram generic inherent impl (impl<T> Range<T>) resolves + interps (§
     const slot = arch.componentSlot(arch.chunks.items[loc.chunk_idx], arch.componentIndex(cid).?, loc.slot);
     var out: i64 = 0;
     @memcpy(std.mem.asBytes(&out), slot[0..8]);
-    try std.testing.expectEqual(@as(i64, 1), out);
+    try std.testing.expectEqual(@as(i64, 2), out);
 }
 
 test "runProgram while let unwraps an optional each iteration (M0.8 E2 block 5)" {
@@ -4862,11 +4868,14 @@ test "runProgram mut-self method mutates the receiver in place (M0.8 E2 block 3)
     // caller (the struct handle is shared — reference semantics for `mut self`).
     // The interpreter is the reference for `mut self`; its codegen is deferred
     // (pointer receiver), so this has no differential. c.n: 10 → +5 → 15.
+    // (M1.0.1 wire-in: the accessor was named `get`, a reserved ECS builtin
+    // keyword — `fn get(...)` is a parse error. Renamed to `value`; the subject
+    // under test is the `mut self` mutation, not the accessor's name.)
     const source =
         \\struct Counter { n: int = 0 }
         \\impl Counter {
         \\  fn bump(mut self, by: int) { self.n += by }
-        \\  fn get(self) -> int { self.n }
+        \\  fn value(self) -> int { self.n }
         \\}
         \\component Acc { out: int = 0 }
         \\rule run(entity: Entity)
@@ -4874,7 +4883,7 @@ test "runProgram mut-self method mutates the receiver in place (M0.8 E2 block 3)
         \\{
         \\  let mut c = Counter { n: 10 }
         \\  c.bump(5)
-        \\  entity.get_mut(Acc).out = c.get()
+        \\  entity.get_mut(Acc).out = c.value()
         \\}
     ;
 

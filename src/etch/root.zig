@@ -33,6 +33,21 @@ const value = @import("value.zig");
 const ecs_bridge = @import("ecs_bridge.zig");
 const interp = @import("interp.zig");
 
+// Pull the S4 interpreter surface files into the module's test import graph
+// so `zig build test` collects their inline tests. The type aliases below
+// (`Interpreter`, `RuntimeReport`) reference `interp.zig`'s declarations but
+// do NOT force analysis of these files' `test` blocks — under Zig 0.16 lazy
+// analysis a referenced declaration pulls only that declaration, not the
+// containing file's tests (`engine-zig-conventions.md` §13). Without this
+// guard `interp.zig` (the file these very change-detection tests live in),
+// `value.zig` and `ecs_bridge.zig` are silently skipped by the test runner.
+// Mirrors the same reference-guard idiom in `zig_codegen/root.zig`.
+comptime {
+    _ = @import("interp.zig");
+    _ = @import("value.zig");
+    _ = @import("ecs_bridge.zig");
+}
+
 /// S5 Zig codegen surface — exposed at the module surface so
 /// `tools/etch_cook` and downstream consumers can drive the codegen
 /// without depending on the internal path layout.
