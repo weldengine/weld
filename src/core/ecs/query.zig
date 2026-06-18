@@ -291,39 +291,38 @@ pub fn Query(comptime Components: []const type, comptime filters: anytype) type 
         /// `Self.empty()` directly).
         pub fn maybeRescan(self: *Self) void {
             const view = self.archetype_view orelse return;
-            const all = view.archetypes_slice(view.ctx);
-            if (all.len == self.last_seen_archetype_count) return;
-            // Scan only the tail — existing matches remain valid
-            // (archetype pointers are stable for the world's lifetime).
-            const tail = all[self.last_seen_archetype_count..];
-            for (tail) |arch| {
-                // M0.2 / E3 — singleton-entity resources are invisible
-                // to user queries. Skip the archetype before the cheaper
-                // signature match runs.
-                if (arch.is_singleton) continue;
-                if (!archetypeMatches(
-                    arch,
-                    &self.required_ids,
-                    &self.with_ids,
-                    &self.without_ids,
-                )) continue;
-                var indices: [Components.len]u32 = undefined;
-                for (self.required_ids, 0..) |cid, i| {
-                    indices[i] = @intCast(arch.componentIndex(cid).?);
+            // The per-match action: resolve each required component's
+            // column index and append the `Match`. `appendBounded` would
+            // error on OOM — but a Query built via queryFiltered always
+            // carries a heap gpa, and the matches list only grows by
+            // O(world archetype delta). On OOM we panic — losing a match
+            // silently is a worse failure mode than crashing (would
+            // corrupt the iteration's chunkCount/chunkAt contract).
+            const Appender = struct {
+                fn onMatch(s: *Self, arch: *Archetype) void {
+                    var indices: [Components.len]u32 = undefined;
+                    for (s.required_ids, 0..) |cid, i| {
+                        indices[i] = @intCast(arch.componentIndex(cid).?);
+                    }
+                    s.matches.append(s.rescan_gpa, .{
+                        .archetype = arch,
+                        .column_indices = indices,
+                    }) catch @panic("Query.maybeRescan: out of memory appending new match");
                 }
-                // `appendBounded` would error on OOM — but a Query
-                // built via queryFiltered always carries a heap gpa,
-                // and the matches list only grows by O(world
-                // archetype delta). On OOM we panic — losing a match
-                // silently is a worse failure mode than crashing
-                // (would corrupt the iteration's chunkCount/chunkAt
-                // contract).
-                self.matches.append(self.rescan_gpa, .{
-                    .archetype = arch,
-                    .column_indices = indices,
-                }) catch @panic("Query.maybeRescan: out of memory appending new match");
-            }
-            self.last_seen_archetype_count = all.len;
+            };
+            // M1.0.0 — the tail scan + singleton skip + `archetypeMatches`
+            // call live in the shared `rescanNewArchetypes` helper, which
+            // the dynamic (`ComponentId`-keyed) query path reuses verbatim.
+            // One matcher, one rescan body, two callers.
+            _ = rescanNewArchetypes(
+                view,
+                &self.last_seen_archetype_count,
+                &self.required_ids,
+                &self.with_ids,
+                &self.without_ids,
+                self,
+                Appender.onMatch,
+            );
         }
 
         /// Number of matched archetypes. Mostly useful for tests and
@@ -508,3 +507,108 @@ pub fn archetypeMatches(
     }
     return true;
 }
+
+/// Shared option-β tail rescan (M1.0.0). Walks the archetypes the world has
+/// gained since `last_seen.*`, applies `archetypeMatches` with the given
+/// id sets (singletons skipped — they are invisible to user queries), and
+/// invokes `onMatch(ctx, arch)` for every new match. Updates `last_seen.*`
+/// to the full archetype count and returns the number of archetypes scanned
+/// this call (0 in the steady state).
+///
+/// This is the single lazy-rescan body. Both the comptime `Query.maybeRescan`
+/// (which appends a typed `Match` with resolved column indices) and the
+/// runtime `DynamicQuery.maybeRescan` (which appends the bare archetype)
+/// route through it — the interpreter no longer carries its own copy of the
+/// rescan loop. The matcher (`archetypeMatches`) is likewise shared.
+///
+/// Cheap in the steady state: one `usize` equality, no heap traffic. The
+/// scan itself is `O(new)` over archetype count.
+pub fn rescanNewArchetypes(
+    view: ArchetypeView,
+    last_seen: *usize,
+    required_ids: []const ComponentId,
+    with_ids: []const ComponentId,
+    without_ids: []const ComponentId,
+    ctx: anytype,
+    comptime onMatch: fn (@TypeOf(ctx), *Archetype) void,
+) usize {
+    const all = view.archetypes_slice(view.ctx);
+    if (all.len == last_seen.*) return 0;
+    // Scan only the tail — existing matches remain valid (archetype
+    // pointers are stable for the world's lifetime).
+    const tail = all[last_seen.*..];
+    for (tail) |arch| {
+        // M0.2 / E3 — singleton-entity resources are invisible to user
+        // queries. Skip before the cheaper signature match runs.
+        if (arch.is_singleton) continue;
+        if (!archetypeMatches(arch, required_ids, with_ids, without_ids)) continue;
+        onMatch(ctx, arch);
+    }
+    const scanned = tail.len;
+    last_seen.* = all.len;
+    return scanned;
+}
+
+/// Runtime, `ComponentId`-keyed multi-archetype query (M1.0.0). The Etch
+/// interpreter has resolved `ComponentId`s, not Zig types, so it cannot use
+/// the comptime `Query`. `DynamicQuery` matches a single conjunctive term —
+/// a `with` id set (archetype must contain every id) and a `without` id set
+/// (archetype must contain none) — reusing `archetypeMatches` and the same
+/// option-β lazy re-scan (`rescanNewArchetypes`) as the comptime path.
+///
+/// Composition is the caller's job: a rule's `when` clause lowers to a DNF
+/// of conjunctive terms, one `DynamicQuery` per term, and the rule's matched
+/// set is the union of the terms' `matching` lists (cf. `interp.zig`).
+///
+/// `matching` is in archetype-creation order (== ascending `archetype_id`),
+/// because both the initial scan and every tail rescan append in
+/// `world.archetypes` order — which lets the interpreter k-way-merge several
+/// terms' lists without sorting.
+pub const DynamicQuery = struct {
+    /// Owned copy of the "must contain" component ids.
+    with_ids: []ComponentId,
+    /// Owned copy of the "must not contain" component ids.
+    without_ids: []ComponentId,
+    /// Matched archetypes, ascending by `archetype_id`. The option-β cache.
+    matching: std.ArrayListUnmanaged(*Archetype) = .empty,
+    /// Lazy-rescan view onto the world's archetype slice. Null only for a
+    /// default-constructed query that was never wired by `World.queryDynamic`.
+    archetype_view: ?ArchetypeView = null,
+    /// Allocator captured at construction so `maybeRescan` can extend the
+    /// matching list without threading a gpa through every iteration.
+    rescan_gpa: std.mem.Allocator = undefined,
+    /// Archetypes seen by the most recent scan. Compared against
+    /// `world.archetypes.items.len` on every `maybeRescan`.
+    last_seen_archetype_count: usize = 0,
+
+    pub fn deinit(self: *DynamicQuery, gpa: std.mem.Allocator) void {
+        gpa.free(self.with_ids);
+        gpa.free(self.without_ids);
+        self.matching.deinit(gpa);
+        self.* = undefined;
+    }
+
+    /// Lazy tail rescan (option β), shared with the comptime `Query` via
+    /// `rescanNewArchetypes`. Returns the number of archetypes scanned this
+    /// call (0 in the steady state) so the interpreter can surface the
+    /// per-rule rescan-evaluation observable. The required-id set is empty:
+    /// the term's "must contain" components live entirely in `with_ids`.
+    pub fn maybeRescan(self: *DynamicQuery) usize {
+        const view = self.archetype_view orelse return 0;
+        const Appender = struct {
+            fn onMatch(s: *DynamicQuery, arch: *Archetype) void {
+                s.matching.append(s.rescan_gpa, arch) catch
+                    @panic("DynamicQuery.maybeRescan: out of memory appending new match");
+            }
+        };
+        return rescanNewArchetypes(
+            view,
+            &self.last_seen_archetype_count,
+            &.{},
+            self.with_ids,
+            self.without_ids,
+            self,
+            Appender.onMatch,
+        );
+    }
+};

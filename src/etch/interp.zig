@@ -30,6 +30,7 @@ const FieldKind = weld_core.ecs.registry.FieldKind;
 const DynamicArchetype = weld_core.ecs.archetype_dynamic.DynamicArchetype;
 const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
 const World = weld_core.ecs.world.World;
+const DynamicQuery = weld_core.ecs.world.DynamicQuery;
 const CoreEntityId = weld_core.ecs.entity.EntityId;
 const Tick = weld_core.ecs.tick.Tick;
 const initial_tick = weld_core.ecs.tick.initial_tick;
@@ -60,10 +61,11 @@ pub const RuntimeReport = struct {
     /// codegen runtime has no report counterpart, so the field is never a
     /// differential-parity obligation.
     last_error: ?RuntimeError = null,
-    /// Root predicate evaluations against archetypes in the entity-bound
-    /// walk (M0.8 E3-D, D-S4-or-archetype) — the observable proving the
-    /// or-bitset short-cut: above the heuristic an `or` rule evaluates each
-    /// archetype once (at rescan), not once per archetype per tick.
+    /// Root predicate evaluations against archetypes during matching-set
+    /// rescans (M1.0.0 — generalised from the M0.8 D-S4-or-archetype counter).
+    /// The observable proving the cached selection: every entity-bound rule
+    /// evaluates each archetype once (at rescan, when it first appears), not
+    /// once per archetype per tick.
     predicate_archetype_evals: u64 = 0,
 };
 
@@ -153,11 +155,19 @@ const PredicateNode = struct {
 const RuleDesc = struct {
     rule_idx: u32,
     name: StringId,
-    /// Pool of resolved predicate nodes. `predicate_root` indexes into it.
-    /// Empty when the rule has no component-side `when` clause (resource-
-    /// only or no when).
-    predicate_pool: []PredicateNode,
-    predicate_root: ?u32,
+    /// M1.0.0 — the rule's archetype selection: one Tier-0 `DynamicQuery`
+    /// per conjunctive term of the `when` clause's DNF (`has T` → `with`,
+    /// `not entity has T` → `without`). The rule's matched-archetype set is
+    /// the UNION of the terms' results. A pure-`and` `when` yields one term;
+    /// `or` yields one per disjunct. Empty for a non-entity-bound rule (the
+    /// global / resource-only / event path never selects archetypes) and for
+    /// an entity-bound rule whose every term is structurally unsatisfiable
+    /// (`has T` ∧ `not has T` → matches nothing). Each query reuses
+    /// `archetypeMatches` + the shared option-β lazy re-scan
+    /// (`query.rescanNewArchetypes`) — the interpreter no longer carries its
+    /// own archetype matcher or rescan loop (the M1.0.0 root-cause fix:
+    /// `interp.zig` stops duplicating `query.zig`).
+    selection: []DynamicQuery,
     resource_deps: []ResourceDep,
     /// Per-entity field filters, one per `has T { field == value }` clause
     /// (M0.8 E3-D, D-S4-multifilter — was a single overwrite-on-collision
@@ -207,21 +217,16 @@ const RuleDesc = struct {
     /// resumes a later tick via its `AsyncSlot`, instead of running to
     /// completion every tick. Dispatched by `runAsyncRule` in `stepOnce`.
     is_async: bool,
-    /// True iff `predicate_pool` contains an `or_` node (M0.8 E3-D,
-    /// D-S4-or-archetype) — gates the cached-bitset archetype path in
-    /// `runRule` above the count heuristic.
-    uses_or: bool,
-    /// Cached bitset of matching archetype indices for an `or` rule
-    /// (M0.8 E3-D) — lazily extended over the `world.archetypes` tail by
-    /// `rescanOrBitset` (the `Query.maybeRescan` pattern). Unused below the
-    /// heuristic / for or-free rules.
-    matching_archetypes: std.DynamicBitSetUnmanaged = .{},
-    /// Number of archetypes seen by the most recent rescan. Compared against
-    /// `world.archetypes.items.len` on every bitset-path entry.
-    last_seen_archetype_count: usize = 0,
+    /// Entities this rule matched in the most recent tick it ran (M1.0.0
+    /// observable). Reset at the top of `runRule`'s entity-bound path,
+    /// incremented per matched entity in `iterateArchetype`.
+    /// `RuntimeReport.entities_iterated` is the program-wide sum; this is the
+    /// per-rule breakdown surfaced by `Interpreter.ruleMatchedEntities`.
+    /// Interp-only / informational, never a differential-parity obligation.
+    matched_entities: u64 = 0,
 
     fn deinit(self: *RuleDesc, gpa: std.mem.Allocator) void {
-        gpa.free(self.predicate_pool);
+        freeSelection(gpa, self.selection);
         gpa.free(self.resource_deps);
         gpa.free(self.field_filters);
         for (self.tag_predicates) |*tp| tp.deinit(gpa);
@@ -232,9 +237,14 @@ const RuleDesc = struct {
         gpa.free(self.expr_conds);
         for (self.resource_expr_filters) |rf| gpa.free(rf.fields);
         gpa.free(self.resource_expr_filters);
-        self.matching_archetypes.deinit(gpa);
     }
 };
+
+/// Free a rule's archetype selection — every `DynamicQuery` plus the slice.
+fn freeSelection(gpa: std.mem.Allocator, selection: []DynamicQuery) void {
+    for (selection) |*q| q.deinit(gpa);
+    gpa.free(selection);
+}
 
 const Local = struct {
     value: Value,
@@ -445,14 +455,6 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
 
 const StmtError = error{ OutOfMemory, RuntimeFailure };
 
-/// Archetype-count heuristic gating the `or`-predicate cached-bitset path
-/// (M0.8 E3-D, D-S4-or-archetype): below it the direct walk is kept
-/// byte-identically (the differential corpus creates 1–3 archetypes and
-/// never pays the cache), above it an `or` rule scans only the archetype
-/// tail it has not seen. The value is a tuning constant, not a frozen
-/// decision — flagged in the Review E3 bounds table.
-const or_bitset_threshold: usize = 8;
-
 /// Upper bound on call-argument count for the stack-allocated source-order
 /// evaluation buffer (M0.8 E4 named args). Far above any real signature;
 /// exceeding it fails loud.
@@ -609,6 +611,11 @@ pub const Interpreter = struct {
     /// Suspend/resume state, one slot per rule (parallel to `rule_descs`). Empty
     /// when `!has_async`; a non-async rule never touches its slot.
     async_slots: []AsyncSlot = &.{},
+    /// Reusable cursor buffer for the multi-term (`or`) archetype-union merge
+    /// (M1.0.0). Resized to the term count of the rule being iterated; capacity
+    /// is retained across rules/ticks so the union path allocates at most once.
+    /// Untouched by single-term rules (the common case iterates directly).
+    merge_cursors: std.ArrayListUnmanaged(usize) = .empty,
 
     pub fn deinit(self: *Interpreter) void {
         for (self.rule_descs) |*r| r.deinit(self.gpa);
@@ -631,6 +638,7 @@ pub const Interpreter = struct {
         for (self.async_slots) |*slot| slot.deinit(self.gpa);
         self.gpa.free(self.async_slots);
         self.descriptors.deinit(self.gpa);
+        self.merge_cursors.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -736,7 +744,7 @@ pub const Interpreter = struct {
             const kind = ast.items.items(.kind)[i];
             const data = ast.items.items(.data)[i];
             if (kind != .rule_decl) continue;
-            const desc = try compileRule(gpa, ast, &bridge, &world.registry, &tag_table, tagset_id, data);
+            const desc = try compileRule(gpa, ast, &bridge, world, &tag_table, tagset_id, data);
             try rule_descs.append(gpa, desc);
         }
 
@@ -888,6 +896,25 @@ pub const Interpreter = struct {
         return report;
     }
 
+    /// Number of compiled rules in the program (M1.0.0 observable — pairs with
+    /// `ruleName` / `ruleMatchedEntities` to log a per-rule matched-entity
+    /// breakdown).
+    pub fn ruleCount(self: *const Interpreter) usize {
+        return self.rule_descs.len;
+    }
+
+    /// Source name of rule `idx` (M1.0.0 observable).
+    pub fn ruleName(self: *const Interpreter, idx: usize) []const u8 {
+        return self.ast.strings.slice(self.rule_descs[idx].name);
+    }
+
+    /// Entities matched by rule `idx` in the most recent tick it ran (M1.0.0
+    /// observable). `RuntimeReport.entities_iterated` is the program-wide sum;
+    /// this is the per-rule breakdown. Interp-only / informational.
+    pub fn ruleMatchedEntities(self: *const Interpreter, idx: usize) u64 {
+        return self.rule_descs[idx].matched_entities;
+    }
+
     pub fn stepOnce(self: *Interpreter, world: *World, report: *RuntimeReport) !void {
         // Advance `current_tick` (and clear the dirty bitsets) at the start of
         // the tick when change detection is live, so a write this tick stamps
@@ -947,40 +974,94 @@ pub const Interpreter = struct {
             return;
         }
         var rule_matched = false;
-        if (rd.uses_or and world.archetypes.items.len >= or_bitset_threshold) {
-            // D-S4-or-archetype (M0.8 E3-D): above the archetype-count
-            // heuristic, an `or` rule iterates a per-rule cached bitset of
-            // matching archetype indices instead of re-evaluating its
-            // predicate tree on every archetype every tick. Sound because an
-            // archetype's component set is immutable after creation (an
-            // add/remove transitions the entity to a DIFFERENT archetype) and
-            // `world.archetypes` is append-only with stable order — a cached
-            // verdict never goes stale; only the tail needs scanning
-            // (`Query.maybeRescan`, the Tier-0 precedent). Ascending index
-            // iteration preserves the direct walk's archetype order, so the
-            // interp↔codegen differential parity is untouched.
-            try self.rescanOrBitset(world, rd, report);
-            var it = rd.matching_archetypes.iterator(.{});
-            while (it.next()) |arch_idx| {
-                const arch = world.archetypes.items[arch_idx];
-                try self.iterateArchetype(world, rd, arch, &rule_matched, report);
-            }
-        } else {
-            for (world.archetypes.items) |arch| {
-                if (rd.predicate_root) |root| {
-                    report.predicate_archetype_evals += 1;
-                    if (!evalPredicate(rd.predicate_pool, root, arch)) continue;
-                }
-                try self.iterateArchetype(world, rd, arch, &rule_matched, report);
-            }
-        }
+        // Per-rule matched-entity count for this tick (M1.0.0 observable) — the
+        // per-rule breakdown of `report.entities_iterated`. Reset before the
+        // walk; incremented per matched entity in `iterateArchetype`.
+        rd.matched_entities = 0;
+        // M1.0.0 — entity selection is driven by the rule's DNF of dynamic
+        // queries (one `DynamicQuery` per conjunctive term). Each query lazily
+        // re-scans the `world.archetypes` tail through the SAME shared matcher
+        // + rescan as the comptime `Query` (`query.archetypeMatches` +
+        // `query.rescanNewArchetypes`, option-β `engine-ecs-internals.md §4`):
+        // O(0) in the steady state, O(new archetypes) after a spawn into a new
+        // shape. Sound because an archetype's component set is immutable after
+        // creation (add/remove transitions the entity to a DIFFERENT archetype)
+        // and `world.archetypes` is append-only with stable order — a cached
+        // match never goes stale. A single term iterates its matches directly
+        // (ascending archetype-creation order, preserving the historical
+        // direct-walk order → interp↔codegen parity); `or` unions the terms.
+        try self.iterateSelection(world, rd, &rule_matched, report);
         if (rule_matched) report.rules_matched += 1;
     }
 
+    /// Iterate the archetypes a rule's `when` clause selects, dispatching the
+    /// body on every matching entity (M1.0.0). The selection is the union of
+    /// the rule's DNF terms (`rd.selection`, one `DynamicQuery` each):
+    ///
+    /// - 0 terms — a non-entity-bound rule reaches here only by mistake (the
+    ///   global path returns earlier), or an entity-bound rule whose every
+    ///   term is unsatisfiable: nothing to iterate.
+    /// - 1 term — the common case (a pure-`and` `when`): iterate the term's
+    ///   matches directly, no merge.
+    /// - N terms (`or`) — rescan each term, then k-way merge their matching
+    ///   lists by ascending `archetype_id`, dispatching each archetype once
+    ///   (an archetype satisfying several disjuncts must not run the body
+    ///   twice). The lists are ascending because every scan appends in
+    ///   `world.archetypes` creation order.
+    ///
+    /// `query.maybeRescan` returns the archetypes it scanned this call (0 in
+    /// the steady state); summing them into `predicate_archetype_evals` keeps
+    /// the tail-only-rescan observable the cache test asserts.
+    fn iterateSelection(self: *Interpreter, world: *World, rd: *RuleDesc, rule_matched: *bool, report: *RuntimeReport) !void {
+        const sel = rd.selection;
+        if (sel.len == 0) return;
+        if (sel.len == 1) {
+            report.predicate_archetype_evals += sel[0].maybeRescan();
+            for (sel[0].matching.items) |arch| {
+                try self.iterateArchetype(world, rd, arch, rule_matched, report);
+            }
+            return;
+        }
+        for (sel) |*q| report.predicate_archetype_evals += q.maybeRescan();
+        try self.iterateUnion(world, rd, rule_matched, report);
+    }
+
+    /// k-way merge of a multi-term (`or`) selection's matching lists, ascending
+    /// by `archetype_id`, each archetype dispatched exactly once (M1.0.0). Uses
+    /// the reusable `merge_cursors` buffer — one cursor per term — so the union
+    /// path allocates at most once over the interpreter's lifetime.
+    fn iterateUnion(self: *Interpreter, world: *World, rd: *RuleDesc, rule_matched: *bool, report: *RuntimeReport) !void {
+        const sel = rd.selection;
+        self.merge_cursors.clearRetainingCapacity();
+        try self.merge_cursors.appendNTimes(self.gpa, 0, sel.len);
+        const cursors = self.merge_cursors.items;
+        while (true) {
+            // Smallest archetype_id at the head of any non-exhausted term.
+            var min_id: ?u32 = null;
+            for (sel, 0..) |q, qi| {
+                if (cursors[qi] < q.matching.items.len) {
+                    const aid = q.matching.items[cursors[qi]].archetype_id;
+                    if (min_id == null or aid < min_id.?) min_id = aid;
+                }
+            }
+            const target = min_id orelse break;
+            // Advance every cursor sitting on `target` (dedup), keep one ref.
+            var arch: *DynamicArchetype = undefined;
+            for (sel, 0..) |q, qi| {
+                if (cursors[qi] < q.matching.items.len and
+                    q.matching.items[cursors[qi]].archetype_id == target)
+                {
+                    arch = q.matching.items[cursors[qi]];
+                    cursors[qi] += 1;
+                }
+            }
+            try self.iterateArchetype(world, rd, arch, rule_matched, report);
+        }
+    }
+
     /// Walk one archetype's chunks/slots for an entity-bound rule — the
-    /// shared per-archetype body of both `runRule` paths (direct walk and
-    /// or-bitset, M0.8 E3-D).
-    fn iterateArchetype(self: *Interpreter, world: *World, rd: *const RuleDesc, arch: *DynamicArchetype, rule_matched: *bool, report: *RuntimeReport) !void {
+    /// per-archetype body of the cached-matching-set selection (M1.0.0).
+    fn iterateArchetype(self: *Interpreter, world: *World, rd: *RuleDesc, arch: *DynamicArchetype, rule_matched: *bool, report: *RuntimeReport) !void {
         for (arch.chunks.items) |chunk| {
             const ids = arch.entityIdsConst(chunk);
             const count = chunk.header().entity_count;
@@ -1005,30 +1086,11 @@ pub const Interpreter = struct {
                 if ((rd.expr_filters.len > 0 or rd.expr_conds.len > 0) and
                     !(try self.exprGuardsPass(world, rd.*, entity_id, arch, chunk, slot))) continue;
                 report.entities_iterated += 1;
+                rd.matched_entities += 1;
                 rule_matched.* = true;
                 try self.execBody(world, rd.*, entity_id, null, report);
             }
         }
-    }
-
-    /// Lazily extend an `or` rule's matching-archetype bitset over the tail
-    /// of `world.archetypes` (M0.8 E3-D, D-S4-or-archetype). Compared on
-    /// every entry; O(0) in the steady state, O(new archetypes) after a
-    /// growth (spawn into a new shape, tick-boundary tag flush). The
-    /// predicate is evaluated once per NEW archetype, never re-evaluated on
-    /// the cached ones.
-    fn rescanOrBitset(self: *Interpreter, world: *World, rd: *RuleDesc, report: *RuntimeReport) !void {
-        const total = world.archetypes.items.len;
-        if (total == rd.last_seen_archetype_count) return;
-        try rd.matching_archetypes.resize(self.gpa, total, false);
-        for (world.archetypes.items[rd.last_seen_archetype_count..], rd.last_seen_archetype_count..) |arch, i| {
-            if (rd.predicate_root) |root| {
-                report.predicate_archetype_evals += 1;
-                if (!evalPredicate(rd.predicate_pool, root, arch)) continue;
-            }
-            rd.matching_archetypes.set(i);
-        }
-        rd.last_seen_archetype_count = total;
     }
 
     /// Evaluate the `resource T { expression }` gates of a rule (M0.8 E4):
@@ -2711,16 +2773,6 @@ fn resourceDepsSatisfied(world: *World, rd: RuleDesc) bool {
     return true;
 }
 
-fn evalPredicate(pool: []const PredicateNode, root: u32, arch: *const DynamicArchetype) bool {
-    const node = pool[root];
-    return switch (node.kind) {
-        .and_ => evalPredicate(pool, node.lhs, arch) and evalPredicate(pool, node.rhs, arch),
-        .or_ => evalPredicate(pool, node.lhs, arch) or evalPredicate(pool, node.rhs, arch),
-        .not_ => !evalPredicate(pool, node.lhs, arch),
-        .has => arch.hasComponent(node.component_id),
-    };
-}
-
 /// Whether every per-rule field filter passes for `(chunk, slot)` (M0.8 E3-D,
 /// D-S4-multifilter): flat-AND over the rule's `field_filters`. Trivially
 /// true for a filter-free rule.
@@ -3059,19 +3111,166 @@ fn fieldKindFromTypeName(name: []const u8) ?FieldKind {
     return null;
 }
 
+// ─── when → DNF of archetype-selection terms (M1.0.0) ──────────────────────
+//
+// `lowerWhen` lowers a `when` clause's structural skeleton to a boolean tree
+// of `has` literals over `arch.hasComponent` (the `PredicateNode` pool). The
+// archetype set it denotes IS that boolean function. Converting the tree to
+// disjunctive normal form — an OR of conjunctive terms, each a set of positive
+// literals (`with`) and negative literals (`without`) — maps each term onto
+// one Tier-0 `DynamicQuery`, the rule's selection being the union of the
+// terms. DNF ≡ the original formula, so the archetype set is provably
+// identical to the pre-M1.0.0 `evalPredicate` walk: differential parity is
+// preserved by construction.
+
+/// One conjunctive term of a `when` DNF: components the archetype must contain
+/// (`with`) and must not (`without`). Owns growable id sets during the build;
+/// the final slices are dup'd into the `DynamicQuery`.
+const DnfTerm = struct {
+    with: std.ArrayListUnmanaged(ComponentId) = .empty,
+    without: std.ArrayListUnmanaged(ComponentId) = .empty,
+
+    fn deinit(self: *DnfTerm, gpa: std.mem.Allocator) void {
+        self.with.deinit(gpa);
+        self.without.deinit(gpa);
+    }
+
+    fn addUnique(list: *std.ArrayListUnmanaged(ComponentId), gpa: std.mem.Allocator, cid: ComponentId) !void {
+        for (list.items) |existing| if (existing == cid) return;
+        try list.append(gpa, cid);
+    }
+
+    fn clone(self: DnfTerm, gpa: std.mem.Allocator) !DnfTerm {
+        var out: DnfTerm = .{};
+        errdefer out.deinit(gpa);
+        try out.with.appendSlice(gpa, self.with.items);
+        try out.without.appendSlice(gpa, self.without.items);
+        return out;
+    }
+
+    /// Fold `other` into `self` (set union of both id sets).
+    fn mergeFrom(self: *DnfTerm, gpa: std.mem.Allocator, other: DnfTerm) !void {
+        for (other.with.items) |cid| try addUnique(&self.with, gpa, cid);
+        for (other.without.items) |cid| try addUnique(&self.without, gpa, cid);
+    }
+
+    /// A term requiring and forbidding the same component matches nothing.
+    fn satisfiable(self: DnfTerm) bool {
+        for (self.with.items) |w| {
+            for (self.without.items) |wo| if (w == wo) return false;
+        }
+        return true;
+    }
+};
+
+const Dnf = std.ArrayListUnmanaged(DnfTerm);
+
+fn freeDnf(gpa: std.mem.Allocator, dnf: *Dnf) void {
+    for (dnf.items) |*t| t.deinit(gpa);
+    dnf.deinit(gpa);
+}
+
+/// Convert the `PredicateNode` subtree at `root` to DNF. `negated` threads
+/// De Morgan through the recursion so `not` over `and`/`or`/`has` stays
+/// correct even for the parenthesised shapes the parser accepts beyond the
+/// flat EBNF grammar. `has` is the only literal — every structural leaf
+/// (`has T`, field-filter, positive tag → `has TagSet`) lowers to a `has`
+/// node; non-structural leaves contribute `no_child` and never reach here.
+fn dnfFromPool(gpa: std.mem.Allocator, pool: []const PredicateNode, root: u32, negated: bool) error{OutOfMemory}!Dnf {
+    const node = pool[root];
+    switch (node.kind) {
+        .has => {
+            var term: DnfTerm = .{};
+            errdefer term.deinit(gpa);
+            if (negated) {
+                try term.without.append(gpa, node.component_id);
+            } else {
+                try term.with.append(gpa, node.component_id);
+            }
+            var dnf: Dnf = .empty;
+            errdefer freeDnf(gpa, &dnf);
+            try dnf.append(gpa, term);
+            return dnf;
+        },
+        .not_ => return try dnfFromPool(gpa, pool, node.lhs, !negated),
+        .and_, .or_ => {
+            // and → cross-product; or → concat. `not` swaps them (De Morgan:
+            // ¬(a∧b)=¬a∨¬b, ¬(a∨b)=¬a∧¬b).
+            const cross = (node.kind == .and_) != negated;
+            var lhs = try dnfFromPool(gpa, pool, node.lhs, negated);
+            defer freeDnf(gpa, &lhs);
+            var rhs = try dnfFromPool(gpa, pool, node.rhs, negated);
+            defer freeDnf(gpa, &rhs);
+            if (cross) return try crossProduct(gpa, lhs, rhs);
+            var out: Dnf = .empty;
+            errdefer freeDnf(gpa, &out);
+            for (lhs.items) |t| try out.append(gpa, try t.clone(gpa));
+            for (rhs.items) |t| try out.append(gpa, try t.clone(gpa));
+            return out;
+        },
+    }
+}
+
+/// Cartesian product of two DNFs: every `a`-term merged with every `b`-term.
+fn crossProduct(gpa: std.mem.Allocator, lhs: Dnf, rhs: Dnf) !Dnf {
+    var out: Dnf = .empty;
+    errdefer freeDnf(gpa, &out);
+    for (lhs.items) |a| {
+        for (rhs.items) |b| {
+            var merged = try a.clone(gpa);
+            errdefer merged.deinit(gpa);
+            try merged.mergeFrom(gpa, b);
+            try out.append(gpa, merged);
+        }
+    }
+    return out;
+}
+
+/// Build a rule's archetype selection: one `DynamicQuery` per satisfiable DNF
+/// term of its `when` predicate (M1.0.0). `predicate_root == null` (no
+/// structural predicate — a negative-tag-only / resource-only `when`) yields a
+/// single empty term matching every archetype, with the per-entity filters
+/// carrying the selection. Unsatisfiable terms (`has T` ∧ `not has T`) are
+/// dropped — the rule never matches via that disjunct. Each query dup's its id
+/// sets, so the DNF is freed here.
+fn buildSelection(gpa: std.mem.Allocator, world: *World, pool: []const PredicateNode, predicate_root: ?u32) ![]DynamicQuery {
+    var dnf: Dnf = .empty;
+    defer freeDnf(gpa, &dnf);
+    if (predicate_root) |root| {
+        dnf = try dnfFromPool(gpa, pool, root, false);
+    } else {
+        try dnf.append(gpa, .{}); // single match-all term
+    }
+
+    var queries: std.ArrayListUnmanaged(DynamicQuery) = .empty;
+    errdefer {
+        for (queries.items) |*q| q.deinit(gpa);
+        queries.deinit(gpa);
+    }
+    // Reserve up front so the append below cannot fail and leak a query.
+    try queries.ensureTotalCapacity(gpa, dnf.items.len);
+    for (dnf.items) |t| {
+        if (!t.satisfiable()) continue;
+        const q = try world.queryDynamic(gpa, t.with.items, t.without.items);
+        queries.appendAssumeCapacity(q);
+    }
+    return try queries.toOwnedSlice(gpa);
+}
+
 fn compileRule(
     gpa: std.mem.Allocator,
     ast: *const AstArena,
     bridge: *Bridge,
-    registry: *const Registry,
+    world: *World,
     tag_table: *const tags_mod.TagTable,
     tagset_id: ?ComponentId,
     rule_data: u32,
 ) !RuleDesc {
+    const registry = &world.registry;
     const rule = ast.rule_decls.items[rule_data];
 
     var pool: std.ArrayListUnmanaged(PredicateNode) = .empty;
-    errdefer pool.deinit(gpa);
+    defer pool.deinit(gpa);
     var res_deps: std.ArrayListUnmanaged(ResourceDep) = .empty;
     errdefer res_deps.deinit(gpa);
     var tag_preds: std.ArrayListUnmanaged(TagPredicate) = .empty;
@@ -3117,7 +3316,10 @@ fn compileRule(
     };
     if (rule.when_root != ast_mod.RuleDecl.none_when) {
         const r = try lowerWhen(&lw, rule.when_root);
-        predicate_root = r;
+        // `no_child` means the `when` contributed only non-structural leaves
+        // (resource deps, negative tags, bare exprs) — no archetype predicate,
+        // so the selection is a single match-all term carried per-entity.
+        if (r != PredicateNode.no_child) predicate_root = r;
     }
 
     var entity_param_name: ?StringId = null;
@@ -3133,16 +3335,6 @@ fn compileRule(
     }
     const is_entity_bound = (entity_param_name != null) and has_component_ref;
 
-    // D-S4-or-archetype (M0.8 E3-D): an `or_` node anywhere in the pool
-    // makes the rule eligible for the cached-bitset archetype path.
-    var uses_or = false;
-    for (pool.items) |n| {
-        if (n.kind == .or_) {
-            uses_or = true;
-            break;
-        }
-    }
-
     // `@on_event(T)` observer (M0.8 E3): the event type name, or null. A
     // malformed annotation (caught + reported E1203 by the resolver) yields
     // null here → the rule degrades to a global/entity rule, no observer drain.
@@ -3151,11 +3343,19 @@ fn compileRule(
     else
         null;
 
+    // M1.0.0 — the rule's archetype selection (DNF → one DynamicQuery per
+    // term). Built only for entity-bound rules; the global / resource-only /
+    // event paths never select archetypes, so they keep an empty selection.
+    const selection: []DynamicQuery = if (is_entity_bound)
+        try buildSelection(gpa, world, pool.items, predicate_root)
+    else
+        &.{};
+    errdefer freeSelection(gpa, selection);
+
     return .{
         .rule_idx = rule_data,
         .name = rule.name,
-        .predicate_pool = try pool.toOwnedSlice(gpa),
-        .predicate_root = predicate_root,
+        .selection = selection,
         .resource_deps = try res_deps.toOwnedSlice(gpa),
         .field_filters = try field_filters.toOwnedSlice(gpa),
         .tag_predicates = try tag_preds.toOwnedSlice(gpa),
@@ -3168,7 +3368,6 @@ fn compileRule(
         .resource_expr_filters = try resource_expr_filters.toOwnedSlice(gpa),
         .last_run_tick = initial_tick,
         .is_async = rule.is_async,
-        .uses_or = uses_or,
     };
 }
 
@@ -5358,7 +5557,7 @@ fn readCounterI64(world: *World, counter_id: ComponentId, eid: CoreEntityId) i64
     return v;
 }
 
-test "or predicate caches an archetype bitset above the count heuristic (D-S4-or-archetype)" {
+test "every entity-bound rule caches its matching-archetype set, rescanning only the tail (M1.0.0)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -5373,8 +5572,8 @@ test "or predicate caches an archetype bitset above the count heuristic (D-S4-or
     const a_id = world.registry.idOf("A").?;
     const b_id = world.registry.idOf("B").?;
 
-    // Materialise 8 distinct archetypes (== or_bitset_threshold): the bare
-    // Counter, the two matching shapes, and five fillers.
+    // Materialise 8 distinct archetypes: the bare Counter, the two matching
+    // shapes, and five fillers.
     _ = try world.spawnDynamic(gpa, &[_]ComponentId{counter_id});
     const e_a = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, a_id });
     const e_b = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, b_id });
@@ -5384,29 +5583,33 @@ test "or predicate caches an archetype bitset above the count heuristic (D-S4-or
     }
     try std.testing.expectEqual(@as(usize, 8), world.archetypes.items.len);
 
-    // Tick 1 — first bitset-path entry: the rescan evaluates the predicate
-    // once per archetype (full initial scan), then iterates the cache.
+    // Tick 1 — first entry: each DNF term scans every archetype once (the
+    // initial full scan). The `when` is `Counter and (A or B)` → 2 conjunctive
+    // terms ({Counter,A}, {Counter,B}), so 8 archetypes × 2 terms = 16
+    // archetype-match evaluations. Then the cached union is iterated.
     const r1 = try interp.runFor(&world, 1);
-    try std.testing.expectEqual(@as(u64, 8), r1.predicate_archetype_evals);
+    try std.testing.expectEqual(@as(u64, 16), r1.predicate_archetype_evals);
     try std.testing.expectEqual(@as(i64, 1), readCounterI64(&world, counter_id, e_a));
     try std.testing.expectEqual(@as(i64, 1), readCounterI64(&world, counter_id, e_b));
 
-    // Tick 2 — steady state: zero re-evaluations (the cache short-cut), the
-    // matching entities still accumulate.
+    // Tick 2 — steady state: no new archetypes, so neither term re-scans
+    // anything (the cached matches), the matching entities still accumulate.
     const r2 = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(u64, 0), r2.predicate_archetype_evals);
     try std.testing.expectEqual(@as(i64, 2), readCounterI64(&world, counter_id, e_a));
 
-    // New archetype {Counter, A, B} — tick 3 rescans ONLY the tail (one
-    // evaluation) and the new entity matches (invalidation correctness).
+    // New archetype {Counter, A, B} — tick 3 rescans ONLY the tail (1 new
+    // archetype × 2 terms = 2 evaluations). The new entity satisfies BOTH
+    // disjuncts, but the union dedup dispatches the body once (counter = 1,
+    // not 2) — the k-way merge collapses the duplicate.
     const e_ab = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, a_id, b_id });
     const r3 = try interp.runFor(&world, 1);
-    try std.testing.expectEqual(@as(u64, 1), r3.predicate_archetype_evals);
+    try std.testing.expectEqual(@as(u64, 2), r3.predicate_archetype_evals);
     try std.testing.expectEqual(@as(i64, 1), readCounterI64(&world, counter_id, e_ab));
     try std.testing.expectEqual(@as(i64, 3), readCounterI64(&world, counter_id, e_a));
 }
 
-test "or predicate keeps the direct walk below the count heuristic (D-S4-or-archetype)" {
+test "the cached matching set replaces the per-tick walk at any archetype count (M1.0.0)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -5425,13 +5628,16 @@ test "or predicate keeps the direct walk below the count heuristic (D-S4-or-arch
     const e_b = try world.spawnDynamic(gpa, &[_]ComponentId{ counter_id, b_id });
     try std.testing.expectEqual(@as(usize, 3), world.archetypes.items.len);
 
-    // Below the heuristic the direct walk re-evaluates the predicate per
-    // archetype per tick — byte-identical to the pre-E3-D behaviour (the
-    // differential corpus never pays the cache).
+    // M1.0.0 — the dynamic-query selection is universal, at ANY archetype
+    // count: tick 1 scans all 3 archetypes once per DNF term (`Counter and
+    // (A or B)` → 2 terms → 6 evaluations), then steady-state ticks re-evaluate
+    // nothing. (This small-world case re-walked the predicate every tick under
+    // the M0.8 below-heuristic direct walk — the global linear scan removed by
+    // this milestone.)
     const r1 = try interp.runFor(&world, 1);
-    try std.testing.expectEqual(@as(u64, 3), r1.predicate_archetype_evals);
+    try std.testing.expectEqual(@as(u64, 6), r1.predicate_archetype_evals);
     const r2 = try interp.runFor(&world, 1);
-    try std.testing.expectEqual(@as(u64, 3), r2.predicate_archetype_evals);
+    try std.testing.expectEqual(@as(u64, 0), r2.predicate_archetype_evals);
     try std.testing.expectEqual(@as(i64, 2), readCounterI64(&world, counter_id, e_a));
     try std.testing.expectEqual(@as(i64, 2), readCounterI64(&world, counter_id, e_b));
 }

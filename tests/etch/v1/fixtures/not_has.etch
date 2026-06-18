@@ -1,0 +1,10 @@
+// M1.0.0 — `not entity has B` is an archetype exclusion at selection time:
+// `entity has A and not entity has B` visits A-carriers that do NOT carry B.
+component A { hit: int = 0 }
+component B { x: int = 0 }
+
+rule visit(entity: Entity)
+  when entity has A and not entity has B
+{
+  entity.get_mut(A).hit += 1
+}

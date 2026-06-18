@@ -1,0 +1,17 @@
+// M1.0.0 — a bare (non-structural) `ecs_condition` — the §6 last arm, a plain
+// boolean `expression` rather than `has` / `not has` — is evaluated PER-ENTITY
+// and is never folded into the archetype selection. Archetype selection here
+// comes solely from `has Lvl` (with-set {Lvl}); the bare `entity.get(Lvl).v > 5`
+// then narrows per-entity over that archetype's entities. Two entities of the
+// SAME archetype with different `v` are differentiated — impossible if the
+// condition had been (wrongly) reduced to an archetype filter.
+component Lvl {
+  v: int = 0
+  hit: int = 0
+}
+
+rule visit(entity: Entity)
+  when entity has Lvl and entity.get(Lvl).v > 5
+{
+  entity.get_mut(Lvl).hit += 1
+}

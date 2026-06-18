@@ -1,0 +1,17 @@
+// M1.0.0 — a rule whose matching-archetype set is empty when the program is
+// compiled (no archetype carries `Rare` yet) must start matching once a
+// matching archetype appears dynamically at runtime. The lazy tail rescan of
+// the cached matching set is what makes the late archetype match.
+//
+// Note: the M0.8 resolver does not emit `W1210 RuleNeverMatches` (it tracks
+// `components_in_when` for access checks but derives no static archetype set —
+// cf. brief Livrable 0 audit / AD-1), so this fixture asserts the runtime
+// dynamic-match behaviour directly rather than a resolve-time warning.
+component Rare { hit: int = 0 }
+component Common { x: int = 0 }
+
+rule visit(entity: Entity)
+  when entity has Rare
+{
+  entity.get_mut(Rare).hit += 1
+}

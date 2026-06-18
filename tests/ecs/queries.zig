@@ -33,6 +33,8 @@ const query_mod = weld_core.ecs.query;
 const With = query_mod.With;
 const Without = query_mod.Without;
 const Predicate = query_mod.Predicate;
+const DynamicQuery = weld_core.ecs.world.DynamicQuery;
+const ComponentId = weld_core.ecs.registry.ComponentId;
 
 // Test-only POD components. Distinct sizes / fields so the predicate
 // below can pick out the right column by `componentIndex` against the
@@ -377,4 +379,99 @@ test "new archetype created during command buffer flush is visible to existing q
     // materialised it. This is the lazy re-scan contract.
     try std.testing.expectEqual(@as(usize, 1), q.matchCount());
     try std.testing.expectEqual(@as(usize, 1), q.chunkCount());
+}
+
+// ─── M1.0.0 — dynamic (ComponentId-keyed) query ───────────────────────────
+//
+// The Etch interpreter holds resolved `ComponentId`s, not Zig types, so it
+// drives rule selection through `World.queryDynamic` rather than the comptime
+// `queryFiltered`. These two tests pin the contract the interpreter relies on:
+// (1) the dynamic path returns the SAME archetype set as the equivalent
+// comptime `Query` — proving the two paths share `archetypeMatches`; and
+// (2) the dynamic path absorbs archetypes created after its first iteration —
+// proving it reuses the same option-β lazy re-scan (`rescanNewArchetypes`).
+
+test "dynamic query matches comptime query" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A spread of archetypes around the (Marker present, Frozen absent) term:
+    //   a — (T, V)                    ← no Marker
+    //   b — (T, V, Marker)            ← MATCH
+    //   c — (T, V, Marker, Health)    ← MATCH
+    //   d — (T, V, Marker, Frozen)    ← excluded by Without(Frozen)
+    //   e — (T, V, Frozen)            ← excluded (no Marker)
+    _ = try world.spawn(gpa, Transform{}, Velocity{});
+    const b = try world.spawn(gpa, Transform{}, Velocity{});
+    try world.addComponent(gpa, b, Marker, .{ .kind = 1 });
+    const c = try world.spawn(gpa, Transform{}, Velocity{});
+    try world.addComponent(gpa, c, Marker, .{ .kind = 2 });
+    try world.addComponent(gpa, c, Health, .{});
+    const d = try world.spawn(gpa, Transform{}, Velocity{});
+    try world.addComponent(gpa, d, Marker, .{ .kind = 3 });
+    try world.addComponent(gpa, d, Frozen, .{});
+    const e = try world.spawn(gpa, Transform{}, Velocity{});
+    try world.addComponent(gpa, e, Frozen, .{});
+
+    // Comptime reference: Query(.{Transform}, .{With(Marker), Without(Frozen)}).
+    var cq = try world.queryFiltered(gpa, &.{Transform}, .{ With(Marker), Without(Frozen) });
+    defer cq.deinit(gpa);
+
+    // Dynamic equivalent, by ComponentId. `required` folds into `with`
+    // (archetypeMatches treats them identically), so the with-set is
+    // {Transform, Marker}, the without-set is {Frozen}.
+    const t_id = try world.ensureComponentRegistered(gpa, Transform);
+    const m_id = try world.ensureComponentRegistered(gpa, Marker);
+    const f_id = try world.ensureComponentRegistered(gpa, Frozen);
+    var dq = try world.queryDynamic(gpa, &.{ t_id, m_id }, &.{f_id});
+    defer dq.deinit(gpa);
+
+    var cq_ids: std.ArrayListUnmanaged(u32) = .empty;
+    defer cq_ids.deinit(gpa);
+    for (cq.matches.items) |m| try cq_ids.append(gpa, m.archetype.archetype_id);
+
+    _ = dq.maybeRescan(); // initial full scan
+    var dq_ids: std.ArrayListUnmanaged(u32) = .empty;
+    defer dq_ids.deinit(gpa);
+    for (dq.matching.items) |arch| try dq_ids.append(gpa, arch.archetype_id);
+
+    std.mem.sort(u32, cq_ids.items, {}, std.sort.asc(u32));
+    std.mem.sort(u32, dq_ids.items, {}, std.sort.asc(u32));
+    try std.testing.expectEqualSlices(u32, cq_ids.items, dq_ids.items);
+    // Exactly b's and c's archetypes match.
+    try std.testing.expectEqual(@as(usize, 2), dq_ids.items.len);
+}
+
+test "dynamic query lazy rescan" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Only a (Transform, Velocity) entity exists — no Marker carrier yet.
+    _ = try world.spawn(gpa, Transform{}, Velocity{});
+
+    const t_id = try world.ensureComponentRegistered(gpa, Transform);
+    const m_id = try world.ensureComponentRegistered(gpa, Marker);
+    var dq = try world.queryDynamic(gpa, &.{ t_id, m_id }, &.{});
+    defer dq.deinit(gpa);
+
+    // First iteration: the (T, Marker) archetype does not exist yet.
+    const first_scanned = dq.maybeRescan();
+    try std.testing.expect(first_scanned > 0); // scanned the existing (T,V) archetype
+    try std.testing.expectEqual(@as(usize, 0), dq.matching.items.len);
+
+    // Materialise a (T, V, Marker) archetype AFTER the first iteration.
+    const e = try world.spawn(gpa, Transform{}, Velocity{});
+    try world.addComponent(gpa, e, Marker, .{ .kind = 7 });
+
+    // The next rescan scans only the tail and picks up the new archetype —
+    // the same option-β contract the comptime Query satisfies above.
+    const second_scanned = dq.maybeRescan();
+    try std.testing.expect(second_scanned > 0);
+    try std.testing.expectEqual(@as(usize, 1), dq.matching.items.len);
+
+    // Steady state: no new archetypes → no scan, set unchanged.
+    try std.testing.expectEqual(@as(usize, 0), dq.maybeRescan());
+    try std.testing.expectEqual(@as(usize, 1), dq.matching.items.len);
 }

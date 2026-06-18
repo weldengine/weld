@@ -1,0 +1,10 @@
+// M1.0.0 — `when entity has T` must visit exactly the entities whose
+// archetype contains T, and no other.
+component Tracked { hit: int = 0 }
+component Other { x: int = 0 }
+
+rule visit(entity: Entity)
+  when entity has Tracked
+{
+  entity.get_mut(Tracked).hit += 1
+}

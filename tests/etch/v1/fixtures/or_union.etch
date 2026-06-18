@@ -1,0 +1,17 @@
+// M1.0.0 — `when ... (entity has A or entity has B)` selects the UNION of the
+// two presence sets. The `when` lowers to a DNF of two conjunctive terms
+// ({Mark,A}, {Mark,B}), one dynamic query each; the rule's matched set is
+// their union. An entity carrying BOTH A and B satisfies both disjuncts but is
+// dispatched EXACTLY ONCE (the union's k-way merge dedups across terms).
+//
+// `Mark` is the always-present body target: `A or B` alone guarantees neither
+// component on a matched entity, so the body writes to `Mark` (in every term).
+component Mark { hit: int = 0 }
+component A { x: int = 0 }
+component B { x: int = 0 }
+
+rule visit(entity: Entity)
+  when entity has Mark and (entity has A or entity has B)
+{
+  entity.get_mut(Mark).hit += 1
+}

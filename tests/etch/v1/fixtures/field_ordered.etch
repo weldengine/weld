@@ -1,0 +1,13 @@
+// M1.0.0 — value field-filter, ordered form (`{ field > value }`):
+// the general-expression filter visits only entities whose `Filt.level`
+// is strictly greater than the literal.
+component Filt {
+  level: int = 0
+  hit: int = 0
+}
+
+rule visit(entity: Entity)
+  when entity has Filt { level > 5 }
+{
+  entity.get_mut(Filt).hit += 1
+}
