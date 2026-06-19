@@ -308,23 +308,39 @@ pub const Scheduler = struct {
         // overhead near the S1 baseline — the brief's E5a sleep/wake
         // requirement applies to the **workers**' idle path (they
         // do park on `work_available` after the spin window).
-        while (self.pending_count.load(.acquire) > 0) {
-            // M0.2.1 / E5 — belt-and-suspenders invariant assertion
-            // at the dispatcher spin site. `pending_count` should
-            // monotonically decrease from `n` to 0 across this wave.
-            // If it ever exceeds `n`, a worker has done an
-            // over-decrement (R1 race signature with `u64::MAX`).
-            // Defends against any future regression of the job
-            // system that reintroduces over-decrement — complements
-            // the E2ter assertion at the site (`scheduler.zig:333`)
-            // by catching the same invariant at the symptom site.
-            // Active in Debug + ReleaseSafe via
-            // `std.debug.runtime_safety`.
-            if (std.debug.runtime_safety) {
+        //
+        // Two comptime-selected variants. ReleaseFast (the bench + the
+        // shipped runtime) gets the bare loop — zero added work, S1/C0.1
+        // untouched. Debug + ReleaseSafe (tests + pre-push) get two
+        // invariants:
+        //   1. M0.2.1 / E5 belt-and-suspenders: `pending_count <= n`
+        //      across the wave — an over-decrement (R1 `u64::MAX`)
+        //      signature, complementing the seat assertion at the
+        //      worker `fetchSub`.
+        //   2. M1.0.1 livelock watchdog: if the wave fails to drain
+        //      within `livelock_budget_ns`, the scheduler is livelocked
+        //      (a worker that missed its wake never ran its `pushShare`,
+        //      so `pending_count` is stuck POSITIVE — distinct from the
+        //      impossible `u64::MAX` that case 1 catches). Dump + panic
+        //      with a parseable signature instead of hanging silently
+        //      until the CI build-runner kills the process at ~60 s.
+        //      This is what turns the windows-2025/ReleaseSafe hang into
+        //      a legible, classifiable failure (M0.2.1 resurgence).
+        if (std.debug.runtime_safety) {
+            const spin_start = std.Io.Clock.now(.awake, self.io);
+            while (self.pending_count.load(.acquire) > 0) {
                 const cur = self.pending_count.load(.acquire);
                 std.debug.assert(cur <= n);
+                const now = std.Io.Clock.now(.awake, self.io);
+                if (spin_start.durationTo(now).nanoseconds > livelock_budget_ns) {
+                    livelockPanic(self, n);
+                }
+                std.Thread.yield() catch {};
             }
-            std.Thread.yield() catch {};
+        } else {
+            while (self.pending_count.load(.acquire) > 0) {
+                std.Thread.yield() catch {};
+            }
         }
     }
 
@@ -419,6 +435,16 @@ pub const Scheduler = struct {
 /// scheduler settles to the parked state in well under a frame at
 /// 60 Hz.
 const idle_spin_rounds: u32 = 1024;
+
+/// M1.0.1 — dispatcher-side livelock watchdog budget. If a wave fails to
+/// drain within this wall-clock window, `publishWaveAndWait` is spinning
+/// forever on a stuck-positive `pending_count` (a worker missed its wake
+/// and never ran its `pushShare`). runtime-safety-gated (Debug +
+/// ReleaseSafe only) → never compiled into the ReleaseFast bench/runtime,
+/// so S1/C0.1 are untouched by construction. 30 s is ~10⁴× any legitimate
+/// wave yet below the CI build-runner's ~60 s no-response kill, so a fired
+/// watchdog is always a real livelock, never a merely slow drain.
+const livelock_budget_ns: i96 = 30 * std.time.ns_per_s;
 
 fn workerMain(sched: *Scheduler, worker_idx: u32) void {
     const self = &sched.workers[worker_idx];
@@ -565,6 +591,33 @@ fn overDecrementPanic(sched: *Scheduler, worker_idx: u32) noreturn {
             stats.chunks_processed,
             stats.steals_succeeded,
         },
+    );
+}
+
+/// M1.0.1 — livelock watchdog panic path for `publishWaveAndWait`'s
+/// dispatcher spin. Mirrors `overDecrementPanic`: dump the full
+/// scheduler state then `std.debug.panic` with a stable parseable
+/// message. The classifier is `pending_count`: stuck POSITIVE is the
+/// park-path wake-lost signature (a worker never ran its strided
+/// `pushShare`, so its chunks were never processed); the impossible
+/// `u64::MAX` would already have tripped `overDecrementPanic` at the
+/// worker seat. The per-worker `chunks_processed` column in the dump
+/// pinpoints the worker(s) that fell short of their bracket-peers.
+fn livelockPanic(sched: *Scheduler, n: u32) noreturn {
+    var stderr_buf: [8192]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(sched.io, &stderr_buf);
+    const stderr = &stderr_writer.interface;
+    stderr.print(
+        "\n=== M1.0.1 — scheduler livelock (wave n={d} did not drain within {d}s) ===\n",
+        .{ n, @divTrunc(livelock_budget_ns, std.time.ns_per_s) },
+    ) catch {};
+    sched.dumpStateTo(stderr) catch {};
+    stderr.flush() catch {};
+
+    const snapshot = unpack(sched.gen_and_n.load(.acquire));
+    std.debug.panic(
+        "scheduler livelock at jobs/scheduler.zig publishWaveAndWait — generation={d} chunk_count={d} pending_count={d}",
+        .{ snapshot.gen, snapshot.n, sched.pending_count.load(.acquire) },
     );
 }
 
