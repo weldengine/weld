@@ -144,8 +144,15 @@ pub const Scheduler = struct {
     /// the standard "check under lock + wait" pattern is preserved.
     pending_count: std.atomic.Value(u64) align(64) = .init(0),
 
-    /// Set under `mu` at deinit to make workers exit cleanly.
-    shutdown: bool = false,
+    /// Set at deinit to make workers exit cleanly. **Atomic** because the
+    /// worker spin path reads it lock-free (no `mu`) every idle round
+    /// (`workerMain`), while `deinit` writes it — a non-atomic `bool` here
+    /// is a data race (UB) the ReleaseFast/ReleaseSafe optimizer may hoist
+    /// out of the spin loop, so a worker could spin forever on a cached
+    /// `false` and never observe shutdown. `.release` store pairs with the
+    /// `.acquire` loads on the read sites (M1.0.1 — surfaced while
+    /// diagnosing the windows-2025/ReleaseSafe scheduler hang).
+    shutdown: std.atomic.Value(bool) = .init(false),
 
     mu: std.Io.Mutex = .init,
     /// Signaled by `dispatch` after every new wave is published.
@@ -193,7 +200,7 @@ pub const Scheduler = struct {
         // Flip shutdown under the mutex and wake every parked worker
         // so they can observe the flag and exit.
         self.mu.lockUncancelable(self.io);
-        self.shutdown = true;
+        self.shutdown.store(true, .release);
         self.work_available.broadcast(self.io);
         self.mu.unlock(self.io);
 
@@ -384,7 +391,7 @@ pub const Scheduler = struct {
         try writer.print("  pending_count : {d}\n", .{self.pending_count.load(.acquire)});
         try writer.print("  generation    : {d}\n", .{snapshot.gen});
         try writer.print("  chunk_count   : {d}\n", .{snapshot.n});
-        try writer.print("  shutdown      : {any}\n", .{self.shutdown});
+        try writer.print("  shutdown      : {any}\n", .{self.shutdown.load(.acquire)});
         try writer.print("  worker_count  : {d}\n", .{self.workers.len});
 
         var sum_chunks: u64 = 0;
@@ -521,10 +528,10 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
             // the split `generation.load` + later `chunk_count` read
             // in pushShare which left a race window (R1).
             const snapshot = unpack(sched.gen_and_n.load(.acquire));
-            if (snapshot.gen != last_generation or sched.shutdown) {
+            if (snapshot.gen != last_generation or sched.shutdown.load(.acquire)) {
                 // Take the fast-path back to wave dispatch — the
                 // park path also handles this but at higher cost.
-                if (sched.shutdown) return;
+                if (sched.shutdown.load(.acquire)) return;
                 last_generation = snapshot.gen;
                 pushShare(sched, self, worker_idx, snapshot.n);
                 idle_spin_count = 0;
@@ -538,7 +545,7 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
         idle_spin_count = 0;
         sched.mu.lockUncancelable(sched.io);
         const snapshot = unpack(sched.gen_and_n.load(.acquire));
-        if (sched.shutdown) {
+        if (sched.shutdown.load(.acquire)) {
             sched.mu.unlock(sched.io);
             return;
         }
@@ -553,7 +560,7 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
         sched.work_available.waitUncancelable(sched.io, &sched.mu);
         _ = self.stats.parks_completed.fetchAdd(1, .acq_rel);
         const wake_snapshot = unpack(sched.gen_and_n.load(.acquire));
-        const wake_shutdown = sched.shutdown;
+        const wake_shutdown = sched.shutdown.load(.acquire);
         sched.mu.unlock(sched.io);
 
         if (wake_shutdown) return;
