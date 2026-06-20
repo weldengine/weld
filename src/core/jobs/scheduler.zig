@@ -316,31 +316,37 @@ pub const Scheduler = struct {
         // requirement applies to the **workers**' idle path (they
         // do park on `work_available` after the spin window).
         //
-        // Two comptime-selected variants. ReleaseFast (the bench + the
-        // shipped runtime) gets the bare loop — zero added work, S1/C0.1
-        // untouched. Debug + ReleaseSafe (tests + pre-push) get two
+        // Two comptime-selected variants. ReleaseFast (C0.1 bench + shipped
+        // runtime) gets the bare loop — zero added work. Debug + ReleaseSafe
+        // (tests, pre-push, AND the S1 bench) get two runtime-safety
         // invariants:
-        //   1. M0.2.1 / E5 belt-and-suspenders: `pending_count <= n`
-        //      across the wave — an over-decrement (R1 `u64::MAX`)
-        //      signature, complementing the seat assertion at the
-        //      worker `fetchSub`.
-        //   2. M1.0.1 livelock watchdog: if the wave fails to drain
-        //      within `livelock_budget_ns`, the scheduler is livelocked
-        //      (a worker that missed its wake never ran its `pushShare`,
-        //      so `pending_count` is stuck POSITIVE — distinct from the
-        //      impossible `u64::MAX` that case 1 catches). Dump + panic
-        //      with a parseable signature instead of hanging silently
+        //   1. M0.2.1 / E5 belt-and-suspenders: `pending_count <= n` across
+        //      the wave — an over-decrement (R1 `u64::MAX`) signature,
+        //      complementing the seat assertion at the worker `fetchSub`.
+        //   2. M1.0.1 livelock watchdog: if the wave fails to drain within
+        //      `livelock_budget_ns` the scheduler is livelocked (a worker that
+        //      missed its wake never ran its `pushShare`, so `pending_count`
+        //      is stuck POSITIVE — distinct from the impossible `u64::MAX`
+        //      case 1 catches). Dump + panic instead of hanging silently
         //      until the CI build-runner kills the process at ~60 s.
-        //      This is what turns the windows-2025/ReleaseSafe hang into
-        //      a legible, classifiable failure (M0.2.1 resurgence).
+        //
+        // The wall-clock is sampled only every `livelock_check_stride` spins,
+        // NOT per iteration: S1 runs in ReleaseSafe, so a per-spin `Clock.now`
+        // would tax the measured dispatch path. A draining wave exits in far
+        // fewer spins than the stride; only a genuinely stuck wave reads the
+        // clock. The counter increment + mask test is ~1 ns, lost in `yield`.
         if (std.debug.runtime_safety) {
             const spin_start = std.Io.Clock.now(.awake, self.io);
+            var spin_rounds: u64 = 0;
             while (self.pending_count.load(.acquire) > 0) {
                 const cur = self.pending_count.load(.acquire);
                 std.debug.assert(cur <= n);
-                const now = std.Io.Clock.now(.awake, self.io);
-                if (spin_start.durationTo(now).nanoseconds > livelock_budget_ns) {
-                    livelockPanic(self, n);
+                spin_rounds +%= 1;
+                if ((spin_rounds & (livelock_check_stride - 1)) == 0) {
+                    const now = std.Io.Clock.now(.awake, self.io);
+                    if (spin_start.durationTo(now).nanoseconds > livelock_budget_ns) {
+                        livelockPanic(self, n);
+                    }
                 }
                 std.Thread.yield() catch {};
             }
@@ -445,13 +451,22 @@ const idle_spin_rounds: u32 = 1024;
 
 /// M1.0.1 — dispatcher-side livelock watchdog budget. If a wave fails to
 /// drain within this wall-clock window, `publishWaveAndWait` is spinning
-/// forever on a stuck-positive `pending_count` (a worker missed its wake
-/// and never ran its `pushShare`). runtime-safety-gated (Debug +
-/// ReleaseSafe only) → never compiled into the ReleaseFast bench/runtime,
-/// so S1/C0.1 are untouched by construction. 30 s is ~10⁴× any legitimate
-/// wave yet below the CI build-runner's ~60 s no-response kill, so a fired
-/// watchdog is always a real livelock, never a merely slow drain.
+/// forever on a stuck-positive `pending_count` (a worker missed its wake and
+/// never ran its `pushShare`). runtime-safety-gated (Debug + ReleaseSafe) →
+/// stripped from the ReleaseFast C0.1 bench + shipped runtime. The **S1 bench
+/// runs in ReleaseSafe**, so the watchdog IS live there — its clock read is
+/// amortized over `livelock_check_stride` spins (below) to keep S1's measured
+/// dispatch path off the per-iteration clock. 30 s is ≫ any legitimate wave
+/// yet below the CI build-runner's ~60 s no-response kill, so a fired watchdog
+/// is always a real livelock, never a merely slow drain.
 const livelock_budget_ns: i96 = 30 * std.time.ns_per_s;
+
+/// Power-of-two spin stride between wall-clock samples in the dispatcher's
+/// livelock watchdog. Sampling `Clock.now` once per this many spins (vs every
+/// iteration) keeps the S1 ReleaseSafe dispatch path free of per-spin clock
+/// syscalls — 65536 ≫ any draining wave, so the clock is read only on a wave
+/// that is genuinely stuck.
+const livelock_check_stride: u64 = 1 << 16;
 
 fn workerMain(sched: *Scheduler, worker_idx: u32) void {
     const self = &sched.workers[worker_idx];
