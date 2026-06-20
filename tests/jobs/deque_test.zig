@@ -1,5 +1,6 @@
 const std = @import("std");
 const weld_core = @import("weld_core");
+const watchdog = @import("test_watchdog");
 
 const Deque = weld_core.jobs.deque.Deque;
 
@@ -41,6 +42,11 @@ fn stealerLoop(ctx: StealCtx) void {
 }
 
 test "concurrent steal: every element is consumed exactly once" {
+    const io = std.testing.io;
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "concurrent steal: every element is consumed exactly once");
+    defer wd.disarm();
+
     const N: u32 = 4096;
     var deque = Deque(u32, 1024).init();
     var consumed: std.atomic.Value(u32) = .init(0);

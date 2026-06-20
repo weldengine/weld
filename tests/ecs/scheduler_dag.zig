@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const weld_core = @import("weld_core");
+const watchdog = @import("test_watchdog");
 
 const World = weld_core.ecs.world.World;
 
@@ -76,12 +77,17 @@ test "implicit DAG orders system that writes X before system that reads X" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "implicit DAG orders system that writes X before system that reads X");
+    defer wd.disarm();
+
     var world = World.init();
     defer world.deinit(gpa);
 
     var jobs_sched = try Scheduler.init(gpa, io);
     try jobs_sched.start();
     defer jobs_sched.deinit(gpa);
+    wd.setScheduler(&jobs_sched);
 
     var sys = SystemScheduler.init();
     defer sys.deinit(gpa);

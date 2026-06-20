@@ -1,5 +1,6 @@
 const std = @import("std");
 const weld_core = @import("weld_core");
+const watchdog = @import("test_watchdog");
 
 const World = weld_core.ecs.world.World;
 const Transform = weld_core.ecs.world.Transform;
@@ -24,6 +25,10 @@ test "split-over-chunks dispatch covers every chunk" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "split-over-chunks dispatch covers every chunk");
+    defer wd.disarm();
+
     var world = World.init();
     defer world.deinit(gpa);
 
@@ -38,6 +43,7 @@ test "split-over-chunks dispatch covers every chunk" {
     var sched = try Scheduler.init(gpa, io);
     try sched.start();
     defer sched.deinit(gpa);
+    wd.setScheduler(&sched);
 
     var counter: std.atomic.Value(u32) = .init(0);
     var archetype_id_seen: std.atomic.Value(u32) = .init(0); // World.archetype.archetype_id
@@ -76,6 +82,10 @@ test "scheduler returns only after all work is done" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "scheduler returns only after all work is done");
+    defer wd.disarm();
+
     var world = World.init();
     defer world.deinit(gpa);
 
@@ -86,6 +96,7 @@ test "scheduler returns only after all work is done" {
     var sched = try Scheduler.init(gpa, io);
     try sched.start();
     defer sched.deinit(gpa);
+    wd.setScheduler(&sched);
 
     var completed: std.atomic.Value(u32) = .init(0);
     var saw: std.atomic.Value(u32) = .init(0);
