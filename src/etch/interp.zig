@@ -5093,6 +5093,159 @@ test "runProgram @on_event observer drains the event store and writes a resource
     try std.testing.expectEqual(@as(i32, 30), total);
 }
 
+test "@on_event(T) fires exactly once per emit T in the tick (M1.0.2 E1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Three `emit Damage` in one producer tick → the `@on_event(Damage)`
+    // observer body must run exactly three times that tick (once per event,
+    // `runObserver` iterating the per-tick store), accumulating amount 1 each
+    // → Tally.total == 3. Catches both under-firing (< 3) and over-firing
+    // (> 3, e.g. a stale re-delivery).
+    const source =
+        \\event Damage { amount: i32 = 0 }
+        \\resource Tally { total: i32 = 0 }
+        \\rule deal() {
+        \\  emit Damage { amount: 1 }
+        \\  emit Damage { amount: 1 }
+        \\  emit Damage { amount: 1 }
+        \\}
+        \\@on_event(Damage)
+        \\rule absorb()
+        \\  when resource Tally
+        \\{
+        \\  let t = get_mut(Tally)
+        \\  t.total += event.amount
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // Three events enqueued this tick, three observer fires → total == 3.
+    const dmg_id = pr.ast.strings.find("Damage").?;
+    try std.testing.expectEqual(@as(usize, 3), interp.events.count(dmg_id));
+    const tally_id = world.registry.idOf("Tally").?;
+    const bytes = world.resources.getResource(tally_id).?;
+    var total: i32 = 0;
+    @memcpy(std.mem.asBytes(&total), bytes[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 3), total);
+}
+
+test "@on_event discriminates event types (M1.0.2 E1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // One producer emits both Alpha and Beta in a tick. `@on_event(Alpha)` must
+    // fire only on Alpha, `@on_event(Beta)` only on Beta — each counter lands at
+    // exactly 1. If the type discrimination in `runObserver` were broken, a
+    // counter would reach 2 (the observer firing on the other type too).
+    const source =
+        \\event Alpha { v: i32 = 0 }
+        \\event Beta { v: i32 = 0 }
+        \\resource CountA { n: i32 = 0 }
+        \\resource CountB { n: i32 = 0 }
+        \\rule emitAB() {
+        \\  emit Alpha { v: 1 }
+        \\  emit Beta { v: 1 }
+        \\}
+        \\@on_event(Alpha)
+        \\rule onA() when resource CountA {
+        \\  let c = get_mut(CountA)
+        \\  c.n += 1
+        \\}
+        \\@on_event(Beta)
+        \\rule onB() when resource CountB {
+        \\  let c = get_mut(CountB)
+        \\  c.n += 1
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // onA fired once (the single Alpha), onB once (the single Beta) — neither
+    // crossed to the other type.
+    var a: i32 = 0;
+    var b: i32 = 0;
+    @memcpy(std.mem.asBytes(&a), world.resources.getResource(world.registry.idOf("CountA").?).?[0..@sizeOf(i32)]);
+    @memcpy(std.mem.asBytes(&b), world.resources.getResource(world.registry.idOf("CountB").?).?[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 1), a);
+    try std.testing.expectEqual(@as(i32, 1), b);
+}
+
+test "event emitted earlier in the tick reaches a later-declared @on_event (M1.0.2 E1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The producer is declared (and so runs) before the `@on_event(Ping)`
+    // consumer. The event it emits must reach the consumer the SAME tick — after
+    // exactly one tick Seen.n == 7 (not 0, which a next-tick or no delivery would
+    // leave). Proves same-tick, in-order delivery up to the live store head.
+    const source =
+        \\event Ping { v: i32 = 0 }
+        \\resource Seen { n: i32 = 0 }
+        \\rule producer() { emit Ping { v: 7 } }
+        \\@on_event(Ping)
+        \\rule consumer() when resource Seen {
+        \\  let s = get_mut(Seen)
+        \\  s.n += event.v
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    var seen: i32 = 0;
+    @memcpy(std.mem.asBytes(&seen), world.resources.getResource(world.registry.idOf("Seen").?).?[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 7), seen);
+}
+
 test "runProgram add_tag is deferred to the tick boundary; has_tag query gates a counter (M0.8 E3)" {
     const gpa = std.testing.allocator;
     var world = World.init();
