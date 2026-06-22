@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const weld_core = @import("weld_core");
+const watchdog = @import("test_watchdog");
 
 const World = weld_core.ecs.world.World;
 const Transform = weld_core.ecs.world.Transform;
@@ -74,12 +75,17 @@ test "phases dispatch sequentially with end-of-phase barrier" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "phases dispatch sequentially with end-of-phase barrier");
+    defer wd.disarm();
+
     var world = World.init();
     defer world.deinit(gpa);
 
     var jobs_sched = try Scheduler.init(gpa, io);
     try jobs_sched.start();
     defer jobs_sched.deinit(gpa);
+    wd.setScheduler(&jobs_sched);
 
     var sys = SystemScheduler.init();
     defer sys.deinit(gpa);
@@ -118,9 +124,14 @@ test "worker count matches CPU topology at startup" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "worker count matches CPU topology at startup");
+    defer wd.disarm();
+
     var sched = try Scheduler.init(gpa, io);
     try sched.start();
     defer sched.deinit(gpa);
+    wd.setScheduler(&sched);
 
     const expected = std.Thread.getCpuCount() catch jobs_sched_mod.default_worker_count;
     try std.testing.expectEqual(expected, sched.workerCount());
@@ -130,6 +141,10 @@ test "worker count matches CPU topology at startup" {
 test "idle workers sleep instead of busy-yielding" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "idle workers sleep instead of busy-yielding");
+    defer wd.disarm();
 
     var world = World.init();
     defer world.deinit(gpa);
@@ -143,43 +158,41 @@ test "idle workers sleep instead of busy-yielding" {
     var sched = try Scheduler.init(gpa, io);
     try sched.start();
     defer sched.deinit(gpa);
+    wd.setScheduler(&sched);
 
     var query = try world.query(gpa);
     defer query.deinit(gpa);
 
-    // First dispatch — wake every worker, give them work, drain to
-    // completion. After this, workers will hit the idle path and
-    // park on `work_available`.
-    try sched.dispatch(&query, idleBody, .{});
-
-    // Give workers time to reach the parked path. The dispatch
-    // returns when `pending_count == 0`, so workers may still be in
-    // the inter-iteration window — the sleep gives them a generous
-    // grace period to enter `cond.wait`.
+    // Bounded wait for the sleep/wake path to be exercised. Each cycle:
+    // dispatch a wave, let idle workers reach the parked path, then the next
+    // cycle's dispatch wakes them (`parks_completed` increments on wake), and
+    // we re-check. The exact moment a worker parks is timing-dependent, so a
+    // single dispatch→sleep→dispatch can miss it under CI load — the
+    // pre-M1.0.1 one-shot `total_parks > 0` assertion flaked for exactly this
+    // reason. Retrying up to a sane bound removes the flake.
     //
-    // Window sized at 500 ms (10× the original 50 ms) to absorb
-    // Windows' default timer resolution of ~15.6 ms — a 50 ms
-    // sleep on Windows can effectively be 32 ms (2 ticks), and on
-    // CI runners with high system load the worker spin window
-    // (~200 µs nominal) can stretch unpredictably. 500 ms is well
-    // below the test timeout, well above any plausible park latency
-    // on any supported platform.
-    std.Io.sleep(io, .fromMilliseconds(500), .awake) catch {};
-
-    // Second dispatch — workers wake from their parked state. The
-    // parks_completed counter must have advanced.
-    try sched.dispatch(&query, idleBody, .{});
-
-    std.Io.sleep(io, .fromMilliseconds(500), .awake) catch {};
-
-    const stats = try sched.snapshotStats(gpa);
-    defer gpa.free(stats);
+    // This is NOT a mask: if the bound is reached with zero parks observed,
+    // the sleep/wake path is genuinely broken (workers busy-yield instead of
+    // parking) and the test FAILS below. The bound (~2 s) sits well under the
+    // 5 s watchdog armed above.
     var total_parks: u64 = 0;
-    for (stats) |s| total_parks += s.parks_completed;
-    // At least one worker must have parked + woken at least once —
-    // confirms the sleep/wake path is exercised. In practice we
-    // expect roughly `worker_count` parks per dispatch cycle, but
-    // exact counts depend on chunk-distribution timing.
+    var attempt: u32 = 0;
+    const max_attempts: u32 = 40;
+    while (attempt < max_attempts) : (attempt += 1) {
+        try sched.dispatch(&query, idleBody, .{});
+        // Grace > the worker spin window (1024 yields) so idle workers reach
+        // the parked path before the next cycle's dispatch wakes them.
+        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+
+        const stats = try sched.snapshotStats(gpa);
+        defer gpa.free(stats);
+        total_parks = 0;
+        for (stats) |s| total_parks += s.parks_completed;
+        if (total_parks > 0) break;
+    }
+
+    // A park must have been observed within the bound — otherwise the
+    // sleep/wake path regressed (workers never park). Fail loud, never pass.
     try std.testing.expect(total_parks > 0);
 }
 

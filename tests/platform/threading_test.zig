@@ -8,11 +8,17 @@ const std = @import("std");
 const weld = @import("weld_core");
 const threading = weld.platform.threading;
 const builtin = @import("builtin");
+const watchdog = @import("test_watchdog");
 
 test "setAffinity + setPriority on spawned thread" {
     if (builtin.os.tag != .linux and builtin.os.tag != .macos and builtin.os.tag != .windows) {
         return error.SkipZigTest;
     }
+
+    const io = std.testing.io;
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "setAffinity + setPriority on spawned thread");
+    defer wd.disarm();
 
     const Ctx = struct {
         done: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),

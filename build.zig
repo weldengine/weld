@@ -496,6 +496,16 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/assets/wav_roundtrip.zig", .asset_pipeline = true },
         .{ .path = "tests/assets/cache_diff.zig", .asset_pipeline = true },
     };
+    // M1.0.1 — shared fail-fast watchdog for in-process concurrency tests
+    // (point-4 permanent guard; covers the scheduler.deinit-join site that
+    // masked the windows-2025/ReleaseSafe hang). Imported by tests via
+    // `@import("test_watchdog")`; only compiled into specs that use it.
+    const watchdog_module = b.createModule(.{
+        .root_source_file = b.path("tests/support/watchdog.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    watchdog_module.addImport("weld_core", core_module);
     for (test_specs) |spec| {
         const t_mod = b.createModule(.{
             .root_source_file = b.path(spec.path),
@@ -503,6 +513,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         t_mod.addImport("weld_core", core_module);
+        t_mod.addImport("test_watchdog", watchdog_module);
         if (spec.wl_protocols) {
             t_mod.addImport("wl_protocols", wl_protocols_test_module);
         }

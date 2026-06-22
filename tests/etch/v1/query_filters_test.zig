@@ -366,3 +366,35 @@ test "observable per-rule matched counts over mixed-filter rules" {
     try std.testing.expectEqual(@as(u64, 2), matchedByName(&loaded.interp, "r_or")); // e2,e5
     try std.testing.expectEqual(@as(u64, 2), matchedByName(&loaded.interp, "r_expr")); // e4,e5
 }
+
+test "changed fires per-slot intra-archetype" {
+    // M1.0.1 — the `.etch` companion to the inline interpreter test of the same
+    // name. Two entities share ONE {Health, Counter, Sel} archetype; `damage`
+    // writes Health only for the `Sel.on == 1` slot, so `react` (`Health
+    // changed`) hits that slot alone — per-slot, not per-archetype, granularity.
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    var loaded = try load(gpa, &world, @embedFile("fixtures/changed_per_slot.etch"));
+    defer loaded.deinit(gpa);
+
+    const health = cid(&world, "Health");
+    const counter = cid(&world, "Counter");
+    const sel = cid(&world, "Sel");
+    const a = try world.spawnDynamic(gpa, &[_]ComponentId{ health, counter, sel });
+    const b = try world.spawnDynamic(gpa, &[_]ComponentId{ health, counter, sel });
+    writeI64(&world, a, "Sel", "on", 1); // A selected; B keeps Sel.on == 0.
+
+    // Both entities share one archetype — the differentiation can only be per-slot.
+    try std.testing.expectEqual(
+        world.dynamicLocation(a).?.archetype_idx,
+        world.dynamicLocation(b).?.archetype_idx,
+    );
+
+    _ = try loaded.interp.runFor(&world, 3);
+
+    // A's Health changes every tick → react hits 3 times. B's untouched slot → 0.
+    try std.testing.expectEqual(@as(i64, 3), readI64(&world, a, "Counter", "hit"));
+    try std.testing.expectEqual(@as(i64, 0), readI64(&world, b, "Counter", "hit"));
+}
