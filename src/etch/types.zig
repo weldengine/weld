@@ -2581,15 +2581,19 @@ pub const TypeChecker = struct {
                     try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .resource);
                 },
                 .event_decl => {
-                    // An `event` is a POD struct of fields (M0.8 E3,
-                    // `etch-grammar.md` §5.10; ABI §3.1). Register the symbol,
-                    // validate `@networked` applicability, and enforce the same
-                    // POD-scalar field surface as component/resource (`true` =
-                    // component-style POD wording).
+                    // An `event` is a frame-arena struct-message, not a POD
+                    // component: the `EMIT_EVENT` opcode promotes non-POD fields
+                    // rule-arena → frame-arena (`etch-memory-model.md` §6.7 / §2.5;
+                    // `etch-abi-zig.md` §3.1/§3.2 passes non-POD by handle), and
+                    // `etch-grammar.md` §5.10 imposes no POD constraint. POD-strict
+                    // is component-only (part1 §5.5, SoA storage). Event fields
+                    // therefore follow the `struct` field surface (`string`/enum
+                    // accepted, nested-struct deferred) via the `.event_` origin
+                    // (M1.0.2 ruling — decision on the E1 test-4 blocker).
                     const decl = self.arena.event_decls.items[data];
                     try self.registerSymbol(.event_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .event);
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .component_like);
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .event_);
                 },
                 .rule_decl => {
                     const decl = self.arena.rule_decls.items[data];
@@ -2937,12 +2941,16 @@ pub const TypeChecker = struct {
         return self.arena.impl_methods.items[idx];
     }
 
-    /// Which declaration kind a validated field range belongs to. Components
-    /// and events share the POD wording (`component_like`); resources keep
-    /// their own rejection wording (Option A alignment is tranche 7);
-    /// `struct_` fields gain the tranche-2 unlocks (`string` + enum-typed
-    /// fields, forced by the builtin `Error` per part1 §10.2).
-    const FieldDeclOrigin = enum { component_like, resource, struct_ };
+    /// Which declaration kind a validated field range belongs to. `component_like`
+    /// (components) keeps the POD-strict surface (`string`/enum/nested-struct
+    /// rejected — part1 §5.5, SoA archetype storage); `resource` keeps its own
+    /// S3 rejection wording (Option A alignment is tranche 7). `struct_` and
+    /// `event_` share the wider surface: `string` + enum-typed fields accepted
+    /// (the builtin `Error` forces them on structs; events carry frame-arena
+    /// non-POD payloads per `etch-memory-model.md` §6.7 / §2.5), nested-struct
+    /// fields deferred. POD-strict is component-only (M1.0.2 ruling, decision on
+    /// the E1 test-4 blocker).
+    const FieldDeclOrigin = enum { component_like, resource, struct_, event_ };
 
     fn validateFieldsInDecl(self: *TypeChecker, fields_start: u32, fields_len: u32, origin: FieldDeclOrigin) !void {
         // Field name uniqueness within parent: collect into a small set.
@@ -2994,24 +3002,27 @@ pub const TypeChecker = struct {
             const tname = self.arena.strings.slice(resolved_name);
 
             if (BuiltinType.fromName(tname) == null) {
-                if (origin == .struct_ and std.mem.eql(u8, tname, "string")) {
-                    // `string` struct fields unlock with the Error layer
-                    // (M0.8 E3-C tranche 2 — `Error.message` forces them;
-                    // part1 §5.5 constrains components, not structs).
-                    // Component / resource string fields stay rejected below.
-                } else if (origin == .struct_ and self.declaredEnumName(resolved_name)) {
-                    // Enum-typed struct fields unlock with `Error.code:
-                    // ErrorCode` (same tranche). Checked against the AST enum
-                    // slab (not the symbol table) so a later-declared enum is
-                    // seen — pass 1 registers symbols incrementally.
-                } else if (origin == .struct_ and self.declaredStructName(resolved_name)) {
-                    // Struct-typed STRUCT fields unlock with the anonymous
-                    // `.{ … }` field-value context (M0.8 E3-C tranche 8) —
-                    // part1 §5.5 allows nested POD structs; the literal must
-                    // PROVIDE such a field (E0208, checked at the struct
-                    // literal) because it has no declared default the two
-                    // backends could agree on. Component / resource fields
-                    // stay builtin-POD-bounded (E1 ruling, unchanged).
+                if ((origin == .struct_ or origin == .event_) and std.mem.eql(u8, tname, "string")) {
+                    // `string` fields unlock for structs (the Error layer,
+                    // M0.8 E3-C tranche 2 — `Error.message` forces them) and for
+                    // events (frame-arena non-POD payload, `etch-memory-model.md`
+                    // §6.7 / §2.5 — M1.0.2 ruling). part1 §5.5 constrains
+                    // components only; component / resource string fields stay
+                    // rejected below.
+                } else if ((origin == .struct_ or origin == .event_) and self.declaredEnumName(resolved_name)) {
+                    // Enum-typed fields unlock for structs (`Error.code:
+                    // ErrorCode`, same tranche) and events (M1.0.2). Checked
+                    // against the AST enum slab (not the symbol table) so a
+                    // later-declared enum is seen — pass 1 registers symbols
+                    // incrementally.
+                } else if ((origin == .struct_ or origin == .event_) and self.declaredStructName(resolved_name)) {
+                    // Struct-typed STRUCT / event fields are deferred: the
+                    // anonymous `.{ … }` field-value context (M0.8 E3-C tranche 8)
+                    // carries them — part1 §5.5 allows nested POD structs; the
+                    // literal must PROVIDE such a field (E0208, checked at the
+                    // struct literal) because it has no declared default the two
+                    // backends could agree on. Component / resource fields stay
+                    // builtin-POD-bounded (E1 ruling, unchanged).
                 } else if (self.symbols.get(resolved_name)) |sym| {
                     if (sym.kind == .rule) {
                         try self.emit(.undefined_symbol, .error_, tspan, "type '{s}' is not a component, resource, or builtin", .{tname});

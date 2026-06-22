@@ -5246,6 +5246,82 @@ test "event emitted earlier in the tick reaches a later-declared @on_event (M1.0
     try std.testing.expectEqual(@as(i32, 7), seen);
 }
 
+test "event string payload survives to drain and not past tick boundary (M1.0.2 E1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // An `event` carries a non-POD `string` field (memory-model §6.7 — events
+    // are frame-arena struct-messages, POD-strict is component-only; the
+    // type-checker accepts this since the M1.0.2 event-field fix). The producer
+    // sets the string in `emit`; the `@on_event(Note)` observer reads it in its
+    // body the SAME tick via `event.msg.len()` (the supported string op) → the
+    // 5-byte "ping!" accumulates 5 into Sink. The per-tick EventStore resets at
+    // the tick boundary: a second tick re-delivers only the fresh event (Sink
+    // 5 → 10, not 15), and the store holds exactly one Note each tick.
+    const source =
+        \\event Note { msg: string }
+        \\resource Sink { n: int = 0 }
+        \\rule announce() { emit Note { msg: "ping!" } }
+        \\@on_event(Note)
+        \\rule listen() when resource Sink {
+        \\  let s = get_mut(Sink)
+        \\  s.n += event.msg.len()
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    // Key assertion for the M1.0.2 event-field fix: a `string` event field
+    // type-checks clean (was rejected by the POD gate before the fix).
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const note_id = pr.ast.strings.find("Note").?;
+    const msg_id = pr.ast.strings.find("msg").?;
+    const sink_id = world.registry.idOf("Sink").?;
+
+    // Tick 1: the string is readable in the observer body the same tick.
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    var n: i64 = 0;
+    @memcpy(std.mem.asBytes(&n), world.resources.getResource(sink_id).?[0..@sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 5), n); // "ping!".len() read in-body
+
+    // The payload bytes survived to the drain intact (not just a non-null
+    // length): inspect the single queued event's `msg` field directly.
+    try std.testing.expectEqual(@as(usize, 1), interp.events.count(note_id));
+    var found_msg = false;
+    for (interp.events.list.items) |ev| {
+        if (ev.type_name != note_id) continue;
+        for (ev.fields.items) |f| {
+            if (f.name == msg_id) {
+                found_msg = true;
+                try std.testing.expectEqualStrings("ping!", interp.stringBytes(f.value).?);
+            }
+        }
+    }
+    try std.testing.expect(found_msg);
+
+    // Tick 2: the EventStore reset at the boundary — only the fresh event is
+    // delivered (no stale re-delivery of tick 1's Note), so Sink is 10 not 15,
+    // and the store again holds exactly one Note.
+    _ = try interp.runFor(&world, 1);
+    @memcpy(std.mem.asBytes(&n), world.resources.getResource(sink_id).?[0..@sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 10), n);
+    try std.testing.expectEqual(@as(usize, 1), interp.events.count(note_id));
+}
+
 test "runProgram add_tag is deferred to the tick boundary; has_tag query gates a counter (M0.8 E3)" {
     const gpa = std.testing.allocator;
     var world = World.init();
