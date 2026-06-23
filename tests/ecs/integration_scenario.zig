@@ -96,9 +96,12 @@ fn cmdDespawnSystem(ctx: ecs.SystemContext) anyerror!void {
 var OBSERVED_DESPAWNS: usize = 0;
 
 fn onDespawned(
+    _: ?*anyopaque,
     _: *ecs.World,
     _: ecs.EntityId,
     _: ?ecs.ComponentId,
+    _: ?*const anyopaque,
+    _: ?*const anyopaque,
     _: *ecs.CommandBuffer,
 ) anyerror!void {
     OBSERVED_DESPAWNS += 1;
@@ -240,7 +243,7 @@ test "end-to-end integration: spawn/despawn/respawn + 10-tick sim + slot reuse +
         .q_changed = &q_changed,
     };
 
-    try world.registerOnDespawned(gpa, &onDespawned);
+    try world.registerOnDespawned(gpa, null, &onDespawned);
 
     var sys = ecs.SystemScheduler.init();
     defer sys.deinit(gpa);

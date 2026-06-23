@@ -160,10 +160,29 @@ application:
 
 | Command | Pre-apply | Post-apply |
 |---|---|---|
-| `spawn` | — | `on_spawned` + `on_add[cid]` for each component |
-| `add_component` | — | `on_add[cid]` |
-| `remove_component` | `on_remove[cid]` | — |
-| `despawn` | `on_remove[cid]` for each component + `on_despawned` | — |
+| `spawn` | — | `on_spawned` + `on_add[cid]` (new) for each component |
+| `add_component` (cid absent) | — | `on_add[cid]` (new) |
+| `add_component` (cid present) | — | `on_replaced[cid]` (old + new) — in-place overwrite, no migration |
+| `remove_component` | `on_remove[cid]` (old) | — |
+| `despawn` | `on_remove[cid]` (old) for each component + `on_despawned` | — |
+
+`on_replaced` (M1.0.2 E3) is triggered solely by `add_component` on an entity
+that already has the component: the old value is captured before the overwrite,
+then `on_replaced[cid]` fires with old + new. There is no separate `replace`
+command.
+
+The `ObserverFn` signature (M1.0.2 E3) is uniform across all kinds:
+
+```zig
+*const fn (ctx: ?*anyopaque, world: *World, entity: EntityId,
+           component_id: ?ComponentId, old_value: ?*const anyopaque,
+           new_value: ?*const anyopaque, deferred: *CommandBuffer) anyerror!void
+```
+
+Conventions: `on_added` → `new_value` set, `old_value` null; `on_removed` →
+`old_value` set, `new_value` null; `on_replaced` → both set; `on_spawned` /
+`on_despawned` → both null, `component_id` null. `ctx` is threaded back from
+registration (the Etch interpreter passes a per-rule `{ interp, rule_desc_idx }`).
 
 Observer callbacks may queue further structural mutations
 through `deferred.spawn(...)` etc. — those cmds apply at the
