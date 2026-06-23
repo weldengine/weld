@@ -255,6 +255,8 @@ fn annotationAppliesTo(kind: ast_mod.AnnotationKind, target: AnnotTarget) bool {
         .phase, .priority, .run_on, .pause_group => target == .rule,
         .id => target == .rule,
         .on_event => target == .rule,
+        // M1.0.2 E2 — structural-observer lifecycle annotations route onto a rule.
+        .on_added, .on_removed, .on_replaced, .on_spawned, .on_despawned => target == .rule,
         .unit, .range, .hidden, .readonly, .replicated => target == .field,
         .networked => target == .event,
         .shader_fn => target == .function,
@@ -2581,15 +2583,19 @@ pub const TypeChecker = struct {
                     try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .resource);
                 },
                 .event_decl => {
-                    // An `event` is a POD struct of fields (M0.8 E3,
-                    // `etch-grammar.md` §5.10; ABI §3.1). Register the symbol,
-                    // validate `@networked` applicability, and enforce the same
-                    // POD-scalar field surface as component/resource (`true` =
-                    // component-style POD wording).
+                    // An `event` is a frame-arena struct-message, not a POD
+                    // component: the `EMIT_EVENT` opcode promotes non-POD fields
+                    // rule-arena → frame-arena (`etch-memory-model.md` §6.7 / §2.5;
+                    // `etch-abi-zig.md` §3.1/§3.2 passes non-POD by handle), and
+                    // `etch-grammar.md` §5.10 imposes no POD constraint. POD-strict
+                    // is component-only (part1 §5.5, SoA storage). Event fields
+                    // therefore follow the `struct` field surface (`string`/enum
+                    // accepted, nested-struct deferred) via the `.event_` origin
+                    // (M1.0.2 ruling — decision on the E1 test-4 blocker).
                     const decl = self.arena.event_decls.items[data];
                     try self.registerSymbol(.event_, decl.name, item_id, span);
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .event);
-                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .component_like);
+                    try self.validateFieldsInDecl(decl.fields_start, decl.fields_len, .event_);
                 },
                 .rule_decl => {
                     const decl = self.arena.rule_decls.items[data];
@@ -2937,12 +2943,16 @@ pub const TypeChecker = struct {
         return self.arena.impl_methods.items[idx];
     }
 
-    /// Which declaration kind a validated field range belongs to. Components
-    /// and events share the POD wording (`component_like`); resources keep
-    /// their own rejection wording (Option A alignment is tranche 7);
-    /// `struct_` fields gain the tranche-2 unlocks (`string` + enum-typed
-    /// fields, forced by the builtin `Error` per part1 §10.2).
-    const FieldDeclOrigin = enum { component_like, resource, struct_ };
+    /// Which declaration kind a validated field range belongs to. `component_like`
+    /// (components) keeps the POD-strict surface (`string`/enum/nested-struct
+    /// rejected — part1 §5.5, SoA archetype storage); `resource` keeps its own
+    /// S3 rejection wording (Option A alignment is tranche 7). `struct_` and
+    /// `event_` share the wider surface: `string` + enum-typed fields accepted
+    /// (the builtin `Error` forces them on structs; events carry frame-arena
+    /// non-POD payloads per `etch-memory-model.md` §6.7 / §2.5), nested-struct
+    /// fields deferred. POD-strict is component-only (M1.0.2 ruling, decision on
+    /// the E1 test-4 blocker).
+    const FieldDeclOrigin = enum { component_like, resource, struct_, event_ };
 
     fn validateFieldsInDecl(self: *TypeChecker, fields_start: u32, fields_len: u32, origin: FieldDeclOrigin) !void {
         // Field name uniqueness within parent: collect into a small set.
@@ -2994,24 +3004,27 @@ pub const TypeChecker = struct {
             const tname = self.arena.strings.slice(resolved_name);
 
             if (BuiltinType.fromName(tname) == null) {
-                if (origin == .struct_ and std.mem.eql(u8, tname, "string")) {
-                    // `string` struct fields unlock with the Error layer
-                    // (M0.8 E3-C tranche 2 — `Error.message` forces them;
-                    // part1 §5.5 constrains components, not structs).
-                    // Component / resource string fields stay rejected below.
-                } else if (origin == .struct_ and self.declaredEnumName(resolved_name)) {
-                    // Enum-typed struct fields unlock with `Error.code:
-                    // ErrorCode` (same tranche). Checked against the AST enum
-                    // slab (not the symbol table) so a later-declared enum is
-                    // seen — pass 1 registers symbols incrementally.
-                } else if (origin == .struct_ and self.declaredStructName(resolved_name)) {
-                    // Struct-typed STRUCT fields unlock with the anonymous
-                    // `.{ … }` field-value context (M0.8 E3-C tranche 8) —
-                    // part1 §5.5 allows nested POD structs; the literal must
-                    // PROVIDE such a field (E0208, checked at the struct
-                    // literal) because it has no declared default the two
-                    // backends could agree on. Component / resource fields
-                    // stay builtin-POD-bounded (E1 ruling, unchanged).
+                if ((origin == .struct_ or origin == .event_) and std.mem.eql(u8, tname, "string")) {
+                    // `string` fields unlock for structs (the Error layer,
+                    // M0.8 E3-C tranche 2 — `Error.message` forces them) and for
+                    // events (frame-arena non-POD payload, `etch-memory-model.md`
+                    // §6.7 / §2.5 — M1.0.2 ruling). part1 §5.5 constrains
+                    // components only; component / resource string fields stay
+                    // rejected below.
+                } else if ((origin == .struct_ or origin == .event_) and self.declaredEnumName(resolved_name)) {
+                    // Enum-typed fields unlock for structs (`Error.code:
+                    // ErrorCode`, same tranche) and events (M1.0.2). Checked
+                    // against the AST enum slab (not the symbol table) so a
+                    // later-declared enum is seen — pass 1 registers symbols
+                    // incrementally.
+                } else if ((origin == .struct_ or origin == .event_) and self.declaredStructName(resolved_name)) {
+                    // Struct-typed STRUCT / event fields are deferred: the
+                    // anonymous `.{ … }` field-value context (M0.8 E3-C tranche 8)
+                    // carries them — part1 §5.5 allows nested POD structs; the
+                    // literal must PROVIDE such a field (E0208, checked at the
+                    // struct literal) because it has no declared default the two
+                    // backends could agree on. Component / resource fields stay
+                    // builtin-POD-bounded (E1 ruling, unchanged).
                 } else if (self.symbols.get(resolved_name)) |sym| {
                     if (sym.kind == .rule) {
                         try self.emit(.undefined_symbol, .error_, tspan, "type '{s}' is not a component, resource, or builtin", .{tname});
@@ -3342,6 +3355,98 @@ pub const TypeChecker = struct {
         }
     };
 
+    /// Number of structural-observer lifecycle annotations on a rule (M1.0.2 E2).
+    fn observerAnnotationCount(self: *TypeChecker, rule: ast_mod.RuleDecl) u32 {
+        var n: u32 = 0;
+        var i: u32 = 0;
+        while (i < rule.annotations_len) : (i += 1) {
+            const annot = self.arena.annot_pool.items[rule.annotations_extra + i];
+            if (annot.kind.toObserverKind() != null) n += 1;
+        }
+        return n;
+    }
+
+    /// True iff rule param `idx` is named `entity` and typed `Entity` (M1.0.2 E2).
+    fn observerParamIsEntity(self: *TypeChecker, rule: ast_mod.RuleDecl, idx: u32) bool {
+        const p = self.arena.rule_params.items[rule.params_start + idx];
+        if (!std.mem.eql(u8, self.arena.strings.slice(p.name), "entity")) return false;
+        const t = self.namedTypeToResolved(p.type_node);
+        return t == .builtin and t.builtin == .entity;
+    }
+
+    /// True iff rule param `idx` is named `name` and typed by the component
+    /// `comp` (the lifecycle annotation's T) — M1.0.2 E2.
+    fn observerParamIsComponent(self: *TypeChecker, rule: ast_mod.RuleDecl, idx: u32, name: []const u8, comp: StringId) bool {
+        const p = self.arena.rule_params.items[rule.params_start + idx];
+        if (!std.mem.eql(u8, self.arena.strings.slice(p.name), name)) return false;
+        const t = self.namedTypeToResolved(p.type_node);
+        return t == .component and t.component == comp;
+    }
+
+    /// Emit E1208 ObserverSignatureMismatch with the parameter shape required by
+    /// the lifecycle `kind` (M1.0.2 E2).
+    fn emitObserverShape(self: *TypeChecker, annot: ast_mod.Annotation, kind: ast_mod.ObserverKind) !void {
+        const shape = switch (kind) {
+            .on_added => "(entity: Entity, value: T)",
+            .on_replaced => "(entity: Entity, old: T, new: T)",
+            .on_removed => "(entity: Entity, old: T)",
+            .on_spawned, .on_despawned => "(entity: Entity)",
+        };
+        try self.emit(.observer_signature_mismatch, .error_, annot.span, "@{s} observer rule requires the parameter shape {s}", .{ self.arena.strings.slice(annot.name), shape });
+    }
+
+    /// Validate an observer rule's annotation argument + parameter shape against
+    /// its lifecycle kind (M1.0.2 E2). E1209 for a bad component argument
+    /// (arity / not a declared component); E1208 for a parameter list that does
+    /// not match the required `(entity: Entity, …)` shape (at most one E1208).
+    fn checkObserverSignature(self: *TypeChecker, rule: ast_mod.RuleDecl, annot: ast_mod.Annotation) !void {
+        const kind = annot.kind.toObserverKind().?;
+        const aname = self.arena.strings.slice(annot.name);
+        const needs_component = switch (kind) {
+            .on_added, .on_removed, .on_replaced => true,
+            .on_spawned, .on_despawned => false,
+        };
+
+        // 1. Component argument (E1209).
+        var comp_name: ?StringId = null;
+        if (needs_component) {
+            if (self.arena.observerComponentName(annot)) |cn| {
+                const sym = self.symbols.get(cn);
+                if (sym != null and sym.?.kind == .component) {
+                    comp_name = cn;
+                } else {
+                    try self.emit(.observer_component_invalid, .error_, annot.span, "@{s}(T) requires T to be a declared component; '{s}' is not", .{ aname, self.arena.strings.slice(cn) });
+                }
+            } else {
+                try self.emit(.observer_component_invalid, .error_, annot.span, "@{s}(T) requires a single component-type argument", .{aname});
+            }
+            // A bad component argument already reported E1209 — skip the shape
+            // check (its component-param type comparison would cascade).
+            if (comp_name == null) return;
+        } else if (annot.args_len != 0) {
+            try self.emit(.observer_component_invalid, .error_, annot.span, "@{s} takes no argument", .{aname});
+        }
+
+        // 2. Parameter shape (E1208).
+        const want: u32 = switch (kind) {
+            .on_added, .on_removed => 2,
+            .on_replaced => 3,
+            .on_spawned, .on_despawned => 1,
+        };
+        if (rule.params_len != want or !self.observerParamIsEntity(rule, 0)) return self.emitObserverShape(annot, kind);
+        switch (kind) {
+            // `@on_added`'s value binding is `value`, not `component` — the latter
+            // is a reserved keyword (M1.0.2 E2 ruling, option a; see deviations).
+            .on_added => if (!self.observerParamIsComponent(rule, 1, "value", comp_name.?)) return self.emitObserverShape(annot, kind),
+            .on_removed => if (!self.observerParamIsComponent(rule, 1, "old", comp_name.?)) return self.emitObserverShape(annot, kind),
+            .on_replaced => {
+                if (!self.observerParamIsComponent(rule, 1, "old", comp_name.?)) return self.emitObserverShape(annot, kind);
+                if (!self.observerParamIsComponent(rule, 2, "new", comp_name.?)) return self.emitObserverShape(annot, kind);
+            },
+            .on_spawned, .on_despawned => {},
+        }
+    }
+
     fn checkRule(self: *TypeChecker, rule: ast_mod.RuleDecl) !void {
         var ctx: RuleCtx = .{};
         defer ctx.deinit(self.gpa);
@@ -3381,6 +3486,26 @@ pub const TypeChecker = struct {
             } else {
                 try self.emit(.on_event_type_mismatch, .error_, annot.span, "@on_event(EventType) requires a single event-type argument", .{});
             }
+        }
+
+        // Observer lifecycle annotations (M1.0.2 E2): `@on_added/removed/replaced/
+        // spawned/despawned` route a structural observer onto a rule, mirroring
+        // `@on_event`. Surface validations only (the Tier-0 ObserverRegistry
+        // bridge is E3). The component-typed params (`component`/`old`/`new`: T)
+        // are bound self-style by the param loop above. An observer rule carries
+        // exactly one lifecycle annotation and no `when` / `@on_event` (the
+        // lifecycle component type is the sole trigger; observers do not iterate).
+        if (self.arena.observerAnnotation(rule)) |oannot| {
+            if (self.arena.onEventAnnotation(rule) != null) {
+                try self.emit(.observer_rule_conflict, .error_, oannot.span, "an observer rule cannot also be an @on_event handler", .{});
+            }
+            if (rule.when_root != ast_mod.RuleDecl.none_when) {
+                try self.emit(.observer_rule_conflict, .error_, oannot.span, "an observer rule takes no `when` clause (the lifecycle component type is the sole trigger)", .{});
+            }
+            if (self.observerAnnotationCount(rule) > 1) {
+                try self.emit(.observer_rule_conflict, .error_, oannot.span, "an observer rule must carry exactly one lifecycle annotation", .{});
+            }
+            try self.checkObserverSignature(rule, oannot);
         }
 
         // Validate when-clause and collect accessible component/resource types.

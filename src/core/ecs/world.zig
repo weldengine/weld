@@ -195,22 +195,25 @@ pub const World = struct {
 
     // ─── Observer registration (M0.1 / E6) ───────────────────────────────
 
-    /// Register an `on_spawned` observer.
+    /// Register an `on_spawned` observer (M1.0.2 E3: `ctx` threaded back to the
+    /// callback; native callers pass `null`).
     pub fn registerOnSpawned(
         self: *World,
         gpa: std.mem.Allocator,
+        ctx: ?*anyopaque,
         callback: observers_mod.ObserverFn,
     ) !void {
-        try self.observer_registry.registerOnSpawned(gpa, self, callback);
+        try self.observer_registry.registerOnSpawned(gpa, self, ctx, callback);
     }
 
     /// Register an `on_despawned` observer.
     pub fn registerOnDespawned(
         self: *World,
         gpa: std.mem.Allocator,
+        ctx: ?*anyopaque,
         callback: observers_mod.ObserverFn,
     ) !void {
-        try self.observer_registry.registerOnDespawned(gpa, self, callback);
+        try self.observer_registry.registerOnDespawned(gpa, self, ctx, callback);
     }
 
     /// Register an `on_add` observer for component `T`.
@@ -218,10 +221,11 @@ pub const World = struct {
         self: *World,
         gpa: std.mem.Allocator,
         comptime T: type,
+        ctx: ?*anyopaque,
         callback: observers_mod.ObserverFn,
     ) !void {
         const cid = try self.ensureRegistered(gpa, T);
-        try self.observer_registry.registerOnAdd(gpa, self, cid, callback);
+        try self.observer_registry.registerOnAdd(gpa, self, cid, ctx, callback);
     }
 
     /// Register an `on_remove` observer for component `T`.
@@ -229,10 +233,24 @@ pub const World = struct {
         self: *World,
         gpa: std.mem.Allocator,
         comptime T: type,
+        ctx: ?*anyopaque,
         callback: observers_mod.ObserverFn,
     ) !void {
         const cid = try self.ensureRegistered(gpa, T);
-        try self.observer_registry.registerOnRemove(gpa, self, cid, callback);
+        try self.observer_registry.registerOnRemove(gpa, self, cid, ctx, callback);
+    }
+
+    /// Register an `on_replaced` observer for component `T` (M1.0.2 E3 — fires
+    /// when `T` is added to an entity that already has it).
+    pub fn registerOnReplaced(
+        self: *World,
+        gpa: std.mem.Allocator,
+        comptime T: type,
+        ctx: ?*anyopaque,
+        callback: observers_mod.ObserverFn,
+    ) !void {
+        const cid = try self.ensureRegistered(gpa, T);
+        try self.observer_registry.registerOnReplaced(gpa, self, cid, ctx, callback);
     }
 
     // ─── Component registration helpers ──────────────────────────────────
@@ -523,6 +541,31 @@ pub const World = struct {
         arch.markChanged(chunk, col_idx, loc.slot, self.current_tick);
         const bytes = arch.componentSlot(chunk, col_idx, loc.slot);
         return @ptrCast(@alignCast(bytes.ptr));
+    }
+
+    /// Dynamic (by `ComponentId`) read of `entity`'s component bytes — the
+    /// runtime analogue of `get`, used by the observer dispatch (M1.0.2 E3).
+    /// Returns the live storage slice (`componentSize(cid)` long), or `null`
+    /// when the entity is stale or its archetype lacks `cid`. Does not mark
+    /// the slot changed.
+    pub fn componentBytes(self: *World, entity: EntityId, cid: ComponentId) ?[]u8 {
+        if (!self.identity.isLive(entity)) return null;
+        const loc = self.entity_locations.get(entity) orelse return null;
+        const arch = self.archetypes.items[loc.archetype_idx];
+        const col = arch.componentIndex(cid) orelse return null;
+        const chunk = arch.chunks.items[loc.chunk_idx];
+        return arch.componentSlot(chunk, col, loc.slot);
+    }
+
+    /// Stamp `entity`'s `cid` slot as changed at `current_tick` (M1.0.2 E3) —
+    /// used after an in-place replace overwrite so a `Changed<T>` query sees it,
+    /// mirroring `getMut`'s auto-mark. No-op when the entity/component is absent.
+    pub fn markComponentChangedDyn(self: *World, entity: EntityId, cid: ComponentId) void {
+        const loc = self.entity_locations.get(entity) orelse return;
+        const arch = self.archetypes.items[loc.archetype_idx];
+        const col = arch.componentIndex(cid) orelse return;
+        const chunk = arch.chunks.items[loc.chunk_idx];
+        arch.markChanged(chunk, col, loc.slot, self.current_tick);
     }
 
     // ─── Add / remove component (M0.1 / E2 — transition cache) ──────────

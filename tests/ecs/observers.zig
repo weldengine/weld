@@ -58,9 +58,12 @@ const AddObserverState = struct {
 var ADD_STATE: ?*AddObserverState = null;
 
 fn onAddTagObserver(
+    _: ?*anyopaque,
     world: *World,
     entity: EntityId,
     component_id: ?ComponentId,
+    _: ?*const anyopaque,
+    _: ?*const anyopaque,
     deferred: *CommandBuffer,
 ) anyerror!void {
     _ = world;
@@ -100,7 +103,7 @@ test "on_add observer is called during flush after add_component" {
     ADD_STATE = &state;
     defer ADD_STATE = null;
 
-    try world.registerOnAdd(gpa, Tag, &onAddTagObserver);
+    try world.registerOnAdd(gpa, Tag, null, &onAddTagObserver);
     try sys.registerSystem(gpa, &world, .{
         .phase = .update,
         .name = "add_tag",
@@ -125,9 +128,12 @@ const DespawnObserverState = struct {
 var DESPAWN_STATE: ?*DespawnObserverState = null;
 
 fn onDespawnedObserver(
+    _: ?*anyopaque,
     world: *World,
     entity: EntityId,
     component_id: ?ComponentId,
+    _: ?*const anyopaque,
+    _: ?*const anyopaque,
     deferred: *CommandBuffer,
 ) anyerror!void {
     _ = deferred;
@@ -170,7 +176,7 @@ test "on_despawned observer fires before chunk slot is reused" {
     DESPAWN_STATE = &state;
     defer DESPAWN_STATE = null;
 
-    try world.registerOnDespawned(gpa, &onDespawnedObserver);
+    try world.registerOnDespawned(gpa, null, &onDespawnedObserver);
     try sys.registerSystem(gpa, &world, .{
         .phase = .update,
         .name = "despawn",
@@ -198,9 +204,12 @@ const ChainState = struct {
 var CHAIN_STATE: ?*ChainState = null;
 
 fn onSpawnedChain(
+    _: ?*anyopaque,
     world: *World,
     entity: EntityId,
     component_id: ?ComponentId,
+    _: ?*const anyopaque,
+    _: ?*const anyopaque,
     deferred: *CommandBuffer,
 ) anyerror!void {
     _ = world;
@@ -246,7 +255,7 @@ test "observer-issued structural mutations are queued for the next flush" {
     CHAIN_STATE = &chain_state;
     defer CHAIN_STATE = null;
 
-    try world.registerOnSpawned(gpa, &onSpawnedChain);
+    try world.registerOnSpawned(gpa, null, &onSpawnedChain);
     try sys.registerSystem(gpa, &world, .{
         .phase = .update,
         .name = "spawn_one",

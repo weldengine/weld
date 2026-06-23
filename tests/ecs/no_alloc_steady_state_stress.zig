@@ -143,9 +143,12 @@ fn cleanupSystem(ctx: ecs.SystemContext) anyerror!void {
 var DESPAWN_OBSERVER_FIRED: u64 = 0;
 
 fn onDespawnedNoop(
+    _: ?*anyopaque,
     _: *ecs.World,
     _: ecs.EntityId,
     _: ?ecs.ComponentId,
+    _: ?*const anyopaque,
+    _: ?*const anyopaque,
     _: *ecs.CommandBuffer,
 ) anyerror!void {
     DESPAWN_OBSERVER_FIRED +%= 1;
@@ -457,7 +460,7 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
         .q_cleanup = &q_cleanup,
     };
 
-    try world.registerOnDespawned(gpa, &onDespawnedNoop);
+    try world.registerOnDespawned(gpa, null, &onDespawnedNoop);
 
     var sys = ecs.SystemScheduler.init();
     defer sys.deinit(gpa);

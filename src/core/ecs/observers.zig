@@ -43,25 +43,48 @@ const CommandBuffer = command_buffer_mod.CommandBuffer;
 const Command = command_buffer_mod.Command;
 
 /// Callback fired when a structural mutation triggers an observer.
-/// Arguments:
+/// Arguments (M1.0.2 E3 — uniform signature carrying a context pointer
+/// and old/new value pointers):
+/// - `ctx` — opaque per-listener context (e.g. the Etch interpreter's
+///    `{ interp, rule_desc_idx }`), threaded back to the callback. `null`
+///    for context-free (native) observers.
 /// - `world` — the world being mutated (read access only is safe;
 ///    direct write access is allowed but discouraged — prefer the
 ///    `deferred` buffer for cmds that should land at the next flush).
 /// - `entity` — the entity that triggered the event.
 /// - `component_id` — the component involved. Populated for
-///    `on_add` / `on_remove`; `null` for `on_spawned` / `on_despawned`.
+///    `on_add` / `on_remove` / `on_replaced`; `null` for
+///    `on_spawned` / `on_despawned`.
+/// - `old_value` — pointer to the pre-mutation component bytes
+///    (`componentSize(component_id)` long). Set for `on_remove` and
+///    `on_replaced`; `null` otherwise.
+/// - `new_value` — pointer to the post-mutation component bytes. Set for
+///    `on_add` and `on_replaced`; `null` otherwise.
 /// - `deferred` — shared command buffer where observer-issued
 ///    mutations are queued for the next flush.
+///
+/// Conventions: `on_added` → `new_value` set, `old_value` null;
+/// `on_removed` → `old_value` set, `new_value` null; `on_replaced` →
+/// both set; `on_spawned` / `on_despawned` → both null, `component_id` null.
 pub const ObserverFn = *const fn (
+    ctx: ?*anyopaque,
     world: *World,
     entity: EntityId,
     component_id: ?ComponentId,
+    old_value: ?*const anyopaque,
+    new_value: ?*const anyopaque,
     deferred: *CommandBuffer,
 ) anyerror!void;
 
-/// Per-event callback list — a flat `ArrayListUnmanaged` keeps
-/// dispatch as `for items |f| try f(...)`.
-const Listeners = std.ArrayListUnmanaged(ObserverFn);
+/// One registered observer: a callback plus its opaque context (M1.0.2 E3).
+pub const Listener = struct {
+    ctx: ?*anyopaque,
+    callback: ObserverFn,
+};
+
+/// Per-event listener list — a flat `ArrayListUnmanaged` keeps
+/// dispatch as `for items |l| try l.callback(...)`.
+const Listeners = std.ArrayListUnmanaged(Listener);
 
 /// Registry holding the four kinds of observer lists. Lives next to
 /// the `World` (typically as a field) and is consulted during every
@@ -71,6 +94,9 @@ pub const ObserverRegistry = struct {
     on_despawned: Listeners = .empty,
     on_add: std.AutoHashMapUnmanaged(ComponentId, Listeners) = .empty,
     on_remove: std.AutoHashMapUnmanaged(ComponentId, Listeners) = .empty,
+    /// `on_replaced[cid]` — fired when `add_component(entity, cid)` lands on an
+    /// entity that already has `cid` (M1.0.2 E3). Carries old + new values.
+    on_replaced: std.AutoHashMapUnmanaged(ComponentId, Listeners) = .empty,
 
     /// Shared deferred buffer for observer-issued cmds. Created
     /// lazily on first observer registration so test paths that do
@@ -93,6 +119,10 @@ pub const ObserverRegistry = struct {
         while (rm_it.next()) |list| list.deinit(gpa);
         self.on_remove.deinit(gpa);
 
+        var rep_it = self.on_replaced.valueIterator();
+        while (rep_it.next()) |list| list.deinit(gpa);
+        self.on_replaced.deinit(gpa);
+
         if (self.deferred) |*d| d.deinit();
         self.* = undefined;
     }
@@ -103,15 +133,16 @@ pub const ObserverRegistry = struct {
         if (self.deferred == null) self.deferred = CommandBuffer.init(gpa, world);
     }
 
-    /// Register an `on_spawned` observer.
+    /// Register an `on_spawned` observer (M1.0.2 E3: `ctx` threaded back).
     pub fn registerOnSpawned(
         self: *ObserverRegistry,
         gpa: std.mem.Allocator,
         world: *World,
+        ctx: ?*anyopaque,
         callback: ObserverFn,
     ) !void {
         self.ensureDeferred(gpa, world);
-        try self.on_spawned.append(gpa, callback);
+        try self.on_spawned.append(gpa, .{ .ctx = ctx, .callback = callback });
     }
 
     /// Register an `on_despawned` observer.
@@ -119,10 +150,11 @@ pub const ObserverRegistry = struct {
         self: *ObserverRegistry,
         gpa: std.mem.Allocator,
         world: *World,
+        ctx: ?*anyopaque,
         callback: ObserverFn,
     ) !void {
         self.ensureDeferred(gpa, world);
-        try self.on_despawned.append(gpa, callback);
+        try self.on_despawned.append(gpa, .{ .ctx = ctx, .callback = callback });
     }
 
     /// Register an `on_add` observer for `cid`.
@@ -131,12 +163,10 @@ pub const ObserverRegistry = struct {
         gpa: std.mem.Allocator,
         world: *World,
         cid: ComponentId,
+        ctx: ?*anyopaque,
         callback: ObserverFn,
     ) !void {
-        self.ensureDeferred(gpa, world);
-        const entry = try self.on_add.getOrPut(gpa, cid);
-        if (!entry.found_existing) entry.value_ptr.* = .empty;
-        try entry.value_ptr.append(gpa, callback);
+        try self.registerInMap(gpa, world, &self.on_add, cid, ctx, callback);
     }
 
     /// Register an `on_remove` observer for `cid`.
@@ -145,12 +175,37 @@ pub const ObserverRegistry = struct {
         gpa: std.mem.Allocator,
         world: *World,
         cid: ComponentId,
+        ctx: ?*anyopaque,
+        callback: ObserverFn,
+    ) !void {
+        try self.registerInMap(gpa, world, &self.on_remove, cid, ctx, callback);
+    }
+
+    /// Register an `on_replaced` observer for `cid` (M1.0.2 E3).
+    pub fn registerOnReplaced(
+        self: *ObserverRegistry,
+        gpa: std.mem.Allocator,
+        world: *World,
+        cid: ComponentId,
+        ctx: ?*anyopaque,
+        callback: ObserverFn,
+    ) !void {
+        try self.registerInMap(gpa, world, &self.on_replaced, cid, ctx, callback);
+    }
+
+    fn registerInMap(
+        self: *ObserverRegistry,
+        gpa: std.mem.Allocator,
+        world: *World,
+        map: *std.AutoHashMapUnmanaged(ComponentId, Listeners),
+        cid: ComponentId,
+        ctx: ?*anyopaque,
         callback: ObserverFn,
     ) !void {
         self.ensureDeferred(gpa, world);
-        const entry = try self.on_remove.getOrPut(gpa, cid);
+        const entry = try map.getOrPut(gpa, cid);
         if (!entry.found_existing) entry.value_ptr.* = .empty;
-        try entry.value_ptr.append(gpa, callback);
+        try entry.value_ptr.append(gpa, .{ .ctx = ctx, .callback = callback });
     }
 
     fn fireList(
@@ -159,10 +214,12 @@ pub const ObserverRegistry = struct {
         world: *World,
         entity: EntityId,
         component_id: ?ComponentId,
+        old_value: ?*const anyopaque,
+        new_value: ?*const anyopaque,
     ) !void {
         const deferred = if (self.deferred != null) &self.deferred.? else return;
-        for (list.items) |f| {
-            try f(world, entity, component_id, deferred);
+        for (list.items) |l| {
+            try l.callback(l.ctx, world, entity, component_id, old_value, new_value, deferred);
         }
     }
 };
@@ -220,10 +277,12 @@ pub fn applyWithObservers(
     switch (c) {
         .spawn => |s| {
             const eid = try world.spawnDynamicWithValues(gpa, s.component_ids, s.payloads);
-            try reg.fireList(reg.on_spawned, world, eid, null);
+            try reg.fireList(reg.on_spawned, world, eid, null, null, null);
             for (s.component_ids) |cid| {
                 if (reg.on_add.get(cid)) |list| {
-                    try reg.fireList(list, world, eid, cid);
+                    // Post-apply: the new component value lives in storage.
+                    const new_ptr: ?*const anyopaque = if (world.componentBytes(eid, cid)) |b| @ptrCast(b.ptr) else null;
+                    try reg.fireList(list, world, eid, cid, null, new_ptr);
                 }
             }
         },
@@ -231,29 +290,57 @@ pub fn applyWithObservers(
             // Pre-apply: fire on_remove[cid] for every component the
             // entity still has, then on_despawned. The observer is
             // free to read the entity's components — they live until
-            // we drop into `world.despawn` below.
+            // we drop into `world.despawn` below, so `old_value` points
+            // at the live (pre-destruction) slot.
             if (world.entity_locations.get(d.entity)) |loc| {
                 const arch = world.archetypes.items[loc.archetype_idx];
                 for (arch.component_ids) |cid| {
                     if (reg.on_remove.get(cid)) |list| {
-                        try reg.fireList(list, world, d.entity, cid);
+                        const old_ptr: ?*const anyopaque = if (world.componentBytes(d.entity, cid)) |b| @ptrCast(b.ptr) else null;
+                        try reg.fireList(list, world, d.entity, cid, old_ptr, null);
                     }
                 }
             }
-            try reg.fireList(reg.on_despawned, world, d.entity, null);
+            try reg.fireList(reg.on_despawned, world, d.entity, null, null, null);
             try world.despawn(gpa, d.entity);
         },
         .add_component => |a| {
-            try world.addComponentDynamic(gpa, a.entity, a.component_id, a.bytes);
-            if (reg.on_add.get(a.component_id)) |list| {
-                try reg.fireList(list, world, a.entity, a.component_id);
+            // Replace = add-on-present (M1.0.2 E3): if the entity already has
+            // the component, this is an in-place overwrite, not a migration —
+            // `addComponentDynamic` would panic on the already-present assert.
+            // Capture the old bytes before the overwrite (storage is clobbered),
+            // overwrite, then fire `on_replaced[cid]` with old + new. Otherwise
+            // it is a genuine add: migrate, then fire `on_add[cid]` with new.
+            if (world.componentBytes(a.entity, a.component_id)) |slot| {
+                const list_opt = reg.on_replaced.get(a.component_id);
+                // Capture the old bytes ONLY when an `on_replaced` listener will
+                // consume them — otherwise the shared Tier-0 path stays alloc-free
+                // (a listener-less add-on-present must not pay a `dupe`).
+                const old_copy: ?[]u8 = if (list_opt != null) try gpa.dupe(u8, slot) else null;
+                defer if (old_copy) |oc| gpa.free(oc);
+                // The in-place overwrite + change-mark are UNCONDITIONAL — the
+                // add-on-present semantics do not depend on a listener.
+                @memcpy(slot, a.bytes);
+                world.markComponentChangedDyn(a.entity, a.component_id);
+                if (list_opt) |list| {
+                    const old_ptr: *const anyopaque = @ptrCast(old_copy.?.ptr);
+                    const new_ptr: *const anyopaque = @ptrCast(slot.ptr);
+                    try reg.fireList(list, world, a.entity, a.component_id, old_ptr, new_ptr);
+                }
+            } else {
+                try world.addComponentDynamic(gpa, a.entity, a.component_id, a.bytes);
+                if (reg.on_add.get(a.component_id)) |list| {
+                    const new_ptr: ?*const anyopaque = if (world.componentBytes(a.entity, a.component_id)) |b| @ptrCast(b.ptr) else null;
+                    try reg.fireList(list, world, a.entity, a.component_id, null, new_ptr);
+                }
             }
         },
         .remove_component => |r| {
-            // Pre-apply: observer reads the component value, THEN
+            // Pre-apply: observer reads the component value (live slot), THEN
             // the migration drops it.
             if (reg.on_remove.get(r.component_id)) |list| {
-                try reg.fireList(list, world, r.entity, r.component_id);
+                const old_ptr: ?*const anyopaque = if (world.componentBytes(r.entity, r.component_id)) |b| @ptrCast(b.ptr) else null;
+                try reg.fireList(list, world, r.entity, r.component_id, old_ptr, null);
             }
             try world.removeComponentDynamic(gpa, r.entity, r.component_id);
         },
@@ -290,4 +377,105 @@ test "ObserverRegistry init/deinit round-trip is leak-free" {
     defer reg.deinit(gpa);
     try testing.expect(reg.deferred == null);
     try testing.expectEqual(@as(usize, 0), reg.on_spawned.items.len);
+}
+
+// ─── M1.0.2 E3 — replace detection + old-value capture ─────────────────────
+
+/// Test-only capture of the old/new component bytes (single `i32`) seen by an
+/// observer fire (M1.0.2 E3).
+const E3Capture = struct {
+    var fired: u32 = 0;
+    var old: i32 = 0;
+    var new: i32 = 0;
+    var saw_old: bool = false;
+    var saw_new: bool = false;
+    fn reset() void {
+        fired = 0;
+        old = 0;
+        new = 0;
+        saw_old = false;
+        saw_new = false;
+    }
+};
+
+fn e3CaptureObserver(
+    _: ?*anyopaque,
+    _: *World,
+    _: EntityId,
+    _: ?ComponentId,
+    old_value: ?*const anyopaque,
+    new_value: ?*const anyopaque,
+    _: *CommandBuffer,
+) anyerror!void {
+    E3Capture.fired += 1;
+    if (old_value) |p| {
+        E3Capture.saw_old = true;
+        E3Capture.old = @as(*const i32, @ptrCast(@alignCast(p))).*;
+    }
+    if (new_value) |p| {
+        E3Capture.saw_new = true;
+        E3Capture.new = @as(*const i32, @ptrCast(@alignCast(p))).*;
+    }
+}
+
+fn e3RegisterRawI32(gpa: std.mem.Allocator, world: *World, name: []const u8) !ComponentId {
+    return try world.registry.registerComponentRaw(gpa, .{
+        .name = name,
+        .size = 4,
+        .alignment = 4,
+        .default_bytes = &[_]u8{ 0, 0, 0, 0 },
+        .fields = &.{},
+    });
+}
+
+test "add on entity already having the component fires on_replaced with old and new (M1.0.2 E3)" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try e3RegisterRawI32(gpa, &world, "Mark");
+    var v7: i32 = 7;
+    const e = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{cid}, &[_][]const u8{std.mem.asBytes(&v7)});
+
+    E3Capture.reset();
+    try world.observer_registry.registerOnReplaced(gpa, &world, cid, null, &e3CaptureObserver);
+
+    // `add_component` on an entity that ALREADY has the component = replace.
+    var v42: i32 = 42;
+    const c: Command = .{ .add_component = .{ .entity = e, .component_id = cid, .bytes = std.mem.asBytes(&v42) } };
+    try applyWithObservers(c, &world.observer_registry, &world, gpa);
+
+    try testing.expectEqual(@as(u32, 1), E3Capture.fired);
+    try testing.expect(E3Capture.saw_old and E3Capture.saw_new);
+    try testing.expectEqual(@as(i32, 7), E3Capture.old);
+    try testing.expectEqual(@as(i32, 42), E3Capture.new);
+    // The slot now holds the new value (in-place overwrite, no migration).
+    var stored: i32 = 0;
+    @memcpy(std.mem.asBytes(&stored), world.componentBytes(e, cid).?[0..4]);
+    try testing.expectEqual(@as(i32, 42), stored);
+}
+
+test "on_removed receives the pre-removal value (M1.0.2 E3)" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Two components so the entity survives the remove (the source archetype
+    // must keep >= 1 component — `removeComponentDynamic` asserts len >= 2).
+    const keep = try e3RegisterRawI32(gpa, &world, "Keep");
+    const drop = try e3RegisterRawI32(gpa, &world, "Drop");
+    var kv: i32 = 1;
+    var dv: i32 = 99;
+    const e = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{ keep, drop }, &[_][]const u8{ std.mem.asBytes(&kv), std.mem.asBytes(&dv) });
+
+    E3Capture.reset();
+    try world.observer_registry.registerOnRemove(gpa, &world, drop, null, &e3CaptureObserver);
+
+    const c: Command = .{ .remove_component = .{ .entity = e, .component_id = drop } };
+    try applyWithObservers(c, &world.observer_registry, &world, gpa);
+
+    try testing.expectEqual(@as(u32, 1), E3Capture.fired);
+    try testing.expect(E3Capture.saw_old and !E3Capture.saw_new); // on_removed: old only
+    try testing.expectEqual(@as(i32, 99), E3Capture.old); // the pre-removal value
+    try testing.expect(world.componentBytes(e, drop) == null); // component gone
 }
