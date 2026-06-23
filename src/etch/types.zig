@@ -3387,7 +3387,7 @@ pub const TypeChecker = struct {
     /// the lifecycle `kind` (M1.0.2 E2).
     fn emitObserverShape(self: *TypeChecker, annot: ast_mod.Annotation, kind: ast_mod.ObserverKind) !void {
         const shape = switch (kind) {
-            .on_added => "(entity: Entity, component: T)",
+            .on_added => "(entity: Entity, value: T)",
             .on_replaced => "(entity: Entity, old: T, new: T)",
             .on_removed => "(entity: Entity, old: T)",
             .on_spawned, .on_despawned => "(entity: Entity)",
@@ -3435,7 +3435,9 @@ pub const TypeChecker = struct {
         };
         if (rule.params_len != want or !self.observerParamIsEntity(rule, 0)) return self.emitObserverShape(annot, kind);
         switch (kind) {
-            .on_added => if (!self.observerParamIsComponent(rule, 1, "component", comp_name.?)) return self.emitObserverShape(annot, kind),
+            // `@on_added`'s value binding is `value`, not `component` — the latter
+            // is a reserved keyword (M1.0.2 E2 ruling, option a; see deviations).
+            .on_added => if (!self.observerParamIsComponent(rule, 1, "value", comp_name.?)) return self.emitObserverShape(annot, kind),
             .on_removed => if (!self.observerParamIsComponent(rule, 1, "old", comp_name.?)) return self.emitObserverShape(annot, kind),
             .on_replaced => {
                 if (!self.observerParamIsComponent(rule, 1, "old", comp_name.?)) return self.emitObserverShape(annot, kind);

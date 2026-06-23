@@ -5400,6 +5400,13 @@ test "observer annotation signature mismatch is rejected (M1.0.2 E2)" {
         \\@on_spawned
         \\rule s(entity: Entity, extra: int) {}
     , .observer_signature_mismatch));
+    // `@on_added(Health)` with `value` typed `int` instead of the component T —
+    // the shape must be `(entity: Entity, value: Health)`. → E1208.
+    try std.testing.expect(try observerProgramHasCode(gpa,
+        \\component Health { current: int = 0 }
+        \\@on_added(Health)
+        \\rule a(entity: Entity, value: int) {}
+    , .observer_signature_mismatch));
 }
 
 test "observer annotation requires a component type (M1.0.2 E2)" {
@@ -5434,16 +5441,16 @@ test "observer rule rejects when clause and conflicting lifecycle annotations (M
     , .observer_rule_conflict));
 }
 
-test "well-formed observer rules type-check clean (M1.0.2 E2)" {
+test "well-formed observer rules of all five kinds type-check clean (M1.0.2 E2)" {
     const gpa = std.testing.allocator;
     // Positive control: each lifecycle kind with its exact required shape — no
     // observer diagnostic should fire (guards against over-rejection). `@on_added`
-    // is omitted here: its frozen binding name `component` is a reserved keyword
-    // (parse error as a param name AND as an expression), so no conformant
-    // `@on_added` rule can be written — pending a Claude.ai ruling (§ Blockers).
-    // The other four kinds bind `entity` / `old` / `new` (all valid identifiers).
+    // binds `value` (not `component`, a reserved keyword — M1.0.2 E2 ruling,
+    // option a); the others bind `entity` / `old` / `new`.
     const n = try observerProgramDiagCount(gpa,
         \\component Health { current: int = 0 }
+        \\@on_added(Health)
+        \\rule added(entity: Entity, value: Health) {}
         \\@on_removed(Health)
         \\rule removed(entity: Entity, old: Health) {}
         \\@on_replaced(Health)
