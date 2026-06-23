@@ -46,6 +46,7 @@ comptime {
     _ = @import("interp.zig");
     _ = @import("value.zig");
     _ = @import("ecs_bridge.zig");
+    _ = @import("persistent.zig");
 }
 
 /// S5 Zig codegen surface — exposed at the module surface so
