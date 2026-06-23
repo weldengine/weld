@@ -100,6 +100,14 @@ pub const Value = union(enum) {
     /// name (interned `StringId`) and the variant's declaration-order index.
     /// Value-typed: compared by `(type_name, variant)` equality.
     enum_value: EnumValue,
+    /// A borrowed view over a resource `string` field's persistent-heap bytes
+    /// (M1.0.3 E2). The read path returns this without incref'ing the block —
+    /// safe for the rule body because the resource (hence the bytes) outlives it
+    /// (`etch-memory-model.md` §11 Phase 1; scope-bound incref is Phase 2). Self-
+    /// contained `{ptr,len}` so `readBytesAsValue` can build it with no allocator
+    /// and no interpreter store; `ptr == 0` ⇔ the empty string. Additive — does
+    /// not disturb `string_id` (AST pool) / `string_run` (rule-arena) semantics.
+    string_persistent: StrView,
     unit,
 
     pub fn fromInt(x: i64) Value {
@@ -142,6 +150,14 @@ pub const Value = union(enum) {
             .struct_ref => false,
             .optional => false, // optional equality is not exercised in M0.8 (unwrap via if/while let)
             .enum_value => |a| a.type_name == other.enum_value.type_name and a.variant == other.enum_value.variant,
+            .string_persistent => |a| blk: {
+                const b = other.string_persistent;
+                if (a.len != b.len) break :blk false;
+                if (a.len == 0) break :blk true;
+                const ab: [*]const u8 = @ptrFromInt(a.ptr);
+                const bb: [*]const u8 = @ptrFromInt(b.ptr);
+                break :blk std.mem.eql(u8, ab[0..a.len], bb[0..b.len]);
+            },
             .unit => true,
         };
     }
@@ -151,6 +167,13 @@ pub const Value = union(enum) {
 pub const EnumValue = struct {
     type_name: u32,
     variant: u32,
+};
+
+/// Borrowed view over persistent-heap string bytes (M1.0.3 E2). `ptr` is the
+/// raw address of the bytes (`0` for the empty string); `len` the byte count.
+pub const StrView = struct {
+    ptr: u64 = 0,
+    len: u32 = 0,
 };
 
 /// Typed sum carrying a `SourceSpan` resolved from the AST `NodeId` that

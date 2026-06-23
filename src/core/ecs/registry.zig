@@ -39,6 +39,15 @@ pub const FieldKind = enum {
     u32_,
     f32_,
     f64_,
+    /// A `string` field slot: `{ ptr: u64, len: u32 }` (16 bytes, 8-aligned)
+    /// pointing into the Etch persistent heap (`src/etch/persistent.zig`,
+    /// `StringSlot`). **Resource-only by construction** (M1.0.3): the Etch
+    /// validator rejects `string` on `component` and `fieldKindFromTypeName`
+    /// only emits this kind for the `.resource` origin, so no component can ever
+    /// carry it — the component SoA/POD invariant (`engine-spec.md` §4) is
+    /// untouched. Tier-0 stays string-agnostic: it stores/copies the 16 raw
+    /// slot bytes; the Etch runtime owns the pointed-to bytes' lifetime.
+    string_,
 
     pub fn sizeBytes(self: FieldKind) usize {
         return switch (self) {
@@ -49,6 +58,9 @@ pub const FieldKind = enum {
             .u32_ => @sizeOf(u32),
             .f32_ => @sizeOf(f32),
             .f64_ => @sizeOf(f64),
+            // `{ ptr: u64, len: u32 }` padded to 8-alignment — must equal
+            // `@sizeOf(persistent.StringSlot)` (asserted in `ecs_bridge.zig`).
+            .string_ => 16,
         };
     }
 
@@ -61,6 +73,7 @@ pub const FieldKind = enum {
             .u32_ => @alignOf(u32),
             .f32_ => @alignOf(f32),
             .f64_ => @alignOf(f64),
+            .string_ => 8,
         };
     }
 

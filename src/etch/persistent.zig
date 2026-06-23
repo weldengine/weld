@@ -56,6 +56,22 @@ pub const type_string: TypeId = 1;
 /// for compile-time interned string literals (`etch-memory-model.md` §4.4).
 pub const sentinel: u32 = std.math.maxInt(u32);
 
+/// On-storage layout of a resource `string` field slot (`etch-memory-model.md`
+/// §5.1): `{ ptr, len }`, 16 bytes, 8-aligned. `ptr` is the address of the
+/// persistent payload bytes (a `type_string` block's payload), or `0` for the
+/// empty string (no backing block). The single source of truth for the slot
+/// layout; `Registry.FieldKind.string_` reports `sizeBytes == 16` / `alignBytes
+/// == 8` to match (cross-checked by a `comptime` assert in `ecs_bridge.zig`).
+pub const StringSlot = extern struct {
+    ptr: u64 = 0,
+    len: u32 = 0,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(StringSlot) == 16);
+    std.debug.assert(@alignOf(StringSlot) == 8);
+}
+
 /// Allocation alignment of every block. ≥ `@alignOf(Header)` (8) and a
 /// multiple of it, so the payload at `block + @sizeOf(Header)` is itself
 /// 16-aligned — enough for any POD payload a future `TypeId` may carry.
