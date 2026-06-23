@@ -25,11 +25,11 @@ knowledge base — see § Quick links spec.
 
 | Field | Value |
 |---|---|
-| Phase | 0 (Fondations) |
+| Phase | 1 (Etch ↔ ECS) |
 | Current milestone | (none — between milestones) |
-| Last released tag | `v0.0.7-S6-ipc-round-trip` |
+| Last released tag | `v0.10.2-etch-events-observers` |
 | Active branch | `main` |
-| Next planned milestone | M0.0 — custom Zig linter + housekeeping |
+| Next planned milestone | M1.0.3 — Resources |
 
 ## Tags
 
