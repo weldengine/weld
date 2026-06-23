@@ -312,12 +312,18 @@ pub fn applyWithObservers(
             // overwrite, then fire `on_replaced[cid]` with old + new. Otherwise
             // it is a genuine add: migrate, then fire `on_add[cid]` with new.
             if (world.componentBytes(a.entity, a.component_id)) |slot| {
-                const old_copy = try gpa.dupe(u8, slot);
-                defer gpa.free(old_copy);
+                const list_opt = reg.on_replaced.get(a.component_id);
+                // Capture the old bytes ONLY when an `on_replaced` listener will
+                // consume them — otherwise the shared Tier-0 path stays alloc-free
+                // (a listener-less add-on-present must not pay a `dupe`).
+                const old_copy: ?[]u8 = if (list_opt != null) try gpa.dupe(u8, slot) else null;
+                defer if (old_copy) |oc| gpa.free(oc);
+                // The in-place overwrite + change-mark are UNCONDITIONAL — the
+                // add-on-present semantics do not depend on a listener.
                 @memcpy(slot, a.bytes);
                 world.markComponentChangedDyn(a.entity, a.component_id);
-                if (reg.on_replaced.get(a.component_id)) |list| {
-                    const old_ptr: *const anyopaque = @ptrCast(old_copy.ptr);
+                if (list_opt) |list| {
+                    const old_ptr: *const anyopaque = @ptrCast(old_copy.?.ptr);
                     const new_ptr: *const anyopaque = @ptrCast(slot.ptr);
                     try reg.fireList(list, world, a.entity, a.component_id, old_ptr, new_ptr);
                 }
