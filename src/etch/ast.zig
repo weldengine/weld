@@ -2109,6 +2109,15 @@ pub const AnnotationArg = struct {
     value: NodeId, // expr
 };
 
+/// The five structural-observer lifecycle hooks (M1.0.2 E2). An observer rule
+/// is routed by one of the `@on_added` / `@on_removed` / `@on_replaced` /
+/// `@on_spawned` / `@on_despawned` annotations — NOT a keyword (the stale
+/// `observer` keyword of `engine-ecs-internals.md` §8 is not implemented; the
+/// brief routes via annotations, reusing the `@on_event` path). `on_added` /
+/// `on_removed` / `on_replaced` carry a target component type; the spawn /
+/// despawn hooks carry none.
+pub const ObserverKind = enum { on_added, on_removed, on_replaced, on_spawned, on_despawned };
+
 /// Builtin annotation set. Covers `@phase`, `@priority`, `@run_on`,
 /// `@pause_group`, `@config`, `@state`, `@transient`, `@save`, `@unit`,
 /// `@range`, `@hidden`, `@readonly`, `@requires`, `@storage`,
@@ -2137,6 +2146,13 @@ pub const AnnotationKind = enum {
     loc,
     on_event,
     shader_fn, // M0.8 E6 — @shader_fn: a function callable from shader bodies (resolver §15.4)
+    // M1.0.2 E2 — structural-observer lifecycle annotations (annotation-routed
+    // observer rules, mirroring `@on_event`; see `ObserverKind`).
+    on_added,
+    on_removed,
+    on_replaced,
+    on_spawned,
+    on_despawned,
 
     pub fn fromName(name: []const u8) AnnotationKind {
         if (std.mem.eql(u8, name, "phase")) return .phase;
@@ -2159,7 +2175,25 @@ pub const AnnotationKind = enum {
         if (std.mem.eql(u8, name, "loc")) return .loc;
         if (std.mem.eql(u8, name, "on_event")) return .on_event;
         if (std.mem.eql(u8, name, "shader_fn")) return .shader_fn;
+        if (std.mem.eql(u8, name, "on_added")) return .on_added;
+        if (std.mem.eql(u8, name, "on_removed")) return .on_removed;
+        if (std.mem.eql(u8, name, "on_replaced")) return .on_replaced;
+        if (std.mem.eql(u8, name, "on_spawned")) return .on_spawned;
+        if (std.mem.eql(u8, name, "on_despawned")) return .on_despawned;
         return .custom;
+    }
+
+    /// The `ObserverKind` this annotation routes to, or null if it is not a
+    /// structural-observer lifecycle annotation (M1.0.2 E2).
+    pub fn toObserverKind(self: AnnotationKind) ?ObserverKind {
+        return switch (self) {
+            .on_added => .on_added,
+            .on_removed => .on_removed,
+            .on_replaced => .on_replaced,
+            .on_spawned => .on_spawned,
+            .on_despawned => .on_despawned,
+            else => null,
+        };
     }
 };
 
@@ -3306,6 +3340,32 @@ pub const AstArena = struct {
     /// the annotation is malformed (no argument, or the argument is not a type
     /// path). The resolver reports E1203 for the null / non-event cases.
     pub fn onEventTypeName(self: *const AstArena, annot: Annotation) ?StringId {
+        if (annot.args_len == 0) return null;
+        const arg = self.annot_args.items[annot.args_start];
+        if (self.exprKind(arg.value) != .path) return null;
+        return self.exprData(arg.value);
+    }
+
+    /// The structural-observer lifecycle annotation on a `rule` (the first one
+    /// found), or null if the rule is not an observer (M1.0.2 E2). Mirrors
+    /// `onEventAnnotation`. The resolver enforces "exactly one lifecycle
+    /// annotation" (E1215 ObserverRuleConflict); this returns the first match
+    /// for routing once that check has passed.
+    pub fn observerAnnotation(self: *const AstArena, rule: RuleDecl) ?Annotation {
+        var i: u32 = 0;
+        while (i < rule.annotations_len) : (i += 1) {
+            const annot = self.annot_pool.items[rule.annotations_extra + i];
+            if (annot.kind.toObserverKind() != null) return annot;
+        }
+        return null;
+    }
+
+    /// The target component type name `T` from an `@on_added(T)` /
+    /// `@on_removed(T)` / `@on_replaced(T)` annotation, or null when the
+    /// annotation carries no type-path argument (the `@on_spawned` /
+    /// `@on_despawned` case, or a malformed argument). Mirrors `onEventTypeName`;
+    /// the resolver validates arity / component-ness (E1209 ObserverComponentInvalid).
+    pub fn observerComponentName(self: *const AstArena, annot: Annotation) ?StringId {
         if (annot.args_len == 0) return null;
         const arg = self.annot_args.items[annot.args_start];
         if (self.exprKind(arg.value) != .path) return null;

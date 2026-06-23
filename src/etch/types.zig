@@ -255,6 +255,8 @@ fn annotationAppliesTo(kind: ast_mod.AnnotationKind, target: AnnotTarget) bool {
         .phase, .priority, .run_on, .pause_group => target == .rule,
         .id => target == .rule,
         .on_event => target == .rule,
+        // M1.0.2 E2 — structural-observer lifecycle annotations route onto a rule.
+        .on_added, .on_removed, .on_replaced, .on_spawned, .on_despawned => target == .rule,
         .unit, .range, .hidden, .readonly, .replicated => target == .field,
         .networked => target == .event,
         .shader_fn => target == .function,
@@ -3353,6 +3355,96 @@ pub const TypeChecker = struct {
         }
     };
 
+    /// Number of structural-observer lifecycle annotations on a rule (M1.0.2 E2).
+    fn observerAnnotationCount(self: *TypeChecker, rule: ast_mod.RuleDecl) u32 {
+        var n: u32 = 0;
+        var i: u32 = 0;
+        while (i < rule.annotations_len) : (i += 1) {
+            const annot = self.arena.annot_pool.items[rule.annotations_extra + i];
+            if (annot.kind.toObserverKind() != null) n += 1;
+        }
+        return n;
+    }
+
+    /// True iff rule param `idx` is named `entity` and typed `Entity` (M1.0.2 E2).
+    fn observerParamIsEntity(self: *TypeChecker, rule: ast_mod.RuleDecl, idx: u32) bool {
+        const p = self.arena.rule_params.items[rule.params_start + idx];
+        if (!std.mem.eql(u8, self.arena.strings.slice(p.name), "entity")) return false;
+        const t = self.namedTypeToResolved(p.type_node);
+        return t == .builtin and t.builtin == .entity;
+    }
+
+    /// True iff rule param `idx` is named `name` and typed by the component
+    /// `comp` (the lifecycle annotation's T) — M1.0.2 E2.
+    fn observerParamIsComponent(self: *TypeChecker, rule: ast_mod.RuleDecl, idx: u32, name: []const u8, comp: StringId) bool {
+        const p = self.arena.rule_params.items[rule.params_start + idx];
+        if (!std.mem.eql(u8, self.arena.strings.slice(p.name), name)) return false;
+        const t = self.namedTypeToResolved(p.type_node);
+        return t == .component and t.component == comp;
+    }
+
+    /// Emit E1208 ObserverSignatureMismatch with the parameter shape required by
+    /// the lifecycle `kind` (M1.0.2 E2).
+    fn emitObserverShape(self: *TypeChecker, annot: ast_mod.Annotation, kind: ast_mod.ObserverKind) !void {
+        const shape = switch (kind) {
+            .on_added => "(entity: Entity, component: T)",
+            .on_replaced => "(entity: Entity, old: T, new: T)",
+            .on_removed => "(entity: Entity, old: T)",
+            .on_spawned, .on_despawned => "(entity: Entity)",
+        };
+        try self.emit(.observer_signature_mismatch, .error_, annot.span, "@{s} observer rule requires the parameter shape {s}", .{ self.arena.strings.slice(annot.name), shape });
+    }
+
+    /// Validate an observer rule's annotation argument + parameter shape against
+    /// its lifecycle kind (M1.0.2 E2). E1209 for a bad component argument
+    /// (arity / not a declared component); E1208 for a parameter list that does
+    /// not match the required `(entity: Entity, …)` shape (at most one E1208).
+    fn checkObserverSignature(self: *TypeChecker, rule: ast_mod.RuleDecl, annot: ast_mod.Annotation) !void {
+        const kind = annot.kind.toObserverKind().?;
+        const aname = self.arena.strings.slice(annot.name);
+        const needs_component = switch (kind) {
+            .on_added, .on_removed, .on_replaced => true,
+            .on_spawned, .on_despawned => false,
+        };
+
+        // 1. Component argument (E1209).
+        var comp_name: ?StringId = null;
+        if (needs_component) {
+            if (self.arena.observerComponentName(annot)) |cn| {
+                const sym = self.symbols.get(cn);
+                if (sym != null and sym.?.kind == .component) {
+                    comp_name = cn;
+                } else {
+                    try self.emit(.observer_component_invalid, .error_, annot.span, "@{s}(T) requires T to be a declared component; '{s}' is not", .{ aname, self.arena.strings.slice(cn) });
+                }
+            } else {
+                try self.emit(.observer_component_invalid, .error_, annot.span, "@{s}(T) requires a single component-type argument", .{aname});
+            }
+            // A bad component argument already reported E1209 — skip the shape
+            // check (its component-param type comparison would cascade).
+            if (comp_name == null) return;
+        } else if (annot.args_len != 0) {
+            try self.emit(.observer_component_invalid, .error_, annot.span, "@{s} takes no argument", .{aname});
+        }
+
+        // 2. Parameter shape (E1208).
+        const want: u32 = switch (kind) {
+            .on_added, .on_removed => 2,
+            .on_replaced => 3,
+            .on_spawned, .on_despawned => 1,
+        };
+        if (rule.params_len != want or !self.observerParamIsEntity(rule, 0)) return self.emitObserverShape(annot, kind);
+        switch (kind) {
+            .on_added => if (!self.observerParamIsComponent(rule, 1, "component", comp_name.?)) return self.emitObserverShape(annot, kind),
+            .on_removed => if (!self.observerParamIsComponent(rule, 1, "old", comp_name.?)) return self.emitObserverShape(annot, kind),
+            .on_replaced => {
+                if (!self.observerParamIsComponent(rule, 1, "old", comp_name.?)) return self.emitObserverShape(annot, kind);
+                if (!self.observerParamIsComponent(rule, 2, "new", comp_name.?)) return self.emitObserverShape(annot, kind);
+            },
+            .on_spawned, .on_despawned => {},
+        }
+    }
+
     fn checkRule(self: *TypeChecker, rule: ast_mod.RuleDecl) !void {
         var ctx: RuleCtx = .{};
         defer ctx.deinit(self.gpa);
@@ -3392,6 +3484,26 @@ pub const TypeChecker = struct {
             } else {
                 try self.emit(.on_event_type_mismatch, .error_, annot.span, "@on_event(EventType) requires a single event-type argument", .{});
             }
+        }
+
+        // Observer lifecycle annotations (M1.0.2 E2): `@on_added/removed/replaced/
+        // spawned/despawned` route a structural observer onto a rule, mirroring
+        // `@on_event`. Surface validations only (the Tier-0 ObserverRegistry
+        // bridge is E3). The component-typed params (`component`/`old`/`new`: T)
+        // are bound self-style by the param loop above. An observer rule carries
+        // exactly one lifecycle annotation and no `when` / `@on_event` (the
+        // lifecycle component type is the sole trigger; observers do not iterate).
+        if (self.arena.observerAnnotation(rule)) |oannot| {
+            if (self.arena.onEventAnnotation(rule) != null) {
+                try self.emit(.observer_rule_conflict, .error_, oannot.span, "an observer rule cannot also be an @on_event handler", .{});
+            }
+            if (rule.when_root != ast_mod.RuleDecl.none_when) {
+                try self.emit(.observer_rule_conflict, .error_, oannot.span, "an observer rule takes no `when` clause (the lifecycle component type is the sole trigger)", .{});
+            }
+            if (self.observerAnnotationCount(rule) > 1) {
+                try self.emit(.observer_rule_conflict, .error_, oannot.span, "an observer rule must carry exactly one lifecycle annotation", .{});
+            }
+            try self.checkObserverSignature(rule, oannot);
         }
 
         // Validate when-clause and collect accessible component/resource types.

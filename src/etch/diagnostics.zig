@@ -76,6 +76,13 @@ pub const DiagnosticCode = enum {
     unknown_tag, // M0.8 E3 — E1212 UnknownTag (tag path in a `when` clause)
     resource_expected_in_when, // S3 — E1213 ResourceExpectedInWhen
     non_exhaustive_match, // M0.8 — E1230 NonExhaustiveMatch
+    // M1.0.2 E2 — structural-observer rule validations (annotation-routed:
+    // @on_added / @on_removed / @on_replaced / @on_spawned / @on_despawned).
+    // Codes allocated in-code beyond E1207; `etch-diagnostics.md` §14 patched
+    // by Claude.ai to match.
+    observer_signature_mismatch, // M1.0.2 E2 — E1208 ObserverSignatureMismatch (param shape ≠ lifecycle kind)
+    observer_component_invalid, // M1.0.2 E2 — E1209 ObserverComponentInvalid (annotation component arg arity / not a declared component)
+    observer_rule_conflict, // M1.0.2 E2 — E1215 ObserverRuleConflict (lifecycle + when / + @on_event / + another lifecycle)
 
     // ── behavior (E1500-E1519, M0.8 E4 — etch-validation-ecs.md §8) ──
     behavior_root_missing, // M0.8 E4 — E1500 BehaviorRootMissing
@@ -380,6 +387,9 @@ pub const DiagnosticCode = enum {
             .unknown_tag => "E1212",
             .resource_expected_in_when => "E1213",
             .non_exhaustive_match => "E1230",
+            .observer_signature_mismatch => "E1208",
+            .observer_component_invalid => "E1209",
+            .observer_rule_conflict => "E1215",
             .behavior_root_missing => "E1500",
             .behavior_empty_composite => "E1501",
             .behavior_invalid_leaf => "E1502",
@@ -557,6 +567,9 @@ pub const DiagnosticCode = enum {
             .unknown_tag => "UnknownTag",
             .resource_expected_in_when => "ResourceExpectedInWhen",
             .non_exhaustive_match => "NonExhaustiveMatch",
+            .observer_signature_mismatch => "ObserverSignatureMismatch",
+            .observer_component_invalid => "ObserverComponentInvalid",
+            .observer_rule_conflict => "ObserverRuleConflict",
             .behavior_root_missing => "BehaviorRootMissing",
             .behavior_empty_composite => "BehaviorEmptyComposite",
             .behavior_invalid_leaf => "BehaviorInvalidLeaf",

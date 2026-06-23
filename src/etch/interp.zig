@@ -192,6 +192,16 @@ const RuleDesc = struct {
     /// self-style (resolver-types §12). Takes precedence over entity/global
     /// dispatch in `runRule`.
     event_type: ?StringId,
+    /// `@on_added/removed/replaced/spawned/despawned` structural-observer routing
+    /// (M1.0.2 E2): the lifecycle kind, or null for a non-observer rule. Recorded
+    /// at descriptor build, mirroring `event_type`. The Tier-0 ObserverRegistry
+    /// bridge + dispatch exclusion are E3 — in E2 the field is populated but not
+    /// yet consumed by `runRule` / world bind.
+    observer_kind: ?ast_mod.ObserverKind,
+    /// The resolved target `ComponentId` of an `@on_added/removed/replaced(T)`
+    /// observer (M1.0.2 E2), or null for `@on_spawned` / `@on_despawned` and for a
+    /// non-observer rule. Resolved against the world registry at descriptor build.
+    observer_component: ?ComponentId,
     /// `entity has T changed` change-detection filters (M0.8 E3): component ids
     /// that must have changed since `last_run_tick` for the entity to match.
     /// Per-entity, ANDed after the field filter and tag predicates (same flat
@@ -3343,6 +3353,20 @@ fn compileRule(
     else
         null;
 
+    // M1.0.2 E2 — structural-observer routing (mirrors `event_type` above): the
+    // lifecycle kind + the resolved target ComponentId (null for spawn/despawn,
+    // or when the component is unregistered — the resolver already reported the
+    // malformed cases E12xx). Surface only here; the ObserverRegistry bridge,
+    // the per-tick dispatch exclusion, and body execution are E3.
+    var observer_kind: ?ast_mod.ObserverKind = null;
+    var observer_component: ?ComponentId = null;
+    if (ast.observerAnnotation(rule)) |annot| {
+        observer_kind = annot.kind.toObserverKind();
+        if (ast.observerComponentName(annot)) |comp_name| {
+            observer_component = registry.idOf(ast.strings.slice(comp_name));
+        }
+    }
+
     // M1.0.0 — the rule's archetype selection (DNF → one DynamicQuery per
     // term). Built only for entity-bound rules; the global / resource-only /
     // event paths never select archetypes, so they keep an empty selection.
@@ -3362,6 +3386,8 @@ fn compileRule(
         .entity_param_name = entity_param_name,
         .is_entity_bound = is_entity_bound,
         .event_type = event_type,
+        .observer_kind = observer_kind,
+        .observer_component = observer_component,
         .changed_filters = try changed_filters.toOwnedSlice(gpa),
         .expr_filters = try expr_filters.toOwnedSlice(gpa),
         .expr_conds = try expr_conds.toOwnedSlice(gpa),
@@ -5320,6 +5346,114 @@ test "event string payload survives to drain and not past tick boundary (M1.0.2 
     @memcpy(std.mem.asBytes(&n), world.resources.getResource(sink_id).?[0..@sizeOf(i64)]);
     try std.testing.expectEqual(@as(i64, 10), n);
     try std.testing.expectEqual(@as(usize, 1), interp.events.count(note_id));
+}
+
+// ── M1.0.2 E2 — observer-surface validation test helpers ──
+
+/// Parse + type-check `source` and report whether any diagnostic carries
+/// `code` (M1.0.2 E2 observer-surface validation tests). Asserts the parse is
+/// clean — the observer programs under test are syntactically valid; their
+/// errors are semantic (caught by the type-checker).
+fn observerProgramHasCode(gpa: std.mem.Allocator, source: []const u8, code: anytype) !bool {
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    for (diags.items) |d| {
+        if (d.code == code) return true;
+    }
+    return false;
+}
+
+/// Parse + type-check `source` and return the diagnostic count (M1.0.2 E2 —
+/// positive control: a well-formed observer program reports zero).
+fn observerProgramDiagCount(gpa: std.mem.Allocator, source: []const u8) !usize {
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    return diags.items.len;
+}
+
+test "observer annotation signature mismatch is rejected (M1.0.2 E2)" {
+    const gpa = std.testing.allocator;
+    // `@on_removed(Poisoned)` without the required `old: Poisoned` param — the
+    // shape must be `(entity: Entity, old: Poisoned)`. → E1208.
+    try std.testing.expect(try observerProgramHasCode(gpa,
+        \\component Poisoned { elapsed: int = 0 }
+        \\@on_removed(Poisoned)
+        \\rule r(entity: Entity) {}
+    , .observer_signature_mismatch));
+    // `@on_spawned` with an extra param — the shape must be exactly
+    // `(entity: Entity)`. → E1208.
+    try std.testing.expect(try observerProgramHasCode(gpa,
+        \\@on_spawned
+        \\rule s(entity: Entity, extra: int) {}
+    , .observer_signature_mismatch));
+}
+
+test "observer annotation requires a component type (M1.0.2 E2)" {
+    const gpa = std.testing.allocator;
+    // `Foo` is a declared struct, NOT a component → the lifecycle type T is
+    // invalid. → E1209 (and no cascading E1208). Uses `@on_removed` (binding
+    // name `old`) because `@on_added`'s frozen binding name `component` is a
+    // reserved keyword — pending a Claude.ai ruling (see § Blockers).
+    try std.testing.expect(try observerProgramHasCode(gpa,
+        \\struct Foo { x: int = 0 }
+        \\@on_removed(Foo)
+        \\rule r(entity: Entity, old: Foo) {}
+    , .observer_component_invalid));
+}
+
+test "observer rule rejects when clause and conflicting lifecycle annotations (M1.0.2 E2)" {
+    const gpa = std.testing.allocator;
+    // A `when` clause on an observer rule — the lifecycle component type is the
+    // sole trigger; observers do not iterate entities. → E1215. (`@on_removed`
+    // binding `old`; `@on_added`'s `component` binding is keyword-blocked.)
+    try std.testing.expect(try observerProgramHasCode(gpa,
+        \\component Health { current: int = 0 }
+        \\@on_removed(Health)
+        \\rule r(entity: Entity, old: Health) when entity has Health {}
+    , .observer_rule_conflict));
+    // Two lifecycle annotations on one rule. → E1215.
+    try std.testing.expect(try observerProgramHasCode(gpa,
+        \\component Health { current: int = 0 }
+        \\@on_removed(Health)
+        \\@on_replaced(Health)
+        \\rule r(entity: Entity, old: Health) {}
+    , .observer_rule_conflict));
+}
+
+test "well-formed observer rules type-check clean (M1.0.2 E2)" {
+    const gpa = std.testing.allocator;
+    // Positive control: each lifecycle kind with its exact required shape — no
+    // observer diagnostic should fire (guards against over-rejection). `@on_added`
+    // is omitted here: its frozen binding name `component` is a reserved keyword
+    // (parse error as a param name AND as an expression), so no conformant
+    // `@on_added` rule can be written — pending a Claude.ai ruling (§ Blockers).
+    // The other four kinds bind `entity` / `old` / `new` (all valid identifiers).
+    const n = try observerProgramDiagCount(gpa,
+        \\component Health { current: int = 0 }
+        \\@on_removed(Health)
+        \\rule removed(entity: Entity, old: Health) {}
+        \\@on_replaced(Health)
+        \\rule replaced(entity: Entity, old: Health, new: Health) {}
+        \\@on_spawned
+        \\rule spawned(entity: Entity) {}
+        \\@on_despawned
+        \\rule despawned(entity: Entity) {}
+    );
+    try std.testing.expectEqual(@as(usize, 0), n);
 }
 
 test "runProgram add_tag is deferred to the tick boundary; has_tag query gates a counter (M0.8 E3)" {
