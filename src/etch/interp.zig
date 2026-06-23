@@ -45,6 +45,9 @@ const RuntimeError = value_mod.RuntimeError;
 const RuntimeErrorKind = value_mod.RuntimeErrorKind;
 const SourceSpan = @import("token.zig").SourceSpan;
 const Bridge = bridge_mod.Bridge;
+const command_buffer_mod = weld_core.ecs.command_buffer;
+const CommandBuffer = command_buffer_mod.CommandBuffer;
+const observers_mod = weld_core.ecs.observers;
 
 /// Counters surfaced by `Interpreter.run` per tick — informational
 /// only, used by tests + bench harnesses to assert hot-path coverage.
@@ -515,6 +518,16 @@ const AsyncSlot = struct {
     }
 };
 
+/// Per-observer-rule context handed to the Tier-0 `ObserverRegistry` as the
+/// opaque `ctx` pointer (M1.0.2 E3). Points back at the interpreter + the
+/// descriptor index so the trampoline can run the right rule body. Allocated
+/// once per binding in `bindToWorld`, freed at `deinit` — the interpreter must
+/// outlive any flush that fires its observers.
+const ObserverCtx = struct {
+    interp: *Interpreter,
+    rule_desc_idx: usize,
+};
+
 /// S4 tree-walking interpreter — owns the bridge state, evaluates
 /// the type-checked AST against a `World` once per tick.
 pub const Interpreter = struct {
@@ -626,6 +639,18 @@ pub const Interpreter = struct {
     /// is retained across rules/ticks so the union path allocates at most once.
     /// Untouched by single-term rules (the common case iterates directly).
     merge_cursors: std.ArrayListUnmanaged(usize) = .empty,
+    /// Per-observer-rule contexts registered into the world's `ObserverRegistry`
+    /// at `bindToWorld` (M1.0.2 E3). One entry per rule with `observer_kind`
+    /// set; the registry holds `&observer_ctxs[k]` as its opaque `ctx`. Freed at
+    /// `deinit` (the interpreter must outlive any observer-firing flush).
+    observer_ctxs: []ObserverCtx = &.{},
+    /// Set once observers have been registered (idempotent `bindToWorld`).
+    observers_bound: bool = false,
+    /// Non-null while an observer body runs (M1.0.2 E3): the registry's deferred
+    /// command buffer. Structural mutations issued by the body (tag mutations)
+    /// route here instead of `pending_tags`, so they apply at the NEXT flush —
+    /// never re-entrantly during the current one (the no-recursion contract).
+    observer_deferred: ?*CommandBuffer = null,
 
     pub fn deinit(self: *Interpreter) void {
         for (self.rule_descs) |*r| r.deinit(self.gpa);
@@ -649,6 +674,7 @@ pub const Interpreter = struct {
         self.gpa.free(self.async_slots);
         self.descriptors.deinit(self.gpa);
         self.merge_cursors.deinit(self.gpa);
+        self.gpa.free(self.observer_ctxs);
         self.* = undefined;
     }
 
@@ -897,6 +923,12 @@ pub const Interpreter = struct {
     }
 
     pub fn runFor(self: *Interpreter, world: *World, ticks: u32) !RuntimeReport {
+        // Register this program's observer rules into the world's
+        // `ObserverRegistry` (M1.0.2 E3) — lazily, once, now that `self` is at a
+        // stable address (the caller holds the interpreter; `compile` returns by
+        // value). A test that drives a Tier-0 flush directly calls `bindToWorld`
+        // itself before flushing.
+        try self.bindToWorld(world);
         var report: RuntimeReport = .{};
         var t: u32 = 0;
         while (t < ticks) : (t += 1) {
@@ -904,6 +936,160 @@ pub const Interpreter = struct {
             world.tickBoundary();
         }
         return report;
+    }
+
+    /// Register this program's observer rules into `world`'s `ObserverRegistry`
+    /// (M1.0.2 E3). Idempotent: the first call allocates one `ObserverCtx` per
+    /// observer rule and registers a trampoline keyed on the rule's lifecycle
+    /// kind + target component; later calls no-op. Called lazily by `runFor`, or
+    /// explicitly by a test that drives a Tier-0 flush before any tick.
+    pub fn bindToWorld(self: *Interpreter, world: *World) !void {
+        if (self.observers_bound) return;
+        self.observers_bound = true;
+
+        var n: usize = 0;
+        for (self.rule_descs) |rd| {
+            if (rd.observer_kind != null) n += 1;
+        }
+        if (n == 0) return;
+
+        self.observer_ctxs = try self.gpa.alloc(ObserverCtx, n);
+        var k: usize = 0;
+        const reg = &world.observer_registry;
+        for (self.rule_descs, 0..) |rd, idx| {
+            const kind = rd.observer_kind orelse continue;
+            self.observer_ctxs[k] = .{ .interp = self, .rule_desc_idx = idx };
+            const ctx: *anyopaque = @ptrCast(&self.observer_ctxs[k]);
+            k += 1;
+            switch (kind) {
+                .on_added => try reg.registerOnAdd(self.gpa, world, rd.observer_component.?, ctx, &observerTrampoline),
+                .on_removed => try reg.registerOnRemove(self.gpa, world, rd.observer_component.?, ctx, &observerTrampoline),
+                .on_replaced => try reg.registerOnReplaced(self.gpa, world, rd.observer_component.?, ctx, &observerTrampoline),
+                .on_spawned => try reg.registerOnSpawned(self.gpa, world, ctx, &observerTrampoline),
+                .on_despawned => try reg.registerOnDespawned(self.gpa, world, ctx, &observerTrampoline),
+            }
+        }
+    }
+
+    /// Top-level trampoline matching `observers.ObserverFn` (M1.0.2 E3): unpack
+    /// the `ObserverCtx` and run the observer rule body with `entity` + the
+    /// lifecycle value(s) bound.
+    fn observerTrampoline(
+        ctx_opaque: ?*anyopaque,
+        world: *World,
+        entity: CoreEntityId,
+        component_id: ?ComponentId,
+        old_value: ?*const anyopaque,
+        new_value: ?*const anyopaque,
+        deferred: *CommandBuffer,
+    ) anyerror!void {
+        _ = component_id;
+        const ctx: *ObserverCtx = @ptrCast(@alignCast(ctx_opaque.?));
+        try ctx.interp.runObserverBody(world, ctx.rule_desc_idx, entity, old_value, new_value, deferred);
+    }
+
+    /// Run an observer rule body (M1.0.2 E3): bind `entity` and the lifecycle
+    /// value(s) on the rule's declared params, then execute the body. The value
+    /// bindings (`value`/`old`/`new`) are materialised as struct values over the
+    /// raw component bytes (`readBytesAsValue` per field) — the same shape as the
+    /// `@on_event` payload binding, so the existing struct-field-access path
+    /// serves `value.field` etc. Structural mutations issued by the body route to
+    /// `deferred` (no re-entrant apply — see `observer_deferred`).
+    fn runObserverBody(
+        self: *Interpreter,
+        world: *World,
+        idx: usize,
+        entity: CoreEntityId,
+        old_value: ?*const anyopaque,
+        new_value: ?*const anyopaque,
+        deferred: *CommandBuffer,
+    ) !void {
+        const rd = self.rule_descs[idx];
+        const rule = self.ast.rule_decls.items[rd.rule_idx];
+
+        var locals: Locals = .{};
+        defer locals.deinit(self.gpa);
+        defer self.collections.reset(self.gpa);
+        defer self.closures.reset(self.gpa);
+        defer self.structs.reset(self.gpa);
+        defer self.optionals.clearRetainingCapacity();
+        defer self.resetRunStrings();
+
+        // Bind the declared params by name (the names are validated in E2):
+        // `entity` → the triggering entity; `value`/`new` → new_value bytes;
+        // `old` → old_value bytes. A binding whose byte source is null (kind
+        // mismatch) is skipped — the body cannot reference it.
+        var p: u32 = 0;
+        while (p < rule.params_len) : (p += 1) {
+            const param = self.ast.rule_params.items[rule.params_start + p];
+            const pname = self.ast.strings.slice(param.name);
+            if (std.mem.eql(u8, pname, "entity")) {
+                try locals.put(self.gpa, param.name, .{ .entity_id = @bitCast(entity) }, false);
+            } else if (std.mem.eql(u8, pname, "old")) {
+                if (old_value) |ov| try locals.put(self.gpa, param.name, try self.observerValueStruct(world, rd.observer_component.?, ov), false);
+            } else { // "value" (on_added) or "new" (on_replaced)
+                if (new_value) |nv| try locals.put(self.gpa, param.name, try self.observerValueStruct(world, rd.observer_component.?, nv), false);
+            }
+        }
+
+        // Route the body's structural mutations to the registry's deferred buffer
+        // for the duration of the body (no-recursion contract).
+        const prev_deferred = self.observer_deferred;
+        self.observer_deferred = deferred;
+        defer self.observer_deferred = prev_deferred;
+
+        self.control = .none;
+        self.thrown = false;
+        self.returning = false;
+        self.pending_error = null;
+
+        var s: u32 = 0;
+        while (s < rule.body_len) : (s += 1) {
+            const stmt_id: NodeId = @bitCast(self.ast.extra.items[rule.body_start + s]);
+            self.execStmt(world, &locals, stmt_id) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // A runtime failure in an observer body unwinds the body (the
+                // Tier-0 flush has no `RuntimeReport` sideband to harvest into).
+                error.RuntimeFailure => {
+                    self.pending_error = null;
+                    return;
+                },
+            };
+            if (self.thrown) {
+                self.thrown = false;
+                self.pending_error = null;
+                return;
+            }
+            if (self.control != .none) {
+                self.control = .none;
+                self.control_label = 0;
+                break;
+            }
+            if (self.returning) {
+                self.returning = false;
+                self.return_value = .{ .unit = {} };
+                break;
+            }
+        }
+    }
+
+    /// Materialise an observer value binding (`value`/`old`/`new`) as a struct
+    /// value over the component's raw bytes (M1.0.2 E3). Mirrors the `@on_event`
+    /// payload binding: one `StructField` per declared field that is referenced
+    /// in the source (so its name is interned), read via `readBytesAsValue`.
+    fn observerValueStruct(self: *Interpreter, world: *World, cid: ComponentId, bytes_ptr: *const anyopaque) !Value {
+        const size = world.registry.componentSize(cid);
+        const base: [*]const u8 = @ptrCast(bytes_ptr);
+        const slice = base[0..size];
+        const type_name_id: StringId = self.ast.strings.find(world.registry.componentName(cid)) orelse 0;
+        const handle = try self.structs.newStruct(self.gpa, type_name_id);
+        for (world.registry.componentFields(cid)) |f| {
+            const fname_id = self.ast.strings.find(f.name) orelse continue;
+            const fbytes = slice[f.offset .. f.offset + @as(usize, @intCast(f.kind.sizeBytes()))];
+            const v = bridge_mod.readBytesAsValue(f.kind, fbytes);
+            try self.structs.list.items[handle].fields.append(self.gpa, .{ .name = fname_id, .value = v });
+        }
+        return Value{ .struct_ref = handle };
     }
 
     /// Number of compiled rules in the program (M1.0.0 observable — pairs with
@@ -942,6 +1128,10 @@ pub const Interpreter = struct {
         // tick's queue before running this tick's rules (M0.8 E3).
         self.events.clear(self.gpa);
         for (self.rule_descs, 0..) |*rd, i| {
+            // Observer rules (M1.0.2 E3) never run in the per-tick dispatch:
+            // they fire at the Tier-0 command-buffer flush via the
+            // `ObserverRegistry` (registered in `bindToWorld`), not here.
+            if (rd.observer_kind != null) continue;
             report.rules_evaluated += 1;
             // `async rule` (M0.8 E3 sub-slice B): drive its suspend/resume task
             // at this position in the rule order, so events it emits/consumes
@@ -1752,11 +1942,25 @@ pub const Interpreter = struct {
                     else => return error.RuntimeFailure,
                 };
                 const bit = self.tagPathLeafBit(tm.path) orelse return error.RuntimeFailure;
-                try self.pending_tags.append(self.gpa, .{
-                    .entity = entity,
-                    .bit_index = bit,
-                    .set = tm.kind == .add,
-                });
+                const set = tm.kind == .add;
+                if (self.observer_deferred) |dbuf| {
+                    // Inside an observer body (M1.0.2 E3): route to the registry's
+                    // deferred Tier-0 buffer so the mutation applies at the NEXT
+                    // flush, never re-entrantly during the current one.
+                    const tid = self.tagset_id orelse return error.RuntimeFailure;
+                    const core_id: CoreEntityId = @bitCast(entity);
+                    const cmd: command_buffer_mod.Command = if (set)
+                        .{ .set_tag = .{ .entity = core_id, .tagset_id = tid, .bit_index = bit } }
+                    else
+                        .{ .clear_tag = .{ .entity = core_id, .tagset_id = tid, .bit_index = bit } };
+                    try dbuf.commands.append(dbuf.gpa, cmd);
+                } else {
+                    try self.pending_tags.append(self.gpa, .{
+                        .entity = entity,
+                        .bit_index = bit,
+                        .set = set,
+                    });
+                }
             },
             else => return error.RuntimeFailure,
         }
@@ -5461,6 +5665,312 @@ test "well-formed observer rules of all five kinds type-check clean (M1.0.2 E2)"
         \\rule despawned(entity: Entity) {}
     );
     try std.testing.expectEqual(@as(usize, 0), n);
+}
+
+test "@on_added(T) fires at flush with entity + value bound (M1.0.2 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `@on_added(Health)` reads the bound `value.current` and emits it. The
+    // observer fires at the Tier-0 command-buffer flush — not during any rule —
+    // so the emitted event lands in the interp's event store, observable here.
+    const source =
+        \\component Marker { tag: i32 = 0 }
+        \\component Health { current: i32 = 0 }
+        \\event Fired { v: i32 = 0 }
+        \\@on_added(Health)
+        \\rule on_health_added(entity: Entity, value: Health) {
+        \\  emit Fired { v: value.current }
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const marker = world.registry.idOf("Marker").?;
+    const health = world.registry.idOf("Health").?;
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{marker});
+
+    // Add Health (current = 42) via a Tier-0 command + observer dispatch.
+    var v42: i32 = 42;
+    const c: command_buffer_mod.Command = .{ .add_component = .{ .entity = e, .component_id = health, .bytes = std.mem.asBytes(&v42) } };
+    try observers_mod.applyWithObservers(c, &world.observer_registry, &world, gpa);
+
+    // The observer fired once, reading value.current == 42 and emitting Fired.
+    const fired_id = pr.ast.strings.find("Fired").?;
+    try std.testing.expectEqual(@as(usize, 1), interp.events.count(fired_id));
+    const v_id = pr.ast.strings.find("v").?;
+    var seen: i64 = -1;
+    for (interp.events.list.items) |ev| {
+        if (ev.type_name != fired_id) continue;
+        for (ev.fields.items) |f| {
+            if (f.name == v_id) seen = f.value.int_;
+        }
+    }
+    try std.testing.expectEqual(@as(i64, 42), seen);
+}
+
+test "@on_removed(T) binds the correct old value (M1.0.2 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const source =
+        \\component Keep { k: i32 = 0 }
+        \\component Poison { dmg: i32 = 0 }
+        \\event Cleared { d: i32 = 0 }
+        \\@on_removed(Poison)
+        \\rule on_poison_removed(entity: Entity, old: Poison) {
+        \\  emit Cleared { d: old.dmg }
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const keep = world.registry.idOf("Keep").?;
+    const poison = world.registry.idOf("Poison").?;
+    var kv: i32 = 0;
+    var dv: i32 = 13;
+    const e = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{ keep, poison }, &[_][]const u8{ std.mem.asBytes(&kv), std.mem.asBytes(&dv) });
+
+    // Remove Poison: the on_remove observer fires PRE-apply, `old` bound to the
+    // live (pre-removal) value.
+    const c: command_buffer_mod.Command = .{ .remove_component = .{ .entity = e, .component_id = poison } };
+    try observers_mod.applyWithObservers(c, &world.observer_registry, &world, gpa);
+
+    const cleared_id = pr.ast.strings.find("Cleared").?;
+    try std.testing.expectEqual(@as(usize, 1), interp.events.count(cleared_id));
+    const d_id = pr.ast.strings.find("d").?;
+    var seen: i64 = -1;
+    for (interp.events.list.items) |ev| {
+        if (ev.type_name != cleared_id) continue;
+        for (ev.fields.items) |f| {
+            if (f.name == d_id) seen = f.value.int_;
+        }
+    }
+    try std.testing.expectEqual(@as(i64, 13), seen); // the pre-removal dmg
+}
+
+test "@on_spawned and @on_despawned fire on spawn/despawn (M1.0.2 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const source =
+        \\component Health { current: i32 = 0 }
+        \\event Spawned { tick: i32 = 0 }
+        \\event Despawned { tick: i32 = 0 }
+        \\@on_spawned
+        \\rule on_spawn(entity: Entity) { emit Spawned { tick: 1 } }
+        \\@on_despawned
+        \\rule on_despawn(entity: Entity) { emit Despawned { tick: 1 } }
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const health = world.registry.idOf("Health").?;
+
+    // Spawn (with Health) → on_spawned fires.
+    var hv: i32 = 5;
+    const spawn_cmd: command_buffer_mod.Command = .{ .spawn = .{ .component_ids = &[_]ComponentId{health}, .payloads = &[_][]const u8{std.mem.asBytes(&hv)} } };
+    try observers_mod.applyWithObservers(spawn_cmd, &world.observer_registry, &world, gpa);
+
+    // Despawn an existing entity → on_despawned fires (before destruction).
+    const victim = try world.spawnDynamic(gpa, &[_]ComponentId{health});
+    const despawn_cmd: command_buffer_mod.Command = .{ .despawn = .{ .entity = victim } };
+    try observers_mod.applyWithObservers(despawn_cmd, &world.observer_registry, &world, gpa);
+
+    try std.testing.expectEqual(@as(usize, 1), interp.events.count(pr.ast.strings.find("Spawned").?));
+    try std.testing.expectEqual(@as(usize, 1), interp.events.count(pr.ast.strings.find("Despawned").?));
+}
+
+test "observer body structural mutation is deferred — no recursion (M1.0.2 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The `@on_added(Health)` body issues a tag mutation. It must NOT apply
+    // re-entrantly during the current flush — it routes to the registry's
+    // deferred buffer and applies at the NEXT flush.
+    const source =
+        \\tags { fx { marked } }
+        \\component Marker { m: i32 = 0 }
+        \\component Health { current: i32 = 0 }
+        \\@on_added(Health)
+        \\rule on_health_added(entity: Entity, value: Health) {
+        \\  entity.add_tag(.fx.marked)
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const marker = world.registry.idOf("Marker").?;
+    const health = world.registry.idOf("Health").?;
+    const tagset = world.registry.idOf("TagSet").?;
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{marker});
+
+    // Flush 1: add Health → on_added fires → body queues a tag mutation into the
+    // deferred buffer. The tag is NOT applied this flush (no re-entrancy).
+    var cmd = command_buffer_mod.CommandBuffer.init(gpa, &world);
+    defer cmd.deinit();
+    var hv: i32 = 7;
+    try cmd.commands.append(gpa, .{ .add_component = .{ .entity = e, .component_id = health, .bytes = std.mem.asBytes(&hv) } });
+    try observers_mod.flushWithObservers(&cmd, &world.observer_registry);
+
+    try std.testing.expect(world.componentBytes(e, tagset) == null); // tag NOT applied yet
+    try std.testing.expectEqual(@as(usize, 1), world.observer_registry.deferred.?.commands.items.len);
+
+    // Flush 2 (empty): drains the previous flush's deferred tag mutation.
+    try observers_mod.flushWithObservers(&cmd, &world.observer_registry);
+    try std.testing.expect(world.componentBytes(e, tagset) != null); // tag applied at next flush
+    try std.testing.expectEqual(@as(usize, 0), world.observer_registry.deferred.?.commands.items.len);
+}
+
+test "observable behaviour: all five observer kinds + emit/@on_event, deterministic ordered log (M1.0.2 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // One program wiring every reactive mechanism. Each structural observer
+    // emits a coded `Log` (the value-bearing kinds encode their bound value so
+    // the binding is checked); a normal producer + `@on_event(Ping)` drainer
+    // show events coexist. The structural observers fire at the Tier-0 flush;
+    // `@on_event` fires in the per-tick dispatch — two distinct contexts.
+    const source =
+        \\component Marker { m: i32 = 0 }
+        \\component Health { current: int = 0 }
+        \\event Log { code: int = 0 }
+        \\event Ping { n: i32 = 0 }
+        \\@on_spawned
+        \\rule l_spawn(entity: Entity) { emit Log { code: 1 } }
+        \\@on_added(Health)
+        \\rule l_add(entity: Entity, value: Health) { emit Log { code: 100 + value.current } }
+        \\@on_replaced(Health)
+        \\rule l_replace(entity: Entity, old: Health, new: Health) { emit Log { code: 300 + old.current * 10 + new.current } }
+        \\@on_removed(Health)
+        \\rule l_remove(entity: Entity, old: Health) { emit Log { code: 400 + old.current } }
+        \\@on_despawned
+        \\rule l_despawn(entity: Entity) { emit Log { code: 5 } }
+        \\rule produce_ping() { emit Ping { n: 1 } }
+        \\@on_event(Ping)
+        \\rule on_ping() { emit Log { code: 6 } }
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const log_id = pr.ast.strings.find("Log").?;
+    const code_id = pr.ast.strings.find("code").?;
+    const marker = world.registry.idOf("Marker").?;
+    const health = world.registry.idOf("Health").?;
+
+    const collectLog = struct {
+        fn run(it: *Interpreter, lid: StringId, cid: StringId, buf: *std.ArrayListUnmanaged(i64), g: std.mem.Allocator) !void {
+            for (it.events.list.items) |ev| {
+                if (ev.type_name != lid) continue;
+                for (ev.fields.items) |f| {
+                    if (f.name == cid) try buf.append(g, f.value.int_);
+                }
+            }
+        }
+    }.run;
+
+    // ── Phase 1: drive the structural lifecycle in order via Tier-0 flushes ──
+    // spawn [Marker, Health(current=1)] → on_spawned (1), on_add[Health] (101).
+    var mv: i32 = 0;
+    var hv1: i64 = 1;
+    try observers_mod.applyWithObservers(.{ .spawn = .{
+        .component_ids = &[_]ComponentId{ marker, health },
+        .payloads = &[_][]const u8{ std.mem.asBytes(&mv), std.mem.asBytes(&hv1) },
+    } }, &world.observer_registry, &world, gpa);
+    // The spawned entity is the only one holding Health — find it.
+    const e = blk: {
+        var qit = world.entity_locations.keyIterator();
+        while (qit.next()) |k| {
+            if (world.componentBytes(k.*, health) != null) break :blk k.*;
+        }
+        unreachable;
+    };
+    // replace Health (current=2) → on_replaced old.current=1, new.current=2 → 312.
+    var hv2: i64 = 2;
+    try observers_mod.applyWithObservers(.{ .add_component = .{ .entity = e, .component_id = health, .bytes = std.mem.asBytes(&hv2) } }, &world.observer_registry, &world, gpa);
+    // remove Health → on_removed old.current=2 → 402.
+    try observers_mod.applyWithObservers(.{ .remove_component = .{ .entity = e, .component_id = health } }, &world.observer_registry, &world, gpa);
+    // despawn → on_despawned (5).
+    try observers_mod.applyWithObservers(.{ .despawn = .{ .entity = e } }, &world.observer_registry, &world, gpa);
+
+    var log: std.ArrayListUnmanaged(i64) = .empty;
+    defer log.deinit(gpa);
+    try collectLog(&interp, log_id, code_id, &log, gpa);
+    try std.testing.expectEqualSlices(i64, &[_]i64{ 1, 101, 312, 402, 5 }, log.items);
+
+    // ── Phase 2: a per-tick `@on_event` drain coexists in the same program ──
+    // `stepOnce` clears the event store first; produce_ping emits Ping, on_ping
+    // drains it same-tick → Log 6.
+    var report: RuntimeReport = .{};
+    try interp.stepOnce(&world, &report);
+    log.clearRetainingCapacity();
+    try collectLog(&interp, log_id, code_id, &log, gpa);
+    try std.testing.expectEqualSlices(i64, &[_]i64{6}, log.items);
 }
 
 test "runProgram add_tag is deferred to the tick boundary; has_tag query gates a counter (M0.8 E3)" {
