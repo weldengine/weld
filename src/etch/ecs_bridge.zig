@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const value_mod = @import("value.zig");
+const persistent = @import("persistent.zig");
 
 const weld_core = @import("weld_core");
 const RegistryNS = weld_core.ecs.registry;
@@ -33,6 +34,13 @@ const Tick = weld_core.ecs.tick.Tick;
 const EntityId = value_mod.EntityId;
 const Value = value_mod.Value;
 const ComponentRef = value_mod.ComponentRef;
+
+comptime {
+    // The `.string_` slot stride the registry reports must match the canonical
+    // `StringSlot` layout (`persistent.zig`) the bridge reads/writes — one
+    // source of truth across the Tier-0 / Etch boundary.
+    std.debug.assert(@sizeOf(persistent.StringSlot) == FieldKind.string_.sizeBytes());
+}
 
 /// Surfaced so callers of `Bridge.dispatchEntityGet` /
 /// `dispatchResourceGet` can map a name-resolution failure into a
@@ -180,6 +188,16 @@ pub const Bridge = struct {
         const bytes = store.getResource(resource_id) orelse return BridgeError.UnknownResource;
         const field = registry.findField(resource_id, field_name) orelse return BridgeError.UnknownField;
         const slice = bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
+        // Enum read (M1.0.3 E3): rebuild a typed `enum_value` from the slot's
+        // discriminant + the declared enum type's interned id on `FieldDesc`
+        // (the byte-only `readBytesAsValue` has no access to the latter). The
+        // `type_name` id matches the rest of the interpreter's enum machinery
+        // (`enum_decls` is keyed by it), so the value compares/matches correctly.
+        if (field.kind == .enum_) {
+            var disc: u32 = 0;
+            @memcpy(std.mem.asBytes(&disc), slice[0..@sizeOf(u32)]);
+            return .{ .enum_value = .{ .type_name = field.enum_type_name_id, .variant = disc } };
+        }
         return readBytesAsValue(field.kind, slice);
     }
 
@@ -194,6 +212,43 @@ pub const Bridge = struct {
         const bytes = store.getMutResource(resource_id) orelse return BridgeError.UnknownResource;
         const slice = bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
         try writeValueAsBytes(field.kind, slice, v);
+    }
+
+    /// Promote `bytes` into a fresh persistent allocation and store it in a
+    /// resource `.string_` slot (`etch-memory-model.md` §6.7 rule-arena →
+    /// persistent promotion). The interpreter resolves the incoming string's
+    /// bytes (literal / rule-arena) and hands them here with the allocator.
+    ///
+    /// Order is load-bearing (M1.0.3 E2 review guard, anti use-after-free): read
+    /// the old slot → alloc + copy the new value → write the new slot → only then
+    /// `decref` the *previous* slot value (never after overwriting it). The
+    /// previous value's `decref` is a no-op when it was the immortal default. An
+    /// empty write stores `{ptr=0,len=0}` and allocates nothing.
+    pub fn promoteResourceString(
+        gpa: std.mem.Allocator,
+        registry: *const Registry,
+        store: *ResourceStore,
+        resource_id: ComponentId,
+        field_name: []const u8,
+        bytes: []const u8,
+    ) BridgeError!void {
+        const field = registry.findField(resource_id, field_name) orelse return BridgeError.UnknownField;
+        std.debug.assert(field.kind == .string_);
+        const buf = store.getMutResource(resource_id) orelse return BridgeError.UnknownResource;
+        const slot = buf[field.offset .. field.offset + @sizeOf(persistent.StringSlot)];
+
+        var old: persistent.StringSlot = undefined;
+        @memcpy(std.mem.asBytes(&old), slot);
+
+        var new_slot: persistent.StringSlot = .{};
+        if (bytes.len > 0) {
+            const block = persistent.alloc(gpa, persistent.type_string, bytes.len) catch return BridgeError.OutOfMemory;
+            @memcpy(block[0..bytes.len], bytes);
+            new_slot = .{ .ptr = @intFromPtr(block), .len = @intCast(bytes.len) };
+        }
+        @memcpy(slot, std.mem.asBytes(&new_slot));
+
+        if (old.ptr != 0) persistent.decref(gpa, @ptrFromInt(old.ptr));
     }
 };
 
@@ -236,6 +291,19 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
             @memcpy(std.mem.asBytes(&v), bytes[0..@sizeOf(f64)]);
             break :blk .{ .float_ = v };
         },
+        // Borrowed read (M1.0.3 E2, resource-only): decode the `{ptr,len}` slot
+        // into a `string_persistent` view without incref'ing the block. `ptr==0`
+        // ⇔ empty string (the no-default / empty-write representation).
+        .string_ => blk: {
+            var ss: persistent.StringSlot = undefined;
+            @memcpy(std.mem.asBytes(&ss), bytes[0..@sizeOf(persistent.StringSlot)]);
+            break :blk .{ .string_persistent = .{ .ptr = ss.ptr, .len = ss.len } };
+        },
+        // Enum reads need the declared type's id (on `FieldDesc`), which this
+        // byte-only decoder lacks — `readResourceField` handles `.enum_` before
+        // delegating here, and components never carry `.enum_` (validator-gated).
+        // Proven invariant: this arm is never reached.
+        .enum_ => unreachable,
     };
 }
 
@@ -291,6 +359,22 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) BridgeError!voi
                 else => return error.TypeMismatch,
             };
             @memcpy(bytes[0..@sizeOf(f32)], std.mem.asBytes(&x));
+        },
+        // A `.string_` write is a persistent promotion (alloc + copy + decref of
+        // the previous slot), which needs an allocator and the old slot bytes —
+        // the POD byte-encoder has neither. Resource string writes route through
+        // `promoteResourceString`; components never carry `.string_` (validator-
+        // gated). Reaching here is a bug, surfaced as a typed error, never a panic.
+        .string_ => return error.TypeMismatch,
+        // Enum write (M1.0.3 E3): store the variant's declaration-order index as
+        // the `u32` discriminant. POD — self-contained in the `enum_value`, so
+        // (unlike `.string_`) it goes through the generic write path.
+        .enum_ => {
+            const disc: u32 = switch (v) {
+                .enum_value => |e| e.variant,
+                else => return error.TypeMismatch,
+            };
+            @memcpy(bytes[0..@sizeOf(u32)], std.mem.asBytes(&disc));
         },
     }
 }

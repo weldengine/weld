@@ -39,6 +39,22 @@ pub const FieldKind = enum {
     u32_,
     f32_,
     f64_,
+    /// A `string` field slot: `{ ptr: u64, len: u32 }` (16 bytes, 8-aligned)
+    /// pointing into the Etch persistent heap (`src/etch/persistent.zig`,
+    /// `StringSlot`). **Resource-only by construction** (M1.0.3): the Etch
+    /// validator rejects `string` on `component` and `fieldKindFromTypeName`
+    /// only emits this kind for the `.resource` origin, so no component can ever
+    /// carry it — the component SoA/POD invariant (`engine-spec.md` §4) is
+    /// untouched. Tier-0 stays string-agnostic: it stores/copies the 16 raw
+    /// slot bytes; the Etch runtime owns the pointed-to bytes' lifetime.
+    string_,
+    /// An enum field slot: the variant's declaration-order index as a `u32`
+    /// discriminant (4 bytes, 4-aligned). POD — no persistent heap, no decref,
+    /// no teardown. **Resource-only** like `.string_` (validator-gated out of
+    /// components). The declared enum type's interned name id rides on
+    /// `FieldDesc.enum_type_name_id` so the Etch bridge can rebuild a typed
+    /// `enum_value{ type_name, variant }` on read.
+    enum_,
 
     pub fn sizeBytes(self: FieldKind) usize {
         return switch (self) {
@@ -49,6 +65,10 @@ pub const FieldKind = enum {
             .u32_ => @sizeOf(u32),
             .f32_ => @sizeOf(f32),
             .f64_ => @sizeOf(f64),
+            // `{ ptr: u64, len: u32 }` padded to 8-alignment — must equal
+            // `@sizeOf(persistent.StringSlot)` (asserted in `ecs_bridge.zig`).
+            .string_ => 16,
+            .enum_ => @sizeOf(u32), // declaration-order discriminant
         };
     }
 
@@ -61,6 +81,8 @@ pub const FieldKind = enum {
             .u32_ => @alignOf(u32),
             .f32_ => @alignOf(f32),
             .f64_ => @alignOf(f64),
+            .string_ => 8,
+            .enum_ => @alignOf(u32),
         };
     }
 
@@ -83,6 +105,14 @@ pub const FieldDesc = struct {
     name: []const u8,
     offset: u16,
     kind: FieldKind,
+    /// For a `.enum_` field (resource-only, M1.0.3 E3): the Etch-interned id of
+    /// the declared enum type name (an AST `StringId`, kept opaque by Tier-0 —
+    /// a plain `u32`, never dereferenced here). Lets the Etch bridge rebuild a
+    /// typed `enum_value{ type_name, variant }` on read with no string pool.
+    /// Stored as the id (not a string) so it needs no allocation and cannot
+    /// dangle when the AST outlives nothing while the registry persists in the
+    /// world. `0` and unused for every non-`.enum_` kind.
+    enum_type_name_id: u32 = 0,
 };
 
 /// Full descriptor stored by the registry. `default_bytes` is `size` bytes
@@ -166,7 +196,12 @@ pub const Registry = struct {
         errdefer for (fields_owned[0..dup_count]) |f| gpa.free(f.name);
         for (desc.fields, 0..) |f, i| {
             const fname_owned = try gpa.dupe(u8, f.name);
-            fields_owned[i] = .{ .name = fname_owned, .offset = f.offset, .kind = f.kind };
+            fields_owned[i] = .{
+                .name = fname_owned,
+                .offset = f.offset,
+                .kind = f.kind,
+                .enum_type_name_id = f.enum_type_name_id,
+            };
             dup_count += 1;
         }
 

@@ -284,6 +284,10 @@ fn writeFieldValue(kind: FieldKind, bytes: []u8, v: FieldValue) void {
             const x: f32 = @floatCast(v.float_);
             @memcpy(bytes[0..@sizeOf(f32)], std.mem.asBytes(&x));
         },
+        // The S4 differential corpus is POD-only: `string`/enum resource fields
+        // (M1.0.3) are exercised by inline interpreter tests, never by this
+        // corpus, so these kinds never reach the runner — proven invariant.
+        .string_, .enum_ => unreachable,
     }
 }
 
@@ -315,5 +319,8 @@ fn readFieldValue(kind: FieldKind, bytes: []const u8) FieldValue {
             @memcpy(std.mem.asBytes(&v), bytes[0..@sizeOf(f32)]);
             break :blk .{ .float_ = v };
         },
+        // POD-only corpus — `.string_`/`.enum_` (M1.0.3) never enter it (see
+        // `writeFieldValue`).
+        .string_, .enum_ => unreachable,
     };
 }

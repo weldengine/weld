@@ -2945,13 +2945,14 @@ pub const TypeChecker = struct {
 
     /// Which declaration kind a validated field range belongs to. `component_like`
     /// (components) keeps the POD-strict surface (`string`/enum/nested-struct
-    /// rejected — part1 §5.5, SoA archetype storage); `resource` keeps its own
-    /// S3 rejection wording (Option A alignment is tranche 7). `struct_` and
-    /// `event_` share the wider surface: `string` + enum-typed fields accepted
-    /// (the builtin `Error` forces them on structs; events carry frame-arena
-    /// non-POD payloads per `etch-memory-model.md` §6.7 / §2.5), nested-struct
-    /// fields deferred. POD-strict is component-only (M1.0.2 ruling, decision on
-    /// the E1 test-4 blocker).
+    /// rejected — part1 §5.5, SoA archetype storage). `resource` shares the wider
+    /// non-POD surface with `struct_` / `event_` for `string` (M1.0.3 E2 — the
+    /// Option A alignment, formerly deferred "tranche 7"; part1 §5.5 "no POD
+    /// constraint for resources"); enum-typed resource fields land in M1.0.3 E3,
+    /// nested-struct fields stay deferred. `struct_` and `event_` accept `string`
+    /// + enum-typed fields (the builtin `Error` forces them on structs; events
+    /// carry frame-arena non-POD payloads per `etch-memory-model.md` §6.7 / §2.5).
+    /// POD-strict is component-only.
     const FieldDeclOrigin = enum { component_like, resource, struct_, event_ };
 
     fn validateFieldsInDecl(self: *TypeChecker, fields_start: u32, fields_len: u32, origin: FieldDeclOrigin) !void {
@@ -3004,19 +3005,23 @@ pub const TypeChecker = struct {
             const tname = self.arena.strings.slice(resolved_name);
 
             if (BuiltinType.fromName(tname) == null) {
-                if ((origin == .struct_ or origin == .event_) and std.mem.eql(u8, tname, "string")) {
+                if ((origin == .struct_ or origin == .event_ or origin == .resource) and std.mem.eql(u8, tname, "string")) {
                     // `string` fields unlock for structs (the Error layer,
-                    // M0.8 E3-C tranche 2 — `Error.message` forces them) and for
-                    // events (frame-arena non-POD payload, `etch-memory-model.md`
-                    // §6.7 / §2.5 — M1.0.2 ruling). part1 §5.5 constrains
-                    // components only; component / resource string fields stay
-                    // rejected below.
-                } else if ((origin == .struct_ or origin == .event_) and self.declaredEnumName(resolved_name)) {
+                    // M0.8 E3-C tranche 2 — `Error.message` forces them), events
+                    // (frame-arena non-POD payload, `etch-memory-model.md` §6.7 /
+                    // §2.5 — M1.0.2 ruling), and now resources (M1.0.3 E2 — the
+                    // Option A alignment; part1 §5.5 "no POD constraint for
+                    // resources"; the persistent-heap slot is `{ptr,len}`). part1
+                    // §5.5 constrains components only — component string fields
+                    // stay rejected below.
+                } else if ((origin == .struct_ or origin == .event_ or origin == .resource) and self.declaredEnumName(resolved_name)) {
                     // Enum-typed fields unlock for structs (`Error.code:
-                    // ErrorCode`, same tranche) and events (M1.0.2). Checked
+                    // ErrorCode`, same tranche), events (M1.0.2), and now resources
+                    // (M1.0.3 E3 — mirrors the `string` unlock; the slot stores the
+                    // variant's declaration-order discriminant, POD). Checked
                     // against the AST enum slab (not the symbol table) so a
                     // later-declared enum is seen — pass 1 registers symbols
-                    // incrementally.
+                    // incrementally. Components stay enum-rejected (POD-strict).
                 } else if ((origin == .struct_ or origin == .event_) and self.declaredStructName(resolved_name)) {
                     // Struct-typed STRUCT / event fields are deferred: the
                     // anonymous `.{ … }` field-value context (M0.8 E3-C tranche 8)
@@ -3034,9 +3039,10 @@ pub const TypeChecker = struct {
                     // unsupported. The brief enforces builtin POD only.
                     try self.emit(.undefined_symbol, .error_, tspan, "type '{s}' is not in the S3 POD builtin set", .{tname});
                 } else if (std.mem.eql(u8, tname, "string")) {
-                    // `string` rejected on components per brief §POD; for
-                    // resources `string` is also out of the S3 builtin set
-                    // (resources POD-enforced via the same builtin table).
+                    // Reached only by `component_like` now: struct / event /
+                    // resource `string` fields are accepted above (M1.0.3 E2
+                    // unlocked resources). Components stay POD-strict (part1
+                    // §5.5, SoA archetype storage). The `else` is defensive.
                     if (origin == .component_like) {
                         try self.emit(.undefined_symbol, .error_, tspan, "type 'string' is rejected on components in S3 (POD enforcement)", .{});
                     } else {
@@ -7257,7 +7263,7 @@ test "type-checker validates tag mutations (M0.8 E3)" {
     try expectAnyCode(bad_recv.diagnostics.items, .tag_invalid_operation);
 }
 
-test "type-checker accepts string and enum fields on struct, keeps component/resource rejection (M0.8 E3-C tranche 2)" {
+test "type-checker accepts string + enum fields on struct + resource, keeps component rejection (M1.0.3)" {
     const gpa = std.testing.allocator;
 
     // `string` + enum-typed struct fields are the tranche-2 unlock (the
@@ -7272,19 +7278,38 @@ test "type-checker accepts string and enum fields on struct, keeps component/res
     defer ok.deinit(gpa);
     try expectNoCode(ok.diagnostics.items, .undefined_symbol);
 
-    // Components stay POD: `string` rejected.
+    // Components stay POD: `string` rejected (part1 §5.5, SoA archetype storage).
     var comp = try parseAndCheck(gpa,
         \\component Name { value: string }
     );
     defer comp.deinit(gpa);
     try expectAnyCode(comp.diagnostics.items, .undefined_symbol);
 
-    // Resources keep the S3 rejection until the Option A alignment (tranche 7).
+    // Components stay POD: enum rejected too.
+    var comp_enum = try parseAndCheck(gpa,
+        \\enum Difficulty { easy, normal, hard }
+        \\component Mode { diff: Difficulty }
+    );
+    defer comp_enum.deinit(gpa);
+    try expectAnyCode(comp_enum.diagnostics.items, .undefined_symbol);
+
+    // Resources accept `string` since M1.0.3 E2 (the Option A alignment,
+    // formerly the deferred "tranche 7"; part1 §5.5 "no POD constraint for
+    // resources"). FLIPPED from rejected → accepted — the intended resolution,
+    // not a regression.
     var res = try parseAndCheck(gpa,
         \\resource Settings { player_name: string }
     );
     defer res.deinit(gpa);
-    try expectAnyCode(res.diagnostics.items, .undefined_symbol);
+    try expectNoCode(res.diagnostics.items, .undefined_symbol);
+
+    // Resources accept enum fields since M1.0.3 E3 (mirrors the `string` unlock).
+    var res_enum = try parseAndCheck(gpa,
+        \\enum Difficulty { easy, normal, hard }
+        \\resource GameMode { diff: Difficulty = .normal }
+    );
+    defer res_enum.deinit(gpa);
+    try expectNoCode(res_enum.diagnostics.items, .undefined_symbol);
 }
 
 test "type-checker resolves the builtin Error struct end-to-end (M0.8 E3-C tranche 2)" {

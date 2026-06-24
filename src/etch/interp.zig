@@ -21,6 +21,7 @@ const value_mod = @import("value.zig");
 const bridge_mod = @import("ecs_bridge.zig");
 const tags_mod = @import("tags.zig");
 const descriptor_mod = @import("descriptor.zig");
+const persistent = @import("persistent.zig");
 
 const weld_core = @import("weld_core");
 const Registry = weld_core.ecs.registry.Registry;
@@ -651,8 +652,44 @@ pub const Interpreter = struct {
     /// route here instead of `pending_tags`, so they apply at the NEXT flush —
     /// never re-entrantly during the current one (the no-recursion contract).
     observer_deferred: ?*CommandBuffer = null,
+    /// The world this program was compiled against (`compile`), borrowed for the
+    /// persistent-string teardown in `deinit` (M1.0.3 E2). The interpreter is
+    /// already lifecycle-coupled to the world (its observer ctxs are registered
+    /// into the world's `ObserverRegistry`), so storing it here is consistent;
+    /// the world MUST outlive the interpreter (the existing contract — `deinit`
+    /// before `world.deinit`). `null` only before `compile` returns.
+    world: ?*World = null,
+    /// Immortal persistent-heap blocks holding compile-time `string` field
+    /// defaults (M1.0.3 E2). Allocated in `compileTypeDecl` via `allocImmortal`
+    /// (sentinel refcount, so slot decref never frees them) and `destroy`'d here
+    /// at `deinit` — they have no slot-owner to reclaim them, so the interpreter
+    /// (their allocator) does. Freed AFTER the per-slot decref so an un-overwritten
+    /// default (slot still points at its immortal block) is reclaimed exactly once.
+    persistent_literals: std.ArrayListUnmanaged([*]u8) = .empty,
 
     pub fn deinit(self: *Interpreter) void {
+        // M1.0.3 E2 — persistent-string teardown, BEFORE `bridge.deinit` (which
+        // drops the resource-name → id map this enumeration needs) and while the
+        // world's resource store is still alive (freed later by `world.deinit`).
+        // Iterate every resource's `.string_` slots and `decref` uniformly: a
+        // sentinel (immortal default) block no-ops, a refcounted user-written
+        // block frees. Then `destroy` the immortal defaults via the literal
+        // registry — no double-free: the slot decref left immortals alive.
+        if (self.world) |w| {
+            var it = self.bridge.resources.valueIterator();
+            while (it.next()) |id_ptr| {
+                const rid = id_ptr.*;
+                const buf = w.resources.getResource(rid) orelse continue;
+                for (w.registry.componentFields(rid)) |fd| {
+                    if (fd.kind != .string_) continue;
+                    var ss: persistent.StringSlot = undefined;
+                    @memcpy(std.mem.asBytes(&ss), buf[fd.offset .. fd.offset + @sizeOf(persistent.StringSlot)]);
+                    if (ss.ptr != 0) persistent.decref(self.gpa, @ptrFromInt(ss.ptr));
+                }
+            }
+        }
+        for (self.persistent_literals.items) |block| persistent.destroy(self.gpa, block);
+        self.persistent_literals.deinit(self.gpa);
         for (self.rule_descs) |*r| r.deinit(self.gpa);
         self.gpa.free(self.rule_descs);
         self.bridge.deinit(self.gpa);
@@ -728,14 +765,24 @@ pub const Interpreter = struct {
         var tag_table = try tags_mod.TagTable.build(gpa, ast, &tag_diags, tags_mod.default_max_tags);
         errdefer tag_table.deinit(gpa);
 
+        // Immortal blocks backing compile-time `string` field defaults (M1.0.3
+        // E2). Filled by `compileTypeDecl`; moved into the returned interpreter,
+        // which `destroy`s them at `deinit`. On a compile error path they are
+        // reclaimed here so no default literal leaks.
+        var persistent_literals: std.ArrayListUnmanaged([*]u8) = .empty;
+        errdefer {
+            for (persistent_literals.items) |block| persistent.destroy(gpa, block);
+            persistent_literals.deinit(gpa);
+        }
+
         // Pass A — register components and resources with the world.
         var i: u28 = 0;
         while (i < ast.items.len) : (i += 1) {
             const kind = ast.items.items(.kind)[i];
             const data = ast.items.items(.data)[i];
             switch (kind) {
-                .component_decl => try compileComponent(gpa, ast, world, &bridge, ast.component_decls.items[data]),
-                .resource_decl => try compileResource(gpa, ast, world, &bridge, ast.resource_decls.items[data]),
+                .component_decl => try compileComponent(gpa, ast, world, &bridge, ast.component_decls.items[data], &persistent_literals),
+                .resource_decl => try compileResource(gpa, ast, world, &bridge, ast.resource_decls.items[data], &persistent_literals),
                 else => {},
             }
         }
@@ -919,6 +966,8 @@ pub const Interpreter = struct {
             .has_async = any_async,
             .async_slots = async_slots,
             .descriptors = descriptors,
+            .world = world,
+            .persistent_literals = persistent_literals,
         };
     }
 
@@ -1999,6 +2048,34 @@ pub const Interpreter = struct {
                 },
                 .resource_ref => |rref| {
                     if (!rref.mutable) return error.RuntimeFailure;
+                    // A `.string_` slot write is a persistent promotion (M1.0.3
+                    // E2), not a byte-block overwrite. Resolve the incoming
+                    // string's bytes (literal / rule-arena) here, then hand them
+                    // to `promoteResourceString`, which allocs the fresh block,
+                    // writes the new slot, and decrefs the previous value (order
+                    // enforced there). Only plain `=` is in the M1.0.3 surface;
+                    // a compound op on a string slot is a runtime failure.
+                    if (world.registry.findField(rref.resource_id, field_name)) |field| {
+                        if (field.kind == .string_) {
+                            if (assign.op != .assign) return error.RuntimeFailure;
+                            const rhs = try self.evalExpr(world, locals, assign.value);
+                            const bytes = self.stringBytes(rhs) orelse return error.RuntimeFailure;
+                            Bridge.promoteResourceString(self.gpa, &world.registry, &world.resources, rref.resource_id, field_name, bytes) catch |e|
+                                return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
+                            return;
+                        }
+                        if (field.kind == .enum_) {
+                            // Enum slot write (M1.0.3 E3): resolve the RHS `.variant`
+                            // shorthand against the field's declared enum type (the
+                            // assignment position carries no expected-type context to
+                            // `evalExpr`), then store its discriminant. Only `=`.
+                            if (assign.op != .assign) return error.RuntimeFailure;
+                            const ev = try self.evalEnumShorthandFor(world, locals, assign.value, field.enum_type_name_id);
+                            Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, ev) catch |e|
+                                return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
+                            return;
+                        }
+                    }
                     const cur = Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                     const rhs = try self.evalExpr(world, locals, assign.value);
@@ -2110,6 +2187,22 @@ pub const Interpreter = struct {
         return Value{ .enum_value = .{ .type_name = ename, .variant = vidx } };
     }
 
+    /// Resolve an enum assignment RHS against a known enum type id (M1.0.3 E3,
+    /// resource enum write). A bare `.variant` shorthand resolves to a typed
+    /// `enum_value` against `enum_type_name_id`; any other form (a variable, a
+    /// qualified `Type.variant`) is evaluated normally — its tag already carries
+    /// the type. The `type_name` id matches `enum_decls`'s keying, so the stored
+    /// discriminant and any later read/compare agree.
+    fn evalEnumShorthandFor(self: *Interpreter, world: *World, locals: *Locals, value: NodeId, enum_type_name_id: u32) StmtError!Value {
+        if (self.ast.exprKind(value) == .tag_path) {
+            const edecl = self.enum_decls.get(enum_type_name_id) orelse return error.RuntimeFailure;
+            const variant: StringId = self.ast.exprData(value);
+            const vidx = self.enumVariantIndexOf(edecl, variant) orelse return error.RuntimeFailure;
+            return Value{ .enum_value = .{ .type_name = enum_type_name_id, .variant = vidx } };
+        }
+        return try self.evalExpr(world, locals, value);
+    }
+
     /// The declared-struct name of a field's `.named` type node, or null when
     /// the field is not struct-typed (M0.8 E3-C tranche 8) — the same
     /// declared-type lookup as `enumFieldShorthand`, for the anonymous
@@ -2202,12 +2295,14 @@ pub const Interpreter = struct {
                 const method = self.trait_methods.get(methodKey(entity_name, mc.method_name)) orelse return error.RuntimeFailure;
                 return try self.callMethod(world, locals, method, mc, recv);
             },
-            .string_id, .string_run => {
+            .string_id, .string_run, .string_persistent => {
                 // Builtin string methods (M0.8 sub-slice C tranche 1 —
                 // minimal faithful subset). `len` → byte length, on a
-                // literal (`string_id`) or a runtime-produced string
-                // (`string_run`, tranche 1b); any other §12 method is
-                // stdlib Phase 1+ → fail loud.
+                // literal (`string_id`), a runtime-produced string
+                // (`string_run`, tranche 1b), or a borrowed resource-string
+                // view (`string_persistent`, M1.0.3 E2); any other §12 method
+                // is stdlib Phase 1+ → fail loud. `stringBytes` already covers
+                // all three forms.
                 const mname = self.ast.strings.slice(mc.method_name);
                 if (std.mem.eql(u8, mname, "len")) {
                     const bytes = self.stringBytes(recv) orelse return error.RuntimeFailure;
@@ -2405,12 +2500,18 @@ pub const Interpreter = struct {
         self.run_strings.clearRetainingCapacity();
     }
 
-    /// The bytes of a string value — an AST-table literal (`string_id`) or a
-    /// runtime-produced string (`string_run`). Null for any non-string value.
+    /// The bytes of a string value — an AST-table literal (`string_id`), a
+    /// runtime-produced string (`string_run`), or a borrowed resource-string
+    /// view (`string_persistent`, M1.0.3 E2). Null for any non-string value.
     fn stringBytes(self: *const Interpreter, v: Value) ?[]const u8 {
         return switch (v) {
             .string_id => |sid| self.ast.strings.slice(sid),
             .string_run => |handle| self.run_strings.items[handle],
+            .string_persistent => |s| blk: {
+                if (s.len == 0) break :blk &.{};
+                const p: [*]const u8 = @ptrFromInt(s.ptr);
+                break :blk p[0..s.len];
+            },
             else => null,
         };
     }
@@ -3212,9 +3313,10 @@ fn compileComponent(
     world: *World,
     bridge: *Bridge,
     decl: ast_mod.ComponentDecl,
+    literals: *std.ArrayListUnmanaged([*]u8),
 ) !void {
     const name = ast.strings.slice(decl.name);
-    _ = try compileTypeDecl(gpa, ast, world, bridge, name, decl.fields_start, decl.fields_len, .component);
+    _ = try compileTypeDecl(gpa, ast, world, bridge, name, decl.fields_start, decl.fields_len, .component, literals);
 }
 
 fn compileResource(
@@ -3223,13 +3325,14 @@ fn compileResource(
     world: *World,
     bridge: *Bridge,
     decl: ast_mod.ResourceDecl,
+    literals: *std.ArrayListUnmanaged([*]u8),
 ) !void {
     const name = ast.strings.slice(decl.name);
     // On a hot-reload re-compile (M0.8 E7) the resource is already registered
     // AND already lives in the resource store with its current value — adding
     // it again would reset it to defaults. Seed the store only on first compile.
     const pre_existing = world.registry.idOf(name) != null;
-    const id = try compileTypeDecl(gpa, ast, world, bridge, name, decl.fields_start, decl.fields_len, .resource);
+    const id = try compileTypeDecl(gpa, ast, world, bridge, name, decl.fields_start, decl.fields_len, .resource, literals);
     if (!pre_existing) {
         const default_bytes = world.registry.componentDefaultBytes(id);
         try world.addResource(gpa, id, default_bytes);
@@ -3247,6 +3350,7 @@ fn compileTypeDecl(
     fields_start: u32,
     fields_len: u32,
     reg_kind: RegKind,
+    literals: *std.ArrayListUnmanaged([*]u8),
 ) !ComponentId {
     var fields: std.ArrayListUnmanaged(FieldDesc) = .empty;
     defer fields.deinit(gpa);
@@ -3258,8 +3362,20 @@ fn compileTypeDecl(
         const f = ast.fields.items[fields_start + f_i];
         const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
         // Resolve through any top-level `type` alias chain (M0.8 foundations).
-        const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
-        const kind = fieldKindFromTypeName(tname) orelse return error.InvalidProgram;
+        const resolved_name_id = ast.resolveTypeAliasName(tnode.name);
+        const tname = ast.strings.slice(resolved_name_id);
+        var enum_type_id: u32 = 0;
+        const kind = fieldKindFromTypeName(tname, reg_kind) orelse blk: {
+            // Enum resource field (M1.0.3 E3): a declared enum type, resource-only
+            // (mirrors the `string` gate; components reject enum at the validator).
+            // `enum_decls` is not built yet in this pass, so match the AST enum
+            // slab directly. The declared enum type's id rides on the FieldDesc.
+            if (reg_kind == .resource and findEnumDecl(ast, resolved_name_id) != null) {
+                enum_type_id = resolved_name_id;
+                break :blk FieldKind.enum_;
+            }
+            return error.InvalidProgram;
+        };
         const align_b = kind.alignBytes();
         if (align_b > max_align) max_align = align_b;
         const off = std.mem.alignForward(usize, size, align_b);
@@ -3268,6 +3384,7 @@ fn compileTypeDecl(
             .name = ast.strings.slice(f.name),
             .offset = @intCast(off),
             .kind = kind,
+            .enum_type_name_id = enum_type_id,
         });
     }
     size = std.mem.alignForward(usize, size, max_align);
@@ -3278,10 +3395,46 @@ fn compileTypeDecl(
     f_i = 0;
     while (f_i < fields_len) : (f_i += 1) {
         const f = ast.fields.items[fields_start + f_i];
-        if (f.default_value.isNone()) continue;
-        const v = evalConst(ast, f.default_value) catch continue;
         const fd = fields.items[f_i];
         const slot = default_buf[fd.offset .. fd.offset + @as(u16, @intCast(fd.kind.sizeBytes()))];
+        if (fd.kind == .string_) {
+            // Resource `string` default = compile-time literal → an immortal
+            // interned block (sentinel refcount): `addResource` copies only the
+            // 16-byte `{ptr,len}` slot, no per-instance allocation. No default ⇒
+            // slot stays `{ptr=0,len=0}` (the empty string; `default_buf` is
+            // zeroed). The block is owned by `literals` and `destroy`'d at the
+            // interpreter's `deinit`. Non-literal const string defaults are out
+            // of the M1.0.3 surface; they leave the empty-string slot.
+            if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .string_lit) {
+                const lit = ast.strings.slice(ast.exprData(f.default_value));
+                const block = try persistent.allocImmortal(gpa, persistent.type_string, lit.len);
+                literals.append(gpa, block) catch |e| {
+                    persistent.destroy(gpa, block);
+                    return e;
+                };
+                if (lit.len > 0) @memcpy(block[0..lit.len], lit);
+                const ss = persistent.StringSlot{ .ptr = @intFromPtr(block), .len = @intCast(lit.len) };
+                @memcpy(slot, std.mem.asBytes(&ss));
+            }
+            continue;
+        }
+        if (fd.kind == .enum_) {
+            // Enum default = a bare `.variant` shorthand → its declaration-order
+            // discriminant (consistent with `EnumValue.variant`). No default ⇒
+            // discriminant 0, the first variant (`default_buf` is zeroed).
+            if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .tag_path) {
+                const variant = ast.exprData(f.default_value);
+                if (findEnumDecl(ast, fd.enum_type_name_id)) |edecl| {
+                    if (enumVariantIndex(ast, edecl, variant)) |vidx| {
+                        const disc: u32 = vidx;
+                        @memcpy(slot[0..@sizeOf(u32)], std.mem.asBytes(&disc));
+                    }
+                }
+            }
+            continue;
+        }
+        if (f.default_value.isNone()) continue;
+        const v = evalConst(ast, f.default_value) catch continue;
         try bridge_mod.writeValueAsBytes(fd.kind, slot, v);
     }
 
@@ -3314,7 +3467,7 @@ fn compileTypeDecl(
     return id;
 }
 
-fn fieldKindFromTypeName(name: []const u8) ?FieldKind {
+fn fieldKindFromTypeName(name: []const u8, reg_kind: RegKind) ?FieldKind {
     if (std.mem.eql(u8, name, "int")) return .int_;
     if (std.mem.eql(u8, name, "float")) return .float_;
     if (std.mem.eql(u8, name, "bool")) return .bool_;
@@ -3322,6 +3475,33 @@ fn fieldKindFromTypeName(name: []const u8) ?FieldKind {
     if (std.mem.eql(u8, name, "u32")) return .u32_;
     if (std.mem.eql(u8, name, "f32")) return .f32_;
     if (std.mem.eql(u8, name, "f64")) return .f64_;
+    // `string` is resource-only (M1.0.3 E2): components are POD-strict (the
+    // validator rejects `string` on them), so this kind is emitted only for the
+    // `.resource` origin. Components reaching here with `string` fall to `null`
+    // → `error.InvalidProgram` (a validator-passed program never does). Enum
+    // field types are not builtin names, so they resolve in `compileTypeDecl`
+    // against the AST enum slab (see `findEnumDecl`), not here.
+    if (reg_kind == .resource and std.mem.eql(u8, name, "string")) return .string_;
+    return null;
+}
+
+/// The declared `enum` with the given (alias-resolved) interned name, or null
+/// — scanned against the AST enum slab so it works in `compileTypeDecl` (pass A,
+/// before `enum_decls` is indexed). Mirrors the type-checker's `declaredEnumName`.
+fn findEnumDecl(ast: *const AstArena, name: StringId) ?ast_mod.EnumDecl {
+    for (ast.enum_decls.items) |d| {
+        if (d.name == name) return d;
+    }
+    return null;
+}
+
+/// Declaration-order index of `variant` within `edecl`, or null (free-fn twin
+/// of `Interpreter.enumVariantIndexOf`, for the allocator-free compile pass).
+fn enumVariantIndex(ast: *const AstArena, edecl: ast_mod.EnumDecl, variant: StringId) ?u32 {
+    var i: u32 = 0;
+    while (i < edecl.variants_len) : (i += 1) {
+        if (ast.enum_variants.items[edecl.variants_start + i].name == variant) return i;
+    }
     return null;
 }
 
@@ -3977,6 +4157,284 @@ test "runProgram resource get/get_mut without receiver reads and writes the reso
     var points: i32 = 0;
     @memcpy(std.mem.asBytes(&points), bytes[0..@sizeOf(i32)]);
     try std.testing.expectEqual(@as(i32, 15), points);
+}
+
+// ── M1.0.3 E2 — resource `string` fields ──────────────────────────────────
+
+/// Read a resource `string` field through the bridge and assert its bytes.
+/// `string_persistent` with `ptr == 0` is the empty string.
+fn expectResourceStringField(
+    world: *World,
+    res_name: []const u8,
+    field_name: []const u8,
+    expected: []const u8,
+) !void {
+    const rid = world.registry.idOf(res_name).?;
+    const v = try bridge_mod.Bridge.readResourceField(&world.registry, &world.resources, rid, field_name);
+    const got: []const u8 = switch (v) {
+        .string_persistent => |s| if (s.len == 0) "" else @as([*]const u8, @ptrFromInt(s.ptr))[0..s.len],
+        else => return error.TestExpectedStringValue,
+    };
+    try std.testing.expectEqualStrings(expected, got);
+}
+
+test "resource string field compiles and reads its default (M1.0.3 E2)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The string default `"intro"` materializes as an immortal interned block;
+    // the rule reads it in-body (`get(S).name`) and stores its byte length, so a
+    // wrong read would surface as a wrong `len`.
+    const source =
+        \\resource S {
+        \\  name: string = "intro"
+        \\  n: int = 0
+        \\}
+        \\rule touch()
+        \\  when resource S
+        \\{
+        \\  let s = get(S).name
+        \\  get_mut(S).n = s.len()
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // The default reads back as "intro", and the in-body read fed `n = 5`.
+    try expectResourceStringField(&world, "S", "name", "intro");
+    const rid = world.registry.idOf("S").?;
+    const bytes = world.resources.getResource(rid).?;
+    const n_field = world.registry.findField(rid, "n").?;
+    var n: i64 = 0;
+    @memcpy(std.mem.asBytes(&n), bytes[n_field.offset .. n_field.offset + @sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 5), n);
+}
+
+test "resource string field with no default reads empty (M1.0.3 E2)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // No default ⇒ the slot stays `{ptr=0,len=0}` — the empty string.
+    var pr = try parser_mod.parse(gpa, "resource S { name: string }");
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    try expectResourceStringField(&world, "S", "name", "");
+}
+
+test "resource string field is mutable and the previous value is released (M1.0.3 E2)" {
+    // An allocation-tracking allocator (backed by the leak-detecting testing
+    // allocator) confirms two things: (a) every overwrite releases the previous
+    // non-immortal value — proven by a `free_count` increase across writes 2→3;
+    // (b) no leak across multiple writes — proven by the backing allocator at
+    // test end (an un-decref'd previous value would leak and fail the test).
+    var counting = weld_core.testing.alloc_counting.CountingAllocator.init(std.testing.allocator);
+    const gpa = counting.allocator();
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Each tick writes a fixed non-default value. Tick 1 overwrites the immortal
+    // default (decref no-op); ticks 2..N overwrite the previous refcounted block
+    // (decref → free). Re-reading returns the written value.
+    const source =
+        \\resource S { name: string = "intro" }
+        \\rule advance()
+        \\  when resource S
+        \\{
+        \\  get_mut(S).name = "boss_arena"
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    // Tick 1: overwrite immortal default (no string free yet).
+    _ = try interp.runFor(&world, 1);
+    try expectResourceStringField(&world, "S", "name", "boss_arena");
+    const after_first = counting.snapshot();
+
+    // Tick 2: overwrite the refcounted value from tick 1 → its block is freed.
+    _ = try interp.runFor(&world, 1);
+    const after_second = counting.snapshot();
+    try std.testing.expect(after_second.free_count > after_first.free_count);
+    try expectResourceStringField(&world, "S", "name", "boss_arena");
+}
+
+// ── M1.0.3 E3 — resource enum fields ──────────────────────────────────────
+
+/// Read a resource enum field's raw `u32` discriminant and assert its value.
+fn expectResourceEnumDiscriminant(
+    world: *World,
+    res_name: []const u8,
+    field_name: []const u8,
+    expected: u32,
+) !void {
+    const rid = world.registry.idOf(res_name).?;
+    const fd = world.registry.findField(rid, field_name).?;
+    const bytes = world.resources.getResource(rid).?;
+    var disc: u32 = 0;
+    @memcpy(std.mem.asBytes(&disc), bytes[fd.offset .. fd.offset + @sizeOf(u32)]);
+    try std.testing.expectEqual(expected, disc);
+}
+
+test "resource enum field compiles, reads its default, and is mutable (M1.0.3 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `.normal` is declaration-order index 1; `.hard` is 2.
+    const source =
+        \\enum Difficulty { easy, normal, hard }
+        \\resource S { diff: Difficulty = .normal }
+        \\rule advance()
+        \\  when resource S
+        \\{
+        \\  let cur = get(S).diff
+        \\  get_mut(S).diff = .hard
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    // Default materialized as `.normal` (index 1) before any rule runs.
+    try expectResourceEnumDiscriminant(&world, "S", "diff", 1);
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // The in-body read (`get(S).diff`) ran, then `.hard` (index 2) was written.
+    try expectResourceEnumDiscriminant(&world, "S", "diff", 2);
+}
+
+test "resource enum field with no default reads the first variant (M1.0.3 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // No default ⇒ discriminant 0 ⇒ the first declared variant (`easy`).
+    const source =
+        \\enum Difficulty { easy, normal, hard }
+        \\resource S { diff: Difficulty }
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    try expectResourceEnumDiscriminant(&world, "S", "diff", 0);
+}
+
+test "GameState end-state program mutates string + enum + int end-to-end (M1.0.3)" {
+    // The brief's flagship resource: `string` + enum + `int` fields mutated in
+    // one rule body, leak-free. Runs under the leak-detecting allocator.
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const source =
+        \\enum Difficulty { easy, normal, hard }
+        \\@state
+        \\resource GameState {
+        \\  current_level: string = "intro"
+        \\  difficulty: Difficulty = .normal
+        \\  player_count: int = 0
+        \\}
+        \\rule advance(dt: float)
+        \\  when resource GameState
+        \\{
+        \\  let mut gs = get_mut(GameState)
+        \\  gs.current_level = "boss_arena"
+        \\  gs.difficulty = .hard
+        \\  gs.player_count += 1
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // current_level == "boss_arena", difficulty == .hard (2), player_count == 1.
+    try expectResourceStringField(&world, "GameState", "current_level", "boss_arena");
+    try expectResourceEnumDiscriminant(&world, "GameState", "difficulty", 2);
+    const rid = world.registry.idOf("GameState").?;
+    const bytes = world.resources.getResource(rid).?;
+    const pc = world.registry.findField(rid, "player_count").?;
+    var n: i64 = 0;
+    @memcpy(std.mem.asBytes(&n), bytes[pc.offset .. pc.offset + @sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 1), n);
 }
 
 test "runProgram type-alias field resolves to the underlying primitive (M0.8 type alias)" {
