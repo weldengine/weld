@@ -2064,6 +2064,17 @@ pub const Interpreter = struct {
                                 return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                             return;
                         }
+                        if (field.kind == .enum_) {
+                            // Enum slot write (M1.0.3 E3): resolve the RHS `.variant`
+                            // shorthand against the field's declared enum type (the
+                            // assignment position carries no expected-type context to
+                            // `evalExpr`), then store its discriminant. Only `=`.
+                            if (assign.op != .assign) return error.RuntimeFailure;
+                            const ev = try self.evalEnumShorthandFor(world, locals, assign.value, field.enum_type_name_id);
+                            Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, ev) catch |e|
+                                return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
+                            return;
+                        }
                     }
                     const cur = Bridge.readResourceField(&world.registry, &world.resources, rref.resource_id, field_name) catch |e|
                         return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
@@ -2174,6 +2185,22 @@ pub const Interpreter = struct {
         const variant: StringId = self.ast.exprData(value);
         const vidx = self.enumVariantIndexOf(edecl, variant) orelse return null;
         return Value{ .enum_value = .{ .type_name = ename, .variant = vidx } };
+    }
+
+    /// Resolve an enum assignment RHS against a known enum type id (M1.0.3 E3,
+    /// resource enum write). A bare `.variant` shorthand resolves to a typed
+    /// `enum_value` against `enum_type_name_id`; any other form (a variable, a
+    /// qualified `Type.variant`) is evaluated normally — its tag already carries
+    /// the type. The `type_name` id matches `enum_decls`'s keying, so the stored
+    /// discriminant and any later read/compare agree.
+    fn evalEnumShorthandFor(self: *Interpreter, world: *World, locals: *Locals, value: NodeId, enum_type_name_id: u32) StmtError!Value {
+        if (self.ast.exprKind(value) == .tag_path) {
+            const edecl = self.enum_decls.get(enum_type_name_id) orelse return error.RuntimeFailure;
+            const variant: StringId = self.ast.exprData(value);
+            const vidx = self.enumVariantIndexOf(edecl, variant) orelse return error.RuntimeFailure;
+            return Value{ .enum_value = .{ .type_name = enum_type_name_id, .variant = vidx } };
+        }
+        return try self.evalExpr(world, locals, value);
     }
 
     /// The declared-struct name of a field's `.named` type node, or null when
@@ -3335,8 +3362,20 @@ fn compileTypeDecl(
         const f = ast.fields.items[fields_start + f_i];
         const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
         // Resolve through any top-level `type` alias chain (M0.8 foundations).
-        const tname = ast.strings.slice(ast.resolveTypeAliasName(tnode.name));
-        const kind = fieldKindFromTypeName(tname, reg_kind) orelse return error.InvalidProgram;
+        const resolved_name_id = ast.resolveTypeAliasName(tnode.name);
+        const tname = ast.strings.slice(resolved_name_id);
+        var enum_type_id: u32 = 0;
+        const kind = fieldKindFromTypeName(tname, reg_kind) orelse blk: {
+            // Enum resource field (M1.0.3 E3): a declared enum type, resource-only
+            // (mirrors the `string` gate; components reject enum at the validator).
+            // `enum_decls` is not built yet in this pass, so match the AST enum
+            // slab directly. The declared enum type's id rides on the FieldDesc.
+            if (reg_kind == .resource and findEnumDecl(ast, resolved_name_id) != null) {
+                enum_type_id = resolved_name_id;
+                break :blk FieldKind.enum_;
+            }
+            return error.InvalidProgram;
+        };
         const align_b = kind.alignBytes();
         if (align_b > max_align) max_align = align_b;
         const off = std.mem.alignForward(usize, size, align_b);
@@ -3345,6 +3384,7 @@ fn compileTypeDecl(
             .name = ast.strings.slice(f.name),
             .offset = @intCast(off),
             .kind = kind,
+            .enum_type_name_id = enum_type_id,
         });
     }
     size = std.mem.alignForward(usize, size, max_align);
@@ -3375,6 +3415,21 @@ fn compileTypeDecl(
                 if (lit.len > 0) @memcpy(block[0..lit.len], lit);
                 const ss = persistent.StringSlot{ .ptr = @intFromPtr(block), .len = @intCast(lit.len) };
                 @memcpy(slot, std.mem.asBytes(&ss));
+            }
+            continue;
+        }
+        if (fd.kind == .enum_) {
+            // Enum default = a bare `.variant` shorthand → its declaration-order
+            // discriminant (consistent with `EnumValue.variant`). No default ⇒
+            // discriminant 0, the first variant (`default_buf` is zeroed).
+            if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .tag_path) {
+                const variant = ast.exprData(f.default_value);
+                if (findEnumDecl(ast, fd.enum_type_name_id)) |edecl| {
+                    if (enumVariantIndex(ast, edecl, variant)) |vidx| {
+                        const disc: u32 = vidx;
+                        @memcpy(slot[0..@sizeOf(u32)], std.mem.asBytes(&disc));
+                    }
+                }
             }
             continue;
         }
@@ -3423,8 +3478,30 @@ fn fieldKindFromTypeName(name: []const u8, reg_kind: RegKind) ?FieldKind {
     // `string` is resource-only (M1.0.3 E2): components are POD-strict (the
     // validator rejects `string` on them), so this kind is emitted only for the
     // `.resource` origin. Components reaching here with `string` fall to `null`
-    // → `error.InvalidProgram` (a validator-passed program never does).
+    // → `error.InvalidProgram` (a validator-passed program never does). Enum
+    // field types are not builtin names, so they resolve in `compileTypeDecl`
+    // against the AST enum slab (see `findEnumDecl`), not here.
     if (reg_kind == .resource and std.mem.eql(u8, name, "string")) return .string_;
+    return null;
+}
+
+/// The declared `enum` with the given (alias-resolved) interned name, or null
+/// — scanned against the AST enum slab so it works in `compileTypeDecl` (pass A,
+/// before `enum_decls` is indexed). Mirrors the type-checker's `declaredEnumName`.
+fn findEnumDecl(ast: *const AstArena, name: StringId) ?ast_mod.EnumDecl {
+    for (ast.enum_decls.items) |d| {
+        if (d.name == name) return d;
+    }
+    return null;
+}
+
+/// Declaration-order index of `variant` within `edecl`, or null (free-fn twin
+/// of `Interpreter.enumVariantIndexOf`, for the allocator-free compile pass).
+fn enumVariantIndex(ast: *const AstArena, edecl: ast_mod.EnumDecl, variant: StringId) ?u32 {
+    var i: u32 = 0;
+    while (i < edecl.variants_len) : (i += 1) {
+        if (ast.enum_variants.items[edecl.variants_start + i].name == variant) return i;
+    }
     return null;
 }
 
@@ -4219,6 +4296,145 @@ test "resource string field is mutable and the previous value is released (M1.0.
     const after_second = counting.snapshot();
     try std.testing.expect(after_second.free_count > after_first.free_count);
     try expectResourceStringField(&world, "S", "name", "boss_arena");
+}
+
+// ── M1.0.3 E3 — resource enum fields ──────────────────────────────────────
+
+/// Read a resource enum field's raw `u32` discriminant and assert its value.
+fn expectResourceEnumDiscriminant(
+    world: *World,
+    res_name: []const u8,
+    field_name: []const u8,
+    expected: u32,
+) !void {
+    const rid = world.registry.idOf(res_name).?;
+    const fd = world.registry.findField(rid, field_name).?;
+    const bytes = world.resources.getResource(rid).?;
+    var disc: u32 = 0;
+    @memcpy(std.mem.asBytes(&disc), bytes[fd.offset .. fd.offset + @sizeOf(u32)]);
+    try std.testing.expectEqual(expected, disc);
+}
+
+test "resource enum field compiles, reads its default, and is mutable (M1.0.3 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `.normal` is declaration-order index 1; `.hard` is 2.
+    const source =
+        \\enum Difficulty { easy, normal, hard }
+        \\resource S { diff: Difficulty = .normal }
+        \\rule advance()
+        \\  when resource S
+        \\{
+        \\  let cur = get(S).diff
+        \\  get_mut(S).diff = .hard
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    // Default materialized as `.normal` (index 1) before any rule runs.
+    try expectResourceEnumDiscriminant(&world, "S", "diff", 1);
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // The in-body read (`get(S).diff`) ran, then `.hard` (index 2) was written.
+    try expectResourceEnumDiscriminant(&world, "S", "diff", 2);
+}
+
+test "resource enum field with no default reads the first variant (M1.0.3 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // No default ⇒ discriminant 0 ⇒ the first declared variant (`easy`).
+    const source =
+        \\enum Difficulty { easy, normal, hard }
+        \\resource S { diff: Difficulty }
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    try expectResourceEnumDiscriminant(&world, "S", "diff", 0);
+}
+
+test "GameState end-state program mutates string + enum + int end-to-end (M1.0.3)" {
+    // The brief's flagship resource: `string` + enum + `int` fields mutated in
+    // one rule body, leak-free. Runs under the leak-detecting allocator.
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const source =
+        \\enum Difficulty { easy, normal, hard }
+        \\@state
+        \\resource GameState {
+        \\  current_level: string = "intro"
+        \\  difficulty: Difficulty = .normal
+        \\  player_count: int = 0
+        \\}
+        \\rule advance(dt: float)
+        \\  when resource GameState
+        \\{
+        \\  let mut gs = get_mut(GameState)
+        \\  gs.current_level = "boss_arena"
+        \\  gs.difficulty = .hard
+        \\  gs.player_count += 1
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // current_level == "boss_arena", difficulty == .hard (2), player_count == 1.
+    try expectResourceStringField(&world, "GameState", "current_level", "boss_arena");
+    try expectResourceEnumDiscriminant(&world, "GameState", "difficulty", 2);
+    const rid = world.registry.idOf("GameState").?;
+    const bytes = world.resources.getResource(rid).?;
+    const pc = world.registry.findField(rid, "player_count").?;
+    var n: i64 = 0;
+    @memcpy(std.mem.asBytes(&n), bytes[pc.offset .. pc.offset + @sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 1), n);
 }
 
 test "runProgram type-alias field resolves to the underlying primitive (M0.8 type alias)" {

@@ -188,6 +188,16 @@ pub const Bridge = struct {
         const bytes = store.getResource(resource_id) orelse return BridgeError.UnknownResource;
         const field = registry.findField(resource_id, field_name) orelse return BridgeError.UnknownField;
         const slice = bytes[field.offset .. field.offset + @as(u16, @intCast(field.kind.sizeBytes()))];
+        // Enum read (M1.0.3 E3): rebuild a typed `enum_value` from the slot's
+        // discriminant + the declared enum type's interned id on `FieldDesc`
+        // (the byte-only `readBytesAsValue` has no access to the latter). The
+        // `type_name` id matches the rest of the interpreter's enum machinery
+        // (`enum_decls` is keyed by it), so the value compares/matches correctly.
+        if (field.kind == .enum_) {
+            var disc: u32 = 0;
+            @memcpy(std.mem.asBytes(&disc), slice[0..@sizeOf(u32)]);
+            return .{ .enum_value = .{ .type_name = field.enum_type_name_id, .variant = disc } };
+        }
         return readBytesAsValue(field.kind, slice);
     }
 
@@ -289,6 +299,11 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
             @memcpy(std.mem.asBytes(&ss), bytes[0..@sizeOf(persistent.StringSlot)]);
             break :blk .{ .string_persistent = .{ .ptr = ss.ptr, .len = ss.len } };
         },
+        // Enum reads need the declared type's id (on `FieldDesc`), which this
+        // byte-only decoder lacks — `readResourceField` handles `.enum_` before
+        // delegating here, and components never carry `.enum_` (validator-gated).
+        // Proven invariant: this arm is never reached.
+        .enum_ => unreachable,
     };
 }
 
@@ -351,6 +366,16 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) BridgeError!voi
         // `promoteResourceString`; components never carry `.string_` (validator-
         // gated). Reaching here is a bug, surfaced as a typed error, never a panic.
         .string_ => return error.TypeMismatch,
+        // Enum write (M1.0.3 E3): store the variant's declaration-order index as
+        // the `u32` discriminant. POD — self-contained in the `enum_value`, so
+        // (unlike `.string_`) it goes through the generic write path.
+        .enum_ => {
+            const disc: u32 = switch (v) {
+                .enum_value => |e| e.variant,
+                else => return error.TypeMismatch,
+            };
+            @memcpy(bytes[0..@sizeOf(u32)], std.mem.asBytes(&disc));
+        },
     }
 }
 

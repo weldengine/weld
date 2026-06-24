@@ -3014,12 +3014,14 @@ pub const TypeChecker = struct {
                     // resources"; the persistent-heap slot is `{ptr,len}`). part1
                     // §5.5 constrains components only — component string fields
                     // stay rejected below.
-                } else if ((origin == .struct_ or origin == .event_) and self.declaredEnumName(resolved_name)) {
+                } else if ((origin == .struct_ or origin == .event_ or origin == .resource) and self.declaredEnumName(resolved_name)) {
                     // Enum-typed fields unlock for structs (`Error.code:
-                    // ErrorCode`, same tranche) and events (M1.0.2). Checked
+                    // ErrorCode`, same tranche), events (M1.0.2), and now resources
+                    // (M1.0.3 E3 — mirrors the `string` unlock; the slot stores the
+                    // variant's declaration-order discriminant, POD). Checked
                     // against the AST enum slab (not the symbol table) so a
                     // later-declared enum is seen — pass 1 registers symbols
-                    // incrementally.
+                    // incrementally. Components stay enum-rejected (POD-strict).
                 } else if ((origin == .struct_ or origin == .event_) and self.declaredStructName(resolved_name)) {
                     // Struct-typed STRUCT / event fields are deferred: the
                     // anonymous `.{ … }` field-value context (M0.8 E3-C tranche 8)
@@ -7261,7 +7263,7 @@ test "type-checker validates tag mutations (M0.8 E3)" {
     try expectAnyCode(bad_recv.diagnostics.items, .tag_invalid_operation);
 }
 
-test "type-checker accepts string fields on struct + resource, keeps component rejection (M1.0.3 E2)" {
+test "type-checker accepts string + enum fields on struct + resource, keeps component rejection (M1.0.3)" {
     const gpa = std.testing.allocator;
 
     // `string` + enum-typed struct fields are the tranche-2 unlock (the
@@ -7283,6 +7285,14 @@ test "type-checker accepts string fields on struct + resource, keeps component r
     defer comp.deinit(gpa);
     try expectAnyCode(comp.diagnostics.items, .undefined_symbol);
 
+    // Components stay POD: enum rejected too.
+    var comp_enum = try parseAndCheck(gpa,
+        \\enum Difficulty { easy, normal, hard }
+        \\component Mode { diff: Difficulty }
+    );
+    defer comp_enum.deinit(gpa);
+    try expectAnyCode(comp_enum.diagnostics.items, .undefined_symbol);
+
     // Resources accept `string` since M1.0.3 E2 (the Option A alignment,
     // formerly the deferred "tranche 7"; part1 §5.5 "no POD constraint for
     // resources"). FLIPPED from rejected → accepted — the intended resolution,
@@ -7292,6 +7302,14 @@ test "type-checker accepts string fields on struct + resource, keeps component r
     );
     defer res.deinit(gpa);
     try expectNoCode(res.diagnostics.items, .undefined_symbol);
+
+    // Resources accept enum fields since M1.0.3 E3 (mirrors the `string` unlock).
+    var res_enum = try parseAndCheck(gpa,
+        \\enum Difficulty { easy, normal, hard }
+        \\resource GameMode { diff: Difficulty = .normal }
+    );
+    defer res_enum.deinit(gpa);
+    try expectNoCode(res_enum.diagnostics.items, .undefined_symbol);
 }
 
 test "type-checker resolves the builtin Error struct end-to-end (M0.8 E3-C tranche 2)" {
