@@ -11,8 +11,20 @@ name: Bench
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'briefs/**'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'briefs/**'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
 
 concurrency:
   group: bench-${{ github.ref }}

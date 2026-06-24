@@ -21,6 +21,54 @@ env:
   ZIG_VERSION: "0.16.0"
 
 jobs:
+  # M1.0.3-followup — doc-only fast path. `ci-gate` (en fin de fichier) devient
+  # l'unique check required de la branch protection, en remplacement des 4
+  # cellules build-and-test ; les jobs lourds sont conditionnés à la présence
+  # d'un changement non-doc. `code` est true SAUF si tous les fichiers changés
+  # matchent l'allowlist docs (**.md, briefs/**, docs/**, LICENSE, .gitignore).
+  # Step bash plutôt que dorny/paths-filter : pas de dépendance d'action hors
+  # whitelist (engine-development-workflow.md §7.3).
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Detect non-doc changes
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+          fi
+          # Base inconnue / zéro-SHA (premier push, force-push, shallow) -> CI
+          # complet : on ne skippe jamais dans le doute.
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "base unknown -> code=true"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files="$(git diff --name-only "$base" "$head")"
+          echo "--- changed files ---"; echo "$files"
+          code=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              *.md|briefs/*|docs/*|LICENSE|.gitignore) : ;;
+              *) code=true ;;
+            esac
+          done <<< "$files"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "--- verdict: code=$code ---"
+
   # M0.9 / E1 — test-category matrix. The 4 cells carry stable, nominative
   # check names that branch protection requires by name (Guy applies the
   # repo settings — out of Claude Code's hands):
@@ -32,6 +80,8 @@ jobs:
   # timeout (neutral state) was not blocking the merge: a required check that
   # is neutral/cancelled is NOT "success", so the merge is blocked.
   build-and-test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -180,7 +230,8 @@ jobs:
     # software driver.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: build-and-test
+    needs: [changes, build-and-test]
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v6
 
@@ -298,7 +349,8 @@ jobs:
     # validation-clean"; visual correctness is hardware-validated.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: build-and-test
+    needs: [changes, build-and-test]
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v6
 
@@ -418,3 +470,34 @@ jobs:
             slice-c08.log
             vkblit.log
           retention-days: 30
+
+  # M1.0.3-followup — l'UNIQUE check required. La branch protection ne requiert
+  # que ce job (Guy applique les réglages repo). Il agrège les jobs lourds :
+  # vert si tous success OU skipped (PR doc-only), rouge si l'un est failure /
+  # cancelled. Une PR doc-only merge en secondes ; une PR code reste gatée sur
+  # toute la matrice + les smokes.
+  ci-gate:
+    needs: [changes, build-and-test, runtime-smoke-test, vertical-slice-smoke]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate required results
+        shell: bash
+        run: |
+          set -euo pipefail
+          changes="${{ needs.changes.result }}"
+          bt="${{ needs.build-and-test.result }}"
+          rst="${{ needs.runtime-smoke-test.result }}"
+          vss="${{ needs.vertical-slice-smoke.result }}"
+          echo "changes=$changes build-and-test=$bt runtime-smoke-test=$rst vertical-slice-smoke=$vss"
+          if [ "$changes" != "success" ]; then
+            echo "::error::changes job did not succeed ($changes)"; exit 1
+          fi
+          for r in "$bt" "$rst" "$vss"; do
+            case "$r" in
+              success|skipped) : ;;
+              *) echo "::error::a required upstream job is $r"; exit 1 ;;
+            esac
+          done
+          echo "ci-gate: all clear."
