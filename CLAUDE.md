@@ -5,31 +5,15 @@ session and captures the operational state of the project plus the rules that
 must never be violated. The full specification lives in the claude.ai
 knowledge base — see § Quick links spec.
 
-> **Status:** Phase −1 closed (7/7 spikes validated) — Phase 0 (Fondations) opens
->
-> Phase −1 wraps with tag `v0.0.7-S6-ipc-round-trip` (2026-05-18,
-> S6 — IPC editor↔runtime round-trip). All seven engineering
-> hypotheses (S0–S6) cleared their gates: S1 18× (54.5 µs / 1 ms),
-> S3 263× (0.019 ms / 5 ms), S4 27× (0.603 ms / 10 ms tick budget),
-> S5 cold 27× / incremental 1.9× (1104 ms / 30 s, 1066 ms / 2 s),
-> S6 RTT 166× (6 µs p50 / 1 ms). Three Phase 0.6 debts carried
-> forward: SCM_RIGHTS fd-passing as primary POSIX shm attach
-> (macOS BSD shm cross-process quirk diagnosed in
-> `validation/s6-go-nogo.md`), editor Windows path wire-up
-> (`src/editor/main.zig` returns `error.Unimplemented`), and
-> `transport_windows.zig:sendWithHandles` (Phase 3, with the GPU
-> shared framebuffer). Phase 0 entry point: `engine-spec.md` §25.3
-> and `engine-phase-0-plan.md`.
-
 ## Current state
 
 | Field | Value |
 |---|---|
 | Phase | 1 (Etch ↔ ECS) |
 | Current milestone | (none — between milestones) |
-| Last released tag | `v0.10.2-etch-events-observers` |
+| Last released tag | `v0.10.3-resource-nonpod-fields` |
 | Active branch | `main` |
-| Next planned milestone | M1.0.3 — Resources |
+| Next planned milestone | (next M1.0.x — to be scoped) |
 
 ## Tags
 
@@ -42,6 +26,21 @@ knowledge base — see § Quick links spec.
 | `v0.0.5-S4-etch-tree-walking-interpreter` | 2026-05-16 | S4 — Etch tree-walking interpreter | Interpreter over S3 AST + additive Tier 0 ECS (runtime registry, dynamic archetype, resource store, runtime query). 20-program differential corpus. Bench verdict GO (median 0.603 ms / tick at 1 000 entities × 5 rules, gate 10 ms; median 6.593 ms / tick at 10 000 × 5, gate 100 ms) on dev Apple Silicon ReleaseSafe. |
 | `v0.0.6-S5-etch-codegen-zig` | 2026-05-17 | S5 — Etch → Zig codegen and compile-time measurement | Etch → Zig codegen on the S3 subset. `extern struct` types + comptime `world.query(.{T1, T2})` iteration (via `src/core/ecs/comptime_query.zig`), with `Registry.registerAlias` letting components be keyed by both Etch name and `@typeName(T)`. `tools/etch_cook` consolidates N inputs into one `.zig`. 100-file synthetic corpus + 3-metric bench. Verdict GO on all 5 gates: (a)+(b) cold 1104 ms vs 30 s, (a)+(c) incremental 1066 ms vs 2 s, zero leak, **382 distinct comptime query instantiations on 400 rules (ceiling 4×=1528)**, 20/20 differential parity. |
 | `v0.0.7-S6-ipc-round-trip` | 2026-05-18 | S6 — IPC editor↔runtime round-trip | Tier 0 `src/core/ipc/` (transport, framing, shm, viewport, server, client, connection). Two binaries `weld-editor` + `weld-runtime` at canonical `src/editor/` and `src/runtime/`. Fullscreen-triangle Vulkan blit pipeline + SPIR-V committed. RTT bench Apple Silicon ReleaseSafe: p50 6 µs / p99 16 µs / max 61 µs / stddev 3 µs (G1 < 1 ms cleared by 166×, G2 cleared). G6 visual GO on Fedora 44 + GTX 1660 Ti dev box (60 s, no tearing, no stale > 100 ms). G7 fd-passing POSIX GO. Linux CI + Windows CI = GO; macOS dev primary = partial — BSD shm cross-process quirk documented in `validation/s6-go-nogo.md` § Diagnostics, migration to SCM_RIGHTS fd-passing tracked Phase 0.6. |
+| `v0.0.8-M0.0-lint-custom` | 2026-05-20 | M0.0 — Custom linter and spec housekeeping | Native Zig lint pass (`zig build lint`) + `commit-msg` hook; spec housekeeping. First milestone under the structured squash-commit + annotated-tag convention (§4.6). |
+| `v0.1.0-M0.1-ecs-full` | 2026-05-21 | M0.1 — Full Tier 0 ECS | Complete Tier 0 ECS: archetype storage, queries, Chase-Lev scheduler. |
+| `v0.2.0-M0.2-rtti` | 2026-05-23 | M0.2 — RTTI + Resources + Events + unified bindgen + plugin-loader skeleton | RTTI, resource store, event system, unified bindgen, plugin-loader skeleton. |
+| `v0.2.1-M0.2.1-scheduler-livelock` | 2026-05-24 | M0.2.1 — Scheduler livelock investigation | Hotfix milestone: scheduler livelock diagnosed and fixed. |
+| `v0.3.0-M0.3-platform` | 2026-05-25 | M0.3 — Platform layer extended + Win32 thread safety + Tier 0 Input | Extended platform layer, Win32 thread-safety, Tier 0 Input. |
+| `v0.4.0-M0.4-render` | 2026-05-28 | M0.4 — Vulkan forward renderer + GAL design | Vulkan forward renderer + graphics-abstraction-layer design. |
+| `v0.5.0-M0.5-housekeeping` | 2026-06-03 | M0.5 — Post-M0.4 housekeeping | CI/legacy debt, two latent bugs fixed (render-graph WAW, Etch keyword idents), POSIX EINTR, `root.zig` convention. |
+| `v0.6.0-M0.6-assets` | 2026-06-04 | M0.6 — Offline asset pipeline + async runtime loader | Formats, native codecs (PNG/glTF/WAV), cooking cache, asset lifecycle. |
+| `v0.7.0-M0.7-ipc` | 2026-06-06 | M0.7 — IPC complete | SCM_RIGHTS primary attach + Windows + replay + nightly fuzz. Closes the Phase 0.6 SCM_RIGHTS fd-passing and editor Windows-path debts. |
+| `v0.8.0-M0.8-etch` | 2026-06-12 | M0.8 — Etch full-grammar v0.6 | Full EBNF v0.6: lexer, hybrid LR(1)+Pratt parser, resolver, type-checker, tree-walking interpreter over the complete language. |
+| `v0.9.0-phase-0-complete` | 2026-06-15 | Phase 0 complete — Weld foundations | Phase 0 close tag. Tier 0 + renderer + assets + Etch toolchain complete. |
+| `v0.10.0-interp-query-filters` | 2026-06-18 | M1.0.0 — Interpreter ↔ filtered ECS queries | `World.queryDynamic` exposing Tier 0 filtered queries to the interpreter; DNF union composition; hand-rolled archetype cache in `interp.zig` removed. |
+| `v0.10.1-changed-detection` | 2026-06-22 | M1.0.1 — Change detection + scheduler data-race fix | `entity has T changed` exposed to the interpreter; `Scheduler.shutdown` data-race fixed (`std.atomic.Value(bool)`); permanent test watchdog added. |
+| `v0.10.2-etch-events-observers` | 2026-06-23 | M1.0.2 — Events + structural observers | `emit`/`@on_event` + five lifecycle-annotation observers (`@on_added`/`@on_removed`/`@on_replaced`/`@on_spawned`/`@on_despawned`), annotation-routed; Tier 0 observer registry completed (`on_replaced`, ctx, old/new). Diagnostics E1208/E1209/E1215. Non-POD (`string`) event-field fix folded in via fix-as-you-go. |
+| `v0.10.3-resource-nonpod-fields` | 2026-06-24 | M1.0.3 — String and enum resource fields | Resource fields reach spec parity for the two scalar non-POD cases; founds the Phase 1 persistent heap (system allocator + atomic refcount + drop-by-`type_id` + immortal-interned sentinel). Resource-only `FieldKind.string_`/`.enum_`; components stay POD-strict (validator-gated). The Option A alignment (the former deferred "tranche 7"). |
 
 ## Hypotheses validated by spikes
 
@@ -60,8 +59,7 @@ knowledge base — see § Quick links spec.
 - **macOS in the CI matrix**: deferred, re-evaluated after Phase 0 (CI quota constraints, primary targets are Win11 + Fedora 44).
 - **Codeberg migration**: end of Phase 1 (criterion C1.10 in `engine-phase-1-criteria.md`). The repo lives on GitHub for Phase −1 / 0 / 1.
 - **`spec/` directory in the repo**: out of scope for Phase −1. Spec lives in the claude.ai knowledge base; re-evaluated during Phase 0 if the absence creates friction.
-- **SCM_RIGHTS fd-passing as primary POSIX shm attach (Phase 0.6)**: the S6 BSD shm cross-process diagnostic showed `shm_open(O_RDWR)` is structurally refused for non-creator siblings on macOS even with same UID. The Phase 0.6 migration ships the create fd via the existing AF_UNIX socket (`IpcSocket.sendWithHandles`, G7 GO) and has the runtime `mmap` directly on the received fd. Sidesteps the macOS quirk completely; cleaner protocol on every platform. `engine-ipc.md` §4.7 to be patched at the same time.
-- **Editor stub Windows path (Phase 0.6)**: `src/editor/main.zig` returns `error.Unimplemented` on Windows. `CreateProcessW` + named pipe + the S2 Win32 window backend already exist — wiring it up is Phase 0.6 work.
+- **Phase 0.6 IPC debts (SCM_RIGHTS fd-passing + editor Windows path)**: resolved in M0.7 (`v0.7.0-M0.7-ipc`). SCM_RIGHTS is the primary POSIX shm attach (create fd over AF_UNIX, runtime `mmap`s the received fd, sidestepping the macOS BSD shm quirk); the editor's Windows `CreateProcessW` + named-pipe path is wired (`src/editor/main.zig` no longer returns `error.Unimplemented`).
 - **`sendWithHandles` Windows (Phase 3)**: `transport_windows.zig:sendWithHandles` returns `error.Unimplemented`. The `DuplicateHandle`-based equivalent lands with the GPU shared framebuffer when an exportable Vulkan semaphore appears upstream (cf. `engine-ipc.md` §4.7).
 
 ## Non-negotiable rules
@@ -196,4 +194,4 @@ The `briefs/` directory is the source of truth for milestone state. The brief's 
 
 ---
 
-Last updated: 2026-05-24
+Last updated: 2026-06-24
