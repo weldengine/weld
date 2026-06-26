@@ -336,6 +336,10 @@ pub fn build(b: *std.Build) void {
         asset_pipeline: bool = false,
         /// M0.6 / E2 — when set, imports the `foundation` module (simd).
         foundation: bool = false,
+        /// M1.0.4 — when set, imports `weld_etch` (the scene cook driver). A
+        /// dedicated flag rather than `.etch` so `tests/scene/` does not pull in
+        /// the `corpus_facade` baggage `.etch` carries.
+        scene: bool = false,
         /// M0.4 stabilization — when set, create a dedicated `zig build
         /// <name>` step that runs ONLY this test. Used by the CI
         /// runtime-smoke-test job to gate strictly on the capture PSNR
@@ -420,6 +424,12 @@ pub fn build(b: *std.Build) void {
         // matched-count observable.
         .{ .path = "tests/etch/v1/query_filters_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
+        // M1.0.4 / E2 — scene cook → writer → accessor round-trip (entities,
+        // archetypes, UUIDs, names, parent links, content_version, resources,
+        // mixed-alignment columns, byte-identical determinism).
+        .{ .path = "tests/scene/cook_roundtrip_test.zig", .scene = true },
+        // M1.0.4 / E3 — scene cook negative cases (typed errors, no panic).
+        .{ .path = "tests/scene/cook_errors_test.zig", .scene = true },
         // M0.3 — common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },
         .{ .path = "tests/platform/time_test.zig" },
@@ -538,6 +548,9 @@ pub fn build(b: *std.Build) void {
         }
         if (spec.foundation) {
             t_mod.addImport("foundation", foundation_module);
+        }
+        if (spec.scene) {
+            t_mod.addImport("weld_etch", etch_module);
         }
         const t = b.addTest(.{ .root_module = t_mod });
         const t_run = b.addRunArtifact(t);
@@ -920,6 +933,30 @@ pub fn build(b: *std.Build) void {
         "Cook the M0.6 fixtures end-to-end (import → cook → cache; logs hits)",
     );
     asset_cook_step.dependOn(&asset_cook_run.step);
+
+    // M1.0.4 / E3 — `zig build scene-cook -- --output <out.scene.bin> <in.scene.etch>`
+    // cooks one `.scene.etch` into the runtime `.scene.bin`, in-process via
+    // `weld_etch.scene_cook` + `weld_core.scene.writer`. Mirrors the asset_cook
+    // user-facing CLI step (built on the user target, args forwarded via `--`).
+    const scene_cook_module = b.createModule(.{
+        .root_source_file = b.path("tools/scene_cook/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    scene_cook_module.addImport("weld_etch", etch_module);
+    scene_cook_module.addImport("weld_core", core_module);
+    const scene_cook_exe = b.addExecutable(.{
+        .name = "scene_cook",
+        .root_module = scene_cook_module,
+    });
+    b.installArtifact(scene_cook_exe);
+    const scene_cook_run = b.addRunArtifact(scene_cook_exe);
+    if (b.args) |args| scene_cook_run.addArgs(args);
+    const scene_cook_step = b.step(
+        "scene-cook",
+        "Cook a .scene.etch into a .scene.bin (scene_cook --output <out> <in>)",
+    );
+    scene_cook_step.dependOn(&scene_cook_run.step);
 
     // -------------------------------------------- Fixture facade (S4 demo) --
 

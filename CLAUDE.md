@@ -11,9 +11,9 @@ knowledge base — see § Quick links spec.
 |---|---|
 | Phase | 1 (Etch ↔ ECS) |
 | Current milestone | (none — between milestones) |
-| Last released tag | `v0.10.3-resource-nonpod-fields` |
+| Last released tag | `v0.10.4-scene-cook` |
 | Active branch | `main` |
-| Next planned milestone | (next M1.0.x — to be scoped) |
+| Next planned milestone | M1.0.5 — runtime `.scene.bin` loader (to be scoped) |
 
 ## Tags
 
@@ -41,6 +41,7 @@ knowledge base — see § Quick links spec.
 | `v0.10.1-changed-detection` | 2026-06-22 | M1.0.1 — Change detection + scheduler data-race fix | `entity has T changed` exposed to the interpreter; `Scheduler.shutdown` data-race fixed (`std.atomic.Value(bool)`); permanent test watchdog added. |
 | `v0.10.2-etch-events-observers` | 2026-06-23 | M1.0.2 — Events + structural observers | `emit`/`@on_event` + five lifecycle-annotation observers (`@on_added`/`@on_removed`/`@on_replaced`/`@on_spawned`/`@on_despawned`), annotation-routed; Tier 0 observer registry completed (`on_replaced`, ctx, old/new). Diagnostics E1208/E1209/E1215. Non-POD (`string`) event-field fix folded in via fix-as-you-go. |
 | `v0.10.3-resource-nonpod-fields` | 2026-06-24 | M1.0.3 — String and enum resource fields | Resource fields reach spec parity for the two scalar non-POD cases; founds the Phase 1 persistent heap (system allocator + atomic refcount + drop-by-`type_id` + immortal-interned sentinel). Resource-only `FieldKind.string_`/`.enum_`; components stay POD-strict (validator-gated). The Option A alignment (the former deferred "tranche 7"). |
+| `v0.10.4-scene-cook` | 2026-06-27 | M1.0.4 — Cooking `.scene.etch` → `.scene.bin` | Offline, World-free cook of direct-entity scenes. Tier-0 `src/core/scene/` codec — `SceneHeader` (64 B) + §10 Schema Registry + `writer` + zero-copy `accessor` (the read half, reused verbatim by the M1.0.5 loader). Etch driver `src/etch/scene_cook.zig` reuses `compileTypeDecl` (refactored `*World`→`*Registry`) + `evalConst`; groups entities by `ComponentSignature` into flat SoA columns. On-disk component identity is the Schema-Registry index → component **name** (no raw `ComponentId`). Resource `string`/enum materialized; `parent` name→UUID; `instance of` + unsupported field kinds rejected with clear diagnostics. `scene_cook` CLI + re-cook byte-identical determinism. |
 
 ## Hypotheses validated by spikes
 
@@ -61,6 +62,9 @@ knowledge base — see § Quick links spec.
 - **`spec/` directory in the repo**: out of scope for Phase −1. Spec lives in the claude.ai knowledge base; re-evaluated during Phase 0 if the absence creates friction.
 - **Phase 0.6 IPC debts (SCM_RIGHTS fd-passing + editor Windows path)**: resolved in M0.7 (`v0.7.0-M0.7-ipc`). SCM_RIGHTS is the primary POSIX shm attach (create fd over AF_UNIX, runtime `mmap`s the received fd, sidestepping the macOS BSD shm quirk); the editor's Windows `CreateProcessW` + named-pipe path is wired (`src/editor/main.zig` no longer returns `error.Unimplemented`).
 - **`sendWithHandles` Windows (Phase 3)**: `transport_windows.zig:sendWithHandles` returns `error.Unimplemented`. The `DuplicateHandle`-based equivalent lands with the GPU shared framebuffer when an exportable Vulkan semaphore appears upstream (cf. `engine-ipc.md` §4.7).
+- **M1.0.4 scope boundary (scene cook)**: the cook is offline + **World-free** (no entity instantiation). Runtime `.scene.bin` → ECS `World` (mmap + memcpy-into-chunks + UUID→handle remap + `on_spawned`) is **M1.0.5** — it reuses `src/core/scene/accessor.zig` verbatim. Prefab `instance of` flattening + entity→entity cross-refs + the Entity Extensions Table are **M1.0.6** (M1.0.4 rejects `instance of` and writes both reserved sections empty). On-disk component identity is the §10 Schema-Registry index → component name (Phase-1 identity = name; no comptime schema-hash for Etch components), so M1.0.5 remaps via `idOf(name)`. Registration deviation: `interp.compileTypeDecl` was refactored `*World`→`*Registry` (+ `pub`) so the cook reuses it World-free (traced in `briefs/M1.0.4-scene-cook.md` Accepted deviations).
+- **Dynamic collections on resource fields (`string[]`, `[K:V]`, `Set`)**: unscheduled-**additive** — they fold into the first consuming milestone, **not** M1.0.4. The `M1.0.4` label in `briefs/M1.0.3-resource-nonpod-fields.md` Context is **superseded** (M1.0.4 is the scene cook, not dynamic collections). The persistent heap's `type_id`→drop dispatch + open `TypeId` set already accommodate them.
+- **Additive future format sections (design-at-day-1, not deferral)**: M1.0.4's `.scene.bin` reserves the Extensions + Cross-references sections (written empty) and the writer/accessor dispatch on `FieldKind` + name-based schema identity — so M1.0.6 (cross-refs/extensions) and the first milestone adding a 3D/handle `FieldKind` add columns/entries **without** changing the on-disk format or the loader.
 
 ## Non-negotiable rules
 
@@ -194,4 +198,4 @@ The `briefs/` directory is the source of truth for milestone state. The brief's 
 
 ---
 
-Last updated: 2026-06-24
+Last updated: 2026-06-27

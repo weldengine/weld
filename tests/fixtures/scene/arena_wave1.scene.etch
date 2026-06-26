@@ -1,0 +1,33 @@
+// M1.0.4 cook round-trip fixture. Two archetypes ([Position] and
+// [Position, Health]) + a parent link + a resources block (int + string + enum).
+//
+// The component/resource/enum declarations precede the scene so the single-file
+// cook resolves every referenced type: M1.0.4 cooks one self-contained program
+// (cross-file `import` resolution at cook time is future work), so this fixture
+// is a multi-construct `.etch` program rather than a strict §21 single-`scene`
+// file. The cook driver parses it in general mode and rejects only `instance of`
+// (owned by M1.0.6).
+component Position { x: f32 = 0.0, y: f32 = 0.0, z: f32 = 0.0 }
+component Health { current: int = 100, max: int = 100 }
+enum Weather { clear, rain, storm }
+resource GameMode { max_players: int = 4, title: string = "arena", weather: Weather = .clear }
+
+scene "ArenaWave1" {
+  version: 3
+
+  resources {
+    GameMode { max_players: 8, title: "wave1", weather: .storm }
+  }
+
+  entity "Spawner" {
+    uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e"
+    Position { x: 1.0, y: 2.0, z: 3.0 }
+  }
+
+  entity "Hero" {
+    uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6"
+    parent: "Spawner"
+    Position { x: 10.0, y: 0.0, z: 0.0 }
+    Health { current: 75, max: 100 }
+  }
+}

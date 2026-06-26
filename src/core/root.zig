@@ -115,6 +115,14 @@ pub const events = @import("events/root.zig");
 /// Phase 3.
 pub const plugin_loader = @import("plugin_loader/root.zig");
 
+/// Scene namespace — Tier 0 `.scene.bin` format (M1.0.4). The neutral cook
+/// model + on-disk format contract (`scene.format`), the byte writer
+/// (`scene.writer`, E2) and the zero-copy accessor (`scene.accessor`, E2,
+/// reused verbatim by the M1.0.5 loader). Single canonical entry point at
+/// `src/core/scene/root.zig`. Imports `weld_core` internals only — never
+/// `weld_etch` (tier discipline).
+pub const scene = @import("scene/root.zig");
+
 comptime {
     // Force eager analysis of every IPC sub-file so inline tests are
     // picked up by `zig build test`. Zig 0.16's lazy semantic analysis
@@ -182,6 +190,10 @@ comptime {
     _ = plugin_loader.desc;
     _ = plugin_loader.api;
     _ = plugin_loader.loader;
+    // M1.0.4 — pin the scene sub-files so their inline tests run.
+    _ = scene.format;
+    _ = scene.writer;
+    _ = scene.accessor;
     // M0.3 — pin the new platform sub-files so their inline tests run.
     _ = platform.once;
     _ = platform.time;

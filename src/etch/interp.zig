@@ -3316,7 +3316,7 @@ fn compileComponent(
     literals: *std.ArrayListUnmanaged([*]u8),
 ) !void {
     const name = ast.strings.slice(decl.name);
-    _ = try compileTypeDecl(gpa, ast, world, bridge, name, decl.fields_start, decl.fields_len, .component, literals);
+    _ = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .component, literals);
 }
 
 fn compileResource(
@@ -3332,19 +3332,33 @@ fn compileResource(
     // AND already lives in the resource store with its current value — adding
     // it again would reset it to defaults. Seed the store only on first compile.
     const pre_existing = world.registry.idOf(name) != null;
-    const id = try compileTypeDecl(gpa, ast, world, bridge, name, decl.fields_start, decl.fields_len, .resource, literals);
+    const id = try compileTypeDecl(gpa, ast, &world.registry, bridge, name, decl.fields_start, decl.fields_len, .resource, literals);
     if (!pre_existing) {
         const default_bytes = world.registry.componentDefaultBytes(id);
         try world.addResource(gpa, id, default_bytes);
     }
 }
 
-const RegKind = enum { component, resource };
+/// Registration origin threaded into `compileTypeDecl`: `.resource` unlocks the
+/// resource-only `string`/`enum` field kinds (`.component` stays POD-strict).
+/// `pub` so the scene cook can drive `compileTypeDecl` against its own registry.
+pub const RegKind = enum { component, resource };
 
-fn compileTypeDecl(
+/// Register one Etch `component`/`resource` declaration into `registry`,
+/// computing its byte layout (`FieldDesc` + size/alignment) and materializing
+/// its compile-time default bytes (POD via `evalConst`, resource `string` via
+/// an immortal persistent block, resource `enum` via the variant discriminant).
+/// Returns the assigned `ComponentId` (or the existing one on a hot-reload
+/// re-compile, idempotent). `bridge` records the name→id mapping.
+///
+/// Operates on a bare `*Registry` — World-free by construction (it never touches
+/// archetypes/entities). The interpreter passes `&world.registry`; the M1.0.4
+/// scene cook (`src/etch/scene_cook.zig`) reuses it verbatim against its own
+/// standalone `Registry` so registration is shared, not duplicated.
+pub fn compileTypeDecl(
     gpa: std.mem.Allocator,
     ast: *const AstArena,
-    world: *World,
+    registry: *Registry,
     bridge: *Bridge,
     name: []const u8,
     fields_start: u32,
@@ -3445,7 +3459,7 @@ fn compileTypeDecl(
     // state (entities, component bytes, resource values) survives the swap.
     // The hot-reload contract is a rule-body edit with the declarations
     // UNCHANGED; a layout-changing reload (archetype migration) is Phase 2+.
-    if (world.registry.idOf(name)) |existing_id| {
+    if (registry.idOf(name)) |existing_id| {
         switch (reg_kind) {
             .component => try bridge.mapComponent(gpa, name, existing_id),
             .resource => try bridge.mapResource(gpa, name, existing_id),
@@ -3453,7 +3467,7 @@ fn compileTypeDecl(
         return existing_id;
     }
 
-    const id = try world.registry.registerComponentRaw(gpa, .{
+    const id = try registry.registerComponentRaw(gpa, .{
         .name = name,
         .size = @intCast(size),
         .alignment = @intCast(max_align),
