@@ -16,12 +16,24 @@
 //! SoA layout contract (correctness contract with the M1.0.5 loader):
 //!   * Component columns are flat N-element SoA arrays (chunk-agnostic); the
 //!     loader slices them across 16 KB chunks.
-//!   * Column order = sorted `component_mask` order (`archetype.sortComponentIds`).
-//!   * Column stride = `Registry.componentSize(component_id)`.
+//!   * Column order = ascending component order (`archetype.sortComponentIds`).
+//!   * Column stride = `Registry.componentSize(component)`.
 //!   * Each column start is aligned to the component alignment
-//!     (`Registry.componentAlignment(component_id)`).
+//!     (`Registry.componentAlignment(component)`).
 //! Components are POD-strict (validator-gated), so archetype columns are pure
 //! byte-copyable scalars/enums — never the resource-only `string_` slot.
+//!
+//! Component identity (on-disk, `engine-ecs-internals.md` §10 — Schema Registry):
+//! the `.scene.bin` carries a **Schema Registry** section; an archetype's
+//! component mask and a resource's schema reference are encoded as **file-local
+//! indices** into that table — never as runtime `ComponentId`s (which are not
+//! stable across runs/processes). Phase-1 schema identity is the component
+//! **name** (the runtime registry for Etch-declared components exposes only
+//! `componentName`/`idOf` — there is no comptime `schema_hash` for them); the
+//! M1.0.5 loader maps each schema name back to a runtime id via `idOf(name)`.
+//! The in-memory `CookModel` below keeps its `ComponentId`s — the in-process
+//! round-trip resolves them through the cook's own registry; only the E2
+//! on-disk encoding is schema-indexed.
 
 const std = @import("std");
 
@@ -66,10 +78,11 @@ pub const StringFieldRef = struct {
 };
 
 /// One serialized resource (the scene's `resources { … }` block, one per
-/// resource instance). `schema_id` is the registry `ComponentId` of the resource
-/// type. `data` is `Registry.componentSize(schema_id)` bytes: POD scalar/enum
-/// fields are encoded in place; each `string_` field's slot is zeroed and listed
-/// in `string_fields`.
+/// resource instance). `schema_id` is the cook's in-memory registry
+/// `ComponentId` of the resource type (the E2 writer re-encodes it as a
+/// file-local Schema Registry index on disk — see the file header). `data` is
+/// `Registry.componentSize(schema_id)` bytes: POD scalar/enum fields are encoded
+/// in place; each `string_` field's slot is zeroed and listed in `string_fields`.
 pub const ResourceEntry = struct {
     schema_id: ComponentId,
     data: []u8,
@@ -91,7 +104,10 @@ pub const EntityEntry = struct {
 /// its components laid out as flat N-element SoA columns.
 pub const ArchetypeBlock = struct {
     /// Sorted-ascending component ids (`archetype.sortComponentIds`) — the
-    /// archetype identity / on-disk component mask.
+    /// in-memory archetype identity. These are the cook's runtime `ComponentId`s;
+    /// the E2 writer re-encodes them as file-local Schema Registry indices on
+    /// disk (the on-disk component mask is never raw `ComponentId`s — see the
+    /// component-identity note in the file header).
     component_ids: []ComponentId,
     entity_count: u32,
     /// One column per `component_ids` entry, same order. `columns[i]` is a flat
