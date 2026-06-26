@@ -78,6 +78,9 @@ pub const CookError = error{
     TypeMismatch,
     /// A `uuid:`/`parent:` enum value referenced an unknown enum variant.
     UnknownEnumVariant,
+    /// An entity declares no `uuid:`. Explicit, stable identity is required at
+    /// cook time — auto-generating a UUID is the editor's job, not the cook's.
+    MissingUuid,
     /// A `uuid:` string is not a valid canonical UUID.
     BadUuid,
     /// An entity `parent:` name does not match any entity in the scene.
@@ -537,11 +540,12 @@ const Builder = struct {
         return idx;
     }
 
-    /// Parse an entity `uuid:` string to 16 bytes. Absent (`0`) ⇒ all-zero
-    /// (deterministic; the cook never auto-generates a random UUID — that would
-    /// break the re-cook byte-identity guarantee).
+    /// Parse an entity `uuid:` string to 16 bytes. An absent `uuid:` is a cook
+    /// error (`MissingUuid`): explicit identity is required, and the cook never
+    /// auto-generates one (a random UUID would break the re-cook byte-identity
+    /// guarantee; deterministic identity is the editor's responsibility).
     fn parseEntityUuid(self: *Builder, uuid_id: StringId, diag_out: ?*[]const u8) CookError![16]u8 {
-        if (uuid_id == 0) return std.mem.zeroes([16]u8);
+        if (uuid_id == 0) return fail(diag_out, error.MissingUuid, "entity requires an explicit uuid");
         return parseUuid(self.ast.strings.slice(uuid_id)) orelse fail(diag_out, error.BadUuid, "entity uuid is not a valid canonical UUID");
     }
 };
@@ -710,6 +714,17 @@ test "cook rejects instance of (M1.0.6 boundary)" {
     ;
     var msg: []const u8 = "";
     try std.testing.expectError(error.InstanceOfUnsupported, cook(gpa, src, &msg));
+}
+
+test "cook rejects an entity without uuid" {
+    const gpa = std.testing.allocator;
+    const src =
+        \\component Position { x: f32 = 0.0 }
+        \\scene "S" {
+        \\  entity "E" { Position { } }
+        \\}
+    ;
+    try std.testing.expectError(error.MissingUuid, cook(gpa, src, null));
 }
 
 test "cook rejects an undeclared resource type" {
