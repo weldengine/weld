@@ -11,10 +11,15 @@
 
 /// `.scene.bin` format contract + the neutral cook model (`CookModel`).
 pub const format = @import("format.zig");
+/// `.scene.bin` byte writer: `format.CookModel` → on-disk bytes.
+pub const writer = @import("writer.zig");
+/// `.scene.bin` zero-copy accessor (read half; reused verbatim by M1.0.5).
+pub const accessor = @import("accessor.zig");
 
 comptime {
     // §13 lazy-analysis guard: pin every sub-file carrying inline `test` blocks
-    // so they run under the `core_tests` target (`engine-zig-conventions.md`
-    // §13). `writer`/`accessor` join here in E2.
+    // so they run under the `core_tests` target (`engine-zig-conventions.md` §13).
     _ = format;
+    _ = writer;
+    _ = accessor;
 }

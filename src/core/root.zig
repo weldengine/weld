@@ -192,6 +192,8 @@ comptime {
     _ = plugin_loader.loader;
     // M1.0.4 — pin the scene sub-files so their inline tests run.
     _ = scene.format;
+    _ = scene.writer;
+    _ = scene.accessor;
     // M0.3 — pin the new platform sub-files so their inline tests run.
     _ = platform.once;
     _ = platform.time;
