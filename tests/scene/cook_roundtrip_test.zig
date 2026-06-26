@@ -76,6 +76,8 @@ test "scene round-trips through cook and accessor" {
     var acc = try scene.accessor.Accessor.open(bytes);
     try std.testing.expect(acc.verifyHash());
     try std.testing.expectEqual(@as(u32, 2), acc.archetypeCount());
+    // Authored `version: 3` propagated to the header.
+    try std.testing.expectEqual(@as(u16, 3), acc.header.content_version);
 
     // Spawner's UUID first byte, for the parent-link assertion.
     const spawner_uuid0: u8 = 0x7b;
@@ -108,4 +110,79 @@ test "scene round-trips through cook and accessor" {
         }
     }
     try std.testing.expect(saw_solo and saw_pair);
+
+    // Resources block: GameMode { max_players: 8, title: "wave1", weather: .storm }.
+    try std.testing.expectEqual(@as(u32, 1), acc.resourceCount());
+    const res = acc.resource(0);
+    try std.testing.expectEqualStrings("GameMode", acc.schema(res.schema_index).name);
+    const reg = &cooked.registry;
+    const gm = reg.idOf("GameMode").?;
+
+    const mp = reg.findField(gm, "max_players").?;
+    try std.testing.expectEqual(@as(i64, 8), std.mem.readInt(i64, res.data[mp.offset..][0..8], .little));
+
+    const wf = reg.findField(gm, "weather").?;
+    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, res.data[wf.offset..][0..4], .little)); // .storm
+
+    const tf = reg.findField(gm, "title").?;
+    try std.testing.expectEqualStrings("wave1", res.stringField(tf.offset).?);
+}
+
+test "scene round-trips a mixed-alignment archetype (column padding)" {
+    // A 1-byte (bool) component beside an 8-byte (f64) one on the same entity
+    // forces one SoA column to start on inter-column padding — locking the
+    // writer's `padToFileAlign` against the accessor's `columnOffset` on a real
+    // misalignment (the main fixture is all-4-byte, so its padding is a no-op).
+    const gpa = std.testing.allocator;
+    const src =
+        \\component Toggle { on: bool = false }
+        \\component Mass { value: f64 = 1.0 }
+        \\scene "Mix" {
+        \\  entity "G" {
+        \\    uuid: "00000000-0000-0000-0000-000000000001"
+        \\    Toggle { on: true }
+        \\    Mass { value: 2.5 }
+        \\  }
+        \\}
+    ;
+    var cooked = try scene_cook.cook(gpa, src, null);
+    defer cooked.deinit(gpa);
+    const bytes = try scene.writer.write(gpa, cooked.model, &cooked.registry);
+    defer gpa.free(bytes);
+
+    var acc = try scene.accessor.Accessor.open(bytes);
+    try std.testing.expect(acc.verifyHash());
+    try std.testing.expectEqual(@as(u32, 1), acc.archetypeCount());
+    const arch = acc.archetype(0);
+    try std.testing.expectEqual(@as(u32, 2), arch.component_count);
+
+    // Toggle.on (bool, 1 byte) — true.
+    const tc = columnOf(acc, arch, "Toggle").?;
+    const on_fd = cooked.registry.findField(cooked.registry.idOf("Toggle").?, "on").?;
+    try std.testing.expect(arch.componentSlot(tc, 0)[on_fd.offset] != 0);
+
+    // Mass.value (f64, 8 bytes, column started on padding) — 2.5.
+    const mc = columnOf(acc, arch, "Mass").?;
+    const val_fd = cooked.registry.findField(cooked.registry.idOf("Mass").?, "value").?;
+    const raw = std.mem.readInt(u64, arch.componentSlot(mc, 0)[val_fd.offset..][0..8], .little);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.5), @as(f64, @bitCast(raw)), 1e-12);
+}
+
+test "re-cook is byte-identical" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const src = try readFixture(gpa, io);
+    defer gpa.free(src);
+
+    var c1 = try scene_cook.cook(gpa, src, null);
+    defer c1.deinit(gpa);
+    const b1 = try scene.writer.write(gpa, c1.model, &c1.registry);
+    defer gpa.free(b1);
+
+    var c2 = try scene_cook.cook(gpa, src, null);
+    defer c2.deinit(gpa);
+    const b2 = try scene.writer.write(gpa, c2.model, &c2.registry);
+    defer gpa.free(b2);
+
+    try std.testing.expectEqualSlices(u8, b1, b2);
 }

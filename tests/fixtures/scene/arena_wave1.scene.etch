@@ -13,6 +13,8 @@ enum Weather { clear, rain, storm }
 resource GameMode { max_players: int = 4, title: string = "arena", weather: Weather = .clear }
 
 scene "ArenaWave1" {
+  version: 3
+
   resources {
     GameMode { max_players: 8, title: "wave1", weather: .storm }
   }
