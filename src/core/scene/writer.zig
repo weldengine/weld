@@ -70,6 +70,7 @@ const Writer = struct {
         try self.collectSchemas();
 
         var hdr: SceneHeader = .{
+            .content_version = self.model.content_version,
             .entity_count = try u32From(self.totalEntities()),
             .resource_count = try u32From(self.model.resources.len),
             .schema_count = try u32From(self.schema_ids.items.len),

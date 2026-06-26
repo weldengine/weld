@@ -269,14 +269,29 @@ const Builder = struct {
 
         const archetypes = try self.groupArchetypes(entities.items);
         const resources = try self.buildResources(scene_decl, diag_out);
+        const content_version = try self.sceneContentVersion(scene_decl, diag_out);
 
         return .{
             .strings = try self.a().dupe([]const u8, self.strings.items),
             .uuids = try self.a().dupe([16]u8, self.uuids.items),
             .resources = resources,
             .archetypes = archetypes,
+            .content_version = content_version,
             .arena = self.arena,
         };
+    }
+
+    /// Const-evaluate the scene's `version:` field to a `u16` (0 if absent). The
+    /// authored content version is otherwise silently lost (it rides through to
+    /// `SceneHeader.content_version`).
+    fn sceneContentVersion(self: *Builder, scene_decl: ast_mod.SceneDecl, diag_out: ?*[]const u8) CookError!u16 {
+        if (scene_decl.version.isNone()) return 0;
+        const v = interp.evalConst(self.ast, scene_decl.version) catch return fail(diag_out, error.NonConstValue, "scene version must be a constant int");
+        const x: i64 = switch (v) {
+            .int_ => |n| n,
+            else => return fail(diag_out, error.NonConstValue, "scene version must be an int"),
+        };
+        return std.math.cast(u16, x) orelse return fail(diag_out, error.NonConstValue, "scene version out of u16 range");
     }
 
     fn buildEntity(self: *Builder, e: ast_mod.SceneEntity, diag_out: ?*[]const u8) CookError!EntityBuild {
@@ -705,45 +720,6 @@ test "cook builds the neutral model from a scene (E1)" {
     try std.testing.expectEqualStrings("wave1", title.?);
 }
 
-test "cook rejects instance of (M1.0.6 boundary)" {
-    const gpa = std.testing.allocator;
-    const src =
-        \\scene "S" {
-        \\  instance of "Torch" "T1" { }
-        \\}
-    ;
-    var msg: []const u8 = "";
-    try std.testing.expectError(error.InstanceOfUnsupported, cook(gpa, src, &msg));
-}
-
-test "cook rejects an entity without uuid" {
-    const gpa = std.testing.allocator;
-    const src =
-        \\component Position { x: f32 = 0.0 }
-        \\scene "S" {
-        \\  entity "E" { Position { } }
-        \\}
-    ;
-    try std.testing.expectError(error.MissingUuid, cook(gpa, src, null));
-}
-
-test "cook rejects an undeclared resource type" {
-    const gpa = std.testing.allocator;
-    const src =
-        \\scene "S" {
-        \\  resources { Bogus { x: 1 } }
-        \\}
-    ;
-    try std.testing.expectError(error.UndeclaredType, cook(gpa, src, null));
-}
-
-test "cook rejects an unsupported component field kind" {
-    const gpa = std.testing.allocator;
-    const src =
-        \\component Spin { axis: Vec3 = [0, 0, 0] }
-        \\scene "S" {
-        \\  entity "E" { uuid: "7b3e2f1a-42a3-4f2b-8c9d-a3f2b1c98d4e" Spin { } }
-        \\}
-    ;
-    try std.testing.expectError(error.UnsupportedFieldKind, cook(gpa, src, null));
-}
+// The cook's negative cases (instance-of / unsupported field kind / undeclared
+// type / missing uuid / unknown field / bad uuid) live in
+// `tests/scene/cook_errors_test.zig`.

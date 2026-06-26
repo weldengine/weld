@@ -270,6 +270,10 @@ pub const CookModel = struct {
     uuids: [][16]u8,
     resources: []ResourceEntry,
     archetypes: []ArchetypeBlock,
+    /// The authored scene's `version:` field (0 if absent). Propagated to
+    /// `SceneHeader.content_version` — opaque to the codec, for the game's own
+    /// scene-versioning/migration.
+    content_version: u16 = 0,
 
     /// Backing arena for every slice above — the cook builds into it, the model
     /// owns it, `deinit` reclaims it in one shot.
