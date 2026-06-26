@@ -336,6 +336,10 @@ pub fn build(b: *std.Build) void {
         asset_pipeline: bool = false,
         /// M0.6 / E2 — when set, imports the `foundation` module (simd).
         foundation: bool = false,
+        /// M1.0.4 — when set, imports `weld_etch` (the scene cook driver). A
+        /// dedicated flag rather than `.etch` so `tests/scene/` does not pull in
+        /// the `corpus_facade` baggage `.etch` carries.
+        scene: bool = false,
         /// M0.4 stabilization — when set, create a dedicated `zig build
         /// <name>` step that runs ONLY this test. Used by the CI
         /// runtime-smoke-test job to gate strictly on the capture PSNR
@@ -420,6 +424,9 @@ pub fn build(b: *std.Build) void {
         // matched-count observable.
         .{ .path = "tests/etch/v1/query_filters_test.zig", .etch = true },
         .{ .path = "tests/etch_interp/corpus_test.zig", .etch_interp = true },
+        // M1.0.4 / E2 — scene cook → writer → accessor round-trip (entities,
+        // archetypes, UUIDs, names, parent links).
+        .{ .path = "tests/scene/cook_roundtrip_test.zig", .scene = true },
         // M0.3 — common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },
         .{ .path = "tests/platform/time_test.zig" },
@@ -538,6 +545,9 @@ pub fn build(b: *std.Build) void {
         }
         if (spec.foundation) {
             t_mod.addImport("foundation", foundation_module);
+        }
+        if (spec.scene) {
+            t_mod.addImport("weld_etch", etch_module);
         }
         const t = b.addTest(.{ .root_module = t_mod });
         const t_run = b.addRunArtifact(t);
