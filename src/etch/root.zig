@@ -47,7 +47,16 @@ comptime {
     _ = @import("value.zig");
     _ = @import("ecs_bridge.zig");
     _ = @import("persistent.zig");
+    // M1.0.4 — pull the scene cook driver into the test import graph (§13).
+    _ = @import("scene_cook.zig");
 }
+
+/// M1.0.4 scene cook — `.scene.etch` source → the neutral Tier-0 scene model
+/// (`weld_core.scene.format.CookModel`) the writer serializes to `.scene.bin`.
+/// World-free: registers types into a standalone RTTI `Registry` and const-evals
+/// the scene's values. Imports `weld_core.scene`; the Tier-0 side never imports
+/// `weld_etch` (tier discipline).
+pub const scene_cook = @import("scene_cook.zig");
 
 /// S5 Zig codegen surface — exposed at the module surface so
 /// `tools/etch_cook` and downstream consumers can drive the codegen
