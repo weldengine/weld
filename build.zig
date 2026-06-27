@@ -430,6 +430,11 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/scene/cook_roundtrip_test.zig", .scene = true },
         // M1.0.4 / E3 — scene cook negative cases (typed errors, no panic).
         .{ .path = "tests/scene/cook_errors_test.zig", .scene = true },
+        // M1.0.5 / E2 — runtime loader `.scene.bin` → ECS: instantiate every
+        // entity (component bytes verbatim), two-phase `on_spawned` (fires once
+        // per entity, after all entities exist). `weld_core` only (no `.scene`
+        // flag → no `weld_etch`); builds the image in-memory via the writer.
+        .{ .path = "tests/scene/load_roundtrip_test.zig" },
         // M0.3 — common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },
         .{ .path = "tests/platform/time_test.zig" },
@@ -807,6 +812,31 @@ pub fn build(b: *std.Build) void {
         "Run the ECS benchmark (S1 non-regression case; pass `-- --smoke` for a CI sanity run)",
     );
     bench_step.dependOn(&bench_run.step);
+
+    // -------------------------------------- M1.0.5 scene loader bench --------
+    //
+    // `loadFromBytes` on a ~10k-entity image synthesized in-bench via the
+    // writer. Measurement only (median), not a gate — see the bench header.
+    const scene_load_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/scene_load_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    scene_load_bench_module.addImport("weld_core", core_module);
+    const scene_load_bench_exe = b.addExecutable(.{
+        .name = "scene-load-bench",
+        .root_module = scene_load_bench_module,
+    });
+    b.installArtifact(scene_load_bench_exe);
+
+    const scene_load_bench_run = b.addRunArtifact(scene_load_bench_exe);
+    scene_load_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| scene_load_bench_run.addArgs(args);
+    const scene_load_bench_step = b.step(
+        "bench-scene-load",
+        "Run the M1.0.5 scene loader bench (~10k entities, reports median)",
+    );
+    scene_load_bench_step.dependOn(&scene_load_bench_run.step);
 
     // ------------------------------------- M0.4 render instancing bench ------
     //
