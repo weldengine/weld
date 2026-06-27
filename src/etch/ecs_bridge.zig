@@ -9,9 +9,10 @@
 
 const std = @import("std");
 const value_mod = @import("value.zig");
-const persistent = @import("persistent.zig");
 
 const weld_core = @import("weld_core");
+// M1.0.5 — persistent heap moved to Tier 0 (`src/core/memory`); reach it via weld_core.
+const persistent = weld_core.memory.persistent;
 const RegistryNS = weld_core.ecs.registry;
 const Registry = RegistryNS.Registry;
 const ComponentId = RegistryNS.ComponentId;

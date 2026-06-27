@@ -40,7 +40,7 @@ pub const FieldKind = enum {
     f32_,
     f64_,
     /// A `string` field slot: `{ ptr: u64, len: u32 }` (16 bytes, 8-aligned)
-    /// pointing into the Etch persistent heap (`src/etch/persistent.zig`,
+    /// pointing into the Tier-0 persistent heap (`src/core/memory/persistent.zig`,
     /// `StringSlot`). **Resource-only by construction** (M1.0.3): the Etch
     /// validator rejects `string` on `component` and `fieldKindFromTypeName`
     /// only emits this kind for the `.resource` origin, so no component can ever

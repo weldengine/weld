@@ -1,9 +1,14 @@
-//! Phase-1 persistent heap for the Etch runtime (`etch-memory-model.md` §4 /
-//! §11). The keystone for non-POD resource fields: a refcounted, system-
-//! allocator-backed heap whose blocks outlive a rule body. M1.0.3 uses it for
-//! resource `string` fields; M1.0.4 reuses it unchanged for dynamic
-//! collections (the `type_id` → drop dispatch and the open `TypeId` set are
-//! exactly what `string[]` / `[K: V]` / `Set<T>` will register against).
+//! Persistent heap — Tier 0 (`src/core/memory`, `etch-memory-model.md` §4 / §11).
+//! The keystone for non-POD resource fields: a refcounted, system-allocator-
+//! backed heap whose blocks outlive a rule body (or a single scene load). M1.0.3
+//! uses it for resource `string` fields; the M1.0.5 scene loader interns loaded
+//! resource strings into it; M1.0.4 reuses it unchanged for dynamic collections
+//! (the `type_id` → drop dispatch and the open `TypeId` set are exactly what
+//! `string[]` / `[K: V]` / `Set<T>` will register against).
+//!
+//! Moved from `src/etch/` to Tier 0 in M1.0.5 (the heap is tier-neutral —
+//! `runDrop` is a no-op, no Etch coupling — and resource `string` fields are a
+//! Tier-0 capability). API + on-storage layout unchanged.
 //!
 //! Layout (`etch-memory-model.md` §4.3 / §5.1). Each block is one system
 //! allocation laid out as:
@@ -32,8 +37,11 @@
 //! `incref` / `decref` are no-ops on it — compile-time string literals (resource
 //! field defaults) use this path so `addResource` allocates nothing.
 //!
-//! Tier-0-agnostic: imports only `std` (no `src/core` dependency). The Etch
-//! runtime owns this heap; the Tier-0 `ResourceStore` stays string-agnostic.
+//! Self-contained: imports only `std` (no other `src/core` coupling), so it sits
+//! cleanly at Tier 0. Consumers are the scene loader and the Etch runtime
+//! (interp / bridge / cook, which reach it through `weld_core.memory`); the
+//! Tier-0 `ResourceStore` itself stays string-agnostic (it stores the raw
+//! `StringSlot` bytes).
 
 const std = @import("std");
 

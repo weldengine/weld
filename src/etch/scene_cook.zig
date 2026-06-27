@@ -32,10 +32,11 @@ const std = @import("std");
 const ast_mod = @import("ast.zig");
 const interp = @import("interp.zig");
 const bridge_mod = @import("ecs_bridge.zig");
-const persistent = @import("persistent.zig");
 const value_mod = @import("value.zig");
 
 const weld_core = @import("weld_core");
+// M1.0.5 — persistent heap moved to Tier 0 (`src/core/memory`); reach it via weld_core.
+const persistent = weld_core.memory.persistent;
 const Registry = weld_core.ecs.registry.Registry;
 const ComponentId = weld_core.ecs.registry.ComponentId;
 const FieldDesc = weld_core.ecs.registry.FieldDesc;
