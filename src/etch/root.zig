@@ -46,7 +46,8 @@ comptime {
     _ = @import("interp.zig");
     _ = @import("value.zig");
     _ = @import("ecs_bridge.zig");
-    _ = @import("persistent.zig");
+    // M1.0.5 — `persistent.zig` moved to Tier 0 (`src/core/memory`); it is now
+    // pinned by `src/core/memory/root.zig` (reached here via `weld_core.memory`).
     // M1.0.4 — pull the scene cook driver into the test import graph (§13).
     _ = @import("scene_cook.zig");
 }

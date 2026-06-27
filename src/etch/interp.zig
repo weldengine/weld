@@ -21,9 +21,10 @@ const value_mod = @import("value.zig");
 const bridge_mod = @import("ecs_bridge.zig");
 const tags_mod = @import("tags.zig");
 const descriptor_mod = @import("descriptor.zig");
-const persistent = @import("persistent.zig");
 
 const weld_core = @import("weld_core");
+// M1.0.5 — persistent heap moved to Tier 0 (`src/core/memory`); reach it via weld_core.
+const persistent = weld_core.memory.persistent;
 const Registry = weld_core.ecs.registry.Registry;
 const ComponentId = weld_core.ecs.registry.ComponentId;
 const FieldDesc = weld_core.ecs.registry.FieldDesc;
@@ -7334,4 +7335,94 @@ test "runProgram anonymous struct literal via let annotation and field value (M0
     var out: i64 = 0;
     @memcpy(std.mem.asBytes(&out), slot[0..8]);
     try std.testing.expectEqual(@as(i64, 84), out);
+}
+
+// ─── M1.0.5 E3 — cross-module cook → load integration ──────────────────────
+//
+// Lives inline here (the brief permits it) so the assertion can read the
+// interpreter's per-tick `EventStore` directly. End-to-end: compile an Etch
+// program (2 components, a `string` resource, an `@on_spawned` rule that
+// `emit`s) into a `World`, bind its observer rules to the Tier-0 registry, cook
+// the same source's scene to `.scene.bin`, load it, and assert (a) every entity
+// is instantiated, (b) the emitted-event count equals the entity count (the
+// loader's two-phase `on_spawned` pass ran the rule once per entity — emits
+// land in `events` and are NOT cleared, since the load drives no tick), and (c)
+// the resource `string` round-trips through the Tier-0 persistent heap.
+test "cooked Etch scene loads, on_spawned rules emit, resource string round-trips (M1.0.5 E3)" {
+    const gpa = std.testing.allocator;
+    const scene_cook = @import("scene_cook.zig");
+
+    const source =
+        \\component Position { x: f32 = 0.0, y: f32 = 0.0 }
+        \\component Health { current: int = 100, max: int = 100 }
+        \\resource Settings { title: string = "default" }
+        \\event Spawned { n: int }
+        \\
+        \\@on_spawned
+        \\rule on_spawn(entity: Entity) {
+        \\  emit Spawned { n: 1 }
+        \\}
+        \\
+        \\scene "IntegrationScene" {
+        \\  version: 1
+        \\  resources {
+        \\    Settings { title: "level_42" }
+        \\  }
+        \\  entity "A" {
+        \\    uuid: "00000000-0000-0000-0000-000000000001"
+        \\    Position { x: 1.0, y: 2.0 }
+        \\    Health { current: 50, max: 100 }
+        \\  }
+        \\  entity "B" {
+        \\    uuid: "00000000-0000-0000-0000-000000000002"
+        \\    Position { x: 3.0, y: 4.0 }
+        \\  }
+        \\  entity "C" {
+        \\    uuid: "00000000-0000-0000-0000-000000000003"
+        \\    Position { x: 5.0, y: 6.0 }
+        \\    Health { current: 75, max: 100 }
+        \\  }
+        \\}
+    ;
+
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Compile the program (registers Position/Health/Settings + the @on_spawned
+    // rule). Bind observer rules to the registry NOW — the loader drives a Tier-0
+    // flush, not an interpreter tick, so `runFor`'s lazy bind never happens.
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    // Cook the same source's scene block to `.scene.bin` (the cook ignores the
+    // rule/event decls, uses the component/resource decls for type resolution).
+    var cooked = try scene_cook.cook(gpa, source, null);
+    defer cooked.deinit(gpa);
+    const bytes = try weld_core.scene.writer.write(gpa, cooked.model, &cooked.registry);
+    defer gpa.free(bytes);
+
+    var result = try weld_core.scene.loader.loadFromBytes(&world, gpa, bytes);
+    defer result.deinit(gpa);
+
+    // (a) every entity instantiated.
+    try std.testing.expectEqual(@as(usize, 3), result.spawned.len);
+    try std.testing.expectEqual(@as(usize, 3), world.entityCount());
+
+    // (b) emitted-event count equals the entity count.
+    const spawned_id = pr.ast.strings.find("Spawned").?;
+    try std.testing.expectEqual(@as(usize, 3), interp.events.count(spawned_id));
+
+    // (c) resource `string` round-trips through the Tier-0 persistent heap.
+    const settings_cid = world.registry.idOf("Settings").?;
+    const fd = world.registry.findField(settings_cid, "title").?;
+    const res_bytes = world.resources.getResource(settings_cid).?;
+    var ss: persistent.StringSlot = undefined;
+    @memcpy(std.mem.asBytes(&ss), res_bytes[fd.offset..][0..@sizeOf(persistent.StringSlot)]);
+    const title: [*]const u8 = @ptrFromInt(ss.ptr);
+    try std.testing.expectEqualStrings("level_42", title[0..ss.len]);
 }

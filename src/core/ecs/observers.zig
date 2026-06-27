@@ -208,6 +208,24 @@ pub const ObserverRegistry = struct {
         try entry.value_ptr.append(gpa, .{ .ctx = ctx, .callback = callback });
     }
 
+    /// Fire `on_spawned` for one already-instantiated entity (M1.0.5 E2). The
+    /// scene loader drives the spawn lifecycle in a dedicated second pass —
+    /// after every loaded entity exists — rather than through the
+    /// command-buffer flush, so the ordering guarantee "all entities present
+    /// before any `on_spawned` fires" holds. Ensures the shared `deferred`
+    /// buffer exists first (a `null` `deferred` makes `fireList` early-return),
+    /// letting an `on_spawned` rule queue structural commands the caller drains
+    /// afterwards. Only `on_spawned` is fired — never `on_add`/`on_replaced`.
+    pub fn dispatchOnSpawned(
+        self: *ObserverRegistry,
+        gpa: std.mem.Allocator,
+        world: *World,
+        eid: EntityId,
+    ) !void {
+        self.ensureDeferred(gpa, world);
+        try self.fireList(self.on_spawned, world, eid, null, null, null);
+    }
+
     fn fireList(
         self: *ObserverRegistry,
         list: Listeners,
@@ -478,4 +496,46 @@ test "on_removed receives the pre-removal value (M1.0.2 E3)" {
     try testing.expect(E3Capture.saw_old and !E3Capture.saw_new); // on_removed: old only
     try testing.expectEqual(@as(i32, 99), E3Capture.old); // the pre-removal value
     try testing.expect(world.componentBytes(e, drop) == null); // component gone
+}
+
+// ─── M1.0.5 E2 — two-phase on_spawned dispatch entry ───────────────────────
+
+const SpawnCounter = struct {
+    var count: u32 = 0;
+    fn reset() void {
+        count = 0;
+    }
+};
+
+fn spawnCountObserver(
+    _: ?*anyopaque,
+    _: *World,
+    _: EntityId,
+    _: ?ComponentId,
+    _: ?*const anyopaque,
+    _: ?*const anyopaque,
+    _: *CommandBuffer,
+) anyerror!void {
+    SpawnCounter.count += 1;
+}
+
+test "dispatchOnSpawned fires on_spawned once for an already-spawned entity (M1.0.5 E2)" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const cid = try e3RegisterRawI32(gpa, &world, "Tag");
+    SpawnCounter.reset();
+    try world.registerOnSpawned(gpa, null, &spawnCountObserver);
+
+    // Direct spawn does NOT fire observers (only a cmd-buffer flush or this
+    // explicit dispatch does) — the counter is still 0 right after spawning.
+    var v: i32 = 1;
+    const e = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{cid}, &[_][]const u8{std.mem.asBytes(&v)});
+    try testing.expectEqual(@as(u32, 0), SpawnCounter.count);
+
+    try world.dispatchOnSpawned(gpa, e);
+    try testing.expectEqual(@as(u32, 1), SpawnCounter.count);
+    // `dispatchOnSpawned` lazily created the shared deferred buffer.
+    try testing.expect(world.observer_registry.deferred != null);
 }

@@ -15,6 +15,9 @@ pub const format = @import("format.zig");
 pub const writer = @import("writer.zig");
 /// `.scene.bin` zero-copy accessor (read half; reused verbatim by M1.0.5).
 pub const accessor = @import("accessor.zig");
+/// `.scene.bin` runtime loader (M1.0.5): reads a cooked scene back into a live
+/// ECS `World`, reusing `accessor` verbatim. `weld_core` only — never `weld_etch`.
+pub const loader = @import("loader.zig");
 
 comptime {
     // §13 lazy-analysis guard: pin every sub-file carrying inline `test` blocks
@@ -22,4 +25,5 @@ comptime {
     _ = format;
     _ = writer;
     _ = accessor;
+    _ = loader;
 }

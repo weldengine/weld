@@ -123,6 +123,12 @@ pub const plugin_loader = @import("plugin_loader/root.zig");
 /// `weld_etch` (tier discipline).
 pub const scene = @import("scene/root.zig");
 
+/// Memory namespace — Tier 0 persistent pools. `memory.persistent` is the
+/// refcounted string/value heap for non-POD resource fields (moved here from
+/// `src/etch/` in M1.0.5). Consumed by the scene loader and, via `weld_core`,
+/// by the Etch runtime.
+pub const memory = @import("memory/root.zig");
+
 comptime {
     // Force eager analysis of every IPC sub-file so inline tests are
     // picked up by `zig build test`. Zig 0.16's lazy semantic analysis
@@ -194,6 +200,9 @@ comptime {
     _ = scene.format;
     _ = scene.writer;
     _ = scene.accessor;
+    _ = scene.loader;
+    // M1.0.5 — pin the Tier-0 persistent heap (moved from src/etch).
+    _ = memory.persistent;
     // M0.3 — pin the new platform sub-files so their inline tests run.
     _ = platform.once;
     _ = platform.time;
