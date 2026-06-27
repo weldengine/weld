@@ -53,6 +53,13 @@ pub const OpenError = format.ReadError || error{CorruptScene};
 /// byte-copying its columns into storage would corrupt it.
 pub const RemapError = error{ UnknownComponent, SchemaMismatch } || std.mem.Allocator.Error;
 
+/// Raised for a scene that opens and hashes valid but is structurally invalid —
+/// e.g. an entity whose parent ordinal points past the UUID table. **Distinct
+/// from `error.CorruptScene`** (a content-hash mismatch): the bytes are intact
+/// (the cook's `XxHash64` matches), the scene structure is not. A well-formed
+/// M1.0.4 cook never produces this — it is a defensive guard on external input.
+pub const StructureError = error{MalformedScene};
+
 /// Open a `.scene.bin` byte image: validate magic + version (via the accessor,
 /// read little-endian field-by-field — never a raw `@ptrCast` off an unaligned
 /// buffer), then verify the content hash. Returns a zero-copy `Accessor`
@@ -149,9 +156,10 @@ fn uuidCount(acc: Accessor) u32 {
 /// before any `on_spawned` fires** (phase 1 spawns via `spawnDynamicWithValues`,
 /// which dispatches no observers; phase 2 fires `on_spawned` per entity).
 ///
-/// Errors: the E1 set (`OpenError`/`RemapError`), `error.CorruptScene` for an
-/// out-of-range parent ordinal, allocation failure, plus anything an
-/// `on_spawned` observer propagates (hence the open error set).
+/// Errors: the E1 set (`OpenError`/`RemapError`), `error.MalformedScene`
+/// (`StructureError`) for a structurally-invalid scene (e.g. an out-of-range
+/// parent ordinal), allocation failure, plus anything an `on_spawned` observer
+/// propagates (hence the open error set).
 pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8) anyerror!LoadResult {
     const acc = try openVerified(bytes);
 
@@ -196,8 +204,9 @@ pub fn loadScene(world: *World, gpa: std.mem.Allocator, path: []const u8) anyerr
 /// remap), gathers each slot's raw component bytes (borrowed, on-disk column
 /// order — `spawnDynamicWithValues` reorders by id), spawns the entity, records
 /// `uuid → eid`, and appends to `spawned`. Validates each parent ordinal is
-/// `no_parent` or in `[0, uuidCount)` but **applies no parent link** (no runtime
-/// hierarchy component exists yet — owned by the hierarchy milestone).
+/// `no_parent` or in `[0, uuidCount)` (else `error.MalformedScene`) but
+/// **applies no parent link** (no runtime hierarchy component exists yet —
+/// owned by the hierarchy milestone).
 fn instantiate(
     world: *World,
     gpa: std.mem.Allocator,
@@ -229,8 +238,11 @@ fn instantiate(
             try uuid_to_entity.put(gpa, block.entityUuid(slot).*, eid);
             try spawned.append(gpa, eid);
 
+            // Structural (not hash) validity: a parent ordinal must index the
+            // UUID table or be `no_parent`. The link itself is not applied (no
+            // runtime hierarchy component yet).
             const parent = block.entityParent(slot);
-            if (parent != format.no_parent and parent >= ucount) return error.CorruptScene;
+            if (parent != format.no_parent and parent >= ucount) return error.MalformedScene;
         }
     }
 }
@@ -391,4 +403,45 @@ test "openVerified surfaces header ReadError (short / bad magic / bad version)" 
 
     std.mem.writeInt(u16, bytes[4..6], 999, .little);
     try testing.expectError(error.BadVersion, openVerified(bytes));
+}
+
+test "loadFromBytes rejects an out-of-range parent ordinal with MalformedScene" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const pos = try registerRaw(gpa, &world.registry, "Pos", 8, 4);
+
+    // 1 entity, 1 UUID (ordinal 0), but its parent ordinal is 5 — past the UUID
+    // table. The writer still computes a valid header hash over these bytes, so
+    // the file opens + verifies; only the structural check rejects it. This is
+    // why the error is `MalformedScene`, not `CorruptScene` (hash mismatch).
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const names = try a.dupe([]const u8, &.{try a.dupe(u8, "E0")});
+    const uuids = try a.dupe([16]u8, &.{[_]u8{0} ** 16});
+    const col = try a.alloc(u8, 8);
+    @memset(col, 0);
+    const cols = try a.dupe([]u8, &.{col});
+    const ents = try a.dupe(format.EntityEntry, &.{
+        .{ .name = 0, .uuid = 0, .parent_uuid = 5 },
+    });
+    const ids = try a.dupe(ComponentId, &.{pos});
+    const blocks = try a.dupe(format.ArchetypeBlock, &.{.{
+        .component_ids = ids,
+        .entity_count = 1,
+        .columns = cols,
+        .entities = ents,
+    }});
+    var model: format.CookModel = .{
+        .strings = names,
+        .uuids = uuids,
+        .resources = &.{},
+        .archetypes = blocks,
+        .arena = arena,
+    };
+    defer model.deinit();
+    const bytes = try writer.write(gpa, model, &world.registry);
+    defer gpa.free(bytes);
+
+    try testing.expectError(error.MalformedScene, loadFromBytes(&world, gpa, bytes));
 }
