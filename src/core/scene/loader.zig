@@ -33,6 +33,7 @@ const world_mod = @import("../ecs/world.zig");
 const observers_mod = @import("../ecs/observers.zig");
 const command_buffer_mod = @import("../ecs/command_buffer.zig");
 const fs = @import("../platform/fs.zig");
+const persistent = @import("../memory/persistent.zig");
 
 const Accessor = accessor_mod.Accessor;
 const ComponentId = registry_mod.ComponentId;
@@ -124,17 +125,24 @@ pub const UuidMap = std.AutoHashMapUnmanaged([16]u8, EntityId);
 /// lifetime is the caller's to end (`engine-scene-serialization.md` §4).
 ///
 /// Ownership: the caller ends the load's life with `deinit` (frees `spawned`,
-/// the map, and closes `mmap` if present).
+/// the map, the interned resource strings, and closes `mmap` if present).
 pub const LoadResult = struct {
     spawned: []EntityId,
     uuid_to_entity: UuidMap,
+    /// Tier-0 persistent-heap blocks interned for loaded resource `string`
+    /// fields (E3), allocated **immortal**. Owned here (not by the interp), so
+    /// `deinit` `destroy`s them — the resources' `StringSlot`s point into these.
+    resource_strings: [][*]u8,
     mmap: ?fs.Mmap,
 
-    /// Free the loader-owned allocations and close the backing mmap (if any).
-    /// Does **not** despawn the loaded entities — they belong to the `World`.
+    /// Free the loader-owned allocations, reclaim the interned resource strings,
+    /// and close the backing mmap (if any). Does **not** despawn the loaded
+    /// entities — they belong to the `World`.
     pub fn deinit(self: *LoadResult, gpa: std.mem.Allocator) void {
         gpa.free(self.spawned);
         self.uuid_to_entity.deinit(gpa);
+        for (self.resource_strings) |p| persistent.destroy(gpa, p);
+        gpa.free(self.resource_strings);
         if (self.mmap) |*m| m.close();
         self.* = undefined;
     }
@@ -176,13 +184,21 @@ pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8) a
     errdefer spawned.deinit(gpa);
     var uuid_to_entity: UuidMap = .empty;
     errdefer uuid_to_entity.deinit(gpa);
+    var res_strings: std.ArrayListUnmanaged([*]u8) = .empty;
+    errdefer {
+        for (res_strings.items) |p| persistent.destroy(gpa, p);
+        res_strings.deinit(gpa);
+    }
 
     try instantiate(world, gpa, acc, remap, &spawned, &uuid_to_entity);
+    // Resources before phase 2 so an `on_spawned` rule can read scene resources.
+    try loadResources(world, gpa, acc, remap, &res_strings);
     try dispatchSpawnLifecycle(world, gpa, spawned.items);
 
     return .{
         .spawned = try spawned.toOwnedSlice(gpa),
         .uuid_to_entity = uuid_to_entity,
+        .resource_strings = try res_strings.toOwnedSlice(gpa),
         .mmap = null,
     };
 }
@@ -243,6 +259,65 @@ fn instantiate(
             // runtime hierarchy component yet).
             const parent = block.entityParent(slot);
             if (parent != format.no_parent and parent >= ucount) return error.MalformedScene;
+        }
+    }
+}
+
+/// Load the resources block (E3) — the load-side mirror of M1.0.3's non-POD
+/// resource path. For each resource: resolve its schema index → runtime
+/// `ComponentId` (the E1 remap, already size/alignment-validated), copy the POD
+/// `data` (string-field slots are zeroed on disk), then for each `string` field
+/// of that resource type (offsets from the runtime `FieldDesc`) intern the
+/// cooked value into the **Tier-0 persistent heap** (`allocImmortal`,
+/// `type_string`) and write the resulting `StringSlot` into the slot — the same
+/// in-memory `StringSlot` byte layout `ecs_bridge` reads/writes. Each interned
+/// block is recorded in `strings` (owned by `LoadResult`, reclaimed at
+/// `deinit`); the install goes through `world.addResource`, which copies the
+/// bytes. An empty string keeps the zeroed slot (`ptr == 0`, no block).
+fn loadResources(
+    world: *World,
+    gpa: std.mem.Allocator,
+    acc: Accessor,
+    remap: []const ComponentId,
+    strings: *std.ArrayListUnmanaged([*]u8),
+) !void {
+    const count = acc.resourceCount();
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const r = acc.resource(i);
+        const cid = remap[r.schema_index];
+        const size = world.registry.componentSize(cid);
+        std.debug.assert(r.data.len == size);
+
+        const bytes = try gpa.alloc(u8, size);
+        defer gpa.free(bytes); // `addResource` copies; this is scratch
+        @memcpy(bytes, r.data);
+
+        for (world.registry.componentFields(cid)) |fd| {
+            if (fd.kind != .string_) continue;
+            const sval = r.stringField(fd.offset) orelse continue;
+            if (sval.len == 0) continue; // empty string → leave the zeroed slot
+
+            try strings.ensureUnusedCapacity(gpa, 1);
+            const p = try persistent.allocImmortal(gpa, persistent.type_string, sval.len);
+            @memcpy(p[0..sval.len], sval);
+            strings.appendAssumeCapacity(p); // capacity reserved → cannot fail
+
+            const fslot: persistent.StringSlot = .{ .ptr = @intFromPtr(p), .len = @intCast(sval.len) };
+            @memcpy(bytes[fd.offset..][0..@sizeOf(persistent.StringSlot)], std.mem.asBytes(&fslot));
+        }
+
+        // Scene resources are *injected into the resource map at load*
+        // (`engine-spec.md` §19.1): the scene value is authoritative, so it
+        // overrides a value the running program already installed at compile
+        // (e.g. a declared resource's defaults) rather than erroring. The
+        // overridden value's own string blocks are owned by whoever installed
+        // them (the interp frees its compile-time defaults at teardown); the
+        // newly-interned blocks here are owned by `LoadResult`.
+        if (world.resources.getMutResource(cid)) |dst| {
+            @memcpy(dst, bytes);
+        } else {
+            try world.addResource(gpa, cid, bytes);
         }
     }
 }

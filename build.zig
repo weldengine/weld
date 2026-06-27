@@ -435,6 +435,9 @@ pub fn build(b: *std.Build) void {
         // per entity, after all entities exist). `weld_core` only (no `.scene`
         // flag → no `weld_etch`); builds the image in-memory via the writer.
         .{ .path = "tests/scene/load_roundtrip_test.zig" },
+        // M1.0.5 / E3 — resource `string` fields round-trip through the Tier-0
+        // persistent heap (intern on load, owned by `LoadResult`). `weld_core` only.
+        .{ .path = "tests/scene/load_resources_test.zig" },
         // M0.3 — common platform layer tests.
         .{ .path = "tests/platform/fs_vfs_test.zig" },
         .{ .path = "tests/platform/time_test.zig" },
