@@ -253,6 +253,17 @@ pub const World = struct {
         try self.observer_registry.registerOnReplaced(gpa, self, cid, ctx, callback);
     }
 
+    /// M1.0.5 E2 — fire `on_spawned` for one already-spawned entity. The scene
+    /// loader's two-phase lifecycle pass calls this directly: entities are
+    /// instantiated by `spawnDynamicWithValues` (which fires no observers), then
+    /// `on_spawned` is dispatched per entity in a second pass, guaranteeing
+    /// every loaded entity exists before any `on_spawned` rule runs. An
+    /// `on_spawned` rule may queue structural commands into the shared deferred
+    /// buffer; the caller drains it via the usual flush path.
+    pub fn dispatchOnSpawned(self: *World, gpa: std.mem.Allocator, eid: EntityId) !void {
+        try self.observer_registry.dispatchOnSpawned(gpa, self, eid);
+    }
+
     // ─── Component registration helpers ──────────────────────────────────
 
     /// Register a component whose layout is described at runtime.
