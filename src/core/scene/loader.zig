@@ -30,10 +30,14 @@ const format = @import("format.zig");
 const accessor_mod = @import("accessor.zig");
 const registry_mod = @import("../ecs/registry.zig");
 const world_mod = @import("../ecs/world.zig");
+const observers_mod = @import("../ecs/observers.zig");
+const command_buffer_mod = @import("../ecs/command_buffer.zig");
+const fs = @import("../platform/fs.zig");
 
 const Accessor = accessor_mod.Accessor;
 const ComponentId = registry_mod.ComponentId;
 const World = world_mod.World;
+const EntityId = world_mod.EntityId;
 
 /// Errors from opening + integrity-checking a `.scene.bin` byte image.
 /// `format.ReadError` covers a truncated / wrong-magic / wrong-version file;
@@ -95,6 +99,162 @@ pub fn buildSchemaRemap(gpa: std.mem.Allocator, world: *const World, acc: Access
         remap[i] = id;
     }
     return remap;
+}
+
+// ─── E2 — instantiation + UUID map + two-phase on_spawned ────────────────────
+
+/// 16-byte UUID → runtime `EntityId`, built as the scene loads. Keyed on the
+/// raw UUID bytes (`Archetype.entityUuid`) so the accessor stays untouched; a
+/// dense ordinal-keyed map is a later optimization.
+pub const UuidMap = std.AutoHashMapUnmanaged([16]u8, EntityId);
+
+/// What a load produces. `spawned` is every instantiated entity in load order;
+/// `uuid_to_entity` resolves a scene UUID to its runtime handle (the seam the
+/// hierarchy / cross-reference milestones build on); `mmap` is the backing file
+/// mapping for the `loadScene(path)` entry (null for `loadFromBytes`, whose
+/// bytes the caller owns). Component data is copied into ECS storage during the
+/// load, so the entities outlive the mapping — `mmap` is held only so its
+/// lifetime is the caller's to end (`engine-scene-serialization.md` §4).
+///
+/// Ownership: the caller ends the load's life with `deinit` (frees `spawned`,
+/// the map, and closes `mmap` if present).
+pub const LoadResult = struct {
+    spawned: []EntityId,
+    uuid_to_entity: UuidMap,
+    mmap: ?fs.Mmap,
+
+    /// Free the loader-owned allocations and close the backing mmap (if any).
+    /// Does **not** despawn the loaded entities — they belong to the `World`.
+    pub fn deinit(self: *LoadResult, gpa: std.mem.Allocator) void {
+        gpa.free(self.spawned);
+        self.uuid_to_entity.deinit(gpa);
+        if (self.mmap) |*m| m.close();
+        self.* = undefined;
+    }
+};
+
+/// Count of entries in the on-disk UUID table, derived from the header section
+/// offsets (`uuid_table` ends where `schema_table` begins; 16 B per UUID). Lets
+/// the loader bounds-check parent ordinals without a new accessor getter.
+fn uuidCount(acc: Accessor) u32 {
+    return (acc.header.schema_table_offset - acc.header.uuid_table_offset) / 16;
+}
+
+/// Load a cooked `.scene.bin` byte image into `world`. The byte-level core
+/// (no filesystem): validate + remap (E1), instantiate every entity, then fire
+/// the `on_spawned` lifecycle in a second pass. The returned `LoadResult` has a
+/// null `mmap` — the caller owns `bytes`.
+///
+/// Two-phase, so the ordering guarantee holds: **every loaded entity exists
+/// before any `on_spawned` fires** (phase 1 spawns via `spawnDynamicWithValues`,
+/// which dispatches no observers; phase 2 fires `on_spawned` per entity).
+///
+/// Errors: the E1 set (`OpenError`/`RemapError`), `error.CorruptScene` for an
+/// out-of-range parent ordinal, allocation failure, plus anything an
+/// `on_spawned` observer propagates (hence the open error set).
+pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8) anyerror!LoadResult {
+    const acc = try openVerified(bytes);
+
+    const remap = try buildSchemaRemap(gpa, world, acc);
+    defer gpa.free(remap);
+
+    // The cross-references + extensions tables are M1.0.6's; M1.0.4 writes them
+    // empty (a zero count prefix). Loading a file that populated them would mean
+    // a newer cook — assert the M1.0.5 contract.
+    std.debug.assert(readU32At(acc, acc.header.extensions_offset) == 0);
+    std.debug.assert(readU32At(acc, acc.header.crossrefs_offset) == 0);
+
+    var spawned: std.ArrayListUnmanaged(EntityId) = .empty;
+    errdefer spawned.deinit(gpa);
+    var uuid_to_entity: UuidMap = .empty;
+    errdefer uuid_to_entity.deinit(gpa);
+
+    try instantiate(world, gpa, acc, remap, &spawned, &uuid_to_entity);
+    try dispatchSpawnLifecycle(world, gpa, spawned.items);
+
+    return .{
+        .spawned = try spawned.toOwnedSlice(gpa),
+        .uuid_to_entity = uuid_to_entity,
+        .mmap = null,
+    };
+}
+
+/// Load a cooked `.scene.bin` from `path`: `mmap` the file, then run
+/// `loadFromBytes` over the borrowed bytes. The returned `LoadResult` owns the
+/// mapping (`LoadResult.deinit` closes it). Adds `fs.Error` (open/map failure)
+/// to `loadFromBytes`'s error set.
+pub fn loadScene(world: *World, gpa: std.mem.Allocator, path: []const u8) anyerror!LoadResult {
+    var mmap = try fs.mmapFile(gpa, path);
+    errdefer mmap.close();
+    var result = try loadFromBytes(world, gpa, mmap.bytes);
+    result.mmap = mmap;
+    return result;
+}
+
+/// Phase 1 — instantiate every entity of every archetype block. Maps each
+/// block's on-disk schema-index columns to runtime `ComponentId`s (the E1
+/// remap), gathers each slot's raw component bytes (borrowed, on-disk column
+/// order — `spawnDynamicWithValues` reorders by id), spawns the entity, records
+/// `uuid → eid`, and appends to `spawned`. Validates each parent ordinal is
+/// `no_parent` or in `[0, uuidCount)` but **applies no parent link** (no runtime
+/// hierarchy component exists yet — owned by the hierarchy milestone).
+fn instantiate(
+    world: *World,
+    gpa: std.mem.Allocator,
+    acc: Accessor,
+    remap: []const ComponentId,
+    spawned: *std.ArrayListUnmanaged(EntityId),
+    uuid_to_entity: *UuidMap,
+) !void {
+    const ucount = uuidCount(acc);
+    const arch_count = acc.archetypeCount();
+    var ai: u32 = 0;
+    while (ai < arch_count) : (ai += 1) {
+        const block = acc.archetype(ai);
+        const cc = block.component_count;
+
+        // Per-block component ids (constant across the block's entities).
+        const ids = try gpa.alloc(ComponentId, cc);
+        defer gpa.free(ids);
+        for (0..cc) |c| ids[c] = remap[block.schemaIndex(c)];
+
+        // Per-slot payload views, reused each slot.
+        const payloads = try gpa.alloc([]const u8, cc);
+        defer gpa.free(payloads);
+
+        var slot: usize = 0;
+        while (slot < block.entity_count) : (slot += 1) {
+            for (0..cc) |c| payloads[c] = block.componentSlot(c, slot);
+            const eid = try world.spawnDynamicWithValues(gpa, ids, payloads);
+            try uuid_to_entity.put(gpa, block.entityUuid(slot).*, eid);
+            try spawned.append(gpa, eid);
+
+            const parent = block.entityParent(slot);
+            if (parent != format.no_parent and parent >= ucount) return error.CorruptScene;
+        }
+    }
+}
+
+/// Phase 2 — fire the `on_spawned` lifecycle for every loaded entity, in load
+/// order, reusing the existing flush path (`observers.flushWithObservers` /
+/// `applyRawCommand`). A pre-existing deferred queue is drained first; an
+/// `on_spawned` rule may queue structural commands, drained after the pass.
+fn dispatchSpawnLifecycle(world: *World, gpa: std.mem.Allocator, spawned: []const EntityId) !void {
+    var drain = command_buffer_mod.CommandBuffer.init(gpa, world);
+    defer drain.deinit();
+
+    // Drain any commands left queued from prior observer activity.
+    try observers_mod.flushWithObservers(&drain, &world.observer_registry);
+    // Every entity already exists — now fire its spawn hook.
+    for (spawned) |eid| try world.dispatchOnSpawned(gpa, eid);
+    // Apply whatever the `on_spawned` rules queued.
+    try observers_mod.flushWithObservers(&drain, &world.observer_registry);
+}
+
+/// Read a little-endian `u32` at file offset `off` (the accessor's `readU32` is
+/// private; the loader reads reserved-section counts directly).
+fn readU32At(acc: Accessor, off: u32) u32 {
+    return std.mem.readInt(u32, acc.bytes[off..][0..4], .little);
 }
 
 // ─── inline tests ───────────────────────────────────────────────────────────
