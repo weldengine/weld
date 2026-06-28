@@ -3361,6 +3361,33 @@ pub const Parser = struct {
     /// {component_instance} "}"` (§15 l.1598). Shared by scene + prefab bodies.
     /// Appends one `SceneEntity`, returns its index. Components append directly
     /// (the body closes before the next sibling — contiguous run).
+    /// Parse the optional `extensions: [ STRING_LITERAL {, STRING_LITERAL} [,] ]`
+    /// clause (M1.0.6 E5, Claude.ai amendment). Active-extension prefab names, by
+    /// name; trailing comma tolerated; empty list allowed. Appends each name to
+    /// `arena.scene_extensions` and returns the `(start, len)` run.
+    fn parseExtensionsClause(self: *Parser) ParseError!struct { start: u32, len: u32 } {
+        const start: u32 = @intCast(self.arena.scene_extensions.items.len);
+        var len: u32 = 0;
+        if (self.peek() == .ident and std.mem.eql(u8, self.sliceOf(self.peekSpan()), "extensions") and self.peekNext() == .colon) {
+            _ = try self.advance(); // 'extensions'
+            _ = try self.advance(); // ':'
+            _ = try self.expect(.lbracket, "expected '[' to start the extensions list");
+            if (self.peek() != .rbracket) {
+                const first = try self.expect(.string_literal, "expected an extension prefab name (string literal)");
+                try self.arena.scene_extensions.append(self.gpa, try self.internStringLiteral(first.span));
+                len += 1;
+                while (try self.match(.comma)) {
+                    if (self.peek() == .rbracket) break; // trailing comma
+                    const t = try self.expect(.string_literal, "expected an extension prefab name (string literal) after ','");
+                    try self.arena.scene_extensions.append(self.gpa, try self.internStringLiteral(t.span));
+                    len += 1;
+                }
+            }
+            _ = try self.expect(.rbracket, "expected ']' to close the extensions list");
+        }
+        return .{ .start = start, .len = len };
+    }
+
     fn parseSceneEntity(self: *Parser) ParseError!u32 {
         const kw_span = self.current.span;
         _ = try self.advance(); // 'entity'
@@ -3380,6 +3407,8 @@ pub const Parser = struct {
             const p = try self.expect(.string_literal, "expected a parent string literal");
             parent = try self.internStringLiteral(p.span);
         }
+        // `extensions: [...]` — after `parent`, before the components (§15 amend).
+        const ext = try self.parseExtensionsClause();
         const components_start: u32 = @intCast(self.arena.component_instances.items.len);
         var components_len: u32 = 0;
         while (self.peek() != .rbrace and self.peek() != .eof) {
@@ -3393,6 +3422,8 @@ pub const Parser = struct {
             .name = try self.internStringLiteral(name_tok.span),
             .uuid = uuid,
             .parent = parent,
+            .extensions_start = ext.start,
+            .extensions_len = ext.len,
             .components_start = components_start,
             .components_len = components_len,
             .span = .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end },
@@ -3421,6 +3452,8 @@ pub const Parser = struct {
             const u = try self.expect(.string_literal, "expected a uuid string literal");
             uuid = try self.internStringLiteral(u.span);
         }
+        // `extensions: [...]` — after `uuid`, before the members (§15 amend).
+        const ext = try self.parseExtensionsClause();
         var members: std.ArrayListUnmanaged(ast_mod.InstanceMember) = .empty;
         defer members.deinit(self.gpa);
         while (self.peek() != .rbrace and self.peek() != .eof) {
@@ -3445,6 +3478,8 @@ pub const Parser = struct {
             .prefab_name = try self.internStringLiteral(prefab_tok.span),
             .instance_name = try self.internStringLiteral(inst_name_tok.span),
             .uuid = uuid,
+            .extensions_start = ext.start,
+            .extensions_len = ext.len,
             .members_start = members_start,
             .members_len = @intCast(members.items.len),
             .span = .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end },

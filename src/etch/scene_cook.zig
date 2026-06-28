@@ -33,6 +33,9 @@ const ast_mod = @import("ast.zig");
 const interp = @import("interp.zig");
 const bridge_mod = @import("ecs_bridge.zig");
 const value_mod = @import("value.zig");
+// M1.0.6 E5 — `renderStmtRunAlloc` renders an extends prefab's on_attach/on_detach
+// statement-runs to canonical Etch text (stored in the .prefab.bin hooks section).
+const descriptor = @import("descriptor.zig");
 
 const weld_core = @import("weld_core");
 // M1.0.5 — persistent heap moved to Tier 0 (`src/core/memory`); reach it via weld_core.
@@ -43,6 +46,9 @@ const FieldDesc = weld_core.ecs.registry.FieldDesc;
 const FieldKind = weld_core.ecs.registry.FieldKind;
 const archetype = weld_core.ecs.archetype;
 const format = weld_core.scene.format;
+// M1.0.6 E2 — `of` variant resolution reads the base prefab's cooked `.prefab.bin`
+// back through the same zero-copy accessor the loader uses.
+const accessor = weld_core.scene.accessor;
 
 const AstArena = ast_mod.AstArena;
 const StringId = ast_mod.StringId;
@@ -59,8 +65,6 @@ pub const CookError = error{
     NoSceneConstruct,
     /// More than one `scene` construct (a `.scene.etch` holds exactly one).
     MultipleScenes,
-    /// `instance of "Prefab"` — prefab flattening is owned by M1.0.6.
-    InstanceOfUnsupported,
     /// A component/resource field has a type the runtime registry rejects
     /// (`error.InvalidProgram`: e.g. `Vec3`/`Entity`/`AssetHandle`, or `string`
     /// on a component).
@@ -86,6 +90,44 @@ pub const CookError = error{
     BadUuid,
     /// An entity `parent:` name does not match any entity in the scene.
     ParentNotFound,
+    // ── M1.0.6 E2 — prefab cook (`cookPrefab`) ──
+    /// No top-level `prefab` construct in a source cooked as a `.prefab.etch`.
+    NoPrefabConstruct,
+    /// More than one `prefab` construct (a `.prefab.etch` holds exactly one).
+    MultiplePrefabs,
+    /// A `scene` construct appeared in a source cooked as a `.prefab.etch`.
+    SceneNotAllowedInPrefab,
+    /// `on_attach`/`on_detach`/`requires` on a standalone or `of` prefab — those
+    /// clauses are valid only with `extends` (`etch-grammar.md` §15 l.1653, §30.5).
+    PrefabHookNotAllowed,
+    /// `extends "X" requires C` where the base prefab `X` does not declare `C`
+    /// (`etch-grammar.md` §15 l.1634 — validated against X's cooked `.prefab.bin`).
+    RequiresNotSatisfied,
+    /// An `extends` prefab's `on_attach`/`on_detach` body could not be rendered to
+    /// canonical Etch text (a construct outside the descriptor renderer's surface).
+    HookRenderFailed,
+    /// `prefab "Y" of "X"` but the base `X.prefab.bin` could not be resolved
+    /// (no resolver, or the resolver returned null for the base name).
+    BasePrefabMissing,
+    /// The resolved base `.prefab.bin` bytes failed `accessor.open`/`verifyHash`.
+    BasePrefabCorrupt,
+    /// A base prefab component's name is unknown to the variant's registry, or
+    /// its on-disk size disagrees with the variant registry's layout.
+    BaseSchemaMismatch,
+    // ── M1.0.6 E3 — `instance of` flattening at scene cook ──
+    /// `instance of "P"` where `P.prefab.bin` holds more than one entity. M1.0.6
+    /// instantiates only single-entity prefabs: the instance supplies one uuid and
+    /// the spec defines no remapping for a multi-entity prefab's internal uuids at
+    /// instantiation (`engine-scene-serialization.md` §2/§5). Multi-entity
+    /// instantiation (and its hierarchy) is a dedicated later milestone (D-D).
+    MultiEntityInstanceUnsupported,
+    /// A `Comp.field = value` per-field override targets a component the flattened
+    /// instance does not carry (neither inherited from the prefab nor added by an
+    /// earlier `Comp { … }` member of the same instance body).
+    OverrideTargetMissing,
+    /// An `Entity` field references an entity name absent from the scene (M1.0.6
+    /// E4 — intra-scene only; cross-scene references are a future milestone).
+    UnresolvedCrossRef,
     OutOfMemory,
 };
 
@@ -105,10 +147,26 @@ pub const Cooked = struct {
     }
 };
 
-/// Cook an Etch source string into the neutral scene model + its registry.
-/// On failure returns a `CookError` and, if `diag_out` is non-null, sets it to a
-/// static human-readable message. No `.scene.bin` is produced on failure.
+/// Cook an Etch source string into the neutral scene model + its registry, with
+/// no prefab resolver — a scene that uses `instance of` errors `BasePrefabMissing`
+/// (use `cookScene` with a resolver to flatten instances). On failure returns a
+/// `CookError` and, if `diag_out` is non-null, sets it to a static message. No
+/// `.scene.bin` is produced on failure.
 pub fn cook(gpa: std.mem.Allocator, source: []const u8, diag_out: ?*[]const u8) CookError!Cooked {
+    return cookScene(gpa, source, null, diag_out);
+}
+
+/// Cook a `.scene.etch` source, resolving each `instance of "P"` by flattening
+/// `P.prefab.bin` (located through `base_resolver`) into the instance's entity:
+/// the prefab's components are inherited and the instance's overrides applied
+/// (M1.0.6 E3). `base_resolver` may be null for a scene with no instances; an
+/// instance with a null/unknowing resolver errors `BasePrefabMissing`.
+pub fn cookScene(
+    gpa: std.mem.Allocator,
+    source: []const u8,
+    base_resolver: ?BaseResolver,
+    diag_out: ?*[]const u8,
+) CookError!Cooked {
     const parser = @import("parser.zig");
     var pr = parser.parse(gpa, source) catch return fail(diag_out, error.ParseFailed, "Etch parse failed (allocator error)");
     defer pr.deinit(gpa);
@@ -124,7 +182,7 @@ pub fn cook(gpa: std.mem.Allocator, source: []const u8, diag_out: ?*[]const u8) 
 
     try b.registerDecls(diag_out);
     const scene_decl = try b.findScene(diag_out);
-    const model = try b.build(scene_decl, diag_out);
+    const model = try b.build(scene_decl, base_resolver, diag_out);
 
     return .{ .model = model, .registry = registry };
 }
@@ -132,6 +190,61 @@ pub fn cook(gpa: std.mem.Allocator, source: []const u8, diag_out: ?*[]const u8) 
 fn fail(diag_out: ?*[]const u8, err: CookError, msg: []const u8) CookError {
     if (diag_out) |d| d.* = msg;
     return err;
+}
+
+/// Resolves a referenced prefab name (the target of `of "X"`) to its already
+/// cooked `.prefab.bin` bytes, or null if unknown. A `.prefab.bin` is the same
+/// format as a `.scene.bin`, so a variant's base is read back through the
+/// `accessor`. This is the cook-time prefab registry / path map (distinct from
+/// Etch `import`, which is M1.0.7); the driver (`tools/scene_cook`) wires it to
+/// the on-disk cook output, and tests wire it to an in-process byte buffer.
+pub const BaseResolver = struct {
+    ctx: *anyopaque,
+    resolveFn: *const fn (ctx: *anyopaque, name: []const u8) ?[]const u8,
+
+    pub fn resolve(self: BaseResolver, name: []const u8) ?[]const u8 {
+        return self.resolveFn(self.ctx, name);
+    }
+};
+
+/// Cook a `.prefab.etch` source into the neutral model + its registry, the same
+/// way `cook` handles `.scene.etch`. A prefab is a mini-scene (one `prefab`
+/// construct, body = `{ entity_decl }`, no `resources`/`instance`), serialized to
+/// the identical `.scene.bin` format.
+///
+/// Three forms (`etch-reference-part2.md` §30): a **standalone** prefab cooks its
+/// entities directly; a **variant** `prefab "Y" of "X"` resolves `X`'s cooked
+/// `.prefab.bin` via `base_resolver`, inherits all of X's flattened components,
+/// and applies Y's per-entity overrides (field-merge on shared components, add on
+/// new ones) — producing the fully flattened set. An **extension** `extends` is
+/// rejected here (`error.ExtendsUnsupported`) — its cook is M1.0.6 E5.
+///
+/// `base_resolver` may be null for a standalone prefab; an `of` prefab requires
+/// it. On failure returns a `CookError` and sets `diag_out` (if non-null).
+pub fn cookPrefab(
+    gpa: std.mem.Allocator,
+    source: []const u8,
+    base_resolver: ?BaseResolver,
+    diag_out: ?*[]const u8,
+) CookError!Cooked {
+    const parser = @import("parser.zig");
+    var pr = parser.parse(gpa, source) catch return fail(diag_out, error.ParseFailed, "Etch parse failed (allocator error)");
+    defer pr.deinit(gpa);
+    if (pr.diagnostics.len > 0) return fail(diag_out, error.ParseFailed, "Etch parse failed");
+    const ast = &pr.ast;
+
+    var registry = Registry.init();
+    errdefer registry.deinit(gpa);
+
+    var b = Builder.init(gpa, ast, &registry);
+    defer b.deinitScratch();
+    errdefer b.arena.deinit();
+
+    try b.registerDecls(diag_out);
+    const prefab_decl = try b.findPrefab(diag_out);
+    const model = try b.buildPrefab(prefab_decl, base_resolver, diag_out);
+
+    return .{ .model = model, .registry = registry };
 }
 
 // ── Builder ──────────────────────────────────────────────────────────────────
@@ -145,6 +258,19 @@ const EntityBuild = struct {
     parent_name: []const u8, // "" if root; resolved to a uuid index after all entities seen
     comp_ids: []ComponentId,
     comp_blobs: [][]u8,
+};
+
+/// An unresolved entity→entity reference recorded during the scene build phase
+/// (M1.0.6 E4). The target is kept as a NAME (not yet resolved): a forward
+/// reference may name an entity declared later, so `name → uuid` resolution waits
+/// until `name_to_uuid_idx` is complete (the two-phase crossref pass). The source
+/// entity's `uuid` ordinal is already known (its identity was interned before its
+/// components were built).
+const CrossRefPending = struct {
+    source_uuid_idx: u32,
+    component_id: ComponentId,
+    field_offset: u32,
+    target_name: []const u8,
 };
 
 const Builder = struct {
@@ -163,6 +289,21 @@ const Builder = struct {
     // Model tables (arena-owned, become the CookModel slices).
     strings: std.ArrayListUnmanaged([]const u8) = .empty,
     uuids: std.ArrayListUnmanaged([16]u8) = .empty,
+
+    // Cross-references (M1.0.6 E4): collected only for a scene cook
+    // (`collect_crossrefs`), resolved name→uuid after all entities are built.
+    // A prefab cook leaves `collect_crossrefs` false — its Entity slots stay
+    // `dead` and emit no cross-ref entry.
+    collect_crossrefs: bool = false,
+    pendings: std.ArrayListUnmanaged(CrossRefPending) = .empty,
+
+    // Active extensions (M1.0.6 E5, scene cook): per-entity `extensions:` clauses
+    // → Entity Extensions Table + a deduplicated Prefab ID Table (extension names
+    // as `strings` indices). `prefab_id_map` dedups a name's `strings` index → its
+    // Prefab ID Table slot.
+    ext_entries: std.ArrayListUnmanaged(format.ExtModelEntry) = .empty,
+    prefab_id_table: std.ArrayListUnmanaged(u32) = .empty,
+    prefab_id_map: std.AutoHashMapUnmanaged(u32, u32) = .empty,
 
     fn init(gpa: std.mem.Allocator, ast: *const AstArena, registry: *Registry) Builder {
         return .{
@@ -186,6 +327,10 @@ const Builder = struct {
         self.name_to_uuid_idx.deinit(self.gpa);
         self.strings.deinit(self.gpa);
         self.uuids.deinit(self.gpa);
+        self.pendings.deinit(self.gpa);
+        self.ext_entries.deinit(self.gpa);
+        self.prefab_id_table.deinit(self.gpa);
+        self.prefab_id_map.deinit(self.gpa);
     }
 
     fn a(self: *Builder) std.mem.Allocator {
@@ -242,21 +387,60 @@ const Builder = struct {
         return found orelse fail(diag_out, error.NoSceneConstruct, "no scene construct in the source");
     }
 
-    /// Build the full neutral model from the resolved scene.
-    fn build(self: *Builder, scene_decl: ast_mod.SceneDecl, diag_out: ?*[]const u8) CookError!format.CookModel {
-        // Reject `instance of` up front (M1.0.6 owns prefab flattening).
-        const children = self.ast.scene_children.items[scene_decl.children_start .. scene_decl.children_start + scene_decl.children_len];
-        for (children) |child| {
-            if (child.kind == .instance) return fail(diag_out, error.InstanceOfUnsupported, "`instance of` (prefab instances) is not cooked by M1.0.4 (owned by M1.0.6)");
+    /// Locate the single `prefab` construct, erroring if there are zero or many,
+    /// or if a `scene` construct is present (a `.prefab.etch` holds exactly one
+    /// `prefab` and no `scene`). The M1.0.6 E2 twin of `findScene`.
+    fn findPrefab(self: *Builder, diag_out: ?*[]const u8) CookError!ast_mod.PrefabDecl {
+        const kinds = self.ast.items.items(.kind);
+        const datas = self.ast.items.items(.data);
+        var found: ?ast_mod.PrefabDecl = null;
+        var i: usize = 0;
+        while (i < self.ast.items.len) : (i += 1) {
+            switch (kinds[i]) {
+                .scene_decl => return fail(diag_out, error.SceneNotAllowedInPrefab, "a scene construct in a prefab source (.prefab.etch holds exactly one prefab)"),
+                .prefab_decl => {
+                    if (found != null) return fail(diag_out, error.MultiplePrefabs, "more than one prefab construct in the source");
+                    found = self.ast.prefab_decls.items[datas[i]];
+                },
+                else => {},
+            }
         }
+        return found orelse fail(diag_out, error.NoPrefabConstruct, "no prefab construct in the source");
+    }
 
-        // Per-entity build, accumulating the name→uuid-index map for parent
-        // resolution in a second pass.
+    /// Build the full neutral model from the resolved scene. Direct entities cook
+    /// from their component instances; `instance of "P"` children are flattened —
+    /// the prefab's components are inherited from `P.prefab.bin` (via the resolver)
+    /// and the instance's overrides applied (M1.0.6 E3).
+    fn build(self: *Builder, scene_decl: ast_mod.SceneDecl, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError!format.CookModel {
+        // Scene cook collects entity→entity cross-references (an `Entity` field's
+        // slot is left `dead` and a pending reference recorded); a prefab cook does
+        // not (it leaves `collect_crossrefs` false).
+        self.collect_crossrefs = true;
+        const children = self.ast.scene_children.items[scene_decl.children_start .. scene_decl.children_start + scene_decl.children_len];
+
+        // Per-entity build, accumulating the name→uuid-index map for parent +
+        // cross-reference resolution in a second pass.
         var entities: std.ArrayListUnmanaged(EntityBuild) = .empty;
         defer entities.deinit(self.gpa);
         for (children) |child| {
-            const e = self.ast.scene_entities.items[child.index];
-            const eb = try self.buildEntity(e, diag_out);
+            var ext_start: u32 = 0;
+            var ext_len: u32 = 0;
+            const eb = switch (child.kind) {
+                .entity => blk: {
+                    const e = self.ast.scene_entities.items[child.index];
+                    ext_start = e.extensions_start;
+                    ext_len = e.extensions_len;
+                    break :blk try self.buildEntity(e, diag_out);
+                },
+                .instance => blk: {
+                    const inst = self.ast.scene_instances.items[child.index];
+                    ext_start = inst.extensions_start;
+                    ext_len = inst.extensions_len;
+                    break :blk try self.buildInstanceEntity(inst, base_resolver, diag_out);
+                },
+            };
+            try self.recordExtensions(eb.uuid_idx, ext_start, ext_len);
             try entities.append(self.gpa, eb);
         }
 
@@ -271,6 +455,7 @@ const Builder = struct {
         const archetypes = try self.groupArchetypes(entities.items);
         const resources = try self.buildResources(scene_decl, diag_out);
         const content_version = try self.sceneContentVersion(scene_decl, diag_out);
+        const cross_refs = try self.resolveCrossRefs(diag_out);
 
         return .{
             .strings = try self.a().dupe([]const u8, self.strings.items),
@@ -278,21 +463,333 @@ const Builder = struct {
             .resources = resources,
             .archetypes = archetypes,
             .content_version = content_version,
+            .cross_refs = cross_refs,
+            .ext_entries = try self.a().dupe(format.ExtModelEntry, self.ext_entries.items),
+            .prefab_id_table = try self.a().dupe(u32, self.prefab_id_table.items),
             .arena = self.arena,
         };
+    }
+
+    /// Record an entity's `extensions:` clause (M1.0.6 E5) into the Entity
+    /// Extensions Table: intern each extension name (by name, D-B) into the model
+    /// strings + the deduplicated Prefab ID Table, and append an `ExtModelEntry`
+    /// keyed by the entity's uuid ordinal. No-op for an empty/absent clause.
+    fn recordExtensions(self: *Builder, uuid_idx: u32, ext_start: u32, ext_len: u32) CookError!void {
+        if (ext_len == 0) return;
+        const ids = try self.a().alloc(u32, ext_len);
+        var k: u32 = 0;
+        while (k < ext_len) : (k += 1) {
+            const name = self.ast.strings.slice(self.ast.scene_extensions.items[ext_start + k]);
+            ids[k] = try self.prefabIdIndex(try self.internString(name));
+        }
+        try self.ext_entries.append(self.gpa, .{ .uuid = uuid_idx, .prefab_ids = ids });
+    }
+
+    /// The Prefab ID Table slot for a model-`strings` index, deduplicated.
+    fn prefabIdIndex(self: *Builder, str_idx: u32) CookError!u32 {
+        const gop = try self.prefab_id_map.getOrPut(self.gpa, str_idx);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = @intCast(self.prefab_id_table.items.len);
+            try self.prefab_id_table.append(self.gpa, str_idx);
+        }
+        return gop.value_ptr.*;
+    }
+
+    /// Phase 2 of the crossref pass: resolve every pending `target_name` against
+    /// the now-complete `name_to_uuid_idx` (a reference can name an entity declared
+    /// later in the scene), producing the model's `CrossRef` slice. A target that
+    /// is not an entity of the scene → `error.UnresolvedCrossRef` (intra-scene
+    /// only; cross-scene references are a future milestone).
+    fn resolveCrossRefs(self: *Builder, diag_out: ?*[]const u8) CookError![]format.CrossRef {
+        const out = try self.a().alloc(format.CrossRef, self.pendings.items.len);
+        for (self.pendings.items, 0..) |p, i| {
+            const target = self.name_to_uuid_idx.get(p.target_name) orelse
+                return fail(diag_out, error.UnresolvedCrossRef, "Entity field references an entity name absent from the scene");
+            out[i] = .{
+                .source_uuid = p.source_uuid_idx,
+                .component_id = p.component_id,
+                .field_offset = p.field_offset,
+                .target_uuid = target,
+            };
+        }
+        return out;
+    }
+
+    /// Record a pending entity→entity reference for a `.entity_` field set to an
+    /// entity-name string literal (the D-B by-name form; there is no `uuid "…"`
+    /// form). The slot itself stays `EntityId.dead` — the side-table entry carries
+    /// the target, resolved at load. No-op for a prefab cook (`!collect_crossrefs`):
+    /// a prefab's Entity slots stay `dead` and emit no entry.
+    fn recordCrossRefPending(self: *Builder, source_uuid_idx: u32, component_id: ComponentId, field_offset: u16, value_node: NodeId, diag_out: ?*[]const u8) CookError!void {
+        if (!self.collect_crossrefs) return;
+        if (self.ast.exprKind(value_node) != .string_lit)
+            return fail(diag_out, error.TypeMismatch, "an Entity field value must be the target entity's name (a string literal)");
+        try self.pendings.append(self.gpa, .{
+            .source_uuid_idx = source_uuid_idx,
+            .component_id = component_id,
+            .field_offset = field_offset,
+            .target_name = self.ast.strings.slice(self.ast.exprData(value_node)),
+        });
+    }
+
+    /// Build the neutral model from a `prefab` construct (the M1.0.6 E2 twin of
+    /// `build`). Standalone prefabs cook their entities directly; an `of` variant
+    /// inherits the base prefab's flattened components (read from its cooked
+    /// `.prefab.bin` via the accessor) then applies per-entity overrides. A prefab
+    /// body is `{ entity_decl }` only — no `resources`/`instance` (§15 l.1624).
+    fn buildPrefab(self: *Builder, pd: ast_mod.PrefabDecl, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError!format.CookModel {
+        // `requires`/`on_attach`/`on_detach` are valid only with `extends` (§30.5).
+        if (pd.relation != .extends and (pd.requires_len != 0 or pd.has_on_attach or pd.has_on_detach))
+            return fail(diag_out, error.PrefabHookNotAllowed, "`requires`/`on_attach`/`on_detach` are valid only on an `extends` prefab");
+
+        const prefab_entities = self.ast.scene_entities.items[pd.entities_start .. pd.entities_start + pd.entities_len];
+
+        var entities: std.ArrayListUnmanaged(EntityBuild) = .empty;
+        defer entities.deinit(self.gpa);
+
+        if (pd.relation == .of) {
+            const base_name = self.ast.strings.slice(pd.relation_target);
+            const resolver = base_resolver orelse return fail(diag_out, error.BasePrefabMissing, "`of` variant cooked without a base-prefab resolver");
+            const base_bytes = resolver.resolve(base_name) orelse return fail(diag_out, error.BasePrefabMissing, "`of` variant references a base prefab the resolver does not know");
+            var acc = accessor.Accessor.open(base_bytes) catch return fail(diag_out, error.BasePrefabCorrupt, "base prefab .prefab.bin failed to open (magic/version)");
+            if (!acc.verifyHash()) return fail(diag_out, error.BasePrefabCorrupt, "base prefab .prefab.bin content hash mismatch");
+            try self.reconstructBase(acc, &entities, diag_out);
+            try self.mergeVariantEntities(prefab_entities, &entities, diag_out);
+        } else {
+            // Standalone OR extends: the prefab's `entity { components }` block(s)
+            // cook directly. For an extension, those are the components added on
+            // activation; its hooks + `requires` are handled below.
+            for (prefab_entities) |e| {
+                const eb = try self.buildEntity(e, diag_out);
+                try entities.append(self.gpa, eb);
+            }
+        }
+
+        // Resolve parent names → uuid indices (same invariant as the scene path).
+        for (entities.items) |*eb| {
+            if (eb.parent_name.len != 0 and self.name_to_uuid_idx.get(eb.parent_name) == null)
+                return fail(diag_out, error.ParentNotFound, "entity parent name does not match any entity in the prefab");
+        }
+
+        const archetypes = try self.groupArchetypes(entities.items);
+        const content_version = try self.versionFromNode(pd.version, diag_out);
+        const hooks = if (pd.relation == .extends) try self.buildExtendsHooks(pd, base_resolver, diag_out) else &[_]format.HookSet{};
+
+        return .{
+            .strings = try self.a().dupe([]const u8, self.strings.items),
+            .uuids = try self.a().dupe([16]u8, self.uuids.items),
+            .resources = &.{},
+            .archetypes = archetypes,
+            .content_version = content_version,
+            .hooks = hooks,
+            .arena = self.arena,
+        };
+    }
+
+    /// Cook an `extends` prefab's hooks (M1.0.6 E5): validate `requires` against
+    /// the base `X` (each required component must be present in `X.prefab.bin`),
+    /// then render `on_attach`/`on_detach` to canonical Etch **text** (interned
+    /// into the model strings; `null` if the hook is absent). Returns a one-element
+    /// `HookSet` slice (`hook_count == 1` for an `extends` `.prefab.bin`).
+    fn buildExtendsHooks(self: *Builder, pd: ast_mod.PrefabDecl, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError![]format.HookSet {
+        try self.validateRequires(pd, base_resolver, diag_out);
+        const hooks = try self.a().alloc(format.HookSet, 1);
+        hooks[0] = .{
+            .on_attach = if (pd.has_on_attach) try self.renderHook(pd.on_attach_start, pd.on_attach_len, diag_out) else null,
+            .on_detach = if (pd.has_on_detach) try self.renderHook(pd.on_detach_start, pd.on_detach_len, diag_out) else null,
+        };
+        return hooks;
+    }
+
+    /// Render a hook statement-run to canonical Etch text and intern it into the
+    /// model strings, returning its index. The loader (E6) re-parses this text.
+    fn renderHook(self: *Builder, body_start: u32, body_len: u32, diag_out: ?*[]const u8) CookError!u32 {
+        const text = descriptor.renderStmtRunAlloc(self.gpa, self.ast, body_start, body_len) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return fail(diag_out, error.HookRenderFailed, "extension hook body could not be rendered to text"),
+        };
+        defer self.gpa.free(text);
+        return self.internString(text);
+    }
+
+    /// Validate an `extends` prefab's `requires C1, C2, …`: each required component
+    /// must be declared by the base `X` (`X.prefab.bin`, read via the resolver).
+    /// `error.RequiresNotSatisfied` otherwise (`etch-grammar.md` §15 l.1634).
+    fn validateRequires(self: *Builder, pd: ast_mod.PrefabDecl, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError!void {
+        if (pd.requires_len == 0) return;
+        const base_name = self.ast.strings.slice(pd.relation_target);
+        const resolver = base_resolver orelse return fail(diag_out, error.BasePrefabMissing, "`extends … requires` needs a base-prefab resolver to validate against X");
+        const base_bytes = resolver.resolve(base_name) orelse return fail(diag_out, error.BasePrefabMissing, "`extends` references a base prefab the resolver does not know");
+        var acc = accessor.Accessor.open(base_bytes) catch return fail(diag_out, error.BasePrefabCorrupt, "base prefab .prefab.bin failed to open (magic/version)");
+        if (!acc.verifyHash()) return fail(diag_out, error.BasePrefabCorrupt, "base prefab .prefab.bin content hash mismatch");
+        var ri: u32 = 0;
+        while (ri < pd.requires_len) : (ri += 1) {
+            const req = self.ast.strings.slice(self.ast.prefab_requires.items[pd.requires_start + ri]);
+            if (!baseHasComponent(acc, req)) return fail(diag_out, error.RequiresNotSatisfied, "`extends … requires` a component the base prefab does not declare");
+        }
+    }
+
+    /// Reconstruct the base prefab's flattened entities from its cooked
+    /// `.prefab.bin` (read via the accessor) as `EntityBuild`s, interning their
+    /// names/uuids into the variant's model tables. Each on-disk schema **name**
+    /// maps to the variant registry's `ComponentId` (`idOf`) and the column bytes
+    /// copy verbatim — the variant inherits all of the base's components. Per
+    /// entity, the column order is re-sorted to the variant registry's id order
+    /// (the base file is sorted by the *base* registry's ids, which may differ).
+    fn reconstructBase(self: *Builder, acc: accessor.Accessor, out: *std.ArrayListUnmanaged(EntityBuild), diag_out: ?*[]const u8) CookError!void {
+        // Pass 1 — intern every base entity's name+uuid first: a parent ordinal
+        // may point at an entity that lives in a later archetype block.
+        var uuid_to_name_idx: std.AutoHashMapUnmanaged([16]u8, u32) = .empty;
+        defer uuid_to_name_idx.deinit(self.gpa);
+        var ai: u32 = 0;
+        while (ai < acc.archetypeCount()) : (ai += 1) {
+            const arch = acc.archetype(ai);
+            var slot: usize = 0;
+            while (slot < arch.entity_count) : (slot += 1) {
+                const name_idx = try self.internString(arch.entityName(slot));
+                const uuid_bytes = arch.entityUuid(slot).*;
+                const uuid_idx = try self.internUuid(uuid_bytes);
+                try self.name_to_uuid_idx.put(self.gpa, self.strings.items[name_idx], uuid_idx);
+                try uuid_to_name_idx.put(self.gpa, uuid_bytes, name_idx);
+            }
+        }
+        // Pass 2 — one EntityBuild per base entity (components + parent name).
+        ai = 0;
+        while (ai < acc.archetypeCount()) : (ai += 1) {
+            const arch = acc.archetype(ai);
+            // Map each column's on-disk schema → variant registry id + validate.
+            const ids0 = try self.a().alloc(ComponentId, arch.component_count);
+            var c: usize = 0;
+            while (c < arch.component_count) : (c += 1) {
+                const sch = acc.schema(arch.schemaIndex(c));
+                const id = self.registry.idOf(sch.name) orelse return fail(diag_out, error.BaseSchemaMismatch, "base prefab uses a component the variant does not declare");
+                if (self.registry.componentSize(id) != sch.size) return fail(diag_out, error.BaseSchemaMismatch, "base prefab component size disagrees with the variant registry layout");
+                ids0[c] = id;
+            }
+            var slot: usize = 0;
+            while (slot < arch.entity_count) : (slot += 1) {
+                const ids = try self.a().dupe(ComponentId, ids0);
+                const blobs = try self.a().alloc([]u8, arch.component_count);
+                c = 0;
+                while (c < arch.component_count) : (c += 1) blobs[c] = try self.a().dupe(u8, arch.componentSlot(c, slot));
+                sortIdsBlobs(ids, blobs);
+
+                const name_idx = try self.internString(arch.entityName(slot));
+                const uuid_idx = try self.internUuid(arch.entityUuid(slot).*);
+                const parent_ord = arch.entityParent(slot);
+                const parent_name: []const u8 = if (parent_ord == format.no_parent) "" else blk: {
+                    const pidx = uuid_to_name_idx.get(acc.uuidAt(parent_ord).*) orelse return fail(diag_out, error.BaseSchemaMismatch, "base prefab parent ordinal does not resolve to an entity");
+                    break :blk self.strings.items[pidx];
+                };
+                try out.append(self.gpa, .{
+                    .name_idx = name_idx,
+                    .uuid_idx = uuid_idx,
+                    .parent_name = parent_name,
+                    .comp_ids = ids,
+                    .comp_blobs = blobs,
+                });
+            }
+        }
+    }
+
+    /// Apply each variant entity over the inherited base set: an entity whose name
+    /// matches a base entity field-merges/adds its components onto it (identity —
+    /// uuid/parent — stays the base's); an entity with a new name is appended as a
+    /// fresh entity (its `uuid:` required, like a standalone).
+    fn mergeVariantEntities(self: *Builder, variant_entities: []const ast_mod.SceneEntity, entities: *std.ArrayListUnmanaged(EntityBuild), diag_out: ?*[]const u8) CookError!void {
+        for (variant_entities) |ve| {
+            const vname = self.ast.strings.slice(ve.name);
+            if (self.findEntityIdxByName(entities.items, vname)) |idx| {
+                try self.applyVariantOverrides(&entities.items[idx], ve, diag_out);
+            } else {
+                try entities.append(self.gpa, try self.buildEntity(ve, diag_out));
+            }
+        }
+    }
+
+    fn findEntityIdxByName(self: *Builder, entities: []const EntityBuild, name: []const u8) ?usize {
+        for (entities, 0..) |eb, i| {
+            if (std.mem.eql(u8, self.strings.items[eb.name_idx], name)) return i;
+        }
+        return null;
+    }
+
+    /// Overlay a variant entity's component instances on an inherited base entity:
+    /// a re-declared component the base already has is field-merged (base bytes +
+    /// the variant's set fields); a component the base lacks is added (registry
+    /// default + the variant's fields). Identity (uuid/parent) stays the base's.
+    fn applyVariantOverrides(self: *Builder, eb: *EntityBuild, ve: ast_mod.SceneEntity, diag_out: ?*[]const u8) CookError!void {
+        const instances = self.ast.component_instances.items[ve.components_start .. ve.components_start + ve.components_len];
+        var ids: std.ArrayListUnmanaged(ComponentId) = .empty;
+        defer ids.deinit(self.gpa);
+        var blobs: std.ArrayListUnmanaged([]u8) = .empty;
+        defer blobs.deinit(self.gpa);
+        try ids.appendSlice(self.gpa, eb.comp_ids);
+        try blobs.appendSlice(self.gpa, eb.comp_blobs);
+
+        for (instances) |ci| {
+            const type_name = self.ast.strings.slice(ci.type_name);
+            const id = self.registry.idOf(type_name) orelse return fail(diag_out, error.UndeclaredType, "variant entity references an undeclared component type");
+            if (indexOfId(ids.items, id)) |ci_idx| {
+                // Prefab cook (`collect_crossrefs` false) → `source_uuid_idx` is
+                // unused (Entity slots stay `dead`, no pending recorded).
+                blobs.items[ci_idx] = try self.mergeComponentBlob(blobs.items[ci_idx], id, ci, eb.uuid_idx, diag_out);
+            } else {
+                try ids.append(self.gpa, id);
+                try blobs.append(self.gpa, try self.buildComponentBlob(id, ci, eb.uuid_idx, diag_out));
+            }
+        }
+
+        const new_ids = try self.a().dupe(ComponentId, ids.items);
+        const new_blobs = try self.a().dupe([]u8, blobs.items);
+        sortIdsBlobs(new_ids, new_blobs);
+        eb.comp_ids = new_ids;
+        eb.comp_blobs = new_blobs;
+    }
+
+    /// Copy `base_blob` and apply the variant instance's set fields over it (the
+    /// variant override form is `Component { field: value }`; the
+    /// `Component.field =` per-field form is scene-instance-only per the grammar).
+    /// Components are POD scalar, so every field is a scalar encode.
+    fn mergeComponentBlob(self: *Builder, base_blob: []const u8, id: ComponentId, ci: ast_mod.ComponentInstance, source_uuid_idx: u32, diag_out: ?*[]const u8) CookError![]u8 {
+        const size = self.registry.componentSize(id);
+        const blob = try self.a().alloc(u8, size);
+        @memcpy(blob, base_blob);
+        const fields = self.ast.struct_lit_fields.items[ci.fields_start .. ci.fields_start + ci.fields_len];
+        for (fields) |slf| {
+            if (slf.name == 0) return fail(diag_out, error.SpreadUnsupported, "`..spread` is not supported in a component instance");
+            const fname = self.ast.strings.slice(slf.name);
+            const fd = self.registry.findField(id, fname) orelse return fail(diag_out, error.UnknownField, "variant component instance sets a field the component does not declare");
+            if (fd.kind == .entity_) {
+                // Base slot is already `dead` (copied); record the reference. The
+                // `Component.field =` per-field form is scene-instance-only, so a
+                // variant body reaches Entity fields only via this `Comp { … }` form.
+                try self.recordCrossRefPending(source_uuid_idx, id, fd.offset, slf.value, diag_out);
+            } else {
+                try self.encodeScalar(blob, fd, slf.value, diag_out);
+            }
+        }
+        return blob;
     }
 
     /// Const-evaluate the scene's `version:` field to a `u16` (0 if absent). The
     /// authored content version is otherwise silently lost (it rides through to
     /// `SceneHeader.content_version`).
     fn sceneContentVersion(self: *Builder, scene_decl: ast_mod.SceneDecl, diag_out: ?*[]const u8) CookError!u16 {
-        if (scene_decl.version.isNone()) return 0;
-        const v = interp.evalConst(self.ast, scene_decl.version) catch return fail(diag_out, error.NonConstValue, "scene version must be a constant int");
+        return self.versionFromNode(scene_decl.version, diag_out);
+    }
+
+    /// Const-evaluate a `version:` expression node to a `u16` (0 if `.none`).
+    /// Shared by the scene cook and the prefab cook — the authored content
+    /// version rides through to `SceneHeader.content_version` unchanged.
+    fn versionFromNode(self: *Builder, version: NodeId, diag_out: ?*[]const u8) CookError!u16 {
+        if (version.isNone()) return 0;
+        const v = interp.evalConst(self.ast, version) catch return fail(diag_out, error.NonConstValue, "version must be a constant int");
         const x: i64 = switch (v) {
             .int_ => |n| n,
-            else => return fail(diag_out, error.NonConstValue, "scene version must be an int"),
+            else => return fail(diag_out, error.NonConstValue, "version must be an int"),
         };
-        return std.math.cast(u16, x) orelse return fail(diag_out, error.NonConstValue, "scene version out of u16 range");
+        return std.math.cast(u16, x) orelse return fail(diag_out, error.NonConstValue, "version out of u16 range");
     }
 
     fn buildEntity(self: *Builder, e: ast_mod.SceneEntity, diag_out: ?*[]const u8) CookError!EntityBuild {
@@ -315,7 +812,7 @@ const Builder = struct {
             const type_name = self.ast.strings.slice(ci.type_name);
             const id = self.registry.idOf(type_name) orelse return fail(diag_out, error.UndeclaredType, "entity references an undeclared component type");
             ids[k] = id;
-            blobs[k] = try self.buildComponentBlob(id, ci, diag_out);
+            blobs[k] = try self.buildComponentBlob(id, ci, uuid_idx, diag_out);
         }
         // Sort (ids, blobs) together by id ascending (insertion sort — component
         // counts per entity are tiny). `archetype.sortComponentIds` sorts ids
@@ -331,10 +828,111 @@ const Builder = struct {
         };
     }
 
+    /// Flatten an `instance of "P" "name" { … }` into one entity: inherit P's
+    /// single entity's components (from `P.prefab.bin` via the resolver), then
+    /// apply the instance body's overrides in declaration order — both forms
+    /// (`Comp { field: value }` field-merge and `Comp.field = value` per-field) and
+    /// added components. M1.0.6 instantiates only single-entity prefabs
+    /// (`MultiEntityInstanceUnsupported` otherwise). The instance supplies the
+    /// entity's name + uuid (the prefab's template uuid is discarded); instances
+    /// are roots (the grammar's `instance_decl` has no `parent:`).
+    fn buildInstanceEntity(self: *Builder, inst: ast_mod.SceneInstance, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError!EntityBuild {
+        // Resolve + open the prefab first (structural availability before the
+        // instance's own field-level validity).
+        const prefab_name = self.ast.strings.slice(inst.prefab_name);
+        const resolver = base_resolver orelse return fail(diag_out, error.BasePrefabMissing, "scene `instance of` cooked without a prefab resolver (no --prefab-dir?)");
+        const base_bytes = resolver.resolve(prefab_name) orelse return fail(diag_out, error.BasePrefabMissing, "`instance of` references a prefab the resolver does not know");
+        var acc = accessor.Accessor.open(base_bytes) catch return fail(diag_out, error.BasePrefabCorrupt, "instanced prefab .prefab.bin failed to open (magic/version)");
+        if (!acc.verifyHash()) return fail(diag_out, error.BasePrefabCorrupt, "instanced prefab .prefab.bin content hash mismatch");
+
+        // Identity next — cross-ref pendings recorded while applying the body need
+        // the source entity's uuid ordinal (the instance's, not the prefab's).
+        const name_idx = try self.internString(self.ast.strings.slice(inst.instance_name));
+        const uuid_idx = try self.internUuid(try self.parseEntityUuid(inst.uuid, diag_out));
+        try self.name_to_uuid_idx.put(self.gpa, self.strings.items[name_idx], uuid_idx);
+
+        // Inherit the prefab's single entity's components (variant-registry ids).
+        var ids: std.ArrayListUnmanaged(ComponentId) = .empty;
+        defer ids.deinit(self.gpa);
+        var blobs: std.ArrayListUnmanaged([]u8) = .empty;
+        defer blobs.deinit(self.gpa);
+        try self.flattenedPrefabComponents(acc, &ids, &blobs, diag_out);
+
+        // Apply the instance body's overrides in declaration order.
+        const members = self.ast.scene_instance_members.items[inst.members_start .. inst.members_start + inst.members_len];
+        for (members) |m| switch (m.kind) {
+            .component => {
+                const ci = self.ast.component_instances.items[m.index];
+                const id = self.registry.idOf(self.ast.strings.slice(ci.type_name)) orelse return fail(diag_out, error.UndeclaredType, "instance component references an undeclared component type");
+                if (indexOfId(ids.items, id)) |idx| {
+                    blobs.items[idx] = try self.mergeComponentBlob(blobs.items[idx], id, ci, uuid_idx, diag_out);
+                } else {
+                    try ids.append(self.gpa, id);
+                    try blobs.append(self.gpa, try self.buildComponentBlob(id, ci, uuid_idx, diag_out));
+                }
+            },
+            .field_override => {
+                const fo = self.ast.field_overrides.items[m.index];
+                const id = self.registry.idOf(self.ast.strings.slice(fo.type_name)) orelse return fail(diag_out, error.UndeclaredType, "instance field override references an undeclared component type");
+                const idx = indexOfId(ids.items, id) orelse return fail(diag_out, error.OverrideTargetMissing, "per-field override targets a component the instance does not carry");
+                const fname = self.ast.strings.slice(fo.field);
+                const fd = self.registry.findField(id, fname) orelse return fail(diag_out, error.UnknownField, "per-field override sets a field the component does not declare");
+                if (fd.kind == .entity_) {
+                    // `Targeting.target = "Boss"` on an inherited Entity field →
+                    // slot stays `dead`, record the reference (not `encodeScalar`).
+                    try self.recordCrossRefPending(uuid_idx, id, fd.offset, fo.value, diag_out);
+                } else {
+                    try self.encodeScalar(blobs.items[idx], fd, fo.value, diag_out);
+                }
+            },
+        };
+
+        const comp_ids = try self.a().dupe(ComponentId, ids.items);
+        const comp_blobs = try self.a().dupe([]u8, blobs.items);
+        sortIdsBlobs(comp_ids, comp_blobs);
+
+        return .{
+            .name_idx = name_idx,
+            .uuid_idx = uuid_idx,
+            .parent_name = "",
+            .comp_ids = comp_ids,
+            .comp_blobs = comp_blobs,
+        };
+    }
+
+    /// Extract a single-entity prefab's components from its `.prefab.bin`: each
+    /// on-disk schema name → the scene registry's `ComponentId` (`idOf`, size
+    /// validated), with the column bytes copied. Errors
+    /// `MultiEntityInstanceUnsupported` if the prefab holds ≠ 1 entity. Appends
+    /// into `ids`/`blobs` (unsorted; the caller sorts after applying overrides).
+    fn flattenedPrefabComponents(self: *Builder, acc: accessor.Accessor, ids: *std.ArrayListUnmanaged(ComponentId), blobs: *std.ArrayListUnmanaged([]u8), diag_out: ?*[]const u8) CookError!void {
+        var total: u32 = 0;
+        var ai: u32 = 0;
+        while (ai < acc.archetypeCount()) : (ai += 1) total += acc.archetype(ai).entity_count;
+        if (total != 1) return fail(diag_out, error.MultiEntityInstanceUnsupported, "instancing a multi-entity prefab is not supported in M1.0.6 (single-entity only)");
+
+        ai = 0;
+        while (ai < acc.archetypeCount()) : (ai += 1) {
+            const arch = acc.archetype(ai);
+            if (arch.entity_count == 0) continue;
+            var c: usize = 0;
+            while (c < arch.component_count) : (c += 1) {
+                const sch = acc.schema(arch.schemaIndex(c));
+                const id = self.registry.idOf(sch.name) orelse return fail(diag_out, error.BaseSchemaMismatch, "instanced prefab uses a component the scene does not declare");
+                if (self.registry.componentSize(id) != sch.size) return fail(diag_out, error.BaseSchemaMismatch, "instanced prefab component size disagrees with the scene registry layout");
+                try ids.append(self.gpa, id);
+                try blobs.append(self.gpa, try self.a().dupe(u8, arch.componentSlot(c, 0)));
+            }
+        }
+    }
+
     /// Build one component blob (`componentSize` bytes) from the type defaults
-    /// overridden by the instance's fields. Components are POD-strict, so every
-    /// field is a scalar — no `string_`/`enum_` slots to special-case here.
-    fn buildComponentBlob(self: *Builder, id: ComponentId, ci: ast_mod.ComponentInstance, diag_out: ?*[]const u8) CookError![]u8 {
+    /// overridden by the instance's fields. Scalar fields encode in place; an
+    /// `.entity_` field is NOT encoded — its slot keeps the default `EntityId.dead`
+    /// and the reference is recorded as a pending cross-ref (`source_uuid_idx` =
+    /// the owning entity's uuid ordinal). `string_`/`enum_` are resource-only, so
+    /// components never reach those kinds here.
+    fn buildComponentBlob(self: *Builder, id: ComponentId, ci: ast_mod.ComponentInstance, source_uuid_idx: u32, diag_out: ?*[]const u8) CookError![]u8 {
         const size = self.registry.componentSize(id);
         const blob = try self.a().alloc(u8, size);
         @memcpy(blob, self.registry.componentDefaultBytes(id));
@@ -344,7 +942,11 @@ const Builder = struct {
             if (slf.name == 0) return fail(diag_out, error.SpreadUnsupported, "`..spread` is not supported in a component instance");
             const fname = self.ast.strings.slice(slf.name);
             const fd = self.registry.findField(id, fname) orelse return fail(diag_out, error.UnknownField, "component instance sets a field the component does not declare");
-            try self.encodeScalar(blob, fd, slf.value, diag_out);
+            if (fd.kind == .entity_) {
+                try self.recordCrossRefPending(source_uuid_idx, id, fd.offset, slf.value, diag_out);
+            } else {
+                try self.encodeScalar(blob, fd, slf.value, diag_out);
+            }
         }
         return blob;
     }
@@ -565,6 +1167,22 @@ const Builder = struct {
         return parseUuid(self.ast.strings.slice(uuid_id)) orelse fail(diag_out, error.BadUuid, "entity uuid is not a valid canonical UUID");
     }
 };
+
+/// Whether the cooked base prefab `acc` declares a component named `name` (used
+/// by `extends … requires` validation — scans the on-disk Schema Registry).
+fn baseHasComponent(acc: accessor.Accessor, name: []const u8) bool {
+    var i: u32 = 0;
+    while (i < acc.schemaCount()) : (i += 1) {
+        if (std.mem.eql(u8, acc.schema(i).name, name)) return true;
+    }
+    return false;
+}
+
+/// Index of `id` in `ids`, or null. Linear (component counts per entity are tiny).
+fn indexOfId(ids: []const ComponentId, id: ComponentId) ?usize {
+    for (ids, 0..) |x, i| if (x == id) return i;
+    return null;
+}
 
 /// Insertion-sort `(ids, blobs)` jointly by `ids` ascending. Component counts
 /// per entity are tiny, so insertion sort is both simplest and fastest.

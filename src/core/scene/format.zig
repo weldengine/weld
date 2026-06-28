@@ -56,7 +56,14 @@ pub const magic = [4]u8{ 'W', 'S', 'C', 'N' };
 /// `.scene.bin` binary format version (the codec/layout version — bumped on any
 /// breaking layout change). Distinct from `content_version` (the authored
 /// scene's `version:` field, opaque to the codec).
-pub const format_version: u16 = 1;
+///
+/// **2** (M1.0.6): the reserved sections became real — the cross-references table
+/// and the `extensions_offset` region (Entity Extensions Table + Prefab ID Table
+/// + hooks) went from bare count-placeholders (`[0]`) to full structures. A break
+/// vs v1 (M1.0.4/M1.0.5): a v1 file fails `BadVersion` and must be re-cooked
+/// (`.scene.bin`/`.prefab.bin` are deterministic build artifacts, no prod files
+/// in Phase 1).
+pub const format_version: u16 = 2;
 
 /// `SceneHeader` size — the fixed 64-byte (cache-line) prefix every file opens
 /// with. All section offsets in the header are relative to the file start.
@@ -174,6 +181,39 @@ pub const SchemaEntry = extern struct {
     alignment: u16,
 };
 
+/// On-disk Cross-references Table entry (M1.0.6 D-B) — one per entity→entity
+/// `Entity` component field that references another entity of the same scene.
+/// 16 bytes, 4-aligned. All four fields are file-local ordinals/indices (never
+/// runtime ids): the loader resolves them against the UUID table + the schema
+/// remap. The bearing field's 8-byte slot is written `EntityId.dead` in its SoA
+/// column at cook; the loader patches it to the target's runtime handle.
+pub const CrossRefEntry = extern struct {
+    /// UUID-table ordinal of the entity bearing the field (the reference source).
+    source_uuid_ordinal: u32,
+    /// File-local Schema Registry index of the bearing component.
+    schema_index: u32,
+    /// Byte offset of the `Entity` field within the component slot.
+    field_offset: u32,
+    /// UUID-table ordinal of the referenced (target) entity.
+    target_uuid_ordinal: u32,
+
+    comptime {
+        std.debug.assert(@sizeOf(CrossRefEntry) == 16);
+        std.debug.assert(@alignOf(CrossRefEntry) == 4);
+    }
+
+    /// Read a `CrossRefEntry` little-endian from `bytes` at `off` (unaligned-safe,
+    /// the codec discipline — never `@ptrCast`). The accessor's `crossref(i)`.
+    pub fn readAt(bytes: []const u8, off: usize) CrossRefEntry {
+        return .{
+            .source_uuid_ordinal = std.mem.readInt(u32, bytes[off..][0..4], .little),
+            .schema_index = std.mem.readInt(u32, bytes[off + 4 ..][0..4], .little),
+            .field_offset = std.mem.readInt(u32, bytes[off + 8 ..][0..4], .little),
+            .target_uuid_ordinal = std.mem.readInt(u32, bytes[off + 12 ..][0..4], .little),
+        };
+    }
+};
+
 /// Byte offset (relative to the column region start `region_start`) of column
 /// `i` within an archetype block, given each column's `sizes`/`aligns` in column
 /// order and the block's `entity_count`. **Writer and accessor MUST call this**
@@ -260,6 +300,41 @@ pub const ArchetypeBlock = struct {
     entities: []EntityEntry,
 };
 
+/// One entity→entity cross-reference in the neutral cook model (M1.0.6 E4). The
+/// model carries it in terms of the cook's in-memory `component_id`; the **writer**
+/// converts `component_id` → file-local Schema Registry index when emitting the
+/// on-disk `CrossRefEntry` (the model never knows file-local schema indices).
+pub const CrossRef = struct {
+    /// `CookModel.uuids` ordinal of the source entity (bears the `Entity` field).
+    source_uuid: u32,
+    /// The bearing component's in-memory `ComponentId` (writer maps → schema index).
+    component_id: ComponentId,
+    /// Byte offset of the `Entity` field within the component slot.
+    field_offset: u32,
+    /// `CookModel.uuids` ordinal of the referenced (target) entity.
+    target_uuid: u32,
+};
+
+/// One entity's active extensions (M1.0.6 E5) in the neutral model — the
+/// `extensions:` clause of a scene entity/instance. `uuid` is a `CookModel.uuids`
+/// ordinal (the bearing entity); `prefab_ids` are indices into
+/// `CookModel.prefab_id_table` (the dedup'd extension-name table). On-disk these
+/// become the Entity Extensions Table entries @ `extensions_offset`.
+pub const ExtModelEntry = struct {
+    uuid: u32,
+    prefab_ids: []const u32,
+};
+
+/// An `extends` prefab's hooks (M1.0.6 E5) in the neutral model — `on_attach` /
+/// `on_detach` rendered as canonical Etch **text** (`CookModel.strings` indices,
+/// `null` = the hook is absent). On-disk these become the hooks sub-section's
+/// `{on_attach_ref, on_detach_ref}` (string-table offsets; `0` = absent). Only an
+/// `extends` `.prefab.bin` carries one (`hook_count ∈ {0,1}` in M1.0.6).
+pub const HookSet = struct {
+    on_attach: ?u32,
+    on_detach: ?u32,
+};
+
 /// The neutral, World-free model the cook produces. Owns every slice via an
 /// internal arena; `deinit` frees the lot. The E2 writer reads it to emit
 /// `.scene.bin`; the E1 cook test inspects it directly (no serialization).
@@ -270,6 +345,21 @@ pub const CookModel = struct {
     uuids: [][16]u8,
     resources: []ResourceEntry,
     archetypes: []ArchetypeBlock,
+    /// Entity→entity cross-references (M1.0.6 E4); empty for a scene with no
+    /// `Entity` field references and for every prefab. Serialized to the
+    /// Cross-references Table @ `crossrefs_offset`.
+    cross_refs: []const CrossRef = &.{},
+    /// Active-extension entries (M1.0.6 E5) — one per scene entity/instance with a
+    /// non-empty `extensions:` clause. Empty for a prefab and for an extension-free
+    /// scene. Serialized to the Entity Extensions Table @ `extensions_offset`.
+    ext_entries: []const ExtModelEntry = &.{},
+    /// Deduplicated extension-prefab names (M1.0.6 E5), as `CookModel.strings`
+    /// indices; `ExtModelEntry.prefab_ids` index this table. Serialized to the
+    /// Prefab ID Table (string-table offsets).
+    prefab_id_table: []const u32 = &.{},
+    /// `extends` prefab hooks (M1.0.6 E5) — `hook_count ∈ {0,1}`. Empty for a
+    /// scene and for `of`/standalone prefabs. Serialized to the hooks sub-section.
+    hooks: []const HookSet = &.{},
     /// The authored scene's `version:` field (0 if absent). Propagated to
     /// `SceneHeader.content_version` — opaque to the codec, for the game's own
     /// scene-versioning/migration.
@@ -301,7 +391,7 @@ test "CookModel arena round-trips an empty model" {
 
 test "format magic + version constants are stable" {
     try std.testing.expectEqualSlices(u8, "WSCN", &magic);
-    try std.testing.expectEqual(@as(u16, 1), format_version);
+    try std.testing.expectEqual(@as(u16, 2), format_version);
 }
 
 test "SceneHeader writeTo/read round-trips little-endian" {

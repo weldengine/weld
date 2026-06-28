@@ -21,6 +21,11 @@
 
 const std = @import("std");
 
+/// `EntityId` (`packed struct(u64)`) — the storage type of a `.entity_` field
+/// (M1.0.6 E4). Imported only for `FieldKind.fromZigType`; `entity.zig` imports
+/// nothing of `registry.zig`, so this is acyclic.
+const EntityId = @import("entity.zig").EntityId;
+
 /// Stable identifier assigned at registration. The first registered
 /// component gets `ComponentId(0)`; subsequent registrations get the next
 /// integer. Stability across runs is *not* guaranteed (it would require an
@@ -55,6 +60,15 @@ pub const FieldKind = enum {
     /// `FieldDesc.enum_type_name_id` so the Etch bridge can rebuild a typed
     /// `enum_value{ type_name, variant }` on read.
     enum_,
+    /// An `Entity` field slot: an `EntityId` (`packed struct(u64)`, 8 bytes,
+    /// 8-aligned). POD — no heap, no teardown — so the component SoA/POD invariant
+    /// (`engine-spec.md` §4) is untouched. **Component-only by construction**
+    /// (M1.0.6 D-A): the exact mirror of `.string_`/`.enum_` (resource-only) —
+    /// `fieldKindFromTypeName` emits `.entity_` only for the `.component` origin.
+    /// An unassigned / dangling slot holds `EntityId.dead` (all-ones); at scene
+    /// cook the slot is written `dead` and an entity→entity reference is carried by
+    /// the Cross-references Table, resolved to the target's handle at load.
+    entity_,
 
     pub fn sizeBytes(self: FieldKind) usize {
         return switch (self) {
@@ -69,6 +83,7 @@ pub const FieldKind = enum {
             // `@sizeOf(persistent.StringSlot)` (asserted in `ecs_bridge.zig`).
             .string_ => 16,
             .enum_ => @sizeOf(u32), // declaration-order discriminant
+            .entity_ => @sizeOf(EntityId), // 8 (packed u64)
         };
     }
 
@@ -83,6 +98,7 @@ pub const FieldKind = enum {
             .f64_ => @alignOf(f64),
             .string_ => 8,
             .enum_ => @alignOf(u32),
+            .entity_ => @alignOf(EntityId), // 8
         };
     }
 
@@ -94,6 +110,7 @@ pub const FieldKind = enum {
             i32 => .i32_,
             u32 => .u32_,
             f32 => .f32_,
+            EntityId => .entity_,
             else => @compileError("unsupported Zig type for FieldKind: " ++ @typeName(T)),
         };
     }

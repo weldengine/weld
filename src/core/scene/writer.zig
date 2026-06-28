@@ -87,9 +87,9 @@ const Writer = struct {
         hdr.archetypes_offset = try self.sectionOffset();
         try self.writeArchetypes();
         hdr.extensions_offset = try self.sectionOffset();
-        try self.appendU32(0); // reserved — empty (M1.0.6)
+        try self.writeExtensionsRegion();
         hdr.crossrefs_offset = try self.sectionOffset();
-        try self.appendU32(0); // reserved — empty (M1.0.6)
+        try self.writeCrossRefs();
 
         hdr.hash = std.hash.XxHash64.hash(0, self.body.items);
 
@@ -142,6 +142,9 @@ const Writer = struct {
             for (arch.component_ids) |id| try self.noteSchema(id);
         }
         for (self.model.resources) |res| try self.noteSchema(res.schema_id);
+        // The bearing component of every cross-ref is already on an entity (hence
+        // in an archetype), but note it explicitly so `id_to_index` is total.
+        for (self.model.cross_refs) |cr| try self.noteSchema(cr.component_id);
         // Deterministic order: ascending ComponentId.
         std.mem.sort(ComponentId, self.schema_ids.items, {}, comptime std.sort.asc(ComponentId));
         for (self.schema_ids.items, 0..) |id, idx| try self.id_to_index.put(self.gpa, id, @intCast(idx));
@@ -223,6 +226,45 @@ const Writer = struct {
                 std.debug.assert(arch.columns[c].len == @as(usize, self.registry.componentSize(id)) * n);
                 try self.appendBytes(arch.columns[c]);
             }
+        }
+    }
+
+    /// Cross-references Table @ `crossrefs_offset`: `count: u32` then `count`
+    /// `CrossRefEntry` (16 B). The model carries `component_id`; here it is
+    /// converted to the file-local Schema Registry index (`id_to_index`) — the
+    /// on-disk entry never stores a runtime `ComponentId`.
+    /// Entity Extensions region @ `extensions_offset` (M1.0.6 E5, SHAPE A) — three
+    /// self-delimiting sub-tables: the Entity Extensions Table (per-entity active
+    /// extensions), the Prefab ID Table (dedup'd extension names → string-table
+    /// offsets), and the hooks (`extends` prefab `on_attach`/`on_detach` text refs;
+    /// `0` = absent — safe because a prefab's entity name is interned before its
+    /// hooks, so no hook text lands at string-table offset 0).
+    fn writeExtensionsRegion(self: *Writer) WriteError!void {
+        // Entity Extensions Table.
+        try self.appendU32(try u32From(self.model.ext_entries.len));
+        for (self.model.ext_entries) |e| {
+            try self.appendU32(e.uuid);
+            try self.appendU32(try u32From(e.prefab_ids.len));
+            for (e.prefab_ids) |pid| try self.appendU32(pid);
+        }
+        // Prefab ID Table (dedup'd extension names as string-table offsets).
+        try self.appendU32(try u32From(self.model.prefab_id_table.len));
+        for (self.model.prefab_id_table) |str_idx| try self.appendU32(self.model_str_ref[str_idx]);
+        // Hooks (`hook_count ∈ {0,1}`; refs are string-table offsets, 0 = absent).
+        try self.appendU32(try u32From(self.model.hooks.len));
+        for (self.model.hooks) |h| {
+            try self.appendU32(if (h.on_attach) |idx| self.model_str_ref[idx] else 0);
+            try self.appendU32(if (h.on_detach) |idx| self.model_str_ref[idx] else 0);
+        }
+    }
+
+    fn writeCrossRefs(self: *Writer) WriteError!void {
+        try self.appendU32(try u32From(self.model.cross_refs.len));
+        for (self.model.cross_refs) |cr| {
+            try self.appendU32(cr.source_uuid);
+            try self.appendU32(self.id_to_index.get(cr.component_id).?);
+            try self.appendU32(cr.field_offset);
+            try self.appendU32(cr.target_uuid);
         }
     }
 };

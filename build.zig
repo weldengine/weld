@@ -430,6 +430,24 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/scene/cook_roundtrip_test.zig", .scene = true },
         // M1.0.4 / E3 — scene cook negative cases (typed errors, no panic).
         .{ .path = "tests/scene/cook_errors_test.zig", .scene = true },
+        // M1.0.6 / E2 — prefab cook → `.prefab.bin`: standalone + `of` variant
+        // (base inherited from its cooked `.prefab.bin`, field-merge/add overrides),
+        // re-cook determinism, and the rejected forms (`extends`, hooks on `of`).
+        .{ .path = "tests/scene/prefab_cook_test.zig", .scene = true, .dedicated_step = "test-prefab-cook" },
+        // M1.0.6 / E3 — `instance of` flattening at scene cook: override-free
+        // instance == hand-authored equivalent (same archetype + bytes), both
+        // override forms, N instances cook→load→ECS, single-entity boundary.
+        .{ .path = "tests/scene/prefab_flatten_test.zig", .scene = true, .dedicated_step = "test-prefab-flatten" },
+        // M1.0.6 / E4 — entity→entity cross-references: cook writes dead + a
+        // side-table entry (by-name, two-phase), loader patches the slot to the
+        // target handle; unset = dead; absent target = UnresolvedCrossRef at cook.
+        .{ .path = "tests/scene/crossref_test.zig", .scene = true, .dedicated_step = "test-crossref" },
+        // M1.0.6 / E5 — `extensions:` clause parse + AST + descriptors. The
+        // cook/binary + load portions land once the hooks-section shape unblocks.
+        .{ .path = "tests/scene/extensions_test.zig", .scene = true, .dedicated_step = "test-extensions" },
+        // M1.0.6 / E3+E4+E6 — capstone: prefab instances + per-field override +
+        // cross-ref + active extension in one scene, cook → load → ECS.
+        .{ .path = "tests/scene/prefab_integration_test.zig", .scene = true, .dedicated_step = "test-prefab-integration" },
         // M1.0.5 / E2 — runtime loader `.scene.bin` → ECS: instantiate every
         // entity (component bytes verbatim), two-phase `on_spawned` (fires once
         // per entity, after all entities exist). `weld_core` only (no `.scene`

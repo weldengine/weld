@@ -1438,10 +1438,16 @@ fn freeComponentInstances(gpa: std.mem.Allocator, cis: []const types.ComponentIn
     gpa.free(cis);
 }
 
+fn freeStrList(gpa: std.mem.Allocator, list: []const []const u8) void {
+    for (list) |s| gpa.free(s);
+    gpa.free(list);
+}
+
 fn freeSceneEntityInner(gpa: std.mem.Allocator, e: types.SceneEntityDesc) void {
     gpa.free(e.name);
     gpa.free(e.uuid);
     gpa.free(e.parent);
+    freeStrList(gpa, e.extensions);
     freeComponentInstances(gpa, e.components);
 }
 
@@ -1454,6 +1460,7 @@ fn freeSceneInstanceInner(gpa: std.mem.Allocator, inst: types.SceneInstanceDesc)
     gpa.free(inst.prefab);
     gpa.free(inst.name);
     gpa.free(inst.uuid);
+    freeStrList(gpa, inst.extensions);
     freeComponentInstances(gpa, inst.components);
     for (inst.overrides) |o| {
         gpa.free(o.type_name);
@@ -1531,6 +1538,20 @@ fn buildComponentInstanceRun(gpa: std.mem.Allocator, arena: *const AstArena, sta
     return try list.toOwnedSlice(gpa);
 }
 
+/// Build the `extensions:` clause names (M1.0.6 E5) as an owned `[]const []const u8`.
+fn buildExtensionsRun(gpa: std.mem.Allocator, arena: *const AstArena, start: u32, len: u32) BuildError![]const []const u8 {
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (list.items) |s| gpa.free(s);
+        list.deinit(gpa);
+    }
+    var i: u32 = 0;
+    while (i < len) : (i += 1) {
+        try list.append(gpa, try gpa.dupe(u8, arena.strings.slice(arena.scene_extensions.items[start + i])));
+    }
+    return try list.toOwnedSlice(gpa);
+}
+
 fn buildSceneEntity(gpa: std.mem.Allocator, arena: *const AstArena, e: ast_mod.SceneEntity) BuildError!types.SceneEntityDesc {
     const name = try gpa.dupe(u8, arena.strings.slice(e.name));
     errdefer gpa.free(name);
@@ -1538,8 +1559,10 @@ fn buildSceneEntity(gpa: std.mem.Allocator, arena: *const AstArena, e: ast_mod.S
     errdefer gpa.free(uuid);
     const parent = if (e.parent == 0) try gpa.dupe(u8, "") else try gpa.dupe(u8, arena.strings.slice(e.parent));
     errdefer gpa.free(parent);
+    const extensions = try buildExtensionsRun(gpa, arena, e.extensions_start, e.extensions_len);
+    errdefer freeStrList(gpa, extensions);
     const components = try buildComponentInstanceRun(gpa, arena, e.components_start, e.components_len);
-    return .{ .name = name, .uuid = uuid, .parent = parent, .components = components };
+    return .{ .name = name, .uuid = uuid, .parent = parent, .extensions = extensions, .components = components };
 }
 
 fn buildSceneEntityRun(gpa: std.mem.Allocator, arena: *const AstArena, start: u32, len: u32) BuildError![]types.SceneEntityDesc {
@@ -1562,6 +1585,8 @@ fn buildSceneInstance(gpa: std.mem.Allocator, arena: *const AstArena, inst: ast_
     errdefer gpa.free(name);
     const uuid = if (inst.uuid == 0) try gpa.dupe(u8, "") else try gpa.dupe(u8, arena.strings.slice(inst.uuid));
     errdefer gpa.free(uuid);
+    const extensions = try buildExtensionsRun(gpa, arena, inst.extensions_start, inst.extensions_len);
+    errdefer freeStrList(gpa, extensions);
     var comps: std.ArrayListUnmanaged(types.ComponentInstanceDesc) = .empty;
     errdefer {
         for (comps.items) |ci| {
@@ -1596,7 +1621,7 @@ fn buildSceneInstance(gpa: std.mem.Allocator, arena: *const AstArena, inst: ast_
             },
         }
     }
-    return .{ .prefab = prefab, .name = name, .uuid = uuid, .components = try comps.toOwnedSlice(gpa), .overrides = try overs.toOwnedSlice(gpa) };
+    return .{ .prefab = prefab, .name = name, .uuid = uuid, .extensions = extensions, .components = try comps.toOwnedSlice(gpa), .overrides = try overs.toOwnedSlice(gpa) };
 }
 
 /// Build a `scene` descriptor (M0.8 E7 Level C): version, metadata, resources,

@@ -305,6 +305,15 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
         // delegating here, and components never carry `.enum_` (validator-gated).
         // Proven invariant: this arm is never reached.
         .enum_ => unreachable,
+        // Entity field (M1.0.6 E4): decode the 8-byte `EntityId` (`value.zig`'s
+        // `EntityId` is a `u64` that shares the bit pattern of core `EntityId`,
+        // packed `struct(u64)`; `invalid_entity`/`dead` == all-ones). The runtime
+        // interp read path returns it as `Value.entity_id`.
+        .entity_ => blk: {
+            var v: value_mod.EntityId = 0;
+            @memcpy(std.mem.asBytes(&v), bytes[0..@sizeOf(value_mod.EntityId)]);
+            break :blk .{ .entity_id = v };
+        },
     };
 }
 
@@ -376,6 +385,17 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) BridgeError!voi
                 else => return error.TypeMismatch,
             };
             @memcpy(bytes[0..@sizeOf(u32)], std.mem.asBytes(&disc));
+        },
+        // Entity field (M1.0.6 E4): store the 8-byte `EntityId` (u64 bit pattern).
+        // The interp runtime write path (e.g. `entity.get_mut(Comp).ref = other`)
+        // routes here; the scene cook does NOT (it writes `dead` + a cross-ref
+        // side entry, never an immediate value).
+        .entity_ => {
+            const x: value_mod.EntityId = switch (v) {
+                .entity_id => |e| e,
+                else => return error.TypeMismatch,
+            };
+            @memcpy(bytes[0..@sizeOf(value_mod.EntityId)], std.mem.asBytes(&x));
         },
     }
 }
