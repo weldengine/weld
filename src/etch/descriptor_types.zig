@@ -562,19 +562,25 @@ pub const FieldOverrideDesc = struct {
     value: []const u8,
 };
 
-/// One scene/prefab `entity "Name" { [uuid] [parent] component* }`.
+/// One scene/prefab `entity "Name" { [uuid] [parent] [extensions:] component* }`.
 pub const SceneEntityDesc = struct {
     name: []const u8,
     uuid: []const u8, // "" if absent
     parent: []const u8, // "" if absent
+    /// Active-extension prefab names (M1.0.6 E5 `extensions:` clause), by name.
+    /// Empty if the clause is absent.
+    extensions: []const []const u8,
     components: []const ComponentInstanceDesc,
 };
 
-/// One scene `instance of "Type" "Name" { [uuid] (component | override)* }`.
+/// One scene `instance of "Type" "Name" { [uuid] [extensions:] (component | override)* }`.
 pub const SceneInstanceDesc = struct {
     prefab: []const u8,
     name: []const u8,
     uuid: []const u8, // "" if absent
+    /// Active-extension prefab names (M1.0.6 E5 `extensions:` clause), by name.
+    /// Empty if the clause is absent.
+    extensions: []const []const u8,
     components: []const ComponentInstanceDesc,
     overrides: []const FieldOverrideDesc,
 };

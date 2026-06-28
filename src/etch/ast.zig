@@ -1243,6 +1243,11 @@ pub const SceneEntity = struct {
     name: StringId, // STRING_LITERAL content
     uuid: StringId, // 0 if absent
     parent: StringId, // 0 if absent
+    /// `extensions: [...]` clause (M1.0.6 E5) — a `(start, len)` run of
+    /// `arena.scene_extensions` (active-extension prefab names, by name). Empty
+    /// (len 0) if the clause is absent.
+    extensions_start: u32,
+    extensions_len: u32,
     components_start: u32, // index into `arena.component_instances`
     components_len: u32,
     span: SourceSpan,
@@ -1256,6 +1261,11 @@ pub const SceneInstance = struct {
     prefab_name: StringId, // STRING_LITERAL after `of`
     instance_name: StringId, // STRING_LITERAL
     uuid: StringId, // 0 if absent
+    /// `extensions: [...]` clause (M1.0.6 E5) — a `(start, len)` run of
+    /// `arena.scene_extensions` (active-extension prefab names, by name). Empty
+    /// (len 0) if the clause is absent.
+    extensions_start: u32,
+    extensions_len: u32,
     members_start: u32, // index into `arena.scene_instance_members`
     members_len: u32,
     span: SourceSpan,
@@ -2324,6 +2334,10 @@ pub const AstArena = struct {
     scene_instance_members: std.ArrayListUnmanaged(InstanceMember) = .empty,
     component_instances: std.ArrayListUnmanaged(ComponentInstance) = .empty,
     field_overrides: std.ArrayListUnmanaged(FieldOverride) = .empty,
+    /// Active-extension name references (M1.0.6 E5) — the `extensions:` clause of
+    /// an `entity`/`instance`, by NAME (STRING_LITERAL `StringId`s, like `parent`).
+    /// `SceneEntity`/`SceneInstance` reference a `(start, len)` run here.
+    scene_extensions: std.ArrayListUnmanaged(StringId) = .empty,
     prefab_decls: std.ArrayListUnmanaged(PrefabDecl) = .empty,
     prefab_requires: std.ArrayListUnmanaged(StringId) = .empty,
     quest_decls: std.ArrayListUnmanaged(QuestDecl) = .empty,
@@ -2548,6 +2562,7 @@ pub const AstArena = struct {
         self.scene_instance_members.deinit(gpa);
         self.component_instances.deinit(gpa);
         self.field_overrides.deinit(gpa);
+        self.scene_extensions.deinit(gpa);
         self.prefab_decls.deinit(gpa);
         self.prefab_requires.deinit(gpa);
         self.rule_params.deinit(gpa);

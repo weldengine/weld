@@ -5318,6 +5318,16 @@ fn emitComponentInstanceEntries(w: *Writer, gpa: std.mem.Allocator, ast: *const 
     }
 }
 
+/// Emit the `extensions:` clause names (M1.0.6 E5) as `&[_][]const u8{…}` entries.
+fn emitExtensionEntries(w: *Writer, ast: *const AstArena, start: u32, len: u32) CodegenError!void {
+    var i: u32 = 0;
+    while (i < len) : (i += 1) {
+        try w.print("            ", .{});
+        try emitZigStringLiteral(w, ast.strings.slice(ast.scene_extensions.items[start + i]));
+        try w.line(",");
+    }
+}
+
 /// Emit one `SceneEntityDesc` literal. Mirrors `buildSceneEntity`.
 fn emitSceneEntity(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, e: ast_mod.SceneEntity) CodegenError!void {
     try w.print("        .{{ .name = ", .{});
@@ -5326,7 +5336,9 @@ fn emitSceneEntity(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, e: 
     try emitZigStringLiteral(w, if (e.uuid == 0) "" else ast.strings.slice(e.uuid));
     try w.print(", .parent = ", .{});
     try emitZigStringLiteral(w, if (e.parent == 0) "" else ast.strings.slice(e.parent));
-    try w.line(", .components = &[_]etch_descriptor.ComponentInstanceDesc{");
+    try w.line(", .extensions = &[_][]const u8{");
+    try emitExtensionEntries(w, ast, e.extensions_start, e.extensions_len);
+    try w.line("        }, .components = &[_]etch_descriptor.ComponentInstanceDesc{");
     try emitComponentInstanceEntries(w, gpa, ast, e.components_start, e.components_len);
     try w.line("        } },");
 }
@@ -5340,7 +5352,9 @@ fn emitSceneInstance(w: *Writer, gpa: std.mem.Allocator, ast: *const AstArena, i
     try emitZigStringLiteral(w, ast.strings.slice(inst.instance_name));
     try w.print(", .uuid = ", .{});
     try emitZigStringLiteral(w, if (inst.uuid == 0) "" else ast.strings.slice(inst.uuid));
-    try w.line(", .components = &[_]etch_descriptor.ComponentInstanceDesc{");
+    try w.line(", .extensions = &[_][]const u8{");
+    try emitExtensionEntries(w, ast, inst.extensions_start, inst.extensions_len);
+    try w.line("        }, .components = &[_]etch_descriptor.ComponentInstanceDesc{");
     var m: u32 = 0;
     while (m < inst.members_len) : (m += 1) {
         const mem = ast.scene_instance_members.items[inst.members_start + m];

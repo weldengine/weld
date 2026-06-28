@@ -442,6 +442,9 @@ pub fn build(b: *std.Build) void {
         // side-table entry (by-name, two-phase), loader patches the slot to the
         // target handle; unset = dead; absent target = UnresolvedCrossRef at cook.
         .{ .path = "tests/scene/crossref_test.zig", .scene = true, .dedicated_step = "test-crossref" },
+        // M1.0.6 / E5 — `extensions:` clause parse + AST + descriptors. The
+        // cook/binary + load portions land once the hooks-section shape unblocks.
+        .{ .path = "tests/scene/extensions_test.zig", .scene = true, .dedicated_step = "test-extensions" },
         // M1.0.5 / E2 — runtime loader `.scene.bin` → ECS: instantiate every
         // entity (component bytes verbatim), two-phase `on_spawned` (fires once
         // per entity, after all entities exist). `weld_core` only (no `.scene`
