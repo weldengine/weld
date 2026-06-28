@@ -134,6 +134,20 @@ pub const Accessor = struct {
         }
     };
 
+    // ── Cross-references Table (M1.0.6 E4) ──
+
+    /// Number of entity→entity cross-reference entries (`0` for a scene with no
+    /// `Entity` field references, and for every M1.0.4/M1.0.5 file).
+    pub fn crossrefsCount(self: Accessor) u32 {
+        return self.readU32(self.header.crossrefs_offset);
+    }
+
+    /// The `i`-th `CrossRefEntry` (16 B each, after the `u32` count prefix).
+    pub fn crossref(self: Accessor, i: u32) format.CrossRefEntry {
+        const off = self.header.crossrefs_offset + 4 + @as(usize, i) * 16;
+        return format.CrossRefEntry.readAt(self.bytes, off);
+    }
+
     // ── Archetypes ──
 
     pub fn archetypeCount(self: Accessor) u32 {

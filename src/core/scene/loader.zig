@@ -174,11 +174,10 @@ pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8) a
     const remap = try buildSchemaRemap(gpa, world, acc);
     defer gpa.free(remap);
 
-    // The cross-references + extensions tables are M1.0.6's; M1.0.4 writes them
-    // empty (a zero count prefix). Loading a file that populated them would mean
-    // a newer cook — assert the M1.0.5 contract.
+    // The extensions table is M1.0.6 E6's; until then a cook writes it empty (a
+    // zero count prefix). Loading a populated one would mean a newer cook — assert
+    // the contract. The cross-references table (M1.0.6 E4) IS read below.
     std.debug.assert(readU32At(acc, acc.header.extensions_offset) == 0);
-    std.debug.assert(readU32At(acc, acc.header.crossrefs_offset) == 0);
 
     var spawned: std.ArrayListUnmanaged(EntityId) = .empty;
     errdefer spawned.deinit(gpa);
@@ -191,6 +190,9 @@ pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8) a
     }
 
     try instantiate(world, gpa, acc, remap, &spawned, &uuid_to_entity);
+    // Cross-references after every entity exists (a reference can point forward),
+    // before resources + on_spawned so a rule sees fully-linked entities.
+    try resolveCrossRefs(world, acc, remap, uuid_to_entity);
     // Resources before phase 2 so an `on_spawned` rule can read scene resources.
     try loadResources(world, gpa, acc, remap, &res_strings);
     try dispatchSpawnLifecycle(world, gpa, spawned.items);
@@ -260,6 +262,35 @@ fn instantiate(
             const parent = block.entityParent(slot);
             if (parent != format.no_parent and parent >= ucount) return error.MalformedScene;
         }
+    }
+}
+
+/// Resolve the Cross-references Table (M1.0.6 E4): patch each cooked `Entity`
+/// field slot (written `EntityId.dead` at cook) to the referenced entity's
+/// runtime handle. Per entry: map source/target UUID ordinals → handles via
+/// `uuid_to_entity`, map the file-local schema index → runtime `ComponentId` via
+/// `remap`, then overwrite the 8-byte field at `field_offset` and flag the
+/// component changed. Bounds/identity are validated (`MalformedScene`) — the
+/// loader treats the byte image as untrusted input. Runs after `instantiate`
+/// (every entity exists) and before `loadResources`.
+fn resolveCrossRefs(world: *World, acc: Accessor, remap: []const ComponentId, uuid_to_entity: UuidMap) !void {
+    const ucount = uuidCount(acc);
+    const count = acc.crossrefsCount();
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const e = acc.crossref(i);
+        if (e.source_uuid_ordinal >= ucount or e.target_uuid_ordinal >= ucount) return error.MalformedScene;
+        if (e.schema_index >= remap.len) return error.MalformedScene;
+
+        const src = uuid_to_entity.get(acc.uuidAt(e.source_uuid_ordinal).*) orelse return error.MalformedScene;
+        const tgt = uuid_to_entity.get(acc.uuidAt(e.target_uuid_ordinal).*) orelse return error.MalformedScene;
+        const cid = remap[e.schema_index];
+
+        const slot = world.componentBytes(src, cid) orelse return error.MalformedScene;
+        const off = e.field_offset;
+        if (@as(usize, off) + @sizeOf(EntityId) > slot.len) return error.MalformedScene;
+        @memcpy(slot[off..][0..@sizeOf(EntityId)], std.mem.asBytes(&tgt));
+        world.markComponentChangedDyn(src, cid);
     }
 }
 

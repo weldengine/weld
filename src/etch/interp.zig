@@ -3448,6 +3448,16 @@ pub fn compileTypeDecl(
             }
             continue;
         }
+        if (fd.kind == .entity_) {
+            // Unassigned `Entity` field = `EntityId.dead` (all-ones), NOT the
+            // zeroed slot (which would decode as a live handle `{index:0, gen:0}`).
+            // `Entity` fields take no literal default; an assignment in a scene is
+            // an entity-name reference resolved at cook (the cross-reference pass),
+            // never a value encoded here. Component-only (validator/gate), so this
+            // is reached only for components.
+            @memset(slot, 0xFF);
+            continue;
+        }
         if (f.default_value.isNone()) continue;
         const v = evalConst(ast, f.default_value) catch continue;
         try bridge_mod.writeValueAsBytes(fd.kind, slot, v);
@@ -3497,6 +3507,12 @@ fn fieldKindFromTypeName(name: []const u8, reg_kind: RegKind) ?FieldKind {
     // field types are not builtin names, so they resolve in `compileTypeDecl`
     // against the AST enum slab (see `findEnumDecl`), not here.
     if (reg_kind == .resource and std.mem.eql(u8, name, "string")) return .string_;
+    // `Entity` is component-only (M1.0.6 D-A): the exact mirror of the `string`
+    // gate above, opposite origin. A `.entity_` field is a POD 8-byte slot; an
+    // unassigned/dangling value is `EntityId.dead`, and an entity→entity reference
+    // is resolved by the scene loader's cross-reference pass. Resource→entity refs
+    // are a future additive milestone, so this is gated out of resources.
+    if (reg_kind == .component and std.mem.eql(u8, name, "Entity")) return .entity_;
     return null;
 }
 

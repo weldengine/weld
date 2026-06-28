@@ -118,6 +118,9 @@ pub const CookError = error{
     /// instance does not carry (neither inherited from the prefab nor added by an
     /// earlier `Comp { … }` member of the same instance body).
     OverrideTargetMissing,
+    /// An `Entity` field references an entity name absent from the scene (M1.0.6
+    /// E4 — intra-scene only; cross-scene references are a future milestone).
+    UnresolvedCrossRef,
     OutOfMemory,
 };
 
@@ -250,6 +253,19 @@ const EntityBuild = struct {
     comp_blobs: [][]u8,
 };
 
+/// An unresolved entity→entity reference recorded during the scene build phase
+/// (M1.0.6 E4). The target is kept as a NAME (not yet resolved): a forward
+/// reference may name an entity declared later, so `name → uuid` resolution waits
+/// until `name_to_uuid_idx` is complete (the two-phase crossref pass). The source
+/// entity's `uuid` ordinal is already known (its identity was interned before its
+/// components were built).
+const CrossRefPending = struct {
+    source_uuid_idx: u32,
+    component_id: ComponentId,
+    field_offset: u32,
+    target_name: []const u8,
+};
+
 const Builder = struct {
     gpa: std.mem.Allocator,
     ast: *const AstArena,
@@ -266,6 +282,13 @@ const Builder = struct {
     // Model tables (arena-owned, become the CookModel slices).
     strings: std.ArrayListUnmanaged([]const u8) = .empty,
     uuids: std.ArrayListUnmanaged([16]u8) = .empty,
+
+    // Cross-references (M1.0.6 E4): collected only for a scene cook
+    // (`collect_crossrefs`), resolved name→uuid after all entities are built.
+    // A prefab cook leaves `collect_crossrefs` false — its Entity slots stay
+    // `dead` and emit no cross-ref entry.
+    collect_crossrefs: bool = false,
+    pendings: std.ArrayListUnmanaged(CrossRefPending) = .empty,
 
     fn init(gpa: std.mem.Allocator, ast: *const AstArena, registry: *Registry) Builder {
         return .{
@@ -289,6 +312,7 @@ const Builder = struct {
         self.name_to_uuid_idx.deinit(self.gpa);
         self.strings.deinit(self.gpa);
         self.uuids.deinit(self.gpa);
+        self.pendings.deinit(self.gpa);
     }
 
     fn a(self: *Builder) std.mem.Allocator {
@@ -371,10 +395,14 @@ const Builder = struct {
     /// the prefab's components are inherited from `P.prefab.bin` (via the resolver)
     /// and the instance's overrides applied (M1.0.6 E3).
     fn build(self: *Builder, scene_decl: ast_mod.SceneDecl, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError!format.CookModel {
+        // Scene cook collects entity→entity cross-references (an `Entity` field's
+        // slot is left `dead` and a pending reference recorded); a prefab cook does
+        // not (it leaves `collect_crossrefs` false).
+        self.collect_crossrefs = true;
         const children = self.ast.scene_children.items[scene_decl.children_start .. scene_decl.children_start + scene_decl.children_len];
 
-        // Per-entity build, accumulating the name→uuid-index map for parent
-        // resolution in a second pass.
+        // Per-entity build, accumulating the name→uuid-index map for parent +
+        // cross-reference resolution in a second pass.
         var entities: std.ArrayListUnmanaged(EntityBuild) = .empty;
         defer entities.deinit(self.gpa);
         for (children) |child| {
@@ -396,6 +424,7 @@ const Builder = struct {
         const archetypes = try self.groupArchetypes(entities.items);
         const resources = try self.buildResources(scene_decl, diag_out);
         const content_version = try self.sceneContentVersion(scene_decl, diag_out);
+        const cross_refs = try self.resolveCrossRefs(diag_out);
 
         return .{
             .strings = try self.a().dupe([]const u8, self.strings.items),
@@ -403,8 +432,46 @@ const Builder = struct {
             .resources = resources,
             .archetypes = archetypes,
             .content_version = content_version,
+            .cross_refs = cross_refs,
             .arena = self.arena,
         };
+    }
+
+    /// Phase 2 of the crossref pass: resolve every pending `target_name` against
+    /// the now-complete `name_to_uuid_idx` (a reference can name an entity declared
+    /// later in the scene), producing the model's `CrossRef` slice. A target that
+    /// is not an entity of the scene → `error.UnresolvedCrossRef` (intra-scene
+    /// only; cross-scene references are a future milestone).
+    fn resolveCrossRefs(self: *Builder, diag_out: ?*[]const u8) CookError![]format.CrossRef {
+        const out = try self.a().alloc(format.CrossRef, self.pendings.items.len);
+        for (self.pendings.items, 0..) |p, i| {
+            const target = self.name_to_uuid_idx.get(p.target_name) orelse
+                return fail(diag_out, error.UnresolvedCrossRef, "Entity field references an entity name absent from the scene");
+            out[i] = .{
+                .source_uuid = p.source_uuid_idx,
+                .component_id = p.component_id,
+                .field_offset = p.field_offset,
+                .target_uuid = target,
+            };
+        }
+        return out;
+    }
+
+    /// Record a pending entity→entity reference for a `.entity_` field set to an
+    /// entity-name string literal (the D-B by-name form; there is no `uuid "…"`
+    /// form). The slot itself stays `EntityId.dead` — the side-table entry carries
+    /// the target, resolved at load. No-op for a prefab cook (`!collect_crossrefs`):
+    /// a prefab's Entity slots stay `dead` and emit no entry.
+    fn recordCrossRefPending(self: *Builder, source_uuid_idx: u32, component_id: ComponentId, field_offset: u16, value_node: NodeId, diag_out: ?*[]const u8) CookError!void {
+        if (!self.collect_crossrefs) return;
+        if (self.ast.exprKind(value_node) != .string_lit)
+            return fail(diag_out, error.TypeMismatch, "an Entity field value must be the target entity's name (a string literal)");
+        try self.pendings.append(self.gpa, .{
+            .source_uuid_idx = source_uuid_idx,
+            .component_id = component_id,
+            .field_offset = field_offset,
+            .target_name = self.ast.strings.slice(self.ast.exprData(value_node)),
+        });
     }
 
     /// Build the neutral model from a `prefab` construct (the M1.0.6 E2 twin of
@@ -559,10 +626,12 @@ const Builder = struct {
             const type_name = self.ast.strings.slice(ci.type_name);
             const id = self.registry.idOf(type_name) orelse return fail(diag_out, error.UndeclaredType, "variant entity references an undeclared component type");
             if (indexOfId(ids.items, id)) |ci_idx| {
-                blobs.items[ci_idx] = try self.mergeComponentBlob(blobs.items[ci_idx], id, ci, diag_out);
+                // Prefab cook (`collect_crossrefs` false) → `source_uuid_idx` is
+                // unused (Entity slots stay `dead`, no pending recorded).
+                blobs.items[ci_idx] = try self.mergeComponentBlob(blobs.items[ci_idx], id, ci, eb.uuid_idx, diag_out);
             } else {
                 try ids.append(self.gpa, id);
-                try blobs.append(self.gpa, try self.buildComponentBlob(id, ci, diag_out));
+                try blobs.append(self.gpa, try self.buildComponentBlob(id, ci, eb.uuid_idx, diag_out));
             }
         }
 
@@ -577,7 +646,7 @@ const Builder = struct {
     /// variant override form is `Component { field: value }`; the
     /// `Component.field =` per-field form is scene-instance-only per the grammar).
     /// Components are POD scalar, so every field is a scalar encode.
-    fn mergeComponentBlob(self: *Builder, base_blob: []const u8, id: ComponentId, ci: ast_mod.ComponentInstance, diag_out: ?*[]const u8) CookError![]u8 {
+    fn mergeComponentBlob(self: *Builder, base_blob: []const u8, id: ComponentId, ci: ast_mod.ComponentInstance, source_uuid_idx: u32, diag_out: ?*[]const u8) CookError![]u8 {
         const size = self.registry.componentSize(id);
         const blob = try self.a().alloc(u8, size);
         @memcpy(blob, base_blob);
@@ -586,7 +655,14 @@ const Builder = struct {
             if (slf.name == 0) return fail(diag_out, error.SpreadUnsupported, "`..spread` is not supported in a component instance");
             const fname = self.ast.strings.slice(slf.name);
             const fd = self.registry.findField(id, fname) orelse return fail(diag_out, error.UnknownField, "variant component instance sets a field the component does not declare");
-            try self.encodeScalar(blob, fd, slf.value, diag_out);
+            if (fd.kind == .entity_) {
+                // Base slot is already `dead` (copied); record the reference. The
+                // `Component.field =` per-field form is scene-instance-only, so a
+                // variant body reaches Entity fields only via this `Comp { … }` form.
+                try self.recordCrossRefPending(source_uuid_idx, id, fd.offset, slf.value, diag_out);
+            } else {
+                try self.encodeScalar(blob, fd, slf.value, diag_out);
+            }
         }
         return blob;
     }
@@ -631,7 +707,7 @@ const Builder = struct {
             const type_name = self.ast.strings.slice(ci.type_name);
             const id = self.registry.idOf(type_name) orelse return fail(diag_out, error.UndeclaredType, "entity references an undeclared component type");
             ids[k] = id;
-            blobs[k] = try self.buildComponentBlob(id, ci, diag_out);
+            blobs[k] = try self.buildComponentBlob(id, ci, uuid_idx, diag_out);
         }
         // Sort (ids, blobs) together by id ascending (insertion sort — component
         // counts per entity are tiny). `archetype.sortComponentIds` sorts ids
@@ -656,11 +732,19 @@ const Builder = struct {
     /// entity's name + uuid (the prefab's template uuid is discarded); instances
     /// are roots (the grammar's `instance_decl` has no `parent:`).
     fn buildInstanceEntity(self: *Builder, inst: ast_mod.SceneInstance, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError!EntityBuild {
+        // Resolve + open the prefab first (structural availability before the
+        // instance's own field-level validity).
         const prefab_name = self.ast.strings.slice(inst.prefab_name);
         const resolver = base_resolver orelse return fail(diag_out, error.BasePrefabMissing, "scene `instance of` cooked without a prefab resolver (no --prefab-dir?)");
         const base_bytes = resolver.resolve(prefab_name) orelse return fail(diag_out, error.BasePrefabMissing, "`instance of` references a prefab the resolver does not know");
         var acc = accessor.Accessor.open(base_bytes) catch return fail(diag_out, error.BasePrefabCorrupt, "instanced prefab .prefab.bin failed to open (magic/version)");
         if (!acc.verifyHash()) return fail(diag_out, error.BasePrefabCorrupt, "instanced prefab .prefab.bin content hash mismatch");
+
+        // Identity next — cross-ref pendings recorded while applying the body need
+        // the source entity's uuid ordinal (the instance's, not the prefab's).
+        const name_idx = try self.internString(self.ast.strings.slice(inst.instance_name));
+        const uuid_idx = try self.internUuid(try self.parseEntityUuid(inst.uuid, diag_out));
+        try self.name_to_uuid_idx.put(self.gpa, self.strings.items[name_idx], uuid_idx);
 
         // Inherit the prefab's single entity's components (variant-registry ids).
         var ids: std.ArrayListUnmanaged(ComponentId) = .empty;
@@ -676,10 +760,10 @@ const Builder = struct {
                 const ci = self.ast.component_instances.items[m.index];
                 const id = self.registry.idOf(self.ast.strings.slice(ci.type_name)) orelse return fail(diag_out, error.UndeclaredType, "instance component references an undeclared component type");
                 if (indexOfId(ids.items, id)) |idx| {
-                    blobs.items[idx] = try self.mergeComponentBlob(blobs.items[idx], id, ci, diag_out);
+                    blobs.items[idx] = try self.mergeComponentBlob(blobs.items[idx], id, ci, uuid_idx, diag_out);
                 } else {
                     try ids.append(self.gpa, id);
-                    try blobs.append(self.gpa, try self.buildComponentBlob(id, ci, diag_out));
+                    try blobs.append(self.gpa, try self.buildComponentBlob(id, ci, uuid_idx, diag_out));
                 }
             },
             .field_override => {
@@ -688,17 +772,19 @@ const Builder = struct {
                 const idx = indexOfId(ids.items, id) orelse return fail(diag_out, error.OverrideTargetMissing, "per-field override targets a component the instance does not carry");
                 const fname = self.ast.strings.slice(fo.field);
                 const fd = self.registry.findField(id, fname) orelse return fail(diag_out, error.UnknownField, "per-field override sets a field the component does not declare");
-                try self.encodeScalar(blobs.items[idx], fd, fo.value, diag_out);
+                if (fd.kind == .entity_) {
+                    // `Targeting.target = "Boss"` on an inherited Entity field →
+                    // slot stays `dead`, record the reference (not `encodeScalar`).
+                    try self.recordCrossRefPending(uuid_idx, id, fd.offset, fo.value, diag_out);
+                } else {
+                    try self.encodeScalar(blobs.items[idx], fd, fo.value, diag_out);
+                }
             },
         };
 
         const comp_ids = try self.a().dupe(ComponentId, ids.items);
         const comp_blobs = try self.a().dupe([]u8, blobs.items);
         sortIdsBlobs(comp_ids, comp_blobs);
-
-        const name_idx = try self.internString(self.ast.strings.slice(inst.instance_name));
-        const uuid_idx = try self.internUuid(try self.parseEntityUuid(inst.uuid, diag_out));
-        try self.name_to_uuid_idx.put(self.gpa, self.strings.items[name_idx], uuid_idx);
 
         return .{
             .name_idx = name_idx,
@@ -736,9 +822,12 @@ const Builder = struct {
     }
 
     /// Build one component blob (`componentSize` bytes) from the type defaults
-    /// overridden by the instance's fields. Components are POD-strict, so every
-    /// field is a scalar — no `string_`/`enum_` slots to special-case here.
-    fn buildComponentBlob(self: *Builder, id: ComponentId, ci: ast_mod.ComponentInstance, diag_out: ?*[]const u8) CookError![]u8 {
+    /// overridden by the instance's fields. Scalar fields encode in place; an
+    /// `.entity_` field is NOT encoded — its slot keeps the default `EntityId.dead`
+    /// and the reference is recorded as a pending cross-ref (`source_uuid_idx` =
+    /// the owning entity's uuid ordinal). `string_`/`enum_` are resource-only, so
+    /// components never reach those kinds here.
+    fn buildComponentBlob(self: *Builder, id: ComponentId, ci: ast_mod.ComponentInstance, source_uuid_idx: u32, diag_out: ?*[]const u8) CookError![]u8 {
         const size = self.registry.componentSize(id);
         const blob = try self.a().alloc(u8, size);
         @memcpy(blob, self.registry.componentDefaultBytes(id));
@@ -748,7 +837,11 @@ const Builder = struct {
             if (slf.name == 0) return fail(diag_out, error.SpreadUnsupported, "`..spread` is not supported in a component instance");
             const fname = self.ast.strings.slice(slf.name);
             const fd = self.registry.findField(id, fname) orelse return fail(diag_out, error.UnknownField, "component instance sets a field the component does not declare");
-            try self.encodeScalar(blob, fd, slf.value, diag_out);
+            if (fd.kind == .entity_) {
+                try self.recordCrossRefPending(source_uuid_idx, id, fd.offset, slf.value, diag_out);
+            } else {
+                try self.encodeScalar(blob, fd, slf.value, diag_out);
+            }
         }
         return blob;
     }

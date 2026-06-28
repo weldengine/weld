@@ -174,6 +174,39 @@ pub const SchemaEntry = extern struct {
     alignment: u16,
 };
 
+/// On-disk Cross-references Table entry (M1.0.6 D-B) — one per entity→entity
+/// `Entity` component field that references another entity of the same scene.
+/// 16 bytes, 4-aligned. All four fields are file-local ordinals/indices (never
+/// runtime ids): the loader resolves them against the UUID table + the schema
+/// remap. The bearing field's 8-byte slot is written `EntityId.dead` in its SoA
+/// column at cook; the loader patches it to the target's runtime handle.
+pub const CrossRefEntry = extern struct {
+    /// UUID-table ordinal of the entity bearing the field (the reference source).
+    source_uuid_ordinal: u32,
+    /// File-local Schema Registry index of the bearing component.
+    schema_index: u32,
+    /// Byte offset of the `Entity` field within the component slot.
+    field_offset: u32,
+    /// UUID-table ordinal of the referenced (target) entity.
+    target_uuid_ordinal: u32,
+
+    comptime {
+        std.debug.assert(@sizeOf(CrossRefEntry) == 16);
+        std.debug.assert(@alignOf(CrossRefEntry) == 4);
+    }
+
+    /// Read a `CrossRefEntry` little-endian from `bytes` at `off` (unaligned-safe,
+    /// the codec discipline — never `@ptrCast`). The accessor's `crossref(i)`.
+    pub fn readAt(bytes: []const u8, off: usize) CrossRefEntry {
+        return .{
+            .source_uuid_ordinal = std.mem.readInt(u32, bytes[off..][0..4], .little),
+            .schema_index = std.mem.readInt(u32, bytes[off + 4 ..][0..4], .little),
+            .field_offset = std.mem.readInt(u32, bytes[off + 8 ..][0..4], .little),
+            .target_uuid_ordinal = std.mem.readInt(u32, bytes[off + 12 ..][0..4], .little),
+        };
+    }
+};
+
 /// Byte offset (relative to the column region start `region_start`) of column
 /// `i` within an archetype block, given each column's `sizes`/`aligns` in column
 /// order and the block's `entity_count`. **Writer and accessor MUST call this**
@@ -260,6 +293,21 @@ pub const ArchetypeBlock = struct {
     entities: []EntityEntry,
 };
 
+/// One entity→entity cross-reference in the neutral cook model (M1.0.6 E4). The
+/// model carries it in terms of the cook's in-memory `component_id`; the **writer**
+/// converts `component_id` → file-local Schema Registry index when emitting the
+/// on-disk `CrossRefEntry` (the model never knows file-local schema indices).
+pub const CrossRef = struct {
+    /// `CookModel.uuids` ordinal of the source entity (bears the `Entity` field).
+    source_uuid: u32,
+    /// The bearing component's in-memory `ComponentId` (writer maps → schema index).
+    component_id: ComponentId,
+    /// Byte offset of the `Entity` field within the component slot.
+    field_offset: u32,
+    /// `CookModel.uuids` ordinal of the referenced (target) entity.
+    target_uuid: u32,
+};
+
 /// The neutral, World-free model the cook produces. Owns every slice via an
 /// internal arena; `deinit` frees the lot. The E2 writer reads it to emit
 /// `.scene.bin`; the E1 cook test inspects it directly (no serialization).
@@ -270,6 +318,10 @@ pub const CookModel = struct {
     uuids: [][16]u8,
     resources: []ResourceEntry,
     archetypes: []ArchetypeBlock,
+    /// Entity→entity cross-references (M1.0.6 E4); empty for a scene with no
+    /// `Entity` field references and for every prefab. Serialized to the
+    /// Cross-references Table @ `crossrefs_offset`.
+    cross_refs: []const CrossRef = &.{},
     /// The authored scene's `version:` field (0 if absent). Propagated to
     /// `SceneHeader.content_version` — opaque to the codec, for the game's own
     /// scene-versioning/migration.
