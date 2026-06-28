@@ -59,7 +59,7 @@ test "resource string fields round-trip through the persistent heap" {
     const bytes = try writer.write(gpa, model, &world.registry);
     defer gpa.free(bytes);
 
-    var result = try loader.loadFromBytes(&world, gpa, bytes);
+    var result = try loader.loadFromBytes(&world, gpa, bytes, null);
     defer result.deinit(gpa);
 
     // Exactly one interned string block, owned by the result.

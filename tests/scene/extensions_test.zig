@@ -17,6 +17,8 @@ const descriptor = weld_etch.descriptor;
 const scene_cook = weld_etch.scene_cook;
 const scene = weld_core.scene;
 const Accessor = scene.accessor.Accessor;
+const World = weld_core.ecs.World;
+const EntityId = weld_core.ecs.EntityId;
 
 /// One-entry in-process base-prefab resolver (for `extends`/`of`/`instance`).
 const OneResolver = struct {
@@ -27,6 +29,9 @@ const OneResolver = struct {
         return if (std.mem.eql(u8, name, self.name)) self.bytes else null;
     }
     fn base(self: *OneResolver) scene_cook.BaseResolver {
+        return .{ .ctx = self, .resolveFn = OneResolver.resolve };
+    }
+    fn ext(self: *OneResolver) scene.loader.ExtensionResolver {
         return .{ .ctx = self, .resolveFn = OneResolver.resolve };
     }
 };
@@ -256,4 +261,104 @@ test "scene extensions clause populates the Entity Extensions + Prefab ID tables
 
     // No hooks in a .scene.bin.
     try std.testing.expectEqual(@as(u32, 0), acc.hookCount());
+}
+
+// ── E6 — load applies extension components + fires the on_attach seam ──
+
+/// Tier-0 `on_attach` dispatch spy (the M1.0.9 Etch execution is out of scope;
+/// E6 only proves the seam fires with the right name + hook text).
+const AttachSpy = struct {
+    var fired: u32 = 0;
+    var saw_name: bool = false;
+    var saw_text: bool = false;
+    fn reset() void {
+        fired = 0;
+        saw_name = false;
+        saw_text = false;
+    }
+    fn cb(_: ?*anyopaque, _: *World, _: EntityId, name: []const u8, text: ?[]const u8) anyerror!void {
+        fired += 1;
+        if (std.mem.eql(u8, name, "CombatModule")) saw_name = true;
+        if (text != null and std.mem.indexOf(u8, text.?, "Health") != null) saw_text = true;
+    }
+};
+
+test "load applies extension components and the on_attach seam fires" {
+    const gpa = std.testing.allocator;
+
+    // Cook BaseCharacter (the extends/requires base) + CombatModule (adds Weapon,
+    // with on_attach), wiring the cook-time base resolver.
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var base_res = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+
+    const combat =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 10 }
+        \\prefab "CombatModule" extends "BaseCharacter" requires Health {
+        \\  entity "mod" {
+        \\    uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6"
+        \\    Weapon { damage: 25 }
+        \\  }
+        \\  on_attach { entity.get_mut(Health).max += 50 }
+        \\}
+    ;
+    var combat_cooked = try scene_cook.cookPrefab(gpa, combat, base_res.base(), null);
+    defer combat_cooked.deinit(gpa);
+    const combat_bytes = try scene.writer.write(gpa, combat_cooked.model, &combat_cooked.registry);
+    defer gpa.free(combat_bytes);
+
+    // A scene with one entity activating CombatModule.
+    const scene_src =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["CombatModule"]
+        \\    Health { current: 100, max: 100 }
+        \\  }
+        \\}
+    ;
+    var scene_cooked = try scene_cook.cook(gpa, scene_src, null);
+    defer scene_cooked.deinit(gpa);
+    const scene_bytes = try scene.writer.write(gpa, scene_cooked.model, &scene_cooked.registry);
+    defer gpa.free(scene_bytes);
+
+    // World mirrors the component layout; register the Tier-0 on_attach seam.
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Health", .size = 8, .alignment = 4, .default_bytes = &[_]u8{0} ** 8, .fields = &.{} });
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Weapon", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
+    AttachSpy.reset();
+    world.registerOnAttach(null, &AttachSpy.cb);
+
+    var ext_res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    var result = try scene.loader.loadFromBytes(&world, gpa, scene_bytes, ext_res.ext());
+    defer result.deinit(gpa);
+
+    const npc = result.uuid_to_entity.get(uuidBytes(0xf1)).?;
+
+    // The extension's component was added (Weapon.damage == 25).
+    const weapon_id = world.componentId("Weapon").?;
+    const wb = world.componentBytes(npc, weapon_id) orelse return error.WeaponNotAdded;
+    try std.testing.expectEqual(@as(i32, 25), std.mem.readInt(i32, wb[0..4], .little));
+
+    // The on_attach seam fired once with the extension name + the cooked hook text.
+    try std.testing.expectEqual(@as(u32, 1), AttachSpy.fired);
+    try std.testing.expect(AttachSpy.saw_name);
+    try std.testing.expect(AttachSpy.saw_text);
+
+    // M1.0.9 boundary: the hook is NOT executed at load — Health.max stays 100
+    // (the `+= 50` effect is M1.0.9, not E6).
+    const health_id = world.componentId("Health").?;
+    const hb = world.componentBytes(npc, health_id).?;
+    try std.testing.expectEqual(@as(i32, 100), std.mem.readInt(i32, hb[4..8], .little)); // max @4
+}
+
+fn uuidBytes(last: u8) [16]u8 {
+    var u = [_]u8{0} ** 16;
+    u[15] = last;
+    return u;
 }

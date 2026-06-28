@@ -87,7 +87,7 @@ fn timeOneLoad(gpa: std.mem.Allocator, io: std.Io, bytes: []const u8) !u64 {
     });
 
     const t0 = std.Io.Clock.now(.awake, io);
-    var result = try loader.loadFromBytes(&world, gpa, bytes);
+    var result = try loader.loadFromBytes(&world, gpa, bytes, null);
     const t1 = std.Io.Clock.now(.awake, io);
     result.deinit(gpa);
     const elapsed = t0.durationTo(t1).nanoseconds;

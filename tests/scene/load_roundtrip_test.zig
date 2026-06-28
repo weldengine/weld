@@ -115,7 +115,7 @@ test "loading a cooked scene instantiates every entity" {
     const bytes = try cookPosVelScene(gpa, &world);
     defer gpa.free(bytes);
 
-    var result = try loader.loadFromBytes(&world, gpa, bytes);
+    var result = try loader.loadFromBytes(&world, gpa, bytes, null);
     defer result.deinit(gpa);
 
     try std.testing.expectEqual(@as(usize, n_entities), world.entityCount());
@@ -167,7 +167,7 @@ test "on_spawned fires once per loaded entity" {
     const bytes = try cookPosVelScene(gpa, &world);
     defer gpa.free(bytes);
 
-    var result = try loader.loadFromBytes(&world, gpa, bytes);
+    var result = try loader.loadFromBytes(&world, gpa, bytes, null);
     defer result.deinit(gpa);
 
     try std.testing.expectEqual(@as(u32, n_entities), Counter.fired);
@@ -205,7 +205,7 @@ test "all entities exist before any on_spawned fires" {
     const bytes = try cookPosVelScene(gpa, &world);
     defer gpa.free(bytes);
 
-    var result = try loader.loadFromBytes(&world, gpa, bytes);
+    var result = try loader.loadFromBytes(&world, gpa, bytes, null);
     defer result.deinit(gpa);
 
     // At the very first on_spawned invocation, the full set was already present.
@@ -233,7 +233,7 @@ test "loadScene mmaps a cooked file and instantiates every entity" {
     f.close(io);
     defer root.deleteFile(io, path) catch {};
 
-    var result = try loader.loadScene(&world, gpa, path);
+    var result = try loader.loadScene(&world, gpa, path, null);
     defer result.deinit(gpa); // also closes the mmap
 
     try std.testing.expectEqual(@as(usize, n_entities), world.entityCount());

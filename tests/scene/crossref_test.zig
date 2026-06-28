@@ -99,7 +99,7 @@ test "cross-ref resolves to the target handle on load; unset reads dead" {
     _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Marker", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
     _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Link", .size = 8, .alignment = 8, .default_bytes = &[_]u8{0xFF} ** 8, .fields = &.{} });
 
-    var result = try scene.loader.loadFromBytes(&world, gpa, bytes);
+    var result = try scene.loader.loadFromBytes(&world, gpa, bytes, null);
     defer result.deinit(gpa);
 
     const link_id = world.componentId("Link").?;

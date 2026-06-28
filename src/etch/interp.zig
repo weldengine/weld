@@ -7422,7 +7422,7 @@ test "cooked Etch scene loads, on_spawned rules emit, resource string round-trip
     const bytes = try weld_core.scene.writer.write(gpa, cooked.model, &cooked.registry);
     defer gpa.free(bytes);
 
-    var result = try weld_core.scene.loader.loadFromBytes(&world, gpa, bytes);
+    var result = try weld_core.scene.loader.loadFromBytes(&world, gpa, bytes, null);
     defer result.deinit(gpa);
 
     // (a) every entity instantiated.

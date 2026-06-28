@@ -180,7 +180,7 @@ test "N instances of one prefab load as N entities (cook -> load -> ECS)" {
     _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Transform", .size = 12, .alignment = 4, .default_bytes = &[_]u8{0} ** 12, .fields = &.{} });
     _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Light", .size = 8, .alignment = 4, .default_bytes = &[_]u8{0} ** 8, .fields = &.{} });
 
-    var result = try scene.loader.loadFromBytes(&world, gpa, bytes);
+    var result = try scene.loader.loadFromBytes(&world, gpa, bytes, null);
     defer result.deinit(gpa);
 
     try std.testing.expectEqual(@as(usize, 3), world.entityCount());

@@ -445,6 +445,9 @@ pub fn build(b: *std.Build) void {
         // M1.0.6 / E5 — `extensions:` clause parse + AST + descriptors. The
         // cook/binary + load portions land once the hooks-section shape unblocks.
         .{ .path = "tests/scene/extensions_test.zig", .scene = true, .dedicated_step = "test-extensions" },
+        // M1.0.6 / E3+E4+E6 — capstone: prefab instances + per-field override +
+        // cross-ref + active extension in one scene, cook → load → ECS.
+        .{ .path = "tests/scene/prefab_integration_test.zig", .scene = true, .dedicated_step = "test-prefab-integration" },
         // M1.0.5 / E2 — runtime loader `.scene.bin` → ECS: instantiate every
         // entity (component bytes verbatim), two-phase `on_spawned` (fires once
         // per entity, after all entities exist). `weld_core` only (no `.scene`

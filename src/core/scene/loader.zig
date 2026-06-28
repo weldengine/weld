@@ -61,6 +61,20 @@ pub const RemapError = error{ UnknownComponent, SchemaMismatch } || std.mem.Allo
 /// M1.0.4 cook never produces this — it is a defensive guard on external input.
 pub const StructureError = error{MalformedScene};
 
+/// Resolves an extension prefab name (from the scene's Prefab ID Table) to its
+/// cooked `.prefab.bin` bytes at load (M1.0.6 E6) — the runtime twin of the
+/// cook's `BaseResolver`. The bytes must outlive the load. Null = unknown name
+/// (the loader errors `UnknownExtension`). Wired to a project/asset registry at
+/// runtime; tests wire it to an in-process buffer.
+pub const ExtensionResolver = struct {
+    ctx: *anyopaque,
+    resolveFn: *const fn (ctx: *anyopaque, name: []const u8) ?[]const u8,
+
+    pub fn resolve(self: ExtensionResolver, name: []const u8) ?[]const u8 {
+        return self.resolveFn(self.ctx, name);
+    }
+};
+
 /// Open a `.scene.bin` byte image: validate magic + version (via the accessor,
 /// read little-endian field-by-field — never a raw `@ptrCast` off an unaligned
 /// buffer), then verify the content hash. Returns a zero-copy `Accessor`
@@ -168,16 +182,11 @@ fn uuidCount(acc: Accessor) u32 {
 /// (`StructureError`) for a structurally-invalid scene (e.g. an out-of-range
 /// parent ordinal), allocation failure, plus anything an `on_spawned` observer
 /// propagates (hence the open error set).
-pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8) anyerror!LoadResult {
+pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8, ext_resolver: ?ExtensionResolver) anyerror!LoadResult {
     const acc = try openVerified(bytes);
 
     const remap = try buildSchemaRemap(gpa, world, acc);
     defer gpa.free(remap);
-
-    // The extensions table is M1.0.6 E6's; until then a cook writes it empty (a
-    // zero count prefix). Loading a populated one would mean a newer cook — assert
-    // the contract. The cross-references table (M1.0.6 E4) IS read below.
-    std.debug.assert(readU32At(acc, acc.header.extensions_offset) == 0);
 
     var spawned: std.ArrayListUnmanaged(EntityId) = .empty;
     errdefer spawned.deinit(gpa);
@@ -193,8 +202,11 @@ pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8) a
     // Cross-references after every entity exists (a reference can point forward),
     // before resources + on_spawned so a rule sees fully-linked entities.
     try resolveCrossRefs(world, acc, remap, uuid_to_entity);
-    // Resources before phase 2 so an `on_spawned` rule can read scene resources.
+    // Resources before extensions/on_spawned so a hook/rule can read them.
     try loadResources(world, gpa, acc, remap, &res_strings);
+    // Extension activation (M1.0.6 E6): add each active extension's components +
+    // fire the `on_attach` seam. After resources, before `on_spawned`.
+    try applyExtensions(world, gpa, acc, uuid_to_entity, ext_resolver);
     try dispatchSpawnLifecycle(world, gpa, spawned.items);
 
     return .{
@@ -209,10 +221,10 @@ pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8) a
 /// `loadFromBytes` over the borrowed bytes. The returned `LoadResult` owns the
 /// mapping (`LoadResult.deinit` closes it). Adds `fs.Error` (open/map failure)
 /// to `loadFromBytes`'s error set.
-pub fn loadScene(world: *World, gpa: std.mem.Allocator, path: []const u8) anyerror!LoadResult {
+pub fn loadScene(world: *World, gpa: std.mem.Allocator, path: []const u8, ext_resolver: ?ExtensionResolver) anyerror!LoadResult {
     var mmap = try fs.mmapFile(gpa, path);
     errdefer mmap.close();
-    var result = try loadFromBytes(world, gpa, mmap.bytes);
+    var result = try loadFromBytes(world, gpa, mmap.bytes, ext_resolver);
     result.mmap = mmap;
     return result;
 }
@@ -292,6 +304,70 @@ fn resolveCrossRefs(world: *World, acc: Accessor, remap: []const ComponentId, uu
         @memcpy(slot[off..][0..@sizeOf(EntityId)], std.mem.asBytes(&tgt));
         world.markComponentChangedDyn(src, cid);
     }
+}
+
+/// Extension activation (M1.0.6 E6) — for each entity in the Entity Extensions
+/// Table, in table order, activate each of its extensions: resolve the extension
+/// `.prefab.bin` by name (Prefab ID Table → `ExtensionResolver`), add its
+/// components, and fire the `on_attach` Tier-0 seam. **No-op when the scene has no
+/// active extensions** (so an extension-free scene needs no resolver). The actual
+/// `on_attach` hook EXECUTION is M1.0.9 — here `dispatchOnAttach` only fires the
+/// registered seam with the cooked hook text.
+fn applyExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to_entity: UuidMap, ext_resolver: ?ExtensionResolver) !void {
+    const count = acc.extensionsCount();
+    if (count == 0) return;
+    const ucount = uuidCount(acc);
+    const resolver = ext_resolver orelse return error.MissingExtensionResolver;
+    const pid_count = acc.prefabIdCount();
+
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const e = acc.extension(i);
+        if (e.uuid_ordinal >= ucount) return error.MalformedScene;
+        const entity = uuid_to_entity.get(acc.uuidAt(e.uuid_ordinal).*) orelse return error.MalformedScene;
+        var j: u32 = 0;
+        while (j < e.extension_count) : (j += 1) {
+            const pid = e.extensionId(j);
+            if (pid >= pid_count) return error.MalformedScene;
+            const name = acc.prefabName(pid);
+            const ext_bytes = resolver.resolve(name) orelse return error.UnknownExtension;
+            try activateExtension(world, gpa, entity, name, ext_bytes);
+        }
+    }
+}
+
+/// Activate one extension on one entity (M1.0.6 E6) — the shared path reused by
+/// the runtime `activate_extension` entry: open the extension's `.prefab.bin`, add
+/// its single entity's components to `entity`, then fire the `on_attach` seam with
+/// the cooked hook text. The extension prefab is mono-entity (cooked as such); a
+/// component the entity already carries is a conflict (§30.5) — surfaced as
+/// `error.ExtensionComponentConflict` rather than the dynamic-add assert.
+fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
+    const ext = try openVerified(ext_bytes);
+
+    // Mono-entity: the extension's components live on its single entity.
+    var total: u32 = 0;
+    var ai: u32 = 0;
+    while (ai < ext.archetypeCount()) : (ai += 1) total += ext.archetype(ai).entity_count;
+    if (total > 1) return error.MultiEntityExtensionUnsupported;
+
+    ai = 0;
+    while (ai < ext.archetypeCount()) : (ai += 1) {
+        const arch = ext.archetype(ai);
+        if (arch.entity_count == 0) continue;
+        var c: usize = 0;
+        while (c < arch.component_count) : (c += 1) {
+            const sch = ext.schema(arch.schemaIndex(c));
+            const cid = world.componentId(sch.name) orelse return error.UnknownComponent;
+            if (sch.size != world.registry.componentSize(cid)) return error.SchemaMismatch;
+            if (world.componentBytes(entity, cid) != null) return error.ExtensionComponentConflict;
+            try world.addComponentDynamic(gpa, entity, cid, arch.componentSlot(c, 0));
+        }
+    }
+
+    // Fire the `on_attach` dispatch seam (D-E). Executing the text is M1.0.9.
+    const on_attach_text: ?[]const u8 = if (ext.hookCount() > 0) ext.hook(0).on_attach else null;
+    try world.dispatchOnAttach(entity, name, on_attach_text);
 }
 
 /// Load the resources block (E3) — the load-side mirror of M1.0.3's non-POD
@@ -549,5 +625,5 @@ test "loadFromBytes rejects an out-of-range parent ordinal with MalformedScene" 
     const bytes = try writer.write(gpa, model, &world.registry);
     defer gpa.free(bytes);
 
-    try testing.expectError(error.MalformedScene, loadFromBytes(&world, gpa, bytes));
+    try testing.expectError(error.MalformedScene, loadFromBytes(&world, gpa, bytes, null));
 }

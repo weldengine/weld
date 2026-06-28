@@ -92,6 +92,22 @@ const FieldKind = registry_mod.FieldKind;
 const ResourceStore = resources_mod.ResourceStore;
 const EntityIdentityStore = entity_mod.EntityIdentityStore;
 
+/// M1.0.6 E6 — the `on_attach` extension dispatch seam (D-E). A Tier-0 function
+/// pointer the Etch bridge registers; the scene loader fires it after adding an
+/// extension's components, passing the entity, the extension name, and the cooked
+/// `on_attach` Etch source text (`null` if absent). M1.0.6 wires + fires the seam;
+/// running the text is M1.0.9.
+pub const ExtensionAttachFn = *const fn (
+    ctx: ?*anyopaque,
+    world: *World,
+    entity: EntityId,
+    extension_name: []const u8,
+    on_attach_text: ?[]const u8,
+) anyerror!void;
+
+/// A registered `on_attach` callback + its opaque context.
+const AttachHook = struct { ctx: ?*anyopaque, func: ExtensionAttachFn };
+
 /// Top-level ECS world — single archetype list, shared identity, shared
 /// registry, shared resources.
 pub const World = struct {
@@ -160,6 +176,13 @@ pub const World = struct {
     /// mutations. Lazy-init'd by the first `registerOn*` call; tests
     /// that don't exercise observers never pay the alloc cost.
     observer_registry: observers_mod.ObserverRegistry = .{},
+
+    /// M1.0.6 E6 — the `on_attach` extension dispatch seam (D-E). A Tier-0
+    /// callback the Etch bridge registers; the scene loader fires it after adding
+    /// an extension's components. `loader.zig` never calls the Etch VM directly —
+    /// it goes through this hook. **M1.0.6 wires + fires the seam only**; the
+    /// actual execution of `on_attach_text` (Etch code) is **M1.0.9**.
+    attach_hook: ?AttachHook = null,
 
     pub fn init() World {
         return .{
@@ -262,6 +285,22 @@ pub const World = struct {
     /// buffer; the caller drains it via the usual flush path.
     pub fn dispatchOnSpawned(self: *World, gpa: std.mem.Allocator, eid: EntityId) !void {
         try self.observer_registry.dispatchOnSpawned(gpa, self, eid);
+    }
+
+    /// M1.0.6 E6 — register the `on_attach` extension dispatch callback (the Etch
+    /// bridge supplies the real one; M1.0.6 tests supply a Tier-0 stand-in). One
+    /// hook per world (last registration wins).
+    pub fn registerOnAttach(self: *World, ctx: ?*anyopaque, callback: ExtensionAttachFn) void {
+        self.attach_hook = .{ .ctx = ctx, .func = callback };
+    }
+
+    /// M1.0.6 E6 — fire the `on_attach` seam for `entity`'s newly-activated
+    /// extension `extension_name`, passing the cooked `on_attach_text` (the Etch
+    /// hook source; `null` if the extension has no `on_attach`). No-op if no hook
+    /// is registered. The loader calls this after adding the extension's
+    /// components. Executing the text is M1.0.9 — here the seam just fires.
+    pub fn dispatchOnAttach(self: *World, entity: EntityId, extension_name: []const u8, on_attach_text: ?[]const u8) anyerror!void {
+        if (self.attach_hook) |h| try h.func(h.ctx, self, entity, extension_name, on_attach_text);
     }
 
     // ─── Component registration helpers ──────────────────────────────────
