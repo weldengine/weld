@@ -434,6 +434,10 @@ pub fn build(b: *std.Build) void {
         // (base inherited from its cooked `.prefab.bin`, field-merge/add overrides),
         // re-cook determinism, and the rejected forms (`extends`, hooks on `of`).
         .{ .path = "tests/scene/prefab_cook_test.zig", .scene = true, .dedicated_step = "test-prefab-cook" },
+        // M1.0.6 / E3 — `instance of` flattening at scene cook: override-free
+        // instance == hand-authored equivalent (same archetype + bytes), both
+        // override forms, N instances cook→load→ECS, single-entity boundary.
+        .{ .path = "tests/scene/prefab_flatten_test.zig", .scene = true, .dedicated_step = "test-prefab-flatten" },
         // M1.0.5 / E2 — runtime loader `.scene.bin` → ECS: instantiate every
         // entity (component bytes verbatim), two-phase `on_spawned` (fires once
         // per entity, after all entities exist). `weld_core` only (no `.scene`

@@ -80,22 +80,26 @@ pub fn main(init: std.process.Init) !void {
 
     const is_prefab = std.mem.endsWith(u8, in_path, ".prefab.etch");
 
+    // The base-prefab resolver serves both `of` variants (prefab cook) and
+    // `instance of` flattening (scene cook); a `--prefab-dir` root is required for
+    // either to resolve a referenced prefab.
+    var resolver = DirResolver{
+        .io = io,
+        .dir = dir,
+        .prefab_dir = prefab_dir,
+        .arena = init.arena.allocator(),
+        .gpa = gpa,
+    };
+
     var diag: []const u8 = "";
     var cooked = blk: {
         if (is_prefab) {
-            var resolver = DirResolver{
-                .io = io,
-                .dir = dir,
-                .prefab_dir = prefab_dir,
-                .arena = init.arena.allocator(),
-                .gpa = gpa,
-            };
             break :blk scene_cook.cookPrefab(gpa, source, resolver.base(), &diag) catch |err| {
                 try printErr(io, "prefab cook failed: ", if (diag.len > 0) diag else @errorName(err));
                 return err;
             };
         } else {
-            break :blk scene_cook.cook(gpa, source, &diag) catch |err| {
+            break :blk scene_cook.cookScene(gpa, source, resolver.base(), &diag) catch |err| {
                 try printErr(io, "cook failed: ", if (diag.len > 0) diag else @errorName(err));
                 return err;
             };

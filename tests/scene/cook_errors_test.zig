@@ -15,8 +15,13 @@ fn expectCookError(comptime want: anyerror, src: []const u8) !void {
     try std.testing.expect(msg.len > 0);
 }
 
-test "instance of is rejected (M1.0.6 boundary)" {
-    try expectCookError(error.InstanceOfUnsupported,
+test "instance of without a prefab resolver errors BasePrefabMissing" {
+    // M1.0.6 E3 replaced the M1.0.4 `InstanceOfUnsupported` boundary with real
+    // flattening: `cook` (the resolver-less wrapper) can no longer locate the
+    // referenced prefab, so an instance now errors `BasePrefabMissing` rather than
+    // a blanket "unsupported". Flattening with a resolver is covered in
+    // `tests/scene/prefab_flatten_test.zig`.
+    try expectCookError(error.BasePrefabMissing,
         \\scene "S" {
         \\  instance of "Torch" "T1" { }
         \\}

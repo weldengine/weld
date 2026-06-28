@@ -62,8 +62,6 @@ pub const CookError = error{
     NoSceneConstruct,
     /// More than one `scene` construct (a `.scene.etch` holds exactly one).
     MultipleScenes,
-    /// `instance of "Prefab"` — prefab flattening is owned by M1.0.6.
-    InstanceOfUnsupported,
     /// A component/resource field has a type the runtime registry rejects
     /// (`error.InvalidProgram`: e.g. `Vec3`/`Entity`/`AssetHandle`, or `string`
     /// on a component).
@@ -109,6 +107,17 @@ pub const CookError = error{
     /// A base prefab component's name is unknown to the variant's registry, or
     /// its on-disk size disagrees with the variant registry's layout.
     BaseSchemaMismatch,
+    // ── M1.0.6 E3 — `instance of` flattening at scene cook ──
+    /// `instance of "P"` where `P.prefab.bin` holds more than one entity. M1.0.6
+    /// instantiates only single-entity prefabs: the instance supplies one uuid and
+    /// the spec defines no remapping for a multi-entity prefab's internal uuids at
+    /// instantiation (`engine-scene-serialization.md` §2/§5). Multi-entity
+    /// instantiation (and its hierarchy) is a dedicated later milestone (D-D).
+    MultiEntityInstanceUnsupported,
+    /// A `Comp.field = value` per-field override targets a component the flattened
+    /// instance does not carry (neither inherited from the prefab nor added by an
+    /// earlier `Comp { … }` member of the same instance body).
+    OverrideTargetMissing,
     OutOfMemory,
 };
 
@@ -128,10 +137,26 @@ pub const Cooked = struct {
     }
 };
 
-/// Cook an Etch source string into the neutral scene model + its registry.
-/// On failure returns a `CookError` and, if `diag_out` is non-null, sets it to a
-/// static human-readable message. No `.scene.bin` is produced on failure.
+/// Cook an Etch source string into the neutral scene model + its registry, with
+/// no prefab resolver — a scene that uses `instance of` errors `BasePrefabMissing`
+/// (use `cookScene` with a resolver to flatten instances). On failure returns a
+/// `CookError` and, if `diag_out` is non-null, sets it to a static message. No
+/// `.scene.bin` is produced on failure.
 pub fn cook(gpa: std.mem.Allocator, source: []const u8, diag_out: ?*[]const u8) CookError!Cooked {
+    return cookScene(gpa, source, null, diag_out);
+}
+
+/// Cook a `.scene.etch` source, resolving each `instance of "P"` by flattening
+/// `P.prefab.bin` (located through `base_resolver`) into the instance's entity:
+/// the prefab's components are inherited and the instance's overrides applied
+/// (M1.0.6 E3). `base_resolver` may be null for a scene with no instances; an
+/// instance with a null/unknowing resolver errors `BasePrefabMissing`.
+pub fn cookScene(
+    gpa: std.mem.Allocator,
+    source: []const u8,
+    base_resolver: ?BaseResolver,
+    diag_out: ?*[]const u8,
+) CookError!Cooked {
     const parser = @import("parser.zig");
     var pr = parser.parse(gpa, source) catch return fail(diag_out, error.ParseFailed, "Etch parse failed (allocator error)");
     defer pr.deinit(gpa);
@@ -147,7 +172,7 @@ pub fn cook(gpa: std.mem.Allocator, source: []const u8, diag_out: ?*[]const u8) 
 
     try b.registerDecls(diag_out);
     const scene_decl = try b.findScene(diag_out);
-    const model = try b.build(scene_decl, diag_out);
+    const model = try b.build(scene_decl, base_resolver, diag_out);
 
     return .{ .model = model, .registry = registry };
 }
@@ -341,21 +366,22 @@ const Builder = struct {
         return found orelse fail(diag_out, error.NoPrefabConstruct, "no prefab construct in the source");
     }
 
-    /// Build the full neutral model from the resolved scene.
-    fn build(self: *Builder, scene_decl: ast_mod.SceneDecl, diag_out: ?*[]const u8) CookError!format.CookModel {
-        // Reject `instance of` up front (M1.0.6 owns prefab flattening).
+    /// Build the full neutral model from the resolved scene. Direct entities cook
+    /// from their component instances; `instance of "P"` children are flattened —
+    /// the prefab's components are inherited from `P.prefab.bin` (via the resolver)
+    /// and the instance's overrides applied (M1.0.6 E3).
+    fn build(self: *Builder, scene_decl: ast_mod.SceneDecl, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError!format.CookModel {
         const children = self.ast.scene_children.items[scene_decl.children_start .. scene_decl.children_start + scene_decl.children_len];
-        for (children) |child| {
-            if (child.kind == .instance) return fail(diag_out, error.InstanceOfUnsupported, "`instance of` (prefab instances) is not cooked by M1.0.4 (owned by M1.0.6)");
-        }
 
         // Per-entity build, accumulating the name→uuid-index map for parent
         // resolution in a second pass.
         var entities: std.ArrayListUnmanaged(EntityBuild) = .empty;
         defer entities.deinit(self.gpa);
         for (children) |child| {
-            const e = self.ast.scene_entities.items[child.index];
-            const eb = try self.buildEntity(e, diag_out);
+            const eb = switch (child.kind) {
+                .entity => try self.buildEntity(self.ast.scene_entities.items[child.index], diag_out),
+                .instance => try self.buildInstanceEntity(self.ast.scene_instances.items[child.index], base_resolver, diag_out),
+            };
             try entities.append(self.gpa, eb);
         }
 
@@ -619,6 +645,94 @@ const Builder = struct {
             .comp_ids = ids,
             .comp_blobs = blobs,
         };
+    }
+
+    /// Flatten an `instance of "P" "name" { … }` into one entity: inherit P's
+    /// single entity's components (from `P.prefab.bin` via the resolver), then
+    /// apply the instance body's overrides in declaration order — both forms
+    /// (`Comp { field: value }` field-merge and `Comp.field = value` per-field) and
+    /// added components. M1.0.6 instantiates only single-entity prefabs
+    /// (`MultiEntityInstanceUnsupported` otherwise). The instance supplies the
+    /// entity's name + uuid (the prefab's template uuid is discarded); instances
+    /// are roots (the grammar's `instance_decl` has no `parent:`).
+    fn buildInstanceEntity(self: *Builder, inst: ast_mod.SceneInstance, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError!EntityBuild {
+        const prefab_name = self.ast.strings.slice(inst.prefab_name);
+        const resolver = base_resolver orelse return fail(diag_out, error.BasePrefabMissing, "scene `instance of` cooked without a prefab resolver (no --prefab-dir?)");
+        const base_bytes = resolver.resolve(prefab_name) orelse return fail(diag_out, error.BasePrefabMissing, "`instance of` references a prefab the resolver does not know");
+        var acc = accessor.Accessor.open(base_bytes) catch return fail(diag_out, error.BasePrefabCorrupt, "instanced prefab .prefab.bin failed to open (magic/version)");
+        if (!acc.verifyHash()) return fail(diag_out, error.BasePrefabCorrupt, "instanced prefab .prefab.bin content hash mismatch");
+
+        // Inherit the prefab's single entity's components (variant-registry ids).
+        var ids: std.ArrayListUnmanaged(ComponentId) = .empty;
+        defer ids.deinit(self.gpa);
+        var blobs: std.ArrayListUnmanaged([]u8) = .empty;
+        defer blobs.deinit(self.gpa);
+        try self.flattenedPrefabComponents(acc, &ids, &blobs, diag_out);
+
+        // Apply the instance body's overrides in declaration order.
+        const members = self.ast.scene_instance_members.items[inst.members_start .. inst.members_start + inst.members_len];
+        for (members) |m| switch (m.kind) {
+            .component => {
+                const ci = self.ast.component_instances.items[m.index];
+                const id = self.registry.idOf(self.ast.strings.slice(ci.type_name)) orelse return fail(diag_out, error.UndeclaredType, "instance component references an undeclared component type");
+                if (indexOfId(ids.items, id)) |idx| {
+                    blobs.items[idx] = try self.mergeComponentBlob(blobs.items[idx], id, ci, diag_out);
+                } else {
+                    try ids.append(self.gpa, id);
+                    try blobs.append(self.gpa, try self.buildComponentBlob(id, ci, diag_out));
+                }
+            },
+            .field_override => {
+                const fo = self.ast.field_overrides.items[m.index];
+                const id = self.registry.idOf(self.ast.strings.slice(fo.type_name)) orelse return fail(diag_out, error.UndeclaredType, "instance field override references an undeclared component type");
+                const idx = indexOfId(ids.items, id) orelse return fail(diag_out, error.OverrideTargetMissing, "per-field override targets a component the instance does not carry");
+                const fname = self.ast.strings.slice(fo.field);
+                const fd = self.registry.findField(id, fname) orelse return fail(diag_out, error.UnknownField, "per-field override sets a field the component does not declare");
+                try self.encodeScalar(blobs.items[idx], fd, fo.value, diag_out);
+            },
+        };
+
+        const comp_ids = try self.a().dupe(ComponentId, ids.items);
+        const comp_blobs = try self.a().dupe([]u8, blobs.items);
+        sortIdsBlobs(comp_ids, comp_blobs);
+
+        const name_idx = try self.internString(self.ast.strings.slice(inst.instance_name));
+        const uuid_idx = try self.internUuid(try self.parseEntityUuid(inst.uuid, diag_out));
+        try self.name_to_uuid_idx.put(self.gpa, self.strings.items[name_idx], uuid_idx);
+
+        return .{
+            .name_idx = name_idx,
+            .uuid_idx = uuid_idx,
+            .parent_name = "",
+            .comp_ids = comp_ids,
+            .comp_blobs = comp_blobs,
+        };
+    }
+
+    /// Extract a single-entity prefab's components from its `.prefab.bin`: each
+    /// on-disk schema name → the scene registry's `ComponentId` (`idOf`, size
+    /// validated), with the column bytes copied. Errors
+    /// `MultiEntityInstanceUnsupported` if the prefab holds ≠ 1 entity. Appends
+    /// into `ids`/`blobs` (unsorted; the caller sorts after applying overrides).
+    fn flattenedPrefabComponents(self: *Builder, acc: accessor.Accessor, ids: *std.ArrayListUnmanaged(ComponentId), blobs: *std.ArrayListUnmanaged([]u8), diag_out: ?*[]const u8) CookError!void {
+        var total: u32 = 0;
+        var ai: u32 = 0;
+        while (ai < acc.archetypeCount()) : (ai += 1) total += acc.archetype(ai).entity_count;
+        if (total != 1) return fail(diag_out, error.MultiEntityInstanceUnsupported, "instancing a multi-entity prefab is not supported in M1.0.6 (single-entity only)");
+
+        ai = 0;
+        while (ai < acc.archetypeCount()) : (ai += 1) {
+            const arch = acc.archetype(ai);
+            if (arch.entity_count == 0) continue;
+            var c: usize = 0;
+            while (c < arch.component_count) : (c += 1) {
+                const sch = acc.schema(arch.schemaIndex(c));
+                const id = self.registry.idOf(sch.name) orelse return fail(diag_out, error.BaseSchemaMismatch, "instanced prefab uses a component the scene does not declare");
+                if (self.registry.componentSize(id) != sch.size) return fail(diag_out, error.BaseSchemaMismatch, "instanced prefab component size disagrees with the scene registry layout");
+                try ids.append(self.gpa, id);
+                try blobs.append(self.gpa, try self.a().dupe(u8, arch.componentSlot(c, 0)));
+            }
+        }
     }
 
     /// Build one component blob (`componentSize` bytes) from the type defaults
