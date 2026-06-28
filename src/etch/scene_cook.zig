@@ -33,6 +33,9 @@ const ast_mod = @import("ast.zig");
 const interp = @import("interp.zig");
 const bridge_mod = @import("ecs_bridge.zig");
 const value_mod = @import("value.zig");
+// M1.0.6 E5 — `renderStmtRunAlloc` renders an extends prefab's on_attach/on_detach
+// statement-runs to canonical Etch text (stored in the .prefab.bin hooks section).
+const descriptor = @import("descriptor.zig");
 
 const weld_core = @import("weld_core");
 // M1.0.5 — persistent heap moved to Tier 0 (`src/core/memory`); reach it via weld_core.
@@ -94,11 +97,15 @@ pub const CookError = error{
     MultiplePrefabs,
     /// A `scene` construct appeared in a source cooked as a `.prefab.etch`.
     SceneNotAllowedInPrefab,
-    /// `prefab "Z" extends "X"` — extension cook is owned by M1.0.6 E5, not E2.
-    ExtendsUnsupported,
     /// `on_attach`/`on_detach`/`requires` on a standalone or `of` prefab — those
     /// clauses are valid only with `extends` (`etch-grammar.md` §15 l.1653, §30.5).
     PrefabHookNotAllowed,
+    /// `extends "X" requires C` where the base prefab `X` does not declare `C`
+    /// (`etch-grammar.md` §15 l.1634 — validated against X's cooked `.prefab.bin`).
+    RequiresNotSatisfied,
+    /// An `extends` prefab's `on_attach`/`on_detach` body could not be rendered to
+    /// canonical Etch text (a construct outside the descriptor renderer's surface).
+    HookRenderFailed,
     /// `prefab "Y" of "X"` but the base `X.prefab.bin` could not be resolved
     /// (no resolver, or the resolver returned null for the base name).
     BasePrefabMissing,
@@ -290,6 +297,14 @@ const Builder = struct {
     collect_crossrefs: bool = false,
     pendings: std.ArrayListUnmanaged(CrossRefPending) = .empty,
 
+    // Active extensions (M1.0.6 E5, scene cook): per-entity `extensions:` clauses
+    // → Entity Extensions Table + a deduplicated Prefab ID Table (extension names
+    // as `strings` indices). `prefab_id_map` dedups a name's `strings` index → its
+    // Prefab ID Table slot.
+    ext_entries: std.ArrayListUnmanaged(format.ExtModelEntry) = .empty,
+    prefab_id_table: std.ArrayListUnmanaged(u32) = .empty,
+    prefab_id_map: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+
     fn init(gpa: std.mem.Allocator, ast: *const AstArena, registry: *Registry) Builder {
         return .{
             .gpa = gpa,
@@ -313,6 +328,9 @@ const Builder = struct {
         self.strings.deinit(self.gpa);
         self.uuids.deinit(self.gpa);
         self.pendings.deinit(self.gpa);
+        self.ext_entries.deinit(self.gpa);
+        self.prefab_id_table.deinit(self.gpa);
+        self.prefab_id_map.deinit(self.gpa);
     }
 
     fn a(self: *Builder) std.mem.Allocator {
@@ -406,10 +424,23 @@ const Builder = struct {
         var entities: std.ArrayListUnmanaged(EntityBuild) = .empty;
         defer entities.deinit(self.gpa);
         for (children) |child| {
+            var ext_start: u32 = 0;
+            var ext_len: u32 = 0;
             const eb = switch (child.kind) {
-                .entity => try self.buildEntity(self.ast.scene_entities.items[child.index], diag_out),
-                .instance => try self.buildInstanceEntity(self.ast.scene_instances.items[child.index], base_resolver, diag_out),
+                .entity => blk: {
+                    const e = self.ast.scene_entities.items[child.index];
+                    ext_start = e.extensions_start;
+                    ext_len = e.extensions_len;
+                    break :blk try self.buildEntity(e, diag_out);
+                },
+                .instance => blk: {
+                    const inst = self.ast.scene_instances.items[child.index];
+                    ext_start = inst.extensions_start;
+                    ext_len = inst.extensions_len;
+                    break :blk try self.buildInstanceEntity(inst, base_resolver, diag_out);
+                },
             };
+            try self.recordExtensions(eb.uuid_idx, ext_start, ext_len);
             try entities.append(self.gpa, eb);
         }
 
@@ -433,8 +464,35 @@ const Builder = struct {
             .archetypes = archetypes,
             .content_version = content_version,
             .cross_refs = cross_refs,
+            .ext_entries = try self.a().dupe(format.ExtModelEntry, self.ext_entries.items),
+            .prefab_id_table = try self.a().dupe(u32, self.prefab_id_table.items),
             .arena = self.arena,
         };
+    }
+
+    /// Record an entity's `extensions:` clause (M1.0.6 E5) into the Entity
+    /// Extensions Table: intern each extension name (by name, D-B) into the model
+    /// strings + the deduplicated Prefab ID Table, and append an `ExtModelEntry`
+    /// keyed by the entity's uuid ordinal. No-op for an empty/absent clause.
+    fn recordExtensions(self: *Builder, uuid_idx: u32, ext_start: u32, ext_len: u32) CookError!void {
+        if (ext_len == 0) return;
+        const ids = try self.a().alloc(u32, ext_len);
+        var k: u32 = 0;
+        while (k < ext_len) : (k += 1) {
+            const name = self.ast.strings.slice(self.ast.scene_extensions.items[ext_start + k]);
+            ids[k] = try self.prefabIdIndex(try self.internString(name));
+        }
+        try self.ext_entries.append(self.gpa, .{ .uuid = uuid_idx, .prefab_ids = ids });
+    }
+
+    /// The Prefab ID Table slot for a model-`strings` index, deduplicated.
+    fn prefabIdIndex(self: *Builder, str_idx: u32) CookError!u32 {
+        const gop = try self.prefab_id_map.getOrPut(self.gpa, str_idx);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = @intCast(self.prefab_id_table.items.len);
+            try self.prefab_id_table.append(self.gpa, str_idx);
+        }
+        return gop.value_ptr.*;
     }
 
     /// Phase 2 of the crossref pass: resolve every pending `target_name` against
@@ -480,9 +538,8 @@ const Builder = struct {
     /// `.prefab.bin` via the accessor) then applies per-entity overrides. A prefab
     /// body is `{ entity_decl }` only — no `resources`/`instance` (§15 l.1624).
     fn buildPrefab(self: *Builder, pd: ast_mod.PrefabDecl, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError!format.CookModel {
-        if (pd.relation == .extends) return fail(diag_out, error.ExtendsUnsupported, "`extends` (extension) prefab cook is owned by M1.0.6 E5, not E2");
         // `requires`/`on_attach`/`on_detach` are valid only with `extends` (§30.5).
-        if (pd.requires_len != 0 or pd.has_on_attach or pd.has_on_detach)
+        if (pd.relation != .extends and (pd.requires_len != 0 or pd.has_on_attach or pd.has_on_detach))
             return fail(diag_out, error.PrefabHookNotAllowed, "`requires`/`on_attach`/`on_detach` are valid only on an `extends` prefab");
 
         const prefab_entities = self.ast.scene_entities.items[pd.entities_start .. pd.entities_start + pd.entities_len];
@@ -499,6 +556,9 @@ const Builder = struct {
             try self.reconstructBase(acc, &entities, diag_out);
             try self.mergeVariantEntities(prefab_entities, &entities, diag_out);
         } else {
+            // Standalone OR extends: the prefab's `entity { components }` block(s)
+            // cook directly. For an extension, those are the components added on
+            // activation; its hooks + `requires` are handled below.
             for (prefab_entities) |e| {
                 const eb = try self.buildEntity(e, diag_out);
                 try entities.append(self.gpa, eb);
@@ -513,6 +573,7 @@ const Builder = struct {
 
         const archetypes = try self.groupArchetypes(entities.items);
         const content_version = try self.versionFromNode(pd.version, diag_out);
+        const hooks = if (pd.relation == .extends) try self.buildExtendsHooks(pd, base_resolver, diag_out) else &[_]format.HookSet{};
 
         return .{
             .strings = try self.a().dupe([]const u8, self.strings.items),
@@ -520,8 +581,52 @@ const Builder = struct {
             .resources = &.{},
             .archetypes = archetypes,
             .content_version = content_version,
+            .hooks = hooks,
             .arena = self.arena,
         };
+    }
+
+    /// Cook an `extends` prefab's hooks (M1.0.6 E5): validate `requires` against
+    /// the base `X` (each required component must be present in `X.prefab.bin`),
+    /// then render `on_attach`/`on_detach` to canonical Etch **text** (interned
+    /// into the model strings; `null` if the hook is absent). Returns a one-element
+    /// `HookSet` slice (`hook_count == 1` for an `extends` `.prefab.bin`).
+    fn buildExtendsHooks(self: *Builder, pd: ast_mod.PrefabDecl, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError![]format.HookSet {
+        try self.validateRequires(pd, base_resolver, diag_out);
+        const hooks = try self.a().alloc(format.HookSet, 1);
+        hooks[0] = .{
+            .on_attach = if (pd.has_on_attach) try self.renderHook(pd.on_attach_start, pd.on_attach_len, diag_out) else null,
+            .on_detach = if (pd.has_on_detach) try self.renderHook(pd.on_detach_start, pd.on_detach_len, diag_out) else null,
+        };
+        return hooks;
+    }
+
+    /// Render a hook statement-run to canonical Etch text and intern it into the
+    /// model strings, returning its index. The loader (E6) re-parses this text.
+    fn renderHook(self: *Builder, body_start: u32, body_len: u32, diag_out: ?*[]const u8) CookError!u32 {
+        const text = descriptor.renderStmtRunAlloc(self.gpa, self.ast, body_start, body_len) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return fail(diag_out, error.HookRenderFailed, "extension hook body could not be rendered to text"),
+        };
+        defer self.gpa.free(text);
+        return self.internString(text);
+    }
+
+    /// Validate an `extends` prefab's `requires C1, C2, …`: each required component
+    /// must be declared by the base `X` (`X.prefab.bin`, read via the resolver).
+    /// `error.RequiresNotSatisfied` otherwise (`etch-grammar.md` §15 l.1634).
+    fn validateRequires(self: *Builder, pd: ast_mod.PrefabDecl, base_resolver: ?BaseResolver, diag_out: ?*[]const u8) CookError!void {
+        if (pd.requires_len == 0) return;
+        const base_name = self.ast.strings.slice(pd.relation_target);
+        const resolver = base_resolver orelse return fail(diag_out, error.BasePrefabMissing, "`extends … requires` needs a base-prefab resolver to validate against X");
+        const base_bytes = resolver.resolve(base_name) orelse return fail(diag_out, error.BasePrefabMissing, "`extends` references a base prefab the resolver does not know");
+        var acc = accessor.Accessor.open(base_bytes) catch return fail(diag_out, error.BasePrefabCorrupt, "base prefab .prefab.bin failed to open (magic/version)");
+        if (!acc.verifyHash()) return fail(diag_out, error.BasePrefabCorrupt, "base prefab .prefab.bin content hash mismatch");
+        var ri: u32 = 0;
+        while (ri < pd.requires_len) : (ri += 1) {
+            const req = self.ast.strings.slice(self.ast.prefab_requires.items[pd.requires_start + ri]);
+            if (!baseHasComponent(acc, req)) return fail(diag_out, error.RequiresNotSatisfied, "`extends … requires` a component the base prefab does not declare");
+        }
     }
 
     /// Reconstruct the base prefab's flattened entities from its cooked
@@ -1062,6 +1167,16 @@ const Builder = struct {
         return parseUuid(self.ast.strings.slice(uuid_id)) orelse fail(diag_out, error.BadUuid, "entity uuid is not a valid canonical UUID");
     }
 };
+
+/// Whether the cooked base prefab `acc` declares a component named `name` (used
+/// by `extends … requires` validation — scans the on-disk Schema Registry).
+fn baseHasComponent(acc: accessor.Accessor, name: []const u8) bool {
+    var i: u32 = 0;
+    while (i < acc.schemaCount()) : (i += 1) {
+        if (std.mem.eql(u8, acc.schema(i).name, name)) return true;
+    }
+    return false;
+}
 
 /// Index of `id` in `ids`, or null. Linear (component counts per entity are tiny).
 fn indexOfId(ids: []const ComponentId, id: ComponentId) ?usize {

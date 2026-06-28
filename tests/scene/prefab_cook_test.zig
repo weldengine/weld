@@ -142,21 +142,15 @@ test "prefab re-cook is byte-identical" {
     try std.testing.expectEqualSlices(u8, b1, b2);
 }
 
-test "cookPrefab rejects extends (M1.0.6 E5) and a scene source" {
+test "cookPrefab rejects a scene source" {
+    // `extends` is COOKED as of M1.0.6 E5 (see tests/scene/extensions_test.zig);
+    // here we only assert a `.prefab.etch` holding a `scene` is rejected.
     const gpa = std.testing.allocator;
-    const extends_src =
-        \\component Health { current: i32 = 100, max: i32 = 100 }
-        \\prefab "CombatModule" extends "BaseCharacter" requires Health {
-        \\  entity "root" { uuid: "00000000-0000-0000-0000-000000000001" Health { max: 150 } }
-        \\}
-    ;
-    var diag: []const u8 = "";
-    try std.testing.expectError(error.ExtendsUnsupported, scene_cook.cookPrefab(gpa, extends_src, null, &diag));
-
     const scene_src =
         \\component Health { current: i32 = 100, max: i32 = 100 }
         \\scene "S" { entity "e" { uuid: "00000000-0000-0000-0000-000000000002" Health {} } }
     ;
+    var diag: []const u8 = "";
     try std.testing.expectError(error.SceneNotAllowedInPrefab, scene_cook.cookPrefab(gpa, scene_src, null, &diag));
 }
 

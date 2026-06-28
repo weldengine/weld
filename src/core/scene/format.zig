@@ -56,7 +56,14 @@ pub const magic = [4]u8{ 'W', 'S', 'C', 'N' };
 /// `.scene.bin` binary format version (the codec/layout version — bumped on any
 /// breaking layout change). Distinct from `content_version` (the authored
 /// scene's `version:` field, opaque to the codec).
-pub const format_version: u16 = 1;
+///
+/// **2** (M1.0.6): the reserved sections became real — the cross-references table
+/// and the `extensions_offset` region (Entity Extensions Table + Prefab ID Table
+/// + hooks) went from bare count-placeholders (`[0]`) to full structures. A break
+/// vs v1 (M1.0.4/M1.0.5): a v1 file fails `BadVersion` and must be re-cooked
+/// (`.scene.bin`/`.prefab.bin` are deterministic build artifacts, no prod files
+/// in Phase 1).
+pub const format_version: u16 = 2;
 
 /// `SceneHeader` size — the fixed 64-byte (cache-line) prefix every file opens
 /// with. All section offsets in the header are relative to the file start.
@@ -308,6 +315,26 @@ pub const CrossRef = struct {
     target_uuid: u32,
 };
 
+/// One entity's active extensions (M1.0.6 E5) in the neutral model — the
+/// `extensions:` clause of a scene entity/instance. `uuid` is a `CookModel.uuids`
+/// ordinal (the bearing entity); `prefab_ids` are indices into
+/// `CookModel.prefab_id_table` (the dedup'd extension-name table). On-disk these
+/// become the Entity Extensions Table entries @ `extensions_offset`.
+pub const ExtModelEntry = struct {
+    uuid: u32,
+    prefab_ids: []const u32,
+};
+
+/// An `extends` prefab's hooks (M1.0.6 E5) in the neutral model — `on_attach` /
+/// `on_detach` rendered as canonical Etch **text** (`CookModel.strings` indices,
+/// `null` = the hook is absent). On-disk these become the hooks sub-section's
+/// `{on_attach_ref, on_detach_ref}` (string-table offsets; `0` = absent). Only an
+/// `extends` `.prefab.bin` carries one (`hook_count ∈ {0,1}` in M1.0.6).
+pub const HookSet = struct {
+    on_attach: ?u32,
+    on_detach: ?u32,
+};
+
 /// The neutral, World-free model the cook produces. Owns every slice via an
 /// internal arena; `deinit` frees the lot. The E2 writer reads it to emit
 /// `.scene.bin`; the E1 cook test inspects it directly (no serialization).
@@ -322,6 +349,17 @@ pub const CookModel = struct {
     /// `Entity` field references and for every prefab. Serialized to the
     /// Cross-references Table @ `crossrefs_offset`.
     cross_refs: []const CrossRef = &.{},
+    /// Active-extension entries (M1.0.6 E5) — one per scene entity/instance with a
+    /// non-empty `extensions:` clause. Empty for a prefab and for an extension-free
+    /// scene. Serialized to the Entity Extensions Table @ `extensions_offset`.
+    ext_entries: []const ExtModelEntry = &.{},
+    /// Deduplicated extension-prefab names (M1.0.6 E5), as `CookModel.strings`
+    /// indices; `ExtModelEntry.prefab_ids` index this table. Serialized to the
+    /// Prefab ID Table (string-table offsets).
+    prefab_id_table: []const u32 = &.{},
+    /// `extends` prefab hooks (M1.0.6 E5) — `hook_count ∈ {0,1}`. Empty for a
+    /// scene and for `of`/standalone prefabs. Serialized to the hooks sub-section.
+    hooks: []const HookSet = &.{},
     /// The authored scene's `version:` field (0 if absent). Propagated to
     /// `SceneHeader.content_version` — opaque to the codec, for the game's own
     /// scene-versioning/migration.
@@ -353,7 +391,7 @@ test "CookModel arena round-trips an empty model" {
 
 test "format magic + version constants are stable" {
     try std.testing.expectEqualSlices(u8, "WSCN", &magic);
-    try std.testing.expectEqual(@as(u16, 1), format_version);
+    try std.testing.expectEqual(@as(u16, 2), format_version);
 }
 
 test "SceneHeader writeTo/read round-trips little-endian" {

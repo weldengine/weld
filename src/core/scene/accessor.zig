@@ -134,6 +134,94 @@ pub const Accessor = struct {
         }
     };
 
+    // ── Entity Extensions region (M1.0.6 E5, SHAPE A) ──
+    //
+    // `@ extensions_offset`, three self-delimiting sub-tables in order:
+    //   Entity Extensions Table — `ext_count:u32` then per entity
+    //     `{ uuid_ordinal:u32, extension_count:u32, extension_ids:[…]u32 }`
+    //   Prefab ID Table — `prefab_id_count:u32` then `[…]u32` string-table offsets
+    //   Hooks — `hook_count:u32` then `[…]{ on_attach_ref:u32, on_detach_ref:u32 }`
+    //     (string-table offsets; 0 = absent). `hook_count ∈ {0,1}` in M1.0.6.
+
+    /// A view over one Entity Extensions Table entry.
+    pub const ExtEntry = struct {
+        acc: Accessor,
+        uuid_ordinal: u32,
+        extension_count: u32,
+        ids_off: usize, // file offset of the first `extension_id` u32
+
+        /// The `j`-th active-extension id (an index into the Prefab ID Table).
+        pub fn extensionId(self: ExtEntry, j: u32) u32 {
+            return self.acc.readU32(self.ids_off + @as(usize, j) * 4);
+        }
+    };
+
+    pub fn extensionsCount(self: Accessor) u32 {
+        return self.readU32(self.header.extensions_offset);
+    }
+
+    /// The `i`-th Entity Extensions Table entry (walks variable-length entries).
+    pub fn extension(self: Accessor, i: u32) ExtEntry {
+        var off: usize = self.header.extensions_offset + 4; // skip ext_count
+        var k: u32 = 0;
+        while (k < i) : (k += 1) {
+            const ecount = self.readU32(off + 4);
+            off += 8 + @as(usize, ecount) * 4;
+        }
+        return .{
+            .acc = self,
+            .uuid_ordinal = self.readU32(off),
+            .extension_count = self.readU32(off + 4),
+            .ids_off = off + 8,
+        };
+    }
+
+    /// File offset of the Prefab ID Table's `prefab_id_count` (past the ext table).
+    fn prefabIdTableStart(self: Accessor) usize {
+        var off: usize = self.header.extensions_offset + 4;
+        const count = self.extensionsCount();
+        var k: u32 = 0;
+        while (k < count) : (k += 1) {
+            const ecount = self.readU32(off + 4);
+            off += 8 + @as(usize, ecount) * 4;
+        }
+        return off;
+    }
+
+    pub fn prefabIdCount(self: Accessor) u32 {
+        return self.readU32(self.prefabIdTableStart());
+    }
+
+    /// The `i`-th deduplicated extension-prefab name (Prefab ID Table).
+    pub fn prefabName(self: Accessor, i: u32) []const u8 {
+        const base = self.prefabIdTableStart() + 4;
+        return self.stringAt(self.readU32(base + @as(usize, i) * 4));
+    }
+
+    /// File offset of the hooks sub-section's `hook_count` (past the Prefab ID Table).
+    fn hooksStart(self: Accessor) usize {
+        const pcount = self.prefabIdCount();
+        return self.prefabIdTableStart() + 4 + @as(usize, pcount) * 4;
+    }
+
+    pub fn hookCount(self: Accessor) u32 {
+        return self.readU32(self.hooksStart());
+    }
+
+    /// One hooks entry: `on_attach`/`on_detach` rendered Etch text, or null if the
+    /// hook is absent (its on-disk string-table ref is 0).
+    pub const Hook = struct { on_attach: ?[]const u8, on_detach: ?[]const u8 };
+
+    pub fn hook(self: Accessor, i: u32) Hook {
+        const base = self.hooksStart() + 4 + @as(usize, i) * 8;
+        const a_ref = self.readU32(base);
+        const d_ref = self.readU32(base + 4);
+        return .{
+            .on_attach = if (a_ref == 0) null else self.stringAt(a_ref),
+            .on_detach = if (d_ref == 0) null else self.stringAt(d_ref),
+        };
+    }
+
     // ── Cross-references Table (M1.0.6 E4) ──
 
     /// Number of entity→entity cross-reference entries (`0` for a scene with no
