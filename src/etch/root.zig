@@ -186,6 +186,47 @@ pub const ProjectFile = struct {
     source: []const u8,
 };
 
+/// Module path of a project file from its `ProjectFile.name` (path under `src/`,
+/// `etch-reference-part1.md` §1.1): strip an optional leading `src/`, strip the
+/// file extension (a typed compound `.scene.etch`/`.prefab.etch`/`.layer.etch`/
+/// `.manifest.etch`/`.d.etch` if present, else plain `.etch`), and map `/`→`.`.
+/// The returned slice is `gpa`-owned. Typed-extension files (scene/prefab/…) take
+/// their basename as the module label; they are never import *targets* (they
+/// declare no top-level types — only one scene/prefab + imports), so the label
+/// only identifies them as nodes in the dependency graph (M1.0.7 E4).
+fn deriveModulePath(gpa: std.mem.Allocator, name: []const u8) ![]u8 {
+    var s = name;
+    if (std.mem.startsWith(u8, s, "src/")) s = s["src/".len..];
+    const typed_exts = [_][]const u8{ ".d.etch", ".scene.etch", ".prefab.etch", ".layer.etch", ".manifest.etch" };
+    var stripped = false;
+    for (typed_exts) |ext| {
+        if (std.mem.endsWith(u8, s, ext)) {
+            s = s[0 .. s.len - ext.len];
+            stripped = true;
+            break;
+        }
+    }
+    if (!stripped and std.mem.endsWith(u8, s, ".etch")) s = s[0 .. s.len - ".etch".len];
+    const out = try gpa.dupe(u8, s);
+    for (out) |*c| {
+        if (c.* == '/') c.* = '.';
+    }
+    return out;
+}
+
+/// The dotted module path an `ImportDecl` references (`import a.b.c` → `"a.b.c"`),
+/// joined from its `import_path_segs` run. `gpa`-owned (M1.0.7 E4).
+fn joinImportPath(gpa: std.mem.Allocator, a: *const Ast, decl: ast.ImportDecl) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(gpa);
+    var i: u32 = 0;
+    while (i < decl.path_len) : (i += 1) {
+        if (i != 0) try buf.append(gpa, '.');
+        try buf.appendSlice(gpa, a.strings.slice(a.import_path_segs.items[decl.path_start + i]));
+    }
+    return try buf.toOwnedSlice(gpa);
+}
+
 /// Cross-file scene/prefab validation (M0.9 E2-B). Parses every project file,
 /// builds the byte-keyed global prefab-name index and a shared cross-scene
 /// UUID tracker, then type-checks each file with that project context so the
@@ -245,9 +286,116 @@ pub fn validateProject(
     var uuids: std.StringHashMapUnmanaged(void) = .empty;
     defer uuids.deinit(gpa);
 
+    // ── M1.0.7 E4 — module graph + topological order + cycle detection ──
+    // Derive each file's module path and build module-path → index map.
+    const n = asts.items.len;
+    var module_paths: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (module_paths.items) |p| gpa.free(p);
+        module_paths.deinit(gpa);
+    }
+    try module_paths.ensureTotalCapacity(gpa, n);
+    var module_index: std.StringHashMapUnmanaged(usize) = .empty;
+    defer module_index.deinit(gpa);
+    for (files, 0..) |f, idx| {
+        const mp = try deriveModulePath(gpa, f.name);
+        module_paths.appendAssumeCapacity(mp);
+        // A duplicate module path (an out-of-scope edge case) maps to the last
+        // file; E4 only needs a consistent node identity for the graph.
+        try module_index.put(gpa, mp, idx);
+    }
+
+    // Build the directed import-dependency graph: edge importer → imported, for
+    // each import whose target module resolves to a file in the set. Targets that
+    // resolve to no file are an E5 concern (E0103/E0104), not a cycle edge.
+    const Edge = struct { to: usize, span: SourceSpan };
+    var adj: std.ArrayListUnmanaged(std.ArrayListUnmanaged(Edge)) = .empty;
+    defer {
+        for (adj.items) |*lst| lst.deinit(gpa);
+        adj.deinit(gpa);
+    }
+    try adj.ensureTotalCapacity(gpa, n);
+    for (0..n) |_| adj.appendAssumeCapacity(.empty);
+    for (asts.items, 0..) |*a, u| {
+        const kinds = a.items.items(.kind);
+        const datas = a.items.items(.data);
+        const spans = a.items.items(.span);
+        var i: usize = 0;
+        while (i < a.items.len) : (i += 1) {
+            if (kinds[i] != .import_decl) continue;
+            const decl = a.import_decls.items[datas[i]];
+            const target_path = try joinImportPath(gpa, a, decl);
+            defer gpa.free(target_path);
+            if (module_index.get(target_path)) |v| {
+                try adj.items[u].append(gpa, .{ .to = v, .span = spans[i] });
+            }
+        }
+    }
+
+    // Iterative DFS: post-order yields a dependencies-first topological order; a
+    // back-edge (to a gray/on-stack node) closes a cycle → E0108 pointing at the
+    // import that closes the loop. White = 0, gray = 1, black = 2.
+    const colors = try gpa.alloc(u8, n);
+    defer gpa.free(colors);
+    @memset(colors, 0);
+    var order: std.ArrayListUnmanaged(usize) = .empty;
+    defer order.deinit(gpa);
+    try order.ensureTotalCapacity(gpa, n);
+    const Frame = struct { node: usize, ei: usize };
+    var stack: std.ArrayListUnmanaged(Frame) = .empty;
+    defer stack.deinit(gpa);
+    var cycle_found = false;
+    for (0..n) |start| {
+        if (colors[start] != 0) continue;
+        colors[start] = 1;
+        stack.clearRetainingCapacity();
+        try stack.append(gpa, .{ .node = start, .ei = 0 });
+        while (stack.items.len > 0) {
+            const frame = &stack.items[stack.items.len - 1];
+            const edges = adj.items[frame.node].items;
+            if (frame.ei < edges.len) {
+                const edge = edges[frame.ei];
+                frame.ei += 1;
+                switch (colors[edge.to]) {
+                    0 => {
+                        colors[edge.to] = 1;
+                        try stack.append(gpa, .{ .node = edge.to, .ei = 0 });
+                    },
+                    1 => {
+                        // Back-edge: `from` imports `to`, already on the stack.
+                        cycle_found = true;
+                        const from_node = frame.node;
+                        const msg = try std.fmt.allocPrint(
+                            gpa,
+                            "import cycle detected: module '{s}' imports '{s}', which closes a cycle back to '{s}'",
+                            .{ module_paths.items[from_node], module_paths.items[edge.to], module_paths.items[edge.to] },
+                        );
+                        errdefer gpa.free(msg);
+                        try diags_out.append(gpa, .{
+                            .code = .import_cycle,
+                            .severity = .error_,
+                            .primary_span = edge.span,
+                            .primary_message = msg,
+                        });
+                    },
+                    else => {}, // black: already finished, no cycle
+                }
+            } else {
+                colors[frame.node] = 2;
+                order.appendAssumeCapacity(frame.node);
+                _ = stack.pop();
+            }
+        }
+    }
+
+    // Check each file with the project context. Acyclic → topological order so a
+    // module's dependencies are checked first (M1.0.7 E6 exports collection);
+    // on a cycle, fall back to input order (the graph has no valid linearization).
     const ctx: TypeChecker.ProjectContext = .{ .prefabs = &prefabs, .uuids = &uuids };
-    for (asts.items) |*a| {
-        try TypeChecker.checkProject(gpa, a, diags_out, &ctx);
+    var k: usize = 0;
+    while (k < n) : (k += 1) {
+        const idx = if (cycle_found) k else order.items[k];
+        try TypeChecker.checkProject(gpa, &asts.items[idx], diags_out, &ctx);
     }
 }
 

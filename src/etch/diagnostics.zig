@@ -33,6 +33,7 @@ pub const DiagnosticCode = enum {
     duplicate_symbol, // S3 — E0101 DuplicateSymbol
     undefined_symbol, // S3 — E0102 UndefinedSymbol
     enum_variant_not_found, // M0.8 — E0105 EnumVariantNotFound
+    import_cycle, // M1.0.7 E4 — E0108 ImportCycle (D-B: NOT E0101; E0101 is DuplicateSymbol)
 
     // ── Type errors (E0200-E0299) ──
     type_mismatch, // S3 — E0200 TypeMismatch
@@ -357,6 +358,7 @@ pub const DiagnosticCode = enum {
             .parse_error => "E0001",
             .duplicate_symbol => "E0101",
             .undefined_symbol => "E0102",
+            .import_cycle => "E0108",
             .enum_variant_not_found => "E0105",
             .type_mismatch => "E0200",
             .arg_count_mismatch => "E0203",
@@ -537,6 +539,7 @@ pub const DiagnosticCode = enum {
             .parse_error => "ParseError",
             .duplicate_symbol => "DuplicateSymbol",
             .undefined_symbol => "UndefinedSymbol",
+            .import_cycle => "ImportCycle",
             .enum_variant_not_found => "EnumVariantNotFound",
             .type_mismatch => "TypeMismatch",
             .arg_count_mismatch => "ArgCountMismatch",
