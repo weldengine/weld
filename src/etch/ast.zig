@@ -324,6 +324,37 @@ pub const Field = struct {
     annotations_len: u32,
 };
 
+/// One `import_item` (`( IDENT | TYPE_IDENT ) [ "as" ( IDENT | TYPE_IDENT ) ]`,
+/// `etch-grammar.md` §5.2, reconciled D-D). Imported items are mostly
+/// `TYPE_IDENT` (`Vec3`, `Health`) but a bare `IDENT` (`gravity`) is equally
+/// legal — the AST stores the interned name, so the token-kind distinction is a
+/// parse concern (E3) and this shape accommodates both. `alias` is the optional
+/// local-alias name (`as Y`), `0` when absent.
+pub const ImportItem = struct {
+    name: StringId, // imported item name (IDENT or TYPE_IDENT)
+    alias: StringId, // local alias (`as Y`), 0 if absent
+};
+
+/// Side-slab entry for an `import` directive (M1.0.7, `etch-grammar.md` §5.2:
+/// `import_decl = "import" module_path [ import_spec ]`). The module path is a
+/// `(start, len)` run of `arena.import_path_segs` (≥1 IDENT segment, e.g.
+/// `core`, `math` — the `tag_path_segs` precedent). `module_alias` carries the
+/// `as m` whole-module alias (`0` when absent — a bare `import a.b` has implicit
+/// alias = last path segment, derived at resolve). `items` is a run of
+/// `arena.import_items` for the selective form (`import a.b { X, Y }`);
+/// `items_len == 0` for the whole-module forms. The four grammar forms map to:
+/// (1) `import a.b` → alias 0, items 0; (2) `import a.b { X, Y }` → items > 0;
+/// (3) `import a.b as m` → module_alias set; (4) `import a.b { X as Y }` → items
+/// with per-item alias. Module-alias qualified resolution (`m.Type`) is deferred
+/// (D-F); E5 still records the alias binding so the later walk is purely additive.
+pub const ImportDecl = struct {
+    path_start: u32, // index into `arena.import_path_segs`
+    path_len: u32, // ≥ 1
+    module_alias: StringId, // `as m` alias (0 if absent or selective form)
+    items_start: u32, // index into `arena.import_items`
+    items_len: u32, // 0 for the whole-module forms (1 and 3)
+};
+
 /// Side-slab entry for a `component` declaration: name + range into
 /// `arena.fields` + annotation range.
 pub const ComponentDecl = struct {
@@ -2249,6 +2280,13 @@ pub const AstArena = struct {
 
     // Side slabs.
     fields: std.ArrayListUnmanaged(Field) = .empty,
+    // M1.0.7 cross-file import. `import_decls` holds one entry per `import`
+    // directive; `import_path_segs` is the flat module-path segment pool (a
+    // `StringId` run, the `tag_path_segs` precedent); `import_items` holds the
+    // selective `{ X, Y }` items.
+    import_decls: std.ArrayListUnmanaged(ImportDecl) = .empty,
+    import_path_segs: std.ArrayListUnmanaged(StringId) = .empty,
+    import_items: std.ArrayListUnmanaged(ImportItem) = .empty,
     component_decls: std.ArrayListUnmanaged(ComponentDecl) = .empty,
     resource_decls: std.ArrayListUnmanaged(ResourceDecl) = .empty,
     event_decls: std.ArrayListUnmanaged(EventDecl) = .empty,
@@ -2469,6 +2507,9 @@ pub const AstArena = struct {
         self.extra.deinit(gpa);
         self.strings.deinit(gpa);
         self.fields.deinit(gpa);
+        self.import_decls.deinit(gpa);
+        self.import_path_segs.deinit(gpa);
+        self.import_items.deinit(gpa);
         self.component_decls.deinit(gpa);
         self.resource_decls.deinit(gpa);
         self.event_decls.deinit(gpa);
@@ -3128,6 +3169,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.prefab_decls.items.len);
         try self.prefab_decls.append(gpa, decl);
         return try self.addItem(gpa, .prefab_decl, idx, span);
+    }
+
+    /// `import module_path [import_spec]` (M1.0.7, §5.2). The caller appends the
+    /// module-path segments to `import_path_segs` and any selective items to
+    /// `import_items` first, passing the resulting ranges in `decl`.
+    pub fn addImportDecl(self: *AstArena, gpa: std.mem.Allocator, decl: ImportDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.import_decls.items.len);
+        try self.import_decls.append(gpa, decl);
+        return try self.addItem(gpa, .import_decl, idx, span);
     }
 
     /// `dialogue Name { elements }` (M0.8 E4, `etch-grammar.md` §8.4). The
