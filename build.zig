@@ -418,6 +418,10 @@ pub fn build(b: *std.Build) void {
         // M0.9 / E2-B — cross-file scene/prefab validation (E1782 cross-scene,
         // E1786 cross-file prefab ref, E1791 cross-file prefab base).
         .{ .path = "tests/etch/crossfile_scene_prefab_test.zig", .etch = true },
+        // M1.0.7 / E3 — `import` directive parsing: the four grammar forms
+        // (whole / selective / aliased / per-item alias), IDENT+TYPE_IDENT items
+        // (D-D), and malformed-import recovery (resync, no UnsupportedConstructInS3).
+        .{ .path = "tests/etch/import_parse_test.zig", .etch = true },
         // M1.0.0 — interpreter ↔ filtered ECS queries: has / not has / value
         // field-filters (== and ordered) / and-or-not composition + the
         // dynamic-archetype (never-matches-then-matches) case + the per-rule
