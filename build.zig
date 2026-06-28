@@ -422,9 +422,12 @@ pub fn build(b: *std.Build) void {
         // (whole / selective / aliased / per-item alias), IDENT+TYPE_IDENT items
         // (D-D), and malformed-import recovery (resync, no UnsupportedConstructInS3).
         .{ .path = "tests/etch/import_parse_test.zig", .etch = true },
-        // M1.0.7 / E4 — module graph + topological order + cycle detection
-        // (E0108). E5/E6 extend this file with selective-import resolution.
+        // M1.0.7 / E4-E6 — module graph + cycle (E0108), exports binding
+        // (E0103/E0104), cross-file type resolution (no E0102).
         .{ .path = "tests/etch/import_resolve_test.zig", .etch = true },
+        // M1.0.7 / E6 — the E1793 unblock: a `.prefab.etch` importing its
+        // component types validates clean; an undeclared component still errors.
+        .{ .path = "tests/etch/crossfile_prefab_import_test.zig", .etch = true },
         // M1.0.0 — interpreter ↔ filtered ECS queries: has / not has / value
         // field-filters (== and ordered) / and-or-not composition + the
         // dynamic-archetype (never-matches-then-matches) case + the per-rule

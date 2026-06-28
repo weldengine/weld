@@ -52,6 +52,24 @@ test "linear import is not a cycle" {
     try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .import_cycle));
 }
 
+test "selective import resolves a cross-file type" {
+    const gpa = std.testing.allocator;
+    // `main` imports the component `Health` from `lib` and uses it in a type
+    // position (`type HA = Health`). The imported `TYPE_IDENT` must resolve —
+    // no E0102 UndefinedSymbol (E6 applies the imported set to type resolution).
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source = "component Health { current: float = 100.0 }" },
+        .{ .name = "main.etch", .source =
+        \\import lib { Health }
+        \\type HA = Health
+        },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .undefined_symbol));
+}
+
 test "unknown export errors (E0104)" {
     const gpa = std.testing.allocator;
     // `lib` exports `Health`; `main` selectively imports `Nope`, which `lib` does

@@ -190,6 +190,20 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
     return (@as(u64, type_name) << 32) | @as(u64, method_name);
 }
 
+/// Resolve a foreign-arena component field's declared type to a `BuiltinType`,
+/// or `null` for a non-builtin (named / array / complex) type — M1.0.7 E6 (D-E).
+/// Mirrors the builtin path of `namedTypeToResolved` but reads the FOREIGN arena's
+/// strings + alias chain; it deliberately does NOT consult any symbol table
+/// (cross-module named-type field-type resolution is the documented residual).
+fn foreignBuiltinFieldType(decl_arena: *const AstArena, type_node: NodeId) ?BuiltinType {
+    if (decl_arena.typeNodeKind(type_node) != .named) return null;
+    const named = decl_arena.named_types.items[decl_arena.typeNodeData(type_node)];
+    const resolved = decl_arena.resolveTypeAliasName(named.name);
+    const tname = decl_arena.strings.slice(resolved);
+    if (std.mem.eql(u8, tname, "string")) return .string_;
+    return BuiltinType.fromName(tname);
+}
+
 /// `true` if `s` contains an ASCII uppercase letter — an `E1768
 /// IdInvalidFormat` data-entry id check (ids are snake_case IDENTs,
 /// `etch-validation-ecs.md` §22.2; M0.8 E4).
@@ -461,6 +475,10 @@ pub const TypeChecker = struct {
             if (BuiltinType.fromName(uname) != null) continue;
             if (self.symbols.get(ultimate)) |sym| {
                 if (sym.kind == .component or sym.kind == .resource) continue;
+            }
+            // M1.0.7 E6 — the alias target may be a selectively-imported type.
+            if (self.imported_symbols.get(ultimate)) |entry| {
+                if (entry.kind == .component or entry.kind == .resource) continue;
             }
             try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.target), "type alias '{s}' does not resolve to a known type", .{self.arena.strings.slice(decl.name)});
         }
@@ -1335,17 +1353,71 @@ pub const TypeChecker = struct {
 
     /// Resolve a `component_instance` against the component RTTI: `code_type`
     /// if the type is not a declared component, then per-field checks.
+    ///
+    /// M1.0.7 E6 (D-E): the component type may be a SELECTIVELY-IMPORTED symbol
+    /// whose declaration lives in another file's arena. When it is, the decl is
+    /// fetched from `project.arenas[entry.arena_index]` and the fields are checked
+    /// CROSS-ARENA (field names compared by bytes — StringIds are per-arena). This
+    /// is the E1793 unblock: a `.prefab.etch` importing its components validates
+    /// clean instead of tripping `PrefabComponentTypeUnknown`.
     fn checkComponentInstance(self: *TypeChecker, ci: ast_mod.ComponentInstance, code_type: DiagnosticCode, code_field: DiagnosticCode, code_field_type: DiagnosticCode) !void {
-        const sym = self.symbols.get(ci.type_name);
-        if (sym == null or sym.?.kind != .component) {
-            try self.emit(code_type, .error_, ci.span, "'{s}' is not a declared component", .{self.arena.strings.slice(ci.type_name)});
-            return;
-        }
-        const decl = self.arena.component_decls.items[self.arena.itemData(sym.?.item_id)];
         const owner = self.arena.strings.slice(ci.type_name);
+        // 1. Local component (the M0.8 path).
+        if (self.symbols.get(ci.type_name)) |sym| {
+            if (sym.kind == .component) {
+                const decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)];
+                var f: u32 = 0;
+                while (f < ci.fields_len) : (f += 1) {
+                    try self.checkInstanceField(owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], code_field, code_field_type);
+                }
+                return;
+            }
+            // A local symbol that is NOT a component → fall through to code_type.
+        } else if (self.imported_symbols.get(ci.type_name)) |entry| {
+            // 2. Imported component (cross-arena, E6 / D-E).
+            if (entry.kind == .component) {
+                const decl_arena = &self.project.?.arenas[entry.arena_index];
+                const decl = decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)];
+                var f: u32 = 0;
+                while (f < ci.fields_len) : (f += 1) {
+                    try self.checkInstanceFieldForeign(decl_arena, owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], code_field, code_field_type);
+                }
+                return;
+            }
+        }
+        try self.emit(code_type, .error_, ci.span, "'{s}' is not a declared component", .{owner});
+    }
+
+    /// Cross-arena field check for an imported component instance (M1.0.7 E6,
+    /// D-E). The instance field (`field`) lives in `self.arena`; the declared
+    /// fields live in `decl_arena`. Field names are matched by BYTES (StringIds
+    /// are per-arena). `code_unknown` (E1794) is full; the field-TYPE check
+    /// (`code_type`, E1795) runs for BUILTIN-typed foreign fields only — a named
+    /// foreign field type (struct/enum/component) would need the foreign module's
+    /// resolved symbol table, which this pass does not hold, so it is skipped
+    /// (documented residual, not a hack).
+    fn checkInstanceFieldForeign(self: *TypeChecker, decl_arena: *const AstArena, owner: []const u8, decl_fields_start: u32, decl_fields_len: u32, field: ast_mod.StructLitField, code_unknown: DiagnosticCode, code_type: DiagnosticCode) !void {
+        if (field.name == 0) return; // spread — not produced in component bodies
+        const field_name_bytes = self.arena.strings.slice(field.name);
+        var declared_type_node: ?NodeId = null;
         var f: u32 = 0;
-        while (f < ci.fields_len) : (f += 1) {
-            try self.checkInstanceField(owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], code_field, code_field_type);
+        while (f < decl_fields_len) : (f += 1) {
+            const df = decl_arena.fields.items[decl_fields_start + f];
+            if (std.mem.eql(u8, decl_arena.strings.slice(df.name), field_name_bytes)) {
+                declared_type_node = df.type_node;
+                break;
+            }
+        }
+        const tn = declared_type_node orelse {
+            try self.emit(code_unknown, .error_, self.arena.exprSpan(field.value), "'{s}' has no field '{s}'", .{ owner, field_name_bytes });
+            return;
+        };
+        // Field-TYPE check, builtins only (the POD-common case). A non-builtin
+        // foreign declared type is skipped (residual).
+        const declared_builtin = foreignBuiltinFieldType(decl_arena, tn) orelse return;
+        const actual = try self.synthExprE(field.value, null);
+        if (actual == .builtin and !self.literalTypeFits(declared_builtin, field.value, actual.builtin)) {
+            try self.emit(code_type, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{field_name_bytes});
         }
     }
 
@@ -3275,6 +3347,20 @@ pub const TypeChecker = struct {
                 if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
                 if (self.symbols.get(resolved_name)) |sym| {
                     return switch (sym.kind) {
+                        .component => .{ .component = resolved_name },
+                        .resource => .{ .resource = resolved_name },
+                        .struct_ => .{ .struct_t = resolved_name },
+                        .enum_ => .{ .enum_t = resolved_name },
+                        else => .unknown,
+                    };
+                }
+                // M1.0.7 E6 — a selectively-imported type resolves in any type
+                // position (`type HA = Health`, field types, signatures). Identity
+                // is the local-name `StringId`; the defining arena is reached via
+                // `imported_symbols` only where the decl itself is needed (the
+                // cross-arena component check, `checkComponentInstance`).
+                if (self.imported_symbols.get(resolved_name)) |entry| {
+                    return switch (entry.kind) {
                         .component => .{ .component = resolved_name },
                         .resource => .{ .resource = resolved_name },
                         .struct_ => .{ .struct_t = resolved_name },
