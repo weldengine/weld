@@ -193,8 +193,10 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
 /// Resolve a foreign-arena component field's declared type to a `BuiltinType`,
 /// or `null` for a non-builtin (named / array / complex) type — M1.0.7 E6 (D-E).
 /// Mirrors the builtin path of `namedTypeToResolved` but reads the FOREIGN arena's
-/// strings + alias chain; it deliberately does NOT consult any symbol table
-/// (cross-module named-type field-type resolution is the documented residual).
+/// strings + alias chain; it consults no symbol table. `null` is unreachable for a
+/// valid component (component fields are builtin-POD only, `validateFieldsInDecl
+/// .component_like`) — so the cross-arena field-TYPE check is complete for every
+/// valid imported component.
 fn foreignBuiltinFieldType(decl_arena: *const AstArena, type_node: NodeId) ?BuiltinType {
     if (decl_arena.typeNodeKind(type_node) != .named) return null;
     const named = decl_arena.named_types.items[decl_arena.typeNodeData(type_node)];
@@ -1392,10 +1394,13 @@ pub const TypeChecker = struct {
     /// D-E). The instance field (`field`) lives in `self.arena`; the declared
     /// fields live in `decl_arena`. Field names are matched by BYTES (StringIds
     /// are per-arena). `code_unknown` (E1794) is full; the field-TYPE check
-    /// (`code_type`, E1795) runs for BUILTIN-typed foreign fields only — a named
-    /// foreign field type (struct/enum/component) would need the foreign module's
-    /// resolved symbol table, which this pass does not hold, so it is skipped
-    /// (documented residual, not a hack).
+    /// (`code_type`, E1795) resolves the foreign declared type via
+    /// `foreignBuiltinFieldType`. That covers EVERY valid component field type:
+    /// `validateFieldsInDecl(.component_like)` admits only builtin-POD field types
+    /// (named struct/enum/string are rejected on components), so a valid imported
+    /// component's fields are all builtins. The `orelse return` (named foreign
+    /// type) is therefore unreachable for a valid component — forward-compat
+    /// headroom if components ever gain named-typed fields, not a skipped check.
     fn checkInstanceFieldForeign(self: *TypeChecker, decl_arena: *const AstArena, owner: []const u8, decl_fields_start: u32, decl_fields_len: u32, field: ast_mod.StructLitField, code_unknown: DiagnosticCode, code_type: DiagnosticCode) !void {
         if (field.name == 0) return; // spread — not produced in component bodies
         const field_name_bytes = self.arena.strings.slice(field.name);
@@ -1412,8 +1417,10 @@ pub const TypeChecker = struct {
             try self.emit(code_unknown, .error_, self.arena.exprSpan(field.value), "'{s}' has no field '{s}'", .{ owner, field_name_bytes });
             return;
         };
-        // Field-TYPE check, builtins only (the POD-common case). A non-builtin
-        // foreign declared type is skipped (residual).
+        // Field-TYPE check. Component fields are builtin-POD only
+        // (validateFieldsInDecl .component_like), so this resolves for every
+        // valid imported component; the `orelse return` is unreachable for a
+        // valid component (forward-compat headroom).
         const declared_builtin = foreignBuiltinFieldType(decl_arena, tn) orelse return;
         const actual = try self.synthExprE(field.value, null);
         if (actual == .builtin and !self.literalTypeFits(declared_builtin, field.value, actual.builtin)) {
