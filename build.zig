@@ -430,6 +430,10 @@ pub fn build(b: *std.Build) void {
         .{ .path = "tests/scene/cook_roundtrip_test.zig", .scene = true },
         // M1.0.4 / E3 — scene cook negative cases (typed errors, no panic).
         .{ .path = "tests/scene/cook_errors_test.zig", .scene = true },
+        // M1.0.6 / E2 — prefab cook → `.prefab.bin`: standalone + `of` variant
+        // (base inherited from its cooked `.prefab.bin`, field-merge/add overrides),
+        // re-cook determinism, and the rejected forms (`extends`, hooks on `of`).
+        .{ .path = "tests/scene/prefab_cook_test.zig", .scene = true, .dedicated_step = "test-prefab-cook" },
         // M1.0.5 / E2 — runtime loader `.scene.bin` → ECS: instantiate every
         // entity (component bytes verbatim), two-phase `on_spawned` (fires once
         // per entity, after all entities exist). `weld_core` only (no `.scene`

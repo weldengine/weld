@@ -1,8 +1,16 @@
-//! `scene_cook` — thin CLI shim around the M1.0.4 scene cook. Parses args + does
-//! file I/O; all real work is `weld_etch.scene_cook.cook` + `weld_core.scene
-//! .writer.write` in-process. Mirrors `tools/etch_cook` / `tools/asset_cook`.
+//! `scene_cook` — thin CLI shim around the M1.0.4 scene cook and the M1.0.6
+//! prefab cook. Parses args + does file I/O; all real work is
+//! `weld_etch.scene_cook.{cook,cookPrefab}` + `weld_core.scene.writer.write`
+//! in-process. Mirrors `tools/etch_cook` / `tools/asset_cook`.
 //!
-//!   scene_cook --output <out.scene.bin> <in.scene.etch>
+//!   scene_cook --output <out.scene.bin>  <in.scene.etch>
+//!   scene_cook --output <out.prefab.bin> [--prefab-dir <dir>] <in.prefab.etch>
+//!
+//! The input kind is taken from its extension: `*.prefab.etch` → prefab cook,
+//! `*.scene.etch` → scene cook. A `prefab "Y" of "X"` variant resolves its base
+//! `X.prefab.bin` under `--prefab-dir` (by prefab NAME → `<dir>/<X>.prefab.bin`),
+//! so the caller cooks prefabs into that dir before cooking variants/scenes that
+//! reference them ("cook prefabs before scenes").
 
 const std = @import("std");
 
@@ -12,6 +20,28 @@ const weld_core = @import("weld_core");
 const scene_cook = weld_etch.scene_cook;
 const writer = weld_core.scene.writer;
 
+/// On-disk base-prefab resolver: maps a prefab name to `<prefab_dir>/<name>.prefab.bin`,
+/// reading it into `arena` on demand (the bytes must outlive the cook). A missing
+/// dir or unreadable file resolves to null → the cook reports `BasePrefabMissing`.
+const DirResolver = struct {
+    io: std.Io,
+    dir: std.Io.Dir,
+    prefab_dir: ?[]const u8,
+    arena: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+
+    fn resolve(ctx: *anyopaque, name: []const u8) ?[]const u8 {
+        const self: *DirResolver = @ptrCast(@alignCast(ctx));
+        const root = self.prefab_dir orelse return null;
+        const path = std.fmt.allocPrint(self.arena, "{s}/{s}.prefab.bin", .{ root, name }) catch return null;
+        return readWholeFile(self.arena, self.io, self.dir, path) catch null;
+    }
+
+    fn base(self: *DirResolver) scene_cook.BaseResolver {
+        return .{ .ctx = self, .resolveFn = DirResolver.resolve };
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -19,6 +49,7 @@ pub fn main(init: std.process.Init) !void {
 
     var output: ?[]const u8 = null;
     var input: ?[]const u8 = null;
+    var prefab_dir: ?[]const u8 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const a = args[i];
@@ -26,6 +57,10 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) return die(io, "missing path after --output");
             output = args[i];
+        } else if (std.mem.eql(u8, a, "--prefab-dir")) {
+            i += 1;
+            if (i >= args.len) return die(io, "missing path after --prefab-dir");
+            prefab_dir = args[i];
         } else if (std.mem.startsWith(u8, a, "--")) {
             return die(io, "unknown flag");
         } else {
@@ -33,8 +68,8 @@ pub fn main(init: std.process.Init) !void {
             input = a;
         }
     }
-    const out_path = output orelse return die(io, "missing --output <out.scene.bin>");
-    const in_path = input orelse return die(io, "missing <in.scene.etch>");
+    const out_path = output orelse return die(io, "missing --output <out.{scene,prefab}.bin>");
+    const in_path = input orelse return die(io, "missing <in.{scene,prefab}.etch>");
 
     const dir = std.Io.Dir.cwd();
     const source = readWholeFile(gpa, io, dir, in_path) catch |err| {
@@ -43,10 +78,28 @@ pub fn main(init: std.process.Init) !void {
     };
     defer gpa.free(source);
 
+    const is_prefab = std.mem.endsWith(u8, in_path, ".prefab.etch");
+
     var diag: []const u8 = "";
-    var cooked = scene_cook.cook(gpa, source, &diag) catch |err| {
-        try printErr(io, "cook failed: ", if (diag.len > 0) diag else @errorName(err));
-        return err;
+    var cooked = blk: {
+        if (is_prefab) {
+            var resolver = DirResolver{
+                .io = io,
+                .dir = dir,
+                .prefab_dir = prefab_dir,
+                .arena = init.arena.allocator(),
+                .gpa = gpa,
+            };
+            break :blk scene_cook.cookPrefab(gpa, source, resolver.base(), &diag) catch |err| {
+                try printErr(io, "prefab cook failed: ", if (diag.len > 0) diag else @errorName(err));
+                return err;
+            };
+        } else {
+            break :blk scene_cook.cook(gpa, source, &diag) catch |err| {
+                try printErr(io, "cook failed: ", if (diag.len > 0) diag else @errorName(err));
+                return err;
+            };
+        }
     };
     defer cooked.deinit(gpa);
 
