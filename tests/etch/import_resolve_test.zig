@@ -51,3 +51,44 @@ test "linear import is not a cycle" {
     try etch.validateProject(gpa, &files, &diags);
     try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .import_cycle));
 }
+
+test "unknown export errors (E0104)" {
+    const gpa = std.testing.allocator;
+    // `lib` exports `Health`; `main` selectively imports `Nope`, which `lib` does
+    // not export → exactly one E0104 (and Health is unaffected).
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source = "component Health { current: float = 100.0 }" },
+        .{ .name = "main.etch", .source = "import lib { Nope }" },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .unknown_export));
+}
+
+test "valid selective import emits no import diagnostic (E5 binding)" {
+    const gpa = std.testing.allocator;
+    // `main` imports an item `lib` actually exports → the binding succeeds with no
+    // E0103/E0104 (TYPE_IDENT application + the prefab unblock are E6).
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source = "component Health { current: float = 100.0 }" },
+        .{ .name = "main.etch", .source = "import lib { Health }" },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .unknown_export));
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .not_a_module));
+}
+
+test "import of a missing module errors (E0103)" {
+    const gpa = std.testing.allocator;
+    // `main` imports `ghost`, which names no file in the set → exactly one E0103.
+    const files = [_]etch.ProjectFile{
+        .{ .name = "main.etch", .source = "import ghost" },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .not_a_module));
+}

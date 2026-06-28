@@ -309,6 +309,16 @@ pub const TypeChecker = struct {
     /// checks resolve against the byte-keyed PROJECT indexes instead, so a
     /// prefab or UUID defined in another project file is in scope.
     project: ?*const ProjectContext = null,
+    /// Symbols brought into this file's scope by a selective `import a.b { X }`
+    /// (M1.0.7 E5), byte-keyed under their LOCAL name's `StringId` in THIS arena
+    /// (the `as Y` alias if present, else the imported name). Built by
+    /// `bindImports` after pass 1; consulted by E6's `TYPE_IDENT` resolution.
+    /// Empty in single-file mode.
+    imported_symbols: std.AutoHashMapUnmanaged(StringId, ExportEntry) = .empty,
+    /// Module aliases from `import a.b as m` / bare `import a.b` (M1.0.7 E5, D-F):
+    /// local alias `StringId` → target file index. Qualified `m.Type` resolution
+    /// is deferred; the binding is recorded so the later walk is purely additive.
+    imported_aliases: std.AutoHashMapUnmanaged(StringId, usize) = .empty,
 
     /// Byte-keyed cross-file indexes for project-level scene/prefab validation
     /// (M0.9 E2-B). StringIds are per-arena, so cross-file resolution keys on
@@ -318,9 +328,38 @@ pub const TypeChecker = struct {
     /// second occurrence of a UUID is E1782. Both sets' keys reference the
     /// arenas' string pools, which `root.validateProject` keeps alive for the
     /// duration of the checks.
+    /// Visibility of an exported symbol (M1.0.7 E5, D-G). Wired but always
+    /// `.public` until `private` graduates (M1.0.8) — then the exports builder
+    /// sets `.private` and the binding path's `E0107` check becomes reachable.
+    pub const Visibility = enum { public, private };
+
+    /// One exported top-level symbol of a module (M1.0.7 E5). `arena_index` is
+    /// the defining file's index in the project (its slot in `exports`/`arenas`);
+    /// `item_id` is its `Item` NodeId in that arena. The cross-arena field check
+    /// (E6) fetches the decl via `project.arenas[arena_index]` + `item_id`.
+    pub const ExportEntry = struct {
+        kind: SymbolKind,
+        visibility: Visibility,
+        arena_index: usize,
+        item_id: NodeId,
+    };
+
+    /// Per-module exports table, byte-keyed on the interned export name (StringIds
+    /// are per-arena → cross-file keys on bytes, the M0.9 pattern). One table per
+    /// project file, indexed by file index in `ProjectContext.exports`.
+    pub const ExportTable = std.StringHashMapUnmanaged(ExportEntry);
+
     pub const ProjectContext = struct {
         prefabs: *const std.StringHashMapUnmanaged(void),
         uuids: *std.StringHashMapUnmanaged(void),
+        // ── M1.0.7 E5 — cross-file import resolution ──
+        /// Module-path bytes → file index (built by `root.validateProject`).
+        module_index: *const std.StringHashMapUnmanaged(usize),
+        /// Per-file exports tables, indexed by file index.
+        exports: []const ExportTable,
+        /// Per-file arenas, indexed by file index (= the project's parsed ASTs).
+        /// The defining arena for E6's cross-arena component-decl fetch.
+        arenas: []AstArena,
     };
 
     /// One `impl Trait for Type [when …]` (M0.8 E2 block 3 tranche C).
@@ -341,6 +380,8 @@ pub const TypeChecker = struct {
         self.methods.deinit(self.gpa);
         self.trait_impls.deinit(self.gpa);
         self.generic_scope.deinit(self.gpa);
+        self.imported_symbols.deinit(self.gpa);
+        self.imported_aliases.deinit(self.gpa);
         if (self.tag_table) |*t| t.deinit(self.gpa);
     }
 
@@ -379,6 +420,7 @@ pub const TypeChecker = struct {
         };
         defer tc.deinit();
         try tc.pass1Collect();
+        try tc.bindImports();
         try tc.validateTypeAliases();
         try tc.validateImpls();
         try tc.validateDataDecls();
@@ -2782,6 +2824,75 @@ pub const TypeChecker = struct {
                     try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .audio_graph);
                 },
                 else => {}, // forward-compatible: unknown items ignored
+            }
+        }
+    }
+
+    /// Bind this file's `import` directives against the project exports index
+    /// (M1.0.7 E5). For each `ImportDecl`:
+    ///   - resolve the module path against `project.module_index`; a path that
+    ///     names no project file is `E0103 NotAModule`.
+    ///   - selective `{ X }`: look X up in the target module's exports — absent →
+    ///     `E0104 UnknownExport`; private → `E0107` (dormant, D-G); else register
+    ///     it in `imported_symbols` under its local name (alias if present).
+    ///   - module alias `as m` / bare `import a.b`: record the alias → target
+    ///     binding in `imported_aliases` (D-F; qualified `m.Type` resolution is
+    ///     E6+ additive, not done here).
+    /// No-op in single-file mode (`project == null`). This pass only records the
+    /// bindings + emits the import diagnostics; APPLYING the imports to
+    /// `TYPE_IDENT` resolution + the cross-arena component check is E6.
+    fn bindImports(self: *TypeChecker) !void {
+        const project = self.project orelse return;
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        const spans = self.arena.items.items(.span);
+        var i: usize = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .import_decl) continue;
+            const decl = self.arena.import_decls.items[datas[i]];
+            const span = spans[i];
+
+            // Join the module-path segments ("a.b.c") and resolve to a file.
+            var path_buf: std.ArrayListUnmanaged(u8) = .empty;
+            defer path_buf.deinit(self.gpa);
+            var s: u32 = 0;
+            while (s < decl.path_len) : (s += 1) {
+                if (s != 0) try path_buf.append(self.gpa, '.');
+                try path_buf.appendSlice(self.gpa, self.arena.strings.slice(self.arena.import_path_segs.items[decl.path_start + s]));
+            }
+            const target_idx = project.module_index.get(path_buf.items) orelse {
+                try self.emit(.not_a_module, .error_, span, "import path '{s}' does not name a module in the project", .{path_buf.items});
+                continue;
+            };
+
+            if (decl.items_len == 0) {
+                // Whole-module form (1 or 3): record the alias → target binding.
+                // Explicit `as m` alias, else the implicit last-segment alias.
+                const alias_id = if (decl.module_alias != 0)
+                    decl.module_alias
+                else
+                    self.arena.import_path_segs.items[decl.path_start + decl.path_len - 1];
+                try self.imported_aliases.put(self.gpa, alias_id, target_idx);
+                continue;
+            }
+
+            // Selective form (2 or 4): bind each item against the target exports.
+            const exports = &project.exports[target_idx];
+            var j: u32 = 0;
+            while (j < decl.items_len) : (j += 1) {
+                const item = self.arena.import_items.items[decl.items_start + j];
+                const item_name = self.arena.strings.slice(item.name);
+                const entry = exports.get(item_name) orelse {
+                    try self.emit(.unknown_export, .error_, span, "'{s}' is not exported by module '{s}'", .{ item_name, path_buf.items });
+                    continue;
+                };
+                if (entry.visibility == .private) {
+                    // Dormant until `private` graduates (M1.0.8, D-G).
+                    try self.emit(.import_private_item, .error_, span, "'{s}' is private to module '{s}'", .{ item_name, path_buf.items });
+                    continue;
+                }
+                const local = if (item.alias != 0) item.alias else item.name;
+                try self.imported_symbols.put(self.gpa, local, entry);
             }
         }
     }

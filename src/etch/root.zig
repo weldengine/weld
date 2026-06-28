@@ -227,6 +227,41 @@ fn joinImportPath(gpa: std.mem.Allocator, a: *const Ast, decl: ast.ImportDecl) !
     return try buf.toOwnedSlice(gpa);
 }
 
+/// Build module `a`'s public exports table (M1.0.7 E5): every top-level
+/// symbol-bearing declaration (component / resource / struct / enum / trait /
+/// event / fn / type-alias) keyed by its interned name's bytes →
+/// `{ kind, visibility, arena_index, item_id }`. All-public until `private`
+/// graduates (D-G). Keys reference `a`'s string pool, kept alive by the caller.
+fn buildExports(gpa: std.mem.Allocator, a: *const Ast, arena_index: usize, table: *TypeChecker.ExportTable) !void {
+    const kinds = a.items.items(.kind);
+    const datas = a.items.items(.data);
+    var i: usize = 0;
+    while (i < a.items.len) : (i += 1) {
+        const item_id: NodeId = .{ .category = .item, .index = @intCast(i) };
+        const nk: ?struct { name: StringId, kind: types.SymbolKind } = switch (kinds[i]) {
+            .component_decl => .{ .name = a.component_decls.items[datas[i]].name, .kind = .component },
+            .resource_decl => .{ .name = a.resource_decls.items[datas[i]].name, .kind = .resource },
+            .struct_decl => .{ .name = a.struct_decls.items[datas[i]].name, .kind = .struct_ },
+            .enum_decl => .{ .name = a.enum_decls.items[datas[i]].name, .kind = .enum_ },
+            .trait_decl => .{ .name = a.trait_decls.items[datas[i]].name, .kind = .trait_ },
+            .event_decl => .{ .name = a.event_decls.items[datas[i]].name, .kind = .event_ },
+            .fn_decl => .{ .name = a.fn_decls.items[datas[i]].name, .kind = .fn_ },
+            .type_alias => .{ .name = a.type_alias_decls.items[datas[i]].name, .kind = .type_alias },
+            else => null,
+        };
+        if (nk) |e| {
+            // Last decl wins on a same-name dup (an intra-file dup is E0101 in
+            // pass 1); the exports table only needs a single resolvable entry.
+            try table.put(gpa, a.strings.slice(e.name), .{
+                .kind = e.kind,
+                .visibility = .public,
+                .arena_index = arena_index,
+                .item_id = item_id,
+            });
+        }
+    }
+}
+
 /// Cross-file scene/prefab validation (M0.9 E2-B). Parses every project file,
 /// builds the byte-keyed global prefab-name index and a shared cross-scene
 /// UUID tracker, then type-checks each file with that project context so the
@@ -388,10 +423,33 @@ pub fn validateProject(
         }
     }
 
+    // Per-module exports tables (M1.0.7 E5): one byte-keyed table per file, so
+    // `import a.b { X }` resolves X in module `a.b`'s exports SPECIFICALLY — two
+    // modules exporting the same name never collide (unlike the flat global
+    // `prefabs` index, whose names are project-global by design).
+    var exports: std.ArrayListUnmanaged(TypeChecker.ExportTable) = .empty;
+    defer {
+        for (exports.items) |*t| t.deinit(gpa);
+        exports.deinit(gpa);
+    }
+    try exports.ensureTotalCapacity(gpa, n);
+    for (asts.items, 0..) |*a, idx| {
+        var table: TypeChecker.ExportTable = .empty;
+        errdefer table.deinit(gpa);
+        try buildExports(gpa, a, idx, &table);
+        exports.appendAssumeCapacity(table);
+    }
+
     // Check each file with the project context. Acyclic → topological order so a
     // module's dependencies are checked first (M1.0.7 E6 exports collection);
     // on a cycle, fall back to input order (the graph has no valid linearization).
-    const ctx: TypeChecker.ProjectContext = .{ .prefabs = &prefabs, .uuids = &uuids };
+    const ctx: TypeChecker.ProjectContext = .{
+        .prefabs = &prefabs,
+        .uuids = &uuids,
+        .module_index = &module_index,
+        .exports = exports.items,
+        .arenas = asts.items,
+    };
     var k: usize = 0;
     while (k < n) : (k += 1) {
         const idx = if (cycle_found) k else order.items[k];
