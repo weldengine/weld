@@ -527,14 +527,25 @@ test "lexer flags unknown Etch keyword from full grammar as error_unknown_keywor
     const gpa = std.testing.allocator;
     // `fn` graduated with the M0.8 E2 call mechanism, `ability` with its E4
     // Level-B slice; the whole E6 render/anim/audio/cinematic family graduated,
-    // and `scene`/`prefab` graduated with the E7 Level-C scene slice (the last
-    // two construct keywords of the v0.6 grammar). The remaining reserved
-    // top-level keyword is `import` (module system, Phase 1+).
-    var lex = Lexer.init("fn ability import");
+    // `scene`/`prefab` graduated with the E7 Level-C scene slice, and `import`
+    // graduated with M1.0.7 cross-file import. The remaining reserved top-level
+    // keyword is `const` (top-level constants, M1.0.8).
+    var lex = Lexer.init("fn ability const");
     defer lex.deinit(gpa);
     try expectKind(&lex, gpa, .kw_fn);
     try expectKind(&lex, gpa, .kw_ability);
     try expectKind(&lex, gpa, .error_unknown_keyword);
+}
+
+test "lexer recognizes the M1.0.7 import keyword (graduated from reserved)" {
+    const gpa = std.testing.allocator;
+    var lex = Lexer.init("import a.b");
+    defer lex.deinit(gpa);
+    try expectKind(&lex, gpa, .kw_import);
+    try expectKind(&lex, gpa, .ident); // a
+    try expectKind(&lex, gpa, .dot);
+    try expectKind(&lex, gpa, .ident); // b
+    try expectKind(&lex, gpa, .eof);
 }
 
 test "lexer recognizes the M0.8 E7 scene + prefab keywords (graduated from reserved)" {
