@@ -108,6 +108,22 @@ pub const ExtensionAttachFn = *const fn (
 /// A registered `on_attach` callback + its opaque context.
 const AttachHook = struct { ctx: ?*anyopaque, func: ExtensionAttachFn };
 
+/// M1.0.9 — the `on_detach` extension dispatch seam, mirror of
+/// `ExtensionAttachFn`. Fired by the runtime `deactivate_extension` path BEFORE
+/// removing the extension's components (so the hook still sees them), passing
+/// the cooked `on_detach` Etch source text (`null` if absent). Never fired at
+/// load — load only activates.
+pub const ExtensionDetachFn = *const fn (
+    ctx: ?*anyopaque,
+    world: *World,
+    entity: EntityId,
+    extension_name: []const u8,
+    on_detach_text: ?[]const u8,
+) anyerror!void;
+
+/// A registered `on_detach` callback + its opaque context.
+const DetachHook = struct { ctx: ?*anyopaque, func: ExtensionDetachFn };
+
 /// Top-level ECS world — single archetype list, shared identity, shared
 /// registry, shared resources.
 pub const World = struct {
@@ -181,8 +197,24 @@ pub const World = struct {
     /// callback the Etch bridge registers; the scene loader fires it after adding
     /// an extension's components. `loader.zig` never calls the Etch VM directly —
     /// it goes through this hook. **M1.0.6 wires + fires the seam only**; the
-    /// actual execution of `on_attach_text` (Etch code) is **M1.0.9**.
+    /// actual execution of `on_attach_text` (Etch code) is **M1.0.9** (wired in
+    /// the Etch bridge's registered callback, not here — the seam still just
+    /// fires).
     attach_hook: ?AttachHook = null,
+
+    /// M1.0.9 — the `on_detach` extension dispatch seam, mirror of `attach_hook`.
+    /// Registered by the Etch bridge; fired by the runtime deactivate path before
+    /// removing an extension's components. `null` until registered (last wins).
+    detach_hook: ?DetachHook = null,
+
+    /// M1.0.9 — per-entity active-extension set: an entity → the OWNED copies of
+    /// the names of the extensions currently active on it, in activation order.
+    /// Populated by `addEntityExtension` inside the shared activate path (so load
+    /// AND runtime activation both track for free), pruned by
+    /// `removeEntityExtension` on deactivate, freed in `deinit`. Not serialized —
+    /// rebuilt at load from the Entity Extensions Table via the same path. Backs
+    /// the interpreter's `has_extension` / `active_extensions`.
+    entity_extensions: std.AutoHashMapUnmanaged(EntityId, std.ArrayListUnmanaged([]const u8)) = .empty,
 
     pub fn init() World {
         return .{
@@ -213,6 +245,15 @@ pub const World = struct {
         self.registry.deinit(gpa);
         self.identity.deinit(gpa);
         self.observer_registry.deinit(gpa);
+        {
+            // Free each entity's owned extension-name copies + its list (M1.0.9).
+            var it = self.entity_extensions.valueIterator();
+            while (it.next()) |list| {
+                for (list.items) |name| gpa.free(name);
+                list.deinit(gpa);
+            }
+            self.entity_extensions.deinit(gpa);
+        }
         self.* = undefined;
     }
 
@@ -301,6 +342,71 @@ pub const World = struct {
     /// components. Executing the text is M1.0.9 — here the seam just fires.
     pub fn dispatchOnAttach(self: *World, entity: EntityId, extension_name: []const u8, on_attach_text: ?[]const u8) anyerror!void {
         if (self.attach_hook) |h| try h.func(h.ctx, self, entity, extension_name, on_attach_text);
+    }
+
+    /// M1.0.9 — register the `on_detach` extension dispatch callback (mirror of
+    /// `registerOnAttach`). One hook per world (last registration wins).
+    pub fn registerOnDetach(self: *World, ctx: ?*anyopaque, callback: ExtensionDetachFn) void {
+        self.detach_hook = .{ .ctx = ctx, .func = callback };
+    }
+
+    /// M1.0.9 — fire the `on_detach` seam for `entity`'s extension being
+    /// deactivated, passing the cooked `on_detach_text` (`null` if absent). The
+    /// runtime deactivate path calls this BEFORE removing the extension's
+    /// components, so the hook still sees them. No-op if no hook is registered.
+    pub fn dispatchOnDetach(self: *World, entity: EntityId, extension_name: []const u8, on_detach_text: ?[]const u8) anyerror!void {
+        if (self.detach_hook) |h| try h.func(h.ctx, self, entity, extension_name, on_detach_text);
+    }
+
+    /// M1.0.9 — record `name` as an active extension on `entity` (storing an
+    /// OWNED copy). Called inside the shared activate path after the extension's
+    /// components are added. A name already present is not duplicated (the
+    /// activate path rejects a re-activation via component conflict first, so
+    /// this is belt-and-braces).
+    pub fn addEntityExtension(self: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8) !void {
+        const gop = try self.entity_extensions.getOrPut(gpa, entity);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        for (gop.value_ptr.items) |existing| {
+            if (std.mem.eql(u8, existing, name)) return;
+        }
+        const owned = try gpa.dupe(u8, name);
+        errdefer gpa.free(owned);
+        try gop.value_ptr.append(gpa, owned);
+    }
+
+    /// M1.0.9 — drop `name` from `entity`'s active-extension set, freeing the
+    /// owned copy. No-op if absent. Removes the map entry once the set empties.
+    pub fn removeEntityExtension(self: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8) void {
+        const list = self.entity_extensions.getPtr(entity) orelse return;
+        var i: usize = 0;
+        while (i < list.items.len) : (i += 1) {
+            if (std.mem.eql(u8, list.items[i], name)) {
+                gpa.free(list.items[i]);
+                _ = list.orderedRemove(i);
+                break;
+            }
+        }
+        if (list.items.len == 0) {
+            list.deinit(gpa);
+            _ = self.entity_extensions.remove(entity);
+        }
+    }
+
+    /// M1.0.9 — whether `name` is currently active on `entity`.
+    pub fn hasEntityExtension(self: *const World, entity: EntityId, name: []const u8) bool {
+        const list = self.entity_extensions.getPtr(entity) orelse return false;
+        for (list.items) |existing| {
+            if (std.mem.eql(u8, existing, name)) return true;
+        }
+        return false;
+    }
+
+    /// M1.0.9 — the OWNED names of the extensions active on `entity`, in
+    /// activation order (empty slice if none). Borrowed view — valid until the
+    /// entity's set is next mutated.
+    pub fn entityExtensions(self: *const World, entity: EntityId) []const []const u8 {
+        const list = self.entity_extensions.getPtr(entity) orelse return &.{};
+        return list.items;
     }
 
     // ─── Component registration helpers ──────────────────────────────────
@@ -1112,4 +1218,77 @@ fn setTagBit(bytes: []u8, bit: u32, set: bool) void {
         word &= ~mask;
     }
     @memcpy(bytes[off .. off + 8], std.mem.asBytes(&word));
+}
+
+test "registerOnDetach / dispatchOnDetach fires the on_detach seam (M1.0.9)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const Spy = struct {
+        var fired: u32 = 0;
+        var saw_name: bool = false;
+        var saw_text: bool = false;
+        fn cb(_: ?*anyopaque, _: *World, _: EntityId, name: []const u8, text: ?[]const u8) anyerror!void {
+            fired += 1;
+            if (std.mem.eql(u8, name, "CombatModule")) saw_name = true;
+            if (text != null and std.mem.indexOf(u8, text.?, "Health") != null) saw_text = true;
+        }
+    };
+    Spy.fired = 0;
+    Spy.saw_name = false;
+    Spy.saw_text = false;
+
+    const e = EntityId{ .index = 1, .generation = 1 };
+    const detach_text = "entity.get_mut(Health).max -= 50";
+
+    // No hook registered → dispatch is a no-op (mirror of the on_attach seam).
+    try world.dispatchOnDetach(e, "CombatModule", detach_text);
+    try std.testing.expectEqual(@as(u32, 0), Spy.fired);
+
+    world.registerOnDetach(null, &Spy.cb);
+    try world.dispatchOnDetach(e, "CombatModule", detach_text);
+    try std.testing.expectEqual(@as(u32, 1), Spy.fired);
+    try std.testing.expect(Spy.saw_name);
+    try std.testing.expect(Spy.saw_text);
+}
+
+test "per-entity extension side-table tracks add / has / remove (M1.0.9)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const e1 = EntityId{ .index = 1, .generation = 1 };
+    const e2 = EntityId{ .index = 2, .generation = 1 };
+
+    try std.testing.expect(!world.hasEntityExtension(e1, "Combat"));
+    try std.testing.expectEqual(@as(usize, 0), world.entityExtensions(e1).len);
+
+    try world.addEntityExtension(gpa, e1, "Combat");
+    try world.addEntityExtension(gpa, e1, "Merchant");
+    try world.addEntityExtension(gpa, e2, "Combat");
+    // Re-adding the same name is a no-op (belt-and-braces dedup).
+    try world.addEntityExtension(gpa, e1, "Combat");
+
+    try std.testing.expect(world.hasEntityExtension(e1, "Combat"));
+    try std.testing.expect(world.hasEntityExtension(e1, "Merchant"));
+    try std.testing.expect(world.hasEntityExtension(e2, "Combat"));
+
+    const e1_exts = world.entityExtensions(e1);
+    try std.testing.expectEqual(@as(usize, 2), e1_exts.len);
+    try std.testing.expectEqualStrings("Combat", e1_exts[0]); // activation order
+    try std.testing.expectEqualStrings("Merchant", e1_exts[1]);
+
+    world.removeEntityExtension(gpa, e1, "Combat");
+    try std.testing.expect(!world.hasEntityExtension(e1, "Combat"));
+    try std.testing.expect(world.hasEntityExtension(e1, "Merchant"));
+    try std.testing.expectEqual(@as(usize, 1), world.entityExtensions(e1).len);
+
+    // e2 still has Combat — the set is per-entity.
+    try std.testing.expect(world.hasEntityExtension(e2, "Combat"));
+
+    // Draining the last extension drops the map entry; `deinit` frees the rest
+    // (the testing allocator flags any leak of the owned name copies).
+    world.removeEntityExtension(gpa, e1, "Merchant");
+    try std.testing.expectEqual(@as(usize, 0), world.entityExtensions(e1).len);
 }
