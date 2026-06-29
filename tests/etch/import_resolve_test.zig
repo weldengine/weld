@@ -110,3 +110,70 @@ test "import of a missing module errors (E0103)" {
     try etch.validateProject(gpa, &files, &diags);
     try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .not_a_module));
 }
+
+test "selective import resolves a cross-file const (M1.0.7 debt cleared, M1.0.8)" {
+    const gpa = std.testing.allocator;
+    // `lib` declares a top-level `const`; `main` selectively imports it. The
+    // const is exported (public) and resolvable → no E0104 / E0107 / E0103.
+    // This clears the M1.0.7 deferred acceptance criterion (cross-file const).
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source = "const ROOM_CAP: int = 8" },
+        .{ .name = "main.etch", .source = "import lib { ROOM_CAP }" },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .unknown_export));
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .import_private_item));
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .not_a_module));
+}
+
+test "import of a private item errors (E0107, M1.0.8 activation)" {
+    const gpa = std.testing.allocator;
+    // `lib` declares a `private component`; `main` selectively imports it. The
+    // item is in `lib`'s exports flagged `.private` → exactly one E0107
+    // (activates the check wired-but-dormant since M1.0.7).
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source = "private component Secret { hash: u32 = 0 }" },
+        .{ .name = "main.etch", .source = "import lib { Secret }" },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .import_private_item));
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .unknown_export));
+}
+
+test "a public declaration alongside a private one stays importable (M1.0.8)" {
+    const gpa = std.testing.allocator;
+    // Visibility is per-declaration: `Public` imports clean, `Secret` is E0107.
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source =
+        \\private component Secret { hash: u32 = 0 }
+        \\component Public { value: int = 0 }
+        },
+        .{ .name = "main.etch", .source =
+        \\import lib { Public }
+        \\import lib { Secret }
+        },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .import_private_item));
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .unknown_export));
+}
+
+test "a test block is not exported (E0104 on import, M1.0.8)" {
+    const gpa = std.testing.allocator;
+    // `lib` declares a `test` block; it is registered intra-module but never
+    // exported → selectively importing its name is E0104 UnknownExport.
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source = "test \"secret_test\" { }" },
+        .{ .name = "main.etch", .source = "import lib { secret_test }" },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .unknown_export));
+}
