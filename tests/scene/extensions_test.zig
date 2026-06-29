@@ -19,6 +19,12 @@ const scene = weld_core.scene;
 const Accessor = scene.accessor.Accessor;
 const World = weld_core.ecs.World;
 const EntityId = weld_core.ecs.EntityId;
+// M1.0.9 — hook execution (the interpreter binds the real on_attach/on_detach
+// seam) + the deferred-drain stand-in (command buffer / observer registry).
+const Interpreter = weld_etch.Interpreter;
+const ComponentId = weld_core.ecs.registry.ComponentId;
+const command_buffer = weld_core.ecs.command_buffer;
+const CommandBuffer = command_buffer.CommandBuffer;
 
 /// One-entry in-process base-prefab resolver (for `extends`/`of`/`instance`).
 const OneResolver = struct {
@@ -362,3 +368,290 @@ fn uuidBytes(last: u8) [16]u8 {
     u[15] = last;
     return u;
 }
+
+// ── M1.0.9 — hook EXECUTION (the E6 seam now re-parses + runs the cooked text) ──
+//
+// These tests live here rather than inline in `interp.zig` (where the brief lists
+// the activate/deactivate/has/active tests) because they need the cook pipeline
+// (`scene_cook.cookPrefab`) + the loader, which would form a circular import from
+// `interp.zig` (`scene_cook` already imports `interp`). Same tier-dependency
+// reason as the M1.0.8 cross-file tests. See the brief's Recorded deviations.
+
+/// Cook `CombatModule extends BaseCharacter` to `.prefab.bin` bytes (adds
+/// `Weapon`; `on_attach` does `Health.max += 50`, `on_detach` `-= 50`). The
+/// `Health` declared here matches `base_character`'s layout. Caller frees.
+fn cookCombatModule(gpa: std.mem.Allocator) ![]const u8 {
+    var base = try scene_cook.cookPrefab(gpa, base_character, null, null);
+    defer base.deinit(gpa);
+    const base_bytes = try scene.writer.write(gpa, base.model, &base.registry);
+    defer gpa.free(base_bytes);
+    var base_res = OneResolver{ .name = "BaseCharacter", .bytes = base_bytes };
+    const combat =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 10 }
+        \\prefab "CombatModule" extends "BaseCharacter" requires Health {
+        \\  entity "mod" { uuid: "9c4f3a2b-1e7d-4a5c-b8e9-f4d2c3a1b5e6" Weapon { damage: 25 } }
+        \\  on_attach { entity.get_mut(Health).max += 50 }
+        \\  on_detach { entity.get_mut(Health).max -= 50 }
+        \\}
+    ;
+    var cooked = try scene_cook.cookPrefab(gpa, combat, base_res.base(), null);
+    defer cooked.deinit(gpa);
+    return scene.writer.write(gpa, cooked.model, &cooked.registry);
+}
+
+/// Compile + bind an interpreter declaring `Health` + `Weapon` (WITH fields, so a
+/// hook's `Health.max` resolves) into `world`, registering the real on_attach /
+/// on_detach execution seam. The caller owns `pr` (parse result) and `interp`.
+const HookEnv = struct {
+    pr: parser.ParseResult,
+    interp: Interpreter,
+    fn deinit(self: *HookEnv, gpa: std.mem.Allocator) void {
+        self.interp.deinit();
+        self.pr.deinit(gpa);
+    }
+};
+
+fn spawnHealth(world: *World, gpa: std.mem.Allocator, current: i32, max: i32) !EntityId {
+    const cid = world.componentId("Health").?;
+    var hv = [_]i32{ current, max };
+    return world.spawnDynamicWithValues(gpa, &[_]ComponentId{cid}, &[_][]const u8{std.mem.asBytes(&hv)});
+}
+
+fn healthMax(world: *World, entity: EntityId) i32 {
+    const hb = world.componentBytes(entity, world.componentId("Health").?).?;
+    return std.mem.readInt(i32, hb[4..8], .little);
+}
+
+test "scene with active extension executes on_attach at load — Health.max adjusted (M1.0.9 headline)" {
+    const gpa = std.testing.allocator;
+
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+
+    const scene_src =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["CombatModule"]
+        \\    Health { current: 100, max: 100 }
+        \\  }
+        \\}
+    ;
+    var scene_cooked = try scene_cook.cook(gpa, scene_src, null);
+    defer scene_cooked.deinit(gpa);
+    const scene_bytes = try scene.writer.write(gpa, scene_cooked.model, &scene_cooked.registry);
+    defer gpa.free(scene_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Compile + bind an interpreter declaring Health+Weapon WITH fields and
+    // registering the real on_attach execution seam.
+    const prog =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 0 }
+        \\rule keep(entity: Entity) when entity has Health {}
+    ;
+    var prog_pr = try parser.parse(gpa, prog);
+    defer prog_pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), prog_pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &prog_pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    var ext_res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    var result = try scene.loader.loadFromBytes(&world, gpa, scene_bytes, ext_res.ext());
+    defer result.deinit(gpa);
+
+    const npc = result.uuid_to_entity.get(uuidBytes(0xf1)).?;
+    // The headline: on_attach RAN at load — Health.max went 100 → 150.
+    try std.testing.expectEqual(@as(i32, 150), healthMax(&world, npc));
+    // The extension's component is present and the extension is tracked active.
+    try std.testing.expect(world.componentBytes(npc, world.componentId("Weapon").?) != null);
+    try std.testing.expect(world.hasEntityExtension(npc, "CombatModule"));
+}
+
+test "entity.activate_extension executes on_attach (M1.0.9)" {
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Single-entity rule: `activate_extension` does an IMMEDIATE structural add
+    // (Weapon). One matching entity makes the mid-body archetype migration safe
+    // (the live chunk scan has no swapped-in entity to skip); the `not has Weapon`
+    // guard keeps it idempotent.
+    const prog =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 0 }
+        \\rule go(entity: Entity) when entity has Health and not entity has Weapon {
+        \\  entity.activate_extension("CombatModule")
+        \\}
+    ;
+    var pr = try parser.parse(gpa, prog);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    interp.setExtensionResolver(res.ext());
+
+    const eid = try spawnHealth(&world, gpa, 100, 100);
+    _ = try interp.runFor(&world, 1);
+
+    try std.testing.expectEqual(@as(i32, 150), healthMax(&world, eid)); // on_attach
+    try std.testing.expect(world.componentBytes(eid, world.componentId("Weapon").?) != null);
+    try std.testing.expect(world.hasEntityExtension(eid, "CombatModule"));
+}
+
+test "has_extension / active_extensions (Etch methods) reflect activation (M1.0.9)" {
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const prog =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 0 }
+        \\component Probe { has_combat: bool = false, count: i32 = 0 }
+        \\rule probe(entity: Entity) when entity has Probe {
+        \\  entity.get_mut(Probe).has_combat = entity.has_extension("CombatModule")
+        \\  entity.get_mut(Probe).count = entity.active_extensions().len() as i32
+        \\}
+    ;
+    var pr = try parser.parse(gpa, prog);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    interp.setExtensionResolver(res.ext());
+
+    // Spawn Health+Probe, then activate directly via the loader entry (no rule
+    // iteration → the immediate component add is unambiguously safe).
+    const health_id = world.componentId("Health").?;
+    const probe_id = world.componentId("Probe").?;
+    const eid = try world.spawnDynamic(gpa, &[_]ComponentId{ health_id, probe_id });
+    try scene.loader.runtimeActivate(&world, gpa, eid, "CombatModule", res.ext());
+
+    _ = try interp.runFor(&world, 1); // probe reads has_extension / active_extensions
+    const pb = world.componentBytes(eid, probe_id).?;
+    try std.testing.expect(pb[0] != 0); // has_combat == true (bool @0)
+    try std.testing.expectEqual(@as(i32, 1), std.mem.readInt(i32, pb[4..8], .little)); // active_extensions().len() == 1
+}
+
+test "entity.deactivate_extension executes on_detach and removes components (M1.0.9)" {
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const prog =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 0 }
+        \\rule off(entity: Entity) when entity has Weapon {
+        \\  entity.deactivate_extension("CombatModule")
+        \\}
+    ;
+    var pr = try parser.parse(gpa, prog);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    interp.setExtensionResolver(res.ext());
+
+    // Activate first (direct loader entry: max 100→150, Weapon added).
+    const eid = try spawnHealth(&world, gpa, 100, 100);
+    try scene.loader.runtimeActivate(&world, gpa, eid, "CombatModule", res.ext());
+    const weapon_id = world.componentId("Weapon").?;
+    try std.testing.expectEqual(@as(i32, 150), healthMax(&world, eid));
+    try std.testing.expect(world.componentBytes(eid, weapon_id) != null);
+
+    // The `off` rule (single entity carrying Weapon) deactivates.
+    _ = try interp.runFor(&world, 1);
+
+    // on_detach ran (max 150 → 100) and the extension's component is gone.
+    try std.testing.expectEqual(@as(i32, 100), healthMax(&world, eid));
+    try std.testing.expect(world.componentBytes(eid, weapon_id) == null);
+    try std.testing.expect(!world.hasEntityExtension(eid, "CombatModule"));
+}
+
+test "on_attach-issued structural command is drained before on_spawned (M1.0.9)" {
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+
+    const scene_src =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["CombatModule"]
+        \\    Health { current: 100, max: 100 }
+        \\  }
+        \\}
+    ;
+    var scene_cooked = try scene_cook.cook(gpa, scene_src, null);
+    defer scene_cooked.deinit(gpa);
+    const scene_bytes = try scene.writer.write(gpa, scene_cooked.model, &scene_cooked.registry);
+    defer gpa.free(scene_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Health", .size = 8, .alignment = 4, .default_bytes = &[_]u8{0} ** 8, .fields = &.{} });
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Weapon", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
+    DrainSpy.marker_id = try world.registry.registerComponentRaw(gpa, .{ .name = "Marker", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
+    DrainSpy.saw_marker_at_spawn = false;
+
+    // Stand-in for a hook that issues a DEFERRED structural change: the attach
+    // callback enqueues `add_component(Marker)` into the world's shared observer-
+    // deferred buffer — the exact channel `execHookText` routes a hook's deferred
+    // structural change into. (The interpreter has no `entity.add(T)`/`spawn` in
+    // bodies — S4 boundary — and tag mutation is not in the cookable hook subset,
+    // so a cooked Etch hook cannot itself issue a deferred structural change; this
+    // Tier-0 stand-in exercises the same drain channel + ordering. See the brief's
+    // Recorded deviations.)
+    world.registerOnAttach(null, &DrainSpy.attachCb);
+    try world.observer_registry.registerOnSpawned(gpa, &world, null, &DrainSpy.onSpawnedCb);
+
+    var ext_res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    var result = try scene.loader.loadFromBytes(&world, gpa, scene_bytes, ext_res.ext());
+    defer result.deinit(gpa);
+
+    const npc = result.uuid_to_entity.get(uuidBytes(0xf1)).?;
+    // The deferred command was drained: the entity carries Marker after load.
+    try std.testing.expect(world.componentBytes(npc, DrainSpy.marker_id) != null);
+    // And it was drained BEFORE on_spawned (the spawn observer saw Marker).
+    try std.testing.expect(DrainSpy.saw_marker_at_spawn);
+}
+
+/// Tier-0 stand-in for a hook that issues a deferred structural change (see the
+/// drain test). The attach callback enqueues an `add_component(Marker)` into the
+/// registry's deferred buffer; the on_spawned observer records whether the
+/// command was already applied when the spawn lifecycle fired.
+const DrainSpy = struct {
+    var marker_id: ComponentId = undefined;
+    var saw_marker_at_spawn: bool = false;
+    var marker_bytes = [_]u8{ 1, 0, 0, 0 };
+    fn attachCb(_: ?*anyopaque, world: *World, entity: EntityId, _: []const u8, _: ?[]const u8) anyerror!void {
+        if (world.observer_registry.deferred == null) {
+            world.observer_registry.deferred = CommandBuffer.init(std.testing.allocator, world);
+        }
+        try world.observer_registry.deferred.?.commands.append(std.testing.allocator, .{ .add_component = .{ .entity = entity, .component_id = marker_id, .bytes = marker_bytes[0..] } });
+    }
+    fn onSpawnedCb(_: ?*anyopaque, world: *World, entity: EntityId, _: ?ComponentId, _: ?*const anyopaque, _: ?*const anyopaque, _: *CommandBuffer) anyerror!void {
+        if (world.componentBytes(entity, marker_id) != null) saw_marker_at_spawn = true;
+    }
+};
