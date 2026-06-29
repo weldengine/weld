@@ -247,14 +247,25 @@ fn buildExports(gpa: std.mem.Allocator, a: *const Ast, arena_index: usize, table
             .event_decl => .{ .name = a.event_decls.items[datas[i]].name, .kind = .event_ },
             .fn_decl => .{ .name = a.fn_decls.items[datas[i]].name, .kind = .fn_ },
             .type_alias => .{ .name = a.type_alias_decls.items[datas[i]].name, .kind = .type_alias },
+            // M1.0.8 — a top-level `const` is exportable (always public — a
+            // const cannot carry a `private` prefix). `test` blocks are NOT
+            // listed: tests are registered intra-module but never exported.
+            .const_decl => .{ .name = a.const_decls.items[datas[i]].name, .kind = .const_ },
             else => null,
         };
         if (nk) |e| {
             // Last decl wins on a same-name dup (an intra-file dup is E0101 in
             // pass 1); the exports table only needs a single resolvable entry.
+            // M1.0.8 — read the item's visibility: a `private` declaration_body
+            // is recorded `.private`, which makes the dormant `E0107` check in
+            // `bindImports` reachable when another module imports it.
+            const vis: TypeChecker.Visibility = switch (a.itemVisibility(item_id)) {
+                .public => .public,
+                .private => .private,
+            };
             try table.put(gpa, a.strings.slice(e.name), .{
                 .kind = e.kind,
-                .visibility = .public,
+                .visibility = vis,
                 .arena_index = arena_index,
                 .item_id = item_id,
             });

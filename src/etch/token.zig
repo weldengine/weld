@@ -107,6 +107,9 @@ pub const TokenKind = enum {
     kw_scene, // scene declaration (M0.8 E7 Level C — STRING-named scene graph, entity/instance decls)
     kw_prefab, // prefab declaration (M0.8 E7 Level C — STRING-named, of/extends relation, requires + on_attach/on_detach hooks)
     kw_import, // import directive (M1.0.7 cross-file import — module path + optional alias / selective items; graduated from non_s3_keywords)
+    kw_const, // top-level `const` declaration (M1.0.8 — graduated from non_s3_keywords; top-level only per part1 §4.5)
+    kw_private, // `private` visibility modifier prefix on a declaration_body (M1.0.8 — graduated from non_s3_keywords; grammar §5.1)
+    kw_test, // top-level `test "name" { ... }` block (M1.0.8 — graduated from non_s3_keywords; parse + validate only, no execution)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -271,6 +274,9 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "scene", .kind = .kw_scene },
     .{ .lexeme = "prefab", .kind = .kw_prefab },
     .{ .lexeme = "import", .kind = .kw_import },
+    .{ .lexeme = "const", .kind = .kw_const },
+    .{ .lexeme = "private", .kind = .kw_private },
+    .{ .lexeme = "test", .kind = .kw_test },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -301,10 +307,10 @@ pub const non_s3_keywords = [_][]const u8{
     //    `event` + `tags` with E3 ECS layer; `data` with E4 Level B gameplay;
     //    `scene` + `prefab` graduated with E7 Level C — the last two construct
     //    keywords of the v0.6 grammar; `import` graduated with M1.0.7 cross-file
-    //    import — it now lexes as `kw_import` via `s3_keywords`) ──
-    "const",
-    "private",
-    "test",
+    //    import; `const` / `private` / `test` graduated with M1.0.8 — they now
+    //    lex as `kw_const` / `kw_private` / `kw_test` via `s3_keywords`.
+    //    `override` is the last reserved member: it waits for a Tier-1
+    //    overridable module (cf. `engine-phase-1-plan.md`) ──
     "override",
 
     // ── Async machinery: `async` graduated with M0.8 E2 (`async fn` parsed;
@@ -339,4 +345,39 @@ test "non_s3_keywords does not collide with s3_keywords" {
             try std.testing.expect(!std.mem.eql(u8, s3_kw.lexeme, non));
         }
     }
+}
+
+test "const/private/test graduate to s3 keywords" {
+    // M1.0.8: `const` / `private` / `test` move from the reserve list into
+    // `s3_keywords`, each mapped to its own `kw_*` kind. `override` is the last
+    // member left reserved, so it still lexes as `error_unknown_keyword`.
+    const T = struct {
+        fn s3Kind(lexeme: []const u8) ?TokenKind {
+            for (s3_keywords) |kw| {
+                if (std.mem.eql(u8, kw.lexeme, lexeme)) return kw.kind;
+            }
+            return null;
+        }
+        fn reserved(lexeme: []const u8) bool {
+            for (non_s3_keywords) |kw| {
+                if (std.mem.eql(u8, kw, lexeme)) return true;
+            }
+            return false;
+        }
+    };
+    try std.testing.expectEqual(TokenKind.kw_const, T.s3Kind("const").?);
+    try std.testing.expectEqual(TokenKind.kw_private, T.s3Kind("private").?);
+    try std.testing.expectEqual(TokenKind.kw_test, T.s3Kind("test").?);
+    // The three are no longer in the reserve list.
+    try std.testing.expect(!T.reserved("const"));
+    try std.testing.expect(!T.reserved("private"));
+    try std.testing.expect(!T.reserved("test"));
+    // `override` stays reserved (still lexes to error_unknown_keyword).
+    try std.testing.expect(T.s3Kind("override") == null);
+    try std.testing.expect(T.reserved("override"));
+    // Graduated keywords sit inside the contiguous keyword range so
+    // `isKeywordToken` covers them (tag-path contextual acceptance).
+    try std.testing.expect(isKeywordToken(.kw_const));
+    try std.testing.expect(isKeywordToken(.kw_private));
+    try std.testing.expect(isKeywordToken(.kw_test));
 }

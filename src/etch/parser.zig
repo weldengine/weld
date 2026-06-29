@@ -608,6 +608,30 @@ pub const Parser = struct {
     fn parseOneTopLevel(self: *Parser) ParseError!void {
         try self.surfaceTokenErrors();
         const annotations = try self.parseAnnotations();
+        // M1.0.8 — optional `private` visibility prefix (grammar §5.1:
+        // `{ annotation } ( ... | visibility_modifier , declaration_body )`).
+        // `private` is consumed AFTER annotations and BEFORE the construct
+        // dispatch, and applies ONLY to a declaration_body — never to a bare
+        // `import` / `const` / `type` declaration (rejected with a generic
+        // syntax error, no new diagnostic code). It adds no `recoverToTopLevel`
+        // stop-set member: the construct it precedes is already in the set.
+        if (self.peek() == .kw_private) {
+            _ = try self.advance(); // 'private'
+            switch (self.peek()) {
+                .kw_import, .kw_const, .kw_type => return self.parseErrFmt(self.peekSpan(), "'private' applies to a declaration (component, resource, fn, struct, ...), not to '{s}'", .{self.sliceOf(self.peekSpan())}),
+                .eof => return self.parseErr(self.peekSpan(), "expected a declaration after 'private'"),
+                else => {},
+            }
+            const before: u28 = @intCast(self.arena.items.len);
+            try self.parseTopLevel(annotations);
+            // The declaration_body appended exactly one top-level item (at
+            // `before`); mark it private so `buildExports` excludes it from the
+            // module's public surface (→ `E0107` on a cross-module import).
+            if (self.arena.items.len > before) {
+                self.arena.setItemVisibility(.{ .category = .item, .index = before }, .private);
+            }
+            return;
+        }
         try self.parseTopLevel(annotations);
     }
 
@@ -620,13 +644,15 @@ pub const Parser = struct {
     /// S3 (`component` / `resource` / `rule`) + `type` (M0.8 alias) + `fn` /
     /// `async` (M0.8 E2 call mechanism) + `struct` / `impl` (M0.8 E2 block 3
     /// declaration layer) + `enum` / `trait` (E2 block 3 tranches B/C) +
-    /// `event` / `tags` (E3 ECS layer). Later milestones extend both sites
-    /// together.
+    /// `event` / `tags` (E3 ECS layer) + `import` (M1.0.7) + `const` / `test`
+    /// (M1.0.8). `private` is NOT a stop-set member — it is a prefix consumed
+    /// before dispatch, and the declaration_body it precedes already is one.
+    /// Later milestones extend both sites together.
     fn recoverToTopLevel(self: *Parser) ParseError!void {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_import, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score, .kw_sequence, .kw_anim_graph, .kw_shader, .kw_scene, .kw_prefab => return,
+                .eof, .kw_import, .kw_const, .kw_test, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score, .kw_sequence, .kw_anim_graph, .kw_shader, .kw_scene, .kw_prefab => return,
                 else => _ = try self.advance(),
             }
         }
@@ -644,6 +670,8 @@ pub const Parser = struct {
     fn parseTopLevel(self: *Parser, annotations: AnnotationRange) ParseError!void {
         switch (self.peek()) {
             .kw_import => try self.parseImportDecl(annotations),
+            .kw_const => try self.parseConstDecl(annotations),
+            .kw_test => try self.parseTestDecl(annotations),
             .kw_component => try self.parseComponentDecl(annotations),
             .kw_resource => try self.parseResourceDecl(annotations),
             .kw_rule => try self.parseRuleDecl(annotations, false),
@@ -687,7 +715,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (import | component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score | sequence | anim_graph | shader | scene | prefab), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (import | const | test | component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score | sequence | anim_graph | shader | scene | prefab), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -706,6 +734,58 @@ pub const Parser = struct {
             .byte_start = kw_span.byte_start,
             .byte_end = target_span.byte_end,
         });
+    }
+
+    /// Parse a top-level `const` declaration (M1.0.8, `etch-grammar.md` §4.1):
+    ///   `const_stmt = "const" ( IDENT | TYPE_IDENT ) ":" type "=" const_expression`.
+    /// The name accepts BOTH `.ident` and `.type_ident` — a canonical
+    /// `SCREAMING_SNAKE_CASE` const lexes as `TYPE_IDENT` (the case rule is a
+    /// style-lint concern, not the grammar). The type annotation is mandatory
+    /// (no inference on a const, part1 §3.5). The value parses as an ordinary
+    /// expression; its const-evaluability (`E1101`) and type (`E0200`) are
+    /// checked at resolve. Top-level ONLY — `parseStmt` does not handle
+    /// `kw_const`, so a `const` inside a block falls through to a parse error
+    /// (part1 §4.5). The `kw_const` starter is mirrored in `recoverToTopLevel`'s
+    /// stop-set + the `parseTopLevel` error enumeration. Like `import` / `type`,
+    /// the v0.6 subset attaches no annotations to a const (range discarded).
+    fn parseConstDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        _ = annotations; // const carries no annotations in the v0.6 subset
+        const kw_span = (try self.advance()).span; // 'const'
+        const name_tok = if (self.peek() == .ident or self.peek() == .type_ident)
+            try self.advance()
+        else
+            return self.parseErr(self.peekSpan(), "expected a constant name (identifier or SCREAMING_SNAKE_CASE) after 'const'");
+        const name_id = try self.internSlice(name_tok.span);
+        _ = try self.expect(.colon, "expected ':' and a type after the constant name (a const requires an explicit type)");
+        const type_node = try self.parseType();
+        _ = try self.expect(.eq, "expected '=' and a constant expression in the const declaration");
+        const value = try self.parseExpr(0);
+        _ = try self.arena.addConstDecl(self.gpa, .{
+            .name = name_id,
+            .type_node = type_node,
+            .value = value,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = self.arena.exprSpan(value).byte_end });
+    }
+
+    /// Parse a top-level `test` block (M1.0.8, `etch-grammar.md` §17):
+    ///   `test_decl = "test" STRING_LITERAL block`.
+    /// The body reuses the ordinary block/statement parser (`parseBlockExpr`).
+    /// `@tag` / `@skip` / `@only` annotations flow through `parseAnnotations`
+    /// before dispatch (the range is discarded here — the v0.6 test subset
+    /// attaches no resolver semantics to them). M1.0.8 is parse + validate +
+    /// symbol registration only; there is no execution surface (M1.0.9). The
+    /// `kw_test` starter is mirrored in `recoverToTopLevel`'s stop-set + the
+    /// `parseTopLevel` error enumeration.
+    fn parseTestDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        _ = annotations; // @tag/@skip/@only parsed but carry no v0.6 resolver semantics
+        const kw_span = (try self.advance()).span; // 'test'
+        const name_tok = try self.expect(.string_literal, "expected a test name (string literal) after 'test'");
+        const name_id = try self.internStringLiteral(name_tok.span);
+        const body = try self.parseBlockExpr();
+        _ = try self.arena.addTestDecl(self.gpa, .{
+            .name = name_id,
+            .body = body,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = self.arena.exprSpan(body).byte_end });
     }
 
     // ─── Annotations ─────────────────────────────────────────────────────
@@ -6537,6 +6617,103 @@ test "parser rejects unsupported top-level construct with E0001" {
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, result.diagnostics[0].code);
+}
+
+test "parse top-level const decl" {
+    const gpa = std.testing.allocator;
+    // M1.0.8: `const Name : type = value`. The name accepts both an ident and a
+    // type_ident — a canonical SCREAMING_SNAKE_CASE const lexes as type_ident.
+    var result = try parse(gpa,
+        \\const MAX_PLAYERS: int = 16
+        \\const PI: float = 3.14
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len == 0);
+    try std.testing.expectEqual(@as(usize, 2), result.ast.items.len);
+    try std.testing.expectEqual(ast_mod.ItemKind.const_decl, result.ast.items.items(.kind)[0]);
+    try std.testing.expectEqual(ast_mod.ItemKind.const_decl, result.ast.items.items(.kind)[1]);
+    // A const is always public (it cannot carry a `private` prefix).
+    try std.testing.expectEqual(ast_mod.Visibility.public, result.ast.items.items(.visibility)[0]);
+    const c0 = result.ast.const_decls.items[result.ast.items.items(.data)[0]];
+    try std.testing.expectEqualStrings("MAX_PLAYERS", result.ast.strings.slice(c0.name));
+}
+
+test "const inside block is a parse error" {
+    const gpa = std.testing.allocator;
+    // Top-level only (part1 §4.5): `const` is not a statement, so it falls
+    // through to a parse error inside a rule body.
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  const X: int = 1
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+}
+
+test "parse private modifier on declaration_body" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\private component Secret { hash: u32 = 0 }
+        \\private fn helper(x: int) -> int { x }
+        \\component Public { value: int = 0 }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len == 0);
+    try std.testing.expectEqual(@as(usize, 3), result.ast.items.len);
+    try std.testing.expectEqual(ast_mod.Visibility.private, result.ast.items.items(.visibility)[0]);
+    try std.testing.expectEqual(ast_mod.Visibility.private, result.ast.items.items(.visibility)[1]);
+    try std.testing.expectEqual(ast_mod.Visibility.public, result.ast.items.items(.visibility)[2]);
+}
+
+test "private before import/const/type is a parse error" {
+    const gpa = std.testing.allocator;
+    // `private` precedes ONLY a declaration_body (grammar §5.1), never a bare
+    // import / const / type alias.
+    inline for (.{ "private import a.b", "private const X: int = 1", "private type Alias = int" }) |src| {
+        var r = try parse(gpa, src);
+        defer r.deinit(gpa);
+        try std.testing.expect(r.diagnostics.len > 0);
+    }
+}
+
+test "parse test block" {
+    const gpa = std.testing.allocator;
+    // `test "name" { ... }`; a leading `@tag(.unit)` annotation is accepted.
+    var result = try parse(gpa,
+        \\@tag(.unit)
+        \\test "math works" {
+        \\  let x = 1 + 1
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len == 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
+    try std.testing.expectEqual(ast_mod.ItemKind.test_decl, result.ast.items.items(.kind)[0]);
+    const td = result.ast.test_decls.items[result.ast.items.items(.data)[0]];
+    try std.testing.expectEqualStrings("math works", result.ast.strings.slice(td.name));
+}
+
+test "recovery after broken const/private/test preserves following valid decl" {
+    const gpa = std.testing.allocator;
+    // Broken leading constructs must resync at the following `const` / `test`
+    // — both are recoverToTopLevel stop-set members as of M1.0.8.
+    var result = try parse(gpa,
+        \\@@@@bad
+        \\const ROOM_CAP: int = 8
+        \\@@@@worse
+        \\test "ok" { }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    var found_const = false;
+    var found_test = false;
+    for (result.ast.items.items(.kind)) |k| {
+        if (k == .const_decl) found_const = true;
+        if (k == .test_decl) found_test = true;
+    }
+    try std.testing.expect(found_const);
+    try std.testing.expect(found_test);
 }
 
 test "parser recovers at top level and returns partial AST" {

@@ -35,7 +35,7 @@ pub const DiagnosticCode = enum {
     not_a_module, // M1.0.7 E5 — E0103 NotAModule (import path resolves to no module)
     unknown_export, // M1.0.7 E5 — E0104 UnknownExport (item absent from target's exports)
     enum_variant_not_found, // M0.8 — E0105 EnumVariantNotFound
-    import_private_item, // M1.0.7 E5 — E0107 ImportPrivateItem (wired but dormant until M1.0.8, D-G)
+    import_private_item, // M1.0.7 E5 — E0107 ImportPrivateItem (activated M1.0.8: buildExports sets .private from Item.visibility)
     import_cycle, // M1.0.7 E4 — E0108 ImportCycle (D-B: NOT E0101; E0101 is DuplicateSymbol)
 
     // ── Type errors (E0200-E0299) ──

@@ -527,14 +527,27 @@ test "lexer flags unknown Etch keyword from full grammar as error_unknown_keywor
     const gpa = std.testing.allocator;
     // `fn` graduated with the M0.8 E2 call mechanism, `ability` with its E4
     // Level-B slice; the whole E6 render/anim/audio/cinematic family graduated,
-    // `scene`/`prefab` graduated with the E7 Level-C scene slice, and `import`
-    // graduated with M1.0.7 cross-file import. The remaining reserved top-level
-    // keyword is `const` (top-level constants, M1.0.8).
-    var lex = Lexer.init("fn ability const");
+    // `scene`/`prefab` graduated with the E7 Level-C scene slice, `import` with
+    // M1.0.7 cross-file import, and `const`/`private`/`test` with M1.0.8. The
+    // single remaining reserved top-level keyword is `override` (M1.0.8 keeps it
+    // reserved until a Tier-1 overridable module exists).
+    var lex = Lexer.init("fn ability override");
     defer lex.deinit(gpa);
     try expectKind(&lex, gpa, .kw_fn);
     try expectKind(&lex, gpa, .kw_ability);
     try expectKind(&lex, gpa, .error_unknown_keyword);
+}
+
+test "lexer promotes const/private/test" {
+    const gpa = std.testing.allocator;
+    // M1.0.8: the three reserved keywords now lex to their own kinds (the
+    // identifier→keyword logic is unchanged — only the keyword tables moved).
+    var lex = Lexer.init("const private test");
+    defer lex.deinit(gpa);
+    try expectKind(&lex, gpa, .kw_const);
+    try expectKind(&lex, gpa, .kw_private);
+    try expectKind(&lex, gpa, .kw_test);
+    try expectKind(&lex, gpa, .eof);
 }
 
 test "lexer recognizes the M1.0.7 import keyword (graduated from reserved)" {
