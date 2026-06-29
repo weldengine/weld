@@ -356,8 +356,9 @@ test "load applies extension components and the on_attach seam fires" {
     try std.testing.expect(AttachSpy.saw_name);
     try std.testing.expect(AttachSpy.saw_text);
 
-    // M1.0.9 boundary: the hook is NOT executed at load — Health.max stays 100
-    // (the `+= 50` effect is M1.0.9, not E6).
+    // The bare Tier-0 seam (an AttachSpy callback, no Etch bridge bound) does NOT
+    // execute the hook — Health.max stays 100. The M1.0.9 headline test below
+    // binds the real interpreter callback and asserts the `+= 50` effect (150).
     const health_id = world.componentId("Health").?;
     const hb = world.componentBytes(npc, health_id).?;
     try std.testing.expectEqual(@as(i32, 100), std.mem.readInt(i32, hb[4..8], .little)); // max @4

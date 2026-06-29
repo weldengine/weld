@@ -320,9 +320,9 @@ fn resolveCrossRefs(world: *World, acc: Accessor, remap: []const ComponentId, uu
 /// Table, in table order, activate each of its extensions: resolve the extension
 /// `.prefab.bin` by name (Prefab ID Table → `ExtensionResolver`), add its
 /// components, and fire the `on_attach` Tier-0 seam. **No-op when the scene has no
-/// active extensions** (so an extension-free scene needs no resolver). The actual
-/// `on_attach` hook EXECUTION is M1.0.9 — here `dispatchOnAttach` only fires the
-/// registered seam with the cooked hook text.
+/// active extensions** (so an extension-free scene needs no resolver). The
+/// `on_attach` hook EXECUTION (M1.0.9) runs inside the registered seam's callback
+/// (the Etch bridge); here `dispatchOnAttach` fires it with the cooked hook text.
 fn applyExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to_entity: UuidMap, ext_resolver: ?ExtensionResolver) !void {
     const count = acc.extensionsCount();
     if (count == 0) return;

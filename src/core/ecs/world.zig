@@ -95,8 +95,9 @@ const EntityIdentityStore = entity_mod.EntityIdentityStore;
 /// M1.0.6 E6 — the `on_attach` extension dispatch seam (D-E). A Tier-0 function
 /// pointer the Etch bridge registers; the scene loader fires it after adding an
 /// extension's components, passing the entity, the extension name, and the cooked
-/// `on_attach` Etch source text (`null` if absent). M1.0.6 wires + fires the seam;
-/// running the text is M1.0.9.
+/// `on_attach` Etch source text (`null` if absent). M1.0.6 wired + fired the
+/// seam; M1.0.9 registers the Etch bridge's callback, which re-parses + runs the
+/// text — the seam itself still only fires whatever callback is registered.
 pub const ExtensionAttachFn = *const fn (
     ctx: ?*anyopaque,
     world: *World,
@@ -339,7 +340,8 @@ pub const World = struct {
     /// extension `extension_name`, passing the cooked `on_attach_text` (the Etch
     /// hook source; `null` if the extension has no `on_attach`). No-op if no hook
     /// is registered. The loader calls this after adding the extension's
-    /// components. Executing the text is M1.0.9 — here the seam just fires.
+    /// components. The registered callback (the Etch bridge, M1.0.9) re-parses +
+    /// executes the text; here the seam just fires it.
     pub fn dispatchOnAttach(self: *World, entity: EntityId, extension_name: []const u8, on_attach_text: ?[]const u8) anyerror!void {
         if (self.attach_hook) |h| try h.func(h.ctx, self, entity, extension_name, on_attach_text);
     }
