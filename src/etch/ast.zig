@@ -164,6 +164,13 @@ pub const ItemKind = enum {
     override_decl,
 };
 
+/// Top-level declaration visibility (M1.0.8, `etch-grammar.md` §5.1
+/// `visibility_modifier`, `etch-reference-part1.md` §1.3). Public by default;
+/// `.private` is set by the parser when a `private` prefix precedes a
+/// `declaration_body`. Consumed only by `buildExports` (cross-module access);
+/// intra-module resolution ignores it (`etch-resolver-types.md` §10.1).
+pub const Visibility = enum { public, private };
+
 /// Closed enum of statement kinds reachable from an Etch rule body.
 /// `// S3` variants are implemented; the others are reserved for
 /// later milestones and rejected at parse-time in S3.
@@ -618,6 +625,29 @@ const RuleParam = struct {
 pub const TypeAliasDecl = struct {
     name: StringId,
     target: NodeId,
+};
+
+/// Side-slab entry for a top-level `const` declaration (M1.0.8,
+/// `etch-grammar.md` §4.1: `const_stmt = "const" ( IDENT | TYPE_IDENT ) ":"
+/// type "=" const_expression`). `name` is the interned binding name (a
+/// `SCREAMING_SNAKE_CASE` const lexes as `TYPE_IDENT`; both cases accepted).
+/// `type_node` is the declared `: type` annotation (mandatory — no inference
+/// on a const, part1 §3.5); `value` is the const expression, validated for
+/// const-evaluability + type at resolve (E1101 / E0200). Top-level only.
+pub const ConstDecl = struct {
+    name: StringId,
+    type_node: NodeId,
+    value: NodeId,
+};
+
+/// Side-slab entry for a top-level `test` block (M1.0.8, `etch-grammar.md`
+/// §17: `test_decl = "test" STRING_LITERAL block`). `name` is the interned
+/// string-literal label; `body` is a `block_expr` NodeId (the reused
+/// block/statement parser). M1.0.8 delivers parse + validate + symbol
+/// registration only — there is no execution surface (that is M1.0.9).
+pub const TestDecl = struct {
+    name: StringId,
+    body: NodeId,
 };
 
 /// Side-slab entry for a `rule` declaration: params, optional `when`
@@ -2244,6 +2274,10 @@ const Item = struct {
     kind: ItemKind,
     data: u32,
     span: SourceSpan,
+    /// M1.0.8 — `.private` when a `private` prefix precedes this top-level
+    /// declaration_body; `.public` otherwise (the dominant case, so the
+    /// default keeps every existing `addItem` call literal valid).
+    visibility: Visibility = .public,
 };
 
 const Stmt = struct {
@@ -2323,6 +2357,8 @@ pub const AstArena = struct {
     /// for a top-level callable. `ImplDecl` references a `(start, len)` run.
     impl_methods: std.ArrayListUnmanaged(FnDecl) = .empty,
     type_alias_decls: std.ArrayListUnmanaged(TypeAliasDecl) = .empty,
+    const_decls: std.ArrayListUnmanaged(ConstDecl) = .empty,
+    test_decls: std.ArrayListUnmanaged(TestDecl) = .empty,
     data_decls: std.ArrayListUnmanaged(DataDecl) = .empty,
     data_entries: std.ArrayListUnmanaged(DataEntry) = .empty,
     theme_decls: std.ArrayListUnmanaged(ThemeDecl) = .empty,
@@ -2543,6 +2579,8 @@ pub const AstArena = struct {
         self.trait_decls.deinit(gpa);
         self.impl_methods.deinit(gpa);
         self.type_alias_decls.deinit(gpa);
+        self.const_decls.deinit(gpa);
+        self.test_decls.deinit(gpa);
         self.data_decls.deinit(gpa);
         self.data_entries.deinit(gpa);
         self.quest_decls.deinit(gpa);
@@ -2746,6 +2784,23 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.type_alias_decls.items.len);
         try self.type_alias_decls.append(gpa, .{ .name = name, .target = target });
         return try self.addItem(gpa, .type_alias, idx, span);
+    }
+
+    /// `const Name : type = value` (M1.0.8, top-level only). Mirrors
+    /// `addTypeAlias` — append the side-slab entry, register the `const_decl`
+    /// item.
+    pub fn addConstDecl(self: *AstArena, gpa: std.mem.Allocator, decl: ConstDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.const_decls.items.len);
+        try self.const_decls.append(gpa, decl);
+        return try self.addItem(gpa, .const_decl, idx, span);
+    }
+
+    /// `test "name" { ... }` (M1.0.8). Append the side-slab entry, register the
+    /// `test_decl` item.
+    pub fn addTestDecl(self: *AstArena, gpa: std.mem.Allocator, decl: TestDecl, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.test_decls.items.len);
+        try self.test_decls.append(gpa, decl);
+        return try self.addItem(gpa, .test_decl, idx, span);
     }
 
     /// Resolve a type name through the top-level `type` alias chain to its
@@ -3350,6 +3405,20 @@ pub const AstArena = struct {
     pub fn itemData(self: *const AstArena, id: NodeId) u32 {
         std.debug.assert(id.category == .item);
         return self.items.items(.data)[id.index];
+    }
+
+    /// Visibility of a top-level item (M1.0.8). `.public` unless the parser set
+    /// `.private` via `setItemVisibility`. Consumed by `buildExports`.
+    pub fn itemVisibility(self: *const AstArena, id: NodeId) Visibility {
+        std.debug.assert(id.category == .item);
+        return self.items.items(.visibility)[id.index];
+    }
+
+    /// Mark a top-level item `.private` (M1.0.8). Called by `parseOneTopLevel`
+    /// when a `private` prefix precedes the declaration_body it parsed.
+    pub fn setItemVisibility(self: *AstArena, id: NodeId, vis: Visibility) void {
+        std.debug.assert(id.category == .item);
+        self.items.items(.visibility)[id.index] = vis;
     }
 
     pub fn stmtKind(self: *const AstArena, id: NodeId) StmtKind {
