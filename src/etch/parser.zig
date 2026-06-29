@@ -626,7 +626,7 @@ pub const Parser = struct {
         if (self.peek() != .eof) _ = try self.advance();
         while (true) {
             switch (self.peek()) {
-                .eof, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score, .kw_sequence, .kw_anim_graph, .kw_shader, .kw_scene, .kw_prefab => return,
+                .eof, .kw_import, .kw_component, .kw_resource, .kw_rule, .kw_type, .kw_fn, .kw_async, .kw_struct, .kw_impl, .kw_enum, .kw_trait, .kw_event, .kw_tags, .kw_data, .kw_routine, .kw_behavior, .kw_quest, .kw_dialogue, .kw_ability, .kw_theme, .kw_motion, .kw_input_mapping, .kw_widget, .kw_locale, .kw_effect, .kw_audio_graph, .kw_audio_score, .kw_sequence, .kw_anim_graph, .kw_shader, .kw_scene, .kw_prefab => return,
                 else => _ = try self.advance(),
             }
         }
@@ -643,6 +643,7 @@ pub const Parser = struct {
 
     fn parseTopLevel(self: *Parser, annotations: AnnotationRange) ParseError!void {
         switch (self.peek()) {
+            .kw_import => try self.parseImportDecl(annotations),
             .kw_component => try self.parseComponentDecl(annotations),
             .kw_resource => try self.parseResourceDecl(annotations),
             .kw_rule => try self.parseRuleDecl(annotations, false),
@@ -686,7 +687,7 @@ pub const Parser = struct {
                 }
             },
             .eof => {},
-            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score | sequence | anim_graph | shader | scene | prefab), got '{s}'", .{self.sliceOf(self.peekSpan())}),
+            else => return self.parseErrFmt(self.peekSpan(), "expected top-level declaration (import | component | resource | rule | type | fn | struct | impl | enum | trait | event | tags | data | routine | behavior | quest | dialogue | ability | theme | motion | input_mapping | widget | locale | effect | audio_graph | audio_score | sequence | anim_graph | shader | scene | prefab), got '{s}'", .{self.sliceOf(self.peekSpan())}),
         }
     }
 
@@ -3355,6 +3356,94 @@ pub const Parser = struct {
             .annotations_extra = annotations.start,
             .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse a top-level `import` directive (M1.0.7, `etch-grammar.md` §5.2):
+    ///   `import_decl = "import" module_path [ import_spec ]`. Four forms:
+    ///     import a.b              (whole module — implicit alias = last segment)
+    ///     import a.b as m         (whole module, explicit alias)
+    ///     import a.b { X, Y }     (selective)
+    ///     import a.b { X as Y }   (selective with per-item alias)
+    /// `module_path` is a run of `.ident` segments separated by `.` (≥1) — the
+    /// path is module-named (snake_case `IDENT`), so segments are `.ident` only;
+    /// the E0859 path-naming check is out-of-scope. Import items accept BOTH
+    /// `.ident` and `.type_ident` (D-D). `import` is a bare `declaration` (§5.1,
+    /// ahead of the `visibility_modifier` branch): it takes no annotations or
+    /// `private` prefix, so the `annotations` range is discarded (the
+    /// `parseTypeAliasDecl` precedent). The `kw_import` starter is mirrored in
+    /// `recoverToTopLevel`'s stop-set.
+    fn parseImportDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
+        _ = annotations; // imports carry no annotations in the v0.6 subset
+        const kw_span = (try self.advance()).span; // 'import'
+
+        // module_path = IDENT { "." IDENT }  (≥1 segment)
+        const path_start: u32 = @intCast(self.arena.import_path_segs.items.len);
+        const first_seg = try self.expect(.ident, "expected a module path segment (identifier) after 'import'");
+        try self.arena.import_path_segs.append(self.gpa, try self.internSlice(first_seg.span));
+        var path_len: u32 = 1;
+        var end_span = first_seg.span;
+        while (try self.match(.dot)) {
+            const seg = try self.expect(.ident, "expected a module path segment (identifier) after '.'");
+            try self.arena.import_path_segs.append(self.gpa, try self.internSlice(seg.span));
+            path_len += 1;
+            end_span = seg.span;
+        }
+
+        // import_spec = "as" IDENT  |  "{" import_item {"," import_item} [","] "}"
+        var module_alias: StringId = 0;
+        const items_start: u32 = @intCast(self.arena.import_items.items.len);
+        var items_len: u32 = 0;
+        if (self.peek() == .kw_as) {
+            _ = try self.advance(); // 'as'
+            const alias_tok = try self.expect(.ident, "expected a module alias (identifier) after 'as'");
+            module_alias = try self.internSlice(alias_tok.span);
+            end_span = alias_tok.span;
+        } else if (self.peek() == .lbrace) {
+            _ = try self.advance(); // '{'
+            // Grammar requires ≥1 item; a trailing comma before `}` is tolerated.
+            const first_item = try self.parseImportItem();
+            try self.arena.import_items.append(self.gpa, first_item);
+            items_len += 1;
+            while (try self.match(.comma)) {
+                if (self.peek() == .rbrace) break; // trailing comma
+                const item = try self.parseImportItem();
+                try self.arena.import_items.append(self.gpa, item);
+                items_len += 1;
+            }
+            const closing = try self.expect(.rbrace, "expected ',' or '}' to close the import item list");
+            end_span = closing.span;
+        }
+
+        _ = try self.arena.addImportDecl(self.gpa, .{
+            .path_start = path_start,
+            .path_len = path_len,
+            .module_alias = module_alias,
+            .items_start = items_start,
+            .items_len = items_len,
+        }, .{ .byte_start = kw_span.byte_start, .byte_end = end_span.byte_end });
+    }
+
+    /// `import_item = ( IDENT | TYPE_IDENT ) [ "as" ( IDENT | TYPE_IDENT ) ]`
+    /// (§5.2, reconciled D-D — imported items are mostly `TYPE_IDENT` but `IDENT`
+    /// is equally legal, so both token kinds are accepted for the name and the
+    /// optional local alias). The AST stores the interned name; the case
+    /// distinction is not preserved here.
+    fn parseImportItem(self: *Parser) ParseError!ast_mod.ImportItem {
+        const name_tok = if (self.peek() == .ident or self.peek() == .type_ident)
+            try self.advance()
+        else
+            return self.parseErr(self.peekSpan(), "expected an import item name (identifier or type name)");
+        const name_id = try self.internSlice(name_tok.span);
+        var alias: StringId = 0;
+        if (self.peek() == .kw_as) {
+            _ = try self.advance(); // 'as'
+            const alias_tok = if (self.peek() == .ident or self.peek() == .type_ident)
+                try self.advance()
+            else
+                return self.parseErr(self.peekSpan(), "expected a local alias name (identifier or type name) after 'as'");
+            alias = try self.internSlice(alias_tok.span);
+        }
+        return .{ .name = name_id, .alias = alias };
     }
 
     /// `entity_decl = "entity" STRING_LITERAL "{" [uuid] [parent]

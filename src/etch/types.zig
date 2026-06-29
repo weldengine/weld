@@ -190,6 +190,22 @@ fn methodKey(type_name: StringId, method_name: StringId) u64 {
     return (@as(u64, type_name) << 32) | @as(u64, method_name);
 }
 
+/// Resolve a foreign-arena component field's declared type to a `BuiltinType`,
+/// or `null` for a non-builtin (named / array / complex) type — M1.0.7 E6 (D-E).
+/// Mirrors the builtin path of `namedTypeToResolved` but reads the FOREIGN arena's
+/// strings + alias chain; it consults no symbol table. `null` is unreachable for a
+/// valid component (component fields are builtin-POD only, `validateFieldsInDecl
+/// .component_like`) — so the cross-arena field-TYPE check is complete for every
+/// valid imported component.
+fn foreignBuiltinFieldType(decl_arena: *const AstArena, type_node: NodeId) ?BuiltinType {
+    if (decl_arena.typeNodeKind(type_node) != .named) return null;
+    const named = decl_arena.named_types.items[decl_arena.typeNodeData(type_node)];
+    const resolved = decl_arena.resolveTypeAliasName(named.name);
+    const tname = decl_arena.strings.slice(resolved);
+    if (std.mem.eql(u8, tname, "string")) return .string_;
+    return BuiltinType.fromName(tname);
+}
+
 /// `true` if `s` contains an ASCII uppercase letter — an `E1768
 /// IdInvalidFormat` data-entry id check (ids are snake_case IDENTs,
 /// `etch-validation-ecs.md` §22.2; M0.8 E4).
@@ -309,6 +325,16 @@ pub const TypeChecker = struct {
     /// checks resolve against the byte-keyed PROJECT indexes instead, so a
     /// prefab or UUID defined in another project file is in scope.
     project: ?*const ProjectContext = null,
+    /// Symbols brought into this file's scope by a selective `import a.b { X }`
+    /// (M1.0.7 E5), byte-keyed under their LOCAL name's `StringId` in THIS arena
+    /// (the `as Y` alias if present, else the imported name). Built by
+    /// `bindImports` after pass 1; consulted by E6's `TYPE_IDENT` resolution.
+    /// Empty in single-file mode.
+    imported_symbols: std.AutoHashMapUnmanaged(StringId, ExportEntry) = .empty,
+    /// Module aliases from `import a.b as m` / bare `import a.b` (M1.0.7 E5, D-F):
+    /// local alias `StringId` → target file index. Qualified `m.Type` resolution
+    /// is deferred; the binding is recorded so the later walk is purely additive.
+    imported_aliases: std.AutoHashMapUnmanaged(StringId, usize) = .empty,
 
     /// Byte-keyed cross-file indexes for project-level scene/prefab validation
     /// (M0.9 E2-B). StringIds are per-arena, so cross-file resolution keys on
@@ -318,9 +344,38 @@ pub const TypeChecker = struct {
     /// second occurrence of a UUID is E1782. Both sets' keys reference the
     /// arenas' string pools, which `root.validateProject` keeps alive for the
     /// duration of the checks.
+    /// Visibility of an exported symbol (M1.0.7 E5, D-G). Wired but always
+    /// `.public` until `private` graduates (M1.0.8) — then the exports builder
+    /// sets `.private` and the binding path's `E0107` check becomes reachable.
+    pub const Visibility = enum { public, private };
+
+    /// One exported top-level symbol of a module (M1.0.7 E5). `arena_index` is
+    /// the defining file's index in the project (its slot in `exports`/`arenas`);
+    /// `item_id` is its `Item` NodeId in that arena. The cross-arena field check
+    /// (E6) fetches the decl via `project.arenas[arena_index]` + `item_id`.
+    pub const ExportEntry = struct {
+        kind: SymbolKind,
+        visibility: Visibility,
+        arena_index: usize,
+        item_id: NodeId,
+    };
+
+    /// Per-module exports table, byte-keyed on the interned export name (StringIds
+    /// are per-arena → cross-file keys on bytes, the M0.9 pattern). One table per
+    /// project file, indexed by file index in `ProjectContext.exports`.
+    pub const ExportTable = std.StringHashMapUnmanaged(ExportEntry);
+
     pub const ProjectContext = struct {
         prefabs: *const std.StringHashMapUnmanaged(void),
         uuids: *std.StringHashMapUnmanaged(void),
+        // ── M1.0.7 E5 — cross-file import resolution ──
+        /// Module-path bytes → file index (built by `root.validateProject`).
+        module_index: *const std.StringHashMapUnmanaged(usize),
+        /// Per-file exports tables, indexed by file index.
+        exports: []const ExportTable,
+        /// Per-file arenas, indexed by file index (= the project's parsed ASTs).
+        /// The defining arena for E6's cross-arena component-decl fetch.
+        arenas: []AstArena,
     };
 
     /// One `impl Trait for Type [when …]` (M0.8 E2 block 3 tranche C).
@@ -341,6 +396,8 @@ pub const TypeChecker = struct {
         self.methods.deinit(self.gpa);
         self.trait_impls.deinit(self.gpa);
         self.generic_scope.deinit(self.gpa);
+        self.imported_symbols.deinit(self.gpa);
+        self.imported_aliases.deinit(self.gpa);
         if (self.tag_table) |*t| t.deinit(self.gpa);
     }
 
@@ -379,6 +436,7 @@ pub const TypeChecker = struct {
         };
         defer tc.deinit();
         try tc.pass1Collect();
+        try tc.bindImports();
         try tc.validateTypeAliases();
         try tc.validateImpls();
         try tc.validateDataDecls();
@@ -419,6 +477,10 @@ pub const TypeChecker = struct {
             if (BuiltinType.fromName(uname) != null) continue;
             if (self.symbols.get(ultimate)) |sym| {
                 if (sym.kind == .component or sym.kind == .resource) continue;
+            }
+            // M1.0.7 E6 — the alias target may be a selectively-imported type.
+            if (self.imported_symbols.get(ultimate)) |entry| {
+                if (entry.kind == .component or entry.kind == .resource) continue;
             }
             try self.emit(.undefined_symbol, .error_, self.arena.typeNodeSpan(decl.target), "type alias '{s}' does not resolve to a known type", .{self.arena.strings.slice(decl.name)});
         }
@@ -1293,17 +1355,76 @@ pub const TypeChecker = struct {
 
     /// Resolve a `component_instance` against the component RTTI: `code_type`
     /// if the type is not a declared component, then per-field checks.
+    ///
+    /// M1.0.7 E6 (D-E): the component type may be a SELECTIVELY-IMPORTED symbol
+    /// whose declaration lives in another file's arena. When it is, the decl is
+    /// fetched from `project.arenas[entry.arena_index]` and the fields are checked
+    /// CROSS-ARENA (field names compared by bytes — StringIds are per-arena). This
+    /// is the E1793 unblock: a `.prefab.etch` importing its components validates
+    /// clean instead of tripping `PrefabComponentTypeUnknown`.
     fn checkComponentInstance(self: *TypeChecker, ci: ast_mod.ComponentInstance, code_type: DiagnosticCode, code_field: DiagnosticCode, code_field_type: DiagnosticCode) !void {
-        const sym = self.symbols.get(ci.type_name);
-        if (sym == null or sym.?.kind != .component) {
-            try self.emit(code_type, .error_, ci.span, "'{s}' is not a declared component", .{self.arena.strings.slice(ci.type_name)});
-            return;
-        }
-        const decl = self.arena.component_decls.items[self.arena.itemData(sym.?.item_id)];
         const owner = self.arena.strings.slice(ci.type_name);
+        // 1. Local component (the M0.8 path).
+        if (self.symbols.get(ci.type_name)) |sym| {
+            if (sym.kind == .component) {
+                const decl = self.arena.component_decls.items[self.arena.itemData(sym.item_id)];
+                var f: u32 = 0;
+                while (f < ci.fields_len) : (f += 1) {
+                    try self.checkInstanceField(owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], code_field, code_field_type);
+                }
+                return;
+            }
+            // A local symbol that is NOT a component → fall through to code_type.
+        } else if (self.imported_symbols.get(ci.type_name)) |entry| {
+            // 2. Imported component (cross-arena, E6 / D-E).
+            if (entry.kind == .component) {
+                const decl_arena = &self.project.?.arenas[entry.arena_index];
+                const decl = decl_arena.component_decls.items[decl_arena.itemData(entry.item_id)];
+                var f: u32 = 0;
+                while (f < ci.fields_len) : (f += 1) {
+                    try self.checkInstanceFieldForeign(decl_arena, owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], code_field, code_field_type);
+                }
+                return;
+            }
+        }
+        try self.emit(code_type, .error_, ci.span, "'{s}' is not a declared component", .{owner});
+    }
+
+    /// Cross-arena field check for an imported component instance (M1.0.7 E6,
+    /// D-E). The instance field (`field`) lives in `self.arena`; the declared
+    /// fields live in `decl_arena`. Field names are matched by BYTES (StringIds
+    /// are per-arena). `code_unknown` (E1794) is full; the field-TYPE check
+    /// (`code_type`, E1795) resolves the foreign declared type via
+    /// `foreignBuiltinFieldType`. That covers EVERY valid component field type:
+    /// `validateFieldsInDecl(.component_like)` admits only builtin-POD field types
+    /// (named struct/enum/string are rejected on components), so a valid imported
+    /// component's fields are all builtins. The `orelse return` (named foreign
+    /// type) is therefore unreachable for a valid component — forward-compat
+    /// headroom if components ever gain named-typed fields, not a skipped check.
+    fn checkInstanceFieldForeign(self: *TypeChecker, decl_arena: *const AstArena, owner: []const u8, decl_fields_start: u32, decl_fields_len: u32, field: ast_mod.StructLitField, code_unknown: DiagnosticCode, code_type: DiagnosticCode) !void {
+        if (field.name == 0) return; // spread — not produced in component bodies
+        const field_name_bytes = self.arena.strings.slice(field.name);
+        var declared_type_node: ?NodeId = null;
         var f: u32 = 0;
-        while (f < ci.fields_len) : (f += 1) {
-            try self.checkInstanceField(owner, decl.fields_start, decl.fields_len, self.arena.struct_lit_fields.items[ci.fields_start + f], code_field, code_field_type);
+        while (f < decl_fields_len) : (f += 1) {
+            const df = decl_arena.fields.items[decl_fields_start + f];
+            if (std.mem.eql(u8, decl_arena.strings.slice(df.name), field_name_bytes)) {
+                declared_type_node = df.type_node;
+                break;
+            }
+        }
+        const tn = declared_type_node orelse {
+            try self.emit(code_unknown, .error_, self.arena.exprSpan(field.value), "'{s}' has no field '{s}'", .{ owner, field_name_bytes });
+            return;
+        };
+        // Field-TYPE check. Component fields are builtin-POD only
+        // (validateFieldsInDecl .component_like), so this resolves for every
+        // valid imported component; the `orelse return` is unreachable for a
+        // valid component (forward-compat headroom).
+        const declared_builtin = foreignBuiltinFieldType(decl_arena, tn) orelse return;
+        const actual = try self.synthExprE(field.value, null);
+        if (actual == .builtin and !self.literalTypeFits(declared_builtin, field.value, actual.builtin)) {
+            try self.emit(code_type, .error_, self.arena.exprSpan(field.value), "field '{s}' value type does not match its declared type", .{field_name_bytes});
         }
     }
 
@@ -2786,6 +2907,75 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// Bind this file's `import` directives against the project exports index
+    /// (M1.0.7 E5). For each `ImportDecl`:
+    ///   - resolve the module path against `project.module_index`; a path that
+    ///     names no project file is `E0103 NotAModule`.
+    ///   - selective `{ X }`: look X up in the target module's exports — absent →
+    ///     `E0104 UnknownExport`; private → `E0107` (dormant, D-G); else register
+    ///     it in `imported_symbols` under its local name (alias if present).
+    ///   - module alias `as m` / bare `import a.b`: record the alias → target
+    ///     binding in `imported_aliases` (D-F; qualified `m.Type` resolution is
+    ///     E6+ additive, not done here).
+    /// No-op in single-file mode (`project == null`). This pass only records the
+    /// bindings + emits the import diagnostics; APPLYING the imports to
+    /// `TYPE_IDENT` resolution + the cross-arena component check is E6.
+    fn bindImports(self: *TypeChecker) !void {
+        const project = self.project orelse return;
+        const kinds = self.arena.items.items(.kind);
+        const datas = self.arena.items.items(.data);
+        const spans = self.arena.items.items(.span);
+        var i: usize = 0;
+        while (i < self.arena.items.len) : (i += 1) {
+            if (kinds[i] != .import_decl) continue;
+            const decl = self.arena.import_decls.items[datas[i]];
+            const span = spans[i];
+
+            // Join the module-path segments ("a.b.c") and resolve to a file.
+            var path_buf: std.ArrayListUnmanaged(u8) = .empty;
+            defer path_buf.deinit(self.gpa);
+            var s: u32 = 0;
+            while (s < decl.path_len) : (s += 1) {
+                if (s != 0) try path_buf.append(self.gpa, '.');
+                try path_buf.appendSlice(self.gpa, self.arena.strings.slice(self.arena.import_path_segs.items[decl.path_start + s]));
+            }
+            const target_idx = project.module_index.get(path_buf.items) orelse {
+                try self.emit(.not_a_module, .error_, span, "import path '{s}' does not name a module in the project", .{path_buf.items});
+                continue;
+            };
+
+            if (decl.items_len == 0) {
+                // Whole-module form (1 or 3): record the alias → target binding.
+                // Explicit `as m` alias, else the implicit last-segment alias.
+                const alias_id = if (decl.module_alias != 0)
+                    decl.module_alias
+                else
+                    self.arena.import_path_segs.items[decl.path_start + decl.path_len - 1];
+                try self.imported_aliases.put(self.gpa, alias_id, target_idx);
+                continue;
+            }
+
+            // Selective form (2 or 4): bind each item against the target exports.
+            const exports = &project.exports[target_idx];
+            var j: u32 = 0;
+            while (j < decl.items_len) : (j += 1) {
+                const item = self.arena.import_items.items[decl.items_start + j];
+                const item_name = self.arena.strings.slice(item.name);
+                const entry = exports.get(item_name) orelse {
+                    try self.emit(.unknown_export, .error_, span, "'{s}' is not exported by module '{s}'", .{ item_name, path_buf.items });
+                    continue;
+                };
+                if (entry.visibility == .private) {
+                    // Dormant until `private` graduates (M1.0.8, D-G).
+                    try self.emit(.import_private_item, .error_, span, "'{s}' is private to module '{s}'", .{ item_name, path_buf.items });
+                    continue;
+                }
+                const local = if (item.alias != 0) item.alias else item.name;
+                try self.imported_symbols.put(self.gpa, local, entry);
+            }
+        }
+    }
+
     fn registerSymbol(self: *TypeChecker, kind: SymbolKind, name: StringId, item_id: NodeId, span: SourceSpan) !void {
         const gop = try self.symbols.getOrPut(self.gpa, name);
         if (gop.found_existing) {
@@ -3164,6 +3354,20 @@ pub const TypeChecker = struct {
                 if (BuiltinType.fromName(tname)) |bt| return .{ .builtin = bt };
                 if (self.symbols.get(resolved_name)) |sym| {
                     return switch (sym.kind) {
+                        .component => .{ .component = resolved_name },
+                        .resource => .{ .resource = resolved_name },
+                        .struct_ => .{ .struct_t = resolved_name },
+                        .enum_ => .{ .enum_t = resolved_name },
+                        else => .unknown,
+                    };
+                }
+                // M1.0.7 E6 — a selectively-imported type resolves in any type
+                // position (`type HA = Health`, field types, signatures). Identity
+                // is the local-name `StringId`; the defining arena is reached via
+                // `imported_symbols` only where the decl itself is needed (the
+                // cross-arena component check, `checkComponentInstance`).
+                if (self.imported_symbols.get(resolved_name)) |entry| {
+                    return switch (entry.kind) {
                         .component => .{ .component = resolved_name },
                         .resource => .{ .resource = resolved_name },
                         .struct_ => .{ .struct_t = resolved_name },

@@ -106,6 +106,7 @@ pub const TokenKind = enum {
     kw_shader, // shader declaration (M0.8 E6 Level B render — vertex/fragment stages, shader-mode body validation)
     kw_scene, // scene declaration (M0.8 E7 Level C — STRING-named scene graph, entity/instance decls)
     kw_prefab, // prefab declaration (M0.8 E7 Level C — STRING-named, of/extends relation, requires + on_attach/on_detach hooks)
+    kw_import, // import directive (M1.0.7 cross-file import — module path + optional alias / selective items; graduated from non_s3_keywords)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -269,6 +270,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "shader", .kind = .kw_shader },
     .{ .lexeme = "scene", .kind = .kw_scene },
     .{ .lexeme = "prefab", .kind = .kw_prefab },
+    .{ .lexeme = "import", .kind = .kw_import },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -298,8 +300,8 @@ pub const non_s3_keywords = [_][]const u8{
     //    call mechanism; `struct` / `impl` / `enum` / `trait` with E2 block 3;
     //    `event` + `tags` with E3 ECS layer; `data` with E4 Level B gameplay;
     //    `scene` + `prefab` graduated with E7 Level C — the last two construct
-    //    keywords of the v0.6 grammar) ──
-    "import",
+    //    keywords of the v0.6 grammar; `import` graduated with M1.0.7 cross-file
+    //    import — it now lexes as `kw_import` via `s3_keywords`) ──
     "const",
     "private",
     "test",

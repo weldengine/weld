@@ -32,7 +32,11 @@ pub const DiagnosticCode = enum {
     // ── Resolver — symbols / paths (E0100-E0199) ──
     duplicate_symbol, // S3 — E0101 DuplicateSymbol
     undefined_symbol, // S3 — E0102 UndefinedSymbol
+    not_a_module, // M1.0.7 E5 — E0103 NotAModule (import path resolves to no module)
+    unknown_export, // M1.0.7 E5 — E0104 UnknownExport (item absent from target's exports)
     enum_variant_not_found, // M0.8 — E0105 EnumVariantNotFound
+    import_private_item, // M1.0.7 E5 — E0107 ImportPrivateItem (wired but dormant until M1.0.8, D-G)
+    import_cycle, // M1.0.7 E4 — E0108 ImportCycle (D-B: NOT E0101; E0101 is DuplicateSymbol)
 
     // ── Type errors (E0200-E0299) ──
     type_mismatch, // S3 — E0200 TypeMismatch
@@ -357,6 +361,10 @@ pub const DiagnosticCode = enum {
             .parse_error => "E0001",
             .duplicate_symbol => "E0101",
             .undefined_symbol => "E0102",
+            .not_a_module => "E0103",
+            .unknown_export => "E0104",
+            .import_private_item => "E0107",
+            .import_cycle => "E0108",
             .enum_variant_not_found => "E0105",
             .type_mismatch => "E0200",
             .arg_count_mismatch => "E0203",
@@ -537,6 +545,10 @@ pub const DiagnosticCode = enum {
             .parse_error => "ParseError",
             .duplicate_symbol => "DuplicateSymbol",
             .undefined_symbol => "UndefinedSymbol",
+            .not_a_module => "NotAModule",
+            .unknown_export => "UnknownExport",
+            .import_private_item => "ImportPrivateItem",
+            .import_cycle => "ImportCycle",
             .enum_variant_not_found => "EnumVariantNotFound",
             .type_mismatch => "TypeMismatch",
             .arg_count_mismatch => "ArgCountMismatch",
