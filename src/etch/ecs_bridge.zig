@@ -24,6 +24,10 @@ const Chunk = weld_core.ecs.archetype_dynamic.Chunk;
 const ResourceStore = weld_core.ecs.resources.ResourceStore;
 const CoreEntityId = weld_core.ecs.entity.EntityId;
 const Tick = weld_core.ecs.tick.Tick;
+// M1.0.9 — runtime extension resolution (name → cooked `.prefab.bin` bytes), the
+// same interface the scene loader receives. Held (optional, borrowed) by the
+// bridge so a name-only Etch `entity.activate_extension("X")` resolves at runtime.
+const ExtensionResolver = weld_core.scene.loader.ExtensionResolver;
 
 // Module-private aliases shadowing the value module — `EntityId`,
 // `Value`, `ComponentRef` are not exported because no external caller
@@ -65,6 +69,12 @@ pub const Bridge = struct {
     components: std.StringHashMapUnmanaged(ComponentId) = .empty,
     /// Etch resource name → registry id.
     resources: std.StringHashMapUnmanaged(ComponentId) = .empty,
+
+    /// M1.0.9 — optional runtime extension resolver (name → cooked `.prefab.bin`
+    /// bytes). Borrowed, not owned — set when the interpreter is bound, used by
+    /// `entity.activate_extension` / `deactivate_extension`. Absent → those
+    /// methods fail with `error.MissingExtensionResolver`.
+    ext_resolver: ?ExtensionResolver = null,
 
     pub fn init() Bridge {
         return .{};
