@@ -344,9 +344,9 @@ pub const TypeChecker = struct {
     /// second occurrence of a UUID is E1782. Both sets' keys reference the
     /// arenas' string pools, which `root.validateProject` keeps alive for the
     /// duration of the checks.
-    /// Visibility of an exported symbol (M1.0.7 E5, D-G). Wired but always
-    /// `.public` until `private` graduates (M1.0.8) — then the exports builder
-    /// sets `.private` and the binding path's `E0107` check becomes reachable.
+    /// Visibility of an exported symbol (M1.0.7 E5, D-G). Since `private`
+    /// graduated (M1.0.8) the exports builder sets `.private` from the decl's
+    /// `Item.visibility`, making the binding path's `E0107` check reachable.
     pub const Visibility = enum { public, private };
 
     /// One exported top-level symbol of a module (M1.0.7 E5). `arena_index` is
@@ -2930,8 +2930,8 @@ pub const TypeChecker = struct {
     ///   - resolve the module path against `project.module_index`; a path that
     ///     names no project file is `E0103 NotAModule`.
     ///   - selective `{ X }`: look X up in the target module's exports — absent →
-    ///     `E0104 UnknownExport`; private → `E0107` (dormant, D-G); else register
-    ///     it in `imported_symbols` under its local name (alias if present).
+    ///     `E0104 UnknownExport`; private → `E0107` (activated M1.0.8); else
+    ///     register it in `imported_symbols` under its local name (alias if present).
     ///   - module alias `as m` / bare `import a.b`: record the alias → target
     ///     binding in `imported_aliases` (D-F; qualified `m.Type` resolution is
     ///     E6+ additive, not done here).
