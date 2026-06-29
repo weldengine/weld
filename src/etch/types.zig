@@ -175,7 +175,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_, audio_graph_, sequence_, anim_graph_, shader_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_, audio_graph_, sequence_, anim_graph_, shader_, const_, test_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -2781,6 +2781,24 @@ pub const TypeChecker = struct {
                     const decl = self.arena.type_alias_decls.items[data];
                     try self.registerSymbol(.type_alias, decl.name, item_id, span);
                 },
+                .const_decl => {
+                    // Top-level `const` (M1.0.8). Register the name (so it
+                    // collides with a same-named symbol via E0101 and resolves
+                    // cross-file once exported), then check the value is
+                    // const-evaluable (E1101) and matches its declared type
+                    // (E0200) — reusing the field-default const surface.
+                    const decl = self.arena.const_decls.items[data];
+                    try self.registerSymbol(.const_, decl.name, item_id, span);
+                    try self.checkConstValue(decl.value, decl.type_node);
+                },
+                .test_decl => {
+                    // Top-level `test` block (M1.0.8). Register a `test_` symbol
+                    // (tracked, NOT exported — `buildExports` omits it). M1.0.8
+                    // is parse + validate + registration only; the body is not
+                    // executed (no runtime surface — M1.0.9).
+                    const decl = self.arena.test_decls.items[data];
+                    try self.registerSymbol(.test_, decl.name, item_id, span);
+                },
                 .data_decl => {
                     // A `data` table (M0.8 E4 Level B) registers its name; the
                     // table body (entries, spreads, entry-type conformance) is
@@ -3284,6 +3302,25 @@ pub const TypeChecker = struct {
             const annot = self.arena.annot_pool.items[start + i];
             if (!annotationAppliesTo(annot.kind, target)) {
                 try self.emit(.annotation_misapplied, .error_, annot.span, "annotation '@{s}' is not valid on a {s}", .{ self.arena.strings.slice(annot.name), @tagName(target) });
+            }
+        }
+    }
+
+    /// Validate a top-level `const` value (M1.0.8): it must be const-evaluable
+    /// (`E1101`) and its synthesized type must match the declared `: type`
+    /// (`E0200`). Reuses the field-default const surface (`isConstEvaluable` +
+    /// `namedTypeToResolved` + `synthExpr` + `literalTypeFits`); the only
+    /// difference is the const-specific diagnostic wording.
+    fn checkConstValue(self: *TypeChecker, value: NodeId, type_node: NodeId) !void {
+        if (!isConstEvaluable(self.arena, value)) {
+            try self.emit(.not_const_evaluable, .error_, self.arena.exprSpan(value), "const value must be a constant expression (literal, arithmetic on literals, or parenthesized)", .{});
+            return;
+        }
+        const declared = self.namedTypeToResolved(type_node);
+        const actual = self.synthExpr(value, null);
+        if (declared == .builtin and actual == .builtin) {
+            if (!self.literalTypeFits(declared.builtin, value, actual.builtin)) {
+                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(value), "const value type does not match the declared type", .{});
             }
         }
     }
@@ -6142,6 +6179,54 @@ test "type-checker emits E1101 on non-const default value" {
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .not_const_evaluable);
+}
+
+test "const type mismatch emits E0200" {
+    const gpa = std.testing.allocator;
+    // M1.0.8 — a `const` value whose type does not match the declared `: type`.
+    var result = try parseAndCheck(gpa,
+        \\const PORT: int = 3.14
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .type_mismatch);
+}
+
+test "non-const-evaluable const emits E1101" {
+    const gpa = std.testing.allocator;
+    // M1.0.8 — a `const` whose value is not const-evaluable (a bare ident).
+    var result = try parseAndCheck(gpa,
+        \\const LIMIT: int = some_var
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .not_const_evaluable);
+}
+
+test "well-formed top-level const checks clean" {
+    const gpa = std.testing.allocator;
+    // The two acceptance fixtures: an ident-cased and a SCREAMING_SNAKE_CASE
+    // (type_ident) const, both literal values matching their declared types.
+    var result = try parseAndCheck(gpa,
+        \\const max_players: int = 16
+        \\const ROOM_CAP: int = 8
+        \\const PI: float = 3.14
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
+}
+
+test "test block registered as test_ symbol and not exported" {
+    const gpa = std.testing.allocator;
+    // Registration proof: two top-level `test` blocks with the same name collide
+    // through `registerSymbol` → E0101 DuplicateSymbol (so a `test` block IS a
+    // registered symbol). The "not exported" half is exercised cross-file in
+    // tests/etch/import_resolve_test.zig (a test name is not in module exports →
+    // E0104 on import).
+    var result = try parseAndCheck(gpa,
+        \\test "same name" { }
+        \\test "same name" { }
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .duplicate_symbol);
 }
 
 test "type-checker emits E0502 when an annotation is applied to the wrong target (D-S3-annot-applicability)" {
