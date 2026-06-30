@@ -5343,8 +5343,12 @@ pub const TypeChecker = struct {
 
     /// M1.0.10 E2 — validate one component-literal argument of `spawn(...)` /
     /// `entity.add(...)`: it must be a `TYPE_IDENT { ... }` struct literal naming
-    /// a declared `component`. Field-value validation is out of E2 scope (the
-    /// brief mandates "T a declared component"); the node is NOT synthesized
+    /// a declared `component`, and its field set + field-value types must match
+    /// the component declaration. The `struct_lit` shares the `struct_lit_fields`
+    /// storage with a `ComponentInstance`, so the scene/prefab validation path
+    /// (`checkComponentInstance` → `checkInstanceField` / `checkInstanceFieldForeign`,
+    /// local + imported) is reused rather than reinvented — `weld check` (C1.6)
+    /// must catch the same field errors as scene/prefab. The node is NOT routed
     /// through `synthStructLit` (which requires a `struct`, not a `component`).
     fn checkStructuralComponentLiteral(self: *TypeChecker, arg: NodeId) TypeError!void {
         if (self.arena.exprKind(arg) != .struct_lit) {
@@ -5356,7 +5360,16 @@ pub const TypeChecker = struct {
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "a component literal needs an explicit component type ('T {{ ... }}')", .{});
             return;
         }
-        try self.checkStructuralComponentName(sl.type_name, self.arena.exprSpan(arg));
+        // A non-component type name surfaces through `code_type` (E0200 — the
+        // structural "not a component" path); declared component fields are
+        // checked with the dedicated E0306/E0307 codes.
+        const ci: ast_mod.ComponentInstance = .{
+            .type_name = sl.type_name,
+            .fields_start = sl.fields_start,
+            .fields_len = sl.fields_len,
+            .span = self.arena.exprSpan(arg),
+        };
+        try self.checkComponentInstance(ci, .type_mismatch, .structural_component_field_unknown, .structural_component_field_type_invalid);
     }
 
     /// M1.0.10 E2 — validate a type name used in a structural mutation
@@ -7712,6 +7725,44 @@ test "prefab-name spawn is refused in Phase 1 (M1.0.10 E2)" {
     );
     defer bad.deinit(gpa);
     try expectAnyCode(bad.diagnostics.items, .prefab_spawn_not_executable);
+}
+
+test "structural component-literal unknown field is rejected (M1.0.10 E2 completion)" {
+    const gpa = std.testing.allocator;
+    // via spawn(...)
+    var s = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\component Health { max: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  spawn(Health { maxx: 10 })
+        \\}
+    );
+    defer s.deinit(gpa);
+    try expectAnyCode(s.diagnostics.items, .structural_component_field_unknown);
+    // via entity.add(...)
+    var a = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\component Health { max: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  entity.add(Health { maxx: 10 })
+        \\}
+    );
+    defer a.deinit(gpa);
+    try expectAnyCode(a.diagnostics.items, .structural_component_field_unknown);
+}
+
+test "structural component-literal mistyped field is rejected (M1.0.10 E2 completion)" {
+    const gpa = std.testing.allocator;
+    // `max: i32` given a float literal → E0307 (same field-type path as scene/prefab).
+    var bad = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\component Health { max: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  entity.add(Health { max: 1.5 })
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .structural_component_field_type_invalid);
 }
 
 test "type-checker validates tag mutations (M0.8 E3)" {
