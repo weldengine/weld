@@ -346,13 +346,15 @@ fn applyExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to
     }
 }
 
-/// Activate one extension on one entity (M1.0.6 E6) — the shared path reused by
-/// the runtime `activate_extension` entry: open the extension's `.prefab.bin`, add
-/// its single entity's components to `entity`, then fire the `on_attach` seam with
-/// the cooked hook text. The extension prefab is mono-entity (cooked as such); a
-/// component the entity already carries is a conflict (§30.5) — surfaced as
+/// Activate one extension on one entity (M1.0.6 E6) — the shared bytes-taking
+/// path reused by load (`applyExtensions`), the runtime `activate_extension`
+/// entry, AND the interpreter's deferred B1 flush: open the extension's
+/// `.prefab.bin`, add its single entity's components to `entity`, record the
+/// active extension, then fire the `on_attach` seam with the cooked hook text.
+/// The extension prefab is mono-entity (cooked as such); a component the entity
+/// already carries is a conflict (§30.5) — surfaced as
 /// `error.ExtensionComponentConflict` rather than the dynamic-add assert.
-fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
+pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
     const ext = try openVerified(ext_bytes);
 
     // Mono-entity: the extension's components live on its single entity.
@@ -405,10 +407,15 @@ pub fn runtimeActivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, 
 /// extension must be active (`error.ExtensionNotActive` otherwise). The §30.5
 /// reject conflict policy makes the component set unambiguous — no two active
 /// extensions share a component — so removal needs no provenance tracking.
-pub fn runtimeDeactivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, resolver: ExtensionResolver) !void {
+/// M1.0.9 — deactivate one extension on one entity given its cooked bytes: the
+/// shared bytes-taking core reused by the runtime deactivate entry AND the
+/// interpreter's deferred B1 flush. Fires `on_detach` FIRST (the hook still reads
+/// the extension's components), then removes them, then drops the active record.
+/// The extension must be active (`error.ExtensionNotActive`). The §30.5 reject
+/// conflict policy makes the component set unambiguous — no provenance tracking.
+pub fn deactivateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
     if (!world.hasEntityExtension(entity, name)) return error.ExtensionNotActive;
-    const bytes = resolver.resolve(name) orelse return error.UnknownExtension;
-    const ext = try openVerified(bytes);
+    const ext = try openVerified(ext_bytes);
 
     // `on_detach` before the components go away (the hook can still read them).
     const on_detach_text: ?[]const u8 = if (ext.hookCount() > 0) ext.hook(0).on_detach else null;
@@ -430,6 +437,14 @@ pub fn runtimeDeactivate(world: *World, gpa: std.mem.Allocator, entity: EntityId
     }
 
     world.removeEntityExtension(gpa, entity, name);
+}
+
+/// M1.0.9 — runtime deactivation entry (direct-programmatic path): resolve the
+/// extension by name, then `deactivateExtension`. The Etch method goes through
+/// the interpreter's deferred queue instead (B1); this stays for direct callers.
+pub fn runtimeDeactivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, resolver: ExtensionResolver) !void {
+    const bytes = resolver.resolve(name) orelse return error.UnknownExtension;
+    try deactivateExtension(world, gpa, entity, name, bytes);
 }
 
 /// Load the resources block (E3) — the load-side mirror of M1.0.3's non-POD

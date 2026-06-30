@@ -141,6 +141,26 @@ const PendingTag = struct {
     set: bool,
 };
 
+/// A deferred extension activate/deactivate (M1.0.9 B1 round-trip). Enqueued by
+/// the Etch `entity.activate_extension`/`deactivate_extension` methods during a
+/// tick — the extension bytes are resolved AT THE CALL — and applied at the tick
+/// boundary (after every rule has run, so never mid-`iterateArchetype`-walk;
+/// applying adds/removes components, an archetype transition). The immediate
+/// `runtimeActivate`/`runtimeDeactivate` loader entries stay for the load +
+/// direct-programmatic paths, which run outside any query iteration.
+const ExtOp = enum { activate, deactivate };
+
+const PendingExtension = struct {
+    entity: CoreEntityId,
+    /// Owned copy of the extension name (the AST / run-string source may not
+    /// outlive the flush); freed when the batch is drained.
+    name: []u8,
+    /// Borrowed cooked `.prefab.bin` bytes, resolved at the call site; the
+    /// resolver's backing outlives the tick.
+    bytes: []const u8,
+    op: ExtOp,
+};
+
 /// Resolved view of a `when` clause node. The interpreter walks
 /// `predicate_pool` at iteration time to filter archetypes.
 const PredicateNodeKind = enum {
@@ -624,6 +644,9 @@ pub const Interpreter = struct {
     /// Deferred tag mutations queued during a tick, flushed at the tick boundary
     /// (M0.8 E3) — never applied mid-archetype-walk.
     pending_tags: std.ArrayListUnmanaged(PendingTag) = .empty,
+    /// M1.0.9 B1 — deferred extension activate/deactivate, drained at the tick
+    /// boundary (after iteration). Mirror of `pending_tags`.
+    pending_extensions: std.ArrayListUnmanaged(PendingExtension) = .empty,
     /// True iff any rule carries a `changed` filter (M0.8 E3). Gates the whole
     /// tick-based change-detection path: only then does `runFor` advance
     /// `current_tick` (`beginFrame`) and a component write `markChanged`s — so
@@ -712,6 +735,8 @@ pub const Interpreter = struct {
         self.trait_methods.deinit(self.gpa);
         self.tag_table.deinit(self.gpa);
         self.pending_tags.deinit(self.gpa);
+        for (self.pending_extensions.items) |pe| self.gpa.free(pe.name);
+        self.pending_extensions.deinit(self.gpa);
         for (self.async_slots) |*slot| slot.deinit(self.gpa);
         self.gpa.free(self.async_slots);
         self.descriptors.deinit(self.gpa);
@@ -1320,6 +1345,9 @@ pub const Interpreter = struct {
         // Apply deferred tag mutations at the tick boundary — after every rule
         // has run, never mid-archetype-walk (M0.8 E3, `etch-grammar.md` §4.4).
         try self.flushPendingTags(world);
+        // Apply deferred extension activate/deactivate at the same boundary
+        // (M1.0.9 B1) — same never-mid-walk discipline.
+        try self.flushPendingExtensions(world);
     }
 
     fn runRule(self: *Interpreter, world: *World, rd: *RuleDesc, report: *RuntimeReport) !void {
@@ -1755,6 +1783,27 @@ pub const Interpreter = struct {
             try world.applyTagMutation(self.gpa, core_id, tid, pt.bit_index, pt.set);
         }
         self.pending_tags.clearRetainingCapacity();
+    }
+
+    /// M1.0.9 B1 — drain the deferred extension activate/deactivate queue at the
+    /// tick boundary (after every rule has run, so no live `iterateArchetype`
+    /// walk is in flight — the immediate `add`/`removeComponentDynamic` an op
+    /// performs is then safe). Each op applies its structural change + fires the
+    /// Tier-0 `on_attach`/`on_detach` seam via the loader's bytes-taking
+    /// `activateExtension` / `deactivateExtension`. The batch is snapshotted
+    /// (`toOwnedSlice`) so a hook fired during apply that enqueues more ops does
+    /// NOT drain recursively — new ops wait for the next flush.
+    fn flushPendingExtensions(self: *Interpreter, world: *World) !void {
+        if (self.pending_extensions.items.len == 0) return;
+        const batch = try self.pending_extensions.toOwnedSlice(self.gpa);
+        defer {
+            for (batch) |pe| self.gpa.free(pe.name);
+            self.gpa.free(batch);
+        }
+        for (batch) |pe| switch (pe.op) {
+            .activate => try scene_loader.activateExtension(world, self.gpa, pe.entity, pe.name, pe.bytes),
+            .deactivate => try scene_loader.deactivateExtension(world, self.gpa, pe.entity, pe.name, pe.bytes),
+        };
     }
 
     /// Resolve a `tag_path` operand node to its leaf bit via the global table,
@@ -2405,6 +2454,20 @@ pub const Interpreter = struct {
         return self.stringBytes(v) orelse error.RuntimeFailure;
     }
 
+    /// M1.0.9 B1 — resolve the extension bytes NOW and enqueue a deferred
+    /// activate/deactivate, applied at the tick boundary (`flushPendingExtensions`)
+    /// — NOT the immediate `runtimeActivate`/`runtimeDeactivate`, which would
+    /// mutate an archetype mid-`iterateArchetype`. Missing resolver / unknown name
+    /// surface as `RuntimeFailure` (the interp's failure channel). The name is
+    /// dup'd (the AST / run-string source may not outlive the flush).
+    fn enqueueExtension(self: *Interpreter, entity: CoreEntityId, name: []const u8, op: ExtOp) StmtError!void {
+        const resolver = self.bridge.ext_resolver orelse return error.RuntimeFailure;
+        const bytes = resolver.resolve(name) orelse return error.RuntimeFailure;
+        const name_dup = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(name_dup);
+        try self.pending_extensions.append(self.gpa, .{ .entity = entity, .name = name_dup, .bytes = bytes, .op = op });
+    }
+
     /// Dispatch an instance method call on an already-evaluated receiver
     /// value — §5.5 order: inherent / trait on user types, then the builtin
     /// string / collection subsets. Split from the `.method_call` arm so the
@@ -2428,15 +2491,13 @@ pub const Interpreter = struct {
                 // component conflict surfaces as the interp's `RuntimeFailure`
                 // (the loader path keeps the named `MissingExtensionResolver` etc.).
                 if (std.mem.eql(u8, mname, "activate_extension")) {
-                    const name = try self.extensionNameArg(world, locals, mc);
-                    const resolver = self.bridge.ext_resolver orelse return error.RuntimeFailure;
-                    scene_loader.runtimeActivate(world, self.gpa, @bitCast(eid), name, resolver) catch return error.RuntimeFailure;
+                    // B1: ENQUEUE (deferred to the tick boundary) — never an
+                    // immediate structural mutation here (we may be mid-iteration).
+                    try self.enqueueExtension(@bitCast(eid), try self.extensionNameArg(world, locals, mc), .activate);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "deactivate_extension")) {
-                    const name = try self.extensionNameArg(world, locals, mc);
-                    const resolver = self.bridge.ext_resolver orelse return error.RuntimeFailure;
-                    scene_loader.runtimeDeactivate(world, self.gpa, @bitCast(eid), name, resolver) catch return error.RuntimeFailure;
+                    try self.enqueueExtension(@bitCast(eid), try self.extensionNameArg(world, locals, mc), .deactivate);
                     return Value{ .unit = {} };
                 }
                 if (std.mem.eql(u8, mname, "has_extension")) {

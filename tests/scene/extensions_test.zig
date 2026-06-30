@@ -482,10 +482,10 @@ test "entity.activate_extension executes on_attach (M1.0.9)" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    // Single-entity rule: `activate_extension` does an IMMEDIATE structural add
-    // (Weapon). One matching entity makes the mid-body archetype migration safe
-    // (the live chunk scan has no swapped-in entity to skip); the `not has Weapon`
-    // guard keeps it idempotent.
+    // `activate_extension` ENQUEUES a deferred command (B1); the structural add
+    // (Weapon) + on_attach are applied at the tick-boundary flush, after the live
+    // archetype walk. Single entity here; the multi-entity no-corruption case is
+    // the dedicated B1 test below.
     const prog =
         \\component Health { current: i32 = 100, max: i32 = 100 }
         \\component Weapon { damage: i32 = 0 }
@@ -587,6 +587,49 @@ test "entity.deactivate_extension executes on_detach and removes components (M1.
     try std.testing.expectEqual(@as(i32, 100), healthMax(&world, eid));
     try std.testing.expect(world.componentBytes(eid, weapon_id) == null);
     try std.testing.expect(!world.hasEntityExtension(eid, "CombatModule"));
+}
+
+test "multi-entity rule activate_extension defers without corrupting iteration (M1.0.9 B1)" {
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa);
+    defer gpa.free(combat_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // No `not has Weapon` guard: B1 defers the structural add to the tick boundary,
+    // so the rule's live archetype walk never sees a mid-walk migration. Every one
+    // of the N matched entities enqueues; the flush activates them all afterwards.
+    const prog =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\component Weapon { damage: i32 = 0 }
+        \\rule go(entity: Entity) when entity has Health {
+        \\  entity.activate_extension("CombatModule")
+        \\}
+    ;
+    var pr = try parser.parse(gpa, prog);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+    var res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    interp.setExtensionResolver(res.ext());
+
+    // Several entities in the SAME archetype — the live-walk corruption case.
+    const n = 5;
+    var ents: [n]EntityId = undefined;
+    for (&ents) |*e| e.* = try spawnHealth(&world, gpa, 100, 100);
+
+    _ = try interp.runFor(&world, 1);
+
+    // Every matched entity was activated after the flush — none skipped, no crash.
+    const weapon_id = world.componentId("Weapon").?;
+    for (ents) |e| {
+        try std.testing.expectEqual(@as(i32, 150), healthMax(&world, e)); // on_attach
+        try std.testing.expect(world.componentBytes(e, weapon_id) != null); // component added
+        try std.testing.expect(world.hasEntityExtension(e, "CombatModule"));
+    }
 }
 
 test "on_attach-issued structural command is drained before on_spawned (M1.0.9)" {
