@@ -110,6 +110,7 @@ pub const TokenKind = enum {
     kw_const, // top-level `const` declaration (M1.0.8 — graduated from non_s3_keywords; top-level only per part1 §4.5)
     kw_private, // `private` visibility modifier prefix on a declaration_body (M1.0.8 — graduated from non_s3_keywords; grammar §5.1)
     kw_test, // top-level `test "name" { ... }` block (M1.0.8 — graduated from non_s3_keywords; parse + validate only, no execution)
+    kw_spawn, // structural spawn expr `spawn(C{…})` (M1.0.10 — graduated from non_s3_keywords; §3.2 structural_spawn. The async `spawn { }` task form §4.2 stays M1.0.11, fail-loud at parse)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -277,6 +278,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "const", .kind = .kw_const },
     .{ .lexeme = "private", .kind = .kw_private },
     .{ .lexeme = "test", .kind = .kw_test },
+    .{ .lexeme = "spawn", .kind = .kw_spawn },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -315,13 +317,15 @@ pub const non_s3_keywords = [_][]const u8{
 
     // ── Async machinery: `async` graduated with M0.8 E2 (`async fn` parsed;
     //    interp E3, codegen Phase 2); `await` graduated with M0.8 E3 sub-slice B
-    //    (`async rule`/`async fn` + `await` interpreted, codegen Phase 2). The
-    //    concurrency algebra (`race`/`sync`/`spawn`) stays reserved (T2/T3,
-    //    flagged for Review E3); `branch` graduated with the E4 quest slice
-    //    (its async statement form keeps an explicit fail-loud parse error) ──
+    //    (`async rule`/`async fn` + `await` interpreted, codegen Phase 2);
+    //    `spawn` graduated with M1.0.10 — the STRUCTURAL `spawn(C{…})` expr
+    //    (§3.2 structural_spawn) now lexes as `kw_spawn` (the async `spawn { }`
+    //    task form §4.2 stays M1.0.11, fail-loud at parse). The remaining
+    //    concurrency algebra (`race`/`sync`) stays reserved (T2/T3, flagged
+    //    for Review E3); `branch` graduated with the E4 quest slice (its async
+    //    statement form keeps an explicit fail-loud parse error) ──
     "race",
     "sync",
-    "spawn",
 
     // ── Timers / lifecycle (out of S3; `emit` graduated with E3 ECS layer;
     //    `after` graduated with E4 routine triggers — the §4.3 timer
@@ -380,4 +384,35 @@ test "const/private/test graduate to s3 keywords" {
     try std.testing.expect(isKeywordToken(.kw_const));
     try std.testing.expect(isKeywordToken(.kw_private));
     try std.testing.expect(isKeywordToken(.kw_test));
+}
+
+test "spawn graduates to s3 keyword; race/sync stay reserved" {
+    // M1.0.10: `spawn` moves from the reserve list into `s3_keywords`, mapped
+    // to `kw_spawn`. The structural `spawn(C{…})` expr now lexes to a real
+    // keyword so the parser can dispatch it (the async `spawn { }` task form
+    // is fail-loud at parse, M1.0.11). `race` / `sync` stay reserved.
+    const T = struct {
+        fn s3Kind(lexeme: []const u8) ?TokenKind {
+            for (s3_keywords) |kw| {
+                if (std.mem.eql(u8, kw.lexeme, lexeme)) return kw.kind;
+            }
+            return null;
+        }
+        fn reserved(lexeme: []const u8) bool {
+            for (non_s3_keywords) |kw| {
+                if (std.mem.eql(u8, kw, lexeme)) return true;
+            }
+            return false;
+        }
+    };
+    try std.testing.expectEqual(TokenKind.kw_spawn, T.s3Kind("spawn").?);
+    try std.testing.expect(!T.reserved("spawn"));
+    // The rest of the concurrency algebra stays reserved.
+    try std.testing.expect(T.s3Kind("race") == null);
+    try std.testing.expect(T.reserved("race"));
+    try std.testing.expect(T.s3Kind("sync") == null);
+    try std.testing.expect(T.reserved("sync"));
+    // `kw_spawn` sits inside the contiguous keyword range (tag-path contextual
+    // acceptance via `isKeywordToken`).
+    try std.testing.expect(isKeywordToken(.kw_spawn));
 }

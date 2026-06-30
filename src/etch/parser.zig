@@ -6387,6 +6387,62 @@ pub const Parser = struct {
         }, .{ .byte_start = kw_span.byte_start, .byte_end = fut_span.byte_end });
     }
 
+    /// Parse the structural spawn expression `spawn(...)` (§3.2
+    /// `structural_spawn`, M1.0.10). The token after `spawn` disambiguates:
+    ///   `spawn (` → STRUCTURAL spawn — `spawn(C1 {…}, …)` component-literal
+    ///               varargs, or `spawn("Prefab")` prefab name.
+    ///   `spawn {` → the async task form (§4.2 `spawn_stmt`), owned by M1.0.11 —
+    ///               emit a clear fail-loud diagnostic rather than mis-parsing.
+    ///               This is the seam M1.0.11 fills.
+    /// Statement-position only (no body handle, §4.5) is enforced by the
+    /// type-checker (M1.0.10 E2); the parser produces the node in any expression
+    /// position. The prefab form parses + is recognized but is refused at
+    /// type-check in Phase 1 (E2).
+    fn parseStructuralSpawn(self: *Parser) ParseError!NodeId {
+        const kw_span = (try self.advance()).span; // 'spawn'
+        if (self.peek() == .lbrace) {
+            // The `{` (async) branch — owned by M1.0.11. Fail loud with a precise
+            // message instead of mis-parsing it as a structural spawn.
+            return self.parseErr(self.peekSpan(), "the async 'spawn { ... }' task is not yet executable (M1.0.11); only structural 'spawn(...)' is supported in M1.0.10");
+        }
+        if (self.peek() != .lparen) {
+            return self.parseErrFmt(self.peekSpan(), "expected '(' to open a structural spawn (or '{{' for an async task), got '{s}'", .{self.sliceOf(self.peekSpan())});
+        }
+        _ = try self.advance(); // '('
+        // Prefab-name form `spawn("Name")` (§3.2 `spawn_arg = … | STRING_LITERAL`).
+        if (self.peek() == .string_literal) {
+            const str_tok = try self.advance();
+            const name = try self.internStringLiteral(str_tok.span);
+            const closing = try self.expect(.rparen, "expected ')' to close spawn(\"...\")");
+            return try self.arena.addSpawnStructPrefab(self.gpa, name, .{
+                .byte_start = kw_span.byte_start,
+                .byte_end = closing.span.byte_end,
+            });
+        }
+        // Component-literal varargs `spawn(C1 {…}, C2 {…}, …)` — each arg is a
+        // `struct_literal` (`TYPE_IDENT struct_literal_body`); an anonymous
+        // `.{…}` carries no component type and is rejected here.
+        var components: std.ArrayListUnmanaged(u32) = .empty;
+        defer components.deinit(self.gpa);
+        while (true) {
+            const ty = try self.expect(.type_ident, "expected a component literal 'T { ... }' or a prefab name string in spawn(...)");
+            const type_name = try self.internSlice(ty.span);
+            if (self.peek() != .lbrace) {
+                return self.parseErrFmt(self.peekSpan(), "expected '{{' to open the component literal body after '{s}' in spawn(...)", .{self.sliceOf(ty.span)});
+            }
+            const lit = try self.parseStructLiteral(type_name, ty.span);
+            try components.append(self.gpa, lit.raw());
+            if (!try self.match(.comma)) break;
+            // Trailing comma allowed: `spawn(A {}, )`.
+            if (self.peek() == .rparen) break;
+        }
+        const closing = try self.expect(.rparen, "expected ')' to close spawn(...)");
+        return try self.arena.addSpawnStructComponents(self.gpa, components.items, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
     fn parsePrimary(self: *Parser) ParseError!NodeId {
         try self.surfaceTokenErrors();
         switch (self.peek()) {
@@ -6394,6 +6450,7 @@ pub const Parser = struct {
             .kw_loop => return try self.parseLoop(0),
             .kw_if => return try self.parseIf(),
             .kw_await => return try self.parseAwaitExpr(),
+            .kw_spawn => return try self.parseStructuralSpawn(),
             .lbrace => return try self.parseBlockExpr(),
             .lbracket => return try self.parseArrayOrMapLiteral(),
             .pipe => return try self.parseClosure(),
@@ -7067,6 +7124,82 @@ test "parser builds method-call postfix into the reserved method_call kind (M0.8
     try std.testing.expectEqual(@as(usize, 2), method_calls); // normalize(), calculate(...)
     try std.testing.expectEqual(@as(usize, 1), field_accesses); // entity.length
     try std.testing.expectEqual(@as(usize, 2), calculate_args); // (target, 5)
+}
+
+test "structural spawn parses component-literal varargs (M1.0.10)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  spawn(Projectile { speed: 20.0 }, Velocity { value: [0, 0, 1] })
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var spawns: usize = 0;
+    var ss: ast_mod.SpawnStructExpr = undefined;
+    for (result.ast.exprs.items(.kind), 0..) |k, i| {
+        if (k == .spawn_struct) {
+            spawns += 1;
+            ss = result.ast.spawn_structs.items[result.ast.exprs.items(.data)[i]];
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), spawns);
+    try std.testing.expect(!ss.is_prefab);
+    try std.testing.expectEqual(@as(u32, 2), ss.args_len);
+    // Each component arg is a `struct_lit` reachable from `arena.extra`.
+    const arg0: ast_mod.NodeId = @bitCast(result.ast.extra.items[ss.args_start]);
+    const arg1: ast_mod.NodeId = @bitCast(result.ast.extra.items[ss.args_start + 1]);
+    try std.testing.expectEqual(ast_mod.ExprKind.struct_lit, result.ast.exprKind(arg0));
+    try std.testing.expectEqual(ast_mod.ExprKind.struct_lit, result.ast.exprKind(arg1));
+}
+
+test "structural spawn parses a prefab name (M1.0.10)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  spawn("Goblin")
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var found = false;
+    var ss: ast_mod.SpawnStructExpr = undefined;
+    for (result.ast.exprs.items(.kind), 0..) |k, i| {
+        if (k == .spawn_struct) {
+            found = true;
+            ss = result.ast.spawn_structs.items[result.ast.exprs.items(.data)[i]];
+        }
+    }
+    try std.testing.expect(found);
+    try std.testing.expect(ss.is_prefab);
+    try std.testing.expectEqualStrings("Goblin", result.ast.strings.slice(ss.prefab_name));
+    try std.testing.expectEqual(@as(u32, 0), ss.args_len);
+}
+
+test "spawn brace form is the async seam (M1.0.11 diagnostic, M1.0.10)" {
+    const gpa = std.testing.allocator;
+    // The async `spawn { }` task form (§4.2) is owned by M1.0.11 — the parser
+    // emits a clear fail-loud diagnostic rather than mis-parsing it.
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  spawn { }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, result.diagnostics[0].code);
+    // No structural spawn node was produced (the `{` branch errors before build).
+    var spawns: usize = 0;
+    for (result.ast.exprs.items(.kind)) |k| {
+        if (k == .spawn_struct) spawns += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), spawns);
 }
 
 test "parser builds loops, labels, break value, and continue (M0.8 loop/break)" {
