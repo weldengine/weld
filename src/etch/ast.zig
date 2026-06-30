@@ -258,6 +258,13 @@ pub const ExprKind = enum {
     /// in both backends (the negative-tag-op precedent — flagged bound).
     /// Data indexes `tag_query_exprs`.
     tag_query,
+    /// Structural spawn `spawn(C1{…}, …)` / `spawn("Prefab")` (§3.2
+    /// `structural_spawn`, M1.0.10). A statement-position expression: the v0.6
+    /// no-body-handle decision (§4.5) means the type-checker rejects binding or
+    /// using its result (M1.0.10 E2). Data indexes `spawn_structs`. Distinct
+    /// from the async `spawn { }` task form (§4.2 `spawn_stmt`, M1.0.11) which
+    /// is fail-loud at parse — it is NOT this node.
+    spawn_struct,
 };
 
 /// Closed enum of type-node kinds the parser can produce.
@@ -1226,6 +1233,25 @@ pub const StructLitExpr = struct {
     type_name: StringId,
     fields_start: u32,
     fields_len: u32,
+};
+
+/// `structural_spawn` (§3.2 l.552, M1.0.10): `spawn(C1 {…}, …)` (component
+/// literals) or `spawn("Prefab")` (prefab name). Two forms, discriminated by
+/// `is_prefab`:
+///   • component-literal varargs — `is_prefab == false`; `args_start` /
+///     `args_len` index a contiguous run of struct-lit `Expr` `NodeId.raw()`
+///     values in `arena.extra` (each a `.struct_lit`), the `addArrayLit` run
+///     convention.
+///   • prefab name — `is_prefab == true`; `prefab_name` is the interned string
+///     literal, `args_len == 0`. The prefab form parses + is recognized but is
+///     REFUSED at type-check in Phase 1 (gating on the prefab runtime, E2).
+/// No body handle is produced (v0.6 statement-only, §4.5) — the result is not a
+/// usable value, which the type-checker enforces (E2).
+pub const SpawnStructExpr = struct {
+    is_prefab: bool,
+    prefab_name: StringId = 0, // valid iff is_prefab
+    args_start: u32 = 0, // index into `arena.extra` (struct-lit NodeIds); valid iff !is_prefab
+    args_len: u32 = 0,
 };
 
 /// One entry of a `data` table (M0.8 E4, `etch-grammar.md` §14:
@@ -2456,6 +2482,10 @@ pub const AstArena = struct {
     method_calls: std.ArrayListUnmanaged(MethodCall) = .empty,
     struct_lits: std.ArrayListUnmanaged(StructLitExpr) = .empty,
     struct_lit_fields: std.ArrayListUnmanaged(StructLitField) = .empty,
+    /// `structural_spawn` nodes (M1.0.10). Component-literal arg runs live in
+    /// `arena.extra` (struct-lit NodeIds); the prefab form carries an interned
+    /// name. See `SpawnStructExpr`.
+    spawn_structs: std.ArrayListUnmanaged(SpawnStructExpr) = .empty,
     /// Named-argument labels (M0.8 E4, §3.3): runs parallel to call arg
     /// runs, `0` = positional slot. Referenced by `CallExpr.names_start` /
     /// `MethodCall.names_start` (`no_arg_names` = all-positional call).
@@ -2671,6 +2701,7 @@ pub const AstArena = struct {
         self.method_calls.deinit(gpa);
         self.struct_lits.deinit(gpa);
         self.struct_lit_fields.deinit(gpa);
+        self.spawn_structs.deinit(gpa);
         self.call_arg_names.deinit(gpa);
         self.loop_exprs.deinit(gpa);
         self.string_interps.deinit(gpa);
@@ -3286,6 +3317,30 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.struct_lits.items.len);
         try self.struct_lits.append(gpa, .{ .type_name = type_name, .fields_start = start, .fields_len = @intCast(fields.len) });
         return try self.addExpr(gpa, .struct_lit, idx, span);
+    }
+
+    /// `spawn(C1 {…}, …)` — component-literal varargs (M1.0.10, §3.2). `components`
+    /// is a slice of struct-lit `NodeId.raw()` values, bulk-appended to
+    /// `arena.extra` as a contiguous run (the `addArrayLit` convention).
+    pub fn addSpawnStructComponents(self: *AstArena, gpa: std.mem.Allocator, components: []const u32, span: SourceSpan) !NodeId {
+        const start: u32 = @intCast(self.extra.items.len);
+        try self.extra.appendSlice(gpa, components);
+        const idx: u32 = @intCast(self.spawn_structs.items.len);
+        try self.spawn_structs.append(gpa, .{
+            .is_prefab = false,
+            .args_start = start,
+            .args_len = @intCast(components.len),
+        });
+        return try self.addExpr(gpa, .spawn_struct, idx, span);
+    }
+
+    /// `spawn("Prefab")` — prefab-name form (M1.0.10, §3.2). `prefab_name` is the
+    /// interned string literal. Parses + is recognized; REFUSED at type-check in
+    /// Phase 1 (E2).
+    pub fn addSpawnStructPrefab(self: *AstArena, gpa: std.mem.Allocator, prefab_name: StringId, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.spawn_structs.items.len);
+        try self.spawn_structs.append(gpa, .{ .is_prefab = true, .prefab_name = prefab_name });
+        return try self.addExpr(gpa, .spawn_struct, idx, span);
     }
 
     /// `return [expr]` (M0.8 E2). The value `NodeId` is stored directly in the

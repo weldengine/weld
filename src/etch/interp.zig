@@ -8,7 +8,11 @@
 //! Boundaries (cf. `briefs/S4-etch-tree-walking-interpreter.md` Out-of-scope):
 //! - No HIR — walks the AST directly.
 //! - No bytecode VM.
-//! - No structural mutation (`spawn`, `despawn`, `add(T)`, `remove(T)`).
+//! - Structural mutation (`spawn`, `despawn`, `add(T)`, `remove(T)`) is a
+//!   DEFERRED change (M1.0.10): a rule / observer / hook body enqueues a Tier-0
+//!   `CommandBuffer` command onto `world.observer_registry.deferred`; it applies
+//!   at the tick boundary via `applyWithObservers` (firing observers per op),
+//!   never mid-`iterateArchetype`.
 //! - No job system use; rules run sequentially on the calling thread.
 //! - `ExprKind.path` and `ExprKind.tag_path` produce `RuntimeError.UnsupportedExpr`.
 
@@ -1348,6 +1352,10 @@ pub const Interpreter = struct {
         // Apply deferred extension activate/deactivate at the same boundary
         // (M1.0.9 B1) — same never-mid-walk discipline.
         try self.flushPendingExtensions(world);
+        // Apply deferred structural mutations (spawn/despawn/add/remove) last, so
+        // any extension hook's structural change (enqueued just above) drains in
+        // the same boundary, with observers firing per op (M1.0.10 E3).
+        try self.flushStructural(world);
     }
 
     fn runRule(self: *Interpreter, world: *World, rd: *RuleDesc, report: *RuntimeReport) !void {
@@ -2468,6 +2476,67 @@ pub const Interpreter = struct {
         try self.pending_extensions.append(self.gpa, .{ .entity = entity, .name = name_dup, .bytes = bytes, .op = op });
     }
 
+    /// M1.0.10 E3 — the Tier-0 `CommandBuffer` that a body's structural
+    /// mutations (`spawn` / `despawn` / `add` / `remove`) enqueue onto. Inside an
+    /// observer / hook body `observer_deferred` is already bound to it; in a
+    /// plain rule body it is the world's shared observer-deferred buffer (lazily
+    /// created, owned + freed by the `ObserverRegistry`). The four ops route here
+    /// — NOT through a parallel `pending_*` queue (cf. `etch-grammar.md` §4.5) —
+    /// and the tick-boundary `flushStructural` drains it via `applyWithObservers`.
+    fn structuralDeferred(self: *Interpreter, world: *World) StmtError!*CommandBuffer {
+        if (self.observer_deferred) |d| return d;
+        if (world.observer_registry.deferred == null) {
+            world.observer_registry.deferred = CommandBuffer.init(self.gpa, world);
+        }
+        return &world.observer_registry.deferred.?;
+    }
+
+    /// M1.0.10 E3 — resolve a component literal `T { f: v, … }` to its registry id
+    /// + a freshly built payload (component defaults overwritten by the provided
+    /// fields, evaluated EAGERLY now). Bytes are allocated in `alloc` (the
+    /// deferred buffer's arena) so they survive until the tick-boundary drain.
+    /// Components are POD-strict (no heap fields), so `writeValueAsBytes` covers
+    /// every valid field kind. The type-checker (E2) has already validated the
+    /// type is a declared component and the fields exist + type-match.
+    fn buildComponentPayload(self: *Interpreter, world: *World, locals: *Locals, struct_lit_arg: NodeId, alloc: std.mem.Allocator) StmtError!struct { cid: ComponentId, bytes: []u8 } {
+        if (self.ast.exprKind(struct_lit_arg) != .struct_lit) return error.RuntimeFailure;
+        const sl = self.ast.struct_lits.items[self.ast.exprData(struct_lit_arg)];
+        const name = self.ast.strings.slice(sl.type_name);
+        const cid = world.registry.idOf(name) orelse return error.RuntimeFailure;
+        const size = world.registry.componentSize(cid);
+        const buf = try alloc.alloc(u8, size);
+        @memcpy(buf, world.registry.componentDefaultBytes(cid));
+        var i: u32 = 0;
+        while (i < sl.fields_len) : (i += 1) {
+            const flit = self.ast.struct_lit_fields.items[sl.fields_start + i];
+            const fd = world.registry.findField(cid, self.ast.strings.slice(flit.name)) orelse return error.RuntimeFailure;
+            const v = try self.evalExpr(world, locals, flit.value);
+            const fsize: u16 = @intCast(fd.kind.sizeBytes());
+            const field_bytes = buf[fd.offset .. fd.offset + fsize];
+            bridge_mod.writeValueAsBytes(fd.kind, field_bytes, v) catch return error.RuntimeFailure;
+        }
+        return .{ .cid = cid, .bytes = buf };
+    }
+
+    /// M1.0.10 E3 — drain the deferred structural commands at the tick boundary,
+    /// applying each via `applyWithObservers` so observers fire per op (spawn →
+    /// `on_spawned` + `on_add`; despawn → `on_remove` + `on_despawned`;
+    /// add-on-present → `on_replaced`; add → `on_add`; remove → `on_remove`).
+    /// Drains until empty: an observer body may itself enqueue more structural
+    /// commands (routed back to the same buffer), and those apply in a later
+    /// round of this same boundary. Never runs mid-`iterateArchetype`.
+    fn flushStructural(self: *Interpreter, world: *World) !void {
+        const reg = &world.observer_registry;
+        if (reg.deferred == null) return;
+        while (reg.deferred.?.commands.items.len > 0) {
+            const batch = try reg.deferred.?.commands.toOwnedSlice(reg.deferred.?.gpa);
+            defer reg.deferred.?.gpa.free(batch);
+            for (batch) |c| try observers_mod.applyWithObservers(c, reg, world, self.gpa);
+        }
+        // All commands applied — reclaim the payload arena.
+        reg.deferred.?.reset();
+    }
+
     /// Dispatch an instance method call on an already-evaluated receiver
     /// value — §5.5 order: inherent / trait on user types, then the builtin
     /// string / collection subsets. Split from the `.method_call` arm so the
@@ -2513,6 +2582,44 @@ pub const Interpreter = struct {
                         try self.collections.arrays.items[handle].append(self.gpa, Value{ .string_persistent = .{ .ptr = @intFromPtr(n.ptr), .len = @intCast(n.len) } });
                     }
                     return Value{ .array_ref = handle };
+                }
+                // M1.0.10 — structural mutation methods on an Entity receiver
+                // (`etch-grammar.md` §4.5). Each ENQUEUES a Tier-0 `CommandBuffer`
+                // command onto the deferred buffer (never an immediate mutation —
+                // we may be mid-`iterateArchetype`); the tick-boundary
+                // `flushStructural` applies it with observers. All return `unit`.
+                if (std.mem.eql(u8, mname, "despawn")) {
+                    if (mc.args_len != 0) return error.RuntimeFailure;
+                    const dbuf = try self.structuralDeferred(world);
+                    try dbuf.commands.append(dbuf.gpa, .{ .despawn = .{ .entity = @bitCast(eid) } });
+                    return Value{ .unit = {} };
+                }
+                if (std.mem.eql(u8, mname, "add")) {
+                    if (mc.args_len != 1) return error.RuntimeFailure;
+                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+                    const dbuf = try self.structuralDeferred(world);
+                    const payload = try self.buildComponentPayload(world, locals, arg, dbuf.arena.allocator());
+                    try dbuf.commands.append(dbuf.gpa, .{ .add_component = .{
+                        .entity = @bitCast(eid),
+                        .component_id = payload.cid,
+                        .bytes = payload.bytes,
+                    } });
+                    return Value{ .unit = {} };
+                }
+                if (std.mem.eql(u8, mname, "remove")) {
+                    if (mc.args_len != 1) return error.RuntimeFailure;
+                    // The argument is a bare component TYPE name (`.path`), not a
+                    // value — resolve the id directly (do not `evalExpr` a path).
+                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+                    if (self.ast.exprKind(arg) != .path) return error.RuntimeFailure;
+                    const cname = self.ast.strings.slice(self.ast.exprData(arg));
+                    const cid = world.registry.idOf(cname) orelse return error.RuntimeFailure;
+                    const dbuf = try self.structuralDeferred(world);
+                    try dbuf.commands.append(dbuf.gpa, .{ .remove_component = .{
+                        .entity = @bitCast(eid),
+                        .component_id = cid,
+                    } });
+                    return Value{ .unit = {} };
                 }
                 // Trait method on an Entity (`impl Trait for Entity`). The
                 // type key is the interned `Entity`; self is the handle.
@@ -3297,6 +3404,29 @@ pub const Interpreter = struct {
                 if (cond.bool_) return try self.evalExpr(world, locals, ife.then_block);
                 if (ife.else_branch.isNone()) return Value{ .unit = {} };
                 return try self.evalExpr(world, locals, ife.else_branch);
+            },
+            .spawn_struct => {
+                // Structural `spawn(C1 {…}, …)` (M1.0.10, `etch-grammar.md` §3.2 /
+                // §4.5) — a statement-position expression (the type-checker rejects
+                // value use, E0304). Resolve each component literal's bytes EAGERLY
+                // now, enqueue a single deferred `.spawn` command, and yield `unit`
+                // (no body handle, v0.6). The prefab form is refused at type-check
+                // (E0305) — never executed.
+                const ss = self.ast.spawn_structs.items[data];
+                if (ss.is_prefab) return error.RuntimeFailure;
+                const dbuf = try self.structuralDeferred(world);
+                const arena_alloc = dbuf.arena.allocator();
+                const ids = try arena_alloc.alloc(ComponentId, ss.args_len);
+                const payloads = try arena_alloc.alloc([]const u8, ss.args_len);
+                var i: u32 = 0;
+                while (i < ss.args_len) : (i += 1) {
+                    const arg: NodeId = @bitCast(self.ast.extra.items[ss.args_start + i]);
+                    const payload = try self.buildComponentPayload(world, locals, arg, arena_alloc);
+                    ids[i] = payload.cid;
+                    payloads[i] = payload.bytes;
+                }
+                try dbuf.commands.append(dbuf.gpa, .{ .spawn = .{ .component_ids = ids, .payloads = payloads } });
+                return Value{ .unit = {} };
             },
             else => return error.RuntimeFailure, // path / tag_path / unsupported variants
         }
@@ -7744,4 +7874,362 @@ test "execHookText emit enqueues into the dynamic event store (M1.0.9 E2)" {
     try interp.execHookText(&world, eid, "emit ExtensionAttached {}");
     // The hook's `emit` landed in the per-tick dynamic event store.
     try std.testing.expectEqual(@as(usize, 1), interp.events.list.items.len);
+}
+
+// ── M1.0.10 E3 — structural mutation in bodies ────────────────────────────
+
+/// E3 test helper — parse + type-check a program, asserting both clean, and
+/// return the `ParseResult` (caller owns; `deinit` after the interp).
+fn checkCleanProgram(gpa: std.mem.Allocator, source: []const u8) !parser_mod.ParseResult {
+    var pr = try parser_mod.parse(gpa, source);
+    errdefer pr.deinit(gpa);
+    if (pr.diagnostics.len != 0) {
+        std.debug.print("unexpected parse diag: {s}\n", .{pr.diagnostics[0].primary_message});
+        return error.UnexpectedParseDiagnostic;
+    }
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    if (diags.items.len != 0) {
+        std.debug.print("unexpected typecheck diag: {s}\n", .{diags.items[0].primary_message});
+        return error.UnexpectedTypecheckDiagnostic;
+    }
+    return pr;
+}
+
+/// Count live entities whose archetype carries `cid`.
+fn countEntitiesWith(world: *World, cid: ComponentId) usize {
+    var total: usize = 0;
+    for (world.archetypes.items) |arch| {
+        if (arch.componentIndex(cid) == null) continue;
+        for (arch.chunks.items) |chunk| total += chunk.header().entity_count;
+    }
+    return total;
+}
+
+/// The first live entity carrying `cid`, or `null` if none.
+fn firstEntityWith(world: *World, cid: ComponentId) ?CoreEntityId {
+    for (world.archetypes.items) |arch| {
+        if (arch.componentIndex(cid) == null) continue;
+        for (arch.chunks.items) |chunk| {
+            if (chunk.header().entity_count > 0) return arch.entityIdsConst(chunk)[0];
+        }
+    }
+    return null;
+}
+
+fn readI32(world: *World, entity: CoreEntityId, cid: ComponentId, field: []const u8) ?i32 {
+    const fd = world.registry.findField(cid, field) orelse return null;
+    const bytes = world.componentBytes(entity, cid) orelse return null;
+    var v: i32 = 0;
+    @memcpy(std.mem.asBytes(&v), bytes[fd.offset .. fd.offset + @sizeOf(i32)]);
+    return v;
+}
+
+test "spawn defers — entity materializes at flush with full payload (M1.0.10 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Trigger { t: i32 = 0 }
+        \\component Health { max: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Trigger {
+        \\  spawn(Health { max: 10 })
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const trigger = world.registry.idOf("Trigger").?;
+    const health = world.registry.idOf("Health").?;
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{trigger});
+    try std.testing.expectEqual(@as(usize, 1), world.entityCount());
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // Materialized at the flush: a new entity carries Health { max: 10 }.
+    try std.testing.expectEqual(@as(usize, 2), world.entityCount());
+    try std.testing.expectEqual(@as(usize, 1), countEntitiesWith(&world, health));
+    const spawned = firstEntityWith(&world, health).?;
+    try std.testing.expectEqual(@as(i32, 10), readI32(&world, spawned, health, "max").?);
+}
+
+test "despawn defers — entity removed at flush (M1.0.10 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Doomed { d: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Doomed {
+        \\  entity.despawn()
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const doomed = world.registry.idOf("Doomed").?;
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{doomed});
+    try std.testing.expect(world.dynamicLocation(e) != null); // live before the tick
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expect(world.dynamicLocation(e) == null); // gone after the flush
+    try std.testing.expectEqual(@as(usize, 0), world.entityCount());
+}
+
+test "add defers — component present at flush (M1.0.10 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Marker { m: i32 = 0 }
+        \\component Shield { amount: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  entity.add(Shield { amount: 7 })
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const marker = world.registry.idOf("Marker").?;
+    const shield = world.registry.idOf("Shield").?;
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{marker});
+    try std.testing.expect(world.componentBytes(e, shield) == null); // absent before
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expect(world.componentBytes(e, shield) != null); // present after
+    try std.testing.expectEqual(@as(i32, 7), readI32(&world, e, shield, "amount").?);
+}
+
+test "remove defers — component gone at flush (M1.0.10 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Marker { m: i32 = 0 }
+        \\component Poison { dmg: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Poison {
+        \\  entity.remove(Poison)
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const marker = world.registry.idOf("Marker").?;
+    const poison = world.registry.idOf("Poison").?;
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{ marker, poison });
+    try std.testing.expect(world.componentBytes(e, poison) != null); // present before
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expect(world.componentBytes(e, poison) == null); // gone after
+    try std.testing.expect(world.componentBytes(e, marker) != null); // Marker kept
+}
+
+test "spawn fires on_spawned then on_add per component at flush (M1.0.10 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Trigger { t: i32 = 0 }
+        \\component Health { max: i32 = 0 }
+        \\event Sp { x: i32 = 0 }
+        \\event Ad { x: i32 = 0 }
+        \\@on_spawned
+        \\rule on_sp(entity: Entity) { emit Sp { x: 1 } }
+        \\@on_added(Health)
+        \\rule on_ad(entity: Entity, value: Health) { emit Ad { x: value.max } }
+        \\rule spawner(entity: Entity) when entity has Trigger {
+        \\  spawn(Health { max: 10 })
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const trigger = world.registry.idOf("Trigger").?;
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{trigger});
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const sp_id = pr.ast.strings.find("Sp").?;
+    const ad_id = pr.ast.strings.find("Ad").?;
+    try std.testing.expectEqual(@as(usize, 1), interp.events.count(sp_id));
+    try std.testing.expectEqual(@as(usize, 1), interp.events.count(ad_id));
+    // Documented order: on_spawned BEFORE on_add (Tier-0 `applyWithObservers`).
+    try std.testing.expectEqual(@as(usize, 2), interp.events.list.items.len);
+    try std.testing.expectEqual(sp_id, interp.events.list.items[0].type_name);
+    try std.testing.expectEqual(ad_id, interp.events.list.items[1].type_name);
+}
+
+test "despawn fires on_remove per component then on_despawned (M1.0.10 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Health { current: i32 = 0 }
+        \\event Rm { v: i32 = 0 }
+        \\event Ds { v: i32 = 0 }
+        \\@on_removed(Health)
+        \\rule on_rm(entity: Entity, old: Health) { emit Rm { v: old.current } }
+        \\@on_despawned
+        \\rule on_ds(entity: Entity) { emit Ds { v: 1 } }
+        \\rule killer(entity: Entity) when entity has Health {
+        \\  entity.despawn()
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const health = world.registry.idOf("Health").?;
+    var hv: i32 = 42;
+    _ = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{health}, &[_][]const u8{std.mem.asBytes(&hv)});
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const rm_id = pr.ast.strings.find("Rm").?;
+    const ds_id = pr.ast.strings.find("Ds").?;
+    try std.testing.expectEqual(@as(usize, 2), interp.events.list.items.len);
+    // Documented order: on_remove (per component) BEFORE on_despawned.
+    try std.testing.expectEqual(rm_id, interp.events.list.items[0].type_name);
+    try std.testing.expectEqual(ds_id, interp.events.list.items[1].type_name);
+    // The component is readable in on_remove, pre-destruction (current = 42).
+    const v_id = pr.ast.strings.find("v").?;
+    var seen: i64 = -1;
+    for (interp.events.list.items[0].fields.items) |f| {
+        if (f.name == v_id) seen = f.value.int_;
+    }
+    try std.testing.expectEqual(@as(i64, 42), seen);
+}
+
+test "add-on-present fires on_replaced not on_added (M1.0.10 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Health { current: i32 = 0 }
+        \\event Rp { o: i32 = 0, n: i32 = 0 }
+        \\event Ad { x: i32 = 0 }
+        \\@on_replaced(Health)
+        \\rule on_rp(entity: Entity, old: Health, new: Health) { emit Rp { o: old.current, n: new.current } }
+        \\@on_added(Health)
+        \\rule on_ad(entity: Entity, value: Health) { emit Ad { x: 1 } }
+        \\rule replacer(entity: Entity) when entity has Health {
+        \\  entity.add(Health { current: 9 })
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const health = world.registry.idOf("Health").?;
+    var hv: i32 = 5;
+    _ = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{health}, &[_][]const u8{std.mem.asBytes(&hv)});
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // add-on-present is a replace: on_replaced fires (old=5, new=9), on_added does not.
+    try std.testing.expectEqual(@as(usize, 1), interp.events.count(pr.ast.strings.find("Rp").?));
+    try std.testing.expectEqual(@as(usize, 0), interp.events.count(pr.ast.strings.find("Ad").?));
+    const o_id = pr.ast.strings.find("o").?;
+    const n_id = pr.ast.strings.find("n").?;
+    var o_seen: i64 = -1;
+    var n_seen: i64 = -1;
+    for (interp.events.list.items[0].fields.items) |f| {
+        if (f.name == o_id) o_seen = f.value.int_;
+        if (f.name == n_id) n_seen = f.value.int_;
+    }
+    try std.testing.expectEqual(@as(i64, 5), o_seen);
+    try std.testing.expectEqual(@as(i64, 9), n_seen);
+}
+
+test "B1 — multi-entity rule structural mutation defers without corrupting iteration (M1.0.10 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Marker { m: i32 = 0 }
+        \\component Shield { x: i32 = 0 }
+        \\component Spawned { id: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  entity.add(Shield { x: 1 })
+        \\  spawn(Spawned { id: 7 })
+        \\  entity.despawn()
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const marker = world.registry.idOf("Marker").?;
+    const spawned = world.registry.idOf("Spawned").?;
+    const shield = world.registry.idOf("Shield").?;
+    var i: usize = 0;
+    while (i < 3) : (i += 1) _ = try world.spawnDynamic(gpa, &[_]ComponentId{marker});
+    try std.testing.expectEqual(@as(usize, 3), world.entityCount());
+
+    // The full live archetype walk (3 entities) runs with no corruption; every
+    // effect applies at the tick's flush.
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // The 3 Marker entities were despawned (with Shield added first, then gone);
+    // 3 new Spawned entities exist. Net entity count unchanged.
+    try std.testing.expectEqual(@as(usize, 0), countEntitiesWith(&world, marker));
+    try std.testing.expectEqual(@as(usize, 0), countEntitiesWith(&world, shield));
+    try std.testing.expectEqual(@as(usize, 3), countEntitiesWith(&world, spawned));
+    try std.testing.expectEqual(@as(usize, 3), world.entityCount());
+}
+
+test "S4 structural-mutation boundary lifted — a body issuing all four ops runs (M1.0.10 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // The S4 header no longer claims spawn/despawn/add/remove are unsupported;
+    // a body issuing all four runs with zero runtime errors (no UnsupportedExpr).
+    var pr = try checkCleanProgram(gpa,
+        \\component Marker { m: i32 = 0 }
+        \\component Poison { dmg: i32 = 0 }
+        \\component Shield { x: i32 = 0 }
+        \\component Spawned { id: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  entity.add(Shield { x: 1 })
+        \\  entity.remove(Poison)
+        \\  spawn(Spawned { id: 1 })
+        \\  entity.despawn()
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const marker = world.registry.idOf("Marker").?;
+    const poison = world.registry.idOf("Poison").?;
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{ marker, poison });
+
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    try std.testing.expectEqual(@as(usize, 1), countEntitiesWith(&world, world.registry.idOf("Spawned").?));
 }

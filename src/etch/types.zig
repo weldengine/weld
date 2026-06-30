@@ -4116,7 +4116,15 @@ pub const TypeChecker = struct {
             },
             .expr_stmt => {
                 const expr_id: NodeId = @bitCast(data);
-                _ = self.synthExpr(expr_id, ctx);
+                // A structural `spawn(...)` is statement-position only (§4.5, no
+                // body handle): check it here so the value-position refusal
+                // (E0304) in `synthExpr` does NOT fire on a legal statement use.
+                // Every other expression types normally.
+                if (self.arena.exprKind(expr_id) == .spawn_struct) {
+                    _ = try self.checkSpawnStruct(expr_id, self.arena.exprData(expr_id), ctx, false);
+                } else {
+                    _ = self.synthExpr(expr_id, ctx);
+                }
             },
             .assert_stmt => {
                 // `assert(cond[, msg])` — the condition must be bool (M0.8
@@ -4538,6 +4546,12 @@ pub const TypeChecker = struct {
             .loop_expr => return try self.synthLoop(data, ctx_opt),
             .block_expr => return try self.synthBlock(data, ctx_opt),
             .if_expr => return try self.synthIf(id, data, ctx_opt),
+            // Reaching a structural spawn through `synthExpr` means it is being
+            // used as a VALUE (let binding, field receiver, call argument) — the
+            // v0.6 refusal (E0304): structural spawn is statement-position only,
+            // no body handle (§4.5). `checkStmt` handles the legal statement
+            // position before this arm is reached.
+            .spawn_struct => return try self.checkSpawnStruct(id, data, ctx_opt, true),
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
             else => return ResolvedType.unknown,
         }
@@ -5301,6 +5315,78 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// M1.0.10 E2 — type-check a structural `spawn(...)` node (`etch-grammar.md`
+    /// §3.2 / §4.5). The spawn is statement-position only (no body handle, v0.6):
+    /// `value_position` is `true` when reached through `synthExpr` (a value use:
+    /// `let e = spawn(…)`, `spawn(…).field`, `spawn(…)` as an argument) → E0304;
+    /// `checkStmt` passes `false` for the legal `expr_stmt` position. The
+    /// prefab-name form is recognized but refused (E0305, gated on the prefab
+    /// runtime). The component-literal form validates each argument names a
+    /// declared `component`. Returns `unknown` (statement effect, no value).
+    fn checkSpawnStruct(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx, value_position: bool) TypeError!ResolvedType {
+        _ = ctx_opt;
+        const ss = self.arena.spawn_structs.items[data];
+        if (value_position) {
+            try self.emit(.spawn_handle_unavailable, .error_, self.arena.exprSpan(id), "structural spawn produces no usable handle in a body (v0.6) — call spawn(...) as a statement, do not bind or use its result", .{});
+        }
+        if (ss.is_prefab) {
+            try self.emit(.prefab_spawn_not_executable, .error_, self.arena.exprSpan(id), "prefab spawn 'spawn(\"...\")' is not executable in Phase 1 (gating on the prefab runtime)", .{});
+            return ResolvedType.unknown;
+        }
+        var i: u32 = 0;
+        while (i < ss.args_len) : (i += 1) {
+            const arg: NodeId = @bitCast(self.arena.extra.items[ss.args_start + i]);
+            try self.checkStructuralComponentLiteral(arg);
+        }
+        return ResolvedType.unknown;
+    }
+
+    /// M1.0.10 E2 — validate one component-literal argument of `spawn(...)` /
+    /// `entity.add(...)`: it must be a `TYPE_IDENT { ... }` struct literal naming
+    /// a declared `component`, and its field set + field-value types must match
+    /// the component declaration. The `struct_lit` shares the `struct_lit_fields`
+    /// storage with a `ComponentInstance`, so the scene/prefab validation path
+    /// (`checkComponentInstance` → `checkInstanceField` / `checkInstanceFieldForeign`,
+    /// local + imported) is reused rather than reinvented — `weld check` (C1.6)
+    /// must catch the same field errors as scene/prefab. The node is NOT routed
+    /// through `synthStructLit` (which requires a `struct`, not a `component`).
+    fn checkStructuralComponentLiteral(self: *TypeChecker, arg: NodeId) TypeError!void {
+        if (self.arena.exprKind(arg) != .struct_lit) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "expected a component literal 'T {{ ... }}'", .{});
+            return;
+        }
+        const sl = self.arena.struct_lits.items[self.arena.exprData(arg)];
+        if (sl.type_name == 0) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "a component literal needs an explicit component type ('T {{ ... }}')", .{});
+            return;
+        }
+        // A non-component type name surfaces through `code_type` (E0200 — the
+        // structural "not a component" path); declared component fields are
+        // checked with the dedicated E0306/E0307 codes.
+        const ci: ast_mod.ComponentInstance = .{
+            .type_name = sl.type_name,
+            .fields_start = sl.fields_start,
+            .fields_len = sl.fields_len,
+            .span = self.arena.exprSpan(arg),
+        };
+        try self.checkComponentInstance(ci, .type_mismatch, .structural_component_field_unknown, .structural_component_field_type_invalid);
+    }
+
+    /// M1.0.10 E2 — validate a type name used in a structural mutation
+    /// (`entity.remove(T)` and the component-literal types of `spawn` / `add`)
+    /// resolves to a declared `component`. Mirrors the `when has` component
+    /// lookup (`self.symbols.get` + `SymbolKind.component`).
+    fn checkStructuralComponentName(self: *TypeChecker, name: StringId, span: SourceSpan) TypeError!void {
+        const tname = self.arena.strings.slice(name);
+        if (self.symbols.get(name)) |sym| {
+            if (sym.kind != .component) {
+                try self.emit(.type_mismatch, .error_, span, "structural mutation requires a component, '{s}' is a {s}", .{ tname, @tagName(sym.kind) });
+            }
+        } else {
+            try self.emit(.type_mismatch, .error_, span, "unknown component '{s}' in structural mutation", .{tname});
+        }
+    }
+
     /// Dispatch an instance method call against an already-typed receiver
     /// (`etch-resolver-types.md §5.5` strict order: inherent → trait →
     /// builtin → service). Split from `synthMethodCall` so the optional
@@ -5456,6 +5542,37 @@ pub const TypeChecker = struct {
             if (std.mem.eql(u8, method_slice, "active_extensions")) {
                 if (mc.args_len != 0) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "Entity method 'active_extensions' takes no arguments", .{});
                 return ResolvedType{ .array_dyn = .string_ };
+            }
+            // M1.0.10 — structural mutation methods on an `Entity` receiver
+            // (`etch-grammar.md` §4.5). All three are statement-effect (`unknown`
+            // return, like `array.push` / `activate_extension`); they enqueue a
+            // deferred command at run (E3). `add` on a present component is a
+            // replace (`@on_replaced`), no separate construct.
+            if (std.mem.eql(u8, method_slice, "despawn")) {
+                if (mc.args_len != 0) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "Entity method 'despawn' takes no arguments", .{});
+                return ResolvedType.unknown;
+            }
+            if (std.mem.eql(u8, method_slice, "add")) {
+                if (mc.args_len != 1) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "Entity method 'add' takes exactly one component literal 'T {{ ... }}'", .{});
+                } else {
+                    const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+                    try self.checkStructuralComponentLiteral(arg);
+                }
+                return ResolvedType.unknown;
+            }
+            if (std.mem.eql(u8, method_slice, "remove")) {
+                if (mc.args_len != 1) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "Entity method 'remove' takes exactly one component type 'T'", .{});
+                } else {
+                    const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+                    if (self.arena.exprKind(arg) != .path) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "Entity method 'remove' expects a component type 'T'", .{});
+                    } else {
+                        try self.checkStructuralComponentName(self.arena.exprData(arg), self.arena.exprSpan(arg));
+                    }
+                }
+                return ResolvedType.unknown;
             }
         }
 
@@ -7547,6 +7664,130 @@ test "type-checker accepts `has T changed` on a component, E1210 on a non-compon
     );
     defer cat.deinit(gpa);
     try expectNoCode(cat.diagnostics.items, .unknown_tag);
+}
+
+test "entity structural methods type-check on an Entity receiver (M1.0.10 E2)" {
+    const gpa = std.testing.allocator;
+    // `entity.add(T { … })` / `entity.remove(T)` / `entity.despawn()` on an
+    // Entity receiver with declared components → zero diagnostics.
+    var ok = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\component Shield { amount: i32 = 0 }
+        \\component Poisoned { stacks: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  entity.add(Shield { amount: 5 })
+        \\  entity.remove(Poisoned)
+        \\  entity.despawn()
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+}
+
+test "structural spawn of component literals type-checks (M1.0.10 E2)" {
+    const gpa = std.testing.allocator;
+    var ok = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\component Projectile { speed: f32 = 0.0 }
+        \\component Velocity { vx: f32 = 0.0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  spawn(Projectile { speed: 20.0 }, Velocity { vx: 1.0 })
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+}
+
+test "binding a structural spawn result is rejected (M1.0.10 E2)" {
+    const gpa = std.testing.allocator;
+    // `let e = spawn(…)` uses the spawn result as a value → E0304 (no body
+    // handle, statement-position only, v0.6).
+    var bad = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\component Health { max: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  let e = spawn(Health { max: 10 })
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .spawn_handle_unavailable);
+}
+
+test "prefab-name spawn is refused in Phase 1 (M1.0.10 E2)" {
+    const gpa = std.testing.allocator;
+    // `spawn("Name")` parses + is recognized but is refused → E0305 (gating on
+    // the prefab runtime).
+    var bad = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  spawn("Goblin")
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .prefab_spawn_not_executable);
+}
+
+test "structural component-literal unknown field is rejected (M1.0.10 E2 completion)" {
+    const gpa = std.testing.allocator;
+    // via spawn(...)
+    var s = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\component Health { max: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  spawn(Health { maxx: 10 })
+        \\}
+    );
+    defer s.deinit(gpa);
+    try expectAnyCode(s.diagnostics.items, .structural_component_field_unknown);
+    // via entity.add(...)
+    var a = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\component Health { max: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  entity.add(Health { maxx: 10 })
+        \\}
+    );
+    defer a.deinit(gpa);
+    try expectAnyCode(a.diagnostics.items, .structural_component_field_unknown);
+}
+
+test "structural component-literal mistyped field is rejected (M1.0.10 E2 completion)" {
+    const gpa = std.testing.allocator;
+    // `max: i32` given a float literal → E0307 (same field-type path as scene/prefab).
+    var bad = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\component Health { max: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  entity.add(Health { max: 1.5 })
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try expectAnyCode(bad.diagnostics.items, .structural_component_field_type_invalid);
+}
+
+test "structural mutation of a non-component type is rejected (M1.0.10 E3 carry-over)" {
+    const gpa = std.testing.allocator;
+    // A resource (not a component) given to `entity.add(...)` → E0200 (the
+    // "not a declared component" path; scene/prefab collapse the same way).
+    var a = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\resource Conf { v: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  entity.add(Conf { v: 1 })
+        \\}
+    );
+    defer a.deinit(gpa);
+    try expectAnyCode(a.diagnostics.items, .type_mismatch);
+    // Same for `entity.remove(T)` on a non-component type.
+    var rm = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\resource Conf { v: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  entity.remove(Conf)
+        \\}
+    );
+    defer rm.deinit(gpa);
+    try expectAnyCode(rm.diagnostics.items, .type_mismatch);
 }
 
 test "type-checker validates tag mutations (M0.8 E3)" {
