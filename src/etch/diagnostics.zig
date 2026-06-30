@@ -55,6 +55,9 @@ pub const DiagnosticCode = enum {
     resource_expected_component_given, // M0.8 — E0301 ResourceExpectedComponentGiven
     component_expected_resource_given, // M0.8 — E0302 ComponentExpectedResourceGiven
     resource_field_unknown, // M0.8 E7 — E0303 ResourceFieldUnknown (scene `resources` block field check)
+    // M1.0.10 E2 — structural-mutation refusals (structural-ECS family, §4.5).
+    spawn_handle_unavailable, // M1.0.10 E2 — E0304 SpawnHandleUnavailable (structural spawn result bound/used in a body; statement-position only, no body handle v0.6)
+    prefab_spawn_not_executable, // M1.0.10 E2 — E0305 PrefabSpawnNotExecutable (spawn("Name") recognized but gated on the prefab runtime; not executable Phase 1)
 
     // ── Annotation errors (E0500-E0599) ──
     annotation_misapplied, // M0.8 — E0502 AnnotationMisapplied
@@ -380,6 +383,8 @@ pub const DiagnosticCode = enum {
             .resource_expected_component_given => "E0301",
             .component_expected_resource_given => "E0302",
             .resource_field_unknown => "E0303",
+            .spawn_handle_unavailable => "E0304",
+            .prefab_spawn_not_executable => "E0305",
             .annotation_misapplied => "E0502",
             .bound_not_satisfied => "E0601",
             .generic_type_annotation_required => "E0603",
@@ -564,6 +569,8 @@ pub const DiagnosticCode = enum {
             .resource_expected_component_given => "ResourceExpectedComponentGiven",
             .component_expected_resource_given => "ComponentExpectedResourceGiven",
             .resource_field_unknown => "ResourceFieldUnknown",
+            .spawn_handle_unavailable => "SpawnHandleUnavailable",
+            .prefab_spawn_not_executable => "PrefabSpawnNotExecutable",
             .annotation_misapplied => "AnnotationMisapplied",
             .bound_not_satisfied => "BoundNotSatisfied",
             .generic_type_annotation_required => "GenericTypeAnnotationRequired",
