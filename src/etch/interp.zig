@@ -36,6 +36,10 @@ const DynamicQuery = weld_core.ecs.world.DynamicQuery;
 const CoreEntityId = weld_core.ecs.entity.EntityId;
 const Tick = weld_core.ecs.tick.Tick;
 const initial_tick = weld_core.ecs.tick.initial_tick;
+// M1.0.9 — the Tier-0 scene loader (extension activate/deactivate runtime
+// entries + the `ExtensionResolver` type). `weld_etch` depends on `weld_core`,
+// so this is the legal direction (core never imports etch).
+const scene_loader = weld_core.scene.loader;
 
 const AstArena = ast_mod.AstArena;
 const NodeId = ast_mod.NodeId;
@@ -135,6 +139,26 @@ const PendingTag = struct {
     entity: EntityId,
     bit_index: u32,
     set: bool,
+};
+
+/// A deferred extension activate/deactivate (M1.0.9 B1 round-trip). Enqueued by
+/// the Etch `entity.activate_extension`/`deactivate_extension` methods during a
+/// tick — the extension bytes are resolved AT THE CALL — and applied at the tick
+/// boundary (after every rule has run, so never mid-`iterateArchetype`-walk;
+/// applying adds/removes components, an archetype transition). The immediate
+/// `runtimeActivate`/`runtimeDeactivate` loader entries stay for the load +
+/// direct-programmatic paths, which run outside any query iteration.
+const ExtOp = enum { activate, deactivate };
+
+const PendingExtension = struct {
+    entity: CoreEntityId,
+    /// Owned copy of the extension name (the AST / run-string source may not
+    /// outlive the flush); freed when the batch is drained.
+    name: []u8,
+    /// Borrowed cooked `.prefab.bin` bytes, resolved at the call site; the
+    /// resolver's backing outlives the tick.
+    bytes: []const u8,
+    op: ExtOp,
 };
 
 /// Resolved view of a `when` clause node. The interpreter walks
@@ -620,6 +644,9 @@ pub const Interpreter = struct {
     /// Deferred tag mutations queued during a tick, flushed at the tick boundary
     /// (M0.8 E3) — never applied mid-archetype-walk.
     pending_tags: std.ArrayListUnmanaged(PendingTag) = .empty,
+    /// M1.0.9 B1 — deferred extension activate/deactivate, drained at the tick
+    /// boundary (after iteration). Mirror of `pending_tags`.
+    pending_extensions: std.ArrayListUnmanaged(PendingExtension) = .empty,
     /// True iff any rule carries a `changed` filter (M0.8 E3). Gates the whole
     /// tick-based change-detection path: only then does `runFor` advance
     /// `current_tick` (`beginFrame`) and a component write `markChanged`s — so
@@ -708,6 +735,8 @@ pub const Interpreter = struct {
         self.trait_methods.deinit(self.gpa);
         self.tag_table.deinit(self.gpa);
         self.pending_tags.deinit(self.gpa);
+        for (self.pending_extensions.items) |pe| self.gpa.free(pe.name);
+        self.pending_extensions.deinit(self.gpa);
         for (self.async_slots) |*slot| slot.deinit(self.gpa);
         self.gpa.free(self.async_slots);
         self.descriptors.deinit(self.gpa);
@@ -988,6 +1017,15 @@ pub const Interpreter = struct {
         return report;
     }
 
+    /// M1.0.9 — give the interpreter a runtime extension resolver (name → cooked
+    /// `.prefab.bin` bytes, the same interface the scene loader receives) so an
+    /// Etch `entity.activate_extension("X")` / `deactivate_extension("X")`
+    /// resolves the extension at runtime. Absent → those methods fail with
+    /// `error.MissingExtensionResolver`.
+    pub fn setExtensionResolver(self: *Interpreter, resolver: scene_loader.ExtensionResolver) void {
+        self.bridge.ext_resolver = resolver;
+    }
+
     /// Register this program's observer rules into `world`'s `ObserverRegistry`
     /// (M1.0.2 E3). Idempotent: the first call allocates one `ObserverCtx` per
     /// observer rule and registers a trampoline keyed on the rule's lifecycle
@@ -996,6 +1034,14 @@ pub const Interpreter = struct {
     pub fn bindToWorld(self: *Interpreter, world: *World) !void {
         if (self.observers_bound) return;
         self.observers_bound = true;
+
+        // M1.0.9 — register the extension hook seams so the loader's
+        // `dispatchOnAttach` / runtime `deactivate_extension` reach `execHookText`.
+        // Registered unconditionally (before the observer-rule early-return): the
+        // callbacks only fire when an extension actually activates / deactivates,
+        // so a program with no observer rules still wires its hook execution.
+        world.registerOnAttach(self, &extensionAttachTrampoline);
+        world.registerOnDetach(self, &extensionDetachTrampoline);
 
         var n: usize = 0;
         for (self.rule_descs) |rd| {
@@ -1123,6 +1169,104 @@ pub const Interpreter = struct {
         }
     }
 
+    /// Execute a cooked extension hook body (M1.0.9 E2). `hook_text` is the
+    /// canonical Etch statement run a `.prefab.bin` carries for an `on_attach` /
+    /// `on_detach` hook (`descriptor.renderStmtRunAlloc`): statements joined by
+    /// `"; "`, no braces. Parse it into a transient `AstArena`, rebind `self.ast`
+    /// to it for the body's duration (the executor resolves identifiers via
+    /// `self.ast.strings`, so the body MUST run with `ast` pointing at the hook
+    /// arena), bind the implicit `entity`, run the body with the same
+    /// `execStmtRun` that drives every rule, and route any deferred structural
+    /// change into the world's shared observer-deferred buffer (drained by the
+    /// loader before `on_spawned`). Mirrors `runObserverBody` — same fresh-scope
+    /// + store-reset discipline. No re-entrancy: a hook runs at a load/flush
+    /// boundary, never nested inside another running hook.
+    fn execHookText(self: *Interpreter, world: *World, entity: CoreEntityId, hook_text: []const u8) !void {
+        var block = parser_mod.parseStmtBlock(self.gpa, hook_text) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // A cooked hook that fails to re-parse is a corrupt asset (the cook
+            // validated it via `renderStmtRunAlloc` → `HookRenderFailed`), so this
+            // should be unreachable in practice — surface it clearly regardless.
+            else => return error.MalformedExtensionHook,
+        };
+        defer block.deinit(self.gpa);
+        if (block.diagnostics.len > 0) return error.MalformedExtensionHook;
+
+        // Rebind the program AST to the hook arena for the body's duration. Safe:
+        // `ast` is a reassignable `*const AstArena` field; nothing on the executor
+        // path dereferences a *program*-arena `NodeId` while rebound (component /
+        // resource field access + enum shorthand resolve by NAME via the registry,
+        // `emit` enqueues by event-name id, and hook-arena `StringId`s resolve
+        // through `self.ast.strings`).
+        const saved_ast = self.ast;
+        self.ast = &block.ast;
+        defer self.ast = saved_ast;
+
+        var locals: Locals = .{};
+        defer locals.deinit(self.gpa);
+        defer self.collections.reset(self.gpa);
+        defer self.closures.reset(self.gpa);
+        defer self.structs.reset(self.gpa);
+        defer self.optionals.clearRetainingCapacity();
+        defer self.resetRunStrings();
+
+        // Bind the implicit `entity` — only if the body references it (else the
+        // name is not interned in the hook arena and no binding is needed).
+        if (block.ast.strings.find("entity")) |eid| {
+            try locals.put(self.gpa, eid, .{ .entity_id = @bitCast(entity) }, false);
+        }
+
+        // Route the body's deferred structural mutations to the world's shared
+        // observer-deferred buffer (lazily created; freed by the registry). The
+        // loader drains it before `on_spawned`, so a hook-issued structural change
+        // is applied at the same flush boundary an observer's would be.
+        if (world.observer_registry.deferred == null) {
+            world.observer_registry.deferred = CommandBuffer.init(self.gpa, world);
+        }
+        const prev_deferred = self.observer_deferred;
+        self.observer_deferred = &world.observer_registry.deferred.?;
+        defer self.observer_deferred = prev_deferred;
+
+        self.control = .none;
+        self.thrown = false;
+        self.returning = false;
+        self.pending_error = null;
+
+        self.execStmtRun(world, &locals, block.body_start, block.body_len) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.RuntimeFailure => {
+                self.pending_error = null;
+                self.thrown = false;
+                self.returning = false;
+                self.control = .none;
+                return error.ExtensionHookFailed;
+            },
+        };
+        // Leave the interpreter clean for the next body (a hook `return` / control
+        // signal is not meaningful at a hook boundary — reset like an observer).
+        self.thrown = false;
+        self.returning = false;
+        self.control = .none;
+        self.pending_error = null;
+    }
+
+    /// Top-level trampoline matching `World.ExtensionAttachFn` (M1.0.9 E2):
+    /// recover the `*Interpreter` from `ctx` and execute the cooked `on_attach`
+    /// hook text. `null` text (an extension with no `on_attach`) is a no-op.
+    fn extensionAttachTrampoline(ctx: ?*anyopaque, world: *World, entity: CoreEntityId, name: []const u8, text: ?[]const u8) anyerror!void {
+        _ = name;
+        const self: *Interpreter = @ptrCast(@alignCast(ctx.?));
+        if (text) |t| try self.execHookText(world, entity, t);
+    }
+
+    /// Top-level trampoline matching `World.ExtensionDetachFn` (M1.0.9 E3): same
+    /// shape as the attach trampoline, for the `on_detach` hook text.
+    fn extensionDetachTrampoline(ctx: ?*anyopaque, world: *World, entity: CoreEntityId, name: []const u8, text: ?[]const u8) anyerror!void {
+        _ = name;
+        const self: *Interpreter = @ptrCast(@alignCast(ctx.?));
+        if (text) |t| try self.execHookText(world, entity, t);
+    }
+
     /// Materialise an observer value binding (`value`/`old`/`new`) as a struct
     /// value over the component's raw bytes (M1.0.2 E3). Mirrors the `@on_event`
     /// payload binding: one `StructField` per declared field that is referenced
@@ -1201,6 +1345,9 @@ pub const Interpreter = struct {
         // Apply deferred tag mutations at the tick boundary — after every rule
         // has run, never mid-archetype-walk (M0.8 E3, `etch-grammar.md` §4.4).
         try self.flushPendingTags(world);
+        // Apply deferred extension activate/deactivate at the same boundary
+        // (M1.0.9 B1) — same never-mid-walk discipline.
+        try self.flushPendingExtensions(world);
     }
 
     fn runRule(self: *Interpreter, world: *World, rd: *RuleDesc, report: *RuntimeReport) !void {
@@ -1636,6 +1783,27 @@ pub const Interpreter = struct {
             try world.applyTagMutation(self.gpa, core_id, tid, pt.bit_index, pt.set);
         }
         self.pending_tags.clearRetainingCapacity();
+    }
+
+    /// M1.0.9 B1 — drain the deferred extension activate/deactivate queue at the
+    /// tick boundary (after every rule has run, so no live `iterateArchetype`
+    /// walk is in flight — the immediate `add`/`removeComponentDynamic` an op
+    /// performs is then safe). Each op applies its structural change + fires the
+    /// Tier-0 `on_attach`/`on_detach` seam via the loader's bytes-taking
+    /// `activateExtension` / `deactivateExtension`. The batch is snapshotted
+    /// (`toOwnedSlice`) so a hook fired during apply that enqueues more ops does
+    /// NOT drain recursively — new ops wait for the next flush.
+    fn flushPendingExtensions(self: *Interpreter, world: *World) !void {
+        if (self.pending_extensions.items.len == 0) return;
+        const batch = try self.pending_extensions.toOwnedSlice(self.gpa);
+        defer {
+            for (batch) |pe| self.gpa.free(pe.name);
+            self.gpa.free(batch);
+        }
+        for (batch) |pe| switch (pe.op) {
+            .activate => try scene_loader.activateExtension(world, self.gpa, pe.entity, pe.name, pe.bytes),
+            .deactivate => try scene_loader.deactivateExtension(world, self.gpa, pe.entity, pe.name, pe.bytes),
+        };
     }
 
     /// Resolve a `tag_path` operand node to its leaf bit via the global table,
@@ -2275,6 +2443,31 @@ pub const Interpreter = struct {
         return Value{ .struct_ref = handle };
     }
 
+    /// M1.0.9 — extract the single string argument of an extension method
+    /// (`activate_extension` / `deactivate_extension` / `has_extension`) as raw
+    /// bytes. Borrowed from the current AST arena / run-string store — valid for
+    /// the synchronous resolve / lookup that immediately follows.
+    fn extensionNameArg(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall) StmtError![]const u8 {
+        if (mc.args_len != 1) return error.RuntimeFailure;
+        const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+        const v = try self.evalExpr(world, locals, arg);
+        return self.stringBytes(v) orelse error.RuntimeFailure;
+    }
+
+    /// M1.0.9 B1 — resolve the extension bytes NOW and enqueue a deferred
+    /// activate/deactivate, applied at the tick boundary (`flushPendingExtensions`)
+    /// — NOT the immediate `runtimeActivate`/`runtimeDeactivate`, which would
+    /// mutate an archetype mid-`iterateArchetype`. Missing resolver / unknown name
+    /// surface as `RuntimeFailure` (the interp's failure channel). The name is
+    /// dup'd (the AST / run-string source may not outlive the flush).
+    fn enqueueExtension(self: *Interpreter, entity: CoreEntityId, name: []const u8, op: ExtOp) StmtError!void {
+        const resolver = self.bridge.ext_resolver orelse return error.RuntimeFailure;
+        const bytes = resolver.resolve(name) orelse return error.RuntimeFailure;
+        const name_dup = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(name_dup);
+        try self.pending_extensions.append(self.gpa, .{ .entity = entity, .name = name_dup, .bytes = bytes, .op = op });
+    }
+
     /// Dispatch an instance method call on an already-evaluated receiver
     /// value — §5.5 order: inherent / trait on user types, then the builtin
     /// string / collection subsets. Split from the `.method_call` arm so the
@@ -2289,7 +2482,38 @@ pub const Interpreter = struct {
                 const method = self.methods.get(key) orelse self.trait_methods.get(key) orelse return error.RuntimeFailure;
                 return try self.callMethod(world, locals, method, mc, recv);
             },
-            .entity_id => {
+            .entity_id => |eid| {
+                const mname = self.ast.strings.slice(mc.method_name);
+                // M1.0.9 — runtime extension API on an entity receiver. Checked
+                // before the `impl Trait for Entity` lookup (these are builtin
+                // methods, not user traits). activate/deactivate route through the
+                // shared loader entries; a missing resolver / unknown extension /
+                // component conflict surfaces as the interp's `RuntimeFailure`
+                // (the loader path keeps the named `MissingExtensionResolver` etc.).
+                if (std.mem.eql(u8, mname, "activate_extension")) {
+                    // B1: ENQUEUE (deferred to the tick boundary) — never an
+                    // immediate structural mutation here (we may be mid-iteration).
+                    try self.enqueueExtension(@bitCast(eid), try self.extensionNameArg(world, locals, mc), .activate);
+                    return Value{ .unit = {} };
+                }
+                if (std.mem.eql(u8, mname, "deactivate_extension")) {
+                    try self.enqueueExtension(@bitCast(eid), try self.extensionNameArg(world, locals, mc), .deactivate);
+                    return Value{ .unit = {} };
+                }
+                if (std.mem.eql(u8, mname, "has_extension")) {
+                    const name = try self.extensionNameArg(world, locals, mc);
+                    return Value{ .bool_ = world.hasEntityExtension(@bitCast(eid), name) };
+                }
+                if (std.mem.eql(u8, mname, "active_extensions")) {
+                    if (mc.args_len != 0) return error.RuntimeFailure;
+                    const handle = try self.collections.newArray(self.gpa);
+                    for (world.entityExtensions(@bitCast(eid))) |n| {
+                        // Wrap each owned name as a borrowed persistent-string view
+                        // (the names outlive the call — owned by the side-table).
+                        try self.collections.arrays.items[handle].append(self.gpa, Value{ .string_persistent = .{ .ptr = @intFromPtr(n.ptr), .len = @intCast(n.len) } });
+                    }
+                    return Value{ .array_ref = handle };
+                }
                 // Trait method on an Entity (`impl Trait for Entity`). The
                 // type key is the interned `Entity`; self is the handle.
                 const entity_name = self.ast.strings.find("Entity") orelse return error.RuntimeFailure;
@@ -7441,4 +7665,83 @@ test "cooked Etch scene loads, on_spawned rules emit, resource string round-trip
     @memcpy(std.mem.asBytes(&ss), res_bytes[fd.offset..][0..@sizeOf(persistent.StringSlot)]);
     const title: [*]const u8 = @ptrFromInt(ss.ptr);
     try std.testing.expectEqualStrings("level_42", title[0..ss.len]);
+}
+
+test "execHookText mutates a component on the live world (M1.0.9 E2)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const source =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\rule keep(entity: Entity) when entity has Health {}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Health").?;
+    var hv = [_]i32{ 100, 100 }; // current, max
+    const eid = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{cid}, &[_][]const u8{std.mem.asBytes(&hv)});
+
+    // The exact text a cooked `on_attach` carries (see CombatModule in the spec).
+    try interp.execHookText(&world, eid, "entity.get_mut(Health).max += 50");
+
+    const hb = world.componentBytes(eid, cid).?;
+    try std.testing.expectEqual(@as(i32, 150), std.mem.readInt(i32, hb[4..8], .little)); // max @4
+}
+
+test "execHookText restores self.ast and the program still steps (M1.0.9 E2)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const source =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\rule tick(entity: Entity) when entity has Health { entity.get_mut(Health).current += 1 }
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Health").?;
+    var hv = [_]i32{ 100, 100 };
+    const eid = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{cid}, &[_][]const u8{std.mem.asBytes(&hv)});
+
+    const program_ast = interp.ast; // == &pr.ast
+    try interp.execHookText(&world, eid, "entity.get_mut(Health).max += 50");
+    // The hook ran against a transient arena; the program AST pointer is restored.
+    try std.testing.expectEqual(program_ast, interp.ast);
+
+    // The program still steps on the restored AST: the rule bumps current 100→101.
+    _ = try interp.runFor(&world, 1);
+    const hb = world.componentBytes(eid, cid).?;
+    try std.testing.expectEqual(@as(i32, 101), std.mem.readInt(i32, hb[0..4], .little)); // current @0
+    try std.testing.expectEqual(@as(i32, 150), std.mem.readInt(i32, hb[4..8], .little)); // max @4 (hook effect persisted)
+}
+
+test "execHookText emit enqueues into the dynamic event store (M1.0.9 E2)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const source =
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\rule keep(entity: Entity) when entity has Health {}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const cid = world.registry.idOf("Health").?;
+    var hv = [_]i32{ 100, 100 };
+    const eid = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{cid}, &[_][]const u8{std.mem.asBytes(&hv)});
+
+    try std.testing.expectEqual(@as(usize, 0), interp.events.list.items.len);
+    try interp.execHookText(&world, eid, "emit ExtensionAttached {}");
+    // The hook's `emit` landed in the per-tick dynamic event store.
+    try std.testing.expectEqual(@as(usize, 1), interp.events.list.items.len);
 }

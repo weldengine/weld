@@ -207,6 +207,16 @@ pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8, e
     // Extension activation (M1.0.6 E6): add each active extension's components +
     // fire the `on_attach` seam. After resources, before `on_spawned`.
     try applyExtensions(world, gpa, acc, uuid_to_entity, ext_resolver);
+    // M1.0.9 — drain the structural commands the `on_attach` hooks queued, AFTER
+    // the whole activation pass and BEFORE `on_spawned`, so a spawn observer sees
+    // a fully-materialised entity. `dispatchSpawnLifecycle` also opens with a
+    // drain; this explicit one keeps the ordering contract local to the load
+    // sequence (it does not depend on a downstream function's internal drain).
+    {
+        var hook_drain = command_buffer_mod.CommandBuffer.init(gpa, world);
+        defer hook_drain.deinit();
+        try observers_mod.flushWithObservers(&hook_drain, &world.observer_registry);
+    }
     try dispatchSpawnLifecycle(world, gpa, spawned.items);
 
     return .{
@@ -310,9 +320,9 @@ fn resolveCrossRefs(world: *World, acc: Accessor, remap: []const ComponentId, uu
 /// Table, in table order, activate each of its extensions: resolve the extension
 /// `.prefab.bin` by name (Prefab ID Table → `ExtensionResolver`), add its
 /// components, and fire the `on_attach` Tier-0 seam. **No-op when the scene has no
-/// active extensions** (so an extension-free scene needs no resolver). The actual
-/// `on_attach` hook EXECUTION is M1.0.9 — here `dispatchOnAttach` only fires the
-/// registered seam with the cooked hook text.
+/// active extensions** (so an extension-free scene needs no resolver). The
+/// `on_attach` hook EXECUTION (M1.0.9) runs inside the registered seam's callback
+/// (the Etch bridge); here `dispatchOnAttach` fires it with the cooked hook text.
 fn applyExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to_entity: UuidMap, ext_resolver: ?ExtensionResolver) !void {
     const count = acc.extensionsCount();
     if (count == 0) return;
@@ -336,13 +346,15 @@ fn applyExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to
     }
 }
 
-/// Activate one extension on one entity (M1.0.6 E6) — the shared path reused by
-/// the runtime `activate_extension` entry: open the extension's `.prefab.bin`, add
-/// its single entity's components to `entity`, then fire the `on_attach` seam with
-/// the cooked hook text. The extension prefab is mono-entity (cooked as such); a
-/// component the entity already carries is a conflict (§30.5) — surfaced as
+/// Activate one extension on one entity (M1.0.6 E6) — the shared bytes-taking
+/// path reused by load (`applyExtensions`), the runtime `activate_extension`
+/// entry, AND the interpreter's deferred B1 flush: open the extension's
+/// `.prefab.bin`, add its single entity's components to `entity`, record the
+/// active extension, then fire the `on_attach` seam with the cooked hook text.
+/// The extension prefab is mono-entity (cooked as such); a component the entity
+/// already carries is a conflict (§30.5) — surfaced as
 /// `error.ExtensionComponentConflict` rather than the dynamic-add assert.
-fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
+pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
     const ext = try openVerified(ext_bytes);
 
     // Mono-entity: the extension's components live on its single entity.
@@ -365,9 +377,74 @@ fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, na
         }
     }
 
-    // Fire the `on_attach` dispatch seam (D-E). Executing the text is M1.0.9.
+    // Record the extension as active on the entity BEFORE firing `on_attach`, so
+    // a hook that queries `has_extension` / `active_extensions` sees it (M1.0.9).
+    // Tracked here means load AND runtime activation both track for free.
+    try world.addEntityExtension(gpa, entity, name);
+
+    // Fire the `on_attach` dispatch seam (D-E). M1.0.9 — the Etch bridge's
+    // registered callback re-parses + executes `on_attach_text` against the live
+    // world; with no bridge registered (Tier-0 tests) the seam is a no-op.
     const on_attach_text: ?[]const u8 = if (ext.hookCount() > 0) ext.hook(0).on_attach else null;
     try world.dispatchOnAttach(entity, name, on_attach_text);
+}
+
+/// M1.0.9 — runtime extension activation entry, reached from Etch
+/// `entity.activate_extension("X")` (the interpreter resolves the name through
+/// the bridge's `ExtensionResolver`). Reuses the shared `activateExtension`
+/// path: add components → record the active extension → fire `on_attach`.
+/// Unknown name → `error.UnknownExtension`; a component the entity already
+/// carries → `error.ExtensionComponentConflict` (§30.5 reject policy).
+pub fn runtimeActivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, resolver: ExtensionResolver) !void {
+    const bytes = resolver.resolve(name) orelse return error.UnknownExtension;
+    try activateExtension(world, gpa, entity, name, bytes);
+}
+
+/// M1.0.9 — runtime extension deactivation entry, reached from Etch
+/// `entity.deactivate_extension("X")`. Fires the `on_detach` seam FIRST (so the
+/// hook still reads the extension's components), then removes the extension's
+/// declared components and drops the entity's active-extension record. The
+/// extension must be active (`error.ExtensionNotActive` otherwise). The §30.5
+/// reject conflict policy makes the component set unambiguous — no two active
+/// extensions share a component — so removal needs no provenance tracking.
+/// M1.0.9 — deactivate one extension on one entity given its cooked bytes: the
+/// shared bytes-taking core reused by the runtime deactivate entry AND the
+/// interpreter's deferred B1 flush. Fires `on_detach` FIRST (the hook still reads
+/// the extension's components), then removes them, then drops the active record.
+/// The extension must be active (`error.ExtensionNotActive`). The §30.5 reject
+/// conflict policy makes the component set unambiguous — no provenance tracking.
+pub fn deactivateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
+    if (!world.hasEntityExtension(entity, name)) return error.ExtensionNotActive;
+    const ext = try openVerified(ext_bytes);
+
+    // `on_detach` before the components go away (the hook can still read them).
+    const on_detach_text: ?[]const u8 = if (ext.hookCount() > 0) ext.hook(0).on_detach else null;
+    try world.dispatchOnDetach(entity, name, on_detach_text);
+
+    // Remove the extension's declared components (mono-entity, like activate).
+    var ai: u32 = 0;
+    while (ai < ext.archetypeCount()) : (ai += 1) {
+        const arch = ext.archetype(ai);
+        if (arch.entity_count == 0) continue;
+        var c: usize = 0;
+        while (c < arch.component_count) : (c += 1) {
+            const sch = ext.schema(arch.schemaIndex(c));
+            const cid = world.componentId(sch.name) orelse return error.UnknownComponent;
+            if (world.componentBytes(entity, cid) != null) {
+                try world.removeComponentDynamic(gpa, entity, cid);
+            }
+        }
+    }
+
+    world.removeEntityExtension(gpa, entity, name);
+}
+
+/// M1.0.9 — runtime deactivation entry (direct-programmatic path): resolve the
+/// extension by name, then `deactivateExtension`. The Etch method goes through
+/// the interpreter's deferred queue instead (B1); this stays for direct callers.
+pub fn runtimeDeactivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, resolver: ExtensionResolver) !void {
+    const bytes = resolver.resolve(name) orelse return error.UnknownExtension;
+    try deactivateExtension(world, gpa, entity, name, bytes);
 }
 
 /// Load the resources block (E3) — the load-side mirror of M1.0.3's non-POD

@@ -53,6 +53,25 @@ pub const ParseResult = struct {
     }
 };
 
+/// Result of `parseStmtBlock` (M1.0.9 E1): a bare statement-run fragment parsed
+/// into its own `AstArena`. `body_start` / `body_len` index the parsed run in
+/// `ast.extra` using the same encoding rule / `fn` bodies use (a slice of raw
+/// `StmtId` values), so the interpreter walks it with the existing
+/// `execStmtRun`. Owns the arena and diagnostics exactly like `ParseResult`.
+pub const StmtBlockResult = struct {
+    ast: AstArena,
+    body_start: u32,
+    body_len: u32,
+    diagnostics: []Diagnostic,
+
+    /// Free the arena and every diagnostic plus the backing slice.
+    pub fn deinit(self: *StmtBlockResult, gpa: std.mem.Allocator) void {
+        for (self.diagnostics) |*d| d.deinit(gpa);
+        gpa.free(self.diagnostics);
+        self.ast.deinit(gpa);
+    }
+};
+
 /// Entry point for the Etch parser. Lexes `source`, builds the
 /// tabular SoA `AstArena`, and returns it together with an optional
 /// first-error `Diagnostic`. Caller owns the arena and must call
@@ -109,6 +128,52 @@ pub fn parse(gpa: std.mem.Allocator, source: []const u8) !ParseResult {
     const diags = try parser.diagnostics.toOwnedSlice(gpa);
     lexer.deinit(gpa);
     return .{ .ast = arena, .diagnostics = diags };
+}
+
+/// Parse a bare statement-run fragment (M1.0.9 E1) into a fresh `AstArena`.
+/// The fragment is the canonical text a cooked extension hook body carries
+/// (`descriptor.renderStmtRunAlloc`): zero or more statements separated by a
+/// `";"`, with NO enclosing braces. This is a new ENTRY POINT over the same
+/// `parseStmt` rule and `fn` bodies use — not a new statement grammar. The one
+/// fragment-specific rule is the separator: `renderStmtRunAlloc` joins
+/// statements with `"; "`, and the parser only ever consumes `;` inside a
+/// fill-array literal, so `parseStmtFragment` skips one optional `.semicolon`
+/// between statements. An empty fragment yields a zero-statement block with no
+/// diagnostics. Caller owns the arena + diagnostics (`StmtBlockResult.deinit`).
+pub fn parseStmtBlock(gpa: std.mem.Allocator, source: []const u8) !StmtBlockResult {
+    var lexer = Lexer.init(source);
+    errdefer lexer.deinit(gpa);
+    var arena = try AstArena.init(gpa);
+    errdefer arena.deinit(gpa);
+
+    const c0 = try lexer.next(gpa);
+    const c1 = try lexer.next(gpa);
+    const c2 = try lexer.next(gpa);
+    var parser: Parser = .{
+        .gpa = gpa,
+        .source = source,
+        .lexer = &lexer,
+        .arena = &arena,
+        .current = c0,
+        .next_tok = c1,
+        .next2_tok = c2,
+    };
+    errdefer {
+        for (parser.diagnostics.items) |*d| d.deinit(gpa);
+        parser.diagnostics.deinit(gpa);
+    }
+    defer parser.active_labels.deinit(gpa);
+
+    const body = try parser.parseStmtFragment();
+
+    const diags = try parser.diagnostics.toOwnedSlice(gpa);
+    lexer.deinit(gpa);
+    return .{
+        .ast = arena,
+        .body_start = body.start,
+        .body_len = body.len,
+        .diagnostics = diags,
+    };
 }
 
 /// Bucket the arena's source-ordered comment / doc-comment slabs onto the
@@ -5174,6 +5239,27 @@ pub const Parser = struct {
         return .{ .start = start, .len = @intCast(stmts.items.len) };
     }
 
+    /// Parse a brace-less statement run terminated by EOF (M1.0.9 E1, used by
+    /// `parseStmtBlock`). Like `parseStmtRun` but: (a) the run ends at `.eof`
+    /// (there is no closing `}`), and (b) a single `.semicolon` separator is
+    /// skipped after each statement — the cooked hook text
+    /// (`descriptor.renderStmtRunAlloc`) joins statements with `"; "`, whereas
+    /// rule / `fn` bodies are newline-delimited. The inner `;` of a fill-array
+    /// literal `[v; n]` is consumed during expression parsing, so only the
+    /// top-level statement separator is seen here.
+    fn parseStmtFragment(self: *Parser) ParseError!struct { start: u32, len: u32 } {
+        var stmts: std.ArrayListUnmanaged(u32) = .empty;
+        defer stmts.deinit(self.gpa);
+        while (self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            try stmts.append(self.gpa, (try self.parseStmt()).raw());
+            _ = try self.match(.semicolon);
+        }
+        const start: u32 = @intCast(self.arena.extra.items.len);
+        try self.arena.extra.appendSlice(self.gpa, stmts.items);
+        return .{ .start = start, .len = @intCast(stmts.items.len) };
+    }
+
     /// True when the current token starts a keyword-led statement that can
     /// never be a block's trailing value (`let` / `assert` / `for` / `while` /
     /// `break` / `continue` / `throw` / `try`, plus the `IDENT ":" loop`
@@ -9007,4 +9093,29 @@ test "parser recovers and a valid prefab after a broken construct survives (M0.8
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.ast.prefab_decls.items.len);
+}
+
+test "parseStmtBlock parses a bare statement run (M1.0.9 E1)" {
+    const gpa = std.testing.allocator;
+    // Exactly the shape `descriptor.renderStmtRunAlloc` emits for an extension
+    // hook body: statements joined by "; ", no enclosing braces. The emit body
+    // uses `field: expr` form — Etch struct-literal fields have no bare-name
+    // shorthand (`etch-grammar.md` §4.3 `field_init`), so the brief's spec-style
+    // `{ entity }` is written `{ source: entity }` here (same 2-statement shape).
+    var result = try parseStmtBlock(gpa, "entity.get_mut(Health).max += 50; emit ExtensionAttached { source: entity }");
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
+    try std.testing.expectEqual(@as(u32, 2), result.body_len);
+    const s0: NodeId = @bitCast(result.ast.extra.items[result.body_start + 0]);
+    const s1: NodeId = @bitCast(result.ast.extra.items[result.body_start + 1]);
+    try std.testing.expectEqual(ast_mod.StmtKind.assign_stmt, result.ast.stmtKind(s0));
+    try std.testing.expectEqual(ast_mod.StmtKind.emit_stmt, result.ast.stmtKind(s1));
+}
+
+test "parseStmtBlock on empty body yields a zero-statement block (M1.0.9 E1)" {
+    const gpa = std.testing.allocator;
+    var result = try parseStmtBlock(gpa, "");
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(u32, 0), result.body_len);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.len);
 }

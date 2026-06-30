@@ -5285,6 +5285,22 @@ pub const TypeChecker = struct {
         return ResolvedType.unknown;
     }
 
+    /// M1.0.9 B2 — validate the single string argument of an `Entity` extension
+    /// method (`activate_extension` / `deactivate_extension` / `has_extension`).
+    /// A non-builtin / `unknown` arg type is left alone (no cascading error), the
+    /// same shape as the collection-method arg checks above.
+    fn checkExtensionNameArg(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, method_slice: []const u8, ctx_opt: ?*RuleCtx) TypeError!void {
+        if (mc.args_len != 1) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "Entity method '{s}' takes exactly one (string) argument", .{method_slice});
+            return;
+        }
+        const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+        const arg_t = try self.synthExprE(arg, ctx_opt);
+        if (arg_t == .builtin and arg_t.builtin != .string_) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "Entity method '{s}' expects a string extension name", .{method_slice});
+        }
+    }
+
     /// Dispatch an instance method call against an already-typed receiver
     /// (`etch-resolver-types.md §5.5` strict order: inherent → trait →
     /// builtin → service). Split from `synthMethodCall` so the optional
@@ -5420,6 +5436,27 @@ pub const TypeChecker = struct {
             }
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "set method '{s}' is not in the M0.8 minimal subset (stdlib activation is Phase 1+)", .{method_slice});
             return ResolvedType.unknown;
+        }
+
+        // M1.0.9 B2 — builtin extension methods on an `Entity` receiver, checked
+        // BEFORE the trait-method resolution below (these are interpreter builtins,
+        // not user traits; any other method on an Entity falls through to the
+        // trait lookup). `activate_extension`/`deactivate_extension` are
+        // statement-use (`unknown` return, like `array.push`); `has_extension`
+        // → bool; `active_extensions` → `[string]`.
+        if (recv_t == .builtin and recv_t.builtin == .entity) {
+            if (std.mem.eql(u8, method_slice, "activate_extension") or std.mem.eql(u8, method_slice, "deactivate_extension")) {
+                try self.checkExtensionNameArg(id, mc, method_slice, ctx_opt);
+                return ResolvedType.unknown;
+            }
+            if (std.mem.eql(u8, method_slice, "has_extension")) {
+                try self.checkExtensionNameArg(id, mc, method_slice, ctx_opt);
+                return ResolvedType{ .builtin = .bool_ };
+            }
+            if (std.mem.eql(u8, method_slice, "active_extensions")) {
+                if (mc.args_len != 0) try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "Entity method 'active_extensions' takes no arguments", .{});
+                return ResolvedType{ .array_dyn = .string_ };
+            }
         }
 
         const type_name: StringId = typeNameOfResolved(recv_t) orelse blk: {
@@ -9058,4 +9095,32 @@ test "ability: canonical ability checks clean, structural codes fire (M0.8 E4)" 
     );
     defer gated.deinit(gpa);
     try std.testing.expect(gated.diagnostics.items.len > 0);
+}
+
+test "extension methods type-check on an Entity receiver (M1.0.9 B2)" {
+    const gpa = std.testing.allocator;
+    // A real (NOT checker-skipped) rule body calling all four extension methods
+    // must type-check clean — no `type_mismatch` "no method on an Entity".
+    var ok = try parseAndCheck(gpa,
+        \\component Health { current: i32 = 100, max: i32 = 100 }
+        \\rule probe(entity: Entity) when entity has Health {
+        \\  entity.activate_extension("Combat")
+        \\  entity.deactivate_extension("Combat")
+        \\  let h = entity.has_extension("Combat")
+        \\  let xs = entity.active_extensions()
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // Wrong arg count / type is still rejected.
+    var bad = try parseAndCheck(gpa,
+        \\component Health { current: i32 = 100 }
+        \\rule probe(entity: Entity) when entity has Health {
+        \\  entity.activate_extension(42)
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expect(bad.diagnostics.items.len > 0);
 }
