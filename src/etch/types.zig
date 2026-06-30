@@ -7765,6 +7765,31 @@ test "structural component-literal mistyped field is rejected (M1.0.10 E2 comple
     try expectAnyCode(bad.diagnostics.items, .structural_component_field_type_invalid);
 }
 
+test "structural mutation of a non-component type is rejected (M1.0.10 E3 carry-over)" {
+    const gpa = std.testing.allocator;
+    // A resource (not a component) given to `entity.add(...)` → E0200 (the
+    // "not a declared component" path; scene/prefab collapse the same way).
+    var a = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\resource Conf { v: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  entity.add(Conf { v: 1 })
+        \\}
+    );
+    defer a.deinit(gpa);
+    try expectAnyCode(a.diagnostics.items, .type_mismatch);
+    // Same for `entity.remove(T)` on a non-component type.
+    var rm = try parseAndCheck(gpa,
+        \\component Marker { x: i32 = 0 }
+        \\resource Conf { v: i32 = 0 }
+        \\rule r(entity: Entity) when entity has Marker {
+        \\  entity.remove(Conf)
+        \\}
+    );
+    defer rm.deinit(gpa);
+    try expectAnyCode(rm.diagnostics.items, .type_mismatch);
+}
+
 test "type-checker validates tag mutations (M0.8 E3)" {
     const gpa = std.testing.allocator;
 
