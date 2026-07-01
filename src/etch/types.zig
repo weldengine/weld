@@ -307,6 +307,13 @@ pub const TypeChecker = struct {
     /// E2), used to type a `return expr` body statement against. `null` outside
     /// a body; `.unit` for a void fn (no `-> type`).
     current_fn_return: ?ResolvedType = null,
+    /// The `await_expr` node that is the statement-head `await` of the statement
+    /// currently being checked (M1.0.11 E3), or `NodeId.none`. Set at the top of
+    /// `checkStmt` for the allowed positions (expr-stmt / `let` init / simple
+    /// assignment RHS / `return` operand); `synthExprE` flags any OTHER
+    /// `await_expr` it visits as E0904 `AwaitNotStatementHead` (a sub-expression
+    /// `await` — a Phase-1 tree-walker restriction; §9.12).
+    stmt_head_await: NodeId = NodeId.none,
     /// Merged global tag table (M0.8 E3, `etch-validation-ecs.md` §5.2), built
     /// between pass 1 and pass 2 from every `tags { ... }` block. `null` until
     /// `buildTags` runs. Pass 2 (tag-op when-conditions / `tag_path` operands,
@@ -4017,6 +4024,31 @@ pub const TypeChecker = struct {
     fn checkStmt(self: *TypeChecker, ctx: *RuleCtx, stmt_id: NodeId) !void {
         const kind = self.arena.stmtKind(stmt_id);
         const data = self.arena.stmtData(stmt_id);
+        // M1.0.11 E3 — mark this statement's head `await` (if any) as allowed:
+        // it is the full RHS of an expr-stmt / `let` init / simple assignment /
+        // `return`. Any OTHER `await_expr` visited while checking this statement
+        // is a sub-expression and is flagged E0904 in `synthExprE`. Reset first
+        // (a non-head statement carries no allowed await).
+        self.stmt_head_await = NodeId.none;
+        switch (kind) {
+            .expr_stmt => {
+                const e: NodeId = @bitCast(data);
+                if (self.arena.exprKind(e) == .await_expr) self.stmt_head_await = e;
+            },
+            .let_stmt => {
+                const v = self.arena.let_stmts.items[data].value;
+                if (self.arena.exprKind(v) == .await_expr) self.stmt_head_await = v;
+            },
+            .assign_stmt => {
+                const a = self.arena.assign_stmts.items[data];
+                if (a.op == .assign and self.arena.exprKind(a.value) == .await_expr) self.stmt_head_await = a.value;
+            },
+            .return_stmt => {
+                const v: NodeId = @bitCast(data);
+                if (!v.isNone() and self.arena.exprKind(v) == .await_expr) self.stmt_head_await = v;
+            },
+            else => {},
+        }
         switch (kind) {
             .let_stmt => {
                 const let = self.arena.let_stmts.items[data];
@@ -4552,13 +4584,18 @@ pub const TypeChecker = struct {
             // no body handle (§4.5). `checkStmt` handles the legal statement
             // position before this arm is reached.
             .spawn_struct => return try self.checkSpawnStruct(id, data, ctx_opt, true),
-            // M1.0.11 E2 — type an `await`. The `future` form (`await f()`) carries
-            // the awaited call's declared return type, so `let x = await f()` binds
-            // the right type (and the inner call is type-checked here — arg count,
-            // etc.). The wake-condition forms (`wait` / `wait_unscaled` /
-            // `entity_event` / `global_event`) produce no value. Function coloring
-            // (E0901) and placement (E0904) are added in E4 / E3.
+            // M1.0.11 E2/E3 — type an `await`. The `future` form (`await f()`)
+            // carries the awaited call's declared return type, so `let x = await f()`
+            // binds the right type (and the inner call is type-checked here — arg
+            // count, etc.). The wake-condition forms (`wait` / `wait_unscaled` /
+            // `entity_event` / `global_event`) produce no value. E3 placement
+            // (E0904): an `await` that is not this statement's head await is a
+            // sub-expression (`some(await f())`, `a + await b`) — rejected; hoist
+            // it into a `let`. Function coloring (E0901) is added in E4.
             .await_expr => {
+                if (@as(u32, @bitCast(id)) != @as(u32, @bitCast(self.stmt_head_await))) {
+                    try self.emit(.await_not_statement_head, .error_, self.arena.exprSpan(id), "`await` must be the full right-hand expression of a statement — hoist it into a `let` (Phase-1 restriction)", .{});
+                }
                 const aw = self.arena.awaitExpr(id);
                 if (aw.target_kind == .future) return try self.synthExprE(aw.arg_expr, ctx_opt);
                 return ResolvedType.unknown;
@@ -9375,4 +9412,46 @@ test "extension methods type-check on an Entity receiver (M1.0.9 B2)" {
     );
     defer bad.deinit(gpa);
     try std.testing.expect(bad.diagnostics.items.len > 0);
+}
+
+test "E0904 fires on a sub-expression await, not on the statement-head forms (M1.0.11 E3)" {
+    const gpa = std.testing.allocator;
+    // The four statement-head positions — expr-stmt, `let` init, simple assign
+    // RHS, `return` operand — are the allowed placement: no E0904.
+    var head = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async fn f() -> int {
+        \\  await wait(0.02s)
+        \\  return 1
+        \\}
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let mut x = await f()
+        \\  x = await f()
+        \\  await f()
+        \\  return await f()
+        \\}
+    );
+    defer head.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), head.parse_diags.len);
+    try expectNoCode(head.diagnostics.items, .await_not_statement_head);
+
+    // A sub-expression `await` (here, an argument of `some(...)`) is not the full
+    // RHS of its statement — E0904 (hoist it into a `let`).
+    var sub = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async fn f() -> int {
+        \\  await wait(0.02s)
+        \\  return 1
+        \\}
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  return some(await f())
+        \\}
+    );
+    defer sub.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), sub.parse_diags.len);
+    try expectAnyCode(sub.diagnostics.items, .await_not_statement_head);
 }

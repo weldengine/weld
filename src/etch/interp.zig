@@ -513,13 +513,29 @@ const Control = enum { none, break_, continue_ };
 /// What an enclosing loop should do once a control signal has surfaced.
 const LoopAction = enum { again, stop, propagate };
 
+/// Phase-1 fixed-timestep tick rate (`etch-reference-part1.md §9.12`): `await
+/// wait(d)` converts a `Duration` to `async_tick` counts as `round(seconds *
+/// 60)` — the 1/60 frame convention. M1.0.13 replaces this with scaled game time
+/// WITHOUT changing the `wait` signature: at `time_scale = 1` and fixed `dt =
+/// 1/60`, the behavior is identical.
+const async_fixed_dt_hz: f64 = 60.0;
+
+/// Parse the seconds of a `Duration` literal lexeme (`"1.5s"` → 1.5) — the
+/// minimal Duration→seconds path `await wait` needs (M1.0.11 E3). `null` if the
+/// lexeme is malformed. General `Duration` arithmetic stays out of scope.
+fn durationLiteralSeconds(text: []const u8) ?f64 {
+    if (text.len < 2 or text[text.len - 1] != 's') return null;
+    return std.fmt.parseFloat(f64, text[0 .. text.len - 1]) catch null;
+}
+
 /// The condition that resumes a suspended `async rule` (M0.8 E3 sub-slice B).
 /// The tree-walker is its own runtime (`etch-reference-part1.md §9`): an
 /// `await` suspends the rule as a task-record, polled each tick in `stepOnce`.
 const WakeCond = union(enum) {
-    /// Resume once `async_tick` reaches this value. `await wait(N)` reached at
-    /// tick T sets it to T + N — M0.8 counts `wait` in TICKS (no wall-clock;
-    /// `wait_unscaled` / duration waits fail loud, out of E3 — Guy's ruling).
+    /// Resume once `async_tick` reaches this value. `await wait(d)` reached at
+    /// tick T sets it to T + `round(seconds(d) * 60)` — the Phase-1 fixed-timestep
+    /// conversion (M1.0.11 E3, `async_fixed_dt_hz`). `wait_unscaled` (M1.0.13)
+    /// stays fail-loud.
     wait_until: u64,
     /// Resume once an event of this type is present in the per-tick EventStore
     /// (M0.8 E3 sub-slice B — `await global_event(T)`). The producer must run
@@ -821,7 +837,8 @@ pub const Interpreter = struct {
     /// byte-identical to the pre-B runtime (no `async_tick` churn, no slots).
     has_async: bool = false,
     /// Logical async clock — incremented once per `stepOnce` when `has_async`.
-    /// `await wait(N)` resolves against it (N is a tick count, not seconds).
+    /// `await wait(d)` resolves against it: a `Duration` is converted to a tick
+    /// count via the fixed 1/60 timestep (`async_fixed_dt_hz`, M1.0.11 E3).
     async_tick: u64 = 0,
     /// Dynamic pool of suspendable tasks (M1.0.11 E1) — the growable replacement
     /// for the M0.8 per-rule `AsyncSlot` slice. A task is appended on first spawn
@@ -1489,7 +1506,7 @@ pub const Interpreter = struct {
         // advances the tick (byte-identical to the pre-E3 runtime).
         if (self.has_changed) world.beginFrame();
         // Advance the logical async clock once per tick when async rules are
-        // present (M0.8 E3 sub-slice B). `await wait(N)` resolves against it.
+        // present (M0.8 E3 sub-slice B). `await wait(d)` resolves against it.
         if (self.has_async) self.async_tick += 1;
         // Events have a per-tick lifetime (`Lifetime.tick`): clear the previous
         // tick's queue before running this tick's rules (M0.8 E3).
@@ -2183,7 +2200,7 @@ pub const Interpreter = struct {
             switch (aw.target_kind) {
                 .future => return try self.beginAsyncCall(world, task, scope, cursor, aw.arg_expr, site.ret),
                 .wait, .global_event => {
-                    task.wake = try self.evalAwaitTarget(world, scope, site.await_id);
+                    task.wake = try self.evalAwaitTarget(site.await_id);
                     cursor.* += 1;
                     task.pending_bind = site.ret;
                     return .suspended;
@@ -2584,22 +2601,24 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Resolve an `await` target to a `WakeCond` (M0.8 E3 sub-slice B). `wait(N)`
-    /// counts N TICKS from now; `global_event(T)` waits for an event of type T.
-    /// `wait_unscaled` (needs a real clock), `entity_event` (no entity-
-    /// association in the global EventStore), and `future` (T2) fail loud —
-    /// deferred, flagged for Review E3. The interpreter is the reference.
-    fn evalAwaitTarget(self: *Interpreter, world: *World, locals: *Locals, await_id: NodeId) StmtError!WakeCond {
+    /// Resolve a wake-condition `await` target to a `WakeCond` (M1.0.11 E3). Only
+    /// `wait` / `global_event` reach here (`future` is handled by `beginAsyncCall`
+    /// upstream). `wait` takes a `Duration` (final API, §9.4): a Duration LITERAL
+    /// → seconds → `async_tick` counts via the fixed 1/60 timestep
+    /// (`async_fixed_dt_hz`). M1.0.13 swaps this for scaled game time WITHOUT
+    /// changing the signature (at `time_scale = 1`, fixed `dt = 1/60`, identical).
+    /// A non-literal Duration (const / arithmetic) is out of scope → fail loud.
+    /// `global_event(T)` waits for an event of type `T`. `wait_unscaled` (M1.0.13)
+    /// / `entity_event` (M1.0.14) fail loud (defensive; filtered upstream).
+    fn evalAwaitTarget(self: *Interpreter, await_id: NodeId) StmtError!WakeCond {
         const aw = self.ast.awaitExpr(await_id);
         switch (aw.target_kind) {
             .wait => {
-                const v = try self.evalExpr(world, locals, aw.arg_expr);
-                const n: i64 = switch (v) {
-                    .int_ => |x| x,
-                    else => return error.RuntimeFailure,
-                };
-                if (n < 0) return error.RuntimeFailure;
-                return .{ .wait_until = self.async_tick + @as(u64, @intCast(n)) };
+                if (self.ast.exprKind(aw.arg_expr) != .duration_lit) return error.RuntimeFailure;
+                const secs = durationLiteralSeconds(self.ast.strings.slice(self.ast.exprData(aw.arg_expr))) orelse return error.RuntimeFailure;
+                if (secs < 0) return error.RuntimeFailure;
+                const ticks: u64 = @intFromFloat(@round(secs * async_fixed_dt_hz));
+                return .{ .wait_until = self.async_tick + ticks };
             },
             .global_event => return .{ .global_event = aw.event_type },
             .wait_unscaled, .entity_event, .future => return error.RuntimeFailure,
@@ -8116,15 +8135,15 @@ test "runProgram changed on a freshly-spawned entity uses the spawn tick (M1.0.1
     try std.testing.expectEqual(@as(Tick, 1), readChangedTick(&world, health_id, e));
 }
 
-test "async rule suspends at await wait(N) and resumes N ticks later (M0.8 E3 sub-slice B)" {
+test "async rule suspends at await wait(<d>s) and resumes at the equivalent tick (M1.0.11 E3)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
 
     // The §9.2 shape: a parameterless async rule sets a resource field, suspends
-    // for 2 ticks (`await wait(2)`), then sets it again. The tree-walker is its
-    // own runtime — it suspends at the await and resumes on wake, no state
-    // machine (codegen is Phase 2). The interpreter is the reference.
+    // on a Duration `await wait(0.04s)` — 0.04 s × 60 = 2 ticks at the Phase-1
+    // fixed 1/60 timestep — then sets it again. The tree-walker is its own
+    // runtime; it suspends at the await and resumes on wake (codegen is Phase 2).
     const source =
         \\resource Out { n: int = 0 }
         \\async rule seq()
@@ -8132,7 +8151,7 @@ test "async rule suspends at await wait(N) and resumes N ticks later (M0.8 E3 su
         \\{
         \\  let a = get_mut(Out)
         \\  a.n = 1
-        \\  await wait(2)
+        \\  await wait(0.04s)
         \\  let b = get_mut(Out)
         \\  b.n = 2
         \\}
@@ -8154,7 +8173,7 @@ test "async rule suspends at await wait(N) and resumes N ticks later (M0.8 E3 su
     defer interp.deinit();
     const out_id = world.registry.idOf("Out").?;
 
-    // tick 1: spawn → n=1, suspend at `await wait(2)` (wake at async_tick 3).
+    // tick 1: spawn → n=1, suspend at `await wait(0.04s)` (wake at async_tick 3).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
     // tick 2: still suspended (async_tick 2 < 3) — n unchanged.
@@ -8246,7 +8265,7 @@ test "async rule suspends at a statement-head await inside an if body and resume
         \\  a.n = 1
         \\  if a.n == 1 {
         \\    emit Beat { }
-        \\    await wait(2)
+        \\    await wait(0.04s)
         \\    let b = get_mut(Out)
         \\    b.n = 2
         \\  }
@@ -8315,7 +8334,7 @@ test "async rule suspends at a statement-head await inside a loop body and resum
         \\    if o.n == 3 {
         \\      break
         \\    }
-        \\    await wait(1)
+        \\    await wait(0.02s)
         \\  }
         \\}
     ;
@@ -8368,7 +8387,7 @@ test "async rule suspends at a statement-head await inside a for body and resume
         \\  for i in 0..3 {
         \\    let o = get_mut(Out)
         \\    o.n += i + 1
-        \\    await wait(1)
+        \\    await wait(0.02s)
         \\  }
         \\}
     ;
@@ -8422,7 +8441,7 @@ test "async rule suspends inside a try body and a post-resume throw routes to th
         \\  try {
         \\    let o = get_mut(Out)
         \\    o.n = 1
-        \\    await wait(1)
+        \\    await wait(0.02s)
         \\    throw Error { message: "boom", code: ErrorCode.io_fail }
         \\  } catch e {
         \\    let o2 = get_mut(Out)
@@ -8472,7 +8491,7 @@ test "async fn called via await runs to completion across ticks and its return v
     const source =
         \\resource Out { n: int = 0 }
         \\async fn compute() -> int {
-        \\  await wait(1)
+        \\  await wait(0.02s)
         \\  return 42
         \\}
         \\async rule caller()
@@ -8499,7 +8518,7 @@ test "async fn called via await runs to completion across ticks and its return v
     defer interp.deinit();
     const out_id = world.registry.idOf("Out").?;
 
-    // tick 1: caller enters `compute`, which suspends at its `await wait(1)`
+    // tick 1: caller enters `compute`, which suspends at its `await wait(0.02s)`
     // (the whole task suspends; the caller has not bound x yet).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
@@ -8519,7 +8538,7 @@ test "async method called via await inlines with its own scope and locals surviv
     defer world.deinit(gpa);
 
     // `bumped` is an `async method`: it reads `self.base` into a local, suspends
-    // at `await wait(1)`, and returns the local + 1 on resume. The call frame
+    // at `await wait(0.02s)`, and returns the local + 1 on resume. The call frame
     // carries `self` + the local in its OWN heap-boxed scope, retained across the
     // suspension (no collision with the caller's scope). `n` goes 0 → 11.
     const source =
@@ -8527,7 +8546,7 @@ test "async method called via await inlines with its own scope and locals surviv
         \\impl Counter {
         \\  async fn bumped(self) -> int {
         \\    let b = self.base
-        \\    await wait(1)
+        \\    await wait(0.02s)
         \\    return b + 1
         \\  }
         \\}
@@ -8558,7 +8577,7 @@ test "async method called via await inlines with its own scope and locals surviv
     const out_id = world.registry.idOf("Out").?;
 
     // tick 1: caller builds `c`, enters `c.bumped()`, which reads self.base into a
-    // local and suspends at its `await wait(1)`.
+    // local and suspends at its `await wait(0.02s)`.
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
     // tick 2: `bumped` resumes (its local `b = 10` survived), returns 11, which
@@ -8569,6 +8588,110 @@ test "async method called via await inlines with its own scope and locals surviv
     // tick 3: task done — n stays 11.
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 11), readResourceInt(&world, out_id));
+}
+
+test "await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60) (M1.0.11 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // 1.0 s at the Phase-1 fixed 1/60 timestep = 60 ticks. Spawned at async_tick
+    // 1, the task wakes at tick 61 — not before. This pins the Duration→tick
+    // conversion (M1.0.13 will swap the clock without changing the result at
+    // time_scale = 1).
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule sec()
+        \\  when resource Out
+        \\{
+        \\  let o = get_mut(Out)
+        \\  o.n = 1
+        \\  await wait(1.0s)
+        \\  let o2 = get_mut(Out)
+        \\  o2.n = 2
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: n=1, suspend (wake at async_tick 61).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // through tick 60: still suspended (60 < 61).
+    _ = try interp.runFor(&world, 59);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // tick 61: wake fires (61 >= 61) → n=2.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+}
+
+/// Compile + run `source` for 2 ticks and return the runtime-error count, after
+/// asserting it parses and type-checks clean (M1.0.11 E3 fail-loud partition
+/// helper). The async targets NOT owned by this milestone must surface a typed
+/// `RuntimeFailure` (counted), never crash or silently no-op.
+fn asyncFailLoudCount(gpa: std.mem.Allocator, source: []const u8) !u64 {
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 2);
+    return report.runtime_errors;
+}
+
+test "await wait_unscaled / entity_event / handle-await still fail loud (partition boundary intact, M1.0.11 E3)" {
+    const gpa = std.testing.allocator;
+    // `wait_unscaled` — needs the scaled/unscaled time subsystem (M1.0.13).
+    try std.testing.expect((try asyncFailLoudCount(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  await wait_unscaled(1.0s)
+        \\}
+    )) >= 1);
+    // `entity_event` — needs entity-scoped events (M1.0.14).
+    try std.testing.expect((try asyncFailLoudCount(gpa,
+        \\event Ev { }
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  await entity_event(get(Out), Ev)
+        \\}
+    )) >= 1);
+    // handle-await (`await` on a stored non-call value / TaskHandle) — M1.0.12.
+    try std.testing.expect((try asyncFailLoudCount(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let h = 5
+        \\  await h
+        \\}
+    )) >= 1);
 }
 
 test "runProgram Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)" {
@@ -8751,7 +8874,7 @@ test "async runtime failure surfaces typed last_error (D-S4-runtime-report)" {
         \\  let x = 1 / d
         \\  let r = get_mut(Out)
         \\  r.n = x
-        \\  await wait(1)
+        \\  await wait(0.02s)
         \\}
     ;
 

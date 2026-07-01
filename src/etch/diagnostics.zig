@@ -360,6 +360,9 @@ pub const DiagnosticCode = enum {
     prefab_component_redefined, // M0.8 E7 — E1796 PrefabComponentRedefined (RESERVED: variant/base component-shape merge is M0.9 runtime)
     prefab_remove_base_component, // M0.8 E7 — W1790 PrefabRemoveBaseComponent (RESERVED: no `remove` syntax in the §24.1 grammar)
 
+    // ── async / effects (E09xx, M1.0.11 — etch-resolver-types.md §9.2) ──
+    await_not_statement_head, // M1.0.11 E3 — E0904 AwaitNotStatementHead (Phase-1 tree-walker: `await` must be a statement's full RHS)
+
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
@@ -545,6 +548,7 @@ pub const DiagnosticCode = enum {
             .prefab_component_field_type_invalid => "E1795",
             .prefab_component_redefined => "E1796",
             .prefab_remove_base_component => "W1790",
+            .await_not_statement_head => "E0904",
         };
     }
 
@@ -733,6 +737,7 @@ pub const DiagnosticCode = enum {
             .prefab_component_field_type_invalid => "PrefabComponentFieldTypeInvalid",
             .prefab_component_redefined => "PrefabComponentRedefined",
             .prefab_remove_base_component => "PrefabRemoveBaseComponent",
+            .await_not_statement_head => "AwaitNotStatementHead",
         };
     }
 };
