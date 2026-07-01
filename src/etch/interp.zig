@@ -513,13 +513,59 @@ const Control = enum { none, break_, continue_ };
 /// What an enclosing loop should do once a control signal has surfaced.
 const LoopAction = enum { again, stop, propagate };
 
+/// Phase-1 fixed-timestep tick rate (`etch-reference-part1.md §9.12`): `await
+/// wait(d)` converts a `Duration` to `async_tick` counts as `round(seconds *
+/// 60)` — the 1/60 frame convention. M1.0.13 replaces this with scaled game time
+/// WITHOUT changing the `wait` signature: at `time_scale = 1` and fixed `dt =
+/// 1/60`, the behavior is identical.
+const async_fixed_dt_hz: f64 = 60.0;
+
+/// Parse the seconds of a `Duration` literal lexeme (`"1.5s"` → 1.5) — the
+/// minimal Duration→seconds path `await wait` needs (M1.0.11 E3). `null` if the
+/// lexeme is malformed. General `Duration` arithmetic stays out of scope.
+fn durationLiteralSeconds(text: []const u8) ?f64 {
+    if (text.len < 2 or text[text.len - 1] != 's') return null;
+    return std.fmt.parseFloat(f64, text[0 .. text.len - 1]) catch null;
+}
+
+// ─── Async suspension core (M1.0.11, `etch-reference-part1.md §9.12`) ─────────
+//
+// Phase 1 is the tree-walker; it reproduces the §9 observable async semantics
+// WITHOUT the Phase-2 compiled state machine (`etch-bytecode.md §9`). A suspended
+// task is a heap record — an `AsyncTask` in the `Interpreter.async_tasks` pool —
+// carrying a RESUME FRAME-STACK: a stack of `AsyncFrame`s (innermost last), one
+// per statement block on the call/control-flow path. `driveTask`/`driveLoop` is an
+// ITERATIVE machine over that stack (no fibers, no per-task OS thread, §9.1):
+//
+//   - A statement-head `await` suspends the whole task at ANY depth: `driveLoop`
+//     returns, the frame-stack persists, and resume re-enters the innermost frame
+//     at its cursor — a prefix statement is NEVER re-run, so `emit` and structural
+//     mutations don't double-fire. `wait(Duration)` resolves against `async_tick`
+//     via the fixed 1/60 timestep (`async_fixed_dt_hz`); `global_event` against the
+//     per-tick event store; the direct-call `future` (`await f()`) is frame
+//     inlining (below).
+//   - Frame kinds cover every EBNF v0.6 statement block (C1.6): `run` (rule/`fn`
+//     body, `if` branch, `match` arm, plain block), `loop_`, `while_`, `for_`,
+//     `try_` (a `throw` after a resume routes to the enclosing `try_` — the
+//     handler is re-established across the suspension), and `call` (an inlined
+//     `async fn`/`async method` body — `await f()` pushes `f`'s body + a heap-boxed
+//     scope + a `RetTarget`; `f`'s own `await` suspends the whole task; `f`'s
+//     `return` resolves at the caller's await site).
+//   - Placement (Phase-1, type-checker `E0904`): `await` must be a statement's
+//     full RHS on the frame-driven spine; a sub-expression `await`, or one in a
+//     synchronously-evaluated VALUE block, is rejected. Coloring (§9.3, `E0901`):
+//     an `await` / async call in a non-async `fn`/`rule` is rejected.
+//   - A sync-only program allocates no task, keeps `async_tick` at 0, and is
+//     byte-identical to the pre-async runtime (by construction).
+
 /// The condition that resumes a suspended `async rule` (M0.8 E3 sub-slice B).
 /// The tree-walker is its own runtime (`etch-reference-part1.md §9`): an
 /// `await` suspends the rule as a task-record, polled each tick in `stepOnce`.
 const WakeCond = union(enum) {
-    /// Resume once `async_tick` reaches this value. `await wait(N)` reached at
-    /// tick T sets it to T + N — M0.8 counts `wait` in TICKS (no wall-clock;
-    /// `wait_unscaled` / duration waits fail loud, out of E3 — Guy's ruling).
+    /// Resume once `async_tick` reaches this value. `await wait(d)` reached at
+    /// tick T sets it to T + `round(seconds(d) * 60)` — the Phase-1 fixed-timestep
+    /// conversion (M1.0.11 E3, `async_fixed_dt_hz`). `wait_unscaled` (M1.0.13)
+    /// stays fail-loud.
     wait_until: u64,
     /// Resume once an event of this type is present in the per-tick EventStore
     /// (M0.8 E3 sub-slice B — `await global_event(T)`). The producer must run
@@ -527,25 +573,184 @@ const WakeCond = union(enum) {
     global_event: StringId,
 };
 
-/// Per-`async rule` suspend/resume state (M0.8 E3 sub-slice B — the Option-A
-/// task-record, validated by Guy). Held in a slice parallel to `rule_descs`;
-/// only `is_async` rules use their slot. This is the interpreter-level analogue
-/// of the async state struct (`etch-memory-model.md §5.7`) — at the tree-walk
-/// level, no compiled state machine (that is Phase-2 codegen).
-const AsyncSlot = struct {
-    state: enum { unspawned, suspended, done } = .unspawned,
-    /// Next top-level body-statement index to run on resume. `await` is bounded
-    /// to a top-level statement (the M0.8 cursor model); nested/value await
-    /// fails loud (the Phase-2 state machine covers the general case).
-    cursor: u32 = 0,
-    wake: WakeCond = .{ .wait_until = 0 },
-    /// The task's locals, retained across suspension. POD-only in M0.8 (heap
-    /// locals surviving a suspend are out of scope — flagged for Review E3).
-    locals: Locals = .{},
+/// One frame of an `AsyncTask`'s resume stack (M1.0.11 E1). The tree-walker is
+/// its own runtime (`etch-reference-part1.md §9.12`): rather than a compiled
+/// state machine (Phase-2 bytecode), a suspended task is a heap record holding a
+/// STACK of frames — each a `(block, statement cursor)` position plus the control
+/// shape needed to resume it. On `await` the whole stack is retained; `driveTask`
+/// resumes by re-entering the innermost frame at its cursor and NEVER re-running
+/// an already-executed statement (no double `emit`). The frame kinds mirror the
+/// sync executor's control flow, ONE per statement block that can hold statements
+/// — a linear `run` (rule body / `if` branch / `match` arm / plain `block` / — E2
+/// — an inlined `async fn` body), a `loop`, a `while`, a `for`, and a `try`/`catch`
+/// — so a statement-head `await` can suspend inside ANY of them. This generalizes
+/// the M0.8 single-top-level-cursor `AsyncSlot` to nested blocks (the stack reaches
+/// depth > 1). The frame set is COMPLETE for EBNF v0.6's statement blocks (C1.6):
+/// no body kind falls through to a fail-loud await. `call` (M1.0.11 E2) is the
+/// inlined body of an `async fn`/`async method` reached by a direct `await f()`; it
+/// OWNS a heap-boxed scope (freed on pop — see `deinitFrame`), so teardown is not a
+/// bare `frames.deinit`. The other frame kinds are pure indices.
+const AsyncFrame = union(enum) {
+    run: RunFrame,
+    loop_: LoopFrame,
+    while_: WhileFrame,
+    for_: ForFrame,
+    try_: TryFrame,
+    call: CallFrame,
+};
 
-    fn deinit(self: *AsyncSlot, gpa: std.mem.Allocator) void {
+/// A linear statement run: execute `block[cursor .. block_len]`, then (if any)
+/// evaluate the trailing `block_expr` value for effect, then pop. Backs the rule
+/// body, an `if` branch, a `match` arm block, and a plain `{ }` block.
+const RunFrame = struct {
+    block_start: u32,
+    block_len: u32,
+    cursor: u32 = 0,
+    /// Trailing `block_expr` value expression, evaluated for effect on pop
+    /// (`null` for a rule body or a value-less block). Statement-position blocks
+    /// discard the value, but a side-effecting trailing expr must still run.
+    value_expr: ?NodeId = null,
+};
+
+/// `loop { body }`: run the body, resetting the cursor to 0 at the end so it
+/// repeats; a `break`/`continue` targeting `label` (or unlabeled) is consumed by
+/// `unwindControl`.
+const LoopFrame = struct {
+    block_start: u32,
+    block_len: u32,
+    cursor: u32 = 0,
+    label: StringId = 0,
+};
+
+/// `while [let x =] cond { body }`: at the top of each iteration (`in_iter =
+/// false`) re-evaluate the condition; enter the body (`in_iter = true`) while it
+/// holds, and drop back to the condition when the body run completes. `while`
+/// carries no loop label (mirrors the sync executor's `handleLoopControl(0)`).
+const WhileFrame = struct {
+    while_id: NodeId,
+    cursor: u32 = 0,
+    in_iter: bool = false,
+};
+
+/// The iterator state of a `for` frame, persisted across a suspension. A `range`
+/// is fully self-contained (no heap) → sound across any suspend. An `array`/`map`
+/// holds a collection-store handle + the once-snapshotted length + the current
+/// index; the referenced collection lives in the rule-arena store, so a heap
+/// iterable surviving a suspend shares the M0.8 "POD-only across a suspend" caveat
+/// (a store reset by an intervening rule frees it). `forAdvance` bounds-checks the
+/// handle and fails loud (a typed `RuntimeFailure`, never an OOB crash) rather than
+/// dereference a reset store. The common `for i in 0..N` (range) is unconditionally
+/// sound.
+const ForIter = union(enum) {
+    range: struct { next: i64, end: i64, inclusive: bool },
+    array: struct { handle: u32, len: usize, idx: usize },
+    map: struct { handle: u32, len: usize, idx: usize },
+};
+
+/// `for v [, k] in iter { body }`: at the top of each iteration (`in_iter =
+/// false`) advance the iterator and bind the loop variable(s); run the body while
+/// elements remain, dropping back to the iterator when the body run completes. The
+/// iterator position lives in `iter`, persisted across suspension so a body
+/// `await` resumes at the same element. `for` carries no loop label (mirrors the
+/// sync executor's `handleLoopControl(0)`).
+const ForFrame = struct {
+    for_id: NodeId,
+    iter: ForIter,
+    cursor: u32 = 0,
+    in_iter: bool = false,
+};
+
+/// `try { body } catch e { handler }`: drives the `try` body (`in_catch = false`);
+/// a `throw` reaching this frame (possibly after a suspension inside the body —
+/// the handler is re-established across the suspend) switches it to the `catch`
+/// body (`in_catch = true`, the caught value bound to `catch_name`). Mirrors the
+/// sync `try_catch_stmt` arm of `execStmt`.
+const TryFrame = struct {
+    try_start: u32,
+    try_len: u32,
+    catch_start: u32,
+    catch_len: u32,
+    catch_name: StringId,
+    cursor: u32 = 0,
+    in_catch: bool = false,
+};
+
+/// Where an `await`'s resolved value is delivered at the caller's await site
+/// (M1.0.11 E2). Set from the statement that carries the `await`: a bare
+/// expr-statement discards it; a `let x = await …` binds a fresh local; an
+/// `x = await …` assigns an existing local; a `return await …` returns it from
+/// the enclosing `async fn` / rule.
+const RetTarget = union(enum) {
+    discard,
+    bind: struct { name: StringId, is_mut: bool },
+    assign_local: StringId,
+    return_,
+};
+
+/// The inlined body of an `async fn` / `async method` reached by a direct
+/// `await f()` (M1.0.11 E2, `etch-reference-part1.md §9.12`): `f`'s body runs as
+/// frames on the CALLER's task, so `f`'s own `await` suspends the whole task and
+/// `f`'s `return` resolves at the caller's await site. Owns a heap-boxed `scope`
+/// (f's params/locals — freed when the frame pops); `value_expr` is f's trailing
+/// block value (implicit return); `ret` is where f's return value is delivered.
+const CallFrame = struct {
+    block_start: u32,
+    block_len: u32,
+    cursor: u32 = 0,
+    scope: *Locals,
+    value_expr: ?NodeId = null,
+    ret: RetTarget,
+};
+
+/// A suspendable task (M1.0.11 E1) — the dynamic-pool replacement for the M0.8
+/// per-rule `AsyncSlot`. Holds the resume frame-stack (`frames`, innermost last),
+/// the wake condition it is blocked on, and the locals retained across
+/// suspension. Allocated in `Interpreter.async_tasks` on first spawn; one task
+/// per `async rule` in E1 (E2 inlines `async fn` bodies as extra frames on the
+/// SAME task; M1.0.12 `spawn` will create sibling tasks in the pool). This is the
+/// tree-walk analogue of the async state struct (`etch-memory-model.md §5.7`) —
+/// no compiled state machine (that is Phase-2 codegen).
+const AsyncTask = struct {
+    state: enum { suspended, done } = .suspended,
+    wake: WakeCond = .{ .wait_until = 0 },
+    frames: std.ArrayListUnmanaged(AsyncFrame) = .empty,
+    /// The task's ROOT locals (the rule body's scope), retained across suspension.
+    /// An `async fn` call frame carries its OWN scope (`CallFrame.scope`); the
+    /// active scope for a statement is `currentScope` (nearest enclosing call
+    /// frame, else this). POD-only across a suspend (the M0.8 caveat).
+    locals: Locals = .{},
+    /// The delivery target for a wake-condition `await` used in a value position
+    /// (`let x = await wait(…)`): the (unit) value is bound on resume (M1.0.11
+    /// E2). `.discard` for a bare `await wait/global_event` (the common form).
+    pending_bind: RetTarget = .discard,
+
+    fn deinit(self: *AsyncTask, gpa: std.mem.Allocator) void {
+        for (self.frames.items) |*f| switch (f.*) {
+            .call => |cf| {
+                cf.scope.deinit(gpa);
+                gpa.destroy(cf.scope);
+            },
+            else => {},
+        };
+        self.frames.deinit(gpa);
         self.locals.deinit(gpa);
     }
+};
+
+/// Outcome of one `driveTask` pass over a task's frame-stack (M1.0.11 E1).
+const AsyncOutcome = enum { suspended, completed };
+
+/// Result of stepping one body statement in `stepBodyStmt` (M1.0.11 E1).
+const StepAction = enum {
+    /// A plain statement ran and the cursor advanced.
+    advanced,
+    /// A child frame (nested block / loop / while) was pushed; the parent cursor
+    /// was already advanced past the control-flow statement.
+    pushed,
+    /// A statement-head `await` suspended the task (stack retained).
+    suspended,
+    /// `break`/`continue`/`return`/`throw` fired — `unwindControl` handles it.
+    signaled,
 };
 
 /// Per-observer-rule context handed to the Tier-0 `ObserverRegistry` as the
@@ -662,11 +867,20 @@ pub const Interpreter = struct {
     /// byte-identical to the pre-B runtime (no `async_tick` churn, no slots).
     has_async: bool = false,
     /// Logical async clock — incremented once per `stepOnce` when `has_async`.
-    /// `await wait(N)` resolves against it (N is a tick count, not seconds).
+    /// `await wait(d)` resolves against it: a `Duration` is converted to a tick
+    /// count via the fixed 1/60 timestep (`async_fixed_dt_hz`, M1.0.11 E3).
     async_tick: u64 = 0,
-    /// Suspend/resume state, one slot per rule (parallel to `rule_descs`). Empty
-    /// when `!has_async`; a non-async rule never touches its slot.
-    async_slots: []AsyncSlot = &.{},
+    /// Dynamic pool of suspendable tasks (M1.0.11 E1) — the growable replacement
+    /// for the M0.8 per-rule `AsyncSlot` slice. A task is appended on first spawn
+    /// of an `async rule` and lives (state `.done` once finished) until `deinit`.
+    /// Empty when `!has_async`; grows as async rules spawn (E2/M1.0.12 add fn
+    /// frames / sibling tasks). Indices into it are stable within a tick (no task
+    /// is created mid-drive in E1).
+    async_tasks: std.ArrayListUnmanaged(AsyncTask) = .empty,
+    /// Per-rule handle into `async_tasks` (parallel to `rule_descs`, allocated iff
+    /// `has_async`): `null` until the async rule first spawns, then the pool index
+    /// of its task. A non-async rule's entry stays `null`.
+    rule_tasks: []?u32 = &.{},
     /// Reusable cursor buffer for the multi-term (`or`) archetype-union merge
     /// (M1.0.0). Resized to the term count of the rule being iterated; capacity
     /// is retained across rules/ticks so the union path allocates at most once.
@@ -741,8 +955,9 @@ pub const Interpreter = struct {
         self.pending_tags.deinit(self.gpa);
         for (self.pending_extensions.items) |pe| self.gpa.free(pe.name);
         self.pending_extensions.deinit(self.gpa);
-        for (self.async_slots) |*slot| slot.deinit(self.gpa);
-        self.gpa.free(self.async_slots);
+        for (self.async_tasks.items) |*task| task.deinit(self.gpa);
+        self.async_tasks.deinit(self.gpa);
+        self.gpa.free(self.rule_tasks);
         self.descriptors.deinit(self.gpa);
         self.merge_cursors.deinit(self.gpa);
         self.gpa.free(self.observer_ctxs);
@@ -962,9 +1177,10 @@ pub const Interpreter = struct {
                 break;
             }
         }
-        // Allocate one suspend/resume slot per rule iff any rule is `async`
-        // (M0.8 E3 sub-slice B). A sync-only program keeps an empty slice and
-        // never advances `async_tick` — byte-identical to the pre-B runtime.
+        // Allocate the per-rule task-handle map iff any rule is `async` (M1.0.11
+        // E1). The task pool itself starts empty and grows on first spawn; a
+        // sync-only program keeps an empty map + pool and never advances
+        // `async_tick` — byte-identical to the pre-async runtime.
         var any_async = false;
         for (slice) |rd| {
             if (rd.is_async) {
@@ -972,10 +1188,10 @@ pub const Interpreter = struct {
                 break;
             }
         }
-        const async_slots: []AsyncSlot = if (any_async) blk: {
-            const slots = try gpa.alloc(AsyncSlot, slice.len);
-            for (slots) |*slot| slot.* = .{};
-            break :blk slots;
+        const rule_tasks: []?u32 = if (any_async) blk: {
+            const map = try gpa.alloc(?u32, slice.len);
+            @memset(map, null);
+            break :blk map;
         } else &.{};
 
         // Pass E — build the Level-B descriptors (M0.8 E4, build-structure
@@ -998,7 +1214,7 @@ pub const Interpreter = struct {
             .tagset_id = tagset_id,
             .has_changed = any_changed,
             .has_async = any_async,
-            .async_slots = async_slots,
+            .rule_tasks = rule_tasks,
             .descriptors = descriptors,
             .world = world,
             .persistent_literals = persistent_literals,
@@ -1320,7 +1536,7 @@ pub const Interpreter = struct {
         // advances the tick (byte-identical to the pre-E3 runtime).
         if (self.has_changed) world.beginFrame();
         // Advance the logical async clock once per tick when async rules are
-        // present (M0.8 E3 sub-slice B). `await wait(N)` resolves against it.
+        // present (M0.8 E3 sub-slice B). `await wait(d)` resolves against it.
         if (self.has_async) self.async_tick += 1;
         // Events have a per-tick lifetime (`Lifetime.tick`): clear the previous
         // tick's queue before running this tick's rules (M0.8 E3).
@@ -1608,125 +1824,831 @@ pub const Interpreter = struct {
         if (matched) report.rules_matched += 1;
     }
 
-    /// Drive an `async rule`'s suspend/resume task at its position in the rule
-    /// order (M0.8 E3 sub-slice B, Option-A task-record). Spawns the task on
-    /// first reach, resumes a suspended one whose wake has fired, skips one
-    /// still waiting, and never re-runs a completed one.
+    /// Drive an `async rule`'s task at its position in the rule order (M1.0.11
+    /// E1). Spawns the task on first reach, resumes a suspended one whose wake
+    /// has fired, skips one still waiting, and never re-runs a completed one. One
+    /// task per async rule (the §9.2 parameterless, non-entity-bound shape); an
+    /// entity-bound async rule (one task per matching entity) is deferred and
+    /// fails loud (counted once, then parked `.done`).
     fn runAsyncRule(self: *Interpreter, world: *World, idx: usize, report: *RuntimeReport) !void {
         const rd = self.rule_descs[idx];
-        const slot = &self.async_slots[idx];
-        switch (slot.state) {
-            .done => return,
-            .suspended => {
-                if (!self.asyncWakeFired(slot.wake)) return;
-                // wake fired → resume from `slot.cursor` below
-            },
-            .unspawned => {
-                // M0.8 bounds async rules to the §9.2 shape: a single
-                // (non-entity-bound) task, parameterless. A resource-only
-                // `when` is fine; an entity-bound async rule (entity param +
-                // component `when`) would need one task per matching entity —
-                // deferred, fail-loud, flagged for Review E3.
-                const rule = self.ast.rule_decls.items[rd.rule_idx];
-                if (rule.params_len > 0 or rd.is_entity_bound) {
-                    report.runtime_errors += 1;
-                    slot.state = .done;
-                    return;
-                }
-                slot.locals = .{};
-                slot.cursor = 0;
-                // run from the start below
-            },
+        if (self.rule_tasks[idx]) |ti| {
+            // Already spawned: resume only if still suspended and its wake fired.
+            if (self.async_tasks.items[ti].state == .done) return;
+            if (!self.asyncWakeFired(self.async_tasks.items[ti].wake)) return;
+            report.rules_matched += 1;
+            try self.driveTask(world, &self.async_tasks.items[ti], report);
+            return;
         }
+        // First reach → spawn a task in the pool.
+        const rule = self.ast.rule_decls.items[rd.rule_idx];
+        if (rule.params_len > 0 or rd.is_entity_bound) {
+            report.runtime_errors += 1;
+            try self.async_tasks.append(self.gpa, .{ .state = .done });
+            self.rule_tasks[idx] = @intCast(self.async_tasks.items.len - 1);
+            return;
+        }
+        try self.async_tasks.append(self.gpa, .{});
+        const ti: u32 = @intCast(self.async_tasks.items.len - 1);
+        self.rule_tasks[idx] = ti;
+        // The initial frame is the rule body as a linear run.
+        try self.async_tasks.items[ti].frames.append(self.gpa, .{ .run = .{
+            .block_start = rule.body_start,
+            .block_len = rule.body_len,
+        } });
         report.rules_matched += 1;
-        try self.driveAsyncBody(world, rd, slot, report);
+        try self.driveTask(world, &self.async_tasks.items[ti], report);
     }
 
-    /// Run an async rule body from `slot.cursor`, suspending at the next
-    /// top-level `await` statement (recording its wake + the resume cursor) or
-    /// running to completion. `await` is bounded to a bare top-level statement
-    /// (the M0.8 cursor model); a nested / value `await` reaches `evalExpr`'s
-    /// `await_expr` arm and fails loud.
-    fn driveAsyncBody(self: *Interpreter, world: *World, rd: RuleDesc, slot: *AsyncSlot, report: *RuntimeReport) !void {
-        const rule = self.ast.rule_decls.items[rd.rule_idx];
+    /// The active scope for the top frame (M1.0.11 E2): the nearest enclosing
+    /// `async fn` call frame's own scope, or the task's root locals if none. The
+    /// `&task.locals` fallback is stable within a drive (no task is created
+    /// mid-drive; `async_tasks` never reallocates while `driveLoop` runs).
+    fn currentScope(task: *AsyncTask) *Locals {
+        var i = task.frames.items.len;
+        while (i > 0) {
+            i -= 1;
+            switch (task.frames.items[i]) {
+                .call => |*cf| return cf.scope,
+                else => {},
+            }
+        }
+        return &task.locals;
+    }
+
+    /// Free a frame's owned resources (M1.0.11 E2): only a `call` frame owns heap
+    /// (its `async fn` scope). Called for every frame removal.
+    fn deinitFrame(self: *Interpreter, frame: *AsyncFrame) void {
+        switch (frame.*) {
+            .call => |cf| {
+                cf.scope.deinit(self.gpa);
+                self.gpa.destroy(cf.scope);
+            },
+            else => {},
+        }
+    }
+
+    /// Pop the top frame, freeing its owned resources (M1.0.11 E2).
+    fn popFrame(self: *Interpreter, task: *AsyncTask) void {
+        if (task.frames.pop()) |f| {
+            var fr = f;
+            self.deinitFrame(&fr);
+        }
+    }
+
+    /// Pop every frame, freeing owned resources (M1.0.11 E2) — the task-teardown
+    /// path (completion / fail-loud), replacing a bare `clearRetainingCapacity`.
+    fn clearFrames(self: *Interpreter, task: *AsyncTask) void {
+        while (task.frames.items.len > 0) self.popFrame(task);
+    }
+
+    /// Deliver a resolved `await` value to its site (M1.0.11 E2). `return_` is
+    /// NOT handled here (it routes through the returning-unwind); this covers the
+    /// value-delivering targets.
+    fn deliverAwaitValue(self: *Interpreter, task: *AsyncTask, ret: RetTarget, v: Value) StmtError!void {
+        switch (ret) {
+            .discard, .return_ => {},
+            .bind => |b| try currentScope(task).put(self.gpa, b.name, v, b.is_mut),
+            .assign_local => |name| {
+                const ptr = currentScope(task).getPtr(name) orelse return error.RuntimeFailure;
+                ptr.* = v;
+            },
+        }
+    }
+
+    /// Classify a statement as a statement-head `await` and its delivery target
+    /// (M1.0.11 E2): a bare expr-stmt (discard), a `let x = await …` (bind), a
+    /// simple `x = await …` (assign a local), or a `return await …`. A destructuring
+    /// `let`, a compound/complex-lvalue assignment, or any non-`await` RHS returns
+    /// `null` (handled elsewhere / by the sync executor). Sub-expression `await`
+    /// is not statement-head — it reaches `evalExpr` and fails loud (E0904, E3).
+    const AwaitSite = struct { await_id: NodeId, ret: RetTarget };
+    fn stmtHeadAwait(self: *Interpreter, stmt: NodeId) ?AwaitSite {
+        switch (self.ast.stmtKind(stmt)) {
+            .expr_stmt => {
+                const e: NodeId = @bitCast(self.ast.stmtData(stmt));
+                if (self.ast.exprKind(e) == .await_expr) return .{ .await_id = e, .ret = .discard };
+            },
+            .let_stmt => {
+                const let = self.ast.let_stmts.items[self.ast.stmtData(stmt)];
+                if (let.name != 0 and self.ast.exprKind(let.value) == .await_expr)
+                    return .{ .await_id = let.value, .ret = .{ .bind = .{ .name = let.name, .is_mut = let.is_mut } } };
+            },
+            .assign_stmt => {
+                const a = self.ast.assign_stmts.items[self.ast.stmtData(stmt)];
+                if (a.op == .assign and self.ast.exprKind(a.value) == .await_expr and self.ast.exprKind(a.target) == .ident)
+                    return .{ .await_id = a.value, .ret = .{ .assign_local = self.ast.exprData(a.target) } };
+            },
+            .return_stmt => {
+                const operand: NodeId = @bitCast(self.ast.stmtData(stmt));
+                if (!operand.isNone() and self.ast.exprKind(operand) == .await_expr)
+                    return .{ .await_id = operand, .ret = .return_ };
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    /// Evaluate a call's arguments in the caller's scope and bind them (parameter
+    /// order, named-arg aware) into `dest` (M1.0.11 E2). Shared by the fn and
+    /// method call-frame setup; mirrors the arg handling of `callFn`/`callMethod`.
+    fn bindAsyncParams(self: *Interpreter, world: *World, caller: *Locals, dest: *Locals, fndecl: ast_mod.FnDecl, args_start: u32, args_len: u32, names_start: u32) StmtError!void {
+        if (fndecl.params_len != args_len) return error.RuntimeFailure;
+        if (args_len > max_call_args) return error.RuntimeFailure;
+        var values: [max_call_args]Value = undefined;
+        var j: u32 = 0;
+        while (j < args_len) : (j += 1) {
+            const arg: NodeId = @bitCast(self.ast.extra.items[args_start + j]);
+            values[j] = try self.evalExpr(world, caller, arg);
+        }
+        var i: u32 = 0;
+        while (i < fndecl.params_len) : (i += 1) {
+            const p = self.ast.fn_params.items[fndecl.params_start + i];
+            const idx = self.ast.callArgIndexForParam(args_start, args_len, names_start, i, p.name) orelse return error.RuntimeFailure;
+            try dest.put(self.gpa, p.name, values[idx], false);
+        }
+    }
+
+    /// Begin a direct `await f()` on an `async fn` / `async method` (M1.0.11 E2):
+    /// resolve the callee, evaluate its args in the caller's scope, create a fresh
+    /// heap-boxed scope (params + `self`), advance the caller cursor PAST the await,
+    /// and push a `call` frame carrying `ret` (where `f`'s return value lands). `f`
+    /// then runs as frames on this task; its own `await` suspends the whole task.
+    /// A direct call to a SYNC fn/method, or an unresolved callee, fails loud.
+    fn beginAsyncCall(self: *Interpreter, world: *World, task: *AsyncTask, scope: *Locals, cursor: *u32, call_expr: NodeId, ret: RetTarget) StmtError!StepAction {
+        const new_scope = try self.gpa.create(Locals);
+        new_scope.* = .{};
+        errdefer {
+            new_scope.deinit(self.gpa);
+            self.gpa.destroy(new_scope);
+        }
+        var fndecl: ast_mod.FnDecl = undefined;
+        switch (self.ast.exprKind(call_expr)) {
+            .fn_call => {
+                const call = self.ast.call_exprs.items[self.ast.exprData(call_expr)];
+                if (self.ast.exprKind(call.callee) != .ident) return error.RuntimeFailure;
+                const callee_name = self.ast.exprData(call.callee);
+                if (scope.get(callee_name) != null) return error.RuntimeFailure; // a local (closure), not an async fn
+                fndecl = self.fns.get(callee_name) orelse return error.RuntimeFailure;
+                if (!fndecl.is_async) return error.RuntimeFailure;
+                try self.bindAsyncParams(world, scope, new_scope, fndecl, call.args_start, call.args_len, call.names_start);
+            },
+            .method_call => {
+                const mc = self.ast.method_calls.items[self.ast.exprData(call_expr)];
+                var self_value: ?Value = null;
+                if (self.ast.exprKind(mc.receiver) == .path) {
+                    // `Type.assoc()` — associated fn (no `self`).
+                    const type_name = self.ast.exprData(mc.receiver);
+                    fndecl = self.methods.get(methodKey(type_name, mc.method_name)) orelse return error.RuntimeFailure;
+                } else {
+                    const recv = try self.evalExpr(world, scope, mc.receiver);
+                    self_value = recv;
+                    switch (recv) {
+                        .struct_ref => |h| {
+                            const tn = self.structs.list.items[h].type_name;
+                            fndecl = self.methods.get(methodKey(tn, mc.method_name)) orelse
+                                self.trait_methods.get(methodKey(tn, mc.method_name)) orelse
+                                return error.RuntimeFailure;
+                        },
+                        .entity_id => {
+                            const en = self.ast.strings.find("Entity") orelse return error.RuntimeFailure;
+                            fndecl = self.trait_methods.get(methodKey(en, mc.method_name)) orelse return error.RuntimeFailure;
+                        },
+                        else => return error.RuntimeFailure,
+                    }
+                }
+                if (!fndecl.is_async) return error.RuntimeFailure;
+                if (self_value) |sv| {
+                    if (self.ast.strings.find("self")) |sid| try new_scope.put(self.gpa, sid, sv, fndecl.self_kind == .by_mut);
+                }
+                try self.bindAsyncParams(world, scope, new_scope, fndecl, mc.args_start, mc.args_len, mc.names_start);
+            },
+            else => return error.RuntimeFailure,
+        }
+        cursor.* += 1; // advance the caller PAST the await before descending into `f`
+        try task.frames.append(self.gpa, .{ .call = .{
+            .block_start = fndecl.body_start,
+            .block_len = fndecl.body_len,
+            .scope = new_scope,
+            .value_expr = if (fndecl.value.isNone()) null else fndecl.value,
+            .ret = ret,
+        } });
+        return .pushed;
+    }
+
+    /// Drive `task` over its resume frame-stack until it suspends at the next
+    /// `await` or runs to completion (M1.0.11 E1). Resets the per-body signal
+    /// state, delivers a pending value-await binding on resume (E2), runs
+    /// `driveLoop`, and routes a fail-loud into `finishTaskFailed`.
+    fn driveTask(self: *Interpreter, world: *World, task: *AsyncTask, report: *RuntimeReport) !void {
         self.control = .none;
+        self.control_label = 0;
         self.thrown = false;
         self.returning = false;
         self.pending_error = null;
-        var s: u32 = slot.cursor;
-        while (s < rule.body_len) : (s += 1) {
-            const stmt_id: NodeId = @bitCast(self.ast.extra.items[rule.body_start + s]);
-            if (self.bareAwaitExpr(stmt_id)) |aw_id| {
-                const wake = self.evalAwaitTarget(world, &slot.locals, aw_id) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.RuntimeFailure => return self.finishAsync(slot, report, true),
-                };
-                slot.cursor = s + 1;
-                slot.wake = wake;
-                slot.state = .suspended;
-                return;
-            }
-            self.execStmt(world, &slot.locals, stmt_id) catch |err| switch (err) {
+        // A wake-condition `await` used in a value position (`let x = await wait(…)`)
+        // resolves to `unit`; deliver it into the resuming scope now (M1.0.11 E2).
+        if (@as(std.meta.Tag(RetTarget), task.pending_bind) != .discard) {
+            self.deliverAwaitValue(task, task.pending_bind, .{ .unit = {} }) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.RuntimeFailure => return self.finishAsync(slot, report, true),
+                error.RuntimeFailure => {
+                    task.pending_bind = .discard;
+                    self.finishTaskFailed(task, report);
+                    return;
+                },
             };
-            if (self.thrown) {
-                self.thrown = false;
-                self.pending_error = .{ .kind = .UncaughtThrow, .span = self.thrown_span };
-                return self.finishAsync(slot, report, true);
-            }
-            // A `break`/`continue`/`return` reaching the async rule top level
-            // ends the task (rules have no return value), like `execBody`.
-            if (self.control != .none) {
-                self.control = .none;
-                self.control_label = 0;
-                break;
-            }
-            if (self.returning) {
-                self.returning = false;
-                self.return_value = .{ .unit = {} };
-                break;
+            task.pending_bind = .discard;
+        }
+        const outcome = self.driveLoop(world, task) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.RuntimeFailure => {
+                self.finishTaskFailed(task, report);
+                return;
+            },
+        };
+        switch (outcome) {
+            .suspended => task.state = .suspended,
+            .completed => self.finishTaskDone(task, report),
+        }
+    }
+
+    /// The iterative frame-stack machine (M1.0.11 E1, `etch-reference-part1.md
+    /// §9.12`). Processes the innermost frame's next statement; a statement-head
+    /// `await` suspends the whole task (stack retained, no re-run on resume); a
+    /// nested `if`/`match`/`loop`/`while`/`block` pushes a child frame; everything
+    /// else runs through the sync `execStmt`. Returns `.suspended` (stack persists
+    /// for the next tick) or `.completed` (stack drained / a `return` / an
+    /// uncaught `throw` / a top-level `break`).
+    fn driveLoop(self: *Interpreter, world: *World, task: *AsyncTask) StmtError!AsyncOutcome {
+        drive: while (task.frames.items.len > 0) {
+            const ti = task.frames.items.len - 1;
+            // The active scope is the nearest enclosing `async fn` call frame's
+            // own scope (M1.0.11 E2), else the task root — recomputed each pass so
+            // a pushed/popped call frame flips it for the next statement.
+            const scope = currentScope(task);
+            switch (task.frames.items[ti]) {
+                .run => {
+                    const rf = &task.frames.items[ti].run;
+                    if (rf.cursor >= rf.block_len) {
+                        const val = rf.value_expr;
+                        self.popFrame(task);
+                        // A block's trailing value runs for effect (rare at stmt
+                        // position); it cannot suspend (an `await` there is a
+                        // sub-expression, rejected E0904 / fails loud).
+                        if (val) |v| _ = try self.evalExpr(world, scope, v);
+                        continue :drive;
+                    }
+                    const stmt: NodeId = @bitCast(self.ast.extra.items[rf.block_start + rf.cursor]);
+                    switch (try self.stepBodyStmt(world, task, scope, &task.frames.items[ti].run.cursor, stmt)) {
+                        .suspended => return .suspended,
+                        .advanced, .pushed => continue :drive,
+                        .signaled => if (try self.unwindControl(task)) continue :drive else return .completed,
+                    }
+                },
+                .loop_ => {
+                    const lf = &task.frames.items[ti].loop_;
+                    if (lf.cursor >= lf.block_len) {
+                        task.frames.items[ti].loop_.cursor = 0; // `loop` repeats
+                        continue :drive;
+                    }
+                    const stmt: NodeId = @bitCast(self.ast.extra.items[lf.block_start + lf.cursor]);
+                    switch (try self.stepBodyStmt(world, task, scope, &task.frames.items[ti].loop_.cursor, stmt)) {
+                        .suspended => return .suspended,
+                        .advanced, .pushed => continue :drive,
+                        .signaled => if (try self.unwindControl(task)) continue :drive else return .completed,
+                    }
+                },
+                .while_ => {
+                    const wid = task.frames.items[ti].while_.while_id;
+                    const wh = self.ast.while_stmts.items[self.ast.stmtData(wid)];
+                    if (!task.frames.items[ti].while_.in_iter) {
+                        if (!(try self.whileCondEnter(world, scope, wid))) {
+                            self.popFrame(task); // condition false → `while` ends
+                            continue :drive;
+                        }
+                        task.frames.items[ti].while_.in_iter = true;
+                        task.frames.items[ti].while_.cursor = 0;
+                        continue :drive;
+                    }
+                    if (task.frames.items[ti].while_.cursor >= wh.body_len) {
+                        task.frames.items[ti].while_.in_iter = false; // re-check cond
+                        continue :drive;
+                    }
+                    const stmt: NodeId = @bitCast(self.ast.extra.items[wh.body_start + task.frames.items[ti].while_.cursor]);
+                    switch (try self.stepBodyStmt(world, task, scope, &task.frames.items[ti].while_.cursor, stmt)) {
+                        .suspended => return .suspended,
+                        .advanced, .pushed => continue :drive,
+                        .signaled => if (try self.unwindControl(task)) continue :drive else return .completed,
+                    }
+                },
+                .for_ => {
+                    const f = self.ast.for_stmts.items[self.ast.stmtData(task.frames.items[ti].for_.for_id)];
+                    if (!task.frames.items[ti].for_.in_iter) {
+                        if (!(try self.forAdvance(&task.frames.items[ti].for_, scope))) {
+                            self.popFrame(task); // iterator exhausted → `for` ends
+                            continue :drive;
+                        }
+                        task.frames.items[ti].for_.in_iter = true;
+                        task.frames.items[ti].for_.cursor = 0;
+                        continue :drive;
+                    }
+                    if (task.frames.items[ti].for_.cursor >= f.body_len) {
+                        task.frames.items[ti].for_.in_iter = false; // advance to next element
+                        continue :drive;
+                    }
+                    const stmt: NodeId = @bitCast(self.ast.extra.items[f.body_start + task.frames.items[ti].for_.cursor]);
+                    switch (try self.stepBodyStmt(world, task, scope, &task.frames.items[ti].for_.cursor, stmt)) {
+                        .suspended => return .suspended,
+                        .advanced, .pushed => continue :drive,
+                        .signaled => if (try self.unwindControl(task)) continue :drive else return .completed,
+                    }
+                },
+                .try_ => {
+                    const tf = &task.frames.items[ti].try_;
+                    const start = if (tf.in_catch) tf.catch_start else tf.try_start;
+                    const len = if (tf.in_catch) tf.catch_len else tf.try_len;
+                    if (tf.cursor >= len) {
+                        self.popFrame(task); // `try` (or `catch`) body done
+                        continue :drive;
+                    }
+                    const stmt: NodeId = @bitCast(self.ast.extra.items[start + tf.cursor]);
+                    switch (try self.stepBodyStmt(world, task, scope, &task.frames.items[ti].try_.cursor, stmt)) {
+                        .suspended => return .suspended,
+                        .advanced, .pushed => continue :drive,
+                        .signaled => if (try self.unwindControl(task)) continue :drive else return .completed,
+                    }
+                },
+                .call => {
+                    const cf = &task.frames.items[ti].call;
+                    if (cf.cursor >= cf.block_len) {
+                        // `f` fell off the end → implicit return (trailing block
+                        // value, or unit). `scope` is f's own scope (the call frame
+                        // is the top). Pop f (frees its scope), then resolve at the
+                        // caller's await site.
+                        const val = cf.value_expr;
+                        const ret = cf.ret;
+                        var rv: Value = .{ .unit = {} };
+                        if (val) |v| rv = try self.evalExpr(world, scope, v);
+                        self.popFrame(task);
+                        switch (ret) {
+                            .return_ => {
+                                self.return_value = rv;
+                                self.returning = true;
+                                if (try self.unwindControl(task)) continue :drive else return .completed;
+                            },
+                            else => {
+                                try self.deliverAwaitValue(task, ret, rv);
+                                continue :drive;
+                            },
+                        }
+                    }
+                    const stmt: NodeId = @bitCast(self.ast.extra.items[cf.block_start + cf.cursor]);
+                    switch (try self.stepBodyStmt(world, task, scope, &task.frames.items[ti].call.cursor, stmt)) {
+                        .suspended => return .suspended,
+                        .advanced, .pushed => continue :drive,
+                        .signaled => if (try self.unwindControl(task)) continue :drive else return .completed,
+                    }
+                },
             }
         }
-        self.finishAsync(slot, report, false);
+        return .completed;
     }
 
-    /// Complete a task (success or fail-loud), freeing its retained locals so
-    /// the final slot deinit is a no-op.
-    fn finishAsync(self: *Interpreter, slot: *AsyncSlot, report: *RuntimeReport, failed: bool) void {
-        if (failed) self.harvestError(report);
-        slot.state = .done;
-        slot.locals.deinit(self.gpa);
-        slot.locals = .{};
+    /// Step one statement of the current frame's body (M1.0.11 E1). `cursor`
+    /// points at the active frame's statement cursor; this advances it (for a
+    /// plain run / a pushed child / a resumed-after `await`) BEFORE any frame push
+    /// (a push reallocates `task.frames`, so the pointer is used first). Returns
+    /// the action for `driveLoop` to route.
+    fn stepBodyStmt(self: *Interpreter, world: *World, task: *AsyncTask, scope: *Locals, cursor: *u32, stmt: NodeId) StmtError!StepAction {
+        // (1) statement-head `await` (M1.0.11 E1/E2) — in an expr-stmt (discard),
+        // a `let` initializer (bind), an assignment RHS (assign), or a `return`
+        // operand. A `future` (`await f()`) inlines `f`'s body as a call frame
+        // (E2); a wake-condition target (`wait` / `global_event`) suspends the
+        // task, delivering its (unit) value to the site on resume via `pending_bind`.
+        if (self.stmtHeadAwait(stmt)) |site| {
+            const aw = self.ast.awaitExpr(site.await_id);
+            switch (aw.target_kind) {
+                .future => return try self.beginAsyncCall(world, task, scope, cursor, aw.arg_expr, site.ret),
+                .wait, .global_event => {
+                    task.wake = try self.evalAwaitTarget(site.await_id);
+                    cursor.* += 1;
+                    task.pending_bind = site.ret;
+                    return .suspended;
+                },
+                .wait_unscaled, .entity_event => return error.RuntimeFailure,
+            }
+        }
+        const sk = self.ast.stmtKind(stmt);
+        // (2a) `while` statement → push a while frame (it re-checks its own cond).
+        if (sk == .while_stmt) {
+            cursor.* += 1;
+            try task.frames.append(self.gpa, .{ .while_ = .{ .while_id = stmt } });
+            return .pushed;
+        }
+        // (2b) `for` statement → evaluate the iterable ONCE (its side effects run
+        // now, exactly like the sync `for`) and push a for frame carrying the
+        // iterator state (so a body `await` resumes at the same element).
+        if (sk == .for_stmt) {
+            const f = self.ast.for_stmts.items[self.ast.stmtData(stmt)];
+            const iter = try self.evalExpr(world, scope, f.iterable);
+            const for_iter: ForIter = switch (iter) {
+                .range => |r| .{ .range = .{ .next = r.start, .end = r.end, .inclusive = r.inclusive } },
+                .array_ref => |h| .{ .array = .{ .handle = h, .len = self.collections.arrays.items[h].items.len, .idx = 0 } },
+                .map_ref => |h| .{ .map = .{ .handle = h, .len = self.collections.maps.items[h].items.len, .idx = 0 } },
+                else => return error.RuntimeFailure,
+            };
+            cursor.* += 1;
+            try task.frames.append(self.gpa, .{ .for_ = .{ .for_id = stmt, .iter = for_iter } });
+            return .pushed;
+        }
+        // (2c) `try { } catch e { }` → push a try frame driving the `try` body; a
+        // `throw` (even after a suspension inside the body) routes to the `catch`
+        // via `unwindControl`, re-establishing the handler across the suspend.
+        if (sk == .try_catch_stmt) {
+            const tc = self.ast.try_catch_stmts.items[self.ast.stmtData(stmt)];
+            cursor.* += 1;
+            try task.frames.append(self.gpa, .{ .try_ = .{
+                .try_start = tc.try_start,
+                .try_len = tc.try_len,
+                .catch_start = tc.catch_start,
+                .catch_len = tc.catch_len,
+                .catch_name = tc.catch_name,
+            } });
+            return .pushed;
+        }
+        // (2d) `if` / `match` / `loop` / `block` expression-statements → push a
+        // child frame so a body `await` can suspend.
+        if (sk == .expr_stmt) {
+            const e: NodeId = @bitCast(self.ast.stmtData(stmt));
+            switch (self.ast.exprKind(e)) {
+                .loop_expr => {
+                    const lp = self.ast.loop_exprs.items[self.ast.exprData(e)];
+                    cursor.* += 1;
+                    try task.frames.append(self.gpa, .{ .loop_ = .{
+                        .block_start = lp.body_start,
+                        .block_len = lp.body_len,
+                        .label = lp.label,
+                    } });
+                    return .pushed;
+                },
+                .block_expr => {
+                    cursor.* += 1;
+                    try self.pushBlockRun(task, e);
+                    return .pushed;
+                },
+                .if_expr => {
+                    // Select the branch synchronously (a condition cannot suspend);
+                    // push its block as a run frame (or nothing if no branch taken).
+                    const branch = try self.asyncIfBranch(world, scope, e);
+                    cursor.* += 1;
+                    if (branch) |b| try self.pushBlockRun(task, b);
+                    return .pushed;
+                },
+                .match_expr => {
+                    // Select the arm synchronously; a block arm becomes a run
+                    // frame (so its body can suspend); a bare-expr arm runs for
+                    // effect (a sub-expression `await` there fails loud).
+                    const body = try self.matchArmBody(world, scope, e);
+                    cursor.* += 1;
+                    if (self.ast.exprKind(body) == .block_expr) {
+                        try self.pushBlockRun(task, body);
+                    } else {
+                        _ = try self.evalExpr(world, scope, body);
+                    }
+                    return .pushed;
+                },
+                else => {},
+            }
+        }
+        // (3) ordinary statement → the shared sync executor.
+        try self.execStmt(world, scope, stmt);
+        if (self.control != .none or self.thrown or self.returning) return .signaled;
+        cursor.* += 1;
+        return .advanced;
     }
 
-    /// The `await_expr` of a bare top-level `await <target>` statement (an
-    /// expr-stmt wrapping an `.await_expr`), or null. Only a bare top-level
-    /// await is a suspension point — the cursor-based resume re-enters at the
-    /// statement after it.
-    fn bareAwaitExpr(self: *const Interpreter, stmt_id: NodeId) ?NodeId {
-        if (self.ast.stmtKind(stmt_id) != .expr_stmt) return null;
-        const e: NodeId = @bitCast(self.ast.stmtData(stmt_id));
-        if (self.ast.exprKind(e) != .await_expr) return null;
-        return e;
+    /// Push a `block_expr`'s body as a `.run` frame (M1.0.11 E1), carrying its
+    /// trailing value expression (evaluated for effect on pop).
+    fn pushBlockRun(self: *Interpreter, task: *AsyncTask, block_expr_id: NodeId) StmtError!void {
+        const blk = self.ast.block_exprs.items[self.ast.exprData(block_expr_id)];
+        try task.frames.append(self.gpa, .{ .run = .{
+            .block_start = blk.body_start,
+            .block_len = blk.body_len,
+            .value_expr = if (blk.value.isNone()) null else blk.value,
+        } });
     }
 
-    /// Resolve an `await` target to a `WakeCond` (M0.8 E3 sub-slice B). `wait(N)`
-    /// counts N TICKS from now; `global_event(T)` waits for an event of type T.
-    /// `wait_unscaled` (needs a real clock), `entity_event` (no entity-
-    /// association in the global EventStore), and `future` (T2) fail loud —
-    /// deferred, flagged for Review E3. The interpreter is the reference.
-    fn evalAwaitTarget(self: *Interpreter, world: *World, locals: *Locals, await_id: NodeId) StmtError!WakeCond {
+    /// Unwind the frame-stack for a pending control signal (M1.0.11 E1). A
+    /// `return` ends the task (`false`, stack cleared — rules have no return
+    /// value). A `throw` routes to the nearest enclosing `try` still in its try
+    /// phase — binding the caught value and switching that frame to its `catch`
+    /// (`true`, keep driving) — or, with no such `try`, ends the task as an
+    /// uncaught throw (`false`). A `break`/`continue` pops intervening block
+    /// frames to the nearest matching `loop`/`while`/`for` and consumes it there
+    /// (`true`); an unmatched signal at the task top ends the task (`false`).
+    /// Mirrors the sync `loop_expr` / `handleLoopControl` / `try_catch_stmt`
+    /// semantics — and re-establishes a `try`'s handler across a suspension.
+    fn unwindControl(self: *Interpreter, task: *AsyncTask) StmtError!bool {
+        if (self.returning) {
+            // `return v` unwinds to the nearest enclosing `async fn` call frame,
+            // which returns `v` to ITS await site (M1.0.11 E2). `return await g()`
+            // chains: that call frame's own `ret` is `return_`, so we loop and the
+            // enclosing fn returns `v` too. With no enclosing call frame, the
+            // `return` is in the rule body — end the task (rules have no value).
+            while (true) {
+                find: while (task.frames.items.len > 0) {
+                    switch (task.frames.items[task.frames.items.len - 1]) {
+                        .call => break :find,
+                        else => self.popFrame(task),
+                    }
+                }
+                if (task.frames.items.len == 0) {
+                    self.returning = false;
+                    self.return_value = .{ .unit = {} };
+                    return false;
+                }
+                const ret = task.frames.items[task.frames.items.len - 1].call.ret;
+                const v = self.return_value;
+                self.popFrame(task);
+                switch (ret) {
+                    .return_ => self.return_value = v, // enclosing fn returns `v` too → loop
+                    else => {
+                        self.returning = false;
+                        self.return_value = .{ .unit = {} };
+                        try self.deliverAwaitValue(task, ret, v);
+                        return true;
+                    },
+                }
+            }
+        }
+        if (self.thrown) {
+            // Route the throw to the nearest `try` in its try phase (a `catch`'s
+            // own throw re-propagates past it). Popping intervening loop/run/for/
+            // call frames mirrors the sync unwinding of a throw out of nested
+            // control flow (a call frame's scope is freed by `popFrame`). If none
+            // catches it, the residual `self.thrown` is left set for
+            // `finishTaskDone` to surface as an UncaughtThrow.
+            while (task.frames.items.len > 0) {
+                const ti = task.frames.items.len - 1;
+                switch (task.frames.items[ti]) {
+                    .try_ => |tfv| {
+                        if (!tfv.in_catch) {
+                            self.thrown = false;
+                            try currentScope(task).put(self.gpa, tfv.catch_name, self.thrown_value, false);
+                            task.frames.items[ti].try_.in_catch = true;
+                            task.frames.items[ti].try_.cursor = 0;
+                            return true;
+                        }
+                        self.popFrame(task); // throw inside this `catch` → propagate past it
+                    },
+                    else => self.popFrame(task),
+                }
+            }
+            return false;
+        }
+        while (task.frames.items.len > 0) {
+            const ti = task.frames.items.len - 1;
+            switch (task.frames.items[ti]) {
+                .run, .call, .try_ => {
+                    // A block / call / try frame is transparent to `break`/
+                    // `continue`: abandon it and keep unwinding to the loop.
+                    self.popFrame(task);
+                },
+                .loop_ => {
+                    const label = task.frames.items[ti].loop_.label;
+                    if (self.control_label == 0 or self.control_label == label) {
+                        const was_break = self.control == .break_;
+                        self.control = .none;
+                        self.control_label = 0;
+                        if (was_break) {
+                            self.popFrame(task); // the loop exits
+                        } else {
+                            task.frames.items[ti].loop_.cursor = 0; // continue → loop again
+                        }
+                        return true;
+                    }
+                    self.popFrame(task); // labeled signal for an outer loop → propagate
+                },
+                .while_ => {
+                    // `while` carries no label → matches only an unlabeled signal.
+                    if (self.control_label == 0) {
+                        const was_break = self.control == .break_;
+                        self.control = .none;
+                        if (was_break) {
+                            self.popFrame(task);
+                        } else {
+                            task.frames.items[ti].while_.in_iter = false; // continue → re-check cond
+                        }
+                        return true;
+                    }
+                    self.popFrame(task); // labeled → propagate (while has no label)
+                },
+                .for_ => {
+                    // `for` carries no label → matches only an unlabeled signal.
+                    if (self.control_label == 0) {
+                        const was_break = self.control == .break_;
+                        self.control = .none;
+                        if (was_break) {
+                            self.popFrame(task);
+                        } else {
+                            task.frames.items[ti].for_.in_iter = false; // continue → next element
+                        }
+                        return true;
+                    }
+                    self.popFrame(task); // labeled → propagate (for has no label)
+                },
+            }
+        }
+        // No enclosing loop matched: a `break`/`continue` at the task top has
+        // nowhere to go — consume it and end the task (mirrors `execBody`).
+        self.control = .none;
+        self.control_label = 0;
+        return false;
+    }
+
+    /// Complete a task normally (M1.0.11 E1): surface an uncaught `throw` as a
+    /// counted runtime error, clear the residual signal state, free the frames +
+    /// retained locals, and park the task `.done`.
+    fn finishTaskDone(self: *Interpreter, task: *AsyncTask, report: *RuntimeReport) void {
+        if (self.thrown) {
+            self.thrown = false;
+            self.pending_error = .{ .kind = .UncaughtThrow, .span = self.thrown_span };
+            self.harvestError(report);
+        }
+        self.control = .none;
+        self.control_label = 0;
+        self.returning = false;
+        self.return_value = .{ .unit = {} };
+        self.clearFrames(task); // frees any residual call-frame scopes
+        task.state = .done;
+        task.frames.clearAndFree(self.gpa);
+        task.pending_bind = .discard;
+        task.locals.deinit(self.gpa);
+        task.locals = .{};
+    }
+
+    /// Complete a fail-loud task (M1.0.11 E1): harvest the typed error into the
+    /// report and park the task `.done`, freeing its frames + retained locals.
+    fn finishTaskFailed(self: *Interpreter, task: *AsyncTask, report: *RuntimeReport) void {
+        self.harvestError(report);
+        self.control = .none;
+        self.control_label = 0;
+        self.thrown = false;
+        self.returning = false;
+        self.clearFrames(task); // frees any residual call-frame scopes
+        task.state = .done;
+        task.frames.clearAndFree(self.gpa);
+        task.pending_bind = .discard;
+        task.locals.deinit(self.gpa);
+        task.locals = .{};
+    }
+
+    /// Resolve an `if`/`else if`/`else` chain to the `block_expr` of the taken
+    /// branch (or `null` when none is), binding an `if let` payload (M1.0.11 E1).
+    /// Conditions are evaluated synchronously — an `await` in a condition is a
+    /// sub-expression and fails loud. Mirrors the sync `if_expr` arm of `evalExpr`.
+    fn asyncIfBranch(self: *Interpreter, world: *World, locals: *Locals, ife_id: NodeId) StmtError!?NodeId {
+        const ife = self.ast.if_exprs.items[self.ast.exprData(ife_id)];
+        if (ife.let_binding != 0) {
+            const opt = try self.evalExpr(world, locals, ife.cond);
+            if (opt != .optional) return error.RuntimeFailure;
+            if (self.optionals.items[opt.optional]) |payload| {
+                try locals.put(self.gpa, ife.let_binding, payload, false);
+                return ife.then_block;
+            }
+            if (ife.else_branch.isNone()) return null;
+            if (self.ast.exprKind(ife.else_branch) == .if_expr) return try self.asyncIfBranch(world, locals, ife.else_branch);
+            return ife.else_branch;
+        }
+        const cond = try self.evalExpr(world, locals, ife.cond);
+        if (cond != .bool_) return error.RuntimeFailure;
+        if (cond.bool_) return ife.then_block;
+        if (ife.else_branch.isNone()) return null;
+        if (self.ast.exprKind(ife.else_branch) == .if_expr) return try self.asyncIfBranch(world, locals, ife.else_branch);
+        return ife.else_branch;
+    }
+
+    /// Select a `match`'s winning arm and return its body expression, binding a
+    /// pattern capture (M1.0.11 E1). The scrutinee + patterns are evaluated
+    /// synchronously. Mirrors the sync `match_expr` arm of `evalExpr`; a
+    /// fall-through is a runtime failure (exhaustiveness proven at type-check).
+    fn matchArmBody(self: *Interpreter, world: *World, locals: *Locals, m_id: NodeId) StmtError!NodeId {
+        const m = self.ast.match_exprs.items[self.ast.exprData(m_id)];
+        const scrut = try self.evalExpr(world, locals, m.scrutinee);
+        var i: u32 = 0;
+        while (i < m.arms_len) : (i += 1) {
+            const arm = self.ast.match_arms.items[m.arms_start + i];
+            switch (arm.pattern_kind) {
+                .wildcard => return arm.body,
+                .binding => {
+                    try locals.put(self.gpa, arm.pattern_payload, scrut, false);
+                    return arm.body;
+                },
+                .literal => {
+                    const lit: NodeId = @bitCast(arm.pattern_payload);
+                    const lit_v = try self.evalExpr(world, locals, lit);
+                    if (scrut.eql(lit_v)) return arm.body;
+                },
+                .enum_variant => {
+                    if (scrut != .enum_value) return error.RuntimeFailure;
+                    const pat = self.ast.enum_pattern_payloads.items[arm.pattern_payload];
+                    const edecl = self.enum_decls.get(scrut.enum_value.type_name) orelse return error.RuntimeFailure;
+                    const vidx = self.enumVariantIndexOf(edecl, pat.variant) orelse return error.RuntimeFailure;
+                    if (scrut.enum_value.variant == vidx) return arm.body;
+                },
+                .optional_some => {
+                    if (scrut != .optional) return error.RuntimeFailure;
+                    if (self.optionals.items[scrut.optional]) |payload| {
+                        try locals.put(self.gpa, arm.pattern_payload, payload, false);
+                        return arm.body;
+                    }
+                },
+                .optional_none => {
+                    if (scrut != .optional) return error.RuntimeFailure;
+                    if (self.optionals.items[scrut.optional] == null) return arm.body;
+                },
+            }
+        }
+        return error.RuntimeFailure;
+    }
+
+    /// Evaluate a `while [let x =] cond` at the top of an iteration (M1.0.11 E1):
+    /// `true` = enter the body, `false` = stop the loop. Mirrors the sync
+    /// `while_stmt` arm of `execStmt`.
+    fn whileCondEnter(self: *Interpreter, world: *World, locals: *Locals, wid: NodeId) StmtError!bool {
+        const wh = self.ast.while_stmts.items[self.ast.stmtData(wid)];
+        if (wh.let_binding != 0) {
+            const opt = try self.evalExpr(world, locals, wh.cond);
+            if (opt != .optional) return error.RuntimeFailure;
+            const payload = self.optionals.items[opt.optional] orelse return false;
+            try locals.put(self.gpa, wh.let_binding, payload, false);
+            return true;
+        }
+        const cond = try self.evalExpr(world, locals, wh.cond);
+        if (cond != .bool_) return error.RuntimeFailure;
+        return cond.bool_;
+    }
+
+    /// Advance a `for` frame's iterator by one element, binding the loop
+    /// variable(s) (M1.0.11 E1): `true` = a body iteration was entered, `false` =
+    /// the iterator is exhausted (the `for` ends). Mirrors the sync `for_stmt`
+    /// arms of `execStmt`. A `range` is self-contained; an `array`/`map` handle is
+    /// bounds-checked against the (possibly reset) collection store and fails loud
+    /// rather than dereference out of bounds (the heap-across-suspend caveat).
+    fn forAdvance(self: *Interpreter, ff: *ForFrame, locals: *Locals) StmtError!bool {
+        const f = self.ast.for_stmts.items[self.ast.stmtData(ff.for_id)];
+        switch (ff.iter) {
+            .range => {
+                const r = &ff.iter.range;
+                const more = if (r.inclusive) r.next <= r.end else r.next < r.end;
+                if (!more) return false;
+                try locals.put(self.gpa, f.var_name, .{ .int_ = r.next }, false);
+                r.next += 1;
+                return true;
+            },
+            .array => {
+                const a = &ff.iter.array;
+                if (a.idx >= a.len) return false;
+                if (a.handle >= self.collections.arrays.items.len) return error.RuntimeFailure;
+                const col = self.collections.arrays.items[a.handle];
+                if (a.idx >= col.items.len) return error.RuntimeFailure;
+                try locals.put(self.gpa, f.var_name, col.items[a.idx], false);
+                a.idx += 1;
+                return true;
+            },
+            .map => {
+                const m = &ff.iter.map;
+                if (m.idx >= m.len) return false;
+                if (m.handle >= self.collections.maps.items.len) return error.RuntimeFailure;
+                const col = self.collections.maps.items[m.handle];
+                if (m.idx >= col.items.len) return error.RuntimeFailure;
+                const pair = col.items[m.idx];
+                try locals.put(self.gpa, f.var_name, pair.key, false);
+                if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
+                m.idx += 1;
+                return true;
+            },
+        }
+    }
+
+    /// Resolve a wake-condition `await` target to a `WakeCond` (M1.0.11 E3). Only
+    /// `wait` / `global_event` reach here (`future` is handled by `beginAsyncCall`
+    /// upstream). `wait` takes a `Duration` (final API, §9.4): a Duration LITERAL
+    /// → seconds → `async_tick` counts via the fixed 1/60 timestep
+    /// (`async_fixed_dt_hz`). M1.0.13 swaps this for scaled game time WITHOUT
+    /// changing the signature (at `time_scale = 1`, fixed `dt = 1/60`, identical).
+    /// A non-literal Duration (const / arithmetic) is out of scope → fail loud.
+    /// `global_event(T)` waits for an event of type `T`. `wait_unscaled` (M1.0.13)
+    /// / `entity_event` (M1.0.14) fail loud (defensive; filtered upstream).
+    fn evalAwaitTarget(self: *Interpreter, await_id: NodeId) StmtError!WakeCond {
         const aw = self.ast.awaitExpr(await_id);
         switch (aw.target_kind) {
             .wait => {
-                const v = try self.evalExpr(world, locals, aw.arg_expr);
-                const n: i64 = switch (v) {
-                    .int_ => |x| x,
-                    else => return error.RuntimeFailure,
-                };
-                if (n < 0) return error.RuntimeFailure;
-                return .{ .wait_until = self.async_tick + @as(u64, @intCast(n)) };
+                if (self.ast.exprKind(aw.arg_expr) != .duration_lit) return error.RuntimeFailure;
+                const secs = durationLiteralSeconds(self.ast.strings.slice(self.ast.exprData(aw.arg_expr))) orelse return error.RuntimeFailure;
+                if (secs < 0) return error.RuntimeFailure;
+                const ticks: u64 = @intFromFloat(@round(secs * async_fixed_dt_hz));
+                return .{ .wait_until = self.async_tick + ticks };
             },
             .global_event => return .{ .global_event = aw.event_type },
             .wait_unscaled, .entity_event, .future => return error.RuntimeFailure,
@@ -2293,7 +3215,11 @@ pub const Interpreter = struct {
     /// consumed at this boundary; with no explicit return the trailing block
     /// value is the implicit return. `async fn` interpretation is E3 (fail loud).
     fn callFn(self: *Interpreter, world: *World, caller_locals: *Locals, fndecl: ast_mod.FnDecl, call: ast_mod.CallExpr) StmtError!Value {
-        if (fndecl.is_async) return error.RuntimeFailure; // async interp lands in E3
+        // An `async fn` executes via the await call-frame path (`beginAsyncCall`),
+        // not this synchronous path (M1.0.11 E2). Reaching here for an async fn is
+        // a direct (non-`await`) call — a function-coloring violation the E4
+        // type-checker rejects (E0901); until then it degrades to a fail-loud.
+        if (fndecl.is_async) return error.RuntimeFailure;
         if (fndecl.params_len != call.args_len) return error.RuntimeFailure;
         var frame: Locals = .{};
         defer frame.deinit(self.gpa);
@@ -2788,7 +3714,9 @@ pub const Interpreter = struct {
     }
 
     fn callMethod(self: *Interpreter, world: *World, caller_locals: *Locals, method: ast_mod.FnDecl, mc: ast_mod.MethodCall, self_value: ?Value) StmtError!Value {
-        if (method.is_async) return error.RuntimeFailure; // async interp lands in E3
+        // As in `callFn`: an `async method` runs via the await call-frame path
+        // (M1.0.11 E2); a direct sync call is a coloring violation (E0901, E4).
+        if (method.is_async) return error.RuntimeFailure;
         if (method.params_len != mc.args_len) return error.RuntimeFailure;
         var frame: Locals = .{};
         defer frame.deinit(self.gpa);
@@ -7237,15 +8165,15 @@ test "runProgram changed on a freshly-spawned entity uses the spawn tick (M1.0.1
     try std.testing.expectEqual(@as(Tick, 1), readChangedTick(&world, health_id, e));
 }
 
-test "async rule suspends at await wait(N) and resumes N ticks later (M0.8 E3 sub-slice B)" {
+test "async rule suspends at await wait(<d>s) and resumes at the equivalent tick (M1.0.11 E3)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
 
     // The §9.2 shape: a parameterless async rule sets a resource field, suspends
-    // for 2 ticks (`await wait(2)`), then sets it again. The tree-walker is its
-    // own runtime — it suspends at the await and resumes on wake, no state
-    // machine (codegen is Phase 2). The interpreter is the reference.
+    // on a Duration `await wait(0.04s)` — 0.04 s × 60 = 2 ticks at the Phase-1
+    // fixed 1/60 timestep — then sets it again. The tree-walker is its own
+    // runtime; it suspends at the await and resumes on wake (codegen is Phase 2).
     const source =
         \\resource Out { n: int = 0 }
         \\async rule seq()
@@ -7253,7 +8181,7 @@ test "async rule suspends at await wait(N) and resumes N ticks later (M0.8 E3 su
         \\{
         \\  let a = get_mut(Out)
         \\  a.n = 1
-        \\  await wait(2)
+        \\  await wait(0.04s)
         \\  let b = get_mut(Out)
         \\  b.n = 2
         \\}
@@ -7275,7 +8203,7 @@ test "async rule suspends at await wait(N) and resumes N ticks later (M0.8 E3 su
     defer interp.deinit();
     const out_id = world.registry.idOf("Out").?;
 
-    // tick 1: spawn → n=1, suspend at `await wait(2)` (wake at async_tick 3).
+    // tick 1: spawn → n=1, suspend at `await wait(0.04s)` (wake at async_tick 3).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
     // tick 2: still suspended (async_tick 2 < 3) — n unchanged.
@@ -7344,6 +8272,456 @@ test "async rule resumes on await global_event(T) (M0.8 E3 sub-slice B)" {
     // tick 3: waiter done — n stays 7.
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 7), readResourceInt(&world, out_id));
+}
+
+test "async rule suspends at a statement-head await inside an if body and resumes without re-running the prefix (M1.0.11 E1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The frame-stack substrate suspends at an `await` NESTED in an `if` body
+    // (a depth-2 resume stack: rule body + if-branch) and resumes at the correct
+    // cursor. The prefix `emit Beat` inside the if runs EXACTLY ONCE — an
+    // `@on_event` observer counts it into `Log.n`; a double-fire on resume would
+    // make it 2. `Out.n` traces the sequence 1 → (suspend) → 2 → 3.
+    const source =
+        \\event Beat { }
+        \\resource Out { n: int = 0 }
+        \\resource Log { n: int = 0 }
+        \\async rule seq()
+        \\  when resource Out
+        \\{
+        \\  let a = get_mut(Out)
+        \\  a.n = 1
+        \\  if a.n == 1 {
+        \\    emit Beat { }
+        \\    await wait(0.04s)
+        \\    let b = get_mut(Out)
+        \\    b.n = 2
+        \\  }
+        \\  let c = get_mut(Out)
+        \\  c.n = 3
+        \\}
+        \\@on_event(Beat)
+        \\rule count_beat()
+        \\  when resource Log
+        \\{
+        \\  let l = get_mut(Log)
+        \\  l.n += 1
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+    const log_id = world.registry.idOf("Log").?;
+
+    // tick 1: n=1, enter the if, emit Beat (counted → Log.n=1), suspend at the
+    // await (wake at async_tick 3).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, log_id));
+    // tick 2: still suspended — no re-run, Log.n stays 1.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, log_id));
+    // tick 3: wake fires → resume AFTER the await (b.n=2), leave the if, c.n=3.
+    // The `emit Beat` prefix is NOT rerun (Log.n still 1) — no double emit.
+    const r3 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r3.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out_id));
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, log_id));
+}
+
+test "async rule suspends at a statement-head await inside a loop body and resumes each iteration (M1.0.11 E1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A `loop` body that awaits every iteration and breaks on the third: the
+    // loop frame persists across suspension and resumes mid-iteration. `Out.n`
+    // counts iterations (1, 2, 3) and settles at 3 after the break — proving the
+    // loop frame repeats correctly and `break` unwinds the frame-stack.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule ticker()
+        \\  when resource Out
+        \\{
+        \\  loop {
+        \\    let o = get_mut(Out)
+        \\    o.n += 1
+        \\    if o.n == 3 {
+        \\      break
+        \\    }
+        \\    await wait(0.02s)
+        \\  }
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: iteration 1 (n=1), suspend at await (wake at async_tick 2).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // tick 2: resume → iteration 2 (n=2), suspend again (wake at async_tick 3).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+    // tick 3: resume → iteration 3 (n=3), the if fires `break`, the loop exits,
+    // the task completes.
+    const r3 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r3.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out_id));
+    // tick 4: task done — n stays 3.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out_id));
+}
+
+test "async rule suspends at a statement-head await inside a for body and resumes per iteration with iterator state preserved (M1.0.11 E1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A `for i in 0..3` body that awaits every iteration: the for frame persists
+    // its range iterator (`next`) across suspension and resumes at the correct
+    // element. `Out.n` accumulates `i + 1` per iteration → 1, 3, 6 — the running
+    // total proves `i` took 0, 1, 2 in order across the suspends.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule ranger()
+        \\  when resource Out
+        \\{
+        \\  for i in 0..3 {
+        \\    let o = get_mut(Out)
+        \\    o.n += i + 1
+        \\    await wait(0.02s)
+        \\  }
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: i=0 → n += 1 = 1, suspend (wake at async_tick 2).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // tick 2: resume → i=1 → n += 2 = 3, suspend.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out_id));
+    // tick 3: resume → i=2 → n += 3 = 6, suspend.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 6), readResourceInt(&world, out_id));
+    // tick 4: resume → iterator exhausted → the `for` ends, the task completes.
+    const r4 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r4.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 6), readResourceInt(&world, out_id));
+    // tick 5: task done — n stays 6.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 6), readResourceInt(&world, out_id));
+}
+
+test "async rule suspends inside a try body and a post-resume throw routes to the catch (M1.0.11 E1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The `try` frame carries its catch handler across a suspension: the body
+    // awaits, and the `throw` runs only AFTER the resume — yet it still routes to
+    // the `catch` (n goes 1 → 2, and the throw is CAUGHT so runtime_errors == 0).
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule guarded()
+        \\  when resource Out
+        \\{
+        \\  try {
+        \\    let o = get_mut(Out)
+        \\    o.n = 1
+        \\    await wait(0.02s)
+        \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+        \\  } catch e {
+        \\    let o2 = get_mut(Out)
+        \\    o2.n = 2
+        \\  }
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: enter the try, o.n=1, suspend at the await (the try frame — with its
+    // catch handler — persists across the suspend).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // tick 2: resume → the throw fires and routes to the catch → o.n=2. The throw
+    // was caught, so it is NOT counted as a runtime error.
+    const r2 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r2.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+    // tick 3: task done — n stays 2.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+}
+
+test "async fn called via await runs to completion across ticks and its return value flows into a let binding (M1.0.11 E2)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `compute` is an `async fn` with an internal `await wait` and a return value.
+    // The caller `let x = await compute()` inlines `compute`'s body onto the
+    // caller's task (its await suspends the WHOLE task); `compute`'s `return`
+    // resolves at the caller's await site, binding `x`. `n` goes 0 → 42.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async fn compute() -> int {
+        \\  await wait(0.02s)
+        \\  return 42
+        \\}
+        \\async rule caller()
+        \\  when resource Out
+        \\{
+        \\  let x = await compute()
+        \\  let o = get_mut(Out)
+        \\  o.n = x
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: caller enters `compute`, which suspends at its `await wait(0.02s)`
+    // (the whole task suspends; the caller has not bound x yet).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    // tick 2: `compute` resumes, `return 42` resolves at the caller's await site
+    // (x = 42), then `o.n = x` → n = 42.
+    const r2 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r2.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 42), readResourceInt(&world, out_id));
+    // tick 3: task done — n stays 42.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 42), readResourceInt(&world, out_id));
+}
+
+test "async method called via await inlines with its own scope and locals survive the suspension (M1.0.11 E2)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `bumped` is an `async method`: it reads `self.base` into a local, suspends
+    // at `await wait(0.02s)`, and returns the local + 1 on resume. The call frame
+    // carries `self` + the local in its OWN heap-boxed scope, retained across the
+    // suspension (no collision with the caller's scope). `n` goes 0 → 11.
+    const source =
+        \\struct Counter { base: int = 0 }
+        \\impl Counter {
+        \\  async fn bumped(self) -> int {
+        \\    let b = self.base
+        \\    await wait(0.02s)
+        \\    return b + 1
+        \\  }
+        \\}
+        \\resource Out { n: int = 0 }
+        \\async rule caller()
+        \\  when resource Out
+        \\{
+        \\  let c = Counter { base: 10 }
+        \\  let x = await c.bumped()
+        \\  let o = get_mut(Out)
+        \\  o.n = x
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: caller builds `c`, enters `c.bumped()`, which reads self.base into a
+    // local and suspends at its `await wait(0.02s)`.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    // tick 2: `bumped` resumes (its local `b = 10` survived), returns 11, which
+    // binds `x`; `o.n = x` → n = 11.
+    const r2 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r2.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 11), readResourceInt(&world, out_id));
+    // tick 3: task done — n stays 11.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 11), readResourceInt(&world, out_id));
+}
+
+test "await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60) (M1.0.11 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // 1.0 s at the Phase-1 fixed 1/60 timestep = 60 ticks. Spawned at async_tick
+    // 1, the task wakes at tick 61 — not before. This pins the Duration→tick
+    // conversion (M1.0.13 will swap the clock without changing the result at
+    // time_scale = 1).
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule sec()
+        \\  when resource Out
+        \\{
+        \\  let o = get_mut(Out)
+        \\  o.n = 1
+        \\  await wait(1.0s)
+        \\  let o2 = get_mut(Out)
+        \\  o2.n = 2
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: n=1, suspend (wake at async_tick 61).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // through tick 60: still suspended (60 < 61).
+    _ = try interp.runFor(&world, 59);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // tick 61: wake fires (61 >= 61) → n=2.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+}
+
+/// Compile + run `source` for 2 ticks and return the runtime-error count, after
+/// asserting it parses and type-checks clean (M1.0.11 E3 fail-loud partition
+/// helper). The async targets NOT owned by this milestone must surface a typed
+/// `RuntimeFailure` (counted), never crash or silently no-op.
+fn asyncFailLoudCount(gpa: std.mem.Allocator, source: []const u8) !u64 {
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 2);
+    return report.runtime_errors;
+}
+
+test "await wait_unscaled / entity_event / handle-await still fail loud (partition boundary intact, M1.0.11 E3)" {
+    const gpa = std.testing.allocator;
+    // `wait_unscaled` — needs the scaled/unscaled time subsystem (M1.0.13).
+    try std.testing.expect((try asyncFailLoudCount(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  await wait_unscaled(1.0s)
+        \\}
+    )) >= 1);
+    // `entity_event` — needs entity-scoped events (M1.0.14).
+    try std.testing.expect((try asyncFailLoudCount(gpa,
+        \\event Ev { }
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  await entity_event(get(Out), Ev)
+        \\}
+    )) >= 1);
+    // handle-await (`await` on a stored non-call value / TaskHandle) — M1.0.12.
+    try std.testing.expect((try asyncFailLoudCount(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let h = 5
+        \\  await h
+        \\}
+    )) >= 1);
 }
 
 test "runProgram Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)" {
@@ -7514,7 +8892,7 @@ test "async runtime failure surfaces typed last_error (D-S4-runtime-report)" {
     var world = World.init();
     defer world.deinit(gpa);
 
-    // The async choke point (`driveAsyncBody` → `finishAsync`) harvests the
+    // The async choke point (`driveTask` → `finishTaskFailed`) harvests the
     // same typed payload as `execBody` — the task fails before its first
     // suspension and the report carries the kind.
     const source =
@@ -7526,7 +8904,7 @@ test "async runtime failure surfaces typed last_error (D-S4-runtime-report)" {
         \\  let x = 1 / d
         \\  let r = get_mut(Out)
         \\  r.n = x
-        \\  await wait(1)
+        \\  await wait(0.02s)
         \\}
     ;
 

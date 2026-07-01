@@ -307,6 +307,27 @@ pub const TypeChecker = struct {
     /// E2), used to type a `return expr` body statement against. `null` outside
     /// a body; `.unit` for a void fn (no `-> type`).
     current_fn_return: ?ResolvedType = null,
+    /// The `await_expr` node that is the statement-head `await` of the statement
+    /// currently being checked (M1.0.11 E3), or `NodeId.none`. Set at the top of
+    /// `checkStmt` for the allowed positions (expr-stmt / `let` init / simple
+    /// assignment RHS / `return` operand); `synthExprE` flags any OTHER
+    /// `await_expr` it visits as E0904 `AwaitNotStatementHead` (a sub-expression
+    /// `await` — a Phase-1 tree-walker restriction; §9.12).
+    stmt_head_await: NodeId = NodeId.none,
+    /// Whether the statements currently being checked sit on the async driver's
+    /// frame-driven spine (M1.0.11 E3): a rule / `fn` / method body, or the body
+    /// of a statement-position control-flow (the interpreter pushes those as
+    /// frames). `false` inside a VALUE block (`let x = if c { … } else { … }`,
+    /// `= match`/`= loop`/`= { … }`, a control-flow/block assignment RHS or
+    /// `return` operand) — the tree-walker evaluates those synchronously, so a
+    /// statement-head `await` there is inexecutable and gets E0904 even though it
+    /// is syntactically a head.
+    await_suspendable: bool = false,
+    /// Whether the `fn` / `rule` / method whose body is currently being checked is
+    /// `async` (M1.0.11 E4, function coloring §9.3). An `await`, or a call to an
+    /// `async fn`/`async method`, in a NON-async context is E0901
+    /// `AsyncCallInNonAsyncContext`. `false` outside any body.
+    current_is_async: bool = false,
     /// Merged global tag table (M0.8 E3, `etch-validation-ecs.md` §5.2), built
     /// between pass 1 and pass 2 from every `tags { ... }` block. `null` until
     /// `buildTags` runs. Pass 2 (tag-op when-conditions / `tag_path` operands,
@@ -3565,6 +3586,16 @@ pub const TypeChecker = struct {
         const saved_ret = self.current_fn_return;
         self.current_fn_return = ret_t;
         defer self.current_fn_return = saved_ret;
+        // The body statements sit on the async driver's frame-driven spine
+        // (M1.0.11 E3): a statement-head `await` here is executable.
+        const saved_susp = self.await_suspendable;
+        self.await_suspendable = true;
+        defer self.await_suspendable = saved_susp;
+        // Function coloring context (M1.0.11 E4): `await` / async calls are legal
+        // only when this body is `async`.
+        const saved_async = self.current_is_async;
+        self.current_is_async = decl.is_async;
+        defer self.current_is_async = saved_async;
 
         var s: u32 = 0;
         while (s < decl.body_len) : (s += 1) {
@@ -3760,7 +3791,16 @@ pub const TypeChecker = struct {
             try self.collectWhen(&ctx, rule.when_root);
         }
 
-        // Walk the body statements.
+        // Walk the body statements. The rule body sits on the async driver's
+        // frame-driven spine (M1.0.11 E3): a statement-head `await` is executable.
+        const saved_susp = self.await_suspendable;
+        self.await_suspendable = true;
+        defer self.await_suspendable = saved_susp;
+        // Function coloring context (M1.0.11 E4): `await` / async calls are legal
+        // only in an `async rule`.
+        const saved_async = self.current_is_async;
+        self.current_is_async = rule.is_async;
+        defer self.current_is_async = saved_async;
         var s: u32 = 0;
         while (s < rule.body_len) : (s += 1) {
             const stmt_raw = self.arena.extra.items[rule.body_start + s];
@@ -3820,6 +3860,16 @@ pub const TypeChecker = struct {
         const saved_ret = self.current_fn_return;
         self.current_fn_return = ret_t;
         defer self.current_fn_return = saved_ret;
+        // The body statements sit on the async driver's frame-driven spine
+        // (M1.0.11 E3): a statement-head `await` here is executable.
+        const saved_susp = self.await_suspendable;
+        self.await_suspendable = true;
+        defer self.await_suspendable = saved_susp;
+        // Function coloring context (M1.0.11 E4): `await` / async calls are legal
+        // only when this body is `async`.
+        const saved_async = self.current_is_async;
+        self.current_is_async = decl.is_async;
+        defer self.current_is_async = saved_async;
 
         var s: u32 = 0;
         while (s < decl.body_len) : (s += 1) {
@@ -4017,6 +4067,34 @@ pub const TypeChecker = struct {
     fn checkStmt(self: *TypeChecker, ctx: *RuleCtx, stmt_id: NodeId) !void {
         const kind = self.arena.stmtKind(stmt_id);
         const data = self.arena.stmtData(stmt_id);
+        // M1.0.11 E3 — mark this statement's head `await` (if any) as allowed:
+        // it is the full RHS of an expr-stmt / `let` init / simple assignment /
+        // `return`. Any OTHER `await_expr` visited while checking this statement
+        // is a sub-expression and is flagged E0904 in `synthExprE`. Reset first
+        // (a non-head statement carries no allowed await).
+        self.stmt_head_await = NodeId.none;
+        switch (kind) {
+            .expr_stmt => {
+                const e: NodeId = @bitCast(data);
+                if (self.arena.exprKind(e) == .await_expr) self.stmt_head_await = e;
+            },
+            .let_stmt => {
+                const v = self.arena.let_stmts.items[data].value;
+                if (self.arena.exprKind(v) == .await_expr) self.stmt_head_await = v;
+            },
+            .assign_stmt => {
+                // Only a simple `local = await …` is a frame-driven head (the
+                // interpreter's `assign_local`); a field/index target or a
+                // compound op leaves the await as a sub-expression → E0904.
+                const a = self.arena.assign_stmts.items[data];
+                if (a.op == .assign and self.arena.exprKind(a.target) == .ident and self.arena.exprKind(a.value) == .await_expr) self.stmt_head_await = a.value;
+            },
+            .return_stmt => {
+                const v: NodeId = @bitCast(data);
+                if (!v.isNone() and self.arena.exprKind(v) == .await_expr) self.stmt_head_await = v;
+            },
+            else => {},
+        }
         switch (kind) {
             .let_stmt => {
                 const let = self.arena.let_stmts.items[data];
@@ -4041,7 +4119,7 @@ pub const TypeChecker = struct {
                             break :blk self.checkStructLitAgainst(let.value, sl_data, declared.?.struct_t, ctx) catch ResolvedType.unknown;
                         }
                     }
-                    break :blk self.synthExpr(let.value, ctx);
+                    break :blk self.synthHeadValue(let.value, ctx);
                 };
                 const final = if (declared) |d| blk: {
                     if (d == .builtin and inferred == .builtin and !self.literalTypeFits(d.builtin, let.value, inferred.builtin)) {
@@ -4079,7 +4157,7 @@ pub const TypeChecker = struct {
                             const span = self.arena.exprSpan(assign.target);
                             try self.emit(.type_mismatch, .error_, span, "cannot assign to immutable binding (use 'let mut')", .{});
                         }
-                        const rhs_type = self.synthExpr(assign.value, ctx);
+                        const rhs_type = self.synthHeadValue(assign.value, ctx);
                         if (local.type_ == .builtin and rhs_type == .builtin and !self.literalTypeFits(local.type_.builtin, assign.value, rhs_type.builtin)) {
                             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(assign.value), "assignment value type does not match binding type", .{});
                         }
@@ -4244,7 +4322,7 @@ pub const TypeChecker = struct {
                 // enclosing fn (e.g. a rule body) is permissive.
                 const value: NodeId = @bitCast(data);
                 if (!value.isNone()) {
-                    const vt = self.synthExpr(value, ctx);
+                    const vt = self.synthHeadValue(value, ctx);
                     if (self.current_fn_return) |ret| {
                         if (ret == .builtin and vt == .builtin and !self.literalTypeFits(ret.builtin, value, vt.builtin)) {
                             try self.emit(.return_type_mismatch, .error_, self.arena.exprSpan(value), "return value type does not match the declared return type", .{});
@@ -4335,6 +4413,19 @@ pub const TypeChecker = struct {
 
     fn synthExpr(self: *TypeChecker, id: NodeId, ctx_opt: ?*RuleCtx) ResolvedType {
         return self.synthExprE(id, ctx_opt) catch ResolvedType.unknown;
+    }
+
+    /// Synthesize a statement-head VALUE expression (`let` init / assignment RHS /
+    /// `return` operand) with the correct suspendable context (M1.0.11 E3): the
+    /// value is on the frame-driven spine ONLY if it IS this statement's head
+    /// `await` (`let x = await f()`). Any other value (an `if`/`match`/`loop`/
+    /// block, or an expression merely containing an `await`) is synchronous, so a
+    /// statement-head `await` nested inside it is inexecutable → E0904.
+    fn synthHeadValue(self: *TypeChecker, id: NodeId, ctx_opt: ?*RuleCtx) ResolvedType {
+        const saved = self.await_suspendable;
+        self.await_suspendable = @as(u32, @bitCast(id)) == @as(u32, @bitCast(self.stmt_head_await));
+        defer self.await_suspendable = saved;
+        return self.synthExpr(id, ctx_opt);
     }
 
     fn synthExprE(self: *TypeChecker, id: NodeId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
@@ -4552,6 +4643,32 @@ pub const TypeChecker = struct {
             // no body handle (§4.5). `checkStmt` handles the legal statement
             // position before this arm is reached.
             .spawn_struct => return try self.checkSpawnStruct(id, data, ctx_opt, true),
+            // M1.0.11 E2/E3 — type an `await`. The `future` form (`await f()`)
+            // carries the awaited call's declared return type, so `let x = await f()`
+            // binds the right type (and the inner call is type-checked here — arg
+            // count, etc.). The wake-condition forms (`wait` / `wait_unscaled` /
+            // `entity_event` / `global_event`) produce no value. E3 placement
+            // (E0904): an `await` that is not this statement's head await is a
+            // sub-expression (`some(await f())`, `a + await b`) — rejected; hoist
+            // it into a `let`. Function coloring (E0901) is added in E4.
+            .await_expr => {
+                // E0904 fires unless this `await` is BOTH the statement head AND
+                // on the frame-driven spine — a statement-head `await` inside a
+                // synchronously-evaluated VALUE block (e.g. `let x = if c { await
+                // f() }`) is inexecutable, so it is rejected too (M1.0.11 E3).
+                const is_head = @as(u32, @bitCast(id)) == @as(u32, @bitCast(self.stmt_head_await));
+                if (!is_head or !self.await_suspendable) {
+                    try self.emit(.await_not_statement_head, .error_, self.arena.exprSpan(id), "`await` must be the full right-hand expression of a statement on the async path — hoist it into a `let` (Phase-1 restriction)", .{});
+                }
+                // Function coloring (M1.0.11 E4, §9.3): `await` is an async effect
+                // — only an `async fn`/`async rule` may use it.
+                if (!self.current_is_async) {
+                    try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "`await` is only allowed in an `async fn` or `async rule`", .{});
+                }
+                const aw = self.arena.awaitExpr(id);
+                if (aw.target_kind == .future) return try self.synthExprE(aw.arg_expr, ctx_opt);
+                return ResolvedType.unknown;
+            },
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
             else => return ResolvedType.unknown,
         }
@@ -4885,6 +5002,12 @@ pub const TypeChecker = struct {
     /// is the declared return type (`unknown` for a void fn).
     fn synthFreeFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, item_id: NodeId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const decl = self.arena.fn_decls.items[self.arena.itemData(item_id)];
+        // Function coloring (M1.0.11 E4, §9.3): calling an `async fn` from a
+        // non-async context is E0901. (A legal async→async call is via `await`,
+        // which reaches here with `current_is_async` true.)
+        if (decl.is_async and !self.current_is_async) {
+            try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "cannot call `async fn` '{s}' from a non-async context (needs an `async fn`/`async rule` + `await`)", .{self.arena.strings.slice(decl.name)});
+        }
         const ret: ResolvedType = if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
         var pnames: std.ArrayListUnmanaged(StringId) = .empty;
         defer pnames.deinit(self.gpa);
@@ -5712,6 +5835,12 @@ pub const TypeChecker = struct {
     /// resolved `method` (M0.8 E2 block 3) and return its declared return type.
     /// `self` is not part of the argument list (it is the receiver).
     fn checkMethodArgs(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, method: ast_mod.FnDecl, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        // Function coloring (M1.0.11 E4, §9.3): calling an `async method` from a
+        // non-async context is E0901 (a legal call is via `await` in an async
+        // context, which reaches here with `current_is_async` true).
+        if (method.is_async and !self.current_is_async) {
+            try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "cannot call `async` method '{s}' from a non-async context (needs an `async fn`/`async rule` + `await`)", .{self.arena.strings.slice(mc.method_name)});
+        }
         const ret: ResolvedType = if (method.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(method.return_type);
         var pnames: std.ArrayListUnmanaged(StringId) = .empty;
         defer pnames.deinit(self.gpa);
@@ -9364,4 +9493,168 @@ test "extension methods type-check on an Entity receiver (M1.0.9 B2)" {
     );
     defer bad.deinit(gpa);
     try std.testing.expect(bad.diagnostics.items.len > 0);
+}
+
+test "E0904 fires on a sub-expression await, not on the statement-head forms (M1.0.11 E3)" {
+    const gpa = std.testing.allocator;
+    // The four statement-head positions — expr-stmt, `let` init, simple assign
+    // RHS, `return` operand — are the allowed placement: no E0904.
+    var head = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async fn f() -> int {
+        \\  await wait(0.02s)
+        \\  return 1
+        \\}
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let mut x = await f()
+        \\  x = await f()
+        \\  await f()
+        \\  return await f()
+        \\}
+    );
+    defer head.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), head.parse_diags.len);
+    try expectNoCode(head.diagnostics.items, .await_not_statement_head);
+
+    // A sub-expression `await` (here, an argument of `some(...)`) is not the full
+    // RHS of its statement — E0904 (hoist it into a `let`).
+    var sub = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async fn f() -> int {
+        \\  await wait(0.02s)
+        \\  return 1
+        \\}
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  return some(await f())
+        \\}
+    );
+    defer sub.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), sub.parse_diags.len);
+    try expectAnyCode(sub.diagnostics.items, .await_not_statement_head);
+}
+
+test "E0904 fires on a statement-head await inside a value-position block, not a statement-position one (M1.0.11 E3)" {
+    const gpa = std.testing.allocator;
+    // An `if` used as a VALUE (a `let` initializer) is evaluated synchronously by
+    // the tree-walker — a statement-head `await` in its branch is inexecutable → E0904.
+    var vif = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async fn f() -> int {
+        \\  await wait(0.02s)
+        \\  return 1
+        \\}
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let x = if true { await f() } else { await f() }
+        \\}
+    );
+    defer vif.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), vif.parse_diags.len);
+    try expectAnyCode(vif.diagnostics.items, .await_not_statement_head);
+
+    // A value block `{ … await … }` (a `let` initializer) — same synchronous
+    // evaluation → E0904.
+    var vblk = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async fn f() -> int {
+        \\  await wait(0.02s)
+        \\  return 1
+        \\}
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let x = { await f() }
+        \\}
+    );
+    defer vblk.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), vblk.parse_diags.len);
+    try expectAnyCode(vblk.diagnostics.items, .await_not_statement_head);
+
+    // But the SAME `if`/`let` in STATEMENT position (a frame-driven body the
+    // driver pushes as a frame) is fine — no E0904.
+    var sif = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async fn f() -> int {
+        \\  await wait(0.02s)
+        \\  return 1
+        \\}
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  if true {
+        \\    let y = await f()
+        \\  }
+        \\}
+    );
+    defer sif.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), sif.parse_diags.len);
+    try expectNoCode(sif.diagnostics.items, .await_not_statement_head);
+}
+
+test "E0901 fires on an async call / await in a non-async context, not on a legal async→async await (M1.0.11 E4)" {
+    const gpa = std.testing.allocator;
+    const af =
+        \\resource Out { n: int = 0 }
+        \\async fn af() -> int {
+        \\  await wait(0.02s)
+        \\  return 1
+        \\}
+        \\
+    ;
+    // (a) `async fn` called from a SYNC `fn` → E0901.
+    var sfn = try parseAndCheck(gpa, af ++
+        \\fn caller() -> int {
+        \\  let x = af()
+        \\  return x
+        \\}
+    );
+    defer sfn.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), sfn.parse_diags.len);
+    try expectAnyCode(sfn.diagnostics.items, .async_call_in_non_async_context);
+
+    // (b) `async fn` called from a SYNC `rule` → E0901.
+    var srule = try parseAndCheck(gpa, af ++
+        \\rule caller()
+        \\  when resource Out
+        \\{
+        \\  let x = af()
+        \\  let o = get_mut(Out)
+        \\  o.n = x
+        \\}
+    );
+    defer srule.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), srule.parse_diags.len);
+    try expectAnyCode(srule.diagnostics.items, .async_call_in_non_async_context);
+
+    // (c) `await` used in a SYNC context → E0901.
+    var sawait = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\rule caller()
+        \\  when resource Out
+        \\{
+        \\  await wait(0.02s)
+        \\}
+    );
+    defer sawait.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), sawait.parse_diags.len);
+    try expectAnyCode(sawait.diagnostics.items, .async_call_in_non_async_context);
+
+    // (d) a legal `async`→`async` call via `await` — no E0901.
+    var ok = try parseAndCheck(gpa, af ++
+        \\async rule caller()
+        \\  when resource Out
+        \\{
+        \\  let x = await af()
+        \\  let o = get_mut(Out)
+        \\  o.n = x
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try expectNoCode(ok.diagnostics.items, .async_call_in_non_async_context);
 }
