@@ -534,16 +534,20 @@ const WakeCond = union(enum) {
 /// shape needed to resume it. On `await` the whole stack is retained; `driveTask`
 /// resumes by re-entering the innermost frame at its cursor and NEVER re-running
 /// an already-executed statement (no double `emit`). The frame kinds mirror the
-/// sync executor's suspendable control flow: a linear `run` (rule body / `if`
-/// branch / `match` arm / plain `block` / — E2 — an inlined `async fn` body), a
-/// `loop`, and a `while`. This generalizes the M0.8 single-top-level-cursor
-/// `AsyncSlot` to nested blocks (the stack reaches depth > 1). `for`-body and
-/// `try`-body awaits are NOT frame-driven (they fall through to sync `execStmt`
-/// and fail loud) — outside the §9.12 placement list, deferred.
+/// sync executor's control flow, ONE per statement block that can hold statements
+/// — a linear `run` (rule body / `if` branch / `match` arm / plain `block` / — E2
+/// — an inlined `async fn` body), a `loop`, a `while`, a `for`, and a `try`/`catch`
+/// — so a statement-head `await` can suspend inside ANY of them. This generalizes
+/// the M0.8 single-top-level-cursor `AsyncSlot` to nested blocks (the stack reaches
+/// depth > 1). The frame set is COMPLETE for EBNF v0.6's statement blocks (C1.6):
+/// no body kind falls through to a fail-loud await. No frame owns heap (frames are
+/// pure indices), so teardown is a plain `frames.deinit`.
 const AsyncFrame = union(enum) {
     run: RunFrame,
     loop_: LoopFrame,
     while_: WhileFrame,
+    for_: ForFrame,
+    try_: TryFrame,
 };
 
 /// A linear statement run: execute `block[cursor .. block_len]`, then (if any)
@@ -577,6 +581,49 @@ const WhileFrame = struct {
     while_id: NodeId,
     cursor: u32 = 0,
     in_iter: bool = false,
+};
+
+/// The iterator state of a `for` frame, persisted across a suspension. A `range`
+/// is fully self-contained (no heap) → sound across any suspend. An `array`/`map`
+/// holds a collection-store handle + the once-snapshotted length + the current
+/// index; the referenced collection lives in the rule-arena store, so a heap
+/// iterable surviving a suspend shares the M0.8 "POD-only across a suspend" caveat
+/// (a store reset by an intervening rule frees it). `forAdvance` bounds-checks the
+/// handle and fails loud (a typed `RuntimeFailure`, never an OOB crash) rather than
+/// dereference a reset store. The common `for i in 0..N` (range) is unconditionally
+/// sound.
+const ForIter = union(enum) {
+    range: struct { next: i64, end: i64, inclusive: bool },
+    array: struct { handle: u32, len: usize, idx: usize },
+    map: struct { handle: u32, len: usize, idx: usize },
+};
+
+/// `for v [, k] in iter { body }`: at the top of each iteration (`in_iter =
+/// false`) advance the iterator and bind the loop variable(s); run the body while
+/// elements remain, dropping back to the iterator when the body run completes. The
+/// iterator position lives in `iter`, persisted across suspension so a body
+/// `await` resumes at the same element. `for` carries no loop label (mirrors the
+/// sync executor's `handleLoopControl(0)`).
+const ForFrame = struct {
+    for_id: NodeId,
+    iter: ForIter,
+    cursor: u32 = 0,
+    in_iter: bool = false,
+};
+
+/// `try { body } catch e { handler }`: drives the `try` body (`in_catch = false`);
+/// a `throw` reaching this frame (possibly after a suspension inside the body —
+/// the handler is re-established across the suspend) switches it to the `catch`
+/// body (`in_catch = true`, the caught value bound to `catch_name`). Mirrors the
+/// sync `try_catch_stmt` arm of `execStmt`.
+const TryFrame = struct {
+    try_start: u32,
+    try_len: u32,
+    catch_start: u32,
+    catch_len: u32,
+    catch_name: StringId,
+    cursor: u32 = 0,
+    in_catch: bool = false,
 };
 
 /// A suspendable task (M1.0.11 E1) — the dynamic-pool replacement for the M0.8
@@ -1811,6 +1858,43 @@ pub const Interpreter = struct {
                         .signaled => if (try self.unwindControl(task)) continue :drive else return .completed,
                     }
                 },
+                .for_ => {
+                    const f = self.ast.for_stmts.items[self.ast.stmtData(task.frames.items[ti].for_.for_id)];
+                    if (!task.frames.items[ti].for_.in_iter) {
+                        if (!(try self.forAdvance(&task.frames.items[ti].for_, locals))) {
+                            _ = task.frames.pop(); // iterator exhausted → `for` ends
+                            continue :drive;
+                        }
+                        task.frames.items[ti].for_.in_iter = true;
+                        task.frames.items[ti].for_.cursor = 0;
+                        continue :drive;
+                    }
+                    if (task.frames.items[ti].for_.cursor >= f.body_len) {
+                        task.frames.items[ti].for_.in_iter = false; // advance to next element
+                        continue :drive;
+                    }
+                    const stmt: NodeId = @bitCast(self.ast.extra.items[f.body_start + task.frames.items[ti].for_.cursor]);
+                    switch (try self.stepBodyStmt(world, task, &task.frames.items[ti].for_.cursor, stmt)) {
+                        .suspended => return .suspended,
+                        .advanced, .pushed => continue :drive,
+                        .signaled => if (try self.unwindControl(task)) continue :drive else return .completed,
+                    }
+                },
+                .try_ => {
+                    const tf = &task.frames.items[ti].try_;
+                    const start = if (tf.in_catch) tf.catch_start else tf.try_start;
+                    const len = if (tf.in_catch) tf.catch_len else tf.try_len;
+                    if (tf.cursor >= len) {
+                        _ = task.frames.pop(); // `try` (or `catch`) body done
+                        continue :drive;
+                    }
+                    const stmt: NodeId = @bitCast(self.ast.extra.items[start + tf.cursor]);
+                    switch (try self.stepBodyStmt(world, task, &task.frames.items[ti].try_.cursor, stmt)) {
+                        .suspended => return .suspended,
+                        .advanced, .pushed => continue :drive,
+                        .signaled => if (try self.unwindControl(task)) continue :drive else return .completed,
+                    }
+                },
             }
         }
         return .completed;
@@ -1836,10 +1920,39 @@ pub const Interpreter = struct {
             try task.frames.append(self.gpa, .{ .while_ = .{ .while_id = stmt } });
             return .pushed;
         }
-        // (2b) `if` / `match` / `loop` / `block` expression-statements → push a
-        // child frame so a body `await` can suspend. `for` / `try` are NOT
-        // frame-driven (fall through to sync `execStmt`; a body `await` there
-        // fails loud — outside the §9.12 placement list, deferred).
+        // (2b) `for` statement → evaluate the iterable ONCE (its side effects run
+        // now, exactly like the sync `for`) and push a for frame carrying the
+        // iterator state (so a body `await` resumes at the same element).
+        if (sk == .for_stmt) {
+            const f = self.ast.for_stmts.items[self.ast.stmtData(stmt)];
+            const iter = try self.evalExpr(world, locals, f.iterable);
+            const for_iter: ForIter = switch (iter) {
+                .range => |r| .{ .range = .{ .next = r.start, .end = r.end, .inclusive = r.inclusive } },
+                .array_ref => |h| .{ .array = .{ .handle = h, .len = self.collections.arrays.items[h].items.len, .idx = 0 } },
+                .map_ref => |h| .{ .map = .{ .handle = h, .len = self.collections.maps.items[h].items.len, .idx = 0 } },
+                else => return error.RuntimeFailure,
+            };
+            cursor.* += 1;
+            try task.frames.append(self.gpa, .{ .for_ = .{ .for_id = stmt, .iter = for_iter } });
+            return .pushed;
+        }
+        // (2c) `try { } catch e { }` → push a try frame driving the `try` body; a
+        // `throw` (even after a suspension inside the body) routes to the `catch`
+        // via `unwindControl`, re-establishing the handler across the suspend.
+        if (sk == .try_catch_stmt) {
+            const tc = self.ast.try_catch_stmts.items[self.ast.stmtData(stmt)];
+            cursor.* += 1;
+            try task.frames.append(self.gpa, .{ .try_ = .{
+                .try_start = tc.try_start,
+                .try_len = tc.try_len,
+                .catch_start = tc.catch_start,
+                .catch_len = tc.catch_len,
+                .catch_name = tc.catch_name,
+            } });
+            return .pushed;
+        }
+        // (2d) `if` / `match` / `loop` / `block` expression-statements → push a
+        // child frame so a body `await` can suspend.
         if (sk == .expr_stmt) {
             const e: NodeId = @bitCast(self.ast.stmtData(stmt));
             switch (self.ast.exprKind(e)) {
@@ -1901,11 +2014,15 @@ pub const Interpreter = struct {
     }
 
     /// Unwind the frame-stack for a pending control signal (M1.0.11 E1). A
-    /// `return` or an uncaught `throw` ends the task (`false`, stack cleared —
-    /// rules have no return value). A `break`/`continue` pops intervening block
-    /// frames to the nearest matching `loop`/`while` and consumes it there
-    /// (`true`, keep driving); an unmatched signal at the task top ends the task
-    /// (`false`). Mirrors the sync `loop_expr` / `handleLoopControl` semantics.
+    /// `return` ends the task (`false`, stack cleared — rules have no return
+    /// value). A `throw` routes to the nearest enclosing `try` still in its try
+    /// phase — binding the caught value and switching that frame to its `catch`
+    /// (`true`, keep driving) — or, with no such `try`, ends the task as an
+    /// uncaught throw (`false`). A `break`/`continue` pops intervening block
+    /// frames to the nearest matching `loop`/`while`/`for` and consumes it there
+    /// (`true`); an unmatched signal at the task top ends the task (`false`).
+    /// Mirrors the sync `loop_expr` / `handleLoopControl` / `try_catch_stmt`
+    /// semantics — and re-establishes a `try`'s handler across a suspension.
     fn unwindControl(self: *Interpreter, task: *AsyncTask) StmtError!bool {
         if (self.returning) {
             self.returning = false;
@@ -1914,8 +2031,27 @@ pub const Interpreter = struct {
             return false;
         }
         if (self.thrown) {
-            // Left set for `finishTaskDone` to surface as an UncaughtThrow.
-            task.frames.clearRetainingCapacity();
+            // Route the throw to the nearest `try` in its try phase (a `catch`'s
+            // own throw re-propagates past it). Popping intervening loop/run/for
+            // frames mirrors the sync unwinding of a throw out of nested control
+            // flow. If none catches it, the residual `self.thrown` is left set for
+            // `finishTaskDone` to surface as an UncaughtThrow.
+            while (task.frames.items.len > 0) {
+                const ti = task.frames.items.len - 1;
+                switch (task.frames.items[ti]) {
+                    .try_ => |tfv| {
+                        if (!tfv.in_catch) {
+                            self.thrown = false;
+                            try task.locals.put(self.gpa, tfv.catch_name, self.thrown_value, false);
+                            task.frames.items[ti].try_.in_catch = true;
+                            task.frames.items[ti].try_.cursor = 0;
+                            return true;
+                        }
+                        _ = task.frames.pop(); // throw inside this `catch` → propagate past it
+                    },
+                    else => _ = task.frames.pop(),
+                }
+            }
             return false;
         }
         while (task.frames.items.len > 0) {
@@ -1952,6 +2088,23 @@ pub const Interpreter = struct {
                         return true;
                     }
                     _ = task.frames.pop(); // labeled → propagate (while has no label)
+                },
+                .for_ => {
+                    // `for` carries no label → matches only an unlabeled signal.
+                    if (self.control_label == 0) {
+                        const was_break = self.control == .break_;
+                        self.control = .none;
+                        if (was_break) {
+                            _ = task.frames.pop();
+                        } else {
+                            task.frames.items[ti].for_.in_iter = false; // continue → next element
+                        }
+                        return true;
+                    }
+                    _ = task.frames.pop(); // labeled → propagate (for has no label)
+                },
+                .try_ => {
+                    _ = task.frames.pop(); // `break`/`continue` unwinds past a `try`
                 },
             }
         }
@@ -2079,6 +2232,48 @@ pub const Interpreter = struct {
         const cond = try self.evalExpr(world, locals, wh.cond);
         if (cond != .bool_) return error.RuntimeFailure;
         return cond.bool_;
+    }
+
+    /// Advance a `for` frame's iterator by one element, binding the loop
+    /// variable(s) (M1.0.11 E1): `true` = a body iteration was entered, `false` =
+    /// the iterator is exhausted (the `for` ends). Mirrors the sync `for_stmt`
+    /// arms of `execStmt`. A `range` is self-contained; an `array`/`map` handle is
+    /// bounds-checked against the (possibly reset) collection store and fails loud
+    /// rather than dereference out of bounds (the heap-across-suspend caveat).
+    fn forAdvance(self: *Interpreter, ff: *ForFrame, locals: *Locals) StmtError!bool {
+        const f = self.ast.for_stmts.items[self.ast.stmtData(ff.for_id)];
+        switch (ff.iter) {
+            .range => {
+                const r = &ff.iter.range;
+                const more = if (r.inclusive) r.next <= r.end else r.next < r.end;
+                if (!more) return false;
+                try locals.put(self.gpa, f.var_name, .{ .int_ = r.next }, false);
+                r.next += 1;
+                return true;
+            },
+            .array => {
+                const a = &ff.iter.array;
+                if (a.idx >= a.len) return false;
+                if (a.handle >= self.collections.arrays.items.len) return error.RuntimeFailure;
+                const col = self.collections.arrays.items[a.handle];
+                if (a.idx >= col.items.len) return error.RuntimeFailure;
+                try locals.put(self.gpa, f.var_name, col.items[a.idx], false);
+                a.idx += 1;
+                return true;
+            },
+            .map => {
+                const m = &ff.iter.map;
+                if (m.idx >= m.len) return false;
+                if (m.handle >= self.collections.maps.items.len) return error.RuntimeFailure;
+                const col = self.collections.maps.items[m.handle];
+                if (m.idx >= col.items.len) return error.RuntimeFailure;
+                const pair = col.items[m.idx];
+                try locals.put(self.gpa, f.var_name, pair.key, false);
+                if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
+                m.idx += 1;
+                return true;
+            },
+        }
     }
 
     /// The `await_expr` of a bare top-level `await <target>` statement (an
@@ -7851,6 +8046,115 @@ test "async rule suspends at a statement-head await inside a loop body and resum
     // tick 4: task done — n stays 3.
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out_id));
+}
+
+test "async rule suspends at a statement-head await inside a for body and resumes per iteration with iterator state preserved (M1.0.11 E1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A `for i in 0..3` body that awaits every iteration: the for frame persists
+    // its range iterator (`next`) across suspension and resumes at the correct
+    // element. `Out.n` accumulates `i + 1` per iteration → 1, 3, 6 — the running
+    // total proves `i` took 0, 1, 2 in order across the suspends.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule ranger()
+        \\  when resource Out
+        \\{
+        \\  for i in 0..3 {
+        \\    let o = get_mut(Out)
+        \\    o.n += i + 1
+        \\    await wait(1)
+        \\  }
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: i=0 → n += 1 = 1, suspend (wake at async_tick 2).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // tick 2: resume → i=1 → n += 2 = 3, suspend.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out_id));
+    // tick 3: resume → i=2 → n += 3 = 6, suspend.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 6), readResourceInt(&world, out_id));
+    // tick 4: resume → iterator exhausted → the `for` ends, the task completes.
+    const r4 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r4.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 6), readResourceInt(&world, out_id));
+    // tick 5: task done — n stays 6.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 6), readResourceInt(&world, out_id));
+}
+
+test "async rule suspends inside a try body and a post-resume throw routes to the catch (M1.0.11 E1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The `try` frame carries its catch handler across a suspension: the body
+    // awaits, and the `throw` runs only AFTER the resume — yet it still routes to
+    // the `catch` (n goes 1 → 2, and the throw is CAUGHT so runtime_errors == 0).
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule guarded()
+        \\  when resource Out
+        \\{
+        \\  try {
+        \\    let o = get_mut(Out)
+        \\    o.n = 1
+        \\    await wait(1)
+        \\    throw Error { message: "boom", code: ErrorCode.io_fail }
+        \\  } catch e {
+        \\    let o2 = get_mut(Out)
+        \\    o2.n = 2
+        \\  }
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: enter the try, o.n=1, suspend at the await (the try frame — with its
+    // catch handler — persists across the suspend).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // tick 2: resume → the throw fires and routes to the catch → o.n=2. The throw
+    // was caught, so it is NOT counted as a runtime error.
+    const r2 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r2.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+    // tick 3: task done — n stays 2.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
 }
 
 test "runProgram Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)" {
