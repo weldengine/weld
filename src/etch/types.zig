@@ -323,6 +323,11 @@ pub const TypeChecker = struct {
     /// statement-head `await` there is inexecutable and gets E0904 even though it
     /// is syntactically a head.
     await_suspendable: bool = false,
+    /// Whether the `fn` / `rule` / method whose body is currently being checked is
+    /// `async` (M1.0.11 E4, function coloring §9.3). An `await`, or a call to an
+    /// `async fn`/`async method`, in a NON-async context is E0901
+    /// `AsyncCallInNonAsyncContext`. `false` outside any body.
+    current_is_async: bool = false,
     /// Merged global tag table (M0.8 E3, `etch-validation-ecs.md` §5.2), built
     /// between pass 1 and pass 2 from every `tags { ... }` block. `null` until
     /// `buildTags` runs. Pass 2 (tag-op when-conditions / `tag_path` operands,
@@ -3586,6 +3591,11 @@ pub const TypeChecker = struct {
         const saved_susp = self.await_suspendable;
         self.await_suspendable = true;
         defer self.await_suspendable = saved_susp;
+        // Function coloring context (M1.0.11 E4): `await` / async calls are legal
+        // only when this body is `async`.
+        const saved_async = self.current_is_async;
+        self.current_is_async = decl.is_async;
+        defer self.current_is_async = saved_async;
 
         var s: u32 = 0;
         while (s < decl.body_len) : (s += 1) {
@@ -3786,6 +3796,11 @@ pub const TypeChecker = struct {
         const saved_susp = self.await_suspendable;
         self.await_suspendable = true;
         defer self.await_suspendable = saved_susp;
+        // Function coloring context (M1.0.11 E4): `await` / async calls are legal
+        // only in an `async rule`.
+        const saved_async = self.current_is_async;
+        self.current_is_async = rule.is_async;
+        defer self.current_is_async = saved_async;
         var s: u32 = 0;
         while (s < rule.body_len) : (s += 1) {
             const stmt_raw = self.arena.extra.items[rule.body_start + s];
@@ -3850,6 +3865,11 @@ pub const TypeChecker = struct {
         const saved_susp = self.await_suspendable;
         self.await_suspendable = true;
         defer self.await_suspendable = saved_susp;
+        // Function coloring context (M1.0.11 E4): `await` / async calls are legal
+        // only when this body is `async`.
+        const saved_async = self.current_is_async;
+        self.current_is_async = decl.is_async;
+        defer self.current_is_async = saved_async;
 
         var s: u32 = 0;
         while (s < decl.body_len) : (s += 1) {
@@ -4640,6 +4660,11 @@ pub const TypeChecker = struct {
                 if (!is_head or !self.await_suspendable) {
                     try self.emit(.await_not_statement_head, .error_, self.arena.exprSpan(id), "`await` must be the full right-hand expression of a statement on the async path — hoist it into a `let` (Phase-1 restriction)", .{});
                 }
+                // Function coloring (M1.0.11 E4, §9.3): `await` is an async effect
+                // — only an `async fn`/`async rule` may use it.
+                if (!self.current_is_async) {
+                    try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "`await` is only allowed in an `async fn` or `async rule`", .{});
+                }
                 const aw = self.arena.awaitExpr(id);
                 if (aw.target_kind == .future) return try self.synthExprE(aw.arg_expr, ctx_opt);
                 return ResolvedType.unknown;
@@ -4977,6 +5002,12 @@ pub const TypeChecker = struct {
     /// is the declared return type (`unknown` for a void fn).
     fn synthFreeFnCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, item_id: NodeId, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const decl = self.arena.fn_decls.items[self.arena.itemData(item_id)];
+        // Function coloring (M1.0.11 E4, §9.3): calling an `async fn` from a
+        // non-async context is E0901. (A legal async→async call is via `await`,
+        // which reaches here with `current_is_async` true.)
+        if (decl.is_async and !self.current_is_async) {
+            try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "cannot call `async fn` '{s}' from a non-async context (needs an `async fn`/`async rule` + `await`)", .{self.arena.strings.slice(decl.name)});
+        }
         const ret: ResolvedType = if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
         var pnames: std.ArrayListUnmanaged(StringId) = .empty;
         defer pnames.deinit(self.gpa);
@@ -5804,6 +5835,12 @@ pub const TypeChecker = struct {
     /// resolved `method` (M0.8 E2 block 3) and return its declared return type.
     /// `self` is not part of the argument list (it is the receiver).
     fn checkMethodArgs(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, method: ast_mod.FnDecl, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        // Function coloring (M1.0.11 E4, §9.3): calling an `async method` from a
+        // non-async context is E0901 (a legal call is via `await` in an async
+        // context, which reaches here with `current_is_async` true).
+        if (method.is_async and !self.current_is_async) {
+            try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "cannot call `async` method '{s}' from a non-async context (needs an `async fn`/`async rule` + `await`)", .{self.arena.strings.slice(mc.method_name)});
+        }
         const ret: ResolvedType = if (method.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(method.return_type);
         var pnames: std.ArrayListUnmanaged(StringId) = .empty;
         defer pnames.deinit(self.gpa);
@@ -9557,4 +9594,67 @@ test "E0904 fires on a statement-head await inside a value-position block, not a
     defer sif.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), sif.parse_diags.len);
     try expectNoCode(sif.diagnostics.items, .await_not_statement_head);
+}
+
+test "E0901 fires on an async call / await in a non-async context, not on a legal async→async await (M1.0.11 E4)" {
+    const gpa = std.testing.allocator;
+    const af =
+        \\resource Out { n: int = 0 }
+        \\async fn af() -> int {
+        \\  await wait(0.02s)
+        \\  return 1
+        \\}
+        \\
+    ;
+    // (a) `async fn` called from a SYNC `fn` → E0901.
+    var sfn = try parseAndCheck(gpa, af ++
+        \\fn caller() -> int {
+        \\  let x = af()
+        \\  return x
+        \\}
+    );
+    defer sfn.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), sfn.parse_diags.len);
+    try expectAnyCode(sfn.diagnostics.items, .async_call_in_non_async_context);
+
+    // (b) `async fn` called from a SYNC `rule` → E0901.
+    var srule = try parseAndCheck(gpa, af ++
+        \\rule caller()
+        \\  when resource Out
+        \\{
+        \\  let x = af()
+        \\  let o = get_mut(Out)
+        \\  o.n = x
+        \\}
+    );
+    defer srule.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), srule.parse_diags.len);
+    try expectAnyCode(srule.diagnostics.items, .async_call_in_non_async_context);
+
+    // (c) `await` used in a SYNC context → E0901.
+    var sawait = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\rule caller()
+        \\  when resource Out
+        \\{
+        \\  await wait(0.02s)
+        \\}
+    );
+    defer sawait.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), sawait.parse_diags.len);
+    try expectAnyCode(sawait.diagnostics.items, .async_call_in_non_async_context);
+
+    // (d) a legal `async`→`async` call via `await` — no E0901.
+    var ok = try parseAndCheck(gpa, af ++
+        \\async rule caller()
+        \\  when resource Out
+        \\{
+        \\  let x = await af()
+        \\  let o = get_mut(Out)
+        \\  o.n = x
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try expectNoCode(ok.diagnostics.items, .async_call_in_non_async_context);
 }
