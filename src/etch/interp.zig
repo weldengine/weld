@@ -528,6 +528,36 @@ fn durationLiteralSeconds(text: []const u8) ?f64 {
     return std.fmt.parseFloat(f64, text[0 .. text.len - 1]) catch null;
 }
 
+// ─── Async suspension core (M1.0.11, `etch-reference-part1.md §9.12`) ─────────
+//
+// Phase 1 is the tree-walker; it reproduces the §9 observable async semantics
+// WITHOUT the Phase-2 compiled state machine (`etch-bytecode.md §9`). A suspended
+// task is a heap record — an `AsyncTask` in the `Interpreter.async_tasks` pool —
+// carrying a RESUME FRAME-STACK: a stack of `AsyncFrame`s (innermost last), one
+// per statement block on the call/control-flow path. `driveTask`/`driveLoop` is an
+// ITERATIVE machine over that stack (no fibers, no per-task OS thread, §9.1):
+//
+//   - A statement-head `await` suspends the whole task at ANY depth: `driveLoop`
+//     returns, the frame-stack persists, and resume re-enters the innermost frame
+//     at its cursor — a prefix statement is NEVER re-run, so `emit` and structural
+//     mutations don't double-fire. `wait(Duration)` resolves against `async_tick`
+//     via the fixed 1/60 timestep (`async_fixed_dt_hz`); `global_event` against the
+//     per-tick event store; the direct-call `future` (`await f()`) is frame
+//     inlining (below).
+//   - Frame kinds cover every EBNF v0.6 statement block (C1.6): `run` (rule/`fn`
+//     body, `if` branch, `match` arm, plain block), `loop_`, `while_`, `for_`,
+//     `try_` (a `throw` after a resume routes to the enclosing `try_` — the
+//     handler is re-established across the suspension), and `call` (an inlined
+//     `async fn`/`async method` body — `await f()` pushes `f`'s body + a heap-boxed
+//     scope + a `RetTarget`; `f`'s own `await` suspends the whole task; `f`'s
+//     `return` resolves at the caller's await site).
+//   - Placement (Phase-1, type-checker `E0904`): `await` must be a statement's
+//     full RHS on the frame-driven spine; a sub-expression `await`, or one in a
+//     synchronously-evaluated VALUE block, is rejected. Coloring (§9.3, `E0901`):
+//     an `await` / async call in a non-async `fn`/`rule` is rejected.
+//   - A sync-only program allocates no task, keeps `async_tick` at 0, and is
+//     byte-identical to the pre-async runtime (by construction).
+
 /// The condition that resumes a suspended `async rule` (M0.8 E3 sub-slice B).
 /// The tree-walker is its own runtime (`etch-reference-part1.md §9`): an
 /// `await` suspends the rule as a task-record, polled each tick in `stepOnce`.
