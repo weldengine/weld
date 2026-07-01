@@ -4552,6 +4552,17 @@ pub const TypeChecker = struct {
             // no body handle (§4.5). `checkStmt` handles the legal statement
             // position before this arm is reached.
             .spawn_struct => return try self.checkSpawnStruct(id, data, ctx_opt, true),
+            // M1.0.11 E2 — type an `await`. The `future` form (`await f()`) carries
+            // the awaited call's declared return type, so `let x = await f()` binds
+            // the right type (and the inner call is type-checked here — arg count,
+            // etc.). The wake-condition forms (`wait` / `wait_unscaled` /
+            // `entity_event` / `global_event`) produce no value. Function coloring
+            // (E0901) and placement (E0904) are added in E4 / E3.
+            .await_expr => {
+                const aw = self.arena.awaitExpr(id);
+                if (aw.target_kind == .future) return try self.synthExprE(aw.arg_expr, ctx_opt);
+                return ResolvedType.unknown;
+            },
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
             else => return ResolvedType.unknown,
         }
