@@ -356,13 +356,13 @@ pub const TypeChecker = struct {
     /// Start of the innermost branch's label window in `conc_labels`
     /// (M1.0.12 E3). Saved/restored at branch entry.
     conc_labels_base: usize = 0,
-    /// True while checking statements inside any of the four concurrency
-    /// constructs (M1.0.12 E3): an async call there is a consumed LAUNCH site
-    /// (`etch-resolver-types.md` §9.2), so E0905 does not fire on it.
-    in_conc_construct: bool = false,
     /// The direct-call node consumed by the `await` currently being typed
-    /// (M1.0.12 E3): `synthCall`/`synthMethodCall` skip E0905 for it. Set
-    /// around the future-form arg synthesis; `NodeId.none` otherwise.
+    /// (M1.0.12 E3): the free-fn/method call sites skip E0905 for it. Set
+    /// around the future-form arg synthesis; `NodeId.none` otherwise. The
+    /// `await` is the SOLE call-grain consumer of the `{async}` effect
+    /// (`etch-resolver-types.md` §9.2, revision 2): the four concurrency
+    /// constructs relocate the suspension into a child task — their bodies
+    /// are ordinary async contexts where E0905 applies recursively.
     awaited_call: NodeId = NodeId.none,
     /// Merged global tag table (M0.8 E3, `etch-validation-ecs.md` §5.2), built
     /// between pass 1 and pass 2 from every `tags { ... }` block. `null` until
@@ -4464,8 +4464,8 @@ pub const TypeChecker = struct {
                 // async". Each conditional guard (`if cond =>`) types as bool
                 // in the PARENT scope (it is evaluated there, synchronously,
                 // at construct entry — §9.5); each branch statement is then
-                // checked inside its branch context (E0906/E0907 + the E0905
-                // launch-site exemption).
+                // checked inside its branch context (E0906/E0907; E0905 keeps
+                // applying recursively — §9.2 revision 2).
                 if (!self.current_is_async) {
                     try self.emit(.async_call_in_non_async_context, .error_, self.arena.stmtSpan(stmt_id), "'{s}' is only allowed in an 'async fn' or 'async rule'", .{if (kind == .race_stmt) "race" else "sync"});
                 }
@@ -4492,7 +4492,7 @@ pub const TypeChecker = struct {
                 // `branch { }` (M1.0.12 E3, §4.2) — fire-and-forget detached
                 // task. Async context required (E0901); the body is checked
                 // inside a `.branch` context (return → E0906, escaping
-                // break/continue → E0907, async calls = launch sites).
+                // break/continue → E0907; E0905 keeps applying recursively).
                 if (!self.current_is_async) {
                     try self.emit(.async_call_in_non_async_context, .error_, self.arena.stmtSpan(stmt_id), "'branch' is only allowed in an 'async fn' or 'async rule'", .{});
                 }
@@ -4521,23 +4521,22 @@ pub const TypeChecker = struct {
     }
 
     /// Enter a concurrency-branch context around one `race`/`sync` branch
-    /// statement (M1.0.12 E3): E0906/E0907 anchor to the INNERMOST branch, the
-    /// in-branch loop depth and label window restart at the boundary, and any
-    /// async call inside is a consumed launch site (E0905 exempt, §9.2).
+    /// statement (M1.0.12 E3): E0906/E0907 anchor to the INNERMOST branch and
+    /// the in-branch loop depth and label window restart at the boundary. The
+    /// branch body stays an ORDINARY async context otherwise — E0905 applies
+    /// recursively inside it (§9.2 revision 2: the constructs relocate the
+    /// `await`, they do not replace it).
     fn checkConcBranchStmt(self: *TypeChecker, ctx: *RuleCtx, stmt: NodeId, kind: ConcBranchKind) TypeError!void {
         const saved_branch = self.conc_branch;
         const saved_depth = self.conc_loop_depth;
         const saved_base = self.conc_labels_base;
-        const saved_launch = self.in_conc_construct;
         self.conc_branch = kind;
         self.conc_loop_depth = 0;
         self.conc_labels_base = self.conc_labels.items.len;
-        self.in_conc_construct = true;
         defer {
             self.conc_branch = saved_branch;
             self.conc_loop_depth = saved_depth;
             self.conc_labels_base = saved_base;
-            self.in_conc_construct = saved_launch;
         }
         try self.checkStmt(ctx, stmt);
     }
@@ -4548,16 +4547,13 @@ pub const TypeChecker = struct {
         const saved_branch = self.conc_branch;
         const saved_depth = self.conc_loop_depth;
         const saved_base = self.conc_labels_base;
-        const saved_launch = self.in_conc_construct;
         self.conc_branch = kind;
         self.conc_loop_depth = 0;
         self.conc_labels_base = self.conc_labels.items.len;
-        self.in_conc_construct = true;
         defer {
             self.conc_branch = saved_branch;
             self.conc_loop_depth = saved_depth;
             self.conc_labels_base = saved_base;
-            self.in_conc_construct = saved_launch;
         }
         var i: u32 = 0;
         while (i < len) : (i += 1) {
@@ -4566,12 +4562,13 @@ pub const TypeChecker = struct {
     }
 
     /// True when an async call at `id` has its `{async}` effect consumed
-    /// (M1.0.12 E3, `etch-resolver-types.md` §9.2): it is the direct target of
-    /// the `await` currently being typed, or it sits inside one of the four
-    /// concurrency constructs (a consumed LAUNCH site). A bare async call in
-    /// an async context otherwise gets E0905.
+    /// (M1.0.12 E3, `etch-resolver-types.md` §9.2 revision 2): it is the
+    /// direct target of the `await` currently being typed — the SOLE
+    /// call-grain consumer. The four concurrency constructs do NOT consume
+    /// it: they relocate the suspension into a child task, so a bare async
+    /// call inside their bodies is E0905 like anywhere else (at execution it
+    /// would hit the sync call path's `is_async` fail-loud gate).
     fn consumesAsyncEffect(self: *const TypeChecker, id: NodeId) bool {
-        if (self.in_conc_construct) return true;
         return @as(u32, @bitCast(id)) == @as(u32, @bitCast(self.awaited_call));
     }
 
@@ -5244,9 +5241,10 @@ pub const TypeChecker = struct {
             try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "cannot call `async fn` '{s}' from a non-async context (needs an `async fn`/`async rule` + `await`)", .{self.arena.strings.slice(decl.name)});
         } else if (decl.is_async and !self.consumesAsyncEffect(id)) {
             // M1.0.12 E3 — E0905: a BARE async call in an async context. The
-            // `{async}` effect must be consumed: wrapped in `await`, or
-            // launched inside a `spawn`/`branch`/`race`/`sync` body (§9.2).
-            try self.emit(.unconsumed_async_effect, .error_, self.arena.exprSpan(id), "bare call to `async fn` '{s}' — consume the async effect with `await`, or launch it inside a spawn/branch/race/sync", .{self.arena.strings.slice(decl.name)});
+            // `await` is the SOLE call-grain consumer of the `{async}` effect
+            // (§9.2 revision 2) — the four constructs relocate the suspension,
+            // they do not consume it.
+            try self.emit(.unconsumed_async_effect, .error_, self.arena.exprSpan(id), "bare call to `async fn` '{s}' — consume the async effect with `await` (inside spawn/branch/race/sync bodies too: the constructs relocate the await into a child task, they do not replace it)", .{self.arena.strings.slice(decl.name)});
         }
         const ret: ResolvedType = if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
         var pnames: std.ArrayListUnmanaged(StringId) = .empty;
@@ -6096,8 +6094,8 @@ pub const TypeChecker = struct {
         if (method.is_async and !self.current_is_async) {
             try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "cannot call `async` method '{s}' from a non-async context (needs an `async fn`/`async rule` + `await`)", .{self.arena.strings.slice(mc.method_name)});
         } else if (method.is_async and !self.consumesAsyncEffect(id)) {
-            // M1.0.12 E3 — E0905 (mirror of the free-fn site, §9.2).
-            try self.emit(.unconsumed_async_effect, .error_, self.arena.exprSpan(id), "bare call to `async` method '{s}' — consume the async effect with `await`, or launch it inside a spawn/branch/race/sync", .{self.arena.strings.slice(mc.method_name)});
+            // M1.0.12 E3 — E0905 (mirror of the free-fn site, §9.2 revision 2).
+            try self.emit(.unconsumed_async_effect, .error_, self.arena.exprSpan(id), "bare call to `async` method '{s}' — consume the async effect with `await` (inside spawn/branch/race/sync bodies too: the constructs relocate the await into a child task, they do not replace it)", .{self.arena.strings.slice(mc.method_name)});
         }
         const ret: ResolvedType = if (method.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(method.return_type);
         var pnames: std.ArrayListUnmanaged(StringId) = .empty;
@@ -9957,7 +9955,7 @@ test "E0901 fires on the four concurrency constructs outside an async context (M
     try expectNoCode(ok.diagnostics.items, .async_call_in_non_async_context);
 }
 
-test "E0905 fires on a bare async call, not when consumed by the five forms (M1.0.12 E3)" {
+test "E0905 fires on every bare async call; await is the sole consumer (M1.0.12 E3)" {
     const gpa = std.testing.allocator;
     const af =
         \\resource Out { n: int = 0 }
@@ -9987,20 +9985,43 @@ test "E0905 fires on a bare async call, not when consumed by the five forms (M1.
     try std.testing.expectEqual(@as(usize, 2), count);
     try expectNoCode(bare.diagnostics.items, .async_call_in_non_async_context);
 
-    // Consumed by each of the five forms — `await` + the four launch sites
-    // (§9.2) — no E0905.
+    // §9.2 revision 2: the four constructs RELOCATE the await into a child
+    // task, they do not replace it — a bare async call inside their bodies is
+    // E0905 like anywhere else (it would hit the sync call path's `is_async`
+    // fail-loud gate at execution). One per body → 4 × E0905.
+    var inbody = try parseAndCheck(gpa, af ++
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  race { af() }
+        \\  sync { af() }
+        \\  branch { af() }
+        \\  spawn { af() }
+        \\}
+    );
+    defer inbody.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), inbody.parse_diags.len);
+    count = 0;
+    for (inbody.diagnostics.items) |d| {
+        if (d.code == .unconsumed_async_effect) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), count);
+
+    // Consumed by `await` — at the rule top AND inside each of the four
+    // construct bodies — no E0905.
     var ok = try parseAndCheck(gpa, af ++
         \\async rule r()
         \\  when resource Out
         \\{
         \\  let x = await af()
         \\  race {
-        \\    af()
-        \\    { let a = await af() }
+        \\    await af()
+        \\    { let a = await af()
+        \\      return }
         \\  }
-        \\  sync { af() }
-        \\  branch { af() }
-        \\  spawn { af() }
+        \\  sync { await af() }
+        \\  branch { let y = await af() }
+        \\  spawn { await af() }
         \\}
     );
     defer ok.deinit(gpa);
