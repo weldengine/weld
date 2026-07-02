@@ -571,6 +571,19 @@ const WakeCond = union(enum) {
     /// (M0.8 E3 sub-slice B — `await global_event(T)`). The producer must run
     /// before the awaiter in the rule order, same as the observer drain.
     global_event: StringId,
+    /// A `race` parent (M1.0.12 E1): fires when at least one child in
+    /// `task_children[start .. start+len]` is `.done` (a winner exists) — OR when
+    /// no child remains `.suspended` (every branch failed/canceled: no winner,
+    /// the race completes and the parent resumes after the statement, E4).
+    /// A range into the shared `Interpreter.task_children` list, kept small.
+    children_any: struct { start: u32, len: u32 },
+    /// A `sync` parent (M1.0.12 E1): fires when no child in the range remains
+    /// `.suspended` — failed (canceled) children do not block the join.
+    children_all: struct { start: u32, len: u32 },
+    /// A handle-await parent (M1.0.12 E1, `await h`): fires when the target task
+    /// is no longer `.suspended`. The pool is monotonic (no slot reuse), so a
+    /// bare pool index is a stable identity — no generation needed in Phase 1.
+    task_done: u32,
 };
 
 /// One frame of an `AsyncTask`'s resume stack (M1.0.11 E1). The tree-walker is
@@ -705,13 +718,23 @@ const CallFrame = struct {
 /// A suspendable task (M1.0.11 E1) — the dynamic-pool replacement for the M0.8
 /// per-rule `AsyncSlot`. Holds the resume frame-stack (`frames`, innermost last),
 /// the wake condition it is blocked on, and the locals retained across
-/// suspension. Allocated in `Interpreter.async_tasks` on first spawn; one task
-/// per `async rule` in E1 (E2 inlines `async fn` bodies as extra frames on the
-/// SAME task; M1.0.12 `spawn` will create sibling tasks in the pool). This is the
-/// tree-walk analogue of the async state struct (`etch-memory-model.md §5.7`) —
-/// no compiled state machine (that is Phase-2 codegen).
+/// suspension. Since M1.0.12 E1 each task is a HEAP record (`gpa.create`) in the
+/// `Interpreter.async_tasks` pointer pool: `race`/`sync`/`branch`/`spawn` create
+/// sibling tasks MID-DRIVE, so pool growth must not invalidate the live
+/// `*AsyncTask` threaded through `driveTask`/`driveLoop`/`stepBodyStmt` (nor
+/// `currentScope`'s `&task.locals`). The pool is MONOTONIC in Phase 1: no slot
+/// reuse — a completed task parks as a small husk (frames + locals freed,
+/// `result` retained), which makes `await` on an already-done handle trivially
+/// correct without generations or refcounting. This is the tree-walk analogue of
+/// the async state struct (`etch-memory-model.md §5.7`) — no compiled state
+/// machine (that is Phase-2 codegen).
 const AsyncTask = struct {
-    state: enum { suspended, done } = .suspended,
+    /// `.suspended` = live (schedulable when `wake` fires); `.done` = completed
+    /// normally (`result` parked); `.canceled` = terminated WITHOUT a result —
+    /// explicitly canceled (`cancelTask`) or, from E4, failed loud (uncaught
+    /// `throw` / runtime failure). A `.canceled` task is never a race winner,
+    /// never blocks a `sync` join, and `await`ing it fails loud (§9.8 amended).
+    state: enum { suspended, done, canceled } = .suspended,
     wake: WakeCond = .{ .wait_until = 0 },
     frames: std.ArrayListUnmanaged(AsyncFrame) = .empty,
     /// The task's ROOT locals (the rule body's scope), retained across suspension.
@@ -723,6 +746,20 @@ const AsyncTask = struct {
     /// (`let x = await wait(…)`): the (unit) value is bound on resume (M1.0.11
     /// E2). `.discard` for a bare `await wait/global_event` (the common form).
     pending_bind: RetTarget = .discard,
+    /// The async rule descriptor index that transitively created this task
+    /// (M1.0.12 E1). Drive-by-origin schedules every task at ITS RULE's position
+    /// in the rule order — events emitted by child tasks interleave there,
+    /// deterministically, including for detached tasks outliving their parent.
+    origin_rule: u32 = 0,
+    /// Pool index of the task that created this one (M1.0.12 E1); `null` for
+    /// rule roots — and for detached (`branch`/`spawn`) tasks after creation
+    /// bookkeeping. Cancellation is NON-transitive (Phase 1): this link is
+    /// lineage bookkeeping, not a cancellation channel.
+    parent: ?u32 = null,
+    /// Parked completion value for handle-await delivery (M1.0.12 E1): the husk
+    /// keeps it after frames + locals are freed. Always `.unit` in Phase 1
+    /// (`spawn` bodies are blocks — no value channel, brief Notes).
+    result: Value = .{ .unit = {} },
 
     fn deinit(self: *AsyncTask, gpa: std.mem.Allocator) void {
         for (self.frames.items) |*f| switch (f.*) {
@@ -871,12 +908,20 @@ pub const Interpreter = struct {
     /// count via the fixed 1/60 timestep (`async_fixed_dt_hz`, M1.0.11 E3).
     async_tick: u64 = 0,
     /// Dynamic pool of suspendable tasks (M1.0.11 E1) — the growable replacement
-    /// for the M0.8 per-rule `AsyncSlot` slice. A task is appended on first spawn
-    /// of an `async rule` and lives (state `.done` once finished) until `deinit`.
-    /// Empty when `!has_async`; grows as async rules spawn (E2/M1.0.12 add fn
-    /// frames / sibling tasks). Indices into it are stable within a tick (no task
-    /// is created mid-drive in E1).
-    async_tasks: std.ArrayListUnmanaged(AsyncTask) = .empty,
+    /// for the M0.8 per-rule `AsyncSlot` slice. POINTER-STABLE since M1.0.12 E1:
+    /// each element is a heap record (`gpa.create`), because `race`/`sync`/
+    /// `branch`/`spawn` create sibling tasks MID-DRIVE and an append must not
+    /// invalidate the live `*AsyncTask` (or `&task.locals`) threaded through the
+    /// drive path. MONOTONIC: no slot reuse — a finished task parks as a husk
+    /// (state `.done`/`.canceled`) until `deinit`, so a pool index is a stable
+    /// task identity (Phase-1 `TaskHandle`, no generations). Empty when
+    /// `!has_async`.
+    async_tasks: std.ArrayListUnmanaged(*AsyncTask) = .empty,
+    /// Shared child-set storage (M1.0.12 E1): a `race`/`sync` parent appends its
+    /// admitted children's pool indices here and suspends on a `WakeCond` range
+    /// `{start, len}` into it — keeps `WakeCond` small. Append-only within a
+    /// program run (ranges stay valid for the parent's whole suspension).
+    task_children: std.ArrayListUnmanaged(u32) = .empty,
     /// Per-rule handle into `async_tasks` (parallel to `rule_descs`, allocated iff
     /// `has_async`): `null` until the async rule first spawns, then the pool index
     /// of its task. A non-async rule's entry stays `null`.
@@ -955,8 +1000,12 @@ pub const Interpreter = struct {
         self.pending_tags.deinit(self.gpa);
         for (self.pending_extensions.items) |pe| self.gpa.free(pe.name);
         self.pending_extensions.deinit(self.gpa);
-        for (self.async_tasks.items) |*task| task.deinit(self.gpa);
+        for (self.async_tasks.items) |task| {
+            task.deinit(self.gpa);
+            self.gpa.destroy(task);
+        }
         self.async_tasks.deinit(self.gpa);
+        self.task_children.deinit(self.gpa);
         self.gpa.free(self.rule_tasks);
         self.descriptors.deinit(self.gpa);
         self.merge_cursors.deinit(self.gpa);
@@ -1824,46 +1873,88 @@ pub const Interpreter = struct {
         if (matched) report.rules_matched += 1;
     }
 
-    /// Drive an `async rule`'s task at its position in the rule order (M1.0.11
-    /// E1). Spawns the task on first reach, resumes a suspended one whose wake
-    /// has fired, skips one still waiting, and never re-runs a completed one. One
-    /// task per async rule (the §9.2 parameterless, non-entity-bound shape); an
-    /// entity-bound async rule (one task per matching entity) is deferred and
-    /// fails loud (counted once, then parked `.done`).
+    /// Create a task record in the pool (M1.0.12 E1). Heap-allocated so live
+    /// `*AsyncTask` pointers survive pool growth (children are created
+    /// mid-drive); monotonic — the returned index is a stable task identity.
+    fn newTask(self: *Interpreter, origin_rule: u32, parent: ?u32) !u32 {
+        const task = try self.gpa.create(AsyncTask);
+        errdefer self.gpa.destroy(task);
+        task.* = .{ .origin_rule = origin_rule, .parent = parent };
+        try self.async_tasks.append(self.gpa, task);
+        return @intCast(self.async_tasks.items.len - 1);
+    }
+
+    /// Cancel a task (M1.0.12 E1): free its frames + locals — the same teardown
+    /// as `finishTaskDone` — and park it `.canceled` so it is never scheduled
+    /// again. Idempotent: a `.done`/`.canceled` task is left untouched (§9.8
+    /// amended, `h.cancel()`). NON-transitive (Phase 1, `etch-bytecode.md §9.5`):
+    /// tasks the canceled task had itself launched are independent pool entries
+    /// and keep running.
+    fn cancelTask(self: *Interpreter, ti: u32) void {
+        const task = self.async_tasks.items[ti];
+        if (task.state != .suspended) return;
+        self.clearFrames(task);
+        task.frames.clearAndFree(self.gpa);
+        task.pending_bind = .discard;
+        task.locals.deinit(self.gpa);
+        task.locals = .{};
+        task.state = .canceled;
+    }
+
+    /// Drive an `async rule`'s tasks at its position in the rule order. Spawns
+    /// the rule-root task on first reach; then (M1.0.12 E1, drive-by-origin)
+    /// drives, in task-CREATION order, every ready task in the pool whose
+    /// `origin_rule` is this rule — not just the root. This preserves the M0.8
+    /// producer-before-consumer ruling: events emitted by child tasks interleave
+    /// at the origin rule's position, deterministically, including for detached
+    /// tasks that outlive a parent iteration. The scan is index-based so a child
+    /// created mid-drive (appended at the tail) is picked up by the SAME pass —
+    /// a child that never suspends completes within the pass. A parent is always
+    /// created before its children (lower index), so a suspended `race` parent
+    /// resumes — and cancels its losers — before any loser could resume.
+    ///
+    /// One root task per async rule (the §9.2 parameterless, non-entity-bound
+    /// shape); an entity-bound async rule (one task per matching entity) is
+    /// deferred and fails loud (counted once, then parked `.done`).
     fn runAsyncRule(self: *Interpreter, world: *World, idx: usize, report: *RuntimeReport) !void {
         const rd = self.rule_descs[idx];
-        if (self.rule_tasks[idx]) |ti| {
-            // Already spawned: resume only if still suspended and its wake fired.
-            if (self.async_tasks.items[ti].state == .done) return;
-            if (!self.asyncWakeFired(self.async_tasks.items[ti].wake)) return;
-            report.rules_matched += 1;
-            try self.driveTask(world, &self.async_tasks.items[ti], report);
-            return;
+        if (self.rule_tasks[idx] == null) {
+            // First reach → spawn the rule-root task in the pool.
+            const rule = self.ast.rule_decls.items[rd.rule_idx];
+            if (rule.params_len > 0 or rd.is_entity_bound) {
+                report.runtime_errors += 1;
+                const ti = try self.newTask(@intCast(idx), null);
+                self.async_tasks.items[ti].state = .done;
+                self.rule_tasks[idx] = ti;
+                return;
+            }
+            const ti = try self.newTask(@intCast(idx), null);
+            self.rule_tasks[idx] = ti;
+            // The initial frame is the rule body as a linear run. The fresh
+            // task's default wake (`wait_until = 0`) fires immediately, so the
+            // drive-by-origin pass below runs it this tick.
+            try self.async_tasks.items[ti].frames.append(self.gpa, .{ .run = .{
+                .block_start = rule.body_start,
+                .block_len = rule.body_len,
+            } });
         }
-        // First reach → spawn a task in the pool.
-        const rule = self.ast.rule_decls.items[rd.rule_idx];
-        if (rule.params_len > 0 or rd.is_entity_bound) {
-            report.runtime_errors += 1;
-            try self.async_tasks.append(self.gpa, .{ .state = .done });
-            self.rule_tasks[idx] = @intCast(self.async_tasks.items.len - 1);
-            return;
+        var drove_any = false;
+        var ti: usize = 0;
+        while (ti < self.async_tasks.items.len) : (ti += 1) {
+            const task = self.async_tasks.items[ti];
+            if (task.origin_rule != idx) continue;
+            if (task.state != .suspended) continue;
+            if (!self.asyncWakeFired(task.wake)) continue;
+            drove_any = true;
+            try self.driveTask(world, task, report);
         }
-        try self.async_tasks.append(self.gpa, .{});
-        const ti: u32 = @intCast(self.async_tasks.items.len - 1);
-        self.rule_tasks[idx] = ti;
-        // The initial frame is the rule body as a linear run.
-        try self.async_tasks.items[ti].frames.append(self.gpa, .{ .run = .{
-            .block_start = rule.body_start,
-            .block_len = rule.body_len,
-        } });
-        report.rules_matched += 1;
-        try self.driveTask(world, &self.async_tasks.items[ti], report);
+        if (drove_any) report.rules_matched += 1;
     }
 
     /// The active scope for the top frame (M1.0.11 E2): the nearest enclosing
     /// `async fn` call frame's own scope, or the task's root locals if none. The
-    /// `&task.locals` fallback is stable within a drive (no task is created
-    /// mid-drive; `async_tasks` never reallocates while `driveLoop` runs).
+    /// `&task.locals` fallback is stable across pool growth (M1.0.12 E1): the
+    /// task is a heap record, so sibling tasks created MID-DRIVE never move it.
     fn currentScope(task: *AsyncTask) *Locals {
         var i = task.frames.items.len;
         while (i > 0) {
@@ -2655,11 +2746,39 @@ pub const Interpreter = struct {
         }
     }
 
-    /// True iff a suspended task's wake condition is satisfied this tick.
+    /// True iff a suspended task's wake condition is satisfied this tick. The
+    /// child-set variants (M1.0.12 E1) POLL the pool states — no notification
+    /// machinery; the pool is small and the poll runs at the rule's position.
     fn asyncWakeFired(self: *const Interpreter, wake: WakeCond) bool {
         return switch (wake) {
             .wait_until => |t| self.async_tick >= t,
             .global_event => |type_name| self.events.count(type_name) > 0,
+            // Race parent: a winner exists (some child `.done`) — or no child
+            // remains `.suspended` (every branch failed/canceled → no winner;
+            // the race completes and the parent resumes after the statement, E4).
+            .children_any => |r| blk: {
+                var any_done = false;
+                var any_suspended = false;
+                for (self.task_children.items[r.start .. r.start + r.len]) |ci| {
+                    switch (self.async_tasks.items[ci].state) {
+                        .done => any_done = true,
+                        .suspended => any_suspended = true,
+                        .canceled => {},
+                    }
+                }
+                break :blk any_done or !any_suspended;
+            },
+            // Sync parent: join when no child remains `.suspended` — failed
+            // (canceled) children do not block the join (E4).
+            .children_all => |r| blk: {
+                for (self.task_children.items[r.start .. r.start + r.len]) |ci| {
+                    if (self.async_tasks.items[ci].state == .suspended) break :blk false;
+                }
+                break :blk true;
+            },
+            // Handle-await: the target task reached a terminal state (`.done`
+            // delivers its parked result; `.canceled` fails loud at resume, E5).
+            .task_done => |ti| self.async_tasks.items[ti].state != .suspended,
         };
     }
 
@@ -8722,6 +8841,69 @@ test "await wait_unscaled / entity_event / handle-await still fail loud (partiti
         \\  await h
         \\}
     )) >= 1);
+}
+
+test "task pool is pointer-stable and cancelTask parks a suspended task for good (M1.0.12 E1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Substrate check for the multi-task scheduler (no construct surface yet):
+    // the rule-root task is a heap record in the pointer pool, carries its
+    // `origin_rule`, and `cancelTask` frees its frames + locals, parks it
+    // `.canceled`, and the drive-by-origin pass never schedules it again —
+    // `Out.n` stays at the pre-suspension value forever. Idempotent re-cancel.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule seq()
+        \\  when resource Out
+        \\{
+        \\  let a = get_mut(Out)
+        \\  a.n = 1
+        \\  await wait(0.04s)
+        \\  let b = get_mut(Out)
+        \\  b.n = 2
+        \\}
+    ;
+
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: spawn → n=1, suspend at `await wait(0.04s)`.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    const ti = interp.rule_tasks[0].?;
+    const task = interp.async_tasks.items[ti];
+    try std.testing.expectEqual(@as(u32, 0), task.origin_rule);
+    try std.testing.expect(task.state == .suspended);
+    try std.testing.expect(task.frames.items.len > 0);
+
+    // Cancel: frames freed, parked `.canceled`; the heap record's address is
+    // the pool entry itself (pointer-stable identity).
+    interp.cancelTask(ti);
+    try std.testing.expect(task.state == .canceled);
+    try std.testing.expectEqual(@as(usize, 0), task.frames.items.len);
+    interp.cancelTask(ti); // idempotent on a non-suspended task
+    try std.testing.expect(task.state == .canceled);
+
+    // ticks 2..5: the canceled task is never scheduled again — n stays 1 even
+    // past the original wake tick (0.04s × 60 = tick 3).
+    const r = try interp.runFor(&world, 4);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
 }
 
 test "runProgram Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)" {
