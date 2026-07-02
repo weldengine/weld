@@ -8810,7 +8810,7 @@ fn asyncFailLoudCount(gpa: std.mem.Allocator, source: []const u8) !u64 {
     return report.runtime_errors;
 }
 
-test "await wait_unscaled / entity_event / handle-await still fail loud (partition boundary intact, M1.0.11 E3)" {
+test "await wait_unscaled / entity_event still fail loud (partition boundary intact, M1.0.11 E3)" {
     const gpa = std.testing.allocator;
     // `wait_unscaled` — needs the scaled/unscaled time subsystem (M1.0.13).
     try std.testing.expect((try asyncFailLoudCount(gpa,
@@ -8831,16 +8831,10 @@ test "await wait_unscaled / entity_event / handle-await still fail loud (partiti
         \\  await entity_event(get(Out), Ev)
         \\}
     )) >= 1);
-    // handle-await (`await` on a stored non-call value / TaskHandle) — M1.0.12.
-    try std.testing.expect((try asyncFailLoudCount(gpa,
-        \\resource Out { n: int = 0 }
-        \\async rule r()
-        \\  when resource Out
-        \\{
-        \\  let h = 5
-        \\  await h
-        \\}
-    )) >= 1);
+    // The third M1.0.11 case — `await` on a stored non-TaskHandle value — is
+    // rejected at TYPE-CHECK since M1.0.12 E3 (E0200, "await target must be a
+    // direct async call or a TaskHandle"), so it never reaches the runtime:
+    // covered by the types.zig E3 tests. Real handle-await execution is E5.
 }
 
 test "task pool is pointer-stable and cancelTask parks a suspended task for good (M1.0.12 E1)" {

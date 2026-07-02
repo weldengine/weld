@@ -48,6 +48,12 @@ pub const BuiltinType = enum {
     /// (the Error layer) `string` is accepted on `struct` fields and resolves
     /// as a declared type through `namedTypeToResolved`'s special case.
     string_,
+    /// `TaskHandle` (§2.2 builtin, M1.0.12 E3) — the value of a bound spawn
+    /// task statement (`let h = spawn { }`). Non-POD (`etch-grammar.md` §2.2):
+    /// like `string_`/`time` it is deliberately NOT in `fromName`, so it stays
+    /// rejected as a component/resource field type. `h.cancel()` and `await h`
+    /// are its only operations (§9.8).
+    task_handle,
 
     pub fn isNumeric(self: BuiltinType) bool {
         return switch (self) {
@@ -328,6 +334,36 @@ pub const TypeChecker = struct {
     /// `async fn`/`async method`, in a NON-async context is E0901
     /// `AsyncCallInNonAsyncContext`. `false` outside any body.
     current_is_async: bool = false,
+    /// The kind of the INNERMOST `race`/`sync` branch or `branch`/`spawn` body
+    /// enclosing the statements being checked (M1.0.12 E3), `null` outside any.
+    /// Drives E0906 (a `return` is legal only in a `race` branch —
+    /// winner-return propagation §9.5; `sync`/`branch`/`spawn` reject it) and
+    /// E0907 (a `break`/`continue` must not cross the task boundary §9.2).
+    /// Saved/restored at each branch entry (innermost wins).
+    conc_branch: ?ConcBranchKind = null,
+    /// Loop-nesting depth accumulated INSIDE the innermost concurrency branch
+    /// (M1.0.12 E3): >0 means an unlabeled `break`/`continue` targets an
+    /// in-branch loop (legal); 0 means it would escape the task → E0907.
+    /// Reset to 0 at branch entry (saved/restored); incremented by the
+    /// `for`/`while` statement arms and `synthLoop`.
+    conc_loop_depth: u32 = 0,
+    /// Stack of the labels of every labeled loop currently open (M1.0.12 E3),
+    /// pushed/popped by `synthLoop`. Only the window past `conc_labels_base`
+    /// belongs to the innermost concurrency branch — a labeled
+    /// `break`/`continue` whose label is outside that window targets a loop
+    /// beyond the task boundary → E0907.
+    conc_labels: std.ArrayListUnmanaged(StringId) = .empty,
+    /// Start of the innermost branch's label window in `conc_labels`
+    /// (M1.0.12 E3). Saved/restored at branch entry.
+    conc_labels_base: usize = 0,
+    /// True while checking statements inside any of the four concurrency
+    /// constructs (M1.0.12 E3): an async call there is a consumed LAUNCH site
+    /// (`etch-resolver-types.md` §9.2), so E0905 does not fire on it.
+    in_conc_construct: bool = false,
+    /// The direct-call node consumed by the `await` currently being typed
+    /// (M1.0.12 E3): `synthCall`/`synthMethodCall` skip E0905 for it. Set
+    /// around the future-form arg synthesis; `NodeId.none` otherwise.
+    awaited_call: NodeId = NodeId.none,
     /// Merged global tag table (M0.8 E3, `etch-validation-ecs.md` §5.2), built
     /// between pass 1 and pass 2 from every `tags { ... }` block. `null` until
     /// `buildTags` runs. Pass 2 (tag-op when-conditions / `tag_path` operands,
@@ -365,6 +401,9 @@ pub const TypeChecker = struct {
     /// second occurrence of a UUID is E1782. Both sets' keys reference the
     /// arenas' string pools, which `root.validateProject` keeps alive for the
     /// duration of the checks.
+    /// The four concurrency-branch contexts (M1.0.12 E3) — see `conc_branch`.
+    pub const ConcBranchKind = enum { race, sync, branch, spawn };
+
     /// Visibility of an exported symbol (M1.0.7 E5, D-G). Since `private`
     /// graduated (M1.0.8) the exports builder sets `.private` from the decl's
     /// `Item.visibility`, making the binding path's `E0107` check reachable.
@@ -416,6 +455,7 @@ pub const TypeChecker = struct {
         self.symbols.deinit(self.gpa);
         self.methods.deinit(self.gpa);
         self.trait_impls.deinit(self.gpa);
+        self.conc_labels.deinit(self.gpa);
         self.generic_scope.deinit(self.gpa);
         self.imported_symbols.deinit(self.gpa);
         self.imported_aliases.deinit(self.gpa);
@@ -3277,6 +3317,12 @@ pub const TypeChecker = struct {
                     } else {
                         try self.emit(.undefined_symbol, .error_, tspan, "type 'string' is not in the S3 builtin set", .{});
                     }
+                } else if (std.mem.eql(u8, tname, "TaskHandle")) {
+                    // M1.0.12 E3 — `TaskHandle` is a non-POD builtin
+                    // (`etch-grammar.md` §2.2): like `string` on components,
+                    // it is rejected as a field type everywhere (a task
+                    // handle is a live runtime identity, never stored state).
+                    try self.emit(.undefined_symbol, .error_, tspan, "type 'TaskHandle' is non-POD (etch-grammar.md par. 2.2) and cannot be a field type", .{});
                 } else {
                     try self.emit(.undefined_symbol, .error_, tspan, "unknown type '{s}'", .{tname});
                 }
@@ -4251,6 +4297,11 @@ pub const TypeChecker = struct {
                     }
                     try ctx.locals.put(self.gpa, f.var_name, .{ .type_ = elem_t, .is_mut = false });
                 }
+                // M1.0.12 E3 — a loop opened here is INSIDE any enclosing
+                // concurrency branch: its `break`/`continue` are legal (E0907
+                // fires only on the boundary-crossing ones).
+                self.conc_loop_depth += 1;
+                defer self.conc_loop_depth -= 1;
                 var i: u32 = 0;
                 while (i < f.body_len) : (i += 1) {
                     const body_stmt: NodeId = @bitCast(self.arena.extra.items[f.body_start + i]);
@@ -4269,6 +4320,9 @@ pub const TypeChecker = struct {
                 } else if (cond_t == .builtin and cond_t.builtin != .bool_) {
                     try self.emit(.type_mismatch, .error_, self.arena.exprSpan(wh.cond), "while condition must be a bool expression", .{});
                 }
+                // M1.0.12 E3 — in-branch loop, mirror of the `for` arm.
+                self.conc_loop_depth += 1;
+                defer self.conc_loop_depth -= 1;
                 var i: u32 = 0;
                 while (i < wh.body_len) : (i += 1) {
                     try self.checkStmt(ctx, @bitCast(self.arena.extra.items[wh.body_start + i]));
@@ -4280,8 +4334,15 @@ pub const TypeChecker = struct {
                 // present; loop-membership / label validity is permissive in E1.
                 const b = self.arena.break_stmts.items[data];
                 if (!b.value.isNone()) _ = self.synthExpr(b.value, ctx);
+                // M1.0.12 E3 — E0907: the break must not cross the enclosing
+                // concurrency-branch task boundary (§9.2).
+                try self.checkConcControlFlow(stmt_id, b.label, "break");
             },
-            .continue_stmt => {},
+            .continue_stmt => {
+                // M1.0.12 E3 — E0907, mirror of `break` (the label rides in
+                // the statement's `data`; `0` = unlabeled).
+                try self.checkConcControlFlow(stmt_id, data, "continue");
+            },
             .throw_stmt => {
                 // `throw expression` (M0.8 error handling, E3-C tranche 2).
                 // The thrown value must be the builtin `Error` struct — part1
@@ -4320,6 +4381,19 @@ pub const TypeChecker = struct {
                 // consistent with the closure-call / trailing-value checks). A
                 // bare `return` is valid in a void fn; a `return` with no
                 // enclosing fn (e.g. a rule body) is permissive.
+                //
+                // M1.0.12 E3 — E0906: inside a concurrency branch, `return` is
+                // legal ONLY in a `race` branch (winner-return propagation at
+                // the race site, §9.5); in a `sync` branch an early return
+                // contradicts the join-all, and in a `branch`/`spawn` body the
+                // parent has potentially already advanced — no propagation
+                // site (`etch-resolver-types.md` §9.2). Asymmetric by design
+                // (brief Notes) — do NOT generalize.
+                if (self.conc_branch) |ck| {
+                    if (ck != .race) {
+                        try self.emit(.illegal_return_in_concurrency_branch, .error_, self.arena.stmtSpan(stmt_id), "'return' is illegal in a '{s}' {s} (only a 'race' branch may return — the winner's return propagates at the race site)", .{ @tagName(ck), if (ck == .sync) "branch" else "body" });
+                    }
+                }
                 const value: NodeId = @bitCast(data);
                 if (!value.isNone()) {
                     const vt = self.synthHeadValue(value, ctx);
@@ -4383,8 +4457,139 @@ pub const TypeChecker = struct {
                 }
                 try self.validateTagMutationPath(tm.path);
             },
+            .race_stmt, .sync_stmt => {
+                // `race { race_branch* }` / `sync { sync_branch* }` (M1.0.12
+                // E3, §4.2). Async-context requirement first (E0901): "Tous
+                // les constructs async ne sont disponibles que dans un context
+                // async". Each conditional guard (`if cond =>`) types as bool
+                // in the PARENT scope (it is evaluated there, synchronously,
+                // at construct entry — §9.5); each branch statement is then
+                // checked inside its branch context (E0906/E0907 + the E0905
+                // launch-site exemption).
+                if (!self.current_is_async) {
+                    try self.emit(.async_call_in_non_async_context, .error_, self.arena.stmtSpan(stmt_id), "'{s}' is only allowed in an 'async fn' or 'async rule'", .{if (kind == .race_stmt) "race" else "sync"});
+                }
+                const range: ast_mod.RaceStmt = if (kind == .race_stmt)
+                    self.arena.race_stmts.items[data]
+                else blk: {
+                    const ss = self.arena.sync_stmts.items[data];
+                    break :blk .{ .branches_start = ss.branches_start, .branches_len = ss.branches_len };
+                };
+                const branch_kind: ConcBranchKind = if (kind == .race_stmt) .race else .sync;
+                var i: u32 = 0;
+                while (i < range.branches_len) : (i += 1) {
+                    const br = self.arena.concurrency_branches.items[range.branches_start + i];
+                    if (!br.cond.isNone()) {
+                        const cond_t = self.synthExpr(br.cond, ctx);
+                        if (cond_t == .builtin and cond_t.builtin != .bool_) {
+                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(br.cond), "conditional branch guard must be a bool expression", .{});
+                        }
+                    }
+                    try self.checkConcBranchStmt(ctx, br.stmt, branch_kind);
+                }
+            },
+            .branch_stmt => {
+                // `branch { }` (M1.0.12 E3, §4.2) — fire-and-forget detached
+                // task. Async context required (E0901); the body is checked
+                // inside a `.branch` context (return → E0906, escaping
+                // break/continue → E0907, async calls = launch sites).
+                if (!self.current_is_async) {
+                    try self.emit(.async_call_in_non_async_context, .error_, self.arena.stmtSpan(stmt_id), "'branch' is only allowed in an 'async fn' or 'async rule'", .{});
+                }
+                const bs = self.arena.branch_stmts.items[data];
+                try self.checkConcBodyRun(ctx, bs.body_start, bs.body_len, .branch);
+            },
+            .spawn_stmt => {
+                // `[let h =] spawn { }` (M1.0.12 E3, §4.2) — detached task
+                // with a handle. Async context required (E0901); body checked
+                // inside a `.spawn` context. The binding types as the builtin
+                // `TaskHandle` (§2.2, non-POD) and is bound AFTER the body:
+                // the task starts on a snapshot of the parent scope taken
+                // before the parent binds the handle (§9.8) — the handle does
+                // not exist inside the body.
+                if (!self.current_is_async) {
+                    try self.emit(.async_call_in_non_async_context, .error_, self.arena.stmtSpan(stmt_id), "'spawn {{ ... }}' is only allowed in an 'async fn' or 'async rule'", .{});
+                }
+                const ss = self.arena.spawn_stmts.items[data];
+                try self.checkConcBodyRun(ctx, ss.body_start, ss.body_len, .spawn);
+                if (ss.binding != 0) {
+                    try ctx.locals.put(self.gpa, ss.binding, .{ .type_ = .{ .builtin = .task_handle }, .is_mut = false });
+                }
+            },
             else => {},
         }
+    }
+
+    /// Enter a concurrency-branch context around one `race`/`sync` branch
+    /// statement (M1.0.12 E3): E0906/E0907 anchor to the INNERMOST branch, the
+    /// in-branch loop depth and label window restart at the boundary, and any
+    /// async call inside is a consumed launch site (E0905 exempt, §9.2).
+    fn checkConcBranchStmt(self: *TypeChecker, ctx: *RuleCtx, stmt: NodeId, kind: ConcBranchKind) TypeError!void {
+        const saved_branch = self.conc_branch;
+        const saved_depth = self.conc_loop_depth;
+        const saved_base = self.conc_labels_base;
+        const saved_launch = self.in_conc_construct;
+        self.conc_branch = kind;
+        self.conc_loop_depth = 0;
+        self.conc_labels_base = self.conc_labels.items.len;
+        self.in_conc_construct = true;
+        defer {
+            self.conc_branch = saved_branch;
+            self.conc_loop_depth = saved_depth;
+            self.conc_labels_base = saved_base;
+            self.in_conc_construct = saved_launch;
+        }
+        try self.checkStmt(ctx, stmt);
+    }
+
+    /// `checkConcBranchStmt` for a `branch`/`spawn` BODY (a statement run in
+    /// `arena.extra`) — same context discipline, applied around the whole run.
+    fn checkConcBodyRun(self: *TypeChecker, ctx: *RuleCtx, start: u32, len: u32, kind: ConcBranchKind) TypeError!void {
+        const saved_branch = self.conc_branch;
+        const saved_depth = self.conc_loop_depth;
+        const saved_base = self.conc_labels_base;
+        const saved_launch = self.in_conc_construct;
+        self.conc_branch = kind;
+        self.conc_loop_depth = 0;
+        self.conc_labels_base = self.conc_labels.items.len;
+        self.in_conc_construct = true;
+        defer {
+            self.conc_branch = saved_branch;
+            self.conc_loop_depth = saved_depth;
+            self.conc_labels_base = saved_base;
+            self.in_conc_construct = saved_launch;
+        }
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            try self.checkStmt(ctx, @bitCast(self.arena.extra.items[start + i]));
+        }
+    }
+
+    /// True when an async call at `id` has its `{async}` effect consumed
+    /// (M1.0.12 E3, `etch-resolver-types.md` §9.2): it is the direct target of
+    /// the `await` currently being typed, or it sits inside one of the four
+    /// concurrency constructs (a consumed LAUNCH site). A bare async call in
+    /// an async context otherwise gets E0905.
+    fn consumesAsyncEffect(self: *const TypeChecker, id: NodeId) bool {
+        if (self.in_conc_construct) return true;
+        return @as(u32, @bitCast(id)) == @as(u32, @bitCast(self.awaited_call));
+    }
+
+    /// E0907 (M1.0.12 E3, `etch-resolver-types.md` §9.2): a `break`/`continue`
+    /// inside a concurrency branch must target a loop INSIDE the branch — an
+    /// unlabeled one needs an in-branch loop (depth > 0); a labeled one needs
+    /// its label among the loops opened inside the branch (the label window
+    /// past `conc_labels_base`). Loops fully inside the branch keep working.
+    fn checkConcControlFlow(self: *TypeChecker, stmt_id: NodeId, label: StringId, comptime what: []const u8) !void {
+        if (self.conc_branch == null) return;
+        if (label == 0) {
+            if (self.conc_loop_depth > 0) return;
+        } else {
+            for (self.conc_labels.items[self.conc_labels_base..]) |l| {
+                if (l == label) return;
+            }
+        }
+        try self.emit(.control_flow_escapes_task_branch, .error_, self.arena.stmtSpan(stmt_id), "'" ++ what ++ "' targets a loop outside the enclosing concurrency branch — control flow cannot cross the task boundary", .{});
     }
 
     /// Validate a tag-mutation operand path against the global tag table (M0.8
@@ -4666,7 +4871,27 @@ pub const TypeChecker = struct {
                     try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "`await` is only allowed in an `async fn` or `async rule`", .{});
                 }
                 const aw = self.arena.awaitExpr(id);
-                if (aw.target_kind == .future) return try self.synthExprE(aw.arg_expr, ctx_opt);
+                if (aw.target_kind == .future) {
+                    // The direct call is CONSUMED by this await (M1.0.12 E3,
+                    // §9.2) — exempt from E0905 while it is synthesized. Only
+                    // the target itself is exempt: an async call among its
+                    // ARGUMENTS is still bare.
+                    const saved_awaited = self.awaited_call;
+                    self.awaited_call = aw.arg_expr;
+                    defer self.awaited_call = saved_awaited;
+                    const t = try self.synthExprE(aw.arg_expr, ctx_opt);
+                    const ak = self.arena.exprKind(aw.arg_expr);
+                    if (ak == .fn_call or ak == .method_call) return t;
+                    // Non-call target: the handle-await form (M1.0.12 E3,
+                    // §9.8) — the target must be a TaskHandle. The result is
+                    // unit in Phase 1 (spawn bodies have no value channel —
+                    // brief Notes); `unknown` ≈ unit, the house convention.
+                    if (t == .builtin and t.builtin == .task_handle) return ResolvedType.unknown;
+                    if (t != .unknown) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(aw.arg_expr), "await target must be a direct async call or a TaskHandle", .{});
+                    }
+                    return ResolvedType.unknown;
+                }
                 return ResolvedType.unknown;
             },
             .paren => unreachable, // parser doesn't emit a paren node — it returns the inner expr
@@ -4770,6 +4995,16 @@ pub const TypeChecker = struct {
     fn synthLoop(self: *TypeChecker, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
         const lp = self.arena.loop_exprs.items[data];
         if (ctx_opt) |ctx| {
+            // M1.0.12 E3 — a `loop` opened here (incl. a labeled one) is
+            // INSIDE any enclosing concurrency branch: its `break`/`continue`
+            // (by depth or by label) are legal; E0907 fires only on the
+            // boundary-crossing ones.
+            self.conc_loop_depth += 1;
+            defer self.conc_loop_depth -= 1;
+            if (lp.label != 0) try self.conc_labels.append(self.gpa, lp.label);
+            defer if (lp.label != 0) {
+                _ = self.conc_labels.pop();
+            };
             var i: u32 = 0;
             while (i < lp.body_len) : (i += 1) {
                 const stmt: NodeId = @bitCast(self.arena.extra.items[lp.body_start + i]);
@@ -5007,6 +5242,11 @@ pub const TypeChecker = struct {
         // which reaches here with `current_is_async` true.)
         if (decl.is_async and !self.current_is_async) {
             try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "cannot call `async fn` '{s}' from a non-async context (needs an `async fn`/`async rule` + `await`)", .{self.arena.strings.slice(decl.name)});
+        } else if (decl.is_async and !self.consumesAsyncEffect(id)) {
+            // M1.0.12 E3 — E0905: a BARE async call in an async context. The
+            // `{async}` effect must be consumed: wrapped in `await`, or
+            // launched inside a `spawn`/`branch`/`race`/`sync` body (§9.2).
+            try self.emit(.unconsumed_async_effect, .error_, self.arena.exprSpan(id), "bare call to `async fn` '{s}' — consume the async effect with `await`, or launch it inside a spawn/branch/race/sync", .{self.arena.strings.slice(decl.name)});
         }
         const ret: ResolvedType = if (decl.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(decl.return_type);
         var pnames: std.ArrayListUnmanaged(StringId) = .empty;
@@ -5647,6 +5887,21 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
 
+        // M1.0.12 E3 — builtin TaskHandle method (§9.8): `cancel()` — no args,
+        // statement-effect (`unknown` ≈ unit; idempotent at runtime, E5). The
+        // handle's only other operation is `await h` (handled in the await
+        // arm); anything else is an error with a pointer to both.
+        if (recv_t == .builtin and recv_t.builtin == .task_handle) {
+            if (std.mem.eql(u8, method_slice, "cancel")) {
+                if (mc.args_len != 0) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "TaskHandle method 'cancel' takes no arguments", .{});
+                }
+                return ResolvedType.unknown;
+            }
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on a TaskHandle (only 'cancel()'; join with 'await h')", .{method_slice});
+            return ResolvedType.unknown;
+        }
+
         // M1.0.9 B2 — builtin extension methods on an `Entity` receiver, checked
         // BEFORE the trait-method resolution below (these are interpreter builtins,
         // not user traits; any other method on an Entity falls through to the
@@ -5840,6 +6095,9 @@ pub const TypeChecker = struct {
         // context, which reaches here with `current_is_async` true).
         if (method.is_async and !self.current_is_async) {
             try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "cannot call `async` method '{s}' from a non-async context (needs an `async fn`/`async rule` + `await`)", .{self.arena.strings.slice(mc.method_name)});
+        } else if (method.is_async and !self.consumesAsyncEffect(id)) {
+            // M1.0.12 E3 — E0905 (mirror of the free-fn site, §9.2).
+            try self.emit(.unconsumed_async_effect, .error_, self.arena.exprSpan(id), "bare call to `async` method '{s}' — consume the async effect with `await`, or launch it inside a spawn/branch/race/sync", .{self.arena.strings.slice(mc.method_name)});
         }
         const ret: ResolvedType = if (method.return_type.isNone()) ResolvedType.unknown else self.namedTypeToResolved(method.return_type);
         var pnames: std.ArrayListUnmanaged(StringId) = .empty;
@@ -9657,4 +9915,306 @@ test "E0901 fires on an async call / await in a non-async context, not on a lega
     defer ok.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
     try expectNoCode(ok.diagnostics.items, .async_call_in_non_async_context);
+}
+
+test "E0901 fires on the four concurrency constructs outside an async context (M1.0.12 E3)" {
+    const gpa = std.testing.allocator;
+    // §4.2: "Tous les constructs async ne sont disponibles que dans un context
+    // async" — each of the four forms in a SYNC rule is E0901.
+    var bad = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  race { }
+        \\  sync { }
+        \\  branch { }
+        \\  spawn { }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), bad.parse_diags.len);
+    var count: usize = 0;
+    for (bad.diagnostics.items) |d| {
+        if (d.code == .async_call_in_non_async_context) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), count);
+
+    // The same four forms in an ASYNC rule are clean.
+    var ok = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  race { }
+        \\  sync { }
+        \\  branch { }
+        \\  spawn { }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try expectNoCode(ok.diagnostics.items, .async_call_in_non_async_context);
+}
+
+test "E0905 fires on a bare async call, not when consumed by the five forms (M1.0.12 E3)" {
+    const gpa = std.testing.allocator;
+    const af =
+        \\resource Out { n: int = 0 }
+        \\async fn af() -> int {
+        \\  await wait(0.02s)
+        \\  return 1
+        \\}
+        \\
+    ;
+    // Bare async calls in an async context — statement and let-init forms —
+    // leave the `{async}` effect unconsumed → E0905 (NOT E0901: the context
+    // IS async).
+    var bare = try parseAndCheck(gpa, af ++
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  af()
+        \\  let t = af()
+        \\}
+    );
+    defer bare.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), bare.parse_diags.len);
+    var count: usize = 0;
+    for (bare.diagnostics.items) |d| {
+        if (d.code == .unconsumed_async_effect) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try expectNoCode(bare.diagnostics.items, .async_call_in_non_async_context);
+
+    // Consumed by each of the five forms — `await` + the four launch sites
+    // (§9.2) — no E0905.
+    var ok = try parseAndCheck(gpa, af ++
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let x = await af()
+        \\  race {
+        \\    af()
+        \\    { let a = await af() }
+        \\  }
+        \\  sync { af() }
+        \\  branch { af() }
+        \\  spawn { af() }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try expectNoCode(ok.diagnostics.items, .unconsumed_async_effect);
+}
+
+test "E0906 rejects return in sync/branch/spawn, accepts it in a race branch (M1.0.12 E3)" {
+    const gpa = std.testing.allocator;
+    // `return` in a sync branch / branch body / spawn body → E0906 each.
+    var bad = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  sync { { return } }
+        \\  branch { return }
+        \\  spawn { return }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), bad.parse_diags.len);
+    var count: usize = 0;
+    for (bad.diagnostics.items) |d| {
+        if (d.code == .illegal_return_in_concurrency_branch) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+
+    // `return` in a race branch is LEGAL (winner-return propagation, §9.5) —
+    // the canonical timeout pattern.
+    var ok = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async fn fetch() -> int {
+        \\  await wait(0.02s)
+        \\  return 1
+        \\}
+        \\async fn with_timeout() -> int {
+        \\  race {
+        \\    return await fetch()
+        \\    { await wait(5.0s)
+        \\      return 0 }
+        \\  }
+        \\  return 0
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try expectNoCode(ok.diagnostics.items, .illegal_return_in_concurrency_branch);
+}
+
+test "E0907 rejects break/continue crossing the task boundary, accepts in-branch loops (M1.0.12 E3)" {
+    const gpa = std.testing.allocator;
+    // An unlabeled `break`/`continue` with no in-branch loop, and a labeled
+    // `break` targeting a loop OUTSIDE the construct, cross the boundary —
+    // E0907 (all four forms exercise the same check; race + spawn shown).
+    var bad = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  outer: loop {
+        \\    race { { break } }
+        \\    spawn { continue }
+        \\    sync { { break outer } }
+        \\    branch { break }
+        \\    break
+        \\  }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), bad.parse_diags.len);
+    var count: usize = 0;
+    for (bad.diagnostics.items) |d| {
+        if (d.code == .control_flow_escapes_task_branch) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), count);
+
+    // Loops FULLY INSIDE a branch keep working: unlabeled and labeled
+    // break/continue targeting in-branch loops are clean.
+    var ok = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  branch {
+        \\    for i in 0..3 {
+        \\      continue
+        \\    }
+        \\    inner: loop {
+        \\      loop { break inner }
+        \\      break
+        \\    }
+        \\  }
+        \\  spawn {
+        \\    while true {
+        \\      break
+        \\    }
+        \\  }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try expectNoCode(ok.diagnostics.items, .control_flow_escapes_task_branch);
+}
+
+test "TaskHandle: binding typed, cancel/await accepted, misuse rejected (M1.0.12 E3)" {
+    const gpa = std.testing.allocator;
+    // The bound spawn types `h` as the builtin TaskHandle: `h.cancel()` and
+    // `await h` are its two operations (§9.8) — clean.
+    var ok = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let h = spawn {
+        \\    await wait(0.02s)
+        \\  }
+        \\  h.cancel()
+        \\  let h2 = spawn { }
+        \\  await h2
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // `cancel` with arguments, and any other method on a TaskHandle → E0200.
+    var badm = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let h = spawn { }
+        \\  h.cancel(1)
+        \\  h.join()
+        \\}
+    );
+    defer badm.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), badm.parse_diags.len);
+    var count: usize = 0;
+    for (badm.diagnostics.items) |d| {
+        if (d.code == .type_mismatch) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+
+    // `await` on a non-TaskHandle non-call expression → E0200.
+    var badh = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let h = 5
+        \\  await h
+        \\}
+    );
+    defer badh.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), badh.parse_diags.len);
+    try expectAnyCode(badh.diagnostics.items, .type_mismatch);
+}
+
+test "TaskHandle is rejected as a component/resource field type (M1.0.12 E3)" {
+    const gpa = std.testing.allocator;
+    // Non-POD builtin (§2.2) — like `string` on components, a `TaskHandle`
+    // field is rejected on both a component and a resource.
+    var bad = try parseAndCheck(gpa,
+        \\component C { h: TaskHandle }
+        \\resource R { h: TaskHandle }
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), bad.parse_diags.len);
+    var count: usize = 0;
+    for (bad.diagnostics.items) |d| {
+        if (d.code == .undefined_symbol) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "conditional branch guards type-check as bool in the parent scope (M1.0.12 E3)" {
+    const gpa = std.testing.allocator;
+    // A bool guard referencing a parent local is clean; a non-bool guard is
+    // E0200. Guards are evaluated in the parent scope at construct entry
+    // (§9.5), synchronously.
+    //
+    // NB: a guarded BLOCK branch must not END on a bare `await` — a block's
+    // trailing expression is its VALUE (synchronously evaluated), so a
+    // trailing await sits off the frame spine → E0904 (M1.0.11 placement,
+    // unchanged). The §9.5 pattern always ends on a statement (`return`).
+    var ok = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let hard = true
+        \\  race {
+        \\    await wait(0.02s)
+        \\    if hard => await wait(2.0s)
+        \\  }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    var bad = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  sync {
+        \\    if 42 => await wait(0.02s)
+        \\  }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), bad.parse_diags.len);
+    try expectAnyCode(bad.diagnostics.items, .type_mismatch);
 }
