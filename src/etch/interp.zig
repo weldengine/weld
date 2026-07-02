@@ -610,6 +610,18 @@ const AsyncFrame = union(enum) {
     for_: ForFrame,
     try_: TryFrame,
     call: CallFrame,
+    single: SingleFrame,
+};
+
+/// A length-1 statement run (M1.0.12 E4): the root frame of a `race`/`sync`
+/// child task whose branch is a single NON-block statement (`await wait(1.0s)`
+/// or a guarded `if cond => stmt` — the branch statement is a bare `NodeId` in
+/// `arena.concurrency_branches`, not an `arena.extra` run, so `RunFrame`'s
+/// range encoding cannot address it). `cursor` 0 = not yet run, 1 = done →
+/// pop. Transparent to `unwindControl` like a `run` frame.
+const SingleFrame = struct {
+    stmt: NodeId,
+    cursor: u32 = 0,
 };
 
 /// A linear statement run: execute `block[cursor .. block_len]`, then (if any)
@@ -756,10 +768,18 @@ const AsyncTask = struct {
     /// bookkeeping. Cancellation is NON-transitive (Phase 1): this link is
     /// lineage bookkeeping, not a cancellation channel.
     parent: ?u32 = null,
-    /// Parked completion value for handle-await delivery (M1.0.12 E1): the husk
-    /// keeps it after frames + locals are freed. Always `.unit` in Phase 1
-    /// (`spawn` bodies are blocks — no value channel, brief Notes).
+    /// Parked completion value (M1.0.12 E1): the husk keeps it after frames +
+    /// locals are freed. For a `spawn` task it is the handle-await delivery
+    /// value — always `.unit` in Phase 1 (`spawn` bodies are blocks — no value
+    /// channel, brief Notes). For a `race` child it carries the branch's
+    /// pending `return` value (with `returned` set, E4) — re-raised at the
+    /// race site if this child wins; discarded otherwise.
     result: Value = .{ .unit = {} },
+    /// True when the task completed via a task-level `return` (M1.0.12 E4):
+    /// `result` then holds the returned value. Only a `race` branch may
+    /// return (E0906), so this drives winner-return propagation (§9.5);
+    /// meaningless-but-harmless on other tasks.
+    returned: bool = false,
 
     fn deinit(self: *AsyncTask, gpa: std.mem.Allocator) void {
         for (self.frames.items) |*f| switch (f.*) {
@@ -2150,6 +2170,27 @@ pub const Interpreter = struct {
             };
             task.pending_bind = .discard;
         }
+        // A parent suspended on a race/sync child set resolves the construct
+        // FIRST (M1.0.12 E4): winner selection + loser cancellation, and — on
+        // a returning winner — the §9.5 winner-return re-raise at the race
+        // site: the parent unwinds as if the race statement itself returned
+        // the value (to the enclosing `async fn`'s await site via its call
+        // frame, or ending the task at rule level).
+        if (self.resolveChildWake(task)) |winner_return| {
+            self.returning = true;
+            self.return_value = winner_return;
+            const cont = self.unwindControl(task) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.RuntimeFailure => {
+                    self.finishTaskFailed(task, report);
+                    return;
+                },
+            };
+            if (!cont) {
+                self.finishTaskDone(task, report);
+                return;
+            }
+        }
         const outcome = self.driveLoop(world, task) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.RuntimeFailure => {
@@ -2269,6 +2310,20 @@ pub const Interpreter = struct {
                         .signaled => if (try self.unwindControl(task)) continue :drive else return .completed,
                     }
                 },
+                .single => {
+                    // Length-1 run (M1.0.12 E4) — a race/sync child whose
+                    // branch is a single non-block statement.
+                    if (task.frames.items[ti].single.cursor >= 1) {
+                        self.popFrame(task);
+                        continue :drive;
+                    }
+                    const stmt = task.frames.items[ti].single.stmt;
+                    switch (try self.stepBodyStmt(world, task, scope, &task.frames.items[ti].single.cursor, stmt)) {
+                        .suspended => return .suspended,
+                        .advanced, .pushed => continue :drive,
+                        .signaled => if (try self.unwindControl(task)) continue :drive else return .completed,
+                    }
+                },
                 .call => {
                     const cf = &task.frames.items[ti].call;
                     if (cf.cursor >= cf.block_len) {
@@ -2330,6 +2385,13 @@ pub const Interpreter = struct {
             }
         }
         const sk = self.ast.stmtKind(stmt);
+        // (1b) `race` / `sync` statement (M1.0.12 E4) → admit branches (guards
+        // in the live parent scope), create one child task per admitted branch,
+        // and suspend the parent on the child set. `branch`/`spawn` (E5) fall
+        // through to `execStmt`, whose `else` arm fails loud.
+        if (sk == .race_stmt or sk == .sync_stmt) {
+            return try self.beginRaceSync(world, task, scope, cursor, stmt, sk == .race_stmt);
+        }
         // (2a) `while` statement → push a while frame (it re-checks its own cond).
         if (sk == .while_stmt) {
             cursor.* += 1;
@@ -2418,6 +2480,129 @@ pub const Interpreter = struct {
         return .advanced;
     }
 
+    /// Enter a `race`/`sync` statement during a drive (M1.0.12 E4, §9.5-§9.6).
+    /// Two passes: (1) evaluate every `if cond =>` guard SYNCHRONOUSLY in the
+    /// parent's live current scope — guards decide admission, and evaluating
+    /// them all before creating any child means a failing guard leaves no
+    /// orphan child behind; (2) create one child task per admitted branch —
+    /// `origin_rule` inherited (drive-by-origin schedules it at this rule's
+    /// position), `parent` linked (lineage only, cancellation is
+    /// non-transitive), root locals = a per-branch SNAPSHOT COPY of the
+    /// parent's current scope (§9.8 normative: branch writes to inherited
+    /// locals are invisible to the parent and to siblings; cross-branch
+    /// communication goes through ECS state/events) — then suspend the parent
+    /// on the child set (`children_any` for race, `children_all` for sync).
+    /// A block branch frames its statement run; any other single statement
+    /// frames a length-1 `single` run. ZERO admitted branches → no suspension,
+    /// the parent continues immediately (E4). Resolution at the parent's
+    /// resume is `resolveChildWake`.
+    fn beginRaceSync(self: *Interpreter, world: *World, task: *AsyncTask, scope: *Locals, cursor: *u32, stmt: NodeId, is_race: bool) StmtError!StepAction {
+        const data = self.ast.stmtData(stmt);
+        const range: ast_mod.RaceStmt = if (is_race)
+            self.ast.race_stmts.items[data]
+        else blk: {
+            const ss = self.ast.sync_stmts.items[data];
+            break :blk .{ .branches_start = ss.branches_start, .branches_len = ss.branches_len };
+        };
+        // Pass 1 — guard admission, all guards before any child creation.
+        var admitted_buf: std.ArrayListUnmanaged(u32) = .empty;
+        defer admitted_buf.deinit(self.gpa);
+        var i: u32 = 0;
+        while (i < range.branches_len) : (i += 1) {
+            const br = self.ast.concurrency_branches.items[range.branches_start + i];
+            if (!br.cond.isNone()) {
+                const cond = try self.evalExpr(world, scope, br.cond);
+                if (cond != .bool_) return error.RuntimeFailure;
+                if (!cond.bool_) continue;
+            }
+            try admitted_buf.append(self.gpa, range.branches_start + i);
+        }
+        cursor.* += 1; // the parent resumes AFTER the construct
+        if (admitted_buf.items.len == 0) return .advanced;
+        // Pass 2 — child creation, in declaration order (= creation order =
+        // deterministic drive + winner tie-break order).
+        const parent_idx: ?u32 = blk: {
+            for (self.async_tasks.items, 0..) |t, pi| {
+                if (t == task) break :blk @intCast(pi);
+            }
+            break :blk null;
+        };
+        const set_start: u32 = @intCast(self.task_children.items.len);
+        for (admitted_buf.items) |bi| {
+            const br = self.ast.concurrency_branches.items[bi];
+            const ti = try self.newTask(task.origin_rule, parent_idx);
+            const child = self.async_tasks.items[ti];
+            try cloneLocalsInto(self.gpa, scope, &child.locals);
+            var framed = false;
+            if (self.ast.stmtKind(br.stmt) == .expr_stmt) {
+                const e: NodeId = @bitCast(self.ast.stmtData(br.stmt));
+                if (self.ast.exprKind(e) == .block_expr) {
+                    try self.pushBlockRun(child, e);
+                    framed = true;
+                }
+            }
+            if (!framed) try child.frames.append(self.gpa, .{ .single = .{ .stmt = br.stmt } });
+            try self.task_children.append(self.gpa, ti);
+        }
+        const len: u32 = @intCast(admitted_buf.items.len);
+        task.pending_bind = .discard;
+        task.wake = if (is_race)
+            .{ .children_any = .{ .start = set_start, .len = len } }
+        else
+            .{ .children_all = .{ .start = set_start, .len = len } };
+        return .suspended;
+    }
+
+    /// Resolve a parent's child-set wake at resume (M1.0.12 E4), BEFORE any
+    /// statement steps. Race (`children_any`): scan the children in
+    /// DECLARATION order — the first `.done` is the winner (deterministic
+    /// tie-break when several complete in the same tick); cancel every other
+    /// non-done child (non-transitive — tasks a loser launched keep running);
+    /// return the winner's pending `return` value for re-raising at the race
+    /// site (`null` when the winner did not return — or when EVERY branch
+    /// failed: no winner, nothing to cancel that is not already terminal, the
+    /// parent just resumes after the statement). Sync (`children_all`): the
+    /// join is complete by wake construction (no child still `.suspended`;
+    /// failed children never block it) — nothing to do. Any other wake: not a
+    /// child set — no-op.
+    fn resolveChildWake(self: *Interpreter, task: *AsyncTask) ?Value {
+        switch (task.wake) {
+            .children_any => |r| {
+                var winner: ?u32 = null;
+                for (self.task_children.items[r.start .. r.start + r.len]) |ci| {
+                    if (self.async_tasks.items[ci].state == .done) {
+                        winner = ci;
+                        break;
+                    }
+                }
+                for (self.task_children.items[r.start .. r.start + r.len]) |ci| {
+                    if (winner != null and ci == winner.?) continue;
+                    self.cancelTask(ci);
+                }
+                if (winner) |wi| {
+                    const wtask = self.async_tasks.items[wi];
+                    if (wtask.returned) return wtask.result;
+                }
+                return null;
+            },
+            .children_all => return null,
+            else => return null,
+        }
+    }
+
+    /// Snapshot-copy `src` locals into `dest` (M1.0.12 E4, §9.8 normative): a
+    /// child task's root scope is a per-branch COPY of the parent's current
+    /// scope, taken at construct entry after guard evaluation. Value-level
+    /// copy: rebinding a local inside the branch is invisible outside; a
+    /// heap-BACKED value (collection/struct handle) shares its rule-arena
+    /// referent — the M0.8 POD-across-suspend caveat family.
+    fn cloneLocalsInto(gpa: std.mem.Allocator, src: *const Locals, dest: *Locals) error{OutOfMemory}!void {
+        var it = src.map.iterator();
+        while (it.next()) |entry| {
+            try dest.map.put(gpa, entry.key_ptr.*, entry.value_ptr.*);
+        }
+    }
+
     /// Push a `block_expr`'s body as a `.run` frame (M1.0.11 E1), carrying its
     /// trailing value expression (evaluated for effect on pop).
     fn pushBlockRun(self: *Interpreter, task: *AsyncTask, block_expr_id: NodeId) StmtError!void {
@@ -2454,6 +2639,14 @@ pub const Interpreter = struct {
                     }
                 }
                 if (task.frames.items.len == 0) {
+                    // Task-level `return` (M1.0.12 E4): park it in the husk —
+                    // a race parent re-raises the WINNER's return at the race
+                    // site (§9.5); unused for any other task (a rule has no
+                    // return value; sync/branch/spawn bodies reject `return`,
+                    // E0906). Heap-backed values share the rule-arena
+                    // POD-across-suspend caveat.
+                    task.returned = true;
+                    task.result = self.return_value;
                     self.returning = false;
                     self.return_value = .{ .unit = {} };
                     return false;
@@ -2500,9 +2693,9 @@ pub const Interpreter = struct {
         while (task.frames.items.len > 0) {
             const ti = task.frames.items.len - 1;
             switch (task.frames.items[ti]) {
-                .run, .call, .try_ => {
-                    // A block / call / try frame is transparent to `break`/
-                    // `continue`: abandon it and keep unwinding to the loop.
+                .run, .call, .try_, .single => {
+                    // A block / call / try / single frame is transparent to
+                    // `break`/`continue`: abandon it and keep unwinding.
                     self.popFrame(task);
                 },
                 .loop_ => {
@@ -2559,19 +2752,24 @@ pub const Interpreter = struct {
 
     /// Complete a task normally (M1.0.11 E1): surface an uncaught `throw` as a
     /// counted runtime error, clear the residual signal state, free the frames +
-    /// retained locals, and park the task `.done`.
+    /// retained locals, and park the task — `.done` on a clean completion,
+    /// `.canceled` when it ended on an uncaught `throw` (M1.0.12 E4: a FAILED
+    /// task terminated without a result — never a race winner, never blocks a
+    /// `sync` join, `await`ing it fails loud; §9.8 amended).
     fn finishTaskDone(self: *Interpreter, task: *AsyncTask, report: *RuntimeReport) void {
+        var failed = false;
         if (self.thrown) {
             self.thrown = false;
             self.pending_error = .{ .kind = .UncaughtThrow, .span = self.thrown_span };
             self.harvestError(report);
+            failed = true;
         }
         self.control = .none;
         self.control_label = 0;
         self.returning = false;
         self.return_value = .{ .unit = {} };
         self.clearFrames(task); // frees any residual call-frame scopes
-        task.state = .done;
+        task.state = if (failed) .canceled else .done;
         task.frames.clearAndFree(self.gpa);
         task.pending_bind = .discard;
         task.locals.deinit(self.gpa);
@@ -2579,7 +2777,9 @@ pub const Interpreter = struct {
     }
 
     /// Complete a fail-loud task (M1.0.11 E1): harvest the typed error into the
-    /// report and park the task `.done`, freeing its frames + retained locals.
+    /// report and park the task `.canceled` (M1.0.12 E4 — failed, no result;
+    /// was `.done` before the child-task distinction became observable),
+    /// freeing its frames + retained locals.
     fn finishTaskFailed(self: *Interpreter, task: *AsyncTask, report: *RuntimeReport) void {
         self.harvestError(report);
         self.control = .none;
@@ -2587,7 +2787,7 @@ pub const Interpreter = struct {
         self.thrown = false;
         self.returning = false;
         self.clearFrames(task); // frees any residual call-frame scopes
-        task.state = .done;
+        task.state = .canceled;
         task.frames.clearAndFree(self.gpa);
         task.pending_bind = .discard;
         task.locals.deinit(self.gpa);
@@ -8895,6 +9095,380 @@ test "task pool is pointer-stable and cancelTask parks a suspended task for good
 
     // ticks 2..5: the canceled task is never scheduled again — n stays 1 even
     // past the original wake tick (0.04s × 60 = tick 3).
+    const r = try interp.runFor(&world, 4);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+}
+
+test "race timeout pattern: winner return propagates, loser canceled (M1.0.12 E4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The Sec. 9.5 canonical pattern: a slow fetch races a timeout. The timeout
+    // branch (3 ticks) beats the slow branch (6 ticks); its `return 99`
+    // propagates to the race site — `with_timeout` returns 99 at the caller's
+    // await — and the loser is canceled: `slow`'s `return 1` never lands.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async fn slow() -> int {
+        \\  await wait(0.1s)
+        \\  return 1
+        \\}
+        \\async fn with_timeout() -> int {
+        \\  race {
+        \\    return await slow()
+        \\    { await wait(0.05s)
+        \\      return 99 }
+        \\  }
+        \\  return 0
+        \\}
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let x = await with_timeout()
+        \\  let o = get_mut(Out)
+        \\  o.n = x
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: spawn -> race entry -> 2 children (slow: wake 7; timeout: wake 4);
+    // parent suspended on children_any. ticks 2-3: everyone waits.
+    _ = try interp.runFor(&world, 4);
+    // tick 4: the timeout child resumed, returned 99, parked done. The parent
+    // (lower pool index, already visited this tick) resumes NEXT tick.
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    // tick 5: parent resumes -> winner = timeout branch, `slow` canceled ->
+    // 99 re-raised at the race site -> with_timeout returns 99 -> n = 99.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 99), readResourceInt(&world, out_id));
+    // ticks 6-10: past the slow branch's original wake (7) — canceled, its
+    // `return 1` never lands; n stays 99, no runtime errors.
+    const tail = try interp.runFor(&world, 5);
+    try std.testing.expectEqual(@as(u64, 0), tail.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 99), readResourceInt(&world, out_id));
+}
+
+test "race emit interleaving is deterministic; canceled loser never emits (M1.0.12 E4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Emit ordering across parent/children over multiple ticks, encoded as
+    // decimal digits into Out.n by an @on_event observer. Documented order:
+    //   tick 1: parent emits 1, race entry (children suspend)      -> n = 1
+    //   tick 3: fast child resumes, emits 2, completes             -> n = 12
+    //   tick 4: parent resumes (winner = fast), cancels slow,
+    //           emits 4                                            -> n = 124
+    //   tick 7+ (slow child's original wake): canceled, never
+    //           emits 3 — and the fast child never re-runs (no
+    //           double emit)                                       -> n = 124
+    const source =
+        \\event Mark { k: int = 0 }
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  emit Mark { k: 1 }
+        \\  race {
+        \\    { await wait(0.04s)
+        \\      emit Mark { k: 2 } }
+        \\    { await wait(0.1s)
+        \\      emit Mark { k: 3 } }
+        \\  }
+        \\  emit Mark { k: 4 }
+        \\}
+        \\@on_event(Mark)
+        \\rule collect()
+        \\  when resource Out
+        \\{
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n * 10 + event.k
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 2); // tick 3: fast child emits 2
+    try std.testing.expectEqual(@as(i64, 12), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 1); // tick 4: parent resumes, emits 4
+    try std.testing.expectEqual(@as(i64, 124), readResourceInt(&world, out_id));
+    const tail = try interp.runFor(&world, 6); // through tick 10: loser stays canceled
+    try std.testing.expectEqual(@as(u64, 0), tail.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 124), readResourceInt(&world, out_id));
+}
+
+test "conditional admission + zero-admitted passthrough (M1.0.12 E4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Guards are evaluated in the parent's LIVE scope at construct entry: the
+    // false guard's branch is never admitted (its write never happens); the
+    // true guard's branch runs. A construct whose every branch is refused
+    // (and an empty one) does not suspend — the parent continues immediately.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let yes = true
+        \\  let no = false
+        \\  race {
+        \\    if no => { let a = get_mut(Out)
+        \\      a.n = 111 }
+        \\    if yes => { let b = get_mut(Out)
+        \\      b.n = 5 }
+        \\  }
+        \\  sync {
+        \\    if no => await wait(0.04s)
+        \\  }
+        \\  race { }
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n + 100
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: race admits ONLY the `yes` branch (child completes in-pass,
+    // n=5); the parent is suspended on it (resumes next tick).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 5), readResourceInt(&world, out_id));
+    // tick 2: parent resumes; the zero-admitted `sync` and the empty `race`
+    // pass through WITHOUT suspending -> +100 lands the same tick.
+    const r2 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r2.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 105), readResourceInt(&world, out_id));
+}
+
+test "race tie-break: same-tick completions resolve in declaration order (M1.0.12 E4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Both branches complete in the same tick (same wait): the winner is the
+    // FIRST in declaration order -> pick() returns 10, never 20. The loser's
+    // pending return is discarded.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async fn pick() -> int {
+        \\  race {
+        \\    { await wait(0.04s)
+        \\      return 10 }
+        \\    { await wait(0.04s)
+        \\      return 20 }
+        \\  }
+        \\  return 0
+        \\}
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let x = await pick()
+        \\  let o = get_mut(Out)
+        \\  o.n = x
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 3: both children resume and complete; tick 4: the parent picks the
+    // declaration-order winner.
+    const r = try interp.runFor(&world, 4);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 10), readResourceInt(&world, out_id));
+}
+
+test "sync joins all branches; a failing branch does not block the join (M1.0.12 E4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Three branches: two parallel awaited writes (2 and 5 ticks) and one that
+    // throws uncaught (fails loud in-pass, harvested, parked canceled). The
+    // join completes when the two live branches are done — the failed one
+    // neither blocks nor re-reports.
+    const source =
+        \\resource A { n: int = 0 }
+        \\resource B { n: int = 0 }
+        \\async rule r()
+        \\  when resource A and resource B
+        \\{
+        \\  sync {
+        \\    { await wait(0.04s)
+        \\      let a = get_mut(A)
+        \\      a.n = 1 }
+        \\    { await wait(0.08s)
+        \\      let b = get_mut(B)
+        \\      b.n = 2 }
+        \\    { throw Error { message: "boom", code: .io_fail } }
+        \\  }
+        \\  let a2 = get_mut(A)
+        \\  a2.n = a2.n + 10
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const a_id = world.registry.idOf("A").?;
+    const b_id = world.registry.idOf("B").?;
+
+    // tick 1: children created; the throwing branch fails loud in-pass
+    // (1 runtime error), the two awaiters suspend (wakes 3 and 6).
+    const r1 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 1), r1.runtime_errors);
+    // tick 3: A=1. tick 6: B=2 (join condition now holds).
+    _ = try interp.runFor(&world, 5);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, a_id));
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, b_id));
+    // tick 7: the parent joins (failed branch did not block it) -> A=11.
+    const r7 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r7.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 11), readResourceInt(&world, a_id));
+}
+
+test "race with every branch failing completes; parent resumes after it (M1.0.12 E4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Both branches throw uncaught -> both park canceled (2 harvested errors),
+    // no winner exists — the race still completes and the parent resumes at
+    // the statement after it.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  race {
+        \\    { throw Error { message: "a", code: .io_fail } }
+        \\    { throw Error { message: "b", code: .io_fail } }
+        \\  }
+        \\  let o = get_mut(Out)
+        \\  o.n = 7
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: both children fail loud in-pass (2 errors), parent suspended.
+    const r1 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 2), r1.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    // tick 2: children_any fires with NO winner (none done, none suspended)
+    // -> the parent resumes after the race.
+    const r2 = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r2.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 7), readResourceInt(&world, out_id));
+}
+
+test "branch scope is a snapshot copy: writes are invisible to the parent (M1.0.12 E4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Sec. 9.8 normative: the child starts on a COPY of the parent's scope —
+    // its rebinds of an inherited local (before and after its own suspension)
+    // never reach the parent, whose `v` still reads 1 after the join.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let mut v = 1
+        \\  sync {
+        \\    { v = 99
+        \\      await wait(0.04s)
+        \\      v = 100 }
+        \\  }
+        \\  let o = get_mut(Out)
+        \\  o.n = v
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: entry (child rebinds ITS v to 99, suspends). tick 3: child
+    // resumes (v -> 100), completes. tick 4: parent joins -> n = parent's v = 1.
     const r = try interp.runFor(&world, 4);
     try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
