@@ -9967,6 +9967,170 @@ test "construct matrix: race nested in a spawn body, joined via handle (M1.0.12 
     try std.testing.expectEqual(@as(i64, 21), readResourceInt(&world, out_id));
 }
 
+test "return await regression: the return is never dropped at resume (M1.0.12 E5)" {
+    const gpa = std.testing.allocator;
+
+    // Regression for the fix-as-you-go E5 fix: a `return await <wake-target>`
+    // used to DROP its return at resume (`deliverAwaitValue` no-ops on
+    // `.return_`) and fall through past the statement. Three forms, each with
+    // a poison statement AFTER the `return` that must never run, and a caller
+    // continuation that must run exactly once.
+
+    // (a) `return await wait(...)` in an async fn — resume path, wake-target
+    // form: the (unit) value resolves at the caller's await site (bind), the
+    // fn's trailing statements are dead.
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        const source =
+            \\resource Out { n: int = 0 }
+            \\async fn fa() {
+            \\  return await wait(0.04s)
+            \\  throw Error { message: "fallthrough", code: ErrorCode.io_fail }
+            \\}
+            \\async rule r()
+            \\  when resource Out
+            \\{
+            \\  let x = await fa()
+            \\  let o = get_mut(Out)
+            \\  o.n = o.n + 1
+            \\}
+        ;
+        var pr = try parser_mod.parse(gpa, source);
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const out_id = world.registry.idOf("Out").?;
+        // ticks 1-2: suspended at the return's await (wake 3).
+        _ = try interp.runFor(&world, 2);
+        try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+        // tick 3: resume -> the RETURN fires (not a fall-through): fa's
+        // poison write (111) never runs, the caller continues once -> n = 1.
+        const r = try interp.runFor(&world, 2);
+        try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+        try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    }
+
+    // (b) `return await h` on an already-`.done` handle — the immediate path
+    // (`.signaled` at the await site, no suspension).
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        const source =
+            \\event Tick { }
+            \\resource Out { n: int = 0 }
+            \\async fn fb() {
+            \\  let h = spawn {
+            \\    emit Tick { }
+            \\  }
+            \\  await wait(0.04s)
+            \\  return await h
+            \\  throw Error { message: "fallthrough", code: ErrorCode.io_fail }
+            \\}
+            \\async rule r()
+            \\  when resource Out
+            \\{
+            \\  await fb()
+            \\  let o = get_mut(Out)
+            \\  o.n = o.n + 1
+            \\}
+            \\@on_event(Tick)
+            \\rule count()
+            \\  when resource Out
+            \\{
+            \\  let l = get_mut(Out)
+            \\  l.n = l.n + 10
+            \\}
+        ;
+        var pr = try parser_mod.parse(gpa, source);
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const out_id = world.registry.idOf("Out").?;
+        // tick 1: the spawned task completes in-pass (emits Tick -> n=10);
+        // fb waits (wake 3).
+        _ = try interp.runFor(&world, 1);
+        try std.testing.expectEqual(@as(i64, 10), readResourceInt(&world, out_id));
+        // tick 3: fb resumes; `return await h` on the DONE handle returns
+        // immediately (same drive): the poison throw is dead (0 errors),
+        // the caller continues once -> 11.
+        const r = try interp.runFor(&world, 2);
+        try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+        try std.testing.expectEqual(@as(i64, 11), readResourceInt(&world, out_id));
+    }
+
+    // (c) `return await h` on a `.suspended` handle — the `.return_` pending
+    // bind at the task_done resume.
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        const source =
+            \\event Tock { }
+            \\resource Out { n: int = 0 }
+            \\async fn fc() {
+            \\  let h = spawn {
+            \\    await wait(0.04s)
+            \\    emit Tock { }
+            \\  }
+            \\  return await h
+            \\  throw Error { message: "fallthrough", code: ErrorCode.io_fail }
+            \\}
+            \\async rule r()
+            \\  when resource Out
+            \\{
+            \\  await fc()
+            \\  let o = get_mut(Out)
+            \\  o.n = o.n + 1
+            \\}
+            \\@on_event(Tock)
+            \\rule count()
+            \\  when resource Out
+            \\{
+            \\  let l = get_mut(Out)
+            \\  l.n = l.n + 100
+            \\}
+        ;
+        var pr = try parser_mod.parse(gpa, source);
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const out_id = world.registry.idOf("Out").?;
+        // tick 3: the spawned task completes (emits Tock -> n=100); the rule
+        // task (awaiting the handle via fc's return) joins the NEXT tick.
+        _ = try interp.runFor(&world, 3);
+        try std.testing.expectEqual(@as(i64, 100), readResourceInt(&world, out_id));
+        // tick 4: the `.return_` pending bind re-raises the return at resume:
+        // the poison throw is dead (0 errors), the caller continues once -> 101.
+        const r = try interp.runFor(&world, 1);
+        try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+        try std.testing.expectEqual(@as(i64, 101), readResourceInt(&world, out_id));
+    }
+}
+
 test "runProgram Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)" {
     const gpa = std.testing.allocator;
     var world = World.init();
