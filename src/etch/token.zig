@@ -110,7 +110,9 @@ pub const TokenKind = enum {
     kw_const, // top-level `const` declaration (M1.0.8 — graduated from non_s3_keywords; top-level only per part1 §4.5)
     kw_private, // `private` visibility modifier prefix on a declaration_body (M1.0.8 — graduated from non_s3_keywords; grammar §5.1)
     kw_test, // top-level `test "name" { ... }` block (M1.0.8 — graduated from non_s3_keywords; parse + validate only, no execution)
-    kw_spawn, // structural spawn expr `spawn(C{…})` (M1.0.10 — graduated from non_s3_keywords; §3.2 structural_spawn. The async `spawn { }` task form §4.2 stays M1.0.11, fail-loud at parse)
+    kw_spawn, // structural spawn expr `spawn(C{…})` (M1.0.10, §3.2 structural_spawn) + the async task statement `[let IDENT =] spawn { }` (M1.0.12, §4.2 spawn_stmt) — disambiguated by the next token
+    kw_race, // race statement `race { race_branch* }` (M1.0.12 — graduated from non_s3_keywords; §4.2 race_stmt)
+    kw_sync, // sync statement `sync { sync_branch* }` (M1.0.12 — graduated from non_s3_keywords; §4.2 sync_stmt)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -279,6 +281,8 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "private", .kind = .kw_private },
     .{ .lexeme = "test", .kind = .kw_test },
     .{ .lexeme = "spawn", .kind = .kw_spawn },
+    .{ .lexeme = "race", .kind = .kw_race },
+    .{ .lexeme = "sync", .kind = .kw_sync },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -315,17 +319,11 @@ pub const non_s3_keywords = [_][]const u8{
     //    overridable module (cf. `engine-phase-1-plan.md`) ──
     "override",
 
-    // ── Async machinery: `async` graduated with M0.8 E2 (`async fn` parsed;
-    //    interp E3, codegen Phase 2); `await` graduated with M0.8 E3 sub-slice B
-    //    (`async rule`/`async fn` + `await` interpreted, codegen Phase 2);
-    //    `spawn` graduated with M1.0.10 — the STRUCTURAL `spawn(C{…})` expr
-    //    (§3.2 structural_spawn) now lexes as `kw_spawn` (the async `spawn { }`
-    //    task form §4.2 stays M1.0.11, fail-loud at parse). The remaining
-    //    concurrency algebra (`race`/`sync`) stays reserved (T2/T3, flagged
-    //    for Review E3); `branch` graduated with the E4 quest slice (its async
-    //    statement form keeps an explicit fail-loud parse error) ──
-    "race",
-    "sync",
+    // ── Async machinery: fully graduated. `async` with M0.8 E2, `await` with
+    //    M0.8 E3 sub-slice B, `spawn` with M1.0.10 (structural expr) then
+    //    M1.0.12 (async task statement — disambiguated by the next token),
+    //    `branch` with the M0.8 E4 quest slice (async statement form M1.0.12),
+    //    `race` / `sync` with M1.0.12 (concurrency algebra, §4.2) ──
 
     // ── Timers / lifecycle (out of S3; `emit` graduated with E3 ECS layer;
     //    `after` graduated with E4 routine triggers — the §4.3 timer
@@ -386,11 +384,11 @@ test "const/private/test graduate to s3 keywords" {
     try std.testing.expect(isKeywordToken(.kw_test));
 }
 
-test "spawn graduates to s3 keyword; race/sync stay reserved" {
+test "spawn graduates to s3 keyword (M1.0.10)" {
     // M1.0.10: `spawn` moves from the reserve list into `s3_keywords`, mapped
     // to `kw_spawn`. The structural `spawn(C{…})` expr now lexes to a real
-    // keyword so the parser can dispatch it (the async `spawn { }` task form
-    // is fail-loud at parse, M1.0.11). `race` / `sync` stay reserved.
+    // keyword so the parser can dispatch it. (The async `spawn { }` task form
+    // shares the keyword since M1.0.12 — next-token disambiguation.)
     const T = struct {
         fn s3Kind(lexeme: []const u8) ?TokenKind {
             for (s3_keywords) |kw| {
@@ -407,12 +405,42 @@ test "spawn graduates to s3 keyword; race/sync stay reserved" {
     };
     try std.testing.expectEqual(TokenKind.kw_spawn, T.s3Kind("spawn").?);
     try std.testing.expect(!T.reserved("spawn"));
-    // The rest of the concurrency algebra stays reserved.
-    try std.testing.expect(T.s3Kind("race") == null);
-    try std.testing.expect(T.reserved("race"));
-    try std.testing.expect(T.s3Kind("sync") == null);
-    try std.testing.expect(T.reserved("sync"));
     // `kw_spawn` sits inside the contiguous keyword range (tag-path contextual
     // acceptance via `isKeywordToken`).
     try std.testing.expect(isKeywordToken(.kw_spawn));
+}
+
+test "race/sync graduate to s3 keywords (M1.0.12 E2)" {
+    // M1.0.12: `race` / `sync` move from the reserve list into `s3_keywords`,
+    // mapped to `kw_race` / `kw_sync` — the concurrency-algebra statements
+    // (§4.2) become parseable. `override` remains the last reserved top-level
+    // construct keyword (waits for a Tier-1 overridable module); the timer
+    // family (`every` / `after_unscaled` / `quantize`) waits for M1.0.13.
+    const T = struct {
+        fn s3Kind(lexeme: []const u8) ?TokenKind {
+            for (s3_keywords) |kw| {
+                if (std.mem.eql(u8, kw.lexeme, lexeme)) return kw.kind;
+            }
+            return null;
+        }
+        fn reserved(lexeme: []const u8) bool {
+            for (non_s3_keywords) |kw| {
+                if (std.mem.eql(u8, kw, lexeme)) return true;
+            }
+            return false;
+        }
+    };
+    try std.testing.expectEqual(TokenKind.kw_race, T.s3Kind("race").?);
+    try std.testing.expectEqual(TokenKind.kw_sync, T.s3Kind("sync").?);
+    try std.testing.expect(!T.reserved("race"));
+    try std.testing.expect(!T.reserved("sync"));
+    // `override` stays reserved; the timers stay reserved until M1.0.13.
+    try std.testing.expect(T.reserved("override"));
+    try std.testing.expect(T.reserved("every"));
+    try std.testing.expect(T.reserved("after_unscaled"));
+    try std.testing.expect(T.reserved("quantize"));
+    // Graduated keywords sit inside the contiguous keyword range (tag-path
+    // contextual acceptance via `isKeywordToken`).
+    try std.testing.expect(isKeywordToken(.kw_race));
+    try std.testing.expect(isKeywordToken(.kw_sync));
 }

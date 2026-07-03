@@ -262,8 +262,9 @@ pub const ExprKind = enum {
     /// `structural_spawn`, M1.0.10). A statement-position expression: the v0.6
     /// no-body-handle decision (§4.5) means the type-checker rejects binding or
     /// using its result (M1.0.10 E2). Data indexes `spawn_structs`. Distinct
-    /// from the async `spawn { }` task form (§4.2 `spawn_stmt`, M1.0.11) which
-    /// is fail-loud at parse — it is NOT this node.
+    /// from the async `spawn { }` task STATEMENT (§4.2 `spawn_stmt`,
+    /// `StmtKind.spawn_stmt` since M1.0.12) — the keyword is shared, the token
+    /// after `spawn` disambiguates; this node is only ever the `(` form.
     spawn_struct,
 };
 
@@ -995,6 +996,60 @@ pub const AwaitExpr = struct {
     arg_expr: NodeId,
     entity_expr: NodeId,
     event_type: StringId,
+};
+
+/// One branch of a `race` / `sync` statement (M1.0.12 E2, `etch-grammar.md`
+/// §4.2 `race_branch = [ "if" expression "=>" ] statement`). `cond` is
+/// `NodeId.none` for an unconditional branch — a conditional branch's guard is
+/// evaluated synchronously in the parent scope at construct entry (§9.5) and
+/// decides whether the branch starts. `stmt` is the single branch statement
+/// (commonly a block-expression statement `{ … }`).
+pub const ConcurrencyBranch = struct {
+    cond: NodeId,
+    stmt: NodeId,
+    span: SourceSpan,
+};
+
+/// `race "{" { race_branch } "}"` statement (M1.0.12 E2, `etch-grammar.md`
+/// §4.2). Branches are a contiguous `(start, len)` run of
+/// `arena.concurrency_branches`. First branch to complete wins; the losers are
+/// canceled (§9.5 — execution M1.0.12 E4).
+pub const RaceStmt = struct {
+    branches_start: u32,
+    branches_len: u32,
+};
+
+/// `sync "{" { sync_branch } "}"` statement (M1.0.12 E2, `etch-grammar.md`
+/// §4.2). Same branch storage as `race`; the parent joins when ALL branches
+/// complete (§9.6 — execution M1.0.12 E4).
+pub const SyncStmt = struct {
+    branches_start: u32,
+    branches_len: u32,
+};
+
+/// `branch block` statement (M1.0.12 E2, `etch-grammar.md` §4.2
+/// `branch_stmt`) — a fire-and-forget detached task; no handle, the parent can
+/// neither await nor cancel it (§9.7 — execution M1.0.12 E5). The body is a
+/// statement run in `arena.extra` (same layout as a rule body). Distinct from
+/// the quest/dialogue `branch` sub-constructs, which are parsed inside their
+/// own construct parsers and never reach statement position.
+pub const BranchStmt = struct {
+    body_start: u32,
+    body_len: u32,
+};
+
+/// `[ "let" IDENT "=" ] "spawn" block` statement (M1.0.12 E2,
+/// `etch-grammar.md` §4.2 `spawn_stmt`) — a detached task with a `TaskHandle`
+/// (§9.8). `binding` is the `let` name (`0` when absent — the handle is
+/// discarded); the binding is PART of the statement, not a `let_stmt` whose
+/// initializer is a spawn. The body is a statement run in `arena.extra`.
+/// Distinct from the structural `spawn ( … )` expression (§3.2
+/// `structural_spawn` — `ExprKind.spawn_struct`); the two share the keyword,
+/// disambiguated by the token after `spawn`.
+pub const SpawnStmt = struct {
+    binding: StringId,
+    body_start: u32,
+    body_len: u32,
 };
 
 /// `|a, b| expr` closure (M0.8 closures, `etch-grammar.md` §524). Params are a
@@ -2499,6 +2554,15 @@ pub const AstArena = struct {
     try_catch_stmts: std.ArrayListUnmanaged(TryCatchStmt) = .empty,
     emit_stmts: std.ArrayListUnmanaged(EmitStmt) = .empty,
     await_exprs: std.ArrayListUnmanaged(AwaitExpr) = .empty,
+    /// Branch runs shared by `race_stmts` / `sync_stmts` (M1.0.12 E2). Each
+    /// statement's branches are a contiguous `(start, len)` run — nesting is
+    /// safe because a nested construct finishes (and appends its run) before
+    /// the enclosing one appends its own (the `match_arms` precedent).
+    concurrency_branches: std.ArrayListUnmanaged(ConcurrencyBranch) = .empty,
+    race_stmts: std.ArrayListUnmanaged(RaceStmt) = .empty,
+    sync_stmts: std.ArrayListUnmanaged(SyncStmt) = .empty,
+    branch_stmts: std.ArrayListUnmanaged(BranchStmt) = .empty,
+    spawn_stmts: std.ArrayListUnmanaged(SpawnStmt) = .empty,
     named_types: std.ArrayListUnmanaged(NamedTypeNode) = .empty,
     array_types: std.ArrayListUnmanaged(ArrayTypeNode) = .empty,
     map_types: std.ArrayListUnmanaged(MapTypeNode) = .empty,
@@ -2712,6 +2776,11 @@ pub const AstArena = struct {
         self.try_catch_stmts.deinit(gpa);
         self.emit_stmts.deinit(gpa);
         self.await_exprs.deinit(gpa);
+        self.concurrency_branches.deinit(gpa);
+        self.race_stmts.deinit(gpa);
+        self.sync_stmts.deinit(gpa);
+        self.branch_stmts.deinit(gpa);
+        self.spawn_stmts.deinit(gpa);
         self.named_types.deinit(gpa);
         self.array_types.deinit(gpa);
         self.map_types.deinit(gpa);
@@ -3421,6 +3490,38 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.try_catch_stmts.items.len);
         try self.try_catch_stmts.append(gpa, tc);
         return try self.addStmt(gpa, .try_catch_stmt, idx, span);
+    }
+
+    /// `branches` is the statement's complete branch list, bulk-appended to
+    /// `arena.concurrency_branches` as a contiguous run (M1.0.12 E2 — the
+    /// `addMatch` arms pattern, safe under nesting).
+    pub fn addRaceStmt(self: *AstArena, gpa: std.mem.Allocator, branches: []const ConcurrencyBranch, span: SourceSpan) !NodeId {
+        const start: u32 = @intCast(self.concurrency_branches.items.len);
+        try self.concurrency_branches.appendSlice(gpa, branches);
+        const idx: u32 = @intCast(self.race_stmts.items.len);
+        try self.race_stmts.append(gpa, .{ .branches_start = start, .branches_len = @intCast(branches.len) });
+        return try self.addStmt(gpa, .race_stmt, idx, span);
+    }
+
+    /// Same storage discipline as `addRaceStmt` (M1.0.12 E2).
+    pub fn addSyncStmt(self: *AstArena, gpa: std.mem.Allocator, branches: []const ConcurrencyBranch, span: SourceSpan) !NodeId {
+        const start: u32 = @intCast(self.concurrency_branches.items.len);
+        try self.concurrency_branches.appendSlice(gpa, branches);
+        const idx: u32 = @intCast(self.sync_stmts.items.len);
+        try self.sync_stmts.append(gpa, .{ .branches_start = start, .branches_len = @intCast(branches.len) });
+        return try self.addStmt(gpa, .sync_stmt, idx, span);
+    }
+
+    pub fn addBranchStmt(self: *AstArena, gpa: std.mem.Allocator, bs: BranchStmt, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.branch_stmts.items.len);
+        try self.branch_stmts.append(gpa, bs);
+        return try self.addStmt(gpa, .branch_stmt, idx, span);
+    }
+
+    pub fn addSpawnStmt(self: *AstArena, gpa: std.mem.Allocator, ss: SpawnStmt, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.spawn_stmts.items.len);
+        try self.spawn_stmts.append(gpa, ss);
+        return try self.addStmt(gpa, .spawn_stmt, idx, span);
     }
 
     pub fn addLetStmt(self: *AstArena, gpa: std.mem.Allocator, let: LetStmt, span: SourceSpan) !NodeId {

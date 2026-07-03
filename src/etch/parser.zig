@@ -5269,6 +5269,11 @@ pub const Parser = struct {
     fn startsKeywordStmt(self: *const Parser) bool {
         return switch (self.peek()) {
             .kw_let, .kw_assert, .kw_for, .kw_while, .kw_break, .kw_continue, .kw_throw, .kw_try, .kw_return, .kw_emit => true,
+            // The concurrency statements (M1.0.12 E2, §4.2) — never a block's
+            // trailing value. `spawn` only in its `spawn {` task form; the
+            // structural `spawn (` stays on the expression path.
+            .kw_race, .kw_sync, .kw_branch => true,
+            .kw_spawn => self.peekNext() == .lbrace,
             .ident => self.peekNext() == .colon, // labeled loop `outer:`
             else => false,
         };
@@ -5356,6 +5361,15 @@ pub const Parser = struct {
             _ = try self.expect(.eq, "expected '=' in 'if let' binding");
         }
         const cond = try self.parseExprNoStruct(0);
+        return try self.finishIf(kw_span, let_binding, cond);
+    }
+
+    /// Finish an `if` whose condition is already parsed (M1.0.12 E2 split): the
+    /// then-block, the else-if chain, and the node. Lets the `race`/`sync`
+    /// branch parser resolve `if expr =>` (conditional branch guard) vs
+    /// `if expr { … }` (an if-statement branch) AFTER the expression — the two
+    /// only diverge at the token following the condition.
+    fn finishIf(self: *Parser, kw_span: SourceSpan, let_binding: StringId, cond: NodeId) ParseError!NodeId {
         const then_block = try self.parseBlockExpr();
         var else_branch: NodeId = NodeId.none;
         if (self.peek() == .kw_else) {
@@ -5581,13 +5595,132 @@ pub const Parser = struct {
         }, .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end });
     }
 
+    /// Parse the branch list of a `race` / `sync` body (M1.0.12 E2,
+    /// `etch-grammar.md` §4.2 `race_branch = [ "if" expression "=>" ]
+    /// statement`). A branch starting with `if` is ambiguous until after the
+    /// expression: a following `=>` makes the expression a conditional-branch
+    /// GUARD (evaluated in the parent scope at construct entry, §9.5) and the
+    /// branch is the statement after `=>`; anything else means the `if` was
+    /// itself the branch statement (an if-statement) — finished via `finishIf`
+    /// with the already-parsed condition. `if let` is always an if-statement
+    /// branch (the guard grammar has no `let`). Collected into `branches`
+    /// (caller-owned) and bulk-appended by `addRaceStmt` / `addSyncStmt`.
+    fn parseConcurrencyBranches(self: *Parser, branches: *std.ArrayListUnmanaged(ast_mod.ConcurrencyBranch)) ParseError!void {
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            try self.surfaceTokenErrors();
+            const branch_start = self.current.span;
+            if (self.peek() == .kw_if and self.peekNext() != .kw_let) {
+                const kw_span = (try self.advance()).span; // 'if'
+                const cond = try self.parseExprNoStruct(0);
+                if (try self.match(.fat_arrow)) {
+                    const stmt = try self.parseStmt();
+                    try branches.append(self.gpa, .{
+                        .cond = cond,
+                        .stmt = stmt,
+                        .span = .{ .byte_start = branch_start.byte_start, .byte_end = self.arena.stmtSpan(stmt).byte_end },
+                    });
+                    continue;
+                }
+                // No `=>` — the `if` is the branch statement itself.
+                const ife = try self.finishIf(kw_span, 0, cond);
+                const span = self.arena.exprSpan(ife);
+                const stmt = try self.arena.addExprStmt(self.gpa, ife, span);
+                try branches.append(self.gpa, .{ .cond = NodeId.none, .stmt = stmt, .span = span });
+                continue;
+            }
+            const stmt = try self.parseStmt();
+            try branches.append(self.gpa, .{
+                .cond = NodeId.none,
+                .stmt = stmt,
+                .span = self.arena.stmtSpan(stmt),
+            });
+        }
+    }
+
+    /// Parse `race "{" { race_branch } "}"` (M1.0.12 E2, `etch-grammar.md`
+    /// §4.2 `race_stmt`). An empty body parses (zero admitted branches — the
+    /// parent continues immediately, E4); async-context legality is the
+    /// type-checker's job (E3).
+    fn parseRaceStmt(self: *Parser) ParseError!NodeId {
+        const kw = try self.advance(); // 'race'
+        _ = try self.expect(.lbrace, "expected '{' to open the race body");
+        var branches: std.ArrayListUnmanaged(ast_mod.ConcurrencyBranch) = .empty;
+        defer branches.deinit(self.gpa);
+        try self.parseConcurrencyBranches(&branches);
+        const closing = try self.expect(.rbrace, "expected '}' to close the race body");
+        return try self.arena.addRaceStmt(self.gpa, branches.items, .{
+            .byte_start = kw.span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
+    /// Parse `sync "{" { sync_branch } "}"` (M1.0.12 E2, `etch-grammar.md`
+    /// §4.2 `sync_stmt`). Same branch grammar as `race`.
+    fn parseSyncStmt(self: *Parser) ParseError!NodeId {
+        const kw = try self.advance(); // 'sync'
+        _ = try self.expect(.lbrace, "expected '{' to open the sync body");
+        var branches: std.ArrayListUnmanaged(ast_mod.ConcurrencyBranch) = .empty;
+        defer branches.deinit(self.gpa);
+        try self.parseConcurrencyBranches(&branches);
+        const closing = try self.expect(.rbrace, "expected '}' to close the sync body");
+        return try self.arena.addSyncStmt(self.gpa, branches.items, .{
+            .byte_start = kw.span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
+    /// Parse `branch block` (M1.0.12 E2, `etch-grammar.md` §4.2 `branch_stmt`)
+    /// — the fire-and-forget task statement. The body is a statement run (the
+    /// rule-body layout). Only reached from statement position; the
+    /// quest/dialogue `branch` sub-constructs are parsed inside their own
+    /// construct parsers (disjoint contexts).
+    fn parseBranchStmt(self: *Parser) ParseError!NodeId {
+        const kw = try self.advance(); // 'branch'
+        _ = try self.expect(.lbrace, "expected '{' to open the branch body");
+        const body = try self.parseStmtRun();
+        const closing = try self.expect(.rbrace, "expected '}' to close the branch body");
+        return try self.arena.addBranchStmt(self.gpa, .{
+            .body_start = body.start,
+            .body_len = body.len,
+        }, .{ .byte_start = kw.span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
+    /// Parse `spawn block` (M1.0.12 E2, `etch-grammar.md` §4.2 `spawn_stmt`),
+    /// the async task statement. `binding` is the `let` name for the bound form
+    /// `let h = spawn { }` (dispatched from `parseLetStmt`; `0` = discarded
+    /// handle); `start_span` is the statement's first token (`let` or `spawn`).
+    /// The caller has already checked the next tokens are `spawn {`.
+    fn parseSpawnStmt(self: *Parser, binding: StringId, start_span: SourceSpan) ParseError!NodeId {
+        _ = try self.advance(); // 'spawn'
+        _ = try self.expect(.lbrace, "expected '{' to open the spawn task body");
+        const body = try self.parseStmtRun();
+        const closing = try self.expect(.rbrace, "expected '}' to close the spawn task body");
+        return try self.arena.addSpawnStmt(self.gpa, .{
+            .binding = binding,
+            .body_start = body.start,
+            .body_len = body.len,
+        }, .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
     fn parseStmt(self: *Parser) ParseError!NodeId {
         if (self.peek() == .kw_branch) {
-            // `branch` graduated to a keyword for quest/dialogue branches
-            // (M0.8 E4); its async-algebra statement form (T2/T3) stays out
-            // of M0.8 — keep the fail-loud explicit (it lexed
-            // `error_unknown_keyword` before the graduation).
-            return self.parseErr(self.peekSpan(), "the async 'branch' statement is not in M0.8 scope (T2/T3, Phase 2)");
+            // The async `branch { }` statement (M1.0.12 E2, §4.2 branch_stmt).
+            // The quest/dialogue `branch` sub-constructs never reach here —
+            // they are parsed inside their own construct parsers.
+            return try self.parseBranchStmt();
+        }
+        if (self.peek() == .kw_race) {
+            return try self.parseRaceStmt();
+        }
+        if (self.peek() == .kw_sync) {
+            return try self.parseSyncStmt();
+        }
+        // `spawn {` at statement head is the async task statement (M1.0.12 E2,
+        // §4.2 spawn_stmt, binding-less form). `spawn (` falls through to the
+        // expression path (structural spawn, §3.2); the bound form
+        // `let h = spawn { }` is dispatched inside `parseLetStmt`.
+        if (self.peek() == .kw_spawn and self.peekNext() == .lbrace) {
+            return try self.parseSpawnStmt(0, self.peekSpan());
         }
         if (self.peek() == .kw_after) {
             // `after` graduated to a keyword for routine triggers (M0.8 E4);
@@ -5670,6 +5803,20 @@ pub const Parser = struct {
             type_annotation = try self.parseType();
         }
         _ = try self.expect(.eq, "expected '=' in let binding");
+        // `let h = spawn { }` — the bound spawn task statement (M1.0.12 E2,
+        // §4.2 `spawn_stmt = [ "let" IDENT "=" ] "spawn" block`): the binding
+        // is PART of the spawn statement, not a let-stmt whose initializer is
+        // a spawn. The grammar admits neither `mut` nor a type annotation on
+        // this form (the handle types as the builtin `TaskHandle`, E3).
+        if (self.peek() == .kw_spawn and self.peekNext() == .lbrace) {
+            if (is_mut) {
+                return self.parseErr(self.peekSpan(), "a spawn task binding takes the form 'let IDENT = spawn { ... }' — 'mut' is not part of the spawn_stmt grammar (§4.2)");
+            }
+            if (!type_annotation.isNone()) {
+                return self.parseErr(self.peekSpan(), "a spawn task binding takes the form 'let IDENT = spawn { ... }' — a type annotation is not part of the spawn_stmt grammar (§4.2)");
+            }
+            return try self.parseSpawnStmt(name_id, let_span);
+        }
         const value = try self.parseExpr(0);
         const span: SourceSpan = .{
             .byte_start = let_span.byte_start,
@@ -6391,9 +6538,13 @@ pub const Parser = struct {
     /// `structural_spawn`, M1.0.10). The token after `spawn` disambiguates:
     ///   `spawn (` → STRUCTURAL spawn — `spawn(C1 {…}, …)` component-literal
     ///               varargs, or `spawn("Prefab")` prefab name.
-    ///   `spawn {` → the async task form (§4.2 `spawn_stmt`), owned by M1.0.11 —
-    ///               emit a clear fail-loud diagnostic rather than mis-parsing.
-    ///               This is the seam M1.0.11 fills.
+    ///   `spawn {` → the async task STATEMENT (§4.2 `spawn_stmt`, M1.0.12 E2)
+    ///               — dispatched at statement head (`parseStmt`) and in the
+    ///               `let h = spawn { }` binding form (`parseLetStmt`); it
+    ///               never reaches this expression parser from those sites.
+    ///               Reaching the `{` HERE means `spawn { }` sits in a genuine
+    ///               sub-expression position, which the grammar does not admit
+    ///               (spawn_stmt is a statement) → precise parse error.
     /// Statement-position only (no body handle, §4.5) is enforced by the
     /// type-checker (M1.0.10 E2); the parser produces the node in any expression
     /// position. The prefab form parses + is recognized but is refused at
@@ -6401,9 +6552,7 @@ pub const Parser = struct {
     fn parseStructuralSpawn(self: *Parser) ParseError!NodeId {
         const kw_span = (try self.advance()).span; // 'spawn'
         if (self.peek() == .lbrace) {
-            // The `{` (async) branch — owned by M1.0.11. Fail loud with a precise
-            // message instead of mis-parsing it as a structural spawn.
-            return self.parseErr(self.peekSpan(), "the async 'spawn { ... }' task is not yet executable (M1.0.11); only structural 'spawn(...)' is supported in M1.0.10");
+            return self.parseErr(self.peekSpan(), "the async 'spawn { ... }' task is a statement (optionally bound: 'let h = spawn { ... }'), not an expression (etch-grammar.md par. 4.2 spawn_stmt)");
         }
         if (self.peek() != .lparen) {
             return self.parseErrFmt(self.peekSpan(), "expected '(' to open a structural spawn (or '{{' for an async task), got '{s}'", .{self.sliceOf(self.peekSpan())});
@@ -7182,13 +7331,14 @@ test "structural spawn parses a prefab name (M1.0.10)" {
     try std.testing.expectEqual(@as(u32, 0), ss.args_len);
 }
 
-test "spawn brace form is the async seam (M1.0.11 diagnostic, M1.0.10)" {
+test "spawn { } in a sub-expression position is a parse error (M1.0.12 E2)" {
     const gpa = std.testing.allocator;
-    // The async `spawn { }` task form (§4.2) is owned by M1.0.11 — the parser
-    // emits a clear fail-loud diagnostic rather than mis-parsing it.
+    // `spawn_stmt` is a STATEMENT (§4.2): statement head and the
+    // `let h = spawn { }` binding form are its only sites. A `spawn { }`
+    // nested inside an expression is not in the grammar — precise error.
     var result = try parse(gpa,
         \\rule r() {
-        \\  spawn { }
+        \\  let x = 1 + spawn { }
         \\}
     );
     defer result.deinit(gpa);
@@ -7200,6 +7350,277 @@ test "spawn brace form is the async seam (M1.0.11 diagnostic, M1.0.10)" {
         if (k == .spawn_struct) spawns += 1;
     }
     try std.testing.expectEqual(@as(usize, 0), spawns);
+}
+
+/// Collect the statement kinds of the first rule's body run (M1.0.12 E2 test
+/// helper) — the rule body is a `(start, len)` statement run in `arena.extra`.
+fn firstRuleBodyKinds(result: *const ParseResult, buf: []ast_mod.StmtKind) []ast_mod.StmtKind {
+    var rule: ast_mod.RuleDecl = undefined;
+    var found = false;
+    for (result.ast.items.items(.kind), 0..) |k, i| {
+        if (k == .rule_decl) {
+            rule = result.ast.rule_decls.items[result.ast.items.items(.data)[i]];
+            found = true;
+            break;
+        }
+    }
+    std.debug.assert(found);
+    var n: usize = 0;
+    while (n < rule.body_len and n < buf.len) : (n += 1) {
+        const sid: NodeId = @bitCast(result.ast.extra.items[rule.body_start + n]);
+        buf[n] = result.ast.stmtKind(sid);
+    }
+    return buf[0..n];
+}
+
+test "race/sync parse: branches, conditional branches, empty body (M1.0.12 E2)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  race {
+        \\    await wait(1.0s)
+        \\    if hard => { await wait(2.0s) }
+        \\    { await wait(3.0s)
+        \\      return }
+        \\  }
+        \\  sync {
+        \\    await wait(1.0s)
+        \\    if extra => await wait(4.0s)
+        \\  }
+        \\  race { }
+        \\  sync { }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var buf: [8]ast_mod.StmtKind = undefined;
+    const kinds = firstRuleBodyKinds(&result, &buf);
+    try std.testing.expectEqualSlices(ast_mod.StmtKind, &.{ .race_stmt, .sync_stmt, .race_stmt, .sync_stmt }, kinds);
+    // First race: 3 branches — unconditional await, guarded block, plain block.
+    const race0 = result.ast.race_stmts.items[0];
+    try std.testing.expectEqual(@as(u32, 3), race0.branches_len);
+    const b = result.ast.concurrency_branches.items;
+    try std.testing.expect(b[race0.branches_start].cond.isNone());
+    try std.testing.expectEqual(ast_mod.StmtKind.expr_stmt, result.ast.stmtKind(b[race0.branches_start].stmt));
+    try std.testing.expect(!b[race0.branches_start + 1].cond.isNone()); // `if hard =>`
+    try std.testing.expect(b[race0.branches_start + 2].cond.isNone());
+    // First sync: 2 branches, second guarded with a non-block statement.
+    const sync0 = result.ast.sync_stmts.items[0];
+    try std.testing.expectEqual(@as(u32, 2), sync0.branches_len);
+    try std.testing.expect(!b[sync0.branches_start + 1].cond.isNone());
+    // Empty bodies: zero branches, no error.
+    try std.testing.expectEqual(@as(u32, 0), result.ast.race_stmts.items[1].branches_len);
+    try std.testing.expectEqual(@as(u32, 0), result.ast.sync_stmts.items[1].branches_len);
+}
+
+test "race branch starting with an if-statement is unconditional (M1.0.12 E2)" {
+    const gpa = std.testing.allocator;
+    // `if cond { … }` at branch head is the branch STATEMENT (an if-statement),
+    // not a conditional-branch guard — the token after the expression (`{` vs
+    // `=>`) disambiguates. `if let` likewise.
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  race {
+        \\    if ready { await wait(1.0s) }
+        \\    if let v = opt { await wait(2.0s) }
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    const race0 = result.ast.race_stmts.items[0];
+    try std.testing.expectEqual(@as(u32, 2), race0.branches_len);
+    const b = result.ast.concurrency_branches.items;
+    // Both branches are UNCONDITIONAL if-statement branches.
+    try std.testing.expect(b[race0.branches_start].cond.isNone());
+    try std.testing.expect(b[race0.branches_start + 1].cond.isNone());
+    for (0..2) |i| {
+        const stmt = b[race0.branches_start + i].stmt;
+        try std.testing.expectEqual(ast_mod.StmtKind.expr_stmt, result.ast.stmtKind(stmt));
+        const e: NodeId = @bitCast(result.ast.stmtData(stmt));
+        try std.testing.expectEqual(ast_mod.ExprKind.if_expr, result.ast.exprKind(e));
+    }
+    // The `if let` branch kept its binding.
+    const e1: NodeId = @bitCast(result.ast.stmtData(b[race0.branches_start + 1].stmt));
+    const ife = result.ast.if_exprs.items[result.ast.exprData(e1)];
+    try std.testing.expect(ife.let_binding != 0);
+}
+
+test "branch/spawn statements parse incl. binding + empty bodies (M1.0.12 E2)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  branch {
+        \\    await wait(30.0s)
+        \\    emit Reminder { }
+        \\  }
+        \\  spawn { }
+        \\  let h = spawn {
+        \\    await wait(1.0s)
+        \\  }
+        \\  branch { }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var buf: [8]ast_mod.StmtKind = undefined;
+    const kinds = firstRuleBodyKinds(&result, &buf);
+    try std.testing.expectEqualSlices(ast_mod.StmtKind, &.{ .branch_stmt, .spawn_stmt, .spawn_stmt, .branch_stmt }, kinds);
+    // First branch: two body statements. Last branch: empty body.
+    try std.testing.expectEqual(@as(u32, 2), result.ast.branch_stmts.items[0].body_len);
+    try std.testing.expectEqual(@as(u32, 0), result.ast.branch_stmts.items[1].body_len);
+    // Bare spawn: no binding, empty body. Bound spawn: binding `h`, one stmt.
+    try std.testing.expectEqual(@as(u32, 0), result.ast.spawn_stmts.items[0].binding);
+    try std.testing.expectEqual(@as(u32, 0), result.ast.spawn_stmts.items[0].body_len);
+    try std.testing.expectEqualStrings("h", result.ast.strings.slice(result.ast.spawn_stmts.items[1].binding));
+    try std.testing.expectEqual(@as(u32, 1), result.ast.spawn_stmts.items[1].body_len);
+    // No let-stmt was produced for the bound form (the binding is part of the
+    // spawn statement), and no structural spawn node either.
+    try std.testing.expectEqual(@as(usize, 0), result.ast.let_stmts.items.len);
+    var spawns: usize = 0;
+    for (result.ast.exprs.items(.kind)) |k| {
+        if (k == .spawn_struct) spawns += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), spawns);
+}
+
+test "spawn ( stays structural next to spawn { task form (M1.0.12 E2)" {
+    const gpa = std.testing.allocator;
+    // Token-based disambiguation (§3.2 note): `spawn (` → structural expr
+    // (M1.0.10 surface untouched), `spawn {` → async task statement.
+    var result = try parse(gpa,
+        \\component Pos { x: int = 0 }
+        \\rule r() {
+        \\  spawn(Pos { x: 1 })
+        \\  spawn { }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var spawns: usize = 0;
+    for (result.ast.exprs.items(.kind)) |k| {
+        if (k == .spawn_struct) spawns += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), spawns);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.spawn_stmts.items.len);
+}
+
+test "nested concurrency constructs parse (M1.0.12 E2)" {
+    const gpa = std.testing.allocator;
+    // A `race` inside a `sync` branch block, a `spawn` inside a `branch` body,
+    // and a `branch` inside a race branch — the shared branch slab stays
+    // contiguous per statement (the `match_arms` precedent).
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  sync {
+        \\    { race {
+        \\        await wait(1.0s)
+        \\        await wait(2.0s)
+        \\      } }
+        \\    await wait(3.0s)
+        \\  }
+        \\  branch {
+        \\    spawn {
+        \\      branch { }
+        \\    }
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    // Inner race: 2 branches; outer sync: 2 branches; each run contiguous.
+    try std.testing.expectEqual(@as(usize, 1), result.ast.race_stmts.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.sync_stmts.items.len);
+    try std.testing.expectEqual(@as(u32, 2), result.ast.race_stmts.items[0].branches_len);
+    try std.testing.expectEqual(@as(u32, 2), result.ast.sync_stmts.items[0].branches_len);
+    try std.testing.expectEqual(@as(usize, 4), result.ast.concurrency_branches.items.len);
+    // The nested race (parsed first) owns the first run.
+    try std.testing.expectEqual(@as(u32, 0), result.ast.race_stmts.items[0].branches_start);
+    try std.testing.expectEqual(@as(u32, 2), result.ast.sync_stmts.items[0].branches_start);
+    // branch { spawn { branch { } } } — two branch stmts, one spawn stmt.
+    try std.testing.expectEqual(@as(usize, 2), result.ast.branch_stmts.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.spawn_stmts.items.len);
+}
+
+test "async branch statement coexists with quest/dialogue branches (M1.0.12 E2)" {
+    const gpa = std.testing.allocator;
+    // `kw_branch` serves three disjoint parse contexts: the quest branch
+    // (inside `parseQuestBranch`), the dialogue branch (inside
+    // `parseDialogueElems`), and the async statement at general statement
+    // head. One program using all three parses clean.
+    var result = try parse(gpa,
+        \\quest Hunt {
+        \\  stage Track {
+        \\    objective main find: player_found_tracks()
+        \\    branch Peaceful {
+        \\      stage Talk {
+        \\        objective main talk: npc_talked()
+        \\      }
+        \\    }
+        \\  }
+        \\}
+        \\dialogue Meeting {
+        \\  speaker "Guide" {
+        \\    line: "Welcome."
+        \\  }
+        \\  branch small_talk {
+        \\    speaker "Guide" {
+        \\      line: "Nice weather."
+        \\    }
+        \\  }
+        \\}
+        \\rule r() {
+        \\  branch {
+        \\    await wait(1.0s)
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    // The async statement produced exactly one BranchStmt; the quest/dialogue
+    // branches live in their construct sub-ASTs, not in `branch_stmts`.
+    try std.testing.expectEqual(@as(usize, 1), result.ast.branch_stmts.items.len);
+    try std.testing.expectEqual(@as(u32, 1), result.ast.branch_stmts.items[0].body_len);
+}
+
+test "spawn binding form rejects mut and type annotation (M1.0.12 E2)" {
+    const gpa = std.testing.allocator;
+    // §4.2: `spawn_stmt = [ "let" IDENT "=" ] "spawn" block` — no `mut`, no
+    // type annotation on the binding.
+    var r1 = try parse(gpa,
+        \\rule r() {
+        \\  let mut h = spawn { }
+        \\}
+    );
+    defer r1.deinit(gpa);
+    try std.testing.expect(r1.diagnostics.len > 0);
+    try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, r1.diagnostics[0].code);
+    var r2 = try parse(gpa,
+        \\rule r() {
+        \\  let h: int = spawn { }
+        \\}
+    );
+    defer r2.deinit(gpa);
+    try std.testing.expect(r2.diagnostics.len > 0);
+    try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, r2.diagnostics[0].code);
 }
 
 test "parser builds loops, labels, break value, and continue (M0.8 loop/break)" {
