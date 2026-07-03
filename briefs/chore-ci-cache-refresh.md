@@ -90,11 +90,13 @@ Single gate (E1), one file: `.github/workflows/ci.yml`.
 
 ## Execution log
 
--
+- 2026-07-03 12:07 CEST — branch `phase-1/chore/ci-cache-refresh` created from `main` (`4daaf6c`, v0.10.11-async-core) and pushed; brief committed verbatim; spec read confirmed; brief ACTIVE.
+- 2026-07-03 12:20 CEST — E1 implemented in `.github/workflows/ci.yml` (`build-and-test` job only): monolithic `actions/cache@v5` replaced by `actions/cache/restore@v5` (id `zig-cache`, per-sha primary key, two prefix restore-keys = three-level fallback) + `actions/cache/save@v5` post-`zig build` (key `...-${{ github.sha }}-build`, timeout immunity) + `actions/cache/save@v5` final `if: always()` (key `...-${{ github.sha }}`). No explicit `-build` entry in restore-keys: verified that restore-keys prefix-match (newest first), so the zon-level fallback `...-<zonhash>-` matches both save entries — the key ladder stays at three levels per the brief's minimality instruction. Timing report records `cache_matched_key` (and `cache_key` updated to the per-sha primary so the artifact stays truthful). ReleaseSafe `timeout-minutes` 40 -> 55, Debug untouched. Budget-history comment extended in the established style; cache doc comment rewritten (split + per-sha refresh + §7.3 sub-action note); the `zig build` timer comment's stale "cold=miss / warm=hit" diagnostic recipe realigned on `cache_matched_key`. YAML syntax validated; §3.6.1 language grep on the diff: clean.
+- 2026-07-03 12:20 CEST — cache-site inventory verified before editing (anti-hallucination discipline): besides `build-and-test`, THREE other `actions/cache@v5` sites exist — `runtime-smoke-test` (ci.yml), `vertical-slice-smoke` (ci.yml), `bench-ecs-smoke` (bench.yml). The brief's Out-of-scope names "two sites (bench job, docs-build job)"; no `docs-build` job exists. The intent is unambiguous (convert ONLY `build-and-test`), so all three stay untouched. Note: the two ci.yml smoke jobs keep their sha-less exact key, which still exact-hits the existing fossil entry until LRU eviction; they complete normally either way, and on fossil eviction their prefix fallback picks up the fresh per-sha caches — no unblock dependency.
 
 ## Recorded deviations
 
--
+- **Commit type `ci(...)` -> `chore(ci): ...`.** The prompt and the brief's Conventions section specify Conventional Commits "type `ci(...)`", but `engine-development-workflow.md` §4.3 defines a strict 8-type whitelist (`feat|fix|perf|refactor|test|docs|chore|breaking`) enforced by the `commit-msg` hook (verified in `tools/weld_lint/rules/conventional_commit.zig` — `ci` is rejected), and the spec's own canonical example for CI work is `chore(ci): ...`. The spec and the hook prevail: all CI commits of this chore use type `chore` with scope `ci`.
 
 ## Blockers encountered
 
