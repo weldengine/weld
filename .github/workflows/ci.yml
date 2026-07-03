@@ -107,7 +107,14 @@ jobs:
     # to bench.yml, Zig build cache added below. The 40/20 min budgets are
     # kept as cold-cache headroom — a cache miss (zon change / eviction)
     # still pays the full build cost; warm runs land well under budget.
-    timeout-minutes: ${{ matrix.mode == 'ReleaseSafe' && 40 || 20 }}
+    # CI cache refresh chore — ReleaseSafe budget raised to 55 min: the M0.9
+    # cache key had no per-commit component and the monolithic action never
+    # re-saved on an exact-key hit, so the cache fossilized at its first save
+    # while the M1.0.x milestones drifted the sources; the near-cold
+    # windows-2025 ReleaseSafe recompile now exceeds 40 min. The restore/save
+    # split below fixes the refresh mechanism; 55 min covers the residual
+    # near-cold case on the slowest runner (Debug still fits in 20).
+    timeout-minutes: ${{ matrix.mode == 'ReleaseSafe' && 55 || 20 }}
     steps:
       - uses: actions/checkout@v6
 
@@ -127,23 +134,36 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      # M0.9 / E1 — Zig build cache, keyed on (os, optimize mode, zig
-      # version, build.zig.zon hash) exactly per the brief. The local
-      # `.zig-cache` holds the mode-specific incremental compilation
-      # outputs that dominate CI wall-time on the ReleaseSafe legs — hence
-      # the key includes `matrix.mode`. The restore-keys fallback lets a
-      # build.zig.zon change still seed from the previous zon's cache and
-      # rebuild incrementally rather than cold. Zig's cache is content-
-      # hashed and self-invalidating: a restored cache never yields a stale
-      # build. setup-zig's own (global) cache is left at its default — this
-      # step adds the mode-keyed local cache it does not cover.
+      # M0.9 / E1, reworked by the CI cache refresh chore — Zig build cache
+      # keyed on (os, optimize mode, zig version, build.zig.zon hash), now as
+      # an explicit restore/save split with a per-sha primary key. The
+      # monolithic actions/cache@v5 step never re-saved on an exact-key hit,
+      # so under a stable build.zig.zon the cache froze at its first save (a
+      # fossil) while every milestone drifted the sources further from it —
+      # until the windows-2025 ReleaseSafe recompile blew the job budget. The
+      # per-sha primary key never exact-hits on a fresh commit, so every run
+      # re-saves from the most recent prior state; GitHub's 10 GB per-repo
+      # LRU retires old entries (no manual cleanup machinery).
+      # Three-level fallback: exact sha -> newest cache under this zon
+      # (prefix-matches both the post-build and post-test saves below,
+      # newest first) -> newest cache under this os/mode/zig. The local
+      # `.zig-cache` holds the mode-specific incremental compilation outputs
+      # that dominate CI wall-time on the ReleaseSafe legs — hence the key
+      # includes `matrix.mode`. Zig's cache is content-hashed and
+      # self-invalidating: a restored cache never yields a stale build.
+      # setup-zig's own (global) cache is left at its default — this step
+      # adds the mode-keyed local cache it does not cover.
+      # §7.3 whitelist note: actions/cache/restore@v5 and actions/cache/save@v5
+      # are sub-actions of the already-whitelisted actions/cache@v5 (same
+      # repo, same major, same portability notes).
       - name: Restore Zig cache
         id: zig-cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: .zig-cache
-          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
+            zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-
             zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-
 
       - name: zig fmt --check
@@ -151,10 +171,10 @@ jobs:
 
       # M0.9 / E1 — `zig build` and `zig build test` are timed individually
       # (bash $SECONDS) and the elapsed values handed to the timing report
-      # step via $GITHUB_ENV. Combined with the cache hit/miss recorded
-      # below, the archived artifact lets the cache optimisation be
-      # validated by measurement (cold run = cache miss = "before";
-      # warm run = cache hit = "after"), not presumed.
+      # step via $GITHUB_ENV. Combined with the matched restore key recorded
+      # below, the archived artifact lets the cache behaviour be validated
+      # by measurement (which fallback level seeded the run, and what the
+      # build/test wall-times were under it), not presumed.
       - name: zig build
         shell: bash
         run: |
@@ -162,6 +182,21 @@ jobs:
           s=$SECONDS
           zig build -Doptimize=${{ matrix.mode }}
           echo "BUILD_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
+
+      # CI cache refresh chore — mid-job save right after `zig build`: a run
+      # killed during `zig build test` (timeout, crash, runner loss) still
+      # leaves a fresh build cache, bounding the damage of any test-step
+      # death to one build's worth of recompilation. The monolithic action's
+      # post-job save was skipped on timeout cancellation, which is what
+      # locked the fossil death loop. The `-build` suffix keeps this entry
+      # distinct from the full post-test save at the end of the job; the
+      # zon-level prefix fallback of the restore step matches both, newest
+      # first.
+      - name: Save Zig cache (post-build)
+        uses: actions/cache/save@v5
+        with:
+          path: .zig-cache
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}-build
 
       - name: zig build test
         shell: bash
@@ -188,9 +223,13 @@ jobs:
         if: matrix.os == 'ubuntu-24.04' && matrix.mode == 'Debug'
         run: zig build verify-synth-100
 
-      # M0.9 / E1 — CI wall-time + cache hit/miss measurement, archived as
-      # an artifact (measurement deliverable, not a gate). `always()` so a
+      # M0.9 / E1 — CI wall-time + cache measurement, archived as an
+      # artifact (measurement deliverable, not a gate). `always()` so a
       # failing build/test leg still publishes whatever it measured.
+      # With the restore/save split, `cache-hit` is true only on an exact
+      # primary-key hit — per-sha, effectively never — so the diagnostic
+      # signal is `cache_matched_key`: which fallback level actually seeded
+      # the run ('none' = fully cold).
       - name: Write CI timing report
         if: always()
         shell: bash
@@ -202,8 +241,9 @@ jobs:
             echo "os=${{ matrix.os }}"
             echo "mode=${{ matrix.mode }}"
             echo "zig_version=${{ env.ZIG_VERSION }}"
-            echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}"
+            echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}"
             echo "cache_hit=${{ steps.zig-cache.outputs.cache-hit || 'false' }}"
+            echo "cache_matched_key=${{ steps.zig-cache.outputs.cache-matched-key || 'none' }}"
             echo "build_seconds=${BUILD_SECONDS:-NA}"
             echo "test_seconds=${TEST_SECONDS:-NA}"
             echo "run_id=${{ github.run_id }}"
@@ -219,6 +259,17 @@ jobs:
           name: ci-timing-${{ matrix.os }}-${{ matrix.mode }}
           path: ci-timing-${{ matrix.os }}-${{ matrix.mode }}.txt
           retention-days: 30
+
+      # CI cache refresh chore — full post-test cache save. `if: always()`
+      # so a red test leg still saves whatever it compiled. This entry is
+      # newer than the post-build save of the same run, so the zon-level
+      # prefix fallback serves it first to the next run.
+      - name: Save Zig cache (final)
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: .zig-cache
+          key: zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
 
   runtime-smoke-test:
     # M0.4 § Scope Post-Review — first application of the runtime
