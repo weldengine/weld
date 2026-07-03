@@ -1,6 +1,6 @@
 # Chore — CI cache refresh + ReleaseSafe budget (windows-2025 unblock)
 
-> **Status:** PLANNED
+> **Status:** ACTIVE
 > **Phase:** 1
 > **Branch:** `phase-1/chore/ci-cache-refresh`
 > **Tag:** none — maintenance chore, merged to `main` without a tag (cf. `engine-development-workflow.md`: maintenance chores are not tagged). Sits **before the M1.0.12 merge** (PR #40 is blocked by the broken cell).
