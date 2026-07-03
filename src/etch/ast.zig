@@ -1052,6 +1052,37 @@ pub const SpawnStmt = struct {
     body_len: u32,
 };
 
+/// Timer statement kind (M1.0.13 E2, `etch-grammar.md` §4.3 `timer_kind`).
+pub const TimerKind = enum {
+    /// `after(d) { }` — one-shot on the game clock (pausable, scaled).
+    after,
+    /// `every(d) { }` — repeating on the game clock (fixed period, no drift
+    /// correction Phase 1).
+    every,
+    /// `after_unscaled(d) { }` — one-shot on the unscaled clock (fires under
+    /// pause, ignores `time_scale`).
+    after_unscaled,
+};
+
+/// `[ "let" IDENT "=" ] timer_kind "(" expression ")" block` statement
+/// (M1.0.13 E2, `etch-grammar.md` §4.3 `timer_stmt`) — schedules a callback
+/// on the runtime timer registry (§9.10: a timer is NOT a task; its body is a
+/// synchronous context). `arg` is the Duration expression, evaluated once at
+/// scheduling time (a full expression — not restricted to a literal, unlike
+/// `await wait`). `binding` is the `let` name, typed `TimerHandle` (`0` when
+/// absent — the handle is discarded); as with `SpawnStmt`, the binding is
+/// PART of the statement, not a `let_stmt` whose initializer is a timer. The
+/// body is a statement run in `arena.extra`. `quantize_stmt` stays a
+/// payloadless placeholder — no struct, no arena list (its musical beat/bar
+/// clock is assigned to a later Sequencer-adjacent milestone).
+pub const TimerStmt = struct {
+    kind: TimerKind,
+    arg: NodeId,
+    body_start: u32,
+    body_len: u32,
+    binding: StringId,
+};
+
 /// `|a, b| expr` closure (M0.8 closures, `etch-grammar.md` §524). Params are a
 /// flat `(start, len)` range of `arena.closure_params`; the body is an
 /// expression node. E1 closures take an expression body — a `{ block }` body
@@ -2563,6 +2594,9 @@ pub const AstArena = struct {
     sync_stmts: std.ArrayListUnmanaged(SyncStmt) = .empty,
     branch_stmts: std.ArrayListUnmanaged(BranchStmt) = .empty,
     spawn_stmts: std.ArrayListUnmanaged(SpawnStmt) = .empty,
+    /// Timer statement payloads (M1.0.13 E2, §4.3 `timer_stmt`), indexed by
+    /// the stmt node's `data`. `quantize_stmt` has NO slab (placeholder).
+    timer_stmts: std.ArrayListUnmanaged(TimerStmt) = .empty,
     named_types: std.ArrayListUnmanaged(NamedTypeNode) = .empty,
     array_types: std.ArrayListUnmanaged(ArrayTypeNode) = .empty,
     map_types: std.ArrayListUnmanaged(MapTypeNode) = .empty,
@@ -2781,6 +2815,7 @@ pub const AstArena = struct {
         self.sync_stmts.deinit(gpa);
         self.branch_stmts.deinit(gpa);
         self.spawn_stmts.deinit(gpa);
+        self.timer_stmts.deinit(gpa);
         self.named_types.deinit(gpa);
         self.array_types.deinit(gpa);
         self.map_types.deinit(gpa);
@@ -3524,6 +3559,12 @@ pub const AstArena = struct {
         return try self.addStmt(gpa, .spawn_stmt, idx, span);
     }
 
+    pub fn addTimerStmt(self: *AstArena, gpa: std.mem.Allocator, ts: TimerStmt, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.timer_stmts.items.len);
+        try self.timer_stmts.append(gpa, ts);
+        return try self.addStmt(gpa, .timer_stmt, idx, span);
+    }
+
     pub fn addLetStmt(self: *AstArena, gpa: std.mem.Allocator, let: LetStmt, span: SourceSpan) !NodeId {
         const idx: u32 = @intCast(self.let_stmts.items.len);
         try self.let_stmts.append(gpa, let);
@@ -3748,6 +3789,42 @@ test "AstArena spans align with passed-in byte offsets" {
     const id_b = try arena.addExpr(gpa, .int_lit, 2, .{ .byte_start = 13, .byte_end = 15 });
     try std.testing.expectEqual(@as(u32, 10), arena.exprSpan(id_a).byte_start);
     try std.testing.expectEqual(@as(u32, 13), arena.exprSpan(id_b).byte_start);
+}
+
+test "AstArena timer statement round-trips through the timer_stmts slab (M1.0.13 E2)" {
+    const gpa = std.testing.allocator;
+    var arena = try AstArena.init(gpa);
+    defer arena.deinit(gpa);
+
+    const arg = try arena.addExpr(gpa, .duration_lit, 0, .{ .byte_start = 6, .byte_end = 10 });
+    const binding = try arena.strings.intern(gpa, "t");
+    const bound = try arena.addTimerStmt(gpa, .{
+        .kind = .every,
+        .arg = arg,
+        .body_start = 7,
+        .body_len = 2,
+        .binding = binding,
+    }, .{ .byte_start = 0, .byte_end = 20 });
+    const unbound = try arena.addTimerStmt(gpa, .{
+        .kind = .after_unscaled,
+        .arg = arg,
+        .body_start = 9,
+        .body_len = 0,
+        .binding = 0,
+    }, .{ .byte_start = 21, .byte_end = 40 });
+
+    try std.testing.expectEqual(StmtKind.timer_stmt, arena.stmtKind(bound));
+    try std.testing.expectEqual(StmtKind.timer_stmt, arena.stmtKind(unbound));
+    const first = arena.timer_stmts.items[arena.stmtData(bound)];
+    try std.testing.expectEqual(TimerKind.every, first.kind);
+    try std.testing.expectEqual(arg, first.arg);
+    try std.testing.expectEqual(@as(u32, 7), first.body_start);
+    try std.testing.expectEqual(@as(u32, 2), first.body_len);
+    try std.testing.expectEqual(binding, first.binding);
+    const second = arena.timer_stmts.items[arena.stmtData(unbound)];
+    try std.testing.expectEqual(TimerKind.after_unscaled, second.kind);
+    // `binding == 0` is the discarded-handle sentinel (the SpawnStmt precedent).
+    try std.testing.expectEqual(@as(StringId, 0), second.binding);
 }
 
 test "AnnotationKind.fromName recognises builtin names" {
