@@ -4459,9 +4459,9 @@ pub const TypeChecker = struct {
             },
             .race_stmt, .sync_stmt => {
                 // `race { race_branch* }` / `sync { sync_branch* }` (M1.0.12
-                // E3, §4.2). Async-context requirement first (E0901): "Tous
-                // les constructs async ne sont disponibles que dans un context
-                // async". Each conditional guard (`if cond =>`) types as bool
+                // E3, §4.2). Async-context requirement first (E0901 — §4.2:
+                // the async constructs are only available in an async
+                // context). Each conditional guard (`if cond =>`) types as bool
                 // in the PARENT scope (it is evaluated there, synchronously,
                 // at construct entry — §9.5); each branch statement is then
                 // checked inside its branch context (E0906/E0907; E0905 keeps
@@ -9917,8 +9917,8 @@ test "E0901 fires on an async call / await in a non-async context, not on a lega
 
 test "E0901 fires on the four concurrency constructs outside an async context (M1.0.12 E3)" {
     const gpa = std.testing.allocator;
-    // §4.2: "Tous les constructs async ne sont disponibles que dans un context
-    // async" — each of the four forms in a SYNC rule is E0901.
+    // §4.2 (the async constructs are only available in an async context) —
+    // each of the four forms in a SYNC rule is E0901.
     var bad = try parseAndCheck(gpa,
         \\resource Out { n: int = 0 }
         \\rule r()

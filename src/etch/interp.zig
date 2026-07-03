@@ -257,8 +257,9 @@ const RuleDesc = struct {
     /// `initial_tick` (0).
     last_run_tick: Tick,
     /// `async rule` (M0.8 E3 sub-slice B): the rule suspends at `await` and
-    /// resumes a later tick via its `AsyncSlot`, instead of running to
-    /// completion every tick. Dispatched by `runAsyncRule` in `stepOnce`.
+    /// resumes a later tick via its task in the `async_tasks` pool (the M0.8
+    /// `AsyncSlot` lineage), instead of running to completion every tick.
+    /// Dispatched by `runAsyncRule` in `stepOnce`.
     is_async: bool,
     /// Entities this rule matched in the most recent tick it ran (M1.0.0
     /// observable). Reset at the top of `runRule`'s entity-bound path,
@@ -10129,6 +10130,74 @@ test "return await regression: the return is never dropped at resume (M1.0.12 E5
         try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
         try std.testing.expectEqual(@as(i64, 101), readResourceInt(&world, out_id));
     }
+}
+
+test "observable: sync parallel-preload over three awaits, documented emit sequence (M1.0.12 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The Sec. 9.6 parallel-preload pattern (brief Observable behavior): three
+    // branches "load" in parallel — all start at tick 1, each emits its Ready
+    // mark at its own wake — and the parent continues only after ALL of them
+    // (never between). Documented sequence, digits folded into Out.n:
+    //   tick 1: sync entry — parent emits 9 (start), branches suspend    -> 9
+    //   tick 3 (0.04s = 2 ticks):        branch 1 emits 1                -> 91
+    //   tick 6 (0.08s = round(4.8) = 5): branch 2 emits 2                -> 912
+    //   tick 7 (0.1s = 6 ticks):         branch 3 emits 3                -> 9123
+    //   tick 8: the parent joins and emits 4 (all-loaded)                -> 91234
+    const source =
+        \\event Mark { k: int = 0 }
+        \\resource Out { n: int = 0 }
+        \\async rule preload()
+        \\  when resource Out
+        \\{
+        \\  emit Mark { k: 9 }
+        \\  sync {
+        \\    { await wait(0.04s)
+        \\      emit Mark { k: 1 } }
+        \\    { await wait(0.08s)
+        \\      emit Mark { k: 2 } }
+        \\    { await wait(0.1s)
+        \\      emit Mark { k: 3 } }
+        \\  }
+        \\  emit Mark { k: 4 }
+        \\}
+        \\@on_event(Mark)
+        \\rule collect()
+        \\  when resource Out
+        \\{
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n * 10 + event.k
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 9), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 2); // tick 3
+    try std.testing.expectEqual(@as(i64, 91), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 3); // tick 6
+    try std.testing.expectEqual(@as(i64, 912), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 1); // tick 7
+    try std.testing.expectEqual(@as(i64, 9123), readResourceInt(&world, out_id));
+    // tick 8: the join — the "all loaded" mark lands strictly after every
+    // branch's own mark.
+    const r = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 91234), readResourceInt(&world, out_id));
 }
 
 test "runProgram Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)" {

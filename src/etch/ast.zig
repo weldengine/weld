@@ -262,8 +262,9 @@ pub const ExprKind = enum {
     /// `structural_spawn`, M1.0.10). A statement-position expression: the v0.6
     /// no-body-handle decision (§4.5) means the type-checker rejects binding or
     /// using its result (M1.0.10 E2). Data indexes `spawn_structs`. Distinct
-    /// from the async `spawn { }` task form (§4.2 `spawn_stmt`, M1.0.11) which
-    /// is fail-loud at parse — it is NOT this node.
+    /// from the async `spawn { }` task STATEMENT (§4.2 `spawn_stmt`,
+    /// `StmtKind.spawn_stmt` since M1.0.12) — the keyword is shared, the token
+    /// after `spawn` disambiguates; this node is only ever the `(` form.
     spawn_struct,
 };
 
