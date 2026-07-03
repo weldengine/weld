@@ -1,12 +1,12 @@
 # Chore — CI cache refresh + ReleaseSafe budget (windows-2025 unblock)
 
-> **Status:** ACTIVE
+> **Status:** CLOSED
 > **Phase:** 1
 > **Branch:** `phase-1/chore/ci-cache-refresh`
 > **Tag:** none — maintenance chore, merged to `main` without a tag (cf. `engine-development-workflow.md`: maintenance chores are not tagged). Sits **before the M1.0.12 merge** (PR #40 is blocked by the broken cell).
 > **Dependencies:** current `main` (`v0.10.11-async-core`). Blocks the M1.0.12 merge sequence.
 > **Opened:** 2026-07-03
-> **Closed:** —
+> **Closed:** 2026-07-03 — PR #41, squash-merged to `main` without a tag (maintenance chore)
 
 ---
 
@@ -107,8 +107,8 @@ Single gate (E1), one file: `.github/workflows/ci.yml`.
 
 ## Closing notes
 
-- **What worked:**
-- **What deviated from the original spec:**
-- **What to flag explicitly in review:**
-- **Final measurements:**
-- **Residual risks / tech debt left intentionally:**
+- **What worked:** The restore/save split behaved exactly as designed on its first live run: the per-sha primary key never exact-hit on a fresh commit, the fossil seeded the near-cold run through the level-3 os/mode/zig fallback, and both new saves wrote fresh entries — the fossil death loop is broken by construction AND by observation. The timeout-immunity path was demonstrated under real conditions without having to simulate a timeout: the known windows-ReleaseSafe hang flake made one test leg red, the `if: always()` final save salvaged its cache anyway, and the rerun exact-hit that entry (`cache_hit=true`, `build_seconds=2`, `test_seconds=20`). All three ladder levels were observed live across three consecutive runs.
+- **What deviated from the original spec:** (1) Commit type — the prompt/brief conventions say `ci(...)`, but the §4.3 whitelist (8 types, hook-enforced, verified in `tools/weld_lint/rules/conventional_commit.zig`) rejects `ci`; all commits use `chore(ci): ...`, the spec's own canonical example (see Recorded deviations). (2) The Out-of-scope inventory names "two other cache sites (bench job, docs-build job)"; the verified inventory is THREE sites (`runtime-smoke-test` + `vertical-slice-smoke` in ci.yml, `bench-ecs-smoke` in bench.yml) and no `docs-build` job exists — the intent (convert ONLY `build-and-test`) was unambiguous and honored.
+- **What to flag explicitly in review:** (1) The two ci.yml smoke jobs keep their sha-less exact key and will keep exact-hitting the FOSSIL entry until LRU eviction; they complete normally either way and self-correct after eviction (their prefix fallback then serves the newest per-sha entry) — but their in-file comment ("the matching key warms this ReleaseSafe build even on the first push") is now slightly stale; left untouched for scope discipline. (2) On `pull_request` events `github.sha` is the merge-commit sha (branch-head sha on `main` push runs) — per-commit unique in both cases, mechanism intact. (3) Observed variance on the final head run: the ubuntu ReleaseSafe cell restored the correct newest lineage (`cache_matched_key` = the previous run's per-sha entry) yet re-paid `build_seconds=291` / `test_seconds=1344`, where the previous run on the same lineage completed in 1 min 13 s total — runner/Zig-side variance, does not gate the mechanism; worth watching in future timing artifacts.
+- **Final measurements:** `windows-2025, ReleaseSafe` near-cold (fossil, level-3 fallback): job 35 min 27 s, `build_seconds=419`, `test_seconds=1652` — first non-NA since M1.0.11 — `cache_matched_key=zig-windows-2025-ReleaseSafe-0.16.0-<zonhash>`. Same cell, exact per-sha hit (flake rerun): job 1 min 47 s, `cache_hit=true`, `build_seconds=2`, `test_seconds=20`. Same cell, warm zon-level fallback (head run): job 3 min 44 s. `ubuntu-24.04, ReleaseSafe` warm zon-level fallback: job 1 min 13 s (vs 28 min 47 s near-cold). Budgets: ReleaseSafe 55 min, Debug 20 min.
+- **Residual risks / tech debt left intentionally:** (1) The three untouched cache sites keep the write-once monolithic pattern — they complete normally and self-correct on fossil eviction; conversion deliberately out of scope. (2) The giant-file ReleaseSafe Sema compile cost keeps growing; the per-sha refresh masks it on warm runs, but a genuinely cold cell (zon bump, eviction) pays the full price — the compile-time reduction work remains a future concern per the brief's Out-of-scope. (3) Per-sha keys multiply cache entries; retirement is delegated to GitHub's 10 GB per-repo LRU per the brief (no manual cleanup machinery).
