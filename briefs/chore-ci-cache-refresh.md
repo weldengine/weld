@@ -86,7 +86,7 @@ Single gate (E1), one file: `.github/workflows/ci.yml`.
 
 ## Specs read
 
-- [ ]
+- [x] `engine-development-workflow.md` — read in full: §4.3 (commit convention, type whitelist), §4.6 (squash-and-merge), §6.1 (maintenance-chore tagging exception), §7.3 (action whitelist) — 2026-07-03 12:07 CEST
 
 ## Execution log
 
