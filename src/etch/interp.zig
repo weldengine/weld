@@ -2157,10 +2157,46 @@ pub const Interpreter = struct {
         self.thrown = false;
         self.returning = false;
         self.pending_error = null;
+        // A handle-await resume (M1.0.12 E5, §9.8 amended) first checks its
+        // target: canceled WHILE awaited → fail-loud runtime error (no silent
+        // unit); done → its parked result (unit in Phase 1) is the value
+        // delivered at the await site below.
+        var resume_value: Value = .{ .unit = {} };
+        switch (task.wake) {
+            .task_done => |ti| {
+                const target = self.async_tasks.items[ti];
+                if (target.state == .canceled) {
+                    task.pending_bind = .discard;
+                    self.finishTaskFailed(task, report);
+                    return;
+                }
+                resume_value = target.result;
+            },
+            else => {},
+        }
         // A wake-condition `await` used in a value position (`let x = await wait(…)`)
-        // resolves to `unit`; deliver it into the resuming scope now (M1.0.11 E2).
-        if (@as(std.meta.Tag(RetTarget), task.pending_bind) != .discard) {
-            self.deliverAwaitValue(task, task.pending_bind, .{ .unit = {} }) catch |err| switch (err) {
+        // resolves to `unit` — or, for a handle-await, to the parked result;
+        // deliver it into the resuming scope now (M1.0.11 E2). A `return await
+        // <wake-target>` re-raises the RETURN at resume instead (M1.0.12 E5
+        // fix-as-you-go: `deliverAwaitValue` no-ops on `.return_`, so M1.0.11
+        // silently dropped the return and fell through past the statement).
+        if (@as(std.meta.Tag(RetTarget), task.pending_bind) == .return_) {
+            task.pending_bind = .discard;
+            self.returning = true;
+            self.return_value = resume_value;
+            const cont = self.unwindControl(task) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.RuntimeFailure => {
+                    self.finishTaskFailed(task, report);
+                    return;
+                },
+            };
+            if (!cont) {
+                self.finishTaskDone(task, report);
+                return;
+            }
+        } else if (@as(std.meta.Tag(RetTarget), task.pending_bind) != .discard) {
+            self.deliverAwaitValue(task, task.pending_bind, resume_value) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.RuntimeFailure => {
                     task.pending_bind = .discard;
@@ -2374,7 +2410,43 @@ pub const Interpreter = struct {
         if (self.stmtHeadAwait(stmt)) |site| {
             const aw = self.ast.awaitExpr(site.await_id);
             switch (aw.target_kind) {
-                .future => return try self.beginAsyncCall(world, task, scope, cursor, aw.arg_expr, site.ret),
+                .future => {
+                    // A direct call inlines the callee's body (M1.0.11 E2);
+                    // any other expression is the HANDLE-AWAIT form (M1.0.12
+                    // E5, §9.8): evaluate it to a `TaskHandle` and join.
+                    const ak = self.ast.exprKind(aw.arg_expr);
+                    if (ak == .fn_call or ak == .method_call) {
+                        return try self.beginAsyncCall(world, task, scope, cursor, aw.arg_expr, site.ret);
+                    }
+                    const hv = try self.evalExpr(world, scope, aw.arg_expr);
+                    if (hv != .task_handle) return error.RuntimeFailure;
+                    const target = self.async_tasks.items[hv.task_handle];
+                    switch (target.state) {
+                        // Already done: resume IMMEDIATELY (no suspension),
+                        // delivering the parked result (unit in Phase 1). A
+                        // `return await h` raises the return signal instead
+                        // (`deliverAwaitValue` no-ops on `.return_`).
+                        .done => {
+                            if (@as(std.meta.Tag(RetTarget), site.ret) == .return_) {
+                                self.returning = true;
+                                self.return_value = target.result;
+                                return .signaled;
+                            }
+                            try self.deliverAwaitValue(task, site.ret, target.result);
+                            cursor.* += 1;
+                            return .advanced;
+                        },
+                        // Awaiting a canceled task is a fail-loud runtime
+                        // error — no silent unit (§9.8 amended).
+                        .canceled => return error.RuntimeFailure,
+                        .suspended => {
+                            cursor.* += 1;
+                            task.pending_bind = site.ret;
+                            task.wake = .{ .task_done = hv.task_handle };
+                            return .suspended;
+                        },
+                    }
+                },
                 .wait, .global_event => {
                     task.wake = try self.evalAwaitTarget(site.await_id);
                     cursor.* += 1;
@@ -2387,10 +2459,39 @@ pub const Interpreter = struct {
         const sk = self.ast.stmtKind(stmt);
         // (1b) `race` / `sync` statement (M1.0.12 E4) → admit branches (guards
         // in the live parent scope), create one child task per admitted branch,
-        // and suspend the parent on the child set. `branch`/`spawn` (E5) fall
-        // through to `execStmt`, whose `else` arm fails loud.
+        // and suspend the parent on the child set.
         if (sk == .race_stmt or sk == .sync_stmt) {
             return try self.beginRaceSync(world, task, scope, cursor, stmt, sk == .race_stmt);
+        }
+        // (1c) `branch { }` / `[let h =] spawn { }` (M1.0.12 E5, §9.7-§9.8) →
+        // create a DETACHED child task (snapshot scope, same origin_rule,
+        // no parent link) and continue immediately — the parent never waits
+        // on it. `spawn` additionally yields a `TaskHandle` (the child's pool
+        // index — monotonic pool, no generation), bound in the PARENT scope
+        // AFTER the snapshot (the handle does not exist inside the body).
+        if (sk == .branch_stmt or sk == .spawn_stmt) {
+            const data = self.ast.stmtData(stmt);
+            const body: ast_mod.BranchStmt = if (sk == .branch_stmt)
+                self.ast.branch_stmts.items[data]
+            else blk: {
+                const ss = self.ast.spawn_stmts.items[data];
+                break :blk .{ .body_start = ss.body_start, .body_len = ss.body_len };
+            };
+            const ti = try self.newTask(task.origin_rule, null);
+            const child = self.async_tasks.items[ti];
+            try cloneLocalsInto(self.gpa, scope, &child.locals);
+            try child.frames.append(self.gpa, .{ .run = .{
+                .block_start = body.body_start,
+                .block_len = body.body_len,
+            } });
+            if (sk == .spawn_stmt) {
+                const ss = self.ast.spawn_stmts.items[data];
+                if (ss.binding != 0) {
+                    try scope.put(self.gpa, ss.binding, .{ .task_handle = ti }, false);
+                }
+            }
+            cursor.* += 1;
+            return .advanced;
         }
         // (2a) `while` statement → push a while frame (it re-checks its own cond).
         if (sk == .while_stmt) {
@@ -3790,6 +3891,19 @@ pub const Interpreter = struct {
     /// resolver's `dispatchMethodOnType` split.
     fn dispatchMethodOnValue(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall, recv: Value) StmtError!Value {
         switch (recv) {
+            .task_handle => |ti| {
+                // M1.0.12 E5 — the TaskHandle's single method (§9.8):
+                // `h.cancel()` is IDEMPOTENT — cancels a suspended task, a
+                // no-op on `.done`/`.canceled` (`cancelTask` gates on state).
+                // Non-transitive: tasks the target launched keep running.
+                const mname = self.ast.strings.slice(mc.method_name);
+                if (std.mem.eql(u8, mname, "cancel")) {
+                    if (mc.args_len != 0) return error.RuntimeFailure;
+                    self.cancelTask(ti);
+                    return Value{ .unit = {} };
+                }
+                return error.RuntimeFailure;
+            },
             .struct_ref => |handle| {
                 const type_name = self.structs.list.items[handle].type_name;
                 const key = methodKey(type_name, mc.method_name);
@@ -9472,6 +9586,385 @@ test "branch scope is a snapshot copy: writes are invisible to the parent (M1.0.
     const r = try interp.runFor(&world, 4);
     try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+}
+
+test "branch is detached: parent continues same tick, task outlives it (M1.0.12 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Sec. 9.7: fire-and-forget. The parent continues immediately (its write
+    // lands tick 1) and COMPLETES; the detached child keeps running at the
+    // origin rule's position and lands its write at its own wake, ticks after
+    // the parent is gone.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  branch {
+        \\    await wait(0.1s)
+        \\    let b = get_mut(Out)
+        \\    b.n = b.n + 50
+        \\  }
+        \\  let o = get_mut(Out)
+        \\  o.n = 3
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: child created (suspends, wake 7); parent continues -> n=3, done.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out_id));
+    // ticks 2-6: the detached child waits (its parent is long done).
+    _ = try interp.runFor(&world, 5);
+    try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out_id));
+    // tick 7: the detached child resumes at the origin rule's position -> +50.
+    const r = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 53), readResourceInt(&world, out_id));
+}
+
+test "spawn handle: cancel() prevents the task from ever running (M1.0.12 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `h.cancel()` on a just-spawned (suspended) task parks it canceled before
+    // its first drive — its body never runs. Idempotence is the E1 primitive.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let h = spawn {
+        \\    await wait(0.04s)
+        \\    let s = get_mut(Out)
+        \\    s.n = 111
+        \\  }
+        \\  h.cancel()
+        \\  let o = get_mut(Out)
+        \\  o.n = 5
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    const r = try interp.runFor(&world, 6);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 5), readResourceInt(&world, out_id));
+}
+
+test "await h joins a running task and resumes after its completion (M1.0.12 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let h = spawn {
+        \\    await wait(0.04s)
+        \\    let s = get_mut(Out)
+        \\    s.n = 7
+        \\  }
+        \\  await h
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n + 100
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 3: the task resumes and completes (n=7); the awaiting parent
+    // (lower index, already visited) joins the NEXT tick.
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 7), readResourceInt(&world, out_id));
+    // tick 4: parent resumes after the join -> n=107.
+    const r = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 107), readResourceInt(&world, out_id));
+}
+
+test "await on an already-done handle resumes immediately, same drive (M1.0.12 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The monotonic-pool payoff: the husk keeps its state, so `await h` on a
+    // task done ticks ago delivers the parked (unit) result WITHOUT
+    // suspending — the +10 lands in the same drive as the resume from `wait`.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let h = spawn {
+        \\    let s = get_mut(Out)
+        \\    s.n = 1
+        \\  }
+        \\  await wait(0.04s)
+        \\  await h
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n + 10
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: spawn -> child completes in-pass (n=1); parent waits (wake 3).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // tick 3: parent resumes from wait; `await h` (done) does NOT suspend ->
+    // +10 lands the same tick.
+    const r = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 11), readResourceInt(&world, out_id));
+}
+
+test "await on a canceled handle fails loud, no silent unit (M1.0.12 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Sec. 9.8 amended: awaiting a task canceled BEFORE the await is a
+    // runtime error — the statements after the await never run.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let h = spawn {
+        \\    await wait(0.1s)
+        \\  }
+        \\  h.cancel()
+        \\  await h
+        \\  let o = get_mut(Out)
+        \\  o.n = 9
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    const r = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(u64, 1), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+}
+
+test "a task canceled WHILE awaited fails the awaiter loud at resume (M1.0.12 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The awaiter is suspended on task_done; the target is then canceled from
+    // outside (harness-driven — the Phase-1 surface has no cross-task cancel
+    // path other than a handle, but the runtime boundary must hold): the
+    // awaiter fails loud at its resume, never reaching the next statement.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let h = spawn {
+        \\    await wait(0.1s)
+        \\  }
+        \\  await h
+        \\  let o = get_mut(Out)
+        \\  o.n = 9
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: parent (pool 0) suspends on task_done(1); the spawned task
+    // (pool 1) suspends on its wait.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(usize, 2), interp.async_tasks.items.len);
+    // Cancel the awaited task out from under the awaiter.
+    interp.cancelTask(1);
+    // tick 2: the awaiter's wake fires (target no longer suspended) -> its
+    // resume sees `.canceled` -> fail-loud; n never becomes 9.
+    const r = try interp.runFor(&world, 2);
+    try std.testing.expectEqual(@as(u64, 1), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+}
+
+test "canceling the parent does not cancel its detached children (M1.0.12 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // The non-transitive boundary (Phase 1, etch-bytecode.md par. 9.5): the
+    // parent is canceled while its spawned task still waits — the detached
+    // task is an independent pool entry and completes on schedule; the
+    // parent's own tail statement never runs.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let h = spawn {
+        \\    await wait(0.08s)
+        \\    let s = get_mut(Out)
+        \\    s.n = s.n + 7
+        \\  }
+        \\  await wait(0.2s)
+        \\  let o = get_mut(Out)
+        \\  o.n = 999
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: parent (pool 0) suspends on its long wait; spawned task (pool 1)
+    // suspends on its short one. Cancel the PARENT.
+    _ = try interp.runFor(&world, 1);
+    interp.cancelTask(interp.rule_tasks[0].?);
+    // tick 6: the detached task still completes -> n = 7.
+    _ = try interp.runFor(&world, 5);
+    try std.testing.expectEqual(@as(i64, 7), readResourceInt(&world, out_id));
+    // Through tick 14 (past the parent's original wake 13): the canceled
+    // parent never resumes -> n stays 7, no errors.
+    const r = try interp.runFor(&world, 8);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 7), readResourceInt(&world, out_id));
+}
+
+test "construct matrix: race nested in a spawn body, joined via handle (M1.0.12 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // spawn { race { fast, slow } } + await h: the spawned task races its own
+    // grandchildren (fast wins at tick 3, slow canceled at the spawn task's
+    // resume, tick 4), completes, and the rule-root awaiter joins at tick 5.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let h = spawn {
+        \\    race {
+        \\      { await wait(0.04s)
+        \\        let a = get_mut(Out)
+        \\        a.n = a.n + 1 }
+        \\      { await wait(0.1s)
+        \\        let b = get_mut(Out)
+        \\        b.n = b.n + 500 }
+        \\    }
+        \\  }
+        \\  await h
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n + 20
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 3: the fast grandchild lands +1.
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // tick 4: the spawn task resolves its race (slow canceled) and completes;
+    // tick 5: the rule root joins -> +20.
+    _ = try interp.runFor(&world, 2);
+    try std.testing.expectEqual(@as(i64, 21), readResourceInt(&world, out_id));
+    // Past the slow branch's original wake: canceled, +500 never lands.
+    const r = try interp.runFor(&world, 5);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 21), readResourceInt(&world, out_id));
 }
 
 test "runProgram Optional ops: ??, !, ?., patterns, pop, m[k] (M0.8 E3-C tranche 4)" {

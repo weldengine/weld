@@ -108,6 +108,12 @@ pub const Value = union(enum) {
     /// and no interpreter store; `ptr == 0` ⇔ the empty string. Additive — does
     /// not disturb `string_id` (AST pool) / `string_run` (rule-arena) semantics.
     string_persistent: StrView,
+    /// A `TaskHandle` (M1.0.12 E5, `etch-grammar.md` §2.2): the pool index of
+    /// a spawned task in `Interpreter.async_tasks`. Safe as a bare index —
+    /// the pool is MONOTONIC (no slot reuse; a finished task parks as a husk),
+    /// so no generation is needed in Phase 1. Copyable/storable as a value;
+    /// its operations are `h.cancel()` (idempotent) and `await h` (§9.8).
+    task_handle: u32,
     unit,
 
     pub fn fromInt(x: i64) Value {
@@ -158,6 +164,9 @@ pub const Value = union(enum) {
                 const bb: [*]const u8 = @ptrFromInt(b.ptr);
                 break :blk std.mem.eql(u8, ab[0..a.len], bb[0..b.len]);
             },
+            // Handle equality is not an Etch v0.6 operation (no `==` on
+            // TaskHandle); identity comparison is reserved for a later spec.
+            .task_handle => false,
             .unit => true,
         };
     }
