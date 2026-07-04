@@ -465,20 +465,44 @@ const EventVal = struct {
 /// `Lifetime.tick` drain cadence (`src/core/events/lifetime.zig`).
 const EventStore = struct {
     list: std.ArrayListUnmanaged(EventVal) = .empty,
+    /// Store-owned deep copies of runtime-produced (`.string_run`) event field
+    /// bytes (M1.0.14 E4). A `.string_run` lives in the emitter's per-body
+    /// `run_strings` and is freed at the body boundary (its handle may even be
+    /// reused), so it cannot back an event that outlives the emitter's body
+    /// (an `@on_event` observer, or an awaiter's cross-tick filter poll). Such a
+    /// field value is deep-copied here at emit and re-tagged `.string_persistent`
+    /// over the copy; the copies are freed together with the event queue at the
+    /// per-tick `clear`.
+    owned_strings: std.ArrayListUnmanaged([]u8) = .empty,
 
     fn deinit(self: *EventStore, gpa: std.mem.Allocator) void {
         for (self.list.items) |*e| e.fields.deinit(gpa);
         self.list.deinit(gpa);
+        for (self.owned_strings.items) |s| gpa.free(s);
+        self.owned_strings.deinit(gpa);
     }
 
     fn clear(self: *EventStore, gpa: std.mem.Allocator) void {
         for (self.list.items) |*e| e.fields.deinit(gpa);
         self.list.clearRetainingCapacity();
+        for (self.owned_strings.items) |s| gpa.free(s);
+        self.owned_strings.clearRetainingCapacity();
     }
 
     /// Enqueue an event of `type_name`, taking ownership of `fields`.
     fn enqueue(self: *EventStore, gpa: std.mem.Allocator, type_name: StringId, fields: std.ArrayListUnmanaged(StructField)) !void {
         try self.list.append(gpa, .{ .type_name = type_name, .fields = fields });
+    }
+
+    /// Deep-copy `bytes` into store-owned memory and return a stable
+    /// `.string_persistent` view over the copy (freed at `clear`). Stabilizes a
+    /// runtime `.string_run` event field value that would otherwise dangle when
+    /// the emitter's body ends (M1.0.14 E4).
+    fn ownRuntimeString(self: *EventStore, gpa: std.mem.Allocator, bytes: []const u8) !Value {
+        const dup = try gpa.dupe(u8, bytes);
+        errdefer gpa.free(dup);
+        try self.owned_strings.append(gpa, dup);
+        return Value{ .string_persistent = .{ .ptr = @intFromPtr(dup.ptr), .len = @intCast(dup.len) } };
     }
 
     /// Number of queued events of `type_name` (test / inspection helper).
@@ -1090,10 +1114,17 @@ pub const Interpreter = struct {
     /// Append-only store of event payload-filter values captured by value at
     /// await suspension (M1.0.14 E4); a suspended `global_event`/`entity_event`
     /// wake owns a `{start,len}` window (`FilterRange`). Never compacted (husk
-    /// discipline, like `task_children`); freed wholesale in deinit. Filter
-    /// values are always literals (`.int_`/`.float_`/`.bool_`/`.string_id`/
-    /// `.enum_value`/`.entity_id`) — copy-stable across ticks.
+    /// discipline, like `task_children`); freed wholesale in deinit. POD filter
+    /// values (`.int_`/`.float_`/`.bool_`/`.string_id`/`.enum_value`/
+    /// `.entity_id`) are copy-stable across ticks; a COMPUTED string filter
+    /// (`prefix + "!"`) is a `.string_run` whose per-body bytes are freed at the
+    /// body boundary — it is deep-copied into `captured_filter_strings` at
+    /// capture and re-tagged `.string_persistent` over the copy.
     captured_filters: std.ArrayListUnmanaged(StructField) = .empty,
+    /// Buffer-owned deep copies of computed (`.string_run`) filter-value bytes
+    /// (M1.0.14 E4). Parallel to `captured_filters`, same husk lifetime: freed
+    /// wholesale in deinit (never per-tick — a suspended wake keeps its window).
+    captured_filter_strings: std.ArrayListUnmanaged([]u8) = .empty,
     /// Reusable cursor buffer for the multi-term (`or`) archetype-union merge
     /// (M1.0.0). Resized to the term count of the rule being iterated; capacity
     /// is retained across rules/ticks so the union path allocates at most once.
@@ -1187,6 +1218,8 @@ pub const Interpreter = struct {
         self.gpa.free(self.entity_rule_tasks);
         self.entity_spawn_buf.deinit(self.gpa);
         self.captured_filters.deinit(self.gpa);
+        for (self.captured_filter_strings.items) |s| self.gpa.free(s);
+        self.captured_filter_strings.deinit(self.gpa);
         self.descriptors.deinit(self.gpa);
         self.merge_cursors.deinit(self.gpa);
         self.gpa.free(self.observer_ctxs);
@@ -3546,7 +3579,17 @@ pub const Interpreter = struct {
         var i: u32 = 0;
         while (i < filter_len) : (i += 1) {
             const flit = self.ast.struct_lit_fields.items[filter_start + i];
-            const v = try self.evalEventFieldValue(world, locals, decl, flit);
+            const v0 = try self.evalEventFieldValue(world, locals, decl, flit);
+            // Stabilize a COMPUTED string (`.string_run`): its per-body bytes are
+            // freed at the body boundary, but the captured filter is re-scanned
+            // at later-tick polls, so deep-copy into `captured_filter_strings`
+            // (M1.0.14 E4). Literal / persistent / POD values are copy-stable.
+            const v = if (v0 == .string_run) blk: {
+                const dup = try self.gpa.dupe(u8, self.run_strings.items[v0.string_run]);
+                errdefer self.gpa.free(dup);
+                try self.captured_filter_strings.append(self.gpa, dup);
+                break :blk Value{ .string_persistent = .{ .ptr = @intFromPtr(dup.ptr), .len = @intCast(dup.len) } };
+            } else v0;
             try self.captured_filters.append(self.gpa, .{ .name = flit.name, .value = v });
         }
         return .{ .start = start, .len = filter_len };
@@ -4137,7 +4180,15 @@ pub const Interpreter = struct {
                         try self.evalEventFieldValue(world, locals, edecl, flit)
                     else
                         try self.evalExpr(world, locals, flit.value);
-                    try fields.append(self.gpa, .{ .name = flit.name, .value = v });
+                    // Stabilize a runtime string (`.string_run`): its per-body
+                    // `run_strings` bytes are freed at the body boundary, but the
+                    // enqueued event outlives the body (observers / cross-tick
+                    // awaiters), so deep-copy into the store (M1.0.14 E4).
+                    const stable = if (v == .string_run)
+                        try self.events.ownRuntimeString(self.gpa, self.run_strings.items[v.string_run])
+                    else
+                        v;
+                    try fields.append(self.gpa, .{ .name = flit.name, .value = stable });
                 }
                 try self.events.enqueue(self.gpa, em.event_type, fields);
             },
@@ -10979,6 +11030,89 @@ test "global_event filter is captured once at suspension, not re-evaluated at po
     const out = world.registry.idOf("Out").?;
     _ = try interp.runFor(&world, 4);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // captured 7 matched despite want→9
+}
+
+test "emit stabilizes a computed string so an @on_event observer reads it safely (M1.0.14 E4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // `producer` emits a COMPUTED string ("go" + "!" → a body-scoped `.string_run`).
+    // Without the E4 deep-copy into the event store, the emitter's body reset would
+    // free those bytes before the `@on_event` observer (a later body, same tick)
+    // reads them → use-after-free. `event.text.len()` touches the copied bytes.
+    var pr = try parser_mod.parse(gpa,
+        \\event Msg { text: string }
+        \\resource Out { n: int = 0 }
+        \\rule producer()
+        \\  when resource Out
+        \\{
+        \\  emit Msg { text: "go" + "!" }
+        \\}
+        \\@on_event(Msg)
+        \\rule reader()
+        \\  when resource Out
+        \\{
+        \\  let o = get_mut(Out)
+        \\  o.n = event.text.len()
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out = world.registry.idOf("Out").?;
+    const rep = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), rep.runtime_errors); // no use-after-free
+    try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out)); // "go!".len(), from the stable copy
+}
+
+test "a computed string filter survives to a cross-tick global_event poll (M1.0.14 E4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // The filter value `get(Cfg).prefix + "!"` is a COMPUTED string (a body-scoped
+    // `.string_run`) captured at suspension and re-scanned at the NEXT tick's poll.
+    // Without the E4 deep-copy into `captured_filter_strings`, the awaiter's body
+    // reset would free those bytes before the poll → use-after-free / false match.
+    var pr = try parser_mod.parse(gpa,
+        \\event Msg { text: string }
+        \\resource Out { n: int = 0 }
+        \\resource Cfg { prefix: string = "go" }
+        \\rule producer()
+        \\  when resource Out
+        \\{
+        \\  emit Msg { text: "go!" }
+        \\}
+        \\async rule watch()
+        \\  when resource Out and resource Cfg
+        \\{
+        \\  await global_event(Msg { text: get(Cfg).prefix + "!" })
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out = world.registry.idOf("Out").?;
+    const rep = try interp.runFor(&world, 4);
+    try std.testing.expectEqual(@as(u64, 0), rep.runtime_errors); // no use-after-free at the cross-tick poll
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // captured "go!" matched cross-tick
 }
 
 test "task pool is pointer-stable and cancelTask parks a suspended task for good (M1.0.12 E1)" {
