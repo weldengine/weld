@@ -114,6 +114,18 @@ pub const Value = union(enum) {
     /// so no generation is needed in Phase 1. Copyable/storable as a value;
     /// its operations are `h.cancel()` (idempotent) and `await h` (§9.8).
     task_handle: u32,
+    /// A `TimerHandle` (M1.0.13 E6, `etch-grammar.md` §2.2): the registry
+    /// index of a scheduled timer in `Interpreter.timers`. Safe as a bare
+    /// index — the registry is MONOTONIC (no slot reuse; a fired one-shot or
+    /// a canceled timer parks as a husk). Copyable/storable as a value; its
+    /// ONLY operation is `t.cancel()` (idempotent, §9.10) — a timer is not a
+    /// task and is not awaitable.
+    timer_handle: u32,
+    /// A `Duration` in seconds (M1.0.13 E6): the runtime shape of a
+    /// `DURATION_LIT` (`1.5s`), carried so a timer argument can be a full
+    /// expression (`after(d)` with `d` a Duration local). Duration
+    /// arithmetic stays out of the M1.0.13 surface.
+    duration: f64,
     unit,
 
     pub fn fromInt(x: i64) Value {
@@ -165,8 +177,11 @@ pub const Value = union(enum) {
                 break :blk std.mem.eql(u8, ab[0..a.len], bb[0..b.len]);
             },
             // Handle equality is not an Etch v0.6 operation (no `==` on
-            // TaskHandle); identity comparison is reserved for a later spec.
+            // TaskHandle/TimerHandle); identity comparison is reserved for a
+            // later spec.
             .task_handle => false,
+            .timer_handle => false,
+            .duration => |a| a == other.duration,
             .unit => true,
         };
     }

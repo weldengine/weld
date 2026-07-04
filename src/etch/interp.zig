@@ -550,6 +550,41 @@ const TimeResources = struct {
     real_since_startup: u16,
 };
 
+/// One scheduled timer (M1.0.13 E6, `etch-reference-part1.md` §9.10/§9.12) —
+/// a heap record in the `Interpreter.timers` registry, DISTINCT from the task
+/// pool (a timer is not a task: no join, no frames, no wake condition). The
+/// registry has the same monotone pointer-stable + husk discipline as the
+/// M1.0.12 task pool: records are allocated individually (a callback that
+/// schedules a timer appends mid-scan without invalidating live pointers),
+/// slots are never reused (a fired one-shot or a canceled timer parks as a
+/// husk with its snapshot freed) — so a `TimerHandle` is a safe bare index,
+/// no generations.
+const TimerEntry = struct {
+    /// Which clock accumulator the deadline compares against: `after`/`every`
+    /// run on the game clock (scaled, frozen under pause); `after_unscaled`
+    /// on the unscaled clock (fires under pause).
+    clock: enum { game, unscaled },
+    /// Tick-unit deadline against the owning clock (the E5 encoding:
+    /// `clock + round(seconds * 60)` at scheduling).
+    deadline: f64,
+    /// Re-arm period in ticks for `every` (`deadline += period` after each
+    /// fire — fixed period, no drift correction in Phase 1); 0 for the
+    /// one-shots.
+    period: f64,
+    body_start: u32,
+    body_len: u32,
+    /// Value-level copy of the scheduling scope (captures `entity` & co.) —
+    /// the M1.0.12 branch-snapshot semantics and heap-backed-value caveats.
+    /// An `every` timer's fires share this scope (mutations persist across
+    /// periods, like a task scope).
+    snapshot: Locals,
+    state: enum { armed, fired, canceled },
+    /// True while the fire scan is executing this entry's body: a
+    /// self-cancel from inside the callback defers its snapshot free to the
+    /// scan (never freed mid-body).
+    firing: bool = false,
+};
+
 /// Read an `f64` resource field at `off` (M1.0.13 E5 population helpers —
 /// unaligned-safe byte copies, the resource store guarantees nothing better).
 fn readF64At(bytes: []const u8, off: u16) f64 {
@@ -1000,6 +1035,11 @@ pub const Interpreter = struct {
     /// (M1.0.13 E5), cached at `compile` so the per-tick population in
     /// `advanceTime` is plain offset writes.
     time_res: TimeResources,
+    /// Runtime timer registry (M1.0.13 E6, §9.10) — heap records, monotone
+    /// pointer-stable + husk (see `TimerEntry`). Scanned by `fireTimers` at
+    /// the head of `stepOnce`, in registration order (deterministic); a
+    /// `Value.timer_handle` is an index into it.
+    timers: std.ArrayListUnmanaged(*TimerEntry) = .empty,
     /// Dynamic pool of suspendable tasks (M1.0.11 E1) — the growable replacement
     /// for the M0.8 per-rule `AsyncSlot` slice. POINTER-STABLE since M1.0.12 E1:
     /// each element is a heap record (`gpa.create`), because `race`/`sync`/
@@ -1098,6 +1138,13 @@ pub const Interpreter = struct {
             self.gpa.destroy(task);
         }
         self.async_tasks.deinit(self.gpa);
+        // Timer registry teardown (M1.0.13 E6): husks (fired/canceled) had
+        // their snapshot freed at husk time — only armed entries still own one.
+        for (self.timers.items) |t| {
+            if (t.state == .armed) t.snapshot.deinit(self.gpa);
+            self.gpa.destroy(t);
+        }
+        self.timers.deinit(self.gpa);
         self.task_children.deinit(self.gpa);
         self.gpa.free(self.rule_tasks);
         self.descriptors.deinit(self.gpa);
@@ -1780,6 +1827,10 @@ pub const Interpreter = struct {
         // Events have a per-tick lifetime (`Lifetime.tick`): clear the previous
         // tick's queue before running this tick's rules (M0.8 E3).
         self.events.clear(self.gpa);
+        // Fire due timers (M1.0.13 E6) — after the clock advance and the
+        // event-queue clear, before rule dispatch: a callback's `emit` lands
+        // in THIS tick's store, visible to every rule of the tick.
+        try self.fireTimers(world, report);
         for (self.rule_descs, 0..) |*rd, i| {
             // Observer rules (M1.0.2 E3) never run in the per-tick dispatch:
             // they fire at the Tier-0 command-buffer flush via the
@@ -1840,6 +1891,131 @@ pub const Interpreter = struct {
         writeF64At(real, tr.real_dt, fixed_dt_secs);
         writeF64At(real, tr.real_total, self.unscaled_clock_ticks * fixed_dt_secs);
         writeF64At(real, tr.real_since_startup, self.unscaled_clock_ticks * fixed_dt_secs);
+    }
+
+    /// Schedule one timer statement (M1.0.13 E6, §9.10): evaluate the
+    /// Duration argument ONCE (a full expression — unlike `await wait`'s
+    /// literal-only path), snapshot the scheduling scope, and append a
+    /// registry entry. Returns the entry's index — the `TimerHandle`.
+    fn scheduleTimer(self: *Interpreter, world: *World, locals: *Locals, ts: ast_mod.TimerStmt) StmtError!u32 {
+        const argv = try self.evalExpr(world, locals, ts.arg);
+        if (argv != .duration) return error.RuntimeFailure;
+        if (argv.duration < 0) return error.RuntimeFailure;
+        const ticks = @round(argv.duration * async_fixed_dt_hz);
+        const entry = try self.gpa.create(TimerEntry);
+        entry.* = .{
+            .clock = if (ts.kind == .after_unscaled) .unscaled else .game,
+            .deadline = if (ts.kind == .after_unscaled)
+                self.unscaled_clock_ticks + ticks
+            else
+                self.game_clock_ticks + ticks,
+            .period = if (ts.kind == .every) ticks else 0,
+            .body_start = ts.body_start,
+            .body_len = ts.body_len,
+            .snapshot = .{},
+            .state = .armed,
+        };
+        errdefer {
+            entry.snapshot.deinit(self.gpa);
+            self.gpa.destroy(entry);
+        }
+        try cloneLocalsInto(self.gpa, locals, &entry.snapshot);
+        const idx: u32 = @intCast(self.timers.items.len);
+        try self.timers.append(self.gpa, entry);
+        return idx;
+    }
+
+    /// Fire every due timer (M1.0.13 E6) — called at the head of `stepOnce`,
+    /// AFTER the clock advance and BEFORE rule dispatch, in registration
+    /// order (deterministic). An entry is due when its deadline has been
+    /// reached on ITS clock. One-shots (`after`/`after_unscaled`) park as
+    /// husks after firing (snapshot freed); `every` re-arms at `deadline +=
+    /// period`. The scan reads the LIVE registry length, so a callback that
+    /// schedules a timer appends an entry the same scan can reach (monotone
+    /// pool — no invalidation); each entry fires at most once per scan.
+    fn fireTimers(self: *Interpreter, world: *World, report: *RuntimeReport) error{OutOfMemory}!void {
+        var i: usize = 0;
+        while (i < self.timers.items.len) : (i += 1) {
+            const t = self.timers.items[i];
+            if (t.state != .armed) continue;
+            const now = switch (t.clock) {
+                .game => self.game_clock_ticks,
+                .unscaled => self.unscaled_clock_ticks,
+            };
+            if (t.deadline > now) continue;
+            if (t.period > 0) {
+                t.deadline += t.period;
+            } else {
+                t.state = .fired;
+            }
+            t.firing = true;
+            try self.execTimerBody(world, t, report);
+            t.firing = false;
+            // Husk a one-shot (just fired) or an entry the callback canceled
+            // mid-fire (the deferred half of `cancelTimer`); a re-armed
+            // `every` keeps its snapshot for the next period.
+            if (t.state != .armed) {
+                t.snapshot.deinit(self.gpa);
+                t.snapshot = .{};
+            }
+        }
+    }
+
+    /// Execute a timer callback body run-to-completion against its snapshot
+    /// (M1.0.13 E6) — the timer body is a synchronous context (§9.10, E4);
+    /// runtime failures and uncaught throws are harvested into the report
+    /// exactly like a rule body (`execBody`); a top-level `return` /
+    /// `break` / `continue` ends the callback. The per-body arena stores are
+    /// NOT reset here: the snapshot may hold handles into them (the same
+    /// heap-backed-value caveat as the M1.0.12 task scopes).
+    fn execTimerBody(self: *Interpreter, world: *World, t: *TimerEntry, report: *RuntimeReport) error{OutOfMemory}!void {
+        self.control = .none;
+        self.thrown = false;
+        self.returning = false;
+        self.pending_error = null;
+        var s: u32 = 0;
+        while (s < t.body_len) : (s += 1) {
+            const stmt_id: NodeId = @bitCast(self.ast.extra.items[t.body_start + s]);
+            self.execStmt(world, &t.snapshot, stmt_id) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.RuntimeFailure => {
+                    self.harvestError(report);
+                    return;
+                },
+            };
+            if (self.thrown) {
+                self.thrown = false;
+                self.pending_error = .{ .kind = .UncaughtThrow, .span = self.thrown_span };
+                self.harvestError(report);
+                return;
+            }
+            if (self.control != .none) {
+                self.control = .none;
+                self.control_label = 0;
+                return;
+            }
+            if (self.returning) {
+                self.returning = false;
+                self.return_value = .{ .unit = {} };
+                return;
+            }
+        }
+    }
+
+    /// `TimerHandle.cancel()` (M1.0.13 E6, §9.10) — IDEMPOTENT: cancels an
+    /// armed timer (husk: snapshot freed), a no-op on one already fired or
+    /// already canceled. A self-cancel from inside the entry's own firing
+    /// callback marks the state only; the fire scan frees the snapshot after
+    /// the body returns (never mid-body).
+    fn cancelTimer(self: *Interpreter, ti: u32) void {
+        if (ti >= self.timers.items.len) return;
+        const t = self.timers.items[ti];
+        if (t.state != .armed) return;
+        t.state = .canceled;
+        if (!t.firing) {
+            t.snapshot.deinit(self.gpa);
+            t.snapshot = .{};
+        }
     }
 
     fn runRule(self: *Interpreter, world: *World, rd: *RuleDesc, report: *RuntimeReport) !void {
@@ -3537,6 +3713,21 @@ pub const Interpreter = struct {
                 const assign = self.ast.assign_stmts.items[data];
                 try self.execAssign(world, locals, assign);
             },
+            .timer_stmt => {
+                // `[let t =] after/every/after_unscaled(d) { }` (M1.0.13 E6,
+                // §9.10) — schedule a registry entry; the statement itself
+                // never fires the body (firing is `fireTimers`, next tick at
+                // the earliest). Reached from sync rule bodies directly and
+                // from async bodies via `stepBodyStmt`'s shared-executor
+                // fall-through. The binding enters the SCHEDULING scope
+                // AFTER the snapshot — the handle does not exist inside the
+                // callback (the spawn_stmt precedent).
+                const ts = self.ast.timer_stmts.items[data];
+                const handle = try self.scheduleTimer(world, locals, ts);
+                if (ts.binding != 0) {
+                    try locals.put(self.gpa, ts.binding, .{ .timer_handle = handle }, false);
+                }
+            },
             .expr_stmt => {
                 const eid: NodeId = @bitCast(data);
                 _ = try self.evalExpr(world, locals, eid);
@@ -4108,6 +4299,20 @@ pub const Interpreter = struct {
                 }
                 return error.RuntimeFailure;
             },
+            .timer_handle => |ti| {
+                // M1.0.13 E6 — the TimerHandle's single method (§9.10):
+                // `t.cancel()` is IDEMPOTENT — cancels an armed timer, a
+                // no-op on one already fired or already canceled. A timer is
+                // not a task: no `await t`, no other method (E4 rejects them
+                // at check; the fail-loud below is the runtime belt).
+                const mname = self.ast.strings.slice(mc.method_name);
+                if (std.mem.eql(u8, mname, "cancel")) {
+                    if (mc.args_len != 0) return error.RuntimeFailure;
+                    self.cancelTimer(ti);
+                    return Value{ .unit = {} };
+                }
+                return error.RuntimeFailure;
+            },
             .struct_ref => |handle| {
                 const type_name = self.structs.list.items[handle].type_name;
                 const key = methodKey(type_name, mc.method_name);
@@ -4438,6 +4643,14 @@ pub const Interpreter = struct {
             .bool_lit => {
                 const text = self.ast.strings.slice(data);
                 return Value{ .bool_ = std.mem.eql(u8, text, "true") };
+            },
+            .duration_lit => {
+                // `1.5s` → seconds (M1.0.13 E6) — the runtime Duration value,
+                // carried so a timer argument can be a full expression
+                // (`after(d)`). `await wait` keeps its own literal-only path
+                // in `evalAwaitTarget` (M1.0.11 restriction).
+                const secs = durationLiteralSeconds(self.ast.strings.slice(data)) orelse return error.RuntimeFailure;
+                return Value{ .duration = secs };
             },
             .string_lit => return Value{ .string_id = data },
             .string_interp => {
@@ -9094,6 +9307,307 @@ test "await wait_unscaled fires under paused (M1.0.13 E5)" {
     const r = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
     try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+}
+
+test "after(d) fires once at the deadline from a non-async rule, then parks as a husk (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // A NON-async rule schedules a one-shot at tick 1 (game clock 1, 0.05s =
+    // 3 ticks → deadline 4). The `armed` latch keeps the rule from
+    // re-scheduling every tick.
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0, armed: bool = true }
+        \\rule sched()
+        \\  when resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    after(0.05s) {
+        \\      get_mut(Out).n = get(Out).n + 1
+        \\    }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // Ticks 1-3: scheduled, not yet due.
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    try std.testing.expectEqual(@as(usize, 1), interp.timers.items.len);
+    // Tick 4: the deadline is reached at the head of the tick — fires once.
+    const r = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    try std.testing.expect(interp.timers.items[0].state == .fired);
+    // The husk never re-fires and the slot is never reused.
+    _ = try interp.runFor(&world, 6);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    try std.testing.expectEqual(@as(usize, 1), interp.timers.items.len);
+    // cancel() on an already-fired timer is a no-op (idempotent).
+    interp.cancelTimer(0);
+    try std.testing.expect(interp.timers.items[0].state == .fired);
+}
+
+test "every(d) fires each period, re-armed at a fixed period (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0, armed: bool = true }
+        \\rule sched()
+        \\  when resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    every(0.05s) {
+        \\      get_mut(Out).n = get(Out).n + 1
+        \\    }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // Scheduled at tick 1 (deadline 4, period 3): fires at ticks 4, 7, 10.
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 1); // tick 4
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 2); // ticks 5-6
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 1); // tick 7
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 3); // ticks 8-10
+    try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out_id));
+    // Still armed — an `every` never husks on its own.
+    try std.testing.expect(interp.timers.items[0].state == .armed);
+}
+
+test "under paused, after freezes while after_unscaled still fires (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { a: int = 0, b: int = 0, armed: bool = true }
+        \\rule sched()
+        \\  when resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    after(0.05s) { get_mut(Out).a = 1 }
+        \\    after_unscaled(0.05s) { get_mut(Out).b = 1 }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+    const a_off = world.registry.findField(out_id, "a").?.offset;
+    const b_off = world.registry.findField(out_id, "b").?.offset;
+
+    // Tick 1: both scheduled (game deadline 4, unscaled deadline 4); pause.
+    _ = try interp.runFor(&world, 1);
+    {
+        const game = world.resources.getMutResource(interp.time_res.game_id).?;
+        game[interp.time_res.game_paused] = 1;
+    }
+    // Ticks 2-6 paused: the unscaled clock reaches 4 → `after_unscaled`
+    // fires; the game clock is frozen at 1 → `after` does not.
+    _ = try interp.runFor(&world, 5);
+    {
+        const out = world.resources.getResource(out_id).?;
+        try std.testing.expectEqual(@as(i64, 0), std.mem.bytesToValue(i64, out[a_off..][0..8]));
+        try std.testing.expectEqual(@as(i64, 1), std.mem.bytesToValue(i64, out[b_off..][0..8]));
+    }
+    // Unpause: the game clock resumes (2, 3, then 4) — `after` fires.
+    {
+        const game = world.resources.getMutResource(interp.time_res.game_id).?;
+        game[interp.time_res.game_paused] = 0;
+    }
+    _ = try interp.runFor(&world, 2);
+    {
+        const out = world.resources.getResource(out_id).?;
+        try std.testing.expectEqual(@as(i64, 0), std.mem.bytesToValue(i64, out[a_off..][0..8]));
+    }
+    _ = try interp.runFor(&world, 1);
+    {
+        const out = world.resources.getResource(out_id).?;
+        try std.testing.expectEqual(@as(i64, 1), std.mem.bytesToValue(i64, out[a_off..][0..8]));
+    }
+}
+
+test "time_scale stretches an after deadline (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0, armed: bool = true }
+        \\rule sched()
+        \\  when resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    after(0.1s) { get_mut(Out).n = 1 }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+    // time_scale = 0.5 from the very first tick: scheduled at tick 1 (game
+    // clock 0.5, 0.1s = 6 ticks → deadline 6.5) — fires when the game clock
+    // reaches 6.5, i.e. tick 13.
+    {
+        const game = world.resources.getMutResource(interp.time_res.game_id).?;
+        writeF64At(game, interp.time_res.game_time_scale, 0.5);
+    }
+    _ = try interp.runFor(&world, 12);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+}
+
+test "a canceled timer never fires and cancel is idempotent (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0, armed: bool = true }
+        \\rule sched()
+        \\  when resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    let t = after(0.05s) { get_mut(Out).n = 99 }
+        \\    t.cancel()
+        \\    t.cancel()
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    const r = try interp.runFor(&world, 10);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    try std.testing.expect(interp.timers.items[0].state == .canceled);
+    // Unit-level: a third cancel on the husk stays a no-op.
+    interp.cancelTimer(0);
+    try std.testing.expect(interp.timers.items[0].state == .canceled);
+}
+
+test "the callback observes the scheduling-time scope snapshot (captured entity) (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Health { current: int = 0 }
+        \\resource Out { seen: int = 0, armed: bool = true }
+        \\rule sched(entity: Entity)
+        \\  when entity has Health and resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    after(0.05s) {
+        \\      get_mut(Out).seen = entity.get(Health).current
+        \\    }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const health = world.registry.idOf("Health").?;
+    var hv: i64 = 42;
+    _ = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{health}, &[_][]const u8{std.mem.asBytes(&hv)});
+
+    const out_id = world.registry.idOf("Out").?;
+    // Tick 1 schedules with `entity` captured in the snapshot; the callback
+    // dereferences it at fire time (tick 4).
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    const r = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 42), readResourceInt(&world, out_id));
+}
+
+test "two timers due the same tick fire in registration order (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0, armed: bool = true }
+        \\rule sched()
+        \\  when resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    after(0.05s) { get_mut(Out).n = get(Out).n * 10 + 1 }
+        \\    after(0.05s) { get_mut(Out).n = get(Out).n * 10 + 2 }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // Both due at tick 4: registration order → 0*10+1 = 1, then 1*10+2 = 12.
+    _ = try interp.runFor(&world, 4);
+    try std.testing.expectEqual(@as(i64, 12), readResourceInt(&world, out_id));
+}
+
+test "a timer scheduled from an async rule fires and its emit reaches same-tick rules (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // The scheduling statement reaches `execStmt` through the async drive's
+    // shared-executor fall-through; the callback's `emit` lands in the tick's
+    // fresh event store (fireTimers runs after the clear, before rules), so
+    // the `@on_event` consumer sees it the SAME tick.
+    var pr = try checkCleanProgram(gpa,
+        \\event Boom { }
+        \\resource Out { n: int = 0 }
+        \\async rule sched()
+        \\  when resource Out
+        \\{
+        \\  after(0.05s) {
+        \\    emit Boom { }
+        \\  }
+        \\}
+        \\@on_event(Boom)
+        \\rule consume()
+        \\  when resource Out
+        \\{
+        \\  get_mut(Out).n = get(Out).n + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // The async rule spawns once at tick 1 and completes; the timer fires at
+    // tick 4, exactly once.
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    const r = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
 }
 
 test "async rule resumes on await global_event(T) (M0.8 E3 sub-slice B)" {
