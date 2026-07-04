@@ -11190,6 +11190,245 @@ test "a borrowed resource-string filter is captured once and survives reassignme
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // matched the captured OLD "old"
 }
 
+test "two awaiters wake on a single global_event instance (M1.0.14 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // One `Ping` is NOT consumed by a wake — both awaiters see the same instance.
+    var pr = try parser_mod.parse(gpa,
+        \\event Ping { }
+        \\resource A { n: int = 0 }
+        \\resource B { n: int = 0 }
+        \\rule producer()
+        \\  when resource A
+        \\{
+        \\  emit Ping { }
+        \\}
+        \\async rule wa()
+        \\  when resource A
+        \\{
+        \\  await global_event(Ping)
+        \\  let a = get_mut(A)
+        \\  a.n = a.n + 1
+        \\}
+        \\async rule wb()
+        \\  when resource B
+        \\{
+        \\  await global_event(Ping)
+        \\  let b = get_mut(B)
+        \\  b.n = b.n + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const a = world.registry.idOf("A").?;
+    const b = world.registry.idOf("B").?;
+    _ = try interp.runFor(&world, 4);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, a));
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, b));
+}
+
+test "an @on_event observer and an awaiter both fire on the same event (M1.0.14 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // The event is not consumed: the observer drains it AND the awaiter wakes on
+    // the very same instance (the awaiter is polled after the observer's slot).
+    var pr = try parser_mod.parse(gpa,
+        \\event Ping { }
+        \\resource Aw { n: int = 0 }
+        \\resource Ob { n: int = 0 }
+        \\rule producer()
+        \\  when resource Aw
+        \\{
+        \\  emit Ping { }
+        \\}
+        \\@on_event(Ping)
+        \\rule obs()
+        \\  when resource Ob
+        \\{
+        \\  let o = get_mut(Ob)
+        \\  o.n = o.n + 1
+        \\}
+        \\async rule watch()
+        \\  when resource Aw
+        \\{
+        \\  await global_event(Ping)
+        \\  let a = get_mut(Aw)
+        \\  a.n = a.n + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const aw = world.registry.idOf("Aw").?;
+    const ob = world.registry.idOf("Ob").?;
+    _ = try interp.runFor(&world, 4);
+    try std.testing.expect(readResourceInt(&world, ob) >= 1); // observer drained
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, aw)); // awaiter woke on the same event
+}
+
+test "an event emitted at tick N does not wake a task that suspends at tick N+1 (M1.0.14 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // `producer` emits `Ping` ONCE (tick 1). `watch` is still on `await wait` at
+    // tick 1 and only reaches `await global_event(Ping)` at tick 2 — by which the
+    // per-tick store has cleared the tick-1 `Ping`. It must never wake.
+    var pr = try parser_mod.parse(gpa,
+        \\event Ping { }
+        \\resource Out { n: int = 0 }
+        \\resource Once { fired: bool = false }
+        \\rule producer()
+        \\  when resource Once
+        \\{
+        \\  if not get(Once).fired {
+        \\    emit Ping { }
+        \\    let f = get_mut(Once)
+        \\    f.fired = true
+        \\  }
+        \\}
+        \\async rule watch()
+        \\  when resource Out
+        \\{
+        \\  await wait(0.02s)
+        \\  await global_event(Ping)
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out = world.registry.idOf("Out").?;
+    _ = try interp.runFor(&world, 6);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out)); // the tick-1 Ping was cleared
+}
+
+test "a filtered global_event wakes only on the matching instance across ticks (M1.0.14 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // `producer` emits Q{id:1}, Q{id:2}, Q{id:3}, … (one per tick). The awaiter
+    // filters {id:7} — it must wake on exactly the tick that emits Q{id:7} and
+    // ignore every other instance.
+    var pr = try parser_mod.parse(gpa,
+        \\event Q { id: int }
+        \\resource Out { n: int = 0 }
+        \\resource Step { t: int = 0 }
+        \\rule producer()
+        \\  when resource Step
+        \\{
+        \\  let s = get_mut(Step)
+        \\  s.t = s.t + 1
+        \\  emit Q { id: s.t }
+        \\}
+        \\async rule watch()
+        \\  when resource Out
+        \\{
+        \\  await global_event(Q { id: 7 })
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out = world.registry.idOf("Out").?;
+    _ = try interp.runFor(&world, 10);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // woke once, on Q{id:7} only
+}
+
+test "9.2 mirror: entity awaiter resumes on its own event and its emit is observed (M1.0.14 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // Mirrors `etch-reference-part1.md` §9.2: an entity-bound async rule on the
+    // hero emits `DialogueStart`, suspends on `await entity_event(e,
+    // DialogueComplete)`, and resumes on the `DialogueComplete` whose designated
+    // `npc` field is the hero — emitting `QuestStarted`, observed by an
+    // `@on_event` sink. A decoy entity's `DialogueComplete { npc: decoy }`
+    // coexists in the store and does NOT wake the hero's awaiter.
+    var pr = try parser_mod.parse(gpa,
+        \\component Hero { v: int = 0 }
+        \\component Marker { v: int = 0 }
+        \\event DialogueStart { who: Entity }
+        \\event DialogueComplete { npc: Entity }
+        \\event QuestStarted { by: Entity }
+        \\resource Sink { n: int = 0 }
+        \\rule producer(e: Entity)
+        \\  when e has Marker
+        \\{
+        \\  emit DialogueComplete { npc: e }
+        \\}
+        \\async rule converse(e: Entity)
+        \\  when e has Hero
+        \\{
+        \\  emit DialogueStart { who: e }
+        \\  await entity_event(e, DialogueComplete)
+        \\  emit QuestStarted { by: e }
+        \\}
+        \\@on_event(QuestStarted)
+        \\rule sink()
+        \\  when resource Sink
+        \\{
+        \\  let s = get_mut(Sink)
+        \\  s.n = s.n + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const hero_c = world.registry.idOf("Hero").?;
+    const marker_c = world.registry.idOf("Marker").?;
+    const sink = world.registry.idOf("Sink").?;
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{ hero_c, marker_c }); // the hero (also Marker → gets its own DC)
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{marker_c}); // a decoy (its DC must not wake the hero)
+    _ = try interp.runFor(&world, 6);
+    try std.testing.expect(readResourceInt(&world, sink) >= 1); // hero resumed on its DC → QuestStarted observed
+}
+
 test "task pool is pointer-stable and cancelTask parks a suspended task for good (M1.0.12 E1)" {
     const gpa = std.testing.allocator;
     var world = World.init();
