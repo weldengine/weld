@@ -1063,7 +1063,7 @@ pub const Interpreter = struct {
     /// (M1.0.14 E3; parallel to `rule_descs`, allocated iff `has_async`). An
     /// entry records the last task spawned for that `(rule, entity)` pair; a
     /// LIVE task is `.suspended` — a terminal-state entry (husk) does not block
-    /// re-arming (ruling 2). A non-entity-bound rule's map stays empty.
+    /// re-arming (ruling 1). A non-entity-bound rule's map stays empty.
     entity_rule_tasks: []std.AutoHashMapUnmanaged(EntityId, u32) = &.{},
     /// Reusable buffer collecting an entity-bound rule's matched entities in
     /// selection order before spawning their tasks (M1.0.14 E3) — filled by the
@@ -2354,8 +2354,8 @@ pub const Interpreter = struct {
             // matched entity). Each selected entity with no LIVE (`.suspended`)
             // task spawns a task — the entity bound into its root locals — in
             // the rule's deterministic selection order (ruling 4). The `when`
-            // gates the SPAWN only (ruling 1); a terminal task re-arms for a
-            // still-matching entity (ruling 2); despawn does not cancel — a
+            // gates the SPAWN only (ruling 2); a terminal task re-arms for a
+            // still-matching entity (ruling 1); despawn does not cancel — a
             // later dead-handle ECS access fails loud (ruling 3).
             try self.spawnEntityBoundTasks(world, idx, rd, rule, report);
         } else if (rule.params_len > 0) {
@@ -2400,8 +2400,8 @@ pub const Interpreter = struct {
     /// matched entities in selection order (nothing runs), then spawn a task
     /// for each entity whose `(rule, entity)` map slot has no LIVE
     /// (`.suspended`) task — a terminal-state husk does not block re-arming
-    /// (ruling 2). A matched entity that later stops matching keeps its live
-    /// task (ruling 1 — `when` gates the spawn, not the task's life). The fresh
+    /// (ruling 1). A matched entity that later stops matching keeps its live
+    /// task (ruling 2 — `when` gates the spawn, not the task's life). The fresh
     /// task's default wake fires this tick, so the drive-by-origin pass runs it.
     fn spawnEntityBoundTasks(self: *Interpreter, world: *World, idx: usize, rd: *RuleDesc, rule: ast_mod.RuleDecl, report: *RuntimeReport) !void {
         self.entity_spawn_buf.clearRetainingCapacity();
@@ -10222,7 +10222,7 @@ test "entity-bound async rule: one root task per matched entity, independent res
     try std.testing.expectEqual(@as(i64, 22), readResourceInt(&world, out));
 }
 
-test "entity-bound async rule: re-arms after a terminal state while the entity matches (M1.0.14 E3 ruling 2)" {
+test "entity-bound async rule: re-arms after a terminal state while the entity matches (M1.0.14 E3 ruling 1)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
@@ -10261,7 +10261,7 @@ test "entity-bound async rule: re-arms after a terminal state while the entity m
     try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out));
 }
 
-test "entity-bound async rule: when gates the spawn, not the task life (M1.0.14 E3 ruling 1)" {
+test "entity-bound async rule: when gates the spawn, not the task life (M1.0.14 E3 ruling 2)" {
     const gpa = std.testing.allocator;
     var world = World.init();
     defer world.deinit(gpa);
