@@ -990,12 +990,18 @@ pub const AwaitTargetKind = enum {
 /// the duration/tick expr (`wait`/`wait_unscaled`) or the awaited future
 /// (`future`), else `NodeId.none`; `entity_expr` is the `entity_event` entity,
 /// else `NodeId.none`; `event_type` is the event type name for the two event
-/// forms, else `0`.
+/// forms, else `0`. `filter_start` / `filter_len` index a run of
+/// `arena.struct_lit_fields` — the optional payload filter of the two event
+/// forms (`entity_event` / `global_event`), each `IDENT : expression` an
+/// equality predicate; `(0, 0)` when no filter body is present (M1.0.14,
+/// `etch-grammar.md` §4.2).
 pub const AwaitExpr = struct {
     target_kind: AwaitTargetKind,
     arg_expr: NodeId,
     entity_expr: NodeId,
     event_type: StringId,
+    filter_start: u32,
+    filter_len: u32,
 };
 
 /// One branch of a `race` / `sync` statement (M1.0.12 E2, `etch-grammar.md`

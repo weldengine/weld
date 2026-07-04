@@ -6532,6 +6532,35 @@ pub const Parser = struct {
         });
     }
 
+    /// Parse the optional `{ field_init {"," field_init} [","] }` payload-filter
+    /// body of an event await target (`entity_event(e, T { … })` /
+    /// `global_event(T { … })`, M1.0.14, `etch-grammar.md` §4.2). Shares the
+    /// `struct_lit_fields` slab and the struct-literal loop shape: each
+    /// `IDENT : expression` is an equality predicate; the spread form `..base`
+    /// is rejected (the filter is field-equality only). The caller has
+    /// confirmed `peek() == {`. Returns the `(start, len)` run into
+    /// `arena.struct_lit_fields`; field values re-enable struct literals inside.
+    fn parseEventFilterBody(self: *Parser) ParseError!struct { start: u32, len: u32 } {
+        _ = try self.advance(); // '{'
+        const saved = self.no_struct_lit;
+        self.no_struct_lit = false;
+        defer self.no_struct_lit = saved;
+        const start: u32 = @intCast(self.arena.struct_lit_fields.items.len);
+        while (self.peek() != .rbrace and self.peek() != .eof) {
+            if (self.peek() == .dotdot) {
+                return self.parseErr(self.peekSpan(), "event payload-filter spread '..base' is not supported (the filter is field-equality only)");
+            }
+            const fname = try self.expect(.ident, "expected field name in event payload filter");
+            _ = try self.expect(.colon, "expected ':' after payload-filter field name");
+            const value = try self.parseExpr(0);
+            try self.arena.struct_lit_fields.append(self.gpa, .{ .name = try self.internSlice(fname.span), .value = value });
+            if (!try self.match(.comma)) break;
+        }
+        _ = try self.expect(.rbrace, "expected '}' to close the event payload filter");
+        const len: u32 = @as(u32, @intCast(self.arena.struct_lit_fields.items.len)) - start;
+        return .{ .start = start, .len = len };
+    }
+
     /// Parse `await <target>` (M0.8 E3 sub-slice B, `etch-grammar.md` §4.2
     /// `await_target`). `wait` / `wait_unscaled` / `entity_event` /
     /// `global_event` are contextual builtins recognised by lexeme when
@@ -6555,6 +6584,8 @@ pub const Parser = struct {
                     .arg_expr = arg,
                     .entity_expr = NodeId.none,
                     .event_type = 0,
+                    .filter_start = 0,
+                    .filter_len = 0,
                 }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
             }
             if (std.mem.eql(u8, name, "entity_event")) {
@@ -6564,10 +6595,14 @@ pub const Parser = struct {
                 _ = try self.expect(.comma, "expected ',' between entity and event type in entity_event(...)");
                 const ty = try self.expect(.type_ident, "expected event type (TYPE_IDENT) in entity_event(...)");
                 const event_type = try self.internSlice(ty.span);
-                // The optional `entity_event(e, T { ... })` payload-filter body is
-                // a post-Phase-0 feature — reject it rather than silently drop it.
+                // Optional `entity_event(e, T { … })` payload filter (M1.0.14,
+                // §4.2): a field-equality predicate run into `struct_lit_fields`.
+                var filter_start: u32 = 0;
+                var filter_len: u32 = 0;
                 if (self.peek() == .lbrace) {
-                    return self.parseErr(self.peekSpan(), "entity_event payload-filter body is not supported in M0.8 (T2 / Phase 2)");
+                    const run = try self.parseEventFilterBody();
+                    filter_start = run.start;
+                    filter_len = run.len;
                 }
                 const closing = try self.expect(.rparen, "expected ')' to close entity_event(...)");
                 return try self.arena.addAwaitExpr(self.gpa, .{
@@ -6575,6 +6610,8 @@ pub const Parser = struct {
                     .arg_expr = NodeId.none,
                     .entity_expr = entity,
                     .event_type = event_type,
+                    .filter_start = filter_start,
+                    .filter_len = filter_len,
                 }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
             }
             if (std.mem.eql(u8, name, "global_event")) {
@@ -6582,12 +6619,23 @@ pub const Parser = struct {
                 _ = try self.advance(); // '('
                 const ty = try self.expect(.type_ident, "expected event type (TYPE_IDENT) in global_event(...)");
                 const event_type = try self.internSlice(ty.span);
+                // Optional `global_event(T { … })` payload filter (M1.0.14, §4.2
+                // erratum aligning the grammar on the §9.4 example).
+                var filter_start: u32 = 0;
+                var filter_len: u32 = 0;
+                if (self.peek() == .lbrace) {
+                    const run = try self.parseEventFilterBody();
+                    filter_start = run.start;
+                    filter_len = run.len;
+                }
                 const closing = try self.expect(.rparen, "expected ')' to close global_event(...)");
                 return try self.arena.addAwaitExpr(self.gpa, .{
                     .target_kind = .global_event,
                     .arg_expr = NodeId.none,
                     .entity_expr = NodeId.none,
                     .event_type = event_type,
+                    .filter_start = filter_start,
+                    .filter_len = filter_len,
                 }, .{ .byte_start = kw_span.byte_start, .byte_end = closing.span.byte_end });
             }
         }
@@ -6599,6 +6647,8 @@ pub const Parser = struct {
             .arg_expr = fut,
             .entity_expr = NodeId.none,
             .event_type = 0,
+            .filter_start = 0,
+            .filter_len = 0,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = fut_span.byte_end });
     }
 
@@ -8494,9 +8544,10 @@ test "parser: async rule parses with await wait + global_event targets (M0.8 E3 
     const aw1 = result.ast.awaitExpr(e1);
     try std.testing.expectEqual(ast_mod.AwaitTargetKind.global_event, aw1.target_kind);
     try std.testing.expectEqualStrings("Done", result.ast.strings.slice(aw1.event_type));
+    try std.testing.expectEqual(@as(u32, 0), aw1.filter_len); // bare form: no payload filter
 }
 
-test "parser: await entity_event(entity, T) parses; payload-filter body rejected (M0.8 E3 sub-slice B)" {
+test "parser: await entity_event(entity, T) parses bare and with payload filter (M1.0.14 E1)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\event Hit { }
@@ -8517,16 +8568,66 @@ test "parser: await entity_event(entity, T) parses; payload-filter body rejected
     try std.testing.expectEqual(ast_mod.AwaitTargetKind.entity_event, aw.target_kind);
     try std.testing.expectEqualStrings("Hit", result.ast.strings.slice(aw.event_type));
     try std.testing.expect(!aw.entity_expr.isNone());
+    try std.testing.expectEqual(@as(u32, 0), aw.filter_len); // bare form: no payload filter
 
-    // The optional `entity_event(e, T { ... })` payload-filter body is rejected.
-    var bad = try parse(gpa,
+    // M1.0.14: the optional `entity_event(e, T { … })` payload-filter body now
+    // PARSES (the M0.8 rejection is lifted), recording an equality-predicate run.
+    var filtered = try parse(gpa,
         \\event Hit { }
         \\async rule watch(target: Entity) {
-        \\  await entity_event(target, Hit { x: 1 })
+        \\  await entity_event(target, Hit { damage: 1 })
         \\}
     );
-    defer bad.deinit(gpa);
-    try std.testing.expect(bad.diagnostics.len > 0);
+    defer filtered.deinit(gpa);
+    if (filtered.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{filtered.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    const frule = filtered.ast.rule_decls.items[0];
+    const fs0: ast_mod.NodeId = @bitCast(filtered.ast.extra.items[frule.body_start]);
+    const fe0: ast_mod.NodeId = @bitCast(filtered.ast.stmtData(fs0));
+    const faw = filtered.ast.awaitExpr(fe0);
+    try std.testing.expectEqual(ast_mod.AwaitTargetKind.entity_event, faw.target_kind);
+    try std.testing.expectEqual(@as(u32, 1), faw.filter_len);
+    const ffield = filtered.ast.struct_lit_fields.items[faw.filter_start];
+    try std.testing.expectEqualStrings("damage", filtered.ast.strings.slice(ffield.name));
+    try std.testing.expectEqual(ast_mod.ExprKind.int_lit, filtered.ast.exprKind(ffield.value));
+}
+
+test "parser: await global_event(T) parses bare and with payload filter + trailing comma (M1.0.14 E1)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\event Quest { }
+        \\async rule watch() {
+        \\  await global_event(Quest)
+        \\  await global_event(Quest { id: 1, tier: 2, })
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    const rule = result.ast.rule_decls.items[0];
+    try std.testing.expectEqual(@as(u32, 2), rule.body_len);
+
+    // stmt 0: bare `global_event(Quest)` — no filter.
+    const s0: ast_mod.NodeId = @bitCast(result.ast.extra.items[rule.body_start]);
+    const e0: ast_mod.NodeId = @bitCast(result.ast.stmtData(s0));
+    const aw0 = result.ast.awaitExpr(e0);
+    try std.testing.expectEqual(ast_mod.AwaitTargetKind.global_event, aw0.target_kind);
+    try std.testing.expectEqual(@as(u32, 0), aw0.filter_len);
+
+    // stmt 1: `global_event(Quest { id: 1, tier: 2, })` — 2 filter fields, trailing comma accepted.
+    const s1: ast_mod.NodeId = @bitCast(result.ast.extra.items[rule.body_start + 1]);
+    const e1: ast_mod.NodeId = @bitCast(result.ast.stmtData(s1));
+    const aw1 = result.ast.awaitExpr(e1);
+    try std.testing.expectEqual(ast_mod.AwaitTargetKind.global_event, aw1.target_kind);
+    try std.testing.expectEqual(@as(u32, 2), aw1.filter_len);
+    const f0 = result.ast.struct_lit_fields.items[aw1.filter_start];
+    const f1 = result.ast.struct_lit_fields.items[aw1.filter_start + 1];
+    try std.testing.expectEqualStrings("id", result.ast.strings.slice(f0.name));
+    try std.testing.expectEqualStrings("tier", result.ast.strings.slice(f1.name));
 }
 
 test "parser builds a data table declaration with entries + spread (M0.8 E4)" {
