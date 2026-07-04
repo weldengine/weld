@@ -644,6 +644,11 @@ fn durationLiteralSeconds(text: []const u8) ?f64 {
 /// The condition that resumes a suspended `async rule` (M0.8 E3 sub-slice B).
 /// The tree-walker is its own runtime (`etch-reference-part1.md §9`): an
 /// `await` suspends the rule as a task-record, polled each tick in `stepOnce`.
+/// A `(start, len)` window into `Interpreter.captured_filters` — an event
+/// await target's payload filter, captured by value at suspension (M1.0.14 E4).
+/// `len == 0` means no filter body.
+const FilterRange = struct { start: u32, len: u32 };
+
 const WakeCond = union(enum) {
     /// Resume once the GAME clock accumulator reaches this deadline, in
     /// tick units (M1.0.13 E5): `await wait(d)` reached with the game clock
@@ -657,10 +662,19 @@ const WakeCond = union(enum) {
     /// the UNSCALED clock, which advances by 1 per tick unconditionally —
     /// the wait keeps running under `paused` and ignores `time_scale`.
     wait_until_unscaled: f64,
-    /// Resume once an event of this type is present in the per-tick EventStore
-    /// (M0.8 E3 sub-slice B — `await global_event(T)`). The producer must run
-    /// before the awaiter in the rule order, same as the observer drain.
-    global_event: StringId,
+    /// Resume once an event of `type_name` matching the optional payload
+    /// `filter` is present in the per-tick EventStore (`await global_event(T
+    /// [{…}])`, M0.8 E3 + M1.0.14 E4 filter). The producer must run before the
+    /// awaiter in the rule order, same as the observer drain. The matched event
+    /// is NOT consumed (observers and other awaiters see it too).
+    global_event: struct { type_name: StringId, filter: FilterRange },
+    /// Resume once an event of `type_name` whose designated `Entity` field
+    /// (`field_name`, matched BY NAME — emit stores fields in emit-site order)
+    /// equals `entity`, and matching the optional payload `filter`, is present
+    /// this tick (`await entity_event(e, T [{…}])`, M1.0.14 E4). `entity` and
+    /// the filter values are captured ONCE at suspension (§9.4); the designated
+    /// field is the compile-time decision from `resolveEventEntityTarget`.
+    entity_event: struct { type_name: StringId, entity: EntityId, field_name: StringId, filter: FilterRange },
     /// A `race` parent (M1.0.12 E1): fires when at least one child in
     /// `task_children[start .. start+len]` is `.done` (a winner exists) — OR when
     /// no child remains `.suspended` (every branch failed/canceled: no winner,
@@ -929,6 +943,10 @@ pub const Interpreter = struct {
     /// `enum` declarations keyed by name (M0.8 E2 block 3 tranche B), for
     /// resolving enum values + match-arm variant indices.
     enum_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.EnumDecl) = .empty,
+    /// Declared events keyed by name (M1.0.14 E4) — resolves an await event
+    /// target's designated field + enum field types at suspension, and enum
+    /// event field values at `emit`. Mirrors `enum_decls`.
+    event_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.EventDecl) = .empty,
     /// Trait-impl methods keyed by `methodKey(type_name, method_name)` (M0.8 E2
     /// block 3 tranche C), each resolved to the impl-provided method or the
     /// trait's default. Consulted AFTER `methods` (inherent) per §5.5.
@@ -1069,6 +1087,13 @@ pub const Interpreter = struct {
     /// selection order before spawning their tasks (M1.0.14 E3) — filled by the
     /// shared selection walk (`iterateSelection` collect mode).
     entity_spawn_buf: std.ArrayListUnmanaged(EntityId) = .empty,
+    /// Append-only store of event payload-filter values captured by value at
+    /// await suspension (M1.0.14 E4); a suspended `global_event`/`entity_event`
+    /// wake owns a `{start,len}` window (`FilterRange`). Never compacted (husk
+    /// discipline, like `task_children`); freed wholesale in deinit. Filter
+    /// values are always literals (`.int_`/`.float_`/`.bool_`/`.string_id`/
+    /// `.enum_value`/`.entity_id`) — copy-stable across ticks.
+    captured_filters: std.ArrayListUnmanaged(StructField) = .empty,
     /// Reusable cursor buffer for the multi-term (`or`) archetype-union merge
     /// (M1.0.0). Resized to the term count of the rule being iterated; capacity
     /// is retained across rules/ticks so the union path allocates at most once.
@@ -1138,6 +1163,7 @@ pub const Interpreter = struct {
         self.methods.deinit(self.gpa);
         self.struct_decls.deinit(self.gpa);
         self.enum_decls.deinit(self.gpa);
+        self.event_decls.deinit(self.gpa);
         self.trait_methods.deinit(self.gpa);
         self.tag_table.deinit(self.gpa);
         self.pending_tags.deinit(self.gpa);
@@ -1160,6 +1186,7 @@ pub const Interpreter = struct {
         for (self.entity_rule_tasks) |*m| m.deinit(self.gpa);
         self.gpa.free(self.entity_rule_tasks);
         self.entity_spawn_buf.deinit(self.gpa);
+        self.captured_filters.deinit(self.gpa);
         self.descriptors.deinit(self.gpa);
         self.merge_cursors.deinit(self.gpa);
         self.gpa.free(self.observer_ctxs);
@@ -1393,6 +1420,8 @@ pub const Interpreter = struct {
         errdefer struct_decls.deinit(gpa);
         var enum_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.EnumDecl) = .empty;
         errdefer enum_decls.deinit(gpa);
+        var event_decls: std.AutoHashMapUnmanaged(StringId, ast_mod.EventDecl) = .empty;
+        errdefer event_decls.deinit(gpa);
         var trait_methods: std.AutoHashMapUnmanaged(u64, ast_mod.FnDecl) = .empty;
         errdefer trait_methods.deinit(gpa);
         // Trait declarations by name (M0.8 E2 block 3 tranche C) — a local index
@@ -1422,6 +1451,10 @@ pub const Interpreter = struct {
                 .enum_decl => {
                     const decl = ast.enum_decls.items[data];
                     try enum_decls.put(gpa, decl.name, decl);
+                },
+                .event_decl => {
+                    const decl = ast.event_decls.items[data];
+                    try event_decls.put(gpa, decl.name, decl);
                 },
                 .trait_decl => {
                     const decl = ast.trait_decls.items[data];
@@ -1505,6 +1538,7 @@ pub const Interpreter = struct {
             .methods = methods,
             .struct_decls = struct_decls,
             .enum_decls = enum_decls,
+            .event_decls = event_decls,
             .trait_methods = trait_methods,
             .tag_table = tag_table,
             .tagset_id = tagset_id,
@@ -2898,13 +2932,23 @@ pub const Interpreter = struct {
                         },
                     }
                 },
-                .wait, .wait_unscaled, .global_event => {
+                .wait, .wait_unscaled => {
                     task.wake = try self.evalAwaitTarget(site.await_id);
                     cursor.* += 1;
                     task.pending_bind = site.ret;
                     return .suspended;
                 },
-                .entity_event => return error.RuntimeFailure,
+                .global_event, .entity_event => {
+                    // M1.0.14 E4: build the (filtered / entity-scoped) event wake
+                    // in the LIVE scope — the entity operand and each filter
+                    // expression are captured by value ONCE here, never
+                    // re-evaluated at later polls (§9.4). Resume delivers unit
+                    // (no implicit `event` binding, §9.4).
+                    task.wake = try self.evalEventWake(world, scope, site.await_id);
+                    cursor.* += 1;
+                    task.pending_bind = site.ret;
+                    return .suspended;
+                },
             }
         }
         const sk = self.ast.stmtKind(stmt);
@@ -3474,16 +3518,129 @@ pub const Interpreter = struct {
         }
     }
 
+    /// Evaluate an event field / payload-filter value with enum-field awareness
+    /// (M1.0.14 E4): a bare `.variant` shorthand resolves against the event
+    /// field's declared enum type (the struct-literal precedent), else via
+    /// `evalExpr`. Shared by `emit` execution and payload-filter capture so both
+    /// sides of an enum equality produce the same `.enum_value`.
+    fn evalEventFieldValue(self: *Interpreter, world: *World, locals: *Locals, decl: ast_mod.EventDecl, flit: ast_mod.StructLitField) StmtError!Value {
+        if (self.ast.exprKind(flit.value) == .tag_path) {
+            var fi: u32 = 0;
+            while (fi < decl.fields_len) : (fi += 1) {
+                const f = self.ast.fields.items[decl.fields_start + fi];
+                if (f.name == flit.name) {
+                    if (self.enumFieldShorthand(f, flit.value)) |ev| return ev;
+                    break;
+                }
+            }
+        }
+        return try self.evalExpr(world, locals, flit.value);
+    }
+
+    /// Capture an await event target's payload filter BY VALUE into the
+    /// append-only `captured_filters` buffer (M1.0.14 E4, capture-once §9.4):
+    /// each filter field is evaluated once in the live scope; the returned
+    /// range is re-scanned at each poll, never re-evaluated.
+    fn captureEventFilter(self: *Interpreter, world: *World, locals: *Locals, decl: ast_mod.EventDecl, filter_start: u32, filter_len: u32) StmtError!FilterRange {
+        const start: u32 = @intCast(self.captured_filters.items.len);
+        var i: u32 = 0;
+        while (i < filter_len) : (i += 1) {
+            const flit = self.ast.struct_lit_fields.items[filter_start + i];
+            const v = try self.evalEventFieldValue(world, locals, decl, flit);
+            try self.captured_filters.append(self.gpa, .{ .name = flit.name, .value = v });
+        }
+        return .{ .start = start, .len = filter_len };
+    }
+
+    /// Build the wake condition for an `await global_event` / `entity_event`
+    /// target (M1.0.14 E4). The entity operand (entity_event) and the payload
+    /// filter are evaluated ONCE, here, in the live scope — never re-evaluated
+    /// at later polls (§9.4). The designated entity field is the compile-time
+    /// decision from `resolveEventEntityTarget` (§9.4), matched BY NAME at poll.
+    fn evalEventWake(self: *Interpreter, world: *World, locals: *Locals, await_id: NodeId) StmtError!WakeCond {
+        const aw = self.ast.awaitExpr(await_id);
+        const decl = self.event_decls.get(aw.event_type) orelse return error.RuntimeFailure;
+        const filter = try self.captureEventFilter(world, locals, decl, aw.filter_start, aw.filter_len);
+        switch (aw.target_kind) {
+            .global_event => return .{ .global_event = .{ .type_name = aw.event_type, .filter = filter } },
+            .entity_event => {
+                const field_name = switch (self.ast.resolveEventEntityTarget(decl)) {
+                    .field => |f| f.name,
+                    else => return error.RuntimeFailure, // defensive: E2 guarantees a designated field
+                };
+                const ev = try self.evalExpr(world, locals, aw.entity_expr);
+                if (ev != .entity_id) return error.RuntimeFailure; // defensive: E2 types the operand Entity
+                return .{ .entity_event = .{ .type_name = aw.event_type, .entity = ev.entity_id, .field_name = field_name, .filter = filter } };
+            },
+            else => return error.RuntimeFailure, // only the two event targets route here
+        }
+    }
+
+    /// An entity gate for `entity_event` wake matching: the designated field's
+    /// name and the awaited entity (M1.0.14 E4).
+    const EntityGate = struct { name: StringId, id: EntityId };
+
+    /// The value of `ev`'s field named `name`, or null if absent — a linear scan
+    /// (emit stores fields in emit-site order; lookup is by interned name).
+    fn eventFieldByName(ev: EventVal, name: StringId) ?Value {
+        for (ev.fields.items) |f| {
+            if (f.name == name) return f.value;
+        }
+        return null;
+    }
+
+    /// True iff some queued event of `type_name` this tick satisfies the payload
+    /// `filter` and (for `entity_event`) has its designated field == the gate
+    /// entity (M1.0.14 E4). The matched event is NOT consumed — observers and
+    /// other awaiters see it too.
+    fn anyEventMatches(self: *const Interpreter, type_name: StringId, filter: FilterRange, gate: ?EntityGate) bool {
+        for (self.events.list.items) |ev| {
+            if (ev.type_name != type_name) continue;
+            if (self.eventMatches(ev, filter, gate)) return true;
+        }
+        return false;
+    }
+
+    fn eventMatches(self: *const Interpreter, ev: EventVal, filter: FilterRange, gate: ?EntityGate) bool {
+        if (gate) |g| {
+            const fv = eventFieldByName(ev, g.name) orelse return false;
+            if (fv != .entity_id or fv.entity_id != g.id) return false;
+        }
+        var i = filter.start;
+        while (i < filter.start + filter.len) : (i += 1) {
+            const want = self.captured_filters.items[i];
+            const fv = eventFieldByName(ev, want.name) orelse return false;
+            if (!self.eventValueEql(want.value, fv)) return false;
+        }
+        return true;
+    }
+
+    /// Equality for an event-field comparison (M1.0.14 E4). Strings compare by
+    /// BYTES (a filter literal is `.string_id`, but an emitted string may be
+    /// `.string_run` / `.string_persistent` — `Value.eql` only matches same tag
+    /// + same pool index); every other admitted kind (int/float/bool/entity/
+    /// enum) uses `Value.eql`.
+    fn eventValueEql(self: *const Interpreter, a: Value, b: Value) bool {
+        if (self.stringBytes(a)) |ab| {
+            const bb = self.stringBytes(b) orelse return false;
+            return std.mem.eql(u8, ab, bb);
+        }
+        return a.eql(b);
+    }
+
     /// Resolve a wake-condition `await` target to a `WakeCond` (M1.0.11 E3). Only
-    /// `wait` / `wait_unscaled` / `global_event` reach here (`future` is handled
-    /// by `beginAsyncCall` upstream). `wait` and `wait_unscaled` take a `Duration`
+    /// `wait` / `wait_unscaled` reach here (`global_event` / `entity_event` build
+    /// their wake via `evalEventWake`; `future` via `beginAsyncCall`). `wait` and
+    /// `wait_unscaled` take a `Duration`
     /// (final API, §9.4): a Duration LITERAL → whole ticks via `round(seconds *
     /// 60)`, scheduled on the game clock (`wait` — scaled, pausable) or the
     /// unscaled clock (`wait_unscaled` — M1.0.13 E5, fires under pause). Both
     /// keep the M1.0.11 literal-only restriction: a non-literal Duration (const /
     /// arithmetic) fails loud — only the TIMER family evaluates a full Duration
-    /// expression (E6). `global_event(T)` waits for an event of type `T`;
-    /// `entity_event` (M1.0.14) fails loud (defensive; filtered upstream).
+    /// expression (E6). `global_event` / `entity_event` build their wake in the
+    /// live scope via `evalEventWake` (M1.0.14 E4 — filter/entity capture) and
+    /// never reach this resolver; `future` is unrealized. All three are a
+    /// defensive fail-loud here.
     fn evalAwaitTarget(self: *Interpreter, await_id: NodeId) StmtError!WakeCond {
         const aw = self.ast.awaitExpr(await_id);
         switch (aw.target_kind) {
@@ -3497,8 +3654,7 @@ pub const Interpreter = struct {
                     else => .{ .wait_until_unscaled = self.unscaled_clock_ticks + ticks },
                 };
             },
-            .global_event => return .{ .global_event = aw.event_type },
-            .entity_event, .future => return error.RuntimeFailure,
+            .global_event, .entity_event, .future => return error.RuntimeFailure,
         }
     }
 
@@ -3509,7 +3665,11 @@ pub const Interpreter = struct {
         return switch (wake) {
             .wait_until => |t| self.game_clock_ticks >= t,
             .wait_until_unscaled => |t| self.unscaled_clock_ticks >= t,
-            .global_event => |type_name| self.events.count(type_name) > 0,
+            // M1.0.14 E4 — a queued event of the type this tick that also
+            // satisfies the payload filter (global_event) and the designated
+            // entity field (entity_event). The event is NOT consumed.
+            .global_event => |g| self.anyEventMatches(g.type_name, g.filter, null),
+            .entity_event => |e| self.anyEventMatches(e.type_name, e.filter, .{ .name = e.field_name, .id = e.entity }),
             // Race parent: a winner exists (some child `.done`) — or no child
             // remains `.suspended` (every branch failed/canceled → no winner;
             // the race completes and the parent resumes after the statement, E4).
@@ -3958,12 +4118,25 @@ pub const Interpreter = struct {
                 // tree-walker; `@on_event` observers drain this store (deferred
                 // to the E3 observer tranche, resolver-types §12).
                 const em = self.ast.emit_stmts.items[data];
+                // The event decl (for enum-shorthand field resolution) is known
+                // only for MAIN-arena events; a re-parsed extension hook
+                // (`execHookText`) runs against a transient arena whose event
+                // type ids are not in `event_decls`, so fall back to plain
+                // `evalExpr` there — its emit fields are the M1.0.9 cookable
+                // subset, which has no enum shorthand.
+                const edecl_opt = self.event_decls.get(em.event_type);
                 var fields: std.ArrayListUnmanaged(StructField) = .empty;
                 errdefer fields.deinit(self.gpa);
                 var i: u32 = 0;
                 while (i < em.fields_len) : (i += 1) {
                     const flit = self.ast.struct_lit_fields.items[em.fields_start + i];
-                    const v = try self.evalExpr(world, locals, flit.value);
+                    // Resolve enum-shorthand field values against the declared
+                    // enum type (M1.0.14 E4 fix-as-you-go — a bare `.Variant`
+                    // event field was fail-loud in generic `evalExpr` before).
+                    const v = if (edecl_opt) |edecl|
+                        try self.evalEventFieldValue(world, locals, edecl, flit)
+                    else
+                        try self.evalExpr(world, locals, flit.value);
                     try fields.append(self.gpa, .{ .name = flit.name, .value = v });
                 }
                 try self.events.enqueue(self.gpa, em.event_type, fields);
@@ -8821,6 +8994,20 @@ fn writeI64Field(world: *World, comp_id: ComponentId, entity: CoreEntityId, valu
     @memcpy(cslot[0..@sizeOf(i64)], std.mem.asBytes(&v));
 }
 
+/// Read the first `int` (`i64`) field of `comp_id` on `entity` (test helper) —
+/// the read counterpart of `writeI64Field`, used by the M1.0.14 E4 tests to
+/// observe a per-entity wake counter.
+fn readI64Field(world: *World, comp_id: ComponentId, entity: CoreEntityId) i64 {
+    const loc = world.dynamicLocation(entity).?;
+    const arch = world.dynamicArchetype(loc.archetype_idx);
+    const chunk = arch.chunks.items[loc.chunk_idx];
+    const cidx = arch.componentIndex(comp_id).?;
+    const cslot = arch.componentSlot(chunk, cidx, loc.slot);
+    var v: i64 = 0;
+    @memcpy(std.mem.asBytes(&v), cslot[0..@sizeOf(i64)]);
+    return v;
+}
+
 /// Read the `changed_tick` change-detection sidecar of `comp_id`'s slot on
 /// `entity` (test helper) — the value a `changed` filter compares against
 /// `last_run_tick` (`engine-ecs-internals.md` §5). Surfaces the spawn-tick
@@ -10136,24 +10323,28 @@ test "await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60) 
     try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
 }
 
-test "entity_event fails loud in evalAwaitTarget until the E4 lift (M1.0.14 E2 pin)" {
+test "future is the sole await target the wake-resolver rejects (M1.0.14 E4 — boundary pin flipped)" {
     const gpa = std.testing.allocator;
-    // `entity_event` type-checks (M1.0.14 E2) but its runtime lands in E4. No
-    // Etch program can REACH the fail-loud site yet: a parameterized async rule
-    // hits the entity-bound `runAsyncRule` guard first (entity-bound async rules
-    // are E3), so a program-driven test would fail loud for the WRONG reason.
-    // The boundary is therefore pinned by calling the private machinery
-    // directly — `evalAwaitTarget` on the `.entity_event` await node must fail
-    // loud. This pin flips at E4 (assert `future` is then the sole target).
+    // The M1.0.13/E2 pin asserted `entity_event` failed loud in the wake-resolver.
+    // M1.0.14 E4 FLIPS it: `entity_event` and `global_event` are now realized —
+    // their wake is built in the live scope by `evalEventWake` (see the E4
+    // resume/filter tests above). `evalAwaitTarget` handles only `wait` /
+    // `wait_unscaled`, so `future` (a genuine `Future<T>` / non-inlined async
+    // return) is the SOLE `await` target it still rejects — the residual
+    // unrealized target after this milestone.
     var world = World.init();
     defer world.deinit(gpa);
     var pr = try parser_mod.parse(gpa,
-        \\component C { }
-        \\event Ev { who: Entity }
-        \\async rule r(e: Entity)
-        \\  when e has C
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
         \\{
-        \\  await entity_event(e, Ev)
+        \\  let h = spawn {
+        \\    await wait(0.02s)
+        \\    let s = get_mut(Out)
+        \\    s.n = 7
+        \\  }
+        \\  await h
         \\}
     );
     defer pr.deinit(gpa);
@@ -10169,14 +10360,14 @@ test "entity_event fails loud in evalAwaitTarget until the E4 lift (M1.0.14 E2 p
     var interp = try Interpreter.compile(gpa, &pr.ast, &world);
     defer interp.deinit();
 
-    // Navigate to the `await entity_event(e, Ev)` node in rule `r`'s body.
+    // Navigate to the `await h` node (2nd statement) in rule `r`'s body — the
+    // handle-await form is a `.future` target.
     const rule = pr.ast.rule_decls.items[0];
-    const stmt: NodeId = @bitCast(pr.ast.extra.items[rule.body_start]);
+    const stmt: NodeId = @bitCast(pr.ast.extra.items[rule.body_start + 1]);
     const await_id: NodeId = @bitCast(pr.ast.stmtData(stmt));
     try std.testing.expectEqual(ast_mod.ExprKind.await_expr, pr.ast.exprKind(await_id));
-    try std.testing.expectEqual(ast_mod.AwaitTargetKind.entity_event, pr.ast.awaitExpr(await_id).target_kind);
-
-    // The direct pin: `entity_event` is not yet realized → fail loud (until E4).
+    try std.testing.expectEqual(ast_mod.AwaitTargetKind.future, pr.ast.awaitExpr(await_id).target_kind);
+    // `future` is the residual fail-loud target of the wake-resolver.
     try std.testing.expectError(error.RuntimeFailure, interp.evalAwaitTarget(await_id));
 }
 
@@ -10452,6 +10643,342 @@ test "async rule shape guard: parameterless byte-stable, dt param fail-loud (M1.
         try std.testing.expect(rep.runtime_errors >= 1);
         try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out)); // body never ran
     }
+}
+
+test "entity_event: wakes for the matching designated entity, not a different one (M1.0.14 E4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // `producer` emits `Done { who: e }` for every Trig entity; the entity-bound
+    // `watch` awaits `entity_event(e, Done)` — the designated field is the single
+    // structural `Entity` field `who`. e1 has Trig (so a Done{who:e1} is emitted);
+    // e2 does not. Only watch(e1) must wake.
+    var pr = try parser_mod.parse(gpa,
+        \\component NPC { v: int = 0 }
+        \\component Woke { n: int = 0 }
+        \\component Trig { v: int = 0 }
+        \\event Done { who: Entity }
+        \\rule producer(e: Entity)
+        \\  when e has Trig
+        \\{
+        \\  emit Done { who: e }
+        \\}
+        \\async rule watch(e: Entity)
+        \\  when e has NPC and e has Woke
+        \\{
+        \\  await entity_event(e, Done)
+        \\  let w = e.get_mut(Woke)
+        \\  w.n = w.n + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const npc = world.registry.idOf("NPC").?;
+    const woke = world.registry.idOf("Woke").?;
+    const trig = world.registry.idOf("Trig").?;
+    const e1 = try world.spawnDynamic(gpa, &[_]ComponentId{ npc, woke, trig });
+    const e2 = try world.spawnDynamic(gpa, &[_]ComponentId{ npc, woke });
+    _ = try interp.runFor(&world, 6);
+    try std.testing.expect(readI64Field(&world, woke, e1) >= 1); // matching designated entity woke
+    try std.testing.expectEqual(@as(i64, 0), readI64Field(&world, woke, e2)); // a different entity never woke
+}
+
+test "global_event payload filter: int match/mismatch + string byte-equality (M1.0.14 E4)" {
+    const gpa = std.testing.allocator;
+
+    // A) int filter MATCH — producer emits Q{id:7}, awaiter filters {id:7} → wakes once.
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa,
+            \\event Q { id: int }
+            \\resource Out { n: int = 0 }
+            \\rule producer()
+            \\  when resource Out
+            \\{
+            \\  emit Q { id: 7 }
+            \\}
+            \\async rule watch()
+            \\  when resource Out
+            \\{
+            \\  await global_event(Q { id: 7 })
+            \\  let o = get_mut(Out)
+            \\  o.n = o.n + 1
+            \\}
+        );
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const out = world.registry.idOf("Out").?;
+        _ = try interp.runFor(&world, 4);
+        try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // matched (parameterless: no re-arm)
+    }
+
+    // B) int filter MISMATCH — producer emits Q{id:9}, awaiter filters {id:7} → never wakes.
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa,
+            \\event Q { id: int }
+            \\resource Out { n: int = 0 }
+            \\rule producer()
+            \\  when resource Out
+            \\{
+            \\  emit Q { id: 9 }
+            \\}
+            \\async rule watch()
+            \\  when resource Out
+            \\{
+            \\  await global_event(Q { id: 7 })
+            \\  let o = get_mut(Out)
+            \\  o.n = o.n + 1
+            \\}
+        );
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const out = world.registry.idOf("Out").?;
+        _ = try interp.runFor(&world, 4);
+        try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out)); // filter never matched
+    }
+
+    // C) string filter across DIFFERENT string tags — the emitted `text` reads a
+    //    resource string (`.string_persistent`, persistent-heap-backed), the filter
+    //    literal is a `.string_id`. They match only because the comparator
+    //    BYTE-compares strings (`Value.eql` tag-mismatches string_persistent vs
+    //    string_id → false). This pins the E4 `stringBytes` path. (An emitted
+    //    runtime-CONCAT string would be a body-scoped `.string_run` and is a
+    //    pre-existing emit/string-lifetime limitation, orthogonal to E4.)
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa,
+            \\event Msg { text: string }
+            \\resource Out { n: int = 0 }
+            \\resource Cfg { name: string = "go" }
+            \\rule producer()
+            \\  when resource Out and resource Cfg
+            \\{
+            \\  emit Msg { text: get(Cfg).name }
+            \\}
+            \\async rule watch()
+            \\  when resource Out
+            \\{
+            \\  await global_event(Msg { text: "go" })
+            \\  let o = get_mut(Out)
+            \\  o.n = o.n + 1
+            \\}
+        );
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const out = world.registry.idOf("Out").?;
+        _ = try interp.runFor(&world, 4);
+        try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // byte-equal string matched
+    }
+}
+
+test "entity_event: @entity_target designates the matched field on a two-Entity event (M1.0.14 E4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // `Hit` has two Entity fields; `@entity_target target` is the designated one.
+    // `producer` (on the Link entity) emits Hit{source: itself, target: its
+    // Link.other} — so source != target. The awaiter is on the `target` entity;
+    // it must wake because the designation is `target`, NOT the structurally-first
+    // `source` (which would be the producer's own entity, never the awaiter).
+    var pr = try parser_mod.parse(gpa,
+        \\component NPC { v: int = 0 }
+        \\component Woke { n: int = 0 }
+        \\component Link { other: Entity }
+        \\event Hit { source: Entity, @entity_target target: Entity }
+        \\rule producer(e: Entity)
+        \\  when e has Link
+        \\{
+        \\  emit Hit { source: e, target: e.get(Link).other }
+        \\}
+        \\async rule watch(e: Entity)
+        \\  when e has NPC and e has Woke
+        \\{
+        \\  await entity_event(e, Hit)
+        \\  let w = e.get_mut(Woke)
+        \\  w.n = w.n + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const npc = world.registry.idOf("NPC").?;
+    const woke = world.registry.idOf("Woke").?;
+    const link = world.registry.idOf("Link").?;
+    const e_target = try world.spawnDynamic(gpa, &[_]ComponentId{ npc, woke });
+    var target_bits: u64 = @bitCast(e_target);
+    _ = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{link}, &[_][]const u8{std.mem.asBytes(&target_bits)});
+    _ = try interp.runFor(&world, 6);
+    try std.testing.expect(readI64Field(&world, woke, e_target) >= 1); // woke via the @entity_target field
+}
+
+test "entity_event: payload filter match/mismatch + `let x = await` binds unit (M1.0.14 E4)" {
+    const gpa = std.testing.allocator;
+    const prog =
+        \\component NPC {{ v: int = 0 }}
+        \\component Woke {{ n: int = 0 }}
+        \\component Trig {{ v: int = 0 }}
+        \\event Dmg {{ who: Entity, amount: int }}
+        \\rule producer(e: Entity)
+        \\  when e has Trig
+        \\{{
+        \\  emit Dmg {{ who: e, amount: 10 }}
+        \\}}
+        \\async rule watch(e: Entity)
+        \\  when e has NPC and e has Woke
+        \\{{
+        \\  let x = await entity_event(e, Dmg {{ amount: {d} }})
+        \\  let w = e.get_mut(Woke)
+        \\  w.n = w.n + 1
+        \\}}
+    ;
+
+    // MATCH — filter {amount: 10} equals the emitted amount; `let x = await …`
+    // binds unit and the body runs (the resume delivers unit, not the event).
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        const src = try std.fmt.allocPrint(gpa, prog, .{10});
+        defer gpa.free(src);
+        var pr = try parser_mod.parse(gpa, src);
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const npc = world.registry.idOf("NPC").?;
+        const woke = world.registry.idOf("Woke").?;
+        const trig = world.registry.idOf("Trig").?;
+        const e = try world.spawnDynamic(gpa, &[_]ComponentId{ npc, woke, trig });
+        _ = try interp.runFor(&world, 6);
+        try std.testing.expect(readI64Field(&world, woke, e) >= 1); // filter matched → resumed (x = unit)
+    }
+
+    // MISMATCH — filter {amount: 99} never equals the emitted amount 10.
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        const src = try std.fmt.allocPrint(gpa, prog, .{99});
+        defer gpa.free(src);
+        var pr = try parser_mod.parse(gpa, src);
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const npc = world.registry.idOf("NPC").?;
+        const woke = world.registry.idOf("Woke").?;
+        const trig = world.registry.idOf("Trig").?;
+        const e = try world.spawnDynamic(gpa, &[_]ComponentId{ npc, woke, trig });
+        _ = try interp.runFor(&world, 6);
+        try std.testing.expectEqual(@as(i64, 0), readI64Field(&world, woke, e)); // filter never matched
+    }
+}
+
+test "global_event filter is captured once at suspension, not re-evaluated at poll (M1.0.14 E4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // The filter reads `get(Cfg).want`, initially 7. `producer` emits Q{id:7};
+    // `bump` sets Cfg.want = 9 AFTER the awaiter suspends (rule order: producer,
+    // watch, bump). The wake uses the CAPTURED 7 → it fires. If the filter were
+    // re-evaluated at the poll (== 9), Q{id:7} would never match → n stays 0.
+    var pr = try parser_mod.parse(gpa,
+        \\event Q { id: int }
+        \\resource Out { n: int = 0 }
+        \\resource Cfg { want: int = 7 }
+        \\rule producer()
+        \\  when resource Cfg
+        \\{
+        \\  emit Q { id: 7 }
+        \\}
+        \\async rule watch()
+        \\  when resource Out and resource Cfg
+        \\{
+        \\  await global_event(Q { id: get(Cfg).want })
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n + 1
+        \\}
+        \\rule bump()
+        \\  when resource Cfg
+        \\{
+        \\  let c = get_mut(Cfg)
+        \\  c.want = 9
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out = world.registry.idOf("Out").?;
+    _ = try interp.runFor(&world, 4);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // captured 7 matched despite want→9
 }
 
 test "task pool is pointer-stable and cancelTask parks a suspended task for good (M1.0.12 E1)" {
