@@ -54,6 +54,14 @@ pub const BuiltinType = enum {
     /// rejected as a component/resource field type. `h.cancel()` and `await h`
     /// are its only operations (§9.8).
     task_handle,
+    /// `TimerHandle` (§2.2 builtin, M1.0.13 E4) — the value of a bound timer
+    /// statement (`let t = after(d) { }`). Non-POD (`etch-grammar.md` §2.2):
+    /// like `task_handle` it is deliberately NOT in `fromName`, so it stays
+    /// rejected as a component/resource field type. `t.cancel()` is its ONLY
+    /// operation (§9.10) — a timer is NOT a task: it is not awaitable and
+    /// carries no join semantics. Distinct from `task_handle` by design (two
+    /// different lifecycle models; reusing one for the other is rejected).
+    timer_handle,
 
     pub fn isNumeric(self: BuiltinType) bool {
         return switch (self) {
@@ -91,6 +99,67 @@ pub const BuiltinType = enum {
         return null;
     }
 };
+
+/// Default-value carrier for a builtin-resource field (M1.0.13 E4). The three
+/// time resources only need the POD scalars below.
+pub const BuiltinResourceDefault = union(enum) {
+    float_: f64,
+    int_: i64,
+    bool_: bool,
+};
+
+/// One field of a builtin engine resource (M1.0.13 E4).
+pub const BuiltinResourceField = struct {
+    name: []const u8,
+    type_: BuiltinType,
+    default: BuiltinResourceDefault,
+};
+
+/// A builtin engine resource descriptor (M1.0.13 E4).
+pub const BuiltinResource = struct {
+    name: []const u8,
+    fields: []const BuiltinResourceField,
+};
+
+/// The three builtin engine time resources (M1.0.13,
+/// `engine-gameplay-systems.md` "Les trois temps") — the SINGLE descriptor
+/// table: the type-checker resolves `get(GameTime).dt` /
+/// `get_mut(GameTime).time_scale` against it, and `interp.zig` Pass A
+/// auto-registers the resources from it at the builtin `TagSet` injection
+/// point (E5). No `.etch` prelude, no separate module. `GameTime.fixed_dt`'s
+/// default IS the interpreter's fixed timestep (`1.0 / 60.0`, the M1.0.11
+/// async 60 Hz convention). `UnscaledTime` and `RealTime` are affected by
+/// neither `time_scale` nor `paused`.
+pub const builtin_resources = [_]BuiltinResource{
+    .{ .name = "GameTime", .fields = &.{
+        .{ .name = "dt", .type_ = .float_, .default = .{ .float_ = 0.0 } },
+        .{ .name = "fixed_dt", .type_ = .float_, .default = .{ .float_ = 1.0 / 60.0 } },
+        .{ .name = "total", .type_ = .float_, .default = .{ .float_ = 0.0 } },
+        .{ .name = "time_scale", .type_ = .float_, .default = .{ .float_ = 1.0 } },
+        .{ .name = "frame", .type_ = .int_, .default = .{ .int_ = 0 } },
+        .{ .name = "fixed_frame", .type_ = .int_, .default = .{ .int_ = 0 } },
+        .{ .name = "paused", .type_ = .bool_, .default = .{ .bool_ = false } },
+    } },
+    .{ .name = "UnscaledTime", .fields = &.{
+        .{ .name = "dt", .type_ = .float_, .default = .{ .float_ = 0.0 } },
+        .{ .name = "total", .type_ = .float_, .default = .{ .float_ = 0.0 } },
+    } },
+    .{ .name = "RealTime", .fields = &.{
+        .{ .name = "dt", .type_ = .float_, .default = .{ .float_ = 0.0 } },
+        .{ .name = "total", .type_ = .float_, .default = .{ .float_ = 0.0 } },
+        .{ .name = "since_startup", .type_ = .float_, .default = .{ .float_ = 0.0 } },
+    } },
+};
+
+/// Descriptor lookup by resource name bytes (M1.0.13 E4). Consulted by the
+/// receiver-less `get(T)` resolution and by the builtin-resource field
+/// lookup; `interp.zig` iterates `builtin_resources` directly (E5).
+pub fn builtinResourceByName(name: []const u8) ?*const BuiltinResource {
+    for (&builtin_resources) |*r| {
+        if (std.mem.eql(u8, r.name, name)) return r;
+    }
+    return null;
+}
 
 /// Fixed-array carrier for `ResolvedType.array_fixed`: builtin element type +
 /// compile-time length. E1 collections hold **builtin primitive** elements
@@ -3323,6 +3392,12 @@ pub const TypeChecker = struct {
                     // it is rejected as a field type everywhere (a task
                     // handle is a live runtime identity, never stored state).
                     try self.emit(.undefined_symbol, .error_, tspan, "type 'TaskHandle' is non-POD (etch-grammar.md par. 2.2) and cannot be a field type", .{});
+                } else if (std.mem.eql(u8, tname, "TimerHandle")) {
+                    // M1.0.13 E4 — `TimerHandle` is a non-POD builtin
+                    // (`etch-grammar.md` §2.2): rejected as a field type
+                    // everywhere, the `TaskHandle` precedent (a timer handle
+                    // is a live runtime identity, never stored state).
+                    try self.emit(.undefined_symbol, .error_, tspan, "type 'TimerHandle' is non-POD (etch-grammar.md par. 2.2) and cannot be a field type", .{});
                 } else {
                     try self.emit(.undefined_symbol, .error_, tspan, "unknown type '{s}'", .{tname});
                 }
@@ -4516,7 +4591,57 @@ pub const TypeChecker = struct {
                     try ctx.locals.put(self.gpa, ss.binding, .{ .type_ = .{ .builtin = .task_handle }, .is_mut = false });
                 }
             },
+            .timer_stmt => {
+                // `[let t =] after/every/after_unscaled(d) { }` (M1.0.13 E4,
+                // §9.10). A timer is usable in ANY body, async or not — it
+                // carries no `{async}` effect (absent from the §9.4
+                // builtin-effect table), so there is no E0901 gate on the
+                // statement itself.
+                const ts = self.arena.timer_stmts.items[data];
+                // The duration argument is a full expression typed `Duration`
+                // (§9.10), evaluated once at scheduling time (E6).
+                const arg_t = self.synthExpr(ts.arg, ctx);
+                if (arg_t != .unknown and !(arg_t == .builtin and arg_t.builtin == .duration)) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(ts.arg), "timer argument must be a Duration expression", .{});
+                }
+                try self.checkTimerBodyRun(ctx, ts.body_start, ts.body_len);
+                // The binding types as the builtin `TimerHandle` (§2.2,
+                // non-POD), bound AFTER the body: the callback runs on a
+                // scope snapshot taken at scheduling, before the parent binds
+                // the handle (E6) — the handle does not exist inside the body.
+                if (ts.binding != 0) {
+                    try ctx.locals.put(self.gpa, ts.binding, .{ .type_ = .{ .builtin = .timer_handle }, .is_mut = false });
+                }
+            },
             else => {},
+        }
+    }
+
+    /// Check a timer callback body (M1.0.13 E4, §9.10) — a SYNCHRONOUS
+    /// context: `current_is_async` is forced false so an `await` / async call
+    /// inside it emits `E0901` even when the scheduling rule is async (the
+    /// timer carries no `{async}` effect). The concurrency-branch state
+    /// resets across the boundary too: the callback is a detached synchronous
+    /// context executed run-to-completion at firing (E6), not part of an
+    /// enclosing task branch.
+    fn checkTimerBodyRun(self: *TypeChecker, ctx: *RuleCtx, start: u32, len: u32) TypeError!void {
+        const saved_async = self.current_is_async;
+        const saved_branch = self.conc_branch;
+        const saved_depth = self.conc_loop_depth;
+        const saved_base = self.conc_labels_base;
+        self.current_is_async = false;
+        self.conc_branch = null;
+        self.conc_loop_depth = 0;
+        self.conc_labels_base = self.conc_labels.items.len;
+        defer {
+            self.current_is_async = saved_async;
+            self.conc_branch = saved_branch;
+            self.conc_loop_depth = saved_depth;
+            self.conc_labels_base = saved_base;
+        }
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            try self.checkStmt(ctx, @bitCast(self.arena.extra.items[start + i]));
         }
     }
 
@@ -4748,6 +4873,15 @@ pub const TypeChecker = struct {
                 // (D-S3-resource-receiver). `T` must name a resource; a
                 // component here is the symmetric E0301 error.
                 if (mg.receiver.isNone()) {
+                    // Builtin engine resource (M1.0.13 E4): resolved against
+                    // the `builtin_resources` descriptor table — no AST
+                    // declaration, auto-registered by the runtime (E5). The
+                    // when-clause gate does not apply: the time resources are
+                    // ambient, readable from any rule (the spec examples read
+                    // `get(GameTime).dt` without a `when resource` clause).
+                    if (builtinResourceByName(tname) != null) {
+                        return .{ .resource = mg.type_name };
+                    }
                     if (self.symbols.get(mg.type_name)) |sym| {
                         if (sym.kind == .component) {
                             try self.emit(.resource_expected_component_given, .error_, self.arena.exprSpan(id), "'{s}' is a component — receiver-less get(...) accesses a resource; use entity.get({s})", .{ tname, tname });
@@ -4884,6 +5018,13 @@ pub const TypeChecker = struct {
                     // unit in Phase 1 (spawn bodies have no value channel —
                     // brief Notes); `unknown` ≈ unit, the house convention.
                     if (t == .builtin and t.builtin == .task_handle) return ResolvedType.unknown;
+                    // A `TimerHandle` is NOT awaitable (M1.0.13 E4, §9.10):
+                    // a timer is not a task — no join semantics. Precise
+                    // message ahead of the generic rejection below.
+                    if (t == .builtin and t.builtin == .timer_handle) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(aw.arg_expr), "a TimerHandle is not awaitable — a timer is not a task (its only operation is 'cancel()', par. 9.10)", .{});
+                        return ResolvedType.unknown;
+                    }
                     if (t != .unknown) {
                         try self.emit(.type_mismatch, .error_, self.arena.exprSpan(aw.arg_expr), "await target must be a direct async call or a TaskHandle", .{});
                     }
@@ -5900,6 +6041,21 @@ pub const TypeChecker = struct {
             return ResolvedType.unknown;
         }
 
+        // M1.0.13 E4 — builtin TimerHandle method (§9.10): `cancel()` — no
+        // args, statement-effect (`unknown` ≈ unit), idempotent at runtime
+        // (E6). Its ONLY operation: a timer is not a task — no `await t`,
+        // no join, nothing else.
+        if (recv_t == .builtin and recv_t.builtin == .timer_handle) {
+            if (std.mem.eql(u8, method_slice, "cancel")) {
+                if (mc.args_len != 0) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "TimerHandle method 'cancel' takes no arguments", .{});
+                }
+                return ResolvedType.unknown;
+            }
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on a TimerHandle (only 'cancel()'; a timer is not awaitable)", .{method_slice});
+            return ResolvedType.unknown;
+        }
+
         // M1.0.9 B2 — builtin extension methods on an `Entity` receiver, checked
         // BEFORE the trait-method resolution below (these are interpreter builtins,
         // not user traits; any other method on an Entity falls through to the
@@ -6395,6 +6551,17 @@ pub const TypeChecker = struct {
                 return ResolvedType.unknown;
             },
             .resource => |name_id| {
+                // Builtin engine resource (M1.0.13 E4): fields resolve
+                // against the `builtin_resources` descriptor table (there is
+                // no AST declaration to consult).
+                if (builtinResourceByName(self.arena.strings.slice(name_id))) |br| {
+                    const fname = self.arena.strings.slice(field_name);
+                    for (br.fields) |f| {
+                        if (std.mem.eql(u8, fname, f.name)) return .{ .builtin = f.type_ };
+                    }
+                    try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on builtin resource '{s}'", .{ fname, br.name });
+                    return ResolvedType.unknown;
+                }
                 const sym = self.symbols.get(name_id) orelse return ResolvedType.unknown;
                 const decl = self.arena.resource_decls.items[self.arena.itemData(sym.item_id)];
                 var i: u32 = 0;
@@ -10197,6 +10364,191 @@ test "TaskHandle is rejected as a component/resource field type (M1.0.12 E3)" {
         if (d.code == .undefined_symbol) count += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "timer: binding typed TimerHandle, cancel accepted, expression arg, non-async rule (M1.0.13 E4)" {
+    const gpa = std.testing.allocator;
+    // A bound timer types `t` as the builtin TimerHandle; `cancel()` is its
+    // only operation (§9.10). Timers carry no `{async}` effect: they are
+    // legal in a plain (non-async) rule. The duration argument is a full
+    // expression — a `Duration` variable is accepted.
+    var ok = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\event Boom { }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let d = 1.5s
+        \\  let t = after(d) {
+        \\    emit Boom { }
+        \\  }
+        \\  t.cancel()
+        \\  every(30.0s) { }
+        \\  after_unscaled(0.5s) { }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // `cancel` with arguments, and any other method on a TimerHandle → E0200.
+    var badm = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let t = after(1.0s) { }
+        \\  t.cancel(1)
+        \\  t.join()
+        \\}
+    );
+    defer badm.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), badm.parse_diags.len);
+    var count: usize = 0;
+    for (badm.diagnostics.items) |d| {
+        if (d.code == .type_mismatch) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "timer: await on a TimerHandle is rejected — a timer is not a task (M1.0.13 E4)" {
+    const gpa = std.testing.allocator;
+    var bad = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  let t = after(1.0s) { }
+        \\  await t
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), bad.parse_diags.len);
+    try expectAnyCode(bad.diagnostics.items, .type_mismatch);
+}
+
+test "TimerHandle is rejected as a component/resource field type (M1.0.13 E4)" {
+    const gpa = std.testing.allocator;
+    // Non-POD builtin (§2.2) — the TaskHandle precedent: a `TimerHandle`
+    // field is rejected on both a component and a resource.
+    var bad = try parseAndCheck(gpa,
+        \\component C { t: TimerHandle }
+        \\resource R { t: TimerHandle }
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), bad.parse_diags.len);
+    var count: usize = 0;
+    for (bad.diagnostics.items) |d| {
+        if (d.code == .undefined_symbol) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "timer: non-Duration argument is rejected (M1.0.13 E4)" {
+    const gpa = std.testing.allocator;
+    var bad = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  after(5) { }
+        \\  every(true) { }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), bad.parse_diags.len);
+    var count: usize = 0;
+    for (bad.diagnostics.items) |d| {
+        if (d.code == .type_mismatch) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "timer body is a synchronous context: await/async call inside is E0901 (M1.0.13 E4)" {
+    const gpa = std.testing.allocator;
+    // §9.10: the timer body carries no `{async}` effect — an `await` or an
+    // async call inside it is E0901 even when the SCHEDULING rule is async.
+    var bad = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\async fn f() {
+        \\  await wait(0.02s)
+        \\}
+        \\async rule r()
+        \\  when resource Out
+        \\{
+        \\  after(1.0s) {
+        \\    await wait(0.5s)
+        \\  }
+        \\  every(1.0s) {
+        \\    f()
+        \\  }
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), bad.parse_diags.len);
+    var count: usize = 0;
+    for (bad.diagnostics.items) |d| {
+        if (d.code == .async_call_in_non_async_context) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+
+    // A deferred structural mutation and an emit stay LEGAL in the body —
+    // the synchronous context only refuses the async effect.
+    var ok = try parseAndCheck(gpa,
+        \\resource Out { n: int = 0 }
+        \\component Health { current: f32 = 100.0 }
+        \\event Boom { }
+        \\rule r(entity: Entity)
+        \\  when entity has Health and resource Out
+        \\{
+        \\  after(2.0s) {
+        \\    emit Boom { }
+        \\    entity.remove(Health)
+        \\  }
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+}
+
+test "builtin time resources resolve by name from the descriptor table (M1.0.13 E4)" {
+    const gpa = std.testing.allocator;
+    // `get(GameTime).dt` / `get_mut(GameTime).time_scale` resolve against
+    // `builtin_resources` — no declaration, no `when resource` clause (the
+    // time resources are ambient; `Out` alone is in the when).
+    var ok = try parseAndCheck(gpa,
+        \\resource Out { total: float = 0.0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let scaled: float = get(GameTime).dt
+        \\  let fixed: float = get(GameTime).fixed_dt
+        \\  let frames: int = get(GameTime).frame
+        \\  let halted: bool = get(GameTime).paused
+        \\  get_mut(GameTime).time_scale = 0.5
+        \\  get_mut(GameTime).paused = true
+        \\  let u: float = get(UnscaledTime).dt
+        \\  let startup: float = get(RealTime).since_startup
+        \\  get_mut(Out).total = get(UnscaledTime).total
+        \\}
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.parse_diags.len);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // An unknown field on a builtin resource is caught against the table.
+    var bad = try parseAndCheck(gpa,
+        \\resource Out { total: float = 0.0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  let x = get(GameTime).nope
+        \\}
+    );
+    defer bad.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), bad.parse_diags.len);
+    try expectAnyCode(bad.diagnostics.items, .invalid_field_filter);
 }
 
 test "conditional branch guards type-check as bool in the parent scope (M1.0.12 E3)" {

@@ -113,6 +113,8 @@ pub const TokenKind = enum {
     kw_spawn, // structural spawn expr `spawn(C{…})` (M1.0.10, §3.2 structural_spawn) + the async task statement `[let IDENT =] spawn { }` (M1.0.12, §4.2 spawn_stmt) — disambiguated by the next token
     kw_race, // race statement `race { race_branch* }` (M1.0.12 — graduated from non_s3_keywords; §4.2 race_stmt)
     kw_sync, // sync statement `sync { sync_branch* }` (M1.0.12 — graduated from non_s3_keywords; §4.2 sync_stmt)
+    kw_every, // repeating timer statement `[let IDENT =] every(d) { }` (M1.0.13 — graduated from non_s3_keywords; §4.3 timer_stmt)
+    kw_after_unscaled, // unscaled one-shot timer statement `[let IDENT =] after_unscaled(d) { }` (M1.0.13 — graduated from non_s3_keywords; §4.3 timer_stmt)
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -283,6 +285,8 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "spawn", .kind = .kw_spawn },
     .{ .lexeme = "race", .kind = .kw_race },
     .{ .lexeme = "sync", .kind = .kw_sync },
+    .{ .lexeme = "every", .kind = .kw_every },
+    .{ .lexeme = "after_unscaled", .kind = .kw_after_unscaled },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },
@@ -326,10 +330,11 @@ pub const non_s3_keywords = [_][]const u8{
     //    `race` / `sync` with M1.0.12 (concurrency algebra, §4.2) ──
 
     // ── Timers / lifecycle (out of S3; `emit` graduated with E3 ECS layer;
-    //    `after` graduated with E4 routine triggers — the §4.3 timer
-    //    statement keeps an explicit fail-loud parse error) ──
-    "every",
-    "after_unscaled",
+    //    `after` graduated with E4 routine triggers; `every` / `after_unscaled`
+    //    graduated with M1.0.13 — the §4.3 timer statement parses and executes.
+    //    `quantize` stays reserved: its musical beat/bar clock (Sequencer /
+    //    Pulse) is absent from the Phase-1 runtime, so its realization is
+    //    assigned to a later Sequencer-adjacent milestone) ──
     "quantize",
 
     // Note: `where`, `self`, `none`, `some` are intentionally NOT listed —
@@ -414,8 +419,7 @@ test "race/sync graduate to s3 keywords (M1.0.12 E2)" {
     // M1.0.12: `race` / `sync` move from the reserve list into `s3_keywords`,
     // mapped to `kw_race` / `kw_sync` — the concurrency-algebra statements
     // (§4.2) become parseable. `override` remains the last reserved top-level
-    // construct keyword (waits for a Tier-1 overridable module); the timer
-    // family (`every` / `after_unscaled` / `quantize`) waits for M1.0.13.
+    // construct keyword (waits for a Tier-1 overridable module).
     const T = struct {
         fn s3Kind(lexeme: []const u8) ?TokenKind {
             for (s3_keywords) |kw| {
@@ -434,13 +438,45 @@ test "race/sync graduate to s3 keywords (M1.0.12 E2)" {
     try std.testing.expectEqual(TokenKind.kw_sync, T.s3Kind("sync").?);
     try std.testing.expect(!T.reserved("race"));
     try std.testing.expect(!T.reserved("sync"));
-    // `override` stays reserved; the timers stay reserved until M1.0.13.
+    // `override` stays reserved.
     try std.testing.expect(T.reserved("override"));
-    try std.testing.expect(T.reserved("every"));
-    try std.testing.expect(T.reserved("after_unscaled"));
-    try std.testing.expect(T.reserved("quantize"));
     // Graduated keywords sit inside the contiguous keyword range (tag-path
     // contextual acceptance via `isKeywordToken`).
     try std.testing.expect(isKeywordToken(.kw_race));
     try std.testing.expect(isKeywordToken(.kw_sync));
+}
+
+test "every/after_unscaled graduate to s3 keywords (M1.0.13 E1)" {
+    // M1.0.13: `every` / `after_unscaled` move from the reserve list into
+    // `s3_keywords`, mapped to `kw_every` / `kw_after_unscaled` — the §4.3
+    // timer statements become parseable (`after` has been a real keyword
+    // since M0.8 E4 routine triggers). `quantize` stays reserved: its
+    // musical clock is absent from the Phase-1 runtime.
+    const T = struct {
+        fn s3Kind(lexeme: []const u8) ?TokenKind {
+            for (s3_keywords) |kw| {
+                if (std.mem.eql(u8, kw.lexeme, lexeme)) return kw.kind;
+            }
+            return null;
+        }
+        fn reserved(lexeme: []const u8) bool {
+            for (non_s3_keywords) |kw| {
+                if (std.mem.eql(u8, kw, lexeme)) return true;
+            }
+            return false;
+        }
+    };
+    try std.testing.expectEqual(TokenKind.kw_every, T.s3Kind("every").?);
+    try std.testing.expectEqual(TokenKind.kw_after_unscaled, T.s3Kind("after_unscaled").?);
+    try std.testing.expect(!T.reserved("every"));
+    try std.testing.expect(!T.reserved("after_unscaled"));
+    // `quantize` stays reserved (still lexes to error_unknown_keyword);
+    // `override` stays the last reserved top-level construct keyword.
+    try std.testing.expect(T.s3Kind("quantize") == null);
+    try std.testing.expect(T.reserved("quantize"));
+    try std.testing.expect(T.reserved("override"));
+    // Graduated keywords sit inside the contiguous keyword range (tag-path
+    // contextual acceptance via `isKeywordToken`).
+    try std.testing.expect(isKeywordToken(.kw_every));
+    try std.testing.expect(isKeywordToken(.kw_after_unscaled));
 }

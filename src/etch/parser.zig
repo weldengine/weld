@@ -727,7 +727,17 @@ pub const Parser = struct {
         switch (self.peek()) {
             .error_byte => return self.parseErrFmt(self.peekSpan(), "unexpected byte '{s}'", .{self.sliceOf(self.peekSpan())}),
             .error_utf8 => return self.parseErr(self.peekSpan(), "invalid UTF-8 sequence"),
-            .error_unknown_keyword => return self.parseErrFmt(self.peekSpan(), "Etch keyword '{s}' is not supported in S3 (UnsupportedConstructInS3)", .{self.sliceOf(self.peekSpan())}),
+            .error_unknown_keyword => {
+                const lexeme = self.sliceOf(self.peekSpan());
+                // §4.3 `quantize_stmt` stays reserved (M1.0.13): its beat/bar
+                // musical clock (Sequencer / Pulse) is absent from the Phase-1
+                // runtime — explicit fail-loud pointing at the milestone that
+                // owns it, instead of the generic reserved-keyword message.
+                if (std.mem.eql(u8, lexeme, "quantize")) {
+                    return self.parseErr(self.peekSpan(), "quantize statements need the Sequencer beat/bar musical clock; 'quantize' stays reserved until a later Sequencer-adjacent milestone");
+                }
+                return self.parseErrFmt(self.peekSpan(), "Etch keyword '{s}' is not supported in S3 (UnsupportedConstructInS3)", .{lexeme});
+            },
             else => {},
         }
     }
@@ -5274,6 +5284,9 @@ pub const Parser = struct {
             // structural `spawn (` stays on the expression path.
             .kw_race, .kw_sync, .kw_branch => true,
             .kw_spawn => self.peekNext() == .lbrace,
+            // The §4.3 timer statements (M1.0.13 E3) — never a block's
+            // trailing value.
+            .kw_after, .kw_every, .kw_after_unscaled => true,
             .ident => self.peekNext() == .colon, // labeled loop `outer:`
             else => false,
         };
@@ -5702,6 +5715,46 @@ pub const Parser = struct {
         }, .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end });
     }
 
+    /// True when `kind` heads a §4.3 timer statement (M1.0.13 E3).
+    fn isTimerKindToken(kind: TokenKind) bool {
+        return switch (kind) {
+            .kw_after, .kw_every, .kw_after_unscaled => true,
+            else => false,
+        };
+    }
+
+    /// Parse `timer_kind "(" expression ")" block` (M1.0.13 E3,
+    /// `etch-grammar.md` §4.3 `timer_stmt`). `binding` is the `let` name for
+    /// the bound form `let t = after(d) { }` (dispatched from `parseLetStmt`;
+    /// `0` = discarded handle); `start_span` is the statement's first token
+    /// (`let` or the timer keyword). The duration argument is a FULL
+    /// expression, evaluated once at scheduling time (E5) — not restricted to
+    /// a literal, unlike `await wait` (M1.0.11). The body is a statement run
+    /// (the branch/spawn layout); its synchronous-context enforcement (`await`
+    /// inside → `E0901`) is the type-checker's job (E4).
+    fn parseTimerStmt(self: *Parser, binding: StringId, start_span: SourceSpan) ParseError!NodeId {
+        const kw = try self.advance(); // 'after' / 'every' / 'after_unscaled'
+        const kind: ast_mod.TimerKind = switch (kw.kind) {
+            .kw_after => .after,
+            .kw_every => .every,
+            .kw_after_unscaled => .after_unscaled,
+            else => unreachable, // dispatch is gated on isTimerKindToken
+        };
+        _ = try self.expect(.lparen, "expected '(' after the timer keyword");
+        const arg = try self.parseExpr(0);
+        _ = try self.expect(.rparen, "expected ')' to close the timer duration argument");
+        _ = try self.expect(.lbrace, "expected '{' to open the timer body");
+        const body = try self.parseStmtRun();
+        const closing = try self.expect(.rbrace, "expected '}' to close the timer body");
+        return try self.arena.addTimerStmt(self.gpa, .{
+            .kind = kind,
+            .arg = arg,
+            .body_start = body.start,
+            .body_len = body.len,
+            .binding = binding,
+        }, .{ .byte_start = start_span.byte_start, .byte_end = closing.span.byte_end });
+    }
+
     fn parseStmt(self: *Parser) ParseError!NodeId {
         if (self.peek() == .kw_branch) {
             // The async `branch { }` statement (M1.0.12 E2, §4.2 branch_stmt).
@@ -5722,12 +5775,12 @@ pub const Parser = struct {
         if (self.peek() == .kw_spawn and self.peekNext() == .lbrace) {
             return try self.parseSpawnStmt(0, self.peekSpan());
         }
-        if (self.peek() == .kw_after) {
-            // `after` graduated to a keyword for routine triggers (M0.8 E4);
-            // the §4.3 timer statement it also heads stays out of M0.8 —
-            // keep the fail-loud explicit (it lexed `error_unknown_keyword`
-            // before the graduation).
-            return self.parseErr(self.peekSpan(), "timer statements ('after ...') are not in M0.8 scope (Phase 2)");
+        if (isTimerKindToken(self.peek())) {
+            // §4.3 timer statement, unbound form (M1.0.13 E3) — the bound form
+            // `let t = after(d) { }` is dispatched inside `parseLetStmt`. The
+            // routine-trigger `after Segment` context is parsed inside the
+            // routine construct parser and never reaches statement position.
+            return try self.parseTimerStmt(0, self.peekSpan());
         }
         if (self.peek() == .kw_let) {
             return try self.parseLetStmt();
@@ -5816,6 +5869,21 @@ pub const Parser = struct {
                 return self.parseErr(self.peekSpan(), "a spawn task binding takes the form 'let IDENT = spawn { ... }' — a type annotation is not part of the spawn_stmt grammar (§4.2)");
             }
             return try self.parseSpawnStmt(name_id, let_span);
+        }
+        // `let t = after(d) { }` — the bound timer statement (M1.0.13 E3, §4.3
+        // `timer_stmt = [ "let" IDENT "=" ] timer_kind "(" expression ")"
+        // block`): as with `spawn_stmt`, the binding is PART of the timer
+        // statement, not a let-stmt whose initializer is a timer. The grammar
+        // admits neither `mut` nor a type annotation on this form (the handle
+        // types as the builtin `TimerHandle`, E4).
+        if (isTimerKindToken(self.peek())) {
+            if (is_mut) {
+                return self.parseErr(self.peekSpan(), "a timer binding takes the form 'let IDENT = after(d) { ... }' — 'mut' is not part of the timer_stmt grammar (§4.3)");
+            }
+            if (!type_annotation.isNone()) {
+                return self.parseErr(self.peekSpan(), "a timer binding takes the form 'let IDENT = after(d) { ... }' — a type annotation is not part of the timer_stmt grammar (§4.3)");
+            }
+            return try self.parseTimerStmt(name_id, let_span);
         }
         const value = try self.parseExpr(0);
         const span: SourceSpan = .{
@@ -8667,15 +8735,124 @@ test "parser rejects routine clause-order and shape violations (M0.8 E4)" {
     try std.testing.expect(bad_time.diagnostics.len > 0);
 }
 
-test "parser rejects the out-of-scope timer statement after kw_after graduation (M0.8 E4)" {
+test "timer statements parse: unbound forms, expression arg (M1.0.13 E3)" {
     const gpa = std.testing.allocator;
     var result = try parse(gpa,
         \\rule r(entity: Entity) when entity has Health {
-        \\  after 2.0 { }
+        \\  after(2.0s) {
+        \\    entity.get_mut(Health).current += 1.0
+        \\  }
+        \\  every(30.0s) { }
+        \\  after_unscaled(0.5s) { }
+        \\  let d = 1.5s
+        \\  after(d) { }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    var buf: [8]ast_mod.StmtKind = undefined;
+    const kinds = firstRuleBodyKinds(&result, &buf);
+    try std.testing.expectEqualSlices(ast_mod.StmtKind, &.{ .timer_stmt, .timer_stmt, .timer_stmt, .let_stmt, .timer_stmt }, kinds);
+    const timers = result.ast.timer_stmts.items;
+    try std.testing.expectEqual(@as(usize, 4), timers.len);
+    try std.testing.expectEqual(ast_mod.TimerKind.after, timers[0].kind);
+    try std.testing.expectEqual(@as(u32, 1), timers[0].body_len);
+    try std.testing.expectEqual(@as(u32, 0), timers[0].binding);
+    try std.testing.expectEqual(ast_mod.TimerKind.every, timers[1].kind);
+    try std.testing.expectEqual(@as(u32, 0), timers[1].body_len);
+    try std.testing.expectEqual(ast_mod.TimerKind.after_unscaled, timers[2].kind);
+    // The duration argument is a full expression (§9.10): a variable is
+    // accepted at parse — `after(d)` carries an ident arg, not a literal.
+    try std.testing.expectEqual(ast_mod.ExprKind.duration_lit, result.ast.exprKind(timers[0].arg));
+    try std.testing.expectEqual(ast_mod.ExprKind.ident, result.ast.exprKind(timers[3].arg));
+}
+
+test "bound timer parses as a TimerStmt, not a let_stmt (M1.0.13 E3)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\event Boom { }
+        \\rule r() {
+        \\  let t = after(5.0s) {
+        \\    emit Boom { }
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.timer_stmts.items.len);
+    const timer = result.ast.timer_stmts.items[0];
+    try std.testing.expectEqual(ast_mod.TimerKind.after, timer.kind);
+    try std.testing.expectEqualStrings("t", result.ast.strings.slice(timer.binding));
+    try std.testing.expectEqual(@as(u32, 1), timer.body_len);
+    // No let-stmt was produced for the bound form (the binding is part of
+    // the timer statement — the SpawnStmt precedent).
+    try std.testing.expectEqual(@as(usize, 0), result.ast.let_stmts.items.len);
+}
+
+test "timer statement routes inside a value block (M1.0.13 E3)" {
+    const gpa = std.testing.allocator;
+    // `startsKeywordStmt` must route the timer keywords to `parseStmt` in a
+    // value-block body so the trailing value stays detectable.
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  let x = {
+        \\    every(1.0s) { }
+        \\    3
+        \\  }
+        \\}
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.timer_stmts.items.len);
+    try std.testing.expectEqual(ast_mod.TimerKind.every, result.ast.timer_stmts.items[0].kind);
+}
+
+test "timer binding form rejects mut and type annotation (M1.0.13 E3)" {
+    const gpa = std.testing.allocator;
+    // §4.3: `timer_stmt = [ "let" IDENT "=" ] timer_kind "(" expression ")"
+    // block` — no `mut`, no type annotation on the binding.
+    var r1 = try parse(gpa,
+        \\rule r() {
+        \\  let mut t = after(1.0s) { }
+        \\}
+    );
+    defer r1.deinit(gpa);
+    try std.testing.expect(r1.diagnostics.len > 0);
+    try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, r1.diagnostics[0].code);
+    var r2 = try parse(gpa,
+        \\rule r() {
+        \\  let t: int = after(1.0s) { }
+        \\}
+    );
+    defer r2.deinit(gpa);
+    try std.testing.expect(r2.diagnostics.len > 0);
+    try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, r2.diagnostics[0].code);
+}
+
+test "quantize still fail-louds at the statement head (M1.0.13 E3)" {
+    const gpa = std.testing.allocator;
+    var result = try parse(gpa,
+        \\rule r() {
+        \\  quantize(.next_beat) { }
         \\}
     );
     defer result.deinit(gpa);
     try std.testing.expect(result.diagnostics.len > 0);
+    try std.testing.expectEqual(diag_mod.DiagnosticCode.parse_error, result.diagnostics[0].code);
+    // The message is re-pointed at the Sequencer-adjacent milestone — the
+    // stale "Phase 2" wording is gone.
+    const msg = result.diagnostics[0].primary_message;
+    try std.testing.expect(std.mem.indexOf(u8, msg, "Sequencer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "Phase 2") == null);
 }
 
 test "parser recovers and a valid routine after a broken construct survives (M0.8 E4 lockstep)" {

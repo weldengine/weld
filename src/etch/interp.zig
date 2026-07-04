@@ -514,12 +514,92 @@ const Control = enum { none, break_, continue_ };
 /// What an enclosing loop should do once a control signal has surfaced.
 const LoopAction = enum { again, stop, propagate };
 
-/// Phase-1 fixed-timestep tick rate (`etch-reference-part1.md §9.12`): `await
-/// wait(d)` converts a `Duration` to `async_tick` counts as `round(seconds *
-/// 60)` — the 1/60 frame convention. M1.0.13 replaces this with scaled game time
-/// WITHOUT changing the `wait` signature: at `time_scale = 1` and fixed `dt =
-/// 1/60`, the behavior is identical.
+/// Phase-1 fixed-timestep tick rate (`etch-reference-part1.md §9.12`): one
+/// `stepOnce` = one fixed 1/60 tick. `await wait(d)` converts a `Duration` to
+/// whole ticks as `round(seconds * 60)` and schedules them on the GAME clock
+/// (scaled by `time_scale`, frozen under `paused` — M1.0.13 E5);
+/// `wait_unscaled(d)` schedules the same conversion on the UNSCALED clock. At
+/// `time_scale = 1` the wake ticks are byte-identical to the pre-M1.0.13
+/// integer conversion. Also the default of the builtin `GameTime.fixed_dt`
+/// resource field (`types.builtin_resources`).
 const async_fixed_dt_hz: f64 = 60.0;
+
+/// Seconds per fixed tick — the `dt` the time subsystem publishes each
+/// `stepOnce` (M1.0.13 E5, `engine-gameplay-systems.md` "Les trois temps").
+const fixed_dt_secs: f64 = 1.0 / async_fixed_dt_hz;
+
+/// Resolved runtime handles of the three builtin time resources (M1.0.13 E5):
+/// registry ids plus the byte offsets of every field `advanceTime` writes.
+/// Resolved once in `compile`, right after the Pass-A registration from
+/// `types.builtin_resources` (the ids and offsets are layout-stable for the
+/// interpreter's lifetime — hot reload reuses the existing registration).
+const TimeResources = struct {
+    game_id: ComponentId,
+    unscaled_id: ComponentId,
+    real_id: ComponentId,
+    game_dt: u16,
+    game_total: u16,
+    game_time_scale: u16,
+    game_frame: u16,
+    game_fixed_frame: u16,
+    game_paused: u16,
+    unscaled_dt: u16,
+    unscaled_total: u16,
+    real_dt: u16,
+    real_total: u16,
+    real_since_startup: u16,
+};
+
+/// One scheduled timer (M1.0.13 E6, `etch-reference-part1.md` §9.10/§9.12) —
+/// a heap record in the `Interpreter.timers` registry, DISTINCT from the task
+/// pool (a timer is not a task: no join, no frames, no wake condition). The
+/// registry has the same monotone pointer-stable + husk discipline as the
+/// M1.0.12 task pool: records are allocated individually (a callback that
+/// schedules a timer appends mid-scan without invalidating live pointers),
+/// slots are never reused (a fired one-shot or a canceled timer parks as a
+/// husk with its snapshot freed) — so a `TimerHandle` is a safe bare index,
+/// no generations.
+const TimerEntry = struct {
+    /// Which clock accumulator the deadline compares against: `after`/`every`
+    /// run on the game clock (scaled, frozen under pause); `after_unscaled`
+    /// on the unscaled clock (fires under pause).
+    clock: enum { game, unscaled },
+    /// Tick-unit deadline against the owning clock (the E5 encoding:
+    /// `clock + round(seconds * 60)` at scheduling).
+    deadline: f64,
+    /// Re-arm period in ticks for `every` (`deadline += period` after each
+    /// fire — fixed period, no drift correction in Phase 1); 0 for the
+    /// one-shots.
+    period: f64,
+    body_start: u32,
+    body_len: u32,
+    /// Value-level copy of the scheduling scope (captures `entity` & co.) —
+    /// the M1.0.12 branch-snapshot semantics and heap-backed-value caveats.
+    /// An `every` timer's fires share this scope (mutations persist across
+    /// periods, like a task scope).
+    snapshot: Locals,
+    state: enum { armed, fired, canceled },
+    /// True while the fire scan is executing this entry's body: a
+    /// self-cancel from inside the callback defers its snapshot free to the
+    /// scan (never freed mid-body).
+    firing: bool = false,
+};
+
+/// Read an `f64` resource field at `off` (M1.0.13 E5 population helpers —
+/// unaligned-safe byte copies, the resource store guarantees nothing better).
+fn readF64At(bytes: []const u8, off: u16) f64 {
+    var x: f64 = undefined;
+    @memcpy(std.mem.asBytes(&x), bytes[off..][0..8]);
+    return x;
+}
+
+fn writeF64At(bytes: []u8, off: u16, v: f64) void {
+    @memcpy(bytes[off..][0..8], std.mem.asBytes(&v));
+}
+
+fn writeI64At(bytes: []u8, off: u16, v: i64) void {
+    @memcpy(bytes[off..][0..8], std.mem.asBytes(&v));
+}
 
 /// Parse the seconds of a `Duration` literal lexeme (`"1.5s"` → 1.5) — the
 /// minimal Duration→seconds path `await wait` needs (M1.0.11 E3). `null` if the
@@ -541,10 +621,11 @@ fn durationLiteralSeconds(text: []const u8) ?f64 {
 //   - A statement-head `await` suspends the whole task at ANY depth: `driveLoop`
 //     returns, the frame-stack persists, and resume re-enters the innermost frame
 //     at its cursor — a prefix statement is NEVER re-run, so `emit` and structural
-//     mutations don't double-fire. `wait(Duration)` resolves against `async_tick`
-//     via the fixed 1/60 timestep (`async_fixed_dt_hz`); `global_event` against the
-//     per-tick event store; the direct-call `future` (`await f()`) is frame
-//     inlining (below).
+//     mutations don't double-fire. `wait(Duration)` resolves against the GAME
+//     clock accumulator and `wait_unscaled(Duration)` against the UNSCALED one
+//     (M1.0.13 E5 — both via the fixed 1/60 tick conversion); `global_event`
+//     against the per-tick event store; the direct-call `future` (`await f()`)
+//     is frame inlining (below).
 //   - Frame kinds cover every EBNF v0.6 statement block (C1.6): `run` (rule/`fn`
 //     body, `if` branch, `match` arm, plain block), `loop_`, `while_`, `for_`,
 //     `try_` (a `throw` after a resume routes to the enclosing `try_` — the
@@ -556,18 +637,26 @@ fn durationLiteralSeconds(text: []const u8) ?f64 {
 //     full RHS on the frame-driven spine; a sub-expression `await`, or one in a
 //     synchronously-evaluated VALUE block, is rejected. Coloring (§9.3, `E0901`):
 //     an `await` / async call in a non-async `fn`/`rule` is rejected.
-//   - A sync-only program allocates no task, keeps `async_tick` at 0, and is
-//     byte-identical to the pre-async runtime (by construction).
+//   - A sync-only program allocates no task and never drives the pool. (Since
+//     M1.0.13 the time subsystem advances unconditionally — the builtin time
+//     resources are ambient state every program can read.)
 
 /// The condition that resumes a suspended `async rule` (M0.8 E3 sub-slice B).
 /// The tree-walker is its own runtime (`etch-reference-part1.md §9`): an
 /// `await` suspends the rule as a task-record, polled each tick in `stepOnce`.
 const WakeCond = union(enum) {
-    /// Resume once `async_tick` reaches this value. `await wait(d)` reached at
-    /// tick T sets it to T + `round(seconds(d) * 60)` — the Phase-1 fixed-timestep
-    /// conversion (M1.0.11 E3, `async_fixed_dt_hz`). `wait_unscaled` (M1.0.13)
-    /// stays fail-loud.
-    wait_until: u64,
+    /// Resume once the GAME clock accumulator reaches this deadline, in
+    /// tick units (M1.0.13 E5): `await wait(d)` reached with the game clock
+    /// at G sets it to `G + round(seconds(d) * 60)`. The game clock advances
+    /// by `time_scale` per tick and freezes under `paused`, so the wait
+    /// scales and pauses with game time. At `time_scale = 1` the clock sums
+    /// stay exact integer-valued f64 and the wake ticks are byte-identical
+    /// to the pre-M1.0.13 `async_tick` conversion (M1.0.11 E3).
+    wait_until: f64,
+    /// `await wait_unscaled(d)` (M1.0.13 E5): the same conversion against
+    /// the UNSCALED clock, which advances by 1 per tick unconditionally —
+    /// the wait keeps running under `paused` and ignores `time_scale`.
+    wait_until_unscaled: f64,
     /// Resume once an event of this type is present in the per-tick EventStore
     /// (M0.8 E3 sub-slice B — `await global_event(T)`). The producer must run
     /// before the awaiter in the rule order, same as the observer drain.
@@ -920,14 +1009,37 @@ pub const Interpreter = struct {
     /// a `changed`-free program is byte-identical to the pre-E3 runtime (no
     /// tick churn, no marking overhead).
     has_changed: bool = false,
-    /// True iff any rule is `async` (M0.8 E3 sub-slice B). Gates the async tick
-    /// counter + the task-record dispatch in `stepOnce`; a sync-only program is
-    /// byte-identical to the pre-B runtime (no `async_tick` churn, no slots).
+    /// True iff any rule is `async` (M0.8 E3 sub-slice B). Gates the
+    /// task-record dispatch in `stepOnce`; a sync-only program allocates no
+    /// task and never drives the pool.
     has_async: bool = false,
-    /// Logical async clock — incremented once per `stepOnce` when `has_async`.
-    /// `await wait(d)` resolves against it: a `Duration` is converted to a tick
-    /// count via the fixed 1/60 timestep (`async_fixed_dt_hz`, M1.0.11 E3).
+    /// Frame counter — incremented once per `stepOnce`; backs the builtin
+    /// `GameTime.frame` / `GameTime.fixed_frame` fields (M1.0.13 E5).
+    /// DEMOTED from its M1.0.11 role: it no longer drives `await wait` —
+    /// the two clock accumulators below do.
     async_tick: u64 = 0,
+    /// The time subsystem's two internal clock accumulators (M1.0.13 E5) —
+    /// the sources of truth for `await wait` / `await wait_unscaled`
+    /// deadlines and for the published `total` fields. They advance in TICK
+    /// units (game: `+= time_scale`, 0 under `paused`; unscaled: `+= 1`)
+    /// rather than seconds: at `time_scale = 1` the sums stay exact
+    /// integer-valued f64, which keeps the wake ticks byte-identical to the
+    /// pre-M1.0.13 integer conversion (a seconds accumulator accrues
+    /// floating-point rounding that can shift a wake by one tick). Seconds
+    /// are derived (`ticks * fixed_dt_secs`) only when publishing the
+    /// resource fields. Seeded from the surviving resource values on a
+    /// hot-reload re-compile (game time continues across an AST swap).
+    game_clock_ticks: f64 = 0,
+    unscaled_clock_ticks: f64 = 0,
+    /// Resolved ids + field offsets of the three builtin time resources
+    /// (M1.0.13 E5), cached at `compile` so the per-tick population in
+    /// `advanceTime` is plain offset writes.
+    time_res: TimeResources,
+    /// Runtime timer registry (M1.0.13 E6, §9.10) — heap records, monotone
+    /// pointer-stable + husk (see `TimerEntry`). Scanned by `fireTimers` at
+    /// the head of `stepOnce`, in registration order (deterministic); a
+    /// `Value.timer_handle` is an index into it.
+    timers: std.ArrayListUnmanaged(*TimerEntry) = .empty,
     /// Dynamic pool of suspendable tasks (M1.0.11 E1) — the growable replacement
     /// for the M0.8 per-rule `AsyncSlot` slice. POINTER-STABLE since M1.0.12 E1:
     /// each element is a heap record (`gpa.create`), because `race`/`sync`/
@@ -1026,6 +1138,13 @@ pub const Interpreter = struct {
             self.gpa.destroy(task);
         }
         self.async_tasks.deinit(self.gpa);
+        // Timer registry teardown (M1.0.13 E6): husks (fired/canceled) had
+        // their snapshot freed at husk time — only armed entries still own one.
+        for (self.timers.items) |t| {
+            if (t.state == .armed) t.snapshot.deinit(self.gpa);
+            self.gpa.destroy(t);
+        }
+        self.timers.deinit(self.gpa);
         self.task_children.deinit(self.gpa);
         self.gpa.free(self.rule_tasks);
         self.descriptors.deinit(self.gpa);
@@ -1132,6 +1251,94 @@ pub const Interpreter = struct {
                 try bridge.mapComponent(gpa, "TagSet", id);
                 tagset_id = id;
             }
+        }
+
+        // Register the three builtin engine time resources (M1.0.13 E5) from
+        // the `types.zig` descriptor table — the same injection point as the
+        // builtin `TagSet` (after the user-decl registration loop). Idempotent
+        // on a hot-reload re-compile: the existing registration and the live
+        // resource values survive the AST swap (the `compileResource` seeding
+        // discipline).
+        for (&types_mod.builtin_resources) |*br| {
+            if (world.registry.idOf(br.name)) |existing| {
+                try bridge.mapResource(gpa, br.name, existing);
+                continue;
+            }
+            var fields_buf: [8]FieldDesc = undefined;
+            var default_buf: [64]u8 = @splat(0);
+            var size: usize = 0;
+            var max_align: usize = 1;
+            for (br.fields, 0..) |bf, fi| {
+                const kind: FieldKind = switch (bf.type_) {
+                    .float_ => .float_,
+                    .int_ => .int_,
+                    .bool_ => .bool_,
+                    else => unreachable, // the table holds POD scalars only
+                };
+                const align_b = kind.alignBytes();
+                if (align_b > max_align) max_align = align_b;
+                const off = std.mem.alignForward(usize, size, align_b);
+                size = off + kind.sizeBytes();
+                fields_buf[fi] = .{ .name = bf.name, .offset = @intCast(off), .kind = kind };
+                const v: Value = switch (bf.default) {
+                    .float_ => |x| .{ .float_ = x },
+                    .int_ => |x| .{ .int_ = x },
+                    .bool_ => |x| .{ .bool_ = x },
+                };
+                try bridge_mod.writeValueAsBytes(kind, default_buf[off..], v);
+            }
+            size = std.mem.alignForward(usize, size, max_align);
+            const id = try world.registry.registerComponentRaw(gpa, .{
+                .name = br.name,
+                .size = @intCast(size),
+                .alignment = @intCast(max_align),
+                .default_bytes = default_buf[0..size],
+                .fields = fields_buf[0..br.fields.len],
+            });
+            try bridge.mapResource(gpa, br.name, id);
+            try world.addResource(gpa, id, default_buf[0..size]);
+        }
+
+        // Resolve the population handles (ids + field offsets) once. The
+        // lookups cannot miss: the resources were registered from the same
+        // descriptor table just above (or by the previous compile of this
+        // world — same table).
+        const time_res = blk: {
+            const gid = world.registry.idOf("GameTime").?;
+            const uid = world.registry.idOf("UnscaledTime").?;
+            const rid = world.registry.idOf("RealTime").?;
+            break :blk TimeResources{
+                .game_id = gid,
+                .unscaled_id = uid,
+                .real_id = rid,
+                .game_dt = world.registry.findField(gid, "dt").?.offset,
+                .game_total = world.registry.findField(gid, "total").?.offset,
+                .game_time_scale = world.registry.findField(gid, "time_scale").?.offset,
+                .game_frame = world.registry.findField(gid, "frame").?.offset,
+                .game_fixed_frame = world.registry.findField(gid, "fixed_frame").?.offset,
+                .game_paused = world.registry.findField(gid, "paused").?.offset,
+                .unscaled_dt = world.registry.findField(uid, "dt").?.offset,
+                .unscaled_total = world.registry.findField(uid, "total").?.offset,
+                .real_dt = world.registry.findField(rid, "dt").?.offset,
+                .real_total = world.registry.findField(rid, "total").?.offset,
+                .real_since_startup = world.registry.findField(rid, "since_startup").?.offset,
+            };
+        };
+
+        // Seed the clock accumulators from the published `total` fields so
+        // game time CONTINUES across a hot-reload re-compile (the resource
+        // values survive; a fresh world reads the 0.0 defaults). Ticks =
+        // seconds / fixed_dt.
+        var game_clock_ticks: f64 = 0;
+        var unscaled_clock_ticks: f64 = 0;
+        var frame_seed: u64 = 0;
+        if (world.resources.getResource(time_res.game_id)) |game_bytes| {
+            game_clock_ticks = readF64At(game_bytes, time_res.game_total) * async_fixed_dt_hz;
+            const frame: i64 = @bitCast(game_bytes[time_res.game_frame..][0..8].*);
+            frame_seed = @intCast(@max(frame, 0));
+        }
+        if (world.resources.getResource(time_res.unscaled_id)) |unscaled_bytes| {
+            unscaled_clock_ticks = readF64At(unscaled_bytes, time_res.unscaled_total) * async_fixed_dt_hz;
         }
 
         // Pass B — compile rules. Need the registry to resolve field
@@ -1249,8 +1456,7 @@ pub const Interpreter = struct {
         }
         // Allocate the per-rule task-handle map iff any rule is `async` (M1.0.11
         // E1). The task pool itself starts empty and grows on first spawn; a
-        // sync-only program keeps an empty map + pool and never advances
-        // `async_tick` — byte-identical to the pre-async runtime.
+        // sync-only program keeps an empty map + pool.
         var any_async = false;
         for (slice) |rd| {
             if (rd.is_async) {
@@ -1282,6 +1488,10 @@ pub const Interpreter = struct {
             .trait_methods = trait_methods,
             .tag_table = tag_table,
             .tagset_id = tagset_id,
+            .time_res = time_res,
+            .game_clock_ticks = game_clock_ticks,
+            .unscaled_clock_ticks = unscaled_clock_ticks,
+            .async_tick = frame_seed,
             .has_changed = any_changed,
             .has_async = any_async,
             .rule_tasks = rule_tasks,
@@ -1605,12 +1815,22 @@ pub const Interpreter = struct {
         // calls `beginFrame` at the same point. A `changed`-free program never
         // advances the tick (byte-identical to the pre-E3 runtime).
         if (self.has_changed) world.beginFrame();
-        // Advance the logical async clock once per tick when async rules are
-        // present (M0.8 E3 sub-slice B). `await wait(d)` resolves against it.
-        if (self.has_async) self.async_tick += 1;
+        // Advance the time subsystem (M1.0.13 E5) — the tree-walker
+        // equivalent of the `pre_update` refresh, fixed timestep 1/60
+        // (`engine-gameplay-systems.md` "Les trois temps"): read the controls
+        // from `GameTime`, advance the two clock accumulators (game freezes
+        // under `paused` and scales with `time_scale`; unscaled always
+        // advances), publish the resource fields. `async_tick` is the frame
+        // counter backing `GameTime.frame` — it no longer drives `wait`.
+        self.async_tick += 1;
+        self.advanceTime(world);
         // Events have a per-tick lifetime (`Lifetime.tick`): clear the previous
         // tick's queue before running this tick's rules (M0.8 E3).
         self.events.clear(self.gpa);
+        // Fire due timers (M1.0.13 E6) — after the clock advance and the
+        // event-queue clear, before rule dispatch: a callback's `emit` lands
+        // in THIS tick's store, visible to every rule of the tick.
+        try self.fireTimers(world, report);
         for (self.rule_descs, 0..) |*rd, i| {
             // Observer rules (M1.0.2 E3) never run in the per-tick dispatch:
             // they fire at the Tier-0 command-buffer flush via the
@@ -1642,6 +1862,160 @@ pub const Interpreter = struct {
         // any extension hook's structural change (enqueued just above) drains in
         // the same boundary, with observers firing per op (M1.0.10 E3).
         try self.flushStructural(world);
+    }
+
+    /// Advance the two clock accumulators and publish the three builtin time
+    /// resources (M1.0.13 E5) — called at the start of every `stepOnce`,
+    /// before rule dispatch. `GameTime.dt = fixed_dt * time_scale` (0 under
+    /// `paused`); `UnscaledTime`/`RealTime` are affected by neither control.
+    /// The published `total` fields derive from the tick accumulators
+    /// (`ticks * fixed_dt_secs` — single rounding, no seconds-side drift);
+    /// `frame`/`fixed_frame` publish the per-`stepOnce` counter (one fixed
+    /// tick per step — the two counters coincide in the Phase-1 tree-walker).
+    fn advanceTime(self: *Interpreter, world: *World) void {
+        const tr = &self.time_res;
+        const game = world.resources.getMutResource(tr.game_id) orelse return;
+        const scale = readF64At(game, tr.game_time_scale);
+        const paused = game[tr.game_paused] != 0;
+        const game_dt: f64 = if (paused) 0 else fixed_dt_secs * scale;
+        self.game_clock_ticks += if (paused) 0 else scale;
+        self.unscaled_clock_ticks += 1;
+        writeF64At(game, tr.game_dt, game_dt);
+        writeF64At(game, tr.game_total, self.game_clock_ticks * fixed_dt_secs);
+        writeI64At(game, tr.game_frame, @intCast(self.async_tick));
+        writeI64At(game, tr.game_fixed_frame, @intCast(self.async_tick));
+        const unscaled = world.resources.getMutResource(tr.unscaled_id) orelse return;
+        writeF64At(unscaled, tr.unscaled_dt, fixed_dt_secs);
+        writeF64At(unscaled, tr.unscaled_total, self.unscaled_clock_ticks * fixed_dt_secs);
+        const real = world.resources.getMutResource(tr.real_id) orelse return;
+        writeF64At(real, tr.real_dt, fixed_dt_secs);
+        writeF64At(real, tr.real_total, self.unscaled_clock_ticks * fixed_dt_secs);
+        writeF64At(real, tr.real_since_startup, self.unscaled_clock_ticks * fixed_dt_secs);
+    }
+
+    /// Schedule one timer statement (M1.0.13 E6, §9.10): evaluate the
+    /// Duration argument ONCE (a full expression — unlike `await wait`'s
+    /// literal-only path), snapshot the scheduling scope, and append a
+    /// registry entry. Returns the entry's index — the `TimerHandle`.
+    fn scheduleTimer(self: *Interpreter, world: *World, locals: *Locals, ts: ast_mod.TimerStmt) StmtError!u32 {
+        const argv = try self.evalExpr(world, locals, ts.arg);
+        if (argv != .duration) return error.RuntimeFailure;
+        if (argv.duration < 0) return error.RuntimeFailure;
+        const ticks = @round(argv.duration * async_fixed_dt_hz);
+        const entry = try self.gpa.create(TimerEntry);
+        entry.* = .{
+            .clock = if (ts.kind == .after_unscaled) .unscaled else .game,
+            .deadline = if (ts.kind == .after_unscaled)
+                self.unscaled_clock_ticks + ticks
+            else
+                self.game_clock_ticks + ticks,
+            .period = if (ts.kind == .every) ticks else 0,
+            .body_start = ts.body_start,
+            .body_len = ts.body_len,
+            .snapshot = .{},
+            .state = .armed,
+        };
+        errdefer {
+            entry.snapshot.deinit(self.gpa);
+            self.gpa.destroy(entry);
+        }
+        try cloneLocalsInto(self.gpa, locals, &entry.snapshot);
+        const idx: u32 = @intCast(self.timers.items.len);
+        try self.timers.append(self.gpa, entry);
+        return idx;
+    }
+
+    /// Fire every due timer (M1.0.13 E6) — called at the head of `stepOnce`,
+    /// AFTER the clock advance and BEFORE rule dispatch, in registration
+    /// order (deterministic). An entry is due when its deadline has been
+    /// reached on ITS clock. One-shots (`after`/`after_unscaled`) park as
+    /// husks after firing (snapshot freed); `every` re-arms at `deadline +=
+    /// period`. The scan reads the LIVE registry length, so a callback that
+    /// schedules a timer appends an entry the same scan can reach (monotone
+    /// pool — no invalidation); each entry fires at most once per scan.
+    fn fireTimers(self: *Interpreter, world: *World, report: *RuntimeReport) error{OutOfMemory}!void {
+        var i: usize = 0;
+        while (i < self.timers.items.len) : (i += 1) {
+            const t = self.timers.items[i];
+            if (t.state != .armed) continue;
+            const now = switch (t.clock) {
+                .game => self.game_clock_ticks,
+                .unscaled => self.unscaled_clock_ticks,
+            };
+            if (t.deadline > now) continue;
+            if (t.period > 0) {
+                t.deadline += t.period;
+            } else {
+                t.state = .fired;
+            }
+            t.firing = true;
+            try self.execTimerBody(world, t, report);
+            t.firing = false;
+            // Husk a one-shot (just fired) or an entry the callback canceled
+            // mid-fire (the deferred half of `cancelTimer`); a re-armed
+            // `every` keeps its snapshot for the next period.
+            if (t.state != .armed) {
+                t.snapshot.deinit(self.gpa);
+                t.snapshot = .{};
+            }
+        }
+    }
+
+    /// Execute a timer callback body run-to-completion against its snapshot
+    /// (M1.0.13 E6) — the timer body is a synchronous context (§9.10, E4);
+    /// runtime failures and uncaught throws are harvested into the report
+    /// exactly like a rule body (`execBody`); a top-level `return` /
+    /// `break` / `continue` ends the callback. The per-body arena stores are
+    /// NOT reset here: the snapshot may hold handles into them (the same
+    /// heap-backed-value caveat as the M1.0.12 task scopes).
+    fn execTimerBody(self: *Interpreter, world: *World, t: *TimerEntry, report: *RuntimeReport) error{OutOfMemory}!void {
+        self.control = .none;
+        self.thrown = false;
+        self.returning = false;
+        self.pending_error = null;
+        var s: u32 = 0;
+        while (s < t.body_len) : (s += 1) {
+            const stmt_id: NodeId = @bitCast(self.ast.extra.items[t.body_start + s]);
+            self.execStmt(world, &t.snapshot, stmt_id) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.RuntimeFailure => {
+                    self.harvestError(report);
+                    return;
+                },
+            };
+            if (self.thrown) {
+                self.thrown = false;
+                self.pending_error = .{ .kind = .UncaughtThrow, .span = self.thrown_span };
+                self.harvestError(report);
+                return;
+            }
+            if (self.control != .none) {
+                self.control = .none;
+                self.control_label = 0;
+                return;
+            }
+            if (self.returning) {
+                self.returning = false;
+                self.return_value = .{ .unit = {} };
+                return;
+            }
+        }
+    }
+
+    /// `TimerHandle.cancel()` (M1.0.13 E6, §9.10) — IDEMPOTENT: cancels an
+    /// armed timer (husk: snapshot freed), a no-op on one already fired or
+    /// already canceled. A self-cancel from inside the entry's own firing
+    /// callback marks the state only; the fire scan frees the snapshot after
+    /// the body returns (never mid-body).
+    fn cancelTimer(self: *Interpreter, ti: u32) void {
+        if (ti >= self.timers.items.len) return;
+        const t = self.timers.items[ti];
+        if (t.state != .armed) return;
+        t.state = .canceled;
+        if (!t.firing) {
+            t.snapshot.deinit(self.gpa);
+            t.snapshot = .{};
+        }
     }
 
     fn runRule(self: *Interpreter, world: *World, rd: *RuleDesc, report: *RuntimeReport) !void {
@@ -2448,13 +2822,13 @@ pub const Interpreter = struct {
                         },
                     }
                 },
-                .wait, .global_event => {
+                .wait, .wait_unscaled, .global_event => {
                     task.wake = try self.evalAwaitTarget(site.await_id);
                     cursor.* += 1;
                     task.pending_bind = site.ret;
                     return .suspended;
                 },
-                .wait_unscaled, .entity_event => return error.RuntimeFailure,
+                .entity_event => return error.RuntimeFailure,
             }
         }
         const sk = self.ast.stmtKind(stmt);
@@ -3025,26 +3399,30 @@ pub const Interpreter = struct {
     }
 
     /// Resolve a wake-condition `await` target to a `WakeCond` (M1.0.11 E3). Only
-    /// `wait` / `global_event` reach here (`future` is handled by `beginAsyncCall`
-    /// upstream). `wait` takes a `Duration` (final API, §9.4): a Duration LITERAL
-    /// → seconds → `async_tick` counts via the fixed 1/60 timestep
-    /// (`async_fixed_dt_hz`). M1.0.13 swaps this for scaled game time WITHOUT
-    /// changing the signature (at `time_scale = 1`, fixed `dt = 1/60`, identical).
-    /// A non-literal Duration (const / arithmetic) is out of scope → fail loud.
-    /// `global_event(T)` waits for an event of type `T`. `wait_unscaled` (M1.0.13)
-    /// / `entity_event` (M1.0.14) fail loud (defensive; filtered upstream).
+    /// `wait` / `wait_unscaled` / `global_event` reach here (`future` is handled
+    /// by `beginAsyncCall` upstream). `wait` and `wait_unscaled` take a `Duration`
+    /// (final API, §9.4): a Duration LITERAL → whole ticks via `round(seconds *
+    /// 60)`, scheduled on the game clock (`wait` — scaled, pausable) or the
+    /// unscaled clock (`wait_unscaled` — M1.0.13 E5, fires under pause). Both
+    /// keep the M1.0.11 literal-only restriction: a non-literal Duration (const /
+    /// arithmetic) fails loud — only the TIMER family evaluates a full Duration
+    /// expression (E6). `global_event(T)` waits for an event of type `T`;
+    /// `entity_event` (M1.0.14) fails loud (defensive; filtered upstream).
     fn evalAwaitTarget(self: *Interpreter, await_id: NodeId) StmtError!WakeCond {
         const aw = self.ast.awaitExpr(await_id);
         switch (aw.target_kind) {
-            .wait => {
+            .wait, .wait_unscaled => {
                 if (self.ast.exprKind(aw.arg_expr) != .duration_lit) return error.RuntimeFailure;
                 const secs = durationLiteralSeconds(self.ast.strings.slice(self.ast.exprData(aw.arg_expr))) orelse return error.RuntimeFailure;
                 if (secs < 0) return error.RuntimeFailure;
-                const ticks: u64 = @intFromFloat(@round(secs * async_fixed_dt_hz));
-                return .{ .wait_until = self.async_tick + ticks };
+                const ticks = @round(secs * async_fixed_dt_hz);
+                return switch (aw.target_kind) {
+                    .wait => .{ .wait_until = self.game_clock_ticks + ticks },
+                    else => .{ .wait_until_unscaled = self.unscaled_clock_ticks + ticks },
+                };
             },
             .global_event => return .{ .global_event = aw.event_type },
-            .wait_unscaled, .entity_event, .future => return error.RuntimeFailure,
+            .entity_event, .future => return error.RuntimeFailure,
         }
     }
 
@@ -3053,7 +3431,8 @@ pub const Interpreter = struct {
     /// machinery; the pool is small and the poll runs at the rule's position.
     fn asyncWakeFired(self: *const Interpreter, wake: WakeCond) bool {
         return switch (wake) {
-            .wait_until => |t| self.async_tick >= t,
+            .wait_until => |t| self.game_clock_ticks >= t,
+            .wait_until_unscaled => |t| self.unscaled_clock_ticks >= t,
             .global_event => |type_name| self.events.count(type_name) > 0,
             // Race parent: a winner exists (some child `.done`) — or no child
             // remains `.suspended` (every branch failed/canceled → no winner;
@@ -3333,6 +3712,21 @@ pub const Interpreter = struct {
             .assign_stmt => {
                 const assign = self.ast.assign_stmts.items[data];
                 try self.execAssign(world, locals, assign);
+            },
+            .timer_stmt => {
+                // `[let t =] after/every/after_unscaled(d) { }` (M1.0.13 E6,
+                // §9.10) — schedule a registry entry; the statement itself
+                // never fires the body (firing is `fireTimers`, next tick at
+                // the earliest). Reached from sync rule bodies directly and
+                // from async bodies via `stepBodyStmt`'s shared-executor
+                // fall-through. The binding enters the SCHEDULING scope
+                // AFTER the snapshot — the handle does not exist inside the
+                // callback (the spawn_stmt precedent).
+                const ts = self.ast.timer_stmts.items[data];
+                const handle = try self.scheduleTimer(world, locals, ts);
+                if (ts.binding != 0) {
+                    try locals.put(self.gpa, ts.binding, .{ .timer_handle = handle }, false);
+                }
             },
             .expr_stmt => {
                 const eid: NodeId = @bitCast(data);
@@ -3905,6 +4299,20 @@ pub const Interpreter = struct {
                 }
                 return error.RuntimeFailure;
             },
+            .timer_handle => |ti| {
+                // M1.0.13 E6 — the TimerHandle's single method (§9.10):
+                // `t.cancel()` is IDEMPOTENT — cancels an armed timer, a
+                // no-op on one already fired or already canceled. A timer is
+                // not a task: no `await t`, no other method (E4 rejects them
+                // at check; the fail-loud below is the runtime belt).
+                const mname = self.ast.strings.slice(mc.method_name);
+                if (std.mem.eql(u8, mname, "cancel")) {
+                    if (mc.args_len != 0) return error.RuntimeFailure;
+                    self.cancelTimer(ti);
+                    return Value{ .unit = {} };
+                }
+                return error.RuntimeFailure;
+            },
             .struct_ref => |handle| {
                 const type_name = self.structs.list.items[handle].type_name;
                 const key = methodKey(type_name, mc.method_name);
@@ -4235,6 +4643,14 @@ pub const Interpreter = struct {
             .bool_lit => {
                 const text = self.ast.strings.slice(data);
                 return Value{ .bool_ = std.mem.eql(u8, text, "true") };
+            },
+            .duration_lit => {
+                // `1.5s` → seconds (M1.0.13 E6) — the runtime Duration value,
+                // carried so a timer argument can be a full expression
+                // (`after(d)`). `await wait` keeps its own literal-only path
+                // in `evalAwaitTarget` (M1.0.11 restriction).
+                const secs = durationLiteralSeconds(self.ast.strings.slice(data)) orelse return error.RuntimeFailure;
+                return Value{ .duration = secs };
             },
             .string_lit => return Value{ .string_id = data },
             .string_interp => {
@@ -8637,10 +9053,10 @@ test "async rule suspends at await wait(<d>s) and resumes at the equivalent tick
     defer interp.deinit();
     const out_id = world.registry.idOf("Out").?;
 
-    // tick 1: spawn → n=1, suspend at `await wait(0.04s)` (wake at async_tick 3).
+    // tick 1: spawn → n=1, suspend at `await wait(0.04s)` (wake at game clock 3).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
-    // tick 2: still suspended (async_tick 2 < 3) — n unchanged.
+    // tick 2: still suspended (game clock 2 < 3) — n unchanged.
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
     // tick 3: wake fires (3 >= 3) → resume, n=2, complete.
@@ -8650,6 +9066,548 @@ test "async rule suspends at await wait(<d>s) and resumes at the equivalent tick
     // tick 4: task done — n stays 2 (the rule never re-runs).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+}
+
+test "time subsystem populates the three builtin resources (M1.0.13 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // A plain sync program: the time resources are ambient — populated every
+    // tick regardless of async rules. 60 ticks at time_scale = 1 → one
+    // second of game/unscaled/real time, frame 60.
+    const source =
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  get_mut(Out).n = get(GameTime).frame
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    _ = try interp.runFor(&world, 60);
+
+    const tr = interp.time_res;
+    const game = world.resources.getResource(tr.game_id).?;
+    try std.testing.expectEqual(fixed_dt_secs, readF64At(game, tr.game_dt));
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), readF64At(game, tr.game_total), 1e-12);
+    try std.testing.expectEqual(@as(i64, 60), std.mem.bytesToValue(i64, game[tr.game_frame..][0..8]));
+    try std.testing.expectEqual(@as(i64, 60), std.mem.bytesToValue(i64, game[tr.game_fixed_frame..][0..8]));
+    try std.testing.expectEqual(@as(f64, 1.0), readF64At(game, tr.game_time_scale));
+    try std.testing.expectEqual(@as(u8, 0), game[tr.game_paused]);
+    const unscaled = world.resources.getResource(tr.unscaled_id).?;
+    try std.testing.expectEqual(fixed_dt_secs, readF64At(unscaled, tr.unscaled_dt));
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), readF64At(unscaled, tr.unscaled_total), 1e-12);
+    const real = world.resources.getResource(tr.real_id).?;
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), readF64At(real, tr.real_since_startup), 1e-12);
+    // A rule read the ambient `GameTime.frame` without a `when resource`
+    // clause on it — the value it saw at tick 60 is the published counter.
+    const out_id = world.registry.idOf("Out").?;
+    try std.testing.expectEqual(@as(i64, 60), readResourceInt(&world, out_id));
+}
+
+test "time_scale halves GameTime.dt/total; paused zeroes them but not unscaled/real (M1.0.13 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const source =
+        \\resource Out { n: int = 0 }
+        \\rule r()
+        \\  when resource Out
+        \\{ }
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const tr = interp.time_res;
+
+    // time_scale = 0.5 → dt halves, total advances at half rate.
+    {
+        const game = world.resources.getMutResource(tr.game_id).?;
+        writeF64At(game, tr.game_time_scale, 0.5);
+    }
+    _ = try interp.runFor(&world, 60);
+    {
+        const game = world.resources.getResource(tr.game_id).?;
+        try std.testing.expectEqual(fixed_dt_secs * 0.5, readF64At(game, tr.game_dt));
+        try std.testing.expectApproxEqAbs(@as(f64, 0.5), readF64At(game, tr.game_total), 1e-12);
+    }
+
+    // paused → GameTime.dt = 0 and total freezes; UnscaledTime/RealTime keep
+    // advancing (affected by neither control).
+    {
+        const game = world.resources.getMutResource(tr.game_id).?;
+        game[tr.game_paused] = 1;
+    }
+    _ = try interp.runFor(&world, 60);
+    const game = world.resources.getResource(tr.game_id).?;
+    try std.testing.expectEqual(@as(f64, 0), readF64At(game, tr.game_dt));
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), readF64At(game, tr.game_total), 1e-12);
+    const unscaled = world.resources.getResource(tr.unscaled_id).?;
+    try std.testing.expectEqual(fixed_dt_secs, readF64At(unscaled, tr.unscaled_dt));
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), readF64At(unscaled, tr.unscaled_total), 1e-12);
+    const real = world.resources.getResource(tr.real_id).?;
+    try std.testing.expectEqual(fixed_dt_secs, readF64At(real, tr.real_dt));
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), readF64At(real, tr.real_total), 1e-12);
+}
+
+test "await wait scales with time_scale and freezes under paused (M1.0.13 E5)" {
+    const gpa = std.testing.allocator;
+    // (a) At time_scale = 0.5, a 0.1s wait (6 fixed ticks) needs 12 real
+    // ticks of game clock: suspended at tick 1 (game clock 0.5), deadline
+    // 6.5, fires when the game clock reaches 6.5 — tick 13.
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        const source =
+            \\resource Out { n: int = 0 }
+            \\async rule seq()
+            \\  when resource Out
+            \\{
+            \\  get_mut(Out).n = 1
+            \\  await wait(0.1s)
+            \\  get_mut(Out).n = 2
+            \\}
+        ;
+        var pr = try parser_mod.parse(gpa, source);
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const out_id = world.registry.idOf("Out").?;
+        {
+            const game = world.resources.getMutResource(interp.time_res.game_id).?;
+            writeF64At(game, interp.time_res.game_time_scale, 0.5);
+        }
+        _ = try interp.runFor(&world, 12);
+        try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+        _ = try interp.runFor(&world, 1);
+        try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+    }
+    // (b) Under paused, the same wait never fires (the game clock freezes);
+    // unpausing lets it complete.
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        const source =
+            \\resource Out { n: int = 0 }
+            \\async rule seq()
+            \\  when resource Out
+            \\{
+            \\  get_mut(Out).n = 1
+            \\  await wait(0.04s)
+            \\  get_mut(Out).n = 2
+            \\}
+        ;
+        var pr = try parser_mod.parse(gpa, source);
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const out_id = world.registry.idOf("Out").?;
+        // tick 1: n=1, suspend (deadline = game clock 1 + 2 = 3).
+        _ = try interp.runFor(&world, 1);
+        try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+        {
+            const game = world.resources.getMutResource(interp.time_res.game_id).?;
+            game[interp.time_res.game_paused] = 1;
+        }
+        // 10 paused ticks: the game clock is frozen at 1 — the wait never fires.
+        _ = try interp.runFor(&world, 10);
+        try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+        {
+            const game = world.resources.getMutResource(interp.time_res.game_id).?;
+            game[interp.time_res.game_paused] = 0;
+        }
+        // Unpaused: clock 2 (< 3) after one tick, fires on the second.
+        _ = try interp.runFor(&world, 1);
+        try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+        _ = try interp.runFor(&world, 1);
+        try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+    }
+}
+
+test "await wait_unscaled fires under paused (M1.0.13 E5)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const source =
+        \\resource Out { n: int = 0 }
+        \\async rule seq()
+        \\  when resource Out
+        \\{
+        \\  get_mut(Out).n = 1
+        \\  await wait_unscaled(0.04s)
+        \\  get_mut(Out).n = 2
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // tick 1: n=1, suspend (unscaled deadline = 1 + 2 = 3); pause immediately.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    {
+        const game = world.resources.getMutResource(interp.time_res.game_id).?;
+        game[interp.time_res.game_paused] = 1;
+    }
+    // tick 2: unscaled clock 2 < 3 — still suspended.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    // tick 3: unscaled clock 3 >= 3 — fires DESPITE the pause.
+    const r = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+}
+
+test "after(d) fires once at the deadline from a non-async rule, then parks as a husk (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // A NON-async rule schedules a one-shot at tick 1 (game clock 1, 0.05s =
+    // 3 ticks → deadline 4). The `armed` latch keeps the rule from
+    // re-scheduling every tick.
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0, armed: bool = true }
+        \\rule sched()
+        \\  when resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    after(0.05s) {
+        \\      get_mut(Out).n = get(Out).n + 1
+        \\    }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // Ticks 1-3: scheduled, not yet due.
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    try std.testing.expectEqual(@as(usize, 1), interp.timers.items.len);
+    // Tick 4: the deadline is reached at the head of the tick — fires once.
+    const r = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    try std.testing.expect(interp.timers.items[0].state == .fired);
+    // The husk never re-fires and the slot is never reused.
+    _ = try interp.runFor(&world, 6);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    try std.testing.expectEqual(@as(usize, 1), interp.timers.items.len);
+    // cancel() on an already-fired timer is a no-op (idempotent).
+    interp.cancelTimer(0);
+    try std.testing.expect(interp.timers.items[0].state == .fired);
+}
+
+test "every(d) fires each period, re-armed at a fixed period (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0, armed: bool = true }
+        \\rule sched()
+        \\  when resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    every(0.05s) {
+        \\      get_mut(Out).n = get(Out).n + 1
+        \\    }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // Scheduled at tick 1 (deadline 4, period 3): fires at ticks 4, 7, 10.
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 1); // tick 4
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 2); // ticks 5-6
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 1); // tick 7
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 3); // ticks 8-10
+    try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out_id));
+    // Still armed — an `every` never husks on its own.
+    try std.testing.expect(interp.timers.items[0].state == .armed);
+}
+
+test "under paused, after freezes while after_unscaled still fires (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { a: int = 0, b: int = 0, armed: bool = true }
+        \\rule sched()
+        \\  when resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    after(0.05s) { get_mut(Out).a = 1 }
+        \\    after_unscaled(0.05s) { get_mut(Out).b = 1 }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+    const a_off = world.registry.findField(out_id, "a").?.offset;
+    const b_off = world.registry.findField(out_id, "b").?.offset;
+
+    // Tick 1: both scheduled (game deadline 4, unscaled deadline 4); pause.
+    _ = try interp.runFor(&world, 1);
+    {
+        const game = world.resources.getMutResource(interp.time_res.game_id).?;
+        game[interp.time_res.game_paused] = 1;
+    }
+    // Ticks 2-6 paused: the unscaled clock reaches 4 → `after_unscaled`
+    // fires; the game clock is frozen at 1 → `after` does not.
+    _ = try interp.runFor(&world, 5);
+    {
+        const out = world.resources.getResource(out_id).?;
+        try std.testing.expectEqual(@as(i64, 0), std.mem.bytesToValue(i64, out[a_off..][0..8]));
+        try std.testing.expectEqual(@as(i64, 1), std.mem.bytesToValue(i64, out[b_off..][0..8]));
+    }
+    // Unpause: the game clock resumes (2, 3, then 4) — `after` fires.
+    {
+        const game = world.resources.getMutResource(interp.time_res.game_id).?;
+        game[interp.time_res.game_paused] = 0;
+    }
+    _ = try interp.runFor(&world, 2);
+    {
+        const out = world.resources.getResource(out_id).?;
+        try std.testing.expectEqual(@as(i64, 0), std.mem.bytesToValue(i64, out[a_off..][0..8]));
+    }
+    _ = try interp.runFor(&world, 1);
+    {
+        const out = world.resources.getResource(out_id).?;
+        try std.testing.expectEqual(@as(i64, 1), std.mem.bytesToValue(i64, out[a_off..][0..8]));
+    }
+}
+
+test "time_scale stretches an after deadline (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0, armed: bool = true }
+        \\rule sched()
+        \\  when resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    after(0.1s) { get_mut(Out).n = 1 }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+    // time_scale = 0.5 from the very first tick: scheduled at tick 1 (game
+    // clock 0.5, 0.1s = 6 ticks → deadline 6.5) — fires when the game clock
+    // reaches 6.5, i.e. tick 13.
+    {
+        const game = world.resources.getMutResource(interp.time_res.game_id).?;
+        writeF64At(game, interp.time_res.game_time_scale, 0.5);
+    }
+    _ = try interp.runFor(&world, 12);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+}
+
+test "a canceled timer never fires and cancel is idempotent (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0, armed: bool = true }
+        \\rule sched()
+        \\  when resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    let t = after(0.05s) { get_mut(Out).n = 99 }
+        \\    t.cancel()
+        \\    t.cancel()
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    const r = try interp.runFor(&world, 10);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    try std.testing.expect(interp.timers.items[0].state == .canceled);
+    // Unit-level: a third cancel on the husk stays a no-op.
+    interp.cancelTimer(0);
+    try std.testing.expect(interp.timers.items[0].state == .canceled);
+}
+
+test "the callback observes the scheduling-time scope snapshot (captured entity) (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\component Health { current: int = 0 }
+        \\resource Out { seen: int = 0, armed: bool = true }
+        \\rule sched(entity: Entity)
+        \\  when entity has Health and resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    after(0.05s) {
+        \\      get_mut(Out).seen = entity.get(Health).current
+        \\    }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    try interp.bindToWorld(&world);
+
+    const health = world.registry.idOf("Health").?;
+    var hv: i64 = 42;
+    _ = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{health}, &[_][]const u8{std.mem.asBytes(&hv)});
+
+    const out_id = world.registry.idOf("Out").?;
+    // Tick 1 schedules with `entity` captured in the snapshot; the callback
+    // dereferences it at fire time (tick 4).
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    const r = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 42), readResourceInt(&world, out_id));
+}
+
+test "two timers due the same tick fire in registration order (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try checkCleanProgram(gpa,
+        \\resource Out { n: int = 0, armed: bool = true }
+        \\rule sched()
+        \\  when resource Out
+        \\{
+        \\  if get(Out).armed {
+        \\    get_mut(Out).armed = false
+        \\    after(0.05s) { get_mut(Out).n = get(Out).n * 10 + 1 }
+        \\    after(0.05s) { get_mut(Out).n = get(Out).n * 10 + 2 }
+        \\  }
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // Both due at tick 4: registration order → 0*10+1 = 1, then 1*10+2 = 12.
+    _ = try interp.runFor(&world, 4);
+    try std.testing.expectEqual(@as(i64, 12), readResourceInt(&world, out_id));
+}
+
+test "a timer scheduled from an async rule fires and its emit reaches same-tick rules (M1.0.13 E6)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // The scheduling statement reaches `execStmt` through the async drive's
+    // shared-executor fall-through; the callback's `emit` lands in the tick's
+    // fresh event store (fireTimers runs after the clear, before rules), so
+    // the `@on_event` consumer sees it the SAME tick.
+    var pr = try checkCleanProgram(gpa,
+        \\event Boom { }
+        \\resource Out { n: int = 0 }
+        \\async rule sched()
+        \\  when resource Out
+        \\{
+        \\  after(0.05s) {
+        \\    emit Boom { }
+        \\  }
+        \\}
+        \\@on_event(Boom)
+        \\rule consume()
+        \\  when resource Out
+        \\{
+        \\  get_mut(Out).n = get(Out).n + 1
+        \\}
+    );
+    defer pr.deinit(gpa);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out_id = world.registry.idOf("Out").?;
+
+    // The async rule spawns once at tick 1 and completes; the timer fires at
+    // tick 4, exactly once.
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out_id));
+    const r = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), r.runtime_errors);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
+    _ = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
 }
 
 test "async rule resumes on await global_event(T) (M0.8 E3 sub-slice B)" {
@@ -8762,7 +9720,7 @@ test "async rule suspends at a statement-head await inside an if body and resume
     const log_id = world.registry.idOf("Log").?;
 
     // tick 1: n=1, enter the if, emit Beat (counted → Log.n=1), suspend at the
-    // await (wake at async_tick 3).
+    // await (wake at game clock 3).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, log_id));
@@ -8818,10 +9776,10 @@ test "async rule suspends at a statement-head await inside a loop body and resum
     defer interp.deinit();
     const out_id = world.registry.idOf("Out").?;
 
-    // tick 1: iteration 1 (n=1), suspend at await (wake at async_tick 2).
+    // tick 1: iteration 1 (n=1), suspend at await (wake at game clock 2).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
-    // tick 2: resume → iteration 2 (n=2), suspend again (wake at async_tick 3).
+    // tick 2: resume → iteration 2 (n=2), suspend again (wake at game clock 3).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
     // tick 3: resume → iteration 3 (n=3), the if fires `break`, the loop exits,
@@ -8871,7 +9829,7 @@ test "async rule suspends at a statement-head await inside a for body and resume
     defer interp.deinit();
     const out_id = world.registry.idOf("Out").?;
 
-    // tick 1: i=0 → n += 1 = 1, suspend (wake at async_tick 2).
+    // tick 1: i=0 → n += 1 = 1, suspend (wake at game clock 2).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
     // tick 2: resume → i=1 → n += 2 = 3, suspend.
@@ -9059,10 +10017,10 @@ test "await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60) 
     var world = World.init();
     defer world.deinit(gpa);
 
-    // 1.0 s at the Phase-1 fixed 1/60 timestep = 60 ticks. Spawned at async_tick
+    // 1.0 s at the Phase-1 fixed 1/60 timestep = 60 ticks. Spawned at game clock
     // 1, the task wakes at tick 61 — not before. This pins the Duration→tick
-    // conversion (M1.0.13 will swap the clock without changing the result at
-    // time_scale = 1).
+    // conversion (M1.0.13 swapped the wake onto the game clock without changing
+    // the result at time_scale = 1 — this test IS the byte-identity witness).
     const source =
         \\resource Out { n: int = 0 }
         \\async rule sec()
@@ -9091,7 +10049,7 @@ test "await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60) 
     defer interp.deinit();
     const out_id = world.registry.idOf("Out").?;
 
-    // tick 1: n=1, suspend (wake at async_tick 61).
+    // tick 1: n=1, suspend (wake at game clock 61).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
     // through tick 60: still suspended (60 < 61).
@@ -9125,17 +10083,10 @@ fn asyncFailLoudCount(gpa: std.mem.Allocator, source: []const u8) !u64 {
     return report.runtime_errors;
 }
 
-test "await wait_unscaled / entity_event still fail loud (partition boundary intact, M1.0.11 E3)" {
+test "await entity_event still fails loud (partition boundary intact, M1.0.13 E5)" {
     const gpa = std.testing.allocator;
-    // `wait_unscaled` — needs the scaled/unscaled time subsystem (M1.0.13).
-    try std.testing.expect((try asyncFailLoudCount(gpa,
-        \\resource Out { n: int = 0 }
-        \\async rule r()
-        \\  when resource Out
-        \\{
-        \\  await wait_unscaled(1.0s)
-        \\}
-    )) >= 1);
+    // `wait_unscaled` graduated to a working await target with the M1.0.13
+    // time subsystem (E5); the remaining partition boundary is
     // `entity_event` — needs entity-scoped events (M1.0.14).
     try std.testing.expect((try asyncFailLoudCount(gpa,
         \\event Ev { }
@@ -9146,10 +10097,10 @@ test "await wait_unscaled / entity_event still fail loud (partition boundary int
         \\  await entity_event(get(Out), Ev)
         \\}
     )) >= 1);
-    // The third M1.0.11 case — `await` on a stored non-TaskHandle value — is
+    // The M1.0.11 case — `await` on a stored non-TaskHandle value — is
     // rejected at TYPE-CHECK since M1.0.12 E3 (E0200, "await target must be a
     // direct async call or a TaskHandle"), so it never reaches the runtime:
-    // covered by the types.zig E3 tests. Real handle-await execution is E5.
+    // covered by the types.zig E3 tests.
 }
 
 test "task pool is pointer-stable and cancelTask parks a suspended task for good (M1.0.12 E1)" {
