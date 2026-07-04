@@ -2414,9 +2414,10 @@ pub const Interpreter = struct {
     /// created before its children (lower index), so a suspended `race` parent
     /// resumes — and cancels its losers — before any loser could resume.
     ///
-    /// One root task per async rule (the §9.2 parameterless, non-entity-bound
-    /// shape); an entity-bound async rule (one task per matching entity) is
-    /// deferred and fails loud (counted once, then parked `.done`).
+    /// Dispatch by rule shape: the §9.2 parameterless, non-entity-bound shape
+    /// gets one root task; an entity-bound async rule (single `Entity` param)
+    /// gets one task per matching entity (M1.0.14 E3); any other parameter
+    /// shape fails loud (counted once, then parked `.done`).
     fn runAsyncRule(self: *Interpreter, world: *World, idx: usize, report: *RuntimeReport) !void {
         const rd = &self.rule_descs[idx];
         const rule = self.ast.rule_decls.items[rd.rule_idx];
