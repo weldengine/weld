@@ -465,14 +465,16 @@ const EventVal = struct {
 /// `Lifetime.tick` drain cadence (`src/core/events/lifetime.zig`).
 const EventStore = struct {
     list: std.ArrayListUnmanaged(EventVal) = .empty,
-    /// Store-owned deep copies of runtime-produced (`.string_run`) event field
-    /// bytes (M1.0.14 E4). A `.string_run` lives in the emitter's per-body
-    /// `run_strings` and is freed at the body boundary (its handle may even be
-    /// reused), so it cannot back an event that outlives the emitter's body
-    /// (an `@on_event` observer, or an awaiter's cross-tick filter poll). Such a
-    /// field value is deep-copied here at emit and re-tagged `.string_persistent`
-    /// over the copy; the copies are freed together with the event queue at the
-    /// per-tick `clear`.
+    /// Store-owned deep copies of NON-AST string event field bytes (M1.0.14 E4):
+    /// a `.string_run` (per-body `run_strings`, freed at the body boundary, its
+    /// handle reusable) OR a borrowed `.string_persistent` (a view over resource
+    /// storage, released when the resource string field is reassigned — M1.0.3).
+    /// Neither survives an event that outlives the emitter's body (an `@on_event`
+    /// observer or an awaiter's cross-tick poll), nor a mutation of its source,
+    /// so such a field value is deep-copied here at emit and re-tagged
+    /// `.string_persistent` over the copy; the copies are freed with the event
+    /// queue at the per-tick `clear`. (`.string_id` — the immortal AST table — is
+    /// stable and never copied.)
     owned_strings: std.ArrayListUnmanaged([]u8) = .empty,
 
     fn deinit(self: *EventStore, gpa: std.mem.Allocator) void {
@@ -496,9 +498,10 @@ const EventStore = struct {
 
     /// Deep-copy `bytes` into store-owned memory and return a stable
     /// `.string_persistent` view over the copy (freed at `clear`). Stabilizes a
-    /// runtime `.string_run` event field value that would otherwise dangle when
-    /// the emitter's body ends (M1.0.14 E4).
-    fn ownRuntimeString(self: *EventStore, gpa: std.mem.Allocator, bytes: []const u8) !Value {
+    /// non-AST string event field value (a per-body `.string_run` or a borrowed
+    /// `.string_persistent`) that would otherwise dangle when the emitter's body
+    /// ends or the source resource string is reassigned (M1.0.14 E4).
+    fn ownEscapingString(self: *EventStore, gpa: std.mem.Allocator, bytes: []const u8) !Value {
         const dup = try gpa.dupe(u8, bytes);
         errdefer gpa.free(dup);
         try self.owned_strings.append(gpa, dup);
@@ -1116,14 +1119,16 @@ pub const Interpreter = struct {
     /// wake owns a `{start,len}` window (`FilterRange`). Never compacted (husk
     /// discipline, like `task_children`); freed wholesale in deinit. POD filter
     /// values (`.int_`/`.float_`/`.bool_`/`.string_id`/`.enum_value`/
-    /// `.entity_id`) are copy-stable across ticks; a COMPUTED string filter
-    /// (`prefix + "!"`) is a `.string_run` whose per-body bytes are freed at the
-    /// body boundary — it is deep-copied into `captured_filter_strings` at
-    /// capture and re-tagged `.string_persistent` over the copy.
+    /// `.entity_id`) are copy-stable across ticks; a NON-AST string filter — a
+    /// computed `.string_run` (`prefix + "!"`) or a borrowed `.string_persistent`
+    /// (`get(R).s`, released on resource reassignment) — is deep-copied into
+    /// `captured_filter_strings` at capture and re-tagged `.string_persistent`
+    /// over the copy (which also enforces capture-once §9.4).
     captured_filters: std.ArrayListUnmanaged(StructField) = .empty,
-    /// Buffer-owned deep copies of computed (`.string_run`) filter-value bytes
-    /// (M1.0.14 E4). Parallel to `captured_filters`, same husk lifetime: freed
-    /// wholesale in deinit (never per-tick — a suspended wake keeps its window).
+    /// Buffer-owned deep copies of non-AST (`.string_run` / borrowed
+    /// `.string_persistent`) filter-value bytes (M1.0.14 E4). Parallel to
+    /// `captured_filters`, same husk lifetime: freed wholesale in deinit (never
+    /// per-tick — a suspended wake keeps its window).
     captured_filter_strings: std.ArrayListUnmanaged([]u8) = .empty,
     /// Reusable cursor buffer for the multi-term (`or`) archetype-union merge
     /// (M1.0.0). Resized to the term count of the rule being iterated; capacity
@@ -3580,12 +3585,15 @@ pub const Interpreter = struct {
         while (i < filter_len) : (i += 1) {
             const flit = self.ast.struct_lit_fields.items[filter_start + i];
             const v0 = try self.evalEventFieldValue(world, locals, decl, flit);
-            // Stabilize a COMPUTED string (`.string_run`): its per-body bytes are
-            // freed at the body boundary, but the captured filter is re-scanned
-            // at later-tick polls, so deep-copy into `captured_filter_strings`
-            // (M1.0.14 E4). Literal / persistent / POD values are copy-stable.
-            const v = if (v0 == .string_run) blk: {
-                const dup = try self.gpa.dupe(u8, self.run_strings.items[v0.string_run]);
+            // Stabilize a NON-AST string (a per-body `.string_run` or a borrowed
+            // `.string_persistent` over resource storage): its bytes are freed at
+            // the body boundary / on resource-string reassignment, but the
+            // captured filter is re-scanned at later-tick polls — deep-copy into
+            // `captured_filter_strings`, which ALSO enforces capture-once §9.4
+            // (the value cannot move under a later mutation). `.string_id` (AST
+            // table) and POD values are copy-stable (M1.0.14 E4).
+            const v = if (stringNeedsOwning(v0)) blk: {
+                const dup = try self.gpa.dupe(u8, self.stringBytes(v0).?);
                 errdefer self.gpa.free(dup);
                 try self.captured_filter_strings.append(self.gpa, dup);
                 break :blk Value{ .string_persistent = .{ .ptr = @intFromPtr(dup.ptr), .len = @intCast(dup.len) } };
@@ -4180,12 +4188,13 @@ pub const Interpreter = struct {
                         try self.evalEventFieldValue(world, locals, edecl, flit)
                     else
                         try self.evalExpr(world, locals, flit.value);
-                    // Stabilize a runtime string (`.string_run`): its per-body
-                    // `run_strings` bytes are freed at the body boundary, but the
+                    // Stabilize a non-AST string (a per-body `.string_run` or a
+                    // borrowed `.string_persistent`): its bytes are freed at the
+                    // body boundary / on resource-string reassignment, but the
                     // enqueued event outlives the body (observers / cross-tick
                     // awaiters), so deep-copy into the store (M1.0.14 E4).
-                    const stable = if (v == .string_run)
-                        try self.events.ownRuntimeString(self.gpa, self.run_strings.items[v.string_run])
+                    const stable = if (stringNeedsOwning(v))
+                        try self.events.ownEscapingString(self.gpa, self.stringBytes(v).?)
                     else
                         v;
                     try fields.append(self.gpa, .{ .name = flit.name, .value = stable });
@@ -4900,6 +4909,21 @@ pub const Interpreter = struct {
     fn resetRunStrings(self: *Interpreter) void {
         for (self.run_strings.items) |s| self.gpa.free(s);
         self.run_strings.clearRetainingCapacity();
+    }
+
+    /// Whether a string `Value`'s bytes must be deep-copied to outlive the
+    /// current body OR survive a mutation of their source (M1.0.14 E4). Only
+    /// `.string_id` (the immortal AST string table) is stable; a `.string_run`
+    /// (per-body `run_strings`, freed at the body boundary) and a NON-EMPTY
+    /// borrowed `.string_persistent` (a view over resource storage, released when
+    /// the resource string field is reassigned — M1.0.3) are NOT. The empty
+    /// `.string_persistent` sentinel (`ptr == 0`, `len == 0`) has no bytes to own.
+    fn stringNeedsOwning(v: Value) bool {
+        return switch (v) {
+            .string_run => true,
+            .string_persistent => |s| s.len > 0,
+            else => false,
+        };
     }
 
     /// The bytes of a string value — an AST-table literal (`string_id`), a
@@ -11113,6 +11137,57 @@ test "a computed string filter survives to a cross-tick global_event poll (M1.0.
     const rep = try interp.runFor(&world, 4);
     try std.testing.expectEqual(@as(u64, 0), rep.runtime_errors); // no use-after-free at the cross-tick poll
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // captured "go!" matched cross-tick
+}
+
+test "a borrowed resource-string filter is captured once and survives reassignment (M1.0.14 E4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // The filter value `get(Cfg).s` is a BORROWED `.string_persistent` view over
+    // the resource string, captured at suspension. `bump` reassigns `Cfg.s`
+    // during the suspension — which RELEASES the old bytes (M1.0.3). Without the
+    // E4 deep-copy the captured view would dangle (use-after-free) AND drift to
+    // the new value; with it, the poll matches the OLD captured "old"
+    // (capture-once §9.4). `producer` always emits "old", so a match proves the
+    // captured value stuck to "old" (a re-evaluation would want "new" ≠ "old").
+    var pr = try parser_mod.parse(gpa,
+        \\event Msg { text: string }
+        \\resource Out { n: int = 0 }
+        \\resource Cfg { s: string = "old" }
+        \\rule producer()
+        \\  when resource Cfg
+        \\{
+        \\  emit Msg { text: "old" }
+        \\}
+        \\async rule watch()
+        \\  when resource Out and resource Cfg
+        \\{
+        \\  await global_event(Msg { text: get(Cfg).s })
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n + 1
+        \\}
+        \\rule bump()
+        \\  when resource Cfg
+        \\{
+        \\  let c = get_mut(Cfg)
+        \\  c.s = "new"
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const out = world.registry.idOf("Out").?;
+    const rep = try interp.runFor(&world, 4);
+    try std.testing.expectEqual(@as(u64, 0), rep.runtime_errors); // no use-after-free
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // matched the captured OLD "old"
 }
 
 test "task pool is pointer-stable and cancelTask parks a suspended task for good (M1.0.12 E1)" {
