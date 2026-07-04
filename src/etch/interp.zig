@@ -10060,14 +10060,26 @@ test "await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60) 
     try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
 }
 
-/// Compile + run `source` for 2 ticks and return the runtime-error count, after
-/// asserting it parses and type-checks clean (M1.0.11 E3 fail-loud partition
-/// helper). The async targets NOT owned by this milestone must surface a typed
-/// `RuntimeFailure` (counted), never crash or silently no-op.
-fn asyncFailLoudCount(gpa: std.mem.Allocator, source: []const u8) !u64 {
+test "entity_event fails loud in evalAwaitTarget until the E4 lift (M1.0.14 E2 pin)" {
+    const gpa = std.testing.allocator;
+    // `entity_event` type-checks (M1.0.14 E2) but its runtime lands in E4. No
+    // Etch program can REACH the fail-loud site yet: a parameterized async rule
+    // hits the entity-bound `runAsyncRule` guard first (entity-bound async rules
+    // are E3), so a program-driven test would fail loud for the WRONG reason.
+    // The boundary is therefore pinned by calling the private machinery
+    // directly — `evalAwaitTarget` on the `.entity_event` await node must fail
+    // loud. This pin flips at E4 (assert `future` is then the sole target).
     var world = World.init();
     defer world.deinit(gpa);
-    var pr = try parser_mod.parse(gpa, source);
+    var pr = try parser_mod.parse(gpa,
+        \\component C { }
+        \\event Ev { who: Entity }
+        \\async rule r(e: Entity)
+        \\  when e has C
+        \\{
+        \\  await entity_event(e, Ev)
+        \\}
+    );
     defer pr.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
     var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
@@ -10077,40 +10089,19 @@ fn asyncFailLoudCount(gpa: std.mem.Allocator, source: []const u8) !u64 {
     }
     try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
     var interp = try Interpreter.compile(gpa, &pr.ast, &world);
     defer interp.deinit();
-    const report = try interp.runFor(&world, 2);
-    return report.runtime_errors;
-}
 
-test "await entity_event still fails loud (partition boundary intact, M1.0.13 E5)" {
-    const gpa = std.testing.allocator;
-    // `wait_unscaled` graduated to a working await target with the M1.0.13
-    // time subsystem (E5); the remaining partition boundary is
-    // `entity_event` — needs entity-scoped events (M1.0.14). The program is
-    // now type-VALID (M1.0.14 E2 validates the target: `e` is an Entity and
-    // `Ev` has a single Entity field), so it reaches the interpreter, where
-    // `entity_event` still fails loud (execution lands in E3). A `seed` rule
-    // spawns the matched entity so the entity-based awaiter actually runs.
-    try std.testing.expect((try asyncFailLoudCount(gpa,
-        \\component M { }
-        \\event Ev { who: Entity }
-        \\resource Boot { on: bool = true }
-        \\rule seed()
-        \\  when resource Boot
-        \\{
-        \\  spawn(M { })
-        \\}
-        \\async rule r(e: Entity)
-        \\  when e has M
-        \\{
-        \\  await entity_event(e, Ev)
-        \\}
-    )) >= 1);
-    // The M1.0.11 case — `await` on a stored non-TaskHandle value — is
-    // rejected at TYPE-CHECK since M1.0.12 E3 (E0200, "await target must be a
-    // direct async call or a TaskHandle"), so it never reaches the runtime:
-    // covered by the types.zig E3 tests.
+    // Navigate to the `await entity_event(e, Ev)` node in rule `r`'s body.
+    const rule = pr.ast.rule_decls.items[0];
+    const stmt: NodeId = @bitCast(pr.ast.extra.items[rule.body_start]);
+    const await_id: NodeId = @bitCast(pr.ast.stmtData(stmt));
+    try std.testing.expectEqual(ast_mod.ExprKind.await_expr, pr.ast.exprKind(await_id));
+    try std.testing.expectEqual(ast_mod.AwaitTargetKind.entity_event, pr.ast.awaitExpr(await_id).target_kind);
+
+    // The direct pin: `entity_event` is not yet realized → fail loud (until E4).
+    try std.testing.expectError(error.RuntimeFailure, interp.evalAwaitTarget(await_id));
 }
 
 test "task pool is pointer-stable and cancelTask parks a suspended task for good (M1.0.12 E1)" {
