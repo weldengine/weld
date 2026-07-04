@@ -350,6 +350,9 @@ fn annotationAppliesTo(kind: ast_mod.AnnotationKind, target: AnnotTarget) bool {
         .on_added, .on_removed, .on_replaced, .on_spawned, .on_despawned => target == .rule,
         .unit, .range, .hidden, .readonly, .replicated => target == .field,
         .networked => target == .event,
+        // M1.0.14 E2 — @entity_target decorates an event field; event-only +
+        // Entity-typed + uniqueness are enforced at the declaration (E0502).
+        .entity_target => target == .field,
         .shader_fn => target == .function,
         .loc => false,
     };
@@ -3297,6 +3300,8 @@ pub const TypeChecker = struct {
         // Field name uniqueness within parent: collect into a small set.
         var seen: std.AutoHashMapUnmanaged(StringId, void) = .empty;
         defer seen.deinit(self.gpa);
+        // M1.0.14 E2 — `@entity_target` is at most one per event (across this decl's fields).
+        var entity_target_seen = false;
 
         var i: u32 = 0;
         while (i < fields_len) : (i += 1) {
@@ -3305,6 +3310,24 @@ pub const TypeChecker = struct {
 
             // Field-level annotation applicability (M0.8 D-S3-annot-applicability).
             try self.validateAnnotations(field.annotations_extra, field.annotations_len, .field);
+
+            // M1.0.14 E2 — `@entity_target` field-annotation placement (§18.10):
+            // it designates the `await entity_event` match field, so it is
+            // event-only, `Entity`-typed, and at most one per event. Misuse →
+            // E0502 (existing kind, no new codes). The designated-field POLICY
+            // lives in `arena.resolveEventEntityTarget` (consumed at the await site).
+            if (self.arena.fieldHasAnnotation(field, .entity_target)) {
+                const at_span = self.arena.typeNodeSpan(field.type_node);
+                if (origin != .event_) {
+                    try self.emit(.annotation_misapplied, .error_, at_span, "annotation '@entity_target' is only valid on an event field", .{});
+                } else if (!self.arena.fieldTypeIsEntity(field)) {
+                    try self.emit(.annotation_misapplied, .error_, at_span, "annotation '@entity_target' must be on an Entity-typed field", .{});
+                }
+                if (entity_target_seen) {
+                    try self.emit(.annotation_misapplied, .error_, at_span, "at most one '@entity_target' per event", .{});
+                }
+                entity_target_seen = true;
+            }
 
             // Check uniqueness.
             const gop = try seen.getOrPut(self.gpa, field.name);
@@ -4185,6 +4208,60 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// Validate a run of `struct_lit_fields[start .. start+len]` against event
+    /// `T`'s declared fields (M1.0.14 E2). Shared by `emit` and the
+    /// `entity_event` / `global_event` payload filter: each `IDENT :
+    /// expression` must name a field of `T` (`E1211 InvalidFieldFilter` else)
+    /// and its value must fit that field's declared type (`E0200 TypeMismatch`
+    /// else). `event_decl_index` indexes `arena.event_decls`.
+    fn checkEventFieldRun(self: *TypeChecker, event_decl_index: u32, start: u32, len: u32, ctx_opt: ?*RuleCtx) !void {
+        const decl = self.arena.event_decls.items[event_decl_index];
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            const flit = self.arena.struct_lit_fields.items[start + i];
+            var declared: ?ResolvedType = null;
+            var f_i: u32 = 0;
+            while (f_i < decl.fields_len) : (f_i += 1) {
+                const f = self.arena.fields.items[decl.fields_start + f_i];
+                if (f.name == flit.name) {
+                    declared = self.namedTypeToResolved(f.type_node);
+                    break;
+                }
+            }
+            const actual = self.synthExpr(flit.value, ctx_opt);
+            if (declared) |d| {
+                if (d == .builtin and actual == .builtin and !self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "event field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
+                }
+            } else {
+                try self.emit(.invalid_field_filter, .error_, self.arena.exprSpan(flit.value), "event '{s}' has no field '{s}'", .{ self.arena.strings.slice(decl.name), self.arena.strings.slice(flit.name) });
+            }
+        }
+    }
+
+    /// Type-check an `await entity_event` / `await global_event` target
+    /// (M1.0.14 E2). `T` must be a declared `event` (`E0102` — fix-as-you-go:
+    /// `global_event` previously accepted an undeclared `T` silently). For an
+    /// entity-scoped target the designated field must resolve (`E0908`/`E0909`
+    /// at the await site, via the shared `arena.resolveEventEntityTarget`). The
+    /// optional payload filter is validated for both targets.
+    fn checkEventTarget(self: *TypeChecker, await_id: NodeId, aw: ast_mod.AwaitExpr, entity_scoped: bool, ctx_opt: ?*RuleCtx) !void {
+        const sym = self.symbols.get(aw.event_type);
+        if (sym == null or sym.?.kind != .event_) {
+            try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(await_id), "'{s}' is not a declared event", .{self.arena.strings.slice(aw.event_type)});
+            return;
+        }
+        const decl_index = self.arena.itemData(sym.?.item_id);
+        if (entity_scoped) {
+            switch (self.arena.resolveEventEntityTarget(self.arena.event_decls.items[decl_index])) {
+                .field => {},
+                .none_entity => try self.emit(.event_not_entity_scoped, .error_, self.arena.exprSpan(await_id), "event '{s}' has no Entity field — 'await entity_event' requires a designated entity target", .{self.arena.strings.slice(aw.event_type)}),
+                .ambiguous => try self.emit(.ambiguous_event_entity_target, .error_, self.arena.exprSpan(await_id), "event '{s}' has multiple Entity fields — annotate the target field with '@entity_target'", .{self.arena.strings.slice(aw.event_type)}),
+            }
+        }
+        try self.checkEventFieldRun(decl_index, aw.filter_start, aw.filter_len, ctx_opt);
+    }
+
     fn checkStmt(self: *TypeChecker, ctx: *RuleCtx, stmt_id: NodeId) !void {
         const kind = self.arena.stmtKind(stmt_id);
         const data = self.arena.stmtData(stmt_id);
@@ -4491,28 +4568,9 @@ pub const TypeChecker = struct {
                 if (sym == null or sym.?.kind != .event_) {
                     try self.emit(.undefined_symbol, .error_, self.arena.stmtSpan(stmt_id), "'{s}' is not a declared event", .{self.arena.strings.slice(em.event_type)});
                 } else {
-                    const decl = self.arena.event_decls.items[self.arena.itemData(sym.?.item_id)];
-                    var i: u32 = 0;
-                    while (i < em.fields_len) : (i += 1) {
-                        const flit = self.arena.struct_lit_fields.items[em.fields_start + i];
-                        var declared: ?ResolvedType = null;
-                        var f_i: u32 = 0;
-                        while (f_i < decl.fields_len) : (f_i += 1) {
-                            const f = self.arena.fields.items[decl.fields_start + f_i];
-                            if (f.name == flit.name) {
-                                declared = self.namedTypeToResolved(f.type_node);
-                                break;
-                            }
-                        }
-                        const actual = self.synthExpr(flit.value, ctx);
-                        if (declared) |d| {
-                            if (d == .builtin and actual == .builtin and !self.literalTypeFits(d.builtin, flit.value, actual.builtin)) {
-                                try self.emit(.type_mismatch, .error_, self.arena.exprSpan(flit.value), "emit field '{s}' value type does not match its declared type", .{self.arena.strings.slice(flit.name)});
-                            }
-                        } else {
-                            try self.emit(.invalid_field_filter, .error_, self.arena.stmtSpan(stmt_id), "event '{s}' has no field '{s}'", .{ self.arena.strings.slice(em.event_type), self.arena.strings.slice(flit.name) });
-                        }
-                    }
+                    // Field-value validation is shared with the `entity_event` /
+                    // `global_event` payload filter (M1.0.14 E2).
+                    try self.checkEventFieldRun(self.arena.itemData(sym.?.item_id), em.fields_start, em.fields_len, ctx);
                 }
             },
             .tag_mutation_stmt => {
@@ -5002,33 +5060,50 @@ pub const TypeChecker = struct {
                     try self.emit(.async_call_in_non_async_context, .error_, self.arena.exprSpan(id), "`await` is only allowed in an `async fn` or `async rule`", .{});
                 }
                 const aw = self.arena.awaitExpr(id);
-                if (aw.target_kind == .future) {
-                    // The direct call is CONSUMED by this await (M1.0.12 E3,
-                    // §9.2) — exempt from E0905 while it is synthesized. Only
-                    // the target itself is exempt: an async call among its
-                    // ARGUMENTS is still bare.
-                    const saved_awaited = self.awaited_call;
-                    self.awaited_call = aw.arg_expr;
-                    defer self.awaited_call = saved_awaited;
-                    const t = try self.synthExprE(aw.arg_expr, ctx_opt);
-                    const ak = self.arena.exprKind(aw.arg_expr);
-                    if (ak == .fn_call or ak == .method_call) return t;
-                    // Non-call target: the handle-await form (M1.0.12 E3,
-                    // §9.8) — the target must be a TaskHandle. The result is
-                    // unit in Phase 1 (spawn bodies have no value channel —
-                    // brief Notes); `unknown` ≈ unit, the house convention.
-                    if (t == .builtin and t.builtin == .task_handle) return ResolvedType.unknown;
-                    // A `TimerHandle` is NOT awaitable (M1.0.13 E4, §9.10):
-                    // a timer is not a task — no join semantics. Precise
-                    // message ahead of the generic rejection below.
-                    if (t == .builtin and t.builtin == .timer_handle) {
-                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(aw.arg_expr), "a TimerHandle is not awaitable — a timer is not a task (its only operation is 'cancel()', par. 9.10)", .{});
+                switch (aw.target_kind) {
+                    // `wait` / `wait_unscaled` take a Duration LITERAL, validated
+                    // at the interpreter (literal-only, M1.0.11/13) — nothing to
+                    // synthesize here.
+                    .wait, .wait_unscaled => {},
+                    .entity_event => {
+                        // The entity operand (evaluated once at suspension in the
+                        // interpreter) must type `Entity` — reuse E0200 (M1.0.14 E2;
+                        // this operand was never synthesized before).
+                        const et = self.synthExpr(aw.entity_expr, ctx_opt);
+                        if (!(et == .builtin and et.builtin == .entity)) {
+                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(aw.entity_expr), "the first argument of entity_event(e, T) must be an Entity", .{});
+                        }
+                        try self.checkEventTarget(id, aw, true, ctx_opt);
+                    },
+                    .global_event => try self.checkEventTarget(id, aw, false, ctx_opt),
+                    .future => {
+                        // The direct call is CONSUMED by this await (M1.0.12 E3,
+                        // §9.2) — exempt from E0905 while it is synthesized. Only
+                        // the target itself is exempt: an async call among its
+                        // ARGUMENTS is still bare.
+                        const saved_awaited = self.awaited_call;
+                        self.awaited_call = aw.arg_expr;
+                        defer self.awaited_call = saved_awaited;
+                        const t = try self.synthExprE(aw.arg_expr, ctx_opt);
+                        const ak = self.arena.exprKind(aw.arg_expr);
+                        if (ak == .fn_call or ak == .method_call) return t;
+                        // Non-call target: the handle-await form (M1.0.12 E3,
+                        // §9.8) — the target must be a TaskHandle. The result is
+                        // unit in Phase 1 (spawn bodies have no value channel —
+                        // brief Notes); `unknown` ≈ unit, the house convention.
+                        if (t == .builtin and t.builtin == .task_handle) return ResolvedType.unknown;
+                        // A `TimerHandle` is NOT awaitable (M1.0.13 E4, §9.10):
+                        // a timer is not a task — no join semantics. Precise
+                        // message ahead of the generic rejection below.
+                        if (t == .builtin and t.builtin == .timer_handle) {
+                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(aw.arg_expr), "a TimerHandle is not awaitable — a timer is not a task (its only operation is 'cancel()', par. 9.10)", .{});
+                            return ResolvedType.unknown;
+                        }
+                        if (t != .unknown) {
+                            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(aw.arg_expr), "await target must be a direct async call or a TaskHandle", .{});
+                        }
                         return ResolvedType.unknown;
-                    }
-                    if (t != .unknown) {
-                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(aw.arg_expr), "await target must be a direct async call or a TaskHandle", .{});
-                    }
-                    return ResolvedType.unknown;
+                    },
                 }
                 return ResolvedType.unknown;
             },
@@ -8093,6 +8168,142 @@ test "type-checker validates event declaration + emit (M0.8 E3)" {
     );
     defer not_event.deinit(gpa);
     try expectAnyCode(not_event.diagnostics.items, .undefined_symbol);
+}
+
+test "type-checker validates entity_event / global_event await targets (M1.0.14 E2)" {
+    const gpa = std.testing.allocator;
+
+    // Non-Entity first operand of `entity_event` → E0200 (the operand was
+    // never synthesized before M1.0.14). `Ev` has an Entity field so E0908 does
+    // not also fire.
+    var bad_operand = try parseAndCheck(gpa,
+        \\component C { }
+        \\event Ev { who: Entity }
+        \\async rule r(e: Entity)
+        \\  when e has C
+        \\{
+        \\  await entity_event(5, Ev)
+        \\}
+    );
+    defer bad_operand.deinit(gpa);
+    try expectAnyCode(bad_operand.diagnostics.items, .type_mismatch);
+
+    // Undeclared event on `entity_event` → E0102.
+    var undecl_ent = try parseAndCheck(gpa,
+        \\component C { }
+        \\async rule r(e: Entity)
+        \\  when e has C
+        \\{
+        \\  await entity_event(e, Ghost)
+        \\}
+    );
+    defer undecl_ent.deinit(gpa);
+    try expectAnyCode(undecl_ent.diagnostics.items, .undefined_symbol);
+
+    // Undeclared event on `global_event` → E0102 (fix-as-you-go: previously
+    // accepted silently).
+    var undecl_glob = try parseAndCheck(gpa,
+        \\resource R { n: int = 0 }
+        \\async rule r()
+        \\  when resource R
+        \\{
+        \\  await global_event(Ghost)
+        \\}
+    );
+    defer undecl_glob.deinit(gpa);
+    try expectAnyCode(undecl_glob.diagnostics.items, .undefined_symbol);
+
+    // Zero Entity fields → E0908 EventNotEntityScoped.
+    var no_entity = try parseAndCheck(gpa,
+        \\component C { }
+        \\event Ev { amount: int = 0 }
+        \\async rule r(e: Entity)
+        \\  when e has C
+        \\{
+        \\  await entity_event(e, Ev)
+        \\}
+    );
+    defer no_entity.deinit(gpa);
+    try expectAnyCode(no_entity.diagnostics.items, .event_not_entity_scoped);
+
+    // Two Entity fields, no `@entity_target` → E0909 AmbiguousEventEntityTarget.
+    var ambiguous = try parseAndCheck(gpa,
+        \\component C { }
+        \\event Ev { source: Entity, target: Entity }
+        \\async rule r(e: Entity)
+        \\  when e has C
+        \\{
+        \\  await entity_event(e, Ev)
+        \\}
+    );
+    defer ambiguous.deinit(gpa);
+    try expectAnyCode(ambiguous.diagnostics.items, .ambiguous_event_entity_target);
+
+    // Two Entity fields WITH `@entity_target` → clean (annotation disambiguates).
+    var annotated = try parseAndCheck(gpa,
+        \\component C { }
+        \\event Ev { source: Entity, @entity_target target: Entity }
+        \\async rule r(e: Entity)
+        \\  when e has C
+        \\{
+        \\  await entity_event(e, Ev)
+        \\}
+    );
+    defer annotated.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), annotated.diagnostics.items.len);
+
+    // `@entity_target` on a non-Entity field → E0502 (existing kind).
+    var at_non_entity = try parseAndCheck(gpa,
+        \\event Ev { @entity_target amount: int = 0, who: Entity }
+    );
+    defer at_non_entity.deinit(gpa);
+    try expectAnyCode(at_non_entity.diagnostics.items, .annotation_misapplied);
+
+    // Duplicate `@entity_target` in one event → E0502.
+    var at_dup = try parseAndCheck(gpa,
+        \\event Ev { @entity_target a: Entity, @entity_target b: Entity }
+    );
+    defer at_dup.deinit(gpa);
+    try expectAnyCode(at_dup.diagnostics.items, .annotation_misapplied);
+
+    // Filter naming a field the event does not declare → E1211.
+    var filter_unknown = try parseAndCheck(gpa,
+        \\component C { }
+        \\event Ev { who: Entity }
+        \\async rule r(e: Entity)
+        \\  when e has C
+        \\{
+        \\  await entity_event(e, Ev { nope: 1 })
+        \\}
+    );
+    defer filter_unknown.deinit(gpa);
+    try expectAnyCode(filter_unknown.diagnostics.items, .invalid_field_filter);
+
+    // Filter value type does not match the field's declared type → E0200.
+    var filter_type = try parseAndCheck(gpa,
+        \\component C { }
+        \\event Ev { amount: int = 0, who: Entity }
+        \\async rule r(e: Entity)
+        \\  when e has C
+        \\{
+        \\  await entity_event(e, Ev { amount: true })
+        \\}
+    );
+    defer filter_type.deinit(gpa);
+    try expectAnyCode(filter_type.diagnostics.items, .type_mismatch);
+
+    // Filtered `global_event` type-checks clean (filter on both targets §4.2).
+    var filtered_global = try parseAndCheck(gpa,
+        \\event Ev { amount: int = 0 }
+        \\resource R { n: int = 0 }
+        \\async rule r()
+        \\  when resource R
+        \\{
+        \\  await global_event(Ev { amount: 3 })
+        \\}
+    );
+    defer filtered_global.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), filtered_global.diagnostics.items.len);
 }
 
 test "type-checker validates @networked on event, rejects @config on event (M0.8 E3)" {

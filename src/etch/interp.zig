@@ -10087,14 +10087,24 @@ test "await entity_event still fails loud (partition boundary intact, M1.0.13 E5
     const gpa = std.testing.allocator;
     // `wait_unscaled` graduated to a working await target with the M1.0.13
     // time subsystem (E5); the remaining partition boundary is
-    // `entity_event` — needs entity-scoped events (M1.0.14).
+    // `entity_event` — needs entity-scoped events (M1.0.14). The program is
+    // now type-VALID (M1.0.14 E2 validates the target: `e` is an Entity and
+    // `Ev` has a single Entity field), so it reaches the interpreter, where
+    // `entity_event` still fails loud (execution lands in E3). A `seed` rule
+    // spawns the matched entity so the entity-based awaiter actually runs.
     try std.testing.expect((try asyncFailLoudCount(gpa,
-        \\event Ev { }
-        \\resource Out { n: int = 0 }
-        \\async rule r()
-        \\  when resource Out
+        \\component M { }
+        \\event Ev { who: Entity }
+        \\resource Boot { on: bool = true }
+        \\rule seed()
+        \\  when resource Boot
         \\{
-        \\  await entity_event(get(Out), Ev)
+        \\  spawn(M { })
+        \\}
+        \\async rule r(e: Entity)
+        \\  when e has M
+        \\{
+        \\  await entity_event(e, Ev)
         \\}
     )) >= 1);
     // The M1.0.11 case — `await` on a stored non-TaskHandle value — is
