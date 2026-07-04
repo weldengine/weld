@@ -9053,10 +9053,10 @@ test "async rule suspends at await wait(<d>s) and resumes at the equivalent tick
     defer interp.deinit();
     const out_id = world.registry.idOf("Out").?;
 
-    // tick 1: spawn → n=1, suspend at `await wait(0.04s)` (wake at async_tick 3).
+    // tick 1: spawn → n=1, suspend at `await wait(0.04s)` (wake at game clock 3).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
-    // tick 2: still suspended (async_tick 2 < 3) — n unchanged.
+    // tick 2: still suspended (game clock 2 < 3) — n unchanged.
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
     // tick 3: wake fires (3 >= 3) → resume, n=2, complete.
@@ -9720,7 +9720,7 @@ test "async rule suspends at a statement-head await inside an if body and resume
     const log_id = world.registry.idOf("Log").?;
 
     // tick 1: n=1, enter the if, emit Beat (counted → Log.n=1), suspend at the
-    // await (wake at async_tick 3).
+    // await (wake at game clock 3).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, log_id));
@@ -9776,10 +9776,10 @@ test "async rule suspends at a statement-head await inside a loop body and resum
     defer interp.deinit();
     const out_id = world.registry.idOf("Out").?;
 
-    // tick 1: iteration 1 (n=1), suspend at await (wake at async_tick 2).
+    // tick 1: iteration 1 (n=1), suspend at await (wake at game clock 2).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
-    // tick 2: resume → iteration 2 (n=2), suspend again (wake at async_tick 3).
+    // tick 2: resume → iteration 2 (n=2), suspend again (wake at game clock 3).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out_id));
     // tick 3: resume → iteration 3 (n=3), the if fires `break`, the loop exits,
@@ -9829,7 +9829,7 @@ test "async rule suspends at a statement-head await inside a for body and resume
     defer interp.deinit();
     const out_id = world.registry.idOf("Out").?;
 
-    // tick 1: i=0 → n += 1 = 1, suspend (wake at async_tick 2).
+    // tick 1: i=0 → n += 1 = 1, suspend (wake at game clock 2).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
     // tick 2: resume → i=1 → n += 2 = 3, suspend.
@@ -10017,10 +10017,10 @@ test "await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60) 
     var world = World.init();
     defer world.deinit(gpa);
 
-    // 1.0 s at the Phase-1 fixed 1/60 timestep = 60 ticks. Spawned at async_tick
+    // 1.0 s at the Phase-1 fixed 1/60 timestep = 60 ticks. Spawned at game clock
     // 1, the task wakes at tick 61 — not before. This pins the Duration→tick
-    // conversion (M1.0.13 will swap the clock without changing the result at
-    // time_scale = 1).
+    // conversion (M1.0.13 swapped the wake onto the game clock without changing
+    // the result at time_scale = 1 — this test IS the byte-identity witness).
     const source =
         \\resource Out { n: int = 0 }
         \\async rule sec()
@@ -10049,7 +10049,7 @@ test "await wait(1.0s) resumes at the fixed-timestep-equivalent tick count (60) 
     defer interp.deinit();
     const out_id = world.registry.idOf("Out").?;
 
-    // tick 1: n=1, suspend (wake at async_tick 61).
+    // tick 1: n=1, suspend (wake at game clock 61).
     _ = try interp.runFor(&world, 1);
     try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out_id));
     // through tick 60: still suspended (60 < 61).
