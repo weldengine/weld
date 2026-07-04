@@ -1059,6 +1059,16 @@ pub const Interpreter = struct {
     /// `has_async`): `null` until the async rule first spawns, then the pool index
     /// of its task. A non-async rule's entry stays `null`.
     rule_tasks: []?u32 = &.{},
+    /// Per-rule `(entity → live task index)` map for ENTITY-BOUND async rules
+    /// (M1.0.14 E3; parallel to `rule_descs`, allocated iff `has_async`). An
+    /// entry records the last task spawned for that `(rule, entity)` pair; a
+    /// LIVE task is `.suspended` — a terminal-state entry (husk) does not block
+    /// re-arming (ruling 2). A non-entity-bound rule's map stays empty.
+    entity_rule_tasks: []std.AutoHashMapUnmanaged(EntityId, u32) = &.{},
+    /// Reusable buffer collecting an entity-bound rule's matched entities in
+    /// selection order before spawning their tasks (M1.0.14 E3) — filled by the
+    /// shared selection walk (`iterateSelection` collect mode).
+    entity_spawn_buf: std.ArrayListUnmanaged(EntityId) = .empty,
     /// Reusable cursor buffer for the multi-term (`or`) archetype-union merge
     /// (M1.0.0). Resized to the term count of the rule being iterated; capacity
     /// is retained across rules/ticks so the union path allocates at most once.
@@ -1147,6 +1157,9 @@ pub const Interpreter = struct {
         self.timers.deinit(self.gpa);
         self.task_children.deinit(self.gpa);
         self.gpa.free(self.rule_tasks);
+        for (self.entity_rule_tasks) |*m| m.deinit(self.gpa);
+        self.gpa.free(self.entity_rule_tasks);
+        self.entity_spawn_buf.deinit(self.gpa);
         self.descriptors.deinit(self.gpa);
         self.merge_cursors.deinit(self.gpa);
         self.gpa.free(self.observer_ctxs);
@@ -1469,6 +1482,13 @@ pub const Interpreter = struct {
             @memset(map, null);
             break :blk map;
         } else &.{};
+        // Per-rule `(entity → live task)` maps for entity-bound async rules
+        // (M1.0.14 E3), parallel to `rule_descs`. Empty for non-entity-bound rules.
+        const entity_rule_tasks: []std.AutoHashMapUnmanaged(EntityId, u32) = if (any_async) blk: {
+            const maps = try gpa.alloc(std.AutoHashMapUnmanaged(EntityId, u32), slice.len);
+            for (maps) |*m| m.* = .empty;
+            break :blk maps;
+        } else &.{};
 
         // Pass E — build the Level-B descriptors (M0.8 E4, build-structure
         // side of the serialized-IR differential). Fail-loud on any
@@ -1495,6 +1515,7 @@ pub const Interpreter = struct {
             .has_changed = any_changed,
             .has_async = any_async,
             .rule_tasks = rule_tasks,
+            .entity_rule_tasks = entity_rule_tasks,
             .descriptors = descriptors,
             .world = world,
             .persistent_literals = persistent_literals,
@@ -2055,7 +2076,7 @@ pub const Interpreter = struct {
         // match never goes stale. A single term iterates its matches directly
         // (ascending archetype-creation order, preserving the historical
         // direct-walk order → interp↔codegen parity); `or` unions the terms.
-        try self.iterateSelection(world, rd, &rule_matched, report);
+        try self.iterateSelection(world, rd, &rule_matched, report, null);
         if (rule_matched) report.rules_matched += 1;
     }
 
@@ -2077,25 +2098,30 @@ pub const Interpreter = struct {
     /// `query.maybeRescan` returns the archetypes it scanned this call (0 in
     /// the steady state); summing them into `predicate_archetype_evals` keeps
     /// the tail-only-rescan observable the cache test asserts.
-    fn iterateSelection(self: *Interpreter, world: *World, rd: *RuleDesc, rule_matched: *bool, report: *RuntimeReport) !void {
+    /// Walk a rule's selected entities in deterministic order. When `collect`
+    /// is non-null the matched `EntityId`s are appended to it and NOTHING runs
+    /// (entity-bound async spawn, M1.0.14 E3); when null, the sync path runs
+    /// `execBody` per match. The order and `when`-guard semantics are identical
+    /// either way — the two consumers share this one walk.
+    fn iterateSelection(self: *Interpreter, world: *World, rd: *RuleDesc, rule_matched: *bool, report: *RuntimeReport, collect: ?*std.ArrayListUnmanaged(EntityId)) !void {
         const sel = rd.selection;
         if (sel.len == 0) return;
         if (sel.len == 1) {
             report.predicate_archetype_evals += sel[0].maybeRescan();
             for (sel[0].matching.items) |arch| {
-                try self.iterateArchetype(world, rd, arch, rule_matched, report);
+                try self.iterateArchetype(world, rd, arch, rule_matched, report, collect);
             }
             return;
         }
         for (sel) |*q| report.predicate_archetype_evals += q.maybeRescan();
-        try self.iterateUnion(world, rd, rule_matched, report);
+        try self.iterateUnion(world, rd, rule_matched, report, collect);
     }
 
     /// k-way merge of a multi-term (`or`) selection's matching lists, ascending
     /// by `archetype_id`, each archetype dispatched exactly once (M1.0.0). Uses
     /// the reusable `merge_cursors` buffer — one cursor per term — so the union
     /// path allocates at most once over the interpreter's lifetime.
-    fn iterateUnion(self: *Interpreter, world: *World, rd: *RuleDesc, rule_matched: *bool, report: *RuntimeReport) !void {
+    fn iterateUnion(self: *Interpreter, world: *World, rd: *RuleDesc, rule_matched: *bool, report: *RuntimeReport, collect: ?*std.ArrayListUnmanaged(EntityId)) !void {
         const sel = rd.selection;
         self.merge_cursors.clearRetainingCapacity();
         try self.merge_cursors.appendNTimes(self.gpa, 0, sel.len);
@@ -2120,13 +2146,15 @@ pub const Interpreter = struct {
                     cursors[qi] += 1;
                 }
             }
-            try self.iterateArchetype(world, rd, arch, rule_matched, report);
+            try self.iterateArchetype(world, rd, arch, rule_matched, report, collect);
         }
     }
 
     /// Walk one archetype's chunks/slots for an entity-bound rule — the
-    /// per-archetype body of the cached-matching-set selection (M1.0.0).
-    fn iterateArchetype(self: *Interpreter, world: *World, rd: *RuleDesc, arch: *DynamicArchetype, rule_matched: *bool, report: *RuntimeReport) !void {
+    /// per-archetype body of the cached-matching-set selection (M1.0.0). When
+    /// `collect` is non-null, matched entities are gathered instead of run
+    /// (M1.0.14 E3, entity-bound async spawn).
+    fn iterateArchetype(self: *Interpreter, world: *World, rd: *RuleDesc, arch: *DynamicArchetype, rule_matched: *bool, report: *RuntimeReport, collect: ?*std.ArrayListUnmanaged(EntityId)) !void {
         for (arch.chunks.items) |chunk| {
             const ids = arch.entityIdsConst(chunk);
             const count = chunk.header().entity_count;
@@ -2150,10 +2178,16 @@ pub const Interpreter = struct {
                 // codegen guards).
                 if ((rd.expr_filters.len > 0 or rd.expr_conds.len > 0) and
                     !(try self.exprGuardsPass(world, rd.*, entity_id, arch, chunk, slot))) continue;
-                report.entities_iterated += 1;
-                rd.matched_entities += 1;
-                rule_matched.* = true;
-                try self.execBody(world, rd.*, entity_id, null, report);
+                if (collect) |buf| {
+                    // Entity-bound async spawn (M1.0.14 E3): gather the matched
+                    // entity in selection order; the caller spawns its task.
+                    try buf.append(self.gpa, entity_id);
+                } else {
+                    report.entities_iterated += 1;
+                    rd.matched_entities += 1;
+                    rule_matched.* = true;
+                    try self.execBody(world, rd.*, entity_id, null, report);
+                }
             }
         }
     }
@@ -2312,27 +2346,41 @@ pub const Interpreter = struct {
     /// shape); an entity-bound async rule (one task per matching entity) is
     /// deferred and fails loud (counted once, then parked `.done`).
     fn runAsyncRule(self: *Interpreter, world: *World, idx: usize, report: *RuntimeReport) !void {
-        const rd = self.rule_descs[idx];
-        if (self.rule_tasks[idx] == null) {
-            // First reach → spawn the rule-root task in the pool.
-            const rule = self.ast.rule_decls.items[rd.rule_idx];
-            if (rule.params_len > 0 or rd.is_entity_bound) {
+        const rd = &self.rule_descs[idx];
+        const rule = self.ast.rule_decls.items[rd.rule_idx];
+        if (rd.is_entity_bound and rule.params_len == 1) {
+            // Entity-bound async rule (M1.0.14 E3): the clean single-`Entity`-param
+            // shape (`async rule r(e: Entity) when e has T`). One root task per (rule,
+            // matched entity). Each selected entity with no LIVE (`.suspended`)
+            // task spawns a task — the entity bound into its root locals — in
+            // the rule's deterministic selection order (ruling 4). The `when`
+            // gates the SPAWN only (ruling 1); a terminal task re-arms for a
+            // still-matching entity (ruling 2); despawn does not cancel — a
+            // later dead-handle ECS access fails loud (ruling 3).
+            try self.spawnEntityBoundTasks(world, idx, rd, rule, report);
+        } else if (rule.params_len > 0) {
+            // A non-entity parameter shape (e.g. `dt: float`) stays fail-loud —
+            // parameter injection beyond the entity binding is a later
+            // milestone. Park one done husk on first reach.
+            if (self.rule_tasks[idx] == null) {
                 report.runtime_errors += 1;
                 const ti = try self.newTask(@intCast(idx), null);
                 self.async_tasks.items[ti].state = .done;
                 self.rule_tasks[idx] = ti;
-                return;
             }
+        } else if (self.rule_tasks[idx] == null) {
+            // Parameterless async rule (byte-stable, unchanged): one root task,
+            // spawned on first reach. The fresh task's default wake
+            // (`wait_until = 0`) fires immediately, so it runs this tick.
             const ti = try self.newTask(@intCast(idx), null);
             self.rule_tasks[idx] = ti;
-            // The initial frame is the rule body as a linear run. The fresh
-            // task's default wake (`wait_until = 0`) fires immediately, so the
-            // drive-by-origin pass below runs it this tick.
             try self.async_tasks.items[ti].frames.append(self.gpa, .{ .run = .{
                 .block_start = rule.body_start,
                 .block_len = rule.body_len,
             } });
         }
+        // Drive-by-origin (UNCHANGED, M1.0.12): drive every suspended task of
+        // this rule whose wake fired, at the rule's position in the tick order.
         var drove_any = false;
         var ti: usize = 0;
         while (ti < self.async_tasks.items.len) : (ti += 1) {
@@ -2344,6 +2392,34 @@ pub const Interpreter = struct {
             try self.driveTask(world, task, report);
         }
         if (drove_any) report.rules_matched += 1;
+    }
+
+    /// Spawn one root task per matched entity for an ENTITY-BOUND async rule
+    /// (M1.0.14 E3). Reuses the SYNC entity selection (collect mode) so the
+    /// order and `when` semantics are identical. Two passes: collect the
+    /// matched entities in selection order (nothing runs), then spawn a task
+    /// for each entity whose `(rule, entity)` map slot has no LIVE
+    /// (`.suspended`) task — a terminal-state husk does not block re-arming
+    /// (ruling 2). A matched entity that later stops matching keeps its live
+    /// task (ruling 1 — `when` gates the spawn, not the task's life). The fresh
+    /// task's default wake fires this tick, so the drive-by-origin pass runs it.
+    fn spawnEntityBoundTasks(self: *Interpreter, world: *World, idx: usize, rd: *RuleDesc, rule: ast_mod.RuleDecl, report: *RuntimeReport) !void {
+        self.entity_spawn_buf.clearRetainingCapacity();
+        var dummy_matched = false;
+        try self.iterateSelection(world, rd, &dummy_matched, report, &self.entity_spawn_buf);
+        const map = &self.entity_rule_tasks[idx];
+        for (self.entity_spawn_buf.items) |entity_id| {
+            if (map.get(entity_id)) |ti| {
+                if (self.async_tasks.items[ti].state == .suspended) continue; // LIVE → no re-arm
+            }
+            const ti = try self.newTask(@intCast(idx), null);
+            try bindParams(self.gpa, self.ast, rule, entity_id, &self.async_tasks.items[ti].locals);
+            try self.async_tasks.items[ti].frames.append(self.gpa, .{ .run = .{
+                .block_start = rule.body_start,
+                .block_len = rule.body_len,
+            } });
+            try map.put(self.gpa, entity_id, ti);
+        }
     }
 
     /// The active scope for the top frame (M1.0.11 E2): the nearest enclosing
@@ -10102,6 +10178,280 @@ test "entity_event fails loud in evalAwaitTarget until the E4 lift (M1.0.14 E2 p
 
     // The direct pin: `entity_event` is not yet realized → fail loud (until E4).
     try std.testing.expectError(error.RuntimeFailure, interp.evalAwaitTarget(await_id));
+}
+
+test "entity-bound async rule: one root task per matched entity, independent resumes (M1.0.14 E3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Tag { v: int = 0 }
+        \\resource Out { n: int = 0 }
+        \\async rule r(e: Entity)
+        \\  when e has Tag and resource Out
+        \\{
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n + 1
+        \\  await wait(0.04s)
+        \\  let o2 = get_mut(Out)
+        \\  o2.n = o2.n + 10
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const tag = world.registry.idOf("Tag").?;
+    const out = world.registry.idOf("Out").?;
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{tag});
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{tag});
+
+    // tick 1: one task spawns per matching entity (2) → each runs the prefix
+    // (n += 1 twice → 2) and suspends at `await wait(0.04s)` (2 ticks).
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out));
+    // ticks 2–3: both wake at the same tick and run the tail (n += 10 twice → 22).
+    _ = try interp.runFor(&world, 2);
+    try std.testing.expectEqual(@as(i64, 22), readResourceInt(&world, out));
+}
+
+test "entity-bound async rule: re-arms after a terminal state while the entity matches (M1.0.14 E3 ruling 2)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Tag { v: int = 0 }
+        \\resource Out { n: int = 0 }
+        \\async rule r(e: Entity)
+        \\  when e has Tag and resource Out
+        \\{
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n + 1
+        \\  await wait(0.02s)
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const tag = world.registry.idOf("Tag").?;
+    const out = world.registry.idOf("Out").?;
+    _ = try world.spawnDynamic(gpa, &[_]ComponentId{tag});
+
+    // Each cycle: spawn → n += 1 → suspend 1 tick → resume → done → re-arm.
+    _ = try interp.runFor(&world, 1); // t1: spawn, n=1, suspend
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out));
+    _ = try interp.runFor(&world, 2); // t2 resume→done; t3 re-arm, n=2, suspend
+    try std.testing.expectEqual(@as(i64, 2), readResourceInt(&world, out));
+    _ = try interp.runFor(&world, 2); // t4 resume→done; t5 re-arm, n=3
+    try std.testing.expectEqual(@as(i64, 3), readResourceInt(&world, out));
+}
+
+test "entity-bound async rule: when gates the spawn, not the task life (M1.0.14 E3 ruling 1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Tag { v: int = 0 }
+        \\component Keep { k: int = 0 }
+        \\resource Out { n: int = 0 }
+        \\async rule r(e: Entity)
+        \\  when e has Tag and resource Out
+        \\{
+        \\  let o = get_mut(Out)
+        \\  o.n = o.n + 1
+        \\  await wait(0.04s)
+        \\  let o2 = get_mut(Out)
+        \\  o2.n = o2.n + 100
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const tag = world.registry.idOf("Tag").?;
+    const keep = world.registry.idOf("Keep").?;
+    const out = world.registry.idOf("Out").?;
+    // Two components so removing Tag leaves the entity non-empty (keeps Keep).
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{ tag, keep });
+
+    _ = try interp.runFor(&world, 1); // t1: spawn, n=1, suspend (wake t3)
+    try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out));
+    // The entity stops matching mid-suspension — its live task must survive.
+    try world.removeComponentDynamic(gpa, e, tag);
+    _ = try interp.runFor(&world, 2); // t2 no wake; t3 resume → n += 100 → 101
+    try std.testing.expectEqual(@as(i64, 101), readResourceInt(&world, out));
+    // No re-arm: the entity no longer matches, so nothing spawns again.
+    _ = try interp.runFor(&world, 2);
+    try std.testing.expectEqual(@as(i64, 101), readResourceInt(&world, out));
+}
+
+test "entity-bound async rule: despawn mid-suspension → dead-handle fail-loud on resume (M1.0.14 E3 ruling 3)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Tag { hp: int = 7 }
+        \\resource Out { n: int = 0 }
+        \\async rule r(e: Entity)
+        \\  when e has Tag and resource Out
+        \\{
+        \\  await wait(0.04s)
+        \\  let o = get_mut(Out)
+        \\  o.n = e.get(Tag).hp
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const tag = world.registry.idOf("Tag").?;
+    const out = world.registry.idOf("Out").?;
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{tag});
+
+    _ = try interp.runFor(&world, 1); // t1: spawn, suspend at await (no e access yet)
+    // Despawn mid-suspension: the task is NOT canceled (ruling 3).
+    try world.despawn(gpa, e);
+    // t2 no wake; t3 resume → `e.get(Tag)` on the dead handle fails loud.
+    const rep = try interp.runFor(&world, 2);
+    try std.testing.expect(rep.runtime_errors >= 1);
+    try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out)); // tail never ran
+}
+
+test "entity-bound async rule: spawn follows selection order (M1.0.14 E3 ruling 4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    var pr = try parser_mod.parse(gpa,
+        \\component Tag { mark: int = 0 }
+        \\resource Out { seq: int = 0 }
+        \\async rule r(e: Entity)
+        \\  when e has Tag and resource Out
+        \\{
+        \\  let o = get_mut(Out)
+        \\  o.seq = o.seq * 10 + e.get(Tag).mark
+        \\  await wait(0.02s)
+        \\}
+    );
+    defer pr.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const tag = world.registry.idOf("Tag").?;
+    const out = world.registry.idOf("Out").?;
+    // Spawn order = selection order (slot 0, then slot 1). mark 1 then mark 2.
+    var m1: i64 = 1;
+    _ = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{tag}, &[_][]const u8{std.mem.asBytes(&m1)});
+    var m2: i64 = 2;
+    _ = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{tag}, &[_][]const u8{std.mem.asBytes(&m2)});
+
+    // tick 1: tasks spawn + drive in selection order → seq = (0*10+1)*10+2 = 12.
+    // A reversed order would yield 21.
+    _ = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(i64, 12), readResourceInt(&world, out));
+}
+
+test "async rule shape guard: parameterless byte-stable, dt param fail-loud (M1.0.14 E3)" {
+    const gpa = std.testing.allocator;
+
+    // Parameterless async rule: one root task, runs once, never re-arms (the
+    // pre-M1.0.14 behavior — byte-stable).
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa,
+            \\resource Out { n: int = 0 }
+            \\async rule r()
+            \\  when resource Out
+            \\{
+            \\  let o = get_mut(Out)
+            \\  o.n = o.n + 1
+            \\  await wait(0.02s)
+            \\}
+        );
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const out = world.registry.idOf("Out").?;
+        const rep = try interp.runFor(&world, 8);
+        try std.testing.expectEqual(@as(u64, 0), rep.runtime_errors);
+        try std.testing.expectEqual(@as(i64, 1), readResourceInt(&world, out)); // ran once, no re-arm
+    }
+
+    // A non-entity parameter shape (`dt: float`) stays fail-loud: the body
+    // never runs and a runtime error is surfaced.
+    {
+        var world = World.init();
+        defer world.deinit(gpa);
+        var pr = try parser_mod.parse(gpa,
+            \\resource Out { n: int = 0 }
+            \\async rule r(dt: float)
+            \\  when resource Out
+            \\{
+            \\  let o = get_mut(Out)
+            \\  o.n = 1
+            \\  await wait(0.02s)
+            \\}
+        );
+        defer pr.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+        var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+        defer {
+            for (diags.items) |*d| d.deinit(gpa);
+            diags.deinit(gpa);
+        }
+        try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+        try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+        var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+        defer interp.deinit();
+        const out = world.registry.idOf("Out").?;
+        const rep = try interp.runFor(&world, 2);
+        try std.testing.expect(rep.runtime_errors >= 1);
+        try std.testing.expectEqual(@as(i64, 0), readResourceInt(&world, out)); // body never ran
+    }
 }
 
 test "task pool is pointer-stable and cancelTask parks a suspended task for good (M1.0.12 E1)" {
