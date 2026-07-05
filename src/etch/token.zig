@@ -109,7 +109,7 @@ pub const TokenKind = enum {
     kw_import, // import directive (M1.0.7 cross-file import — module path + optional alias / selective items; graduated from non_s3_keywords)
     kw_const, // top-level `const` declaration (M1.0.8 — graduated from non_s3_keywords; top-level only per part1 §4.5)
     kw_private, // `private` visibility modifier prefix on a declaration_body (M1.0.8 — graduated from non_s3_keywords; grammar §5.1)
-    kw_test, // top-level `test "name" { ... }` block (M1.0.8 — graduated from non_s3_keywords; parse + validate only, no execution)
+    kw_test, // top-level `test "name" { ... }` block (M1.0.8 graduated it; M1.0.15 executes it end-to-end via the test runner)
     kw_spawn, // structural spawn expr `spawn(C{…})` (M1.0.10, §3.2 structural_spawn) + the async task statement `[let IDENT =] spawn { }` (M1.0.12, §4.2 spawn_stmt) — disambiguated by the next token
     kw_race, // race statement `race { race_branch* }` (M1.0.12 — graduated from non_s3_keywords; §4.2 race_stmt)
     kw_sync, // sync statement `sync { sync_branch* }` (M1.0.12 — graduated from non_s3_keywords; §4.2 sync_stmt)
