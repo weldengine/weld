@@ -1048,6 +1048,16 @@ pub const Interpreter = struct {
     /// reach that tick's rules — §32's `emit; tick(1)` semantics. Consumed by the
     /// first `stepOnce`; `runFor` never sets it (identical to the pre-M1.0.15 path).
     suppress_event_clear: bool = false,
+    /// While TRUE, the per-body value-store resets (`resetBodyStores`) are no-ops
+    /// (M1.0.15). A `test` body OUTLIVES the rule / guard / timer / observer /
+    /// hook bodies that `world.tick(n)` drives; those bodies' per-body resets
+    /// would free heap-backed values (arrays / structs / closures / `.string_run`)
+    /// still held by the test body's locals — a use-after-free (the M1.0.14
+    /// string class). `runTestBody` sets this for its whole duration; the driven
+    /// bodies then accumulate into the shared stores (test-scale, bounded), and
+    /// `runTestBody`'s own end-defers (raw resets, NOT `resetBodyStores`) free
+    /// everything at once. `false` on every production path — no behavior change.
+    suppress_body_store_resets: bool = false,
     /// Whether a `return` is unwinding to the enclosing `fn` boundary (M0.8 E2).
     /// Mirrors `thrown`: every statement-run / loop / block site that stops on a
     /// throw also stops on a return; the fn-call boundary consumes it.
@@ -1653,10 +1663,17 @@ pub const Interpreter = struct {
     /// `throw`, or any runtime failure becomes a `.fail` outcome carrying the
     /// position + message (NOT an aggregated `runtime_errors` count — §32).
     /// Mirrors `execTimerBody`'s sync run-to-completion discipline with a fresh,
-    /// param-less locals scope and per-body arena-store resets.
+    /// param-less locals scope. Suppresses the per-body store resets of every
+    /// body `tick(n)` drives (rule / guard / timer / observer / hook) for the
+    /// whole test body: those bodies must not free heap-backed values the test's
+    /// locals still hold (UAF, M1.0.14 class). The stores accumulate (test-scale,
+    /// bounded) and the end-defers below free them en bloc — RAW resets, so they
+    /// run unconditionally even while the suppression flag is (about to be) set.
     pub fn runTestBody(self: *Interpreter, world: *World, decl: ast_mod.TestDecl) error{OutOfMemory}!TestBodyOutcome {
         var locals: Locals = .{};
         defer locals.deinit(self.gpa);
+        self.suppress_body_store_resets = true;
+        defer self.suppress_body_store_resets = false;
         defer self.collections.reset(self.gpa);
         defer self.closures.reset(self.gpa);
         defer self.structs.reset(self.gpa);
@@ -1808,11 +1825,7 @@ pub const Interpreter = struct {
 
         var locals: Locals = .{};
         defer locals.deinit(self.gpa);
-        defer self.collections.reset(self.gpa);
-        defer self.closures.reset(self.gpa);
-        defer self.structs.reset(self.gpa);
-        defer self.optionals.clearRetainingCapacity();
-        defer self.resetRunStrings();
+        defer self.resetBodyStores();
 
         // Bind the declared params by name (the names are validated in E2):
         // `entity` → the triggering entity; `value`/`new` → new_value bytes;
@@ -1907,11 +1920,7 @@ pub const Interpreter = struct {
 
         var locals: Locals = .{};
         defer locals.deinit(self.gpa);
-        defer self.collections.reset(self.gpa);
-        defer self.closures.reset(self.gpa);
-        defer self.structs.reset(self.gpa);
-        defer self.optionals.clearRetainingCapacity();
-        defer self.resetRunStrings();
+        defer self.resetBodyStores();
 
         // Bind the implicit `entity` — only if the body references it (else the
         // name is not interned in the hook arena and no binding is needed).
@@ -2462,16 +2471,29 @@ pub const Interpreter = struct {
         return v == .bool_ and v.bool_;
     }
 
-    /// Reset the rule-arena stores after a guard evaluation (M0.8 E4): guard
-    /// expressions may allocate (strings, collections); nothing they create
-    /// outlives the guard verdict, and the body starts from a clean arena
-    /// (its own boundary resets are unchanged).
-    fn resetGuardStores(self: *Interpreter) void {
+    /// Reset the shared per-body value stores (collections / closures / structs /
+    /// optionals / run-strings) at a body boundary. No-op while a `test` body is
+    /// running (`suppress_body_store_resets`, M1.0.15): that body outlives the
+    /// rule / guard / timer / observer / hook bodies `tick(n)` drives, so their
+    /// resets must not free heap-backed values its locals still hold (UAF, the
+    /// M1.0.14 class). The single choke point for every per-body reset; a test's
+    /// own end-cleanup calls the raw resets directly (unconditional).
+    fn resetBodyStores(self: *Interpreter) void {
+        if (self.suppress_body_store_resets) return;
         self.collections.reset(self.gpa);
         self.closures.reset(self.gpa);
         self.structs.reset(self.gpa);
         self.optionals.clearRetainingCapacity();
         self.resetRunStrings();
+    }
+
+    /// Reset the rule-arena stores after a guard evaluation (M0.8 E4): guard
+    /// expressions may allocate (strings, collections); nothing they create
+    /// outlives the guard verdict, and the body starts from a clean arena
+    /// (its own boundary resets are unchanged). Routed through `resetBodyStores`
+    /// so a test body suppresses it too (M1.0.15).
+    fn resetGuardStores(self: *Interpreter) void {
+        self.resetBodyStores();
     }
 
     /// Run an `@on_event(T)` observer (M0.8 E3): fire the body once per event of
@@ -3970,12 +3992,10 @@ pub const Interpreter = struct {
         defer locals.deinit(self.gpa);
         // Collections, closures, and structs created in this body live in the
         // rule arena: free them at the body boundary so handles never outlive
-        // their invocation.
-        defer self.collections.reset(self.gpa);
-        defer self.closures.reset(self.gpa);
-        defer self.structs.reset(self.gpa);
-        defer self.optionals.clearRetainingCapacity();
-        defer self.resetRunStrings();
+        // their invocation — UNLESS a test body is driving this rule via
+        // `tick(n)`, in which case the reset is deferred to the test body's end
+        // (`resetBodyStores` no-ops; M1.0.15, the outlives-UAF fix).
+        defer self.resetBodyStores();
         try bindParams(self.gpa, self.ast, rule, entity_id, &locals);
         // `@on_event(T)` observer (M0.8 E3): inject the implicit `event` payload
         // self-style (like `self` in `callMethod`). The event is materialised as
@@ -4671,9 +4691,9 @@ pub const Interpreter = struct {
     /// observer-firing primitive (`world.spawnWithObservers` — on_spawned +
     /// on_add), returning the live `Entity` handle (usable same-tick, §32). The
     /// scratch arena holds the payloads only until the spawn memcpies them into
-    /// storage. NOTE: entity handles are plain scalars — they survive a later
-    /// `tick()`; a collection/struct handle built in the body would not (the
-    /// shared per-body stores reset each rule body, M1.0.12 heap-value caveat).
+    /// storage. A test body's collection / struct / string values also survive a
+    /// later `tick()`: `runTestBody` suppresses the driven bodies' store resets
+    /// (`resetBodyStores`), so nothing frees them from under the test.
     fn evalSpawnWith(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall) StmtError!Value {
         if (mc.args_len != 1) return error.RuntimeFailure;
         const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);

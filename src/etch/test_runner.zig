@@ -405,3 +405,61 @@ test "fresh world per test — no cross-test state leak" {
     try std.testing.expectEqual(@as(u32, 2), report.passed);
     try std.testing.expectEqual(@as(u32, 0), report.failed);
 }
+
+test "test-body collection handle survives tick (no reset-from-under)" {
+    const gpa = std.testing.allocator;
+    // The driven rule body allocates + resets its own collection each tick; the
+    // test body's `xs` (a shared-store handle) must survive that tick unmangled.
+    // Without the suppression fix, the rule's per-body reset truncates the store
+    // and `xs`'s index is stale/reused → wrong values or OOB.
+    var report = try runSource(gpa,
+        \\component Marker { x: int = 0 }
+        \\rule churn(entity: Entity)
+        \\  when entity has Marker
+        \\{
+        \\  let mut tmp: int[] = [7, 8, 9]
+        \\  tmp.push(tmp.len())
+        \\}
+        \\test "xs survives tick" {
+        \\  let world = test_world()
+        \\  world.spawn_with([Marker { x: 1 }])
+        \\  let mut xs: int[] = [10, 20]
+        \\  world.tick(1)
+        \\  xs.push(30)
+        \\  assert(xs.len() == 3)
+        \\  assert(xs[0] == 10)
+        \\  assert(xs[2] == 30)
+        \\}
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 1), report.passed);
+    try std.testing.expectEqual(@as(u32, 0), report.failed);
+}
+
+test "test-body runtime string survives tick (no use-after-free)" {
+    const gpa = std.testing.allocator;
+    // `greeting` is a `.string_run` (concat) held across tick(1); the driven rule
+    // body's `resetRunStrings` would free it (the M1.0.14 UAF class) without the
+    // suppression fix. Under testing.allocator a freed/reused slot yields a wrong
+    // length (or OOB), so `len() == 10` is a genuine regression guard.
+    var report = try runSource(gpa,
+        \\component Marker { x: int = 0 }
+        \\rule churn(entity: Entity)
+        \\  when entity has Marker
+        \\{
+        \\  let s = "ab" + "cd"
+        \\  s.len()
+        \\}
+        \\test "greeting survives tick" {
+        \\  let world = test_world()
+        \\  world.spawn_with([Marker { x: 1 }])
+        \\  let name = "hero"
+        \\  let greeting = "hello " + name
+        \\  world.tick(1)
+        \\  assert(greeting.len() == 10)
+        \\}
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 1), report.passed);
+    try std.testing.expectEqual(@as(u32, 0), report.failed);
+}
