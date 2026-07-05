@@ -1041,6 +1041,13 @@ pub const Interpreter = struct {
     /// into it. Overwritten per failure, freed at `deinit`; the runner copies the
     /// message out before the next test runs.
     test_msg_buf: std.ArrayListUnmanaged(u8) = .empty,
+    /// One-shot: skip the next `stepOnce` head event-store clear (M1.0.15). The
+    /// test-world `world.tick(n)` sets it when events were emitted BEFORE the tick
+    /// (by the test body's `world.emit`, or by observers fired during
+    /// `world.spawn_with`) so those events survive the first tick's head-clear and
+    /// reach that tick's rules — §32's `emit; tick(1)` semantics. Consumed by the
+    /// first `stepOnce`; `runFor` never sets it (identical to the pre-M1.0.15 path).
+    suppress_event_clear: bool = false,
     /// Whether a `return` is unwinding to the enclosing `fn` boundary (M0.8 E2).
     /// Mirrors `thrown`: every statement-run / loop / block site that stops on a
     /// throw also stops on a return; the fn-call boundary consumes it.
@@ -2021,8 +2028,15 @@ pub const Interpreter = struct {
         self.async_tick += 1;
         self.advanceTime(world);
         // Events have a per-tick lifetime (`Lifetime.tick`): clear the previous
-        // tick's queue before running this tick's rules (M0.8 E3).
-        self.events.clear(self.gpa);
+        // tick's queue before running this tick's rules (M0.8 E3). The test-world
+        // `tick(n)` suppresses exactly this first clear (M1.0.15) so events
+        // emitted before the tick (`world.emit`, or a `spawn_with` observer)
+        // survive into it — §32's `emit; tick(1)`.
+        if (self.suppress_event_clear) {
+            self.suppress_event_clear = false;
+        } else {
+            self.events.clear(self.gpa);
+        }
         // Fire due timers (M1.0.13 E6) — after the clock advance and the
         // event-queue clear, before rule dispatch: a callback's `emit` lands
         // in THIS tick's store, visible to every rule of the tick.
@@ -4273,43 +4287,11 @@ pub const Interpreter = struct {
                 self.returning = true;
             },
             .emit_stmt => {
-                // `emit EventType { field: value, … }` (M0.8 E3). Evaluate the
-                // field initializers and enqueue the event in the dynamic event
-                // store. The comptime-typed `World.event_bus` is unusable by the
-                // tree-walker; `@on_event` observers drain this store (deferred
-                // to the E3 observer tranche, resolver-types §12).
+                // `emit EventType { field: value, … }` (M0.8 E3). Shared with the
+                // test-world `world.emit(T {…})` method form (M1.0.15) via
+                // `enqueueEvent`.
                 const em = self.ast.emit_stmts.items[data];
-                // The event decl (for enum-shorthand field resolution) is known
-                // only for MAIN-arena events; a re-parsed extension hook
-                // (`execHookText`) runs against a transient arena whose event
-                // type ids are not in `event_decls`, so fall back to plain
-                // `evalExpr` there — its emit fields are the M1.0.9 cookable
-                // subset, which has no enum shorthand.
-                const edecl_opt = self.event_decls.get(em.event_type);
-                var fields: std.ArrayListUnmanaged(StructField) = .empty;
-                errdefer fields.deinit(self.gpa);
-                var i: u32 = 0;
-                while (i < em.fields_len) : (i += 1) {
-                    const flit = self.ast.struct_lit_fields.items[em.fields_start + i];
-                    // Resolve enum-shorthand field values against the declared
-                    // enum type (M1.0.14 E4 fix-as-you-go — a bare `.Variant`
-                    // event field was fail-loud in generic `evalExpr` before).
-                    const v = if (edecl_opt) |edecl|
-                        try self.evalEventFieldValue(world, locals, edecl, flit)
-                    else
-                        try self.evalExpr(world, locals, flit.value);
-                    // Stabilize a non-AST string (a per-body `.string_run` or a
-                    // borrowed `.string_persistent`): its bytes are freed at the
-                    // body boundary / on resource-string reassignment, but the
-                    // enqueued event outlives the body (observers / cross-tick
-                    // awaiters), so deep-copy into the store (M1.0.14 E4).
-                    const stable = if (stringNeedsOwning(v))
-                        try self.events.ownEscapingString(self.gpa, self.stringBytes(v).?)
-                    else
-                        v;
-                    try fields.append(self.gpa, .{ .name = flit.name, .value = stable });
-                }
-                try self.events.enqueue(self.gpa, em.event_type, fields);
+                try self.enqueueEvent(world, locals, em.event_type, em.fields_start, em.fields_len);
             },
             .tag_mutation_stmt => {
                 // `entity.add_tag(.path)` / `entity.remove_tag(.path)` (M0.8 E3,
@@ -4658,6 +4640,101 @@ pub const Interpreter = struct {
     /// Components are POD-strict (no heap fields), so `writeValueAsBytes` covers
     /// every valid field kind. The type-checker (E2) has already validated the
     /// type is a declared component and the fields exist + type-match.
+    /// Evaluate an event field-init run and enqueue the event into the per-tick
+    /// `EventStore` (M0.8 E3; shared by the `emit` statement and the test-world
+    /// `world.emit(T {…})` method form, M1.0.15). Enum-shorthand field values
+    /// resolve against the declared event (main-arena events only); non-AST
+    /// strings are deep-copied into the store so the enqueued event outlives the
+    /// body (observers / cross-tick awaiters), per the M1.0.14 E4 discipline.
+    fn enqueueEvent(self: *Interpreter, world: *World, locals: *Locals, event_type: StringId, fields_start: u32, fields_len: u32) StmtError!void {
+        const edecl_opt = self.event_decls.get(event_type);
+        var fields: std.ArrayListUnmanaged(StructField) = .empty;
+        errdefer fields.deinit(self.gpa);
+        var i: u32 = 0;
+        while (i < fields_len) : (i += 1) {
+            const flit = self.ast.struct_lit_fields.items[fields_start + i];
+            const v = if (edecl_opt) |edecl|
+                try self.evalEventFieldValue(world, locals, edecl, flit)
+            else
+                try self.evalExpr(world, locals, flit.value);
+            const stable = if (stringNeedsOwning(v))
+                try self.events.ownEscapingString(self.gpa, self.stringBytes(v).?)
+            else
+                v;
+            try fields.append(self.gpa, .{ .name = flit.name, .value = stable });
+        }
+        try self.events.enqueue(self.gpa, event_type, fields);
+    }
+
+    /// M1.0.15 — evaluate `world.spawn_with([C {…}, …])`: build each component
+    /// literal's payload eagerly, then spawn IMMEDIATELY through the shared
+    /// observer-firing primitive (`world.spawnWithObservers` — on_spawned +
+    /// on_add), returning the live `Entity` handle (usable same-tick, §32). The
+    /// scratch arena holds the payloads only until the spawn memcpies them into
+    /// storage. NOTE: entity handles are plain scalars — they survive a later
+    /// `tick()`; a collection/struct handle built in the body would not (the
+    /// shared per-body stores reset each rule body, M1.0.12 heap-value caveat).
+    fn evalSpawnWith(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall) StmtError!Value {
+        if (mc.args_len != 1) return error.RuntimeFailure;
+        const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+        if (self.ast.exprKind(arg) != .array_lit) return error.RuntimeFailure;
+        const al = self.ast.array_lits.items[self.ast.exprData(arg)];
+        if (al.is_fill) return error.RuntimeFailure;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const aa = arena.allocator();
+        const ids = try aa.alloc(ComponentId, al.elements_len);
+        const payloads = try aa.alloc([]const u8, al.elements_len);
+        var i: u32 = 0;
+        while (i < al.elements_len) : (i += 1) {
+            const elem: NodeId = @bitCast(self.ast.extra.items[al.elements_start + i]);
+            const p = try self.buildComponentPayload(world, locals, elem, aa);
+            ids[i] = p.cid;
+            payloads[i] = p.bytes;
+        }
+        const eid = world.spawnWithObservers(self.gpa, ids, payloads) catch return error.RuntimeFailure;
+        return Value{ .entity_id = @bitCast(eid) };
+    }
+
+    /// M1.0.15 — evaluate `world.emit(T {…})`: the `emit` statement semantics on
+    /// the test world's per-tick EventStore (shared `enqueueEvent`).
+    fn evalWorldEmit(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall) StmtError!void {
+        if (mc.args_len != 1) return error.RuntimeFailure;
+        const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+        if (self.ast.exprKind(arg) != .struct_lit) return error.RuntimeFailure;
+        const sl = self.ast.struct_lits.items[self.ast.exprData(arg)];
+        try self.enqueueEvent(world, locals, sl.type_name, sl.fields_start, sl.fields_len);
+    }
+
+    /// M1.0.15 — evaluate `world.tick(n)`: advance the test world by `n` ticks
+    /// (`n >= 1`), each a `stepOnce` + `world.tickBoundary()` — the canonical tick
+    /// runFor drives. Rule-tick runtime errors are counted into a throwaway
+    /// report (they do not fail the test — a test fails on its OWN body's
+    /// assert/throw/failure, §32; the body's assertions catch a wrong result).
+    fn evalWorldTick(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall) StmtError!void {
+        if (mc.args_len != 1) return error.RuntimeFailure;
+        const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+        const v = try self.evalExpr(world, locals, arg);
+        if (v != .int_ or v.int_ < 1) return error.RuntimeFailure;
+        // Events emitted before this tick (test body / `spawn_with` observers)
+        // must reach the first tick's rules: suppress that tick's head-clear.
+        if (self.events.list.items.len > 0) self.suppress_event_clear = true;
+        var report: RuntimeReport = .{};
+        var t: i64 = 0;
+        while (t < v.int_) : (t += 1) {
+            self.stepOnce(world, &report) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.RuntimeFailure,
+            };
+            world.tickBoundary();
+        }
+        // Leave the store clean so a later `emit; tick` in the same test does not
+        // re-see this tick's consumed events (the normal next-tick head-clear,
+        // applied here since there is no next tick in this call).
+        self.events.clear(self.gpa);
+    }
+
     fn buildComponentPayload(self: *Interpreter, world: *World, locals: *Locals, struct_lit_arg: NodeId, alloc: std.mem.Allocator) StmtError!struct { cid: ComponentId, bytes: []u8 } {
         if (self.ast.exprKind(struct_lit_arg) != .struct_lit) return error.RuntimeFailure;
         const sl = self.ast.struct_lits.items[self.ast.exprData(struct_lit_arg)];
@@ -4705,6 +4782,22 @@ pub const Interpreter = struct {
     /// resolver's `dispatchMethodOnType` split.
     fn dispatchMethodOnValue(self: *Interpreter, world: *World, locals: *Locals, mc: ast_mod.MethodCall, recv: Value) StmtError!Value {
         switch (recv) {
+            .world_handle => {
+                // M1.0.15 — the test World surface (§32). The mono-world handle
+                // operates on the `world` already threaded here (the test's fresh
+                // world). Type-check gated the shapes; the fail-loud belt stays.
+                const mname = self.ast.strings.slice(mc.method_name);
+                if (std.mem.eql(u8, mname, "spawn_with")) return try self.evalSpawnWith(world, locals, mc);
+                if (std.mem.eql(u8, mname, "emit")) {
+                    try self.evalWorldEmit(world, locals, mc);
+                    return Value{ .unit = {} };
+                }
+                if (std.mem.eql(u8, mname, "tick")) {
+                    try self.evalWorldTick(world, locals, mc);
+                    return Value{ .unit = {} };
+                }
+                return error.RuntimeFailure;
+            },
             .task_handle => |ti| {
                 // M1.0.12 E5 — the TaskHandle's single method (§9.8):
                 // `h.cancel()` is IDEMPOTENT — cancels a suspended task, a
@@ -5452,6 +5545,12 @@ pub const Interpreter = struct {
                 if (self.ast.exprKind(call.callee) == .ident) {
                     const callee_name = self.ast.exprData(call.callee);
                     if (locals.get(callee_name) == null) {
+                        // Test-scoped builtin `test_world()` (M1.0.15): yields the
+                        // mono-world handle. The type-checker gated it to test
+                        // bodies, so reaching here means we run under `runTestBody`.
+                        if (std.mem.eql(u8, self.ast.strings.slice(callee_name), "test_world")) {
+                            return Value{ .world_handle = {} };
+                        }
                         if (self.fns.get(callee_name)) |fndecl| {
                             return try self.callFn(world, locals, fndecl, call);
                         }

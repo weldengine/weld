@@ -211,6 +211,10 @@ pub const ResolvedType = union(enum) {
     /// (the optional-ness is not tracked; permissive). `if let` / `while let`
     /// unwrap this to the payload builtin.
     optional: BuiltinType,
+    /// The current test's World handle (M1.0.15) — the return type of
+    /// `test_world()` (test bodies only). Receiver of `spawn_with`/`emit`/`tick`
+    /// in `dispatchMethodOnType`. No payload (mono-world). Not field-storable.
+    test_world,
     /// Type unknown / unresolved. Used as the fallback after a diagnostic
     /// has been emitted; subsequent checks treat `unknown` as wildcard to
     /// avoid cascade errors.
@@ -233,6 +237,7 @@ pub const ResolvedType = union(enum) {
             .event_t => |id| id == b.event_t,
             .generic => |id| id == b.generic,
             .optional => |bt| bt == b.optional,
+            .test_world => true,
             .unknown => true,
         };
     }
@@ -3987,7 +3992,10 @@ pub const TypeChecker = struct {
     /// the duration of the body. Mirrors `checkTimerBodyRun`'s sync-context
     /// discipline; the body is a single `block_expr`, checked via `synthExprE`.
     fn checkTest(self: *TypeChecker, decl: ast_mod.TestDecl) !void {
-        var ctx: RuleCtx = .{};
+        // A test body has no `when` clause but full ECS access (`get`/`get_mut`
+        // on any resource/component, e.g. `world.spawn_with(...).get(Health)`) —
+        // the same unrestricted context observer / data bodies use.
+        var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
         defer ctx.deinit(self.gpa);
 
         const saved_async = self.current_is_async;
@@ -5409,6 +5417,15 @@ pub const TypeChecker = struct {
             const callee_name = self.arena.exprData(call.callee);
             const shadowed = if (ctx_opt) |ctx| ctx.locals.contains(callee_name) else false;
             if (!shadowed) {
+                // Test-scoped free builtins (M1.0.15) resolve ONLY inside a test
+                // body; elsewhere `test_world` is an ordinary undefined ident, so
+                // the callee's `synthExprE` below emits E0102 (§32: "fall through
+                // to E0102"). `test_world()` takes no args and yields the World
+                // handle.
+                if (self.in_test_body and std.mem.eql(u8, self.arena.strings.slice(callee_name), "test_world")) {
+                    if (call.args_len != 0) try self.emit(.arg_count_mismatch, .error_, self.arena.exprSpan(id), "test_world() takes no arguments", .{});
+                    return ResolvedType.test_world;
+                }
                 if (self.symbols.get(callee_name)) |sym| {
                     if (sym.kind == .fn_) {
                         return try self.synthFreeFnCall(id, call, sym.item_id, ctx_opt);
@@ -6037,6 +6054,60 @@ pub const TypeChecker = struct {
         try self.checkComponentInstance(ci, .type_mismatch, .structural_component_field_unknown, .structural_component_field_type_invalid);
     }
 
+    /// M1.0.15 — validate `world.spawn_with([C {…}, …])`: exactly one array
+    /// literal whose every element is a component literal. Reuses
+    /// `checkStructuralComponentLiteral` (the same E0306/E0307 as scene / prefab /
+    /// structural `spawn`) — bespoke checking, NOT a general heterogeneous array
+    /// type (a component list is not a typed `T[]`).
+    fn checkSpawnWithArg(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx) TypeError!void {
+        _ = ctx_opt;
+        if (mc.args_len != 1) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "spawn_with takes exactly one component-literal list '[C {{ ... }}, ...]'", .{});
+            return;
+        }
+        const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+        if (self.arena.exprKind(arg) != .array_lit) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "spawn_with expects a component-literal list '[C {{ ... }}, ...]'", .{});
+            return;
+        }
+        const al = self.arena.array_lits.items[self.arena.exprData(arg)];
+        if (al.is_fill) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "spawn_with does not accept fill syntax '[x; n]'", .{});
+            return;
+        }
+        var i: u32 = 0;
+        while (i < al.elements_len) : (i += 1) {
+            const elem: NodeId = @bitCast(self.arena.extra.items[al.elements_start + i]);
+            try self.checkStructuralComponentLiteral(elem);
+        }
+    }
+
+    /// M1.0.15 — validate `world.emit(T {…})`: exactly one event-literal arg
+    /// naming a declared `event`, fields checked via the shared
+    /// `checkEventFieldRun` (identical to the `emit` statement, §32).
+    fn checkWorldEmitArg(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx) TypeError!void {
+        if (mc.args_len != 1) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "emit takes exactly one event literal 'T {{ ... }}'", .{});
+            return;
+        }
+        const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+        if (self.arena.exprKind(arg) != .struct_lit) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "emit expects an event literal 'T {{ ... }}'", .{});
+            return;
+        }
+        const sl = self.arena.struct_lits.items[self.arena.exprData(arg)];
+        if (sl.type_name == 0) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "emit needs an explicit event type ('T {{ ... }}')", .{});
+            return;
+        }
+        const sym = self.symbols.get(sl.type_name);
+        if (sym == null or sym.?.kind != .event_) {
+            try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(arg), "'{s}' is not a declared event", .{self.arena.strings.slice(sl.type_name)});
+            return;
+        }
+        try self.checkEventFieldRun(self.arena.itemData(sym.?.item_id), sl.fields_start, sl.fields_len, ctx_opt);
+    }
+
     /// M1.0.10 E2 — validate a type name used in a structural mutation
     /// (`entity.remove(T)` and the component-literal types of `spawn` / `add`)
     /// resolves to a declared `component`. Mirrors the `when has` component
@@ -6216,6 +6287,37 @@ pub const TypeChecker = struct {
                 return ResolvedType.unknown;
             }
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on a TimerHandle (only 'cancel()'; a timer is not awaitable)", .{method_slice});
+            return ResolvedType.unknown;
+        }
+
+        // M1.0.15 — the test World surface (§32): methods on the handle returned
+        // by `test_world()`. `spawn_with([C {…}, …])` -> Entity (immediate spawn,
+        // fires on_spawn observers, live handle); `emit(T {…})` -> unit (emit-
+        // statement semantics); `tick(n)` -> unit (advance n ticks, n >= 1
+        // enforced at runtime). Reachable only on `.test_world`, itself resolvable
+        // only in a test body.
+        if (recv_t == .test_world) {
+            if (std.mem.eql(u8, method_slice, "spawn_with")) {
+                try self.checkSpawnWithArg(id, mc, ctx_opt);
+                return ResolvedType{ .builtin = .entity };
+            }
+            if (std.mem.eql(u8, method_slice, "emit")) {
+                try self.checkWorldEmitArg(id, mc, ctx_opt);
+                return ResolvedType.unknown;
+            }
+            if (std.mem.eql(u8, method_slice, "tick")) {
+                if (mc.args_len != 1) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "tick takes exactly one count 'tick(n)'", .{});
+                } else {
+                    const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+                    const t = self.synthExpr(arg, ctx_opt);
+                    if (t == .builtin and !t.builtin.isInteger()) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "tick(n) requires an integer tick count", .{});
+                    }
+                }
+                return ResolvedType.unknown;
+            }
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on the test world (spawn_with / emit / tick)", .{method_slice});
             return ResolvedType.unknown;
         }
 
@@ -6762,7 +6864,7 @@ pub const TypeChecker = struct {
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on event '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
-            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .optional, .unknown => return ResolvedType.unknown,
+            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .optional, .test_world, .unknown => return ResolvedType.unknown,
         }
     }
 

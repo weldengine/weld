@@ -6082,6 +6082,17 @@ pub const Parser = struct {
                             _ = try self.advance();
                             return try self.parseTagMutation(expr, .remove);
                         },
+                        // `world.emit(T {…})` — the test-world event method
+                        // (M1.0.15). `emit` is a keyword, so the `.ident` arm below
+                        // never sees it; route it explicitly to a `method_call`
+                        // (`parseMethodCall` interns the token slice → "emit"). Only
+                        // valid as a call form.
+                        .kw_emit => {
+                            if (self.peekNext() != .lparen) {
+                                return self.parseErrFmt(self.peekSpan(), "'emit' after '.' must be a method call, e.g. world.emit(T {{ ... }})", .{});
+                            }
+                            expr = try self.parseMethodCall(expr);
+                        },
                         .ident => {
                             // `recv.method(args)` → the reserved `method_call`
                             // kind (M0.8 E2 call mechanism, `etch-grammar.md`

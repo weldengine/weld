@@ -50,6 +50,9 @@ comptime {
     // pinned by `src/core/memory/root.zig` (reached here via `weld_core.memory`).
     // M1.0.4 — pull the scene cook driver into the test import graph (§13).
     _ = @import("scene_cook.zig");
+    // M1.0.15 — the test runner's inline tests (the `pub const test_runner`
+    // re-export pulls its declarations, NOT its `test` blocks — §13).
+    _ = @import("test_runner.zig");
 }
 
 /// M1.0.4 scene cook — `.scene.etch` source → the neutral Tier-0 scene model

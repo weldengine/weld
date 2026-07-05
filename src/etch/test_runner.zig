@@ -32,6 +32,7 @@ const Ast = ast_mod.AstArena;
 const Interpreter = interp_mod.Interpreter;
 const AnnotationKind = ast_mod.AnnotationKind;
 const SourceSpan = token.SourceSpan;
+const Io = std.Io;
 
 /// Per-test outcome status.
 pub const TestStatus = enum { passed, failed, skipped };
@@ -71,9 +72,10 @@ pub const RunReport = struct {
 /// order; a fresh World + Interpreter per test (full isolation, mono-world);
 /// `@skip` reported skipped with its reason (body not run); `@only` focusing (if
 /// any `@only` test exists in the set, only those run, the rest reported
-/// skipped). `gpa` backs the transient per-test World/Interpreter; the returned
-/// report owns its strings.
-pub fn run(gpa: std.mem.Allocator, ast: *const Ast) !RunReport {
+/// skipped). `gpa` backs the transient per-test World/Interpreter; `io` provides
+/// the monotonic clock for per-test wall-clock durations (Zig 0.16 clocks live
+/// under `std.Io.Clock`); the returned report owns its strings.
+pub fn run(gpa: std.mem.Allocator, io: Io, ast: *const Ast) !RunReport {
     var report = RunReport{ .arena = std.heap.ArenaAllocator.init(gpa) };
     errdefer report.deinit();
     const a = report.arena.allocator();
@@ -113,9 +115,10 @@ pub fn run(gpa: std.mem.Allocator, ast: *const Ast) !RunReport {
         defer interp.deinit();
         try interp.bindToWorld(&world);
 
-        var timer = try std.time.Timer.start();
+        const t0 = Io.Clock.now(.awake, io);
         const outcome = try interp.runTestBody(&world, decl);
-        const dur = timer.read();
+        const t1 = Io.Clock.now(.awake, io);
+        const dur: u64 = @intCast(@max(@as(i96, 0), t0.durationTo(t1).nanoseconds));
 
         switch (outcome) {
             .pass => {
@@ -173,7 +176,9 @@ const parser_mod = @import("parser.zig");
 const types_mod = @import("types.zig");
 const Diagnostic = @import("diagnostics.zig").Diagnostic;
 
-/// Parse + type-check `source` (asserting both clean) then run its tests.
+/// Parse + type-check `source` (asserting both clean) then run its tests. A
+/// throwaway `std.Io.Threaded` supplies the clock (the shim passes the process
+/// `io`).
 fn runSource(gpa: std.mem.Allocator, source: []const u8) !RunReport {
     var pr = try parser_mod.parse(gpa, source);
     defer pr.deinit(gpa);
@@ -187,7 +192,9 @@ fn runSource(gpa: std.mem.Allocator, source: []const u8) !RunReport {
     try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 
-    return try run(gpa, &pr.ast);
+    var threaded: Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    return try run(gpa, threaded.io(), &pr.ast);
 }
 
 test "passing test reports pass" {
@@ -272,4 +279,129 @@ test "aggregate counts across a mixed set" {
     try std.testing.expectEqual(@as(u32, 1), report.failed);
     try std.testing.expectEqual(@as(u32, 1), report.skipped);
     try std.testing.expectEqual(@as(usize, 3), report.results.len);
+}
+
+// ─── E3: test-world surface ──────────────────────────────────────────────────
+
+test "spawn_with returns a live handle usable with get(C) immediately" {
+    const gpa = std.testing.allocator;
+    var report = try runSource(gpa,
+        \\component Health { current: float = 100.0, max: float = 100.0 }
+        \\test "live handle" {
+        \\  let world = test_world()
+        \\  let e = world.spawn_with([Health { current: 42.0 }])
+        \\  assert(e.get(Health).current == 42.0)
+        \\  assert(e.get(Health).max == 100.0)
+        \\}
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 1), report.passed);
+    try std.testing.expectEqual(@as(u32, 0), report.failed);
+}
+
+test "spawn_with fires observers (on_added emits, event tallied after tick)" {
+    const gpa = std.testing.allocator;
+    // spawn_with fires the on_added(Marker) observer, which emits Spawned; the
+    // pre-tick event survives into tick(1), where @on_event(Spawned) tallies it.
+    var report = try runSource(gpa,
+        \\component Marker { x: int = 0 }
+        \\event Spawned { by: int }
+        \\resource Count { n: int = 0 }
+        \\@on_added(Marker)
+        \\rule note(entity: Entity, value: Marker) {
+        \\  emit Spawned { by: value.x }
+        \\}
+        \\@on_event(Spawned)
+        \\rule tally()
+        \\  when resource Count
+        \\{
+        \\  get_mut(Count).n += 1
+        \\}
+        \\test "observer effect visible" {
+        \\  let world = test_world()
+        \\  world.spawn_with([Marker { x: 7 }])
+        \\  world.tick(1)
+        \\  assert(get(Count).n == 1)
+        \\}
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 1), report.passed);
+    try std.testing.expectEqual(@as(u32, 0), report.failed);
+}
+
+test "tick drives an iterative rule" {
+    const gpa = std.testing.allocator;
+    var report = try runSource(gpa,
+        \\component Health { current: float = 0.0, max: float = 100.0 }
+        \\rule regen(entity: Entity)
+        \\  when entity has Health
+        \\{
+        \\  entity.get_mut(Health).current += 10.0
+        \\}
+        \\test "regen over ticks" {
+        \\  let world = test_world()
+        \\  let e = world.spawn_with([Health { current: 0.0 }])
+        \\  world.tick(1)
+        \\  assert(e.get(Health).current == 10.0)
+        \\  world.tick(2)
+        \\  assert(e.get(Health).current == 30.0)
+        \\}
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 1), report.passed);
+    try std.testing.expectEqual(@as(u32, 0), report.failed);
+}
+
+test "world.emit + tick drives an event-handling rule" {
+    const gpa = std.testing.allocator;
+    var report = try runSource(gpa,
+        \\event Damage { amount: int }
+        \\resource Tally { total: int = 0 }
+        \\@on_event(Damage)
+        \\rule absorb()
+        \\  when resource Tally
+        \\{
+        \\  get_mut(Tally).total += event.amount
+        \\}
+        \\test "damage tallied" {
+        \\  let world = test_world()
+        \\  world.emit(Damage { amount: 30 })
+        \\  world.tick(1)
+        \\  assert(get(Tally).total == 30)
+        \\}
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 1), report.passed);
+    try std.testing.expectEqual(@as(u32, 0), report.failed);
+}
+
+test "fresh world per test — no cross-test state leak" {
+    const gpa = std.testing.allocator;
+    // A rule counts Marker entities into a resource each tick; a fresh World per
+    // test means test 2 sees only its own spawn, not test 1's two.
+    var report = try runSource(gpa,
+        \\resource Count { n: int = 0 }
+        \\component Marker { x: int = 0 }
+        \\rule count(entity: Entity)
+        \\  when entity has Marker and resource Count
+        \\{
+        \\  get_mut(Count).n += 1
+        \\}
+        \\test "first spawns two" {
+        \\  let world = test_world()
+        \\  world.spawn_with([Marker { x: 1 }])
+        \\  world.spawn_with([Marker { x: 2 }])
+        \\  world.tick(1)
+        \\  assert(get(Count).n == 2)
+        \\}
+        \\test "second spawns one — isolated" {
+        \\  let world = test_world()
+        \\  world.spawn_with([Marker { x: 9 }])
+        \\  world.tick(1)
+        \\  assert(get(Count).n == 1)
+        \\}
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 2), report.passed);
+    try std.testing.expectEqual(@as(u32, 0), report.failed);
 }
