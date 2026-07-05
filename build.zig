@@ -1127,6 +1127,56 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(etch_cook_exe);
 
+    // M1.0.15 — `etch_test` shim (thin CLI over `weld_etch.test_runner`) + the
+    // `test-etch` acceptance step. The shim owns arg parsing + I/O; all logic is
+    // in the library (same split as `etch_cook`).
+    const etch_test_module = b.createModule(.{
+        .root_source_file = b.path("tools/etch_test/main.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    etch_test_module.addImport("weld_etch", etch_module);
+    etch_test_module.addImport("weld_core", core_module);
+    const etch_test_exe = b.addExecutable(.{
+        .name = "etch_test",
+        .root_module = etch_test_module,
+    });
+    b.installArtifact(etch_test_exe);
+
+    // The Zig acceptance driver (assertions over the `.etch` fixtures + the
+    // diagnostic cases). Wired manually — not through `test_specs` — so the
+    // `test-etch` step can depend on it directly AND it stays in `zig build test`.
+    const etch_driver_module = b.createModule(.{
+        .root_source_file = b.path("tests/etch/test_runner/driver_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    etch_driver_module.addImport("weld_core", core_module);
+    etch_driver_module.addImport("weld_etch", etch_module);
+    const etch_driver_test = b.addTest(.{ .root_module = etch_driver_module });
+    const etch_driver_run = b.addRunArtifact(etch_driver_test);
+    test_step.dependOn(&etch_driver_run.step);
+
+    const test_etch_step = b.step("test-etch", "Run the M1.0.15 Etch test-runner acceptance corpus (driver + shim over the green fixtures)");
+    test_etch_step.dependOn(&etch_driver_run.step);
+    // Run the shim over the all-green fixtures in a SINGLE invocation (the shim
+    // takes many files): prints the ✓ / skipped lines + per-file and total
+    // aggregates (observable behavior), exits 0. One process → clean, un-
+    // interleaved output. `failing.etch` is exercised by the driver (which
+    // asserts the failure) + by hand, not here.
+    const etch_shim_run = b.addRunArtifact(etch_test_exe);
+    for ([_][]const u8{
+        "tests/etch/test_runner/green.etch",
+        "tests/etch/test_runner/only.etch",
+        "tests/etch/test_runner/isolation.etch",
+        "tests/etch/test_runner/world.etch",
+        "tests/etch/test_runner/timing.etch",
+    }) |fixture| {
+        etch_shim_run.addFileArg(b.path(fixture));
+    }
+    etch_shim_run.stdio = .inherit; // show the ✓ lines during the build
+    test_etch_step.dependOn(&etch_shim_run.step);
+
     // Cook the 20 differential corpus programs into a single consolidated
     // `corpus_codegen.zig`. The driver test imports it via the
     // `corpus_codegen` module name.

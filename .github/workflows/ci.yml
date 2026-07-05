@@ -206,6 +206,11 @@ jobs:
           zig build test -Doptimize=${{ matrix.mode }}
           echo "TEST_SECONDS=$((SECONDS - s))" >> "$GITHUB_ENV"
 
+      # M1.0.15 — Etch test-runner acceptance corpus: the Zig driver over the
+      # `.etch` fixtures + the `etch_test` shim run over the green fixtures.
+      - name: zig build test-etch
+        run: zig build test-etch -Doptimize=${{ matrix.mode }}
+
       # M0.2 / E5 — bindgen-verify gate. Regenerates the Vulkan +
       # Wayland bindings and asserts `git diff --quiet` on
       # `bindings/generated/` + `src/core/platform/`. Any drift

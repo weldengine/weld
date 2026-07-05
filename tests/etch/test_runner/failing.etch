@@ -1,0 +1,11 @@
+// M1.0.15 acceptance corpus — a deliberately failing file: one green test and
+// one failing `assert_eq` whose message must carry both compared values and a
+// source span. `etch_test` on this file prints a ✗ line and exits nonzero.
+
+test "this one passes" {
+  assert_eq(1 + 1, 2)
+}
+
+test "two plus two is not five" {
+  assert_eq(2 + 2, 5)
+}

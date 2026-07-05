@@ -1,0 +1,24 @@
+// M1.0.15 acceptance corpus — an all-green file: passing tests + one @skip.
+// Run by `zig build test-etch` (the shim prints ✓ / skipped lines, exits 0).
+
+component Health {
+  current: float = 100.0
+  max: float = 100.0
+}
+
+@tag(.unit)
+test "arithmetic holds" {
+  assert_eq(2 + 2, 4)
+}
+
+test "spawn_with yields a live handle" {
+  let world = test_world()
+  let e = world.spawn_with([Health { current: 42.0 }])
+  assert_eq(e.get(Health).current, 42.0)
+  assert_eq(e.get(Health).max, 100.0)
+}
+
+@skip(reason: "documented WIP")
+test "not ready yet" {
+  assert(false)
+}

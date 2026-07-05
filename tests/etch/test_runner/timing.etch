@@ -1,0 +1,28 @@
+// M1.0.15 acceptance corpus — `measure` and `tick_until`.
+
+resource Counter { n: int = 0 }
+rule inc()
+  when resource Counter
+{
+  get_mut(Counter).n += 1
+}
+
+test "measure yields a positive duration" {
+  let elapsed = measure {
+    let mut i: int = 0
+    while i < 5000 { i += 1 }
+  }
+  assert(elapsed > 0.0s)
+}
+
+test "tick_until stops on the predicate" {
+  let world = test_world()
+  let hit = tick_until(|| get(Counter).n >= 3, 1.0s)
+  assert(hit)
+}
+
+test "tick_until stops on timeout" {
+  let world = test_world()
+  let hit = tick_until(|| get(Counter).n >= 1000, 0.05s)
+  assert(not hit)
+}
