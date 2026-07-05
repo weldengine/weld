@@ -5436,6 +5436,14 @@ pub const TypeChecker = struct {
         };
     }
 
+    /// Whether a type is a float (or `unknown`, already-diagnosed) — the operand
+    /// constraint for `assert_approx` (M1.0.15): a tolerance comparison is
+    /// float-only, so int operands are rejected at type-check (symmetry with the
+    /// rest of the assert family) rather than failing loud at runtime.
+    fn isFloatType(t: ResolvedType) bool {
+        return t == .unknown or (t == .builtin and t.builtin.isFloat());
+    }
+
     /// Resolve a builtin free-function call by name (M1.0.15). Returns the result
     /// type when `name` is a builtin, else `null` (the caller falls through to the
     /// user-fn lookup, then E0102). Global builtins — the assertion family
@@ -5494,8 +5502,21 @@ pub const TypeChecker = struct {
             if (call.args_len < 2 or call.args_len > 4) {
                 try self.emit(.arg_count_mismatch, .error_, span, "assert_approx(a, b[, tolerance][, msg]) takes 2 to 4 arguments", .{});
             } else {
-                var i: u32 = 0;
-                while (i < call.args_len) : (i += 1) _ = try self.synthArg(call, i, ctx_opt);
+                // Float-only by construction (tolerance comparison): constrain a,
+                // b, and the optional tolerance at type-check — symmetric with the
+                // rest of the family (the runtime keeps a defensive fail-loud).
+                const ta = try self.synthArg(call, 0, ctx_opt);
+                const tb = try self.synthArg(call, 1, ctx_opt);
+                if (!isFloatType(ta) or !isFloatType(tb)) {
+                    try self.emit(.type_mismatch, .error_, span, "assert_approx compares float values (use assert_eq for other types)", .{});
+                }
+                if (call.args_len >= 3) {
+                    const tt = try self.synthArg(call, 2, ctx_opt);
+                    if (!isFloatType(tt)) {
+                        try self.emit(.type_mismatch, .error_, span, "assert_approx tolerance must be a float", .{});
+                    }
+                }
+                if (call.args_len == 4) _ = try self.synthArg(call, 3, ctx_opt);
             }
             return ResolvedType.unknown;
         }
@@ -7420,6 +7441,24 @@ test "assert_eq rejects non-comparable aggregate operands (M1.0.15 review fix)" 
     );
     defer ok.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+}
+
+test "assert_approx constrains its operands to float at type-check (M1.0.15 review fix)" {
+    const gpa = std.testing.allocator;
+    // Int operands → type_mismatch at check (symmetric with the rest of the
+    // family), not a generic runtime failure.
+    var ints = try parseAndCheck(gpa,
+        \\test "approx ints" { assert_approx(1, 2) }
+    );
+    defer ints.deinit(gpa);
+    try expectAnyCode(ints.diagnostics.items, .type_mismatch);
+
+    // Floats (incl. an explicit tolerance) check clean.
+    var floats = try parseAndCheck(gpa,
+        \\test "approx floats" { assert_approx(1.0, 1.5, 0.6) }
+    );
+    defer floats.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), floats.diagnostics.items.len);
 }
 
 test "type-checker emits E0502 when an annotation is applied to the wrong target (D-S3-annot-applicability)" {
