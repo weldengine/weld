@@ -1048,6 +1048,20 @@ pub const Interpreter = struct {
     /// reach that tick's rules — §32's `emit; tick(1)` semantics. Consumed by the
     /// first `stepOnce`; `runFor` never sets it (identical to the pre-M1.0.15 path).
     suppress_event_clear: bool = false,
+    /// Monotonic-clock provider for the wall-clock `measure { … }` expression
+    /// (M1.0.15). Zig 0.16 clocks live under `std.Io.Clock`, which needs an `io`;
+    /// the test runner sets this before `runTestBody`. `null` on every non-test
+    /// path — and `measure` is E0910 outside a test, so it is never evaluated
+    /// there; a null here at a `measure` site is a fail-loud belt.
+    io: ?std.Io = null,
+    /// Whether a `test` body is currently executing (M1.0.15). Gates the runtime
+    /// interception of the TEST-SCOPED builtins `test_world` / `tick_until` in
+    /// `evalBuiltinCall`, mirroring the type-checker's `in_test_body` gate — so a
+    /// user top-level `fn test_world()` / `fn tick_until()` called OUTSIDE a test
+    /// is not shadowed by the builtin (the checker binds it to the user fn).
+    /// Set for the duration of `runTestBody`. The global assertion family +
+    /// panic/todo/unreachable resolve regardless (symmetric with the checker).
+    in_test_body: bool = false,
     /// While TRUE, the per-body value-store resets (`resetBodyStores`) are no-ops
     /// (M1.0.15). A `test` body OUTLIVES the rule / guard / timer / observer /
     /// hook bodies that `world.tick(n)` drives; those bodies' per-body resets
@@ -1674,6 +1688,8 @@ pub const Interpreter = struct {
         defer locals.deinit(self.gpa);
         self.suppress_body_store_resets = true;
         defer self.suppress_body_store_resets = false;
+        self.in_test_body = true;
+        defer self.in_test_body = false;
         defer self.collections.reset(self.gpa);
         defer self.closures.reset(self.gpa);
         defer self.structs.reset(self.gpa);
@@ -4071,6 +4087,11 @@ pub const Interpreter = struct {
         report.runtime_errors += 1;
         if (self.pending_error) |pe| report.last_error = pe;
         self.pending_error = null;
+        // Clear the assert-message sideband too (M1.0.15 review fix): a rule-body
+        // assertion failure harvested during a test's `tick(n)` must not leave a
+        // stale `pending_message` for a LATER `fail()`-routed test-body failure
+        // (division-by-zero, etc.) to mis-report as the rule's assert text.
+        self.pending_message = null;
     }
 
     /// Run a contiguous statement run, stopping early if a control signal
@@ -4753,6 +4774,221 @@ pub const Interpreter = struct {
         // re-see this tick's consumed events (the normal next-tick head-clear,
         // applied here since there is no next tick in this call).
         self.events.clear(self.gpa);
+    }
+
+    fn evalArg(self: *Interpreter, world: *World, locals: *Locals, call: ast_mod.CallExpr, i: u32) StmtError!Value {
+        const arg: NodeId = @bitCast(self.ast.extra.items[call.args_start + i]);
+        return try self.evalExpr(world, locals, arg);
+    }
+
+    /// Append raw bytes to the assertion-message scratch (`test_msg_buf`).
+    fn msgAppend(self: *Interpreter, bytes: []const u8) StmtError!void {
+        try self.test_msg_buf.appendSlice(self.gpa, bytes);
+    }
+
+    /// Append `fmt`/`args` (allocPrint + appendSlice — the house pattern; the
+    /// ArrayList has no `writer` in this Zig).
+    fn msgPrint(self: *Interpreter, comptime fmt: []const u8, args: anytype) StmtError!void {
+        const piece = try std.fmt.allocPrint(self.gpa, fmt, args);
+        defer self.gpa.free(piece);
+        try self.test_msg_buf.appendSlice(self.gpa, piece);
+    }
+
+    /// Append a Value as human-readable text for an assertion-failure message
+    /// (M1.0.15). Scalars + strings + Duration render faithfully; a richer value
+    /// falls back to a placeholder (assert messages target the comparable cases).
+    fn msgValue(self: *Interpreter, v: Value) StmtError!void {
+        switch (v) {
+            .int_ => |x| try self.msgPrint("{d}", .{x}),
+            .float_ => |x| try self.msgPrint("{d}", .{x}),
+            .bool_ => |x| try self.msgAppend(if (x) "true" else "false"),
+            .duration => |x| try self.msgPrint("{d}s", .{x}),
+            .string_id, .string_run, .string_persistent => try self.msgAppend(self.stringBytes(v) orelse ""),
+            .entity_id => |e| try self.msgPrint("entity#{d}", .{e}),
+            .unit => try self.msgAppend("()"),
+            else => try self.msgAppend("<value>"),
+        }
+    }
+
+    /// Raise an assertion failure whose message has already been written into
+    /// `test_msg_buf` (M1.0.15): point `pending_message` at it and fail. The
+    /// runner copies the message out; outside a test the failure is harvested
+    /// into the report (like the `assert` statement).
+    fn raiseAssert(self: *Interpreter, span: SourceSpan) error{RuntimeFailure} {
+        self.pending_message = self.test_msg_buf.items;
+        self.pending_error = .{ .kind = .AssertFailed, .span = span };
+        return error.RuntimeFailure;
+    }
+
+    /// Call a zero-argument closure Value to completion and return its result
+    /// (M1.0.15 — the `tick_until` predicate). Mirrors the `fn_call` closure
+    /// invocation: frame from the captured env, evaluate the body, consume a
+    /// `return`. Fails loud on a non-closure or a nonzero arity.
+    fn callZeroArgClosure(self: *Interpreter, world: *World, cv: Value) StmtError!Value {
+        if (cv != .closure) return error.RuntimeFailure;
+        const handle = cv.closure;
+        const node = self.closures.list.items[handle].node;
+        const ce = self.ast.closure_exprs.items[self.ast.exprData(node)];
+        if (ce.params_len != 0) return error.RuntimeFailure;
+        var frame: Locals = .{};
+        defer frame.deinit(self.gpa);
+        var cap_it = self.closures.list.items[handle].captured.iterator();
+        while (cap_it.next()) |e| try frame.put(self.gpa, e.key_ptr.*, e.value_ptr.*, false);
+        const result = try self.evalExpr(world, &frame, ce.body);
+        if (self.returning) {
+            self.returning = false;
+            const rv = self.return_value;
+            self.return_value = .{ .unit = {} };
+            return rv;
+        }
+        if (self.thrown or self.control != .none) return Value{ .unit = {} };
+        return result;
+    }
+
+    /// `tick_until(pred: () -> bool, timeout: Duration) -> bool` (M1.0.15): tick
+    /// the world, evaluating `pred` after each tick, until it is true or the
+    /// budget (`round(secs · 60)` ticks, the `wait` conversion) is exhausted.
+    fn evalTickUntil(self: *Interpreter, world: *World, locals: *Locals, call: ast_mod.CallExpr) StmtError!Value {
+        if (call.args_len != 2) return error.RuntimeFailure;
+        const pred = try self.evalArg(world, locals, call, 0);
+        const timeout = try self.evalArg(world, locals, call, 1);
+        if (timeout != .duration) return error.RuntimeFailure;
+        const budget: i64 = @intFromFloat(@round(timeout.duration * async_fixed_dt_hz));
+        // Keep the event store clean for a later `emit; tick` in the same test.
+        defer self.events.clear(self.gpa);
+        if (self.events.list.items.len > 0) self.suppress_event_clear = true;
+        var report: RuntimeReport = .{};
+        var i: i64 = 0;
+        while (i < budget) : (i += 1) {
+            self.stepOnce(world, &report) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.RuntimeFailure,
+            };
+            world.tickBoundary();
+            const r = try self.callZeroArgClosure(world, pred);
+            // A predicate `throw` / control signal stops the loop and surfaces as
+            // the test failure (M1.0.15 review fix) — do NOT keep ticking on a
+            // latched throw. `callZeroArgClosure` consumes `return`; only a throw
+            // or a stray control signal can remain set here.
+            if (self.thrown) {
+                self.thrown = false;
+                self.pending_error = .{ .kind = .UncaughtThrow, .span = self.thrown_span };
+                self.pending_message = null;
+                return error.RuntimeFailure;
+            }
+            if (self.control != .none) return error.RuntimeFailure;
+            if (r == .bool_ and r.bool_) return Value{ .bool_ = true };
+        }
+        return Value{ .bool_ = false };
+    }
+
+    /// Evaluate a builtin free-function call by name (M1.0.15). Returns the value
+    /// when `name` is a builtin, else null (the caller falls to the user-fn
+    /// lookup). Mirrors `synthBuiltinCall`'s name set. An assertion failure
+    /// formats a message into `test_msg_buf` and raises `fail(.AssertFailed)`;
+    /// the runner reports it per-test, and outside a test it is harvested into
+    /// the report exactly like the `assert` statement.
+    fn evalBuiltinCall(self: *Interpreter, world: *World, locals: *Locals, id: NodeId, call: ast_mod.CallExpr, callee_name: StringId) StmtError!?Value {
+        const name = self.ast.strings.slice(callee_name);
+        const span = self.ast.exprSpan(id);
+
+        // Test-scoped builtins are intercepted ONLY inside a test body — mirrors
+        // the type-checker's `in_test_body` gate (M1.0.15 review fix), so a user
+        // fn of the same name outside a test resolves to the user fn (the checker
+        // bound it there), not the builtin.
+        if (self.in_test_body) {
+            if (std.mem.eql(u8, name, "test_world")) return Value{ .world_handle = {} };
+            if (std.mem.eql(u8, name, "tick_until")) return try self.evalTickUntil(world, locals, call);
+        }
+
+        if (std.mem.eql(u8, name, "assert_eq") or std.mem.eql(u8, name, "assert_neq")) {
+            const want_eq = std.mem.eql(u8, name, "assert_eq");
+            if (call.args_len < 2) return error.RuntimeFailure;
+            const a = try self.evalArg(world, locals, call, 0);
+            const b = try self.evalArg(world, locals, call, 1);
+            // String-aware equality (M1.0.15 review fix): `Value.eql` compares
+            // strings only by pool identity (`.string_run` is always unequal, and
+            // a `.string_id` literal never matches a `.string_persistent` /
+            // `.string_run`), which would false-fail `assert_eq` and — worse —
+            // false-PASS `assert_neq`. `eventValueEql` byte-compares strings and
+            // falls back to `Value.eql` otherwise. Aggregates are rejected at
+            // type-check (`synthBuiltinCall`), so only comparable values arrive.
+            if (self.eventValueEql(a, b) != want_eq) {
+                self.test_msg_buf.clearRetainingCapacity();
+                try self.msgAssertPrefix(world, locals, call, 2, name);
+                try self.msgAppend(": ");
+                try self.msgValue(a);
+                try self.msgAppend(if (want_eq) " != " else " == ");
+                try self.msgValue(b);
+                return self.raiseAssert(span);
+            }
+            return Value{ .unit = {} };
+        }
+        if (std.mem.eql(u8, name, "assert_approx")) {
+            if (call.args_len < 2) return error.RuntimeFailure;
+            const a = try self.evalArg(world, locals, call, 0);
+            const b = try self.evalArg(world, locals, call, 1);
+            if (a != .float_ or b != .float_) return error.RuntimeFailure;
+            var tol: f64 = 1e-6;
+            if (call.args_len >= 3) {
+                const t = try self.evalArg(world, locals, call, 2);
+                if (t != .float_) return error.RuntimeFailure;
+                tol = t.float_;
+            }
+            if (@abs(a.float_ - b.float_) > tol) {
+                self.test_msg_buf.clearRetainingCapacity();
+                try self.msgAssertPrefix(world, locals, call, 3, name);
+                try self.msgPrint(": {d} vs {d} (tolerance {d})", .{ a.float_, b.float_, tol });
+                return self.raiseAssert(span);
+            }
+            return Value{ .unit = {} };
+        }
+        if (std.mem.eql(u8, name, "assert_some") or std.mem.eql(u8, name, "assert_none")) {
+            const want_some = std.mem.eql(u8, name, "assert_some");
+            if (call.args_len < 1) return error.RuntimeFailure;
+            const v = try self.evalArg(world, locals, call, 0);
+            if (v != .optional) return error.RuntimeFailure;
+            const is_some = self.optionals.items[v.optional] != null;
+            if (is_some != want_some) {
+                self.test_msg_buf.clearRetainingCapacity();
+                try self.msgAssertPrefix(world, locals, call, 1, name);
+                try self.msgAppend(if (want_some) ": value is none" else ": value is some");
+                return self.raiseAssert(span);
+            }
+            return Value{ .unit = {} };
+        }
+        if (std.mem.eql(u8, name, "panic")) {
+            if (call.args_len != 1) return error.RuntimeFailure;
+            const m = try self.evalArg(world, locals, call, 0);
+            self.test_msg_buf.clearRetainingCapacity();
+            try self.msgAppend(self.stringBytes(m) orelse "panic");
+            return self.raiseAssert(span);
+        }
+        if (std.mem.eql(u8, name, "todo") or std.mem.eql(u8, name, "unreachable")) {
+            self.test_msg_buf.clearRetainingCapacity();
+            if (call.args_len == 1) {
+                const m = try self.evalArg(world, locals, call, 0);
+                try self.msgAppend(self.stringBytes(m) orelse "");
+            } else {
+                try self.msgAppend(if (std.mem.eql(u8, name, "todo")) "not yet implemented" else "unreachable code reached");
+            }
+            return self.raiseAssert(span);
+        }
+        return null;
+    }
+
+    /// Append the leading part of an assertion-failure message into `test_msg_buf`:
+    /// the user's custom message argument (a string at `msg_idx`) if present, else
+    /// the builtin name (M1.0.15). The caller appends the specifics.
+    fn msgAssertPrefix(self: *Interpreter, world: *World, locals: *Locals, call: ast_mod.CallExpr, msg_idx: u32, name: []const u8) StmtError!void {
+        if (msg_idx < call.args_len) {
+            const m = try self.evalArg(world, locals, call, msg_idx);
+            if (self.stringBytes(m)) |bytes| {
+                try self.msgAppend(bytes);
+                return;
+            }
+        }
+        try self.msgAppend(name);
     }
 
     fn buildComponentPayload(self: *Interpreter, world: *World, locals: *Locals, struct_lit_arg: NodeId, alloc: std.mem.Allocator) StmtError!struct { cid: ComponentId, bytes: []u8 } {
@@ -5565,12 +5801,11 @@ pub const Interpreter = struct {
                 if (self.ast.exprKind(call.callee) == .ident) {
                     const callee_name = self.ast.exprData(call.callee);
                     if (locals.get(callee_name) == null) {
-                        // Test-scoped builtin `test_world()` (M1.0.15): yields the
-                        // mono-world handle. The type-checker gated it to test
-                        // bodies, so reaching here means we run under `runTestBody`.
-                        if (std.mem.eql(u8, self.ast.strings.slice(callee_name), "test_world")) {
-                            return Value{ .world_handle = {} };
-                        }
+                        // Builtin free functions (M1.0.15): assertion family +
+                        // panic/todo/unreachable + test_world/tick_until. Resolved
+                        // before the user-fn lookup (the type-checker already gated
+                        // scope), mirroring `synthBuiltinCall`.
+                        if (try self.evalBuiltinCall(world, locals, id, call, callee_name)) |v| return v;
                         if (self.fns.get(callee_name)) |fndecl| {
                             return try self.callFn(world, locals, fndecl, call);
                         }
@@ -5709,6 +5944,23 @@ pub const Interpreter = struct {
                 if (self.control != .none or self.thrown or self.returning) return Value{ .unit = {} };
                 if (blk.value.isNone()) return Value{ .unit = {} };
                 return try self.evalExpr(world, locals, blk.value);
+            },
+            .measure_expr => {
+                // `measure { block }` (M1.0.15, §17 erratum): run the block once,
+                // return the elapsed WALL-CLOCK as a `Duration` (seconds). The
+                // type-checker gates it to test bodies (E0910), so `self.io` (set
+                // by the runner) is present; a null is a fail-loud belt. The
+                // block's own value is discarded — only the timing is returned.
+                const m = self.ast.measure_exprs.items[data];
+                const io = self.io orelse return error.RuntimeFailure;
+                const t0 = std.Io.Clock.now(.awake, io);
+                try self.execStmtRun(world, locals, m.body_start, m.body_len);
+                if (!m.value.isNone() and self.control == .none and !self.thrown and !self.returning) {
+                    _ = try self.evalExpr(world, locals, m.value);
+                }
+                const t1 = std.Io.Clock.now(.awake, io);
+                const ns: u64 = @intCast(@max(@as(i96, 0), t0.durationTo(t1).nanoseconds));
+                return Value{ .duration = @as(f64, @floatFromInt(ns)) / @as(f64, std.time.ns_per_s) };
             },
             .if_expr => {
                 const ife = self.ast.if_exprs.items[data];
@@ -5956,6 +6208,21 @@ fn binaryCompare(op: ast_mod.BinaryOp, a: Value, b: Value) !Value {
         const r = switch (op) {
             .eq => a.bool_ == b.bool_,
             .neq => a.bool_ != b.bool_,
+            else => return error.RuntimeFailure,
+        };
+        return Value{ .bool_ = r };
+    }
+    // Duration ordering (M1.0.15) — `elapsed < 0.1s`, `measure { … } > 0.0s`.
+    // The type-checker already types `Duration <op> Duration` as bool
+    // (`synthBinary` matching-builtin arm); this is the runtime half.
+    if (a == .duration and b == .duration) {
+        const r = switch (op) {
+            .eq => a.duration == b.duration,
+            .neq => a.duration != b.duration,
+            .lt => a.duration < b.duration,
+            .gt => a.duration > b.duration,
+            .le => a.duration <= b.duration,
+            .ge => a.duration >= b.duration,
             else => return error.RuntimeFailure,
         };
         return Value{ .bool_ = r };
@@ -7744,6 +8011,31 @@ test "runProgram while let unwraps an optional each iteration (M0.8 E2 block 5)"
     var out: i64 = 0;
     @memcpy(std.mem.asBytes(&out), slot[0..8]);
     try std.testing.expectEqual(@as(i64, 6), out);
+}
+
+test "user fn named test_world is not shadowed by the builtin outside a test (M1.0.15 review fix)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    // Outside a test body the interpreter must call the USER fn (the type-checker
+    // bound the call to it), not intercept the test-scoped builtin. The rule
+    // writes 42 (the user fn's result) into a resource — a `world_handle` here
+    // would fail loud on the assignment instead.
+    const report = try Interpreter.runProgram(gpa,
+        \\resource Out { v: i32 = 0 }
+        \\fn test_world() -> i32 { 42 }
+        \\rule r()
+        \\  when resource Out
+        \\{
+        \\  get_mut(Out).v = test_world()
+        \\}
+    , &world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    const out_id = world.registry.idOf("Out").?;
+    const bytes = world.resources.getResource(out_id).?;
+    var v: i32 = undefined;
+    @memcpy(std.mem.asBytes(&v), bytes[0..@sizeOf(i32)]);
+    try std.testing.expectEqual(@as(i32, 42), v);
 }
 
 test "runProgram assert passes on true, reports a runtime error on false (M0.8 assert)" {

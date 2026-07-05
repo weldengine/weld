@@ -115,6 +115,7 @@ pub const TokenKind = enum {
     kw_sync, // sync statement `sync { sync_branch* }` (M1.0.12 — graduated from non_s3_keywords; §4.2 sync_stmt)
     kw_every, // repeating timer statement `[let IDENT =] every(d) { }` (M1.0.13 — graduated from non_s3_keywords; §4.3 timer_stmt)
     kw_after_unscaled, // unscaled one-shot timer statement `[let IDENT =] after_unscaled(d) { }` (M1.0.13 — graduated from non_s3_keywords; §4.3 timer_stmt)
+    kw_measure, // `measure { block }` expression (M1.0.15 — §17 erratum; wall-clock Duration, test-body only via E0910). Stays inside the [kw_let, kw_f64] keyword range for isKeywordToken.
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -287,6 +288,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "sync", .kind = .kw_sync },
     .{ .lexeme = "every", .kind = .kw_every },
     .{ .lexeme = "after_unscaled", .kind = .kw_after_unscaled },
+    .{ .lexeme = "measure", .kind = .kw_measure },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },

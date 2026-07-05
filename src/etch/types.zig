@@ -5126,6 +5126,7 @@ pub const TypeChecker = struct {
             .method_call => return try self.synthMethodCall(id, data, ctx_opt),
             .loop_expr => return try self.synthLoop(data, ctx_opt),
             .block_expr => return try self.synthBlock(data, ctx_opt),
+            .measure_expr => return try self.synthMeasure(id, data, ctx_opt),
             .if_expr => return try self.synthIf(id, data, ctx_opt),
             // Reaching a structural spawn through `synthExpr` means it is being
             // used as a VALUE (let binding, field receiver, call argument) — the
@@ -5349,6 +5350,27 @@ pub const TypeChecker = struct {
         return try self.synthExprE(blk.value, ctx_opt);
     }
 
+    /// Type a `measure { block }` expression (M1.0.15, §17 erratum). Result type
+    /// is always `Duration` (the elapsed wall-clock; the block's own value is
+    /// discarded). Legal ONLY inside a test body — anywhere else it is
+    /// `E0910 MeasureOutsideTest` (wall-clock never enters deterministic gameplay
+    /// code). The block statements are checked in the current (sync test) context.
+    fn synthMeasure(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        if (!self.in_test_body) {
+            try self.emit(.measure_outside_test, .error_, self.arena.exprSpan(id), "measure {{ … }} is only valid inside a test body", .{});
+        }
+        const m = self.arena.measure_exprs.items[data];
+        if (ctx_opt) |ctx| {
+            var i: u32 = 0;
+            while (i < m.body_len) : (i += 1) {
+                const stmt: NodeId = @bitCast(self.arena.extra.items[m.body_start + i]);
+                try self.checkStmt(ctx, stmt);
+            }
+        }
+        if (!m.value.isNone()) _ = try self.synthExprE(m.value, ctx_opt);
+        return .{ .builtin = .duration };
+    }
+
     /// Type an `if` expression (M0.8 control flow). The condition must be
     /// `bool`; the then / else branches (block expressions, `else if` chaining
     /// through a nested `if`) must unify to one result type. An `if` with no
@@ -5399,6 +5421,111 @@ pub const TypeChecker = struct {
         };
     }
 
+    fn synthArg(self: *TypeChecker, call: ast_mod.CallExpr, i: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const arg: NodeId = @bitCast(self.arena.extra.items[call.args_start + i]);
+        return try self.synthExprE(arg, ctx_opt);
+    }
+
+    /// Whether a type has a meaningful runtime equality for `assert_eq`/`assert_neq`
+    /// (M1.0.15): scalars/strings (`.builtin`, incl. `string_`/`Entity`), enums,
+    /// or `unknown` (already-diagnosed). Aggregates lack a structural `Value.eql`.
+    fn assertComparable(t: ResolvedType) bool {
+        return switch (t) {
+            .builtin, .enum_t, .unknown => true,
+            else => false,
+        };
+    }
+
+    /// Resolve a builtin free-function call by name (M1.0.15). Returns the result
+    /// type when `name` is a builtin, else `null` (the caller falls through to the
+    /// user-fn lookup, then E0102). Global builtins — the assertion family
+    /// (`assert_eq`/`assert_neq`/`assert_approx`/`assert_some`/`assert_none`,
+    /// `etch-stdlib.md §19.4`) + `panic`/`todo`/`unreachable` — resolve anywhere;
+    /// test-scoped builtins (`test_world`, `tick_until`) only inside a test body.
+    /// Statement-effect builtins yield `unknown` (≈ unit); args are synth-checked
+    /// so nested expressions are typed and light shape checks surface misuse.
+    fn synthBuiltinCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, callee_name: StringId, ctx_opt: ?*RuleCtx) TypeError!?ResolvedType {
+        const name = self.arena.strings.slice(callee_name);
+        const span = self.arena.exprSpan(id);
+
+        // ── Test-scoped (only inside a test body; else null → E0102) ──
+        if (self.in_test_body) {
+            if (std.mem.eql(u8, name, "test_world")) {
+                if (call.args_len != 0) try self.emit(.arg_count_mismatch, .error_, span, "test_world() takes no arguments", .{});
+                return ResolvedType.test_world;
+            }
+            if (std.mem.eql(u8, name, "tick_until")) {
+                // `tick_until(pred: () -> bool, timeout: Duration) -> bool`.
+                if (call.args_len != 2) {
+                    try self.emit(.arg_count_mismatch, .error_, span, "tick_until(pred: () -> bool, timeout: Duration) takes 2 arguments", .{});
+                } else {
+                    _ = try self.synthArg(call, 0, ctx_opt);
+                    const t1 = try self.synthArg(call, 1, ctx_opt);
+                    if (t1 == .builtin and t1.builtin != .duration) {
+                        try self.emit(.type_mismatch, .error_, span, "tick_until timeout must be a Duration", .{});
+                    }
+                }
+                return .{ .builtin = .bool_ };
+            }
+        }
+
+        // ── Global assertion family + panic/todo/unreachable ──
+        if (std.mem.eql(u8, name, "assert_eq") or std.mem.eql(u8, name, "assert_neq")) {
+            if (call.args_len < 2 or call.args_len > 3) {
+                try self.emit(.arg_count_mismatch, .error_, span, "{s}(a, b[, msg]) takes 2 or 3 arguments", .{name});
+            } else {
+                const ta = try self.synthArg(call, 0, ctx_opt);
+                const tb = try self.synthArg(call, 1, ctx_opt);
+                // Only scalar / enum / string values compare at runtime (M1.0.15
+                // review fix): aggregates (struct/array/map/set/optional/closure)
+                // have no structural `Value.eql`, so an aggregate operand would
+                // false-fail `assert_eq` and false-PASS `assert_neq`. Reject them
+                // fail-loud rather than mis-compare.
+                if (!assertComparable(ta) or !assertComparable(tb)) {
+                    try self.emit(.type_mismatch, .error_, span, "{s} compares scalar / string / enum values (structs, arrays, maps, sets, optionals are not comparable in v0.6)", .{name});
+                } else if (ta == .builtin and tb == .builtin and ta.builtin != tb.builtin) {
+                    try self.emit(.type_mismatch, .error_, span, "{s} compares two values of the same type", .{name});
+                }
+                if (call.args_len == 3) _ = try self.synthArg(call, 2, ctx_opt);
+            }
+            return ResolvedType.unknown;
+        }
+        if (std.mem.eql(u8, name, "assert_approx")) {
+            if (call.args_len < 2 or call.args_len > 4) {
+                try self.emit(.arg_count_mismatch, .error_, span, "assert_approx(a, b[, tolerance][, msg]) takes 2 to 4 arguments", .{});
+            } else {
+                var i: u32 = 0;
+                while (i < call.args_len) : (i += 1) _ = try self.synthArg(call, i, ctx_opt);
+            }
+            return ResolvedType.unknown;
+        }
+        if (std.mem.eql(u8, name, "assert_some") or std.mem.eql(u8, name, "assert_none")) {
+            if (call.args_len < 1 or call.args_len > 2) {
+                try self.emit(.arg_count_mismatch, .error_, span, "{s}(value[, msg]) takes 1 or 2 arguments", .{name});
+            } else {
+                const tv = try self.synthArg(call, 0, ctx_opt);
+                if (tv != .optional and tv != .unknown) {
+                    try self.emit(.type_mismatch, .error_, span, "{s} requires an optional (T?) value", .{name});
+                }
+                if (call.args_len == 2) _ = try self.synthArg(call, 1, ctx_opt);
+            }
+            return ResolvedType.unknown;
+        }
+        if (std.mem.eql(u8, name, "panic")) {
+            if (call.args_len != 1) {
+                try self.emit(.arg_count_mismatch, .error_, span, "panic(msg) takes 1 argument", .{});
+            } else _ = try self.synthArg(call, 0, ctx_opt);
+            return ResolvedType.unknown;
+        }
+        if (std.mem.eql(u8, name, "todo") or std.mem.eql(u8, name, "unreachable")) {
+            if (call.args_len > 1) {
+                try self.emit(.arg_count_mismatch, .error_, span, "{s}([msg]) takes 0 or 1 arguments", .{name});
+            } else if (call.args_len == 1) _ = try self.synthArg(call, 0, ctx_opt);
+            return ResolvedType.unknown;
+        }
+        return null;
+    }
+
     /// Type a call expression (M0.8 closures). E1 only resolves calls whose
     /// callee is a closure: arity is checked, then the body is typed for the
     /// return with the parameters bound (to their annotation, else the argument
@@ -5417,15 +5544,13 @@ pub const TypeChecker = struct {
             const callee_name = self.arena.exprData(call.callee);
             const shadowed = if (ctx_opt) |ctx| ctx.locals.contains(callee_name) else false;
             if (!shadowed) {
-                // Test-scoped free builtins (M1.0.15) resolve ONLY inside a test
-                // body; elsewhere `test_world` is an ordinary undefined ident, so
-                // the callee's `synthExprE` below emits E0102 (§32: "fall through
-                // to E0102"). `test_world()` takes no args and yields the World
-                // handle.
-                if (self.in_test_body and std.mem.eql(u8, self.arena.strings.slice(callee_name), "test_world")) {
-                    if (call.args_len != 0) try self.emit(.arg_count_mismatch, .error_, self.arena.exprSpan(id), "test_world() takes no arguments", .{});
-                    return ResolvedType.test_world;
-                }
+                // Builtin free functions (M1.0.15) — the assertion family +
+                // panic/todo/unreachable (global), test_world/tick_until
+                // (test-scoped). Resolved before the user-fn lookup so a builtin
+                // name is never shadowed by a stdlib decl; a test-scoped builtin
+                // outside a test body returns null → falls through to E0102
+                // (§32: "fall through to E0102").
+                if (try self.synthBuiltinCall(id, call, callee_name, ctx_opt)) |t| return t;
                 if (self.symbols.get(callee_name)) |sym| {
                     if (sym.kind == .fn_) {
                         return try self.synthFreeFnCall(id, call, sym.item_id, ctx_opt);
@@ -7253,6 +7378,48 @@ test "await in a test body is E0901 (sync context, M1.0.15)" {
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .async_call_in_non_async_context);
+}
+
+test "measure outside a test body is E0910; inside checks clean (M1.0.15)" {
+    const gpa = std.testing.allocator;
+    // `measure { }` in a `fn` body → E0910 (wall-clock stays out of gameplay).
+    var outside = try parseAndCheck(gpa,
+        \\fn timed() -> Duration { measure { } }
+    );
+    defer outside.deinit(gpa);
+    try expectAnyCode(outside.diagnostics.items, .measure_outside_test);
+
+    // Inside a test body it types clean (result is Duration).
+    var inside = try parseAndCheck(gpa,
+        \\test "m" {
+        \\  let d = measure { let x = 1 + 1 }
+        \\  assert(d > 0.0s)
+        \\}
+    );
+    defer inside.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), inside.diagnostics.items.len);
+}
+
+test "assert_eq rejects non-comparable aggregate operands (M1.0.15 review fix)" {
+    const gpa = std.testing.allocator;
+    // A struct value has no structural equality — comparing it would false-fail
+    // assert_eq / false-pass assert_neq, so it is rejected at type-check.
+    var result = try parseAndCheck(gpa,
+        \\struct P { x: int }
+        \\test "cmp" {
+        \\  let a = P { x: 1 }
+        \\  assert_eq(a, a)
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .type_mismatch);
+
+    // Scalars compare clean.
+    var ok = try parseAndCheck(gpa,
+        \\test "cmp ok" { assert_eq(1 + 1, 2) }
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
 }
 
 test "type-checker emits E0502 when an annotation is applied to the wrong target (D-S3-annot-applicability)" {

@@ -368,6 +368,7 @@ pub const DiagnosticCode = enum {
     control_flow_escapes_task_branch, // M1.0.12 E3 — E0907 ControlFlowEscapesTaskBranch (break/continue targeting a loop outside the concurrency construct)
     event_not_entity_scoped, // M1.0.14 E2 — E0908 EventNotEntityScoped (`await entity_event(e, T)` where T has no `Entity` field)
     ambiguous_event_entity_target, // M1.0.14 E2 — E0909 AmbiguousEventEntityTarget (T has multiple `Entity` fields with no `@entity_target`)
+    measure_outside_test, // M1.0.15 E4 — E0910 MeasureOutsideTest (`measure { … }` outside a test body; wall-clock stays out of deterministic gameplay)
 
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
@@ -561,6 +562,7 @@ pub const DiagnosticCode = enum {
             .control_flow_escapes_task_branch => "E0907",
             .event_not_entity_scoped => "E0908",
             .ambiguous_event_entity_target => "E0909",
+            .measure_outside_test => "E0910",
         };
     }
 
@@ -756,6 +758,7 @@ pub const DiagnosticCode = enum {
             .control_flow_escapes_task_branch => "ControlFlowEscapesTaskBranch",
             .event_not_entity_scoped => "EventNotEntityScoped",
             .ambiguous_event_entity_target => "AmbiguousEventEntityTarget",
+            .measure_outside_test => "MeasureOutsideTest",
         };
     }
 };

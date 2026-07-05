@@ -5354,6 +5354,21 @@ pub const Parser = struct {
         });
     }
 
+    /// `measure { block }` (M1.0.15, §17 erratum). Reuses the ordinary block-body
+    /// parser (statement run + optional trailing value); the `measure` keyword
+    /// tags the node so the type-checker types it as `Duration` (test-body only,
+    /// E0910 elsewhere) and the interpreter times the block on the wall clock.
+    fn parseMeasureExpr(self: *Parser) ParseError!NodeId {
+        const kw_span = (try self.advance()).span; // 'measure'
+        _ = try self.expect(.lbrace, "expected '{' to start measure block");
+        const body = try self.parseBlockBody();
+        const closing = try self.expect(.rbrace, "expected '}' to close measure block");
+        return try self.arena.addMeasureExpr(self.gpa, body.start, body.len, body.value, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
     /// Parse `if cond block {else if cond block} [else block]` (M0.8 control
     /// flow, `etch-grammar.md` §3.2 l.500 / §4.1 l.618). Parsed as an
     /// if-expression in `parsePrimary`; in statement position it is wrapped as
@@ -6729,6 +6744,7 @@ pub const Parser = struct {
             .kw_if => return try self.parseIf(),
             .kw_await => return try self.parseAwaitExpr(),
             .kw_spawn => return try self.parseStructuralSpawn(),
+            .kw_measure => return try self.parseMeasureExpr(),
             .lbrace => return try self.parseBlockExpr(),
             .lbracket => return try self.parseArrayOrMapLiteral(),
             .pipe => return try self.parseClosure(),
@@ -7118,6 +7134,20 @@ test "parse test block" {
     try std.testing.expectEqual(@as(u32, 1), td.annotations_len);
     const annot = result.ast.annot_pool.items[td.annotations_extra];
     try std.testing.expectEqual(ast_mod.AnnotationKind.tag, annot.kind);
+}
+
+test "parse measure expression (M1.0.15)" {
+    const gpa = std.testing.allocator;
+    // `measure { block }` parses as a primary expression (§17 erratum); the
+    // parser produces one `measure_exprs` slab entry, no diagnostics.
+    var result = try parse(gpa,
+        \\fn timed() -> Duration {
+        \\  measure { let x = 1 + 1 }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len == 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.measure_exprs.items.len);
 }
 
 test "recovery after broken const/private/test preserves following valid decl" {

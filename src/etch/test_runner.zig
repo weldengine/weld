@@ -113,6 +113,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, ast: *const Ast) !RunReport {
         defer world.deinit(gpa);
         var interp = try Interpreter.compile(gpa, ast, &world);
         defer interp.deinit();
+        interp.io = io; // wall-clock provider for `measure { … }` (M1.0.15)
         try interp.bindToWorld(&world);
 
         const t0 = Io.Clock.now(.awake, io);
@@ -462,4 +463,156 @@ test "test-body runtime string survives tick (no use-after-free)" {
     defer report.deinit();
     try std.testing.expectEqual(@as(u32, 1), report.passed);
     try std.testing.expectEqual(@as(u32, 0), report.failed);
+}
+
+// ─── E4: assertion family, measure, tick_until ──────────────────────────────
+
+test "assert_eq passes; a failure carries both values" {
+    const gpa = std.testing.allocator;
+    var report = try runSource(gpa,
+        \\test "eq ok" { assert_eq(2 + 2, 4) }
+        \\test "eq bad" { assert_eq(2 + 2, 5) }
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 1), report.passed);
+    try std.testing.expectEqual(@as(u32, 1), report.failed);
+    // The failing test's message names both compared values (4 and 5).
+    var msg: []const u8 = "";
+    for (report.results) |r| {
+        if (r.status == .failed) msg = r.message.?;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, msg, "4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "5") != null);
+}
+
+test "assert_neq / assert_approx / assert_some / assert_none" {
+    const gpa = std.testing.allocator;
+    var report = try runSource(gpa,
+        \\test "neq ok" { assert_neq(1, 2) }
+        \\test "neq bad" { assert_neq(3, 3) }
+        \\test "approx ok" { assert_approx(1.0, 1.0000001) }
+        \\test "approx bad" { assert_approx(1.0, 2.0) }
+        \\test "some ok" { let s: int? = some(5) assert_some(s) }
+        \\test "some bad" { let n: int? = none assert_some(n) }
+        \\test "none ok" { let n: int? = none assert_none(n) }
+        \\test "none bad" { let s: int? = some(5) assert_none(s) }
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 4), report.passed);
+    try std.testing.expectEqual(@as(u32, 4), report.failed);
+}
+
+test "panic / todo / unreachable fail the test with a message" {
+    const gpa = std.testing.allocator;
+    var report = try runSource(gpa,
+        \\test "boom" { panic("kaboom") }
+        \\test "wip" { todo() }
+        \\test "never" { unreachable() }
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 0), report.passed);
+    try std.testing.expectEqual(@as(u32, 3), report.failed);
+    for (report.results) |r| {
+        try std.testing.expect(r.message != null);
+        try std.testing.expect(r.message.?.len > 0);
+    }
+    // The custom panic message is preserved.
+    try std.testing.expectEqualStrings("kaboom", report.results[0].message.?);
+}
+
+test "measure returns a positive duration" {
+    const gpa = std.testing.allocator;
+    var report = try runSource(gpa,
+        \\test "measured" {
+        \\  let elapsed = measure {
+        \\    let mut i: int = 0
+        \\    while i < 5000 { i += 1 }
+        \\  }
+        \\  assert(elapsed > 0.0s)
+        \\  assert(elapsed < 100.0s)
+        \\}
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 1), report.passed);
+    try std.testing.expectEqual(@as(u32, 0), report.failed);
+}
+
+test "tick_until stops on the predicate and on timeout" {
+    const gpa = std.testing.allocator;
+    var report = try runSource(gpa,
+        \\resource Counter { n: int = 0 }
+        \\rule inc()
+        \\  when resource Counter
+        \\{
+        \\  get_mut(Counter).n += 1
+        \\}
+        \\test "reaches predicate" {
+        \\  let world = test_world()
+        \\  let hit = tick_until(|| get(Counter).n >= 3, 1.0s)
+        \\  assert(hit)
+        \\  assert_eq(get(Counter).n, 3)
+        \\}
+        \\test "hits timeout" {
+        \\  let world = test_world()
+        \\  let hit = tick_until(|| get(Counter).n >= 1000, 0.05s)
+        \\  assert(not hit)
+        \\}
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 2), report.passed);
+    try std.testing.expectEqual(@as(u32, 0), report.failed);
+}
+
+// ─── E4 review-fix regressions ──────────────────────────────────────────────
+
+test "a rule-body assert failure during tick does not leak into the test's message" {
+    const gpa = std.testing.allocator;
+    // A driven rule fails an assert (harvested); the test body then fails its own
+    // plain assert. The reported message must be the test's ("assertion failed"),
+    // NOT the stale rule assert ("assert_eq: 0 != 999").
+    var report = try runSource(gpa,
+        \\resource C { n: int = 0 }
+        \\rule bad()
+        \\  when resource C
+        \\{
+        \\  assert_eq(get(C).n, 999)
+        \\}
+        \\test "no stale message" {
+        \\  let world = test_world()
+        \\  world.tick(1)
+        \\  assert(1 == 2)
+        \\}
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 1), report.failed);
+    try std.testing.expect(std.mem.indexOf(u8, report.results[0].message.?, "999") == null);
+}
+
+test "assert_eq / assert_neq compare strings by bytes (no false-pass)" {
+    const gpa = std.testing.allocator;
+    var report = try runSource(gpa,
+        \\test "eq computed strings" { let a = "hi"  assert_eq(a + "!", "hi!") }
+        \\test "neq equal strings fails" { let a = "hi"  assert_neq(a + "!", "hi!") }
+    );
+    defer report.deinit();
+    // eq of two byte-equal strings passes; neq of two byte-equal strings FAILS
+    // (without the fix, Value.eql's string-blindness would flip both).
+    try std.testing.expectEqual(@as(u32, 1), report.passed);
+    try std.testing.expectEqual(@as(u32, 1), report.failed);
+}
+
+test "a throwing tick_until predicate fails the test with the throw" {
+    const gpa = std.testing.allocator;
+    var report = try runSource(gpa,
+        \\test "pred throws" {
+        \\  let world = test_world()
+        \\  let hit = tick_until(|| { throw Error { message: "boom", code: .io_fail } }, 1.0s)
+        \\  assert(hit)
+        \\}
+    );
+    defer report.deinit();
+    try std.testing.expectEqual(@as(u32, 1), report.failed);
+    // The failure is the predicate's uncaught throw, surfaced immediately —
+    // not a timeout / a downstream assert.
+    try std.testing.expectEqualStrings("uncaught throw", report.results[0].message.?);
 }
