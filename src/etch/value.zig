@@ -126,6 +126,12 @@ pub const Value = union(enum) {
     /// expression (`after(d)` with `d` a Duration local). Duration
     /// arithmetic stays out of the M1.0.13 surface.
     duration: f64,
+    /// The current test's World handle (M1.0.15): returned by `test_world()`,
+    /// receiver of `spawn_with`/`emit`/`tick`. v0.6 is MONO-WORLD — the payload
+    /// is a marker (`void`); the interpreter operates on the `world` already
+    /// threaded through `execStmt`, so repeated `test_world()` calls denote the
+    /// same world. Not field-storable, not comparable in Etch.
+    world_handle,
     unit,
 
     pub fn fromInt(x: i64) Value {
@@ -182,6 +188,9 @@ pub const Value = union(enum) {
             .task_handle => false,
             .timer_handle => false,
             .duration => |a| a == other.duration,
+            // Mono-world: the sole world handle is equal to itself; `==` on world
+            // handles is not an Etch v0.6 operation regardless.
+            .world_handle => true,
             .unit => true,
         };
     }
@@ -222,6 +231,10 @@ pub const RuntimeErrorKind = enum {
     /// An Etch `throw` that reached the rule top level uncaught (M0.8
     /// E3-D). The span covers the thrown value expression.
     UncaughtThrow,
+    /// A failed `assert(...)` / assertion-family builtin (M1.0.15). The span
+    /// covers the failing condition; the message (compared values, custom
+    /// reason) travels alongside via the interpreter's `pending_message`.
+    AssertFailed,
 };
 
 // ─── Arithmetic helpers ──────────────────────────────────────────────────

@@ -1,0 +1,11 @@
+// M1.0.15 acceptance corpus — `@only` focusing: with at least one `@only` test
+// present, only those run; the rest are reported skipped (never failing).
+
+@only
+test "focused" {
+  assert(true)
+}
+
+test "would fail if run" {
+  assert(false)
+}

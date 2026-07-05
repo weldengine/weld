@@ -266,6 +266,11 @@ pub const ExprKind = enum {
     /// `StmtKind.spawn_stmt` since M1.0.12) — the keyword is shared, the token
     /// after `spawn` disambiguates; this node is only ever the `(` form.
     spawn_struct,
+    /// `measure { block }` (M1.0.15, §17 erratum) — a wall-clock timing
+    /// expression yielding a `Duration`. Data indexes `measure_exprs`. Valid only
+    /// in a test body (E0910 elsewhere); determinism is preserved by confining
+    /// the sole wall-clock surface to tests.
+    measure_expr,
 };
 
 /// Closed enum of type-node kinds the parser can produce.
@@ -668,11 +673,14 @@ pub const ConstDecl = struct {
 /// Side-slab entry for a top-level `test` block (M1.0.8, `etch-grammar.md`
 /// §17: `test_decl = "test" STRING_LITERAL block`). `name` is the interned
 /// string-literal label; `body` is a `block_expr` NodeId (the reused
-/// block/statement parser). M1.0.8 delivers parse + validate + symbol
-/// registration only — there is no execution surface (that is M1.0.9).
+/// block/statement parser). M1.0.15 delivers execution: the body is
+/// type-checked (sync context) and run by `test_runner.zig`. The annotation
+/// range (`@tag`/`@skip`/`@only`) is preserved (M1.0.15 — M1.0.8 discarded it).
 pub const TestDecl = struct {
     name: StringId,
     body: NodeId,
+    annotations_extra: u32 = 0,
+    annotations_len: u32 = 0,
 };
 
 /// Side-slab entry for a `rule` declaration: params, optional `when`
@@ -934,6 +942,16 @@ pub const StringInterp = struct {
 /// last bare expression before `}` is the value). Used directly
 /// (`let x = { ...; v }`), as `if`/`match` arm bodies, and as closure bodies.
 pub const BlockExpr = struct {
+    body_start: u32,
+    body_len: u32,
+    value: NodeId,
+};
+
+/// `measure { block }` expression (M1.0.15, `etch-grammar.md` §17 erratum). Same
+/// storage shape as a `BlockExpr` (statement run + optional trailing value); a
+/// distinct node kind so the type-checker gates it (Duration result, test-body
+/// only → E0910) and the interpreter times the block on the wall clock.
+pub const MeasureExpr = struct {
     body_start: u32,
     body_len: u32,
     value: NodeId,
@@ -2363,6 +2381,12 @@ pub const AnnotationKind = enum {
     // `await entity_event(e, T)` (§18.10). Field-level, event-only,
     // Entity-typed, at most one per event (validated in the type-checker).
     entity_target,
+    // M1.0.15 — `test`-only annotations (§17): `@tag(.unit|.integration|.slow|
+    // .perf)`, `@skip(reason: "...")`, `@only`. Applicability is `.test_` only
+    // (annotationAppliesTo); args are validated in the test-decl check.
+    tag,
+    skip,
+    only,
 
     pub fn fromName(name: []const u8) AnnotationKind {
         if (std.mem.eql(u8, name, "phase")) return .phase;
@@ -2391,6 +2415,9 @@ pub const AnnotationKind = enum {
         if (std.mem.eql(u8, name, "on_spawned")) return .on_spawned;
         if (std.mem.eql(u8, name, "on_despawned")) return .on_despawned;
         if (std.mem.eql(u8, name, "entity_target")) return .entity_target;
+        if (std.mem.eql(u8, name, "tag")) return .tag;
+        if (std.mem.eql(u8, name, "skip")) return .skip;
+        if (std.mem.eql(u8, name, "only")) return .only;
         return .custom;
     }
 
@@ -2607,6 +2634,7 @@ pub const AstArena = struct {
     loop_exprs: std.ArrayListUnmanaged(LoopExpr) = .empty,
     string_interps: std.ArrayListUnmanaged(StringInterp) = .empty,
     block_exprs: std.ArrayListUnmanaged(BlockExpr) = .empty,
+    measure_exprs: std.ArrayListUnmanaged(MeasureExpr) = .empty,
     if_exprs: std.ArrayListUnmanaged(IfExpr) = .empty,
     break_stmts: std.ArrayListUnmanaged(BreakStmt) = .empty,
     throw_stmts: std.ArrayListUnmanaged(ThrowStmt) = .empty,
@@ -2832,6 +2860,7 @@ pub const AstArena = struct {
         self.loop_exprs.deinit(gpa);
         self.string_interps.deinit(gpa);
         self.block_exprs.deinit(gpa);
+        self.measure_exprs.deinit(gpa);
         self.if_exprs.deinit(gpa);
         self.break_stmts.deinit(gpa);
         self.throw_stmts.deinit(gpa);
@@ -3546,6 +3575,12 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.block_exprs.items.len);
         try self.block_exprs.append(gpa, .{ .body_start = body_start, .body_len = body_len, .value = value });
         return try self.addExpr(gpa, .block_expr, idx, span);
+    }
+
+    pub fn addMeasureExpr(self: *AstArena, gpa: std.mem.Allocator, body_start: u32, body_len: u32, value: NodeId, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.measure_exprs.items.len);
+        try self.measure_exprs.append(gpa, .{ .body_start = body_start, .body_len = body_len, .value = value });
+        return try self.addExpr(gpa, .measure_expr, idx, span);
     }
 
     pub fn addIfExpr(self: *AstArena, gpa: std.mem.Allocator, cond: NodeId, then_block: NodeId, else_branch: NodeId, let_binding: StringId, span: SourceSpan) !NodeId {

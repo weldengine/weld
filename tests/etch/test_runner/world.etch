@@ -1,0 +1,42 @@
+// M1.0.15 acceptance corpus — the test-world surface: spawn_with fires
+// observers (on_added -> emit -> @on_event tallies), and world.emit + tick
+// drives an event-handling rule.
+
+component Marker { x: int = 0 }
+event Spawned { by: int }
+event Damage { amount: int }
+resource Count { n: int = 0 }
+resource Tally { total: int = 0 }
+
+@on_added(Marker)
+rule note(entity: Entity, value: Marker) {
+  emit Spawned { by: value.x }
+}
+
+@on_event(Spawned)
+rule tally_spawn()
+  when resource Count
+{
+  get_mut(Count).n += 1
+}
+
+@on_event(Damage)
+rule absorb()
+  when resource Tally
+{
+  get_mut(Tally).total += event.amount
+}
+
+test "spawn_with fires observers" {
+  let world = test_world()
+  world.spawn_with([Marker { x: 7 }])
+  world.tick(1)
+  assert_eq(get(Count).n, 1)
+}
+
+test "emit + tick drives a rule" {
+  let world = test_world()
+  world.emit(Damage { amount: 30 })
+  world.tick(1)
+  assert_eq(get(Tally).total, 30)
+}

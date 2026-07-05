@@ -1,0 +1,27 @@
+// M1.0.15 acceptance corpus — a fresh World per test: a rule counts Marker
+// entities into a resource each tick; test 2 sees only its own spawn, not
+// test 1's two.
+
+resource Count { n: int = 0 }
+component Marker { x: int = 0 }
+
+rule count(entity: Entity)
+  when entity has Marker and resource Count
+{
+  get_mut(Count).n += 1
+}
+
+test "first spawns two" {
+  let world = test_world()
+  world.spawn_with([Marker { x: 1 }])
+  world.spawn_with([Marker { x: 2 }])
+  world.tick(1)
+  assert_eq(get(Count).n, 2)
+}
+
+test "second is isolated" {
+  let world = test_world()
+  world.spawn_with([Marker { x: 9 }])
+  world.tick(1)
+  assert_eq(get(Count).n, 1)
+}

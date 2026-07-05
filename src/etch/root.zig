@@ -50,6 +50,9 @@ comptime {
     // pinned by `src/core/memory/root.zig` (reached here via `weld_core.memory`).
     // M1.0.4 — pull the scene cook driver into the test import graph (§13).
     _ = @import("scene_cook.zig");
+    // M1.0.15 — the test runner's inline tests (the `pub const test_runner`
+    // re-export pulls its declarations, NOT its `test` blocks — §13).
+    _ = @import("test_runner.zig");
 }
 
 /// M1.0.4 scene cook — `.scene.etch` source → the neutral Tier-0 scene model
@@ -95,6 +98,21 @@ pub const Interpreter = interp.Interpreter;
 /// `entities_iterated` / `rules_matched` without reaching into the
 /// interpreter internals.
 pub const RuntimeReport = interp.RuntimeReport;
+
+/// Etch `test` runner (M1.0.15) — iterates a type-checked program's `test`
+/// blocks in isolation and reports pass/fail/skip. Exposed at the module
+/// surface so the `etch_test` shim (and, later, `weld test`) drive it without
+/// reaching into the internal path. Also roots the module for its inline tests
+/// (Zig 0.16 lazy analysis, `engine-zig-conventions.md` §13).
+pub const test_runner = @import("test_runner.zig");
+/// Aggregate result of a `test_runner.run` — per-test results plus
+/// passed/failed/skipped counts. Owns its strings (internal arena).
+pub const RunReport = test_runner.RunReport;
+/// One test's outcome: name, status, wall-clock duration, and (on failure)
+/// message + source span.
+pub const TestResult = test_runner.TestResult;
+/// Whether a test passed, failed, or was skipped.
+pub const TestStatus = test_runner.TestStatus;
 
 // ───────────────────────────────────────────────────────────────────────────
 // AST stable interface — Level 1 (frozen cross-phase)
@@ -249,7 +267,8 @@ fn buildExports(gpa: std.mem.Allocator, a: *const Ast, arena_index: usize, table
             .type_alias => .{ .name = a.type_alias_decls.items[datas[i]].name, .kind = .type_alias },
             // M1.0.8 — a top-level `const` is exportable (always public — a
             // const cannot carry a `private` prefix). `test` blocks are NOT
-            // listed: tests are registered intra-module but never exported.
+            // listed: they live in a dedicated test-name namespace (M1.0.15,
+            // `TypeChecker.test_symbols`) and are never exported.
             .const_decl => .{ .name = a.const_decls.items[datas[i]].name, .kind = .const_ },
             else => null,
         };

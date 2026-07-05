@@ -846,13 +846,11 @@ pub const Parser = struct {
     ///   `test_decl = "test" STRING_LITERAL block`.
     /// The body reuses the ordinary block/statement parser (`parseBlockExpr`).
     /// `@tag` / `@skip` / `@only` annotations flow through `parseAnnotations`
-    /// before dispatch (the range is discarded here — the v0.6 test subset
-    /// attaches no resolver semantics to them). M1.0.8 is parse + validate +
-    /// symbol registration only; there is no execution surface (M1.0.9). The
-    /// `kw_test` starter is mirrored in `recoverToTopLevel`'s stop-set + the
-    /// `parseTopLevel` error enumeration.
+    /// before dispatch; the range is preserved on the `TestDecl` (M1.0.15 — the
+    /// resolver validates applicability + args). The `kw_test` starter is
+    /// mirrored in `recoverToTopLevel`'s stop-set + the `parseTopLevel` error
+    /// enumeration.
     fn parseTestDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
-        _ = annotations; // @tag/@skip/@only parsed but carry no v0.6 resolver semantics
         const kw_span = (try self.advance()).span; // 'test'
         const name_tok = try self.expect(.string_literal, "expected a test name (string literal) after 'test'");
         const name_id = try self.internStringLiteral(name_tok.span);
@@ -860,6 +858,8 @@ pub const Parser = struct {
         _ = try self.arena.addTestDecl(self.gpa, .{
             .name = name_id,
             .body = body,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = self.arena.exprSpan(body).byte_end });
     }
 
@@ -5354,6 +5354,21 @@ pub const Parser = struct {
         });
     }
 
+    /// `measure { block }` (M1.0.15, §17 erratum). Reuses the ordinary block-body
+    /// parser (statement run + optional trailing value); the `measure` keyword
+    /// tags the node so the type-checker types it as `Duration` (test-body only,
+    /// E0910 elsewhere) and the interpreter times the block on the wall clock.
+    fn parseMeasureExpr(self: *Parser) ParseError!NodeId {
+        const kw_span = (try self.advance()).span; // 'measure'
+        _ = try self.expect(.lbrace, "expected '{' to start measure block");
+        const body = try self.parseBlockBody();
+        const closing = try self.expect(.rbrace, "expected '}' to close measure block");
+        return try self.arena.addMeasureExpr(self.gpa, body.start, body.len, body.value, .{
+            .byte_start = kw_span.byte_start,
+            .byte_end = closing.span.byte_end,
+        });
+    }
+
     /// Parse `if cond block {else if cond block} [else block]` (M0.8 control
     /// flow, `etch-grammar.md` §3.2 l.500 / §4.1 l.618). Parsed as an
     /// if-expression in `parsePrimary`; in statement position it is wrapped as
@@ -6082,6 +6097,17 @@ pub const Parser = struct {
                             _ = try self.advance();
                             return try self.parseTagMutation(expr, .remove);
                         },
+                        // `world.emit(T {…})` — the test-world event method
+                        // (M1.0.15). `emit` is a keyword, so the `.ident` arm below
+                        // never sees it; route it explicitly to a `method_call`
+                        // (`parseMethodCall` interns the token slice → "emit"). Only
+                        // valid as a call form.
+                        .kw_emit => {
+                            if (self.peekNext() != .lparen) {
+                                return self.parseErrFmt(self.peekSpan(), "'emit' after '.' must be a method call, e.g. world.emit(T {{ ... }})", .{});
+                            }
+                            expr = try self.parseMethodCall(expr);
+                        },
                         .ident => {
                             // `recv.method(args)` → the reserved `method_call`
                             // kind (M0.8 E2 call mechanism, `etch-grammar.md`
@@ -6718,6 +6744,7 @@ pub const Parser = struct {
             .kw_if => return try self.parseIf(),
             .kw_await => return try self.parseAwaitExpr(),
             .kw_spawn => return try self.parseStructuralSpawn(),
+            .kw_measure => return try self.parseMeasureExpr(),
             .lbrace => return try self.parseBlockExpr(),
             .lbracket => return try self.parseArrayOrMapLiteral(),
             .pipe => return try self.parseClosure(),
@@ -7102,6 +7129,25 @@ test "parse test block" {
     try std.testing.expectEqual(ast_mod.ItemKind.test_decl, result.ast.items.items(.kind)[0]);
     const td = result.ast.test_decls.items[result.ast.items.items(.data)[0]];
     try std.testing.expectEqualStrings("math works", result.ast.strings.slice(td.name));
+    // M1.0.15 — the annotation range is preserved (no longer discarded): the
+    // single `@tag(.unit)` is reachable through the decl's annotation slab.
+    try std.testing.expectEqual(@as(u32, 1), td.annotations_len);
+    const annot = result.ast.annot_pool.items[td.annotations_extra];
+    try std.testing.expectEqual(ast_mod.AnnotationKind.tag, annot.kind);
+}
+
+test "parse measure expression (M1.0.15)" {
+    const gpa = std.testing.allocator;
+    // `measure { block }` parses as a primary expression (§17 erratum); the
+    // parser produces one `measure_exprs` slab entry, no diagnostics.
+    var result = try parse(gpa,
+        \\fn timed() -> Duration {
+        \\  measure { let x = 1 + 1 }
+        \\}
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len == 0);
+    try std.testing.expectEqual(@as(usize, 1), result.ast.measure_exprs.items.len);
 }
 
 test "recovery after broken const/private/test preserves following valid decl" {

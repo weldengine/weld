@@ -329,6 +329,19 @@ pub const World = struct {
         try self.observer_registry.dispatchOnSpawned(gpa, self, eid);
     }
 
+    /// M1.0.15 — immediate spawn with initial values that fires the same
+    /// observers a deferred `.spawn` flush would (on_spawned + on_add), returning
+    /// the new handle. Backs the Etch `world.spawn_with` test-runner surface;
+    /// wraps `ObserverRegistry.spawnWithObservers`.
+    pub fn spawnWithObservers(
+        self: *World,
+        gpa: std.mem.Allocator,
+        component_ids: []const ComponentId,
+        payloads: []const []const u8,
+    ) !EntityId {
+        return self.observer_registry.spawnWithObservers(gpa, self, component_ids, payloads);
+    }
+
     /// M1.0.6 E6 — register the `on_attach` extension dispatch callback (the Etch
     /// bridge supplies the real one; M1.0.6 tests supply a Tier-0 stand-in). One
     /// hook per world (last registration wins).

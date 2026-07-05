@@ -109,12 +109,13 @@ pub const TokenKind = enum {
     kw_import, // import directive (M1.0.7 cross-file import — module path + optional alias / selective items; graduated from non_s3_keywords)
     kw_const, // top-level `const` declaration (M1.0.8 — graduated from non_s3_keywords; top-level only per part1 §4.5)
     kw_private, // `private` visibility modifier prefix on a declaration_body (M1.0.8 — graduated from non_s3_keywords; grammar §5.1)
-    kw_test, // top-level `test "name" { ... }` block (M1.0.8 — graduated from non_s3_keywords; parse + validate only, no execution)
+    kw_test, // top-level `test "name" { ... }` block (M1.0.8 graduated it; M1.0.15 executes it end-to-end via the test runner)
     kw_spawn, // structural spawn expr `spawn(C{…})` (M1.0.10, §3.2 structural_spawn) + the async task statement `[let IDENT =] spawn { }` (M1.0.12, §4.2 spawn_stmt) — disambiguated by the next token
     kw_race, // race statement `race { race_branch* }` (M1.0.12 — graduated from non_s3_keywords; §4.2 race_stmt)
     kw_sync, // sync statement `sync { sync_branch* }` (M1.0.12 — graduated from non_s3_keywords; §4.2 sync_stmt)
     kw_every, // repeating timer statement `[let IDENT =] every(d) { }` (M1.0.13 — graduated from non_s3_keywords; §4.3 timer_stmt)
     kw_after_unscaled, // unscaled one-shot timer statement `[let IDENT =] after_unscaled(d) { }` (M1.0.13 — graduated from non_s3_keywords; §4.3 timer_stmt)
+    kw_measure, // `measure { block }` expression (M1.0.15 — §17 erratum; wall-clock Duration, test-body only via E0910). Stays inside the [kw_let, kw_f64] keyword range for isKeywordToken.
 
     // ── Primitive type keywords (lexed as kw_type_*) ──
     kw_int,
@@ -287,6 +288,7 @@ pub const s3_keywords = [_]KeywordEntry{
     .{ .lexeme = "sync", .kind = .kw_sync },
     .{ .lexeme = "every", .kind = .kw_every },
     .{ .lexeme = "after_unscaled", .kind = .kw_after_unscaled },
+    .{ .lexeme = "measure", .kind = .kw_measure },
     .{ .lexeme = "true", .kind = .bool_literal },
     .{ .lexeme = "false", .kind = .bool_literal },
     .{ .lexeme = "int", .kind = .kw_int },

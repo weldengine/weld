@@ -226,6 +226,33 @@ pub const ObserverRegistry = struct {
         try self.fireList(self.on_spawned, world, eid, null, null, null);
     }
 
+    /// Spawn an entity with initial component values AND fire the exact
+    /// observers a deferred `.spawn` flush fires — `on_spawned`, then
+    /// `on_add[cid]` per component — returning the new handle. Factored out of
+    /// `applyWithObservers`'s `.spawn` arm so an IMMEDIATE spawn that must return
+    /// a handle (the Etch `world.spawn_with` test-runner surface, M1.0.15) shares
+    /// the one observer-firing spawn path instead of duplicating it. The handle
+    /// is valid on return (same tick). Observer-issued structural changes queue
+    /// into the shared `deferred` buffer (drained at the next flush / tick).
+    pub fn spawnWithObservers(
+        self: *ObserverRegistry,
+        gpa: std.mem.Allocator,
+        world: *World,
+        component_ids: []const ComponentId,
+        payloads: []const []const u8,
+    ) !EntityId {
+        self.ensureDeferred(gpa, world);
+        const eid = try world.spawnDynamicWithValues(gpa, component_ids, payloads);
+        try self.fireList(self.on_spawned, world, eid, null, null, null);
+        for (component_ids) |cid| {
+            if (self.on_add.get(cid)) |list| {
+                const new_ptr: ?*const anyopaque = if (world.componentBytes(eid, cid)) |b| @ptrCast(b.ptr) else null;
+                try self.fireList(list, world, eid, cid, null, new_ptr);
+            }
+        }
+        return eid;
+    }
+
     fn fireList(
         self: *ObserverRegistry,
         list: Listeners,
@@ -294,15 +321,10 @@ pub fn applyWithObservers(
 ) !void {
     switch (c) {
         .spawn => |s| {
-            const eid = try world.spawnDynamicWithValues(gpa, s.component_ids, s.payloads);
-            try reg.fireList(reg.on_spawned, world, eid, null, null, null);
-            for (s.component_ids) |cid| {
-                if (reg.on_add.get(cid)) |list| {
-                    // Post-apply: the new component value lives in storage.
-                    const new_ptr: ?*const anyopaque = if (world.componentBytes(eid, cid)) |b| @ptrCast(b.ptr) else null;
-                    try reg.fireList(list, world, eid, cid, null, new_ptr);
-                }
-            }
+            // Shares the returning-eid primitive with the immediate
+            // `world.spawn_with` surface (M1.0.15) — one observer-firing spawn
+            // path (on_spawned + on_add per component).
+            _ = try reg.spawnWithObservers(gpa, world, s.component_ids, s.payloads);
         },
         .despawn => |d| {
             // Pre-apply: fire on_remove[cid] for every component the

@@ -211,6 +211,10 @@ pub const ResolvedType = union(enum) {
     /// (the optional-ness is not tracked; permissive). `if let` / `while let`
     /// unwrap this to the payload builtin.
     optional: BuiltinType,
+    /// The current test's World handle (M1.0.15) — the return type of
+    /// `test_world()` (test bodies only). Receiver of `spawn_with`/`emit`/`tick`
+    /// in `dispatchMethodOnType`. No payload (mono-world). Not field-storable.
+    test_world,
     /// Type unknown / unresolved. Used as the fallback after a diagnostic
     /// has been emitted; subsequent checks treat `unknown` as wildcard to
     /// avoid cascade errors.
@@ -233,6 +237,7 @@ pub const ResolvedType = union(enum) {
             .event_t => |id| id == b.event_t,
             .generic => |id| id == b.generic,
             .optional => |bt| bt == b.optional,
+            .test_world => true,
             .unknown => true,
         };
     }
@@ -250,7 +255,7 @@ pub const ResolvedType = union(enum) {
 };
 
 /// Symbol entry in the file-local symbol table built by pass 1.
-pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_, audio_graph_, sequence_, anim_graph_, shader_, const_, test_ };
+pub const SymbolKind = enum { component, resource, rule, type_alias, fn_, struct_, enum_, trait_, event_, data_, routine_, behavior_, quest_, dialogue_, ability_, motion_, widget_, locale_, effect_, audio_graph_, sequence_, anim_graph_, shader_, const_ };
 
 const Symbol = struct {
     kind: SymbolKind,
@@ -329,7 +334,7 @@ fn numericLitValue(arena: *const AstArena, expr_id: NodeId) ?f64 {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph, shader, scene, prefab };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph, shader, scene, prefab, test_ };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -354,6 +359,10 @@ fn annotationAppliesTo(kind: ast_mod.AnnotationKind, target: AnnotTarget) bool {
         // Entity-typed + uniqueness are enforced at the declaration (E0502).
         .entity_target => target == .field,
         .shader_fn => target == .function,
+        // M1.0.15 — the three `test`-only annotations (§17). Applied to any
+        // other target → E0502 (misapplied); applied to a test, arg-validated
+        // separately in `checkTestAnnotations`.
+        .tag, .skip, .only => target == .test_,
         .loc => false,
     };
 }
@@ -367,6 +376,12 @@ pub const TypeChecker = struct {
     diagnostics: *std.ArrayListUnmanaged(Diagnostic),
     /// Symbol table keyed by interned name `StringId`.
     symbols: std.AutoHashMapUnmanaged(StringId, Symbol) = .empty,
+    /// Test-name namespace (M1.0.15), SEPARATE from `symbols`: a `test "Foo"`
+    /// no longer collides with a `component Foo` (the M1.0.8 collision this
+    /// milestone resolves). Keyed by the interned test-name string; membership
+    /// enforces intra-namespace uniqueness (two `test "X"` → E0101, contextual
+    /// message). Test names are never referenced by code and never exported.
+    test_symbols: std.AutoHashMapUnmanaged(StringId, void) = .empty,
     /// Inherent `impl` methods (M0.8 E2 block 3), keyed by `methodKey(type_name,
     /// method_name)` → index into `arena.impl_methods`. Drives the inherent
     /// (kind 1, `etch-resolver-types.md §5.1`) dispatch of `recv.method()` and
@@ -406,6 +421,12 @@ pub const TypeChecker = struct {
     /// `async fn`/`async method`, in a NON-async context is E0901
     /// `AsyncCallInNonAsyncContext`. `false` outside any body.
     current_is_async: bool = false,
+    /// Whether the statements currently being checked are a `test` block body
+    /// (M1.0.15). Test-scoped builtins (`test_world`, `tick_until`) and the
+    /// `measure { }` expression resolve only when this is `true`; outside a test
+    /// body they fall through to E0102 (`test_world`/`tick_until`) or E0910
+    /// (`measure`). Set/restored around the body in `checkTest`.
+    in_test_body: bool = false,
     /// The kind of the INNERMOST `race`/`sync` branch or `branch`/`spawn` body
     /// enclosing the statements being checked (M1.0.12 E3), `null` outside any.
     /// Drives E0906 (a `return` is legal only in a `race` branch —
@@ -525,6 +546,7 @@ pub const TypeChecker = struct {
 
     pub fn deinit(self: *TypeChecker) void {
         self.symbols.deinit(self.gpa);
+        self.test_symbols.deinit(self.gpa);
         self.methods.deinit(self.gpa);
         self.trait_impls.deinit(self.gpa);
         self.conc_labels.deinit(self.gpa);
@@ -2925,12 +2947,20 @@ pub const TypeChecker = struct {
                     try self.checkConstValue(decl.value, decl.type_node);
                 },
                 .test_decl => {
-                    // Top-level `test` block (M1.0.8). Register a `test_` symbol
-                    // (tracked, NOT exported — `buildExports` omits it). M1.0.8
-                    // is parse + validate + registration only; the body is not
-                    // executed (no runtime surface — M1.0.9).
+                    // Top-level `test` block (M1.0.15). The test name lives in a
+                    // DEDICATED namespace (`test_symbols`), so `test "Foo"` does
+                    // not collide with `component Foo` (the M1.0.8 collision this
+                    // milestone resolves). Intra-namespace uniqueness only: two
+                    // `test "X"` → E0101 with a contextual message (the code is
+                    // reused per `etch-diagnostics.md` §24.1, the
+                    // `collectImplMethods` precedent). Never exported.
                     const decl = self.arena.test_decls.items[data];
-                    try self.registerSymbol(.test_, decl.name, item_id, span);
+                    const gop = try self.test_symbols.getOrPut(self.gpa, decl.name);
+                    if (gop.found_existing) {
+                        try self.emit(.duplicate_symbol, .error_, span, "duplicate test '{s}'", .{self.arena.strings.slice(decl.name)});
+                    }
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .test_);
+                    try self.checkTestAnnotations(decl.annotations_extra, decl.annotations_len);
                 },
                 .data_decl => {
                     // A `data` table (M0.8 E4 Level B) registers its name; the
@@ -3657,6 +3687,7 @@ pub const TypeChecker = struct {
                 .rule_decl => try self.checkRule(self.arena.rule_decls.items[data]),
                 .fn_decl => try self.checkFn(self.arena.fn_decls.items[data]),
                 .impl_decl => try self.checkImpl(self.arena.impl_decls.items[data]),
+                .test_decl => try self.checkTest(self.arena.test_decls.items[data]),
                 else => {},
             }
         }
@@ -3950,6 +3981,71 @@ pub const TypeChecker = struct {
             const stmt_raw = self.arena.extra.items[rule.body_start + s];
             const stmt_id: NodeId = @bitCast(stmt_raw);
             try self.checkStmt(&ctx, stmt_id);
+        }
+    }
+
+    /// Type-check a `test` block body (M1.0.15, §32 normative). The body is a
+    /// SYNC statement context: `await` inside it → E0901 (function coloring,
+    /// `current_is_async = false`); the async surface is exercised through the
+    /// file's rules driven by `tick(n)`. `in_test_body` unlocks the test-scoped
+    /// builtins (`test_world`/`tick_until`) and the `measure { }` expression for
+    /// the duration of the body. Mirrors `checkTimerBodyRun`'s sync-context
+    /// discipline; the body is a single `block_expr`, checked via `synthExprE`.
+    fn checkTest(self: *TypeChecker, decl: ast_mod.TestDecl) !void {
+        // A test body has no `when` clause but full ECS access (`get`/`get_mut`
+        // on any resource/component, e.g. `world.spawn_with(...).get(Health)`) —
+        // the same unrestricted context observer / data bodies use.
+        var ctx: RuleCtx = .{ .unrestricted_ecs_access = true };
+        defer ctx.deinit(self.gpa);
+
+        const saved_async = self.current_is_async;
+        const saved_susp = self.await_suspendable;
+        const saved_test = self.in_test_body;
+        self.current_is_async = false;
+        self.await_suspendable = true;
+        self.in_test_body = true;
+        defer {
+            self.current_is_async = saved_async;
+            self.await_suspendable = saved_susp;
+            self.in_test_body = saved_test;
+        }
+        _ = try self.synthExprE(decl.body, &ctx);
+    }
+
+    /// Validate the argument shape of the three `test`-only annotations (M1.0.15,
+    /// §17). Applicability (test-only) is already enforced by
+    /// `validateAnnotations` with the `.test_` target; this checks the args,
+    /// reusing E0502 with a contextual message (no new diagnostic code — E0910 is
+    /// the milestone's only new code):
+    ///   - `@tag(.X)`: exactly one enum-shorthand arg in {unit, integration,
+    ///     slow, perf}.
+    ///   - `@skip(reason: "...")`: exactly one string-literal arg (positional or
+    ///     named `reason`).
+    ///   - `@only`: no args.
+    fn checkTestAnnotations(self: *TypeChecker, start: u32, len: u32) !void {
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            const annot = self.arena.annot_pool.items[start + i];
+            switch (annot.kind) {
+                .tag => {
+                    const ok = annot.args_len == 1 and blk: {
+                        const arg = self.arena.annot_args.items[annot.args_start];
+                        if (self.arena.exprKind(arg.value) != .tag_path) break :blk false;
+                        const v = self.arena.strings.slice(self.arena.exprData(arg.value));
+                        break :blk std.mem.eql(u8, v, "unit") or std.mem.eql(u8, v, "integration") or
+                            std.mem.eql(u8, v, "slow") or std.mem.eql(u8, v, "perf");
+                    };
+                    if (!ok) try self.emit(.annotation_misapplied, .error_, annot.span, "@tag requires one of .unit / .integration / .slow / .perf", .{});
+                },
+                .skip => {
+                    const ok = annot.args_len == 1 and self.arena.exprKind(self.arena.annot_args.items[annot.args_start].value) == .string_lit;
+                    if (!ok) try self.emit(.annotation_misapplied, .error_, annot.span, "@skip requires a string reason (e.g. @skip(reason: \"WIP\"))", .{});
+                },
+                .only => {
+                    if (annot.args_len != 0) try self.emit(.annotation_misapplied, .error_, annot.span, "@only takes no arguments", .{});
+                },
+                else => {},
+            }
         }
     }
 
@@ -5030,6 +5126,7 @@ pub const TypeChecker = struct {
             .method_call => return try self.synthMethodCall(id, data, ctx_opt),
             .loop_expr => return try self.synthLoop(data, ctx_opt),
             .block_expr => return try self.synthBlock(data, ctx_opt),
+            .measure_expr => return try self.synthMeasure(id, data, ctx_opt),
             .if_expr => return try self.synthIf(id, data, ctx_opt),
             // Reaching a structural spawn through `synthExpr` means it is being
             // used as a VALUE (let binding, field receiver, call argument) — the
@@ -5253,6 +5350,27 @@ pub const TypeChecker = struct {
         return try self.synthExprE(blk.value, ctx_opt);
     }
 
+    /// Type a `measure { block }` expression (M1.0.15, §17 erratum). Result type
+    /// is always `Duration` (the elapsed wall-clock; the block's own value is
+    /// discarded). Legal ONLY inside a test body — anywhere else it is
+    /// `E0910 MeasureOutsideTest` (wall-clock never enters deterministic gameplay
+    /// code). The block statements are checked in the current (sync test) context.
+    fn synthMeasure(self: *TypeChecker, id: NodeId, data: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        if (!self.in_test_body) {
+            try self.emit(.measure_outside_test, .error_, self.arena.exprSpan(id), "measure {{ … }} is only valid inside a test body", .{});
+        }
+        const m = self.arena.measure_exprs.items[data];
+        if (ctx_opt) |ctx| {
+            var i: u32 = 0;
+            while (i < m.body_len) : (i += 1) {
+                const stmt: NodeId = @bitCast(self.arena.extra.items[m.body_start + i]);
+                try self.checkStmt(ctx, stmt);
+            }
+        }
+        if (!m.value.isNone()) _ = try self.synthExprE(m.value, ctx_opt);
+        return .{ .builtin = .duration };
+    }
+
     /// Type an `if` expression (M0.8 control flow). The condition must be
     /// `bool`; the then / else branches (block expressions, `else if` chaining
     /// through a nested `if`) must unify to one result type. An `if` with no
@@ -5303,6 +5421,132 @@ pub const TypeChecker = struct {
         };
     }
 
+    fn synthArg(self: *TypeChecker, call: ast_mod.CallExpr, i: u32, ctx_opt: ?*RuleCtx) TypeError!ResolvedType {
+        const arg: NodeId = @bitCast(self.arena.extra.items[call.args_start + i]);
+        return try self.synthExprE(arg, ctx_opt);
+    }
+
+    /// Whether a type has a meaningful runtime equality for `assert_eq`/`assert_neq`
+    /// (M1.0.15): scalars/strings (`.builtin`, incl. `string_`/`Entity`), enums,
+    /// or `unknown` (already-diagnosed). Aggregates lack a structural `Value.eql`.
+    fn assertComparable(t: ResolvedType) bool {
+        return switch (t) {
+            .builtin, .enum_t, .unknown => true,
+            else => false,
+        };
+    }
+
+    /// Whether a type is a float (or `unknown`, already-diagnosed) — the operand
+    /// constraint for `assert_approx` (M1.0.15): a tolerance comparison is
+    /// float-only, so int operands are rejected at type-check (symmetry with the
+    /// rest of the assert family) rather than failing loud at runtime.
+    fn isFloatType(t: ResolvedType) bool {
+        return t == .unknown or (t == .builtin and t.builtin.isFloat());
+    }
+
+    /// Resolve a builtin free-function call by name (M1.0.15). Returns the result
+    /// type when `name` is a builtin, else `null` (the caller falls through to the
+    /// user-fn lookup, then E0102). Global builtins — the assertion family
+    /// (`assert_eq`/`assert_neq`/`assert_approx`/`assert_some`/`assert_none`,
+    /// `etch-stdlib.md §19.4`) + `panic`/`todo`/`unreachable` — resolve anywhere;
+    /// test-scoped builtins (`test_world`, `tick_until`) only inside a test body.
+    /// Statement-effect builtins yield `unknown` (≈ unit); args are synth-checked
+    /// so nested expressions are typed and light shape checks surface misuse.
+    fn synthBuiltinCall(self: *TypeChecker, id: NodeId, call: ast_mod.CallExpr, callee_name: StringId, ctx_opt: ?*RuleCtx) TypeError!?ResolvedType {
+        const name = self.arena.strings.slice(callee_name);
+        const span = self.arena.exprSpan(id);
+
+        // ── Test-scoped (only inside a test body; else null → E0102) ──
+        if (self.in_test_body) {
+            if (std.mem.eql(u8, name, "test_world")) {
+                if (call.args_len != 0) try self.emit(.arg_count_mismatch, .error_, span, "test_world() takes no arguments", .{});
+                return ResolvedType.test_world;
+            }
+            if (std.mem.eql(u8, name, "tick_until")) {
+                // `tick_until(pred: () -> bool, timeout: Duration) -> bool`.
+                if (call.args_len != 2) {
+                    try self.emit(.arg_count_mismatch, .error_, span, "tick_until(pred: () -> bool, timeout: Duration) takes 2 arguments", .{});
+                } else {
+                    _ = try self.synthArg(call, 0, ctx_opt);
+                    const t1 = try self.synthArg(call, 1, ctx_opt);
+                    if (t1 == .builtin and t1.builtin != .duration) {
+                        try self.emit(.type_mismatch, .error_, span, "tick_until timeout must be a Duration", .{});
+                    }
+                }
+                return .{ .builtin = .bool_ };
+            }
+        }
+
+        // ── Global assertion family + panic/todo/unreachable ──
+        if (std.mem.eql(u8, name, "assert_eq") or std.mem.eql(u8, name, "assert_neq")) {
+            if (call.args_len < 2 or call.args_len > 3) {
+                try self.emit(.arg_count_mismatch, .error_, span, "{s}(a, b[, msg]) takes 2 or 3 arguments", .{name});
+            } else {
+                const ta = try self.synthArg(call, 0, ctx_opt);
+                const tb = try self.synthArg(call, 1, ctx_opt);
+                // Only scalar / enum / string values compare at runtime (M1.0.15
+                // review fix): aggregates (struct/array/map/set/optional/closure)
+                // have no structural `Value.eql`, so an aggregate operand would
+                // false-fail `assert_eq` and false-PASS `assert_neq`. Reject them
+                // fail-loud rather than mis-compare.
+                if (!assertComparable(ta) or !assertComparable(tb)) {
+                    try self.emit(.type_mismatch, .error_, span, "{s} compares scalar / string / enum values (structs, arrays, maps, sets, optionals are not comparable in v0.6)", .{name});
+                } else if (ta == .builtin and tb == .builtin and ta.builtin != tb.builtin) {
+                    try self.emit(.type_mismatch, .error_, span, "{s} compares two values of the same type", .{name});
+                }
+                if (call.args_len == 3) _ = try self.synthArg(call, 2, ctx_opt);
+            }
+            return ResolvedType.unknown;
+        }
+        if (std.mem.eql(u8, name, "assert_approx")) {
+            if (call.args_len < 2 or call.args_len > 4) {
+                try self.emit(.arg_count_mismatch, .error_, span, "assert_approx(a, b[, tolerance][, msg]) takes 2 to 4 arguments", .{});
+            } else {
+                // Float-only by construction (tolerance comparison): constrain a,
+                // b, and the optional tolerance at type-check — symmetric with the
+                // rest of the family (the runtime keeps a defensive fail-loud).
+                const ta = try self.synthArg(call, 0, ctx_opt);
+                const tb = try self.synthArg(call, 1, ctx_opt);
+                if (!isFloatType(ta) or !isFloatType(tb)) {
+                    try self.emit(.type_mismatch, .error_, span, "assert_approx compares float values (use assert_eq for other types)", .{});
+                }
+                if (call.args_len >= 3) {
+                    const tt = try self.synthArg(call, 2, ctx_opt);
+                    if (!isFloatType(tt)) {
+                        try self.emit(.type_mismatch, .error_, span, "assert_approx tolerance must be a float", .{});
+                    }
+                }
+                if (call.args_len == 4) _ = try self.synthArg(call, 3, ctx_opt);
+            }
+            return ResolvedType.unknown;
+        }
+        if (std.mem.eql(u8, name, "assert_some") or std.mem.eql(u8, name, "assert_none")) {
+            if (call.args_len < 1 or call.args_len > 2) {
+                try self.emit(.arg_count_mismatch, .error_, span, "{s}(value[, msg]) takes 1 or 2 arguments", .{name});
+            } else {
+                const tv = try self.synthArg(call, 0, ctx_opt);
+                if (tv != .optional and tv != .unknown) {
+                    try self.emit(.type_mismatch, .error_, span, "{s} requires an optional (T?) value", .{name});
+                }
+                if (call.args_len == 2) _ = try self.synthArg(call, 1, ctx_opt);
+            }
+            return ResolvedType.unknown;
+        }
+        if (std.mem.eql(u8, name, "panic")) {
+            if (call.args_len != 1) {
+                try self.emit(.arg_count_mismatch, .error_, span, "panic(msg) takes 1 argument", .{});
+            } else _ = try self.synthArg(call, 0, ctx_opt);
+            return ResolvedType.unknown;
+        }
+        if (std.mem.eql(u8, name, "todo") or std.mem.eql(u8, name, "unreachable")) {
+            if (call.args_len > 1) {
+                try self.emit(.arg_count_mismatch, .error_, span, "{s}([msg]) takes 0 or 1 arguments", .{name});
+            } else if (call.args_len == 1) _ = try self.synthArg(call, 0, ctx_opt);
+            return ResolvedType.unknown;
+        }
+        return null;
+    }
+
     /// Type a call expression (M0.8 closures). E1 only resolves calls whose
     /// callee is a closure: arity is checked, then the body is typed for the
     /// return with the parameters bound (to their annotation, else the argument
@@ -5321,6 +5565,13 @@ pub const TypeChecker = struct {
             const callee_name = self.arena.exprData(call.callee);
             const shadowed = if (ctx_opt) |ctx| ctx.locals.contains(callee_name) else false;
             if (!shadowed) {
+                // Builtin free functions (M1.0.15) — the assertion family +
+                // panic/todo/unreachable (global), test_world/tick_until
+                // (test-scoped). Resolved before the user-fn lookup so a builtin
+                // name is never shadowed by a stdlib decl; a test-scoped builtin
+                // outside a test body returns null → falls through to E0102
+                // (§32: "fall through to E0102").
+                if (try self.synthBuiltinCall(id, call, callee_name, ctx_opt)) |t| return t;
                 if (self.symbols.get(callee_name)) |sym| {
                     if (sym.kind == .fn_) {
                         return try self.synthFreeFnCall(id, call, sym.item_id, ctx_opt);
@@ -5949,6 +6200,60 @@ pub const TypeChecker = struct {
         try self.checkComponentInstance(ci, .type_mismatch, .structural_component_field_unknown, .structural_component_field_type_invalid);
     }
 
+    /// M1.0.15 — validate `world.spawn_with([C {…}, …])`: exactly one array
+    /// literal whose every element is a component literal. Reuses
+    /// `checkStructuralComponentLiteral` (the same E0306/E0307 as scene / prefab /
+    /// structural `spawn`) — bespoke checking, NOT a general heterogeneous array
+    /// type (a component list is not a typed `T[]`).
+    fn checkSpawnWithArg(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx) TypeError!void {
+        _ = ctx_opt;
+        if (mc.args_len != 1) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "spawn_with takes exactly one component-literal list '[C {{ ... }}, ...]'", .{});
+            return;
+        }
+        const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+        if (self.arena.exprKind(arg) != .array_lit) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "spawn_with expects a component-literal list '[C {{ ... }}, ...]'", .{});
+            return;
+        }
+        const al = self.arena.array_lits.items[self.arena.exprData(arg)];
+        if (al.is_fill) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "spawn_with does not accept fill syntax '[x; n]'", .{});
+            return;
+        }
+        var i: u32 = 0;
+        while (i < al.elements_len) : (i += 1) {
+            const elem: NodeId = @bitCast(self.arena.extra.items[al.elements_start + i]);
+            try self.checkStructuralComponentLiteral(elem);
+        }
+    }
+
+    /// M1.0.15 — validate `world.emit(T {…})`: exactly one event-literal arg
+    /// naming a declared `event`, fields checked via the shared
+    /// `checkEventFieldRun` (identical to the `emit` statement, §32).
+    fn checkWorldEmitArg(self: *TypeChecker, id: NodeId, mc: ast_mod.MethodCall, ctx_opt: ?*RuleCtx) TypeError!void {
+        if (mc.args_len != 1) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "emit takes exactly one event literal 'T {{ ... }}'", .{});
+            return;
+        }
+        const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+        if (self.arena.exprKind(arg) != .struct_lit) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "emit expects an event literal 'T {{ ... }}'", .{});
+            return;
+        }
+        const sl = self.arena.struct_lits.items[self.arena.exprData(arg)];
+        if (sl.type_name == 0) {
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "emit needs an explicit event type ('T {{ ... }}')", .{});
+            return;
+        }
+        const sym = self.symbols.get(sl.type_name);
+        if (sym == null or sym.?.kind != .event_) {
+            try self.emit(.undefined_symbol, .error_, self.arena.exprSpan(arg), "'{s}' is not a declared event", .{self.arena.strings.slice(sl.type_name)});
+            return;
+        }
+        try self.checkEventFieldRun(self.arena.itemData(sym.?.item_id), sl.fields_start, sl.fields_len, ctx_opt);
+    }
+
     /// M1.0.10 E2 — validate a type name used in a structural mutation
     /// (`entity.remove(T)` and the component-literal types of `spawn` / `add`)
     /// resolves to a declared `component`. Mirrors the `when has` component
@@ -6128,6 +6433,37 @@ pub const TypeChecker = struct {
                 return ResolvedType.unknown;
             }
             try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on a TimerHandle (only 'cancel()'; a timer is not awaitable)", .{method_slice});
+            return ResolvedType.unknown;
+        }
+
+        // M1.0.15 — the test World surface (§32): methods on the handle returned
+        // by `test_world()`. `spawn_with([C {…}, …])` -> Entity (immediate spawn,
+        // fires on_spawn observers, live handle); `emit(T {…})` -> unit (emit-
+        // statement semantics); `tick(n)` -> unit (advance n ticks, n >= 1
+        // enforced at runtime). Reachable only on `.test_world`, itself resolvable
+        // only in a test body.
+        if (recv_t == .test_world) {
+            if (std.mem.eql(u8, method_slice, "spawn_with")) {
+                try self.checkSpawnWithArg(id, mc, ctx_opt);
+                return ResolvedType{ .builtin = .entity };
+            }
+            if (std.mem.eql(u8, method_slice, "emit")) {
+                try self.checkWorldEmitArg(id, mc, ctx_opt);
+                return ResolvedType.unknown;
+            }
+            if (std.mem.eql(u8, method_slice, "tick")) {
+                if (mc.args_len != 1) {
+                    try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "tick takes exactly one count 'tick(n)'", .{});
+                } else {
+                    const arg: NodeId = @bitCast(self.arena.extra.items[mc.args_start]);
+                    const t = self.synthExpr(arg, ctx_opt);
+                    if (t == .builtin and !t.builtin.isInteger()) {
+                        try self.emit(.type_mismatch, .error_, self.arena.exprSpan(arg), "tick(n) requires an integer tick count", .{});
+                    }
+                }
+                return ResolvedType.unknown;
+            }
+            try self.emit(.type_mismatch, .error_, self.arena.exprSpan(id), "no method '{s}' on the test world (spawn_with / emit / tick)", .{method_slice});
             return ResolvedType.unknown;
         }
 
@@ -6674,7 +7010,7 @@ pub const TypeChecker = struct {
                 try self.emit(.invalid_field_filter, .error_, span, "field '{s}' does not exist on event '{s}'", .{ self.arena.strings.slice(field_name), self.arena.strings.slice(name_id) });
                 return ResolvedType.unknown;
             },
-            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .optional, .unknown => return ResolvedType.unknown,
+            .builtin, .range, .array_fixed, .array_dyn, .map_t, .set_t, .closure, .enum_t, .generic, .optional, .test_world, .unknown => return ResolvedType.unknown,
         }
     }
 
@@ -6995,19 +7331,134 @@ test "well-formed top-level const checks clean" {
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
 }
 
-test "test block registered as test_ symbol and not exported" {
+test "duplicate test names collide within the test namespace (E0101, M1.0.15)" {
     const gpa = std.testing.allocator;
-    // Registration proof: two top-level `test` blocks with the same name collide
-    // through `registerSymbol` → E0101 DuplicateSymbol (so a `test` block IS a
-    // registered symbol). The "not exported" half is exercised cross-file in
-    // tests/etch/import_resolve_test.zig (a test name is not in module exports →
-    // E0104 on import).
+    // Intra-namespace uniqueness: two top-level `test` blocks with the same name
+    // collide → E0101 (contextual "duplicate test 'X'"). The "not exported" half
+    // is exercised cross-file in tests/etch/import_resolve_test.zig (a test name
+    // is not in module exports → E0104 on import).
     var result = try parseAndCheck(gpa,
         \\test "same name" { }
         \\test "same name" { }
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .duplicate_symbol);
+}
+
+test "test name does not collide with a component of the same name (M1.0.15)" {
+    const gpa = std.testing.allocator;
+    // The M1.0.8 collision this milestone resolves: a `test "Foo"` lives in a
+    // dedicated namespace, so it no longer clashes with `component Foo`.
+    var result = try parseAndCheck(gpa,
+        \\component Foo { x: int = 0 }
+        \\test "Foo" { }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
+}
+
+test "test annotation applicability + args (M1.0.15)" {
+    const gpa = std.testing.allocator;
+
+    // `@phase` is rule-only — on a test it is misapplied (E0502).
+    var wrong = try parseAndCheck(gpa,
+        \\@phase(.update)
+        \\test "x" { }
+    );
+    defer wrong.deinit(gpa);
+    try expectAnyCode(wrong.diagnostics.items, .annotation_misapplied);
+
+    // The three test annotations with well-formed args check clean.
+    var ok = try parseAndCheck(gpa,
+        \\@tag(.perf)
+        \\test "a" { }
+        \\@skip(reason: "WIP")
+        \\test "b" { }
+        \\@only
+        \\test "c" { }
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // A bad `@tag` value (not in {unit, integration, slow, perf}) is E0502.
+    var bad_tag = try parseAndCheck(gpa,
+        \\@tag(.bogus)
+        \\test "d" { }
+    );
+    defer bad_tag.deinit(gpa);
+    try expectAnyCode(bad_tag.diagnostics.items, .annotation_misapplied);
+}
+
+test "await in a test body is E0901 (sync context, M1.0.15)" {
+    const gpa = std.testing.allocator;
+    // A `test` body is a sync context (§32): `await` there is a coloring error.
+    var result = try parseAndCheck(gpa,
+        \\test "no await here" {
+        \\  await wait(1.0s)
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .async_call_in_non_async_context);
+}
+
+test "measure outside a test body is E0910; inside checks clean (M1.0.15)" {
+    const gpa = std.testing.allocator;
+    // `measure { }` in a `fn` body → E0910 (wall-clock stays out of gameplay).
+    var outside = try parseAndCheck(gpa,
+        \\fn timed() -> Duration { measure { } }
+    );
+    defer outside.deinit(gpa);
+    try expectAnyCode(outside.diagnostics.items, .measure_outside_test);
+
+    // Inside a test body it types clean (result is Duration).
+    var inside = try parseAndCheck(gpa,
+        \\test "m" {
+        \\  let d = measure { let x = 1 + 1 }
+        \\  assert(d > 0.0s)
+        \\}
+    );
+    defer inside.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), inside.diagnostics.items.len);
+}
+
+test "assert_eq rejects non-comparable aggregate operands (M1.0.15 review fix)" {
+    const gpa = std.testing.allocator;
+    // A struct value has no structural equality — comparing it would false-fail
+    // assert_eq / false-pass assert_neq, so it is rejected at type-check.
+    var result = try parseAndCheck(gpa,
+        \\struct P { x: int }
+        \\test "cmp" {
+        \\  let a = P { x: 1 }
+        \\  assert_eq(a, a)
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .type_mismatch);
+
+    // Scalars compare clean.
+    var ok = try parseAndCheck(gpa,
+        \\test "cmp ok" { assert_eq(1 + 1, 2) }
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+}
+
+test "assert_approx constrains its operands to float at type-check (M1.0.15 review fix)" {
+    const gpa = std.testing.allocator;
+    // Int operands → type_mismatch at check (symmetric with the rest of the
+    // family), not a generic runtime failure.
+    var ints = try parseAndCheck(gpa,
+        \\test "approx ints" { assert_approx(1, 2) }
+    );
+    defer ints.deinit(gpa);
+    try expectAnyCode(ints.diagnostics.items, .type_mismatch);
+
+    // Floats (incl. an explicit tolerance) check clean.
+    var floats = try parseAndCheck(gpa,
+        \\test "approx floats" { assert_approx(1.0, 1.5, 0.6) }
+    );
+    defer floats.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), floats.diagnostics.items.len);
 }
 
 test "type-checker emits E0502 when an annotation is applied to the wrong target (D-S3-annot-applicability)" {
