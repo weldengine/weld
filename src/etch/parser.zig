@@ -846,13 +846,11 @@ pub const Parser = struct {
     ///   `test_decl = "test" STRING_LITERAL block`.
     /// The body reuses the ordinary block/statement parser (`parseBlockExpr`).
     /// `@tag` / `@skip` / `@only` annotations flow through `parseAnnotations`
-    /// before dispatch (the range is discarded here — the v0.6 test subset
-    /// attaches no resolver semantics to them). M1.0.8 is parse + validate +
-    /// symbol registration only; there is no execution surface (M1.0.9). The
-    /// `kw_test` starter is mirrored in `recoverToTopLevel`'s stop-set + the
-    /// `parseTopLevel` error enumeration.
+    /// before dispatch; the range is preserved on the `TestDecl` (M1.0.15 — the
+    /// resolver validates applicability + args). The `kw_test` starter is
+    /// mirrored in `recoverToTopLevel`'s stop-set + the `parseTopLevel` error
+    /// enumeration.
     fn parseTestDecl(self: *Parser, annotations: AnnotationRange) ParseError!void {
-        _ = annotations; // @tag/@skip/@only parsed but carry no v0.6 resolver semantics
         const kw_span = (try self.advance()).span; // 'test'
         const name_tok = try self.expect(.string_literal, "expected a test name (string literal) after 'test'");
         const name_id = try self.internStringLiteral(name_tok.span);
@@ -860,6 +858,8 @@ pub const Parser = struct {
         _ = try self.arena.addTestDecl(self.gpa, .{
             .name = name_id,
             .body = body,
+            .annotations_extra = annotations.start,
+            .annotations_len = annotations.len,
         }, .{ .byte_start = kw_span.byte_start, .byte_end = self.arena.exprSpan(body).byte_end });
     }
 
@@ -7102,6 +7102,11 @@ test "parse test block" {
     try std.testing.expectEqual(ast_mod.ItemKind.test_decl, result.ast.items.items(.kind)[0]);
     const td = result.ast.test_decls.items[result.ast.items.items(.data)[0]];
     try std.testing.expectEqualStrings("math works", result.ast.strings.slice(td.name));
+    // M1.0.15 — the annotation range is preserved (no longer discarded): the
+    // single `@tag(.unit)` is reachable through the decl's annotation slab.
+    try std.testing.expectEqual(@as(u32, 1), td.annotations_len);
+    const annot = result.ast.annot_pool.items[td.annotations_extra];
+    try std.testing.expectEqual(ast_mod.AnnotationKind.tag, annot.kind);
 }
 
 test "recovery after broken const/private/test preserves following valid decl" {

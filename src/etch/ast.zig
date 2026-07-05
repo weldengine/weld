@@ -668,11 +668,14 @@ pub const ConstDecl = struct {
 /// Side-slab entry for a top-level `test` block (M1.0.8, `etch-grammar.md`
 /// §17: `test_decl = "test" STRING_LITERAL block`). `name` is the interned
 /// string-literal label; `body` is a `block_expr` NodeId (the reused
-/// block/statement parser). M1.0.8 delivers parse + validate + symbol
-/// registration only — there is no execution surface (that is M1.0.9).
+/// block/statement parser). M1.0.15 delivers execution: the body is
+/// type-checked (sync context) and run by `test_runner.zig`. The annotation
+/// range (`@tag`/`@skip`/`@only`) is preserved (M1.0.15 — M1.0.8 discarded it).
 pub const TestDecl = struct {
     name: StringId,
     body: NodeId,
+    annotations_extra: u32 = 0,
+    annotations_len: u32 = 0,
 };
 
 /// Side-slab entry for a `rule` declaration: params, optional `when`
@@ -2363,6 +2366,12 @@ pub const AnnotationKind = enum {
     // `await entity_event(e, T)` (§18.10). Field-level, event-only,
     // Entity-typed, at most one per event (validated in the type-checker).
     entity_target,
+    // M1.0.15 — `test`-only annotations (§17): `@tag(.unit|.integration|.slow|
+    // .perf)`, `@skip(reason: "...")`, `@only`. Applicability is `.test_` only
+    // (annotationAppliesTo); args are validated in the test-decl check.
+    tag,
+    skip,
+    only,
 
     pub fn fromName(name: []const u8) AnnotationKind {
         if (std.mem.eql(u8, name, "phase")) return .phase;
@@ -2391,6 +2400,9 @@ pub const AnnotationKind = enum {
         if (std.mem.eql(u8, name, "on_spawned")) return .on_spawned;
         if (std.mem.eql(u8, name, "on_despawned")) return .on_despawned;
         if (std.mem.eql(u8, name, "entity_target")) return .entity_target;
+        if (std.mem.eql(u8, name, "tag")) return .tag;
+        if (std.mem.eql(u8, name, "skip")) return .skip;
+        if (std.mem.eql(u8, name, "only")) return .only;
         return .custom;
     }
 

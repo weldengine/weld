@@ -329,7 +329,7 @@ fn numericLitValue(arena: *const AstArena, expr_id: NodeId) ?f64 {
 /// (M0.8 E3); other construct targets arrive with their constructs.
 /// `data` / `routine` join with the E4 Level-B constructs (no builtin
 /// annotation targets them — only `.custom` is accepted, like `function`).
-const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph, shader, scene, prefab };
+const AnnotTarget = enum { component, resource, rule, field, function, event, data, routine, behavior, quest, dialogue, ability, theme, motion, input_mapping, widget, locale, effect, audio_graph, audio_score, sequence, anim_graph, shader, scene, prefab, test_ };
 
 /// Whether a builtin annotation kind is valid on `target`
 /// (cf. `etch-resolver-types.md` §13.2 + `etch-reference-part3.md` §1-§10).
@@ -354,6 +354,10 @@ fn annotationAppliesTo(kind: ast_mod.AnnotationKind, target: AnnotTarget) bool {
         // Entity-typed + uniqueness are enforced at the declaration (E0502).
         .entity_target => target == .field,
         .shader_fn => target == .function,
+        // M1.0.15 — the three `test`-only annotations (§17). Applied to any
+        // other target → E0502 (misapplied); applied to a test, arg-validated
+        // separately in `checkTestAnnotations`.
+        .tag, .skip, .only => target == .test_,
         .loc => false,
     };
 }
@@ -367,6 +371,12 @@ pub const TypeChecker = struct {
     diagnostics: *std.ArrayListUnmanaged(Diagnostic),
     /// Symbol table keyed by interned name `StringId`.
     symbols: std.AutoHashMapUnmanaged(StringId, Symbol) = .empty,
+    /// Test-name namespace (M1.0.15), SEPARATE from `symbols`: a `test "Foo"`
+    /// no longer collides with a `component Foo` (the M1.0.8 collision this
+    /// milestone resolves). Keyed by the interned test-name string; membership
+    /// enforces intra-namespace uniqueness (two `test "X"` → E0101, contextual
+    /// message). Test names are never referenced by code and never exported.
+    test_symbols: std.AutoHashMapUnmanaged(StringId, void) = .empty,
     /// Inherent `impl` methods (M0.8 E2 block 3), keyed by `methodKey(type_name,
     /// method_name)` → index into `arena.impl_methods`. Drives the inherent
     /// (kind 1, `etch-resolver-types.md §5.1`) dispatch of `recv.method()` and
@@ -406,6 +416,12 @@ pub const TypeChecker = struct {
     /// `async fn`/`async method`, in a NON-async context is E0901
     /// `AsyncCallInNonAsyncContext`. `false` outside any body.
     current_is_async: bool = false,
+    /// Whether the statements currently being checked are a `test` block body
+    /// (M1.0.15). Test-scoped builtins (`test_world`, `tick_until`) and the
+    /// `measure { }` expression resolve only when this is `true`; outside a test
+    /// body they fall through to E0102 (`test_world`/`tick_until`) or E0910
+    /// (`measure`). Set/restored around the body in `checkTest`.
+    in_test_body: bool = false,
     /// The kind of the INNERMOST `race`/`sync` branch or `branch`/`spawn` body
     /// enclosing the statements being checked (M1.0.12 E3), `null` outside any.
     /// Drives E0906 (a `return` is legal only in a `race` branch —
@@ -525,6 +541,7 @@ pub const TypeChecker = struct {
 
     pub fn deinit(self: *TypeChecker) void {
         self.symbols.deinit(self.gpa);
+        self.test_symbols.deinit(self.gpa);
         self.methods.deinit(self.gpa);
         self.trait_impls.deinit(self.gpa);
         self.conc_labels.deinit(self.gpa);
@@ -2925,12 +2942,20 @@ pub const TypeChecker = struct {
                     try self.checkConstValue(decl.value, decl.type_node);
                 },
                 .test_decl => {
-                    // Top-level `test` block (M1.0.8). Register a `test_` symbol
-                    // (tracked, NOT exported — `buildExports` omits it). M1.0.8
-                    // is parse + validate + registration only; the body is not
-                    // executed (no runtime surface — M1.0.9).
+                    // Top-level `test` block (M1.0.15). The test name lives in a
+                    // DEDICATED namespace (`test_symbols`), so `test "Foo"` does
+                    // not collide with `component Foo` (the M1.0.8 collision this
+                    // milestone resolves). Intra-namespace uniqueness only: two
+                    // `test "X"` → E0101 with a contextual message (the code is
+                    // reused per `etch-diagnostics.md` §24.1, the
+                    // `collectImplMethods` precedent). Never exported.
                     const decl = self.arena.test_decls.items[data];
-                    try self.registerSymbol(.test_, decl.name, item_id, span);
+                    const gop = try self.test_symbols.getOrPut(self.gpa, decl.name);
+                    if (gop.found_existing) {
+                        try self.emit(.duplicate_symbol, .error_, span, "duplicate test '{s}'", .{self.arena.strings.slice(decl.name)});
+                    }
+                    try self.validateAnnotations(decl.annotations_extra, decl.annotations_len, .test_);
+                    try self.checkTestAnnotations(decl.annotations_extra, decl.annotations_len);
                 },
                 .data_decl => {
                     // A `data` table (M0.8 E4 Level B) registers its name; the
@@ -3657,6 +3682,7 @@ pub const TypeChecker = struct {
                 .rule_decl => try self.checkRule(self.arena.rule_decls.items[data]),
                 .fn_decl => try self.checkFn(self.arena.fn_decls.items[data]),
                 .impl_decl => try self.checkImpl(self.arena.impl_decls.items[data]),
+                .test_decl => try self.checkTest(self.arena.test_decls.items[data]),
                 else => {},
             }
         }
@@ -3950,6 +3976,68 @@ pub const TypeChecker = struct {
             const stmt_raw = self.arena.extra.items[rule.body_start + s];
             const stmt_id: NodeId = @bitCast(stmt_raw);
             try self.checkStmt(&ctx, stmt_id);
+        }
+    }
+
+    /// Type-check a `test` block body (M1.0.15, §32 normative). The body is a
+    /// SYNC statement context: `await` inside it → E0901 (function coloring,
+    /// `current_is_async = false`); the async surface is exercised through the
+    /// file's rules driven by `tick(n)`. `in_test_body` unlocks the test-scoped
+    /// builtins (`test_world`/`tick_until`) and the `measure { }` expression for
+    /// the duration of the body. Mirrors `checkTimerBodyRun`'s sync-context
+    /// discipline; the body is a single `block_expr`, checked via `synthExprE`.
+    fn checkTest(self: *TypeChecker, decl: ast_mod.TestDecl) !void {
+        var ctx: RuleCtx = .{};
+        defer ctx.deinit(self.gpa);
+
+        const saved_async = self.current_is_async;
+        const saved_susp = self.await_suspendable;
+        const saved_test = self.in_test_body;
+        self.current_is_async = false;
+        self.await_suspendable = true;
+        self.in_test_body = true;
+        defer {
+            self.current_is_async = saved_async;
+            self.await_suspendable = saved_susp;
+            self.in_test_body = saved_test;
+        }
+        _ = try self.synthExprE(decl.body, &ctx);
+    }
+
+    /// Validate the argument shape of the three `test`-only annotations (M1.0.15,
+    /// §17). Applicability (test-only) is already enforced by
+    /// `validateAnnotations` with the `.test_` target; this checks the args,
+    /// reusing E0502 with a contextual message (no new diagnostic code — E0910 is
+    /// the milestone's only new code):
+    ///   - `@tag(.X)`: exactly one enum-shorthand arg in {unit, integration,
+    ///     slow, perf}.
+    ///   - `@skip(reason: "...")`: exactly one string-literal arg (positional or
+    ///     named `reason`).
+    ///   - `@only`: no args.
+    fn checkTestAnnotations(self: *TypeChecker, start: u32, len: u32) !void {
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            const annot = self.arena.annot_pool.items[start + i];
+            switch (annot.kind) {
+                .tag => {
+                    const ok = annot.args_len == 1 and blk: {
+                        const arg = self.arena.annot_args.items[annot.args_start];
+                        if (self.arena.exprKind(arg.value) != .tag_path) break :blk false;
+                        const v = self.arena.strings.slice(self.arena.exprData(arg.value));
+                        break :blk std.mem.eql(u8, v, "unit") or std.mem.eql(u8, v, "integration") or
+                            std.mem.eql(u8, v, "slow") or std.mem.eql(u8, v, "perf");
+                    };
+                    if (!ok) try self.emit(.annotation_misapplied, .error_, annot.span, "@tag requires one of .unit / .integration / .slow / .perf", .{});
+                },
+                .skip => {
+                    const ok = annot.args_len == 1 and self.arena.exprKind(self.arena.annot_args.items[annot.args_start].value) == .string_lit;
+                    if (!ok) try self.emit(.annotation_misapplied, .error_, annot.span, "@skip requires a string reason (e.g. @skip(reason: \"WIP\"))", .{});
+                },
+                .only => {
+                    if (annot.args_len != 0) try self.emit(.annotation_misapplied, .error_, annot.span, "@only takes no arguments", .{});
+                },
+                else => {},
+            }
         }
     }
 
@@ -6995,19 +7083,74 @@ test "well-formed top-level const checks clean" {
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
 }
 
-test "test block registered as test_ symbol and not exported" {
+test "duplicate test names collide within the test namespace (E0101, M1.0.15)" {
     const gpa = std.testing.allocator;
-    // Registration proof: two top-level `test` blocks with the same name collide
-    // through `registerSymbol` → E0101 DuplicateSymbol (so a `test` block IS a
-    // registered symbol). The "not exported" half is exercised cross-file in
-    // tests/etch/import_resolve_test.zig (a test name is not in module exports →
-    // E0104 on import).
+    // Intra-namespace uniqueness: two top-level `test` blocks with the same name
+    // collide → E0101 (contextual "duplicate test 'X'"). The "not exported" half
+    // is exercised cross-file in tests/etch/import_resolve_test.zig (a test name
+    // is not in module exports → E0104 on import).
     var result = try parseAndCheck(gpa,
         \\test "same name" { }
         \\test "same name" { }
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .duplicate_symbol);
+}
+
+test "test name does not collide with a component of the same name (M1.0.15)" {
+    const gpa = std.testing.allocator;
+    // The M1.0.8 collision this milestone resolves: a `test "Foo"` lives in a
+    // dedicated namespace, so it no longer clashes with `component Foo`.
+    var result = try parseAndCheck(gpa,
+        \\component Foo { x: int = 0 }
+        \\test "Foo" { }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
+}
+
+test "test annotation applicability + args (M1.0.15)" {
+    const gpa = std.testing.allocator;
+
+    // `@phase` is rule-only — on a test it is misapplied (E0502).
+    var wrong = try parseAndCheck(gpa,
+        \\@phase(.update)
+        \\test "x" { }
+    );
+    defer wrong.deinit(gpa);
+    try expectAnyCode(wrong.diagnostics.items, .annotation_misapplied);
+
+    // The three test annotations with well-formed args check clean.
+    var ok = try parseAndCheck(gpa,
+        \\@tag(.perf)
+        \\test "a" { }
+        \\@skip(reason: "WIP")
+        \\test "b" { }
+        \\@only
+        \\test "c" { }
+    );
+    defer ok.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), ok.diagnostics.items.len);
+
+    // A bad `@tag` value (not in {unit, integration, slow, perf}) is E0502.
+    var bad_tag = try parseAndCheck(gpa,
+        \\@tag(.bogus)
+        \\test "d" { }
+    );
+    defer bad_tag.deinit(gpa);
+    try expectAnyCode(bad_tag.diagnostics.items, .annotation_misapplied);
+}
+
+test "await in a test body is E0901 (sync context, M1.0.15)" {
+    const gpa = std.testing.allocator;
+    // A `test` body is a sync context (§32): `await` there is a coloring error.
+    var result = try parseAndCheck(gpa,
+        \\test "no await here" {
+        \\  await wait(1.0s)
+        \\}
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .async_call_in_non_async_context);
 }
 
 test "type-checker emits E0502 when an annotation is applied to the wrong target (D-S3-annot-applicability)" {
