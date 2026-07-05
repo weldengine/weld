@@ -403,6 +403,23 @@ pub const EventDecl = struct {
     annotations_len: u32,
 };
 
+/// Resolution of an event's designated `Entity` field for `await
+/// entity_event` scoping (M1.0.14, `etch-reference-part1.md` §9.4): the field
+/// annotated `@entity_target`, else the single `Entity`-typed field, else a
+/// diagnostic condition. Produced by `AstArena.resolveEventEntityTarget` — the
+/// single home of the designated-field policy, consumed by the type-checker
+/// (to diagnose `E0908`/`E0909` at the `await` site) and by the interpreter
+/// (to capture the field at suspension, where it always resolves — the program
+/// has passed `weld check`).
+pub const EntityTargetResolution = union(enum) {
+    /// The designated field: its ordinal in the event's field run and its name.
+    field: struct { index: u32, name: StringId },
+    /// No `Entity`-typed field at all → `E0908 EventNotEntityScoped`.
+    none_entity,
+    /// Two or more `Entity` fields and no `@entity_target` → `E0909 AmbiguousEventEntityTarget`.
+    ambiguous,
+};
+
 /// Side-slab entry for a `tags { ... }` hierarchical declaration (M0.8 E3,
 /// `etch-grammar.md` §5.11 `tags_decl`). The hierarchy is stored flat and
 /// parent-linked across `arena.tag_namespaces` + `arena.tag_leaves`, appended
@@ -990,12 +1007,18 @@ pub const AwaitTargetKind = enum {
 /// the duration/tick expr (`wait`/`wait_unscaled`) or the awaited future
 /// (`future`), else `NodeId.none`; `entity_expr` is the `entity_event` entity,
 /// else `NodeId.none`; `event_type` is the event type name for the two event
-/// forms, else `0`.
+/// forms, else `0`. `filter_start` / `filter_len` index a run of
+/// `arena.struct_lit_fields` — the optional payload filter of the two event
+/// forms (`entity_event` / `global_event`), each `IDENT : expression` an
+/// equality predicate; `(0, 0)` when no filter body is present (M1.0.14,
+/// `etch-grammar.md` §4.2).
 pub const AwaitExpr = struct {
     target_kind: AwaitTargetKind,
     arg_expr: NodeId,
     entity_expr: NodeId,
     event_type: StringId,
+    filter_start: u32,
+    filter_len: u32,
 };
 
 /// One branch of a `race` / `sync` statement (M1.0.12 E2, `etch-grammar.md`
@@ -2336,6 +2359,10 @@ pub const AnnotationKind = enum {
     on_replaced,
     on_spawned,
     on_despawned,
+    // M1.0.14 E2 — @entity_target: designates the field matched by
+    // `await entity_event(e, T)` (§18.10). Field-level, event-only,
+    // Entity-typed, at most one per event (validated in the type-checker).
+    entity_target,
 
     pub fn fromName(name: []const u8) AnnotationKind {
         if (std.mem.eql(u8, name, "phase")) return .phase;
@@ -2363,6 +2390,7 @@ pub const AnnotationKind = enum {
         if (std.mem.eql(u8, name, "on_replaced")) return .on_replaced;
         if (std.mem.eql(u8, name, "on_spawned")) return .on_spawned;
         if (std.mem.eql(u8, name, "on_despawned")) return .on_despawned;
+        if (std.mem.eql(u8, name, "entity_target")) return .entity_target;
         return .custom;
     }
 
@@ -2958,6 +2986,58 @@ pub const AstArena = struct {
             break;
         }
         return current;
+    }
+
+    /// Whether `field` carries the builtin annotation `kind` (M1.0.14).
+    pub fn fieldHasAnnotation(self: *const AstArena, field: Field, kind: AnnotationKind) bool {
+        var i: u32 = 0;
+        while (i < field.annotations_len) : (i += 1) {
+            if (self.annot_pool.items[field.annotations_extra + i].kind == kind) return true;
+        }
+        return false;
+    }
+
+    /// Whether `field`'s declared type is the builtin `Entity` (resolved
+    /// through the `type` alias chain). An optional (`Entity?`) or any other
+    /// shape is NOT `Entity` — the `await entity_event` target must be a bare
+    /// `Entity` (M1.0.14, §9.4).
+    pub fn fieldTypeIsEntity(self: *const AstArena, field: Field) bool {
+        if (self.typeNodeKind(field.type_node) != .named) return false;
+        const named = self.named_types.items[self.typeNodeData(field.type_node)];
+        return std.mem.eql(u8, self.strings.slice(self.resolveTypeAliasName(named.name)), "Entity");
+    }
+
+    /// Resolve the event's designated `Entity` field for `await entity_event`
+    /// scoping (M1.0.14, §9.4 normative order): a field annotated
+    /// `@entity_target` wins; else the single `Entity`-typed field; else a
+    /// diagnostic condition (`none_entity` / `ambiguous`). The `@entity_target`
+    /// field is returned as written — its Entity-typing and uniqueness are
+    /// validated at the event declaration (E2), so a program reaching the
+    /// interpreter has already passed those checks. This is the ONE
+    /// implementation of the designated-field policy (`EntityTargetResolution`).
+    pub fn resolveEventEntityTarget(self: *const AstArena, decl: EventDecl) EntityTargetResolution {
+        // 1. `@entity_target`-annotated field wins.
+        var i: u32 = 0;
+        while (i < decl.fields_len) : (i += 1) {
+            const field = self.fields.items[decl.fields_start + i];
+            if (self.fieldHasAnnotation(field, .entity_target)) {
+                return .{ .field = .{ .index = i, .name = field.name } };
+            }
+        }
+        // 2. Else the single `Entity`-typed field.
+        var found_index: ?u32 = null;
+        var found_name: StringId = 0;
+        i = 0;
+        while (i < decl.fields_len) : (i += 1) {
+            const field = self.fields.items[decl.fields_start + i];
+            if (self.fieldTypeIsEntity(field)) {
+                if (found_index != null) return .ambiguous; // ≥2 Entity fields → E0909
+                found_index = i;
+                found_name = field.name;
+            }
+        }
+        if (found_index) |idx| return .{ .field = .{ .index = idx, .name = found_name } };
+        return .none_entity; // zero Entity fields → E0908
     }
 
     pub fn addStmt(self: *AstArena, gpa: std.mem.Allocator, kind: StmtKind, data: u32, span: SourceSpan) !NodeId {
@@ -3830,5 +3910,6 @@ test "AstArena timer statement round-trips through the timer_stmts slab (M1.0.13
 test "AnnotationKind.fromName recognises builtin names" {
     try std.testing.expectEqual(AnnotationKind.phase, AnnotationKind.fromName("phase"));
     try std.testing.expectEqual(AnnotationKind.range, AnnotationKind.fromName("range"));
+    try std.testing.expectEqual(AnnotationKind.entity_target, AnnotationKind.fromName("entity_target"));
     try std.testing.expectEqual(AnnotationKind.custom, AnnotationKind.fromName("totally_unknown"));
 }

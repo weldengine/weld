@@ -366,6 +366,8 @@ pub const DiagnosticCode = enum {
     unconsumed_async_effect, // M1.0.12 E3 — E0905 UnconsumedAsyncEffect (bare async call in an async context: neither awaited nor launched via spawn/branch/race/sync)
     illegal_return_in_concurrency_branch, // M1.0.12 E3 — E0906 IllegalReturnInConcurrencyBranch (return in a sync branch or a branch/spawn body; legal only in a race branch)
     control_flow_escapes_task_branch, // M1.0.12 E3 — E0907 ControlFlowEscapesTaskBranch (break/continue targeting a loop outside the concurrency construct)
+    event_not_entity_scoped, // M1.0.14 E2 — E0908 EventNotEntityScoped (`await entity_event(e, T)` where T has no `Entity` field)
+    ambiguous_event_entity_target, // M1.0.14 E2 — E0909 AmbiguousEventEntityTarget (T has multiple `Entity` fields with no `@entity_target`)
 
     /// Canonical short code, e.g. `"E0001"`.
     pub fn code(self: DiagnosticCode) []const u8 {
@@ -557,6 +559,8 @@ pub const DiagnosticCode = enum {
             .unconsumed_async_effect => "E0905",
             .illegal_return_in_concurrency_branch => "E0906",
             .control_flow_escapes_task_branch => "E0907",
+            .event_not_entity_scoped => "E0908",
+            .ambiguous_event_entity_target => "E0909",
         };
     }
 
@@ -750,6 +754,8 @@ pub const DiagnosticCode = enum {
             .unconsumed_async_effect => "UnconsumedAsyncEffect",
             .illegal_return_in_concurrency_branch => "IllegalReturnInConcurrencyBranch",
             .control_flow_escapes_task_branch => "ControlFlowEscapesTaskBranch",
+            .event_not_entity_scoped => "EventNotEntityScoped",
+            .ambiguous_event_entity_target => "AmbiguousEventEntityTarget",
         };
     }
 };
@@ -850,4 +856,8 @@ test "DiagnosticCode code and name are stable cross-version" {
     try std.testing.expectEqualStrings("E1210", DiagnosticCode.unknown_component_in_when.code());
     try std.testing.expectEqualStrings("UnknownComponentInWhen", DiagnosticCode.unknown_component_in_when.name());
     try std.testing.expectEqualStrings("E1213", DiagnosticCode.resource_expected_in_when.code());
+    try std.testing.expectEqualStrings("E0908", DiagnosticCode.event_not_entity_scoped.code());
+    try std.testing.expectEqualStrings("EventNotEntityScoped", DiagnosticCode.event_not_entity_scoped.name());
+    try std.testing.expectEqualStrings("E0909", DiagnosticCode.ambiguous_event_entity_target.code());
+    try std.testing.expectEqualStrings("AmbiguousEventEntityTarget", DiagnosticCode.ambiguous_event_entity_target.name());
 }
