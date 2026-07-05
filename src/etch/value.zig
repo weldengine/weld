@@ -222,6 +222,10 @@ pub const RuntimeErrorKind = enum {
     /// An Etch `throw` that reached the rule top level uncaught (M0.8
     /// E3-D). The span covers the thrown value expression.
     UncaughtThrow,
+    /// A failed `assert(...)` / assertion-family builtin (M1.0.15). The span
+    /// covers the failing condition; the message (compared values, custom
+    /// reason) travels alongside via the interpreter's `pending_message`.
+    AssertFailed,
 };
 
 // ─── Arithmetic helpers ──────────────────────────────────────────────────

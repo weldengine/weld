@@ -1029,6 +1029,18 @@ pub const Interpreter = struct {
     /// `RuntimeReport.last_error` at the body choke points. Raise sites
     /// without a typed conversion leave it null (the report still counts).
     pending_error: ?RuntimeError = null,
+    /// Human-readable message accompanying the in-flight failure (M1.0.15): the
+    /// `assert(cond, "msg")` literal, or an assertion-family builtin's formatted
+    /// compared-values string. Rides alongside `pending_error` so `runTestBody`
+    /// can report it as the per-test failure message. Points at AST-stable bytes
+    /// (assert literal) or into `test_msg_buf` (formatted messages); `null` ⇒ the
+    /// runner derives a message from the error kind. Read only on the test path.
+    pending_message: ?[]const u8 = null,
+    /// Owned scratch for a formatted assertion-failure message (M1.0.15). The
+    /// assertion-family builtins (E4) write here; `pending_message` then points
+    /// into it. Overwritten per failure, freed at `deinit`; the runner copies the
+    /// message out before the next test runs.
+    test_msg_buf: std.ArrayListUnmanaged(u8) = .empty,
     /// Whether a `return` is unwinding to the enclosing `fn` boundary (M0.8 E2).
     /// Mirrors `thrown`: every statement-run / loop / block site that stops on a
     /// throw also stops on a return; the fn-call boundary consumes it.
@@ -1228,6 +1240,7 @@ pub const Interpreter = struct {
         self.descriptors.deinit(self.gpa);
         self.merge_cursors.deinit(self.gpa);
         self.gpa.free(self.observer_ctxs);
+        self.test_msg_buf.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -1608,6 +1621,96 @@ pub const Interpreter = struct {
             world.tickBoundary();
         }
         return report;
+    }
+
+    /// Outcome of running one `test` block body (M1.0.15). `pass` = the body ran
+    /// to completion with no failure; `fail` carries the failing source position
+    /// and a message (the `assert` reason, an assertion-family formatted string,
+    /// or a kind-derived default). The message is borrowed — from AST-stable
+    /// bytes or the interpreter's `test_msg_buf` — valid until the next
+    /// `runTestBody` / `deinit`; the runner copies it into report-owned memory
+    /// before the next test runs.
+    pub const TestBodyOutcome = union(enum) {
+        pass,
+        fail: TestFailure,
+    };
+
+    pub const TestFailure = struct {
+        span: SourceSpan,
+        message: []const u8,
+    };
+
+    /// Execute one `test` block body to completion (M1.0.15, §32 normative). The
+    /// body is a SYNC context (the type-checker rejected `await`), so nothing
+    /// suspends — the statements run once. A failed `assert*`, an uncaught
+    /// `throw`, or any runtime failure becomes a `.fail` outcome carrying the
+    /// position + message (NOT an aggregated `runtime_errors` count — §32).
+    /// Mirrors `execTimerBody`'s sync run-to-completion discipline with a fresh,
+    /// param-less locals scope and per-body arena-store resets.
+    pub fn runTestBody(self: *Interpreter, world: *World, decl: ast_mod.TestDecl) error{OutOfMemory}!TestBodyOutcome {
+        var locals: Locals = .{};
+        defer locals.deinit(self.gpa);
+        defer self.collections.reset(self.gpa);
+        defer self.closures.reset(self.gpa);
+        defer self.structs.reset(self.gpa);
+        defer self.optionals.clearRetainingCapacity();
+        defer self.resetRunStrings();
+
+        self.control = .none;
+        self.thrown = false;
+        self.returning = false;
+        self.pending_error = null;
+        self.pending_message = null;
+
+        const blk = self.ast.block_exprs.items[self.ast.exprData(decl.body)];
+        var s: u32 = 0;
+        while (s < blk.body_len) : (s += 1) {
+            const stmt_id: NodeId = @bitCast(self.ast.extra.items[blk.body_start + s]);
+            self.execStmt(world, &locals, stmt_id) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.RuntimeFailure => return self.testFailure(),
+            };
+            if (self.thrown) return self.testThrow();
+            // A top-level `return` / `break` / `continue` ends the body (no value).
+            if (self.control != .none) {
+                self.control = .none;
+                self.control_label = 0;
+                return .pass;
+            }
+            if (self.returning) {
+                self.returning = false;
+                self.return_value = .{ .unit = {} };
+                return .pass;
+            }
+        }
+        // A trailing block value (rare in a test) is evaluated for effect.
+        if (!blk.value.isNone()) {
+            _ = self.evalExpr(world, &locals, blk.value) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.RuntimeFailure => return self.testFailure(),
+            };
+            if (self.thrown) return self.testThrow();
+        }
+        return .pass;
+    }
+
+    /// Build a `.fail` outcome from the in-flight `pending_error`/`pending_message`
+    /// (M1.0.15). Message = `pending_message` when set, else a stable default
+    /// derived from the error kind.
+    fn testFailure(self: *Interpreter) TestBodyOutcome {
+        const span = if (self.pending_error) |pe| pe.span else SourceSpan{ .byte_start = 0, .byte_end = 0 };
+        const kind = if (self.pending_error) |pe| pe.kind else RuntimeErrorKind.UnsupportedExpr;
+        const msg = self.pending_message orelse defaultFailureMessage(kind);
+        return .{ .fail = .{ .span = span, .message = msg } };
+    }
+
+    /// `.fail` outcome for an uncaught `throw` reaching the test top level
+    /// (M1.0.15): consume the flag, record the typed payload, then convert.
+    fn testThrow(self: *Interpreter) TestBodyOutcome {
+        self.thrown = false;
+        self.pending_error = .{ .kind = .UncaughtThrow, .span = self.thrown_span };
+        self.pending_message = null;
+        return self.testFailure();
     }
 
     /// M1.0.9 — give the interpreter a runtime extension resolver (name → cooked
@@ -4022,11 +4125,17 @@ pub const Interpreter = struct {
             },
             .assert_stmt => {
                 // `assert(cond)` — a false condition is a runtime failure (the
-                // dev-build panic of `etch-reference-part1.md` §10.3, surfaced
-                // here as a counted RuntimeReport error).
+                // dev-build panic of `etch-reference-part1.md` §10.3). Raised via
+                // `fail(.AssertFailed, span)` so the failure carries the source
+                // position (M1.0.15): a rule-body assert still counts into the
+                // report; a test-body assert becomes the per-test failure. The
+                // optional message literal rides on `pending_message`.
                 const a = self.ast.assert_stmts.items[data];
                 const v = try self.evalExpr(world, locals, a.cond);
-                if (v != .bool_ or !v.bool_) return error.RuntimeFailure;
+                if (v != .bool_ or !v.bool_) {
+                    self.pending_message = if (a.message != 0) self.ast.strings.slice(a.message) else null;
+                    return self.fail(.AssertFailed, self.ast.exprSpan(a.cond));
+                }
             },
             .for_stmt => {
                 // `for v in range/array/map { body }` (M0.8). The loop variable
@@ -5640,6 +5749,21 @@ fn bridgeFailureKind(err: anyerror) RuntimeErrorKind {
     return switch (err) {
         error.TypeMismatch => .TypeMismatch,
         else => .UnsupportedExpr,
+    };
+}
+
+/// Stable default message for a test failure with no `pending_message`
+/// (M1.0.15) — a runtime failure (division-by-zero, overflow, …) or an uncaught
+/// throw. All returned strings are static, so the `.fail` outcome can borrow
+/// them until the runner copies the message out.
+fn defaultFailureMessage(kind: RuntimeErrorKind) []const u8 {
+    return switch (kind) {
+        .DivisionByZero => "division by zero",
+        .IntegerOverflow => "integer overflow",
+        .UnsupportedExpr => "unsupported expression",
+        .TypeMismatch => "type mismatch",
+        .UncaughtThrow => "uncaught throw",
+        .AssertFailed => "assertion failed",
     };
 }
 
