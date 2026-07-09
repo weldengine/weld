@@ -37,6 +37,7 @@ pub const DiagnosticCode = enum {
     enum_variant_not_found, // M0.8 — E0105 EnumVariantNotFound
     import_private_item, // M1.0.7 E5 — E0107 ImportPrivateItem (activated M1.0.8: buildExports sets .private from Item.visibility)
     import_cycle, // M1.0.7 E4 — E0108 ImportCycle (D-B: NOT E0101; E0101 is DuplicateSymbol)
+    private_type_in_public_impl, // M1.0.16 — W0902 PrivateTypeInPublicImpl (visibility §10.2, warning)
 
     // ── Type errors (E0200-E0299) ──
     type_mismatch, // S3 — E0200 TypeMismatch
@@ -380,6 +381,7 @@ pub const DiagnosticCode = enum {
             .unknown_export => "E0104",
             .import_private_item => "E0107",
             .import_cycle => "E0108",
+            .private_type_in_public_impl => "W0902",
             .enum_variant_not_found => "E0105",
             .type_mismatch => "E0200",
             .arg_count_mismatch => "E0203",
@@ -576,6 +578,7 @@ pub const DiagnosticCode = enum {
             .unknown_export => "UnknownExport",
             .import_private_item => "ImportPrivateItem",
             .import_cycle => "ImportCycle",
+            .private_type_in_public_impl => "PrivateTypeInPublicImpl",
             .enum_variant_not_found => "EnumVariantNotFound",
             .type_mismatch => "TypeMismatch",
             .arg_count_mismatch => "ArgCountMismatch",

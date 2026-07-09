@@ -627,6 +627,27 @@ pub const TypeChecker = struct {
         while (i < self.arena.items.len) : (i += 1) {
             if (kinds[i] != .type_alias) continue;
             const decl = self.arena.type_alias_decls.items[datas[i]];
+            // M1.0.16 — a qualified `.path` target (`type HA = m.Member`) is
+            // the use site for the whole-module import: unlike selective import
+            // (diagnosed at the `import { … }` binding), a whole-module import
+            // names no members, so E0104 (absent) / E0107 (private) fire HERE.
+            // A resolved component/resource is a valid alias target (selective
+            // parity); struct/enum/non-type resolve to E0102 exactly as a
+            // selective `type HB = ImportedStruct` does today.
+            if (self.arena.typeNodeKind(decl.target) == .path) {
+                const path = self.arena.path_types.items[self.arena.typeNodeData(decl.target)];
+                const tspan = self.arena.typeNodeSpan(decl.target);
+                switch (self.resolvePathTypeNode(decl.target)) {
+                    .resolved => |t| switch (t) {
+                        .component, .resource => {},
+                        else => try self.emit(.undefined_symbol, .error_, tspan, "type alias '{s}' does not resolve to a known type", .{self.arena.strings.slice(decl.name)}),
+                    },
+                    .member_absent => try self.emit(.unknown_export, .error_, tspan, "'{s}' is not exported by the aliased module", .{self.arena.strings.slice(path.member)}),
+                    .member_private => try self.emit(.import_private_item, .error_, tspan, "'{s}' is private to the aliased module", .{self.arena.strings.slice(path.member)}),
+                    .alias_unresolved => try self.emit(.undefined_symbol, .error_, tspan, "'{s}' is not a module alias in scope", .{self.arena.strings.slice(path.alias)}),
+                }
+                continue;
+            }
             const ultimate = self.arena.resolveTypeAliasName(decl.name);
             const uname = self.arena.strings.slice(ultimate);
             if (BuiltinType.fromName(uname) != null) continue;
@@ -3259,6 +3280,24 @@ pub const TypeChecker = struct {
                 try self.emit(.incomplete_trait_impl, .error_, span, "impl of trait '{s}' for '{s}' is missing method '{s}'", .{ trait_slice, type_slice, self.arena.strings.slice(tmethod.name) });
             }
         }
+
+        // §10.2 — W0902 PrivateTypeInPublicImpl: a PUBLIC trait implemented for a
+        // PRIVATE target type surfaces the private type through a public
+        // interface. Warning, not error — legitimate for internal use. Fires
+        // only when the target is a local private type AND the trait is a local
+        // PUBLIC trait (both symbols resolved above). An imported target is
+        // public by construction (only public items import), so it never trips
+        // this; an imported PUBLIC trait implemented for a private local type is
+        // the spec's "trait imported" case, but an imported-trait impl does not
+        // resolve here today (returns early at the `!trait_local` gate) — a
+        // pre-existing, orthogonal gap, not this milestone's surface.
+        if (type_sym) |ts| {
+            const target_private = self.arena.itemVisibility(ts.item_id) == .private;
+            const trait_public = self.arena.itemVisibility(trait_sym.?.item_id) == .public;
+            if (target_private and trait_public) {
+                try self.emit(.private_type_in_public_impl, .warning, span, "public trait '{s}' implemented for private type '{s}'", .{ trait_slice, type_slice });
+            }
+        }
     }
 
     /// `true` if `impl` provides a method named `name` (M0.8 E2 block 3 tranche
@@ -3609,6 +3648,19 @@ pub const TypeChecker = struct {
                 }
                 return .unknown;
             },
+            .path => {
+                // `alias.Member` qualified type (M1.0.16). Resolve silently
+                // through the whole-module aliases + project exports — the
+                // qualified twin of the `imported_symbols` branch above. A
+                // failure (unknown alias / absent / private member) is a
+                // silent `.unknown` here; the use-site diagnostics
+                // (E0102/E0104/E0107) are minted where a selective type would
+                // be (the type-alias target, `validateTypeAliases`).
+                return switch (self.resolvePathTypeNode(type_node)) {
+                    .resolved => |t| t,
+                    else => .unknown,
+                };
+            },
             .generic => {
                 // `Foo<T, …>` generic type application (M0.8 E2 block 4). The
                 // type arguments are erased (no monomorphisation in M0.8); the
@@ -3662,6 +3714,46 @@ pub const TypeChecker = struct {
             },
             else => return .unknown,
         }
+    }
+
+    /// Outcome of resolving a `.path` qualified type node (`alias.Member`,
+    /// M1.0.16). Split so the silent central resolver (`namedTypeToResolved`)
+    /// and the emitting use site (`validateTypeAliases`) share one lookup, each
+    /// deciding whether/how to diagnose.
+    const PathResolution = union(enum) {
+        /// The member resolved to a type kind (component / resource / struct /
+        /// enum), or `.unknown` when it is exported but not a type (fn / const
+        /// / …) — mirrors the `imported_symbols` arm's `else => .unknown`.
+        resolved: ResolvedType,
+        /// The receiver ident is not a whole-module alias in scope → E0102.
+        alias_unresolved,
+        /// The alias resolves, but the target module exports no such member → E0104.
+        member_absent,
+        /// The member exists in the target module but is `private` → E0107.
+        member_private,
+    };
+
+    /// Resolve a `.path` type node (`alias.Member`, M1.0.16) against the
+    /// whole-module import aliases (`imported_aliases` → target file index) and
+    /// the project exports index — the qualified twin of the `imported_symbols`
+    /// branch in `namedTypeToResolved`. Pure lookup, no diagnostics. Identity of
+    /// a resolved kind is the member's `StringId` in THIS arena (`path.member`),
+    /// matching how the selective arm keys on the local name. No-op-ish when
+    /// `project == null` (single-file mode has no aliases → `.alias_unresolved`).
+    fn resolvePathTypeNode(self: *TypeChecker, type_node: NodeId) PathResolution {
+        const path = self.arena.path_types.items[self.arena.typeNodeData(type_node)];
+        const project = self.project orelse return .alias_unresolved;
+        const target_idx = self.imported_aliases.get(path.alias) orelse return .alias_unresolved;
+        const member_bytes = self.arena.strings.slice(path.member);
+        const entry = project.exports[target_idx].get(member_bytes) orelse return .member_absent;
+        if (entry.visibility == .private) return .member_private;
+        return .{ .resolved = switch (entry.kind) {
+            .component => .{ .component = path.member },
+            .resource => .{ .resource = path.member },
+            .struct_ => .{ .struct_t = path.member },
+            .enum_ => .{ .enum_t = path.member },
+            else => .unknown,
+        } };
     }
 
     /// Const-fold a fixed-array size node to its `u64` length. E1 accepts a

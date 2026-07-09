@@ -278,7 +278,7 @@ pub const TypeNodeKind = enum {
     // S3
     named,
     // Reserved
-    path,
+    path, // produced since M1.0.16 (qualified_path `alias.Member`, type position)
     generic,
     array,
     slice,
@@ -2290,6 +2290,17 @@ const NamedTypeNode = struct {
     name: StringId,
 };
 
+/// `alias . Member` qualified type path (M1.0.16, `etch-grammar.md` §2.1
+/// `qualified_path = IDENT , "." , TYPE_IDENT`). `alias` is the whole-module
+/// import alias (a lowercase IDENT — explicit `as m` or the implicit
+/// last-segment name); `member` is the referenced TYPE_IDENT. The `.path`
+/// type-node kind reaches this slab through `data`. Type position only — the
+/// expression-position qualified forms are out of scope (whole-import parity).
+pub const PathTypeNode = struct {
+    alias: StringId,
+    member: StringId,
+};
+
 /// `T[N]` (fixed, `size` is a const expr) or `T[]` (dynamic, `size` is
 /// `NodeId.none`) array type (M0.8 collections, `etch-grammar.md` §264). The
 /// `.array` type-node kind carries a fixed size, `.slice` carries none — both
@@ -2654,6 +2665,7 @@ pub const AstArena = struct {
     /// the stmt node's `data`. `quantize_stmt` has NO slab (placeholder).
     timer_stmts: std.ArrayListUnmanaged(TimerStmt) = .empty,
     named_types: std.ArrayListUnmanaged(NamedTypeNode) = .empty,
+    path_types: std.ArrayListUnmanaged(PathTypeNode) = .empty,
     array_types: std.ArrayListUnmanaged(ArrayTypeNode) = .empty,
     map_types: std.ArrayListUnmanaged(MapTypeNode) = .empty,
     set_types: std.ArrayListUnmanaged(SetTypeNode) = .empty,
@@ -2874,6 +2886,7 @@ pub const AstArena = struct {
         self.spawn_stmts.deinit(gpa);
         self.timer_stmts.deinit(gpa);
         self.named_types.deinit(gpa);
+        self.path_types.deinit(gpa);
         self.array_types.deinit(gpa);
         self.map_types.deinit(gpa);
         self.set_types.deinit(gpa);
@@ -3007,6 +3020,13 @@ pub const AstArena = struct {
         outer: while (guard <= max) : (guard += 1) {
             for (self.type_alias_decls.items) |alias| {
                 if (alias.name == current) {
+                    // A `.path` alias target (`type HA = m.Member`, M1.0.16)
+                    // has no single ultimate name in this arena — stop the
+                    // by-name chain here (returning `current`) rather than
+                    // mis-indexing `named_types`. The qualified target is
+                    // resolved by node kind at the consult sites (a `.path`
+                    // TypeNode → `resolvePathTypeNode`), not by this walk.
+                    if (self.typeNodeKind(alias.target) != .named) break :outer;
                     const named = self.named_types.items[self.typeNodeData(alias.target)];
                     current = named.name;
                     continue :outer;
@@ -3091,6 +3111,15 @@ pub const AstArena = struct {
         const idx: u32 = @intCast(self.named_types.items.len);
         try self.named_types.append(gpa, .{ .name = name });
         return try self.addTypeNode(gpa, .named, idx, span);
+    }
+
+    /// Build a `.path` type node for the qualified type `alias.Member`
+    /// (M1.0.16). `alias` is the whole-module import alias, `member` the
+    /// referenced TYPE_IDENT — both interned in this arena's strings.
+    pub fn addPathType(self: *AstArena, gpa: std.mem.Allocator, alias: StringId, member: StringId, span: SourceSpan) !NodeId {
+        const idx: u32 = @intCast(self.path_types.items.len);
+        try self.path_types.append(gpa, .{ .alias = alias, .member = member });
+        return try self.addTypeNode(gpa, .path, idx, span);
     }
 
     pub fn addBinary(self: *AstArena, gpa: std.mem.Allocator, op: BinaryOp, lhs: NodeId, rhs: NodeId, span: SourceSpan) !NodeId {

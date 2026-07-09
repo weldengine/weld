@@ -1197,6 +1197,21 @@ pub const Parser = struct {
             .ident,
             => {
                 const tok = try self.advance();
+                // Qualified type path `alias.Member` (M1.0.16, `etch-grammar.md`
+                // §2.1 `qualified_path = IDENT , "." , TYPE_IDENT`). Only a
+                // lowercase IDENT alias followed by `.` then a TYPE_IDENT — a
+                // TYPE_IDENT/primitive receiver followed by `.` is the separate
+                // (out-of-scope) `Type.CONST` associated-access gap, left alone.
+                if (tok.kind == .ident and self.peek() == .dot and self.peekNext() == .type_ident) {
+                    _ = try self.advance(); // '.'
+                    const member_tok = try self.advance(); // TYPE_IDENT
+                    const alias_id = try self.internSlice(tok.span);
+                    const member_id = try self.internSlice(member_tok.span);
+                    return try self.arena.addPathType(self.gpa, alias_id, member_id, .{
+                        .byte_start = tok.span.byte_start,
+                        .byte_end = member_tok.span.byte_end,
+                    });
+                }
                 if (self.peek() == .lt) {
                     const name = self.sliceOf(tok.span);
                     if (std.mem.eql(u8, name, "Set")) return try self.parseSetGeneric(tok.span);
@@ -8186,6 +8201,40 @@ test "parser builds generic params + bounds + where + generic type (M0.8 E2 bloc
     // Struct + enum carry their generic params.
     try std.testing.expectEqual(@as(u32, 1), result.ast.struct_decls.items[0].generics_len);
     try std.testing.expectEqual(@as(u32, 1), result.ast.enum_decls.items[0].generics_len);
+}
+
+test "parser builds a qualified type path in type position (M1.0.16)" {
+    const gpa = std.testing.allocator;
+    // `m.Health` as a type-alias target parses to the reserved `.path`
+    // TypeNode carrying { alias = "m", member = "Health" }.
+    var result = try parse(gpa,
+        \\type HA = m.Health
+    );
+    defer result.deinit(gpa);
+    if (result.diagnostics.len > 0) {
+        std.debug.print("unexpected parse diagnostic: {s}\n", .{result.diagnostics[0].primary_message});
+        try std.testing.expect(false);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.ast.items.len);
+    try std.testing.expectEqual(ast_mod.ItemKind.type_alias, result.ast.items.items(.kind)[0]);
+    const alias = result.ast.type_alias_decls.items[0];
+    try std.testing.expectEqual(ast_mod.TypeNodeKind.path, result.ast.typeNodeKind(alias.target));
+    const path = result.ast.path_types.items[result.ast.typeNodeData(alias.target)];
+    try std.testing.expectEqualStrings("m", result.ast.strings.slice(path.alias));
+    try std.testing.expectEqualStrings("Health", result.ast.strings.slice(path.member));
+}
+
+test "parser leaves a qualified path in expression position a parse error (M1.0.16 type-position boundary)" {
+    const gpa = std.testing.allocator;
+    // The M1.0.16 grammar addition is type-position only: a qualified access
+    // in expression position (`let x = m.Health`) still fails to parse — a
+    // TYPE_IDENT after `.` is not a field/method name (documents the boundary
+    // that keeps expression-position qualified access out of scope).
+    var result = try parse(gpa,
+        \\fn f() -> int { let x = m.Health  0 }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expect(result.diagnostics.len > 0);
 }
 
 test "parser accepts inherent impl generic + bare targets, rejects generic trait-impl target (§891, M0.8 E2)" {
