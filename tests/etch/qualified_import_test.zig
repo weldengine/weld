@@ -7,8 +7,10 @@
 //! whole-module import names no members, so `E0104` (absent) / `E0107`
 //! (private) fire at the qualified USE site, not at the `import` binding.
 //!
-//! Gate E2 (visibility inheritance + `W0902 PrivateTypeInPublicImpl`) is added
-//! to this file in the E2 commit.
+//! Gate E2 (visibility inheritance §10.2 + `W0902 PrivateTypeInPublicImpl`):
+//! a private type's inherent impl is not surfaced as public (structurally — an
+//! impl is never exported and a private type is unnameable cross-module), and a
+//! PUBLIC trait implemented for a PRIVATE target type warns `W0902`.
 
 const std = @import("std");
 const etch = @import("weld_etch");
@@ -143,4 +145,67 @@ test "non-alias receiver is unaffected (selective + local resolution, no regress
     try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .undefined_symbol));
     try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .unknown_export));
     try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .import_private_item));
+}
+
+test "private type inherent impl is not leaked (E2, §10.2 inheritance)" {
+    const gpa = std.testing.allocator;
+    // `lib` declares a private component `X` and an inherent impl on it — the
+    // impl is not a public surface (impls are never exported; the private type
+    // is unnameable cross-module), so `lib` validates with no false E0107 and no
+    // W0902 (inherent, not a trait impl). `main` naming `m.X` (private) is E0107
+    // at the use site — inheritance holds: the private type stays unnameable.
+    const files = [_]etch.ProjectFile{
+        .{ .name = "lib.etch", .source =
+        \\private component X { hash: u32 = 0 }
+        \\impl X { fn f(self) { } }
+        },
+        .{ .name = "main.etch", .source =
+        \\import lib as m
+        \\type A = m.X
+        },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .import_private_item));
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .private_type_in_public_impl));
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .undefined_symbol));
+}
+
+test "public trait impl for private type is W0902 (E2)" {
+    const gpa = std.testing.allocator;
+    // A public trait `T` implemented for a PRIVATE component `X` exposes the
+    // private type through a public interface → exactly one W0902 (warning, not
+    // error — legitimate for internal use). No import, so no E0107.
+    const files = [_]etch.ProjectFile{
+        .{ .name = "main.etch", .source =
+        \\private component X { hash: u32 = 0 }
+        \\trait T { fn f(self) }
+        \\impl T for X { fn f(self) { } }
+        },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 1), countCode(diags.items, .private_type_in_public_impl));
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .import_private_item));
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .undefined_symbol));
+}
+
+test "public trait impl for public type is not W0902 (E2, over-report guard)" {
+    const gpa = std.testing.allocator;
+    // Same trait, but a PUBLIC target type → no leak, no W0902. Guards the
+    // detection against firing on every public trait impl.
+    const files = [_]etch.ProjectFile{
+        .{ .name = "main.etch", .source =
+        \\component X { hash: u32 = 0 }
+        \\trait T { fn f(self) }
+        \\impl T for X { fn f(self) { } }
+        },
+    };
+    var diags: std.ArrayListUnmanaged(etch.Diagnostic) = .empty;
+    defer deinitDiags(gpa, &diags);
+    try etch.validateProject(gpa, &files, &diags);
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .private_type_in_public_impl));
+    try std.testing.expectEqual(@as(usize, 0), countCode(diags.items, .undefined_symbol));
 }
