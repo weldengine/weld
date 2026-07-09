@@ -278,7 +278,7 @@ pub const TypeNodeKind = enum {
     // S3
     named,
     // Reserved
-    path,
+    path, // produced since M1.0.16 (qualified_path `alias.Member`, type position)
     generic,
     array,
     slice,
