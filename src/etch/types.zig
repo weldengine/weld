@@ -3280,6 +3280,24 @@ pub const TypeChecker = struct {
                 try self.emit(.incomplete_trait_impl, .error_, span, "impl of trait '{s}' for '{s}' is missing method '{s}'", .{ trait_slice, type_slice, self.arena.strings.slice(tmethod.name) });
             }
         }
+
+        // §10.2 — W0902 PrivateTypeInPublicImpl: a PUBLIC trait implemented for a
+        // PRIVATE target type surfaces the private type through a public
+        // interface. Warning, not error — legitimate for internal use. Fires
+        // only when the target is a local private type AND the trait is a local
+        // PUBLIC trait (both symbols resolved above). An imported target is
+        // public by construction (only public items import), so it never trips
+        // this; an imported PUBLIC trait implemented for a private local type is
+        // the spec's "trait imported" case, but an imported-trait impl does not
+        // resolve here today (returns early at the `!trait_local` gate) — a
+        // pre-existing, orthogonal gap, not this milestone's surface.
+        if (type_sym) |ts| {
+            const target_private = self.arena.itemVisibility(ts.item_id) == .private;
+            const trait_public = self.arena.itemVisibility(trait_sym.?.item_id) == .public;
+            if (target_private and trait_public) {
+                try self.emit(.private_type_in_public_impl, .warning, span, "public trait '{s}' implemented for private type '{s}'", .{ trait_slice, type_slice });
+            }
+        }
     }
 
     /// `true` if `impl` provides a method named `name` (M0.8 E2 block 3 tranche
