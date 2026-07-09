@@ -425,6 +425,10 @@ pub fn build(b: *std.Build) void {
         // M1.0.7 / E4-E6 — module graph + cycle (E0108), exports binding
         // (E0103/E0104), cross-file type resolution (no E0102).
         .{ .path = "tests/etch/import_resolve_test.zig", .etch = true },
+        // M1.0.16 / E1 — qualified `m.Type` resolution under validateProject:
+        // type-alias-target parity with the selective form (`as m` + `m.Type`),
+        // use-site E0104/E0107, unresolved-alias E0102. E2 adds W0902.
+        .{ .path = "tests/etch/qualified_import_test.zig", .etch = true },
         // M1.0.7 / E6 — the E1793 unblock: a `.prefab.etch` importing its
         // component types validates clean; an undeclared component still errors.
         .{ .path = "tests/etch/crossfile_prefab_import_test.zig", .etch = true },
