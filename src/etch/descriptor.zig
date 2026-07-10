@@ -970,6 +970,14 @@ fn buildLocale(gpa: std.mem.Allocator, arena: *const AstArena, decl: ast_mod.Loc
 /// `renderAbilityRuleAlloc` precedent; a generic/compound type fails loud).
 /// SHARED by both backends so a params-block field renders identically.
 pub fn renderFieldTypeAlloc(gpa: std.mem.Allocator, arena: *const AstArena, type_node: NodeId) BuildError![]u8 {
+    // A non-named field type (collection `.slice`/`.map_type`/`.set_type`, tuple,
+    // function, …) has no descriptor-construct surface: fail loud. Collections in
+    // particular type-check ONLY on `resource` (cooked via `interp.compileTypeDecl`,
+    // not this path), so a collection type node is unreachable here for a valid
+    // program — the rejection is the cook's defensive fail-loud contract (M1.0.17
+    // E5: a collection-specific error was weighed and rejected — it would ripple
+    // through ~15 codegen `BuildError` switches for zero behavioral gain, both
+    // mapping to `UnsupportedConstruct`).
     if (arena.typeNodeKind(type_node) != .named) return error.UnsupportedDescriptorExpr;
     return try gpa.dupe(u8, arena.strings.slice(arena.named_types.items[arena.typeNodeData(type_node)].name));
 }
@@ -2981,4 +2989,19 @@ test "descriptor renderer fails loud on an unsupported expression kind (M0.8 E4)
     defer pr.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
     try std.testing.expectError(error.UnsupportedDescriptorExpr, build(gpa, &pr.ast));
+}
+
+test "renderFieldTypeAlloc rejects a collection field type (M1.0.17 E5)" {
+    // Documents the recon result: a collection field type is not a descriptor
+    // surface (collections cook via `interp.compileTypeDecl`, resource-only) — a
+    // `.slice` type node is rejected by the cook's fail-loud `UnsupportedDescriptorExpr`
+    // (a collection-specific error was rejected for disproportionate codegen churn).
+    const gpa = std.testing.allocator;
+    const token_mod = @import("token.zig");
+    var arena = try ast_mod.AstArena.init(gpa);
+    defer arena.deinit(gpa);
+    const span: token_mod.SourceSpan = .{ .byte_start = 0, .byte_end = 0 };
+    const elem = try arena.addNamedType(gpa, try arena.strings.intern(gpa, "string"), span);
+    const slice = try arena.addArrayType(gpa, elem, NodeId.none, span); // `string[]` → .slice
+    try std.testing.expectError(error.UnsupportedDescriptorExpr, renderFieldTypeAlloc(gpa, &arena, slice));
 }

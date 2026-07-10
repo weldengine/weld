@@ -74,3 +74,45 @@ test "resource string fields round-trip through the persistent heap" {
     const loaded: [*]const u8 = @ptrFromInt(ss.ptr);
     try std.testing.expectEqualStrings(title_value, loaded[0..ss.len]);
 }
+
+test "loader rejects a resource collection field (M1.0.17 E5 guard)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Resource `Bag { items: T[] }` — one 8-byte `CollectionSlot` at offset 0. The
+    // scene cook writes a zeroed slot (ptr == 0); the loader must REJECT it (a
+    // null container would crash the interpreter / leak an installed one), not
+    // silently install it. Full block reconstruction at load is M1.6, not here.
+    const bag = try world.registry.registerComponentRaw(gpa, .{
+        .name = "Bag",
+        .size = 8,
+        .alignment = 8,
+        .default_bytes = &[_]u8{0} ** 8,
+        .fields = &[_]registry.FieldDesc{
+            .{ .name = "items", .offset = 0, .kind = .array_ },
+        },
+    });
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const data = try a.alloc(u8, 8);
+    @memset(data, 0);
+    const resources = try a.dupe(format.ResourceEntry, &.{.{
+        .schema_id = bag,
+        .data = data,
+        .string_fields = &.{},
+    }});
+    var model: format.CookModel = .{
+        .strings = &.{},
+        .uuids = &.{},
+        .resources = resources,
+        .archetypes = &.{},
+        .arena = arena,
+    };
+    defer model.deinit();
+    const bytes = try writer.write(gpa, model, &world.registry);
+    defer gpa.free(bytes);
+
+    try std.testing.expectError(error.CollectionResourceFieldUnsupported, loader.loadFromBytes(&world, gpa, bytes, null));
+}
