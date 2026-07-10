@@ -3554,10 +3554,22 @@ pub const TypeChecker = struct {
         const named = self.arena.named_types.items[self.arena.typeNodeData(elem)];
         const resolved = self.arena.resolveTypeAliasName(named.name);
         const tname = self.arena.strings.slice(resolved);
-        // Exact resource scalar-field surface: builtin POD scalar, `string`, or a
-        // declared enum. Anything else (component / resource / struct / unknown)
-        // is unsupported as a collection element.
-        if (BuiltinType.fromName(tname) != null) return;
+        // Value-POD builtins + `string` + a declared enum are the supported
+        // element set: they are stored inline (POD) or promoted into an owned
+        // persistent string, with no per-element load-time fixup. `Entity` is a
+        // builtin scalar field type, but it carries cross-reference-table remap
+        // semantics at scene load (M1.0.6: a cooked `.entity_` slot is written
+        // `dead` and resolved via the Cross-references Table) — the collection
+        // container wires no per-element remap, so an entity reference as a
+        // collection element is out of Phase-1 scope (rejected here rather than
+        // becoming a silent load-time gap).
+        if (BuiltinType.fromName(tname)) |bt| {
+            if (bt == .entity) {
+                try self.emit(.collection_field_element_invalid, .error_, espan, "'Entity' is not supported as a resource collection element (Phase 1) — an entity reference carries cross-reference-table remap semantics a persistent collection does not wire", .{});
+                return;
+            }
+            return; // value-POD builtin, stored inline
+        }
         if (std.mem.eql(u8, tname, "string")) return;
         if (self.declaredEnumName(resolved)) return;
         try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element type '{s}' is not supported — must be a scalar POD, string, or enum", .{tname});
@@ -7472,6 +7484,28 @@ test "component int[] field still rejected (POD-strict unchanged)" {
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .undefined_symbol);
     try expectNoCode(result.diagnostics.items, .collection_field_element_invalid);
+}
+
+test "resource Entity[] collection element yields E0222 (entity-reference message)" {
+    const gpa = std.testing.allocator;
+    // `Entity` is a valid resource scalar field type, but as a collection element
+    // it carries cross-reference-table remap semantics a persistent collection
+    // does not wire (M1.0.6 `.entity_` load-time resolution) → rejected with a
+    // message distinct from the generic unsupported-element one.
+    var result = try parseAndCheck(gpa,
+        \\resource Party { members: Entity[] }
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .collection_field_element_invalid);
+    var entity_specific = false;
+    for (result.diagnostics.items) |d| {
+        if (d.code == .collection_field_element_invalid and
+            std.mem.indexOf(u8, d.primary_message, "cross-reference-table") != null)
+        {
+            entity_specific = true;
+        }
+    }
+    try std.testing.expect(entity_specific);
 }
 
 test "type-checker emits E0200 on arithmetic between int and float without cast" {
