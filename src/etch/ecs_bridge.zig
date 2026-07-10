@@ -368,9 +368,12 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
             @memcpy(std.mem.asBytes(&cs), bytes[0..@sizeOf(persistent.CollectionSlot)]);
             break :blk .{ .map_persistent = cs.ptr };
         },
-        // Set reads land in E4 (its `*_persistent` tag doesn't exist yet); until
-        // then no runtime descriptor emits `.set_`. Never reached.
-        .set_ => unreachable,
+        // Set read (M1.0.17 E4): same borrowed-view decode.
+        .set_ => blk: {
+            var cs: persistent.CollectionSlot = undefined;
+            @memcpy(std.mem.asBytes(&cs), bytes[0..@sizeOf(persistent.CollectionSlot)]);
+            break :blk .{ .set_persistent = cs.ptr };
+        },
         // Entity field (M1.0.6 E4): decode the 8-byte `EntityId` (`value.zig`'s
         // `EntityId` is a `u64` that shares the bit pattern of core `EntityId`,
         // packed `struct(u64)`; `invalid_entity`/`dead` == all-ones). The runtime

@@ -126,6 +126,13 @@ pub const Value = union(enum) {
     /// resource outlives the body). String keys and values are stored as owned
     /// `.string_persistent`, POD inline. Never `0` for a live field.
     map_persistent: u64,
+    /// A borrowed view over a resource `Set<T>` field's persistent-heap container
+    /// block (M1.0.17 E4). The `u64` is a `persistent` `type_set` block whose
+    /// payload is the owned insertion-ordered unique-element list (same
+    /// `ArrayListUnmanaged(Value)` shape as `array_persistent`; the drop is
+    /// shared). Same persistent-vs-rule-arena split as `.set_ref`; borrowed on
+    /// read. String elements owned as `.string_persistent`, POD inline. Never `0`.
+    set_persistent: u64,
     /// A `TaskHandle` (M1.0.12 E5, `etch-grammar.md` §2.2): the pool index of
     /// a spawned task in `Interpreter.async_tasks`. Safe as a bare index —
     /// the pool is MONOTONIC (no slot reuse; a finished task parks as a husk),
@@ -190,6 +197,7 @@ pub const Value = union(enum) {
             .map_persistent => false, // as with map_ref
             .map_ref => false,
             .set_ref => false, // set equality is not in the M0.8 minimal subset
+            .set_persistent => false, // as with set_ref
             .closure => false,
             .struct_ref => false,
             .optional => false, // optional equality is not exercised in M0.8 (unwrap via if/while let)

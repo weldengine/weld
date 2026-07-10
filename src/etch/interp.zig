@@ -1235,8 +1235,8 @@ pub const Interpreter = struct {
                         },
                         // M1.0.17 — collection field: decref the container block; its
                         // registered drop releases string elements/keys/values before
-                        // the block frees. `.set_` joins this switch in E4.
-                        .array_, .map_ => {
+                        // the block frees.
+                        .array_, .map_, .set_ => {
                             var cs: persistent.CollectionSlot = undefined;
                             @memcpy(std.mem.asBytes(&cs), buf[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)]);
                             if (cs.ptr != 0) persistent.decref(self.gpa, @ptrFromInt(cs.ptr));
@@ -1360,6 +1360,9 @@ pub const Interpreter = struct {
         // Idempotent: every interpreter init registers the same callback.
         persistent.registerDrop(persistent.type_array, dropPersistentArray);
         persistent.registerDrop(persistent.type_map, dropPersistentMap);
+        // A set's payload is the same `ArrayListUnmanaged(Value)` as an array's,
+        // so the array drop (decref string elements + deinit) applies verbatim.
+        persistent.registerDrop(persistent.type_set, dropPersistentArray);
 
         // Pass A — register components and resources with the world.
         var i: u28 = 0;
@@ -4519,19 +4522,20 @@ pub const Interpreter = struct {
                                 return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                             return;
                         }
-                        if (field.kind == .array_ or field.kind == .map_) {
+                        if (field.kind == .array_ or field.kind == .map_ or field.kind == .set_) {
                             // Whole-field reassignment `get_mut(R).xs = [...]`
-                            // (M1.0.17 E2/E3): build a fresh persistent container
+                            // (M1.0.17 E2/E3/E4): build a fresh persistent container
                             // from the RHS (deep-copy entries, promote strings),
                             // then swap the slot and decref the previous block
                             // (order enforced in `promoteResourceCollection`).
                             // Only `=`.
                             if (assign.op != .assign) return error.RuntimeFailure;
                             const rhs = try self.evalExpr(world, locals, assign.value);
-                            const new_block = if (field.kind == .array_)
-                                try self.buildPersistentArrayFrom(rhs)
-                            else
-                                try self.buildPersistentMapFrom(rhs);
+                            const new_block = switch (field.kind) {
+                                .array_ => try self.buildPersistentArrayFrom(rhs),
+                                .map_ => try self.buildPersistentMapFrom(rhs),
+                                else => try self.buildPersistentSetFrom(rhs),
+                            };
                             errdefer persistent.decref(self.gpa, new_block);
                             Bridge.promoteResourceCollection(self.gpa, &world.registry, &world.resources, rref.resource_id, field_name, new_block) catch |e|
                                 return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
@@ -5386,6 +5390,35 @@ pub const Interpreter = struct {
                 }
                 return error.RuntimeFailure;
             },
+            .set_persistent => |ptr| {
+                // Persistent resource `Set<T>` methods (M1.0.17 E4), mirroring the
+                // rule-arena `.set_ref` arm: `insert(x)` (unique — dedup by byte/
+                // value equality, string promoted), `contains(x) -> bool`, `len()`.
+                // No index and no for-in (set for-in is type-check-rejected, out of
+                // the M0.8 subset — so neither is a reachable surface).
+                const mname = self.ast.strings.slice(mc.method_name);
+                if (std.mem.eql(u8, mname, "insert")) {
+                    if (mc.args_len != 1) return error.RuntimeFailure;
+                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+                    const v = try self.evalExpr(world, locals, arg);
+                    try self.setInsertPromoted(persistentSetOf(ptr), v);
+                    return Value{ .unit = {} };
+                }
+                if (std.mem.eql(u8, mname, "contains")) {
+                    if (mc.args_len != 1) return error.RuntimeFailure;
+                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+                    const v = try self.evalExpr(world, locals, arg);
+                    for (persistentSetOf(ptr).items) |existing| {
+                        if (self.collectionKeyEql(existing, v)) return Value{ .bool_ = true };
+                    }
+                    return Value{ .bool_ = false };
+                }
+                if (std.mem.eql(u8, mname, "len")) {
+                    if (mc.args_len != 0) return error.RuntimeFailure;
+                    return Value{ .int_ = @intCast(persistentSetOf(ptr).items.len) };
+                }
+                return error.RuntimeFailure;
+            },
             .set_ref => |handle| {
                 // Builtin set methods (M0.8 E3-C tranche 3bis — minimal
                 // faithful subset of stdlib §15.2). `insert` is the same
@@ -5663,6 +5696,33 @@ pub const Interpreter = struct {
         switch (src) {
             .map_ref => |h| for (self.collections.maps.items[h].items) |pair| try self.mapInsertPromoted(list, pair.key, pair.value),
             .map_persistent => |p| for (persistentMapOf(p).items) |pair| try self.mapInsertPromoted(list, pair.key, pair.value),
+            else => return error.RuntimeFailure,
+        }
+        return block;
+    }
+
+    /// Insert `v` into a persistent set with the unique-element policy (M1.0.17
+    /// E4): skip if already present (byte/value equality — same cross-representation
+    /// subtlety as map keys), else promote + append. Leak-safe.
+    fn setInsertPromoted(self: *Interpreter, list: *PersistentSet, v: Value) !void {
+        for (list.items) |existing| {
+            if (self.collectionKeyEql(existing, v)) return;
+        }
+        try list.ensureUnusedCapacity(self.gpa, 1);
+        const owned = try self.promoteForCollection(v);
+        list.appendAssumeCapacity(owned);
+    }
+
+    /// Build a fresh persistent `type_set` block from a source set value (M1.0.17
+    /// E4, whole-field reassignment): deep-copy every element (promoted, deduped).
+    /// Source is a rule-arena `.set_ref` or a `.set_persistent`.
+    fn buildPersistentSetFrom(self: *Interpreter, src: Value) ![*]u8 {
+        const block = try allocEmptySetBlock(self.gpa);
+        errdefer persistent.decref(self.gpa, block);
+        const list: *PersistentSet = @ptrCast(@alignCast(block));
+        switch (src) {
+            .set_ref => |h| for (self.collections.sets.items[h].items) |el| try self.setInsertPromoted(list, el),
+            .set_persistent => |p| for (persistentSetOf(p).items) |el| try self.setInsertPromoted(list, el),
             else => return error.RuntimeFailure,
         }
         return block;
@@ -6653,6 +6713,22 @@ fn dropPersistentArray(gpa: std.mem.Allocator, p: [*]u8, size: usize) void {
     list.deinit(gpa);
 }
 
+/// A persistent `Set<T>` (`type_set`, M1.0.17 E4) has the SAME owned payload
+/// shape as a `T[]` — an `ArrayListUnmanaged(Value)` (insertion order, elements
+/// unique) — so it reuses the array container type AND the array drop
+/// (`dropPersistentArray`, registered for `type_set` too); only the insert /
+/// contains policy differs (dedup). The distinct aliases document intent.
+const PersistentSet = PersistentArray;
+const persistentSetOf = persistentArrayOf;
+
+/// Allocate an empty `type_set` container block (refcount 1).
+fn allocEmptySetBlock(gpa: std.mem.Allocator) std.mem.Allocator.Error![*]u8 {
+    const block = try persistent.alloc(gpa, persistent.type_set, @sizeOf(PersistentSet));
+    const list: *PersistentSet = @ptrCast(@alignCast(block));
+    list.* = .empty;
+    return block;
+}
+
 /// The owned payload of a persistent map block (`type_map`, M1.0.17 E3): an
 /// insertion-ordered `ArrayListUnmanaged(MapPair)` (keys unique — the rule-arena
 /// `map_ref` policy). String keys and values are stored as owned
@@ -6755,6 +6831,10 @@ fn initResourceCollections(gpa: std.mem.Allocator, ast: *const AstArena, world: 
         const block: [*]u8 = switch (fd.kind) {
             .array_ => try initArrayBlock(gpa, ast, f),
             .map_ => try initMapBlock(gpa, ast, f),
+            // A set has no literal form (`etch-reference-part1.md` §3.3), so a set
+            // field always starts empty (a `= Set.new()`/`Set.from(...)` default
+            // is a non-const call, not materialized here).
+            .set_ => try allocEmptySetBlock(gpa),
             else => continue,
         };
         errdefer persistent.decref(gpa, block);
@@ -6812,6 +6892,7 @@ pub fn compileTypeDecl(
             // `.set_type` are out of the E2 surface (E3/E4 add map/set).
             if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .slice) break :kb .array_;
             if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .map_type) break :kb .map_;
+            if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .set_type) break :kb .set_;
             const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
             // Resolve through any top-level `type` alias chain (M0.8 foundations).
             const resolved_name_id = ast.resolveTypeAliasName(tnode.name);
@@ -6851,7 +6932,7 @@ pub fn compileTypeDecl(
         // M1.0.17 — a collection field's container is allocated at `addResource`
         // (initResourceCollections), not here: the default slot stays `{ptr=0}`
         // (zeroed), overwritten with the real block pointer then.
-        if (fd.kind == .array_ or fd.kind == .map_) continue;
+        if (fd.kind == .array_ or fd.kind == .map_ or fd.kind == .set_) continue;
         if (fd.kind == .string_) {
             // Resource `string` default = compile-time literal → an immortal
             // interned block (sentinel refcount): `addResource` copies only the
@@ -8261,6 +8342,115 @@ test "resource [string: string] map drop releases keys and values" {
     try expectResourceMapLen(&world, "Config", "props", 2); // last-write-wins on "name"
     try expectResourceMapStringEntry(&world, "Config", "props", "name", "bob");
     try expectResourceMapStringEntry(&world, "Config", "props", "role", "admin");
+}
+
+// ── M1.0.17 E4 — resource Set<T> collection fields ────────────────────────
+
+test "resource Set<string> insert/contains/len with uniqueness persists" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Seed once (guarded); "stun" inserted twice → the set stays unique (len 2).
+    // `contains` is present ("stun" → true) / absent ("ghost" → false). `n` read
+    // every tick proves persistence (a per-tick reset would show 0). At teardown
+    // the set drop releases "stun" + "burn" (no leak under the testing allocator).
+    const source =
+        \\resource Tags {
+        \\  active: Set<string> = Set.new()
+        \\  seeded: bool = false
+        \\  n: int = 0
+        \\  has_stun: bool = false
+        \\  has_ghost: bool = false
+        \\}
+        \\rule sync_tags()
+        \\  when resource Tags
+        \\{
+        \\  if not get(Tags).seeded {
+        \\    get_mut(Tags).active.insert("stun")
+        \\    get_mut(Tags).active.insert("burn")
+        \\    get_mut(Tags).active.insert("stun")
+        \\    get_mut(Tags).seeded = true
+        \\  }
+        \\  get_mut(Tags).n = get(Tags).active.len()
+        \\  get_mut(Tags).has_stun = get(Tags).active.contains("stun")
+        \\  get_mut(Tags).has_ghost = get(Tags).active.contains("ghost")
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // A set's container is the same `ArrayListUnmanaged(Value)` as an array's, so
+    // the array-string helper reads it (insertion order, dup collapsed).
+    try expectResourceArrayStrings(&world, "Tags", "active", &.{ "stun", "burn" });
+    try std.testing.expectEqual(@as(i64, 2), readResourceIntNamed(&world, "Tags", "n")); // unique + persisted
+    const rid = world.registry.idOf("Tags").?;
+    const buf = world.resources.getResource(rid).?;
+    try std.testing.expect(buf[world.registry.findField(rid, "has_stun").?.offset] != 0); // contains present
+    try std.testing.expect(buf[world.registry.findField(rid, "has_ghost").?.offset] == 0); // contains absent
+}
+
+test "resource Set<string> whole-field reassignment releases previous backing" {
+    var counting = weld_core.testing.alloc_counting.CountingAllocator.init(std.testing.allocator);
+    const gpa = counting.allocator();
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Seed the set (tick 1), then reassign to a fresh `Set.from([...])` (tick 2) —
+    // the previous backing (container block + "a"/"b" strings) must be freed.
+    const source =
+        \\resource Tags {
+        \\  active: Set<string> = Set.new()
+        \\  step: int = 0
+        \\}
+        \\rule go()
+        \\  when resource Tags
+        \\{
+        \\  if get(Tags).step == 0 {
+        \\    get_mut(Tags).active.insert("a")
+        \\    get_mut(Tags).active.insert("b")
+        \\    get_mut(Tags).step = 1
+        \\  } else {
+        \\    get_mut(Tags).active = Set.from(["x", "y", "z"])
+        \\  }
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    _ = try interp.runFor(&world, 1); // seed {a, b}
+    try expectResourceArrayStrings(&world, "Tags", "active", &.{ "a", "b" });
+    const before = counting.snapshot();
+    const report = try interp.runFor(&world, 1); // reassign → {x, y, z}
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    const after = counting.snapshot();
+
+    try std.testing.expect(after.free_count > before.free_count); // old backing freed
+    try expectResourceArrayStrings(&world, "Tags", "active", &.{ "x", "y", "z" });
 }
 
 // ── M1.0.3 E3 — resource enum fields ──────────────────────────────────────
