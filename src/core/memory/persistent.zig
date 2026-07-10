@@ -2,9 +2,10 @@
 //! The keystone for non-POD resource fields: a refcounted, system-allocator-
 //! backed heap whose blocks outlive a rule body (or a single scene load). M1.0.3
 //! uses it for resource `string` fields; the M1.0.5 scene loader interns loaded
-//! resource strings into it; M1.0.4 reuses it unchanged for dynamic collections
-//! (the `type_id` → drop dispatch and the open `TypeId` set are exactly what
-//! `string[]` / `[K: V]` / `Set<T>` will register against).
+//! resource strings into it; M1.0.17 reuses it for dynamic collections — the
+//! `type_id` → drop dispatch (now a `DropFn` registry the Etch runtime populates
+//! at init) and the open `TypeId` set are exactly what `string[]` / `[K: V]` /
+//! `Set<T>` register against, with no Etch coupling in this module.
 //!
 //! Moved from `src/etch/` to Tier 0 in M1.0.5 (the heap is tier-neutral —
 //! `runDrop` is a no-op, no Etch coupling — and resource `string` fields are a
@@ -59,6 +60,20 @@ pub const type_plain: TypeId = 0;
 /// id documents intent and lets `typeId` round-trip for debug/inspection.
 pub const type_string: TypeId = 1;
 
+/// A dynamic-array container block (`T[]`, M1.0.17). Its payload is the owned
+/// container the Etch runtime writes; the registered `DropFn` releases element
+/// handles (persistent-string elements) and deinits the container before the
+/// block is freed. Resource-only (the validator gates collection fields to
+/// resources); Tier 0 never interprets the payload — see `registerDrop`.
+pub const type_array: TypeId = 2;
+
+/// A map container block (`[K: V]`, M1.0.17). Same discipline as `type_array`;
+/// its registered drop releases string keys + values before the container.
+pub const type_map: TypeId = 3;
+
+/// A set container block (`Set<T>`, M1.0.17). Same discipline as `type_array`.
+pub const type_set: TypeId = 4;
+
 /// Refcount value marking an immortal block. `incref` / `decref` are
 /// no-ops on it; only `destroy` reclaims it (heap-owner teardown). Used
 /// for compile-time interned string literals (`etch-memory-model.md` §4.4).
@@ -78,6 +93,52 @@ pub const StringSlot = extern struct {
 comptime {
     std.debug.assert(@sizeOf(StringSlot) == 16);
     std.debug.assert(@alignOf(StringSlot) == 8);
+}
+
+/// On-storage layout of a resource collection field slot (`T[]` / `[K: V]` /
+/// `Set<T>`, M1.0.17): a single `{ ptr }` (8 bytes, 8-aligned) holding the
+/// persistent block pointer of the owned container (a `type_array` / `type_map`
+/// / `type_set` block). Unlike `StringSlot`, `ptr` is never `0` for a live
+/// field: an empty collection is a real (empty) container block allocated at
+/// `addResource`, so a read always finds a valid container. The block pointer
+/// is stable across the container's internal realloc (the buffer moves inside
+/// the container, not the block). `Registry.FieldKind.{array_,map_,set_}` report
+/// `sizeBytes == 8` / `alignBytes == 8` to match (asserted in `ecs_bridge.zig`).
+pub const CollectionSlot = extern struct {
+    ptr: u64 = 0,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(CollectionSlot) == 8);
+    std.debug.assert(@alignOf(CollectionSlot) == 8);
+}
+
+/// Signature of a per-`TypeId` drop callback (`etch-memory-model.md` §4.3).
+/// Given a block's exposed payload pointer and its recorded payload size, it
+/// releases the type's owned sub-resources (element / key / value handles) and
+/// deinits the owned container BEFORE the block is freed. Registered by the
+/// Etch runtime at init; Tier 0 stays Etch-agnostic — it never interprets the
+/// payload, it only stores and dispatches the callback (decision a, brief Notes:
+/// `runDrop` must not reinterpret a payload as an Etch container).
+pub const DropFn = *const fn (gpa: std.mem.Allocator, p: [*]u8, size: usize) void;
+
+/// Upper bound of the drop registry — a small fixed table indexed by `TypeId`.
+/// Comfortably above the Phase-1 collection ids (`type_array`/`_map`/`_set`).
+const drop_table_len = 16;
+
+/// Per-`TypeId` drop registry (the "open `TypeId` set" the module advertises).
+/// `type_plain` / `type_string` are static no-ops handled directly in `runDrop`
+/// and never consult this table. Phase-1 discipline: populated once at
+/// interpreter init, before any collection block exists, and read at drop time
+/// — the tree-walker is single-threaded, so no lock is needed.
+var drop_table = [_]?DropFn{null} ** drop_table_len;
+
+/// Register the drop callback for a collection `TypeId`. Idempotent when the
+/// same `f` is re-registered (the Etch runtime registers the same callbacks at
+/// every interpreter init). `type_id` must be below the table bound.
+pub fn registerDrop(type_id: TypeId, f: DropFn) void {
+    std.debug.assert(type_id < drop_table_len);
+    drop_table[type_id] = f;
 }
 
 /// Allocation alignment of every block. ≥ `@alignOf(Header)` (8) and a
@@ -184,18 +245,20 @@ pub fn payloadSize(p: [*]u8) usize {
 }
 
 /// Release a type's owned sub-resources before its block is freed
-/// (`etch-memory-model.md` §4.3). Phase-1 ids (`type_plain` / `type_string`)
-/// own nothing beyond their inline payload, so their drop is a no-op — the
-/// block free reclaims the bytes. M1.0.4 collection ids free their element /
-/// table buffers in the `else` arm before the block goes.
+/// (`etch-memory-model.md` §4.3). `type_plain` / `type_string` own nothing
+/// beyond their inline payload, so their drop is a static no-op — the block
+/// free reclaims the bytes. Every other id (the open collection set) dispatches
+/// through the `DropFn` registry the Etch runtime populated; an unregistered id
+/// is a no-op fallback. Tier 0 never reinterprets the payload itself.
 fn runDrop(gpa: std.mem.Allocator, type_id: TypeId, p: [*]u8, size: usize) void {
     switch (type_id) {
         type_plain, type_string => {},
-        else => {},
+        else => {
+            if (type_id < drop_table_len) {
+                if (drop_table[type_id]) |f| f(gpa, p, size);
+            }
+        },
     }
-    _ = gpa;
-    _ = p;
-    _ = size;
 }
 
 fn freeBlock(gpa: std.mem.Allocator, p: [*]u8) void {
@@ -243,4 +306,121 @@ test "immortal-interned sentinel: incref/decref are no-ops" {
     try std.testing.expectEqual(sentinel, refcount(p)); // still alive
     // Immortal blocks are reclaimed only by the heap owner at teardown.
     destroy(gpa, p);
+}
+
+// ─── M1.0.17 collection drop-registry tests ─────────────────────────────────
+//
+// Tier-0 purity: each test defines its OWN container type + `DropFn` (persistent
+// never imports the Etch `Value`); the module only stores and dispatches the
+// callback. `std.testing.allocator` fails the test on any leak, so a clean exit
+// proves the drop released every sub-resource before the container block freed.
+
+test "type_array drop frees container and decrefs string elements (no leak)" {
+    const gpa = std.testing.allocator;
+    const List = std.ArrayListUnmanaged([*]u8);
+    const Drop = struct {
+        fn run(g: std.mem.Allocator, p: [*]u8, size: usize) void {
+            _ = size;
+            const list: *List = @ptrCast(@alignCast(p));
+            for (list.items) |elem| decref(g, elem);
+            list.deinit(g);
+        }
+    };
+    registerDrop(type_array, Drop.run);
+
+    // The container lives inside the block payload; its two string elements are
+    // separate `type_string` blocks (refcount 1 each), owned by the container.
+    const blk = try alloc(gpa, type_array, @sizeOf(List));
+    const list: *List = @ptrCast(@alignCast(blk));
+    list.* = .empty;
+    const s1 = try alloc(gpa, type_string, 5);
+    @memcpy(s1[0..5], "intro");
+    const s2 = try alloc(gpa, type_string, 5);
+    @memcpy(s2[0..5], "outro");
+    try list.append(gpa, s1);
+    try list.append(gpa, s2);
+
+    // decref → runDrop dispatches type_array → Drop.run releases both strings and
+    // deinits the container; freeBlock then reclaims the block. No leak.
+    decref(gpa, blk);
+}
+
+test "type_map drop decrefs keys and values" {
+    const gpa = std.testing.allocator;
+    const Pair = struct { key: [*]u8, value: [*]u8 };
+    const List = std.ArrayListUnmanaged(Pair);
+    const Drop = struct {
+        fn run(g: std.mem.Allocator, p: [*]u8, size: usize) void {
+            _ = size;
+            const list: *List = @ptrCast(@alignCast(p));
+            for (list.items) |pair| {
+                decref(g, pair.key);
+                decref(g, pair.value);
+            }
+            list.deinit(g);
+        }
+    };
+    registerDrop(type_map, Drop.run);
+
+    const blk = try alloc(gpa, type_map, @sizeOf(List));
+    const list: *List = @ptrCast(@alignCast(blk));
+    list.* = .empty;
+    const k = try alloc(gpa, type_string, 4);
+    @memcpy(k[0..4], "name");
+    const v = try alloc(gpa, type_string, 5);
+    @memcpy(v[0..5], "alice");
+    try list.append(gpa, .{ .key = k, .value = v });
+
+    decref(gpa, blk);
+}
+
+test "type_set drop decrefs elements" {
+    const gpa = std.testing.allocator;
+    const List = std.ArrayListUnmanaged([*]u8);
+    const Drop = struct {
+        fn run(g: std.mem.Allocator, p: [*]u8, size: usize) void {
+            _ = size;
+            const list: *List = @ptrCast(@alignCast(p));
+            for (list.items) |elem| decref(g, elem);
+            list.deinit(g);
+        }
+    };
+    registerDrop(type_set, Drop.run);
+
+    const blk = try alloc(gpa, type_set, @sizeOf(List));
+    const list: *List = @ptrCast(@alignCast(blk));
+    list.* = .empty;
+    const e = try alloc(gpa, type_string, 3);
+    @memcpy(e[0..3], "tag");
+    try list.append(gpa, e);
+
+    decref(gpa, blk);
+}
+
+test "registerDrop dispatches; unregistered id is a no-op" {
+    const gpa = std.testing.allocator;
+    // Ids outside the static-no-op set (type_plain/type_string) and outside the
+    // collection ids, so this test never collides with the others' registrations.
+    const dispatch_id: TypeId = 8;
+    const unregistered_id: TypeId = 9;
+
+    // Dispatch: a drop that frees a sub-allocation the block payload points at.
+    // A missed dispatch would surface as a leak under `std.testing.allocator`.
+    const Drop = struct {
+        fn run(g: std.mem.Allocator, p: [*]u8, size: usize) void {
+            _ = size;
+            const owned: *[]u8 = @ptrCast(@alignCast(p));
+            g.free(owned.*);
+        }
+    };
+    registerDrop(dispatch_id, Drop.run);
+    const blk = try alloc(gpa, dispatch_id, @sizeOf([]u8));
+    const slot: *[]u8 = @ptrCast(@alignCast(blk));
+    slot.* = try gpa.alloc(u8, 8);
+    decref(gpa, blk); // → Drop.run frees the sub-allocation, then the block.
+
+    // Unregistered id: runDrop falls through to the no-op fallback; freeBlock
+    // still reclaims the payload. No drop is called, no leak, no crash.
+    const blk2 = try alloc(gpa, unregistered_id, 4);
+    decref(gpa, blk2);
 }

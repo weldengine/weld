@@ -69,6 +69,20 @@ pub const FieldKind = enum {
     /// cook the slot is written `dead` and an entity→entity reference is carried by
     /// the Cross-references Table, resolved to the target's handle at load.
     entity_,
+    /// A dynamic-array field slot (`T[]`, M1.0.17): a `CollectionSlot`
+    /// (`{ ptr: u64 }`, 8 bytes, 8-aligned, `src/core/memory/persistent.zig`)
+    /// holding the persistent-heap pointer of the owned container block. Like
+    /// `.string_`, **resource-only by construction** — the Etch validator gates
+    /// collection fields to resources, so no component SoA slot ever carries one
+    /// (the POD invariant, `engine-spec.md` §4, is untouched). Tier 0 stores/
+    /// copies the 8 raw slot bytes; the Etch runtime owns the container's lifetime.
+    array_,
+    /// A map field slot (`[K: V]`, M1.0.17). Same 8-byte `CollectionSlot`
+    /// discipline and resource-only gating as `.array_`.
+    map_,
+    /// A set field slot (`Set<T>`, M1.0.17). Same 8-byte `CollectionSlot`
+    /// discipline and resource-only gating as `.array_`.
+    set_,
 
     pub fn sizeBytes(self: FieldKind) usize {
         return switch (self) {
@@ -84,6 +98,9 @@ pub const FieldKind = enum {
             .string_ => 16,
             .enum_ => @sizeOf(u32), // declaration-order discriminant
             .entity_ => @sizeOf(EntityId), // 8 (packed u64)
+            // `CollectionSlot { ptr: u64 }` — 8 bytes; must equal
+            // `@sizeOf(persistent.CollectionSlot)` (asserted in `ecs_bridge.zig`).
+            .array_, .map_, .set_ => 8,
         };
     }
 
@@ -99,6 +116,7 @@ pub const FieldKind = enum {
             .string_ => 8,
             .enum_ => @alignOf(u32),
             .entity_ => @alignOf(EntityId), // 8
+            .array_, .map_, .set_ => 8, // CollectionSlot pointer
         };
     }
 

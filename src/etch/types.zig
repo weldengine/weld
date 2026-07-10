@@ -3422,6 +3422,36 @@ pub const TypeChecker = struct {
                         if (pn.name == self.arena.error_type_name) continue;
                     }
                 }
+                // Resource collection fields (M1.0.17): `T[]` (`.slice`),
+                // `[K: V]` (`.map_type`), `Set<T>` (`.set_type`) unlock on
+                // `resource` with a supported element type — `etch-reference-
+                // part1.md` §5.5 (`recent_servers: string[]`), the persistent-heap
+                // `CollectionSlot`. Fixed `T[N]` (`.array`) stays out of scope
+                // (falls through to rejection). Element ∈ {POD scalar, string,
+                // enum}; nested collection / unsupported element → E0222. The
+                // collection default (`= []`) is wired in E2+, so the accepted
+                // field skips the scalar-default check below.
+                if (origin == .resource) {
+                    switch (self.arena.typeNodeKind(field.type_node)) {
+                        .slice => {
+                            const at = self.arena.array_types.items[self.arena.typeNodeData(field.type_node)];
+                            try self.checkResourceCollectionElement(at.elem);
+                            continue;
+                        },
+                        .set_type => {
+                            const st = self.arena.set_types.items[self.arena.typeNodeData(field.type_node)];
+                            try self.checkResourceCollectionElement(st.elem);
+                            continue;
+                        },
+                        .map_type => {
+                            const mt = self.arena.map_types.items[self.arena.typeNodeData(field.type_node)];
+                            try self.checkResourceCollectionElement(mt.key);
+                            try self.checkResourceCollectionElement(mt.value);
+                            continue;
+                        },
+                        else => {},
+                    }
+                }
                 try self.emit(.undefined_symbol, .error_, tspan, "collection / composite field types are not supported in E1 — component and resource fields must be scalar POD", .{});
                 continue;
             }
@@ -3500,6 +3530,37 @@ pub const TypeChecker = struct {
                 try self.checkFieldDefault(field.default_value, field.type_node);
             }
         }
+    }
+
+    /// M1.0.17 (E1): validate a resource collection field's element type is in
+    /// the supported set {POD scalar builtin, `string`, enum} — the exact
+    /// resource scalar-field surface (M1.0.3). A nested collection, or any other
+    /// element (component/resource/struct/unknown/optional/function/…), emits
+    /// `E0222 CollectionFieldElementInvalid`. This is the type-check gate only;
+    /// element STORAGE / promotion wiring is E2+ (`string[]`) / E3 / E4.
+    fn checkResourceCollectionElement(self: *TypeChecker, elem: NodeId) !void {
+        const espan = self.arena.typeNodeSpan(elem);
+        switch (self.arena.typeNodeKind(elem)) {
+            .named => {},
+            .slice, .array, .map_type, .set_type => {
+                try self.emit(.collection_field_element_invalid, .error_, espan, "nested collections are not supported as a resource collection element (Phase 1)", .{});
+                return;
+            },
+            else => {
+                try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element must be a scalar POD, string, or enum", .{});
+                return;
+            },
+        }
+        const named = self.arena.named_types.items[self.arena.typeNodeData(elem)];
+        const resolved = self.arena.resolveTypeAliasName(named.name);
+        const tname = self.arena.strings.slice(resolved);
+        // Exact resource scalar-field surface: builtin POD scalar, `string`, or a
+        // declared enum. Anything else (component / resource / struct / unknown)
+        // is unsupported as a collection element.
+        if (BuiltinType.fromName(tname) != null) return;
+        if (std.mem.eql(u8, tname, "string")) return;
+        if (self.declaredEnumName(resolved)) return;
+        try self.emit(.collection_field_element_invalid, .error_, espan, "resource collection element type '{s}' is not supported — must be a scalar POD, string, or enum", .{tname});
     }
 
     /// `true` if `name` is a declared `enum`, checked against the AST slab
@@ -7365,6 +7426,52 @@ test "type-checker emits E0102 on field referencing unknown type" {
     );
     defer result.deinit(gpa);
     try expectAnyCode(result.diagnostics.items, .undefined_symbol);
+}
+
+// ── M1.0.17 E1 — resource collection field type-check ─────────────────────
+
+test "resource string[] field type-checks" {
+    const gpa = std.testing.allocator;
+    // `etch-reference-part1.md` §5.5 — a resource `string[]` field is sanctioned
+    // (no POD constraint on resources). Accepted clean, no diagnostic.
+    var result = try parseAndCheck(gpa,
+        \\resource GameSettings { recent_servers: string[] }
+    );
+    defer result.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
+}
+
+test "resource collection field with unsupported element yields E0222" {
+    const gpa = std.testing.allocator;
+    // A component-typed element is outside {POD scalar, string, enum}.
+    var result = try parseAndCheck(gpa,
+        \\component Health { current: float = 0.0 }
+        \\resource Bag { items: Health[] }
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .collection_field_element_invalid);
+}
+
+test "resource nested collection field string[][] yields E0222" {
+    const gpa = std.testing.allocator;
+    // Nesting is out of Phase 1 (the recursive-drop dimension is out of scope).
+    var result = try parseAndCheck(gpa,
+        \\resource Grid { rows: string[][] }
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .collection_field_element_invalid);
+}
+
+test "component int[] field still rejected (POD-strict unchanged)" {
+    const gpa = std.testing.allocator;
+    // Collection fields do NOT unlock on components — POD-strict is unchanged.
+    // The rejection is the pre-existing composite-field one (E0102), NOT E0222.
+    var result = try parseAndCheck(gpa,
+        \\component Buffer { items: int[] }
+    );
+    defer result.deinit(gpa);
+    try expectAnyCode(result.diagnostics.items, .undefined_symbol);
+    try expectNoCode(result.diagnostics.items, .collection_field_element_invalid);
 }
 
 test "type-checker emits E0200 on arithmetic between int and float without cast" {

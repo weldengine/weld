@@ -53,6 +53,12 @@ comptime {
     // M1.0.15 — the test runner's inline tests (the `pub const test_runner`
     // re-export pulls its declarations, NOT its `test` blocks — §13).
     _ = @import("test_runner.zig");
+    // M1.0.17 — `types.zig` carries the type-checker's inline tests (E0101,
+    // scene/prefab/const validation, the M1.0.17 resource-collection acceptance
+    // tests, …). The `pub const types`/`TypeChecker` re-exports above pull only
+    // its declarations, NOT its `test` blocks (§13) — without this guard the
+    // whole type-checker test suite is silently skipped by `zig build test`.
+    _ = @import("types.zig");
 }
 
 /// M1.0.4 scene cook — `.scene.etch` source → the neutral Tier-0 scene model

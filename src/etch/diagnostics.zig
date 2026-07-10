@@ -51,6 +51,7 @@ pub const DiagnosticCode = enum {
     orphan_impl, // M0.8 — E0217 OrphanImpl
     immutable_receiver_for_mut_self, // M0.8 — E0220 ImmutableReceiverForMutSelfMethod
     closure_cannot_mutate_capture, // M0.8 — E0221 ClosureCannotMutateCapture
+    collection_field_element_invalid, // M1.0.17 — E0222 CollectionFieldElementInvalid (resource collection field: unsupported element or nested collection)
 
     // ── ECS access errors (E0300-E0399) ──
     resource_expected_component_given, // M0.8 — E0301 ResourceExpectedComponentGiven
@@ -394,6 +395,7 @@ pub const DiagnosticCode = enum {
             .orphan_impl => "E0217",
             .immutable_receiver_for_mut_self => "E0220",
             .closure_cannot_mutate_capture => "E0221",
+            .collection_field_element_invalid => "E0222",
             .resource_expected_component_given => "E0301",
             .component_expected_resource_given => "E0302",
             .resource_field_unknown => "E0303",
@@ -591,6 +593,7 @@ pub const DiagnosticCode = enum {
             .orphan_impl => "OrphanImpl",
             .immutable_receiver_for_mut_self => "ImmutableReceiverForMutSelfMethod",
             .closure_cannot_mutate_capture => "ClosureCannotMutateCapture",
+            .collection_field_element_invalid => "CollectionFieldElementInvalid",
             .resource_expected_component_given => "ResourceExpectedComponentGiven",
             .component_expected_resource_given => "ComponentExpectedResourceGiven",
             .resource_field_unknown => "ResourceFieldUnknown",
