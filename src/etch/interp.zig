@@ -801,6 +801,11 @@ const ForIter = union(enum) {
     range: struct { next: i64, end: i64, inclusive: bool },
     array: struct { handle: u32, len: usize, idx: usize },
     map: struct { handle: u32, len: usize, idx: usize },
+    /// A resource `T[]` iterated in an async body (M1.0.17 E2). Carries the
+    /// `type_array` block pointer (stable across suspend, unlike a rule-arena
+    /// handle) + a snapshotted length + cursor — same index-based semantics as
+    /// the `.array` variant.
+    array_persistent: struct { ptr: u64, len: usize, idx: usize },
 };
 
 /// `for v [, k] in iter { body }`: at the top of each iteration (`in_iter =
@@ -3214,6 +3219,7 @@ pub const Interpreter = struct {
             const for_iter: ForIter = switch (iter) {
                 .range => |r| .{ .range = .{ .next = r.start, .end = r.end, .inclusive = r.inclusive } },
                 .array_ref => |h| .{ .array = .{ .handle = h, .len = self.collections.arrays.items[h].items.len, .idx = 0 } },
+                .array_persistent => |p| .{ .array_persistent = .{ .ptr = p, .len = persistentArrayOf(p).items.len, .idx = 0 } },
                 .map_ref => |h| .{ .map = .{ .handle = h, .len = self.collections.maps.items[h].items.len, .idx = 0 } },
                 else => return error.RuntimeFailure,
             };
@@ -3711,6 +3717,18 @@ pub const Interpreter = struct {
                 const col = self.collections.arrays.items[a.handle];
                 if (a.idx >= col.items.len) return error.RuntimeFailure;
                 try locals.put(self.gpa, f.var_name, col.items[a.idx], false);
+                a.idx += 1;
+                return true;
+            },
+            .array_persistent => {
+                // Resource `T[]` in an async body (M1.0.17 E2): the block pointer
+                // is stable across suspend; bounds-check the snapshotted length
+                // against the (possibly mutated) container, same as `.array`.
+                const a = &ff.iter.array_persistent;
+                if (a.idx >= a.len) return false;
+                const list = persistentArrayOf(a.ptr);
+                if (a.idx >= list.items.len) return error.RuntimeFailure;
+                try locals.put(self.gpa, f.var_name, list.items[a.idx], false);
                 a.idx += 1;
                 return true;
             },
@@ -5276,6 +5294,35 @@ pub const Interpreter = struct {
                 if (std.mem.eql(u8, mname, "len")) {
                     if (mc.args_len != 0) return error.RuntimeFailure;
                     return Value{ .int_ = @intCast(persistentArrayOf(ptr).items.len) };
+                }
+                if (std.mem.eql(u8, mname, "pop")) {
+                    // `pop() -> T?` (M1.0.17 E2, mirror of the `.array_ref` arm).
+                    // A string element is DEMOTED to a body-scoped rule-arena copy
+                    // (the reverse of the push-side promotion): deep-copy its bytes
+                    // into a `.string_run`, then decref the owned persistent block.
+                    // A POD element is returned inline. Peek → do the fallible copy
+                    // → only then commit (decref + remove the slot), so a failure
+                    // leaves the element owned in place (no leak, no dangling).
+                    if (mc.args_len != 0) return error.RuntimeFailure;
+                    const list = persistentArrayOf(ptr);
+                    var popped: ?Value = null;
+                    if (list.items.len > 0) {
+                        const last = list.items[list.items.len - 1];
+                        if (last == .string_persistent) {
+                            const s = last.string_persistent;
+                            const bytes: []const u8 = if (s.len == 0) "" else @as([*]const u8, @ptrFromInt(s.ptr))[0..s.len];
+                            const copy = try self.gpa.dupe(u8, bytes);
+                            errdefer self.gpa.free(copy);
+                            popped = try self.newRunString(copy); // takes `copy` on success
+                            if (s.ptr != 0) persistent.decref(self.gpa, @ptrFromInt(s.ptr));
+                        } else {
+                            popped = last;
+                        }
+                        _ = list.pop(); // remove the (already-handled) slot
+                    }
+                    const oh: u32 = @intCast(self.optionals.items.len);
+                    try self.optionals.append(self.gpa, popped);
+                    return Value{ .optional = oh };
                 }
                 return error.RuntimeFailure;
             },
@@ -7735,6 +7782,132 @@ test "resource string[] push promotes a runtime string (no use-after-free after 
     // copy outlived tick 1's body reset.
     try expectResourceArrayStrings(&world, "Log", "entries", &.{ "hp:100", "hp:100" });
     try expectResourceStringField(&world, "Log", "last", "hp:100");
+}
+
+/// Read a resource `.array_` field's container and assert its POD `int` elements.
+fn expectResourceArrayInts(
+    world: *World,
+    res_name: []const u8,
+    field_name: []const u8,
+    expected: []const i64,
+) !void {
+    const rid = world.registry.idOf(res_name).?;
+    const fd = world.registry.findField(rid, field_name).?;
+    const bytes = world.resources.getResource(rid).?;
+    var cs: persistent.CollectionSlot = undefined;
+    @memcpy(std.mem.asBytes(&cs), bytes[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)]);
+    try std.testing.expect(cs.ptr != 0);
+    const list = persistentArrayOf(cs.ptr);
+    try std.testing.expectEqual(expected.len, list.items.len);
+    for (expected, 0..) |exp, i| try std.testing.expectEqual(exp, list.items[i].int_);
+}
+
+test "resource string[]/int[] pop demotes strings, returns POD inline, empty yields none" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Each tick pops the last `words` (string → demoted to a body-scoped copy,
+    // owned block decref'd) and the last `nums` (POD int, inline). When a list is
+    // empty `pop()` yields `none` (the `if let` is false, the field unchanged).
+    const source =
+        \\resource Stack {
+        \\  words: string[] = ["a", "b"]
+        \\  nums: int[] = [10, 20]
+        \\  last_word: string = ""
+        \\  last_num: int = 0
+        \\  n_words: int = 0
+        \\}
+        \\rule step()
+        \\  when resource Stack
+        \\{
+        \\  if let w = get_mut(Stack).words.pop() {
+        \\    get_mut(Stack).last_word = w
+        \\  }
+        \\  if let x = get_mut(Stack).nums.pop() {
+        \\    get_mut(Stack).last_num = x
+        \\  }
+        \\  get_mut(Stack).n_words = get(Stack).words.len()
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    // Tick 1: pop "b"/20. Tick 2: pop "a"/10 → both empty. Tick 3: both pops
+    // yield none (fields unchanged); the last non-none values persist.
+    const report = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    try expectResourceArrayStrings(&world, "Stack", "words", &.{});
+    try expectResourceArrayInts(&world, "Stack", "nums", &.{});
+    try expectResourceStringField(&world, "Stack", "last_word", "a");
+    const rid = world.registry.idOf("Stack").?;
+    const buf = world.resources.getResource(rid).?;
+    const lnf = world.registry.findField(rid, "last_num").?;
+    var last_num: i64 = 0;
+    @memcpy(std.mem.asBytes(&last_num), buf[lnf.offset .. lnf.offset + @sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 10), last_num);
+}
+
+test "resource string[] iterated by an async for-in across a suspend" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // An async rule iterates a resource `string[]` (`.array_persistent`), awaiting
+    // one tick per element — the for-frame carries the block pointer across the
+    // suspend. `done` gates re-arming so `count` settles at exactly 3.
+    const source =
+        \\resource Log {
+        \\  entries: string[] = ["x", "y", "z"]
+        \\  count: int = 0
+        \\  done: bool = false
+        \\}
+        \\async rule scan()
+        \\  when resource Log
+        \\{
+        \\  if not get(Log).done {
+        \\    get_mut(Log).done = true
+        \\    for e in get(Log).entries {
+        \\      get_mut(Log).count = get(Log).count + 1
+        \\      await wait(0.016s)
+        \\    }
+        \\  }
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    // Generous tick budget for the 3 one-tick awaits + drive-by-origin latency.
+    const report = try interp.runFor(&world, 12);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    const rid = world.registry.idOf("Log").?;
+    const buf = world.resources.getResource(rid).?;
+    const cf = world.registry.findField(rid, "count").?;
+    var count: i64 = 0;
+    @memcpy(std.mem.asBytes(&count), buf[cf.offset .. cf.offset + @sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 3), count);
 }
 
 // ── M1.0.3 E3 — resource enum fields ──────────────────────────────────────
