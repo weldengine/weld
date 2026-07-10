@@ -806,6 +806,9 @@ const ForIter = union(enum) {
     /// handle) + a snapshotted length + cursor — same index-based semantics as
     /// the `.array` variant.
     array_persistent: struct { ptr: u64, len: usize, idx: usize },
+    /// A resource `[K: V]` iterated in an async body (M1.0.17 E3), mirror of
+    /// `.map` on a `type_map` block pointer.
+    map_persistent: struct { ptr: u64, len: usize, idx: usize },
 };
 
 /// `for v [, k] in iter { body }`: at the top of each iteration (`in_iter =
@@ -1231,9 +1234,9 @@ pub const Interpreter = struct {
                             if (ss.ptr != 0) persistent.decref(self.gpa, @ptrFromInt(ss.ptr));
                         },
                         // M1.0.17 — collection field: decref the container block; its
-                        // registered drop releases string elements before the block
-                        // frees. `.map_`/`.set_` join this switch in E3/E4.
-                        .array_ => {
+                        // registered drop releases string elements/keys/values before
+                        // the block frees. `.set_` joins this switch in E4.
+                        .array_, .map_ => {
                             var cs: persistent.CollectionSlot = undefined;
                             @memcpy(std.mem.asBytes(&cs), buf[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)]);
                             if (cs.ptr != 0) persistent.decref(self.gpa, @ptrFromInt(cs.ptr));
@@ -1356,6 +1359,7 @@ pub const Interpreter = struct {
         // collection container is created (Pass A) or dropped (`deinit`).
         // Idempotent: every interpreter init registers the same callback.
         persistent.registerDrop(persistent.type_array, dropPersistentArray);
+        persistent.registerDrop(persistent.type_map, dropPersistentMap);
 
         // Pass A — register components and resources with the world.
         var i: u28 = 0;
@@ -3221,6 +3225,7 @@ pub const Interpreter = struct {
                 .array_ref => |h| .{ .array = .{ .handle = h, .len = self.collections.arrays.items[h].items.len, .idx = 0 } },
                 .array_persistent => |p| .{ .array_persistent = .{ .ptr = p, .len = persistentArrayOf(p).items.len, .idx = 0 } },
                 .map_ref => |h| .{ .map = .{ .handle = h, .len = self.collections.maps.items[h].items.len, .idx = 0 } },
+                .map_persistent => |p| .{ .map_persistent = .{ .ptr = p, .len = persistentMapOf(p).items.len, .idx = 0 } },
                 else => return error.RuntimeFailure,
             };
             cursor.* += 1;
@@ -3739,6 +3744,17 @@ pub const Interpreter = struct {
                 const col = self.collections.maps.items[m.handle];
                 if (m.idx >= col.items.len) return error.RuntimeFailure;
                 const pair = col.items[m.idx];
+                try locals.put(self.gpa, f.var_name, pair.key, false);
+                if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
+                m.idx += 1;
+                return true;
+            },
+            .map_persistent => {
+                const m = &ff.iter.map_persistent;
+                if (m.idx >= m.len) return false;
+                const list = persistentMapOf(m.ptr);
+                if (m.idx >= list.items.len) return error.RuntimeFailure;
+                const pair = list.items[m.idx];
                 try locals.put(self.gpa, f.var_name, pair.key, false);
                 if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
                 m.idx += 1;
@@ -4306,6 +4322,24 @@ pub const Interpreter = struct {
                             }
                         }
                     },
+                    .map_persistent => |ptr| {
+                        // `for k, v in get(R).m` over a resource map (M1.0.17 E3):
+                        // insertion order, block pointer stable, re-fetch per step.
+                        const len = persistentMapOf(ptr).items.len;
+                        var k: usize = 0;
+                        pmap_loop: while (k < len) : (k += 1) {
+                            const pair = persistentMapOf(ptr).items[k];
+                            try locals.put(self.gpa, f.var_name, pair.key, false);
+                            if (f.index_name != 0) try locals.put(self.gpa, f.index_name, pair.value, false);
+                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            if (self.thrown or self.returning) return;
+                            switch (self.handleLoopControl(0)) {
+                                .again => {},
+                                .stop => break :pmap_loop,
+                                .propagate => return,
+                            }
+                        }
+                    },
                     else => return error.RuntimeFailure,
                 }
             },
@@ -4485,15 +4519,19 @@ pub const Interpreter = struct {
                                 return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                             return;
                         }
-                        if (field.kind == .array_) {
+                        if (field.kind == .array_ or field.kind == .map_) {
                             // Whole-field reassignment `get_mut(R).xs = [...]`
-                            // (M1.0.17 E2): build a fresh persistent container from
-                            // the RHS (deep-copy elements, promote strings), then
-                            // swap the slot and decref the previous block (order
-                            // enforced in `promoteResourceCollection`). Only `=`.
+                            // (M1.0.17 E2/E3): build a fresh persistent container
+                            // from the RHS (deep-copy entries, promote strings),
+                            // then swap the slot and decref the previous block
+                            // (order enforced in `promoteResourceCollection`).
+                            // Only `=`.
                             if (assign.op != .assign) return error.RuntimeFailure;
                             const rhs = try self.evalExpr(world, locals, assign.value);
-                            const new_block = try self.buildPersistentArrayFrom(rhs);
+                            const new_block = if (field.kind == .array_)
+                                try self.buildPersistentArrayFrom(rhs)
+                            else
+                                try self.buildPersistentMapFrom(rhs);
                             errdefer persistent.decref(self.gpa, new_block);
                             Bridge.promoteResourceCollection(self.gpa, &world.registry, &world.resources, rref.resource_id, field_name, new_block) catch |e|
                                 return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
@@ -5326,6 +5364,28 @@ pub const Interpreter = struct {
                 }
                 return error.RuntimeFailure;
             },
+            .map_persistent => |ptr| {
+                // Persistent resource `[K: V]` methods (M1.0.17 E3), mirroring the
+                // rule-arena `.map_ref` arm: `insert(k, v)` (last-write-wins, keys
+                // + values promoted, old value released on replace) and `len()`.
+                // `get`/`contains` are NOT map methods (type-check-rejected) —
+                // membership/read is `m[k] -> V?` (the index path).
+                const mname = self.ast.strings.slice(mc.method_name);
+                if (std.mem.eql(u8, mname, "insert")) {
+                    if (mc.args_len != 2) return error.RuntimeFailure;
+                    const karg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+                    const varg: NodeId = @bitCast(self.ast.extra.items[mc.args_start + 1]);
+                    const k = try self.evalExpr(world, locals, karg);
+                    const v = try self.evalExpr(world, locals, varg);
+                    try self.mapInsertPromoted(persistentMapOf(ptr), k, v);
+                    return Value{ .unit = {} };
+                }
+                if (std.mem.eql(u8, mname, "len")) {
+                    if (mc.args_len != 0) return error.RuntimeFailure;
+                    return Value{ .int_ = @intCast(persistentMapOf(ptr).items.len) };
+                }
+                return error.RuntimeFailure;
+            },
             .set_ref => |handle| {
                 // Builtin set methods (M0.8 E3-C tranche 3bis — minimal
                 // faithful subset of stdlib §15.2). `insert` is the same
@@ -5552,6 +5612,57 @@ pub const Interpreter = struct {
         switch (src) {
             .array_ref => |h| for (self.collections.arrays.items[h].items) |el| try self.pushPromoted(list, el),
             .array_persistent => |p| for (persistentArrayOf(p).items) |el| try self.pushPromoted(list, el),
+            else => return error.RuntimeFailure,
+        }
+        return block;
+    }
+
+    /// Collection key equality (M1.0.17 E3): string keys compared BY BYTES (a
+    /// stored key is always a promoted `.string_persistent`, an incoming key may
+    /// be `.string_id`/`.string_run` — `Value.eql` would false-mismatch across
+    /// tags), POD keys by value. Load-bearing for the `[K:V]` unique-key policy.
+    fn collectionKeyEql(self: *const Interpreter, a: Value, b: Value) bool {
+        const ab = self.stringBytes(a);
+        const bb = self.stringBytes(b);
+        if (ab != null and bb != null) return std.mem.eql(u8, ab.?, bb.?);
+        return a.eql(b);
+    }
+
+    /// Insert `(k, v)` into a persistent map with the unique-key / last-write-wins
+    /// policy (M1.0.17 E3). On an existing key: promote the new value, decref the
+    /// OLD owned string value, replace (the key stays). On a new key: promote key
+    /// AND value, append. Leak-safe (reserve → promote → commit).
+    fn mapInsertPromoted(self: *Interpreter, list: *PersistentMap, k: Value, v: Value) !void {
+        for (list.items) |*pair| {
+            if (self.collectionKeyEql(pair.key, k)) {
+                const new_v = try self.promoteForCollection(v);
+                if (pair.value == .string_persistent and pair.value.string_persistent.ptr != 0) {
+                    persistent.decref(self.gpa, @ptrFromInt(pair.value.string_persistent.ptr));
+                }
+                pair.value = new_v;
+                return;
+            }
+        }
+        try list.ensureUnusedCapacity(self.gpa, 1);
+        const pk = try self.promoteForCollection(k);
+        const pv = self.promoteForCollection(v) catch |e| {
+            if (pk == .string_persistent and pk.string_persistent.ptr != 0) persistent.decref(self.gpa, @ptrFromInt(pk.string_persistent.ptr));
+            return e;
+        };
+        list.appendAssumeCapacity(.{ .key = pk, .value = pv });
+    }
+
+    /// Build a fresh persistent `type_map` block from a source map value (M1.0.17
+    /// E3, whole-field reassignment): deep-copy every pair (key + value promoted)
+    /// with the unique-key policy. Source is a rule-arena `.map_ref` or a
+    /// `.map_persistent`.
+    fn buildPersistentMapFrom(self: *Interpreter, src: Value) ![*]u8 {
+        const block = try allocEmptyMapBlock(self.gpa);
+        errdefer persistent.decref(self.gpa, block);
+        const list: *PersistentMap = @ptrCast(@alignCast(block));
+        switch (src) {
+            .map_ref => |h| for (self.collections.maps.items[h].items) |pair| try self.mapInsertPromoted(list, pair.key, pair.value),
+            .map_persistent => |p| for (persistentMapOf(p).items) |pair| try self.mapInsertPromoted(list, pair.key, pair.value),
             else => return error.RuntimeFailure,
         }
         return block;
@@ -5906,6 +6017,22 @@ pub const Interpreter = struct {
                     var found: ?Value = null;
                     for (self.collections.maps.items[recv.map_ref].items) |pair| {
                         if (pair.key.eql(key_v)) {
+                            found = pair.value;
+                            break;
+                        }
+                    }
+                    const oh: u32 = @intCast(self.optionals.items.len);
+                    try self.optionals.append(self.gpa, found);
+                    return Value{ .optional = oh };
+                }
+                if (recv == .map_persistent) {
+                    // `m[k] -> V?` on a resource map (M1.0.17 E3): byte/value key
+                    // match (keys are promoted `.string_persistent`); the found
+                    // value is a borrowed view (the map owns it, outlives the body).
+                    const key_v = try self.evalExpr(world, locals, ix.index);
+                    var found: ?Value = null;
+                    for (persistentMapOf(recv.map_persistent).items) |pair| {
+                        if (self.collectionKeyEql(pair.key, key_v)) {
                             found = pair.value;
                             break;
                         }
@@ -6526,40 +6653,111 @@ fn dropPersistentArray(gpa: std.mem.Allocator, p: [*]u8, size: usize) void {
     list.deinit(gpa);
 }
 
-/// Initialize a resource's `.array_` collection fields right after the resource
-/// is seeded into the store (M1.0.17 E2, first compile only). Each field gets a
-/// fresh `type_array` block written into its `CollectionSlot`: empty by default,
-/// or — for a literal-array default (`= ["a", "b"]`) — the elements deep-copied
-/// (string literals promoted to owned persistent strings, POD const inline). A
-/// live collection field's slot is therefore never `ptr == 0` (the read path
-/// relies on this). The registry field order matches `decl.fields` 1:1.
+/// The owned payload of a persistent map block (`type_map`, M1.0.17 E3): an
+/// insertion-ordered `ArrayListUnmanaged(MapPair)` (keys unique — the rule-arena
+/// `map_ref` policy). String keys and values are stored as owned
+/// `.string_persistent`; POD inline. Block pointer stable across realloc.
+const PersistentMap = std.ArrayListUnmanaged(MapPair);
+
+/// Resolve a `.map_persistent` block pointer to its owned pair list.
+fn persistentMapOf(ptr: u64) *PersistentMap {
+    return @ptrFromInt(ptr);
+}
+
+/// Allocate an empty `type_map` container block (refcount 1).
+fn allocEmptyMapBlock(gpa: std.mem.Allocator) std.mem.Allocator.Error![*]u8 {
+    const block = try persistent.alloc(gpa, persistent.type_map, @sizeOf(PersistentMap));
+    const list: *PersistentMap = @ptrCast(@alignCast(block));
+    list.* = .empty;
+    return block;
+}
+
+/// Registered `type_map` drop (M1.0.17 E3): release each pair's owned string key
+/// AND string value before deiniting the container.
+fn dropPersistentMap(gpa: std.mem.Allocator, p: [*]u8, size: usize) void {
+    _ = size;
+    const list: *PersistentMap = @ptrCast(@alignCast(p));
+    for (list.items) |pair| {
+        if (pair.key == .string_persistent and pair.key.string_persistent.ptr != 0) {
+            persistent.decref(gpa, @ptrFromInt(pair.key.string_persistent.ptr));
+        }
+        if (pair.value == .string_persistent and pair.value.string_persistent.ptr != 0) {
+            persistent.decref(gpa, @ptrFromInt(pair.value.string_persistent.ptr));
+        }
+    }
+    list.deinit(gpa);
+}
+
+/// Const-evaluate a literal-default collection entry for storage (M1.0.17): a
+/// string literal is deep-copied into an owned persistent string; any other
+/// const expression is `evalConst`'d (POD inline). Errors on a non-const entry.
+fn constCollectionValue(gpa: std.mem.Allocator, ast: *const AstArena, node: NodeId) !Value {
+    if (ast.exprKind(node) == .string_lit) return ownBytesAsPersistentString(gpa, ast.strings.slice(ast.exprData(node)));
+    return evalConst(ast, node);
+}
+
+/// Build a `type_array` container for a resource field: empty, or a literal-array
+/// default (`= [...]`) with elements deep-copied (M1.0.17 E2).
+fn initArrayBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) std.mem.Allocator.Error![*]u8 {
+    const block = try allocEmptyArrayBlock(gpa);
+    errdefer persistent.decref(gpa, block);
+    if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .array_lit) {
+        const al = ast.array_lits.items[ast.exprData(f.default_value)];
+        const list: *PersistentArray = @ptrCast(@alignCast(block));
+        var e_i: u32 = 0;
+        while (e_i < al.elements_len) : (e_i += 1) {
+            const en: NodeId = @bitCast(ast.extra.items[al.elements_start + e_i]);
+            // Reserve before promoting so a string allocation never dangles on an
+            // append-time OOM (the block's errdefer drops appended elements).
+            try list.ensureUnusedCapacity(gpa, 1);
+            const ev = constCollectionValue(gpa, ast, en) catch continue;
+            list.appendAssumeCapacity(ev);
+        }
+    }
+    return block;
+}
+
+/// Build a `type_map` container for a resource field: empty, or a literal-map
+/// default (`= [k: v, …]`) with keys+values deep-copied (M1.0.17 E3). Entries are
+/// appended in order; a degenerate duplicate key in the literal yields duplicate
+/// pairs (runtime `insert` is the last-write-wins path).
+fn initMapBlock(gpa: std.mem.Allocator, ast: *const AstArena, f: ast_mod.Field) std.mem.Allocator.Error![*]u8 {
+    const block = try allocEmptyMapBlock(gpa);
+    errdefer persistent.decref(gpa, block);
+    if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .map_lit) {
+        const ml = ast.map_lits.items[ast.exprData(f.default_value)];
+        const list: *PersistentMap = @ptrCast(@alignCast(block));
+        var e_i: u32 = 0;
+        while (e_i < ml.entries_len) : (e_i += 1) {
+            const entry = ast.map_entries.items[ml.entries_start + e_i];
+            try list.ensureUnusedCapacity(gpa, 1);
+            const kv = constCollectionValue(gpa, ast, entry.key) catch continue;
+            const vv = constCollectionValue(gpa, ast, entry.value) catch {
+                if (kv == .string_persistent and kv.string_persistent.ptr != 0) persistent.decref(gpa, @ptrFromInt(kv.string_persistent.ptr));
+                continue;
+            };
+            list.appendAssumeCapacity(.{ .key = kv, .value = vv });
+        }
+    }
+    return block;
+}
+
+/// Initialize a resource's collection fields right after the resource is seeded
+/// into the store (M1.0.17, first compile only): `.array_` → `type_array`,
+/// `.map_` → `type_map`. Each field gets a fresh container written into its
+/// `CollectionSlot` (empty or a literal default), so a live collection field's
+/// slot is never `ptr == 0` (the read path relies on this). Registry field order
+/// matches `decl.fields` 1:1. `.set_` joins in E4.
 fn initResourceCollections(gpa: std.mem.Allocator, ast: *const AstArena, world: *World, id: ComponentId, decl: ast_mod.ResourceDecl) !void {
     const fields = world.registry.componentFields(id);
     for (fields, 0..) |fd, i| {
-        if (fd.kind != .array_) continue; // .map_ / .set_ land in E3 / E4
-        const block = try allocEmptyArrayBlock(gpa);
-        errdefer persistent.decref(gpa, block);
-
         const f = ast.fields.items[decl.fields_start + i];
-        if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .array_lit) {
-            const al = ast.array_lits.items[ast.exprData(f.default_value)];
-            const list: *PersistentArray = @ptrCast(@alignCast(block));
-            var e_i: u32 = 0;
-            while (e_i < al.elements_len) : (e_i += 1) {
-                const en: NodeId = @bitCast(ast.extra.items[al.elements_start + e_i]);
-                // Reserve before promoting so a string allocation never dangles on
-                // an append-time OOM (the block's errdefer drops appended elements).
-                try list.ensureUnusedCapacity(gpa, 1);
-                const ev: Value = if (ast.exprKind(en) == .string_lit)
-                    try ownBytesAsPersistentString(gpa, ast.strings.slice(ast.exprData(en)))
-                else
-                    evalConst(ast, en) catch continue;
-                list.appendAssumeCapacity(ev);
-            }
-        }
-
-        // Write the block pointer into the resource's CollectionSlot. Re-fetch the
-        // store buffer per field (getMutResource is stable, but keep it local).
+        const block: [*]u8 = switch (fd.kind) {
+            .array_ => try initArrayBlock(gpa, ast, f),
+            .map_ => try initMapBlock(gpa, ast, f),
+            else => continue,
+        };
+        errdefer persistent.decref(gpa, block);
         const buf = world.resources.getMutResource(id) orelse {
             persistent.decref(gpa, block);
             return;
@@ -6613,6 +6811,7 @@ pub fn compileTypeDecl(
             // only (validator-gated). Fixed `T[N]` (`.array`) and `.map_type` /
             // `.set_type` are out of the E2 surface (E3/E4 add map/set).
             if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .slice) break :kb .array_;
+            if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .map_type) break :kb .map_;
             const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
             // Resolve through any top-level `type` alias chain (M0.8 foundations).
             const resolved_name_id = ast.resolveTypeAliasName(tnode.name);
@@ -6649,10 +6848,10 @@ pub fn compileTypeDecl(
         const f = ast.fields.items[fields_start + f_i];
         const fd = fields.items[f_i];
         const slot = default_buf[fd.offset .. fd.offset + @as(u16, @intCast(fd.kind.sizeBytes()))];
-        // M1.0.17 E2 — a `.array_` collection field's container is allocated at
-        // `addResource` (initResourceCollections), not here: the default slot
-        // stays `{ptr=0}` (zeroed), overwritten with the real block pointer then.
-        if (fd.kind == .array_) continue;
+        // M1.0.17 — a collection field's container is allocated at `addResource`
+        // (initResourceCollections), not here: the default slot stays `{ptr=0}`
+        // (zeroed), overwritten with the real block pointer then.
+        if (fd.kind == .array_ or fd.kind == .map_) continue;
         if (fd.kind == .string_) {
             // Resource `string` default = compile-time literal → an immortal
             // interned block (sentinel refcount): `addResource` copies only the
@@ -7908,6 +8107,160 @@ test "resource string[] iterated by an async for-in across a suspend" {
     var count: i64 = 0;
     @memcpy(std.mem.asBytes(&count), buf[cf.offset .. cf.offset + @sizeOf(i64)]);
     try std.testing.expectEqual(@as(i64, 3), count);
+}
+
+// ── M1.0.17 E3 — resource [K: V] map collection fields ────────────────────
+
+/// The collection field's container block pointer (0 if not a live collection).
+fn resourceCollectionPtr(world: *World, res_name: []const u8, field_name: []const u8) u64 {
+    const rid = world.registry.idOf(res_name).?;
+    const fd = world.registry.findField(rid, field_name).?;
+    const bytes = world.resources.getResource(rid).?;
+    var cs: persistent.CollectionSlot = undefined;
+    @memcpy(std.mem.asBytes(&cs), bytes[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)]);
+    return cs.ptr;
+}
+
+/// Bytes of a `.string_persistent` value (empty otherwise). Test helper.
+fn persistentStrBytes(v: Value) []const u8 {
+    return switch (v) {
+        .string_persistent => |s| if (s.len == 0) "" else @as([*]const u8, @ptrFromInt(s.ptr))[0..s.len],
+        else => "",
+    };
+}
+
+fn expectResourceMapLen(world: *World, res_name: []const u8, field_name: []const u8, expected: usize) !void {
+    const ptr = resourceCollectionPtr(world, res_name, field_name);
+    try std.testing.expect(ptr != 0);
+    try std.testing.expectEqual(expected, persistentMapOf(ptr).items.len);
+}
+
+/// Assert the map has a string key `key` mapping to string value `expected`.
+fn expectResourceMapStringEntry(world: *World, res_name: []const u8, field_name: []const u8, key: []const u8, expected: []const u8) !void {
+    const ptr = resourceCollectionPtr(world, res_name, field_name);
+    try std.testing.expect(ptr != 0);
+    for (persistentMapOf(ptr).items) |pair| {
+        if (std.mem.eql(u8, persistentStrBytes(pair.key), key)) {
+            try std.testing.expectEqualStrings(expected, persistentStrBytes(pair.value));
+            return;
+        }
+    }
+    return error.TestMapKeyNotFound;
+}
+
+/// Read a resource `int` field (test helper).
+fn readResourceIntNamed(world: *World, res_name: []const u8, field_name: []const u8) i64 {
+    const rid = world.registry.idOf(res_name).?;
+    const fd = world.registry.findField(rid, field_name).?;
+    const bytes = world.resources.getResource(rid).?;
+    var x: i64 = 0;
+    @memcpy(std.mem.asBytes(&x), bytes[fd.offset .. fd.offset + @sizeOf(i64)]);
+    return x;
+}
+
+test "resource [string: int] insert/get/contains/len/iteration persists" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Seed the map ONCE (guarded); every tick reads `len()` into `n`, so a per-tick
+    // reset would show as `n == 0` at tick 2+. `get` = `m[k] -> V?` (bob present →
+    // some; ghost absent → none — the membership/contains semantics); `for k, v`
+    // sums the values.
+    const source =
+        \\resource Scores {
+        \\  table: [string: int] = [:]
+        \\  seeded: bool = false
+        \\  n: int = 0
+        \\  bob: int = 0
+        \\  ghost: int = -1
+        \\  sum: int = 0
+        \\}
+        \\rule fill()
+        \\  when resource Scores
+        \\{
+        \\  if not get(Scores).seeded {
+        \\    get_mut(Scores).table.insert("alice", 100)
+        \\    get_mut(Scores).table.insert("bob", 85)
+        \\    get_mut(Scores).seeded = true
+        \\  }
+        \\  get_mut(Scores).n = get(Scores).table.len()
+        \\  if let s = get(Scores).table["bob"] {
+        \\    get_mut(Scores).bob = s
+        \\  }
+        \\  if let g = get(Scores).table["ghost"] {
+        \\    get_mut(Scores).ghost = g
+        \\  }
+        \\  let mut acc = 0
+        \\  for k, v in get(Scores).table {
+        \\    acc = acc + v
+        \\  }
+        \\  get_mut(Scores).sum = acc
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    try expectResourceMapLen(&world, "Scores", "table", 2);
+    try std.testing.expectEqual(@as(i64, 2), readResourceIntNamed(&world, "Scores", "n")); // persisted across 3 ticks
+    try std.testing.expectEqual(@as(i64, 85), readResourceIntNamed(&world, "Scores", "bob")); // get present
+    try std.testing.expectEqual(@as(i64, -1), readResourceIntNamed(&world, "Scores", "ghost")); // get absent → none
+    try std.testing.expectEqual(@as(i64, 185), readResourceIntNamed(&world, "Scores", "sum")); // iteration
+}
+
+test "resource [string: string] map drop releases keys and values" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // String keys AND values are owned persistent strings. `insert("name","bob")`
+    // over the prior `("name","alice")` REPLACES — the old "alice" value must be
+    // released (else it leaks). At teardown the map drop releases every key +
+    // value. `std.testing.allocator` fails on any leak.
+    const source =
+        \\resource Config {
+        \\  props: [string: string] = [:]
+        \\}
+        \\rule setup()
+        \\  when resource Config
+        \\{
+        \\  get_mut(Config).props.insert("name", "alice")
+        \\  get_mut(Config).props.insert("name", "bob")
+        \\  get_mut(Config).props.insert("role", "admin")
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 2);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    try expectResourceMapLen(&world, "Config", "props", 2); // last-write-wins on "name"
+    try expectResourceMapStringEntry(&world, "Config", "props", "name", "bob");
+    try expectResourceMapStringEntry(&world, "Config", "props", "role", "admin");
 }
 
 // ── M1.0.3 E3 — resource enum fields ──────────────────────────────────────

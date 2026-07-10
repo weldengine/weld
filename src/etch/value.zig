@@ -119,6 +119,13 @@ pub const Value = union(enum) {
     /// real empty block allocated at `addResource`). String elements are stored
     /// as owned `.string_persistent`; POD elements inline.
     array_persistent: u64,
+    /// A borrowed view over a resource `[K: V]` field's persistent-heap container
+    /// block (M1.0.17 E3). The `u64` is a `persistent` `type_map` block whose
+    /// payload is the owned insertion-ordered pair list. Same persistent-vs-rule-
+    /// arena split as `.map_ref`; the read path borrows it without incref (the
+    /// resource outlives the body). String keys and values are stored as owned
+    /// `.string_persistent`, POD inline. Never `0` for a live field.
+    map_persistent: u64,
     /// A `TaskHandle` (M1.0.12 E5, `etch-grammar.md` §2.2): the pool index of
     /// a spawned task in `Interpreter.async_tasks`. Safe as a bare index —
     /// the pool is MONOTONIC (no slot reuse; a finished task parks as a husk),
@@ -180,6 +187,7 @@ pub const Value = union(enum) {
             .range => false,
             .array_ref => false,
             .array_persistent => false, // collection equality is not an Etch v0.6 op (as with array_ref)
+            .map_persistent => false, // as with map_ref
             .map_ref => false,
             .set_ref => false, // set equality is not in the M0.8 minimal subset
             .closure => false,
