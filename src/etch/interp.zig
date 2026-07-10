@@ -1219,10 +1219,22 @@ pub const Interpreter = struct {
                 const rid = id_ptr.*;
                 const buf = w.resources.getResource(rid) orelse continue;
                 for (w.registry.componentFields(rid)) |fd| {
-                    if (fd.kind != .string_) continue;
-                    var ss: persistent.StringSlot = undefined;
-                    @memcpy(std.mem.asBytes(&ss), buf[fd.offset .. fd.offset + @sizeOf(persistent.StringSlot)]);
-                    if (ss.ptr != 0) persistent.decref(self.gpa, @ptrFromInt(ss.ptr));
+                    switch (fd.kind) {
+                        .string_ => {
+                            var ss: persistent.StringSlot = undefined;
+                            @memcpy(std.mem.asBytes(&ss), buf[fd.offset .. fd.offset + @sizeOf(persistent.StringSlot)]);
+                            if (ss.ptr != 0) persistent.decref(self.gpa, @ptrFromInt(ss.ptr));
+                        },
+                        // M1.0.17 — collection field: decref the container block; its
+                        // registered drop releases string elements before the block
+                        // frees. `.map_`/`.set_` join this switch in E3/E4.
+                        .array_ => {
+                            var cs: persistent.CollectionSlot = undefined;
+                            @memcpy(std.mem.asBytes(&cs), buf[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)]);
+                            if (cs.ptr != 0) persistent.decref(self.gpa, @ptrFromInt(cs.ptr));
+                        },
+                        else => {},
+                    }
                 }
             }
         }
@@ -1334,6 +1346,11 @@ pub const Interpreter = struct {
             for (persistent_literals.items) |block| persistent.destroy(gpa, block);
             persistent_literals.deinit(gpa);
         }
+
+        // M1.0.17 — register the collection block drops before any resource
+        // collection container is created (Pass A) or dropped (`deinit`).
+        // Idempotent: every interpreter init registers the same callback.
+        persistent.registerDrop(persistent.type_array, dropPersistentArray);
 
         // Pass A — register components and resources with the world.
         var i: u28 = 0;
@@ -4231,6 +4248,25 @@ pub const Interpreter = struct {
                             }
                         }
                     },
+                    .array_persistent => |ptr| {
+                        // `for x in get(R).xs` over a resource collection (M1.0.17
+                        // E2). The block pointer is stable; snapshot len and re-
+                        // fetch the list each iteration (a body push to the SAME
+                        // collection reallocs its internal buffer, not the block).
+                        const len = persistentArrayOf(ptr).items.len;
+                        var k: usize = 0;
+                        parr_loop: while (k < len) : (k += 1) {
+                            const elem = persistentArrayOf(ptr).items[k];
+                            try locals.put(self.gpa, f.var_name, elem, false);
+                            try self.execStmtRun(world, locals, f.body_start, f.body_len);
+                            if (self.thrown or self.returning) return;
+                            switch (self.handleLoopControl(0)) {
+                                .again => {},
+                                .stop => break :parr_loop,
+                                .propagate => return,
+                            }
+                        }
+                    },
                     .map_ref => |handle| {
                         // `for k, v in m` — bind key then value per entry (M0.8
                         // collections). Iteration order is insertion order in
@@ -4428,6 +4464,20 @@ pub const Interpreter = struct {
                             if (assign.op != .assign) return error.RuntimeFailure;
                             const ev = try self.evalEnumShorthandFor(world, locals, assign.value, field.enum_type_name_id);
                             Bridge.writeResourceField(&world.registry, &world.resources, rref.resource_id, field_name, ev) catch |e|
+                                return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
+                            return;
+                        }
+                        if (field.kind == .array_) {
+                            // Whole-field reassignment `get_mut(R).xs = [...]`
+                            // (M1.0.17 E2): build a fresh persistent container from
+                            // the RHS (deep-copy elements, promote strings), then
+                            // swap the slot and decref the previous block (order
+                            // enforced in `promoteResourceCollection`). Only `=`.
+                            if (assign.op != .assign) return error.RuntimeFailure;
+                            const rhs = try self.evalExpr(world, locals, assign.value);
+                            const new_block = try self.buildPersistentArrayFrom(rhs);
+                            errdefer persistent.decref(self.gpa, new_block);
+                            Bridge.promoteResourceCollection(self.gpa, &world.registry, &world.resources, rref.resource_id, field_name, new_block) catch |e|
                                 return self.fail(bridgeFailureKind(e), self.ast.exprSpan(assign.target));
                             return;
                         }
@@ -5208,6 +5258,27 @@ pub const Interpreter = struct {
                 }
                 return error.RuntimeFailure;
             },
+            .array_persistent => |ptr| {
+                // Persistent resource `T[]` methods (M1.0.17 E2), mirroring the
+                // rule-arena `.array_ref` arm but on the owned container block: the
+                // block pointer is stable across `append`, and a string element is
+                // promoted into an owned persistent string before storage (POD
+                // inline). `push`/`len` are the E2 surface; `pop` (ownership
+                // transfer out of a persistent collection) is deferred.
+                const mname = self.ast.strings.slice(mc.method_name);
+                if (std.mem.eql(u8, mname, "push")) {
+                    if (mc.args_len != 1) return error.RuntimeFailure;
+                    const arg: NodeId = @bitCast(self.ast.extra.items[mc.args_start]);
+                    const v = try self.evalExpr(world, locals, arg);
+                    try self.pushPromoted(persistentArrayOf(ptr), v);
+                    return Value{ .unit = {} };
+                }
+                if (std.mem.eql(u8, mname, "len")) {
+                    if (mc.args_len != 0) return error.RuntimeFailure;
+                    return Value{ .int_ = @intCast(persistentArrayOf(ptr).items.len) };
+                }
+                return error.RuntimeFailure;
+            },
             .set_ref => |handle| {
                 // Builtin set methods (M0.8 E3-C tranche 3bis — minimal
                 // faithful subset of stdlib §15.2). `insert` is the same
@@ -5399,6 +5470,44 @@ pub const Interpreter = struct {
             },
             else => null,
         };
+    }
+
+    /// Promote a value for storage in a persistent collection (M1.0.17): any
+    /// string (AST literal / rule-arena / borrowed persistent) is deep-copied
+    /// into a fresh persistent `type_string` block owned by the collection
+    /// (returned as `.string_persistent`, refcount 1) — this is the load-bearing
+    /// escape gate (`stringNeedsOwning` class: a `.string_run`/borrowed
+    /// `.string_persistent` would dangle at the body reset). A POD value (int /
+    /// float / bool / enum) is stored inline unchanged.
+    fn promoteForCollection(self: *Interpreter, v: Value) !Value {
+        if (self.stringBytes(v)) |bytes| return ownBytesAsPersistentString(self.gpa, bytes);
+        return v;
+    }
+
+    /// Append a promoted element to a persistent container leak-safely (M1.0.17):
+    /// reserve first, promote second, `appendAssumeCapacity` third — so a
+    /// promotion allocation never dangles on an append-time OOM.
+    fn pushPromoted(self: *Interpreter, list: *PersistentArray, v: Value) !void {
+        try list.ensureUnusedCapacity(self.gpa, 1);
+        const owned = try self.promoteForCollection(v);
+        list.appendAssumeCapacity(owned);
+    }
+
+    /// Build a fresh persistent `type_array` block from a source collection value
+    /// (M1.0.17 E2, whole-field reassignment): deep-copy every element into a new
+    /// owned container (strings promoted). The source is a rule-arena `.array_ref`
+    /// (an array literal `[...]`) or another `.array_persistent`. Returns the new
+    /// block (refcount 1); the caller hands it to `promoteResourceCollection`.
+    fn buildPersistentArrayFrom(self: *Interpreter, src: Value) ![*]u8 {
+        const block = try allocEmptyArrayBlock(self.gpa);
+        errdefer persistent.decref(self.gpa, block);
+        const list: *PersistentArray = @ptrCast(@alignCast(block));
+        switch (src) {
+            .array_ref => |h| for (self.collections.arrays.items[h].items) |el| try self.pushPromoted(list, el),
+            .array_persistent => |p| for (persistentArrayOf(p).items) |el| try self.pushPromoted(list, el),
+            else => return error.RuntimeFailure,
+        }
+        return block;
     }
 
     /// Take ownership of `bytes` into the per-body runtime-string store,
@@ -5757,6 +5866,18 @@ pub const Interpreter = struct {
                     const oh: u32 = @intCast(self.optionals.items.len);
                     try self.optionals.append(self.gpa, found);
                     return Value{ .optional = oh };
+                }
+                if (recv == .array_persistent) {
+                    // Single-element read `xs[i]` on a resource collection (M1.0.17
+                    // E2). Slicing a persistent array (`xs[0..3]`) is out of the E2
+                    // surface (it would need a fresh rule-arena copy).
+                    if (self.ast.exprKind(ix.index) == .range) return error.RuntimeFailure;
+                    const list = persistentArrayOf(recv.array_persistent);
+                    const idx_v = try self.evalExpr(world, locals, ix.index);
+                    if (idx_v != .int_) return error.RuntimeFailure;
+                    const i = std.math.cast(usize, idx_v.int_) orelse return error.RuntimeFailure;
+                    if (i >= list.items.len) return error.RuntimeFailure;
+                    return list.items[i];
                 }
                 if (recv != .array_ref) return error.RuntimeFailure;
                 if (self.ast.exprKind(ix.index) == .range) {
@@ -6304,6 +6425,101 @@ fn compileResource(
     if (!pre_existing) {
         const default_bytes = world.registry.componentDefaultBytes(id);
         try world.addResource(gpa, id, default_bytes);
+        // M1.0.17 E2 — allocate the resource's collection field containers now
+        // that the store slot exists. On a hot-reload re-compile (`pre_existing`)
+        // the resource keeps its live containers, so this runs first-compile only.
+        try initResourceCollections(gpa, ast, world, id, decl);
+    }
+}
+
+/// The owned payload of a persistent collection block (`type_array`, M1.0.17):
+/// an `ArrayListUnmanaged(Value)` living inline in the block. Its element buffer
+/// is a separate `gpa` allocation the list owns; the block (hence the
+/// `.array_persistent` / `CollectionSlot` pointer) is stable across the list's
+/// realloc — only the buffer inside moves.
+const PersistentArray = std.ArrayListUnmanaged(Value);
+
+/// Resolve an `.array_persistent` block pointer to its owned container. The
+/// block payload is 16-aligned (`persistent` `block_align`), ≥ `@alignOf`.
+fn persistentArrayOf(ptr: u64) *PersistentArray {
+    return @ptrFromInt(ptr);
+}
+
+/// Allocate an empty `type_array` container block (refcount 1) and return its
+/// exposed payload pointer. The block payload is an empty `PersistentArray`.
+fn allocEmptyArrayBlock(gpa: std.mem.Allocator) std.mem.Allocator.Error![*]u8 {
+    const block = try persistent.alloc(gpa, persistent.type_array, @sizeOf(PersistentArray));
+    const list: *PersistentArray = @ptrCast(@alignCast(block));
+    list.* = .empty;
+    return block;
+}
+
+/// Deep-copy `bytes` into a fresh persistent `type_string` block owned by a
+/// collection (M1.0.17), returned as `.string_persistent` (refcount 1). The
+/// empty string is the `ptr == 0` sentinel — no allocation, no drop cost.
+fn ownBytesAsPersistentString(gpa: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!Value {
+    if (bytes.len == 0) return Value{ .string_persistent = .{ .ptr = 0, .len = 0 } };
+    const block = try persistent.alloc(gpa, persistent.type_string, bytes.len);
+    @memcpy(block[0..bytes.len], bytes);
+    return Value{ .string_persistent = .{ .ptr = @intFromPtr(block), .len = @intCast(bytes.len) } };
+}
+
+/// Registered `type_array` drop (M1.0.17): release the container's owned string
+/// elements (each an owned `.string_persistent`, refcount 1) then deinit the
+/// container, before `persistent` frees the block. POD elements own nothing. The
+/// interpreter registers this at init; Tier-0 `persistent` only dispatches it.
+fn dropPersistentArray(gpa: std.mem.Allocator, p: [*]u8, size: usize) void {
+    _ = size;
+    const list: *PersistentArray = @ptrCast(@alignCast(p));
+    for (list.items) |v| {
+        if (v == .string_persistent and v.string_persistent.ptr != 0) {
+            persistent.decref(gpa, @ptrFromInt(v.string_persistent.ptr));
+        }
+    }
+    list.deinit(gpa);
+}
+
+/// Initialize a resource's `.array_` collection fields right after the resource
+/// is seeded into the store (M1.0.17 E2, first compile only). Each field gets a
+/// fresh `type_array` block written into its `CollectionSlot`: empty by default,
+/// or — for a literal-array default (`= ["a", "b"]`) — the elements deep-copied
+/// (string literals promoted to owned persistent strings, POD const inline). A
+/// live collection field's slot is therefore never `ptr == 0` (the read path
+/// relies on this). The registry field order matches `decl.fields` 1:1.
+fn initResourceCollections(gpa: std.mem.Allocator, ast: *const AstArena, world: *World, id: ComponentId, decl: ast_mod.ResourceDecl) !void {
+    const fields = world.registry.componentFields(id);
+    for (fields, 0..) |fd, i| {
+        if (fd.kind != .array_) continue; // .map_ / .set_ land in E3 / E4
+        const block = try allocEmptyArrayBlock(gpa);
+        errdefer persistent.decref(gpa, block);
+
+        const f = ast.fields.items[decl.fields_start + i];
+        if (!f.default_value.isNone() and ast.exprKind(f.default_value) == .array_lit) {
+            const al = ast.array_lits.items[ast.exprData(f.default_value)];
+            const list: *PersistentArray = @ptrCast(@alignCast(block));
+            var e_i: u32 = 0;
+            while (e_i < al.elements_len) : (e_i += 1) {
+                const en: NodeId = @bitCast(ast.extra.items[al.elements_start + e_i]);
+                // Reserve before promoting so a string allocation never dangles on
+                // an append-time OOM (the block's errdefer drops appended elements).
+                try list.ensureUnusedCapacity(gpa, 1);
+                const ev: Value = if (ast.exprKind(en) == .string_lit)
+                    try ownBytesAsPersistentString(gpa, ast.strings.slice(ast.exprData(en)))
+                else
+                    evalConst(ast, en) catch continue;
+                list.appendAssumeCapacity(ev);
+            }
+        }
+
+        // Write the block pointer into the resource's CollectionSlot. Re-fetch the
+        // store buffer per field (getMutResource is stable, but keep it local).
+        const buf = world.resources.getMutResource(id) orelse {
+            persistent.decref(gpa, block);
+            return;
+        };
+        const slot = buf[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)];
+        const cs = persistent.CollectionSlot{ .ptr = @intFromPtr(block) };
+        @memcpy(slot, std.mem.asBytes(&cs));
     }
 }
 
@@ -6342,19 +6558,26 @@ pub fn compileTypeDecl(
     var f_i: u32 = 0;
     while (f_i < fields_len) : (f_i += 1) {
         const f = ast.fields.items[fields_start + f_i];
-        const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
-        // Resolve through any top-level `type` alias chain (M0.8 foundations).
-        const resolved_name_id = ast.resolveTypeAliasName(tnode.name);
-        const tname = ast.strings.slice(resolved_name_id);
         var enum_type_id: u32 = 0;
-        const kind = fieldKindFromTypeName(tname, reg_kind) orelse blk: {
+        const kind: FieldKind = kb: {
+            // M1.0.17 E2 — a resource `T[]` field is a `.slice` type node (NOT
+            // `.named`): map it to `.array_` (a CollectionSlot) BEFORE the named-
+            // type decode below, which would mis-index `named_types`. Resource-
+            // only (validator-gated). Fixed `T[N]` (`.array`) and `.map_type` /
+            // `.set_type` are out of the E2 surface (E3/E4 add map/set).
+            if (reg_kind == .resource and ast.typeNodeKind(f.type_node) == .slice) break :kb .array_;
+            const tnode = ast.named_types.items[ast.typeNodeData(f.type_node)];
+            // Resolve through any top-level `type` alias chain (M0.8 foundations).
+            const resolved_name_id = ast.resolveTypeAliasName(tnode.name);
+            const tname = ast.strings.slice(resolved_name_id);
+            if (fieldKindFromTypeName(tname, reg_kind)) |k| break :kb k;
             // Enum resource field (M1.0.3 E3): a declared enum type, resource-only
             // (mirrors the `string` gate; components reject enum at the validator).
             // `enum_decls` is not built yet in this pass, so match the AST enum
             // slab directly. The declared enum type's id rides on the FieldDesc.
             if (reg_kind == .resource and findEnumDecl(ast, resolved_name_id) != null) {
                 enum_type_id = resolved_name_id;
-                break :blk FieldKind.enum_;
+                break :kb .enum_;
             }
             return error.InvalidProgram;
         };
@@ -6379,6 +6602,10 @@ pub fn compileTypeDecl(
         const f = ast.fields.items[fields_start + f_i];
         const fd = fields.items[f_i];
         const slot = default_buf[fd.offset .. fd.offset + @as(u16, @intCast(fd.kind.sizeBytes()))];
+        // M1.0.17 E2 — a `.array_` collection field's container is allocated at
+        // `addResource` (initResourceCollections), not here: the default slot
+        // stays `{ptr=0}` (zeroed), overwritten with the real block pointer then.
+        if (fd.kind == .array_) continue;
         if (fd.kind == .string_) {
             // Resource `string` default = compile-time literal → an immortal
             // interned block (sentinel refcount): `addResource` copies only the
@@ -7294,6 +7521,220 @@ test "resource string field is mutable and the previous value is released (M1.0.
     const after_second = counting.snapshot();
     try std.testing.expect(after_second.free_count > after_first.free_count);
     try expectResourceStringField(&world, "S", "name", "boss_arena");
+}
+
+// ── M1.0.17 E2 — resource string[] collection fields ──────────────────────
+
+/// Read a resource `.array_` field's container and assert its string elements
+/// match `expected` (element count + each element's bytes). A live collection
+/// field's `CollectionSlot` is never `ptr == 0` (a real empty block at least).
+fn expectResourceArrayStrings(
+    world: *World,
+    res_name: []const u8,
+    field_name: []const u8,
+    expected: []const []const u8,
+) !void {
+    const rid = world.registry.idOf(res_name).?;
+    const fd = world.registry.findField(rid, field_name).?;
+    const bytes = world.resources.getResource(rid).?;
+    var cs: persistent.CollectionSlot = undefined;
+    @memcpy(std.mem.asBytes(&cs), bytes[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)]);
+    try std.testing.expect(cs.ptr != 0);
+    const list = persistentArrayOf(cs.ptr);
+    try std.testing.expectEqual(expected.len, list.items.len);
+    for (expected, 0..) |exp, i| {
+        const got: []const u8 = switch (list.items[i]) {
+            .string_persistent => |s| if (s.len == 0) "" else @as([*]const u8, @ptrFromInt(s.ptr))[0..s.len],
+            else => return error.TestExpectedStringElement,
+        };
+        try std.testing.expectEqualStrings(exp, got);
+    }
+}
+
+test "resource string[] defaults empty, pushes across ticks, reads len and index" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `items` starts empty; each tick pushes "sword", then reads `len()` into
+    // `count` and `items[0]` into `first` (both Etch-side reads, verifiable).
+    const source =
+        \\resource Inventory {
+        \\  items: string[] = []
+        \\  count: int = 0
+        \\  first: string = ""
+        \\}
+        \\rule add()
+        \\  when resource Inventory
+        \\{
+        \\  get_mut(Inventory).items.push("sword")
+        \\  get_mut(Inventory).count = get(Inventory).items.len()
+        \\  get_mut(Inventory).first = get(Inventory).items[0]
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // Three pushes accumulated across three ticks (no per-body reset).
+    try expectResourceArrayStrings(&world, "Inventory", "items", &.{ "sword", "sword", "sword" });
+    const rid = world.registry.idOf("Inventory").?;
+    const buf = world.resources.getResource(rid).?;
+    const cf = world.registry.findField(rid, "count").?;
+    var count: i64 = 0;
+    @memcpy(std.mem.asBytes(&count), buf[cf.offset .. cf.offset + @sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 3), count);
+    try expectResourceStringField(&world, "Inventory", "first", "sword");
+}
+
+test "resource string[] persists across world.tick (no rule-arena reset)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Push exactly once (guarded by `done`); every tick reads `len()` into
+    // `seen`. If the collection were rule-arena-scoped (reset at the body
+    // boundary), tick 2's read would see 0 — `seen == 1` proves persistence.
+    const source =
+        \\resource Log {
+        \\  entries: string[] = []
+        \\  done: bool = false
+        \\  seen: int = 0
+        \\}
+        \\rule fill()
+        \\  when resource Log
+        \\{
+        \\  if not get(Log).done {
+        \\    get_mut(Log).entries.push("first")
+        \\    get_mut(Log).done = true
+        \\  }
+        \\  get_mut(Log).seen = get(Log).entries.len()
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 3);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    try expectResourceArrayStrings(&world, "Log", "entries", &.{"first"});
+    const rid = world.registry.idOf("Log").?;
+    const buf = world.resources.getResource(rid).?;
+    const sf = world.registry.findField(rid, "seen").?;
+    var seen: i64 = 0;
+    @memcpy(std.mem.asBytes(&seen), buf[sf.offset .. sf.offset + @sizeOf(i64)]);
+    try std.testing.expectEqual(@as(i64, 1), seen);
+}
+
+test "resource string[] whole-field reassignment releases previous backing" {
+    // A counting allocator proves the previous backing (the `["a","b"]` container
+    // block + its two string blocks) is freed on reassignment, and that nothing
+    // leaks at teardown (the testing allocator behind it fails on any leak).
+    var counting = weld_core.testing.alloc_counting.CountingAllocator.init(std.testing.allocator);
+    const gpa = counting.allocator();
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Literal-array default `["a","b"]` (materialized at addResource), reassigned
+    // to `["x","y","z"]` on tick 1.
+    const source =
+        \\resource Inventory { items: string[] = ["a", "b"] }
+        \\rule reset()
+        \\  when resource Inventory
+        \\{
+        \\  get_mut(Inventory).items = ["x", "y", "z"]
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    // The default is materialized at compile; snapshot, then reassign on tick 1.
+    try expectResourceArrayStrings(&world, "Inventory", "items", &.{ "a", "b" });
+    const before = counting.snapshot();
+    const report = try interp.runFor(&world, 1);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+    const after = counting.snapshot();
+
+    // The old backing (array block + "a" + "b") was freed by the reassignment.
+    try std.testing.expect(after.free_count > before.free_count);
+    try expectResourceArrayStrings(&world, "Inventory", "items", &.{ "x", "y", "z" });
+}
+
+test "resource string[] push promotes a runtime string (no use-after-free after body reset)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // `s` is a runtime concat (`.string_run`, freed at the body boundary). If
+    // push did not deep-copy it into an owned persistent string, `items[0]` read
+    // on the NEXT tick — after tick 1's `run_strings` were freed — would dangle.
+    // Reading back "hp:100" proves the promotion survived the body reset.
+    const source =
+        \\resource Log {
+        \\  entries: string[] = []
+        \\  last: string = ""
+        \\}
+        \\rule add()
+        \\  when resource Log
+        \\{
+        \\  let s = "hp:" + "100"
+        \\  get_mut(Log).entries.push(s)
+        \\  get_mut(Log).last = get(Log).entries[0]
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+    const report = try interp.runFor(&world, 2);
+    try std.testing.expectEqual(@as(u64, 0), report.runtime_errors);
+
+    // Tick 2 read `items[0]` (a tick-1-pushed element) as "hp:100" — the promoted
+    // copy outlived tick 1's body reset.
+    try expectResourceArrayStrings(&world, "Log", "entries", &.{ "hp:100", "hp:100" });
+    try expectResourceStringField(&world, "Log", "last", "hp:100");
 }
 
 // ── M1.0.3 E3 — resource enum fields ──────────────────────────────────────

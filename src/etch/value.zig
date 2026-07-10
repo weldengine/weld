@@ -108,6 +108,17 @@ pub const Value = union(enum) {
     /// and no interpreter store; `ptr == 0` ⇔ the empty string. Additive — does
     /// not disturb `string_id` (AST pool) / `string_run` (rule-arena) semantics.
     string_persistent: StrView,
+    /// A borrowed view over a resource `T[]` field's persistent-heap container
+    /// block (M1.0.17 E2). The `u64` is the block's exposed payload pointer (a
+    /// `persistent` `type_array` block whose payload is the owned
+    /// `ArrayListUnmanaged(Value)`). Mirrors `.string_persistent`'s persistent-vs-
+    /// rule-arena split against `.array_ref`: the zone is known at the tag, no
+    /// runtime discriminant, drop dispatched by `type_id`. The read path returns
+    /// it without incref — safe for the rule body because the resource (hence the
+    /// block) outlives it. Never `0` for a live field (the empty collection is a
+    /// real empty block allocated at `addResource`). String elements are stored
+    /// as owned `.string_persistent`; POD elements inline.
+    array_persistent: u64,
     /// A `TaskHandle` (M1.0.12 E5, `etch-grammar.md` §2.2): the pool index of
     /// a spawned task in `Interpreter.async_tasks`. Safe as a bare index —
     /// the pool is MONOTONIC (no slot reuse; a finished task parks as a husk),
@@ -168,6 +179,7 @@ pub const Value = union(enum) {
             .resource_ref => false,
             .range => false,
             .array_ref => false,
+            .array_persistent => false, // collection equality is not an Etch v0.6 op (as with array_ref)
             .map_ref => false,
             .set_ref => false, // set equality is not in the M0.8 minimal subset
             .closure => false,

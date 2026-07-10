@@ -266,6 +266,36 @@ pub const Bridge = struct {
 
         if (old.ptr != 0) persistent.decref(gpa, @ptrFromInt(old.ptr));
     }
+
+    /// Swap a resource collection field's slot to a freshly-built persistent
+    /// container block (M1.0.17 E2, whole-field reassignment `get_mut(R).xs =
+    /// [...]`). The interpreter builds `new_block` (a `type_array` block whose
+    /// elements are deep-copied, strings promoted — it owns the collections store
+    /// + string helpers this needs); the bridge does only the slot mechanics, in
+    /// the load-bearing order: read the old slot → write the new slot → decref the
+    /// previous block (never before the new one is in place). The previous block's
+    /// drop (registered by the interpreter) releases its string elements.
+    pub fn promoteResourceCollection(
+        gpa: std.mem.Allocator,
+        registry: *const Registry,
+        store: *ResourceStore,
+        resource_id: ComponentId,
+        field_name: []const u8,
+        new_block: [*]u8,
+    ) BridgeError!void {
+        const field = registry.findField(resource_id, field_name) orelse return BridgeError.UnknownField;
+        std.debug.assert(field.kind == .array_ or field.kind == .map_ or field.kind == .set_);
+        const buf = store.getMutResource(resource_id) orelse return BridgeError.UnknownResource;
+        const slot = buf[field.offset .. field.offset + @sizeOf(persistent.CollectionSlot)];
+
+        var old: persistent.CollectionSlot = undefined;
+        @memcpy(std.mem.asBytes(&old), slot);
+
+        const new_slot = persistent.CollectionSlot{ .ptr = @intFromPtr(new_block) };
+        @memcpy(slot, std.mem.asBytes(&new_slot));
+
+        if (old.ptr != 0) persistent.decref(gpa, @ptrFromInt(old.ptr));
+    }
 };
 
 // ─── Byte ↔ Value conversion ─────────────────────────────────────────────
@@ -320,11 +350,21 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
         // delegating here, and components never carry `.enum_` (validator-gated).
         // Proven invariant: this arm is never reached.
         .enum_ => unreachable,
-        // Collection reads (M1.0.17) are built by a dedicated `readResourceField`
-        // special-case (E2+) — an `*_persistent` view from the `CollectionSlot`,
-        // never delegated here — and components never carry a collection kind
-        // (validator-gated, resource-only). Proven invariant: never reached.
-        .array_, .map_, .set_ => unreachable,
+        // Collection read (M1.0.17 E2): decode the `CollectionSlot { ptr }` into a
+        // borrowed `.array_persistent` view over the owned container block (no
+        // incref — the resource, hence the block, outlives the rule body). `ptr`
+        // is never 0 for a live field (the empty collection is a real block
+        // allocated at `addResource`). Components never carry a collection kind
+        // (validator-gated, resource-only), so this is reached only via
+        // `readResourceField`.
+        .array_ => blk: {
+            var cs: persistent.CollectionSlot = undefined;
+            @memcpy(std.mem.asBytes(&cs), bytes[0..@sizeOf(persistent.CollectionSlot)]);
+            break :blk .{ .array_persistent = cs.ptr };
+        },
+        // Map / set reads land in E3 / E4 (their `*_persistent` tags don't exist
+        // yet); until then no runtime descriptor emits `.map_`/`.set_`. Never reached.
+        .map_, .set_ => unreachable,
         // Entity field (M1.0.6 E4): decode the 8-byte `EntityId` (`value.zig`'s
         // `EntityId` is a `u64` that shares the bit pattern of core `EntityId`,
         // packed `struct(u64)`; `invalid_entity`/`dead` == all-ones). The runtime
