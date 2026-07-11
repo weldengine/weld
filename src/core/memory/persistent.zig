@@ -48,7 +48,7 @@ const std = @import("std");
 
 /// Coarse type tag stored in each block's header, used to dispatch the
 /// drop that releases a type's owned sub-resources before the block is
-/// freed. Open set: M1.0.4 dynamic collections add their own ids.
+/// freed. Open set: M1.0.17 dynamic collections add their own ids.
 pub const TypeId = u32;
 
 /// A block whose payload owns no sub-resources (the bytes/POD live inline
