@@ -45,6 +45,11 @@ comptime {
     // `StringSlot` layout (`persistent.zig`) the bridge reads/writes — one
     // source of truth across the Tier-0 / Etch boundary.
     std.debug.assert(@sizeOf(persistent.StringSlot) == FieldKind.string_.sizeBytes());
+    // Same one-source-of-truth guard for the collection slot stride (M1.0.17):
+    // `CollectionSlot { ptr }` must match `.array_`/`.map_`/`.set_` sizeBytes.
+    std.debug.assert(@sizeOf(persistent.CollectionSlot) == FieldKind.array_.sizeBytes());
+    std.debug.assert(@sizeOf(persistent.CollectionSlot) == FieldKind.map_.sizeBytes());
+    std.debug.assert(@sizeOf(persistent.CollectionSlot) == FieldKind.set_.sizeBytes());
 }
 
 /// Surfaced so callers of `Bridge.dispatchEntityGet` /
@@ -261,6 +266,36 @@ pub const Bridge = struct {
 
         if (old.ptr != 0) persistent.decref(gpa, @ptrFromInt(old.ptr));
     }
+
+    /// Swap a resource collection field's slot to a freshly-built persistent
+    /// container block (M1.0.17 E2, whole-field reassignment `get_mut(R).xs =
+    /// [...]`). The interpreter builds `new_block` (a `type_array` block whose
+    /// elements are deep-copied, strings promoted — it owns the collections store
+    /// + string helpers this needs); the bridge does only the slot mechanics, in
+    /// the load-bearing order: read the old slot → write the new slot → decref the
+    /// previous block (never before the new one is in place). The previous block's
+    /// drop (registered by the interpreter) releases its string elements.
+    pub fn promoteResourceCollection(
+        gpa: std.mem.Allocator,
+        registry: *const Registry,
+        store: *ResourceStore,
+        resource_id: ComponentId,
+        field_name: []const u8,
+        new_block: [*]u8,
+    ) BridgeError!void {
+        const field = registry.findField(resource_id, field_name) orelse return BridgeError.UnknownField;
+        std.debug.assert(field.kind == .array_ or field.kind == .map_ or field.kind == .set_);
+        const buf = store.getMutResource(resource_id) orelse return BridgeError.UnknownResource;
+        const slot = buf[field.offset .. field.offset + @sizeOf(persistent.CollectionSlot)];
+
+        var old: persistent.CollectionSlot = undefined;
+        @memcpy(std.mem.asBytes(&old), slot);
+
+        const new_slot = persistent.CollectionSlot{ .ptr = @intFromPtr(new_block) };
+        @memcpy(slot, std.mem.asBytes(&new_slot));
+
+        if (old.ptr != 0) persistent.decref(gpa, @ptrFromInt(old.ptr));
+    }
 };
 
 // ─── Byte ↔ Value conversion ─────────────────────────────────────────────
@@ -315,6 +350,30 @@ pub fn readBytesAsValue(kind: FieldKind, bytes: []const u8) Value {
         // delegating here, and components never carry `.enum_` (validator-gated).
         // Proven invariant: this arm is never reached.
         .enum_ => unreachable,
+        // Collection read (M1.0.17 E2): decode the `CollectionSlot { ptr }` into a
+        // borrowed `.array_persistent` view over the owned container block (no
+        // incref — the resource, hence the block, outlives the rule body). `ptr`
+        // is never 0 for a live field (the empty collection is a real block
+        // allocated at `addResource`). Components never carry a collection kind
+        // (validator-gated, resource-only), so this is reached only via
+        // `readResourceField`.
+        .array_ => blk: {
+            var cs: persistent.CollectionSlot = undefined;
+            @memcpy(std.mem.asBytes(&cs), bytes[0..@sizeOf(persistent.CollectionSlot)]);
+            break :blk .{ .array_persistent = cs.ptr };
+        },
+        // Map read (M1.0.17 E3): same borrowed-view decode as `.array_`.
+        .map_ => blk: {
+            var cs: persistent.CollectionSlot = undefined;
+            @memcpy(std.mem.asBytes(&cs), bytes[0..@sizeOf(persistent.CollectionSlot)]);
+            break :blk .{ .map_persistent = cs.ptr };
+        },
+        // Set read (M1.0.17 E4): same borrowed-view decode.
+        .set_ => blk: {
+            var cs: persistent.CollectionSlot = undefined;
+            @memcpy(std.mem.asBytes(&cs), bytes[0..@sizeOf(persistent.CollectionSlot)]);
+            break :blk .{ .set_persistent = cs.ptr };
+        },
         // Entity field (M1.0.6 E4): decode the 8-byte `EntityId` (`value.zig`'s
         // `EntityId` is a `u64` that shares the bit pattern of core `EntityId`,
         // packed `struct(u64)`; `invalid_entity`/`dead` == all-ones). The runtime
@@ -407,6 +466,13 @@ pub fn writeValueAsBytes(kind: FieldKind, bytes: []u8, v: Value) BridgeError!voi
             };
             @memcpy(bytes[0..@sizeOf(value_mod.EntityId)], std.mem.asBytes(&x));
         },
+        // A collection write is a persistent promotion (alloc + deep-copy +
+        // decref of the previous slot), needing an allocator and the old slot —
+        // the POD byte-encoder has neither. Resource collection writes route
+        // through `promoteResourceCollection` (M1.0.17 E2+); components never
+        // carry a collection kind (validator-gated). Reaching here is a bug,
+        // surfaced as a typed error, never a panic — the `.string_` precedent.
+        .array_, .map_, .set_ => return error.TypeMismatch,
     }
 }
 

@@ -53,6 +53,15 @@ comptime {
     // M1.0.15 — the test runner's inline tests (the `pub const test_runner`
     // re-export pulls its declarations, NOT its `test` blocks — §13).
     _ = @import("test_runner.zig");
+    // M1.0.17 — explicit wire-in of `types.zig`'s inline tests (E0101,
+    // scene/prefab/const validation, the M1.0.17 resource-collection acceptance
+    // tests, …), consistent with the sibling entries above. NOTE: unlike those,
+    // this one is *belt-and-suspenders* — a deliberate-failure probe confirmed
+    // `zig build test` already collects `types.zig`'s `test` blocks via the
+    // `pub const types` re-export (a public re-export of the root module is
+    // force-analyzed, tests included), WITH and WITHOUT this line (etch_tests
+    // count identical). Kept for explicitness; not load-bearing (§13 residual).
+    _ = @import("types.zig");
 }
 
 /// M1.0.4 scene cook — `.scene.etch` source → the neutral Tier-0 scene model

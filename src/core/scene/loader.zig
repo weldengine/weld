@@ -470,6 +470,19 @@ fn loadResources(
     while (i < count) : (i += 1) {
         const r = acc.resource(i);
         const cid = remap[r.schema_index];
+
+        // M1.0.17 — the loader reconstructs POD + interned `string` resource fields
+        // only. A collection field (`.array_`/`.map_`/`.set_`) on disk is a zeroed
+        // `CollectionSlot` (ptr == 0); installing it would crash the interpreter on
+        // first access AND overwrite (without decref) any container the running
+        // program already built — a leak. Reject cleanly; full persistent-block
+        // reconstruction at scene-load is a Tier-0 scene-serialization milestone
+        // (M1.6), not this one.
+        for (world.registry.componentFields(cid)) |fd| switch (fd.kind) {
+            .array_, .map_, .set_ => return error.CollectionResourceFieldUnsupported,
+            else => {},
+        };
+
         const size = world.registry.componentSize(cid);
         std.debug.assert(r.data.len == size);
 
