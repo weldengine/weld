@@ -2,8 +2,9 @@
 //!
 //! Bodies live in a `std.MultiArrayList` (SoA) keyed by a generational
 //! `IdAllocator` (LIFO free-list, generation bump on remove; identical
-//! mechanism to `ShapeStore`). Each element is 16 bytes — `Vec3r` position
-//! (16-aligned) and `Quatr` rotation (4×f32, matching the element layout of
+//! mechanism to `ShapeStore`). Each element is 16 bytes at the default
+//! `Real = f32` (32 bytes at `f64`) — `Vec3r` position (16-aligned) and `Quatr`
+//! rotation (4×f32, matching the element layout of
 //! `core.ecs.components.Transform.rot`) — so element-wise copy to/from the ECS
 //! `Transform` is layout-clean (Notes decision 7). Caveat: `Quatr` is align-4
 //! (the E1-frozen `Quat` storage), so the rotation column matches

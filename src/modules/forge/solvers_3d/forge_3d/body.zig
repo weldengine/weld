@@ -82,6 +82,10 @@ pub fn computeMotion(desc: BodyDescriptor, shape: Shape) MotionProperties {
         };
     }
 
+    // A dynamic body must have positive mass (inv_mass/inertia divide by it).
+    // Full descriptor validation (typed errors, degenerate geometry) is a later
+    // milestone; this guards the unchecked dynamic path.
+    std.debug.assert(desc.mass > 0);
     const mass: Real = desc.mass;
     const inertia = shape.unit_inertia.scale(mass).toArray(); // principal-axis diagonal
     const inv_inertia = Vec3r.fromArray(.{
