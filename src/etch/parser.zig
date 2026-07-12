@@ -1,12 +1,15 @@
-//! S3 Etch parser — recursive descent for declarations, statements and
-//! `when` clauses; Pratt parsing for binary expressions using the
-//! precedence table from `etch-grammar.md` §3.1 restricted to the S3
-//! operator set (all left-associative).
+//! Etch parser — recursive descent for declarations, statements and
+//! `when` clauses; Pratt parsing for expressions using the full
+//! `etch-grammar.md` §3.1 precedence table. Grown from the S3 subset to
+//! the complete EBNF v0.6 grammar in M0.8; the incremental hybrid
+//! LR(1)+Pratt rewrite is a separate milestone (M1.9, `etch-parser.md`
+//! §23) — until that switch this file is the batch parser.
 //!
-//! Produces an `AstArena` directly (no intermediate CST). On the first
-//! parse error the parser stops; the returned AST contains a best-effort
-//! partial result so subsequent type-checking can run on declarations
-//! parsed before the error (cf. `briefs/S3-etch-parser-subset.md` Scope).
+//! Produces an `AstArena` directly (no intermediate CST). Since the M0.8
+//! top-level recovery sync-point the parser no longer stops at the first
+//! error: it advances to the next top-level keyword and resumes, so a
+//! broken file yields one diagnostic per broken construct while the sane
+//! constructs still land in the AST (cf. `ParseResult` below).
 
 const std = @import("std");
 const token_mod = @import("token.zig");

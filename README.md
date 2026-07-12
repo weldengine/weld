@@ -2,96 +2,26 @@
 
 A game engine written in Zig 0.16.x.
 
-> **Status:** Phase 0 — M0.0 closed
+> **Status:** Phase 1 (Playability) — in progress.
 >
-> Phase −1 closed 2026-05-18 with all seven engineering hypotheses (S0–S6)
-> validated — Phase 0 (Fondations) is now underway. The repo is internal
-> until end of Phase 1.
+> - **Phase −1** (7 validation spikes S0–S6) closed 2026-05-18.
+> - **Phase 0** (Foundations, M0.0–M0.9) closed 2026-06-15, tag
+>   `v0.9.0-phase-0-complete` — Tier 0 (ECS, jobs, RTTI, resources,
+>   events, plugin-loader skeleton, IPC, platform), Vulkan forward
+>   renderer + GAL, offline asset pipeline, Etch toolchain
+>   (full-grammar parser + tree-walking interpreter + Zig codegen
+>   prototype), vertical slice.
+> - **Phase 1 / M1.0** (Etch ↔ ECS, core-language execution) closed
+>   2026-07-12, tag `v0.10.18-extension-additive-warning` — the C1.6
+>   Etch core-language closure. Next: the Tier 1 module cores (Forge,
+>   Kinesis, Cortex, Pulse, Render delta), Asset Pipeline v1, and the
+>   Phase 1 demo game.
 >
-> **S1** (closed, tag `v0.0.2-S1-mini-ecs`) validated the comptime ECS +
-> Chase-Lev work-stealing hypothesis on a single `(Transform, Velocity)`
-> archetype with a 4-worker pool — 54.5 µs median per 100 k entities
-> iterated on the M4 Pro reference (gate: ≤ 1 ms). Run the bench locally
-> with `zig build bench-ecs -Doptimize=ReleaseSafe`.
->
-> **S2** (closed, tag `v0.0.3-S2-window-vulkan-triangle`) validated the
-> "100 % Zig windowing + Vulkan triangle" hypothesis on three
-> target machines: Win11 + RTX 4080 Super, Fedora 44 + Intel UHD 630 (Mesa
-> ANV), Fedora 44 + GTX 1660 Ti (NVIDIA proprietary). Native Win32 +
-> Wayland windowing (no SDL/GLFW, no `@cImport`), custom XML → Zig binding
-> generators emitting ~34 000 lines of idiomatic Zig from the vendored
-> upstream registries, Vulkan 1.3 triangle render path. Full report:
-> [`validation/s2-go-nogo.md`](validation/s2-go-nogo.md).
->
-> **S3** (closed, tag `v0.0.4-S3-etch-parser-subset`) validated the Etch
-> grammar (EBNF v0.6, S3 subset: `component`,
-> `resource`, `rule`, `when`, basic arithmetic expressions) — lexer +
-> recursive-descent + Pratt parser + tabular SoA `AstArena` + minimal
-> two-pass type-checker. Worst median 0.019 ms / file across 30 corpus
-> files on dev Apple Silicon ReleaseSafe (gate: < 5 ms). Run the bench
-> locally with `zig build bench-etch -Doptimize=ReleaseSafe`.
->
-> **S4** (closed, tag `v0.0.5-S4-etch-tree-walking-interpreter`) validated
-> the tree-walking interpreter hypothesis — the AST emitted by S3 is
-> correctly executable, and a runtime bridge exists between the
-> interpreter and the dynamic ECS surface (runtime component registry,
-> dynamic SoA archetype, resource store, runtime query). On the dev
-> primary (Apple Silicon, ReleaseSafe) the bench reports a median per
-> tick of **0.603 ms** at 1 000 entities × 5 rules and **6.593 ms** at
-> 10 000 entities × 5 rules — well under the 10 ms / 100 ms gates
-> respectively. Run the bench locally with
-> `zig build bench-etch-interp -Doptimize=ReleaseSafe` and the demo with
-> `zig build run-demo-etch-interp -Doptimize=ReleaseSafe`.
->
-> **S5** (closed, tag `v0.0.6-S5-etch-codegen-zig`) validated
-> the shipping codegen hypothesis — `Etch → Zig source → Zig compile` is
-> viable build-time-wise. The codegen lives in `src/etch/zig_codegen/`
-> and lowers the S3 subset to idiomatic Zig: components become `extern
-> struct`s, rules open `comptime_query.query(world, .{T1, T2})`
-> iterations (via `src/core/ecs/comptime_query.zig`), and the registry
-> aliases each component by both Etch name and `@typeName(T)` so the
-> spawn-by-name and query-by-type paths share one `ComponentId`. The
-> 20-program differential corpus passes through both the interpreter
-> and the cooked code with byte-exact parity (`zig build
-> test-codegen-diff`). On the dev primary the compile-time bench
-> reports cold (a)+(b) at **1104 ms** and incremental (a)+(c) at
-> **1066 ms** — 27× and 1.9× under the 30 s / 2 s gates respectively;
-> Gate 4 measures **382 distinct comptime query instantiations** on the
-> 100-file synth corpus (ceiling 4× = 1528). Run the bench locally with
-> `zig build bench-etch-compile -Doptimize=ReleaseSafe` and the demo
-> with `zig build run-demo-etch-codegen`. Full report:
-> [`validation/s5-go-nogo.md`](validation/s5-go-nogo.md).
->
-> **S6** (closed, tag `v0.0.7-S6-ipc-round-trip` on `main` since 2026-05-18)
-> validated the editor↔runtime IPC. `src/core/ipc/` is the Tier 0 endpoint per
-> `engine-ipc.md` — AF_UNIX socket / Win32 named pipe transport, 16 B
-> framing header + comptime Wyhash `schemaHash`, 13-message catalogue,
-> POSIX shm + Win32 file-mapping double-buffer viewport, fd-passing
-> via `SCM_RIGHTS` cmsg. `src/editor/main.zig` and `src/runtime/main.zig`
-> are the two canonical binaries at their Phase 0+ locations; the editor
-> opens a 1280×720 Vulkan window and presents the runtime's
-> CPU-side mire via a fullscreen-triangle blit pipeline
-> (`src/editor/vk_blit.zig`, SPIR-V committed under
-> `assets/shaders/viewport_blit.{vert,frag}.spv`). Bench RTT on the
-> dev primary (Apple Silicon, ReleaseSafe) reports **p50 6 µs / p99
-> 16 µs / max 61 µs** — G1 < 1 ms cleared by ~166×, G2 cleared. G6
-> visual on Fedora 44 + GTX 1660 Ti: GO (60 s observation, no
-> tearing, no stale frame > 100 ms). One macOS BSD POSIX shm cross-
-> process limitation found en route, scoped to a Phase 0.6 SCM_RIGHTS
-> fd-passing migration. Full report:
-> [`validation/s6-go-nogo.md`](validation/s6-go-nogo.md).
-> Brief: [`briefs/S6-ipc-editor-runtime.md`](briefs/S6-ipc-editor-runtime.md).
->
-> **M0.0** (closed, tag `v0.0.8-M0.0-lint-custom` on `main` since
-> 2026-05-20) — first Phase 0 milestone. Ships an in-tree Zig linter
-> (`tools/weld_lint/`) enforcing four patterns (no `@cImport`, no
-> `usingnamespace`, `///` doc comments on every root-level `pub`, `*_c`
-> module imports only from generated files) and Conventional Commits
-> validation via `zig build lint-commit`. Lefthook now drives both passes
-> in the local hooks. The default scan covers `src/ bench/ tests/
-> tools/` — `tools/` was added in-review so the linter sweeps its own
-> sources and the throwaway `vk_gen` / `wayland_gen` generators on every
-> run. Brief: [`briefs/M0.0-lint-custom.md`](briefs/M0.0-lint-custom.md).
+> The repo is internal until the end of Phase 1. The living state
+> (current milestone, full tag table, open decisions) is in
+> [`CLAUDE.md`](CLAUDE.md); per-milestone history is under
+> [`briefs/`](briefs/) and hardware validation reports under
+> [`validation/`](validation/).
 
 ## Prerequisites
 
@@ -104,90 +34,82 @@ A game engine written in Zig 0.16.x.
 ## Basic commands
 
 ```sh
-zig build                                                # build the weld executable
-zig build run                                            # build and run (S2 spike — open window + render triangle)
-zig build test                                           # run all tests (S0/S1/S2/S3: spike + ABI + ECS + jobs + Etch corpus)
-zig build bench-ecs -Doptimize=ReleaseSafe               # S1 ECS iteration bench
-zig build bench-etch -Doptimize=ReleaseSafe              # S3 Etch parser bench (report under bench/results/)
-zig build bench-etch-interp -Doptimize=ReleaseSafe       # S4 Etch interpreter bench (report under bench/results/)
-zig build run-demo-etch-interp -Doptimize=ReleaseSafe    # S4 demo (1000 entities × 5 rules × 60 ticks)
-zig build bench-etch-compile -Doptimize=ReleaseSafe      # S5 codegen compile-time bench (3 metrics, report under bench/results/)
-zig build run-demo-etch-codegen                          # S5 codegen demo (cooks demo_5_rules_codegen.etch, 10 ticks)
-zig build test-codegen-diff                              # S5 differential corpus via the cooked runner
-zig build synth-100 -- --output bench/fixtures/synth_100/scripts --count 100   # regenerate the synthetic bench corpus
-zig build bench-ecs -- --smoke                           # short bench run (used by CI)
-zig build bench-etch -- --smoke                          # short Etch bench run (sanity)
-zig build bench-etch-interp -- --smoke                   # short S4 bench run (sanity)
-zig build bench-etch-compile -- --smoke                  # short S5 compile-time bench (sanity)
-zig build run-editor-stub                                # S6 editor stub alone (spawns the runtime)
-zig build run-runtime-stub                               # S6 runtime stub alone (needs --socket=… --shm=…)
-zig build run-ipc-demo                                   # S6 full demo: editor spawns runtime, window + mire 60 s
-zig build run-ipc-demo -- --frames=600                   #   override the frame budget (default 3600 ≈ 60 s)
-zig build bench-ipc-rtt -Doptimize=ReleaseSafe           # S6 Echo RTT bench (N=10 000, report under bench/results/)
-zig build test-ipc                                       # S6 IPC tests (subset of `zig build test`, fast iteration)
-zig build test-ipc-fuzz-1h                               # S6 1 h fuzz harness — manual invocation only
-zig build lint                                           # M0.0 custom linter on src/ bench/ tests/ tools/
-zig build lint-commit -- <file>                          # M0.0 Conventional Commits validation (used by commit-msg hook)
-./scripts/install-hooks.sh                               # install local git hooks (run once after clone)
+# build & run
+zig build                                                # build everything (default install step)
+zig build run-editor-stub                                # editor binary — opens a window, spawns the runtime
+zig build run-runtime-stub                               # runtime binary alone (needs --socket=… --shm=… argv)
+zig build run-ipc-demo                                   # full editor↔runtime demo (window + Vulkan blit, ~60 s)
+zig build run-demo-etch-interp                           # Etch tree-walking interpreter demo (1000 entities × 5 rules)
+zig build run-demo-etch-codegen                          # Etch → Zig codegen demo (cooks a scene, runs 10 ticks)
+
+# test
+zig build test                                           # run the whole test suite (pre-push gate)
+zig build test-etch                                      # Etch test-runner acceptance corpus (test "…" blocks)
+zig build test-ipc                                       # IPC tests only (fast subset of `zig build test`)
+zig build test-codegen-diff                              # interp↔codegen differential corpus, byte-exact parity
+
+# lint
+zig build lint                                           # weld_lint (no @cImport / no usingnamespace / doc comments)
+zig build lint-commit -- <file>                          # Conventional Commits validation (drives the commit-msg hook)
+
+# bench (ReleaseSafe)
+zig build bench-ecs -Doptimize=ReleaseSafe               # Tier 0 ECS iteration bench
+zig build bench-etch-interp -Doptimize=ReleaseSafe       # Etch interpreter per-tick bench
+zig build bench-etch-compile -Doptimize=ReleaseSafe      # Etch → Zig compile-time bench
+
+# assets & tooling
+zig build scene-cook -- --output <out.scene.bin> <in.scene.etch>   # cook a .scene.etch into a .scene.bin
+zig build cook-demo                                      # cook the asset fixtures end-to-end (import → cook → cache)
+zig build shaders                                        # regenerate assets/shaders/*.spv from *.glsl (needs glslc)
+zig build bindgen                                        # regenerate the Vulkan + Wayland Zig bindings
+./scripts/install-hooks.sh                               # install the local git hooks (run once after clone)
 ```
-
-### S2 spike (Native Window + Vulkan triangle)
-
-```sh
-zig build run -Doptimize=ReleaseSafe -- --verbose        # interactive: window + triangle + event logging
-zig build run -- --smoke-test                            # render 10 frames, capture PPM to zig-out/smoke/, exit
-zig build run -- --measure-frame-time=300 --smoke-test   # capture + report median/p95/max over 300 post-warmup frames
-zig build run -- --gpu-prefer=discrete                   # force discrete GPU on multi-GPU hosts
-zig build run -- --gpu-prefer=integrated                 # force integrated GPU on multi-GPU hosts
-zig build run -- --gpu-prefer=index:N                    # pin to physical device #N
-zig build bindgen-vk                                     # regenerate src/core/platform/vk.zig from vk.xml
-zig build bindgen-wayland                                # regenerate wayland_protocols/*.zig from XMLs
-./scripts/compile-shaders.sh                             # recompile assets/shaders/*.glsl to *.spv (needs glslc)
-```
-
-Smoke-test exit codes: `0` success, `1` timeout (5 s wall-clock) or capture
-error, `130` SIGINT / `CTRL_C_EVENT`.
 
 ## Project layout
 
 ```
-briefs/                            milestone briefs (committed as first commit of each branch)
-bindings/upstream/                 vendored XML registries (vk.xml, wayland.xml, xdg-shell.xml, …) + LICENSEs
 src/
-  main.zig                         S2 spike entry point (throwaway with src/spike/)
-  core/
-    ecs/                           Tier 0 ECS — components, chunks, archetypes, queries, world
-    jobs/                          Tier 0 work-stealing scheduler (Chase-Lev deques + 4 workers)
-    testing/                       testing helpers (counting allocator wrapper)
-    ipc/                           S6 Tier 0 editor↔runtime IPC — transport, framing, shm, viewport, server, client, connection
-    platform/                      generated Vulkan binding + native Win32 / Wayland windowing + process control
-      vk.zig                       ~31 000 lines — generated from vk.xml by tools/vk_gen
-      window.zig                   public Window interface (create/destroy/pollEvent/nativeHandles)
-      window/{win32,wayland,stub}.zig  per-OS backends (no SDL/GLFW, no @cImport)
-      window/wayland_protocols/    ~3 000 lines — generated from wayland XMLs by tools/wayland_gen
-      process.zig                  S6 process control — spawn / wait_nonblock / kill / is_alive (POSIX + Windows stub)
-  editor/                          S6 editor binary — Window + Vulkan blit pipeline + IPC server
-    main.zig, vk_blit.zig
-  runtime/                         S6 runtime binary — IPC client + 60 Hz CPU mire to shm viewport
-    main.zig
-  etch/                            S3 Etch parser, S4 interpreter, S5 Zig codegen
-    zig_codegen/                   S5 codegen — lower, emit, type_map, cache, errors, tests
-    parser.zig, types.zig, ast.zig (S3) / interp.zig, value.zig, ecs_bridge.zig (S4)
-  spike/                           throwaway S2 spike code (CLI parser, scoring, vk_setup, vk_frame, ppm)
-tests/etch/                        S3 parser corpus driver + ~30 valid + ~10 invalid `.etch` fixtures
-tests/etch_interp/                 S4 + S5 differential corpus — 20 `.etch` programs + sidecars + interp/codegen runners
-tools/
-  vk_gen/                          XML → Zig generator for Vulkan bindings
-  wayland_gen/                     XML → Zig generator for Wayland protocol bindings
-  etch_cook/                       S5 codegen CLI (Etch → consolidated Zig)
-  etch_synth/                      S5 synthetic Etch corpus generator (deterministic)
-assets/shaders/                    GLSL sources + pre-compiled SPIR-V (S2 triangle + S6 viewport_blit)
-bench/                             performance benchmarks (see "Basic commands" above)
-tests/                             out-of-tree tests wired into `zig build test`
-validation/                        hardware validation reports + PPM/PNG artefacts (step (j) per milestone)
-scripts/                           POSIX shell helpers (commit-msg validation, hook setup, shader compile)
-.github/                           CI workflows
-.vscode/                           project-level VSCode minimum (extensions + settings)
+  foundation/       cross-cutting substrate (consumed by every tier) — root.zig + simd/ SIMD kernels
+  core/             Tier 0 engine internals (the weld_core module)
+    ecs/            components, chunks, archetypes, queries, world
+    jobs/           work-stealing scheduler (Chase-Lev deques + worker pool)
+    memory/         persistent refcounted heap (strings / values / collections)
+    rtti/           runtime type information
+    resources/      global resource store
+    events/         event bus + structural observers
+    plugin_loader/  dynamic plugin loading
+    ipc/            editor↔runtime transport, framing, shm, viewport
+    scene/          .scene.bin / .prefab.bin codec (writer, accessor, loader)
+    platform/       generated Vulkan binding + native Win32 / Wayland windowing + process control
+    testing/        test helpers (counting allocator wrapper)
+  etch/             Etch toolchain — lexer, parser, resolver, type-checker, interpreter
+    zig_codegen/    Etch → Zig lowering (lower, emit, type_map, cache)
+    (parser.zig, interp.zig, ast.zig, value.zig, ecs_bridge.zig, scene_cook.zig, test_runner.zig, …)
+  modules/          Tier 1 modules
+    render/         Vulkan forward renderer + GAL
+    audio/          audio module
+    asset_pipeline/ offline asset pipeline (formats, codecs, cooking cache)
+  editor/           editor binary — Window + Vulkan blit pipeline + IPC server (main.zig, vk_blit.zig)
+  runtime/          runtime binary — IPC client + CPU mire to shm viewport (main.zig)
+  demo_etch_interp.zig, demo_etch_codegen.zig    Etch demo entry points (run-demo-etch-*)
+tools/              in-tree CLIs and generators
+  weld_lint/        custom linter (zig build lint)
+  bindgen/          XML → Zig binding generator (Vulkan + Wayland)
+  etch_cook/        Etch → consolidated Zig CLI
+  etch_synth/       deterministic synthetic Etch corpus generator
+  etch_test/        Etch test-runner shim (zig build test-etch)
+  scene_cook/       .scene.etch → .scene.bin CLI
+  asset_cook/       asset cooking CLI
+  shader_compiler/  GLSL → SPIR-V helper
+tests/              out-of-tree tests wired into `zig build test` (ecs, etch, ipc, scene, render, …)
+bench/              performance benchmarks (see "Basic commands" above)
+briefs/             per-milestone briefs (committed as the first commit of each branch)
+validation/         hardware validation reports + PPM/PNG artefacts
+examples/           standalone example sub-projects (triangle, vertical_slice)
+bindings/           vendored upstream XML registries + generated Zig bindings
+assets/             engine assets (shaders/ — GLSL sources + pre-compiled SPIR-V)
+scripts/            POSIX shell helpers (commit-msg validation, hook setup, shader compile)
+.github/            CI workflows
 ```
 
 ## License

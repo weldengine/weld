@@ -1,8 +1,9 @@
-//! Public surface of the `weld_core` Zig module — Tier 0 internals exposed
-//! to the runtime executable, tests, and the S1 bench harness. Everything
-//! Phase −1 needs lives under `core/ecs/`, `core/jobs/`, and `core/testing/`
-//! for now; Phase 0 will expand the surface (resources, events, RTTI,
-//! plugin loader, IPC, platform layer) as those land.
+//! Public surface of the `weld_core` Zig module — the Tier 0 internals
+//! exposed to the runtime and editor executables, the tests, and the
+//! benches. Spans the full Tier 0 surface: `ecs`, `jobs`, `memory`,
+//! `rtti`, `resources`, `events`, `plugin_loader`, `ipc`, `scene`,
+//! `platform`, and `testing`. Each namespace is documented at its
+//! declaration below.
 
 /// ECS namespace — single canonical entry point at
 /// `src/core/ecs/root.zig` (M0.1 / E7). The root provides both:
