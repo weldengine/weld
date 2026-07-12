@@ -202,6 +202,10 @@ pub fn cookScene(
     const scene_decl = try b.findScene(diag_out);
     const model = try b.build(scene_decl, base_resolver, diag_out);
 
+    // `model` owns the cook arena by value — a copy of `b.arena` (build: `.arena =
+    // self.arena`, scene_cook build return). A failing `toOwnedSlice` here is
+    // already covered by `errdefer b.arena.deinit()` above: same buffers, freed
+    // once. Do NOT add `errdefer model.deinit()` — it double-frees the aliased arena.
     return .{ .model = model, .registry = registry, .warnings = try b.warnings.toOwnedSlice(gpa) };
 }
 
@@ -262,6 +266,10 @@ pub fn cookPrefab(
     const prefab_decl = try b.findPrefab(diag_out);
     const model = try b.buildPrefab(prefab_decl, base_resolver, diag_out);
 
+    // `model` owns the cook arena by value — a copy of `b.arena` (buildPrefab:
+    // `.arena = self.arena`). A failing `toOwnedSlice` here is already covered by
+    // `errdefer b.arena.deinit()` above: same buffers, freed once. Do NOT add
+    // `errdefer model.deinit()` — it double-frees the aliased arena.
     return .{ .model = model, .registry = registry, .warnings = try b.warnings.toOwnedSlice(gpa) };
 }
 
