@@ -10,10 +10,10 @@ knowledge base — see § Quick links spec.
 | Field | Value |
 |---|---|
 | Phase | 1 (Etch ↔ ECS) |
-| Current milestone | M1.0.18 — Cook warning on additive extension conflict (§30.5) — closed on branch `phase-1/etch/extension-additive-warning`, awaiting merge + tag by Guy |
-| Last released tag | `v0.10.17-resource-collections` |
+| Current milestone | (none — between milestones) |
+| Last released tag | `v0.10.18-extension-additive-warning` |
 | Active branch | `main` |
-| Next planned milestone | M1.0.18 (this branch) **closes the M1.0 core-language series** — Etch-closure C1.6 (cook §30.5 warning W1791). The remaining EBNF v0.6 constructs are **module/narrative** execution, **out of core-language scope by design** (C1.6): `routine`/`quest`/`dialogue` (narrative — parse + type-check exist, **0 interp execution path**) and the rendering/UI/audio/animation constructs, each owned by its Tier-1 module. Next milestone: **TBD by Guy** (post-C1.6 track). Reserved (Tier-1-module-dependent, **not** core gaps): `future` (`await <expression>` on a `Future<T>`: asset loading, non-inlined `async fn` returns) — the **sole** reserved await target; `override` — the last reserved top-level construct keyword (waits for a Tier-1 overridable module); `quantize` — reserved in `non_s3_keywords` (its beat/bar musical clock is a later Sequencer-adjacent milestone). |
+| Next planned milestone | M1.1.0 — Forge 3D (forge_3d) foundations: types + physics math + `BodyManager` (SoA, ECS-aligned) — first core sub-milestone of M1.1, per the Forme A execution order (module cores M1.1→M1.5, then M1.6 Asset Pipeline, then the M1.7 demo). The M1.0 core-language series (M1.0.0–M1.0.18, 19 sub-milestones) is CLOSED — C1.6 Etch-closure tag `v0.10.18-extension-additive-warning`. Module-owned/narrative constructs execute at their homes (C1.6 four-category rule): `behavior`+`routine` → M1.3.7 (Cortex), `anim_graph`+`motion` → M1.2.4 (Kinesis), `audio_graph`+`audio_score` → M1.4.6 (Pulse), `input_mapping` → Input/demo milestone, `quest`+`dialogue` → codegen desugaring (Phase 2-3; descriptor-complete in Phase 1). Reserved (Tier-1-dependent, NOT core gaps): `future` (`await <expression>` on a `Future<T>`: asset loading, non-inlined `async fn` returns) — the sole reserved await target; `override` — the last reserved top-level construct keyword (waits for a Tier-1 overridable module); `quantize` — reserved in `non_s3_keywords` (beat/bar musical clock, later Sequencer-adjacent milestone). |
 
 ## Tags
 
@@ -35,7 +35,7 @@ knowledge base — see § Quick links spec.
 | `v0.5.0-M0.5-housekeeping` | 2026-06-03 | M0.5 — Post-M0.4 housekeeping | CI/legacy debt, two latent bugs fixed (render-graph WAW, Etch keyword idents), POSIX EINTR, `root.zig` convention. |
 | `v0.6.0-M0.6-assets` | 2026-06-04 | M0.6 — Offline asset pipeline + async runtime loader | Formats, native codecs (PNG/glTF/WAV), cooking cache, asset lifecycle. |
 | `v0.7.0-M0.7-ipc` | 2026-06-06 | M0.7 — IPC complete | SCM_RIGHTS primary attach + Windows + replay + nightly fuzz. Closes the Phase 0.6 SCM_RIGHTS fd-passing and editor Windows-path debts. |
-| `v0.8.0-M0.8-etch` | 2026-06-12 | M0.8 — Etch full-grammar v0.6 | Full EBNF v0.6: lexer, hybrid LR(1)+Pratt parser, resolver, type-checker, tree-walking interpreter over the complete language. |
+| `v0.8.0-M0.8-etch` | 2026-06-12 | M0.8 — Etch full-grammar v0.6 | Full EBNF v0.6: lexer, recursive-descent + Pratt parser (the hybrid LR(1)+Pratt rewrite is M1.9), resolver, type-checker, tree-walking interpreter over the complete language. |
 | `v0.9.0-phase-0-complete` | 2026-06-15 | Phase 0 complete — Weld foundations | Phase 0 close tag. Tier 0 + renderer + assets + Etch toolchain complete. |
 | `v0.10.0-interp-query-filters` | 2026-06-18 | M1.0.0 — Interpreter ↔ filtered ECS queries | `World.queryDynamic` exposing Tier 0 filtered queries to the interpreter; DNF union composition; hand-rolled archetype cache in `interp.zig` removed. |
 | `v0.10.1-changed-detection` | 2026-06-22 | M1.0.1 — Change detection + scheduler data-race fix | `entity has T changed` exposed to the interpreter; `Scheduler.shutdown` data-race fixed (`std.atomic.Value(bool)`); permanent test watchdog added. |
