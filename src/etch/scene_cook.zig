@@ -144,6 +144,12 @@ pub const Warning = struct {
     span: token.SourceSpan,
 };
 
+/// `W1791 ExtensionAdditiveConflict` — emitted at cook time when two or more
+/// active extensions on an entity declare the same component (§30.5). Kept as a
+/// stable code STRING here: the cook is a separate tool from the resolver, and the
+/// central catalogue entry (`diagnostics.zig`) is registered at M1.0.18 E3.
+const w1791_code: []const u8 = "W1791";
+
 /// The cook's output: the neutral model plus the `Registry` it was cooked
 /// against. The registry owns the type metadata (names/sizes/field offsets +
 /// kinds) needed to interpret the model's raw component bytes — the AST is
@@ -461,21 +467,27 @@ const Builder = struct {
         for (children) |child| {
             var ext_start: u32 = 0;
             var ext_len: u32 = 0;
+            var ext_span: token.SourceSpan = .{ .byte_start = 0, .byte_end = 0 };
             const eb = switch (child.kind) {
                 .entity => blk: {
                     const e = self.ast.scene_entities.items[child.index];
                     ext_start = e.extensions_start;
                     ext_len = e.extensions_len;
+                    ext_span = e.span;
                     break :blk try self.buildEntity(e, diag_out);
                 },
                 .instance => blk: {
                     const inst = self.ast.scene_instances.items[child.index];
                     ext_start = inst.extensions_start;
                     ext_len = inst.extensions_len;
+                    ext_span = inst.span;
                     break :blk try self.buildInstanceEntity(inst, base_resolver, diag_out);
                 },
             };
             try self.recordExtensions(eb.uuid_idx, ext_start, ext_len);
+            // M1.0.18 (§30.5) — non-fatal warning if ≥2 active extensions on this
+            // entity declare the same component (resolution is last-wins, unchanged).
+            try self.detectExtensionConflicts(self.strings.items[eb.name_idx], ext_span, ext_start, ext_len, base_resolver);
             try entities.append(self.gpa, eb);
         }
 
@@ -518,6 +530,73 @@ const Builder = struct {
             ids[k] = try self.prefabIdIndex(try self.internString(name));
         }
         try self.ext_entries.append(self.gpa, .{ .uuid = uuid_idx, .prefab_ids = ids });
+    }
+
+    /// M1.0.18 (§30.5) — Detect additive extension conflicts on one entity's
+    /// `extensions:` clause and emit a non-fatal `W1791` per conflicting component.
+    /// A conflict is a component declared by two or more DISTINCT active extensions;
+    /// the resolution is last-extension-wins (unchanged) — this only warns. The
+    /// extension component sets are resolved through the SAME prefab path as
+    /// `of`/`extends` (`base_resolver` → `.prefab.bin` → accessor schema names), not
+    /// a second resolution path. No-op when: fewer than two extensions; no resolver;
+    /// or an extension name does not resolve / its bytes do not open (the clause is
+    /// by-name — an unresolved name is an existing condition, not a cook error).
+    fn detectExtensionConflicts(
+        self: *Builder,
+        entity_name: []const u8,
+        span: token.SourceSpan,
+        ext_start: u32,
+        ext_len: u32,
+        base_resolver: ?BaseResolver,
+    ) CookError!void {
+        if (ext_len < 2) return;
+        const resolver = base_resolver orelse return;
+
+        // component name → number of DISTINCT active extensions that declare it.
+        var counts: std.StringHashMapUnmanaged(u32) = .empty;
+        defer counts.deinit(self.gpa);
+        // Dedup the extension names: activating the same extension twice must not
+        // conflict with itself.
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        defer seen.deinit(self.gpa);
+
+        var k: u32 = 0;
+        while (k < ext_len) : (k += 1) {
+            const ext_name = self.ast.strings.slice(self.ast.scene_extensions.items[ext_start + k]);
+            const seen_gop = try seen.getOrPut(self.gpa, ext_name);
+            if (seen_gop.found_existing) continue;
+
+            const bytes = resolver.resolve(ext_name) orelse continue;
+            var acc = accessor.Accessor.open(bytes) catch continue;
+            if (!acc.verifyHash()) continue;
+
+            // Each component the extension declares (its `.prefab.bin` schema table;
+            // names are unique) bumps that name's distinct-extension count. The
+            // second distinct declarer is the conflict — emit exactly once, in
+            // encounter order (a third declarer does not re-emit). Keys borrow the
+            // accessor bytes (resolver-owned, live for the whole cook) and compare
+            // by content, so the same name across extensions aggregates correctly.
+            var ci: u32 = 0;
+            while (ci < acc.schemaCount()) : (ci += 1) {
+                const comp_name = acc.schema(ci).name;
+                const gop = try counts.getOrPut(self.gpa, comp_name);
+                if (!gop.found_existing) gop.value_ptr.* = 0;
+                gop.value_ptr.* += 1;
+                if (gop.value_ptr.* == 2) try self.emitAdditiveConflict(entity_name, comp_name, span);
+            }
+        }
+    }
+
+    /// Append one `W1791` warning naming the conflicting component. The message is
+    /// gpa-owned — freed by `Cooked.deinit` on success, `deinitScratch` on error.
+    fn emitAdditiveConflict(self: *Builder, entity_name: []const u8, comp_name: []const u8, span: token.SourceSpan) CookError!void {
+        const msg = try std.fmt.allocPrint(
+            self.gpa,
+            "entity '{s}': two or more active extensions declare component '{s}'; the last extension in the list wins (§30.5)",
+            .{ entity_name, comp_name },
+        );
+        errdefer self.gpa.free(msg);
+        try self.warnings.append(self.gpa, .{ .code = w1791_code, .message = msg, .span = span });
     }
 
     /// The Prefab ID Table slot for a model-`strings` index, deduplicated.
