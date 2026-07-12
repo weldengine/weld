@@ -25,6 +25,8 @@ pub const Velocity = components.Velocity;
 
 // --- Descriptor + handle types ---
 
+/// Generational ECS entity handle (re-export of `core.ecs.EntityId`).
+pub const EntityId = types.EntityId;
 /// Opaque physics-body handle (`u32`, `index:24 | generation:8`).
 pub const BodyId = types.BodyId;
 /// Opaque collision-shape handle (`u32`, same packing as `BodyId`).

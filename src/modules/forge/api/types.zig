@@ -15,7 +15,11 @@ const core = @import("weld_core");
 
 const Vec3 = math.Vec3;
 const Quatf = math.Quatf;
-const EntityId = core.ecs.EntityId;
+
+/// Generational ECS entity handle — re-export of `core.ecs.EntityId` so forge
+/// solvers reach the core entity type through `api/` (brief §E3), not via a
+/// direct `weld_core` import.
+pub const EntityId = core.ecs.EntityId;
 
 /// Opaque physics-body handle. `u32` at the interface boundary
 /// (`engine-tier-interfaces.md` §1); internally `index:24 | generation:8`
