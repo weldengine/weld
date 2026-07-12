@@ -321,6 +321,12 @@ const ext_arsenal = // ArsenalModule: declares Weapon only
     \\  entity "m" { uuid: "00000000-0000-0000-0000-0000000000c4" Weapon { damage: 5 } }
     \\}
 ;
+const ext_stash = // StashModule: declares Inventory only
+    \\component Inventory { slots: i32 = 0 }
+    \\prefab "StashModule" extends "Base" {
+    \\  entity "m" { uuid: "00000000-0000-0000-0000-0000000000c5" Inventory { slots: 5 } }
+    \\}
+;
 
 // The `extensions:` clause + additive-conflict detection run through the SAME
 // scene `build` loop for `entity` and `instance` — these tests use `entity`.
@@ -459,6 +465,34 @@ test "single extension declaring a component emits no warning" {
     var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
     defer cooked.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), cooked.warnings.len);
+}
+
+test "3+ extensions declaring the same component emit exactly one W1791" {
+    const gpa = std.testing.allocator;
+    const m = try prefabBytes(gpa, ext_merchant); // Inventory
+    defer gpa.free(m);
+    const t = try prefabBytes(gpa, ext_trade); // Inventory
+    defer gpa.free(t);
+    const s = try prefabBytes(gpa, ext_stash); // Inventory
+    defer gpa.free(s);
+    var mr = MultiResolver{ .names = &.{ "MerchantModule", "TradeModule", "StashModule" }, .blobs = &.{ m, t, s } };
+    const src =
+        \\component Marker { v: i32 = 0 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["MerchantModule", "TradeModule", "StashModule"]
+        \\    Marker { v: 1 }
+        \\  }
+        \\}
+    ;
+    var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
+    defer cooked.deinit(gpa);
+    // All three declare Inventory: the `== 2` guard emits once (at the 2nd distinct
+    // declarer) and never re-emits at the 3rd → exactly one warning, not two/three.
+    try std.testing.expectEqual(@as(usize, 1), cooked.warnings.len);
+    try std.testing.expectEqualStrings("W1791", cooked.warnings[0].code);
+    try std.testing.expect(std.mem.indexOf(u8, cooked.warnings[0].message, "Inventory") != null);
 }
 
 // ── E6 — load applies extension components + fires the on_attach seam ──
