@@ -30,6 +30,7 @@
 const std = @import("std");
 
 const ast_mod = @import("ast.zig");
+const token = @import("token.zig");
 const interp = @import("interp.zig");
 const bridge_mod = @import("ecs_bridge.zig");
 const value_mod = @import("value.zig");
@@ -131,6 +132,18 @@ pub const CookError = error{
     OutOfMemory,
 };
 
+/// A non-fatal cook diagnostic (M1.0.18). Unlike `CookError`/`fail` — which abort
+/// the cook and leave no output — a `Warning` is collected on the `Cooked` result
+/// and the `.scene.bin`/`.prefab.bin` is still produced. `code` is the stable
+/// diagnostic code string (e.g. `"W1791"`, registered in `diagnostics.zig`); it is
+/// a static string, never freed. `message` is a gpa-owned human string (freed by
+/// `Cooked.deinit`). `span` locates the offending source construct.
+pub const Warning = struct {
+    code: []const u8,
+    message: []const u8,
+    span: token.SourceSpan,
+};
+
 /// The cook's output: the neutral model plus the `Registry` it was cooked
 /// against. The registry owns the type metadata (names/sizes/field offsets +
 /// kinds) needed to interpret the model's raw component bytes — the AST is
@@ -139,8 +152,13 @@ pub const CookError = error{
 pub const Cooked = struct {
     model: format.CookModel,
     registry: Registry,
+    /// Non-fatal cook diagnostics (M1.0.18). Empty (`&.{}`) for a clean cook.
+    /// gpa-owned — both the slice and each `message` are freed by `deinit`.
+    warnings: []const Warning = &.{},
 
     pub fn deinit(self: *Cooked, gpa: std.mem.Allocator) void {
+        for (self.warnings) |w| gpa.free(w.message);
+        gpa.free(self.warnings);
         self.model.deinit();
         self.registry.deinit(gpa);
         self.* = undefined;
@@ -184,7 +202,7 @@ pub fn cookScene(
     const scene_decl = try b.findScene(diag_out);
     const model = try b.build(scene_decl, base_resolver, diag_out);
 
-    return .{ .model = model, .registry = registry };
+    return .{ .model = model, .registry = registry, .warnings = try b.warnings.toOwnedSlice(gpa) };
 }
 
 fn fail(diag_out: ?*[]const u8, err: CookError, msg: []const u8) CookError {
@@ -244,7 +262,7 @@ pub fn cookPrefab(
     const prefab_decl = try b.findPrefab(diag_out);
     const model = try b.buildPrefab(prefab_decl, base_resolver, diag_out);
 
-    return .{ .model = model, .registry = registry };
+    return .{ .model = model, .registry = registry, .warnings = try b.warnings.toOwnedSlice(gpa) };
 }
 
 // ── Builder ──────────────────────────────────────────────────────────────────
@@ -305,6 +323,11 @@ const Builder = struct {
     prefab_id_table: std.ArrayListUnmanaged(u32) = .empty,
     prefab_id_map: std.AutoHashMapUnmanaged(u32, u32) = .empty,
 
+    // Non-fatal cook warnings (M1.0.18). Accumulated during the build, then
+    // transferred to `Cooked.warnings` on success (`toOwnedSlice`); freed here
+    // (messages + backing) on the error path by `deinitScratch`.
+    warnings: std.ArrayListUnmanaged(Warning) = .empty,
+
     fn init(gpa: std.mem.Allocator, ast: *const AstArena, registry: *Registry) Builder {
         return .{
             .gpa = gpa,
@@ -331,6 +354,10 @@ const Builder = struct {
         self.ext_entries.deinit(self.gpa);
         self.prefab_id_table.deinit(self.gpa);
         self.prefab_id_map.deinit(self.gpa);
+        // Any warning still held here was NOT transferred to a `Cooked` (error
+        // path); free its message. On success `toOwnedSlice` emptied the list.
+        for (self.warnings.items) |w| self.gpa.free(w.message);
+        self.warnings.deinit(self.gpa);
     }
 
     fn a(self: *Builder) std.mem.Allocator {
