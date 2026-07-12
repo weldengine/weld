@@ -108,6 +108,22 @@ pub fn build(b: *std.Build) void {
     // `foundation.simd.adler32`.
     asset_pipeline_module.addImport("foundation", foundation_module);
 
+    // M1.1.0 / E2 — `weld_forge` public API surface: Forge ECS component types
+    // (`engine-physics-forge.md` §2) + physics descriptor/handle types
+    // (`engine-tier-interfaces.md` §1). Type definitions only — no ECS
+    // registration, no module instantiation. Imports `foundation` (math types)
+    // and `weld_core` (re-exports `core.ecs.components.Velocity` +
+    // `core.ecs.EntityId`). Rooted at `api/root.zig` until the module-instantiation
+    // `forge/root.zig` lands (a later milestone re-roots it, zero call sites).
+    // The `forge_3d` solver (E3) depends on this module.
+    const forge_api_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/forge/api/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    forge_api_module.addImport("foundation", foundation_module);
+    forge_api_module.addImport("weld_core", core_module);
+
     // M0.2 / E6 — plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
     // Exposes the C ABI types from `desc.zig` (no `WeldAPI` itself,
@@ -264,6 +280,13 @@ pub fn build(b: *std.Build) void {
     // reachable and analysed (engine-zig-conventions.md §13).
     const foundation_tests = b.addTest(.{ .root_module = foundation_module });
     test_step.dependOn(&b.addRunArtifact(foundation_tests).step);
+
+    // M1.1.0 / E2 — inline tests inside src/modules/forge/api/** (component
+    // size/align asserts, descriptor + component defaults, Velocity re-export
+    // identity, BodyId pack/unpack). The api root re-exports components/ +
+    // types/, so their inline tests are reachable (engine-zig-conventions.md §13).
+    const forge_api_tests = b.addTest(.{ .root_module = forge_api_module });
+    test_step.dependOn(&b.addRunArtifact(forge_api_tests).step);
 
     // Out-of-tree tests. Each file is its own root_module and imports
     // `weld_core` to reach the engine internals.
