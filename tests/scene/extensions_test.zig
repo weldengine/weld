@@ -269,6 +269,232 @@ test "scene extensions clause populates the Entity Extensions + Prefab ID tables
     try std.testing.expectEqual(@as(u32, 0), acc.hookCount());
 }
 
+// ── M1.0.18 — cook warning W1791 on additive extension conflict (§30.5) ──
+
+/// Multi-entry in-process resolver mapping extension prefab names to their cooked
+/// bytes (the additive-conflict detection resolves extension component sets through
+/// this, exactly like `of`/`extends`). The bytes must outlive the cook.
+const MultiResolver = struct {
+    names: []const []const u8,
+    blobs: []const []const u8,
+    fn resolve(ctx: *anyopaque, name: []const u8) ?[]const u8 {
+        const self: *MultiResolver = @ptrCast(@alignCast(ctx));
+        for (self.names, self.blobs) |n, b| if (std.mem.eql(u8, name, n)) return b;
+        return null;
+    }
+    fn base(self: *MultiResolver) scene_cook.BaseResolver {
+        return .{ .ctx = self, .resolveFn = MultiResolver.resolve };
+    }
+};
+
+/// Cook an `extends` prefab source to its `.prefab.bin` bytes (caller frees). No
+/// `requires` → the base need not exist, cookable with a null resolver. The bytes
+/// are a self-contained serialized artifact, independent of the (freed) `Cooked`.
+fn prefabBytes(gpa: std.mem.Allocator, src: []const u8) ![]const u8 {
+    var c = try scene_cook.cookPrefab(gpa, src, null, null);
+    defer c.deinit(gpa);
+    return scene.writer.write(gpa, c.model, &c.registry);
+}
+
+const ext_combat = // CombatModule: declares Inventory + Weapon
+    \\component Inventory { slots: i32 = 0 }
+    \\component Weapon { damage: i32 = 0 }
+    \\prefab "CombatModule" extends "Base" {
+    \\  entity "m" { uuid: "00000000-0000-0000-0000-0000000000c1" Inventory { slots: 30 } Weapon { damage: 10 } }
+    \\}
+;
+const ext_merchant = // MerchantModule: declares Inventory only
+    \\component Inventory { slots: i32 = 0 }
+    \\prefab "MerchantModule" extends "Base" {
+    \\  entity "m" { uuid: "00000000-0000-0000-0000-0000000000c2" Inventory { slots: 100 } }
+    \\}
+;
+const ext_trade = // TradeModule: declares Inventory only
+    \\component Inventory { slots: i32 = 0 }
+    \\prefab "TradeModule" extends "Base" {
+    \\  entity "m" { uuid: "00000000-0000-0000-0000-0000000000c3" Inventory { slots: 50 } }
+    \\}
+;
+const ext_arsenal = // ArsenalModule: declares Weapon only
+    \\component Weapon { damage: i32 = 0 }
+    \\prefab "ArsenalModule" extends "Base" {
+    \\  entity "m" { uuid: "00000000-0000-0000-0000-0000000000c4" Weapon { damage: 5 } }
+    \\}
+;
+const ext_stash = // StashModule: declares Inventory only
+    \\component Inventory { slots: i32 = 0 }
+    \\prefab "StashModule" extends "Base" {
+    \\  entity "m" { uuid: "00000000-0000-0000-0000-0000000000c5" Inventory { slots: 5 } }
+    \\}
+;
+
+// The `extensions:` clause + additive-conflict detection run through the SAME
+// scene `build` loop for `entity` and `instance` — these tests use `entity`.
+
+test "cook warns W1791 when two extensions declare the same component" {
+    const gpa = std.testing.allocator;
+    const m = try prefabBytes(gpa, ext_merchant);
+    defer gpa.free(m);
+    const t = try prefabBytes(gpa, ext_trade);
+    defer gpa.free(t);
+    var mr = MultiResolver{ .names = &.{ "MerchantModule", "TradeModule" }, .blobs = &.{ m, t } };
+    const src =
+        \\component Marker { v: i32 = 0 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["MerchantModule", "TradeModule"]
+        \\    Marker { v: 1 }
+        \\  }
+        \\}
+    ;
+    var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
+    defer cooked.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), cooked.warnings.len);
+    try std.testing.expectEqualStrings("W1791", cooked.warnings[0].code);
+    try std.testing.expect(std.mem.indexOf(u8, cooked.warnings[0].message, "Inventory") != null);
+}
+
+test "cook emits no warning when extensions declare disjoint components" {
+    const gpa = std.testing.allocator;
+    const m = try prefabBytes(gpa, ext_merchant); // Inventory
+    defer gpa.free(m);
+    const a = try prefabBytes(gpa, ext_arsenal); // Weapon
+    defer gpa.free(a);
+    var mr = MultiResolver{ .names = &.{ "MerchantModule", "ArsenalModule" }, .blobs = &.{ m, a } };
+    const src =
+        \\component Marker { v: i32 = 0 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["MerchantModule", "ArsenalModule"]
+        \\    Marker { v: 1 }
+        \\  }
+        \\}
+    ;
+    var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
+    defer cooked.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), cooked.warnings.len);
+}
+
+test "cook emits one W1791 per conflicting component" {
+    const gpa = std.testing.allocator;
+    const c = try prefabBytes(gpa, ext_combat); // Inventory + Weapon
+    defer gpa.free(c);
+    const m = try prefabBytes(gpa, ext_merchant); // Inventory
+    defer gpa.free(m);
+    const a = try prefabBytes(gpa, ext_arsenal); // Weapon
+    defer gpa.free(a);
+    var mr = MultiResolver{ .names = &.{ "CombatModule", "MerchantModule", "ArsenalModule" }, .blobs = &.{ c, m, a } };
+    const src =
+        \\component Marker { v: i32 = 0 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["CombatModule", "MerchantModule", "ArsenalModule"]
+        \\    Marker { v: 1 }
+        \\  }
+        \\}
+    ;
+    var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
+    defer cooked.deinit(gpa);
+    // Inventory shared by Combat+Merchant; Weapon shared by Combat+Arsenal → exactly
+    // two warnings, one per conflicting component (NOT one per extension pair).
+    try std.testing.expectEqual(@as(usize, 2), cooked.warnings.len);
+    var saw_inv = false;
+    var saw_weap = false;
+    for (cooked.warnings) |w| {
+        try std.testing.expectEqualStrings("W1791", w.code);
+        if (std.mem.indexOf(u8, w.message, "Inventory") != null) saw_inv = true;
+        if (std.mem.indexOf(u8, w.message, "Weapon") != null) saw_weap = true;
+    }
+    try std.testing.expect(saw_inv and saw_weap);
+}
+
+test "W1791 is non-fatal — cooked output applies last-extension-wins" {
+    const gpa = std.testing.allocator;
+    const m = try prefabBytes(gpa, ext_merchant);
+    defer gpa.free(m);
+    const t = try prefabBytes(gpa, ext_trade);
+    defer gpa.free(t);
+    var mr = MultiResolver{ .names = &.{ "MerchantModule", "TradeModule" }, .blobs = &.{ m, t } };
+    const src =
+        \\component Marker { v: i32 = 0 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["MerchantModule", "TradeModule"]
+        \\    Marker { v: 1 }
+        \\  }
+        \\}
+    ;
+    // Non-fatal: the cook returns a valid `Cooked` (no `CookError`) with one warning.
+    var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
+    defer cooked.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), cooked.warnings.len);
+
+    // The warning never alters the cooked output: the Entity Extensions Table still
+    // lists both extensions in declaration order, so the loader's last-extension-wins
+    // resolution sees TradeModule (index 1, last) as the winner.
+    const bytes = try scene.writer.write(gpa, cooked.model, &cooked.registry);
+    defer gpa.free(bytes);
+    var acc = try Accessor.open(bytes);
+    try std.testing.expect(acc.verifyHash());
+    try std.testing.expectEqual(@as(u32, 1), acc.extensionsCount());
+    const e = acc.extension(0);
+    try std.testing.expectEqual(@as(u32, 2), e.extension_count);
+    try std.testing.expectEqualStrings("MerchantModule", acc.prefabName(e.extensionId(0)));
+    try std.testing.expectEqualStrings("TradeModule", acc.prefabName(e.extensionId(1)));
+}
+
+test "single extension declaring a component emits no warning" {
+    const gpa = std.testing.allocator;
+    const c = try prefabBytes(gpa, ext_combat); // Inventory + Weapon
+    defer gpa.free(c);
+    var mr = MultiResolver{ .names = &.{"CombatModule"}, .blobs = &.{c} };
+    const src =
+        \\component Marker { v: i32 = 0 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["CombatModule"]
+        \\    Marker { v: 1 }
+        \\  }
+        \\}
+    ;
+    var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
+    defer cooked.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), cooked.warnings.len);
+}
+
+test "3+ extensions declaring the same component emit exactly one W1791" {
+    const gpa = std.testing.allocator;
+    const m = try prefabBytes(gpa, ext_merchant); // Inventory
+    defer gpa.free(m);
+    const t = try prefabBytes(gpa, ext_trade); // Inventory
+    defer gpa.free(t);
+    const s = try prefabBytes(gpa, ext_stash); // Inventory
+    defer gpa.free(s);
+    var mr = MultiResolver{ .names = &.{ "MerchantModule", "TradeModule", "StashModule" }, .blobs = &.{ m, t, s } };
+    const src =
+        \\component Marker { v: i32 = 0 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["MerchantModule", "TradeModule", "StashModule"]
+        \\    Marker { v: 1 }
+        \\  }
+        \\}
+    ;
+    var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
+    defer cooked.deinit(gpa);
+    // All three declare Inventory: the `== 2` guard emits once (at the 2nd distinct
+    // declarer) and never re-emits at the 3rd → exactly one warning, not two/three.
+    try std.testing.expectEqual(@as(usize, 1), cooked.warnings.len);
+    try std.testing.expectEqualStrings("W1791", cooked.warnings[0].code);
+    try std.testing.expect(std.mem.indexOf(u8, cooked.warnings[0].message, "Inventory") != null);
+}
+
 // ── E6 — load applies extension components + fires the on_attach seam ──
 
 /// Tier-0 `on_attach` dispatch spy (the M1.0.9 Etch execution is out of scope;
