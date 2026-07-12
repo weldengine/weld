@@ -94,9 +94,9 @@ pub const ShapeType = enum(u8) {
     empty,
 };
 
-/// Shape parameters, a tagged union discriminated by `ShapeType` (the spec §1
-/// flat struct annotates itself as "union discriminée par shape_type —
-/// simplifié ici"; the union IS the specified design, Notes decision 3a).
+/// Shape parameters, a tagged union discriminated by `ShapeType`. The spec §1
+/// flat struct self-describes as a simplification of a discriminated union;
+/// the union IS the specified design (Notes decision 3a).
 /// M1.1.0 carries payloads for sphere/box/capsule; the rest are `void`
 /// placeholders whose payloads land at their own sub-milestones (pre-freeze).
 pub const ShapeDescriptor = union(ShapeType) {
