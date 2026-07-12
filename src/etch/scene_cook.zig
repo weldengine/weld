@@ -226,6 +226,11 @@ fn fail(diag_out: ?*[]const u8, err: CookError, msg: []const u8) CookError {
 /// `accessor`. This is the cook-time prefab registry / path map (distinct from
 /// Etch `import`, which is M1.0.7); the driver (`tools/scene_cook`) wires it to
 /// the on-disk cook output, and tests wire it to an in-process byte buffer.
+///
+/// The resolved bytes must outlive the cook (mirror of `loader.zig`'s
+/// `ExtensionResolver`): since M1.0.18 the additive-conflict warning (§30.5)
+/// borrows them as component-name map keys ACROSS resolves, so a resolver
+/// returning a reused/temporary buffer would be a use-after-free.
 pub const BaseResolver = struct {
     ctx: *anyopaque,
     resolveFn: *const fn (ctx: *anyopaque, name: []const u8) ?[]const u8,
