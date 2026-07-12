@@ -190,6 +190,24 @@ test "capsule unit inertia degenerates to a sphere at h=0" {
     try testing.expect(inertia.approxEql(Vec3r.splat(0.4 * 1.5 * 1.5), 1e-6));
 }
 
+test "shape slot reuse is LIFO and generation-checked" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    const a = try store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    const b = try store.createShape(gpa, .{ .box = .{} });
+    store.destroyShape(b);
+    try testing.expect(store.get(b) == null); // stale ⇒ safe getter returns null
+    const c = try store.createShape(gpa, .{ .capsule = .{} }); // reuses b's slot
+    try testing.expect(c != b);
+    try testing.expectEqual(api.PackedId.unpack(b).index, api.PackedId.unpack(c).index);
+    try testing.expectEqual(api.PackedId.unpack(b).generation +% 1, api.PackedId.unpack(c).generation);
+    try testing.expect(store.get(b) == null);
+    try testing.expect(store.get(a) != null);
+    try testing.expect(store.get(c) != null);
+    try testing.expectEqual(@as(u32, 2), store.count());
+}
+
 // Test helper: build a solver-precision Vec3r from literals.
 fn vec3(x: Real, y: Real, z: Real) Vec3r {
     return Vec3r.fromArray(.{ x, y, z });
