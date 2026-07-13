@@ -49,5 +49,7 @@ comptime {
     _ = shape;
     _ = body;
     _ = body_manager;
+    _ = @import("pipeline/broadphase.zig");
     _ = @import("tests/body_manager_test.zig");
+    _ = @import("tests/broadphase_test.zig");
 }
