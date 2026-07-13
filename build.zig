@@ -135,7 +135,7 @@ pub fn build(b: *std.Build) void {
     // `foundation` (math) and `weld_forge` (the api surface; core entity types
     // reach it through api/), plus the `build_options` for the `Real` scalar.
     const forge_3d_module = b.createModule(.{
-        .root_source_file = b.path("src/modules/forge/solvers_3d/forge_3d/root.zig"),
+        .root_source_file = b.path("src/modules/forge/forge_3d/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -309,7 +309,7 @@ pub fn build(b: *std.Build) void {
 
     // M1.1.0 / E3 — forge_3d solver unit tests (C1.1 verification path): the
     // inline tests in config/shape/body/body_manager + the acceptance suite
-    // under solvers_3d/forge_3d/tests/. root.zig pins them all. Added to
+    // under forge_3d/tests/. root.zig pins them all. Added to
     // `zig build test`; `zig build test-forge-3d` runs just these.
     const forge_3d_tests = b.addTest(.{ .root_module = forge_3d_module });
     const forge_3d_tests_run = b.addRunArtifact(forge_3d_tests);
