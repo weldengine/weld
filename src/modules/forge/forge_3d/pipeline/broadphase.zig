@@ -584,10 +584,19 @@ pub fn Broadphase(comptime T: type) type {
         /// layer — `computePairs` treats it as the proxy's identity to exclude
         /// self-matches, so a collision would silently drop a legitimate pair
         /// (forge_3d passes the packed `BodyId`, which is unique by construction).
+        ///
+        /// Atomic: **on error (OOM), the broadphase is unchanged**. The
+        /// moved-log slot is reserved before the tree is touched, so a leaf can
+        /// never be inserted-but-unlogged (an orphan the caller has no `Proxy`
+        /// to remove).
         pub fn insert(self: *Self, gpa: std.mem.Allocator, layer: BroadphaseLayer, tight_aabb: AabbT, user_data: u32) !Proxy {
             const li = @intFromEnum(layer);
+            // Reserve the moved-log slot BEFORE mutating the tree (`Bvh.insert`
+            // is itself atomic), so no allocation remains after the tree gains
+            // the leaf → insert is all-or-nothing.
+            try self.moved[li].ensureUnusedCapacity(gpa, 1);
             const id = try self.trees[li].insert(gpa, tight_aabb, user_data);
-            try self.moved[li].append(gpa, id);
+            self.moved[li].appendAssumeCapacity(id);
             return .{ .layer = layer, .id = id };
         }
 
@@ -600,10 +609,19 @@ pub fn Broadphase(comptime T: type) type {
         /// Move a proxy to `tight_aabb`. Marks it moved only when the tree
         /// actually re-inserted it (the fat AABB changed); an in-margin nudge is
         /// a no-op with no pair consequence (hysteresis).
+        ///
+        /// Atomic: **on error (OOM), the broadphase is unchanged**. The
+        /// moved-log slot is reserved UP FRONT — before the hysteresis test and
+        /// the (allocation-free) tree re-insert — so a re-inserted proxy can
+        /// never go unlogged. Were it unlogged, a retry would find the box
+        /// already re-fattened, pass the hysteresis test, and the move would be
+        /// lost forever. The reserve is unconditional; `computePairs` retains
+        /// the log's capacity, so in steady state it is a no-op.
         pub fn update(self: *Self, gpa: std.mem.Allocator, proxy: Proxy, tight_aabb: AabbT) !void {
             const li = @intFromEnum(proxy.layer);
+            try self.moved[li].ensureUnusedCapacity(gpa, 1);
             if (self.trees[li].update(proxy.id, tight_aabb)) {
-                try self.moved[li].append(gpa, proxy.id);
+                self.moved[li].appendAssumeCapacity(proxy.id);
             }
         }
 

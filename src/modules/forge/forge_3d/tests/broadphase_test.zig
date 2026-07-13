@@ -639,3 +639,104 @@ test "BodyManager to Broadphase integration" {
         try expectQueryIds(gpa, &bph, q, &expected);
     }
 }
+
+test "insert is atomic under allocation failure (no orphan leaf)" {
+    const dyn: usize = @intFromEnum(Layer.dynamic);
+    const attempts = 24;
+    // Sweep the failing allocation index across an insert batch. The moved-log
+    // grows from empty and the Bvh node pool grows too, so every allocation
+    // site is exercised. Whatever fails, the tree must hold EXACTLY the proxies
+    // the caller received — never a half-inserted orphan (leaf in the tree but
+    // no `Proxy` returned, hence unremovable and invisible to `computePairs`).
+    var fail_index: usize = 0;
+    while (fail_index < 400) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const gpa = failing.allocator();
+        var bph = BphF.init(.{ .margin = 0 });
+        defer bph.deinit(gpa);
+
+        // Track only the proxies actually returned (this list uses the real
+        // allocator, so it never fails).
+        var ids: std.ArrayListUnmanaged(u32) = .empty;
+        defer ids.deinit(std.testing.allocator);
+
+        var oom = false;
+        var i: u32 = 0;
+        while (i < attempts) : (i += 1) {
+            const proxy = bph.insert(gpa, .dynamic, boxCe(.{ @floatFromInt(i * 3), 0, 0 }, 0.5), i) catch |e| {
+                try std.testing.expectEqual(error.OutOfMemory, e);
+                oom = true;
+                break;
+            };
+            try ids.append(std.testing.allocator, proxy.id);
+        }
+
+        // No orphan: dynamic-tree leaf count == the proxies the caller holds.
+        try std.testing.expectEqual(@as(u32, @intCast(ids.items.len)), bph.trees[dyn].leafCount());
+
+        // And a whole-region query returns exactly those ids (an orphan leaf
+        // would surface here as an extra hit).
+        var c = Collector{ .gpa = std.testing.allocator };
+        defer c.deinit();
+        _ = bph.queryAabb(Aabbf.fromMinMax(Vec3.splat(-1), Vec3.fromArray(.{ attempts * 3, 1, 1 })), &c);
+        try std.testing.expectEqual(ids.items.len, c.items.items.len);
+
+        if (!oom) break; // reached the all-succeed index — sweep is complete
+    }
+}
+
+test "update is atomic under allocation failure (no hysteresis poisoning)" {
+    const gpa = std.testing.allocator;
+    const dyn: usize = @intFromEnum(Layer.dynamic);
+
+    var bph = BphF.init(.{ .margin = 0.1 });
+    defer bph.deinit(gpa);
+
+    // Stationary pair target (ud 3), the proxy under test p @ origin (ud 2),
+    // and a filler (ud 1) shuttled to consume the moved-log's capacity.
+    _ = try bph.insert(gpa, .dynamic, boxCe(.{ 100, 0, 0 }, 0.5), 3);
+    const p = try bph.insert(gpa, .dynamic, boxCe(.{ 0, 0, 0 }, 0.5), 2);
+    const filler = try bph.insert(gpa, .dynamic, boxCe(.{ -100, 0, 0 }, 0.5), 1);
+
+    var pairs: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pairs.deinit(gpa);
+    try bph.computePairs(gpa, &pairs); // drain the moved-log (capacity retained)
+
+    // Fill the moved-log back to exactly capacity by shuttling the filler
+    // between two far cells (each move exits its fat box ⇒ re-insert ⇒ mark).
+    // p stays at the origin. The NEXT mark then has to grow the log — the
+    // allocation the failing update will hit.
+    var at_a = true;
+    var guard: usize = 0;
+    while (bph.moved[dyn].items.len < bph.moved[dyn].capacity and guard < 256) : (guard += 1) {
+        const fx: f32 = if (at_a) -200 else -100;
+        try bph.update(gpa, filler, boxCe(.{ fx, 0, 0 }, 0.5));
+        at_a = !at_a;
+    }
+    try std.testing.expectEqual(bph.moved[dyn].capacity, bph.moved[dyn].items.len); // log is full
+
+    // Failing update on p: the log grow is the sole fallible op and (with the
+    // fix) precedes the allocation-free tree re-insert, so p must stay put.
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, bph.update(failing.allocator(), p, boxCe(.{ 50, 0, 0 }, 0.5)));
+
+    // Anti-poisoning: p is still queryable at the origin, NOT at the target.
+    {
+        var at_old = Collector{ .gpa = gpa };
+        defer at_old.deinit();
+        _ = bph.queryAabb(boxCe(.{ 0, 0, 0 }, 0.1), &at_old);
+        try std.testing.expect(at_old.contains(2));
+
+        var at_new = Collector{ .gpa = gpa };
+        defer at_new.deinit();
+        _ = bph.queryAabb(boxCe(.{ 50, 0, 0 }, 0.1), &at_new);
+        try std.testing.expect(!at_new.contains(2));
+    }
+
+    // Retry with a healthy allocator: p moves onto the target, and `computePairs`
+    // reports (2,3) — the move was NOT lost to hysteresis poisoning.
+    try bph.update(gpa, p, boxCe(.{ 100, 0, 0 }, 0.5));
+    pairs.clearRetainingCapacity();
+    try bph.computePairs(gpa, &pairs);
+    try std.testing.expect(hasPair(pairs.items, 2, 3));
+}
