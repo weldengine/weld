@@ -220,7 +220,15 @@ fn commitResources(world: *const World, gpa: std.mem.Allocator, journal: *Resour
 /// / prior presence; the old blocks were never decreffed, so no incref is needed
 /// and no double-free is possible. Frees each snapshot and the journal.
 fn rollbackResources(world: *World, gpa: std.mem.Allocator, journal: *ResourceJournal) void {
-    for (journal.items) |edit| {
+    // Reverse (LIFO) — an undo-log replays in the opposite order it recorded.
+    // A `.bin` may carry two entries of the SAME cid; those edits alias one live
+    // slot, so undoing them FORWARD would restore an old block and then decref
+    // that just-restored block, corrupting its refcount into a teardown
+    // double-free / use-after-free. Mirrors the reverse despawn in `loadFromBytes`.
+    var k: usize = journal.items.len;
+    while (k > 0) {
+        k -= 1;
+        const edit = journal.items[k];
         if (world.resources.getMutResource(edit.cid)) |live| {
             decrefResourceStrings(world, gpa, edit.cid, live);
         }
@@ -789,6 +797,43 @@ fn buildSpawnThenFailScene(
     return try writer.write(gpa, model, reg);
 }
 
+/// Test helper: cook a 0-entity scene with TWO string-resource entries of the
+/// SAME `settings_cid` ("a" then "b"), then a collection resource `bag_cid`
+/// (LAST) that trips the loader's rejection. The rollback must undo the two
+/// same-cid edits in LIFO order; a forward undo would corrupt the refcount.
+fn buildDupResourceFailScene(
+    gpa: std.mem.Allocator,
+    reg: *const Registry,
+    settings_cid: ComponentId,
+    bag_cid: ComponentId,
+) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const strings = try a.dupe([]const u8, &.{ try a.dupe(u8, "a"), try a.dupe(u8, "b") });
+    const d0 = try a.alloc(u8, reg.componentSize(settings_cid));
+    @memset(d0, 0);
+    const d1 = try a.alloc(u8, reg.componentSize(settings_cid));
+    @memset(d1, 0);
+    const b_data = try a.alloc(u8, reg.componentSize(bag_cid));
+    @memset(b_data, 0);
+    const sf0 = try a.dupe(format.StringFieldRef, &.{.{ .offset = 0, .str = 0 }});
+    const sf1 = try a.dupe(format.StringFieldRef, &.{.{ .offset = 0, .str = 1 }});
+    const resources = try a.dupe(format.ResourceEntry, &.{
+        .{ .schema_id = settings_cid, .data = d0, .string_fields = sf0 },
+        .{ .schema_id = settings_cid, .data = d1, .string_fields = sf1 },
+        .{ .schema_id = bag_cid, .data = b_data, .string_fields = &.{} },
+    });
+    var model: format.CookModel = .{
+        .strings = strings,
+        .uuids = &.{},
+        .resources = resources,
+        .archetypes = &.{},
+        .arena = arena,
+    };
+    defer model.deinit();
+    return try writer.write(gpa, model, reg);
+}
+
 test "buildSchemaRemap resolves on-disk schema names to runtime ids" {
     const gpa = testing.allocator;
     var world = World.init();
@@ -1002,4 +1047,35 @@ test "a failed load leaves the world unchanged (M1.1.1-HF1 D2)" {
     try testing.expectEqualStrings("old", held[0..ss.len]);
 
     decrefResourceStrings(&world, gpa, settings, buf); // release "old"
+}
+
+test "rollback restores across duplicate resource entries (M1.1.1-HF1 D2)" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const settings = try registerStringResource(gpa, &world.registry, "Settings");
+    const bag = try registerArrayResource(gpa, &world.registry, "Bag");
+
+    // Prior state: Settings = "pre".
+    const seed = try buildStringResourceScene(gpa, &world.registry, settings, "pre");
+    defer gpa.free(seed);
+    var r_seed = try loadFromBytes(&world, gpa, seed, null);
+    r_seed.deinit(gpa);
+
+    // A scene with TWO Settings entries of the same cid ("a" then "b") + a
+    // trailing collection resource that fails. Rolling the two same-cid edits
+    // back forward would restore "a" then wrongly decref it; LIFO restores "pre"
+    // and frees each block exactly once (the testing allocator flags either bug).
+    const bytes = try buildDupResourceFailScene(gpa, &world.registry, settings, bag);
+    defer gpa.free(bytes);
+
+    try testing.expectError(error.CollectionResourceFieldUnsupported, loadFromBytes(&world, gpa, bytes, null));
+
+    const buf = world.resources.getResource(settings).?;
+    var ss: persistent.StringSlot = undefined;
+    @memcpy(std.mem.asBytes(&ss), buf[0..@sizeOf(persistent.StringSlot)]);
+    const held: [*]const u8 = @ptrFromInt(ss.ptr);
+    try testing.expectEqualStrings("pre", held[0..ss.len]); // pre-load value restored
+
+    decrefResourceStrings(&world, gpa, settings, buf); // release "pre"
 }
