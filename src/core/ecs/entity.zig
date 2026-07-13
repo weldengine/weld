@@ -121,6 +121,11 @@ pub const EntityIdentityStore = struct {
     /// onto the free list for recycling. Caller must have validated `id`
     /// prior; this still asserts liveness in debug.
     ///
+    /// Reserve-then-mutate: the free-list capacity is grown *before* the slot
+    /// is touched, so an `OutOfMemory` leaves the store with no observable
+    /// mutation — the slot stays alive, `liveCount` is unchanged, and the
+    /// call is retryable.
+    ///
     /// Generation arithmetic uses wrapping increment — the u32 counter is
     /// only at risk after 4 G releases of the same slot, which is well
     /// past the Phase 0 horizon. A future-phase milestone can introduce a
@@ -130,9 +135,10 @@ pub const EntityIdentityStore = struct {
         const slot = &self.slots.items[id.index];
         std.debug.assert(slot.alive);
         std.debug.assert(slot.generation == id.generation);
+        try self.free_indices.ensureUnusedCapacity(gpa, 1);
         slot.alive = false;
         slot.generation +%= 1;
-        try self.free_indices.append(gpa, id.index);
+        self.free_indices.appendAssumeCapacity(id.index);
     }
 
     /// Number of currently live entities — `total slots - freed slots`.
@@ -259,4 +265,29 @@ test "100k allocate then release back to zero live count" {
         try store.release(gpa, ids[i]);
     }
     try std.testing.expectEqual(@as(usize, 0), store.liveCount());
+}
+
+test "release under OOM leaves the slot alive and retryable" {
+    const gpa = std.testing.allocator;
+    var store = EntityIdentityStore.init();
+    defer store.deinit(gpa);
+
+    const a = try store.allocate(gpa);
+    try std.testing.expectEqual(@as(usize, 1), store.liveCount());
+
+    // A failing allocator that refuses the free-list growth in `release`. The
+    // free list starts empty, so the reserve is the first allocation it sees.
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, store.release(failing.allocator(), a));
+
+    // Reserve-then-mutate contract: no observable mutation on OOM. The slot is
+    // still alive, the handle still validates, and `liveCount` is unchanged.
+    try std.testing.expect(store.isLive(a));
+    try std.testing.expectEqual(@as(usize, 1), store.liveCount());
+    try store.validate(a);
+
+    // Retrying with a working allocator succeeds and frees the slot.
+    try store.release(gpa, a);
+    try std.testing.expectEqual(@as(usize, 0), store.liveCount());
+    try std.testing.expect(!store.isLive(a));
 }
