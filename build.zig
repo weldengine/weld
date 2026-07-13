@@ -108,6 +108,41 @@ pub fn build(b: *std.Build) void {
     // `foundation.simd.adler32`.
     asset_pipeline_module.addImport("foundation", foundation_module);
 
+    // M1.1.0 / E2 — `weld_forge` public API surface: Forge ECS component types
+    // (`engine-physics-forge.md` §2) + physics descriptor/handle types
+    // (`engine-tier-interfaces.md` §1). Type definitions only — no ECS
+    // registration, no module instantiation. Imports `foundation` (math types)
+    // and `weld_core` (re-exports `core.ecs.components.Velocity` +
+    // `core.ecs.EntityId`). Rooted at `api/root.zig` until the module-instantiation
+    // `forge/root.zig` lands (a later milestone re-roots it, zero call sites).
+    // The `forge_3d` solver (E3) depends on this module.
+    const forge_api_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/forge/api/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    forge_api_module.addImport("foundation", foundation_module);
+    forge_api_module.addImport("weld_core", core_module);
+
+    // M1.1.0 / E3 — `physics_f64` build option (default false → `Real = f32`).
+    // `-Dphysics_f64=true` flips forge_3d to double precision (large worlds).
+    // Exposed to forge_3d as the `build_options` module read by `config.zig`.
+    const physics_f64 = b.option(bool, "physics_f64", "Build forge_3d in f64 (double) precision (default f32)") orelse false;
+    const forge_build_options = b.addOptions();
+    forge_build_options.addOption(bool, "physics_f64", physics_f64);
+
+    // M1.1.0 / E3 — `forge_3d` native 3D solver skeleton. Depends only on
+    // `foundation` (math) and `weld_forge` (the api surface; core entity types
+    // reach it through api/), plus the `build_options` for the `Real` scalar.
+    const forge_3d_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/forge/solvers_3d/forge_3d/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    forge_3d_module.addImport("foundation", foundation_module);
+    forge_3d_module.addImport("weld_forge", forge_api_module);
+    forge_3d_module.addOptions("build_options", forge_build_options);
+
     // M0.2 / E6 — plugin loader ABI module shared with the stub
     // plugin sub-projects under `tests/core/plugin_loader/stub_plugin/`.
     // Exposes the C ABI types from `desc.zig` (no `WeldAPI` itself,
@@ -264,6 +299,23 @@ pub fn build(b: *std.Build) void {
     // reachable and analysed (engine-zig-conventions.md §13).
     const foundation_tests = b.addTest(.{ .root_module = foundation_module });
     test_step.dependOn(&b.addRunArtifact(foundation_tests).step);
+
+    // M1.1.0 / E2 — inline tests inside src/modules/forge/api/** (component
+    // size/align asserts, descriptor + component defaults, Velocity re-export
+    // identity, BodyId pack/unpack). The api root re-exports components/ +
+    // types/, so their inline tests are reachable (engine-zig-conventions.md §13).
+    const forge_api_tests = b.addTest(.{ .root_module = forge_api_module });
+    test_step.dependOn(&b.addRunArtifact(forge_api_tests).step);
+
+    // M1.1.0 / E3 — forge_3d solver unit tests (C1.1 verification path): the
+    // inline tests in config/shape/body/body_manager + the acceptance suite
+    // under solvers_3d/forge_3d/tests/. root.zig pins them all. Added to
+    // `zig build test`; `zig build test-forge-3d` runs just these.
+    const forge_3d_tests = b.addTest(.{ .root_module = forge_3d_module });
+    const forge_3d_tests_run = b.addRunArtifact(forge_3d_tests);
+    test_step.dependOn(&forge_3d_tests_run.step);
+    const forge_3d_test_step = b.step("test-forge-3d", "Run only the forge_3d solver tests");
+    forge_3d_test_step.dependOn(&forge_3d_tests_run.step);
 
     // Out-of-tree tests. Each file is its own root_module and imports
     // `weld_core` to reach the engine internals.

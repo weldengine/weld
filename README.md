@@ -69,7 +69,7 @@ zig build bindgen                                        # regenerate the Vulkan
 
 ```
 src/
-  foundation/       cross-cutting substrate (consumed by every tier) — root.zig + simd/ SIMD kernels
+  foundation/       cross-cutting substrate (consumed by every tier) — root.zig + math/ (Vec/Quat/Mat3/Aabb) + simd/ SIMD kernels
   core/             Tier 0 engine internals (the weld_core module)
     ecs/            components, chunks, archetypes, queries, world
     jobs/           work-stealing scheduler (Chase-Lev deques + worker pool)
@@ -87,6 +87,7 @@ src/
     (parser.zig, interp.zig, ast.zig, value.zig, ecs_bridge.zig, scene_cook.zig, test_runner.zig, …)
   modules/          Tier 1 modules
     render/         Vulkan forward renderer + GAL
+    forge/          physics — api (ECS components + descriptors) + forge_3d solver foundations
     audio/          audio module
     asset_pipeline/ offline asset pipeline (formats, codecs, cooking cache)
   editor/           editor binary — Window + Vulkan blit pipeline + IPC server (main.zig, vk_blit.zig)
