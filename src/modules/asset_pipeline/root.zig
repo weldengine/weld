@@ -24,7 +24,11 @@
 /// sets. DISTINCT from `format.current_version` (on-disk header layout) and
 /// `AssetDoc.version` (on-disk schema). Bumped on any breaking change — a
 /// tracked migration, not a freeze failure (the `*_PROTOCOL_VERSION` rule).
-pub const WELD_ASSET_PIPELINE_PROTOCOL_VERSION: u32 = 1;
+///
+/// M1.1.1-HF1 (D6) bumped 1 → 2: `Loader.LoadError` gained `MalformedAsset`
+/// (runtime `.bin` header + data-hash validation), which widens the pinned
+/// `load` / `reload` error sets.
+pub const WELD_ASSET_PIPELINE_PROTOCOL_VERSION: u32 = 2;
 
 /// On-disk format surfaces: `AssetType`, the runtime `.bin` header, the
 /// intermediate `.asset.etch` document model + reader/writer.
