@@ -1,15 +1,18 @@
 //! `forge_3d` — the native Zig 3D physics solver (Tier 1, in-tree per
-//! `engine-spec.md` §3.5). M1.1.0 lays the foundations: the `Real` scalar,
-//! the `ShapeStore`, per-body `MotionProperties` with analytic inertia, and the
-//! SoA `BodyManager`. No stepping, no scheduler, no broadphase yet — those are
-//! later M1.1 sub-milestones. Depends only on `foundation/math` and
-//! `src/modules/forge/api/` (core entity/component types reach here through
+//! `engine-spec.md` §3.5). M1.1.0 laid the foundations: the `Real` scalar, the
+//! `ShapeStore`, per-body `MotionProperties` with analytic inertia, and the SoA
+//! `BodyManager`. M1.1.1 adds the shared `pipeline/broadphase.zig` (a dynamic
+//! multi-layer AABB tree — BVH), re-exported here at `Real`. No stepping,
+//! narrowphase, island manager, scheduler, or `PhysicsModule` instantiation
+//! yet — those are later M1.1 sub-milestones. Depends only on `foundation/math`
+//! and `src/modules/forge/api/` (core entity/component types reach here through
 //! `api/`).
 
 const config = @import("config.zig");
 const shape = @import("shape.zig");
 const body = @import("body.zig");
 const body_manager = @import("body_manager.zig");
+const broadphase = @import("pipeline/broadphase.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -42,6 +45,18 @@ pub const Body = body.Body;
 /// SoA store of rigid bodies with generational handles.
 pub const BodyManager = body_manager.BodyManager;
 
+// --- Pipeline (shared by both solver branches) ---
+
+/// Dynamic AABB tree (BVH) at solver precision.
+pub const Bvh = broadphase.Bvh(Real);
+/// Multi-layer broadphase (one `Bvh` per layer + candidate-pair generation) at
+/// solver precision.
+pub const Broadphase = broadphase.Broadphase(Real);
+/// The broad collision layers (scalar-independent).
+pub const BroadphaseLayer = broadphase.BroadphaseLayer;
+/// Broadphase tuning at solver precision.
+pub const BroadphaseConfig = broadphase.BroadphaseConfig(Real);
+
 // Pins so the inline tests + the acceptance suite are analysed when this module
 // is built as a test target (engine-zig-conventions.md §13).
 comptime {
@@ -49,5 +64,7 @@ comptime {
     _ = shape;
     _ = body;
     _ = body_manager;
+    _ = broadphase;
     _ = @import("tests/body_manager_test.zig");
+    _ = @import("tests/broadphase_test.zig");
 }

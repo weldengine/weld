@@ -58,6 +58,10 @@ pub const Body = struct {
     shape: ShapeId,
     /// Simulation class.
     body_type: BodyType,
+    /// Object collision-layer index (stored from the descriptor). Consumed by
+    /// the object-layer pair filtering / `CollisionConfig` matrix wiring in a
+    /// later M1.1 sub-milestone; nothing reads it yet.
+    collision_layer: u8,
     /// Per-body flags.
     flags: BodyFlags,
     /// Owning ECS entity.

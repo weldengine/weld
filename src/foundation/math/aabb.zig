@@ -60,6 +60,14 @@ pub fn Aabb(comptime T: type) type {
         pub fn halfExtents(self: Self) Vec3T {
             return self.max.sub(self.min).scale(0.5);
         }
+
+        /// Surface area `2·(dx·dy + dy·dz + dz·dx)` where `d = max - min`.
+        /// The SAH cost metric the broadphase BVH descends on. A degenerate
+        /// (zero-extent) box returns 0.
+        pub fn surfaceArea(self: Self) T {
+            const d = self.max.sub(self.min).toArray();
+            return 2 * (d[0] * d[1] + d[1] * d[2] + d[2] * d[0]);
+        }
     };
 }
 
@@ -110,4 +118,19 @@ test "generic Aabb f64 instantiation compiles" {
     const box = A.fromCenterHalfExtents(V.zero, V.splat(2));
     try testing.expect(box.contains(V.fromArray(.{ 1, -1, 2 })));
     try testing.expect(!box.contains(V.fromArray(.{ 3, 0, 0 })));
+}
+
+test "surfaceArea" {
+    // 2 × 3 × 4 box → 2·(2·3 + 3·4 + 4·2) = 2·(6 + 12 + 8) = 52.
+    const box = Aabbf.fromMinMax(Vec3.zero, Vec3.fromArray(.{ 2, 3, 4 }));
+    try testing.expectApproxEqAbs(@as(f32, 52), box.surfaceArea(), 1e-4);
+    // Offset from the origin must not change the extents.
+    const shifted = Aabbf.fromMinMax(Vec3.fromArray(.{ 5, 5, 5 }), Vec3.fromArray(.{ 7, 8, 9 }));
+    try testing.expectApproxEqAbs(@as(f32, 52), shifted.surfaceArea(), 1e-4);
+    // Degenerate (zero-extent) box → 0.
+    const point = Aabbf.fromMinMax(Vec3.one, Vec3.one);
+    try testing.expectEqual(@as(f32, 0), point.surfaceArea());
+    // A flat (zero-thickness) box has two faces of area dx·dz: 2·(2·0 + 0·4 + 4·2) = 16.
+    const flat = Aabbf.fromMinMax(Vec3.zero, Vec3.fromArray(.{ 2, 0, 4 }));
+    try testing.expectApproxEqAbs(@as(f32, 16), flat.surfaceArea(), 1e-4);
 }

@@ -219,6 +219,29 @@ test "static body has zero inverse mass and inertia" {
     }
 }
 
+test "collision_layer is stored and retrievable" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+
+    // Round-trip a non-default layer.
+    var d = descOf(0, .dynamic, s);
+    d.collision_layer = 7;
+    const id = try bm.addBody(gpa, &store, d);
+    try testing.expectEqual(@as(?u8, 7), bm.collisionLayer(id));
+
+    // Descriptor default is 0.
+    const id0 = try bm.addBody(gpa, &store, descOf(1, .dynamic, s));
+    try testing.expectEqual(@as(?u8, 0), bm.collisionLayer(id0));
+
+    // Stale handle ⇒ null.
+    bm.removeBody(id);
+    try testing.expectEqual(@as(?u8, null), bm.collisionLayer(id));
+}
+
 test "inertia matches analytic values" {
     const gpa = testing.allocator;
     var store = ShapeStore{};
