@@ -136,12 +136,20 @@ pub fn retain(self: *Registry, handle: AssetHandle) Error!void {
 /// Drop a strong reference; unloads the slot (bumping its generation) when
 /// the count reaches 0. Errors `error.StaleHandle` if the handle no longer
 /// resolves.
+///
+/// Reserve-then-mutate: when this release unloads the slot (refcount was 1),
+/// the free-list slot is reserved *before* any mutation (via `freeSlot`), so
+/// an `OutOfMemory` leaves the slot alive at refcount 1 and the call
+/// retryable. The plain decrement path (refcount > 1) allocates nothing.
 pub fn release(self: *Registry, gpa: std.mem.Allocator, handle: AssetHandle) Error!void {
     const idx = self.liveIndex(handle) orelse return error.StaleHandle;
     const slot = &self.slots.items[idx];
     std.debug.assert(slot.refcount > 0);
-    slot.refcount -= 1;
-    if (slot.refcount == 0) try self.freeSlot(gpa, idx);
+    if (slot.refcount == 1) {
+        try self.freeSlot(gpa, idx);
+    } else {
+        slot.refcount -= 1;
+    }
 }
 
 /// Force-unload the slot regardless of refcount, bumping its generation so
@@ -174,12 +182,17 @@ fn liveIndex(self: *const Registry, handle: AssetHandle) ?u32 {
 /// Mark a slot dead, bump its generation, and push it onto the free list.
 /// Generation arithmetic wraps — only at risk after 64 K reuses of the same
 /// slot, past the Phase 0 horizon.
+///
+/// Reserve-then-mutate: the free-list capacity is grown *before* the slot is
+/// touched, so an `OutOfMemory` leaves the slot untouched (alive, refcount
+/// preserved) and the caller (`release`/`unload`) retryable.
 fn freeSlot(self: *Registry, gpa: std.mem.Allocator, idx: u32) Error!void {
+    try self.free_indices.ensureUnusedCapacity(gpa, 1);
     const slot = &self.slots.items[idx];
     slot.alive = false;
     slot.refcount = 0;
     slot.generation +%= 1;
-    try self.free_indices.append(gpa, idx);
+    self.free_indices.appendAssumeCapacity(idx);
 }
 
 test "alloc returns a live, type-tagged handle with refcount 1" {
@@ -282,4 +295,31 @@ test "allocWithUuid stores the stable identity; alloc leaves it zero" {
 
     const h2 = try reg.alloc(gpa, .texture);
     try std.testing.expectEqual(@as(u128, 0), reg.resolve(h2).?.uuid);
+}
+
+test "release at refcount 1 under OOM leaves the slot alive and retryable" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    const h = try reg.alloc(gpa, .texture);
+    try std.testing.expectEqual(@as(u32, 1), reg.refCount(h).?);
+
+    // The free list starts empty, so the reserve inside freeSlot is the first
+    // allocation the failing allocator sees.
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, reg.release(failing.allocator(), h));
+
+    // No observable mutation on OOM: still alive at refcount 1.
+    try std.testing.expect(reg.isAlive(h));
+    try std.testing.expectEqual(@as(u32, 1), reg.refCount(h).?);
+    try std.testing.expectEqual(@as(usize, 1), reg.liveCount());
+
+    // Retrying with a working allocator unloads and recycles the slot.
+    try reg.release(gpa, h);
+    try std.testing.expect(!reg.isAlive(h));
+    try std.testing.expectEqual(@as(usize, 0), reg.liveCount());
+
+    const h2 = try reg.alloc(gpa, .mesh);
+    try std.testing.expectEqual(h.index, h2.index); // slot recycled
 }
