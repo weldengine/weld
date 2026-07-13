@@ -101,6 +101,24 @@ pub fn Bvh(comptime T: type) type {
             return self.nodes.items[self.root].height;
         }
 
+        /// The opaque `user_data` stored for `proxy` (must be a live leaf).
+        pub fn userData(self: *const Self, proxy: u32) u32 {
+            std.debug.assert(self.nodes.items[proxy].height == 0);
+            return self.nodes.items[proxy].user_data;
+        }
+
+        /// The stored fat AABB of `proxy` (must be a live leaf).
+        pub fn proxyAabb(self: *const Self, proxy: u32) AabbT {
+            std.debug.assert(self.nodes.items[proxy].height == 0);
+            return self.nodes.items[proxy].aabb;
+        }
+
+        /// Whether `index` currently names a live leaf (used to skip a stale
+        /// proxy id whose slot was freed and not yet reused).
+        pub fn isLiveLeaf(self: *const Self, index: u32) bool {
+            return index < self.nodes.items.len and self.nodes.items[index].height == 0;
+        }
+
         /// Insert a proxy for `tight_aabb` carrying `user_data`. The stored box
         /// is `tight_aabb` fattened by `config.margin`. Returns the proxy id
         /// (a node index). Each insert adds at most two nodes (the leaf plus one
@@ -476,6 +494,193 @@ pub fn Bvh(comptime T: type) type {
         fn aabbContains(outer: AabbT, inner: AabbT) bool {
             return @reduce(.And, outer.min.data <= inner.min.data) and
                 @reduce(.And, inner.max.data <= outer.max.data);
+        }
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Multi-layer aggregate + candidate-pair generation
+// ---------------------------------------------------------------------------
+
+/// The collision broad layers (`engine-physics-forge.md` §1.2). Each owns its
+/// own `Bvh(T)` inside `Broadphase(T)`; `default_layer_pairs` decides which
+/// layer combinations may produce candidate pairs.
+pub const BroadphaseLayer = enum(u8) {
+    static,
+    dynamic,
+    debris,
+    trigger,
+};
+
+/// Number of broad layers.
+pub const layer_count = @typeInfo(BroadphaseLayer).@"enum".fields.len;
+
+/// Default layer-pair matrix — symmetric; `true` = the two layers produce
+/// candidate pairs. Indexed by `@intFromEnum(BroadphaseLayer)`
+/// (static=0, dynamic=1, debris=2, trigger=3). Allowed: dynamic×dynamic,
+/// dynamic×static, dynamic×debris, dynamic×trigger, debris×static (brief Notes).
+/// Overridable `CollisionConfig` wiring is a later milestone (out of scope);
+/// this `const` is the Phase-1 default.
+pub const default_layer_pairs: [layer_count][layer_count]bool = .{
+    //         static  dynamic  debris  trigger
+    .{ false, true, true, false }, // static
+    .{ true, true, true, true }, // dynamic
+    .{ true, true, false, false }, // debris
+    .{ false, true, false, false }, // trigger
+};
+
+/// Multi-layer broadphase: one `Bvh(T)` per `BroadphaseLayer`, per-layer
+/// moved-proxy tracking, and `computePairs` producing the deterministic,
+/// deduplicated candidate-pair list the narrowphase consumes. No hash
+/// containers anywhere (determinism by construction, M1.1.14).
+pub fn Broadphase(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        const BvhT = Bvh(T);
+        const AabbT = math.Aabb(T);
+
+        /// Tuning config type for this scalar.
+        pub const Config = BroadphaseConfig(T);
+
+        /// A proxy handle: the owning layer plus its tree-local proxy id.
+        pub const Proxy = struct {
+            layer: BroadphaseLayer,
+            id: u32,
+        };
+
+        /// A candidate overlap between two proxies, by `user_data`, canonical
+        /// (`a < b`).
+        pub const Pair = struct {
+            a: u32,
+            b: u32,
+        };
+
+        trees: [layer_count]BvhT,
+        /// Per-layer log of proxy ids touched since the last `computePairs`
+        /// (inserted, or re-inserted by `update`). Consumed (cleared) by
+        /// `computePairs`; may hold duplicates or stale ids — both are handled
+        /// there (pair-set dedup; `isLiveLeaf` skip for a freed id).
+        moved: [layer_count]std.ArrayListUnmanaged(u32),
+
+        /// A broadphase with the given tuning and no proxies.
+        pub fn init(config: Config) Self {
+            var self: Self = .{ .trees = undefined, .moved = undefined };
+            for (&self.trees) |*t| t.* = BvhT.init(config);
+            for (&self.moved) |*m| m.* = .empty;
+            return self;
+        }
+
+        /// Release every layer tree and moved-log.
+        pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
+            for (&self.trees) |*t| t.deinit(gpa);
+            for (&self.moved) |*m| m.deinit(gpa);
+            self.* = undefined;
+        }
+
+        /// Insert a proxy into `layer` for `tight_aabb` carrying `user_data`,
+        /// and mark it moved so the next `computePairs` considers it.
+        pub fn insert(self: *Self, gpa: std.mem.Allocator, layer: BroadphaseLayer, tight_aabb: AabbT, user_data: u32) !Proxy {
+            const li = @intFromEnum(layer);
+            const id = try self.trees[li].insert(gpa, tight_aabb, user_data);
+            try self.moved[li].append(gpa, id);
+            return .{ .layer = layer, .id = id };
+        }
+
+        /// Remove a proxy. A lingering moved-log entry for it is harmless — the
+        /// freed slot fails `isLiveLeaf` and is skipped by `computePairs`.
+        pub fn remove(self: *Self, proxy: Proxy) void {
+            self.trees[@intFromEnum(proxy.layer)].remove(proxy.id);
+        }
+
+        /// Move a proxy to `tight_aabb`. Marks it moved only when the tree
+        /// actually re-inserted it (the fat AABB changed); an in-margin nudge is
+        /// a no-op with no pair consequence (hysteresis).
+        pub fn update(self: *Self, gpa: std.mem.Allocator, proxy: Proxy, tight_aabb: AabbT) !void {
+            const li = @intFromEnum(proxy.layer);
+            if (self.trees[li].update(proxy.id, tight_aabb)) {
+                try self.moved[li].append(gpa, proxy.id);
+            }
+        }
+
+        /// Overlap query across every layer: `collector.add(user_data)` for each
+        /// proxy whose fat AABB overlaps `query`. Returns the total nodes
+        /// visited. `collector` is a pointer with `fn add(self, u32) void`.
+        pub fn queryAabb(self: *const Self, query: AabbT, collector: anytype) u32 {
+            var visited: u32 = 0;
+            for (&self.trees) |*t| visited += t.queryAabb(query, collector);
+            return visited;
+        }
+
+        /// Fill `out` with the deterministic candidate pairs among moved proxies
+        /// and the layers they may pair with (`default_layer_pairs`). Consumes
+        /// (clears) the moved-logs. `out` is cleared first, then sorted by the
+        /// packed key `(a << 32) | b` and adjacent-deduped, so it holds each
+        /// unordered pair once, in canonical `(a < b)` form.
+        pub fn computePairs(self: *Self, gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(Pair)) !void {
+            out.clearRetainingCapacity();
+
+            var sink = PairSink{ .out = out, .gpa = gpa };
+            for (0..layer_count) |li| {
+                for (self.moved[li].items) |proxy| {
+                    if (!self.trees[li].isLiveLeaf(proxy)) continue; // stale id
+                    sink.moved_ud = self.trees[li].userData(proxy);
+                    const p_aabb = self.trees[li].proxyAabb(proxy);
+                    for (0..layer_count) |lj| {
+                        if (!default_layer_pairs[li][lj]) continue;
+                        _ = self.trees[lj].queryAabb(p_aabb, &sink);
+                    }
+                }
+            }
+            if (sink.err) |e| return e;
+
+            for (&self.moved) |*m| m.clearRetainingCapacity();
+
+            std.mem.sort(Pair, out.items, {}, pairLess);
+            dedupAdjacent(out);
+        }
+
+        /// Query sink: turns each found `user_data` into a canonical pair with
+        /// the current moved proxy, skipping the self-match (a proxy's
+        /// `user_data` is its unique id). OOM in the void-returning `add` is
+        /// latched in `err` and surfaced by `computePairs`.
+        const PairSink = struct {
+            out: *std.ArrayListUnmanaged(Pair),
+            gpa: std.mem.Allocator,
+            moved_ud: u32 = 0,
+            err: ?std.mem.Allocator.Error = null,
+
+            fn add(self: *PairSink, found_ud: u32) void {
+                if (found_ud == self.moved_ud) return; // self / same body
+                self.out.append(self.gpa, .{
+                    .a = @min(self.moved_ud, found_ud),
+                    .b = @max(self.moved_ud, found_ud),
+                }) catch |e| {
+                    self.err = e;
+                };
+            }
+        };
+
+        fn packKey(p: Pair) u64 {
+            return (@as(u64, p.a) << 32) | @as(u64, p.b);
+        }
+
+        fn pairLess(_: void, x: Pair, y: Pair) bool {
+            return packKey(x) < packKey(y);
+        }
+
+        fn dedupAdjacent(out: *std.ArrayListUnmanaged(Pair)) void {
+            if (out.items.len == 0) return;
+            var w: usize = 1;
+            var i: usize = 1;
+            while (i < out.items.len) : (i += 1) {
+                const prev = out.items[w - 1];
+                const cur = out.items[i];
+                if (cur.a != prev.a or cur.b != prev.b) {
+                    out.items[w] = cur;
+                    w += 1;
+                }
+            }
+            out.shrinkRetainingCapacity(w);
         }
     };
 }

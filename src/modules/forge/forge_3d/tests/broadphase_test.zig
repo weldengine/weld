@@ -12,6 +12,8 @@ const math = @import("foundation").math;
 const Aabbf = math.Aabbf;
 const Vec3 = math.Vec3;
 const BvhF = broadphase.Bvh(f32);
+const BphF = broadphase.Broadphase(f32);
+const Layer = broadphase.BroadphaseLayer;
 
 /// Unit-half-extent box centred at (x, 0, 0).
 fn boxAt(x: f32) Aabbf {
@@ -21,6 +23,29 @@ fn boxAt(x: f32) Aabbf {
 /// Box centred at `c` with uniform half-extent `he`.
 fn boxCe(c: [3]f32, he: f32) Aabbf {
     return Aabbf.fromCenterHalfExtents(Vec3.fromArray(c), Vec3.splat(he));
+}
+
+/// Whether the pair set contains the unordered pair {a, b}.
+fn hasPair(pairs: []const BphF.Pair, a: u32, b: u32) bool {
+    const lo = @min(a, b);
+    const hi = @max(a, b);
+    for (pairs) |p| {
+        if (p.a == lo and p.b == hi) return true;
+    }
+    return false;
+}
+
+/// Assert every pair is canonical (`a < b`) and the list is strictly ascending
+/// by packed key — which proves both sorted order and the absence of dups.
+fn assertSortedDeduped(pairs: []const BphF.Pair) !void {
+    for (pairs) |p| try std.testing.expect(p.a < p.b);
+    if (pairs.len < 2) return;
+    var i: usize = 1;
+    while (i < pairs.len) : (i += 1) {
+        const prev = (@as(u64, pairs[i - 1].a) << 32) | @as(u64, pairs[i - 1].b);
+        const cur = (@as(u64, pairs[i].a) << 32) | @as(u64, pairs[i].b);
+        try std.testing.expect(prev < cur);
+    }
 }
 
 /// Query sink: records the `user_data` of every proxy the traversal reports.
@@ -370,5 +395,157 @@ test "identical op sequences produce identical trees and query results" {
         const vb = b.queryAabb(q, &cb);
         try std.testing.expectEqual(va, vb);
         try std.testing.expectEqualSlices(u32, ca.sortedOwned(), cb.sortedOwned());
+    }
+}
+
+test "layer-pair matrix filters pairs" {
+    const gpa = std.testing.allocator;
+    var bph = BphF.init(.{ .margin = 0 });
+    defer bph.deinit(gpa);
+
+    // Two proxies per layer, all identical boxes at the origin → all overlap,
+    // so only the layer-pair matrix decides which pairs appear.
+    const box = boxCe(.{ 0, 0, 0 }, 1);
+    _ = try bph.insert(gpa, .static, box, 10);
+    _ = try bph.insert(gpa, .static, box, 11);
+    _ = try bph.insert(gpa, .dynamic, box, 20);
+    _ = try bph.insert(gpa, .dynamic, box, 21);
+    _ = try bph.insert(gpa, .debris, box, 30);
+    _ = try bph.insert(gpa, .debris, box, 31);
+    _ = try bph.insert(gpa, .trigger, box, 40);
+    _ = try bph.insert(gpa, .trigger, box, 41);
+
+    var pairs: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pairs.deinit(gpa);
+    try bph.computePairs(gpa, &pairs);
+    try assertSortedDeduped(pairs.items);
+
+    // Allowed combinations present.
+    try std.testing.expect(hasPair(pairs.items, 20, 21)); // dynamic × dynamic
+    try std.testing.expect(hasPair(pairs.items, 10, 20)); // static × dynamic
+    try std.testing.expect(hasPair(pairs.items, 10, 30)); // static × debris
+    try std.testing.expect(hasPair(pairs.items, 20, 30)); // dynamic × debris
+    try std.testing.expect(hasPair(pairs.items, 20, 40)); // dynamic × trigger
+
+    // Forbidden combinations absent.
+    try std.testing.expect(!hasPair(pairs.items, 10, 11)); // static × static
+    try std.testing.expect(!hasPair(pairs.items, 30, 31)); // debris × debris
+    try std.testing.expect(!hasPair(pairs.items, 40, 41)); // trigger × trigger
+    try std.testing.expect(!hasPair(pairs.items, 10, 40)); // static × trigger
+    try std.testing.expect(!hasPair(pairs.items, 30, 40)); // debris × trigger
+}
+
+test "computePairs matches brute force multi-layer" {
+    const gpa = std.testing.allocator;
+    var bph = BphF.init(.{ .margin = 0 }); // fat == tight → reference is a plain overlaps scan
+    defer bph.deinit(gpa);
+
+    const Rec = struct { ud: u32, layer: Layer, box: Aabbf };
+    var recs: std.ArrayListUnmanaged(Rec) = .empty;
+    defer recs.deinit(gpa);
+
+    var prng = std.Random.DefaultPrng.init(0xBEEF_F00D);
+    const rng = prng.random();
+    const nlayers: u8 = broadphase.layer_count;
+
+    var i: u32 = 0;
+    while (i < 300) : (i += 1) {
+        const layer: Layer = @enumFromInt(rng.uintLessThan(u8, nlayers));
+        const bx = boxCe(.{
+            rng.float(f32) * 30 - 15,
+            rng.float(f32) * 30 - 15,
+            rng.float(f32) * 30 - 15,
+        }, 0.5 + rng.float(f32) * 2.0);
+        _ = try bph.insert(gpa, layer, bx, i);
+        try recs.append(gpa, .{ .ud = i, .layer = layer, .box = bx });
+    }
+
+    var got: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer got.deinit(gpa);
+    try bph.computePairs(gpa, &got);
+    try assertSortedDeduped(got.items);
+
+    // O(n²) reference: same matrix, face-inclusive `overlaps`, canonical key.
+    var want: std.ArrayListUnmanaged(u64) = .empty;
+    defer want.deinit(gpa);
+    for (recs.items, 0..) |ri, ii| {
+        for (recs.items[ii + 1 ..]) |rj| {
+            if (!broadphase.default_layer_pairs[@intFromEnum(ri.layer)][@intFromEnum(rj.layer)]) continue;
+            if (!ri.box.overlaps(rj.box)) continue;
+            const a = @min(ri.ud, rj.ud);
+            const b = @max(ri.ud, rj.ud);
+            try want.append(gpa, (@as(u64, a) << 32) | @as(u64, b));
+        }
+    }
+    std.mem.sort(u64, want.items, {}, std.sort.asc(u64));
+
+    var got_keys: std.ArrayListUnmanaged(u64) = .empty;
+    defer got_keys.deinit(gpa);
+    for (got.items) |p| try got_keys.append(gpa, (@as(u64, p.a) << 32) | @as(u64, p.b));
+
+    try std.testing.expect(got.items.len > 0); // non-vacuous
+    try std.testing.expectEqualSlices(u64, want.items, got_keys.items);
+}
+
+/// Deterministic multi-layer op sequence (insert / update / remove across all
+/// four layers) used to prove `computePairs` is a pure function of the ops.
+fn runBph(gpa: std.mem.Allocator, bph: *BphF) !void {
+    var prng = std.Random.DefaultPrng.init(0xC0DE_5EED);
+    const rng = prng.random();
+    const nlayers: u8 = broadphase.layer_count;
+    var live: std.ArrayListUnmanaged(BphF.Proxy) = .empty;
+    defer live.deinit(gpa);
+
+    var op: u32 = 0;
+    while (op < 1500) : (op += 1) {
+        const r = rng.float(f32);
+        if (live.items.len == 0 or r < 0.5) {
+            const layer: Layer = @enumFromInt(rng.uintLessThan(u8, nlayers));
+            const bx = boxCe(.{
+                rng.float(f32) * 30 - 15,
+                rng.float(f32) * 30 - 15,
+                rng.float(f32) * 30 - 15,
+            }, 0.5 + rng.float(f32) * 2.0);
+            const p = try bph.insert(gpa, layer, bx, op);
+            try live.append(gpa, p);
+        } else if (r < 0.8) {
+            const idx = rng.intRangeLessThan(usize, 0, live.items.len);
+            const bx = boxCe(.{
+                rng.float(f32) * 30 - 15,
+                rng.float(f32) * 30 - 15,
+                rng.float(f32) * 30 - 15,
+            }, 0.5 + rng.float(f32) * 2.0);
+            try bph.update(gpa, live.items[idx], bx);
+        } else {
+            const idx = rng.intRangeLessThan(usize, 0, live.items.len);
+            bph.remove(live.swapRemove(idx));
+        }
+    }
+}
+
+test "computePairs is deterministic across identical op sequences" {
+    const gpa = std.testing.allocator;
+    var a = BphF.init(.{ .margin = 0.1 });
+    defer a.deinit(gpa);
+    var b = BphF.init(.{ .margin = 0.1 });
+    defer b.deinit(gpa);
+
+    try runBph(gpa, &a);
+    try runBph(gpa, &b);
+
+    var pa: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pa.deinit(gpa);
+    var pb: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pb.deinit(gpa);
+    try a.computePairs(gpa, &pa);
+    try b.computePairs(gpa, &pb);
+
+    try assertSortedDeduped(pa.items);
+    try assertSortedDeduped(pb.items);
+    try std.testing.expect(pa.items.len > 0); // non-vacuous
+    try std.testing.expectEqual(pa.items.len, pb.items.len);
+    for (pa.items, pb.items) |x, y| {
+        try std.testing.expectEqual(x.a, y.a);
+        try std.testing.expectEqual(x.b, y.b);
     }
 }
