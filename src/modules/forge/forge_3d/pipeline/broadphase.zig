@@ -131,6 +131,48 @@ pub fn Bvh(comptime T: type) type {
             self.leaf_count -= 1;
         }
 
+        /// Move a proxy to `tight_aabb`. Hysteresis: if `tight_aabb` still lies
+        /// inside the proxy's stored fat AABB, nothing changes and this returns
+        /// `false`; otherwise the proxy is re-fattened around `tight_aabb`,
+        /// re-inserted, and this returns `true`. Allocation-free — `removeLeaf`
+        /// frees exactly the one internal node `insertLeaf` reuses (and a lone
+        /// proxy re-roots without touching the pool), so no `gpa` is needed.
+        pub fn update(self: *Self, proxy: u32, tight_aabb: AabbT) bool {
+            std.debug.assert(proxy < self.nodes.items.len);
+            std.debug.assert(self.nodes.items[proxy].height == 0); // live leaf
+            if (aabbContains(self.nodes.items[proxy].aabb, tight_aabb)) {
+                return false;
+            }
+            self.removeLeaf(proxy);
+            self.nodes.items[proxy].aabb = self.fatten(tight_aabb);
+            self.insertLeaf(proxy);
+            return true;
+        }
+
+        /// Overlap query: call `collector.add(user_data)` for every proxy whose
+        /// stored (fat) AABB overlaps `query` (face-inclusive, `Aabb.overlaps`).
+        /// Returns the number of nodes visited — the metric the O(log n)
+        /// complexity test asserts on. `collector` is a pointer to any value
+        /// exposing `fn add(self, user_data: u32) void`.
+        pub fn queryAabb(self: *const Self, query: AabbT, collector: anytype) u32 {
+            if (self.root == null_index) return 0;
+            return self.queryNode(self.root, query, collector);
+        }
+
+        /// Recursive half of `queryAabb`: prune on non-overlap, collect leaves,
+        /// descend otherwise. Each touched node counts as one visit. Depth is
+        /// the (balanced) tree height, so the call stack stays logarithmic.
+        fn queryNode(self: *const Self, index: u32, query: AabbT, collector: anytype) u32 {
+            const node = self.nodes.items[index];
+            if (!node.aabb.overlaps(query)) return 1; // visited then pruned
+            if (isLeaf(node)) {
+                collector.add(node.user_data);
+                return 1;
+            }
+            return 1 + self.queryNode(node.child1, query, collector) +
+                self.queryNode(node.child2, query, collector);
+        }
+
         // --- Node pool ---
 
         /// Grab a slot (LIFO free-list reuse, else a fresh append). Capacity for
