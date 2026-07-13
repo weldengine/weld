@@ -227,6 +227,16 @@ pub const Backend = struct {
     }
 
     pub fn send(self: *Backend, bytes: []const u8) Error!void {
+        return self.writeAll(bytes);
+    }
+
+    /// Write `bytes` in full over the raw stream socket, looping over partial
+    /// writes and retrying on `EINTR`. Shared by `send` and the short-write
+    /// remainder path of `sendWithHandles` (M1.1.1-HF1 / D5) so the
+    /// partial-write loop is defined once, never duplicated. Carries no
+    /// ancillary data — a `sendWithHandles` remainder re-sends only leftover
+    /// payload bytes, never the fds (those rode out with the first segment).
+    fn writeAll(self: *Backend, bytes: []const u8) Error!void {
         var offset: usize = 0;
         while (offset < bytes.len) {
             const n = sys.write(self.fd, bytes.ptr + offset, bytes.len - offset);
@@ -300,6 +310,17 @@ pub const Backend = struct {
                 .INTR => continue,
                 else => return error.BrokenPipe,
             };
+            // n == 0 means neither data nor the attached fds left the socket
+            // (peer closed) — surface it as a broken pipe rather than flush a
+            // no-ancillary "remainder" that would silently drop the fds
+            // (mirrors `writeAll`'s n == 0 handling).
+            if (n == 0) return error.BrokenPipe;
+            // The fds rode out with this first segment. On a short write —
+            // a signal after a partial transfer left 0 < sent < bytes.len —
+            // flush the remaining payload through the shared plain-write loop;
+            // the remainder carries no ancillary data (D5).
+            const sent: usize = @intCast(n);
+            if (sent < bytes.len) try self.writeAll(bytes[sent..]);
             break;
         }
     }
