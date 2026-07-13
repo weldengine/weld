@@ -65,6 +65,7 @@ pub const BodyManager = struct {
             .motion = body_mod.computeMotion(desc, shape),
             .shape = desc.shape,
             .body_type = desc.body_type,
+            .collision_layer = desc.collision_layer,
             .flags = .{ .continuous = desc.continuous },
             .entity = desc.entity,
         };
@@ -100,6 +101,13 @@ pub const BodyManager = struct {
     pub fn motionProperties(self: *const BodyManager, id: BodyId) ?MotionProperties {
         const idx = self.alloc.validate(id) orelse return null;
         return self.bodies.items(.motion)[idx];
+    }
+
+    /// Safe getter: the body's object collision-layer index, or null if `id` is
+    /// stale/invalid.
+    pub fn collisionLayer(self: *const BodyManager, id: BodyId) ?u8 {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.collision_layer)[idx];
     }
 
     /// Safe getter: the exact world-space AABB of the body's shape, or null if

@@ -8,12 +8,23 @@
 const std = @import("std");
 const broadphase = @import("../pipeline/broadphase.zig");
 const math = @import("foundation").math;
+const config = @import("../config.zig");
+const shape_mod = @import("../shape.zig");
+const body_manager_mod = @import("../body_manager.zig");
+const api = @import("weld_forge");
 
 const Aabbf = math.Aabbf;
 const Vec3 = math.Vec3;
 const BvhF = broadphase.Bvh(f32);
 const BphF = broadphase.Broadphase(f32);
 const Layer = broadphase.BroadphaseLayer;
+
+// Real-precision aliases for the BodyManager integration test (f32 by default,
+// f64 under -Dphysics_f64) — so that gate exercises the solver's actual scalar.
+const Real = config.Real;
+const Aabbr = config.Aabbr;
+const Vec3r = config.Vec3r;
+const BphR = broadphase.Broadphase(Real);
 
 /// Unit-half-extent box centred at (x, 0, 0).
 fn boxAt(x: f32) Aabbf {
@@ -547,5 +558,84 @@ test "computePairs is deterministic across identical op sequences" {
     for (pa.items, pb.items) |x, y| {
         try std.testing.expectEqual(x.a, y.a);
         try std.testing.expectEqual(x.b, y.b);
+    }
+}
+
+/// Small query cell (half-extent 0.1) at solver precision.
+fn cell(x: Real, y: Real, z: Real) Aabbr {
+    return Aabbr.fromCenterHalfExtents(Vec3r.fromArray(.{ x, y, z }), Vec3r.splat(0.1));
+}
+
+/// Run a `Broadphase(Real)` query and assert the collected ids equal
+/// `expected_sorted` (which must be ascending).
+fn expectQueryIds(gpa: std.mem.Allocator, bph: *const BphR, query: Aabbr, expected_sorted: []const u32) !void {
+    var c = Collector{ .gpa = gpa };
+    defer c.deinit();
+    _ = bph.queryAabb(query, &c);
+    try std.testing.expectEqualSlices(u32, expected_sorted, c.sortedOwned());
+}
+
+test "BodyManager to Broadphase integration" {
+    const gpa = std.testing.allocator;
+    var store = shape_mod.ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = body_manager_mod.BodyManager{};
+    defer bm.deinit(gpa);
+    var bph = BphR.init(.{ .margin = 0 }); // fat == tight ⇒ exact query matching
+    defer bph.deinit(gpa);
+
+    const sphere = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+
+    // Mixed body types at distinct, well-separated positions (spheres r=0.5,
+    // 10 m apart, so a small cell query hits exactly one).
+    const Spec = struct { pos: [3]f32, bt: api.BodyType };
+    const specs = [_]Spec{
+        .{ .pos = .{ 0, 0, 0 }, .bt = .static },
+        .{ .pos = .{ 10, 0, 0 }, .bt = .dynamic },
+        .{ .pos = .{ 20, 0, 0 }, .bt = .kinematic },
+        .{ .pos = .{ 0, 10, 0 }, .bt = .dynamic },
+        .{ .pos = .{ 10, 10, 0 }, .bt = .static },
+    };
+
+    var ids: [specs.len]api.BodyId = undefined;
+    for (specs, 0..) |s, i| {
+        var d = api.BodyDescriptor{
+            .entity = .{ .index = @intCast(i), .generation = 0 },
+            .body_type = s.bt,
+            .shape = sphere,
+        };
+        d.position = Vec3.fromArray(s.pos);
+        const id = try bm.addBody(gpa, &store, d);
+        ids[i] = id;
+        // body_type → layer: static → .static, dynamic/kinematic → .dynamic.
+        const layer: Layer = switch (s.bt) {
+            .static => .static,
+            .dynamic, .kinematic => .dynamic,
+        };
+        const aabb = bm.bodyAabb(&store, id).?; // exact world AABB from the manager
+        _ = try bph.insert(gpa, layer, aabb, id); // user_data = packed BodyId
+    }
+
+    // Single-cell queries return exactly the body at that cell — including the
+    // kinematic one (in the .dynamic layer) since the query spans all layers.
+    try expectQueryIds(gpa, &bph, cell(10, 0, 0), &.{ids[1]});
+    try expectQueryIds(gpa, &bph, cell(0, 0, 0), &.{ids[0]});
+    try expectQueryIds(gpa, &bph, cell(20, 0, 0), &.{ids[2]});
+
+    // A box spanning (10,0,0) and (10,10,0) returns both across layers
+    // (dynamic ids[1] + static ids[4]).
+    {
+        const q = Aabbr.fromMinMax(Vec3r.fromArray(.{ 9, -1, -1 }), Vec3r.fromArray(.{ 11, 11, 1 }));
+        var expected = [_]u32{ ids[1], ids[4] };
+        std.mem.sort(u32, &expected, {}, std.sort.asc(u32));
+        try expectQueryIds(gpa, &bph, q, &expected);
+    }
+
+    // A box covering the whole scene returns all five ids.
+    {
+        const q = Aabbr.fromMinMax(Vec3r.splat(-5), Vec3r.fromArray(.{ 25, 15, 5 }));
+        var expected = ids;
+        std.mem.sort(u32, &expected, {}, std.sort.asc(u32));
+        try expectQueryIds(gpa, &bph, q, &expected);
     }
 }

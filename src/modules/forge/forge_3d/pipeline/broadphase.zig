@@ -579,6 +579,11 @@ pub fn Broadphase(comptime T: type) type {
 
         /// Insert a proxy into `layer` for `tight_aabb` carrying `user_data`,
         /// and mark it moved so the next `computePairs` considers it.
+        ///
+        /// Precondition: `user_data` must be unique across ALL proxies in every
+        /// layer — `computePairs` treats it as the proxy's identity to exclude
+        /// self-matches, so a collision would silently drop a legitimate pair
+        /// (forge_3d passes the packed `BodyId`, which is unique by construction).
         pub fn insert(self: *Self, gpa: std.mem.Allocator, layer: BroadphaseLayer, tight_aabb: AabbT, user_data: u32) !Proxy {
             const li = @intFromEnum(layer);
             const id = try self.trees[li].insert(gpa, tight_aabb, user_data);

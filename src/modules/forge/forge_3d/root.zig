@@ -10,6 +10,7 @@ const config = @import("config.zig");
 const shape = @import("shape.zig");
 const body = @import("body.zig");
 const body_manager = @import("body_manager.zig");
+const broadphase = @import("pipeline/broadphase.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -42,6 +43,18 @@ pub const Body = body.Body;
 /// SoA store of rigid bodies with generational handles.
 pub const BodyManager = body_manager.BodyManager;
 
+// --- Pipeline (shared by both solver branches) ---
+
+/// Dynamic AABB tree (BVH) at solver precision.
+pub const Bvh = broadphase.Bvh(Real);
+/// Multi-layer broadphase (one `Bvh` per layer + candidate-pair generation) at
+/// solver precision.
+pub const Broadphase = broadphase.Broadphase(Real);
+/// The broad collision layers (scalar-independent).
+pub const BroadphaseLayer = broadphase.BroadphaseLayer;
+/// Broadphase tuning at solver precision.
+pub const BroadphaseConfig = broadphase.BroadphaseConfig(Real);
+
 // Pins so the inline tests + the acceptance suite are analysed when this module
 // is built as a test target (engine-zig-conventions.md §13).
 comptime {
@@ -49,7 +62,7 @@ comptime {
     _ = shape;
     _ = body;
     _ = body_manager;
-    _ = @import("pipeline/broadphase.zig");
+    _ = broadphase;
     _ = @import("tests/body_manager_test.zig");
     _ = @import("tests/broadphase_test.zig");
 }
