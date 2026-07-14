@@ -55,6 +55,15 @@ pub const ReadError = error{
     BadMagic,
 };
 
+/// Errors surfaced by `validate` (M1.1.1-HF1 / D6).
+pub const ValidateError = error{
+    /// `version` is not `current_version`.
+    UnsupportedVersion,
+    /// A section escapes `[header_size, bin_len]` — including an
+    /// `offset + size` that overflows.
+    SectionOutOfBounds,
+};
+
 /// 40-byte runtime header. Field order and offsets are frozen day 1; the
 /// `comptime` block below pins them so a refactor that reorders fields or
 /// changes a type fails to compile rather than silently breaking the
@@ -181,6 +190,31 @@ pub const RuntimeHeader = extern struct {
             .hash = std.mem.readInt(u64, bytes[32..40], .little),
         };
     }
+
+    /// Structural validation of a header parsed from a `.bin` of total length
+    /// `bin_len`, run right after `read`. Confirms the version and that the
+    /// data and metadata sections lie fully within `[header_size, bin_len]`,
+    /// using overflow-safe (u64-widened) arithmetic so a crafted
+    /// `offset + size` that wraps in u32 cannot slip past the bounds test.
+    ///
+    /// The payload hash-equality check (`hash == hash.u64Of(data section)`) is
+    /// performed by the caller (`Loader.readBin`), which owns the bytes — this
+    /// method needs only the length.
+    ///
+    /// Errors:
+    ///   - `error.UnsupportedVersion` if `version != current_version`
+    ///   - `error.SectionOutOfBounds` if a section escapes the file bounds
+    pub fn validate(self: RuntimeHeader, bin_len: usize) ValidateError!void {
+        if (self.version != current_version) return error.UnsupportedVersion;
+        const len: u64 = bin_len;
+        const hdr: u64 = header_size;
+        const data_off: u64 = self.data_offset;
+        const data_end: u64 = data_off + @as(u64, self.data_size);
+        if (data_off < hdr or data_end > len) return error.SectionOutOfBounds;
+        const md_off: u64 = self.metadata_offset;
+        const md_end: u64 = md_off + @as(u64, self.metadata_size);
+        if (md_off < hdr or md_end > len) return error.SectionOutOfBounds;
+    }
 };
 
 test "runtime header round-trips through its bytes" {
@@ -236,4 +270,67 @@ test "runtime header read rejects a bad magic" {
     }).toBytes();
     bytes[1] = 'X';
     try std.testing.expectError(error.BadMagic, RuntimeHeader.read(&bytes));
+}
+
+test "validate rejects out-of-bounds sections" {
+    // A 48-byte file cannot hold a 100-byte data section.
+    const big_data = RuntimeHeader.init(.{
+        .asset_type = .texture,
+        .metadata_offset = header_size,
+        .metadata_size = 0,
+        .data_offset = header_size,
+        .data_size = 100,
+        .hash = 0,
+    });
+    try std.testing.expectError(error.SectionOutOfBounds, big_data.validate(header_size + 8));
+
+    // Metadata section overruns the file.
+    const big_meta = RuntimeHeader.init(.{
+        .asset_type = .texture,
+        .metadata_offset = header_size,
+        .metadata_size = 100,
+        .data_offset = header_size,
+        .data_size = 0,
+        .hash = 0,
+    });
+    try std.testing.expectError(error.SectionOutOfBounds, big_meta.validate(header_size));
+
+    // A data_offset that points inside the header is rejected.
+    const under_header = RuntimeHeader.init(.{
+        .asset_type = .texture,
+        .metadata_offset = header_size,
+        .metadata_size = 0,
+        .data_offset = 8,
+        .data_size = 0,
+        .hash = 0,
+    });
+    try std.testing.expectError(error.SectionOutOfBounds, under_header.validate(header_size));
+}
+
+test "validate rejects an unsupported version" {
+    var h = RuntimeHeader.init(.{
+        .asset_type = .texture,
+        .metadata_offset = header_size,
+        .metadata_size = 0,
+        .data_offset = header_size,
+        .data_size = 0,
+        .hash = 0,
+    });
+    try h.validate(header_size); // header-only baseline is valid
+    h.version = current_version + 1;
+    try std.testing.expectError(error.UnsupportedVersion, h.validate(header_size));
+}
+
+test "validate rejects offset+size overflow" {
+    // data_offset + data_size wraps in u32 (40 + 0xFFFFFFFF == 39) but the
+    // u64-widened bounds check sees 4294967335 > bin_len and rejects it.
+    const h = RuntimeHeader.init(.{
+        .asset_type = .texture,
+        .metadata_offset = header_size,
+        .metadata_size = 0,
+        .data_offset = header_size,
+        .data_size = std.math.maxInt(u32),
+        .hash = 0,
+    });
+    try std.testing.expectError(error.SectionOutOfBounds, h.validate(1024));
 }

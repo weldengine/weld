@@ -424,6 +424,19 @@ pub const World = struct {
         return list.items;
     }
 
+    /// M1.1.1-HF1 (D7) — drop `entity`'s entire active-extension set, freeing
+    /// every owned name copy and the backing list, and dropping the map entry.
+    /// No-op when the entity has no active extensions. Called from `despawn` so
+    /// a despawned entity never leaves its extension-name copies stranded in
+    /// `entity_extensions` until `deinit`.
+    fn purgeEntityExtensions(self: *World, gpa: std.mem.Allocator, entity: EntityId) void {
+        if (self.entity_extensions.fetchRemove(entity)) |kv| {
+            var list = kv.value;
+            for (list.items) |name| gpa.free(name);
+            list.deinit(gpa);
+        }
+    }
+
     // ─── Component registration helpers ──────────────────────────────────
 
     /// Register a component whose layout is described at runtime.
@@ -648,7 +661,9 @@ pub const World = struct {
     /// Despawn an entity by handle. Returns `error.StaleEntityHandle`
     /// when the handle's index is unknown, the slot is already freed,
     /// or the generation does not match. Updates the swapped-in
-    /// entity's location atomically with the chunk-level swap.
+    /// entity's location atomically with the chunk-level swap. Purges the
+    /// entity's active-extension set (M1.1.1-HF1 D7) so its owned name copies
+    /// are freed here rather than stranded until `World.deinit`.
     pub fn despawn(self: *World, gpa: std.mem.Allocator, id: EntityId) WorldError!void {
         try self.identity.validate(id);
         const location = self.entity_locations.get(id) orelse return error.StaleEntityHandle;
@@ -658,6 +673,7 @@ pub const World = struct {
             self.entity_locations.getPtr(swapped_id).?.* = location;
         }
         _ = self.entity_locations.remove(id);
+        self.purgeEntityExtensions(gpa, id);
         try self.identity.release(gpa, id);
     }
 
@@ -1306,4 +1322,29 @@ test "per-entity extension side-table tracks add / has / remove (M1.0.9)" {
     // (the testing allocator flags any leak of the owned name copies).
     world.removeEntityExtension(gpa, e1, "Merchant");
     try std.testing.expectEqual(@as(usize, 0), world.entityExtensions(e1).len);
+}
+
+test "despawn removes the entity's extension entry (M1.1.1-HF1 D7)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const Marker = extern struct { v: u32 = 0 };
+    const cid = try world.registerComponent(gpa, Marker);
+
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    try world.addEntityExtension(gpa, e, "CombatModule");
+    try world.addEntityExtension(gpa, e, "MerchantModule");
+    try std.testing.expect(world.hasEntityExtension(e, "CombatModule"));
+    try std.testing.expectEqual(@as(usize, 2), world.entityExtensions(e).len);
+
+    try world.despawn(gpa, e);
+
+    // The extension entry is gone — its owned name copies were freed by
+    // `despawn`, not stranded until `deinit` (the testing allocator would flag
+    // any leak). No entry remains for this entity.
+    try std.testing.expect(!world.hasEntityExtension(e, "CombatModule"));
+    try std.testing.expect(!world.hasEntityExtension(e, "MerchantModule"));
+    try std.testing.expectEqual(@as(usize, 0), world.entityExtensions(e).len);
+    try std.testing.expect(!world.isLive(e));
 }

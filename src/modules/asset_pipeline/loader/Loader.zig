@@ -29,6 +29,7 @@
 
 const std = @import("std");
 const format = @import("../format/root.zig");
+const hash = @import("../hash.zig");
 const registry_mod = @import("../registry/root.zig");
 
 const Loader = @This();
@@ -57,6 +58,10 @@ pub const LoadError = error{
     ShortBuffer,
     /// The `.bin` did not start with the `WELD` magic.
     BadMagic,
+    /// The header failed structural validation (unsupported version, a
+    /// section out of bounds / overflowing) or the data-section hash did not
+    /// match the header hash (M1.1.1-HF1 / D6).
+    MalformedAsset,
     /// Allocation failed.
     OutOfMemory,
 };
@@ -257,5 +262,101 @@ fn readBin(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8
     if (off != size) return error.ReadFailed;
 
     const header = try RuntimeHeader.read(bin); // portable LE parse
+    // D6: structural validation (version + section bounds) then data-hash
+    // integrity. Both map to error.MalformedAsset; `bin`'s errdefer frees it.
+    header.validate(bin.len) catch return error.MalformedAsset;
+    const data = bin[header.data_offset..][0..header.data_size];
+    if (header.hash != hash.u64Of(data)) return error.MalformedAsset;
     return .{ .header = header, .bin = bin };
+}
+
+// ─── tests (M1.1.1-HF1 / D6) ────────────────────────────────────────────
+
+test "a malformed .bin loads as error.MalformedAsset" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const payload = "payload-bytes";
+
+    const H = struct {
+        // Assemble [40-byte header][payload] into an owned buffer.
+        fn build(a: std.mem.Allocator, header: RuntimeHeader, body: []const u8) ![]u8 {
+            const buf = try a.alloc(u8, format.header_size + body.len);
+            const hb = header.toBytes();
+            @memcpy(buf[0..format.header_size], &hb);
+            @memcpy(buf[format.header_size..], body);
+            return buf;
+        }
+        fn writeFile(i: std.Io, dir: std.Io.Dir, name: []const u8, bin: []const u8) !void {
+            const file = try dir.createFile(i, name, .{ .truncate = true });
+            defer file.close(i);
+            try file.writeStreamingAll(i, bin);
+        }
+    };
+
+    var loader = Loader.init(tmp.dir);
+    defer loader.deinit(gpa);
+
+    // A well-formed header used as the template for each corruption.
+    const valid = RuntimeHeader.init(.{
+        .asset_type = .texture,
+        .metadata_offset = format.header_size,
+        .metadata_size = 0,
+        .data_offset = format.header_size,
+        .data_size = payload.len,
+        .hash = hash.u64Of(payload),
+    });
+
+    // 1. Unsupported header version.
+    {
+        var h = valid;
+        h.version = format.current_version + 1;
+        const bin = try H.build(gpa, h, payload);
+        defer gpa.free(bin);
+        try H.writeFile(io, tmp.dir, "bad_version.bin", bin);
+        try std.testing.expectError(error.MalformedAsset, loader.load(gpa, io, "bad_version.bin"));
+    }
+
+    // 2. Truncated data section (header claims more data than the file holds).
+    {
+        var h = valid;
+        h.data_size = payload.len + 1000;
+        const bin = try H.build(gpa, h, payload);
+        defer gpa.free(bin);
+        try H.writeFile(io, tmp.dir, "truncated.bin", bin);
+        try std.testing.expectError(error.MalformedAsset, loader.load(gpa, io, "truncated.bin"));
+    }
+
+    // 3. Out-of-bounds metadata section.
+    {
+        var h = valid;
+        h.metadata_size = 1000;
+        const bin = try H.build(gpa, h, payload);
+        defer gpa.free(bin);
+        try H.writeFile(io, tmp.dir, "oob_meta.bin", bin);
+        try std.testing.expectError(error.MalformedAsset, loader.load(gpa, io, "oob_meta.bin"));
+    }
+
+    // 4. Wrong data-section hash (structure valid, integrity fails).
+    {
+        var h = valid;
+        h.hash = valid.hash ^ 1;
+        const bin = try H.build(gpa, h, payload);
+        defer gpa.free(bin);
+        try H.writeFile(io, tmp.dir, "bad_hash.bin", bin);
+        try std.testing.expectError(error.MalformedAsset, loader.load(gpa, io, "bad_hash.bin"));
+    }
+
+    // Positive control: the untouched valid header loads cleanly.
+    {
+        const bin = try H.build(gpa, valid, payload);
+        defer gpa.free(bin);
+        try H.writeFile(io, tmp.dir, "valid.bin", bin);
+        const handle = try loader.load(gpa, io, "valid.bin");
+        try std.testing.expectEqualSlices(u8, payload, loader.get(handle).?);
+        try loader.release(gpa, handle);
+    }
 }

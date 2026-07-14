@@ -139,24 +139,23 @@ pub const UuidMap = std.AutoHashMapUnmanaged([16]u8, EntityId);
 /// lifetime is the caller's to end (`engine-scene-serialization.md` §4).
 ///
 /// Ownership: the caller ends the load's life with `deinit` (frees `spawned`,
-/// the map, the interned resource strings, and closes `mmap` if present).
+/// the map, and closes `mmap` if present). Loaded resource `string` blocks are
+/// refcounted and owned by their `StringSlot`s (M1.1.1-HF1 / D1), not by the
+/// `LoadResult` — the resource owner reclaims them at teardown.
 pub const LoadResult = struct {
     spawned: []EntityId,
     uuid_to_entity: UuidMap,
-    /// Tier-0 persistent-heap blocks interned for loaded resource `string`
-    /// fields (E3), allocated **immortal**. Owned here (not by the interp), so
-    /// `deinit` `destroy`s them — the resources' `StringSlot`s point into these.
-    resource_strings: [][*]u8,
     mmap: ?fs.Mmap,
 
-    /// Free the loader-owned allocations, reclaim the interned resource strings,
-    /// and close the backing mmap (if any). Does **not** despawn the loaded
-    /// entities — they belong to the `World`.
+    /// Free the loader-owned allocations and close the backing mmap (if any).
+    /// Does **not** despawn the loaded entities — they belong to the `World` —
+    /// and does **not** free the loaded resource `string` blocks: those are
+    /// refcounted, owned by the resources' `StringSlot`s (D1), and reclaimed by
+    /// the resource owner's teardown exactly like interp-written resource
+    /// strings (`interp.zig` deinit). Teardown parity — no new mechanism.
     pub fn deinit(self: *LoadResult, gpa: std.mem.Allocator) void {
         gpa.free(self.spawned);
         self.uuid_to_entity.deinit(gpa);
-        for (self.resource_strings) |p| persistent.destroy(gpa, p);
-        gpa.free(self.resource_strings);
         if (self.mmap) |*m| m.close();
         self.* = undefined;
     }
@@ -167,6 +166,80 @@ pub const LoadResult = struct {
 /// the loader bounds-check parent ordinals without a new accessor getter.
 fn uuidCount(acc: Accessor) u32 {
     return (acc.header.schema_table_offset - acc.header.uuid_table_offset) / 16;
+}
+
+// ─── D2 — resource-write transaction (snapshot / commit / rollback) ──────────
+
+/// One resource the loader wrote, recorded for commit or rollback (M1.1.1-HF1 /
+/// D2). `snapshot` is the resource's full byte image captured immediately BEFORE
+/// the loader overwrote its string fields — its slots point at the *old* blocks.
+/// A `null` snapshot marks a resource the loader ADDED fresh (rollback removes it
+/// rather than restoring). The load is transactional: on success `commitResources`
+/// decrefs the replaced old blocks; on any post-first-spawn error `rollbackResources`
+/// decrefs the new blocks and restores/removes each touched resource.
+const ResourceEdit = struct {
+    cid: ComponentId,
+    snapshot: ?[]u8,
+};
+
+const ResourceJournal = std.ArrayListUnmanaged(ResourceEdit);
+
+/// Decref every `.string_` field block referenced by `bytes` (a snapshot image or
+/// the live resource buffer) for resource type `cid`. Empty slots (`ptr == 0`) are
+/// skipped; immortal blocks no-op. Shared by commit (old blocks, read from the
+/// snapshot) and rollback (new blocks, read from the live buffer).
+fn decrefResourceStrings(world: *const World, gpa: std.mem.Allocator, cid: ComponentId, bytes: []const u8) void {
+    for (world.registry.componentFields(cid)) |fd| {
+        if (fd.kind != .string_) continue;
+        var ss: persistent.StringSlot = undefined;
+        @memcpy(std.mem.asBytes(&ss), bytes[fd.offset..][0..@sizeOf(persistent.StringSlot)]);
+        if (ss.ptr != 0) persistent.decref(gpa, @ptrFromInt(ss.ptr));
+    }
+}
+
+/// Commit the loader's resource writes (M1.1.1-HF1 / D2). For each resource that
+/// REPLACED a prior value, decref the old string blocks the snapshot captured —
+/// they are no longer referenced (the live slot holds the new block). The new
+/// blocks stay live, owned by the resource slots (freed by the resource owner's
+/// teardown — parity with interp-written strings). Frees each snapshot and the
+/// journal. Infallible.
+fn commitResources(world: *const World, gpa: std.mem.Allocator, journal: *ResourceJournal) void {
+    for (journal.items) |edit| {
+        if (edit.snapshot) |snap| {
+            decrefResourceStrings(world, gpa, edit.cid, snap);
+            gpa.free(snap);
+        }
+    }
+    journal.deinit(gpa);
+}
+
+/// Roll back the loader's resource writes (M1.1.1-HF1 / D2), best-effort under
+/// OOM. For each touched resource, decref the NEW string blocks it installed (read
+/// from the live buffer), then restore the snapshot (a replaced resource) or remove
+/// it (a freshly-added one). Every touched resource is left holding its prior bytes
+/// / prior presence; the old blocks were never decreffed, so no incref is needed
+/// and no double-free is possible. Frees each snapshot and the journal.
+fn rollbackResources(world: *World, gpa: std.mem.Allocator, journal: *ResourceJournal) void {
+    // Reverse (LIFO) — an undo-log replays in the opposite order it recorded.
+    // A `.bin` may carry two entries of the SAME cid; those edits alias one live
+    // slot, so undoing them FORWARD would restore an old block and then decref
+    // that just-restored block, corrupting its refcount into a teardown
+    // double-free / use-after-free. Mirrors the reverse despawn in `loadFromBytes`.
+    var k: usize = journal.items.len;
+    while (k > 0) {
+        k -= 1;
+        const edit = journal.items[k];
+        if (world.resources.getMutResource(edit.cid)) |live| {
+            decrefResourceStrings(world, gpa, edit.cid, live);
+        }
+        if (edit.snapshot) |snap| {
+            if (world.resources.getMutResource(edit.cid)) |live| @memcpy(live, snap);
+            gpa.free(snap);
+        } else {
+            world.resources.removeResource(gpa, edit.cid) catch {};
+        }
+    }
+    journal.deinit(gpa);
 }
 
 /// Load a cooked `.scene.bin` byte image into `world`. The byte-level core
@@ -189,21 +262,35 @@ pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8, e
     defer gpa.free(remap);
 
     var spawned: std.ArrayListUnmanaged(EntityId) = .empty;
-    errdefer spawned.deinit(gpa);
+    defer spawned.deinit(gpa);
     var uuid_to_entity: UuidMap = .empty;
     errdefer uuid_to_entity.deinit(gpa);
-    var res_strings: std.ArrayListUnmanaged([*]u8) = .empty;
-    errdefer {
-        for (res_strings.items) |p| persistent.destroy(gpa, p);
-        res_strings.deinit(gpa);
-    }
+    var journal: ResourceJournal = .empty;
+
+    // D2 — the load is loader-transactional. On any error after the first spawn,
+    // roll back the loader's OWN mutations: decref the string blocks it installed
+    // and restore/remove the resources it touched, then despawn every spawned
+    // entity in reverse order (which, post-D7, also purges each entity's extension
+    // entry). The contract covers the loader's mutations only — side effects of
+    // user `on_attach` / `on_spawned` hooks that ran before the failure are
+    // outside it. Best-effort under OOM (despawn on the D3-atomic release path).
+    var committed = false;
+    errdefer if (!committed) {
+        rollbackResources(world, gpa, &journal);
+        var k: usize = spawned.items.len;
+        while (k > 0) {
+            k -= 1;
+            world.despawn(gpa, spawned.items[k]) catch |e|
+                std.log.warn("scene load rollback: despawn failed: {t}", .{e});
+        }
+    };
 
     try instantiate(world, gpa, acc, remap, &spawned, &uuid_to_entity);
     // Cross-references after every entity exists (a reference can point forward),
     // before resources + on_spawned so a rule sees fully-linked entities.
     try resolveCrossRefs(world, acc, remap, uuid_to_entity);
     // Resources before extensions/on_spawned so a hook/rule can read them.
-    try loadResources(world, gpa, acc, remap, &res_strings);
+    try loadResources(world, gpa, acc, remap, &journal);
     // Extension activation (M1.0.6 E6): add each active extension's components +
     // fire the `on_attach` seam. After resources, before `on_spawned`.
     try applyExtensions(world, gpa, acc, uuid_to_entity, ext_resolver);
@@ -219,10 +306,18 @@ pub fn loadFromBytes(world: *World, gpa: std.mem.Allocator, bytes: []const u8, e
     }
     try dispatchSpawnLifecycle(world, gpa, spawned.items);
 
+    // Build the owned spawned slice BEFORE committing so a dupe OOM still rolls
+    // back cleanly (commit is irreversible — it decrefs the replaced old blocks).
+    const spawned_slice = try gpa.dupe(EntityId, spawned.items);
+
+    // Commit the resource writes: decref each replaced old block; the new blocks
+    // stay live, owned by the resource slots. Infallible; frees the journal.
+    commitResources(world, gpa, &journal);
+    committed = true;
+
     return .{
-        .spawned = try spawned.toOwnedSlice(gpa),
+        .spawned = spawned_slice,
         .uuid_to_entity = uuid_to_entity,
-        .resource_strings = try res_strings.toOwnedSlice(gpa),
         .mmap = null,
     };
 }
@@ -448,22 +543,26 @@ pub fn runtimeDeactivate(world: *World, gpa: std.mem.Allocator, entity: EntityId
 }
 
 /// Load the resources block (E3) — the load-side mirror of M1.0.3's non-POD
-/// resource path. For each resource: resolve its schema index → runtime
-/// `ComponentId` (the E1 remap, already size/alignment-validated), copy the POD
-/// `data` (string-field slots are zeroed on disk), then for each `string` field
-/// of that resource type (offsets from the runtime `FieldDesc`) intern the
-/// cooked value into the **Tier-0 persistent heap** (`allocImmortal`,
-/// `type_string`) and write the resulting `StringSlot` into the slot — the same
-/// in-memory `StringSlot` byte layout `ecs_bridge` reads/writes. Each interned
-/// block is recorded in `strings` (owned by `LoadResult`, reclaimed at
-/// `deinit`); the install goes through `world.addResource`, which copies the
-/// bytes. An empty string keeps the zeroed slot (`ptr == 0`, no block).
+/// resource path, following the `ecs_bridge` write discipline (M1.1.1-HF1 / D1):
+/// for each resource, snapshot its current bytes, install the POD `data`
+/// (string-field slots are zeroed on disk), then for each `string` field intern
+/// the cooked value into the **Tier-0 persistent heap** as a **refcounted** block
+/// (`persistent.alloc`, not immortal) and write its `StringSlot`. The new blocks
+/// are owned by the slot, reclaimed by the resource owner's teardown (parity with
+/// interp-written strings); the old blocks the snapshot captured are decreffed at
+/// commit. Each touched resource is recorded in `journal` so the load is
+/// transactional (D2). An empty string keeps the zeroed slot (`ptr == 0`).
+///
+/// Scene resources are *injected into the resource map at load* (`engine-spec.md`
+/// §19.1): the scene value is authoritative and overrides a value the running
+/// program already installed (e.g. a declared resource's defaults) rather than
+/// erroring; the overridden value's old string blocks are decreffed at commit.
 fn loadResources(
     world: *World,
     gpa: std.mem.Allocator,
     acc: Accessor,
     remap: []const ComponentId,
-    strings: *std.ArrayListUnmanaged([*]u8),
+    journal: *ResourceJournal,
 ) !void {
     const count = acc.resourceCount();
     var i: u32 = 0;
@@ -475,9 +574,9 @@ fn loadResources(
         // only. A collection field (`.array_`/`.map_`/`.set_`) on disk is a zeroed
         // `CollectionSlot` (ptr == 0); installing it would crash the interpreter on
         // first access AND overwrite (without decref) any container the running
-        // program already built — a leak. Reject cleanly; full persistent-block
-        // reconstruction at scene-load is a Tier-0 scene-serialization milestone
-        // (M1.6), not this one.
+        // program already built — a leak. Reject cleanly BEFORE touching the
+        // resource; full persistent-block reconstruction at scene-load is a Tier-0
+        // scene-serialization milestone (M1.6), not this one.
         for (world.registry.componentFields(cid)) |fd| switch (fd.kind) {
             .array_, .map_, .set_ => return error.CollectionResourceFieldUnsupported,
             else => {},
@@ -486,35 +585,39 @@ fn loadResources(
         const size = world.registry.componentSize(cid);
         std.debug.assert(r.data.len == size);
 
-        const bytes = try gpa.alloc(u8, size);
-        defer gpa.free(bytes); // `addResource` copies; this is scratch
-        @memcpy(bytes, r.data);
+        // Reserve the journal slot up front so recording the edit cannot fail
+        // after the resource is mutated (reserve-then-mutate).
+        try journal.ensureUnusedCapacity(gpa, 1);
 
+        // Install the POD image (string slots zeroed on disk), capturing the
+        // pre-write snapshot. For an existing resource the snapshot holds the old
+        // string slots (decreffed at commit / restored at rollback); for a fresh
+        // one the snapshot is null (rollback removes it).
+        var snapshot: ?[]u8 = null;
+        const dst = if (world.resources.getMutResource(cid)) |existing| blk: {
+            const snap = try gpa.dupe(u8, existing);
+            snapshot = snap;
+            @memcpy(existing, r.data);
+            break :blk existing;
+        } else blk: {
+            try world.addResource(gpa, cid, r.data);
+            break :blk world.resources.getMutResource(cid).?;
+        };
+
+        // Journal the edit BEFORE the fallible string writes, so a mid-field OOM
+        // rolls the whole resource back (decref partial new blocks + restore).
+        journal.appendAssumeCapacity(.{ .cid = cid, .snapshot = snapshot });
+
+        // Per string field: alloc a REFCOUNTED block owned by the slot (D1), copy
+        // the cooked value, write the new `StringSlot`.
         for (world.registry.componentFields(cid)) |fd| {
             if (fd.kind != .string_) continue;
             const sval = r.stringField(fd.offset) orelse continue;
             if (sval.len == 0) continue; // empty string → leave the zeroed slot
-
-            try strings.ensureUnusedCapacity(gpa, 1);
-            const p = try persistent.allocImmortal(gpa, persistent.type_string, sval.len);
-            @memcpy(p[0..sval.len], sval);
-            strings.appendAssumeCapacity(p); // capacity reserved → cannot fail
-
-            const fslot: persistent.StringSlot = .{ .ptr = @intFromPtr(p), .len = @intCast(sval.len) };
-            @memcpy(bytes[fd.offset..][0..@sizeOf(persistent.StringSlot)], std.mem.asBytes(&fslot));
-        }
-
-        // Scene resources are *injected into the resource map at load*
-        // (`engine-spec.md` §19.1): the scene value is authoritative, so it
-        // overrides a value the running program already installed at compile
-        // (e.g. a declared resource's defaults) rather than erroring. The
-        // overridden value's own string blocks are owned by whoever installed
-        // them (the interp frees its compile-time defaults at teardown); the
-        // newly-interned blocks here are owned by `LoadResult`.
-        if (world.resources.getMutResource(cid)) |dst| {
-            @memcpy(dst, bytes);
-        } else {
-            try world.addResource(gpa, cid, bytes);
+            const block = try persistent.alloc(gpa, persistent.type_string, sval.len);
+            @memcpy(block[0..sval.len], sval);
+            const fslot: persistent.StringSlot = .{ .ptr = @intFromPtr(block), .len = @intCast(sval.len) };
+            @memcpy(dst[fd.offset..][0..@sizeOf(persistent.StringSlot)], std.mem.asBytes(&fslot));
         }
     }
 }
@@ -590,6 +693,145 @@ fn registerRaw(gpa: std.mem.Allocator, reg: *Registry, name: []const u8, size: u
         .default_bytes = zeros,
         .fields = &.{},
     });
+}
+
+/// Test helper: register a resource `<name> { v: string }` — one 16-byte
+/// `.string_` slot at offset 0.
+fn registerStringResource(gpa: std.mem.Allocator, reg: *Registry, name: []const u8) !ComponentId {
+    return try reg.registerComponentRaw(gpa, .{
+        .name = name,
+        .size = 16,
+        .alignment = 8,
+        .default_bytes = &[_]u8{0} ** 16,
+        .fields = &[_]registry_mod.FieldDesc{
+            .{ .name = "v", .offset = 0, .kind = .string_ },
+        },
+    });
+}
+
+/// Test helper: register a resource `<name> { xs: T[] }` — one 8-byte `.array_`
+/// (collection) slot at offset 0, which the loader must reject.
+fn registerArrayResource(gpa: std.mem.Allocator, reg: *Registry, name: []const u8) !ComponentId {
+    return try reg.registerComponentRaw(gpa, .{
+        .name = name,
+        .size = 8,
+        .alignment = 8,
+        .default_bytes = &[_]u8{0} ** 8,
+        .fields = &[_]registry_mod.FieldDesc{
+            .{ .name = "xs", .offset = 0, .kind = .array_ },
+        },
+    });
+}
+
+/// Test helper: cook a 0-entity scene with one string resource `res_cid` whose
+/// field holds `value`. Caller-owned bytes.
+fn buildStringResourceScene(gpa: std.mem.Allocator, reg: *const Registry, res_cid: ComponentId, value: []const u8) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const strings = try a.dupe([]const u8, &.{try a.dupe(u8, value)});
+    const data = try a.alloc(u8, 16);
+    @memset(data, 0);
+    const string_fields = try a.dupe(format.StringFieldRef, &.{.{ .offset = 0, .str = 0 }});
+    const resources = try a.dupe(format.ResourceEntry, &.{.{
+        .schema_id = res_cid,
+        .data = data,
+        .string_fields = string_fields,
+    }});
+    var model: format.CookModel = .{
+        .strings = strings,
+        .uuids = &.{},
+        .resources = resources,
+        .archetypes = &.{},
+        .arena = arena,
+    };
+    defer model.deinit();
+    return try writer.write(gpa, model, reg);
+}
+
+/// Test helper: cook a scene that spawns one `ecid` entity, overrides string
+/// resource `settings_cid` with `"new"`, then carries a collection resource
+/// `bag_cid` (LAST) — so the loader's collection rejection fires AFTER the spawn
+/// and the Settings write, exercising the full transactional rollback (D2).
+fn buildSpawnThenFailScene(
+    gpa: std.mem.Allocator,
+    reg: *const Registry,
+    ecid: ComponentId,
+    settings_cid: ComponentId,
+    bag_cid: ComponentId,
+) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    // strings[0] = entity name, strings[1] = the new Settings value.
+    const names = try a.dupe([]const u8, &.{ try a.dupe(u8, "E0"), try a.dupe(u8, "new") });
+    const uuids = try a.dupe([16]u8, &.{[_]u8{0} ** 16});
+    const col = try a.alloc(u8, reg.componentSize(ecid));
+    @memset(col, 0);
+    const cols = try a.dupe([]u8, &.{col});
+    const ents = try a.dupe(format.EntityEntry, &.{
+        .{ .name = 0, .uuid = 0, .parent_uuid = format.no_parent },
+    });
+    const ids = try a.dupe(ComponentId, &.{ecid});
+    const blocks = try a.dupe(format.ArchetypeBlock, &.{.{
+        .component_ids = ids,
+        .entity_count = 1,
+        .columns = cols,
+        .entities = ents,
+    }});
+    const s_data = try a.alloc(u8, reg.componentSize(settings_cid));
+    @memset(s_data, 0);
+    const s_fields = try a.dupe(format.StringFieldRef, &.{.{ .offset = 0, .str = 1 }});
+    const b_data = try a.alloc(u8, reg.componentSize(bag_cid));
+    @memset(b_data, 0);
+    const resources = try a.dupe(format.ResourceEntry, &.{
+        .{ .schema_id = settings_cid, .data = s_data, .string_fields = s_fields },
+        .{ .schema_id = bag_cid, .data = b_data, .string_fields = &.{} },
+    });
+    var model: format.CookModel = .{
+        .strings = names,
+        .uuids = uuids,
+        .resources = resources,
+        .archetypes = blocks,
+        .arena = arena,
+    };
+    defer model.deinit();
+    return try writer.write(gpa, model, reg);
+}
+
+/// Test helper: cook a 0-entity scene with TWO string-resource entries of the
+/// SAME `settings_cid` ("a" then "b"), then a collection resource `bag_cid`
+/// (LAST) that trips the loader's rejection. The rollback must undo the two
+/// same-cid edits in LIFO order; a forward undo would corrupt the refcount.
+fn buildDupResourceFailScene(
+    gpa: std.mem.Allocator,
+    reg: *const Registry,
+    settings_cid: ComponentId,
+    bag_cid: ComponentId,
+) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const strings = try a.dupe([]const u8, &.{ try a.dupe(u8, "a"), try a.dupe(u8, "b") });
+    const d0 = try a.alloc(u8, reg.componentSize(settings_cid));
+    @memset(d0, 0);
+    const d1 = try a.alloc(u8, reg.componentSize(settings_cid));
+    @memset(d1, 0);
+    const b_data = try a.alloc(u8, reg.componentSize(bag_cid));
+    @memset(b_data, 0);
+    const sf0 = try a.dupe(format.StringFieldRef, &.{.{ .offset = 0, .str = 0 }});
+    const sf1 = try a.dupe(format.StringFieldRef, &.{.{ .offset = 0, .str = 1 }});
+    const resources = try a.dupe(format.ResourceEntry, &.{
+        .{ .schema_id = settings_cid, .data = d0, .string_fields = sf0 },
+        .{ .schema_id = settings_cid, .data = d1, .string_fields = sf1 },
+        .{ .schema_id = bag_cid, .data = b_data, .string_fields = &.{} },
+    });
+    var model: format.CookModel = .{
+        .strings = strings,
+        .uuids = &.{},
+        .resources = resources,
+        .archetypes = &.{},
+        .arena = arena,
+    };
+    defer model.deinit();
+    return try writer.write(gpa, model, reg);
 }
 
 test "buildSchemaRemap resolves on-disk schema names to runtime ids" {
@@ -716,4 +958,124 @@ test "loadFromBytes rejects an out-of-range parent ordinal with MalformedScene" 
     defer gpa.free(bytes);
 
     try testing.expectError(error.MalformedScene, loadFromBytes(&world, gpa, bytes, null));
+}
+
+test "resource strings outlive LoadResult.deinit (M1.1.1-HF1 D1)" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const settings = try registerStringResource(gpa, &world.registry, "Settings");
+
+    const bytes = try buildStringResourceScene(gpa, &world.registry, settings, "Verdant Keep");
+    defer gpa.free(bytes);
+
+    var result = try loadFromBytes(&world, gpa, bytes, null);
+    result.deinit(gpa); // D1: LoadResult no longer owns the resource string block
+
+    // The interned block outlives LoadResult.deinit — it is owned by the slot.
+    const buf = world.resources.getResource(settings).?;
+    var ss: persistent.StringSlot = undefined;
+    @memcpy(std.mem.asBytes(&ss), buf[0..@sizeOf(persistent.StringSlot)]);
+    try testing.expect(ss.ptr != 0);
+    const loaded: [*]const u8 = @ptrFromInt(ss.ptr);
+    try testing.expectEqualStrings("Verdant Keep", loaded[0..ss.len]);
+
+    // Owner teardown (parity with the interp's resource-string deinit): release
+    // the slot's refcounted block so the testing allocator sees no leak.
+    decrefResourceStrings(&world, gpa, settings, buf);
+}
+
+test "loading over an existing resource string releases the previous block (M1.1.1-HF1 D1)" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const settings = try registerStringResource(gpa, &world.registry, "Settings");
+
+    const bytes_a = try buildStringResourceScene(gpa, &world.registry, settings, "first");
+    defer gpa.free(bytes_a);
+    const bytes_b = try buildStringResourceScene(gpa, &world.registry, settings, "second");
+    defer gpa.free(bytes_b);
+
+    var ra = try loadFromBytes(&world, gpa, bytes_a, null);
+    ra.deinit(gpa);
+    // The second load reads the old slot ("first" block), installs "second", and
+    // decrefs "first" at commit → "first" is freed. Under `std.testing.allocator`
+    // a missed decref would surface as a leak.
+    var rb = try loadFromBytes(&world, gpa, bytes_b, null);
+    rb.deinit(gpa);
+
+    const buf = world.resources.getResource(settings).?;
+    var ss: persistent.StringSlot = undefined;
+    @memcpy(std.mem.asBytes(&ss), buf[0..@sizeOf(persistent.StringSlot)]);
+    const loaded: [*]const u8 = @ptrFromInt(ss.ptr);
+    try testing.expectEqualStrings("second", loaded[0..ss.len]);
+
+    decrefResourceStrings(&world, gpa, settings, buf); // release "second"
+}
+
+test "a failed load leaves the world unchanged (M1.1.1-HF1 D2)" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const pos = try registerRaw(gpa, &world.registry, "Pos", 8, 4);
+    const settings = try registerStringResource(gpa, &world.registry, "Settings");
+    const bag = try registerArrayResource(gpa, &world.registry, "Bag");
+
+    // Prior state: Settings = "old", no entities.
+    const seed = try buildStringResourceScene(gpa, &world.registry, settings, "old");
+    defer gpa.free(seed);
+    var r_seed = try loadFromBytes(&world, gpa, seed, null);
+    r_seed.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), world.entityCount());
+
+    // A scene that spawns an entity + overrides Settings = "new", then trips the
+    // collection-resource rejection — a failure AFTER the spawn and the resource
+    // write. (Injection chosen for buildability with the Tier-0 test scaffolding;
+    // the brief's example injections are equivalent post-first-spawn failures.)
+    const bytes = try buildSpawnThenFailScene(gpa, &world.registry, pos, settings, bag);
+    defer gpa.free(bytes);
+
+    try testing.expectError(error.CollectionResourceFieldUnsupported, loadFromBytes(&world, gpa, bytes, null));
+
+    // World unchanged: the spawned entity is despawned and Settings holds "old".
+    try testing.expectEqual(@as(usize, 0), world.entityCount());
+    const buf = world.resources.getResource(settings).?;
+    var ss: persistent.StringSlot = undefined;
+    @memcpy(std.mem.asBytes(&ss), buf[0..@sizeOf(persistent.StringSlot)]);
+    const held: [*]const u8 = @ptrFromInt(ss.ptr);
+    try testing.expectEqualStrings("old", held[0..ss.len]);
+
+    decrefResourceStrings(&world, gpa, settings, buf); // release "old"
+}
+
+test "rollback restores across duplicate resource entries (M1.1.1-HF1 D2)" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const settings = try registerStringResource(gpa, &world.registry, "Settings");
+    const bag = try registerArrayResource(gpa, &world.registry, "Bag");
+
+    // Prior state: Settings = "pre".
+    const seed = try buildStringResourceScene(gpa, &world.registry, settings, "pre");
+    defer gpa.free(seed);
+    var r_seed = try loadFromBytes(&world, gpa, seed, null);
+    r_seed.deinit(gpa);
+
+    // A scene with TWO Settings entries of the same cid ("a" then "b") + a
+    // trailing collection resource that fails. Rolling the two same-cid edits
+    // back forward would restore "a" then wrongly decref it; LIFO restores "pre"
+    // and frees each block exactly once (the testing allocator flags either bug).
+    const bytes = try buildDupResourceFailScene(gpa, &world.registry, settings, bag);
+    defer gpa.free(bytes);
+
+    try testing.expectError(error.CollectionResourceFieldUnsupported, loadFromBytes(&world, gpa, bytes, null));
+
+    const buf = world.resources.getResource(settings).?;
+    var ss: persistent.StringSlot = undefined;
+    @memcpy(std.mem.asBytes(&ss), buf[0..@sizeOf(persistent.StringSlot)]);
+    const held: [*]const u8 = @ptrFromInt(ss.ptr);
+    try testing.expectEqualStrings("pre", held[0..ss.len]); // pre-load value restored
+
+    decrefResourceStrings(&world, gpa, settings, buf); // release "pre"
 }
