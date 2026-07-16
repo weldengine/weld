@@ -51,6 +51,8 @@ const sys = struct {
     extern "c" fn unlink(path: [*:0]const u8) c_int;
     extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
     extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
+    extern "c" fn send(sockfd: c_int, buf: [*]const u8, len: usize, flags: c_int) isize;
+    extern "c" fn setsockopt(sockfd: c_int, level: c_int, optname: c_int, optval: *const anyopaque, optlen: Socklen) c_int;
 };
 
 // -------------------------------------------------- constants ----------
@@ -60,6 +62,10 @@ const SOCK_STREAM: c_int = if (is_linux) 1 else 1; // same value on macOS
 const SOL_SOCKET: c_int = if (is_linux) 1 else 0xFFFF;
 const SCM_RIGHTS: c_int = 1;
 const MSG_NOSIGNAL: c_int = if (is_linux) 0x4000 else 0;
+// BSD/macOS per-socket SIGPIPE suppression (`SO_NOSIGPIPE`, value `0x1022`).
+// Absent on Linux, where `send(MSG_NOSIGNAL)` carries the guarantee instead —
+// referenced only under `is_macos`, so it is unused (but harmless) on Linux.
+const SO_NOSIGPIPE: c_int = 0x1022;
 
 // `sockaddr_un` layout diverges between Linux glibc and BSD/macOS:
 //   - Linux: `sa_family_t sun_family` (u16) + `char sun_path[108]`.
@@ -127,6 +133,20 @@ fn cmsgSpace(len: usize) usize {
 
 fn cmsgLen(len: usize) usize {
     return cmsgAlign(@sizeOf(CmsgHdr)) + len;
+}
+
+/// Suppress SIGPIPE on this socket's send path (M1.1.1-HF2 C5). On BSD/macOS
+/// this is the per-socket `SO_NOSIGPIPE` option — there `MSG_NOSIGNAL` is
+/// unavailable (it is `0`), so without this a peer-closed write would raise a
+/// process-fatal `SIGPIPE`. On Linux `SO_NOSIGPIPE` does not exist and the
+/// guarantee comes from `send(MSG_NOSIGNAL)` in `writeAll`, so this is a no-op
+/// there. Best-effort: a failed `setsockopt` is ignored (there is no portable
+/// recovery, and `ENOPROTOOPT` on a platform lacking the option is expected).
+fn setNoSigPipe(fd: c_int) void {
+    if (comptime is_macos) {
+        const one: c_int = 1;
+        _ = sys.setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, @sizeOf(c_int));
+    }
 }
 
 // -------------------------------------------------- public types ------
@@ -217,12 +237,17 @@ pub const Backend = struct {
 
         if (sys.connect(fd, &addr, addr_len) != 0) return error.ConnectionRefused;
 
+        // C5: suppress SIGPIPE on the connected data socket (no-op on Linux,
+        // where `send(MSG_NOSIGNAL)` covers it; `SO_NOSIGPIPE` on macOS).
+        setNoSigPipe(fd);
         return Backend{ .fd = fd };
     }
 
     pub fn accept(self: *Backend) Error!Backend {
         const client_fd = sys.accept(self.fd, null, null);
         if (client_fd < 0) return error.ConnectionRefused;
+        // C5: suppress SIGPIPE on the accepted data socket (see `setNoSigPipe`).
+        setNoSigPipe(client_fd);
         return Backend{ .fd = client_fd };
     }
 
@@ -239,7 +264,13 @@ pub const Backend = struct {
     fn writeAll(self: *Backend, bytes: []const u8) Error!void {
         var offset: usize = 0;
         while (offset < bytes.len) {
-            const n = sys.write(self.fd, bytes.ptr + offset, bytes.len - offset);
+            // C5 (M1.1.1-HF2): `send(MSG_NOSIGNAL)`, not raw `write`. On Linux the
+            // flag suppresses the process-fatal SIGPIPE a peer-closed socket
+            // would otherwise raise (raw `write` cannot carry it). On macOS
+            // `MSG_NOSIGNAL` is 0 and the suppression comes from `SO_NOSIGPIPE`
+            // set at fd creation (`setNoSigPipe`). EINTR / n == 0 semantics below
+            // are preserved verbatim.
+            const n = sys.send(self.fd, bytes.ptr + offset, bytes.len - offset, MSG_NOSIGNAL);
             if (n < 0) switch (std.c.errno(n)) {
                 // A signal interrupted the write before any byte moved —
                 // retry the same chunk rather than mis-report a broken
