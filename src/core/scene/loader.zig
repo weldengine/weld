@@ -382,9 +382,14 @@ fn instantiate(
         var bi: u32 = 0;
         while (bi < arch_count) : (bi += 1) total_entities += acc.archetype(bi).entity_count;
     }
+    // A hash-valid malformed scene can declare block entity counts whose sum
+    // exceeds the hash map's u32 capacity domain — reject it as malformed
+    // rather than panic in the `@intCast` below (the loader's contract is
+    // `MalformedScene`, not a panic — C2b).
+    if (total_entities > std.math.maxInt(u32)) return error.MalformedScene;
     try spawned.ensureTotalCapacity(gpa, total_entities);
-    // The hash map's capacity is a `u32` (`Size`); `total_entities` is bounded by
-    // the scene's entity count (u32-representable, matches the on-disk tables).
+    // The hash map's capacity is a `u32` (`Size`); the guard above GUARANTEES
+    // `total_entities` fits, so the `@intCast` cannot truncate or panic.
     try uuid_to_entity.ensureTotalCapacity(gpa, @intCast(total_entities));
 
     var ai: u32 = 0;
