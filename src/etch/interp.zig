@@ -1214,38 +1214,19 @@ pub const Interpreter = struct {
     persistent_literals: std.ArrayListUnmanaged([*]u8) = .empty,
 
     pub fn deinit(self: *Interpreter) void {
-        // M1.0.3 E2 — persistent-string teardown, BEFORE `bridge.deinit` (which
-        // drops the resource-name → id map this enumeration needs) and while the
-        // world's resource store is still alive (freed later by `world.deinit`).
-        // Iterate every resource's `.string_` slots and `decref` uniformly: a
-        // sentinel (immortal default) block no-ops, a refcounted user-written
-        // block frees. Then `destroy` the immortal defaults via the literal
-        // registry — no double-free: the slot decref left immortals alive.
-        if (self.world) |w| {
-            var it = self.bridge.resources.valueIterator();
-            while (it.next()) |id_ptr| {
-                const rid = id_ptr.*;
-                const buf = w.resources.getResource(rid) orelse continue;
-                for (w.registry.componentFields(rid)) |fd| {
-                    switch (fd.kind) {
-                        .string_ => {
-                            var ss: persistent.StringSlot = undefined;
-                            @memcpy(std.mem.asBytes(&ss), buf[fd.offset .. fd.offset + @sizeOf(persistent.StringSlot)]);
-                            if (ss.ptr != 0) persistent.decref(self.gpa, @ptrFromInt(ss.ptr));
-                        },
-                        // M1.0.17 — collection field: decref the container block; its
-                        // registered drop releases string elements/keys/values before
-                        // the block frees.
-                        .array_, .map_, .set_ => {
-                            var cs: persistent.CollectionSlot = undefined;
-                            @memcpy(std.mem.asBytes(&cs), buf[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)]);
-                            if (cs.ptr != 0) persistent.decref(self.gpa, @ptrFromInt(cs.ptr));
-                        },
-                        else => {},
-                    }
-                }
-            }
-        }
+        // Uniform resource-payload teardown (M1.0.3 E2 origin, generalized to
+        // Tier-0 ownership in M1.1.1-HF2 C4). The decref walk over every
+        // resource's `.string_`/`.array_`/`.map_`/`.set_` slots now lives on
+        // `World.releaseResourcePayloads`; run it here BEFORE destroying the
+        // immortal `persistent_literals` below. Ordering is load-bearing: the
+        // walk zeroes each slot after decref, so the later `World.deinit` call
+        // is a no-op and never re-reads a slot pointing at a freed immortal
+        // block (a use-after-free). `decref` no-ops on a sentinel (immortal
+        // default) and frees a refcounted user-written block; the immortal
+        // defaults are then reclaimed by `destroy` below (their allocator is
+        // the interpreter). The walk no longer needs `bridge.resources`, so it
+        // is decoupled from `bridge.deinit`.
+        if (self.world) |w| w.releaseResourcePayloads(self.gpa);
         for (self.persistent_literals.items) |block| persistent.destroy(self.gpa, block);
         self.persistent_literals.deinit(self.gpa);
         for (self.rule_descs) |*r| r.deinit(self.gpa);
@@ -7848,6 +7829,50 @@ test "resource string field is mutable and the previous value is released (M1.0.
     const after_second = counting.snapshot();
     try std.testing.expect(after_second.free_count > after_first.free_count);
     try expectResourceStringField(&world, "S", "name", "boss_arena");
+}
+
+test "world+interp teardown frees resource strings once (M1.1.1-HF2 C4)" {
+    // The resource-payload decref walk is owned by Tier-0
+    // `World.releaseResourcePayloads`, called from BOTH `Interpreter.deinit`
+    // (before its immortal `persistent_literals` are destroyed) and
+    // `World.deinit` (before `resources.deinit`). Slot zeroing makes the second
+    // call a no-op, so a written resource string is freed exactly once across
+    // the two-stage teardown. The teardown runs via LIFO defers below —
+    // `interp.deinit()` first, then `world.deinit(gpa)` — and
+    // `std.testing.allocator` flags either a leak (missed free) or a
+    // double-free (both stages freeing the same block).
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const source =
+        \\@state
+        \\resource Save { name: string = "intro" }
+        \\rule advance()
+        \\  when resource Save
+        \\{
+        \\  get_mut(Save).name = "checkpoint_alpha"
+        \\}
+    ;
+    var pr = try parser_mod.parse(gpa, source);
+    defer pr.deinit(gpa);
+    try std.testing.expect(pr.diagnostics.len == 0);
+
+    var diags: std.ArrayListUnmanaged(Diagnostic) = .empty;
+    defer {
+        for (diags.items) |*d| d.deinit(gpa);
+        diags.deinit(gpa);
+    }
+    try types_mod.TypeChecker.check(gpa, &pr.ast, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+
+    var interp = try Interpreter.compile(gpa, &pr.ast, &world);
+    defer interp.deinit();
+
+    // Tick 1 overwrites the immortal default with a refcounted user block held
+    // by the slot — this is the block whose single free the teardown must make.
+    _ = try interp.runFor(&world, 1);
+    try expectResourceStringField(&world, "Save", "name", "checkpoint_alpha");
 }
 
 // ── M1.0.17 E2 — resource string[] collection fields ──────────────────────

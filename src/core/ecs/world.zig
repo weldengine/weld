@@ -45,6 +45,10 @@ const singleton_resources_mod = @import("../resources/registry.zig");
 // E3's singleton_resources and with `engine-tier-interfaces.md`
 // §0 which lists `event_bus` among Tier 0 services).
 const events_bus_mod = @import("../events/bus.zig");
+// M1.1.1-HF2 C4 — Tier-0 persistent heap (moved to core in M1.0.5). `World`
+// owns the uniform decref walk over resource-owned payload slots; see
+// `releaseResourcePayloads`.
+const persistent = @import("../memory/persistent.zig");
 
 /// Public surface for consumers that spawn `(Transform, Velocity)`
 /// entities without depending on `components.zig` directly — the
@@ -240,6 +244,10 @@ pub const World = struct {
         self.archetypes.deinit(gpa);
         self.archetype_by_signature.deinit(gpa);
         self.entity_locations.deinit(gpa);
+        // Reclaim resource-owned persistent payloads (strings, collections)
+        // BEFORE freeing the byte buffers (M1.1.1-HF2 C4). Idempotent — a no-op
+        // when an interpreter already ran this in its own deinit.
+        self.releaseResourcePayloads(gpa);
         self.resources.deinit(gpa);
         self.singleton_resources.deinit(gpa);
         self.event_bus.deinit(gpa);
@@ -1225,6 +1233,61 @@ pub const World = struct {
         self.resources.tickBoundary();
     }
 
+    /// Decref and zero every resource's persistent-heap payload slot
+    /// (`.string_` / `.array_` / `.map_` / `.set_`) — the uniform teardown of
+    /// resource-owned heap blocks (M1.1.1-HF2 C4). Tier-0 `World` owns this
+    /// walk so a world with no interpreter (e.g. the scene loader over a bare
+    /// world) and any resource outside the interpreter's `bridge.resources`
+    /// still reclaim their blocks. `ResourceStore` stays string-agnostic in
+    /// write — `resources.deinit` only frees the byte buffers — but `World`
+    /// owns this decref pass over them.
+    ///
+    /// Idempotent: each slot is zeroed (`ptr = 0`) after its decref, so a
+    /// second call no-ops. This is load-bearing for the interpreter teardown
+    /// order — `Interpreter.deinit` calls this BEFORE destroying its immortal
+    /// `persistent_literals`, and the subsequent `World.deinit` call then sees
+    /// zeroed slots and never re-reads a slot pointing at a freed immortal
+    /// block (which would be a use-after-free). `persistent.decref` no-ops on a
+    /// sentinel-refcount immortal default and frees a refcounted user block.
+    ///
+    /// Allocation-free (decrefs + in-place slot zeroing only); never fails.
+    /// Reaches into `resources.entries` directly rather than through a store
+    /// method: the enumeration is a `World`-level teardown concern, and
+    /// `ResourceStore` (FROZEN, M0.9) exposes no all-resources iterator.
+    pub fn releaseResourcePayloads(self: *World, gpa: std.mem.Allocator) void {
+        var it = self.resources.entries.iterator();
+        while (it.next()) |kv| {
+            const rid = kv.key_ptr.*;
+            const buf = kv.value_ptr.bytes;
+            for (self.registry.componentFields(rid)) |fd| {
+                switch (fd.kind) {
+                    .string_ => {
+                        var ss: persistent.StringSlot = undefined;
+                        @memcpy(std.mem.asBytes(&ss), buf[fd.offset .. fd.offset + @sizeOf(persistent.StringSlot)]);
+                        if (ss.ptr != 0) {
+                            persistent.decref(gpa, @ptrFromInt(ss.ptr));
+                            ss.ptr = 0;
+                            @memcpy(buf[fd.offset .. fd.offset + @sizeOf(persistent.StringSlot)], std.mem.asBytes(&ss));
+                        }
+                    },
+                    // Collection field (M1.0.17): decref the container block; its
+                    // registered drop releases string elements/keys/values before
+                    // the block frees.
+                    .array_, .map_, .set_ => {
+                        var cs: persistent.CollectionSlot = undefined;
+                        @memcpy(std.mem.asBytes(&cs), buf[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)]);
+                        if (cs.ptr != 0) {
+                            persistent.decref(gpa, @ptrFromInt(cs.ptr));
+                            cs.ptr = 0;
+                            @memcpy(buf[fd.offset .. fd.offset + @sizeOf(persistent.CollectionSlot)], std.mem.asBytes(&cs));
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+
     // ─── Inspection helpers ──────────────────────────────────────────────
 
     /// Total chunk count across every archetype. Used by the bench
@@ -1407,4 +1470,44 @@ test "spawn OOM on archetype storage leaves no orphan identity (M1.1.1-HF2 C1)" 
 
     try std.testing.expectEqual(live_before, w.identity.liveCount());
     try std.testing.expectEqual(@as(usize, 0), w.entityCount());
+}
+
+test "releaseResourcePayloads is idempotent and frees a string block once (M1.1.1-HF2 C4)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    // Register a resource-shaped type with a single `.string_` field at offset
+    // 0 (16 bytes, a `StringSlot`). Resources register through the same raw
+    // path as components — the resource-only gating of `.string_` lives in the
+    // Etch validator, not in the Tier-0 registry.
+    const zero16 = [_]u8{0} ** 16;
+    const fields = [_]registry_mod.FieldDesc{.{ .name = "s", .offset = 0, .kind = .string_ }};
+    const rid = try world.registerComponentRaw(gpa, .{
+        .name = "ResWithString",
+        .size = 16,
+        .alignment = 8,
+        .default_bytes = &zero16,
+        .fields = &fields,
+    });
+    try world.addResource(gpa, rid, &zero16);
+
+    // Write a refcounted (refcount 1) persistent string block into the slot.
+    const block = try persistent.alloc(gpa, persistent.type_string, 5);
+    try std.testing.expectEqual(@as(u32, 1), persistent.refcount(block));
+    var ss = persistent.StringSlot{ .ptr = @intFromPtr(block), .len = 5 };
+    const buf = world.resources.getMutResource(rid).?;
+    @memcpy(buf[0..@sizeOf(persistent.StringSlot)], std.mem.asBytes(&ss));
+
+    // First call frees the block (refcount 1 → 0) and zeroes the slot.
+    world.releaseResourcePayloads(gpa);
+    // Slot is zeroed → the second call decrefs nothing (no double-free / UAF).
+    world.releaseResourcePayloads(gpa);
+
+    @memcpy(std.mem.asBytes(&ss), buf[0..@sizeOf(persistent.StringSlot)]);
+    try std.testing.expectEqual(@as(u64, 0), ss.ptr);
+
+    // Leak detection (std.testing.allocator, via the deferred `world.deinit`
+    // whose own `releaseResourcePayloads` call is a third no-op) proves the
+    // block was reclaimed exactly once.
 }
