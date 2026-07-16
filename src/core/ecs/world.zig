@@ -550,7 +550,7 @@ pub const World = struct {
 
         try self.entity_locations.ensureUnusedCapacity(gpa, 1);
         const eid = try self.identity.allocate(gpa);
-        errdefer self.identity.release(gpa, eid) catch {};
+        errdefer self.identity.release(eid);
 
         const r = try arch.allocateSlot(gpa, self.current_tick);
         const chunk = arch.chunks.items[r.chunk_idx];
@@ -589,7 +589,7 @@ pub const World = struct {
         try self.entity_locations.ensureUnusedCapacity(gpa, 1);
         const arch = try self.getOrCreateArchetype(gpa, sorted);
         const eid = try self.identity.allocate(gpa);
-        errdefer self.identity.release(gpa, eid) catch {};
+        errdefer self.identity.release(eid);
 
         const r = try arch.spawnDefault(gpa, eid, self.current_tick);
         self.entity_locations.putAssumeCapacity(eid, .{
@@ -624,7 +624,7 @@ pub const World = struct {
         try self.entity_locations.ensureUnusedCapacity(gpa, 1);
         const arch = try self.getOrCreateArchetype(gpa, sorted);
         const eid = try self.identity.allocate(gpa);
-        errdefer self.identity.release(gpa, eid) catch {};
+        errdefer self.identity.release(eid);
 
         const r = try arch.allocateSlot(gpa, self.current_tick);
         const chunk = arch.chunks.items[r.chunk_idx];
@@ -674,7 +674,7 @@ pub const World = struct {
         }
         _ = self.entity_locations.remove(id);
         self.purgeEntityExtensions(gpa, id);
-        try self.identity.release(gpa, id);
+        self.identity.release(id);
     }
 
     pub fn entityCount(self: *const World) usize {
@@ -1347,4 +1347,64 @@ test "despawn removes the entity's extension entry (M1.1.1-HF1 D7)" {
     try std.testing.expect(!world.hasEntityExtension(e, "MerchantModule"));
     try std.testing.expectEqual(@as(usize, 0), world.entityExtensions(e).len);
     try std.testing.expect(!world.isLive(e));
+}
+
+test "despawn is allocation-free after spawn (M1.1.1-HF2 C1)" {
+    const gpa = std.testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const Marker = extern struct { v: u32 = 0 };
+    const cid = try world.registerComponent(gpa, Marker);
+
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{cid});
+    try std.testing.expect(world.isLive(e));
+    const live_before = world.identity.liveCount();
+
+    // Despawn allocates nothing: `identity.release` is a bare
+    // `appendAssumeCapacity` (C1), `entity_locations.remove` frees a hash slot,
+    // and this entity carries no extension entry to purge. Prove it by failing
+    // every allocation for the whole despawn — it must still succeed and
+    // reclaim the slot.
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    try world.despawn(failing.allocator(), e);
+
+    try std.testing.expect(!world.isLive(e));
+    try std.testing.expectEqual(live_before - 1, world.identity.liveCount());
+    try std.testing.expectEqual(@as(usize, 0), world.entityCount());
+}
+
+test "spawn OOM on archetype storage leaves no orphan identity (M1.1.1-HF2 C1)" {
+    const gpa = std.testing.allocator;
+    const Marker = extern struct { v: u32 = 0 };
+
+    // Pass 1 — count the allocations a fresh dynamic spawn performs. The final
+    // one is the archetype chunk allocation in `spawnDefault`, which runs AFTER
+    // `identity.allocate`.
+    var alloc_count: usize = undefined;
+    {
+        var w = World.init();
+        defer w.deinit(gpa);
+        const cid = try w.registerComponent(gpa, Marker);
+        var counting = std.testing.FailingAllocator.init(gpa, .{ .fail_index = std.math.maxInt(usize) });
+        _ = try w.spawnDynamic(counting.allocator(), &[_]ComponentId{cid});
+        alloc_count = counting.alloc_index;
+    }
+    try std.testing.expect(alloc_count > 0);
+
+    // Pass 2 — identical fresh world; fail the final allocation
+    // (`fail_index = alloc_count - 1`). Identity was already allocated by then,
+    // so the spawn's `errdefer self.identity.release(eid)` must reclaim it.
+    // `release` is now infallible (no swallowed OOM from a `catch {}`), so
+    // `liveCount` returns to its pre-spawn value and no slot is stranded.
+    var w = World.init();
+    defer w.deinit(gpa);
+    const cid = try w.registerComponent(gpa, Marker);
+    const live_before = w.identity.liveCount();
+
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = alloc_count - 1 });
+    try std.testing.expectError(error.OutOfMemory, w.spawnDynamic(failing.allocator(), &[_]ComponentId{cid}));
+
+    try std.testing.expectEqual(live_before, w.identity.liveCount());
+    try std.testing.expectEqual(@as(usize, 0), w.entityCount());
 }

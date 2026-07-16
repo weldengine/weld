@@ -84,8 +84,23 @@ pub const EntityIdentityStore = struct {
     /// one is available (returning the bumped generation captured by the
     /// previous `release`), otherwise appends a new slot with generation 0.
     ///
-    /// Errors: `OutOfMemory` if the slot table needs to grow and the
-    /// allocator refuses.
+    /// Establishes the C1 invariant *`free_indices.capacity >= slots.len` at
+    /// all times*, which is what lets `release` be an infallible
+    /// `appendAssumeCapacity`: the recycled path frees a free-list slot the
+    /// re-push reuses (`pop` drops `len` under an unchanged capacity), and the
+    /// fresh path reserves free-list capacity for the new slot **before**
+    /// growing `slots`. On the fresh path `free_indices.items.len == 0`, so
+    /// `ensureTotalCapacity(slots.len + 1)` makes `capacity >= slots.len + 1`
+    /// (`ensureUnusedCapacity(1)` would only guarantee `capacity >= 1` and
+    /// freeze there — see brief B1).
+    ///
+    /// Reserve-then-mutate: an `OutOfMemory` from the free-list reservation
+    /// leaves `slots` untouched and returns no handle; an `OutOfMemory` from
+    /// the subsequent `slots.append` leaves harmless spare free-list capacity
+    /// and adds no slot. Either way there is no observable mutation.
+    ///
+    /// Errors: `OutOfMemory` if either the free list or the slot table needs
+    /// to grow and the allocator refuses.
     pub fn allocate(self: *EntityIdentityStore, gpa: std.mem.Allocator) WorldError!EntityId {
         if (self.free_indices.pop()) |idx| {
             const slot = &self.slots.items[idx];
@@ -94,6 +109,7 @@ pub const EntityIdentityStore = struct {
             return .{ .index = idx, .generation = slot.generation };
         }
         const idx: u32 = @intCast(self.slots.items.len);
+        try self.free_indices.ensureTotalCapacity(gpa, self.slots.items.len + 1);
         try self.slots.append(gpa, .{ .generation = 0, .alive = true });
         return .{ .index = idx, .generation = 0 };
     }
@@ -121,21 +137,21 @@ pub const EntityIdentityStore = struct {
     /// onto the free list for recycling. Caller must have validated `id`
     /// prior; this still asserts liveness in debug.
     ///
-    /// Reserve-then-mutate: the free-list capacity is grown *before* the slot
-    /// is touched, so an `OutOfMemory` leaves the store with no observable
-    /// mutation — the slot stays alive, `liveCount` is unchanged, and the
-    /// call is retryable.
+    /// Infallible and allocation-free by construction: `allocate` already
+    /// reserved the free-list slot this push reuses (C1 invariant
+    /// `free_indices.capacity >= slots.len`), so this is a bare
+    /// `appendAssumeCapacity` — no allocator parameter, no error. See
+    /// `allocate` for the reservation that backs it.
     ///
     /// Generation arithmetic uses wrapping increment — the u32 counter is
     /// only at risk after 4 G releases of the same slot, which is well
     /// past the Phase 0 horizon. A future-phase milestone can introduce a
     /// guard that retires the slot once `generation == maxInt(u32) - 1`.
-    pub fn release(self: *EntityIdentityStore, gpa: std.mem.Allocator, id: EntityId) WorldError!void {
+    pub fn release(self: *EntityIdentityStore, id: EntityId) void {
         std.debug.assert(id.index < self.slots.items.len);
         const slot = &self.slots.items[id.index];
         std.debug.assert(slot.alive);
         std.debug.assert(slot.generation == id.generation);
-        try self.free_indices.ensureUnusedCapacity(gpa, 1);
         slot.alive = false;
         slot.generation +%= 1;
         self.free_indices.appendAssumeCapacity(id.index);
@@ -189,7 +205,7 @@ test "allocate / release / allocate recycles the slot with a bumped generation" 
     defer store.deinit(gpa);
 
     const a = try store.allocate(gpa);
-    try store.release(gpa, a);
+    store.release(a);
     try std.testing.expectEqual(@as(usize, 0), store.liveCount());
 
     const b = try store.allocate(gpa);
@@ -210,7 +226,7 @@ test "validate rejects out-of-range index, freed slot, and stale generation" {
     );
 
     const a = try store.allocate(gpa);
-    try store.release(gpa, a);
+    store.release(a);
 
     // Freed slot, original handle is stale.
     try std.testing.expectError(error.StaleEntityHandle, store.validate(a));
@@ -232,8 +248,8 @@ test "free list is LIFO — last released slot is reused first" {
     const b = try store.allocate(gpa);
     const c = try store.allocate(gpa);
 
-    try store.release(gpa, a);
-    try store.release(gpa, c);
+    store.release(a);
+    store.release(c);
 
     const d = try store.allocate(gpa);
     try std.testing.expectEqual(c.index, d.index);
@@ -262,32 +278,72 @@ test "100k allocate then release back to zero live count" {
 
     i = 0;
     while (i < N) : (i += 1) {
-        try store.release(gpa, ids[i]);
+        store.release(ids[i]);
     }
     try std.testing.expectEqual(@as(usize, 0), store.liveCount());
 }
 
-test "release under OOM leaves the slot alive and retryable" {
+test "allocate reserves release capacity; release is allocation-free" {
+    // C1 acceptance test. N is deliberately large (1000) so the buggy
+    // `ensureUnusedCapacity(gpa, 1)` fresh-path reservation (brief B1) would
+    // freeze `free_indices.capacity` far below `slots.len` and overflow the
+    // infallible `appendAssumeCapacity` in `release` (repro: overflow at
+    // release #33). The corrected `ensureTotalCapacity(gpa, slots.len + 1)`
+    // keeps `free_indices.capacity >= slots.len`, so every release fits.
     const gpa = std.testing.allocator;
     var store = EntityIdentityStore.init();
     defer store.deinit(gpa);
 
+    const N: u32 = 1000;
+    const ids = try gpa.alloc(EntityId, N);
+    defer gpa.free(ids);
+
+    var i: u32 = 0;
+    while (i < N) : (i += 1) ids[i] = try store.allocate(gpa);
+    try std.testing.expectEqual(@as(usize, N), store.liveCount());
+
+    // The invariant `allocate` establishes: the free list can already hold
+    // every slot, so `release` never needs to grow it.
+    try std.testing.expect(store.free_indices.capacity >= store.slots.items.len);
+
+    // Release all N. `release` takes no allocator and is a bare
+    // `appendAssumeCapacity` — allocation-free by construction. No allocator
+    // can be consulted here, so "release with the allocator set to fail every
+    // request" is satisfied structurally.
+    i = 0;
+    while (i < N) : (i += 1) store.release(ids[i]);
+    try std.testing.expectEqual(@as(usize, 0), store.liveCount());
+}
+
+test "allocate is reserve-then-mutate: OOM on a fresh slot leaves no observable mutation" {
+    const gpa = std.testing.allocator;
+    var store = EntityIdentityStore.init();
+    defer store.deinit(gpa);
+
+    // Fill the slot table exactly to capacity so the NEXT fresh allocate is
+    // forced to grow (and can therefore OOM). Without this, `allocate`
+    // amortizes on the spare capacity from an earlier geometric growth and
+    // never touches the allocator, so there would be no OOM to observe.
     const a = try store.allocate(gpa);
-    try std.testing.expectEqual(@as(usize, 1), store.liveCount());
+    while (store.slots.items.len < store.slots.capacity) {
+        _ = try store.allocate(gpa);
+    }
+    const slots_before = store.slots.items.len;
+    const live_before = store.liveCount();
 
-    // A failing allocator that refuses the free-list growth in `release`. The
-    // free list starts empty, so the reserve is the first allocation it sees.
+    // The free list is empty (every slot is live), so the next allocate takes
+    // the fresh path. Its first allocation is the free-list reservation, made
+    // *before* `slots` is touched; `slots.append` then must grow too. Failing
+    // the first allocation request exercises the reserve-then-mutate ordering.
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    try std.testing.expectError(error.OutOfMemory, store.release(failing.allocator(), a));
+    try std.testing.expectError(error.OutOfMemory, store.allocate(failing.allocator()));
 
-    // Reserve-then-mutate contract: no observable mutation on OOM. The slot is
-    // still alive, the handle still validates, and `liveCount` is unchanged.
-    try std.testing.expect(store.isLive(a));
-    try std.testing.expectEqual(@as(usize, 1), store.liveCount());
+    // Reserve-then-mutate: no new slot, live count unchanged, prior handle intact.
+    try std.testing.expectEqual(slots_before, store.slots.items.len);
+    try std.testing.expectEqual(live_before, store.liveCount());
     try store.validate(a);
 
-    // Retrying with a working allocator succeeds and frees the slot.
-    try store.release(gpa, a);
-    try std.testing.expectEqual(@as(usize, 0), store.liveCount());
-    try std.testing.expect(!store.isLive(a));
+    // The store is still usable with a working allocator afterwards.
+    _ = try store.allocate(gpa);
+    try std.testing.expectEqual(live_before + 1, store.liveCount());
 }
