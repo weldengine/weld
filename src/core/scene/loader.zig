@@ -28,6 +28,7 @@ const std = @import("std");
 
 const format = @import("format.zig");
 const accessor_mod = @import("accessor.zig");
+const validate = @import("validate.zig");
 const registry_mod = @import("../ecs/registry.zig");
 const world_mod = @import("../ecs/world.zig");
 const observers_mod = @import("../ecs/observers.zig");
@@ -43,8 +44,9 @@ const EntityId = world_mod.EntityId;
 /// Errors from opening + integrity-checking a `.scene.bin` byte image.
 /// `format.ReadError` covers a truncated / wrong-magic / wrong-version file;
 /// `CorruptScene` is a content-hash mismatch (the bytes were altered after the
-/// cook recorded their `XxHash64`).
-pub const OpenError = format.ReadError || error{CorruptScene};
+/// cook recorded their `XxHash64`); `MalformedScene` is a structural
+/// inconsistency caught by `validate.structure` (`StructureError`).
+pub const OpenError = format.ReadError || error{CorruptScene} || StructureError;
 
 /// Errors from mapping on-disk schema identity to the runtime registry.
 /// `UnknownComponent`: a scene type the running program never registered
@@ -77,15 +79,26 @@ pub const ExtensionResolver = struct {
 
 /// Open a `.scene.bin` byte image: validate magic + version (via the accessor,
 /// read little-endian field-by-field — never a raw `@ptrCast` off an unaligned
-/// buffer), then verify the content hash. Returns a zero-copy `Accessor`
-/// borrowing `bytes` for its whole lifetime.
+/// buffer), verify the content hash, then run the standalone **structural
+/// validator** (`validate.structure`) before returning. The validator is the
+/// single gate that lets every subsequent `Accessor` getter trust the
+/// file-controlled offsets/counts it dereferences — no caller should touch an
+/// accessor built any other way on externally-supplied bytes. Returns a
+/// zero-copy `Accessor` borrowing `bytes` for its whole lifetime.
+///
+/// Order is load-bearing: header → hash → structure. `verifyHash` is no defense
+/// against a crafted image (the hash is recomputable), so `validate.structure`
+/// runs regardless of the hash and walks the raw bytes with checked arithmetic.
 ///
 /// Errors:
 ///   - `error.TooShort` / `error.BadMagic` / `error.BadVersion` — invalid header
 ///   - `error.CorruptScene` — content hash does not match the header's
+///   - `error.MalformedScene` — the structure is inconsistent (offsets, counts,
+///     or references a getter would trust)
 pub fn openVerified(bytes: []const u8) OpenError!Accessor {
     const acc = try Accessor.open(bytes);
     if (!acc.verifyHash()) return error.CorruptScene;
+    try validate.structure(bytes, acc.header);
     return acc;
 }
 
@@ -164,6 +177,12 @@ pub const LoadResult = struct {
 /// Count of entries in the on-disk UUID table, derived from the header section
 /// offsets (`uuid_table` ends where `schema_table` begins; 16 B per UUID). Lets
 /// the loader bounds-check parent ordinals without a new accessor getter.
+///
+/// Relies on `validate.structure` (run in `openVerified` before any loader step
+/// reaches here): it proves check (a) `uuid_table_offset ≤ schema_table_offset`
+/// so the subtraction never underflows, and check (b) their difference is a
+/// multiple of 16 so the division is exact. Callers must have opened via
+/// `openVerified` — never on unvalidated bytes.
 fn uuidCount(acc: Accessor) u32 {
     return (acc.header.schema_table_offset - acc.header.uuid_table_offset) / 16;
 }

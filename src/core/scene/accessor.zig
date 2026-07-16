@@ -12,6 +12,18 @@
 //!
 //! Column placement is computed with `format.columnOffset` — the SAME routine
 //! the writer used — so reader/writer offsets agree by construction.
+//!
+//! **Trust contract (M1.1.1-HF3 / R1).** Every getter here trusts file-controlled
+//! offsets and counts: `stringAt` does an unbounded `ref + 4 + len`, `schema`
+//! indexes without a range check, `archetypeAt` asserts `component_count <=
+//! max_components_per_archetype` (an assert stripped in ReleaseFast), and `column`
+//! computes `stride × entity_count` unchecked. These are only safe on bytes that
+//! `loader.openVerified` has run through `validate.structure` first — the
+//! standalone structural validator proves, with checked arithmetic, that every
+//! such offset/count/reference is in range. **Do not build an `Accessor` over
+//! externally-supplied bytes by calling `open` directly and then invoking
+//! getters** — go through `loader.openVerified`, which gates on the validator.
+//! (`open` itself only parses + range-checks the fixed 64-byte header.)
 
 const std = @import("std");
 
