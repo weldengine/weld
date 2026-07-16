@@ -300,6 +300,11 @@ pub const Accessor = struct {
         pub fn entityUuid(self: Archetype, slot: usize) *const [16]u8 {
             return self.acc.uuidAt(self.acc.readU32(self.uuids_off + slot * 4));
         }
+        /// Entity `slot`'s own UUID ordinal (unvalidated — callers bound-check
+        /// against `uuidCount` before dereferencing via `uuidAt`).
+        pub fn entityUuidOrdinal(self: Archetype, slot: usize) u32 {
+            return self.acc.readU32(self.uuids_off + slot * 4);
+        }
         /// Entity `slot`'s parent UUID ordinal, or `format.no_parent`.
         pub fn entityParent(self: Archetype, slot: usize) u32 {
             return self.acc.readU32(self.parents_off + slot * 4);

@@ -373,15 +373,19 @@ fn instantiate(
     // any spawn, so on their OOM nothing has spawned and the errdefer's despawn
     // loop is a no-op. `spawnDynamicWithValues` stays fallible, but on its
     // failure it records nothing, so the already-recorded prior entities are
-    // despawned and the failed one never existed. `spawned` needs one slot per
-    // entity; `uuid_to_entity` at most `uuidCount` distinct keys.
+    // despawned and the failed one never existed. Both maps take exactly
+    // `total_entities` inserts — one per entity; C2b rejects duplicate UUID
+    // ordinals, so `uuid_to_entity`'s capacity no longer depends on ordinal
+    // validity (defence in depth against a malformed hash-valid scene).
     var total_entities: usize = 0;
     {
         var bi: u32 = 0;
         while (bi < arch_count) : (bi += 1) total_entities += acc.archetype(bi).entity_count;
     }
     try spawned.ensureTotalCapacity(gpa, total_entities);
-    try uuid_to_entity.ensureTotalCapacity(gpa, ucount);
+    // The hash map's capacity is a `u32` (`Size`); `total_entities` is bounded by
+    // the scene's entity count (u32-representable, matches the on-disk tables).
+    try uuid_to_entity.ensureTotalCapacity(gpa, @intCast(total_entities));
 
     var ai: u32 = 0;
     while (ai < arch_count) : (ai += 1) {
@@ -399,12 +403,27 @@ fn instantiate(
 
         var slot: usize = 0;
         while (slot < block.entity_count) : (slot += 1) {
+            // C2b (M1.1.1-HF2): validate the entity's own UUID ordinal BEFORE the
+            // spawn — mirroring the parent-ordinal / cross-ref / extension checks.
+            // A malformed (hash-valid) scene could otherwise dereference out of
+            // the UUID table via `uuidAt`, and inserting > `uuidCount` distinct
+            // keys would overflow the pre-reserved map post-spawn. Pre-spawn
+            // error: the current entity is not yet created and priors are in
+            // `spawned`, so the standard rollback reclaims them.
+            const uuid_ord = block.entityUuidOrdinal(slot);
+            if (uuid_ord >= ucount) return error.MalformedScene;
+
             for (0..cc) |c| payloads[c] = block.componentSlot(c, slot);
             const eid = try world.spawnDynamicWithValues(gpa, ids, payloads);
-            // Assume-capacity (infallible) — reserved above. No fallible insert
-            // may follow the spawn, or a post-spawn OOM would orphan `eid`.
-            uuid_to_entity.putAssumeCapacity(block.entityUuid(slot).*, eid);
+            // Record in `spawned` FIRST so the rollback covers `eid` even if the
+            // duplicate-ordinal check below rejects the scene. Both inserts are
+            // assume-capacity (reserved to `total_entities`, the exact put count).
             spawned.appendAssumeCapacity(eid);
+            const gop = uuid_to_entity.getOrPutAssumeCapacity(acc.uuidAt(uuid_ord).*);
+            // A UUID ordinal shared by two entities is malformed (the cooker
+            // never emits one); reject rather than silently overwrite the map.
+            if (gop.found_existing) return error.MalformedScene;
+            gop.value_ptr.* = eid;
 
             // Structural (not hash) validity: a parent ordinal must index the
             // UUID table or be `no_parent`. The link itself is not applied (no
@@ -1228,4 +1247,78 @@ test "rejected load restores the resource dirty bit (M1.1.1-HF2 C6)" {
     // true by the rollback's own `getMutResource` calls. And no entity survived.
     try testing.expect(!world.resources.isDirty(settings));
     try testing.expectEqual(@as(usize, 0), world.entityCount());
+}
+
+/// Test helper: cook a 1-archetype, 2-entity `.scene.bin` over `reg` (component
+/// `cid`), with the two entities' own UUID ordinals set to `ord0` / `ord1`. The
+/// UUID table always holds 2 entries (so `uuidCount == 2`); an out-of-range or
+/// duplicate ordinal is what the C2b tests inject. The writer computes a valid
+/// header hash over the bytes, so the file opens + verifies — only the loader's
+/// structural checks reject it.
+fn buildTwoEntityOneBlockScene(gpa: std.mem.Allocator, reg: *const Registry, cid: ComponentId, ord0: u32, ord1: u32) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const names = try a.dupe([]const u8, &.{ try a.dupe(u8, "E0"), try a.dupe(u8, "E1") });
+    var uuid1 = [_]u8{0} ** 16;
+    uuid1[0] = 1;
+    const uuids = try a.dupe([16]u8, &.{ [_]u8{0} ** 16, uuid1 });
+    const col = try a.alloc(u8, reg.componentSize(cid) * 2); // 2 entities, one archetype
+    @memset(col, 0);
+    const cols = try a.dupe([]u8, &.{col});
+    const ents = try a.dupe(format.EntityEntry, &.{
+        .{ .name = 0, .uuid = ord0, .parent_uuid = format.no_parent },
+        .{ .name = 1, .uuid = ord1, .parent_uuid = format.no_parent },
+    });
+    const ids = try a.dupe(ComponentId, &.{cid});
+    const blocks = try a.dupe(format.ArchetypeBlock, &.{.{
+        .component_ids = ids,
+        .entity_count = 2,
+        .columns = cols,
+        .entities = ents,
+    }});
+    var model: format.CookModel = .{
+        .strings = names,
+        .uuids = uuids,
+        .resources = &.{},
+        .archetypes = blocks,
+        .arena = arena,
+    };
+    defer model.deinit();
+    return try writer.write(gpa, model, reg);
+}
+
+test "instantiate rejects an out-of-range entity uuid ordinal (M1.1.1-HF2 C2b)" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const pos = try registerRaw(gpa, &world.registry, "Pos", 8, 4);
+
+    // 2 entities, 2 UUIDs (uuidCount == 2); entity 1's own UUID ordinal is 2 —
+    // past the table. The C2b pre-spawn check rejects it (MalformedScene, not
+    // CorruptScene — the writer's hash is valid). Entity 0 spawned first, so the
+    // rollback must reclaim it: entityCount and liveCount return to 0.
+    const bytes = try buildTwoEntityOneBlockScene(gpa, &world.registry, pos, 0, 2);
+    defer gpa.free(bytes);
+
+    try testing.expectError(error.MalformedScene, loadFromBytes(&world, gpa, bytes, null));
+    try testing.expectEqual(@as(usize, 0), world.entityCount());
+    try testing.expectEqual(@as(usize, 0), world.identity.liveCount());
+}
+
+test "instantiate rejects a duplicate entity uuid ordinal (M1.1.1-HF2 C2b)" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const pos = try registerRaw(gpa, &world.registry, "Pos", 8, 4);
+
+    // 2 entities sharing UUID ordinal 0 — malformed (the cooker never emits it).
+    // Entity 0 spawns + registers uuid[0]; entity 1 (also ordinal 0) is spawned,
+    // recorded in `spawned` FIRST, then rejected by the duplicate check → both
+    // entities roll back. entityCount and liveCount return to 0.
+    const bytes = try buildTwoEntityOneBlockScene(gpa, &world.registry, pos, 0, 0);
+    defer gpa.free(bytes);
+
+    try testing.expectError(error.MalformedScene, loadFromBytes(&world, gpa, bytes, null));
+    try testing.expectEqual(@as(usize, 0), world.entityCount());
+    try testing.expectEqual(@as(usize, 0), world.identity.liveCount());
 }
