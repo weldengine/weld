@@ -96,6 +96,17 @@ pub const ResourceStore = struct {
         return e.dirty;
     }
 
+    /// Set a resource's dirty bit to an explicit value. **Tier-0-internal seam**,
+    /// not a public runtime / Etch / plugin API: the scene loader's rollback path
+    /// (a different Zig file — hence `pub`) restores the pre-load dirty state
+    /// after a rejected transaction, because `getMutResource` (called during both
+    /// the failed load and the rollback) unconditionally sets `dirty = true`
+    /// (M1.1.1-HF2 C6). No-op if the resource is absent.
+    pub fn setDirty(self: *ResourceStore, id: ComponentId, value: bool) void {
+        const e = self.entries.getPtr(id) orelse return;
+        e.dirty = value;
+    }
+
     pub fn contains(self: *const ResourceStore, id: ComponentId) bool {
         return self.entries.contains(id);
     }
@@ -177,4 +188,23 @@ test "addResource rejects duplicate id" {
     const bytes = [_]u8{1};
     try store.addResource(gpa, 0, &bytes);
     try std.testing.expectError(error.DuplicateResource, store.addResource(gpa, 0, &bytes));
+}
+
+test "setDirty restores an explicit dirty state (M1.1.1-HF2 C6)" {
+    const gpa = std.testing.allocator;
+    var store = ResourceStore.init();
+    defer store.deinit(gpa);
+
+    const bytes = [_]u8{1};
+    try store.addResource(gpa, 5, &bytes);
+    _ = store.getMutResource(5).?; // forces dirty = true
+    try std.testing.expect(store.isDirty(5));
+
+    store.setDirty(5, false);
+    try std.testing.expect(!store.isDirty(5));
+    store.setDirty(5, true);
+    try std.testing.expect(store.isDirty(5));
+
+    // Absent resource → no-op, no crash.
+    store.setDirty(999, false);
 }
