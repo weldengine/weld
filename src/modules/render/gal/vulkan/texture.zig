@@ -167,6 +167,9 @@ pub fn createView(
         },
     };
     const view = device.vk_device.createImageView(&ci, null) catch return error.BackendInternal;
+    // R5b (M1.1.1-HF3): the native view must be destroyed if the registry `put`
+    // below fails (OOM) — otherwise the `VkImageView` leaks with no handle to it.
+    errdefer device.vk_device.destroyImageView(view, null);
     const id = device.nextHandle();
     try device.texture_views.put(device.allocator, id, .{
         .vk_view = view,

@@ -142,6 +142,34 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
 
     const views = try device.allocator.alloc(vk.ImageView, images.len);
     errdefer device.allocator.free(views);
+
+    // Pre-allocate one stable GAL TextureViewHandle per swapchain image.
+    // Lookup in the device's texture_views registry happens via these
+    // handles in `getImageView` — zero alloc per frame on the hot path.
+    // Allocated up front so the unified cleanup errdefer below can name it.
+    const view_handles = try device.allocator.alloc(types.TextureViewHandle, images.len);
+    errdefer device.allocator.free(view_handles);
+
+    // R5d (M1.1.1-HF3): ONE native-cleanup path covering the whole function.
+    // `views_created` counts the native image views actually created; `registered`
+    // counts the GAL handles adopted for them. On any failure from here through
+    // `swapchains.put`, destroy every created native view and drop every
+    // registered handle. This fixes two leaks the previous piecemeal errdefers
+    // missed: (1) a mid-loop `createImageView` failure orphaned `views[0..i]`
+    // (the old errdefer freed only the array, not the native views); (2) a failure
+    // after adoption leaked the native views entirely, because the adopted entries
+    // are `swapchain_owned` and a plain registry `remove` skips their native free.
+    // Declared after the two array `free` errdefers, so it runs first (LIFO) while
+    // both slices are still valid.
+    var views_created: usize = 0;
+    var registered: usize = 0;
+    errdefer {
+        var i: usize = 0;
+        while (i < registered) : (i += 1) _ = device.texture_views.remove(view_handles[i].inner);
+        i = 0;
+        while (i < views_created) : (i += 1) device.vk_device.destroyImageView(views[i], null);
+    }
+
     for (images, 0..) |img, i| {
         const vci: vk.ImageViewCreateInfo = .{
             .flags = .empty,
@@ -158,18 +186,9 @@ pub fn create(device: *Device, descriptor: types.SwapchainDescriptor) types.Erro
             },
         };
         views[i] = device.vk_device.createImageView(&vci, null) catch return error.BackendInternal;
+        views_created = i + 1;
     }
 
-    // Pre-allocate one stable GAL TextureViewHandle per swapchain image.
-    // Lookup in the device's texture_views registry happens via these
-    // handles in `getImageView` — zero alloc per frame on the hot path.
-    const view_handles = try device.allocator.alloc(types.TextureViewHandle, images.len);
-    errdefer device.allocator.free(view_handles);
-    var registered: usize = 0;
-    errdefer {
-        var i: usize = 0;
-        while (i < registered) : (i += 1) _ = device.texture_views.remove(view_handles[i].inner);
-    }
     const swap_format = conv.textureFormatFromVk(fmt_format);
     for (views, 0..) |v, i| {
         view_handles[i] = try texture_mod.adoptSwapchainView(device, v, extent.width, extent.height, swap_format);

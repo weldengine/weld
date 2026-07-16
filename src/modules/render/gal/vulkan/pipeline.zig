@@ -46,6 +46,17 @@ pub fn createRender(
     if (!descriptor.vertex_module.isValid()) return error.InvalidArgument;
     if (descriptor.sample_count > 1) return error.Unsupported;
 
+    // R8 (M1.1.1-HF3): bound the fixed [9] attachment arrays below (mirror of the
+    // `render_pass.begin` guard) AND honor the device's color-attachment limit —
+    // an over-long `color_targets` would otherwise write past `attachments` /
+    // `color_refs`, and one exceeding `maxColorAttachments` is invalid.
+    const max_attachments = 9;
+    if (descriptor.color_targets.len + @as(usize, if (descriptor.depth_format != null) 1 else 0) > max_attachments) {
+        return error.Unsupported;
+    }
+    const dev_limits = device.physical_device.getPhysicalDeviceProperties().limits;
+    if (descriptor.color_targets.len > @as(usize, dev_limits.max_color_attachments)) return error.Unsupported;
+
     // PipelineLayout
     var set_layouts: std.ArrayList(vk.DescriptorSetLayout) = .empty;
     defer set_layouts.deinit(device.allocator);
@@ -63,9 +74,10 @@ pub fn createRender(
     const pl_layout = device.vk_device.createPipelineLayout(&layout_ci, null) catch return error.PipelineCreationFailed;
     errdefer device.vk_device.destroyPipelineLayout(pl_layout, null);
 
-    // Template render pass (color attachments + optional depth).
-    var attachments: [9]vk.AttachmentDescription = undefined;
-    var color_refs: [9]vk.AttachmentReference = undefined;
+    // Template render pass (color attachments + optional depth). Sized by the
+    // R8 guard above (`max_attachments`), so the loops below cannot overflow.
+    var attachments: [max_attachments]vk.AttachmentDescription = undefined;
+    var color_refs: [max_attachments]vk.AttachmentReference = undefined;
     var depth_ref: vk.AttachmentReference = .{ .attachment = 0, .layout = .undefined };
     var n_attach: u32 = 0;
     var n_color: u32 = 0;
@@ -301,6 +313,10 @@ pub fn createRender(
     };
     var pipelines: [1]vk.Pipeline = .{.null};
     device.vk_device.createGraphicsPipelines(.null, &pipe_ci, null, &pipelines) catch return error.PipelineCreationFailed;
+    // R5c (M1.1.1-HF3): destroy the just-created pipeline if the registry `put`
+    // below fails — the layout + render-pass errdefers already cover their halves
+    // of the tail, but the pipeline itself would otherwise leak.
+    errdefer device.vk_device.destroyPipeline(pipelines[0], null);
 
     const id = device.nextHandle();
     try device.render_pipelines.put(device.allocator, id, .{
@@ -358,6 +374,9 @@ pub fn createCompute(
     }};
     var pipelines: [1]vk.Pipeline = .{.null};
     device.vk_device.createComputePipelines(.null, &ci, null, &pipelines) catch return error.PipelineCreationFailed;
+    // R5c (M1.1.1-HF3): destroy the pipeline if the registry `put` below fails
+    // (the layout errdefer covers the layout; the pipeline would otherwise leak).
+    errdefer device.vk_device.destroyPipeline(pipelines[0], null);
 
     // Phase 0: we store in render_pipelines for simplicity — Phase 1+
     // a dedicated compute_pipelines registry. The `render_pass` is `.null`
