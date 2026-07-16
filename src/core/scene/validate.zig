@@ -464,13 +464,100 @@ fn refixHash(bytes: []u8) void {
     std.mem.writeInt(u64, bytes[56..64], h, .little);
 }
 
+/// Test-only: read the first and last byte of `slice` (nothing if empty) through
+/// `doNotOptimizeAway`, so a slice the accessor built out of bounds panics here
+/// under Debug/ReleaseSafe instead of being optimized away.
+fn touch(slice: []const u8) void {
+    if (slice.len == 0) return;
+    std.mem.doNotOptimizeAway(slice[0]);
+    std.mem.doNotOptimizeAway(slice[slice.len - 1]);
+}
+
+/// Test-only: traverse EVERY accessor getter over a validated image, asserting
+/// nothing but the absence of a panic. This is what proves the gate's real
+/// property — an image that *survives* `structure` can never drive a getter out
+/// of bounds. Called on the seeded-mutation survivors and on the nominal scenes
+/// alike; under Debug/ReleaseSafe the safety checks are live, so any out-of-bounds
+/// slice or index panics here.
+fn walkAll(acc: accessor_mod.Accessor) void {
+    // Schemas: name (via stringAt), size, alignment.
+    var si: u32 = 0;
+    while (si < acc.schemaCount()) : (si += 1) {
+        const s = acc.schema(si);
+        touch(s.name);
+        std.mem.doNotOptimizeAway(s.size);
+        std.mem.doNotOptimizeAway(s.alignment);
+    }
+    // Resources: block walk, `.data`, and a few `stringField` offsets.
+    var ri: u32 = 0;
+    while (ri < acc.resourceCount()) : (ri += 1) {
+        const r = acc.resource(ri);
+        std.mem.doNotOptimizeAway(r.schema_index);
+        touch(r.data);
+        for ([_]u16{ 0, 4, 0xFFFF }) |off| {
+            if (r.stringField(off)) |v| touch(v);
+        }
+    }
+    // Archetypes: schema indices, per-entity meta, and every column / slot.
+    var ai: u32 = 0;
+    while (ai < acc.archetypeCount()) : (ai += 1) {
+        const block = acc.archetype(ai);
+        var c: usize = 0;
+        while (c < block.component_count) : (c += 1) {
+            std.mem.doNotOptimizeAway(block.schemaIndex(c));
+            touch(block.column(c));
+        }
+        var slot: usize = 0;
+        while (slot < block.entity_count) : (slot += 1) {
+            touch(block.entityName(slot));
+            const u = block.entityUuid(slot);
+            std.mem.doNotOptimizeAway(u[0]);
+            std.mem.doNotOptimizeAway(u[15]);
+            std.mem.doNotOptimizeAway(block.entityParent(slot));
+            var cc: usize = 0;
+            while (cc < block.component_count) : (cc += 1) {
+                touch(block.componentSlot(cc, slot));
+            }
+        }
+    }
+    // Extensions: entries + ids, prefab names, hooks.
+    var ei: u32 = 0;
+    while (ei < acc.extensionsCount()) : (ei += 1) {
+        const e = acc.extension(ei);
+        std.mem.doNotOptimizeAway(e.uuid_ordinal);
+        var j: u32 = 0;
+        while (j < e.extension_count) : (j += 1) std.mem.doNotOptimizeAway(e.extensionId(j));
+    }
+    var pi: u32 = 0;
+    while (pi < acc.prefabIdCount()) : (pi += 1) touch(acc.prefabName(pi));
+    var hi: u32 = 0;
+    while (hi < acc.hookCount()) : (hi += 1) {
+        const h = acc.hook(hi);
+        if (h.on_attach) |v| touch(v);
+        if (h.on_detach) |v| touch(v);
+    }
+    // Cross-references.
+    var xi: u32 = 0;
+    while (xi < acc.crossrefsCount()) : (xi += 1) {
+        const cr = acc.crossref(xi);
+        std.mem.doNotOptimizeAway(cr.source_uuid_ordinal);
+        std.mem.doNotOptimizeAway(cr.schema_index);
+        std.mem.doNotOptimizeAway(cr.field_offset);
+        std.mem.doNotOptimizeAway(cr.target_uuid_ordinal);
+    }
+}
+
 /// Open + verify + validate, mirroring `loader.openVerified` without importing it
-/// (avoids the loader→validate import cycle). Returns whatever error the pipeline
-/// raises; the point of the callers is that it never panics.
+/// (avoids the loader→validate import cycle). On success, `walkAll` exercises
+/// every accessor getter over the validated image — so a validator gap that let
+/// an invalid geometry through would surface as an out-of-bounds panic in a getter,
+/// not slip by unseen. Returns whatever error the pipeline raises; the point of
+/// the callers is that neither the validation nor the subsequent walk ever panics.
 fn openAndValidate(bytes: []const u8) !void {
     const acc = try accessor_mod.Accessor.open(bytes);
     if (!acc.verifyHash()) return error.CorruptScene;
     try structure(bytes, acc.header);
+    walkAll(acc);
 }
 
 test "validator accepts every cooked scene the writer produces" {
@@ -484,6 +571,7 @@ test "validator accepts every cooked scene the writer produces" {
     const acc = try accessor_mod.Accessor.open(bytes);
     try testing.expect(acc.verifyHash());
     try structure(bytes, acc.header);
+    walkAll(acc); // nominal-path getter coverage (parity with the seeded survivors)
 
     // Minimal scene: one component, one entity, no resources/crossrefs/exts.
     var reg2 = Registry.init();
@@ -492,6 +580,7 @@ test "validator accepts every cooked scene the writer produces" {
     defer gpa.free(min_bytes);
     const acc2 = try accessor_mod.Accessor.open(min_bytes);
     try structure(min_bytes, acc2.header);
+    walkAll(acc2);
 }
 
 /// One archetype `[Pos]`, one entity — the smallest non-empty scene.
