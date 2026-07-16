@@ -180,6 +180,13 @@ fn uuidCount(acc: Accessor) u32 {
 const ResourceEdit = struct {
     cid: ComponentId,
     snapshot: ?[]u8,
+    /// The resource's dirty bit BEFORE the loader touched it, captured at
+    /// snapshot time (before the first `getMutResource`, which sets it true).
+    /// Restored on rollback so a rejected load leaves no spurious
+    /// `when resource T changed` (M1.1.1-HF2 C6). Moot on commit (a committed
+    /// write is genuinely dirty) and for a freshly-added resource (rollback
+    /// removes it).
+    dirty_before: bool,
 };
 
 const ResourceJournal = std.ArrayListUnmanaged(ResourceEdit);
@@ -235,6 +242,10 @@ fn rollbackResources(world: *World, gpa: std.mem.Allocator, journal: *ResourceJo
         if (edit.snapshot) |snap| {
             if (world.resources.getMutResource(edit.cid)) |live| @memcpy(live, snap);
             gpa.free(snap);
+            // C6: the `getMutResource` calls above (decref pass + restore) forced
+            // `dirty = true`; restore the pre-load state so the rejected load
+            // leaves no spurious `when resource T changed`.
+            world.resources.setDirty(edit.cid, edit.dirty_before);
         } else {
             world.resources.removeResource(gpa, edit.cid) catch {};
         }
@@ -615,6 +626,12 @@ fn loadResources(
         // pre-write snapshot. For an existing resource the snapshot holds the old
         // string slots (decreffed at commit / restored at rollback); for a fresh
         // one the snapshot is null (rollback removes it).
+        // C6 (M1.1.1-HF2): capture the pre-write dirty bit BEFORE `getMutResource`
+        // (which unconditionally sets it true), so a rollback can restore it — a
+        // rejected load must not leave a spurious `when resource T changed`.
+        // Absent resource → false (added fresh below; rollback removes it, moot).
+        const dirty_before = world.resources.isDirty(cid);
+
         var snapshot: ?[]u8 = null;
         const dst = if (world.resources.getMutResource(cid)) |existing| blk: {
             const snap = try gpa.dupe(u8, existing);
@@ -628,7 +645,7 @@ fn loadResources(
 
         // Journal the edit BEFORE the fallible string writes, so a mid-field OOM
         // rolls the whole resource back (decref partial new blocks + restore).
-        journal.appendAssumeCapacity(.{ .cid = cid, .snapshot = snapshot });
+        journal.appendAssumeCapacity(.{ .cid = cid, .snapshot = snapshot, .dirty_before = dirty_before });
 
         // Per string field: alloc a REFCOUNTED block owned by the slot (D1), copy
         // the cooked value, write the new `StringSlot`.
@@ -1185,4 +1202,30 @@ test "instantiate under post-spawn OOM leaves no orphan (M1.1.1-HF2 C2)" {
     // The bound reached the all-allocations-succeed case, so the sweep covered
     // every load allocation (including all post-spawn points).
     try testing.expect(saw_success);
+}
+
+test "rejected load restores the resource dirty bit (M1.1.1-HF2 C6)" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+
+    const ecid = try registerRaw(gpa, &world.registry, "E", 8, 4);
+    const settings = try registerStringResource(gpa, &world.registry, "Settings");
+    const bag = try registerArrayResource(gpa, &world.registry, "Bag");
+
+    // Seed Settings so the failing load OVERRIDES it (snapshot path). addResource
+    // starts it clean — the pre-load dirty state the rollback must restore.
+    try world.addResource(gpa, settings, &[_]u8{0} ** 16);
+    try testing.expect(!world.resources.isDirty(settings));
+
+    // Spawns E, writes Settings.v = "new" (getMutResource → dirty = true), then
+    // trips the Bag collection rejection → the transactional rollback runs.
+    const bytes = try buildSpawnThenFailScene(gpa, &world.registry, ecid, settings, bag);
+    defer gpa.free(bytes);
+    try testing.expectError(error.CollectionResourceFieldUnsupported, loadFromBytes(&world, gpa, bytes, null));
+
+    // C6: dirty is restored to its pre-load value (false), not left spuriously
+    // true by the rollback's own `getMutResource` calls. And no entity survived.
+    try testing.expect(!world.resources.isDirty(settings));
+    try testing.expectEqual(@as(usize, 0), world.entityCount());
 }
