@@ -397,6 +397,43 @@ pub const World = struct {
         try gop.value_ptr.append(gpa, owned);
     }
 
+    /// R6 (M1.1.1-HF3) — reserve everything a following `commitEntityExtension`
+    /// needs so that commit is infallible: dupe `name` (returned to the caller),
+    /// reserve one map slot, and reserve one slot in the entity's inner list.
+    /// This is the fallible half of the reserve-then-mutate split
+    /// `activateExtension` uses. It performs **no observable extension mutation**:
+    /// it may materialize a fresh EMPTY list entry for `entity`, but an empty set
+    /// reads as "no extensions" through `hasEntityExtension` / `entityExtensions`,
+    /// so a caller that aborts before `commitEntityExtension` (e.g. the grouped add
+    /// fails) leaves observable state unchanged and the call retryable. The stray
+    /// empty entry is inert and reclaimed at `despawn` / `deinit`.
+    pub fn reserveEntityExtension(self: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8) ![]u8 {
+        const owned = try gpa.dupe(u8, name);
+        errdefer gpa.free(owned);
+        try self.entity_extensions.ensureUnusedCapacity(gpa, 1);
+        const gop = self.entity_extensions.getOrPutAssumeCapacity(entity);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        try gop.value_ptr.ensureUnusedCapacity(gpa, 1);
+        return owned;
+    }
+
+    /// R6 (M1.1.1-HF3) — infallibly record an extension reserved by
+    /// `reserveEntityExtension`, taking ownership of `owned`. Appends via
+    /// `appendAssumeCapacity` (capacity reserved). Belt-and-braces dedup: if the
+    /// name is already active it frees `owned` instead (the activate path's
+    /// component-conflict check already precludes re-activation). Either way the
+    /// caller must not touch `owned` afterwards.
+    pub fn commitEntityExtension(self: *World, gpa: std.mem.Allocator, entity: EntityId, owned: []u8) void {
+        const list = self.entity_extensions.getPtr(entity).?; // reserved above
+        for (list.items) |existing| {
+            if (std.mem.eql(u8, existing, owned)) {
+                gpa.free(owned);
+                return;
+            }
+        }
+        list.appendAssumeCapacity(owned);
+    }
+
     /// M1.0.9 — drop `name` from `entity`'s active-extension set, freeing the
     /// owned copy. No-op if absent. Removes the map entry once the set empties.
     pub fn removeEntityExtension(self: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8) void {
@@ -995,6 +1032,156 @@ pub const World = struct {
         });
     }
 
+    /// R6 (M1.1.1-HF3) — add SEVERAL components to `entity` in a SINGLE archetype
+    /// migration. Either the whole set lands (the entity moves once to the target
+    /// archetype with every new column written) or nothing changes: the only
+    /// fallible steps — target-archetype creation, `entity_locations` reservation,
+    /// and the destination slot allocation — all run BEFORE the first observable
+    /// mutation (the source `removeSwap` + location update), and the value writes
+    /// are infallible `memcpy`. This replaces N sequential `addComponentDynamic`
+    /// calls, whose mid-loop failure left the entity partially extended — the
+    /// extension-activation atomicity defect.
+    ///
+    /// `cids[i]` pairs with `values[i]` (`values[i].len == componentSize(cids[i])`).
+    /// Every `cids[i]` MUST be absent from `entity`'s current archetype and the ids
+    /// MUST be distinct (asserted; the caller does the conflict check). A `cids`
+    /// length of 0 is a no-op.
+    pub fn addComponentsDynamic(
+        self: *World,
+        gpa: std.mem.Allocator,
+        entity: EntityId,
+        cids: []const ComponentId,
+        values: []const []const u8,
+    ) !void {
+        std.debug.assert(cids.len == values.len);
+        if (cids.len == 0) return;
+        try self.identity.validate(entity);
+        const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
+        {
+            const src_arch = self.archetypes.items[src_loc.archetype_idx];
+            for (cids) |c| std.debug.assert(!src_arch.hasComponent(c));
+        }
+
+        // Target archetype = source components ∪ `cids`, sorted. Built once — the
+        // per-transition cache is single-component-keyed, so the grouped path
+        // resolves the target directly via `getOrCreateArchetype` (dedup by set).
+        const src_len = self.archetypes.items[src_loc.archetype_idx].component_ids.len;
+        const target_ids = try gpa.alloc(ComponentId, src_len + cids.len);
+        defer gpa.free(target_ids);
+        @memcpy(target_ids[0..src_len], self.archetypes.items[src_loc.archetype_idx].component_ids);
+        @memcpy(target_ids[src_len..], cids);
+        archetype_mod.sortComponentIds(target_ids);
+
+        const dst_arch = try self.getOrCreateArchetype(gpa, target_ids);
+        // `getOrCreateArchetype` may have grown `self.archetypes` — re-fetch the
+        // source archetype pointer through the (possibly-moved) list.
+        const src_arch = self.archetypes.items[src_loc.archetype_idx];
+
+        try self.entity_locations.ensureUnusedCapacity(gpa, 1);
+        const dst_r = try dst_arch.allocateSlot(gpa, self.current_tick);
+        // ── from here down: infallible (reserve-then-mutate boundary) ──
+        const dst_chunk = dst_arch.chunks.items[dst_r.chunk_idx];
+        const src_chunk = src_arch.chunks.items[src_loc.chunk_idx];
+
+        for (dst_arch.component_ids, 0..) |dst_cid, i| {
+            const dst = dst_arch.componentSlot(dst_chunk, i, dst_r.slot);
+            var new_k: ?usize = null;
+            for (cids, 0..) |c, k| {
+                if (c == dst_cid) {
+                    new_k = k;
+                    break;
+                }
+            }
+            if (new_k) |k| {
+                @memcpy(dst, values[k]); // a newly-added component: caller's bytes
+            } else {
+                const src_i = src_arch.componentIndex(dst_cid).?;
+                const src = src_arch.componentSlot(src_chunk, src_i, src_loc.slot);
+                @memcpy(dst, src);
+                dst_chunk.addedTickColumn(&dst_arch.layout, i)[dst_r.slot] = src_arch.addedTick(src_chunk, src_i, src_loc.slot);
+                dst_chunk.changedTickColumn(&dst_arch.layout, i)[dst_r.slot] = src_arch.changedTick(src_chunk, src_i, src_loc.slot);
+            }
+        }
+        dst_arch.entityIds(dst_chunk)[dst_r.slot] = entity;
+
+        if (src_arch.removeSwap(src_loc.chunk_idx, src_loc.slot)) |swapped_id| {
+            self.entity_locations.getPtr(swapped_id).?.* = src_loc;
+        }
+        self.entity_locations.putAssumeCapacity(entity, .{
+            .archetype_idx = dst_arch.archetype_id,
+            .chunk_idx = dst_r.chunk_idx,
+            .slot = dst_r.slot,
+        });
+    }
+
+    /// R6 (M1.1.1-HF3) — remove SEVERAL components from `entity` in a SINGLE
+    /// migration, atomic under OOM by the same reserve-then-mutate structure as
+    /// `addComponentsDynamic`. Every `cids[i]` MUST be present and distinct
+    /// (asserted; the caller filters to present ids). A `cids` length of 0 is a
+    /// no-op. The mirror of the grouped add for extension deactivation.
+    pub fn removeComponentsDynamic(
+        self: *World,
+        gpa: std.mem.Allocator,
+        entity: EntityId,
+        cids: []const ComponentId,
+    ) !void {
+        if (cids.len == 0) return;
+        try self.identity.validate(entity);
+        const src_loc = self.entity_locations.get(entity) orelse return error.StaleEntityHandle;
+        const src_len = self.archetypes.items[src_loc.archetype_idx].component_ids.len;
+        {
+            const src_arch = self.archetypes.items[src_loc.archetype_idx];
+            for (cids) |c| std.debug.assert(src_arch.hasComponent(c));
+        }
+        std.debug.assert(src_len >= cids.len);
+
+        // Target archetype = source components \ `cids`.
+        const target_ids = try gpa.alloc(ComponentId, src_len - cids.len);
+        defer gpa.free(target_ids);
+        var di: usize = 0;
+        for (self.archetypes.items[src_loc.archetype_idx].component_ids) |cid| {
+            var drop = false;
+            for (cids) |c| {
+                if (c == cid) {
+                    drop = true;
+                    break;
+                }
+            }
+            if (drop) continue;
+            target_ids[di] = cid;
+            di += 1;
+        }
+        std.debug.assert(di == target_ids.len);
+
+        const dst_arch = try self.getOrCreateArchetype(gpa, target_ids);
+        const src_arch = self.archetypes.items[src_loc.archetype_idx];
+
+        try self.entity_locations.ensureUnusedCapacity(gpa, 1);
+        const dst_r = try dst_arch.allocateSlot(gpa, self.current_tick);
+        // ── from here down: infallible ──
+        const dst_chunk = dst_arch.chunks.items[dst_r.chunk_idx];
+        const src_chunk = src_arch.chunks.items[src_loc.chunk_idx];
+
+        for (dst_arch.component_ids, 0..) |dst_cid, i| {
+            const src_i = src_arch.componentIndex(dst_cid).?;
+            const dst = dst_arch.componentSlot(dst_chunk, i, dst_r.slot);
+            const src = src_arch.componentSlot(src_chunk, src_i, src_loc.slot);
+            @memcpy(dst, src);
+            dst_chunk.addedTickColumn(&dst_arch.layout, i)[dst_r.slot] = src_arch.addedTick(src_chunk, src_i, src_loc.slot);
+            dst_chunk.changedTickColumn(&dst_arch.layout, i)[dst_r.slot] = src_arch.changedTick(src_chunk, src_i, src_loc.slot);
+        }
+        dst_arch.entityIds(dst_chunk)[dst_r.slot] = entity;
+
+        if (src_arch.removeSwap(src_loc.chunk_idx, src_loc.slot)) |swapped_id| {
+            self.entity_locations.getPtr(swapped_id).?.* = src_loc;
+        }
+        self.entity_locations.putAssumeCapacity(entity, .{
+            .archetype_idx = dst_arch.archetype_id,
+            .chunk_idx = dst_r.chunk_idx,
+            .slot = dst_r.slot,
+        });
+    }
+
     /// M0.8 E3 — apply a single tag-bit mutation (`etch-grammar.md` §4.4): the
     /// deferred-structural-change primitive shared by the Etch interpreter's
     /// tag queue and the codegen command buffer's `set_tag`/`clear_tag`.
@@ -1510,4 +1697,108 @@ test "releaseResourcePayloads is idempotent and frees a string block once (M1.1.
     // Leak detection (std.testing.allocator, via the deferred `world.deinit`
     // whose own `releaseResourcePayloads` call is a third no-op) proves the
     // block was reclaimed exactly once.
+}
+
+test "addComponentsDynamic migrates once and is atomic under OOM" {
+    const backing = std.testing.allocator;
+    const va = [_]u8{ 0xAA, 0, 0, 0 };
+    const vb = [_]u8{ 0xBB, 0, 0, 0 };
+    const vc = [_]u8{ 0xCC, 0, 0, 0 };
+    const vd = [_]u8{ 0xDD, 0, 0, 0 };
+    const desc = struct {
+        fn d(name: []const u8) ComponentDesc {
+            return .{ .name = name, .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} };
+        }
+    }.d;
+
+    // Success path: grouped add of B,C,D onto an entity that has A yields one
+    // archetype move with all four values readable.
+    {
+        var world = World.init();
+        defer world.deinit(backing);
+        const a = try world.registerComponentRaw(backing, desc("GA"));
+        const b = try world.registerComponentRaw(backing, desc("GB"));
+        const c = try world.registerComponentRaw(backing, desc("GC"));
+        const d = try world.registerComponentRaw(backing, desc("GD"));
+        const e = try world.spawnDynamicWithValues(backing, &.{a}, &.{&va});
+        try world.addComponentsDynamic(backing, e, &.{ b, c, d }, &.{ &vb, &vc, &vd });
+        try std.testing.expectEqualSlices(u8, &va, world.componentBytes(e, a).?);
+        try std.testing.expectEqualSlices(u8, &vb, world.componentBytes(e, b).?);
+        try std.testing.expectEqualSlices(u8, &vc, world.componentBytes(e, c).?);
+        try std.testing.expectEqualSlices(u8, &vd, world.componentBytes(e, d).?);
+    }
+
+    // Atomic under OOM: at every injected failure point the grouped add either
+    // fully lands or leaves the entity in its source archetype with only A.
+    var fail_index: usize = 0;
+    while (fail_index < 40) : (fail_index += 1) {
+        var world = World.init();
+        defer world.deinit(backing);
+        const a = try world.registerComponentRaw(backing, desc("GA"));
+        const b = try world.registerComponentRaw(backing, desc("GB"));
+        const c = try world.registerComponentRaw(backing, desc("GC"));
+        const d = try world.registerComponentRaw(backing, desc("GD"));
+        const e = try world.spawnDynamicWithValues(backing, &.{a}, &.{&va});
+        var fa = std.testing.FailingAllocator.init(backing, .{ .fail_index = fail_index });
+        if (world.addComponentsDynamic(fa.allocator(), e, &.{ b, c, d }, &.{ &vb, &vc, &vd })) |_| {
+            try std.testing.expectEqualSlices(u8, &vd, world.componentBytes(e, d).?);
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqualSlices(u8, &va, world.componentBytes(e, a).?);
+            try std.testing.expect(world.componentBytes(e, b) == null);
+            try std.testing.expect(world.componentBytes(e, c) == null);
+            try std.testing.expect(world.componentBytes(e, d) == null);
+        }
+    }
+}
+
+test "removeComponentsDynamic is atomic under OOM" {
+    const backing = std.testing.allocator;
+    const va = [_]u8{ 0xAA, 0, 0, 0 };
+    const vb = [_]u8{ 0xBB, 0, 0, 0 };
+    const vc = [_]u8{ 0xCC, 0, 0, 0 };
+    const vd = [_]u8{ 0xDD, 0, 0, 0 };
+    const desc = struct {
+        fn d(name: []const u8) ComponentDesc {
+            return .{ .name = name, .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} };
+        }
+    }.d;
+
+    // Success path: grouped remove of B,C,D leaves only A.
+    {
+        var world = World.init();
+        defer world.deinit(backing);
+        const a = try world.registerComponentRaw(backing, desc("RA"));
+        const b = try world.registerComponentRaw(backing, desc("RB"));
+        const c = try world.registerComponentRaw(backing, desc("RC"));
+        const d = try world.registerComponentRaw(backing, desc("RD"));
+        const e = try world.spawnDynamicWithValues(backing, &.{ a, b, c, d }, &.{ &va, &vb, &vc, &vd });
+        try world.removeComponentsDynamic(backing, e, &.{ b, c, d });
+        try std.testing.expectEqualSlices(u8, &va, world.componentBytes(e, a).?);
+        try std.testing.expect(world.componentBytes(e, b) == null);
+        try std.testing.expect(world.componentBytes(e, c) == null);
+        try std.testing.expect(world.componentBytes(e, d) == null);
+    }
+
+    // Atomic under OOM: on failure the entity keeps all four components.
+    var fail_index: usize = 0;
+    while (fail_index < 40) : (fail_index += 1) {
+        var world = World.init();
+        defer world.deinit(backing);
+        const a = try world.registerComponentRaw(backing, desc("RA"));
+        const b = try world.registerComponentRaw(backing, desc("RB"));
+        const c = try world.registerComponentRaw(backing, desc("RC"));
+        const d = try world.registerComponentRaw(backing, desc("RD"));
+        const e = try world.spawnDynamicWithValues(backing, &.{ a, b, c, d }, &.{ &va, &vb, &vc, &vd });
+        var fa = std.testing.FailingAllocator.init(backing, .{ .fail_index = fail_index });
+        if (world.removeComponentsDynamic(fa.allocator(), e, &.{ b, c, d })) |_| {
+            try std.testing.expect(world.componentBytes(e, b) == null);
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqualSlices(u8, &va, world.componentBytes(e, a).?);
+            try std.testing.expectEqualSlices(u8, &vb, world.componentBytes(e, b).?);
+            try std.testing.expectEqualSlices(u8, &vc, world.componentBytes(e, c).?);
+            try std.testing.expectEqualSlices(u8, &vd, world.componentBytes(e, d).?);
+        }
+    }
 }
