@@ -29,6 +29,10 @@ pub const Error = error{
     DistanceTooFar,
     /// A Huffman code length exceeded 15 bits.
     OversizedCode,
+    /// The decompressed output would exceed the caller's `max_out` budget — a
+    /// decompression bomb, or a stream inconsistent with the expected size
+    /// (R3, M1.1.1-HF3). The output buffer never grows past `max_out`.
+    OutputLimitExceeded,
     /// Allocation failed.
     OutOfMemory,
 };
@@ -170,9 +174,20 @@ fn bitReverse(value: u16, len: u32) u16 {
     return r;
 }
 
+/// Append `byte` to `out`, enforcing the `max_out` output budget FIRST so the
+/// buffer never grows past it (R3, M1.1.1-HF3): a decompression bomb is stopped
+/// at the ceiling instead of exhausting memory. The single write choke point
+/// for every block type.
+fn appendByte(gpa: std.mem.Allocator, out: *std.ArrayList(u8), byte: u8, max_out: usize) Error!void {
+    if (out.items.len >= max_out) return error.OutputLimitExceeded;
+    try out.append(gpa, byte);
+}
+
 /// Inflate a raw DEFLATE (RFC 1951) stream into a freshly allocated,
-/// caller-owned byte slice.
-pub fn inflate(gpa: std.mem.Allocator, src: []const u8) Error![]u8 {
+/// caller-owned byte slice. `max_out` bounds the decompressed size: production
+/// beyond it is `error.OutputLimitExceeded` and the buffer never exceeds it (the
+/// caller — the PNG codec — computes the exact expected size from IHDR).
+pub fn inflate(gpa: std.mem.Allocator, src: []const u8, max_out: usize) Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
 
@@ -181,9 +196,9 @@ pub fn inflate(gpa: std.mem.Allocator, src: []const u8) Error![]u8 {
         const bfinal = try br.take(1);
         const btype = try br.take(2);
         switch (btype) {
-            0 => try inflateStored(&br, &out, gpa),
-            1 => try inflateFixed(gpa, &br, &out),
-            2 => try inflateDynamic(gpa, &br, &out),
+            0 => try inflateStored(&br, &out, gpa, max_out),
+            1 => try inflateFixed(gpa, &br, &out, max_out),
+            2 => try inflateDynamic(gpa, &br, &out, max_out),
             else => return error.BadBlockType,
         }
         if (bfinal == 1) break;
@@ -191,7 +206,7 @@ pub fn inflate(gpa: std.mem.Allocator, src: []const u8) Error![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-fn inflateStored(br: *BitReader, out: *std.ArrayList(u8), gpa: std.mem.Allocator) Error!void {
+fn inflateStored(br: *BitReader, out: *std.ArrayList(u8), gpa: std.mem.Allocator, max_out: usize) Error!void {
     br.alignToByte();
     const len: u16 = @intCast(try br.take(16));
     const nlen: u16 = @intCast(try br.take(16));
@@ -199,11 +214,11 @@ fn inflateStored(br: *BitReader, out: *std.ArrayList(u8), gpa: std.mem.Allocator
     var i: u16 = 0;
     while (i < len) : (i += 1) {
         const byte: u8 = @intCast(try br.take(8));
-        try out.append(gpa, byte);
+        try appendByte(gpa, out, byte, max_out);
     }
 }
 
-fn inflateFixed(gpa: std.mem.Allocator, br: *BitReader, out: *std.ArrayList(u8)) Error!void {
+fn inflateFixed(gpa: std.mem.Allocator, br: *BitReader, out: *std.ArrayList(u8), max_out: usize) Error!void {
     // RFC 1951 §3.2.6 — fixed code lengths.
     var litlen_lengths = [_]u8{0} ** 288;
     for (0..288) |i| {
@@ -215,10 +230,10 @@ fn inflateFixed(gpa: std.mem.Allocator, br: *BitReader, out: *std.ArrayList(u8))
     defer litlen.deinit(gpa);
     var dist = try HuffmanTable.build(gpa, &dist_lengths);
     defer dist.deinit(gpa);
-    try decodeBlock(gpa, br, out, &litlen, &dist);
+    try decodeBlock(gpa, br, out, &litlen, &dist, max_out);
 }
 
-fn inflateDynamic(gpa: std.mem.Allocator, br: *BitReader, out: *std.ArrayList(u8)) Error!void {
+fn inflateDynamic(gpa: std.mem.Allocator, br: *BitReader, out: *std.ArrayList(u8), max_out: usize) Error!void {
     const hlit = try br.take(5) + 257; // # literal/length codes (257..286)
     const hdist = try br.take(5) + 1; // # distance codes (1..32)
     const hclen = try br.take(4) + 4; // # code-length codes (4..19)
@@ -273,7 +288,7 @@ fn inflateDynamic(gpa: std.mem.Allocator, br: *BitReader, out: *std.ArrayList(u8
     defer litlen.deinit(gpa);
     var dist = try HuffmanTable.build(gpa, lengths[hlit..total]);
     defer dist.deinit(gpa);
-    try decodeBlock(gpa, br, out, &litlen, &dist);
+    try decodeBlock(gpa, br, out, &litlen, &dist, max_out);
 }
 
 fn decodeBlock(
@@ -282,11 +297,12 @@ fn decodeBlock(
     out: *std.ArrayList(u8),
     litlen: *const HuffmanTable,
     dist: *const HuffmanTable,
+    max_out: usize,
 ) Error!void {
     while (true) {
         const sym = try litlen.decode(br);
         if (sym < 256) {
-            try out.append(gpa, @intCast(sym));
+            try appendByte(gpa, out, @intCast(sym), max_out);
         } else if (sym == 256) {
             return; // end of block
         } else if (sym <= 285) {
@@ -300,7 +316,7 @@ fn decodeBlock(
             var k: usize = 0;
             while (k < length) : (k += 1) {
                 const byte = out.items[start + k];
-                try out.append(gpa, byte);
+                try appendByte(gpa, out, byte, max_out);
             }
         } else {
             return error.BadSymbol;
@@ -312,7 +328,14 @@ test "inflate decodes a stored block" {
     const gpa = std.testing.allocator;
     // BFINAL=1, BTYPE=00, LEN=3, NLEN=~3, "abc".
     const stream = [_]u8{ 0x01, 0x03, 0x00, 0xfc, 0xff, 'a', 'b', 'c' };
-    const got = try inflate(gpa, &stream);
+    const got = try inflate(gpa, &stream, 3);
     defer gpa.free(got);
     try std.testing.expectEqualStrings("abc", got);
+}
+
+test "inflate stops at max_out with OutputLimitExceeded" {
+    const gpa = std.testing.allocator;
+    // Same stored "abc" stream, but a budget of 2 bytes — the third append trips.
+    const stream = [_]u8{ 0x01, 0x03, 0x00, 0xfc, 0xff, 'a', 'b', 'c' };
+    try std.testing.expectError(error.OutputLimitExceeded, inflate(gpa, &stream, 2));
 }

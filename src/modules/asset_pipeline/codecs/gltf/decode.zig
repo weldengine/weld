@@ -24,6 +24,14 @@ pub const Error = error{
     UnsupportedBuffer,
     /// An accessor/bufferView reached past its buffer.
     Truncated,
+    /// A table index (accessor / bufferView / buffer), a stride, an offset/size
+    /// computation, or an index value is out of range (R4, M1.1.1-HF3). Covers
+    /// every case that used to panic in safe builds or read out of bounds in
+    /// ReleaseFast: a bad `accessors[i]`/`bufferViews[i]`/`buffers[i]` index, a
+    /// stride below the element size, an accessor span past its bufferView, a
+    /// bufferView past its buffer, an arithmetic overflow, or a mesh index ≥
+    /// `vertex_count`.
+    MalformedGltf,
     /// Allocation failed.
     OutOfMemory,
 };
@@ -114,14 +122,14 @@ pub fn decode(gpa: std.mem.Allocator, src: []const u8) Error!Mesh {
     if (prim.attributes.TEXCOORD_0) |ui| uvs = try readFloats(gpa, doc, buffers, ui, 2);
 
     const indices = if (prim.indices) |ii|
-        try readIndices(gpa, doc, buffers, ii)
+        try readIndices(gpa, doc, buffers, ii, vertex_count)
     else
         try sequentialIndices(gpa, vertex_count);
     errdefer gpa.free(indices);
 
     var bmin: [3]f32 = .{ 0, 0, 0 };
     var bmax: [3]f32 = .{ 0, 0, 0 };
-    computeBounds(doc.accessors[pos_index], positions, &bmin, &bmax);
+    computeBounds(try accessorAt(doc, pos_index), positions, &bmin, &bmax);
 
     return .{
         .positions = positions,
@@ -132,6 +140,56 @@ pub fn decode(gpa: std.mem.Allocator, src: []const u8) Error!Mesh {
         .bounds_min = bmin,
         .bounds_max = bmax,
     };
+}
+
+/// Checked `a * b`; overflow → `error.MalformedGltf` (R4 — never a bare `*` on a
+/// document-controlled quantity, even one that cannot overflow on 64-bit).
+fn mulSize(a: usize, b: usize) Error!usize {
+    return std.math.mul(usize, a, b) catch error.MalformedGltf;
+}
+
+/// Checked `a + b`; overflow → `error.MalformedGltf`.
+fn addSize(a: usize, b: usize) Error!usize {
+    return std.math.add(usize, a, b) catch error.MalformedGltf;
+}
+
+/// Bounds-checked `accessors[i]` (R4). Out of range → `error.MalformedGltf`
+/// instead of a safe-build panic / ReleaseFast out-of-bounds read.
+fn accessorAt(doc: Gltf, i: usize) Error!Gltf.Accessor {
+    if (i >= doc.accessors.len) return error.MalformedGltf;
+    return doc.accessors[i];
+}
+
+/// Bounds-checked `bufferViews[i]` (R4).
+fn viewAt(doc: Gltf, i: usize) Error!Gltf.BufferView {
+    if (i >= doc.bufferViews.len) return error.MalformedGltf;
+    return doc.bufferViews[i];
+}
+
+/// Bounds-checked `buffers[i]` (R4). `buffers` is the decoded-payload array
+/// (length == `doc.buffers.len`).
+fn bufferAt(buffers: []const []u8, i: usize) Error![]const u8 {
+    if (i >= buffers.len) return error.MalformedGltf;
+    return buffers[i];
+}
+
+/// A validated accessor's source buffer + byte base + element stride.
+const ResolvedAccessor = struct { buf: []const u8, base: usize, stride: usize };
+
+/// Resolve + semantically validate an accessor against its bufferView and buffer
+/// (R4): checked table indices, `stride ≥ elem`, `byteOffset + count × stride ≤
+/// view.byteLength`, and the view span within its buffer. Every read from the
+/// returned `(buf, base, stride)` is then in-bounds, AND the caller's output
+/// allocation is bounded by the input (`count × stride ≤ view.byteLength ≤
+/// buf.len`) — no separate budget needed. All arithmetic checked.
+fn resolveAccessor(doc: Gltf, buffers: []const []u8, acc: Gltf.Accessor, elem: usize) Error!ResolvedAccessor {
+    const view = try viewAt(doc, acc.bufferView);
+    const buf = try bufferAt(buffers, view.buffer);
+    if (try addSize(view.byteOffset, view.byteLength) > buf.len) return error.MalformedGltf;
+    const stride = view.byteStride orelse elem;
+    if (stride < elem) return error.MalformedGltf;
+    if (try addSize(acc.byteOffset, try mulSize(acc.count, stride)) > view.byteLength) return error.MalformedGltf;
+    return .{ .buf = buf, .base = try addSize(view.byteOffset, acc.byteOffset), .stride = stride };
 }
 
 fn decodeDataUri(gpa: std.mem.Allocator, uri: []const u8) Error![]u8 {
@@ -148,53 +206,52 @@ fn decodeDataUri(gpa: std.mem.Allocator, uri: []const u8) Error![]u8 {
 }
 
 fn readFloats(gpa: std.mem.Allocator, doc: Gltf, buffers: []const []u8, accessor_index: usize, comps: usize) Error![]f32 {
-    const acc = doc.accessors[accessor_index];
+    const acc = try accessorAt(doc, accessor_index);
     if (acc.componentType != component_f32) return error.UnsupportedComponentType;
-    const view = doc.bufferViews[acc.bufferView];
-    const buf = buffers[view.buffer];
-    const elem = comps * 4;
-    const stride = view.byteStride orelse elem;
-    const base = view.byteOffset + acc.byteOffset;
+    const elem = try mulSize(comps, 4);
+    const rv = try resolveAccessor(doc, buffers, acc, elem);
 
-    const out = try gpa.alloc(f32, acc.count * comps);
+    const out = try gpa.alloc(f32, try mulSize(acc.count, comps));
     errdefer gpa.free(out);
     var i: usize = 0;
     while (i < acc.count) : (i += 1) {
         var c: usize = 0;
         while (c < comps) : (c += 1) {
-            const off = base + i * stride + c * 4;
-            if (off + 4 > buf.len) return error.Truncated;
-            out[i * comps + c] = @bitCast(std.mem.readInt(u32, buf[off..][0..4], .little));
+            const off = try addSize(rv.base, try addSize(try mulSize(i, rv.stride), try mulSize(c, 4)));
+            if (try addSize(off, 4) > rv.buf.len) return error.Truncated;
+            out[i * comps + c] = @bitCast(std.mem.readInt(u32, rv.buf[off..][0..4], .little));
         }
     }
     return out;
 }
 
-fn readIndices(gpa: std.mem.Allocator, doc: Gltf, buffers: []const []u8, accessor_index: usize) Error![]u32 {
-    const acc = doc.accessors[accessor_index];
+/// Read the index accessor. Every decoded index must be `< vertex_count` (R4) —
+/// an out-of-range index would otherwise dangle into unrelated vertices at
+/// draw/build time.
+fn readIndices(gpa: std.mem.Allocator, doc: Gltf, buffers: []const []u8, accessor_index: usize, vertex_count: u32) Error![]u32 {
+    const acc = try accessorAt(doc, accessor_index);
     const csize: usize = switch (acc.componentType) {
         5121 => 1, // u8
         5123 => 2, // u16
         5125 => 4, // u32
         else => return error.UnsupportedComponentType,
     };
-    const view = doc.bufferViews[acc.bufferView];
-    const buf = buffers[view.buffer];
-    const stride = view.byteStride orelse csize;
-    const base = view.byteOffset + acc.byteOffset;
+    const rv = try resolveAccessor(doc, buffers, acc, csize);
 
     const out = try gpa.alloc(u32, acc.count);
     errdefer gpa.free(out);
     var i: usize = 0;
     while (i < acc.count) : (i += 1) {
-        const off = base + i * stride;
-        if (off + csize > buf.len) return error.Truncated;
-        out[i] = switch (csize) {
-            1 => buf[off],
-            2 => std.mem.readInt(u16, buf[off..][0..2], .little),
-            4 => std.mem.readInt(u32, buf[off..][0..4], .little),
+        const off = try addSize(rv.base, try mulSize(i, rv.stride));
+        if (try addSize(off, csize) > rv.buf.len) return error.Truncated;
+        const idx: u32 = switch (csize) {
+            1 => rv.buf[off],
+            2 => std.mem.readInt(u16, rv.buf[off..][0..2], .little),
+            4 => std.mem.readInt(u32, rv.buf[off..][0..4], .little),
             else => unreachable,
         };
+        if (idx >= vertex_count) return error.MalformedGltf;
+        out[i] = idx;
     }
     return out;
 }
@@ -248,6 +305,40 @@ test "decode static cube glTF extracts positions, normals, uvs, indices" {
 test "decode rejects non-glTF json" {
     const gpa = std.testing.allocator;
     try std.testing.expectError(error.NoMesh, decode(gpa, "{\"buffers\":[],\"bufferViews\":[],\"accessors\":[],\"meshes\":[]}"));
+}
+
+test "out-of-range accessor, view and buffer indices error, never panic" {
+    const gpa = std.testing.allocator;
+    // Each doc parses and has a mesh/primitive/POSITION + a valid 12-byte buffer,
+    // so decoding reaches the accessor/view/buffer resolution — where the bad
+    // index must surface as MalformedGltf (not a safe-build panic / ReleaseFast OOB).
+    const cases = [_][]const u8{
+        // POSITION accessor index out of range (accessors has 1 entry).
+        \\{"buffers":[{"byteLength":12,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAA"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":12}],"accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"VEC3"}],"meshes":[{"primitives":[{"attributes":{"POSITION":9}}]}]}
+        ,
+        // accessor.bufferView index out of range (bufferViews has 1 entry).
+        \\{"buffers":[{"byteLength":12,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAA"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":12}],"accessors":[{"bufferView":9,"componentType":5126,"count":1,"type":"VEC3"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}]}
+        ,
+        // bufferView.buffer index out of range (buffers has 1 entry).
+        \\{"buffers":[{"byteLength":12,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAA"}],"bufferViews":[{"buffer":9,"byteOffset":0,"byteLength":12}],"accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"VEC3"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}]}
+        ,
+        // accessor span (count × stride) exceeds the bufferView's byteLength.
+        \\{"buffers":[{"byteLength":12,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAA"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":12}],"accessors":[{"bufferView":0,"componentType":5126,"count":1000000,"type":"VEC3"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}]}
+        ,
+    };
+    for (cases) |src| {
+        try std.testing.expectError(error.MalformedGltf, decode(gpa, src));
+    }
+}
+
+test "indices >= vertex_count are rejected" {
+    const gpa = std.testing.allocator;
+    // 1 vertex (POSITION count 1) + an index buffer holding a single u16 == 5.
+    // 5 >= vertex_count(1) → MalformedGltf. Buffer = 12 zero bytes + {0x05,0x00}.
+    const src =
+        \\{"buffers":[{"byteLength":14,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAABQA="}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":12},{"buffer":0,"byteOffset":12,"byteLength":2}],"accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"VEC3"},{"bufferView":1,"componentType":5123,"count":1,"type":"SCALAR"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}]}
+    ;
+    try std.testing.expectError(error.MalformedGltf, decode(gpa, src));
 }
 
 const cube_gltf =
