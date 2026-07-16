@@ -77,6 +77,13 @@ pub const Error = error{
     ListenFailed,
     NameTooLong,
     PermissionDenied,
+    /// R2 (M1.1.1-HF3): the post-`bind` `chmod(path, 0600)` failed — the socket
+    /// could not be locked to owner-only, so `listen` refuses to start it.
+    SocketPermissionFailed,
+    /// R2 (M1.1.1-HF3): an accepted peer runs as a different UID than us; the
+    /// connection is closed and rejected (the authoritative local-IPC boundary,
+    /// `engine-ipc.md §8.2`).
+    PeerCredentialMismatch,
     SocketCreationFailed,
     SystemResources,
     /// Windows: `sendWithHandles` / `recvWithHandles` are scoped to
