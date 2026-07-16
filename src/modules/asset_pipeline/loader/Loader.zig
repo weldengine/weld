@@ -142,6 +142,18 @@ pub fn finish(self: *Loader, gpa: std.mem.Allocator, raw: Raw) FinishError!Asset
         gpa.free(raw.bin);
         return error.UnknownAssetType;
     };
+    // C3 (M1.1.1-HF2): reserve the payload-map slot BEFORE allocating the
+    // registry handle, so the post-alloc insert is infallible. Reserve-then-
+    // mutate — on the reservation's OOM, free the buffer and return with NO
+    // handle allocated, so there is no undischargeable slot. The old order
+    // allocated the handle first, then a fallible `payloads.put`; its OOM path
+    // tried to unwind via `registry.unload`, but `unload`→`freeSlot` itself
+    // allocates and can OOM, and the `catch {}` swallowed it — stranding a live
+    // handle with no payload and an already-freed buffer.
+    self.payloads.ensureUnusedCapacity(gpa, 1) catch |err| {
+        gpa.free(raw.bin);
+        return err;
+    };
     const handle = self.registry.allocWithUuid(gpa, asset_type, 0) catch |err| switch (err) {
         error.OutOfMemory => {
             gpa.free(raw.bin);
@@ -150,11 +162,9 @@ pub fn finish(self: *Loader, gpa: std.mem.Allocator, raw: Raw) FinishError!Asset
         // `alloc` reserves a fresh slot; it never validates an existing handle.
         error.StaleHandle => unreachable,
     };
-    self.payloads.put(gpa, handle.index, .{ .header = raw.header, .bin = raw.bin }) catch |err| {
-        gpa.free(raw.bin);
-        self.registry.unload(gpa, handle) catch {};
-        return err;
-    };
+    // Infallible — capacity reserved above. A fresh handle index is unmapped
+    // (unload/reload remove the payload entry), so this inserts, not overwrites.
+    self.payloads.putAssumeCapacity(handle.index, .{ .header = raw.header, .bin = raw.bin });
     return handle;
 }
 
@@ -359,4 +369,43 @@ test "a malformed .bin loads as error.MalformedAsset" {
         try std.testing.expectEqualSlices(u8, payload, loader.get(handle).?);
         try loader.release(gpa, handle);
     }
+}
+
+test "finish under payload-reservation OOM allocates no handle and frees the buffer (M1.1.1-HF2 C3)" {
+    const gpa = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var loader = Loader.init(tmp.dir);
+    defer loader.deinit(gpa);
+
+    // A completed read: a valid header (known asset_type) + an owned buffer.
+    // `finish` stores `raw.header` and takes ownership of `raw.bin`; it does not
+    // re-parse the buffer, so its content is irrelevant here.
+    const bin = try gpa.alloc(u8, 8);
+    @memset(bin, 0);
+    const raw: Raw = .{
+        .header = RuntimeHeader.init(.{
+            .asset_type = .texture,
+            .metadata_offset = format.header_size,
+            .metadata_size = 0,
+            .data_offset = format.header_size,
+            .data_size = 0,
+            .hash = 0,
+        }),
+        .bin = bin,
+    };
+
+    // Fail the FIRST allocation `finish` makes — the payload-map reservation,
+    // which now precedes the registry handle allocation (C3). The buffer must be
+    // freed and NO handle allocated. Under the pre-fix code the handle was
+    // allocated first, then a `payloads.put` OOM tried to unwind via `unload`
+    // (whose `freeSlot` can itself OOM, swallowed by `catch {}`) — stranding a
+    // live handle with a freed buffer.
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, loader.finish(failing.allocator(), raw));
+
+    // No handle allocated; the buffer was freed (a stranded `bin` would trip the
+    // testing allocator's leak detection at scope end).
+    try std.testing.expectEqual(@as(usize, 0), loader.registry.liveCount());
 }
