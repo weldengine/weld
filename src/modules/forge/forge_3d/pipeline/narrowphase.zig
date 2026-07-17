@@ -1,11 +1,11 @@
 //! `forge_3d/pipeline/narrowphase.zig` — distance-based GJK convex detection.
 //!
-//! Delivered gate by gate across M1.1.2: **E1–E2 (present)** — E1 the support
+//! Delivered gate by gate across M1.1.2: **E1–E3 (present)** — E1 the support
 //! shapes + support functions + relative-pose precompute; E2 the Voronoi-region
-//! simplex solver (`Simplex(T)`). E3 adds the GJK descent loop and `GjkResult`;
-//! E4 the forge_3d integration (`Shape → SupportShape`, `gjkPair`). EPA,
-//! penetration depth, contact normal, and the fast paths are later
-//! sub-milestones (M1.1.3/4).
+//! simplex solver (`Simplex(T)`); E3 the bounded GJK descent loop (`gjk`) and
+//! its three-regime `GjkResult(T)`. E4 adds the forge_3d integration
+//! (`Shape → SupportShape`, `gjkPair`). EPA, penetration depth, contact normal,
+//! and the fast paths are later sub-milestones (M1.1.3/4).
 //!
 //! **Dependency discipline (brief Notes).** This file imports `foundation`
 //! (math) ONLY — never `weld_forge`, never `body*.zig`, never `config.zig`,
@@ -385,4 +385,192 @@ pub fn Simplex(comptime T: type) type {
             return .{ .closest = p, .count = 3, .indices = .{ ia, ib, ic, 0 }, .bary = .{ wa, wb, wc, 0 } };
         }
     };
+}
+
+/// Named iteration ceiling for the GJK descent (brief Notes, anticipates the
+/// M1.1.14 determinism freeze): the loop always terminates within this many
+/// support queries. 32 is generous — a well-formed pair converges in a handful;
+/// the bound only backstops adversarial near-parallel configurations.
+pub const max_gjk_iterations: u32 = 32;
+
+/// The three-regime GJK outcome (`engine-physics-forge.md` §1). `status`
+/// discriminates which fields are meaningful:
+///  - `.separated` / `.shallow`: `distance` (core distance) and `closest_a` /
+///    `closest_b` (the closest points on each core, **world** space) are valid;
+///    `simplex_count` is 0.
+///  - `.deep`: `simplex[0..simplex_count]` is the terminal origin-enclosing
+///    simplex — the EPA seed for M1.1.3; `distance` is 0 and the closest points
+///    are unspecified. No depth / normal is computed here (that is M1.1.3).
+pub fn GjkResult(comptime T: type) type {
+    return struct {
+        const Vec3T = math.Vec(3, T);
+
+        /// Which regime the pair is in (see the type doc). The plan's
+        /// touch/no-touch is `status != .separated`.
+        pub const Status = enum { separated, shallow, deep };
+        /// The simplex-vertex triplet stored for the `.deep` EPA seed.
+        pub const Vertex = Simplex(T).Vertex;
+
+        /// The regime.
+        status: Status,
+        /// Core distance (`.separated`/`.shallow`); 0 for `.deep`.
+        distance: T,
+        /// Closest point on A's core, world space (`.separated`/`.shallow`).
+        closest_a: Vec3T,
+        /// Closest point on B's core, world space (`.separated`/`.shallow`).
+        closest_b: Vec3T,
+        /// Terminal origin-enclosing simplex (`.deep`; entries `[0..simplex_count]`).
+        simplex: [4]Vertex,
+        /// Number of valid `simplex` entries (`.deep`: 1..4; otherwise 0).
+        simplex_count: u8,
+    };
+}
+
+/// Distance-based GJK between the **cores** of `shape_a` and `shape_b` at their
+/// world poses. Runs in the frame of A (B pre-transformed via `RelativePose`),
+/// descending on the Minkowski difference `support_A(d) − support_B(−d)` toward
+/// the origin with the E2 Voronoi solver. The search direction is never
+/// normalized — squared distances throughout, a single `sqrt` for the reported
+/// distance (brief Notes). See the file header for the cores + inflation model
+/// and the frozen frame-of-A choice.
+///
+/// Classification (brief Notes): if the terminal simplex encloses the origin the
+/// cores intersect → `.deep`; otherwise the converged core distance `dist` gives
+/// `.separated` iff `dist² > (r_a + r_b)²` strictly, else `.shallow` (exact
+/// inflated touch, `dist == r_a + r_b`, counts as shallow).
+pub fn gjk(
+    comptime T: type,
+    shape_a: SupportShape(T),
+    pos_a: math.Vec(3, T),
+    rot_a: math.Quat(T),
+    shape_b: SupportShape(T),
+    pos_b: math.Vec(3, T),
+    rot_b: math.Quat(T),
+) GjkResult(T) {
+    const Vec3T = math.Vec(3, T);
+    const VertexT = Simplex(T).Vertex;
+    const Res = GjkResult(T);
+
+    // Named relative progress tolerance (the squared-distance progress test) and
+    // the absolute origin-reached threshold. A-frame coordinates are shape-
+    // relative (small) — the reason the frame of A is frozen — so an absolute
+    // deep threshold is scale-appropriate.
+    const rel_tolerance: T = if (T == f32) 1.0e-5 else 1.0e-10;
+    const deep_eps_sq: T = if (T == f32) 1.0e-8 else 1.0e-12;
+
+    const relpose = RelativePose(T).init(pos_a, rot_a, pos_b, rot_b);
+
+    // Seed the search from the relative position; fixed fallback if degenerate
+    // (coincident origins) — a fixed fallback keeps the walk deterministic.
+    var dir = relpose.pos_rel;
+    if (dir.dot(dir) <= 0) dir = Vec3T.unit_x;
+
+    var verts: [4]VertexT = undefined;
+    verts[0] = minkowskiSupport(T, shape_a, relpose, shape_b, dir);
+    var count: usize = 1;
+    var closest = verts[0].w;
+    var bary: [4]T = .{ 1, 0, 0, 0 };
+
+    var iter: u32 = 0;
+    while (iter < max_gjk_iterations) : (iter += 1) {
+        // Origin on the current simplex ⇒ cores intersect ⇒ deep.
+        if (closest.dot(closest) <= deep_eps_sq) return deepResult(T, verts, count);
+
+        const w = minkowskiSupport(T, shape_a, relpose, shape_b, closest.neg());
+
+        // Progress test (relative, squared distance): `vv − v·w ≥ 0` for the
+        // closest point `v`; when it is negligible the support in direction −v
+        // no longer pushes past the plane through v, so v is the closest point.
+        const vv = closest.dot(closest);
+        if (vv - closest.dot(w.w) <= rel_tolerance * vv) break;
+
+        verts[count] = w;
+        count += 1;
+
+        const res = closestOnSimplex(T, verts[0..count]);
+        closest = res.closest;
+        // Reduce the simplex to the surviving feature, carrying the barycentrics.
+        var reduced: [4]VertexT = undefined;
+        for (0..res.count) |i| reduced[i] = verts[res.indices[i]];
+        for (0..res.count) |i| {
+            verts[i] = reduced[i];
+            bary[i] = res.bary[i];
+        }
+        count = res.count;
+
+        // Origin inside the tetrahedron (or reached on a lower feature) ⇒ deep.
+        if (res.count == 4 or closest.dot(closest) <= deep_eps_sq) return deepResult(T, verts, count);
+    }
+
+    // Converged (or hit the iteration bound): reconstruct the closest point on
+    // each core in A's frame from the barycentrics, then map to world. Distances
+    // are preserved by the rigid map, so `|closest_a − closest_b| == dist`.
+    var ca = Vec3T.zero;
+    var cb = Vec3T.zero;
+    for (0..count) |i| {
+        ca = ca.add(verts[i].support_a.scale(bary[i]));
+        cb = cb.add(verts[i].support_b.scale(bary[i]));
+    }
+    const dist_sq = closest.dot(closest);
+    const r_sum = shape_a.radius + shape_b.radius;
+    return .{
+        .status = if (dist_sq > r_sum * r_sum) Res.Status.separated else Res.Status.shallow,
+        .distance = @sqrt(dist_sq),
+        .closest_a = rot_a.rotateVec3(ca).add(pos_a),
+        .closest_b = rot_a.rotateVec3(cb).add(pos_a),
+        .simplex = emptySimplex(T),
+        .simplex_count = 0,
+    };
+}
+
+// --- GJK internal helpers ---
+
+/// Support point of the Minkowski difference of the two cores in direction
+/// `dir` (A's frame): `support_A(dir) − support_B(−dir)`, keeping both supports
+/// so the closest points on A and B stay reconstructible.
+fn minkowskiSupport(
+    comptime T: type,
+    shape_a: SupportShape(T),
+    relpose: RelativePose(T),
+    shape_b: SupportShape(T),
+    dir: math.Vec(3, T),
+) Simplex(T).Vertex {
+    const sa = shape_a.support(dir);
+    const sb = relpose.supportB(shape_b, dir.neg());
+    return .{ .w = sa.sub(sb), .support_a = sa, .support_b = sb };
+}
+
+/// Dispatch the E2 Voronoi solver by simplex size. GJK maintains a 1..4-vertex
+/// simplex by construction, so the `else` arm is exactly the tetrahedron.
+fn closestOnSimplex(comptime T: type, verts: []const Simplex(T).Vertex) Simplex(T).Result {
+    const S = Simplex(T);
+    std.debug.assert(verts.len >= 1 and verts.len <= 4);
+    return switch (verts.len) {
+        1 => S.closestOriginPoint(verts[0].w),
+        2 => S.closestOriginSegment(verts[0].w, verts[1].w),
+        3 => S.closestOriginTriangle(verts[0].w, verts[1].w, verts[2].w),
+        else => S.closestOriginTetra(verts[0].w, verts[1].w, verts[2].w, verts[3].w),
+    };
+}
+
+/// A `.deep` result carrying the terminal simplex `verts[0..count]` (EPA seed).
+/// The unused tail is zeroed so the returned value holds no `undefined`.
+fn deepResult(comptime T: type, verts: [4]Simplex(T).Vertex, count: usize) GjkResult(T) {
+    var s = emptySimplex(T);
+    for (0..count) |i| s[i] = verts[i];
+    return .{
+        .status = .deep,
+        .distance = 0,
+        .closest_a = math.Vec(3, T).zero,
+        .closest_b = math.Vec(3, T).zero,
+        .simplex = s,
+        .simplex_count = @intCast(count),
+    };
+}
+
+/// Four zeroed simplex vertices — the placeholder for the unused `simplex` field
+/// on non-deep results and the base for `deepResult`'s copy.
+fn emptySimplex(comptime T: type) [4]Simplex(T).Vertex {
+    const z = Simplex(T).Vertex{ .w = math.Vec(3, T).zero, .support_a = math.Vec(3, T).zero, .support_b = math.Vec(3, T).zero };
+    return .{ z, z, z, z };
 }
