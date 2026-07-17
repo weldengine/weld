@@ -14,6 +14,7 @@ const Quatr = config.Quatr;
 const SupportShape = narrowphase.SupportShape(Real);
 const RelativePose = narrowphase.RelativePose(Real);
 const Simplex = narrowphase.Simplex(Real);
+const GjkResult = narrowphase.GjkResult(Real);
 const testing = std.testing;
 
 /// Solver-precision Vec3 from literals.
@@ -266,4 +267,189 @@ test "simplex feature reconstructs closest from barycentrics" {
     // For this triangle the origin's closest is the AB midpoint (0,1,0).
     try testing.expect(r.closest.approxEql(vr(0, 1, 0), tol));
     try testing.expect(hasFeature(r, &.{ 0, 1 }));
+}
+
+// --- E3: GJK loop + result ---------------------------------------------------
+
+/// Distance tolerance for GJK results (looser than `tol`: convergence + f32 +
+/// an oblique global rotation accumulate error; f64 passes far tighter).
+const gjk_test_tol: Real = 1.0e-3;
+
+/// Build a support shape from a core + radius (test brevity).
+fn sphereShape(radius: Real) SupportShape {
+    return .{ .core = .point, .radius = radius };
+}
+fn capsuleShape(half_height: Real, radius: Real) SupportShape {
+    return .{ .core = .{ .segment = half_height }, .radius = radius };
+}
+fn boxShape(hx: Real, hy: Real, hz: Real) SupportShape {
+    return .{ .core = .{ .box = vr(hx, hy, hz) }, .radius = 0 };
+}
+
+/// Whether `world_pt` lies on `shape`'s core, given the shape's world pose. The
+/// point is mapped into the shape's local frame and tested per core kind.
+fn onCore(shape: SupportShape, pos: Vec3r, rot: Quatr, world_pt: Vec3r, eps: Real) bool {
+    const local = rot.conjugate().rotateVec3(world_pt.sub(pos)).toArray();
+    switch (shape.core) {
+        .point => return @abs(local[0]) <= eps and @abs(local[1]) <= eps and @abs(local[2]) <= eps,
+        .segment => |h| return @abs(local[0]) <= eps and @abs(local[2]) <= eps and
+            local[1] >= -h - eps and local[1] <= h + eps,
+        .box => |he_v| {
+            const he = he_v.toArray();
+            return @abs(local[0]) <= he[0] + eps and @abs(local[1]) <= he[1] + eps and @abs(local[2]) <= he[2] + eps;
+        },
+    }
+}
+
+/// Assert a separated pair: status, analytic distance, `|closest_a − closest_b|
+/// == distance`, and each closest point on its core.
+fn checkSeparated(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr, dist: Real) !void {
+    const r = narrowphase.gjk(Real, sa, pa, ra, sb, pb, rb);
+    try testing.expectEqual(GjkResult.Status.separated, r.status);
+    try testing.expectApproxEqAbs(dist, r.distance, gjk_test_tol);
+    try testing.expectApproxEqAbs(dist, r.closest_a.sub(r.closest_b).length(), gjk_test_tol);
+    try testing.expect(onCore(sa, pa, ra, r.closest_a, gjk_test_tol));
+    try testing.expect(onCore(sb, pb, rb, r.closest_b, gjk_test_tol));
+}
+
+/// Whether the terminal simplex encloses the origin — the origin-closest point
+/// on it (re-solved) is the origin.
+fn enclosesOrigin(simplex: [4]Simplex.Vertex, count: u8) bool {
+    const res = switch (count) {
+        1 => Simplex.closestOriginPoint(simplex[0].w),
+        2 => Simplex.closestOriginSegment(simplex[0].w, simplex[1].w),
+        3 => Simplex.closestOriginTriangle(simplex[0].w, simplex[1].w, simplex[2].w),
+        4 => Simplex.closestOriginTetra(simplex[0].w, simplex[1].w, simplex[2].w, simplex[3].w),
+        else => return false,
+    };
+    return res.closest.approxEql(Vec3r.zero, gjk_test_tol);
+}
+
+/// Assert a deep pair: status and the terminal simplex encloses the origin.
+fn checkDeep(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr) !void {
+    const r = narrowphase.gjk(Real, sa, pa, ra, sb, pb, rb);
+    try testing.expectEqual(GjkResult.Status.deep, r.status);
+    try testing.expect(r.simplex_count >= 1 and r.simplex_count <= 4);
+    try testing.expect(enclosesOrigin(r.simplex, r.simplex_count));
+}
+
+test "gjk separated pairs report analytic distance" {
+    // A single oblique global rigid transform, applied to both bodies, must
+    // leave the (rotation-invariant) core distance unchanged — the "non-trivial
+    // rotation" coverage without losing the analytic value.
+    const g_rot = Quatr.fromAxisAngle(vr(1, 2, 3).normalize(), 0.7);
+    const g_trans = vr(-4, 7, 2);
+
+    const Combo = struct { sa: SupportShape, pa: Vec3r, sb: SupportShape, pb: Vec3r, dist: Real };
+    const combos = [_]Combo{
+        // ss: two point cores 3 apart.
+        .{ .sa = sphereShape(0.5), .pa = vr(0, 0, 0), .sb = sphereShape(0.5), .pb = vr(3, 0, 0), .dist = 3 },
+        // sb: point vs box [4,6]³ ⇒ closest face at x=4.
+        .{ .sa = sphereShape(0.5), .pa = vr(0, 0, 0), .sb = boxShape(1, 1, 1), .pb = vr(5, 0, 0), .dist = 4 },
+        // sc: point vs Y-segment at x=5 ⇒ perpendicular foot (5,0,0).
+        .{ .sa = sphereShape(0.5), .pa = vr(0, 0, 0), .sb = capsuleShape(1, 0.3), .pb = vr(5, 0, 0), .dist = 5 },
+        // bb: box +X face x=1 vs box −X face x=4.
+        .{ .sa = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .sb = boxShape(1, 1, 1), .pb = vr(5, 0, 0), .dist = 3 },
+        // bc: box +X face x=1 vs Y-segment at x=5.
+        .{ .sa = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .sb = capsuleShape(1, 0.3), .pb = vr(5, 0, 0), .dist = 4 },
+        // cc: two parallel Y-segments at x=0 and x=5.
+        .{ .sa = capsuleShape(1, 0.3), .pa = vr(0, 0, 0), .sb = capsuleShape(1, 0.3), .pb = vr(5, 0, 0), .dist = 5 },
+    };
+
+    for (combos) |c| {
+        // Canonical (identity rotations).
+        try checkSeparated(c.sa, c.pa, Quatr.identity, c.sb, c.pb, Quatr.identity, c.dist);
+        // Same scene under the oblique global transform ⇒ identical distance.
+        try checkSeparated(
+            c.sa,
+            g_rot.rotateVec3(c.pa).add(g_trans),
+            g_rot,
+            c.sb,
+            g_rot.rotateVec3(c.pb).add(g_trans),
+            g_rot,
+            c.dist,
+        );
+    }
+}
+
+test "gjk shallow pairs are detected" {
+    // Cores disjoint (dist=3) but the inflated spheres overlap (r_sum=4).
+    {
+        const r = narrowphase.gjk(Real, sphereShape(2), vr(0, 0, 0), Quatr.identity, sphereShape(2), vr(3, 0, 0), Quatr.identity);
+        try testing.expectEqual(GjkResult.Status.shallow, r.status);
+        try testing.expectApproxEqAbs(@as(Real, 3), r.distance, gjk_test_tol);
+        try testing.expectApproxEqAbs(@as(Real, 3), r.closest_a.sub(r.closest_b).length(), gjk_test_tol);
+    }
+    // Exact-touch boundary: core distance == r_a + r_b (5) ⇒ shallow, not
+    // separated (touching counts).
+    {
+        const r = narrowphase.gjk(Real, sphereShape(2), vr(0, 0, 0), Quatr.identity, sphereShape(3), vr(5, 0, 0), Quatr.identity);
+        try testing.expectEqual(GjkResult.Status.shallow, r.status);
+        try testing.expectApproxEqAbs(@as(Real, 5), r.distance, gjk_test_tol);
+    }
+    // Point vs box, cores 3 apart, huge sphere radius (5) ⇒ shallow.
+    {
+        const r = narrowphase.gjk(Real, sphereShape(5), vr(0, 0, 0), Quatr.identity, boxShape(1, 1, 1), vr(4, 0, 0), Quatr.identity);
+        try testing.expectEqual(GjkResult.Status.shallow, r.status);
+        try testing.expectApproxEqAbs(@as(Real, 3), r.distance, gjk_test_tol);
+        try testing.expect(onCore(boxShape(1, 1, 1), vr(4, 0, 0), Quatr.identity, r.closest_b, gjk_test_tol));
+    }
+}
+
+test "gjk deep pairs enclose the origin" {
+    const rot_z90 = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
+
+    // ss: coincident point cores.
+    try checkDeep(sphereShape(0.5), vr(2, 3, 4), Quatr.identity, sphereShape(0.5), vr(2, 3, 4), Quatr.identity);
+    // sb: point core inside the box volume.
+    try checkDeep(sphereShape(0.5), vr(5, 0, 0), Quatr.identity, boxShape(1, 1, 1), vr(5, 0, 0), Quatr.identity);
+    // sc: point core on the capsule segment.
+    try checkDeep(sphereShape(0.5), vr(5, 0, 0), Quatr.identity, capsuleShape(1, 0.3), vr(5, 0, 0), Quatr.identity);
+    // bb: overlapping box volumes.
+    try checkDeep(boxShape(1, 1, 1), vr(0, 0, 0), Quatr.identity, boxShape(1, 1, 1), vr(1, 0, 0), Quatr.identity);
+    // bc: segment core passing through the box volume.
+    try checkDeep(boxShape(1, 1, 1), vr(0, 0, 0), Quatr.identity, capsuleShape(1, 0.3), vr(0.5, 0, 0), Quatr.identity);
+    // cc: two segment cores crossing at the origin (B rotated onto the X axis).
+    try checkDeep(capsuleShape(1, 0.3), vr(0, 0, 0), Quatr.identity, capsuleShape(1, 0.3), vr(0, 0, 0), rot_z90);
+
+    // Deep detection holds under an oblique global rotation (bb overlap).
+    const g_rot = Quatr.fromAxisAngle(vr(2, -1, 4).normalize(), 1.3);
+    const g_trans = vr(6, -3, 8);
+    try checkDeep(
+        boxShape(1, 1, 1),
+        g_rot.rotateVec3(vr(0, 0, 0)).add(g_trans),
+        g_rot,
+        boxShape(1, 1, 1),
+        g_rot.rotateVec3(vr(1, 0, 0)).add(g_trans),
+        g_rot,
+    );
+}
+
+test "gjk is deterministic and iteration-bounded" {
+    // Determinism: a fixed rotated separated pair, run twice ⇒ bit-identical.
+    const sa = boxShape(1, 1, 1);
+    const sb = capsuleShape(1, 0.3);
+    const ra = Quatr.fromAxisAngle(vr(1, 1, 0).normalize(), 0.5);
+    const rb = Quatr.fromAxisAngle(vr(0, 1, 1).normalize(), 1.1);
+    const r1 = narrowphase.gjk(Real, sa, vr(0, 0, 0), ra, sb, vr(5, 1, 2), rb);
+    const r2 = narrowphase.gjk(Real, sa, vr(0, 0, 0), ra, sb, vr(5, 1, 2), rb);
+    try testing.expectEqual(r1.status, r2.status);
+    try testing.expectEqual(r1.distance, r2.distance);
+    try testing.expect(r1.closest_a.eql(r2.closest_a));
+    try testing.expect(r1.closest_b.eql(r2.closest_b));
+
+    // Adversarial: exactly-parallel unit box faces (the pathological equidistant-
+    // support case) with a gap of 1 ⇒ converges to distance 1. A pure `iter < 32`
+    // loop cannot hang, so a sane result IS the termination proof.
+    const box = boxShape(1, 1, 1);
+    const adv = narrowphase.gjk(Real, box, vr(0, 0, 0), Quatr.identity, box, vr(3, 0, 0), Quatr.identity);
+    try testing.expectEqual(GjkResult.Status.separated, adv.status);
+    try testing.expectApproxEqAbs(@as(Real, 1), adv.distance, gjk_test_tol);
+    try testing.expect(finite3(adv.closest_a) and finite3(adv.closest_b));
+
+    // Near-parallel (tiny rotation on B): still terminates with a sane result.
+    const near = narrowphase.gjk(Real, box, vr(0, 0, 0), Quatr.identity, box, vr(3, 0, 0), Quatr.fromAxisAngle(Vec3r.unit_z, 0.02));
+    try testing.expectEqual(GjkResult.Status.separated, near.status);
+    try testing.expect(finite3(near.closest_a) and finite3(near.closest_b));
+    try testing.expect(near.distance > 0.5 and near.distance < 1.2);
 }
