@@ -31,30 +31,36 @@ const zlib_expected = "Weld zlib wrapper round-trip with ADLER32 trailer verific
 
 // -----------------------------------------------------------------------------
 
+// R3 (M1.1.1-HF3): `inflate` / `zlib.decompress` now take a `max_out` budget.
+// Positive vectors pass the exact expected length (also asserting the exact-size
+// path succeeds); negative vectors pass a generous cap they never reach (each
+// errors before any output byte is produced).
+const neg_cap: usize = 64;
+
 test "inflate fixed huffman" {
     const gpa = std.testing.allocator;
-    const got = try inflate(gpa, &fixed_compressed);
+    const got = try inflate(gpa, &fixed_compressed, fixed_expected.len);
     defer gpa.free(got);
     try std.testing.expectEqualSlices(u8, &fixed_expected, got);
 }
 
 test "inflate dynamic huffman" {
     const gpa = std.testing.allocator;
-    const got = try inflate(gpa, &dynamic_compressed);
+    const got = try inflate(gpa, &dynamic_compressed, dynamic_expected.len);
     defer gpa.free(got);
     try std.testing.expectEqualSlices(u8, dynamic_expected, got);
 }
 
 test "inflate stored block" {
     const gpa = std.testing.allocator;
-    const got = try inflate(gpa, &stored_compressed);
+    const got = try inflate(gpa, &stored_compressed, stored_expected.len);
     defer gpa.free(got);
     try std.testing.expectEqualSlices(u8, stored_expected, got);
 }
 
 test "zlib decompress verifies the adler32 trailer" {
     const gpa = std.testing.allocator;
-    const got = try zlib.decompress(gpa, &zlib_compressed);
+    const got = try zlib.decompress(gpa, &zlib_compressed, zlib_expected.len);
     defer gpa.free(got);
     try std.testing.expectEqualSlices(u8, zlib_expected, got);
 }
@@ -63,7 +69,7 @@ test "zlib decompress rejects a corrupted adler32 trailer" {
     const gpa = std.testing.allocator;
     var corrupt = zlib_compressed;
     corrupt[corrupt.len - 1] ^= 0xff; // flip the last trailer byte
-    try std.testing.expectError(error.BadChecksum, zlib.decompress(gpa, &corrupt));
+    try std.testing.expectError(error.BadChecksum, zlib.decompress(gpa, &corrupt, zlib_expected.len));
 }
 
 // --- Negative vectors: one per inflate guard (hand-built, LSB-first). -------
@@ -82,15 +88,15 @@ const v_bad_huffman_code = [_]u8{ 0x05, 0x00, 0x02, 0x20 };
 
 test "inflate rejects a stored block with bad LEN/NLEN" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.BadStoredLength, inflate(gpa, &v_bad_stored_length));
+    try std.testing.expectError(error.BadStoredLength, inflate(gpa, &v_bad_stored_length, neg_cap));
 }
 
 test "inflate rejects a back-reference distance past the output start" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.DistanceTooFar, inflate(gpa, &v_distance_too_far));
+    try std.testing.expectError(error.DistanceTooFar, inflate(gpa, &v_distance_too_far, neg_cap));
 }
 
 test "inflate rejects a bit pattern matching no Huffman code" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.BadHuffmanCode, inflate(gpa, &v_bad_huffman_code));
+    try std.testing.expectError(error.BadHuffmanCode, inflate(gpa, &v_bad_huffman_code, neg_cap));
 }

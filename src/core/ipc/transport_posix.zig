@@ -53,6 +53,13 @@ const sys = struct {
     extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
     extern "c" fn send(sockfd: c_int, buf: [*]const u8, len: usize, flags: c_int) isize;
     extern "c" fn setsockopt(sockfd: c_int, level: c_int, optname: c_int, optval: *const anyopaque, optlen: Socklen) c_int;
+    // R2 (M1.1.1-HF3): socket-permission + peer-credential surface.
+    extern "c" fn chmod(path: [*:0]const u8, mode: mode_t) c_int;
+    extern "c" fn getsockopt(sockfd: c_int, level: c_int, optname: c_int, optval: *anyopaque, optlen: *Socklen) c_int; // Linux SO_PEERCRED
+    extern "c" fn getpeereid(sockfd: c_int, euid: *u32, egid: *u32) c_int; // macOS/BSD
+    extern "c" fn getuid() u32;
+    extern "c" fn umask(mask: mode_t) mode_t; // used only by the 0600 test
+    extern "c" fn fstatat(dirfd: c_int, path: [*:0]const u8, buf: *anyopaque, flag: c_int) c_int; // 0600 test (macOS)
 };
 
 // -------------------------------------------------- constants ----------
@@ -66,6 +73,13 @@ const MSG_NOSIGNAL: c_int = if (is_linux) 0x4000 else 0;
 // Absent on Linux, where `send(MSG_NOSIGNAL)` carries the guarantee instead —
 // referenced only under `is_macos`, so it is unused (but harmless) on Linux.
 const SO_NOSIGPIPE: c_int = 0x1022;
+
+// R2 (M1.1.1-HF3): `mode_t` for `chmod`/`umask` (u32 on Linux, u16 on macOS/BSD).
+const mode_t = if (is_linux) u32 else u16;
+// Linux `SO_PEERCRED` (17) + its `struct ucred`. Unused on macOS (which uses
+// `getpeereid` instead), harmless to declare.
+const SO_PEERCRED: c_int = 17;
+const ucred = extern struct { pid: i32, uid: u32, gid: u32 };
 
 // `sockaddr_un` layout diverges between Linux glibc and BSD/macOS:
 //   - Linux: `sa_family_t sun_family` (u16) + `char sun_path[108]`.
@@ -149,6 +163,26 @@ fn setNoSigPipe(fd: c_int) void {
     }
 }
 
+/// R2 (M1.1.1-HF3): does the peer connected on `fd` run as our own UID? Linux
+/// reads `SO_PEERCRED`; macOS/BSD reads `getpeereid`. A failed query returns
+/// `false` (fail-closed — reject rather than trust an unverifiable peer). This is
+/// the authoritative local-IPC security boundary (`engine-ipc.md §8.2`); the
+/// `chmod 0600` on the socket file is the complementary conformance layer.
+fn peerUidMatches(fd: c_int) bool {
+    const our_uid = sys.getuid();
+    if (comptime is_linux) {
+        var cred: ucred = undefined;
+        var len: Socklen = @sizeOf(ucred);
+        if (sys.getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) return false;
+        return cred.uid == our_uid;
+    } else {
+        var euid: u32 = undefined;
+        var egid: u32 = undefined;
+        if (sys.getpeereid(fd, &euid, &egid) != 0) return false;
+        return euid == our_uid;
+    }
+}
+
 // -------------------------------------------------- public types ------
 
 /// Picked up by `transport.zig`'s comptime backend dispatch — must
@@ -207,6 +241,13 @@ pub const Backend = struct {
         if (sys.bind(fd, &addr, addr_len) != 0) return error.BindFailed;
         errdefer _ = sys.unlink(path_z.ptr);
 
+        // R2 (M1.1.1-HF3): force owner-only (0600) on the socket file
+        // IMMEDIATELY after bind and BEFORE listen, so its permissions never
+        // depend on the process umask (`engine-ipc.md §8.2`). Hard failure — a
+        // socket we cannot lock down must not begin accepting. The errdefers
+        // above unlink the file and close the fd on this path.
+        if (sys.chmod(path_z.ptr, 0o600) != 0) return error.SocketPermissionFailed;
+
         if (sys.listen(fd, 1) != 0) return error.ListenFailed;
 
         return Backend{
@@ -246,6 +287,14 @@ pub const Backend = struct {
     pub fn accept(self: *Backend) Error!Backend {
         const client_fd = sys.accept(self.fd, null, null);
         if (client_fd < 0) return error.ConnectionRefused;
+        // R2 (M1.1.1-HF3): the AUTHORITATIVE check — reject a peer running as a
+        // different UID (close the fd first). This also closes the bind→chmod
+        // TOCTOU window: a connection that sneaked in before `chmod` is still
+        // rejected here.
+        if (!peerUidMatches(client_fd)) {
+            _ = sys.close(client_fd);
+            return error.PeerCredentialMismatch;
+        }
         // C5: suppress SIGPIPE on the accepted data socket (see `setNoSigPipe`).
         setNoSigPipe(client_fd);
         return Backend{ .fd = client_fd };
@@ -424,6 +473,40 @@ pub const Backend = struct {
     }
 };
 
-// Runtime tests live in `tests/ipc/transport.zig` — one exe each
+// Most runtime tests live in `tests/ipc/transport.zig` — one exe each
 // to keep an eventual deadlock in one case from stalling the rest of
-// `zig build test`.
+// `zig build test`. The R2 permission test below is bind-only (no
+// accept/recv, so no deadlock risk) and is kept inline with the code it guards.
+
+/// Test helper: the raw `st_mode` of a path, read WITHOUT opening it (so it works
+/// on a socket file). Linux goes kernel-native via the `statx` syscall —
+/// `std.posix.Stat` / `std.c.Stat` are `void` on Linux and the libc `struct stat`
+/// layout is version-sensitive. macOS/BSD uses the libc `fstatat` + `std.c.Stat`.
+fn statMode(path: [*:0]const u8) u32 {
+    if (comptime is_linux) {
+        var stx: std.os.linux.Statx = undefined;
+        const rc = std.os.linux.statx(std.os.linux.AT.FDCWD, path, 0, std.os.linux.STATX.BASIC_STATS, &stx);
+        std.debug.assert(rc == 0);
+        return stx.mode;
+    } else {
+        var st: std.c.Stat = undefined;
+        std.debug.assert(sys.fstatat(std.c.AT.FDCWD, path, @ptrCast(&st), 0) == 0);
+        return st.mode;
+    }
+}
+
+test "listen enforces 0600 under umask 000" {
+    const path = "/tmp/weld-hf3-e4-perm-test.sock";
+    // `umask` is process-global. The Zig test runner runs a binary's tests
+    // sequentially, so this does not race other tests; the previous umask is
+    // restored unconditionally in a `defer`. Set 000 so a umask-derived mode
+    // would be world-accessible — the `chmod 0600` in `listen` must override it.
+    const prev = sys.umask(0o000);
+    defer _ = sys.umask(prev);
+
+    var sock = try Backend.listen(path);
+    defer sock.close();
+
+    // The socket file's permission bits must be exactly 0600, independent of umask.
+    try std.testing.expectEqual(@as(u32, 0o600), statMode(path) & 0o777);
+}

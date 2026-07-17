@@ -28,6 +28,7 @@ const std = @import("std");
 
 const format = @import("format.zig");
 const accessor_mod = @import("accessor.zig");
+const validate = @import("validate.zig");
 const registry_mod = @import("../ecs/registry.zig");
 const world_mod = @import("../ecs/world.zig");
 const observers_mod = @import("../ecs/observers.zig");
@@ -43,8 +44,9 @@ const EntityId = world_mod.EntityId;
 /// Errors from opening + integrity-checking a `.scene.bin` byte image.
 /// `format.ReadError` covers a truncated / wrong-magic / wrong-version file;
 /// `CorruptScene` is a content-hash mismatch (the bytes were altered after the
-/// cook recorded their `XxHash64`).
-pub const OpenError = format.ReadError || error{CorruptScene};
+/// cook recorded their `XxHash64`); `MalformedScene` is a structural
+/// inconsistency caught by `validate.structure` (`StructureError`).
+pub const OpenError = format.ReadError || error{CorruptScene} || StructureError;
 
 /// Errors from mapping on-disk schema identity to the runtime registry.
 /// `UnknownComponent`: a scene type the running program never registered
@@ -77,15 +79,26 @@ pub const ExtensionResolver = struct {
 
 /// Open a `.scene.bin` byte image: validate magic + version (via the accessor,
 /// read little-endian field-by-field — never a raw `@ptrCast` off an unaligned
-/// buffer), then verify the content hash. Returns a zero-copy `Accessor`
-/// borrowing `bytes` for its whole lifetime.
+/// buffer), verify the content hash, then run the standalone **structural
+/// validator** (`validate.structure`) before returning. The validator is the
+/// single gate that lets every subsequent `Accessor` getter trust the
+/// file-controlled offsets/counts it dereferences — no caller should touch an
+/// accessor built any other way on externally-supplied bytes. Returns a
+/// zero-copy `Accessor` borrowing `bytes` for its whole lifetime.
+///
+/// Order is load-bearing: header → hash → structure. `verifyHash` is no defense
+/// against a crafted image (the hash is recomputable), so `validate.structure`
+/// runs regardless of the hash and walks the raw bytes with checked arithmetic.
 ///
 /// Errors:
 ///   - `error.TooShort` / `error.BadMagic` / `error.BadVersion` — invalid header
 ///   - `error.CorruptScene` — content hash does not match the header's
+///   - `error.MalformedScene` — the structure is inconsistent (offsets, counts,
+///     or references a getter would trust)
 pub fn openVerified(bytes: []const u8) OpenError!Accessor {
     const acc = try Accessor.open(bytes);
     if (!acc.verifyHash()) return error.CorruptScene;
+    try validate.structure(bytes, acc.header);
     return acc;
 }
 
@@ -103,8 +116,10 @@ pub fn openVerified(bytes: []const u8) OpenError!Accessor {
 /// Errors:
 ///   - `error.UnknownComponent` — a schema name the world never registered
 ///   - `error.SchemaMismatch` — registered, but size/alignment diverge
+///   - `error.MalformedScene` — two schema entries resolve to the same
+///     runtime `ComponentId` (duplicate schema names on disk; R11(b), M1.1.1-HF3)
 ///   - `error.OutOfMemory`
-pub fn buildSchemaRemap(gpa: std.mem.Allocator, world: *const World, acc: Accessor) RemapError![]ComponentId {
+pub fn buildSchemaRemap(gpa: std.mem.Allocator, world: *const World, acc: Accessor) (RemapError || StructureError)![]ComponentId {
     const count = acc.schemaCount();
     const remap = try gpa.alloc(ComponentId, count);
     errdefer gpa.free(remap);
@@ -119,6 +134,15 @@ pub fn buildSchemaRemap(gpa: std.mem.Allocator, world: *const World, acc: Access
             return error.SchemaMismatch;
         }
         remap[i] = id;
+    }
+    // R11(b): two schema entries resolving to the same runtime `ComponentId` means
+    // duplicate schema names on disk — malformed (the cook emits exactly one entry
+    // per distinct id). The strictly-increasing file-local index check (validate
+    // block (e)) cannot see this, since it compares indices, not resolved ids.
+    for (remap, 0..) |a, ai| {
+        for (remap[ai + 1 ..]) |b| {
+            if (a == b) return error.MalformedScene;
+        }
     }
     return remap;
 }
@@ -164,6 +188,12 @@ pub const LoadResult = struct {
 /// Count of entries in the on-disk UUID table, derived from the header section
 /// offsets (`uuid_table` ends where `schema_table` begins; 16 B per UUID). Lets
 /// the loader bounds-check parent ordinals without a new accessor getter.
+///
+/// Relies on `validate.structure` (run in `openVerified` before any loader step
+/// reaches here): it proves check (a) `uuid_table_offset ≤ schema_table_offset`
+/// so the subtraction never underflows, and check (b) their difference is a
+/// multiple of 16 so the division is exact. Callers must have opened via
+/// `openVerified` — never on unvalidated bytes.
 fn uuidCount(acc: Accessor) u32 {
     return (acc.header.schema_table_offset - acc.header.uuid_table_offset) / 16;
 }
@@ -498,45 +528,88 @@ fn applyExtensions(world: *World, gpa: std.mem.Allocator, acc: Accessor, uuid_to
     }
 }
 
-/// Activate one extension on one entity (M1.0.6 E6) — the shared bytes-taking
-/// path reused by load (`applyExtensions`), the runtime `activate_extension`
-/// entry, AND the interpreter's deferred B1 flush: open the extension's
-/// `.prefab.bin`, add its single entity's components to `entity`, record the
-/// active extension, then fire the `on_attach` seam with the cooked hook text.
-/// The extension prefab is mono-entity (cooked as such); a component the entity
-/// already carries is a conflict (§30.5) — surfaced as
-/// `error.ExtensionComponentConflict` rather than the dynamic-add assert.
-pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
-    const ext = try openVerified(ext_bytes);
-
-    // Mono-entity: the extension's components live on its single entity.
-    var total: u32 = 0;
+/// The single archetype block of a mono-entity extension prefab (R12(c),
+/// M1.1.1-HF3): STRICT cardinality — `total == 0` → `error.EmptyExtension`,
+/// `total > 1` → `error.MultiEntityExtensionUnsupported`, else the one archetype
+/// whose `entity_count == 1`. The single source of the mono-entity contract,
+/// shared by `activateExtension` and `deactivateExtension`.
+fn extEntityArchetype(ext: Accessor) !Accessor.Archetype {
+    var found: ?Accessor.Archetype = null;
+    var total: u64 = 0; // u64 so the sum cannot wrap (entity_counts are u32)
     var ai: u32 = 0;
-    while (ai < ext.archetypeCount()) : (ai += 1) total += ext.archetype(ai).entity_count;
-    if (total > 1) return error.MultiEntityExtensionUnsupported;
-
-    ai = 0;
     while (ai < ext.archetypeCount()) : (ai += 1) {
-        const arch = ext.archetype(ai);
-        if (arch.entity_count == 0) continue;
-        var c: usize = 0;
-        while (c < arch.component_count) : (c += 1) {
-            const sch = ext.schema(arch.schemaIndex(c));
-            const cid = world.componentId(sch.name) orelse return error.UnknownComponent;
-            if (sch.size != world.registry.componentSize(cid)) return error.SchemaMismatch;
-            if (world.componentBytes(entity, cid) != null) return error.ExtensionComponentConflict;
-            try world.addComponentDynamic(gpa, entity, cid, arch.componentSlot(c, 0));
-        }
+        const a = ext.archetype(ai);
+        total += a.entity_count;
+        if (found == null and a.entity_count >= 1) found = a;
+    }
+    if (total == 0) return error.EmptyExtension;
+    if (total > 1) return error.MultiEntityExtensionUnsupported;
+    return found.?; // total == 1 ⇒ exactly one archetype has entity_count == 1
+}
+
+/// Activate one extension on one entity (M1.0.6 E6; **R6 atomicity rewrite,
+/// M1.1.1-HF3**) — the shared bytes-taking path reused by load
+/// (`applyExtensions`), the runtime `activate_extension` entry, and the
+/// interpreter's deferred B1 flush. Structured reserve-then-mutate so it is
+/// all-or-nothing under OOM:
+///   0. Reject re-activation of an already-active extension
+///      (`error.ExtensionAlreadyActive`, R12(d) — closes the hook-only
+///      re-activation gap); resolve the strict mono-entity archetype
+///      (`extEntityArchetype`: `total == 0`/`> 1` rejected).
+///   1. Prevalidate with ZERO mutation: resolve every `ComponentId`; size-check;
+///      conflict-check each against the entity.
+///   2. Reserve the extension-record capacity (fallible, no observable mutation).
+///   3. Grouped add — the SINGLE fallible component mutation, itself atomic
+///      (`world.addComponentsDynamic`): one archetype migration, not N.
+///   4. Record the extension (infallible) then fire `on_attach`.
+/// On any failure through step 3 the entity is left untouched (no partial
+/// extension — the defect this rewrite closes). The activation is committed
+/// BEFORE the hook; a hook error propagates but does not unwind it (same contract
+/// as load-time hooks, M1.1.1-HF1 / D2).
+///
+/// Conflict policy: a component the entity already carries is rejected with
+/// `error.ExtensionComponentConflict` — the PROVISIONAL runtime policy recorded in
+/// `briefs/m1.1.1-hf3-core-robustness-hotfix-3.md` (R6). Last-wins runtime
+/// semantics (masking, restoration, out-of-order deactivate) are an open design
+/// surface for a dedicated spec session; `etch-reference-part2.md §30.5` defines
+/// no reject policy — do not cite it.
+pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
+    // Step 0 — refuse re-activation (R12(d)); works for hook-only (0-component)
+    // extensions too, where the component-conflict check below cannot fire.
+    if (world.hasEntityExtension(entity, name)) return error.ExtensionAlreadyActive;
+    const ext = try openVerified(ext_bytes);
+    const arch = try extEntityArchetype(ext); // strict mono-entity cardinality
+    const comp_count = arch.component_count;
+
+    // Step 1 — prevalidate + collect (ZERO mutation): ids, size, conflict.
+    const cids = try gpa.alloc(ComponentId, comp_count);
+    defer gpa.free(cids);
+    const values = try gpa.alloc([]const u8, comp_count);
+    defer gpa.free(values);
+    var c: usize = 0;
+    while (c < comp_count) : (c += 1) {
+        const sch = ext.schema(arch.schemaIndex(c));
+        const cid = world.componentId(sch.name) orelse return error.UnknownComponent;
+        if (sch.size != world.registry.componentSize(cid)) return error.SchemaMismatch;
+        if (world.componentBytes(entity, cid) != null) return error.ExtensionComponentConflict;
+        cids[c] = cid;
+        values[c] = arch.componentSlot(c, 0);
     }
 
-    // Record the extension as active on the entity BEFORE firing `on_attach`, so
-    // a hook that queries `has_extension` / `active_extensions` sees it (M1.0.9).
-    // Tracked here means load AND runtime activation both track for free.
-    try world.addEntityExtension(gpa, entity, name);
+    // Step 2 — reserve the extension-record capacity (fallible, no observable
+    // mutation). `owned` is freed if we abort before committing it.
+    const owned = try world.reserveEntityExtension(gpa, entity, name);
+    var committed = false;
+    errdefer if (!committed) gpa.free(owned);
 
-    // Fire the `on_attach` dispatch seam (D-E). M1.0.9 — the Etch bridge's
-    // registered callback re-parses + executes `on_attach_text` against the live
-    // world; with no bridge registered (Tier-0 tests) the seam is a no-op.
+    // Step 3 — grouped add: THE single fallible component mutation (atomic).
+    try world.addComponentsDynamic(gpa, entity, cids, values);
+
+    // Step 4 — record the extension (infallible; takes ownership of `owned`),
+    // then fire `on_attach`. The record is BEFORE the hook so a hook querying
+    // `has_extension` / `active_extensions` sees it (M1.0.9).
+    world.commitEntityExtension(gpa, entity, owned);
+    committed = true;
     const on_attach_text: ?[]const u8 = if (ext.hookCount() > 0) ext.hook(0).on_attach else null;
     try world.dispatchOnAttach(entity, name, on_attach_text);
 }
@@ -544,50 +617,77 @@ pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId
 /// M1.0.9 — runtime extension activation entry, reached from Etch
 /// `entity.activate_extension("X")` (the interpreter resolves the name through
 /// the bridge's `ExtensionResolver`). Reuses the shared `activateExtension`
-/// path: add components → record the active extension → fire `on_attach`.
+/// path (atomic prevalidate → reserve → grouped add → record → `on_attach`).
 /// Unknown name → `error.UnknownExtension`; a component the entity already
-/// carries → `error.ExtensionComponentConflict` (§30.5 reject policy).
+/// carries → `error.ExtensionComponentConflict` (the provisional reject policy
+/// recorded in the R6 brief — not `§30.5`).
 pub fn runtimeActivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, resolver: ExtensionResolver) !void {
     const bytes = resolver.resolve(name) orelse return error.UnknownExtension;
     try activateExtension(world, gpa, entity, name, bytes);
 }
 
-/// M1.0.9 — runtime extension deactivation entry, reached from Etch
-/// `entity.deactivate_extension("X")`. Fires the `on_detach` seam FIRST (so the
-/// hook still reads the extension's components), then removes the extension's
-/// declared components and drops the entity's active-extension record. The
-/// extension must be active (`error.ExtensionNotActive` otherwise). The §30.5
-/// reject conflict policy makes the component set unambiguous — no two active
-/// extensions share a component — so removal needs no provenance tracking.
-/// M1.0.9 — deactivate one extension on one entity given its cooked bytes: the
-/// shared bytes-taking core reused by the runtime deactivate entry AND the
-/// interpreter's deferred B1 flush. Fires `on_detach` FIRST (the hook still reads
-/// the extension's components), then removes them, then drops the active record.
-/// The extension must be active (`error.ExtensionNotActive`). The §30.5 reject
-/// conflict policy makes the component set unambiguous — no provenance tracking.
+/// Deactivate one extension on one entity given its cooked bytes (M1.0.9; **R6
+/// atomicity rewrite, M1.1.1-HF3**) — the shared bytes-taking core reused by the
+/// runtime deactivate entry and the interpreter's deferred B1 flush.
+///
+/// R12(b) prepare/commit order — the hook-ordering guarantee is now REAL:
+///   1. Prevalidate with ZERO mutation: extension active (`ExtensionNotActive`),
+///      bytes valid, strict mono-entity archetype, declared components resolvable;
+///      collect the ones currently present.
+///   2. PREPARE the grouped remove — all the fallible work (target archetype,
+///      capacity, reserved dst slot), no observable mutation yet.
+///   3. Fire `on_detach` FIRST (it still reads the present components). If it
+///      fails, ABORT the prepared remove — the entity stays fully active.
+///   4. COMMIT the remove + drop the record — both infallible.
+/// So after the hook succeeds, NOT ONE fallible step remains; a hook failure rolls
+/// the reserved slot back. (A component-less hook-only extension skips 2/4 and
+/// just fires `on_detach` then drops the record.)
+///
+/// Conflict policy: reject-on-conflict (see `activateExtension`) keeps the
+/// component set unambiguous — no two active extensions share a component — so
+/// removal needs no provenance tracking. Provisional, recorded in the R6 brief;
+/// `etch-reference-part2.md §30.5` defines no such policy — do not cite it.
 pub fn deactivateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
     if (!world.hasEntityExtension(entity, name)) return error.ExtensionNotActive;
     const ext = try openVerified(ext_bytes);
+    const arch = try extEntityArchetype(ext); // strict mono-entity cardinality
+    const comp_count = arch.component_count;
 
-    // `on_detach` before the components go away (the hook can still read them).
-    const on_detach_text: ?[]const u8 = if (ext.hookCount() > 0) ext.hook(0).on_detach else null;
-    try world.dispatchOnDetach(entity, name, on_detach_text);
-
-    // Remove the extension's declared components (mono-entity, like activate).
-    var ai: u32 = 0;
-    while (ai < ext.archetypeCount()) : (ai += 1) {
-        const arch = ext.archetype(ai);
-        if (arch.entity_count == 0) continue;
-        var c: usize = 0;
-        while (c < arch.component_count) : (c += 1) {
-            const sch = ext.schema(arch.schemaIndex(c));
-            const cid = world.componentId(sch.name) orelse return error.UnknownComponent;
-            if (world.componentBytes(entity, cid) != null) {
-                try world.removeComponentDynamic(gpa, entity, cid);
-            }
+    // Step 1 — prevalidate + collect the declared components currently present
+    // (ZERO mutation). Under the reject policy all are present; the presence
+    // filter is belt-and-braces.
+    const cids_buf = try gpa.alloc(ComponentId, comp_count);
+    defer gpa.free(cids_buf);
+    var n: usize = 0;
+    var c: usize = 0;
+    while (c < comp_count) : (c += 1) {
+        const sch = ext.schema(arch.schemaIndex(c));
+        const cid = world.componentId(sch.name) orelse return error.UnknownComponent;
+        if (world.componentBytes(entity, cid) != null) {
+            cids_buf[n] = cid;
+            n += 1;
         }
     }
 
+    const on_detach_text: ?[]const u8 = if (ext.hookCount() > 0) ext.hook(0).on_detach else null;
+
+    // Hook-only extension (no present components): no structural change to make —
+    // fire `on_detach`, then drop the record.
+    if (n == 0) {
+        try world.dispatchOnDetach(entity, name, on_detach_text);
+        world.removeEntityExtension(gpa, entity, name);
+        return;
+    }
+
+    // Step 2 — PREPARE (all fallible work; no observable mutation yet).
+    const prepared = try world.prepareRemoveComponentsDynamic(gpa, entity, cids_buf[0..n]);
+    // Step 3 — `on_detach` FIRST; roll the prepared remove back if it fails. After
+    // this `try`, only infallible steps remain, so the errdefer never fires past it.
+    errdefer world.abortRemoveComponentsDynamic(prepared);
+    try world.dispatchOnDetach(entity, name, on_detach_text);
+
+    // Step 4 — commit (infallible) + drop the record (infallible).
+    world.commitRemoveComponentsDynamic(prepared);
     world.removeEntityExtension(gpa, entity, name);
 }
 
@@ -1326,4 +1426,205 @@ test "instantiate rejects a duplicate entity uuid ordinal (M1.1.1-HF2 C2b)" {
     try testing.expectError(error.MalformedScene, loadFromBytes(&world, gpa, bytes, null));
     try testing.expectEqual(@as(usize, 0), world.entityCount());
     try testing.expectEqual(@as(usize, 0), world.identity.liveCount());
+}
+
+/// Build a mono-entity extension `.prefab.bin`: one entity carrying [ExtX, ExtY]
+/// (both size 4, align 4). Reused by the E3 activate-atomicity test.
+fn buildExtPrefab(gpa: std.mem.Allocator) ![]u8 {
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+    const x = try registerRaw(gpa, &reg, "ExtX", 4, 4); // id 0
+    const y = try registerRaw(gpa, &reg, "ExtY", 4, 4); // id 1
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const names = try a.dupe([]const u8, &.{try a.dupe(u8, "ext_entity")});
+    const uuids = try a.dupe([16]u8, &.{[_]u8{9} ** 16});
+    const col_x = try a.alloc(u8, 4);
+    @memset(col_x, 0x11);
+    const col_y = try a.alloc(u8, 4);
+    @memset(col_y, 0x22);
+    const ids = try a.dupe(ComponentId, &.{ x, y }); // sorted ascending (0,1)
+    const cols = try a.dupe([]u8, &.{ col_x, col_y });
+    const ents = try a.dupe(format.EntityEntry, &.{.{ .name = 0, .uuid = 0, .parent_uuid = format.no_parent }});
+    const blocks = try a.dupe(format.ArchetypeBlock, &.{.{ .component_ids = ids, .entity_count = 1, .columns = cols, .entities = ents }});
+    var model: format.CookModel = .{ .strings = names, .uuids = uuids, .resources = &.{}, .archetypes = blocks, .arena = arena };
+    defer model.deinit();
+    return writer.write(gpa, model, &reg);
+}
+
+test "activateExtension is all-or-nothing under injected OOM" {
+    const backing = testing.allocator;
+    const ext_bytes = try buildExtPrefab(backing);
+    defer backing.free(ext_bytes);
+
+    // Step the FailingAllocator across the whole activation. At every failure
+    // point the entity's component set AND its extension record equal the
+    // pre-call state (base component present, ExtX/ExtY absent, no record).
+    var fail_index: usize = 0;
+    while (fail_index < 60) : (fail_index += 1) {
+        var world = World.init();
+        defer world.deinit(backing);
+        const base = try registerRaw(backing, &world.registry, "ExtBase", 4, 4);
+        _ = try registerRaw(backing, &world.registry, "ExtX", 4, 4);
+        _ = try registerRaw(backing, &world.registry, "ExtY", 4, 4);
+        const e = try world.spawnDynamic(backing, &[_]ComponentId{base});
+
+        var fa = std.testing.FailingAllocator.init(backing, .{ .fail_index = fail_index });
+        const x = world.componentId("ExtX").?;
+        const y = world.componentId("ExtY").?;
+        if (activateExtension(&world, fa.allocator(), e, "TestExt", ext_bytes)) |_| {
+            // Succeeded before the injected point — components + record present.
+            try testing.expect(world.hasEntityExtension(e, "TestExt"));
+            try testing.expect(world.componentBytes(e, x) != null);
+            try testing.expect(world.componentBytes(e, y) != null);
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expect(world.componentBytes(e, base) != null); // base intact
+            try testing.expect(world.componentBytes(e, x) == null); // no partial add
+            try testing.expect(world.componentBytes(e, y) == null);
+            try testing.expect(!world.hasEntityExtension(e, "TestExt")); // no record
+        }
+    }
+}
+
+test "extension with zero entities is rejected" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const base = try registerRaw(gpa, &world.registry, "ZBase", 4, 4);
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{base});
+
+    // A cooked prefab with no entities (no archetypes) → total == 0.
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+    const arena = std.heap.ArenaAllocator.init(gpa);
+    var model: format.CookModel = .{ .strings = &.{}, .uuids = &.{}, .resources = &.{}, .archetypes = &.{}, .arena = arena };
+    defer model.deinit();
+    const ext_bytes = try writer.write(gpa, model, &reg);
+    defer gpa.free(ext_bytes);
+
+    try testing.expectError(error.EmptyExtension, activateExtension(&world, gpa, e, "Empty", ext_bytes));
+    // Entity untouched: base still present, no extension recorded.
+    try testing.expect(world.componentBytes(e, base) != null);
+    try testing.expect(!world.hasEntityExtension(e, "Empty"));
+}
+
+test "buildSchemaRemap rejects duplicate schema names (R11b)" {
+    const gpa = testing.allocator;
+    const bytes = try buildExtPrefab(gpa); // 2 schemas: ExtX, ExtY (both 4/4)
+    defer gpa.free(bytes);
+    const acc0 = try Accessor.open(bytes);
+    const st = acc0.header.schema_table_offset;
+
+    // Overwrite schema entry 1 (8 B) with a copy of entry 0 → both entries name
+    // the same component, so `buildSchemaRemap` resolves both to one ComponentId.
+    const buf = try gpa.dupe(u8, bytes);
+    defer gpa.free(buf);
+    @memcpy(buf[st + 8 ..][0..8], buf[st .. st + 8]);
+    const h = std.hash.XxHash64.hash(0, buf[format.header_size..]);
+    std.mem.writeInt(u64, buf[56..64], h, .little);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try registerRaw(gpa, &world.registry, "ExtX", 4, 4);
+    const acc = try openVerified(buf); // validate passes (indices 0,1 still distinct)
+    try testing.expectError(error.MalformedScene, buildSchemaRemap(gpa, &world, acc));
+}
+
+test "deactivateExtension is all-or-nothing under injected OOM; on_detach fires exactly once (R12e)" {
+    const backing = testing.allocator;
+    const ext_bytes = try buildExtPrefab(backing);
+    defer backing.free(ext_bytes);
+
+    // A Tier-0 on_detach hook that only counts — no allocation, so it can never
+    // be the OOM point.
+    const Hook = struct {
+        var fired: usize = 0;
+        fn cb(_: ?*anyopaque, _: *World, _: EntityId, _: []const u8, _: ?[]const u8) anyerror!void {
+            fired += 1;
+        }
+    };
+
+    var fail_index: usize = 0;
+    while (fail_index < 60) : (fail_index += 1) {
+        var world = World.init();
+        defer world.deinit(backing);
+        const base = try registerRaw(backing, &world.registry, "ExtBase", 4, 4);
+        _ = try registerRaw(backing, &world.registry, "ExtX", 4, 4);
+        _ = try registerRaw(backing, &world.registry, "ExtY", 4, 4);
+        world.registerOnDetach(null, &Hook.cb);
+        const e = try world.spawnDynamic(backing, &[_]ComponentId{base});
+        try activateExtension(&world, backing, e, "TestExt", ext_bytes); // working allocator
+        const x = world.componentId("ExtX").?;
+        const y = world.componentId("ExtY").?;
+
+        Hook.fired = 0;
+        var fa = std.testing.FailingAllocator.init(backing, .{ .fail_index = fail_index });
+        if (deactivateExtension(&world, fa.allocator(), e, "TestExt", ext_bytes)) |_| {
+            // Success: on_detach fired exactly once; components + record gone.
+            try testing.expectEqual(@as(usize, 1), Hook.fired);
+            try testing.expect(!world.hasEntityExtension(e, "TestExt"));
+            try testing.expect(world.componentBytes(e, x) == null);
+            try testing.expect(world.componentBytes(e, y) == null);
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            // Every OOM point is BEFORE on_detach → hook fired 0 times and the
+            // extension is fully active (components + record intact).
+            try testing.expectEqual(@as(usize, 0), Hook.fired);
+            try testing.expect(world.hasEntityExtension(e, "TestExt"));
+            try testing.expect(world.componentBytes(e, x) != null);
+            try testing.expect(world.componentBytes(e, y) != null);
+        }
+    }
+}
+
+test "deactivateExtension rejects multi-entity extension bytes (R12c)" {
+    const gpa = testing.allocator;
+    var world = World.init();
+    defer world.deinit(gpa);
+    const pos = try registerRaw(gpa, &world.registry, "Pos", 8, 4);
+    const e = try world.spawnDynamic(gpa, &[_]ComponentId{pos});
+    try world.addEntityExtension(gpa, e, "Multi"); // mark active by name
+
+    // A valid 2-entity cooked image → the strict cardinality guard rejects it.
+    const multi_bytes = try buildTwoEntityOneBlockScene(gpa, &world.registry, pos, 0, 1);
+    defer gpa.free(multi_bytes);
+    try testing.expectError(error.MultiEntityExtensionUnsupported, deactivateExtension(&world, gpa, e, "Multi", multi_bytes));
+    try testing.expect(world.hasEntityExtension(e, "Multi")); // untouched
+}
+
+test "activateExtension rejects re-activation, including a hook-only extension (R12d)" {
+    const backing = testing.allocator;
+    const ext_bytes = try buildExtPrefab(backing);
+    defer backing.free(ext_bytes);
+
+    var world = World.init();
+    defer world.deinit(backing);
+    const base = try registerRaw(backing, &world.registry, "ExtBase", 4, 4);
+    _ = try registerRaw(backing, &world.registry, "ExtX", 4, 4);
+    _ = try registerRaw(backing, &world.registry, "ExtY", 4, 4);
+    const e = try world.spawnDynamic(backing, &[_]ComponentId{base});
+    try activateExtension(&world, backing, e, "TestExt", ext_bytes);
+    try testing.expectError(error.ExtensionAlreadyActive, activateExtension(&world, backing, e, "TestExt", ext_bytes));
+
+    // Hook-only extension (one entity, zero components): the component-conflict
+    // guard cannot fire, so R12(d)'s `hasEntityExtension` check is what rejects
+    // re-activation.
+    var arena = std.heap.ArenaAllocator.init(backing);
+    const a = arena.allocator();
+    const hnames = try a.dupe([]const u8, &.{try a.dupe(u8, "he")});
+    const huuids = try a.dupe([16]u8, &.{[_]u8{5} ** 16});
+    const hents = try a.dupe(format.EntityEntry, &.{.{ .name = 0, .uuid = 0, .parent_uuid = format.no_parent }});
+    const hblocks = try a.dupe(format.ArchetypeBlock, &.{.{ .component_ids = &.{}, .entity_count = 1, .columns = &.{}, .entities = hents }});
+    var hmodel: format.CookModel = .{ .strings = hnames, .uuids = huuids, .resources = &.{}, .archetypes = hblocks, .arena = arena };
+    defer hmodel.deinit();
+    var hreg = Registry.init();
+    defer hreg.deinit(backing);
+    const hook_only = try writer.write(backing, hmodel, &hreg);
+    defer backing.free(hook_only);
+
+    const e2 = try world.spawnDynamic(backing, &[_]ComponentId{base});
+    try activateExtension(&world, backing, e2, "HookOnly", hook_only);
+    try testing.expect(world.hasEntityExtension(e2, "HookOnly"));
+    try testing.expectError(error.ExtensionAlreadyActive, activateExtension(&world, backing, e2, "HookOnly", hook_only));
 }

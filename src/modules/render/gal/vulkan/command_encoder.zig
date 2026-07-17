@@ -442,6 +442,10 @@ pub fn create(device: *Device, label: ?[]const u8) types.Error!*CommandEncoder {
     };
     var bufs: [1]*vk.CommandBuffer = undefined;
     device.vk_device.allocateCommandBuffers(&alloc_ci, &bufs) catch return error.BackendInternal;
+    // R14 (M1.1.1-HF3): free the command buffer back to the pool if anything below
+    // fails (beginCommandBuffer or the encoder allocation) — otherwise it leaks,
+    // since only `destroy` frees it and no encoder is returned.
+    errdefer device.vk_device.freeCommandBuffers(device.command_pool, &bufs);
 
     const begin: vk.CommandBufferBeginInfo = .{
         .flags = .empty,
@@ -458,31 +462,27 @@ pub fn create(device: *Device, label: ?[]const u8) types.Error!*CommandEncoder {
     return enc;
 }
 
-/// Frees a CommandEncoder. Destroys the transient pass if still active.
-/// The `vk.CommandBuffer` is not explicitly freed — the pool will be reset
-/// on the caller's next `resetCommandBuffer`.
+/// Frees a CommandEncoder: waits for the GPU, frees its command buffer back to
+/// the shared pool, and destroys any still-active transient pass + the encoder.
 ///
-/// Phase 0 safety net: when destroying a CommandEncoder that owned an
-/// `active_pass` (= a render pass + framebuffer Transient), we wait on
-/// `vkDeviceWaitIdle` before tearing the GPU resources down. Without
-/// the wait, callers who `defer destroyCommandEncoder` immediately
-/// after `device.submit` (the common pattern) trigger Vulkan's
-/// `Framebuffer is currently in use by VkCommandBuffer` warning
-/// because the GPU may still be executing the pass. The wait is
-/// over-cautious — Phase 1+ a per-encoder fence + retire queue will
-/// scope this more tightly — but it matches the S2 pattern
-/// (`/tmp/s2-ref/src/spike/vk_setup.zig:recreateSwapchain` calls
-/// `waitIdle` before destroying its framebuffers) and keeps Phase 0
-/// callers honest by default.
+/// R5a (M1.1.1-HF3): `waitIdle` is now UNCONDITIONAL. An encoder may have been
+/// submitted (the common `defer destroy` right after `device.submit`) and still
+/// be executing on the GPU; freeing an in-flight command buffer — or tearing
+/// down an active pass's framebuffer — is invalid. The device-wide wait is
+/// conservative (it also avoids Vulkan's `Framebuffer is currently in use`
+/// warning, and mirrors the S2 swapchain-recreate `waitIdle`); a per-encoder
+/// fence + retire queue will scope it more tightly in Phase 1+.
+///
+/// The command buffer IS now explicitly freed. Nothing resets this shared pool,
+/// so the previous "the pool reset handles it" claim was false — the pool grew
+/// by one buffer per encoder for the device's whole life. `waitIdle` above makes
+/// the free safe.
 pub fn destroy(device: *Device, encoder: *CommandEncoder) void {
+    device.vk_device.waitIdle() catch {};
     if (encoder.active_pass) |*t| {
-        device.vk_device.waitIdle() catch {};
         t.destroy(device.vk_device);
         encoder.active_pass = null;
     }
-    // The command buffer is freed when the pool is reset/destroyed — we
-    // don't need to call `freeCommandBuffers` in Phase 0 (the pool is
-    // created with the `reset_command_buffer` flag, the caller can do
-    // `cmd.resetCommandBuffer` before the next use).
+    device.vk_device.freeCommandBuffers(device.command_pool, &.{encoder.cb});
     device.allocator.destroy(encoder);
 }

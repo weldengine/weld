@@ -15,6 +15,10 @@ pub const format = @import("format.zig");
 pub const writer = @import("writer.zig");
 /// `.scene.bin` zero-copy accessor (read half; reused verbatim by M1.0.5).
 pub const accessor = @import("accessor.zig");
+/// `.scene.bin` structural validator (M1.1.1-HF3 / R1): a standalone pre-flight
+/// that walks the raw bytes and backs every accessor getter's trusted invariant.
+/// `loader.openVerified` runs it before returning an `Accessor`.
+pub const validate = @import("validate.zig");
 /// `.scene.bin` runtime loader (M1.0.5): reads a cooked scene back into a live
 /// ECS `World`, reusing `accessor` verbatim. `weld_core` only — never `weld_etch`.
 pub const loader = @import("loader.zig");
@@ -25,5 +29,6 @@ comptime {
     _ = format;
     _ = writer;
     _ = accessor;
+    _ = validate;
     _ = loader;
 }

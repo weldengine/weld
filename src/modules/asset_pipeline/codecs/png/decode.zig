@@ -21,8 +21,13 @@ pub const Error = error{
     BadSignature,
     /// A chunk or the pixel stream ended early.
     Truncated,
-    /// Malformed IHDR or an inconsistent palette index.
+    /// Malformed IHDR or an inconsistent palette index, or an image-size
+    /// computation that overflowed `usize` (R3, M1.1.1-HF3 — checked arithmetic).
     BadHeader,
+    /// IHDR width or height exceeds `max_dimension` (R3, M1.1.1-HF3): a hostile
+    /// dimension is rejected before any allocation, so a size product can never
+    /// wrap `usize` into an undersized buffer.
+    DimensionsTooLarge,
     /// Colour type not one of 0/2/3/4/6.
     UnsupportedColorType,
     /// Bit depth invalid for the colour type, or 16-bit (out of scope).
@@ -55,6 +60,38 @@ pub const Image = struct {
 
 const signature = [_]u8{ 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
 
+/// Maximum accepted image dimension, per axis (R3, M1.1.1-HF3). Aligned with a
+/// common Vulkan `maxImageDimension2D` (16384). Capping `width`/`height` here is
+/// what makes every downstream size product (`width × height × channels`, per-
+/// scanline bytes, the inflate budget) provably non-overflowing — a
+/// `0xFFFFFFFF × 0xFFFFFFFF × 4` wrap into an undersized allocation is impossible.
+const max_dimension: u32 = 16384;
+
+/// Checked `a * b`; overflow → `error.BadHeader` (R3 — never a bare `*` on a
+/// file-controlled quantity, even one that cannot overflow post-cap).
+fn mulSize(a: usize, b: usize) Error!usize {
+    return std.math.mul(usize, a, b) catch error.BadHeader;
+}
+
+/// Checked `a + b`; overflow → `error.BadHeader`.
+fn addSize(a: usize, b: usize) Error!usize {
+    return std.math.add(usize, a, b) catch error.BadHeader;
+}
+
+/// Adam7 interlace passes (`xs`/`ys` start, `xstep`/`ystep` stride). Shared by
+/// `expectedRawSize` and `deinterlaceAdam7` so the pre-inflation size budget and
+/// the raw-stream walk agree by construction.
+const Adam7Pass = struct { xs: u32, ys: u32, xstep: u32, ystep: u32 };
+const adam7_passes = [7]Adam7Pass{
+    .{ .xs = 0, .ys = 0, .xstep = 8, .ystep = 8 },
+    .{ .xs = 4, .ys = 0, .xstep = 8, .ystep = 8 },
+    .{ .xs = 0, .ys = 4, .xstep = 4, .ystep = 8 },
+    .{ .xs = 2, .ys = 0, .xstep = 4, .ystep = 4 },
+    .{ .xs = 0, .ys = 2, .xstep = 2, .ystep = 4 },
+    .{ .xs = 1, .ys = 0, .xstep = 2, .ystep = 2 },
+    .{ .xs = 0, .ys = 1, .xstep = 1, .ystep = 2 },
+};
+
 const Header = struct {
     width: u32,
     height: u32,
@@ -64,6 +101,14 @@ const Header = struct {
 };
 
 /// Decode `src` (a complete PNG file) to an RGBA8 `Image`.
+///
+/// Peak transient allocation is ~2×(width×height×4) + IDAT (R15). The inflated
+/// `raw` stream is freed the instant deinterlacing produces `samples`, before the
+/// RGBA `pixels` buffer is allocated — so `raw` and `pixels` never coexist. The
+/// live pair is either `raw`+`samples` (during deinterlace) or `samples`+`pixels`
+/// (during RGBA conversion), each ≤ 2×(width×height×4); the accumulated IDAT
+/// bytes stay resident until return. The prior form kept `raw` alive to the end,
+/// peaking at ~3×.
 pub fn decode(gpa: std.mem.Allocator, src: []const u8) Error!Image {
     if (src.len < signature.len or !std.mem.eql(u8, src[0..signature.len], &signature)) {
         return error.BadSignature;
@@ -100,10 +145,19 @@ pub fn decode(gpa: std.mem.Allocator, src: []const u8) Error!Image {
     const h = header orelse return error.BadHeader;
     const channels = try channelsOf(h.color_type);
 
-    const raw = try zlib.decompress(gpa, idat.items);
-    defer gpa.free(raw);
+    // R3: the exact inflated size is known from IHDR before inflation. It bounds
+    // the inflater's output (a decompression bomb trips `OutputLimitExceeded`
+    // instead of exhausting memory); the produced stream must then match it
+    // exactly (short → `Truncated`).
+    const expected_raw = try expectedRawSize(h, channels);
+    const raw = try zlib.decompress(gpa, idat.items, expected_raw);
+    // Freed the instant deinterlacing is done (before the RGBA allocation, R15);
+    // the flag keeps the error path safe if deinterlace fails first.
+    var raw_freed = false;
+    defer if (!raw_freed) gpa.free(raw);
+    if (raw.len != expected_raw) return error.Truncated;
 
-    const sample_count = @as(usize, h.width) * h.height * channels;
+    const sample_count = try mulSize(try mulSize(h.width, h.height), channels);
     const samples = try gpa.alloc(u8, sample_count);
     defer gpa.free(samples);
 
@@ -113,7 +167,12 @@ pub fn decode(gpa: std.mem.Allocator, src: []const u8) Error!Image {
         try deinterlaceAdam7(gpa, h, channels, raw, samples);
     }
 
-    const pixels = try gpa.alloc(u8, @as(usize, h.width) * h.height * 4);
+    // R15: `raw` is dead once `samples` holds the deinterlaced image — free it
+    // before allocating the RGBA buffer so the two never coexist (~2× peak).
+    gpa.free(raw);
+    raw_freed = true;
+
+    const pixels = try gpa.alloc(u8, try mulSize(try mulSize(h.width, h.height), 4));
     errdefer gpa.free(pixels);
     try convertToRgba(samples, h, channels, palette, trns, pixels);
 
@@ -130,6 +189,8 @@ fn parseHeader(data: []const u8) Error!Header {
         .interlace = data[12],
     };
     if (h.width == 0 or h.height == 0) return error.BadHeader;
+    // R3: reject a hostile dimension BEFORE any size product or allocation.
+    if (h.width > max_dimension or h.height > max_dimension) return error.DimensionsTooLarge;
     if (data[10] != 0) return error.BadHeader; // compression method
     if (data[11] != 0) return error.BadHeader; // filter method
     if (h.interlace > 1) return error.UnsupportedInterlace;
@@ -158,8 +219,33 @@ fn validateDepth(color_type: u8, bit_depth: u8) Error!void {
     if (!ok) return error.UnsupportedBitDepth;
 }
 
-fn bytesPerRow(width: u32, channels: u8, bit_depth: u8) usize {
-    return (@as(usize, width) * channels * bit_depth + 7) / 8;
+/// Bytes per scanline row = ceil(width × channels × bit_depth / 8), all products
+/// checked (R3). Post-cap these cannot overflow, but the checked form is the
+/// contract the per-gate review verifies on file-controlled quantities.
+fn bytesPerRow(width: u32, channels: u8, bit_depth: u8) Error!usize {
+    const bits = try addSize(try mulSize(try mulSize(width, channels), bit_depth), 7);
+    return bits / 8;
+}
+
+/// The exact expected inflated raw-stream size, computed from IHDR BEFORE
+/// inflation (R3). Per scanline: 1 filter byte + `bytesPerRow`. Non-interlaced:
+/// `height × (1 + bytesPerRow)`. Adam7: the sum over the 7 passes, an empty pass
+/// (zero width or height) contributing 0. This is the `max_out` budget handed to
+/// the inflater and the exact length the produced stream must equal.
+fn expectedRawSize(h: Header, channels: u8) Error!usize {
+    if (h.interlace == 0) {
+        const stride = try addSize(1, try bytesPerRow(h.width, channels, h.bit_depth));
+        return try mulSize(h.height, stride);
+    }
+    var total: usize = 0;
+    for (adam7_passes) |p| {
+        const pw: u32 = if (h.width > p.xs) (h.width - p.xs + p.xstep - 1) / p.xstep else 0;
+        const ph: u32 = if (h.height > p.ys) (h.height - p.ys + p.ystep - 1) / p.ystep else 0;
+        if (pw == 0 or ph == 0) continue;
+        const stride = try addSize(1, try bytesPerRow(pw, channels, h.bit_depth));
+        total = try addSize(total, try mulSize(ph, stride));
+    }
+    return total;
 }
 
 fn filterBpp(channels: u8, bit_depth: u8) u8 {
@@ -209,7 +295,7 @@ fn unpackRow(packed_row: []const u8, width: u32, bit_depth: u8, out: []u8) void 
 
 /// Non-interlaced: unfilter each row in place, then unpack into `samples`.
 fn deinterlaceNone(gpa: std.mem.Allocator, h: Header, channels: u8, raw: []u8, samples: []u8) Error!void {
-    const row_bytes = bytesPerRow(h.width, channels, h.bit_depth);
+    const row_bytes = try bytesPerRow(h.width, channels, h.bit_depth);
     const bpp = filterBpp(channels, h.bit_depth);
     const stride = 1 + row_bytes;
     if (raw.len < @as(usize, h.height) * stride) return error.Truncated;
@@ -235,31 +321,21 @@ fn deinterlaceNone(gpa: std.mem.Allocator, h: Header, channels: u8, raw: []u8, s
 
 /// Adam7: 7 passes, each unfiltered + unpacked then scattered into the grid.
 fn deinterlaceAdam7(gpa: std.mem.Allocator, h: Header, channels: u8, raw: []u8, samples: []u8) Error!void {
-    const Pass = struct { xs: u32, ys: u32, xstep: u32, ystep: u32 };
-    const passes = [7]Pass{
-        .{ .xs = 0, .ys = 0, .xstep = 8, .ystep = 8 },
-        .{ .xs = 4, .ys = 0, .xstep = 8, .ystep = 8 },
-        .{ .xs = 0, .ys = 4, .xstep = 4, .ystep = 8 },
-        .{ .xs = 2, .ys = 0, .xstep = 4, .ystep = 4 },
-        .{ .xs = 0, .ys = 2, .xstep = 2, .ystep = 4 },
-        .{ .xs = 1, .ys = 0, .xstep = 2, .ystep = 2 },
-        .{ .xs = 0, .ys = 1, .xstep = 1, .ystep = 2 },
-    };
     const bpp = filterBpp(channels, h.bit_depth);
 
-    const zero = try gpa.alloc(u8, bytesPerRow(h.width, channels, h.bit_depth));
+    const zero = try gpa.alloc(u8, try bytesPerRow(h.width, channels, h.bit_depth));
     defer gpa.free(zero);
     @memset(zero, 0);
-    const pass_samples = try gpa.alloc(u8, @as(usize, h.width) * channels);
+    const pass_samples = try gpa.alloc(u8, try mulSize(h.width, channels));
     defer gpa.free(pass_samples);
 
     var cursor: usize = 0;
-    for (passes) |p| {
+    for (adam7_passes) |p| {
         const pw: u32 = if (h.width > p.xs) (h.width - p.xs + p.xstep - 1) / p.xstep else 0;
         const ph: u32 = if (h.height > p.ys) (h.height - p.ys + p.ystep - 1) / p.ystep else 0;
         if (pw == 0 or ph == 0) continue;
 
-        const row_bytes = bytesPerRow(pw, channels, h.bit_depth);
+        const row_bytes = try bytesPerRow(pw, channels, h.bit_depth);
         const stride = 1 + row_bytes;
         if (cursor + @as(usize, ph) * stride > raw.len) return error.Truncated;
 
@@ -355,6 +431,50 @@ test "decode Adam7 interlaced RGB image" {
 test "decode rejects a non-PNG buffer" {
     const gpa = std.testing.allocator;
     try std.testing.expectError(error.BadSignature, decode(gpa, "not a png at all!!"));
+}
+
+test "oversized dimensions are rejected before inflation" {
+    // IHDR width @16 (big-endian u32). Force it to 0xFFFFFFFF.
+    var buf = png_rgba_filters;
+    @memset(buf[16..20], 0xFF);
+    // A FailingAllocator that fails on the very FIRST allocation. `parseHeader`
+    // (run when the IHDR chunk is seen, before any IDAT accumulation or pixel
+    // buffer) rejects the dimension without allocating — so `decode` returns
+    // `DimensionsTooLarge`, not `OutOfMemory`. That proves no size-proportional
+    // allocation is attempted for the claimed 4-billion-pixel image.
+    var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.DimensionsTooLarge, decode(fa.allocator(), &buf));
+}
+
+test "inflate output exceeding the expected size is rejected" {
+    const gpa = std.testing.allocator;
+    // png_rgba_filters is 8×5 RGBA → raw stream is 5 × (1 + 8×4) = 165 bytes.
+    // IHDR height low byte is @23.
+    // Claiming height 4 → expected 132 < 165: the inflater trips the budget.
+    {
+        var buf = png_rgba_filters;
+        buf[23] = 4;
+        try std.testing.expectError(error.OutputLimitExceeded, decode(gpa, &buf));
+    }
+    // Claiming height 6 → expected 198 > 165: the stream is short of the header.
+    {
+        var buf = png_rgba_filters;
+        buf[23] = 6;
+        try std.testing.expectError(error.Truncated, decode(gpa, &buf));
+    }
+}
+
+test "Adam7 expected-size accounting is exact" {
+    const gpa = std.testing.allocator;
+    // The valid 5×5 interlaced fixture round-trips (exact per-pass accounting).
+    var img = try decode(gpa, &png_interlaced);
+    defer img.deinit(gpa);
+    try std.testing.expectEqual(@as(u32, png_interlaced_h), img.height);
+    // An off-by-one height (6) inflates the Adam7 pass total past the real
+    // stream → rejected, never a partial/undersized decode.
+    var buf = png_interlaced;
+    buf[23] = 6;
+    try std.testing.expectError(error.Truncated, decode(gpa, &buf));
 }
 
 const png_rgba_filters_w = 8;

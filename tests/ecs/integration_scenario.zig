@@ -29,6 +29,7 @@
 
 const std = @import("std");
 const weld_core = @import("weld_core");
+const watchdog = @import("test_watchdog");
 
 const ecs = weld_core.ecs;
 
@@ -113,12 +114,17 @@ test "end-to-end integration: spawn/despawn/respawn + 10-tick sim + slot reuse +
 
     OBSERVED_DESPAWNS = 0;
 
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "end-to-end integration: spawn/despawn/respawn + 10-tick sim + slot reuse + observers");
+    defer wd.disarm();
+
     var world = ecs.World.init();
     defer world.deinit(gpa);
 
     var jobs_sched = try weld_core.jobs.scheduler.Scheduler.init(gpa, io);
     try jobs_sched.start();
     defer jobs_sched.deinit(gpa);
+    wd.setScheduler(&jobs_sched);
 
     const t_id = try world.ensureComponentRegistered(gpa, ecs.Transform);
     const v_id = try world.ensureComponentRegistered(gpa, ecs.Velocity);

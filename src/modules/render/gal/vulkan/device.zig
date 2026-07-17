@@ -119,6 +119,11 @@ pub const Device = struct {
             createDebugMessenger(device.vk_instance) catch null
         else
             null;
+        // R5e (M1.1.1-HF3): the messenger lives on the instance; without this a
+        // later init failure would run only the instance-teardown errdefer and
+        // leak it. Declared after the instance errdefer, so it runs first (LIFO)
+        // — the messenger is destroyed before the instance it belongs to.
+        errdefer if (device.debug_messenger) |m| device.vk_instance.destroyDebugUtilsMessengerEXT(m, null);
 
         try pickPhysicalDevice(&device, allocator, descriptor);
 
@@ -149,13 +154,16 @@ pub const Device = struct {
         while (bit.next()) |entry| entry.destroy(self.vk_device);
         self.buffers.deinit(self.allocator);
 
-        var tit = self.textures.valueIterator();
-        while (tit.next()) |entry| entry.destroy(self.vk_device);
-        self.textures.deinit(self.allocator);
-
+        // R5f (M1.1.1-HF3): destroy image VIEWS before their source images
+        // (reverse dependency order) — a `VkImageView` outliving its `VkImage` is
+        // invalid. The previous order destroyed `textures` (images) first.
         var vit = self.texture_views.valueIterator();
         while (vit.next()) |entry| entry.destroy(self.vk_device);
         self.texture_views.deinit(self.allocator);
+
+        var tit = self.textures.valueIterator();
+        while (tit.next()) |entry| entry.destroy(self.vk_device);
+        self.textures.deinit(self.allocator);
 
         var git = self.bind_groups.valueIterator();
         while (git.next()) |entry| entry.destroy(self.vk_device);

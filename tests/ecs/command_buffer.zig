@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const weld_core = @import("weld_core");
+const watchdog = @import("test_watchdog");
 
 const World = weld_core.ecs.world.World;
 const Transform = weld_core.ecs.world.Transform;
@@ -58,12 +59,17 @@ test "deferred spawn is visible only after the phase flush" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "deferred spawn is visible only after the phase flush");
+    defer wd.disarm();
+
     var world = World.init();
     defer world.deinit(gpa);
 
     var jobs_sched = try Scheduler.init(gpa, io);
     try jobs_sched.start();
     defer jobs_sched.deinit(gpa);
+    wd.setScheduler(&jobs_sched);
 
     var sys = SystemScheduler.init();
     defer sys.deinit(gpa);
@@ -117,12 +123,17 @@ test "add_component and remove_component are applied in system submission order"
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "add_component and remove_component are applied in system submission order");
+    defer wd.disarm();
+
     var world = World.init();
     defer world.deinit(gpa);
 
     var jobs_sched = try Scheduler.init(gpa, io);
     try jobs_sched.start();
     defer jobs_sched.deinit(gpa);
+    wd.setScheduler(&jobs_sched);
 
     var sys = SystemScheduler.init();
     defer sys.deinit(gpa);

@@ -52,6 +52,7 @@
 const std = @import("std");
 const weld_core = @import("weld_core");
 const dump = @import("livelock_dump.zig");
+const watchdog = @import("test_watchdog");
 
 const ecs = weld_core.ecs;
 const CountingAllocator = weld_core.testing.alloc_counting.CountingAllocator;
@@ -383,9 +384,23 @@ test "stress steady-state — composite scenario under concurrent CPU and alloca
     var world = ecs.World.init();
     defer world.deinit(gpa);
 
+    // E9b: GLOBAL teardown watchdog covering Scheduler.deinit()/join() — the
+    // site the local per-dispatch `runWithWatchdog` below does NOT cover. Armed
+    // immediately before the Scheduler (after the noise threads) so the 5 s
+    // window wraps the scheduler lifecycle + deinit/join tightly, not the noise
+    // spin-up; `defer disarm()` is declared before `defer jobs_sched.deinit` so
+    // LIFO keeps it armed through deinit/join. It uses `io` + its own thread
+    // stack, never the counting `gpa`, so it can't perturb the measured delta
+    // (the before/after `snapshot` window further down). The local
+    // `runWithWatchdog` stays in place (complementary dispatch-side coverage).
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "stress steady-state — composite scenario under concurrent CPU and allocator noise");
+    defer wd.disarm();
+
     var jobs_sched = try weld_core.jobs.scheduler.Scheduler.init(gpa, io);
     try jobs_sched.start();
     defer jobs_sched.deinit(gpa);
+    wd.setScheduler(&jobs_sched);
 
     const t_id = try world.ensureComponentRegistered(gpa, ecs.Transform);
     const v_id = try world.ensureComponentRegistered(gpa, ecs.Velocity);
