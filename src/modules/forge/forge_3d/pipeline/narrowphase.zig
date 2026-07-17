@@ -289,7 +289,13 @@ pub fn Simplex(comptime T: type) type {
 
             // Origin inside every face ⇒ inside the tetrahedron.
             const bary_det = tripleProduct(b.sub(a), c.sub(a), d.sub(a));
-            if (!(@abs(bary_det) > 0)) return minOverFaces4(verts); // coplanar tetra
+            // Relative degeneracy: `bary_det` = 6·signed volume (length³). A
+            // near-flat tetrahedron falls back to its faces (count ≤ 3, so it
+            // never yields a spurious `.deep`). Compared squared to avoid a
+            // sqrt: `|bary_det|² ≤ deg_rel² · (max squared edge)³`.
+            const deg_rel: T = if (T == f32) 1.0e-4 else 1.0e-9;
+            const mes = maxEdgeSq(a, b, c, d);
+            if (bary_det * bary_det <= deg_rel * deg_rel * mes * mes * mes) return minOverFaces4(verts);
             const inv = 1.0 / bary_det;
             return .{
                 .closest = Vec3T.zero,
@@ -330,6 +336,15 @@ pub fn Simplex(comptime T: type) type {
         /// Scalar triple product `u · (v × w)` = det[u v w].
         fn tripleProduct(u: Vec3T, v: Vec3T, w: Vec3T) T {
             return u.dot(v.cross(w));
+        }
+
+        /// Largest squared edge length of the tetrahedron `(a,b,c,d)` — the
+        /// characteristic length² used to make the degeneracy test scale-relative.
+        fn maxEdgeSq(a: Vec3T, b: Vec3T, c: Vec3T, d: Vec3T) T {
+            const edges = [_]Vec3T{ b.sub(a), c.sub(a), d.sub(a), c.sub(b), d.sub(b), d.sub(c) };
+            var m: T = 0;
+            for (edges) |e| m = @max(m, e.dot(e));
+            return m;
         }
 
         /// Closest of the three edges of a degenerate triangle to the origin
@@ -451,12 +466,18 @@ pub fn gjk(
     const VertexT = Simplex(T).Vertex;
     const Res = GjkResult(T);
 
-    // Named relative progress tolerance (the squared-distance progress test) and
-    // the absolute origin-reached threshold. A-frame coordinates are shape-
-    // relative (small) — the reason the frame of A is frozen — so an absolute
-    // deep threshold is scale-appropriate.
+    // Named tolerances — all RELATIVE, no absolute distance threshold, so the
+    // classification is scale-robust. `rel_tolerance`: the squared-distance
+    // progress test. `dup_rel_sq`: a support duplicates an existing simplex
+    // vertex (anti-cycling), relative to the simplex magnitude². `rel_deep`:
+    // origin reached on the simplex ⇒ deep, relative to the simplex magnitude.
+    // `contact_rel`: shallow/separated boundary margin — GJK distance is
+    // approximate, so an exact tangency must not tip into `.separated` (the
+    // frozen touch = shallow rule).
     const rel_tolerance: T = if (T == f32) 1.0e-5 else 1.0e-10;
-    const deep_eps_sq: T = if (T == f32) 1.0e-8 else 1.0e-12;
+    const dup_rel_sq: T = if (T == f32) 1.0e-10 else 1.0e-20;
+    const rel_deep: T = if (T == f32) 1.0e-4 else 1.0e-7;
+    const contact_rel: T = if (T == f32) 1.0e-4 else 1.0e-9;
 
     const relpose = RelativePose(T).init(pos_a, rot_a, pos_b, rot_b);
 
@@ -473,8 +494,9 @@ pub fn gjk(
 
     var iter: u32 = 0;
     while (iter < max_gjk_iterations) : (iter += 1) {
-        // Origin on the current simplex ⇒ cores intersect ⇒ deep.
-        if (closest.dot(closest) <= deep_eps_sq) return deepResult(T, verts, count);
+        // Origin reached on the current simplex (relative to its magnitude) ⇒
+        // cores intersect ⇒ deep.
+        if (originEnclosed(T, verts[0..count], closest, rel_deep)) return deepResult(T, verts, count);
 
         const w = minkowskiSupport(T, shape_a, relpose, shape_b, closest.neg());
 
@@ -483,6 +505,12 @@ pub fn gjk(
         // no longer pushes past the plane through v, so v is the closest point.
         const vv = closest.dot(closest);
         if (vv - closest.dot(w.w) <= rel_tolerance * vv) break;
+
+        // Anti-cycling (standard GJK guard): a support duplicating a simplex
+        // vertex — within a tolerance relative to the simplex magnitude — means
+        // no further progress. Kills at the source the degenerate tetrahedra the
+        // floating-point progress test alone can let through.
+        if (duplicateSupport(T, verts[0..count], w.w, dup_rel_sq)) break;
 
         verts[count] = w;
         count += 1;
@@ -498,8 +526,9 @@ pub fn gjk(
         }
         count = res.count;
 
-        // Origin inside the tetrahedron (or reached on a lower feature) ⇒ deep.
-        if (res.count == 4 or closest.dot(closest) <= deep_eps_sq) return deepResult(T, verts, count);
+        // Origin strictly inside the (non-degenerate, cf. `closestOriginTetra`)
+        // tetrahedron, or reached on a lower feature (relative test) ⇒ deep.
+        if (res.count == 4 or originEnclosed(T, verts[0..count], closest, rel_deep)) return deepResult(T, verts, count);
     }
 
     // Converged (or hit the iteration bound): reconstruct the closest point on
@@ -512,9 +541,13 @@ pub fn gjk(
         cb = cb.add(verts[i].support_b.scale(bary[i]));
     }
     const dist_sq = closest.dot(closest);
+    // Contact-margin boundary: `.separated` only when the core distance exceeds
+    // `r_a + r_b` beyond the relative margin. GJK's distance carries a
+    // convergence error, and the frozen convention makes an exact touch shallow.
     const r_sum = shape_a.radius + shape_b.radius;
+    const boundary = r_sum * (1 + contact_rel);
     return .{
-        .status = if (dist_sq > r_sum * r_sum) Res.Status.separated else Res.Status.shallow,
+        .status = if (dist_sq > boundary * boundary) Res.Status.separated else Res.Status.shallow,
         .distance = @sqrt(dist_sq),
         .closest_a = rot_a.rotateVec3(ca).add(pos_a),
         .closest_b = rot_a.rotateVec3(cb).add(pos_a),
@@ -551,6 +584,36 @@ fn closestOnSimplex(comptime T: type, verts: []const Simplex(T).Vertex) Simplex(
         3 => S.closestOriginTriangle(verts[0].w, verts[1].w, verts[2].w),
         else => S.closestOriginTetra(verts[0].w, verts[1].w, verts[2].w, verts[3].w),
     };
+}
+
+/// Largest squared `w`-magnitude across the current simplex — the scale the
+/// relative deep / duplicate tests normalize against.
+fn maxVertexMagSq(comptime T: type, verts: []const Simplex(T).Vertex) T {
+    var m: T = 0;
+    for (verts) |v| m = @max(m, v.w.dot(v.w));
+    return m;
+}
+
+/// Whether the origin lies on the current simplex to within a tolerance
+/// relative to the simplex magnitude — the scale-robust "cores intersect"
+/// signal. When every vertex is at the origin the threshold is 0, so `.deep`
+/// then requires `closest` to be exactly the origin.
+fn originEnclosed(comptime T: type, verts: []const Simplex(T).Vertex, closest: math.Vec(3, T), rel_deep: T) bool {
+    const mag = maxVertexMagSq(T, verts);
+    return closest.dot(closest) <= rel_deep * rel_deep * mag;
+}
+
+/// Whether `w` duplicates an existing simplex vertex to within a tolerance
+/// relative to the simplex magnitude² — the anti-cycling test.
+fn duplicateSupport(comptime T: type, verts: []const Simplex(T).Vertex, w: math.Vec(3, T), dup_rel_sq: T) bool {
+    const mag = maxVertexMagSq(T, verts);
+    var min_sq: T = std.math.floatMax(T);
+    for (verts) |v| {
+        const delta = w.sub(v.w);
+        const dsq = delta.dot(delta);
+        if (dsq < min_sq) min_sq = dsq;
+    }
+    return min_sq <= dup_rel_sq * mag;
 }
 
 /// A `.deep` result carrying the terminal simplex `verts[0..count]` (EPA seed).
