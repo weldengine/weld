@@ -7,6 +7,11 @@
 const std = @import("std");
 const config = @import("../config.zig");
 const narrowphase = @import("../pipeline/narrowphase.zig");
+const math = @import("foundation").math;
+const api = @import("weld_forge");
+const bm_mod = @import("../body_manager.zig");
+const shape_mod = @import("../shape.zig");
+const broadphase = @import("../pipeline/broadphase.zig");
 
 const Real = config.Real;
 const Vec3r = config.Vec3r;
@@ -15,6 +20,11 @@ const SupportShape = narrowphase.SupportShape(Real);
 const RelativePose = narrowphase.RelativePose(Real);
 const Simplex = narrowphase.Simplex(Real);
 const GjkResult = narrowphase.GjkResult(Real);
+const BodyManager = bm_mod.BodyManager;
+const ShapeStore = shape_mod.ShapeStore;
+const Broadphase = broadphase.Broadphase(Real);
+const BodyId = api.BodyId;
+const ApiVec3 = math.Vec3; // f32 descriptor vector
 const testing = std.testing;
 
 /// Solver-precision Vec3 from literals.
@@ -452,4 +462,77 @@ test "gjk is deterministic and iteration-bounded" {
     try testing.expectEqual(GjkResult.Status.separated, near.status);
     try testing.expect(finite3(near.closest_a) and finite3(near.closest_b));
     try testing.expect(near.distance > 0.5 and near.distance < 1.2);
+}
+
+// --- E4: broadphase → narrowphase integration --------------------------------
+
+/// Add a `.dynamic` box body at (x,y,z) — descriptor positions are the f32 api
+/// `Vec3`, so the coordinates are f32.
+fn addBoxBodyAt(gpa: std.mem.Allocator, bm: *BodyManager, store: *const ShapeStore, shape: api.ShapeId, entity_index: u32, x: f32, y: f32, z: f32) !BodyId {
+    var d = api.BodyDescriptor{
+        .entity = .{ .index = entity_index, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = shape,
+    };
+    d.position = ApiVec3.fromArray(.{ x, y, z });
+    return bm.addBody(gpa, store, d);
+}
+
+/// Whether `p` is the unordered pair `{x, y}` (candidate pairs are canonical,
+/// `a < b` by packed `BodyId`).
+fn isPair(p: Broadphase.Pair, x: BodyId, y: BodyId) bool {
+    return p.a == @min(x, y) and p.b == @max(x, y);
+}
+
+test "broadphase pairs filtered by gjkPair" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    var bp = Broadphase.init(.{});
+    defer bp.deinit(gpa);
+
+    const box = try store.createShape(gpa, .{ .box = .{ .half_extents = ApiVec3.splat(0.5) } });
+
+    // A–B: tight AABBs 0.15 apart (disjoint) but fat AABBs (margin 0.1) overlap
+    // ⇒ a broadphase fat-AABB false positive the narrowphase must reject.
+    const id_a = try addBoxBodyAt(gpa, &bm, &store, box, 0, 0, 0, 0);
+    const id_b = try addBoxBodyAt(gpa, &bm, &store, box, 1, 1.15, 0, 0);
+    // C–D: boxes genuinely overlap ⇒ a real collision (deep) — proves gjkPair
+    // discriminates, not just always returns separated.
+    const id_c = try addBoxBodyAt(gpa, &bm, &store, box, 2, 10, 0, 0);
+    const id_d = try addBoxBodyAt(gpa, &bm, &store, box, 3, 10.3, 0, 0);
+
+    // Proxies via the broadphase, `user_data` = the packed `BodyId` (M1.1.1).
+    const ids = [_]BodyId{ id_a, id_b, id_c, id_d };
+    for (ids) |id| {
+        _ = try bp.insert(gpa, .dynamic, bm.bodyAabb(&store, id).?, id);
+    }
+
+    var pairs: std.ArrayListUnmanaged(Broadphase.Pair) = .empty;
+    defer pairs.deinit(gpa);
+    try bp.computePairs(gpa, &pairs);
+
+    // Classify every broadphase candidate through gjkPair.
+    var found_false_positive = false;
+    var found_overlap = false;
+    for (pairs.items) |p| {
+        const res = bm.gjkPair(&store, p.a, p.b).?; // all four bodies still live
+        if (isPair(p, id_a, id_b)) {
+            found_false_positive = true;
+            try testing.expectEqual(GjkResult.Status.separated, res.status);
+        } else if (isPair(p, id_c, id_d)) {
+            found_overlap = true;
+            try testing.expectEqual(GjkResult.Status.deep, res.status);
+        }
+    }
+    // The broadphase surfaced the fat-AABB false positive, and gjkPair rejected
+    // it as separated; the genuine overlap came back deep.
+    try testing.expect(found_false_positive);
+    try testing.expect(found_overlap);
+
+    // Stale-handle pair ⇒ null.
+    bm.removeBody(id_d);
+    try testing.expect(bm.gjkPair(&store, id_c, id_d) == null);
 }
