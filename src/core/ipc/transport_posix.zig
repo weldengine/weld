@@ -59,7 +59,7 @@ const sys = struct {
     extern "c" fn getpeereid(sockfd: c_int, euid: *u32, egid: *u32) c_int; // macOS/BSD
     extern "c" fn getuid() u32;
     extern "c" fn umask(mask: mode_t) mode_t; // used only by the 0600 test
-    extern "c" fn fstatat(dirfd: c_int, path: [*:0]const u8, buf: *std.c.Stat, flag: c_int) c_int; // 0600 test
+    extern "c" fn fstatat(dirfd: c_int, path: [*:0]const u8, buf: *anyopaque, flag: c_int) c_int; // 0600 test (macOS)
 };
 
 // -------------------------------------------------- constants ----------
@@ -478,6 +478,23 @@ pub const Backend = struct {
 // `zig build test`. The R2 permission test below is bind-only (no
 // accept/recv, so no deadlock risk) and is kept inline with the code it guards.
 
+/// Test helper: the raw `st_mode` of a path, read WITHOUT opening it (so it works
+/// on a socket file). Linux goes kernel-native via the `statx` syscall —
+/// `std.posix.Stat` / `std.c.Stat` are `void` on Linux and the libc `struct stat`
+/// layout is version-sensitive. macOS/BSD uses the libc `fstatat` + `std.c.Stat`.
+fn statMode(path: [*:0]const u8) u32 {
+    if (comptime is_linux) {
+        var stx: std.os.linux.Statx = undefined;
+        const rc = std.os.linux.statx(std.os.linux.AT.FDCWD, path, 0, std.os.linux.STATX.BASIC_STATS, &stx);
+        std.debug.assert(rc == 0);
+        return stx.mode;
+    } else {
+        var st: std.c.Stat = undefined;
+        std.debug.assert(sys.fstatat(std.c.AT.FDCWD, path, @ptrCast(&st), 0) == 0);
+        return st.mode;
+    }
+}
+
 test "listen enforces 0600 under umask 000" {
     const path = "/tmp/weld-hf3-e4-perm-test.sock";
     // `umask` is process-global. The Zig test runner runs a binary's tests
@@ -490,9 +507,6 @@ test "listen enforces 0600 under umask 000" {
     var sock = try Backend.listen(path);
     defer sock.close();
 
-    // `lstat`-equivalent on the socket path (never opens the socket). The
-    // permission bits must be exactly 0600, independent of the 000 umask.
-    var st: std.c.Stat = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), sys.fstatat(std.c.AT.FDCWD, path, &st, 0));
-    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, st.mode) & 0o777);
+    // The socket file's permission bits must be exactly 0600, independent of umask.
+    try std.testing.expectEqual(@as(u32, 0o600), statMode(path) & 0o777);
 }
