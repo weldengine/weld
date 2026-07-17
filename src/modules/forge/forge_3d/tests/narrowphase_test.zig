@@ -295,6 +295,13 @@ fn capsuleShape(half_height: Real, radius: Real) SupportShape {
 fn boxShape(hx: Real, hy: Real, hz: Real) SupportShape {
     return .{ .core = .{ .box = vr(hx, hy, hz) }, .radius = 0 };
 }
+/// A box core with a convex (inflation) radius — a "rounded box". forge_3d's
+/// `supportShape` produces radius-0 boxes, so this is only for exercising the
+/// narrowphase's radius-agnostic classification (e.g. box/box in the shallow
+/// regime, which a radius-0 box pair cannot reach).
+fn roundedBoxShape(hx: Real, hy: Real, hz: Real, radius: Real) SupportShape {
+    return .{ .core = .{ .box = vr(hx, hy, hz) }, .radius = radius };
+}
 
 /// Whether `world_pt` lies on `shape`'s core, given the shape's world pose. The
 /// point is mapped into the shape's local frame and tested per core kind.
@@ -316,6 +323,17 @@ fn onCore(shape: SupportShape, pos: Vec3r, rot: Quatr, world_pt: Vec3r, eps: Rea
 fn checkSeparated(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr, dist: Real) !void {
     const r = narrowphase.gjk(Real, sa, pa, ra, sb, pb, rb);
     try testing.expectEqual(GjkResult.Status.separated, r.status);
+    try testing.expectApproxEqAbs(dist, r.distance, gjk_test_tol);
+    try testing.expectApproxEqAbs(dist, r.closest_a.sub(r.closest_b).length(), gjk_test_tol);
+    try testing.expect(onCore(sa, pa, ra, r.closest_a, gjk_test_tol));
+    try testing.expect(onCore(sb, pb, rb, r.closest_b, gjk_test_tol));
+}
+
+/// Assert a shallow pair: status, analytic core distance, `|closest_a −
+/// closest_b| == distance`, and each closest point on its core.
+fn checkShallow(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr, dist: Real) !void {
+    const r = narrowphase.gjk(Real, sa, pa, ra, sb, pb, rb);
+    try testing.expectEqual(GjkResult.Status.shallow, r.status);
     try testing.expectApproxEqAbs(dist, r.distance, gjk_test_tol);
     try testing.expectApproxEqAbs(dist, r.closest_a.sub(r.closest_b).length(), gjk_test_tol);
     try testing.expect(onCore(sa, pa, ra, r.closest_a, gjk_test_tol));
@@ -383,26 +401,90 @@ test "gjk separated pairs report analytic distance" {
 }
 
 test "gjk shallow pairs are detected" {
-    // Cores disjoint (dist=3) but the inflated spheres overlap (r_sum=4).
-    {
-        const r = narrowphase.gjk(Real, sphereShape(2), vr(0, 0, 0), Quatr.identity, sphereShape(2), vr(3, 0, 0), Quatr.identity);
-        try testing.expectEqual(GjkResult.Status.shallow, r.status);
-        try testing.expectApproxEqAbs(@as(Real, 3), r.distance, gjk_test_tol);
-        try testing.expectApproxEqAbs(@as(Real, 3), r.closest_a.sub(r.closest_b).length(), gjk_test_tol);
+    // All 6 core-pair combinations in the shallow regime (cores disjoint, the
+    // inflated shapes overlapping), canonical and under an oblique global rigid
+    // transform (non-trivial rotation) — the Scope's "6 combinations in all 3
+    // regimes". Line 70's ss+sb-only phrasing was aligned on the Scope (line 25)
+    // via a Claude.ai round-trip (see the brief's Recorded deviations).
+    const g_rot = Quatr.fromAxisAngle(vr(3, -1, 2).normalize(), 0.9);
+    const g_trans = vr(6, -3, 5);
+
+    const Combo = struct { sa: SupportShape, pa: Vec3r, sb: SupportShape, pb: Vec3r, dist: Real };
+    const combos = [_]Combo{
+        // ss: point cores 3 apart, inflated spheres overlap (r_sum = 4).
+        .{ .sa = sphereShape(2), .pa = vr(0, 0, 0), .sb = sphereShape(2), .pb = vr(3, 0, 0), .dist = 3 },
+        // sb: point vs box, cores 4 apart, large sphere radius (r_sum = 5).
+        .{ .sa = sphereShape(5), .pa = vr(0, 0, 0), .sb = boxShape(1, 1, 1), .pb = vr(5, 0, 0), .dist = 4 },
+        // sc: point vs Y-segment, cores 5 apart (r_sum = 5.5).
+        .{ .sa = sphereShape(5), .pa = vr(0, 0, 0), .sb = capsuleShape(1, 0.5), .pb = vr(5, 0, 0), .dist = 5 },
+        // bb: rounded boxes (radius 1.5), cores 2 apart (r_sum = 3). A radius-0
+        // box pair cannot be shallow, so this exercises the narrowphase box-core
+        // shallow path with a convex radius (see `roundedBoxShape`).
+        .{ .sa = roundedBoxShape(0.5, 0.5, 0.5, 1.5), .pa = vr(0, 0, 0), .sb = roundedBoxShape(0.5, 0.5, 0.5, 1.5), .pb = vr(3, 0, 0), .dist = 2 },
+        // bc: box vs Y-segment, cores 4 apart, capsule radius 5 (r_sum = 5).
+        .{ .sa = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .sb = capsuleShape(1, 5), .pb = vr(5, 0, 0), .dist = 4 },
+        // cc: two parallel Y-segments 3 apart, inflated (r_sum = 4).
+        .{ .sa = capsuleShape(1, 2), .pa = vr(0, 0, 0), .sb = capsuleShape(1, 2), .pb = vr(3, 0, 0), .dist = 3 },
+    };
+
+    for (combos) |c| {
+        try checkShallow(c.sa, c.pa, Quatr.identity, c.sb, c.pb, Quatr.identity, c.dist);
+        try checkShallow(
+            c.sa,
+            g_rot.rotateVec3(c.pa).add(g_trans),
+            g_rot,
+            c.sb,
+            g_rot.rotateVec3(c.pb).add(g_trans),
+            g_rot,
+            c.dist,
+        );
     }
+
     // Exact-touch boundary: core distance == r_a + r_b (5) ⇒ shallow, not
-    // separated (touching counts).
+    // separated (touching counts — honored by the contact margin).
     {
         const r = narrowphase.gjk(Real, sphereShape(2), vr(0, 0, 0), Quatr.identity, sphereShape(3), vr(5, 0, 0), Quatr.identity);
         try testing.expectEqual(GjkResult.Status.shallow, r.status);
         try testing.expectApproxEqAbs(@as(Real, 5), r.distance, gjk_test_tol);
     }
-    // Point vs box, cores 3 apart, huge sphere radius (5) ⇒ shallow.
+}
+
+test "gjk near-contact pairs are not deep" {
+    // (a) A point core ~1 cm outside an ORIENTED box (the P1 repro). The box is
+    // rotated 45° about +Z (presenting a diamond edge toward −X) and centered at
+    // √2 + 0.01, so its nearest edge sits at x = 0.01 ⇒ core distance 0.01. With
+    // radius 0 this is `.separated`, never a false `.deep` (Fixes 1+2 kill the
+    // degenerate Minkowski tetrahedron that used to slip through).
     {
-        const r = narrowphase.gjk(Real, sphereShape(5), vr(0, 0, 0), Quatr.identity, boxShape(1, 1, 1), vr(4, 0, 0), Quatr.identity);
+        const c: Real = std.math.sqrt2 + 0.01;
+        const r = narrowphase.gjk(
+            Real,
+            sphereShape(0),
+            vr(0, 0, 0),
+            Quatr.identity,
+            boxShape(1, 1, 1),
+            vr(c, 0, 0),
+            Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 4.0),
+        );
+        try testing.expect(r.status != .deep);
+        try testing.expectEqual(GjkResult.Status.separated, r.status);
+        try testing.expectApproxEqAbs(@as(Real, 0.01), r.distance, gjk_test_tol);
+    }
+    // (b) Two point cores 5e-5 apart with a large inflation sum (r_sum = 1.1):
+    // proximity is NOT intersection ⇒ `.shallow`, never `.deep`. The old absolute
+    // deep threshold (1e-8) mis-fired here; Fix 3's relative threshold does not.
+    {
+        const r = narrowphase.gjk(
+            Real,
+            sphereShape(0.5),
+            vr(0, 0, 0),
+            Quatr.identity,
+            sphereShape(0.6),
+            vr(5.0e-5, 0, 0),
+            Quatr.identity,
+        );
+        try testing.expect(r.status != .deep);
         try testing.expectEqual(GjkResult.Status.shallow, r.status);
-        try testing.expectApproxEqAbs(@as(Real, 3), r.distance, gjk_test_tol);
-        try testing.expect(onCore(boxShape(1, 1, 1), vr(4, 0, 0), Quatr.identity, r.closest_b, gjk_test_tol));
     }
 }
 
