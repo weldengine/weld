@@ -42,6 +42,7 @@
 const std = @import("std");
 const weld_core = @import("weld_core");
 const dump = @import("livelock_dump.zig");
+const watchdog = @import("test_watchdog");
 
 const ecs = weld_core.ecs;
 const CountingAllocator = weld_core.testing.alloc_counting.CountingAllocator;
@@ -236,12 +237,25 @@ test "composite steady-state — queries + change detection + cmd + observers do
     const gpa = counting.allocator();
     const io = std.testing.io;
 
+    // E9b: GLOBAL teardown watchdog covering Scheduler.deinit()/join() (the
+    // site the local per-dispatch `runWithWatchdog` below does NOT cover). Armed
+    // outside the measured no-allocation region (the before/after `snapshot`
+    // window further down) — the watchdog uses `io` + its own thread stack, never
+    // the counting `gpa`, so it cannot perturb the measured delta. `defer
+    // disarm()` is declared BEFORE `defer jobs_sched.deinit` so LIFO keeps the
+    // watchdog armed through deinit/join. The local `runWithWatchdog` stays in
+    // place (complementary dispatch-side coverage).
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "composite steady-state — queries + change detection + cmd + observers do not allocate post-warmup");
+    defer wd.disarm();
+
     var world = ecs.World.init();
     defer world.deinit(gpa);
 
     var jobs_sched = try weld_core.jobs.scheduler.Scheduler.init(gpa, io);
     try jobs_sched.start();
     defer jobs_sched.deinit(gpa);
+    wd.setScheduler(&jobs_sched);
 
     // Spawn ~1000 entities across the 4 archetypes — small enough
     // that the entire test runs in well under a second even in

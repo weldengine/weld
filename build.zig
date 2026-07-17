@@ -670,6 +670,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         stress_mod.addImport("weld_core", core_module);
+        // E9b: the stress spec is created outside the `test_specs` loop, so it
+        // does not get `test_watchdog` automatically — wire it explicitly for
+        // the global teardown watchdog it now arms.
+        stress_mod.addImport("test_watchdog", watchdog_module);
         const stress_test = b.addTest(.{ .root_module = stress_mod });
         const stress_test_run = b.addRunArtifact(stress_test);
         const stress_step = b.step(
