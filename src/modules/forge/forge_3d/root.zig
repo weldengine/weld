@@ -13,6 +13,11 @@ const shape = @import("shape.zig");
 const body = @import("body.zig");
 const body_manager = @import("body_manager.zig");
 const broadphase = @import("pipeline/broadphase.zig");
+// M1.1.2 / E1 — narrowphase (GJK). Public re-exports at `Real` land at E4; the
+// import here + the comptime pin below make its acceptance tests run now
+// (engine-zig-conventions.md §13 lazy-analysis guard — an unreferenced module's
+// inline/collected tests are silently skipped).
+const narrowphase = @import("pipeline/narrowphase.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -65,6 +70,8 @@ comptime {
     _ = body;
     _ = body_manager;
     _ = broadphase;
+    _ = narrowphase;
     _ = @import("tests/body_manager_test.zig");
     _ = @import("tests/broadphase_test.zig");
+    _ = @import("tests/narrowphase_test.zig");
 }
