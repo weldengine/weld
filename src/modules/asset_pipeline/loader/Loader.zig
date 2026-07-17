@@ -159,8 +159,9 @@ pub fn finish(self: *Loader, gpa: std.mem.Allocator, raw: Raw) FinishError!Asset
             gpa.free(raw.bin);
             return error.OutOfMemory;
         },
-        // `alloc` reserves a fresh slot; it never validates an existing handle.
-        error.StaleHandle => unreachable,
+        // `alloc` reserves a fresh slot; it never validates an existing handle
+        // (`StaleHandle`) nor increments a refcount (`ReferenceCountOverflow`).
+        error.StaleHandle, error.ReferenceCountOverflow => unreachable,
     };
     // Infallible — capacity reserved above. A fresh handle index is unmapped
     // (unload/reload remove the payload entry), so this inserts, not overwrites.
@@ -218,20 +219,26 @@ pub fn unload(self: *Loader, gpa: std.mem.Allocator, handle: AssetHandle) Regist
 
 /// Hot-reload: re-read `path` and swap the payload in place. The handle,
 /// generation, and refcount are preserved. Returns `error.StaleHandle`
-/// when `handle` is no longer alive; otherwise surfaces `LoadError` from
-/// the re-read (`readBin`) plus `OutOfMemory` from the payload-map
-/// insert. **Pinned** named set `LoadError || error{StaleHandle}` (see
-/// `load`): a Phase-1 change is a `WELD_ASSET_PIPELINE_PROTOCOL_VERSION`
-/// bump (cf. C0.5).
+/// when `handle` is no longer alive; `error.AssetTypeMismatch` when the
+/// re-read `.bin`'s category differs from the handle's; otherwise surfaces
+/// `LoadError` from the re-read (`readBin`) plus `OutOfMemory` from the
+/// payload-map insert. **Pinned** named set
+/// `LoadError || error{StaleHandle, AssetTypeMismatch}` (see `load`): a
+/// Phase-1 change is a `WELD_ASSET_PIPELINE_PROTOCOL_VERSION` bump (cf. C0.5).
 ///
-/// Known Phase-0 limitation: the re-read `.bin`'s `asset_type` is not
-/// re-validated against the slot's `AssetHandle.type_tag`, so reloading
-/// from a `.bin` of a different category serves a mismatched payload
-/// under the old handle. A typed `error.AssetTypeMismatch` is the
-/// additive Phase-1 fix.
-pub fn reload(self: *Loader, gpa: std.mem.Allocator, io: std.Io, handle: AssetHandle, path: []const u8) (LoadError || error{StaleHandle})!void {
+/// R7 (M1.1.1-HF3): the re-read `.bin`'s `asset_type` is validated against the
+/// slot's `AssetHandle.type_tag` BEFORE any payload mutation — reloading from a
+/// `.bin` of a different category is rejected (its bytes freed) instead of
+/// serving a mismatched payload under the old handle.
+pub fn reload(self: *Loader, gpa: std.mem.Allocator, io: std.Io, handle: AssetHandle, path: []const u8) (LoadError || error{ StaleHandle, AssetTypeMismatch })!void {
     if (!self.registry.isAlive(handle)) return error.StaleHandle;
     const raw = try readBin(gpa, io, self.dir, path);
+    // R7: category must match the handle before we touch the payload. Both are
+    // the raw 16-bit type tag (`RuntimeHeader.asset_type` / `AssetHandle.type_tag`).
+    if (raw.header.asset_type != handle.type_tag) {
+        gpa.free(raw.bin);
+        return error.AssetTypeMismatch;
+    }
     if (self.payloads.getPtr(handle.index)) |p| {
         gpa.free(p.bin);
         p.* = .{ .header = raw.header, .bin = raw.bin };
@@ -408,4 +415,70 @@ test "finish under payload-reservation OOM allocates no handle and frees the buf
     // No handle allocated; the buffer was freed (a stranded `bin` would trip the
     // testing allocator's leak detection at scope end).
     try std.testing.expectEqual(@as(usize, 0), loader.registry.liveCount());
+}
+
+test "reload with a mismatched asset_type returns AssetTypeMismatch and keeps the old payload" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const H = struct {
+        fn build(a: std.mem.Allocator, at: format.AssetType, body: []const u8) ![]u8 {
+            const header = RuntimeHeader.init(.{
+                .asset_type = at,
+                .metadata_offset = format.header_size,
+                .metadata_size = 0,
+                .data_offset = format.header_size,
+                .data_size = @intCast(body.len),
+                .hash = hash.u64Of(body),
+            });
+            const buf = try a.alloc(u8, format.header_size + body.len);
+            const hb = header.toBytes();
+            @memcpy(buf[0..format.header_size], &hb);
+            @memcpy(buf[format.header_size..], body);
+            return buf;
+        }
+        fn writeFile(i: std.Io, dir: std.Io.Dir, name: []const u8, bin: []const u8) !void {
+            const file = try dir.createFile(i, name, .{ .truncate = true });
+            defer file.close(i);
+            try file.writeStreamingAll(i, bin);
+        }
+    };
+
+    var loader = Loader.init(tmp.dir);
+    defer loader.deinit(gpa);
+
+    // Load a texture asset.
+    const tex_payload = "texture-pixels";
+    {
+        const bin = try H.build(gpa, .texture, tex_payload);
+        defer gpa.free(bin);
+        try H.writeFile(io, tmp.dir, "tex.bin", bin);
+    }
+    const handle = try loader.load(gpa, io, "tex.bin");
+    defer loader.release(gpa, handle) catch {};
+    try std.testing.expectEqualSlices(u8, tex_payload, loader.get(handle).?);
+
+    // Write a .bin of a DIFFERENT category (mesh) and reload the texture handle
+    // from it — R7 rejects the category mismatch before swapping the payload.
+    {
+        const bin = try H.build(gpa, .mesh, "mesh-verts");
+        defer gpa.free(bin);
+        try H.writeFile(io, tmp.dir, "mesh.bin", bin);
+    }
+    try std.testing.expectError(error.AssetTypeMismatch, loader.reload(gpa, io, handle, "mesh.bin"));
+
+    // The old texture payload is untouched — the reject happened before any swap.
+    try std.testing.expectEqualSlices(u8, tex_payload, loader.get(handle).?);
+
+    // A same-category reload still succeeds.
+    {
+        const bin = try H.build(gpa, .texture, "new-pixels");
+        defer gpa.free(bin);
+        try H.writeFile(io, tmp.dir, "tex2.bin", bin);
+    }
+    try loader.reload(gpa, io, handle, "tex2.bin");
+    try std.testing.expectEqualSlices(u8, "new-pixels", loader.get(handle).?);
 }

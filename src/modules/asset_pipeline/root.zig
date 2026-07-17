@@ -28,7 +28,14 @@
 /// M1.1.1-HF1 (D6) bumped 1 → 2: `Loader.LoadError` gained `MalformedAsset`
 /// (runtime `.bin` header + data-hash validation), which widens the pinned
 /// `load` / `reload` error sets.
-pub const WELD_ASSET_PIPELINE_PROTOCOL_VERSION: u32 = 2;
+///
+/// M1.1.1-HF3 (R7 + R9) bumped 2 → 3, covering two pinned error-set widenings:
+/// `Loader.reload` gained `error.AssetTypeMismatch` (R7 — the re-read `.bin`'s
+/// category must match the handle), and `Registry.Error` gained
+/// `error.ReferenceCountOverflow` (R9 — `retain` at a saturated `u32` refcount).
+/// The `AssetHandle` layout is untouched (generation stays `u16`; R9's
+/// generation-wrap slot retirement lives inside `Registry.freeSlot`).
+pub const WELD_ASSET_PIPELINE_PROTOCOL_VERSION: u32 = 3;
 
 /// On-disk format surfaces: `AssetType`, the runtime `.bin` header, the
 /// intermediate `.asset.etch` document model + reader/writer.

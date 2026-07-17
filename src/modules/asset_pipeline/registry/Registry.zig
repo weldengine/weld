@@ -49,6 +49,10 @@ pub const Error = error{
     StaleHandle,
     /// The slot table or free list could not grow.
     OutOfMemory,
+    /// R9 (M1.1.1-HF3): `retain` would overflow the `u32` refcount (it is already
+    /// at `maxInt(u32)`). Widens the pinned `Registry.Error` — a change tracked by
+    /// `WELD_ASSET_PIPELINE_PROTOCOL_VERSION`.
+    ReferenceCountOverflow,
 };
 
 /// A resolved view of a live slot returned by `resolve`.
@@ -127,10 +131,13 @@ pub fn refCount(self: *const Registry, handle: AssetHandle) ?u32 {
 }
 
 /// Add a strong reference. Errors `error.StaleHandle` if the handle no
-/// longer resolves.
+/// longer resolves, or `error.ReferenceCountOverflow` if the `u32` refcount is
+/// saturated (R9 — guarded before the increment so the count is never wrapped).
 pub fn retain(self: *Registry, handle: AssetHandle) Error!void {
     const idx = self.liveIndex(handle) orelse return error.StaleHandle;
-    self.slots.items[idx].refcount += 1;
+    const slot = &self.slots.items[idx];
+    if (slot.refcount == std.math.maxInt(u32)) return error.ReferenceCountOverflow;
+    slot.refcount += 1;
 }
 
 /// Drop a strong reference; unloads the slot (bumping its generation) when
@@ -180,15 +187,29 @@ fn liveIndex(self: *const Registry, handle: AssetHandle) ?u32 {
 }
 
 /// Mark a slot dead, bump its generation, and push it onto the free list.
-/// Generation arithmetic wraps — only at risk after 64 K reuses of the same
-/// slot, past the Phase 0 horizon.
 ///
-/// Reserve-then-mutate: the free-list capacity is grown *before* the slot is
-/// touched, so an `OutOfMemory` leaves the slot untouched (alive, refcount
-/// preserved) and the caller (`release`/`unload`) retryable.
+/// R9 (M1.1.1-HF3): a slot whose generation would WRAP is PERMANENTLY retired —
+/// marked dead but never returned to the free list. Recycling it would reset the
+/// generation to 0 and let a stale handle (generation 0) resolve against a fresh
+/// asset (the ABA hazard). This is a deliberate, bounded, documented leak: one
+/// slot index per 65 535 reuses of that same slot. Generation stays `u16` —
+/// `AssetHandle` is a FROZEN `packed struct(u64)` (C0.5) with no spare bits, so
+/// widening it is impossible without breaking the frozen layout; a wider
+/// generation would ride a future (protocol-bumped) `AssetHandle` change.
+///
+/// Reserve-then-mutate: the non-retiring path grows the free-list capacity
+/// *before* the slot is touched, so an `OutOfMemory` leaves the slot untouched
+/// (alive, refcount preserved) and the caller (`release`/`unload`) retryable. The
+/// retiring path allocates nothing (it never pushes to the free list).
 fn freeSlot(self: *Registry, gpa: std.mem.Allocator, idx: u32) Error!void {
-    try self.free_indices.ensureUnusedCapacity(gpa, 1);
     const slot = &self.slots.items[idx];
+    if (slot.generation == std.math.maxInt(u16)) {
+        // Retire permanently: dead, generation left saturated, never recycled.
+        slot.alive = false;
+        slot.refcount = 0;
+        return;
+    }
+    try self.free_indices.ensureUnusedCapacity(gpa, 1);
     slot.alive = false;
     slot.refcount = 0;
     slot.generation +%= 1;
@@ -322,4 +343,39 @@ test "release at refcount 1 under OOM leaves the slot alive and retryable" {
 
     const h2 = try reg.alloc(gpa, .mesh);
     try std.testing.expectEqual(h.index, h2.index); // slot recycled
+}
+
+test "retain at maxInt refcount returns ReferenceCountOverflow" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    const h = try reg.alloc(gpa, .texture);
+    // Saturate the refcount directly (no public API reaches maxInt in a test).
+    reg.slots.items[h.index].refcount = std.math.maxInt(u32);
+
+    try std.testing.expectError(error.ReferenceCountOverflow, reg.retain(h));
+    // The count is unchanged — the guard runs before the increment.
+    try std.testing.expectEqual(@as(u32, std.math.maxInt(u32)), reg.refCount(h).?);
+}
+
+test "a slot at generation maxInt is retired, not recycled" {
+    const gpa = std.testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+
+    const h = try reg.alloc(gpa, .texture); // slot index 0, generation 0
+    // Force the generation to the wrap boundary, then free it: the slot must be
+    // permanently retired (dead, not returned to the free list).
+    reg.slots.items[h.index].generation = std.math.maxInt(u16);
+    try reg.freeSlot(gpa, h.index);
+
+    try std.testing.expect(!reg.isAlive(h)); // old handle is stale
+    try std.testing.expectEqual(@as(usize, 0), reg.free_indices.items.len); // not recycled
+
+    // A fresh alloc must NOT reuse the retired slot — it appends a new one.
+    const h2 = try reg.alloc(gpa, .mesh);
+    try std.testing.expect(h2.index != h.index);
+    // The retired index stays dead forever; a stale handle to it never resolves.
+    try std.testing.expect(!reg.isAlive(h));
 }
