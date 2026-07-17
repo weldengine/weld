@@ -402,20 +402,23 @@ pub const Scheduler = struct {
 
         var sum_chunks: u64 = 0;
         var sum_parks: u64 = 0;
+        var sum_parks_entered: u64 = 0;
         var sum_steals_a: u64 = 0;
         var sum_steals_s: u64 = 0;
         for (self.workers, 0..) |*w, i| {
             const snap = w.stats.snapshot();
             sum_chunks += snap.chunks_processed;
             sum_parks += snap.parks_completed;
+            sum_parks_entered += snap.parks_entered;
             sum_steals_a += snap.steals_attempted;
             sum_steals_s += snap.steals_succeeded;
             try writer.print(
-                "  worker[{d:>2}] id={d:>2} chunks={d:>8} parks={d:>6} steals_a={d:>8} steals_s={d:>8} work_ns={d}\n",
+                "  worker[{d:>2}] id={d:>2} chunks={d:>8} parks_entered={d:>6} parks={d:>6} steals_a={d:>8} steals_s={d:>8} work_ns={d}\n",
                 .{
                     i,
                     w.id,
                     snap.chunks_processed,
+                    snap.parks_entered,
                     snap.parks_completed,
                     snap.steals_attempted,
                     snap.steals_succeeded,
@@ -423,9 +426,13 @@ pub const Scheduler = struct {
                 },
             );
         }
+        // `parks` = parks_completed (wake-ups); `parks_entered` = park entries.
+        // Invariant `parks <= parks_entered` holds at every observation
+        // (`WorkerStats.snapshot` reads completed before entered); a live
+        // `parks_entered > parks` means workers are currently parked.
         try writer.print(
-            "  totals: chunks={d} parks={d} steals_a={d} steals_s={d}\n",
-            .{ sum_chunks, sum_parks, sum_steals_a, sum_steals_s },
+            "  totals: chunks={d} parks_entered={d} parks={d} steals_a={d} steals_s={d} (invariant parks<=parks_entered: {any})\n",
+            .{ sum_chunks, sum_parks_entered, sum_parks, sum_steals_a, sum_steals_s, sum_parks <= sum_parks_entered },
         );
     }
 };
@@ -572,6 +579,10 @@ fn workerMain(sched: *Scheduler, worker_idx: u32) void {
             continue;
         }
         // Truly idle — park on the wake-up condvar.
+        // E9 STATS-ONLY: count the park entry under `sched.mu`, immediately
+        // before the wait — the mirror of `parks_completed` after the wake. The
+        // park/wake logic itself is unchanged.
+        _ = self.stats.parks_entered.fetchAdd(1, .acq_rel);
         sched.work_available.waitUncancelable(sched.io, &sched.mu);
         _ = self.stats.parks_completed.fetchAdd(1, .acq_rel);
         const wake_snapshot = unpack(sched.gen_and_n.load(.acquire));

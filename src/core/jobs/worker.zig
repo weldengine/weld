@@ -64,6 +64,18 @@ pub const WorkerStats = struct {
     steals_attempted: std.atomic.Value(u64) = .init(0),
     steals_succeeded: std.atomic.Value(u64) = .init(0),
     work_duration_ns: std.atomic.Value(u64) = .init(0),
+    /// Number of times the worker ENTERED the parked path — incremented under
+    /// the park mutex immediately BEFORE `work_available.waitUncancelable`, the
+    /// mirror of `parks_completed` (which counts the wake-ups after the wait
+    /// returns). Because entered is always bumped before completed, the
+    /// invariant `parks_completed <= parks_entered` holds at every observation
+    /// (`snapshot` reads completed first — see below); a strict
+    /// `parks_entered > parks_completed` means at least one worker has entered a
+    /// park it has not yet woken from. Once a dispatched wave has drained (no
+    /// park↔wake churn — the state the E9 test relies on) that is a worker
+    /// parked right now. The M1.1.1-HF3 E9 deterministic parking test observes
+    /// this in place of a fixed sleep window.
+    parks_entered: std.atomic.Value(u64) = .init(0),
     /// Number of times the worker successfully completed a
     /// `work_available.waitUncancelable` (i.e. actually slept rather
     /// than busy-yielded). Used by the E5a "idle workers sleep"
@@ -76,16 +88,24 @@ pub const WorkerStats = struct {
         steals_attempted: u64,
         steals_succeeded: u64,
         work_duration_ns: u64,
+        parks_entered: u64,
         parks_completed: u64,
     };
 
     pub fn snapshot(self: *const WorkerStats) Snapshot {
+        // Read `parks_completed` BEFORE `parks_entered` so the snapshot always
+        // satisfies `parks_completed <= parks_entered`, even if a worker cycles
+        // park→wake between the two atomic loads (entered is bumped before
+        // completed under the park mutex, so reading completed first can never
+        // observe a completed value that outruns the later-read entered value).
+        const completed = self.parks_completed.load(.acquire);
         return .{
             .chunks_processed = self.chunks_processed.load(.acquire),
             .steals_attempted = self.steals_attempted.load(.acquire),
             .steals_succeeded = self.steals_succeeded.load(.acquire),
             .work_duration_ns = self.work_duration_ns.load(.acquire),
-            .parks_completed = self.parks_completed.load(.acquire),
+            .parks_entered = self.parks_entered.load(.acquire),
+            .parks_completed = completed,
         };
     }
 
@@ -94,6 +114,7 @@ pub const WorkerStats = struct {
         self.steals_attempted.store(0, .release);
         self.steals_succeeded.store(0, .release);
         self.work_duration_ns.store(0, .release);
+        self.parks_entered.store(0, .release);
         self.parks_completed.store(0, .release);
     }
 };

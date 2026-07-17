@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const weld_core = @import("weld_core");
+const watchdog = @import("test_watchdog");
 
 const World = weld_core.ecs.world.World;
 const Transform = weld_core.ecs.world.Transform;
@@ -83,12 +84,17 @@ test "on_add observer is called during flush after add_component" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "on_add observer is called during flush after add_component");
+    defer wd.disarm();
+
     var world = World.init();
     defer world.deinit(gpa);
 
     var jobs_sched = try Scheduler.init(gpa, io);
     try jobs_sched.start();
     defer jobs_sched.deinit(gpa);
+    wd.setScheduler(&jobs_sched);
 
     var sys = SystemScheduler.init();
     defer sys.deinit(gpa);
@@ -157,12 +163,17 @@ test "on_despawned observer fires before chunk slot is reused" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "on_despawned observer fires before chunk slot is reused");
+    defer wd.disarm();
+
     var world = World.init();
     defer world.deinit(gpa);
 
     var jobs_sched = try Scheduler.init(gpa, io);
     try jobs_sched.start();
     defer jobs_sched.deinit(gpa);
+    wd.setScheduler(&jobs_sched);
 
     var sys = SystemScheduler.init();
     defer sys.deinit(gpa);
@@ -241,12 +252,17 @@ test "observer-issued structural mutations are queued for the next flush" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "observer-issued structural mutations are queued for the next flush");
+    defer wd.disarm();
+
     var world = World.init();
     defer world.deinit(gpa);
 
     var jobs_sched = try Scheduler.init(gpa, io);
     try jobs_sched.start();
     defer jobs_sched.deinit(gpa);
+    wd.setScheduler(&jobs_sched);
 
     var sys = SystemScheduler.init();
     defer sys.deinit(gpa);

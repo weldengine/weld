@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const weld_core = @import("weld_core");
+const watchdog = @import("test_watchdog");
 
 const World = weld_core.ecs.world.World;
 const Transform = weld_core.ecs.world.Transform;
@@ -34,6 +35,14 @@ test "scheduler.dispatch does zero allocations across a full dispatch cycle" {
     const gpa = counting.allocator();
     const io = std.testing.io;
 
+    // Watchdog armed OUTSIDE the measured no-allocation region below: it uses
+    // `io` (not the counting allocator `gpa`), and both arm and the deferred
+    // disarm run before/after the `counting.snapshot()` window, so they do not
+    // perturb the measured delta.
+    var wd: watchdog.Watchdog = .{};
+    try wd.arm(io, watchdog.default_timeout_ns, "scheduler.dispatch does zero allocations across a full dispatch cycle");
+    defer wd.disarm();
+
     var world = World.init();
     defer world.deinit(gpa);
 
@@ -47,6 +56,7 @@ test "scheduler.dispatch does zero allocations across a full dispatch cycle" {
     var sched = try Scheduler.init(gpa, io);
     try sched.start();
     defer sched.deinit(gpa);
+    wd.setScheduler(&sched);
 
     var query = try world.query(gpa);
     defer query.deinit(gpa);

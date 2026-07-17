@@ -11,13 +11,18 @@
 //! - `test "worker count matches CPU topology at startup"` —
 //!   `Scheduler.init` reports a worker count equal to
 //!   `std.Thread.getCpuCount() catch default_worker_count`.
-//! - `test "idle workers sleep instead of busy-yielding"` — method
-//!   (a) from the brief: an observable counter
-//!   (`WorkerStats.parks_completed`) increments every time a worker
-//!   returns from `work_available.waitUncancelable`. After two
-//!   dispatches with no concurrent work, total parks_completed
-//!   across workers is strictly greater than zero — proof that
-//!   workers reached the parked path rather than busy-yielding.
+//! - `test "workers deterministically park then wake on dispatch"` —
+//!   M1.1.1-HF3 E9 deterministic replacement for the former fixed
+//!   40×50 ms window (which flaked / hung under CI load). Two phases,
+//!   each polled against the scheduler's park stats, bounded only by
+//!   the 5 s watchdog:
+//!     (a) after one dispatch, poll until `Σ parks_entered >
+//!         Σ parks_completed` — at least one worker is parked RIGHT
+//!         NOW (it incremented `parks_entered` under the park mutex and
+//!         is blocked in `waitUncancelable`, not yet woken);
+//!     (b) capture the completed count, dispatch again, poll until
+//!         `Σ parks_completed` strictly grows — the park→wake cycle is
+//!         proven. No wall-clock sleep window is used.
 
 const std = @import("std");
 const weld_core = @import("weld_core");
@@ -138,12 +143,12 @@ test "worker count matches CPU topology at startup" {
     try std.testing.expect(sched.workerCount() >= 1);
 }
 
-test "idle workers sleep instead of busy-yielding" {
+test "workers deterministically park then wake on dispatch" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
     var wd: watchdog.Watchdog = .{};
-    try wd.arm(io, watchdog.default_timeout_ns, "idle workers sleep instead of busy-yielding");
+    try wd.arm(io, watchdog.default_timeout_ns, "workers deterministically park then wake on dispatch");
     defer wd.disarm();
 
     var world = World.init();
@@ -163,37 +168,55 @@ test "idle workers sleep instead of busy-yielding" {
     var query = try world.query(gpa);
     defer query.deinit(gpa);
 
-    // Bounded wait for the sleep/wake path to be exercised. Each cycle:
-    // dispatch a wave, let idle workers reach the parked path, then the next
-    // cycle's dispatch wakes them (`parks_completed` increments on wake), and
-    // we re-check. The exact moment a worker parks is timing-dependent, so a
-    // single dispatch→sleep→dispatch can miss it under CI load — the
-    // pre-M1.0.1 one-shot `total_parks > 0` assertion flaked for exactly this
-    // reason. Retrying up to a sane bound removes the flake.
+    // Phase (a) — observe a worker parked RIGHT NOW.
     //
-    // This is NOT a mask: if the bound is reached with zero parks observed,
-    // the sleep/wake path is genuinely broken (workers busy-yield instead of
-    // parking) and the test FAILS below. The bound (~2 s) sits well under the
-    // 5 s watchdog armed above.
-    var total_parks: u64 = 0;
-    var attempt: u32 = 0;
-    const max_attempts: u32 = 40;
-    while (attempt < max_attempts) : (attempt += 1) {
-        try sched.dispatch(&query, idleBody, .{});
-        // Grace > the worker spin window (1024 yields) so idle workers reach
-        // the parked path before the next cycle's dispatch wakes them.
-        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
-
+    // One dispatch of trivial work; idle workers then spin briefly and park on
+    // `work_available.waitUncancelable`, incrementing `parks_entered` under the
+    // park mutex before the wait. Poll until `Σ parks_entered > Σ parks_completed`:
+    // that strict inequality can only hold when a worker has entered a wait it
+    // has not yet woken from. The per-snapshot invariant
+    // `parks_completed <= parks_entered` (snapshot reads completed before entered)
+    // rules out a sampling artefact; and because this dispatch's wave has drained
+    // (no park↔wake churn), that entered-not-woken worker is a worker parked now.
+    // `std.Thread.yield` between polls; the 5 s watchdog armed above is
+    // the hard upper bound (a genuine regression — workers never parking — hangs
+    // here and the watchdog dumps the scheduler state, rather than a silent CI
+    // timeout).
+    try sched.dispatch(&query, idleBody, .{});
+    while (true) {
+        std.Thread.yield() catch {};
         const stats = try sched.snapshotStats(gpa);
         defer gpa.free(stats);
-        total_parks = 0;
-        for (stats) |s| total_parks += s.parks_completed;
-        if (total_parks > 0) break;
+        var entered: u64 = 0;
+        var completed: u64 = 0;
+        for (stats) |s| {
+            entered += s.parks_entered;
+            completed += s.parks_completed;
+        }
+        if (entered > completed) break; // at least one worker is parked now
     }
 
-    // A park must have been observed within the bound — otherwise the
-    // sleep/wake path regressed (workers never park). Fail loud, never pass.
-    try std.testing.expect(total_parks > 0);
+    // Phase (b) — prove the wake side of the cycle.
+    //
+    // Capture the current completed count (a worker is parked, so nothing raises
+    // it until the next dispatch), dispatch again, and poll until
+    // `Σ parks_completed` strictly grows — a parked worker returned from
+    // `waitUncancelable`.
+    var completed_before: u64 = 0;
+    {
+        const stats = try sched.snapshotStats(gpa);
+        defer gpa.free(stats);
+        for (stats) |s| completed_before += s.parks_completed;
+    }
+    try sched.dispatch(&query, idleBody, .{});
+    while (true) {
+        std.Thread.yield() catch {};
+        const stats = try sched.snapshotStats(gpa);
+        defer gpa.free(stats);
+        var completed: u64 = 0;
+        for (stats) |s| completed += s.parks_completed;
+        if (completed > completed_before) break; // a park→wake completed
+    }
 }
 
 fn idleBody(chunk: *Chunk) void {
