@@ -442,6 +442,10 @@ pub fn create(device: *Device, label: ?[]const u8) types.Error!*CommandEncoder {
     };
     var bufs: [1]*vk.CommandBuffer = undefined;
     device.vk_device.allocateCommandBuffers(&alloc_ci, &bufs) catch return error.BackendInternal;
+    // R14 (M1.1.1-HF3): free the command buffer back to the pool if anything below
+    // fails (beginCommandBuffer or the encoder allocation) — otherwise it leaks,
+    // since only `destroy` frees it and no encoder is returned.
+    errdefer device.vk_device.freeCommandBuffers(device.command_pool, &bufs);
 
     const begin: vk.CommandBufferBeginInfo = .{
         .flags = .empty,

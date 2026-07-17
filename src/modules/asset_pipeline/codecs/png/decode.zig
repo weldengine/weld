@@ -101,6 +101,14 @@ const Header = struct {
 };
 
 /// Decode `src` (a complete PNG file) to an RGBA8 `Image`.
+///
+/// Peak transient allocation is ~2×(width×height×4) + IDAT (R15). The inflated
+/// `raw` stream is freed the instant deinterlacing produces `samples`, before the
+/// RGBA `pixels` buffer is allocated — so `raw` and `pixels` never coexist. The
+/// live pair is either `raw`+`samples` (during deinterlace) or `samples`+`pixels`
+/// (during RGBA conversion), each ≤ 2×(width×height×4); the accumulated IDAT
+/// bytes stay resident until return. The prior form kept `raw` alive to the end,
+/// peaking at ~3×.
 pub fn decode(gpa: std.mem.Allocator, src: []const u8) Error!Image {
     if (src.len < signature.len or !std.mem.eql(u8, src[0..signature.len], &signature)) {
         return error.BadSignature;
@@ -143,7 +151,10 @@ pub fn decode(gpa: std.mem.Allocator, src: []const u8) Error!Image {
     // exactly (short → `Truncated`).
     const expected_raw = try expectedRawSize(h, channels);
     const raw = try zlib.decompress(gpa, idat.items, expected_raw);
-    defer gpa.free(raw);
+    // Freed the instant deinterlacing is done (before the RGBA allocation, R15);
+    // the flag keeps the error path safe if deinterlace fails first.
+    var raw_freed = false;
+    defer if (!raw_freed) gpa.free(raw);
     if (raw.len != expected_raw) return error.Truncated;
 
     const sample_count = try mulSize(try mulSize(h.width, h.height), channels);
@@ -155,6 +166,11 @@ pub fn decode(gpa: std.mem.Allocator, src: []const u8) Error!Image {
     } else {
         try deinterlaceAdam7(gpa, h, channels, raw, samples);
     }
+
+    // R15: `raw` is dead once `samples` holds the deinterlaced image — free it
+    // before allocating the RGBA buffer so the two never coexist (~2× peak).
+    gpa.free(raw);
+    raw_freed = true;
 
     const pixels = try gpa.alloc(u8, try mulSize(try mulSize(h.width, h.height), 4));
     errdefer gpa.free(pixels);
