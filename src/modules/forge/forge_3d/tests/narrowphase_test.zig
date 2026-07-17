@@ -59,6 +59,21 @@ test "support functions return extremal points" {
     );
     try testing.expect(rp_rot.supportB(box, vr(1, 0, 0)).approxEql(vr(2, 1, 3), tol));
 
+    // Segment core (capsule) through a non-trivial relative rotation — the real
+    // capsule GJK path the box/point cases above never exercise: inverse-rotate
+    // the direction into B-local, sign-of-local-Y endpoint select, map back. B
+    // is `seg`, rotated +90° about +Z relative to A. For dir = +X in A's frame,
+    // the direction inverse-rotates to B-local (0,−1,0) ⇒ B-local support
+    // (0,−0.9,0) ⇒ mapped back to A ((x,y,z)→(−y,x,z)) = (0.9,0,0).
+    const rp_seg = RelativePose.init(
+        Vec3r.zero,
+        Quatr.identity,
+        Vec3r.zero,
+        Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0),
+    );
+    try testing.expect(rp_seg.supportB(seg, vr(1, 0, 0)).approxEql(vr(0.9, 0, 0), tol));
+    try testing.expect(rp_seg.supportB(seg, vr(-1, 0, 0)).approxEql(vr(-0.9, 0, 0), tol));
+
     // Through a non-trivial rotation on A *and* a translation, exercising the
     // full `pos_rel = conj(rot_a)·(pos_b − pos_a)` formula. Both bodies rotated
     // +90° about +Y ⇒ rot_rel = identity; pos_b − pos_a = (0,0,5), inverse-
