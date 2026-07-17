@@ -172,6 +172,11 @@ const Validator = struct {
                 const schema_index = try readU32(self.bytes, off);
                 if (schema_index >= h.schema_count) return error.MalformedScene;
                 const data_size = try readU32(self.bytes, try add(off, 4));
+                // R10(a): the resource blob must be EXACTLY the component size — the
+                // loader memcpys `data_size` bytes into a `componentSize`-byte slot
+                // behind a `debug.assert` stripped in ReleaseFast, so a mismatch is
+                // an out-of-bounds write there.
+                if (data_size != @as(u32, try self.schemaSize(schema_index))) return error.MalformedScene;
                 const data_end = try add(try add(off, 8), data_size);
                 const sf_count_end = try add(data_end, 4);
                 if (sf_count_end > ar) return error.MalformedScene;
@@ -182,6 +187,10 @@ const Validator = struct {
                 var s: usize = 0;
                 while (s < sf_count) : (s += 1) {
                     const pair = try add(sf_count_end, try mul(s, 8));
+                    // R10(b): the string-field offset is only a loader lookup key,
+                    // but bound it inside the blob anyway (defense in depth).
+                    const field_off = try readU32(self.bytes, pair);
+                    if (try add(field_off, 4) > data_size) return error.MalformedScene;
                     try self.checkStringRef(try readU32(self.bytes, try add(pair, 4)));
                 }
                 off = block_end;
@@ -201,12 +210,22 @@ const Validator = struct {
                 const sidx_off = try add(off, 4);
                 const ec_off = try add(sidx_off, try mul(cc, 4));
                 if (try add(ec_off, 4) > ex) return error.MalformedScene;
-                // Schema indices in range.
+                // Schema indices in range AND strictly increasing (R11(a)): the
+                // on-disk schema mask is normatively "sorted ascending"
+                // (`engine-scene-serialization.md` §4), so strict monotonicity also
+                // rules out a duplicate ComponentId hiding in one archetype.
+                // Extension prefabs run the same `openVerified` → `structure`, so
+                // this covers their archetype blocks too.
                 {
                     var c: usize = 0;
+                    var prev_si: ?u32 = null;
                     while (c < cc) : (c += 1) {
                         const si = try readU32(self.bytes, try add(sidx_off, try mul(c, 4)));
                         if (si >= h.schema_count) return error.MalformedScene;
+                        if (prev_si) |p| {
+                            if (si <= p) return error.MalformedScene;
+                        }
+                        prev_si = si;
                     }
                 }
                 const entity_count = try readU32(self.bytes, ec_off);
@@ -725,4 +744,72 @@ test "seeded mutation robustness: hash-fixed corrupt scenes never panic" {
         refixHash(buf);
         openAndValidate(buf) catch {};
     }
+}
+
+/// One archetype `[Pos(8,4), Tag(4,4)]`, one entity — for the R11(a) monotonic
+/// schema-index test. The block's `schema_indices` sit at a known offset.
+fn buildTwoCompScene(gpa: std.mem.Allocator, reg: *Registry) ![]u8 {
+    const pos = try registerPod(gpa, reg, "Pos", 8, 4); // id 0 → file schema index 0
+    const tag = try registerPod(gpa, reg, "Tag", 4, 4); // id 1 → file schema index 1
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const strings = try a.dupe([]const u8, &.{try a.dupe(u8, "E0")});
+    const uuids = try a.dupe([16]u8, &.{[_]u8{3} ** 16});
+    const col_pos = try a.alloc(u8, 8);
+    @memset(col_pos, 0);
+    const col_tag = try a.alloc(u8, 4);
+    @memset(col_tag, 0);
+    const ids = try a.dupe(format.ComponentId, &.{ pos, tag });
+    const cols = try a.dupe([]u8, &.{ col_pos, col_tag });
+    const ents = try a.dupe(format.EntityEntry, &.{.{ .name = 0, .uuid = 0, .parent_uuid = format.no_parent }});
+    const blocks = try a.dupe(format.ArchetypeBlock, &.{.{ .component_ids = ids, .entity_count = 1, .columns = cols, .entities = ents }});
+    var model: format.CookModel = .{ .strings = strings, .uuids = uuids, .resources = &.{}, .archetypes = blocks, .arena = arena };
+    defer model.deinit();
+    return writer.write(gpa, model, reg);
+}
+
+test "validator rejects bad resource data_size and string-field offset" {
+    const gpa = testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+    const base = try buildRichScene(gpa, &reg); // Settings resource: size 16, 1 string field
+    defer gpa.free(base);
+    const acc = try accessor_mod.Accessor.open(base);
+    const ro = acc.header.resources_offset;
+
+    // R10(a): data_size (@ resources_offset + 4) must equal the schema size (16).
+    inline for (.{ @as(u32, 15), @as(u32, 20) }) |bad_size| {
+        const buf = try gpa.dupe(u8, base);
+        defer gpa.free(buf);
+        std.mem.writeInt(u32, buf[ro + 4 ..][0..4], bad_size, .little);
+        refixHash(buf);
+        try testing.expectError(error.MalformedScene, openAndValidate(buf));
+    }
+    // R10(b): the string-field offset (first sf pair @ resources_offset + 8 +
+    // data_size(16) + 4 = +28) must satisfy offset + 4 <= data_size(16).
+    {
+        const buf = try gpa.dupe(u8, base);
+        defer gpa.free(buf);
+        std.mem.writeInt(u32, buf[ro + 28 ..][0..4], 20, .little); // 20 + 4 > 16
+        refixHash(buf);
+        try testing.expectError(error.MalformedScene, openAndValidate(buf));
+    }
+}
+
+test "validator rejects non-ascending / duplicate schema indices in an archetype" {
+    const gpa = testing.allocator;
+    var reg = Registry.init();
+    defer reg.deinit(gpa);
+    const base = try buildTwoCompScene(gpa, &reg);
+    defer gpa.free(base);
+    const acc = try accessor_mod.Accessor.open(base);
+    // Block @ archetypes_offset + 4: [cc=2 u32][sidx0 u32][sidx1 u32]…
+    // sidx1 lives at archetypes_offset + 12. Force it to equal sidx0 (0) — the
+    // mask is no longer strictly ascending.
+    const s1 = acc.header.archetypes_offset + 12;
+    const buf = try gpa.dupe(u8, base);
+    defer gpa.free(buf);
+    std.mem.writeInt(u32, buf[s1..][0..4], 0, .little);
+    refixHash(buf);
+    try testing.expectError(error.MalformedScene, openAndValidate(buf));
 }
