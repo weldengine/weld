@@ -570,16 +570,22 @@ pub fn gjk(
     }
     const dist = @sqrt(closest.dot(closest));
     // Contact-margin boundary: `.separated` only when the core distance exceeds
-    // `r_a + r_b` by more than GJK's convergence noise on `dist`. The margin is
-    // ABSOLUTE — `conv_k · floatEps(T) · coordScale`, where `coordScale` is the
-    // cores' coordinate scale (the absolute support magnitude, the scale of the
-    // `w = sa − sb` rounding error) — never a fraction of the radius: a
-    // radius-proportional margin (a fixed fraction of `r_sum`) grows without
-    // bound and is a collision margin beyond the core radius, out of scope (§32).
-    // The comparison is additive on the already-computed `dist`. The frozen
-    // convention keeps an exact inflated touch (`dist == r_sum`) shallow.
+    // `r_a + r_b` by more than GJK's accumulated rounding on `dist`. The margin is
+    // ABSOLUTE — `conv_k · floatEps(T) · coord_scale` — never a fraction of the
+    // radius: a radius-proportional margin grows without bound and is a collision
+    // margin beyond the core radius, out of scope (§32).
+    //
+    // `coord_scale` is a SYMMETRIC bound on the coordinate scale the `w = sa − sb`
+    // rounding accumulates over: the relative-centre distance plus each core's
+    // own extent (radius excluded). It is symmetric under an A/B swap BY
+    // CONSTRUCTION (all three terms are), so the classification is order-
+    // independent — unlike the terminal simplex's A-frame support magnitude,
+    // which after cancellation reflects only who is A and made a tangency read
+    // `.separated` in one order and `.shallow` in the other (P1c). The comparison
+    // is additive on the already-computed `dist`; the frozen convention keeps an
+    // exact inflated touch (`dist == r_sum`) shallow.
     const r_sum = shape_a.radius + shape_b.radius;
-    const coord_scale = @sqrt(maxSupportMagSq(T, verts[0..count]));
+    const coord_scale = pos_b.sub(pos_a).length() + coreExtent(T, shape_a) + coreExtent(T, shape_b);
     const contact_margin = conv_k * std.math.floatEps(T) * coord_scale;
     return .{
         .status = if (dist - r_sum > contact_margin) Res.Status.separated else Res.Status.shallow,
@@ -628,6 +634,19 @@ fn maxVertexMagSq(comptime T: type, verts: []const Simplex(T).Vertex) T {
     var m: T = 0;
     for (verts) |v| m = @max(m, v.w.dot(v.w));
     return m;
+}
+
+/// A core's maximal local support magnitude, radius EXCLUDED: 0 for a point
+/// (sphere), the half-height for a segment (capsule), `|half_extents|` for a
+/// box. Summed over both cores plus the relative-centre distance, it forms the
+/// SYMMETRIC coordinate-scale bound for the contact margin (`gjk`), so the
+/// shallow/separated decision is invariant under an A/B swap.
+fn coreExtent(comptime T: type, shape: SupportShape(T)) T {
+    return switch (shape.core) {
+        .point => 0,
+        .segment => |half_height| half_height,
+        .box => |half_extents| half_extents.length(),
+    };
 }
 
 /// Largest squared ABSOLUTE support magnitude across the current simplex — the
