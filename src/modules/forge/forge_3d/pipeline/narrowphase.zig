@@ -451,8 +451,10 @@ pub fn GjkResult(comptime T: type) type {
 ///
 /// Classification (brief Notes): if the terminal simplex encloses the origin the
 /// cores intersect → `.deep`; otherwise the converged core distance `dist` gives
-/// `.separated` iff `dist² > (r_a + r_b)²` strictly, else `.shallow` (exact
-/// inflated touch, `dist == r_a + r_b`, counts as shallow).
+/// `.separated` iff `dist − (r_a + r_b)` exceeds the contact margin (an absolute
+/// float-noise margin `conv_k · floatEps(T) · coordScale`, see the tolerance
+/// block), else `.shallow`. An exact inflated touch (`dist == r_a + r_b`), and a
+/// separation within that noise margin, both count as shallow.
 pub fn gjk(
     comptime T: type,
     shape_a: SupportShape(T),
