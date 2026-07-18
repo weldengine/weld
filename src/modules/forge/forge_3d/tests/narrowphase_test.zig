@@ -486,6 +486,29 @@ test "gjk near-contact pairs are not deep" {
         try testing.expect(r.status != .deep);
         try testing.expectEqual(GjkResult.Status.shallow, r.status);
     }
+    // (c) LARGE shape (the Fix 3b repro — the character-on-a-large-ground case).
+    // A point core ~1 cm outside a big ORIENTED box (half-extents 50, rotated 45°
+    // about +Z, nearest diamond edge at x = 0.01 ⇒ core distance 0.01). Fix 3's
+    // deep threshold was relative to the Minkowski-vertex magnitude, which scaled
+    // with the box's distant-face support and mis-classified this as `.deep`; Fix
+    // 3b's numerical-noise floor (scaled by machine epsilon, not shape size) does
+    // not.
+    {
+        const h: Real = 50;
+        const c: Real = h * std.math.sqrt2 + 0.01;
+        const r = narrowphase.gjk(
+            Real,
+            sphereShape(0),
+            vr(0, 0, 0),
+            Quatr.identity,
+            boxShape(h, h, h),
+            vr(c, 0, 0),
+            Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 4.0),
+        );
+        try testing.expect(r.status != .deep);
+        try testing.expectEqual(GjkResult.Status.separated, r.status);
+        try testing.expectApproxEqAbs(@as(Real, 0.01), r.distance, gjk_test_tol);
+    }
 }
 
 test "gjk deep pairs enclose the origin" {
@@ -515,6 +538,12 @@ test "gjk deep pairs enclose the origin" {
         g_rot.rotateVec3(vr(1, 0, 0)).add(g_trans),
         g_rot,
     );
+
+    // LARGE shape (Fix 3b non-regression): two boxes of half-extents 50 in
+    // franc overlap ⇒ `.deep`. The absolute noise floor must not weaken
+    // genuine enclosure at scale — deep here is proven by a non-degenerate
+    // origin-containing tetrahedron (`count == 4`), not by any distance test.
+    try checkDeep(boxShape(50, 50, 50), vr(0, 0, 0), Quatr.identity, boxShape(50, 50, 50), vr(1, 0, 0), Quatr.identity);
 }
 
 test "gjk is deterministic and iteration-bounded" {
