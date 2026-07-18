@@ -509,14 +509,18 @@ test "gjk near-contact pairs are not deep" {
         try testing.expectEqual(GjkResult.Status.separated, r.status);
         try testing.expectApproxEqAbs(@as(Real, 0.01), r.distance, gjk_test_tol);
     }
-    // (d) NOISE-LEVEL near contact (Fix P2 — the noise floor recalibration). The
-    // same oriented box-50, but with the point only 2e-5 outside — right above
-    // the f32 rounding-noise floor at this coordinate scale (~1.5e-5 in distance,
-    // ~machine-epsilon · 50). It must be `.separated`, neither a false `.deep`
-    // (the former 8×-eps floor mis-fired here) nor `.shallow`. At f64 the floor
-    // is ~9 orders tighter, so this is separated by a wide margin.
+    // (d) SMALL separation at LARGE scale (scale-robustness of the contact margin
+    // after the P1b `conv_k` 2→16 recalibration). The same oriented box-50 with
+    // the point 1e-3 outside — comfortably above the 16-ULP accumulated-rounding
+    // contact margin (~1.3e-4 at this coordinate scale ~70, ≈119 ULP·coordScale,
+    // past the 64-ULP no-false-shallow bound). It is `.separated`, neither `.deep`
+    // nor `.shallow`: the margin scales with the coordinate magnitude, so a
+    // discernible gap at scale 50 is not swallowed. A sub-margin gap here (e.g.
+    // the former 2e-5, ~2 ULP·coordScale) now correctly reads as touch —
+    // indistinguishable from tangency at f32 (cf. `gjk oriented tangency stays
+    // shallow`). At f64 the floor is ~9 orders tighter.
     {
-        const c: Real = 50 * std.math.sqrt2 + 2.0e-5;
+        const c: Real = 50 * std.math.sqrt2 + 1.0e-3;
         const r = narrowphase.gjk(
             Real,
             sphereShape(0),
@@ -548,6 +552,46 @@ test "gjk contact margin is absolute not radius-proportional" {
         const g_rot = Quatr.fromAxisAngle(vr(1, 2, 3).normalize(), 0.7);
         const g_trans = vr(-4, 7, 2);
         try checkSeparated(sphereShape(500), g_rot.rotateVec3(vr(0, 0, 0)).add(g_trans), g_rot, sphereShape(500), g_rot.rotateVec3(vr(1000.05, 0, 0)).add(g_trans), g_rot, 1000.05);
+    }
+}
+
+test "gjk oriented tangency stays shallow" {
+    // P1b (Codex review): the exact tangency the `conv_k = 2` margin mis-classified
+    // as `.separated`. GJK over-estimates `dist` by the ACCUMULATED rounding of its
+    // pipeline (7.15e-7 here, ≈ 2 ULP × coordScale, zero convergence residue) — the
+    // contact margin at `conv_k = 16` absorbs it; the pair is `.shallow` (touch).
+    {
+        const box_rot = Quatr.fromAxisAngle(vr(1, 2, 3).normalize(), 0.73);
+        const he = vr(0.7, 1.1, 0.6);
+        const p = vr(-3.6000001, 2.16, 0.65999997);
+        // Exact core distance = |p_local − clamp(p_local, −he, he)| in the box's
+        // local frame (box at origin), computed at `Real` precision so the sphere
+        // radius makes an EXACT tangency at BOTH f32 and f64. (The reviewer's
+        // hardcoded 2.8698921 is the f32 analytic value; recomputing keeps f64
+        // exact — a hardcoded f32 radius is off by ~1e-7 at f64, far above the f64
+        // margin, and would read `.separated`.) At f32 this ≈ 2.8698921.
+        const p_local = box_rot.conjugate().rotateVec3(p);
+        const dist_analytic = p_local.sub(p_local.max(he.neg()).min(he)).length();
+        const r = narrowphase.gjk(Real, boxShape(0.7, 1.1, 0.6), vr(0, 0, 0), box_rot, sphereShape(dist_analytic), p, Quatr.identity);
+        try testing.expectEqual(GjkResult.Status.shallow, r.status);
+    }
+    // Lock the calibration across scales: exact point–box tangencies at ~10 and
+    // ~100, oblique rotations. The point sits `gap` beyond the box's local +X
+    // face (`box_rot·(hx + gap, 0, 0)`), so the analytic core distance is exactly
+    // `gap`; the sphere radius `gap` makes it a tangency ⇒ `.shallow`.
+    {
+        const q = Quatr.fromAxisAngle(vr(2, -1, 3).normalize(), 1.1);
+        const hx: Real = 10;
+        const gap: Real = 4;
+        const r = narrowphase.gjk(Real, boxShape(hx, 8, 6), vr(0, 0, 0), q, sphereShape(gap), q.rotateVec3(vr(hx + gap, 0, 0)), Quatr.identity);
+        try testing.expectEqual(GjkResult.Status.shallow, r.status);
+    }
+    {
+        const q = Quatr.fromAxisAngle(vr(-1, 2, 1).normalize(), 0.6);
+        const hx: Real = 100;
+        const gap: Real = 7;
+        const r = narrowphase.gjk(Real, boxShape(hx, 70, 40), vr(0, 0, 0), q, sphereShape(gap), q.rotateVec3(vr(hx + gap, 0, 0)), Quatr.identity);
+        try testing.expectEqual(GjkResult.Status.shallow, r.status);
     }
 }
 
