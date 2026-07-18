@@ -466,18 +466,27 @@ pub fn gjk(
     const VertexT = Simplex(T).Vertex;
     const Res = GjkResult(T);
 
-    // Named tolerances — all RELATIVE, no absolute distance threshold, so the
-    // classification is scale-robust. `rel_tolerance`: the squared-distance
-    // progress test. `dup_rel_sq`: a support duplicates an existing simplex
-    // vertex (anti-cycling), relative to the simplex magnitude². `rel_deep`:
-    // origin reached on the simplex ⇒ deep, relative to the simplex magnitude.
-    // `contact_rel`: shallow/separated boundary margin — GJK distance is
-    // approximate, so an exact tangency must not tip into `.separated` (the
-    // frozen touch = shallow rule).
+    // Named tolerances. `rel_tolerance`: the squared-distance progress test,
+    // relative to the closest-point magnitude. `dup_rel_sq`: a support
+    // duplicates an existing simplex vertex (anti-cycling), relative to the
+    // simplex magnitude². `contact_rel`: the shallow/separated boundary margin —
+    // GJK distance is approximate, so an exact tangency must not tip into
+    // `.separated` (the frozen touch = shallow rule).
+    //
+    // `mach_eps` is a NUMERICAL-NOISE floor (≈ machine epsilon with an
+    // accumulation margin), NOT a geometric tolerance. `.deep` rests on
+    // geometric ENCLOSURE — a non-degenerate origin-containing tetrahedron
+    // (`res.count == 4`, degeneracy guarded relative to the tetra's own edges in
+    // `closestOriginTetra`); no shape-size-relative distance threshold ever
+    // decides intersection. `mach_eps` only catches the genuinely degenerate
+    // Minkowski configs that cannot form a tetrahedron (coincident / collinear
+    // cores) yet do reach the origin: there the closest point sits at the origin
+    // up to the rounding error of the `w = support_a − support_b` subtraction,
+    // whose scale is the ABSOLUTE support magnitude (see `degenerateOriginReached`).
     const rel_tolerance: T = if (T == f32) 1.0e-5 else 1.0e-10;
     const dup_rel_sq: T = if (T == f32) 1.0e-10 else 1.0e-20;
-    const rel_deep: T = if (T == f32) 1.0e-4 else 1.0e-7;
     const contact_rel: T = if (T == f32) 1.0e-4 else 1.0e-9;
+    const mach_eps: T = if (T == f32) 1.0e-6 else 1.0e-13;
 
     const relpose = RelativePose(T).init(pos_a, rot_a, pos_b, rot_b);
 
@@ -494,9 +503,10 @@ pub fn gjk(
 
     var iter: u32 = 0;
     while (iter < max_gjk_iterations) : (iter += 1) {
-        // Origin reached on the current simplex (relative to its magnitude) ⇒
-        // cores intersect ⇒ deep.
-        if (originEnclosed(T, verts[0..count], closest, rel_deep)) return deepResult(T, verts, count);
+        // A degenerate Minkowski config whose origin is genuinely reached (e.g.
+        // coincident cores whose simplex cannot grow into a tetrahedron) ⇒ deep.
+        // This is the numerical-noise early-out, NOT a geometric proximity test.
+        if (degenerateOriginReached(T, verts[0..count], closest, mach_eps)) return deepResult(T, verts, count);
 
         const w = minkowskiSupport(T, shape_a, relpose, shape_b, closest.neg());
 
@@ -526,9 +536,12 @@ pub fn gjk(
         }
         count = res.count;
 
-        // Origin strictly inside the (non-degenerate, cf. `closestOriginTetra`)
-        // tetrahedron, or reached on a lower feature (relative test) ⇒ deep.
-        if (res.count == 4 or originEnclosed(T, verts[0..count], closest, rel_deep)) return deepResult(T, verts, count);
+        // Deep by geometric ENCLOSURE: a non-degenerate tetrahedron containing
+        // the origin (`res.count == 4`, degeneracy guarded in `closestOriginTetra`)
+        // — no distance threshold on this path. The noise early-out additionally
+        // covers a degenerate lower feature that reached the origin exactly
+        // (coincident / collinear cores that never tetrahedralize).
+        if (res.count == 4 or degenerateOriginReached(T, verts[0..count], closest, mach_eps)) return deepResult(T, verts, count);
     }
 
     // Converged (or hit the iteration bound): reconstruct the closest point on
@@ -587,20 +600,42 @@ fn closestOnSimplex(comptime T: type, verts: []const Simplex(T).Vertex) Simplex(
 }
 
 /// Largest squared `w`-magnitude across the current simplex — the scale the
-/// relative deep / duplicate tests normalize against.
+/// anti-cycling duplicate test normalizes against (the Minkowski points are
+/// compared to one another, so their own magnitude is the right scale).
 fn maxVertexMagSq(comptime T: type, verts: []const Simplex(T).Vertex) T {
     var m: T = 0;
     for (verts) |v| m = @max(m, v.w.dot(v.w));
     return m;
 }
 
-/// Whether the origin lies on the current simplex to within a tolerance
-/// relative to the simplex magnitude — the scale-robust "cores intersect"
-/// signal. When every vertex is at the origin the threshold is 0, so `.deep`
-/// then requires `closest` to be exactly the origin.
-fn originEnclosed(comptime T: type, verts: []const Simplex(T).Vertex, closest: math.Vec(3, T), rel_deep: T) bool {
-    const mag = maxVertexMagSq(T, verts);
-    return closest.dot(closest) <= rel_deep * rel_deep * mag;
+/// Largest squared ABSOLUTE support magnitude across the current simplex — the
+/// coordinate scale of the `w = support_a − support_b` subtraction, hence the
+/// scale of its floating-point rounding error. This is the scale the
+/// numerical-noise deep test normalizes against — deliberately NOT
+/// `maxVertexMagSq` (the `w` magnitude): a large shape whose face is far from
+/// the origin has a large `w` magnitude, so a `w`-relative threshold would
+/// mistake mere proximity to that distant face for an enclosure (the residual
+/// Fix 3b removes).
+fn maxSupportMagSq(comptime T: type, verts: []const Simplex(T).Vertex) T {
+    var m: T = 0;
+    for (verts) |v| {
+        m = @max(m, v.support_a.dot(v.support_a));
+        m = @max(m, v.support_b.dot(v.support_b));
+    }
+    return m;
+}
+
+/// Whether the origin is reached on the current simplex to within numerical
+/// NOISE (≈ machine epsilon scaled by the absolute support magnitude) — the
+/// scale-robust signal for a degenerate Minkowski config that cannot be
+/// tetrahedralized yet does contain the origin (coincident / collinear cores).
+/// This is deliberately NOT a geometric tolerance: genuine intersection is
+/// decided by enclosure (`res.count == 4`), never by this test. When every
+/// support sits at the origin the scale is 0, so the test then requires
+/// `closest` to be exactly the origin.
+fn degenerateOriginReached(comptime T: type, verts: []const Simplex(T).Vertex, closest: math.Vec(3, T), mach_eps: T) bool {
+    const scale_sq = maxSupportMagSq(T, verts);
+    return closest.dot(closest) <= mach_eps * mach_eps * scale_sq;
 }
 
 /// Whether `w` duplicates an existing simplex vertex to within a tolerance
