@@ -328,11 +328,13 @@ const ext_arsenal = // ArsenalModule: declares Weapon only
 
 // The `extensions:` clause + additive-conflict gate run through the SAME scene
 // `build` loop for `entity` and `instance` — these tests use `entity`. A conflict
-// (≥2 active extensions declaring the same component) is a FATAL cook error
+// — the entity's base + active extensions not conflict-free: (a) two extensions
+// declare the same component, (b) an extension re-declares a base/earlier-extension
+// component, or (c) the same extension is listed twice — is a FATAL cook error
 // (`E1797 ExtensionAdditiveConflict` → `error.ExtensionAdditiveConflict`), the
 // strictly-additive `extends` reject policy (M1.1.1-HF4). Disjoint components cook
-// cleanly. Together with the runtime `error.ExtensionComponentConflict` this
-// guarantees `cooked ⇒ loadable`.
+// cleanly. Together with the runtime rejects (`error.ExtensionComponentConflict`
+// for a/b, `error.ExtensionAlreadyActive` for c) this guarantees `cooked ⇒ loadable`.
 
 test "cook fails fatally when two extensions declare the same component" {
     const gpa = std.testing.allocator;

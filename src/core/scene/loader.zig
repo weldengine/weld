@@ -645,8 +645,8 @@ pub fn runtimeActivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, 
 /// just fires `on_detach` then drops the record.)
 ///
 /// Conflict policy: reject-on-conflict (see `activateExtension`) keeps the
-/// component set unambiguous — no two active extensions share a component — so
-/// removal needs no provenance tracking. Normative; see
+/// component set unambiguous — no two active declarants (base or extension) share a
+/// component — so removal needs no provenance tracking. Normative; see
 /// `engine-scene-serialization.md` (extension additive conflicts).
 pub fn deactivateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
     if (!world.hasEntityExtension(entity, name)) return error.ExtensionNotActive;
