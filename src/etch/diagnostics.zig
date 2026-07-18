@@ -361,7 +361,7 @@ pub const DiagnosticCode = enum {
     prefab_component_field_type_invalid, // M0.8 E7 — E1795 PrefabComponentFieldTypeInvalid
     prefab_component_redefined, // M0.8 E7 — E1796 PrefabComponentRedefined (RESERVED: variant/base component-shape merge is M0.9 runtime)
     prefab_remove_base_component, // M0.8 E7 — W1790 PrefabRemoveBaseComponent (RESERVED: no `remove` syntax in the §24.1 grammar)
-    extension_additive_conflict, // M1.0.18 → M1.1.1-HF4 — E1797 ExtensionAdditiveConflict (fatal cook error: ≥2 active extensions on an entity declare the same component; strictly-additive `extends` → reject, guaranteeing `cooked ⇒ loadable`; runtime backstop `error.ExtensionComponentConflict`)
+    extension_additive_conflict, // M1.0.18 → M1.1.1-HF4 — E1797 ExtensionAdditiveConflict (fatal cook error, strictly-additive `extends` → reject: (a) two extensions declare the same component, (b) an extension declares a component already carried by the base/an earlier extension, (c) the same extension is listed twice; guarantees `cooked ⇒ loadable`; runtime backstops `error.ExtensionComponentConflict` (a/b) / `error.ExtensionAlreadyActive` (c))
 
     // ── async / effects (E09xx, M1.0.11 — etch-resolver-types.md §9.2) ──
     async_call_in_non_async_context, // M1.0.11 E4 — E0901 AsyncCallInNonAsyncContext (async fn/method call, or `await`, in a non-async fn/rule)

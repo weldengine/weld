@@ -490,6 +490,24 @@ test "cook fails when the same extension is listed twice (form c)" {
     try std.testing.expectError(error.ExtensionAdditiveConflict, scene_cook.cookScene(gpa, src, mr.base(), null));
 }
 
+test "cook without a resolver still fails on a duplicate extension (form c)" {
+    const gpa = std.testing.allocator;
+    // `cook` always passes a null base_resolver. Form (c) is a PURE LEXICAL check
+    // and MUST fire even with no resolver — otherwise the scene cooks and fails at
+    // load with `error.ExtensionAlreadyActive`. The extension name need not resolve.
+    const src =
+        \\component Marker { v: i32 = 0 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["CombatModule", "CombatModule"]
+        \\    Marker { v: 1 }
+        \\  }
+        \\}
+    ;
+    try std.testing.expectError(error.ExtensionAdditiveConflict, scene_cook.cook(gpa, src, null));
+}
+
 test "cook skips a structurally-invalid but data-hash-correct extension (no panic)" {
     const gpa = std.testing.allocator;
     const orig = try prefabBytes(gpa, ext_merchant); // valid MerchantModule

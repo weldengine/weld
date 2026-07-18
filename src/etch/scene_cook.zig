@@ -129,12 +129,15 @@ pub const CookError = error{
     /// An `Entity` field references an entity name absent from the scene (M1.0.6
     /// E4 — intra-scene only; cross-scene references are a future milestone).
     UnresolvedCrossRef,
-    /// Two or more active extensions on one entity's `extensions:` clause declare
-    /// the same component (M1.1.1-HF4 — `E1797 ExtensionAdditiveConflict`). The
-    /// `extends` model is strictly additive: a shared component is rejected, never
-    /// resolved by list order. Fatal cook error → guarantees `cooked ⇒ loadable`
-    /// (the runtime backstop is `error.ExtensionComponentConflict`). See
-    /// `engine-scene-serialization.md` (extension additive conflicts).
+    /// The entity's {base components} ∪ {active extensions' components} is not
+    /// conflict-free (M1.1.1-HF4 — `E1797 ExtensionAdditiveConflict`). Three
+    /// rejected forms: (a) two extensions declare the same component; (b) an
+    /// extension declares a component already carried by the base (or an earlier
+    /// extension); (c) the same extension is listed twice. The `extends` model is
+    /// strictly additive — a conflict is rejected, never resolved by list order.
+    /// Fatal cook error → guarantees `cooked ⇒ loadable` (runtime backstops:
+    /// `error.ExtensionComponentConflict` for a/b, `error.ExtensionAlreadyActive`
+    /// for c). See `engine-scene-serialization.md` (extension additive conflicts).
     ExtensionAdditiveConflict,
     OutOfMemory,
 };
@@ -528,16 +531,18 @@ const Builder = struct {
     /// for c). Short-circuits on the FIRST conflict (no enumeration); the
     /// duplicate-extension form carries a distinct static message.
     ///
-    /// Forms (a) and (b) are UNIFIED: `counts` is seeded with the entity's BASE
-    /// components at 1 each, then each extension's components are counted; a name
-    /// reaching 2 is a conflict whether the earlier declarant was the base seed or
-    /// another extension. Extension component sets are resolved through the SAME
-    /// prefab path as `of`/`extends` (`base_resolver` → `.prefab.bin` → validated
-    /// accessor schema names). Best-effort: an extension whose name does not
-    /// resolve, whose bytes do not open, whose hash mismatches, or whose structure
-    /// is invalid is SKIPPED (the by-name clause; the runtime reject is the
-    /// invariant backstop for the resolver-less path). No `ext_len < 2` early-out —
-    /// a single extension can conflict with the base.
+    /// Structure (two passes): form (c) is a PURE LEXICAL pass over the extension
+    /// names, independent of any resolver — it fires even when `base_resolver` is
+    /// null (the public `cook` entry), so a duplicate never cooks into a load-time
+    /// `ExtensionAlreadyActive`. Forms (a)/(b) need each extension's component set
+    /// (resolved through the SAME prefab path as `of`/`extends`), so they run only
+    /// when a resolver is present and are UNIFIED by seeding `counts` with the
+    /// entity's BASE components at 1 each: a component name reaching 2 is a conflict
+    /// whether the earlier declarant was the base seed or another extension. No
+    /// `ext_len < 2` early-out — a single extension can conflict with the base.
+    /// Best-effort for a/b: an extension whose name does not resolve, whose bytes do
+    /// not open, whose hash mismatches, or whose structure is invalid is SKIPPED
+    /// (the runtime reject is the invariant backstop for the resolver-less path).
     /// See `engine-scene-serialization.md` (extension additive conflicts).
     fn detectExtensionConflicts(
         self: *Builder,
@@ -547,26 +552,37 @@ const Builder = struct {
         base_resolver: ?BaseResolver,
         diag_out: ?*[]const u8,
     ) CookError!void {
+        // Pass 1 — form (c): a PURE LEXICAL check, no resolver needed. The same
+        // extension listed twice is a fatal conflict; running BEFORE the resolver
+        // guard means `cook` (always a null resolver) still rejects it rather than
+        // cooking a scene that fails at load with `ExtensionAlreadyActive`.
+        {
+            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(self.gpa);
+            var k: u32 = 0;
+            while (k < ext_len) : (k += 1) {
+                const ext_name = self.ast.strings.slice(self.ast.scene_extensions.items[ext_start + k]);
+                const gop = try seen.getOrPut(self.gpa, ext_name);
+                if (gop.found_existing) return fail(diag_out, error.ExtensionAdditiveConflict, "the same extension is listed more than once in an entity's `extensions:` clause; the `extends` model is strictly additive — reject (E1797 ExtensionAdditiveConflict)");
+            }
+        }
+
+        // Forms (a)/(b) need the extensions' component sets (the prefab path). Without
+        // a resolver they cannot be checked here; the runtime reject is the backstop.
         const resolver = base_resolver orelse return;
 
-        // component name → number of DISTINCT active declarants (the base counts as
-        // one). Seeding the base at 1 (form b) makes the FIRST extension re-declaring
-        // a base component reach 2 = conflict. Base names borrow the registry (owned,
-        // live for the whole cook); extension names borrow the resolver-owned bytes.
+        // Pass 2 — forms (a) ext-vs-ext and (b) ext-vs-base, UNIFIED: seed the base
+        // components at 1 each, then count each extension's components; a name
+        // reaching 2 is fatal. Extension names are unique here (pass 1 guaranteed it).
+        // Base names borrow the registry (owned, live for the whole cook); extension
+        // names borrow the resolver-owned bytes.
         var counts: std.StringHashMapUnmanaged(u32) = .empty;
         defer counts.deinit(self.gpa);
         for (base_comp_ids) |id| try counts.put(self.gpa, self.registry.componentName(id), 1);
 
-        // Dedup the extension names: the same extension listed twice is form (c).
-        var seen: std.StringHashMapUnmanaged(void) = .empty;
-        defer seen.deinit(self.gpa);
-
         var k: u32 = 0;
         while (k < ext_len) : (k += 1) {
             const ext_name = self.ast.strings.slice(self.ast.scene_extensions.items[ext_start + k]);
-            const seen_gop = try seen.getOrPut(self.gpa, ext_name);
-            if (seen_gop.found_existing) return fail(diag_out, error.ExtensionAdditiveConflict, "the same extension is listed more than once in an entity's `extensions:` clause; the `extends` model is strictly additive — reject (E1797 ExtensionAdditiveConflict)");
-
             const bytes = resolver.resolve(ext_name) orelse continue;
             var acc = accessor.Accessor.open(bytes) catch continue;
             if (!acc.verifyHash()) continue;
@@ -576,10 +592,10 @@ const Builder = struct {
             validate.structure(acc.bytes, acc.header) catch continue;
 
             // Each component the extension declares (its `.prefab.bin` schema table;
-            // names are unique per prefab) bumps that name's distinct-declarant
-            // count. Reaching 2 is the conflict — form (a) if the prior declarant was
-            // another extension, form (b) if it was the base seed — a fatal cook
-            // error, short-circuiting on the first. Keys borrow the accessor bytes
+            // names unique per prefab) bumps that name's distinct-declarant count.
+            // Reaching 2 is the conflict — form (a) if the prior declarant was another
+            // extension, form (b) if it was the base seed — a fatal cook error,
+            // short-circuiting on the first. Keys borrow the accessor bytes
             // (resolver-owned, live for the whole cook) and compare by content.
             var ci: u32 = 0;
             while (ci < acc.schemaCount()) : (ci += 1) {
