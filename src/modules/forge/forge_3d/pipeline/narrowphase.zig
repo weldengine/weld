@@ -288,14 +288,21 @@ pub fn Simplex(comptime T: type) type {
             if (best) |br| return br;
 
             // Origin inside every face ⇒ inside the tetrahedron.
-            const bary_det = tripleProduct(b.sub(a), c.sub(a), d.sub(a));
-            // Relative degeneracy: `bary_det` = 6·signed volume (length³). A
-            // near-flat tetrahedron falls back to its faces (count ≤ 3, so it
-            // never yields a spurious `.deep`). Compared squared to avoid a
-            // sqrt: `|bary_det|² ≤ deg_rel² · (max squared edge)³`.
+            const ab = b.sub(a);
+            const ac = c.sub(a);
+            const ad = d.sub(a);
+            const bary_det = tripleProduct(ab, ac, ad); // 6·signed volume (length³)
+            // DIMENSIONLESS degeneracy: `bary_det² / (|ab|²·|ac|²·|ad|²)` is the
+            // squared normalized volume (≈ sin² of the solid angle at the
+            // reference vertex) — scale- AND aspect-ratio-invariant, so a
+            // well-formed but elongated (anisotropic) tetrahedron stays
+            // non-degenerate. A `maxEdgeSq³` normalization instead rejected valid
+            // anisotropic tetra, making a sharp box's interior read `.separated`
+            // (P1d). A genuinely near-flat tetra still falls back to its faces
+            // (count ≤ 3, never a spurious `.deep`). Squared form, no sqrt.
             const deg_rel: T = if (T == f32) 1.0e-4 else 1.0e-9;
-            const mes = maxEdgeSq(a, b, c, d);
-            if (bary_det * bary_det <= deg_rel * deg_rel * mes * mes * mes) return minOverFaces4(verts);
+            const edge_prod = ab.dot(ab) * ac.dot(ac) * ad.dot(ad);
+            if (bary_det * bary_det <= deg_rel * deg_rel * edge_prod) return minOverFaces4(verts);
             const inv = 1.0 / bary_det;
             return .{
                 .closest = Vec3T.zero,
@@ -336,15 +343,6 @@ pub fn Simplex(comptime T: type) type {
         /// Scalar triple product `u · (v × w)` = det[u v w].
         fn tripleProduct(u: Vec3T, v: Vec3T, w: Vec3T) T {
             return u.dot(v.cross(w));
-        }
-
-        /// Largest squared edge length of the tetrahedron `(a,b,c,d)` — the
-        /// characteristic length² used to make the degeneracy test scale-relative.
-        fn maxEdgeSq(a: Vec3T, b: Vec3T, c: Vec3T, d: Vec3T) T {
-            const edges = [_]Vec3T{ b.sub(a), c.sub(a), d.sub(a), c.sub(b), d.sub(b), d.sub(c) };
-            var m: T = 0;
-            for (edges) |e| m = @max(m, e.dot(e));
-            return m;
         }
 
         /// Closest of the three edges of a degenerate triangle to the origin
@@ -556,6 +554,19 @@ pub fn gjk(
         // — no distance threshold on this path. The noise early-out additionally
         // covers a degenerate lower feature that reached the origin exactly
         // (coincident / collinear cores that never tetrahedralize).
+        //
+        // LIMITATION (radius-0 box cores of EXTREME aspect ratio, >~50:1). Sharp,
+        // very anisotropic box cores are GJK's worst case in f32: `.deep` for an
+        // interior point can be missed (false `.separated`) by two mechanisms —
+        // (1) the tetrahedron degeneracy test still trips at extreme anisotropy
+        // (P1d makes it dimensionless, robust to moderate ~30:1 anisotropy, not
+        // extreme), and (2) the anti-cycling guard above can `break` on a
+        // duplicate support before the enclosing tetrahedron forms (near-parallel
+        // search directions repeat a corner on a flat box). Reliable to a
+        // moderate aspect ratio; beyond it, exact box `.deep` is the domain of the
+        // M1.1.4 analytic box/box + point/box fast paths and M1.1.3 EPA. Deferred
+        // by scope decision — not chased with generic f32 GJK here (diminishing
+        // returns, overlaps EPA, still imperfect in f32).
         if (res.count == 4 or degenerateOriginReached(T, verts[0..count], closest, mach_eps)) return deepResult(T, verts, count);
     }
 
