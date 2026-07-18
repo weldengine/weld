@@ -9,6 +9,7 @@
 const std = @import("std");
 const api = @import("weld_forge");
 const config = @import("config.zig");
+const narrowphase = @import("pipeline/narrowphase.zig");
 const IdAllocator = @import("slot_alloc.zig").IdAllocator;
 
 const Real = config.Real;
@@ -78,6 +79,21 @@ pub const ShapeStore = struct {
         return self.shapes.items[idx];
     }
 };
+
+/// Convert an immutable `Shape` to the narrowphase `SupportShape` at solver
+/// precision: sphere → point core + radius, capsule → Y-segment(`half_height`)
+/// core + radius, box → box(`half_extents`) core + radius 0 (a box has no convex
+/// radius in M1.1.2). `ShapeStore` only ever holds these three (`createShape`
+/// rejects the rest with `error.UnsupportedShape`), so no other tag can reach
+/// here — the same invariant as `body_manager.worldAabb`.
+pub fn supportShape(shape: Shape) narrowphase.SupportShape(Real) {
+    return switch (shape.shape_type) {
+        .sphere => .{ .core = .point, .radius = shape.radius },
+        .capsule => .{ .core = .{ .segment = shape.half_height }, .radius = shape.radius },
+        .box => .{ .core = .{ .box = shape.half_extents }, .radius = 0 },
+        else => unreachable,
+    };
+}
 
 /// Build the `Shape` for a descriptor (sphere/box/capsule), computing its local
 /// AABB and unit-mass inertia. Other shapes → `error.UnsupportedShape`.

@@ -1,9 +1,10 @@
 //! `forge_3d` — the native Zig 3D physics solver (Tier 1, in-tree per
 //! `engine-spec.md` §3.5). M1.1.0 laid the foundations: the `Real` scalar, the
 //! `ShapeStore`, per-body `MotionProperties` with analytic inertia, and the SoA
-//! `BodyManager`. M1.1.1 adds the shared `pipeline/broadphase.zig` (a dynamic
-//! multi-layer AABB tree — BVH), re-exported here at `Real`. No stepping,
-//! narrowphase, island manager, scheduler, or `PhysicsModule` instantiation
+//! `BodyManager`. M1.1.1 added the shared `pipeline/broadphase.zig` (a dynamic
+//! multi-layer AABB tree — BVH); M1.1.2 adds `pipeline/narrowphase.zig`
+//! (distance-based GJK convex detection). Both are re-exported here at `Real`.
+//! No stepping, EPA, island manager, scheduler, or `PhysicsModule` instantiation
 //! yet — those are later M1.1 sub-milestones. Depends only on `foundation/math`
 //! and `src/modules/forge/api/` (core entity/component types reach here through
 //! `api/`).
@@ -13,6 +14,10 @@ const shape = @import("shape.zig");
 const body = @import("body.zig");
 const body_manager = @import("body_manager.zig");
 const broadphase = @import("pipeline/broadphase.zig");
+// M1.1.2 — narrowphase (GJK convex detection). Re-exported at `Real` below; the
+// comptime pin analyses its acceptance tests (engine-zig-conventions.md §13
+// lazy-analysis guard — an unreferenced module's tests are silently skipped).
+const narrowphase = @import("pipeline/narrowphase.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -57,6 +62,26 @@ pub const BroadphaseLayer = broadphase.BroadphaseLayer;
 /// Broadphase tuning at solver precision.
 pub const BroadphaseConfig = broadphase.BroadphaseConfig(Real);
 
+// --- Narrowphase (GJK convex detection) ---
+
+/// A convex support shape (core + inflation radius) at solver precision.
+pub const SupportShape = narrowphase.SupportShape(Real);
+/// Shape-B-relative-to-A pose precompute at solver precision.
+pub const RelativePose = narrowphase.RelativePose(Real);
+/// GJK simplex machinery (triplet vertex + Voronoi solver) at solver precision.
+pub const Simplex = narrowphase.Simplex(Real);
+/// Three-regime GJK result (separated / shallow / deep) at solver precision.
+pub const GjkResult = narrowphase.GjkResult(Real);
+/// The GJK descent iteration ceiling (scalar-independent).
+pub const max_gjk_iterations = narrowphase.max_gjk_iterations;
+
+/// Distance-based GJK between two support shapes at their world poses — the
+/// `Real`-bound narrowphase entry. `BodyManager.gjkPair` is the `BodyId`-level
+/// adapter used by the broadphase→narrowphase flow.
+pub fn gjk(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: SupportShape, pos_b: Vec3r, rot_b: Quatr) GjkResult {
+    return narrowphase.gjk(Real, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
+}
+
 // Pins so the inline tests + the acceptance suite are analysed when this module
 // is built as a test target (engine-zig-conventions.md §13).
 comptime {
@@ -65,6 +90,8 @@ comptime {
     _ = body;
     _ = body_manager;
     _ = broadphase;
+    _ = narrowphase;
     _ = @import("tests/body_manager_test.zig");
     _ = @import("tests/broadphase_test.zig");
+    _ = @import("tests/narrowphase_test.zig");
 }

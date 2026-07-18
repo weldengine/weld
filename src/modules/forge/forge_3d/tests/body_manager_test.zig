@@ -280,3 +280,25 @@ test "inertia matches analytic values" {
         try expectInertiaRel(bm.motionProperties(id).?, capsuleInertiaRef(0.4, 0.9, 3.0), 1e-4);
     }
 }
+
+test "rotation getter round-trips and rejects stale handles" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+
+    const q = Quatf.fromAxisAngle(Vec3.unit_y, std.math.pi / 3.0);
+    var d = descOf(0, .dynamic, s);
+    d.rotation = q;
+    const id = try bm.addBody(gpa, &store, d);
+
+    // Round-trips (widened to solver precision).
+    const expected = config.Quatr.fromArray(.{ q.x, q.y, q.z, q.w });
+    try testing.expect(bm.rotation(id).?.approxEql(expected, 1e-6));
+
+    // Stale handle ⇒ null.
+    bm.removeBody(id);
+    try testing.expect(bm.rotation(id) == null);
+}

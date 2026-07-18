@@ -18,6 +18,7 @@ const api = @import("weld_forge");
 const config = @import("config.zig");
 const shape_mod = @import("shape.zig");
 const body_mod = @import("body.zig");
+const narrowphase = @import("pipeline/narrowphase.zig");
 const IdAllocator = @import("slot_alloc.zig").IdAllocator;
 
 const Real = config.Real;
@@ -31,6 +32,7 @@ const ShapeStore = shape_mod.ShapeStore;
 const Shape = shape_mod.Shape;
 const Body = body_mod.Body;
 const MotionProperties = body_mod.MotionProperties;
+const GjkResult = narrowphase.GjkResult(Real);
 
 const ApiVec3 = @import("foundation").math.Vec3;
 const ApiQuat = @import("foundation").math.Quatf;
@@ -97,6 +99,13 @@ pub const BodyManager = struct {
         return self.bodies.items(.position)[idx];
     }
 
+    /// Safe getter: world-space orientation, or null if `id` is stale/invalid
+    /// (symmetric to `position`).
+    pub fn rotation(self: *const BodyManager, id: BodyId) ?Quatr {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.rotation)[idx];
+    }
+
     /// Safe getter: derived motion properties, or null if `id` is stale/invalid.
     pub fn motionProperties(self: *const BodyManager, id: BodyId) ?MotionProperties {
         const idx = self.alloc.validate(id) orelse return null;
@@ -118,6 +127,27 @@ pub const BodyManager = struct {
         const rot = self.bodies.items(.rotation)[idx];
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
         return worldAabb(shape, pos, rot);
+    }
+
+    /// Run distance-based GJK on the pair `a`/`b`, resolving each body's world
+    /// pose and support shape (via `store`). Returns null if either handle — or
+    /// its shape — is stale/invalid. This is the `BodyId`-level narrowphase
+    /// adapter for the broadphase→narrowphase flow: unpack a `computePairs`
+    /// candidate's `user_data` as a `BodyId` and call this per pair.
+    pub fn gjkPair(self: *const BodyManager, store: *const ShapeStore, a: BodyId, b: BodyId) ?GjkResult {
+        const ia = self.alloc.validate(a) orelse return null;
+        const ib = self.alloc.validate(b) orelse return null;
+        const shape_a = store.get(self.bodies.items(.shape)[ia]) orelse return null;
+        const shape_b = store.get(self.bodies.items(.shape)[ib]) orelse return null;
+        return narrowphase.gjk(
+            Real,
+            shape_mod.supportShape(shape_a),
+            self.bodies.items(.position)[ia],
+            self.bodies.items(.rotation)[ia],
+            shape_mod.supportShape(shape_b),
+            self.bodies.items(.position)[ib],
+            self.bodies.items(.rotation)[ib],
+        );
     }
 };
 
