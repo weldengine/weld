@@ -30,7 +30,6 @@
 const std = @import("std");
 
 const ast_mod = @import("ast.zig");
-const token = @import("token.zig");
 const interp = @import("interp.zig");
 const bridge_mod = @import("ecs_bridge.zig");
 const value_mod = @import("value.zig");
@@ -50,6 +49,7 @@ const format = weld_core.scene.format;
 // M1.0.6 E2 — `of` variant resolution reads the base prefab's cooked `.prefab.bin`
 // back through the same zero-copy accessor the loader uses.
 const accessor = weld_core.scene.accessor;
+const validate = weld_core.scene.validate;
 
 const AstArena = ast_mod.AstArena;
 const StringId = ast_mod.StringId;
@@ -129,26 +129,18 @@ pub const CookError = error{
     /// An `Entity` field references an entity name absent from the scene (M1.0.6
     /// E4 — intra-scene only; cross-scene references are a future milestone).
     UnresolvedCrossRef,
+    /// The entity's {base components} ∪ {active extensions' components} is not
+    /// conflict-free (M1.1.1-HF4 — `E1797 ExtensionAdditiveConflict`). Three
+    /// rejected forms: (a) two extensions declare the same component; (b) an
+    /// extension declares a component already carried by the base (or an earlier
+    /// extension); (c) the same extension is listed twice. The `extends` model is
+    /// strictly additive — a conflict is rejected, never resolved by list order.
+    /// Fatal cook error → guarantees `cooked ⇒ loadable` (runtime backstops:
+    /// `error.ExtensionComponentConflict` for a/b, `error.ExtensionAlreadyActive`
+    /// for c). See `engine-scene-serialization.md` (extension additive conflicts).
+    ExtensionAdditiveConflict,
     OutOfMemory,
 };
-
-/// A non-fatal cook diagnostic (M1.0.18). Unlike `CookError`/`fail` — which abort
-/// the cook and leave no output — a `Warning` is collected on the `Cooked` result
-/// and the `.scene.bin`/`.prefab.bin` is still produced. `code` is the stable
-/// diagnostic code string (e.g. `"W1791"`, registered in `diagnostics.zig`); it is
-/// a static string, never freed. `message` is a gpa-owned human string (freed by
-/// `Cooked.deinit`). `span` locates the offending source construct.
-pub const Warning = struct {
-    code: []const u8,
-    message: []const u8,
-    span: token.SourceSpan,
-};
-
-/// `W1791 ExtensionAdditiveConflict` — emitted at cook time when two or more
-/// active extensions on an entity declare the same component (§30.5). Kept as a
-/// stable code STRING here: the cook is a separate tool from the resolver, and the
-/// central catalogue entry (`diagnostics.zig`) is registered at M1.0.18 E3.
-const w1791_code: []const u8 = "W1791";
 
 /// The cook's output: the neutral model plus the `Registry` it was cooked
 /// against. The registry owns the type metadata (names/sizes/field offsets +
@@ -158,13 +150,8 @@ const w1791_code: []const u8 = "W1791";
 pub const Cooked = struct {
     model: format.CookModel,
     registry: Registry,
-    /// Non-fatal cook diagnostics (M1.0.18). Empty (`&.{}`) for a clean cook.
-    /// gpa-owned — both the slice and each `message` are freed by `deinit`.
-    warnings: []const Warning = &.{},
 
     pub fn deinit(self: *Cooked, gpa: std.mem.Allocator) void {
-        for (self.warnings) |w| gpa.free(w.message);
-        gpa.free(self.warnings);
         self.model.deinit();
         self.registry.deinit(gpa);
         self.* = undefined;
@@ -212,7 +199,7 @@ pub fn cookScene(
     // self.arena`, scene_cook build return). A failing `toOwnedSlice` here is
     // already covered by `errdefer b.arena.deinit()` above: same buffers, freed
     // once. Do NOT add `errdefer model.deinit()` — it double-frees the aliased arena.
-    return .{ .model = model, .registry = registry, .warnings = try b.warnings.toOwnedSlice(gpa) };
+    return .{ .model = model, .registry = registry };
 }
 
 fn fail(diag_out: ?*[]const u8, err: CookError, msg: []const u8) CookError {
@@ -228,9 +215,9 @@ fn fail(diag_out: ?*[]const u8, err: CookError, msg: []const u8) CookError {
 /// the on-disk cook output, and tests wire it to an in-process byte buffer.
 ///
 /// The resolved bytes must outlive the cook (mirror of `loader.zig`'s
-/// `ExtensionResolver`): since M1.0.18 the additive-conflict warning (§30.5)
-/// borrows them as component-name map keys ACROSS resolves, so a resolver
-/// returning a reused/temporary buffer would be a use-after-free.
+/// `ExtensionResolver`): the additive-conflict check (fatal E1797) borrows them
+/// as component-name map keys ACROSS resolves, so a resolver returning a
+/// reused/temporary buffer would be a use-after-free.
 pub const BaseResolver = struct {
     ctx: *anyopaque,
     resolveFn: *const fn (ctx: *anyopaque, name: []const u8) ?[]const u8,
@@ -281,7 +268,7 @@ pub fn cookPrefab(
     // `.arena = self.arena`). A failing `toOwnedSlice` here is already covered by
     // `errdefer b.arena.deinit()` above: same buffers, freed once. Do NOT add
     // `errdefer model.deinit()` — it double-frees the aliased arena.
-    return .{ .model = model, .registry = registry, .warnings = try b.warnings.toOwnedSlice(gpa) };
+    return .{ .model = model, .registry = registry };
 }
 
 // ── Builder ──────────────────────────────────────────────────────────────────
@@ -342,11 +329,6 @@ const Builder = struct {
     prefab_id_table: std.ArrayListUnmanaged(u32) = .empty,
     prefab_id_map: std.AutoHashMapUnmanaged(u32, u32) = .empty,
 
-    // Non-fatal cook warnings (M1.0.18). Accumulated during the build, then
-    // transferred to `Cooked.warnings` on success (`toOwnedSlice`); freed here
-    // (messages + backing) on the error path by `deinitScratch`.
-    warnings: std.ArrayListUnmanaged(Warning) = .empty,
-
     fn init(gpa: std.mem.Allocator, ast: *const AstArena, registry: *Registry) Builder {
         return .{
             .gpa = gpa,
@@ -373,10 +355,6 @@ const Builder = struct {
         self.ext_entries.deinit(self.gpa);
         self.prefab_id_table.deinit(self.gpa);
         self.prefab_id_map.deinit(self.gpa);
-        // Any warning still held here was NOT transferred to a `Cooked` (error
-        // path); free its message. On success `toOwnedSlice` emptied the list.
-        for (self.warnings.items) |w| self.gpa.free(w.message);
-        self.warnings.deinit(self.gpa);
     }
 
     fn a(self: *Builder) std.mem.Allocator {
@@ -472,27 +450,29 @@ const Builder = struct {
         for (children) |child| {
             var ext_start: u32 = 0;
             var ext_len: u32 = 0;
-            var ext_span: token.SourceSpan = .{ .byte_start = 0, .byte_end = 0 };
             const eb = switch (child.kind) {
                 .entity => blk: {
                     const e = self.ast.scene_entities.items[child.index];
                     ext_start = e.extensions_start;
                     ext_len = e.extensions_len;
-                    ext_span = e.span;
                     break :blk try self.buildEntity(e, diag_out);
                 },
                 .instance => blk: {
                     const inst = self.ast.scene_instances.items[child.index];
                     ext_start = inst.extensions_start;
                     ext_len = inst.extensions_len;
-                    ext_span = inst.span;
                     break :blk try self.buildInstanceEntity(inst, base_resolver, diag_out);
                 },
             };
             try self.recordExtensions(eb.uuid_idx, ext_start, ext_len);
-            // M1.0.18 (§30.5) — non-fatal warning if ≥2 active extensions on this
-            // entity declare the same component (resolution is last-wins, unchanged).
-            try self.detectExtensionConflicts(self.strings.items[eb.name_idx], ext_span, ext_start, ext_len, base_resolver);
+            // Additive-conflict gate (§30.5, M1.1.1-HF4): a FATAL cook error unless
+            // the entity's {base components} ∪ {active extensions' components} is
+            // conflict-free — three rejected forms: (a) two extensions declare the
+            // same component, (b) an extension declares a component already carried
+            // by the base (or an earlier extension), (c) the same extension is listed
+            // twice. Strictly-additive `extends` reject, guaranteeing
+            // `cooked ⇒ loadable`. Short-circuits on the first conflict.
+            try self.detectExtensionConflicts(eb.comp_ids, ext_start, ext_len, base_resolver, diag_out);
             try entities.append(self.gpa, eb);
         }
 
@@ -537,71 +517,95 @@ const Builder = struct {
         try self.ext_entries.append(self.gpa, .{ .uuid = uuid_idx, .prefab_ids = ids });
     }
 
-    /// M1.0.18 (§30.5) — Detect additive extension conflicts on one entity's
-    /// `extensions:` clause and emit a non-fatal `W1791` per conflicting component.
-    /// A conflict is a component declared by two or more DISTINCT active extensions;
-    /// the resolution is last-extension-wins (unchanged) — this only warns. The
-    /// extension component sets are resolved through the SAME prefab path as
-    /// `of`/`extends` (`base_resolver` → `.prefab.bin` → accessor schema names), not
-    /// a second resolution path. No-op when: fewer than two extensions; no resolver;
-    /// or an extension name does not resolve / its bytes do not open (the clause is
-    /// by-name — an unresolved name is an existing condition, not a cook error).
+    /// Additive-conflict gate (§30.5, M1.1.1-HF4) — a FATAL cook error unless the
+    /// set {entity base components} ∪ {each active extension's components} is
+    /// conflict-free. The `extends` model is strictly additive; three forms are
+    /// rejected (never resolved by list order), each a fatal `E1797
+    /// ExtensionAdditiveConflict`:
+    ///   (a) two active extensions declare the same component;
+    ///   (b) an extension declares a component already carried by the base
+    ///       (or an earlier extension);
+    ///   (c) the same extension is listed twice in the `extensions:` clause.
+    /// This guarantees `cooked ⇒ loadable` (runtime backstops:
+    /// `error.ExtensionComponentConflict` for a/b, `error.ExtensionAlreadyActive`
+    /// for c). Short-circuits on the FIRST conflict (no enumeration); the
+    /// duplicate-extension form carries a distinct static message.
+    ///
+    /// Structure (two passes): form (c) is a PURE LEXICAL pass over the extension
+    /// names, independent of any resolver — it fires even when `base_resolver` is
+    /// null (the public `cook` entry), so a duplicate never cooks into a load-time
+    /// `ExtensionAlreadyActive`. Forms (a)/(b) need each extension's component set
+    /// (resolved through the SAME prefab path as `of`/`extends`), so they run only
+    /// when a resolver is present and are UNIFIED by seeding `counts` with the
+    /// entity's BASE components at 1 each: a component name reaching 2 is a conflict
+    /// whether the earlier declarant was the base seed or another extension. No
+    /// `ext_len < 2` early-out — a single extension can conflict with the base.
+    /// Best-effort for a/b: an extension whose name does not resolve, whose bytes do
+    /// not open, whose hash mismatches, or whose structure is invalid is SKIPPED
+    /// (the runtime reject is the invariant backstop for the resolver-less path).
+    /// See `engine-scene-serialization.md` (extension additive conflicts).
     fn detectExtensionConflicts(
         self: *Builder,
-        entity_name: []const u8,
-        span: token.SourceSpan,
+        base_comp_ids: []const ComponentId,
         ext_start: u32,
         ext_len: u32,
         base_resolver: ?BaseResolver,
+        diag_out: ?*[]const u8,
     ) CookError!void {
-        if (ext_len < 2) return;
+        // Pass 1 — form (c): a PURE LEXICAL check, no resolver needed. The same
+        // extension listed twice is a fatal conflict; running BEFORE the resolver
+        // guard means `cook` (always a null resolver) still rejects it rather than
+        // cooking a scene that fails at load with `ExtensionAlreadyActive`.
+        {
+            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(self.gpa);
+            var k: u32 = 0;
+            while (k < ext_len) : (k += 1) {
+                const ext_name = self.ast.strings.slice(self.ast.scene_extensions.items[ext_start + k]);
+                const gop = try seen.getOrPut(self.gpa, ext_name);
+                if (gop.found_existing) return fail(diag_out, error.ExtensionAdditiveConflict, "the same extension is listed more than once in an entity's `extensions:` clause; the `extends` model is strictly additive — reject (E1797 ExtensionAdditiveConflict)");
+            }
+        }
+
+        // Forms (a)/(b) need the extensions' component sets (the prefab path). Without
+        // a resolver they cannot be checked here; the runtime reject is the backstop.
         const resolver = base_resolver orelse return;
 
-        // component name → number of DISTINCT active extensions that declare it.
+        // Pass 2 — forms (a) ext-vs-ext and (b) ext-vs-base, UNIFIED: seed the base
+        // components at 1 each, then count each extension's components; a name
+        // reaching 2 is fatal. Extension names are unique here (pass 1 guaranteed it).
+        // Base names borrow the registry (owned, live for the whole cook); extension
+        // names borrow the resolver-owned bytes.
         var counts: std.StringHashMapUnmanaged(u32) = .empty;
         defer counts.deinit(self.gpa);
-        // Dedup the extension names: activating the same extension twice must not
-        // conflict with itself.
-        var seen: std.StringHashMapUnmanaged(void) = .empty;
-        defer seen.deinit(self.gpa);
+        for (base_comp_ids) |id| try counts.put(self.gpa, self.registry.componentName(id), 1);
 
         var k: u32 = 0;
         while (k < ext_len) : (k += 1) {
             const ext_name = self.ast.strings.slice(self.ast.scene_extensions.items[ext_start + k]);
-            const seen_gop = try seen.getOrPut(self.gpa, ext_name);
-            if (seen_gop.found_existing) continue;
-
             const bytes = resolver.resolve(ext_name) orelse continue;
             var acc = accessor.Accessor.open(bytes) catch continue;
             if (!acc.verifyHash()) continue;
+            // P1#3 (HF3/R1 accessor contract): structurally validate BEFORE calling
+            // any getter — a malformed-but-rehashed prefab (hash valid, structure
+            // invalid) would otherwise panic on `schemaCount`/`schema` reads.
+            validate.structure(acc.bytes, acc.header) catch continue;
 
             // Each component the extension declares (its `.prefab.bin` schema table;
-            // names are unique) bumps that name's distinct-extension count. The
-            // second distinct declarer is the conflict — emit exactly once, in
-            // encounter order (a third declarer does not re-emit). Keys borrow the
-            // accessor bytes (resolver-owned, live for the whole cook) and compare
-            // by content, so the same name across extensions aggregates correctly.
+            // names unique per prefab) bumps that name's distinct-declarant count.
+            // Reaching 2 is the conflict — form (a) if the prior declarant was another
+            // extension, form (b) if it was the base seed — a fatal cook error,
+            // short-circuiting on the first. Keys borrow the accessor bytes
+            // (resolver-owned, live for the whole cook) and compare by content.
             var ci: u32 = 0;
             while (ci < acc.schemaCount()) : (ci += 1) {
                 const comp_name = acc.schema(ci).name;
                 const gop = try counts.getOrPut(self.gpa, comp_name);
                 if (!gop.found_existing) gop.value_ptr.* = 0;
                 gop.value_ptr.* += 1;
-                if (gop.value_ptr.* == 2) try self.emitAdditiveConflict(entity_name, comp_name, span);
+                if (gop.value_ptr.* == 2) return fail(diag_out, error.ExtensionAdditiveConflict, "a component is carried by more than one active declarant (base or extension) on an entity; the `extends` model is strictly additive — reject (E1797 ExtensionAdditiveConflict)");
             }
         }
-    }
-
-    /// Append one `W1791` warning naming the conflicting component. The message is
-    /// gpa-owned — freed by `Cooked.deinit` on success, `deinitScratch` on error.
-    fn emitAdditiveConflict(self: *Builder, entity_name: []const u8, comp_name: []const u8, span: token.SourceSpan) CookError!void {
-        const msg = try std.fmt.allocPrint(
-            self.gpa,
-            "entity '{s}': two or more active extensions declare component '{s}'; the last extension in the list wins (§30.5)",
-            .{ entity_name, comp_name },
-        );
-        errdefer self.gpa.free(msg);
-        try self.warnings.append(self.gpa, .{ .code = w1791_code, .message = msg, .span = span });
     }
 
     /// The Prefab ID Table slot for a model-`strings` index, deduplicated.

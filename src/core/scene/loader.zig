@@ -568,11 +568,12 @@ fn extEntityArchetype(ext: Accessor) !Accessor.Archetype {
 /// as load-time hooks, M1.1.1-HF1 / D2).
 ///
 /// Conflict policy: a component the entity already carries is rejected with
-/// `error.ExtensionComponentConflict` — the PROVISIONAL runtime policy recorded in
-/// `briefs/m1.1.1-hf3-core-robustness-hotfix-3.md` (R6). Last-wins runtime
-/// semantics (masking, restoration, out-of-order deactivate) are an open design
-/// surface for a dedicated spec session; `etch-reference-part2.md §30.5` defines
-/// no reject policy — do not cite it.
+/// `error.ExtensionComponentConflict` — the normative runtime policy for additive
+/// extension conflicts. The `extends` model is strictly additive: no two active
+/// extensions may declare the same component on one entity. See
+/// `engine-scene-serialization.md` (extension additive conflicts) as the
+/// authority; the static cook counterpart is the fatal `E1797
+/// ExtensionAdditiveConflict`, and together they guarantee `cooked ⇒ loadable`.
 pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
     // Step 0 — refuse re-activation (R12(d)); works for hook-only (0-component)
     // extensions too, where the component-conflict check below cannot fire.
@@ -619,8 +620,8 @@ pub fn activateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId
 /// the bridge's `ExtensionResolver`). Reuses the shared `activateExtension`
 /// path (atomic prevalidate → reserve → grouped add → record → `on_attach`).
 /// Unknown name → `error.UnknownExtension`; a component the entity already
-/// carries → `error.ExtensionComponentConflict` (the provisional reject policy
-/// recorded in the R6 brief — not `§30.5`).
+/// carries → `error.ExtensionComponentConflict` (the normative additive-conflict
+/// reject policy — see `engine-scene-serialization.md`).
 pub fn runtimeActivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, resolver: ExtensionResolver) !void {
     const bytes = resolver.resolve(name) orelse return error.UnknownExtension;
     try activateExtension(world, gpa, entity, name, bytes);
@@ -644,9 +645,9 @@ pub fn runtimeActivate(world: *World, gpa: std.mem.Allocator, entity: EntityId, 
 /// just fires `on_detach` then drops the record.)
 ///
 /// Conflict policy: reject-on-conflict (see `activateExtension`) keeps the
-/// component set unambiguous — no two active extensions share a component — so
-/// removal needs no provenance tracking. Provisional, recorded in the R6 brief;
-/// `etch-reference-part2.md §30.5` defines no such policy — do not cite it.
+/// component set unambiguous — no two active declarants (base or extension) share a
+/// component — so removal needs no provenance tracking. Normative; see
+/// `engine-scene-serialization.md` (extension additive conflicts).
 pub fn deactivateExtension(world: *World, gpa: std.mem.Allocator, entity: EntityId, name: []const u8, ext_bytes: []const u8) !void {
     if (!world.hasEntityExtension(entity, name)) return error.ExtensionNotActive;
     const ext = try openVerified(ext_bytes);
