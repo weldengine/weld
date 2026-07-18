@@ -486,14 +486,21 @@ pub fn gjk(
     //     tetrahedron) whose closest point sits at the origin up to rounding.
     //     `.deep` proper rests on geometric ENCLOSURE (`res.count == 4`, a
     //     non-degenerate origin-containing tetra), never on this floor.
-    //   - `conv_k` scales the shallow/separated contact margin below — the GJK
-    //     convergence error on the reported `dist` at the coordinate scale.
-    // `noise_k`/`conv_k` are a couple of ULPs (≈ 2): the accumulation margin is
-    // MINIMAL so the floor tracks the real rounding noise, not a geometric slack.
+    //   - `conv_k` scales the shallow/separated contact margin below — a
+    //     conservative bound on the ACCUMULATED rounding of the GJK pipeline
+    //     (quaternion rotate-by-conjugate + Voronoi tetrahedron solve + final
+    //     sqrt) on the reported `dist` at the coordinate scale.
+    // `noise_k` and `conv_k` are DISTINCT and must not be aligned: `noise_k ≈ 2`
+    // ULP is the tight POINT-noise floor (widening it recreates a proximity-as-
+    // deep false positive); `conv_k = 16` ULP covers the pipeline's accumulated
+    // rounding — an exact tangency's `dist − r_sum` can reach a few ULP × scale
+    // with zero convergence residue, which 2 ULP under-dimensions. 16 ULP stays
+    // at the noise level (~2e-6 relative in f32) and swallows no discernible
+    // separation.
     const rel_tolerance: T = if (T == f32) 1.0e-5 else 1.0e-10;
     const dup_rel_sq: T = if (T == f32) 1.0e-10 else 1.0e-20;
     const noise_k: T = 2;
-    const conv_k: T = 2;
+    const conv_k: T = 16;
     const mach_eps: T = noise_k * std.math.floatEps(T);
 
     const relpose = RelativePose(T).init(pos_a, rot_a, pos_b, rot_b);
