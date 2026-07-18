@@ -686,6 +686,36 @@ test "gjk deep pairs enclose the origin" {
     // `count == 4` — the case most sensitive to the floor recalibration. It must
     // stay `.deep` at scale (the closest point lands at the origin up to rounding).
     try checkDeep(capsuleShape(50, 0.3), vr(0, 0, 0), Quatr.identity, capsuleShape(50, 0.3), vr(0, 0, 0), rot_z90);
+
+    // ANISOTROPIC box interior (Codex P1d): a point core well inside a sharp,
+    // very flat box (half-extents 50.14 × 0.236 × 0.984, ~212:1) ⇒ `.deep`. The
+    // former `maxEdgeSq³` degeneracy normalization rejected the valid but
+    // elongated enclosing tetrahedron (its long edge dominated the cube), reading
+    // this interior point `.separated`; the dimensionless product-of-edges
+    // criterion classifies it correctly. (Aspect ratios beyond a moderate bound
+    // are NOT guaranteed — a GJK f32 limitation on sharp cores, deferred to the
+    // M1.1.4 analytic box fast paths / M1.1.3 EPA; see `narrowphase.zig`.)
+    try checkDeep(boxShape(50.13848, 0.23608336, 0.98368657), vr(0, 0, 0), Quatr.identity, sphereShape(0.5), vr(14.877217, 0.01973883, 0.07743414), Quatr.identity);
+}
+
+test "gjk deep is reliable to moderate box aspect ratio" {
+    // Boundary guarantee (P1d): a point core inside a box is reliably `.deep`
+    // up to a MODERATE aspect ratio (~30:1). Beyond that (sharp radius-0 boxes)
+    // GJK f32 can miss the enclosure (degeneracy + premature anti-cycling
+    // termination) — a documented limitation deferred to M1.1.4 (analytic box
+    // fast paths) / M1.1.3 (EPA). This test deliberately stops at the guaranteed
+    // regime; it does NOT assert `.deep` at extreme aspect ratios (that would
+    // paper over the residual).
+    const aspects = [_]Real{ 1, 5, 15, 30 };
+    for (aspects) |ar| {
+        const box = boxShape(ar, 1, ar * 0.5);
+        // A point near the box centre, offset within every half-extent.
+        const p = vr(0.3 * ar, 0.2, 0.1 * ar);
+        try checkDeep(box, vr(0, 0, 0), Quatr.identity, sphereShape(0.5), p, Quatr.identity);
+        // ...and under an oblique rotation (deep is rotation-invariant).
+        const q = Quatr.fromAxisAngle(vr(1, 2, 3).normalize(), 0.5);
+        try checkDeep(box, vr(0, 0, 0), q, sphereShape(0.5), q.rotateVec3(p), Quatr.identity);
+    }
 }
 
 test "gjk is deterministic and iteration-bounded" {
