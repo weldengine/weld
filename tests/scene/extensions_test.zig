@@ -451,6 +451,76 @@ test "cooked scene with extensions is loadable" {
     try std.testing.expect(world.hasEntityExtension(npc, "ArsenalModule"));
 }
 
+test "cook fails when an extension declares a component already on the base (form b)" {
+    const gpa = std.testing.allocator;
+    const m = try prefabBytes(gpa, ext_merchant); // declares Inventory
+    defer gpa.free(m);
+    var mr = MultiResolver{ .names = &.{"MerchantModule"}, .blobs = &.{m} };
+    const src =
+        \\component Inventory { slots: i32 = 0 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["MerchantModule"]
+        \\    Inventory { slots: 5 }
+        \\  }
+        \\}
+    ;
+    // The base entity carries Inventory; the single active extension also declares
+    // Inventory → form (b) additive conflict, fatal (a lone extension suffices).
+    try std.testing.expectError(error.ExtensionAdditiveConflict, scene_cook.cookScene(gpa, src, mr.base(), null));
+}
+
+test "cook fails when the same extension is listed twice (form c)" {
+    const gpa = std.testing.allocator;
+    const m = try prefabBytes(gpa, ext_merchant); // Inventory, disjoint from base
+    defer gpa.free(m);
+    var mr = MultiResolver{ .names = &.{"MerchantModule"}, .blobs = &.{m} };
+    const src =
+        \\component Marker { v: i32 = 0 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["MerchantModule", "MerchantModule"]
+        \\    Marker { v: 1 }
+        \\  }
+        \\}
+    ;
+    // The same extension listed twice → form (c) additive conflict, fatal.
+    try std.testing.expectError(error.ExtensionAdditiveConflict, scene_cook.cookScene(gpa, src, mr.base(), null));
+}
+
+test "cook skips a structurally-invalid but data-hash-correct extension (no panic)" {
+    const gpa = std.testing.allocator;
+    const orig = try prefabBytes(gpa, ext_merchant); // valid MerchantModule
+    defer gpa.free(orig);
+
+    // Forge a malformed-but-rehashed prefab: bloat `schema_count` (header field @20,
+    // OUTSIDE the hashed region bytes[64..], so the data hash stays correct) to a
+    // value that overflows the schema table. `Accessor.open` (magic/version only) +
+    // `verifyHash` still pass; only `validate.structure` rejects it. Without the
+    // detector's structural guard, `schemaCount()`/`schema()` would read OOB → panic.
+    const buf = try gpa.dupe(u8, orig);
+    defer gpa.free(buf);
+    std.mem.writeInt(u32, buf[20..24], 0xFFFF, .little); // schema_count := 65535
+
+    var mr = MultiResolver{ .names = &.{"MerchantModule"}, .blobs = &.{buf} };
+    const src =
+        \\component Marker { v: i32 = 0 }
+        \\scene "S" {
+        \\  entity "npc" {
+        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
+        \\    extensions: ["MerchantModule"]
+        \\    Marker { v: 1 }
+        \\  }
+        \\}
+    ;
+    // The malformed extension is SKIPPED (validate.structure fails → continue): the
+    // cook does not panic and, with no detectable conflict, succeeds.
+    var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
+    cooked.deinit(gpa);
+}
+
 test "runtime activate rejects a component the entity already carries" {
     // The dynamic counterpart of the static cook gate: `activate_extension` adding
     // a component the entity already carries is rejected with
