@@ -595,6 +595,57 @@ test "gjk oriented tangency stays shallow" {
     }
 }
 
+test "gjk classification is order-independent" {
+    // Collision detection must be invariant under an A/B swap. Before P1c the
+    // contact margin's coordinate scale was the terminal simplex's support
+    // magnitude in the frame of A, which depends on which shape is A — a tangency
+    // classified `.separated` one way and `.shallow` the other. The symmetric
+    // `coord_scale = |Δpos| + coreExtent_a + coreExtent_b` guarantees agreement.
+    const expectSame = struct {
+        fn f(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr) !void {
+            const ab = narrowphase.gjk(Real, sa, pa, ra, sb, pb, rb);
+            const ba = narrowphase.gjk(Real, sb, pb, rb, sa, pa, ra);
+            try testing.expectEqual(ab.status, ba.status);
+            try testing.expectApproxEqAbs(ab.distance, ba.distance, gjk_test_tol);
+        }
+    }.f;
+
+    // separated / shallow / deep baselines.
+    try expectSame(sphereShape(0.5), vr(0, 0, 0), Quatr.identity, boxShape(1, 1, 1), vr(5, 0, 0), Quatr.identity);
+    try expectSame(sphereShape(2), vr(0, 0, 0), Quatr.identity, sphereShape(2), vr(3, 0, 0), Quatr.identity);
+    try expectSame(boxShape(1, 1, 1), vr(0, 0, 0), Quatr.identity, boxShape(1, 1, 1), vr(1, 0, 0), Quatr.identity);
+
+    // Oriented point–box tangencies at two scales, both orders.
+    {
+        const q = Quatr.fromAxisAngle(vr(2, -1, 3).normalize(), 1.1);
+        const hx: Real = 10;
+        const gap: Real = 4;
+        try expectSame(boxShape(hx, 8, 6), vr(0, 0, 0), q, sphereShape(gap), q.rotateVec3(vr(hx + gap, 0, 0)), Quatr.identity);
+    }
+    {
+        const q = Quatr.fromAxisAngle(vr(-1, 2, 1).normalize(), 0.6);
+        const hx: Real = 100;
+        const gap: Real = 7;
+        try expectSame(boxShape(hx, 70, 40), vr(0, 0, 0), q, sphereShape(gap), q.rotateVec3(vr(hx + gap, 0, 0)), Quatr.identity);
+    }
+
+    // The Codex P1c repro: a large oriented box tangent to a point core. Under the
+    // former A-frame `coord_scale` this read `.separated` one order and `.shallow`
+    // the other; the symmetric scale makes both `.shallow`. The radius (= analytic
+    // core distance) is recomputed at `Real` so the tangency is exact at f32+f64.
+    {
+        const box_rot = (Quatr{ .x = 0.47042668, .y = -0.33259994, .z = 0.7495928, .w = 0.32586288 }).normalize();
+        const he = vr(65.80497, 50.802673, 21.834202);
+        const p = vr(-11.051631, -65.118095, -66.90062);
+        const p_local = box_rot.conjugate().rotateVec3(p);
+        const dist_analytic = p_local.sub(p_local.max(he.neg()).min(he)).length();
+        const box_shape = SupportShape{ .core = .{ .box = he }, .radius = 0 };
+        try expectSame(box_shape, vr(0, 0, 0), box_rot, sphereShape(dist_analytic), p, Quatr.identity);
+        const r = narrowphase.gjk(Real, box_shape, vr(0, 0, 0), box_rot, sphereShape(dist_analytic), p, Quatr.identity);
+        try testing.expectEqual(GjkResult.Status.shallow, r.status);
+    }
+}
+
 test "gjk deep pairs enclose the origin" {
     const rot_z90 = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
 
