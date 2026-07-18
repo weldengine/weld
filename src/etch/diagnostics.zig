@@ -361,7 +361,7 @@ pub const DiagnosticCode = enum {
     prefab_component_field_type_invalid, // M0.8 E7 — E1795 PrefabComponentFieldTypeInvalid
     prefab_component_redefined, // M0.8 E7 — E1796 PrefabComponentRedefined (RESERVED: variant/base component-shape merge is M0.9 runtime)
     prefab_remove_base_component, // M0.8 E7 — W1790 PrefabRemoveBaseComponent (RESERVED: no `remove` syntax in the §24.1 grammar)
-    extension_additive_conflict, // M1.0.18 — W1791 ExtensionAdditiveConflict (cook: ≥2 active extensions on an entity declare the same component; §30.5, last-extension-wins)
+    extension_additive_conflict, // M1.0.18 → M1.1.1-HF4 — E1797 ExtensionAdditiveConflict (fatal cook error: ≥2 active extensions on an entity declare the same component; strictly-additive `extends` → reject, guaranteeing `cooked ⇒ loadable`; runtime backstop `error.ExtensionComponentConflict`)
 
     // ── async / effects (E09xx, M1.0.11 — etch-resolver-types.md §9.2) ──
     async_call_in_non_async_context, // M1.0.11 E4 — E0901 AsyncCallInNonAsyncContext (async fn/method call, or `await`, in a non-async fn/rule)
@@ -560,7 +560,7 @@ pub const DiagnosticCode = enum {
             .prefab_component_field_type_invalid => "E1795",
             .prefab_component_redefined => "E1796",
             .prefab_remove_base_component => "W1790",
-            .extension_additive_conflict => "W1791",
+            .extension_additive_conflict => "E1797",
             .async_call_in_non_async_context => "E0901",
             .await_not_statement_head => "E0904",
             .unconsumed_async_effect => "E0905",
@@ -872,6 +872,6 @@ test "DiagnosticCode code and name are stable cross-version" {
     try std.testing.expectEqualStrings("EventNotEntityScoped", DiagnosticCode.event_not_entity_scoped.name());
     try std.testing.expectEqualStrings("E0909", DiagnosticCode.ambiguous_event_entity_target.code());
     try std.testing.expectEqualStrings("AmbiguousEventEntityTarget", DiagnosticCode.ambiguous_event_entity_target.name());
-    try std.testing.expectEqualStrings("W1791", DiagnosticCode.extension_additive_conflict.code());
+    try std.testing.expectEqualStrings("E1797", DiagnosticCode.extension_additive_conflict.code());
     try std.testing.expectEqualStrings("ExtensionAdditiveConflict", DiagnosticCode.extension_additive_conflict.name());
 }

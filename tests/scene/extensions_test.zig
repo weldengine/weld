@@ -269,10 +269,11 @@ test "scene extensions clause populates the Entity Extensions + Prefab ID tables
     try std.testing.expectEqual(@as(u32, 0), acc.hookCount());
 }
 
-// ── M1.0.18 — cook warning W1791 on additive extension conflict (§30.5) ──
+// ── M1.1.1-HF4 — fatal cook error E1797 on additive extension conflict (§30.5) ──
+// (was M1.0.18's non-fatal warning; reject ratified — `error.ExtensionAdditiveConflict`)
 
 /// Multi-entry in-process resolver mapping extension prefab names to their cooked
-/// bytes (the additive-conflict detection resolves extension component sets through
+/// bytes (the additive-conflict gate resolves extension component sets through
 /// this, exactly like `of`/`extends`). The bytes must outlive the cook.
 const MultiResolver = struct {
     names: []const []const u8,
@@ -283,6 +284,9 @@ const MultiResolver = struct {
         return null;
     }
     fn base(self: *MultiResolver) scene_cook.BaseResolver {
+        return .{ .ctx = self, .resolveFn = MultiResolver.resolve };
+    }
+    fn ext(self: *MultiResolver) scene.loader.ExtensionResolver {
         return .{ .ctx = self, .resolveFn = MultiResolver.resolve };
     }
 };
@@ -321,21 +325,20 @@ const ext_arsenal = // ArsenalModule: declares Weapon only
     \\  entity "m" { uuid: "00000000-0000-0000-0000-0000000000c4" Weapon { damage: 5 } }
     \\}
 ;
-const ext_stash = // StashModule: declares Inventory only
-    \\component Inventory { slots: i32 = 0 }
-    \\prefab "StashModule" extends "Base" {
-    \\  entity "m" { uuid: "00000000-0000-0000-0000-0000000000c5" Inventory { slots: 5 } }
-    \\}
-;
 
-// The `extensions:` clause + additive-conflict detection run through the SAME
-// scene `build` loop for `entity` and `instance` — these tests use `entity`.
+// The `extensions:` clause + additive-conflict gate run through the SAME scene
+// `build` loop for `entity` and `instance` — these tests use `entity`. A conflict
+// (≥2 active extensions declaring the same component) is a FATAL cook error
+// (`E1797 ExtensionAdditiveConflict` → `error.ExtensionAdditiveConflict`), the
+// strictly-additive `extends` reject policy (M1.1.1-HF4). Disjoint components cook
+// cleanly. Together with the runtime `error.ExtensionComponentConflict` this
+// guarantees `cooked ⇒ loadable`.
 
-test "cook warns W1791 when two extensions declare the same component" {
+test "cook fails fatally when two extensions declare the same component" {
     const gpa = std.testing.allocator;
-    const m = try prefabBytes(gpa, ext_merchant);
+    const m = try prefabBytes(gpa, ext_merchant); // Inventory
     defer gpa.free(m);
-    const t = try prefabBytes(gpa, ext_trade);
+    const t = try prefabBytes(gpa, ext_trade); // Inventory
     defer gpa.free(t);
     var mr = MultiResolver{ .names = &.{ "MerchantModule", "TradeModule" }, .blobs = &.{ m, t } };
     const src =
@@ -348,14 +351,16 @@ test "cook warns W1791 when two extensions declare the same component" {
         \\  }
         \\}
     ;
-    var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
-    defer cooked.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 1), cooked.warnings.len);
-    try std.testing.expectEqualStrings("W1791", cooked.warnings[0].code);
-    try std.testing.expect(std.mem.indexOf(u8, cooked.warnings[0].message, "Inventory") != null);
+    // Fatal: the cook returns `error.ExtensionAdditiveConflict` and produces no
+    // `Cooked` (no output). `diag_out`, when provided, carries the static E1797
+    // message (no leak — a `CookError` message is never gpa-owned).
+    var diag: []const u8 = "";
+    try std.testing.expectError(error.ExtensionAdditiveConflict, scene_cook.cookScene(gpa, src, mr.base(), &diag));
+    try std.testing.expect(diag.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, diag, "additive") != null);
 }
 
-test "cook emits no warning when extensions declare disjoint components" {
+test "cook succeeds when extensions declare disjoint components" {
     const gpa = std.testing.allocator;
     const m = try prefabBytes(gpa, ext_merchant); // Inventory
     defer gpa.free(m);
@@ -372,12 +377,12 @@ test "cook emits no warning when extensions declare disjoint components" {
         \\  }
         \\}
     ;
+    // Disjoint (Inventory vs Weapon): the cook succeeds with no error.
     var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
-    defer cooked.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 0), cooked.warnings.len);
+    cooked.deinit(gpa);
 }
 
-test "cook emits one W1791 per conflicting component" {
+test "cook fails on the first conflicting component" {
     const gpa = std.testing.allocator;
     const c = try prefabBytes(gpa, ext_combat); // Inventory + Weapon
     defer gpa.free(c);
@@ -396,103 +401,84 @@ test "cook emits one W1791 per conflicting component" {
         \\  }
         \\}
     ;
-    var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
-    defer cooked.deinit(gpa);
-    // Inventory shared by Combat+Merchant; Weapon shared by Combat+Arsenal → exactly
-    // two warnings, one per conflicting component (NOT one per extension pair).
-    try std.testing.expectEqual(@as(usize, 2), cooked.warnings.len);
-    var saw_inv = false;
-    var saw_weap = false;
-    for (cooked.warnings) |w| {
-        try std.testing.expectEqualStrings("W1791", w.code);
-        if (std.mem.indexOf(u8, w.message, "Inventory") != null) saw_inv = true;
-        if (std.mem.indexOf(u8, w.message, "Weapon") != null) saw_weap = true;
-    }
-    try std.testing.expect(saw_inv and saw_weap);
+    // Inventory (Combat+Merchant) and Weapon (Combat+Arsenal) both conflict; the
+    // cook fails ONCE, fatally, short-circuiting on the first — no enumeration.
+    try std.testing.expectError(error.ExtensionAdditiveConflict, scene_cook.cookScene(gpa, src, mr.base(), null));
 }
 
-test "W1791 is non-fatal — cooked output applies last-extension-wins" {
-    const gpa = std.testing.allocator;
-    const m = try prefabBytes(gpa, ext_merchant);
-    defer gpa.free(m);
-    const t = try prefabBytes(gpa, ext_trade);
-    defer gpa.free(t);
-    var mr = MultiResolver{ .names = &.{ "MerchantModule", "TradeModule" }, .blobs = &.{ m, t } };
-    const src =
-        \\component Marker { v: i32 = 0 }
-        \\scene "S" {
-        \\  entity "npc" {
-        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
-        \\    extensions: ["MerchantModule", "TradeModule"]
-        \\    Marker { v: 1 }
-        \\  }
-        \\}
-    ;
-    // Non-fatal: the cook returns a valid `Cooked` (no `CookError`) with one warning.
-    var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
-    defer cooked.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 1), cooked.warnings.len);
-
-    // The warning never alters the cooked output: the Entity Extensions Table still
-    // lists both extensions in declaration order, so the loader's last-extension-wins
-    // resolution sees TradeModule (index 1, last) as the winner.
-    const bytes = try scene.writer.write(gpa, cooked.model, &cooked.registry);
-    defer gpa.free(bytes);
-    var acc = try Accessor.open(bytes);
-    try std.testing.expect(acc.verifyHash());
-    try std.testing.expectEqual(@as(u32, 1), acc.extensionsCount());
-    const e = acc.extension(0);
-    try std.testing.expectEqual(@as(u32, 2), e.extension_count);
-    try std.testing.expectEqualStrings("MerchantModule", acc.prefabName(e.extensionId(0)));
-    try std.testing.expectEqualStrings("TradeModule", acc.prefabName(e.extensionId(1)));
-}
-
-test "single extension declaring a component emits no warning" {
-    const gpa = std.testing.allocator;
-    const c = try prefabBytes(gpa, ext_combat); // Inventory + Weapon
-    defer gpa.free(c);
-    var mr = MultiResolver{ .names = &.{"CombatModule"}, .blobs = &.{c} };
-    const src =
-        \\component Marker { v: i32 = 0 }
-        \\scene "S" {
-        \\  entity "npc" {
-        \\    uuid: "00000000-0000-0000-0000-0000000000f1"
-        \\    extensions: ["CombatModule"]
-        \\    Marker { v: 1 }
-        \\  }
-        \\}
-    ;
-    var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
-    defer cooked.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 0), cooked.warnings.len);
-}
-
-test "3+ extensions declaring the same component emit exactly one W1791" {
+test "cooked scene with extensions is loadable" {
+    // Contract test — the core deliverable. A cooked multi-extension scene with
+    // DISJOINT components loads cleanly and every extension's components are
+    // present (the positive side of `cooked ⇒ loadable`).
     const gpa = std.testing.allocator;
     const m = try prefabBytes(gpa, ext_merchant); // Inventory
     defer gpa.free(m);
-    const t = try prefabBytes(gpa, ext_trade); // Inventory
-    defer gpa.free(t);
-    const s = try prefabBytes(gpa, ext_stash); // Inventory
-    defer gpa.free(s);
-    var mr = MultiResolver{ .names = &.{ "MerchantModule", "TradeModule", "StashModule" }, .blobs = &.{ m, t, s } };
+    const a = try prefabBytes(gpa, ext_arsenal); // Weapon
+    defer gpa.free(a);
+
     const src =
         \\component Marker { v: i32 = 0 }
         \\scene "S" {
         \\  entity "npc" {
         \\    uuid: "00000000-0000-0000-0000-0000000000f1"
-        \\    extensions: ["MerchantModule", "TradeModule", "StashModule"]
+        \\    extensions: ["MerchantModule", "ArsenalModule"]
         \\    Marker { v: 1 }
         \\  }
         \\}
     ;
-    var cooked = try scene_cook.cookScene(gpa, src, mr.base(), null);
+    var cooked = try scene_cook.cook(gpa, src, null);
     defer cooked.deinit(gpa);
-    // All three declare Inventory: the `== 2` guard emits once (at the 2nd distinct
-    // declarer) and never re-emits at the 3rd → exactly one warning, not two/three.
-    try std.testing.expectEqual(@as(usize, 1), cooked.warnings.len);
-    try std.testing.expectEqualStrings("W1791", cooked.warnings[0].code);
-    try std.testing.expect(std.mem.indexOf(u8, cooked.warnings[0].message, "Inventory") != null);
+    const scene_bytes = try scene.writer.write(gpa, cooked.model, &cooked.registry);
+    defer gpa.free(scene_bytes);
+
+    // A World mirroring the base + extension component layout (all i32-sized).
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Marker", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Inventory", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Weapon", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
+
+    var mr = MultiResolver{ .names = &.{ "MerchantModule", "ArsenalModule" }, .blobs = &.{ m, a } };
+    var result = try scene.loader.loadFromBytes(&world, gpa, scene_bytes, mr.ext());
+    defer result.deinit(gpa);
+
+    const npc = result.uuid_to_entity.get(uuidBytes(0xf1)).?;
+    // Base component + BOTH extensions' components are present on the entity.
+    try std.testing.expect(world.componentBytes(npc, world.componentId("Marker").?) != null);
+    try std.testing.expect(world.componentBytes(npc, world.componentId("Inventory").?) != null);
+    try std.testing.expect(world.componentBytes(npc, world.componentId("Weapon").?) != null);
+    try std.testing.expect(world.hasEntityExtension(npc, "MerchantModule"));
+    try std.testing.expect(world.hasEntityExtension(npc, "ArsenalModule"));
+}
+
+test "runtime activate rejects a component the entity already carries" {
+    // The dynamic counterpart of the static cook gate: `activate_extension` adding
+    // a component the entity already carries is rejected with
+    // `error.ExtensionComponentConflict`, and the entity is left unchanged.
+    const gpa = std.testing.allocator;
+    const combat_bytes = try cookCombatModule(gpa); // adds Weapon{25}, on_attach Health.max += 50
+    defer gpa.free(combat_bytes);
+
+    var world = World.init();
+    defer world.deinit(gpa);
+    _ = try world.registry.registerComponentRaw(gpa, .{ .name = "Health", .size = 8, .alignment = 4, .default_bytes = &[_]u8{0} ** 8, .fields = &.{} });
+    const weapon_id = try world.registry.registerComponentRaw(gpa, .{ .name = "Weapon", .size = 4, .alignment = 4, .default_bytes = &[_]u8{0} ** 4, .fields = &.{} });
+
+    // Entity already carries Weapon (damage 10) — the component CombatModule adds.
+    const health_id = world.componentId("Health").?;
+    var hv = [_]i32{ 100, 100 };
+    var wv: i32 = 10;
+    const eid = try world.spawnDynamicWithValues(gpa, &[_]ComponentId{ health_id, weapon_id }, &[_][]const u8{ std.mem.asBytes(&hv), std.mem.asBytes(&wv) });
+
+    var res = OneResolver{ .name = "CombatModule", .bytes = combat_bytes };
+    try std.testing.expectError(error.ExtensionComponentConflict, scene.loader.runtimeActivate(&world, gpa, eid, "CombatModule", res.ext()));
+
+    // Unchanged: Weapon keeps its value, on_attach never ran (Health.max stays
+    // 100), and no extension record was created (rejected at prevalidate).
+    const wb = world.componentBytes(eid, weapon_id).?;
+    try std.testing.expectEqual(@as(i32, 10), std.mem.readInt(i32, wb[0..4], .little));
+    try std.testing.expectEqual(@as(i32, 100), healthMax(&world, eid));
+    try std.testing.expect(!world.hasEntityExtension(eid, "CombatModule"));
 }
 
 // ── E6 — load applies extension components + fires the on_attach seam ──
