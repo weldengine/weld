@@ -509,6 +509,46 @@ test "gjk near-contact pairs are not deep" {
         try testing.expectEqual(GjkResult.Status.separated, r.status);
         try testing.expectApproxEqAbs(@as(Real, 0.01), r.distance, gjk_test_tol);
     }
+    // (d) NOISE-LEVEL near contact (Fix P2 — the noise floor recalibration). The
+    // same oriented box-50, but with the point only 2e-5 outside — right above
+    // the f32 rounding-noise floor at this coordinate scale (~1.5e-5 in distance,
+    // ~machine-epsilon · 50). It must be `.separated`, neither a false `.deep`
+    // (the former 8×-eps floor mis-fired here) nor `.shallow`. At f64 the floor
+    // is ~9 orders tighter, so this is separated by a wide margin.
+    {
+        const c: Real = 50 * std.math.sqrt2 + 2.0e-5;
+        const r = narrowphase.gjk(
+            Real,
+            sphereShape(0),
+            vr(0, 0, 0),
+            Quatr.identity,
+            boxShape(50, 50, 50),
+            vr(c, 0, 0),
+            Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 4.0),
+        );
+        try testing.expectEqual(GjkResult.Status.separated, r.status);
+    }
+}
+
+test "gjk contact margin is absolute not radius-proportional" {
+    // P1 (Codex review): the shallow/separated boundary must absorb only GJK's
+    // convergence noise on `dist` (∝ the cores' coordinate scale), never a
+    // fraction of r_sum. Two point cores r=500 (r_sum=1000): a genuine 5 cm gap
+    // (centers 1000.05) is unambiguously `.separated`. Under the former
+    // r_sum-proportional margin (`contact_rel·r_sum` = 0.1 m at r_sum=1000) this
+    // 5 cm separation was swallowed as `.shallow` — a collision margin beyond the
+    // core radius, out of scope (§32).
+    try checkSeparated(sphereShape(500), vr(0, 0, 0), Quatr.identity, sphereShape(500), vr(1000.05, 0, 0), Quatr.identity, 1000.05);
+    // Exact tangency (core distance == r_sum) stays `.shallow` (frozen touch =
+    // shallow), so the absolute margin has not simply become "always separated".
+    try checkShallow(sphereShape(500), vr(0, 0, 0), Quatr.identity, sphereShape(500), vr(1000, 0, 0), Quatr.identity, 1000);
+    // Same 5 cm gap under an oblique global rigid transform ⇒ still `.separated`
+    // (the additive margin is rotation-invariant, coordinate-scale-based).
+    {
+        const g_rot = Quatr.fromAxisAngle(vr(1, 2, 3).normalize(), 0.7);
+        const g_trans = vr(-4, 7, 2);
+        try checkSeparated(sphereShape(500), g_rot.rotateVec3(vr(0, 0, 0)).add(g_trans), g_rot, sphereShape(500), g_rot.rotateVec3(vr(1000.05, 0, 0)).add(g_trans), g_rot, 1000.05);
+    }
 }
 
 test "gjk deep pairs enclose the origin" {
@@ -544,6 +584,13 @@ test "gjk deep pairs enclose the origin" {
     // genuine enclosure at scale — deep here is proven by a non-degenerate
     // origin-containing tetrahedron (`count == 4`), not by any distance test.
     try checkDeep(boxShape(50, 50, 50), vr(0, 0, 0), Quatr.identity, boxShape(50, 50, 50), vr(1, 0, 0), Quatr.identity);
+
+    // LARGE DEGENERATE deep (Fix P2 non-regression): two half-height-50 segment
+    // cores crossing at the origin. This deep is a planar (non-tetrahedralizable)
+    // Minkowski config, so it rests on the numerical-noise floor rather than
+    // `count == 4` — the case most sensitive to the floor recalibration. It must
+    // stay `.deep` at scale (the closest point lands at the origin up to rounding).
+    try checkDeep(capsuleShape(50, 0.3), vr(0, 0, 0), Quatr.identity, capsuleShape(50, 0.3), vr(0, 0, 0), rot_z90);
 }
 
 test "gjk is deterministic and iteration-bounded" {
