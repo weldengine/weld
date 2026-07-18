@@ -469,24 +469,30 @@ pub fn gjk(
     // Named tolerances. `rel_tolerance`: the squared-distance progress test,
     // relative to the closest-point magnitude. `dup_rel_sq`: a support
     // duplicates an existing simplex vertex (anti-cycling), relative to the
-    // simplex magnitude². `contact_rel`: the shallow/separated boundary margin —
-    // GJK distance is approximate, so an exact tangency must not tip into
-    // `.separated` (the frozen touch = shallow rule).
+    // simplex magnitude².
     //
-    // `mach_eps` is a NUMERICAL-NOISE floor (≈ machine epsilon with an
-    // accumulation margin), NOT a geometric tolerance. `.deep` rests on
-    // geometric ENCLOSURE — a non-degenerate origin-containing tetrahedron
-    // (`res.count == 4`, degeneracy guarded relative to the tetra's own edges in
-    // `closestOriginTetra`); no shape-size-relative distance threshold ever
-    // decides intersection. `mach_eps` only catches the genuinely degenerate
-    // Minkowski configs that cannot form a tetrahedron (coincident / collinear
-    // cores) yet do reach the origin: there the closest point sits at the origin
-    // up to the rounding error of the `w = support_a − support_b` subtraction,
-    // whose scale is the ABSOLUTE support magnitude (see `degenerateOriginReached`).
+    // The classification thresholds absorb ONLY floating-point rounding noise —
+    // no decision depends on a geometric quantity (radius, shape size, or
+    // `w`-vertex magnitude). Both are of the form `k · floatEps(T) · coordScale`,
+    // where `coordScale` is the cores' coordinate scale (the ABSOLUTE support
+    // magnitude — the scale of the `w = support_a − support_b` rounding error),
+    // NEVER `r_sum` nor the `w` magnitude:
+    //   - `mach_eps` = `noise_k · floatEps(T)` is the NUMERICAL-NOISE floor for
+    //     the degenerate-origin test (`degenerateOriginReached`, floor
+    //     `mach_eps² · maxSupportMagSq`). It only catches genuinely degenerate
+    //     Minkowski configs (coincident / collinear cores that cannot form a
+    //     tetrahedron) whose closest point sits at the origin up to rounding.
+    //     `.deep` proper rests on geometric ENCLOSURE (`res.count == 4`, a
+    //     non-degenerate origin-containing tetra), never on this floor.
+    //   - `conv_k` scales the shallow/separated contact margin below — the GJK
+    //     convergence error on the reported `dist` at the coordinate scale.
+    // `noise_k`/`conv_k` are a couple of ULPs (≈ 2): the accumulation margin is
+    // MINIMAL so the floor tracks the real rounding noise, not a geometric slack.
     const rel_tolerance: T = if (T == f32) 1.0e-5 else 1.0e-10;
     const dup_rel_sq: T = if (T == f32) 1.0e-10 else 1.0e-20;
-    const contact_rel: T = if (T == f32) 1.0e-4 else 1.0e-9;
-    const mach_eps: T = if (T == f32) 1.0e-6 else 1.0e-13;
+    const noise_k: T = 2;
+    const conv_k: T = 2;
+    const mach_eps: T = noise_k * std.math.floatEps(T);
 
     const relpose = RelativePose(T).init(pos_a, rot_a, pos_b, rot_b);
 
@@ -553,15 +559,22 @@ pub fn gjk(
         ca = ca.add(verts[i].support_a.scale(bary[i]));
         cb = cb.add(verts[i].support_b.scale(bary[i]));
     }
-    const dist_sq = closest.dot(closest);
+    const dist = @sqrt(closest.dot(closest));
     // Contact-margin boundary: `.separated` only when the core distance exceeds
-    // `r_a + r_b` beyond the relative margin. GJK's distance carries a
-    // convergence error, and the frozen convention makes an exact touch shallow.
+    // `r_a + r_b` by more than GJK's convergence noise on `dist`. The margin is
+    // ABSOLUTE — `conv_k · floatEps(T) · coordScale`, where `coordScale` is the
+    // cores' coordinate scale (the absolute support magnitude, the scale of the
+    // `w = sa − sb` rounding error) — never a fraction of the radius: a
+    // radius-proportional margin (a fixed fraction of `r_sum`) grows without
+    // bound and is a collision margin beyond the core radius, out of scope (§32).
+    // The comparison is additive on the already-computed `dist`. The frozen
+    // convention keeps an exact inflated touch (`dist == r_sum`) shallow.
     const r_sum = shape_a.radius + shape_b.radius;
-    const boundary = r_sum * (1 + contact_rel);
+    const coord_scale = @sqrt(maxSupportMagSq(T, verts[0..count]));
+    const contact_margin = conv_k * std.math.floatEps(T) * coord_scale;
     return .{
-        .status = if (dist_sq > boundary * boundary) Res.Status.separated else Res.Status.shallow,
-        .distance = @sqrt(dist_sq),
+        .status = if (dist - r_sum > contact_margin) Res.Status.separated else Res.Status.shallow,
+        .distance = dist,
         .closest_a = rot_a.rotateVec3(ca).add(pos_a),
         .closest_b = rot_a.rotateVec3(cb).add(pos_a),
         .simplex = emptySimplex(T),
