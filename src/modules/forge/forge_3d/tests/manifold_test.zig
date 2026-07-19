@@ -190,6 +190,37 @@ fn refCornerFid(m: ContactManifold) ?u32 {
     return null;
 }
 
+test "single-contact fallback id never aliases a clip id" {
+    // Codex FIX-11 threshold repro (the two Codex angles straddle `face_face_min`
+    // at f32; the threshold is precision-dependent — 0.999 f32 / 0.9999 f64 — so
+    // scan a small tilt range around them to find, at THIS build's precision, both
+    // a clipped (multi-point) and a fallback (single-contact) box/box at the same
+    // base pose). The fallback's feature_id must equal NONE of the clip ids — its
+    // (class_a ref, class_c inc) class pair is disjoint from every clip-id class
+    // pair (kept vertex (a,a), edge (edge,edge), corner (c,c)).
+    const box = boxShape(1, 1, 1);
+    const p = vr(0, 0.8, -1.8);
+    var m_clip: ?ContactManifold = null;
+    var m_fb: ?ContactManifold = null;
+    // Tilt grows from 0 (identity ⇒ a clean face-face clip at any precision)
+    // through the face-face↔fallback threshold into the edge/vertex regime.
+    var a: Real = 0;
+    while (a < 0.4) : (a += 0.0005) {
+        const rot = Quatr.fromAxisAngle(Vec3r.unit_y, a).mul(Quatr.fromAxisAngle(Vec3r.unit_x, a));
+        const m = collide(box, vr(0, 0, 0), Quatr.identity, box, p, rot) orelse continue;
+        if (m.count >= 2 and m_clip == null) m_clip = m;
+        if (m.count == 1 and m_fb == null) m_fb = m;
+    }
+    const mc = m_clip orelse return error.NoClippedManifold;
+    const mf = m_fb orelse return error.NoFallbackManifold;
+    const fb_id = mf.points[0].feature_id;
+    // The fallback id carries the disjoint (class_a, class_c) class pair …
+    try testing.expectEqual(@as(u32, 0x0000), (fb_id >> 16) & 0xc000);
+    try testing.expectEqual(@as(u32, 0x8000), fb_id & 0xc000);
+    // … and equals none of the clip ids.
+    for (0..mc.count) |i| try testing.expect(fb_id != mc.points[i].feature_id);
+}
+
 test "reference corner feature id encodes the incident face" {
     // Codex FIX-10: a reference corner's incident half must carry which incident
     // face it lies on, not a constant — else two corners at the SAME reference
@@ -529,11 +560,19 @@ test "pose sweep: feature ids are distinct and frame-stable" {
                     }
                     // (a2, FIX-10) any reference corner carries an incident FACE in
                     // its low half (class_c + a real face id 0..5), not a constant.
+                    // (a3, FIX-11) a multi-point (clipped) manifold never carries the
+                    // single-contact fallback class pair (class_a ref, class_c inc),
+                    // so a fallback id can never alias a clip id across the
+                    // face-face↔fallback threshold for this body pair.
                     for (0..m.count) |i| {
                         const fid = m.points[i].feature_id;
                         if ((fid >> 16) & 0xc000 == 0x8000) {
                             try testing.expectEqual(@as(u32, 0x8000), fid & 0xc000);
                             try testing.expect((fid & 0x3fff) <= 5);
+                        }
+                        if (m.count > 1) {
+                            const is_fallback_pair = ((fid >> 16) & 0xc000 == 0x0000) and (fid & 0xc000 == 0x8000);
+                            try testing.expect(!is_fallback_pair);
                         }
                     }
                     // (b) frame-stable id SET under the tiny shift — asserted only

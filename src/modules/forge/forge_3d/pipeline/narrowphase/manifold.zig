@@ -183,7 +183,7 @@ fn generateManifold(
     // Point-core contact (a sphere, or an end-on capsule → 1 vertex): a single
     // contact straight from the GJK/EPA witness points, mapped to the surfaces.
     if (face_a.count == 1 or face_b.count == 1) {
-        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, packFeatureId(face_a.face_id, face_b.face_id));
+        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(face_a.face_id, face_b.face_id));
     }
 
     // Reference/incident by alignment with the contact axis (non-polygon → 0; tie A).
@@ -208,7 +208,7 @@ fn generateManifold(
     // contact, whose depth is along `n_a` (EPA / GJK-closest).
     const face_face_min: T = if (T == f32) 0.999 else 0.9999;
     if (@abs(rn.dot(n_a)) < face_face_min) {
-        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, packFeatureId(ref.face_id, inc.face_id));
+        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(ref.face_id, inc.face_id));
     }
 
     // Clip the incident polygon/segment against the reference side planes,
@@ -237,7 +237,7 @@ fn generateManifold(
     if (raw_n == 0) {
         // Degenerate clip (an oblique feature that clipped empty): fall back to the
         // single witness-point contact so a genuine overlap is never lost.
-        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, packFeatureId(ref.face_id, inc.face_id));
+        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(ref.face_id, inc.face_id));
     }
 
     // Reduce to ≤ 4 (A's frame, deepest + area-maximising), then map to world.
@@ -284,10 +284,15 @@ fn oneContact(comptime T: type, normal: math.Vec(3, T), position: math.Vec(3, T)
     };
 }
 
-/// Deterministic per-contact identity (reference-feature id << 16 | incident id),
-/// consumed at M1.1.6. Packing is provisional (brief FROZEN convention).
-fn packFeatureId(ref_id: u32, inc_id: u32) u32 {
-    return (ref_id << 16) | (inc_id & 0xffff);
+/// The feature id of a SINGLE witness contact (point core, edge/vertex fallback,
+/// or degenerate empty clip): reference face (`class_a`) high, incident FACE
+/// (`class_c` — the incident-face class) low. The `(class_a, class_c)` class pair
+/// is used by NO clip-manifold id (kept vertex `(class_a, class_a)`, edge
+/// crossing `(class_edge, class_edge)`, reference corner `(class_c, class_c)`), so
+/// a single-contact id can never alias a clip id for the same body pair at the
+/// face-face↔fallback transition (Codex FIX-11). No untagged packer remains.
+fn singleContactFid(ref_face_id: u16, inc_face_id: u16) u32 {
+    return featureId(class_a | (ref_face_id & id_mask), class_c | (inc_face_id & id_mask));
 }
 
 /// Outward normal of a face in A's frame: the polygon normal oriented toward
