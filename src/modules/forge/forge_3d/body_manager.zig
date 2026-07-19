@@ -157,7 +157,24 @@ pub const BodyManager = struct {
     /// — is stale/invalid. The `BodyId`-level manifold adapter for the
     /// broadphase→narrowphase flow (mirror of `gjkPair`): unpack a `computePairs`
     /// candidate's `user_data` as a `BodyId` and call this per pair.
+    ///
+    /// The pipeline is driven in a canonical BODY-ID order (`min(a, b)` first),
+    /// negating the normal for the `a > b` caller. This makes the whole
+    /// narrowphase order-independent even for the measure-zero case `collide`'s
+    /// pose key cannot break — two bodies with bit-identical shape AND pose — and
+    /// gives a stable, body-id-keyed order for M1.1.6 warm-starting.
     pub fn collidePair(self: *const BodyManager, store: *const ShapeStore, a: BodyId, b: BodyId) ?ContactManifold {
+        if (a > b) {
+            var m = self.collidePairOrdered(store, b, a) orelse return null;
+            m.normal = m.normal.neg(); // caller wants a→b = −(b→a)
+            return m;
+        }
+        return self.collidePairOrdered(store, a, b);
+    }
+
+    /// `collidePair` for a fixed (already-canonical) body order — validates both
+    /// handles/shapes then runs the manifold pipeline.
+    fn collidePairOrdered(self: *const BodyManager, store: *const ShapeStore, a: BodyId, b: BodyId) ?ContactManifold {
         const ia = self.alloc.validate(a) orelse return null;
         const ib = self.alloc.validate(b) orelse return null;
         const shape_a = store.get(self.bodies.items(.shape)[ia]) orelse return null;

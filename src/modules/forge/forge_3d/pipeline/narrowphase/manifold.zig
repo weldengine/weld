@@ -171,13 +171,10 @@ fn generateManifold(
     // Point-core contact (a sphere, or an end-on capsule → 1 vertex): a single
     // contact straight from the GJK/EPA witness points, mapped to the surfaces.
     if (face_a.count == 1 or face_b.count == 1) {
-        const sa = closest_a.add(n_world.scale(r_a)); // A's surface toward B
-        const sb = closest_b.sub(n_world.scale(r_b)); // B's surface toward A
-        const position = sa.add(sb).scale(0.5);
-        return oneContact(T, n_world, position, @max(base_penetration, 0), packFeatureId(0, 0));
+        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, packFeatureId(face_a.face_id, face_b.face_id));
     }
 
-    // --- Face-face / face-edge: reference vs incident, clipped in A's frame ---
+    // Reference/incident by alignment with the contact axis (non-polygon → 0; tie A).
     const n_a_face = faceNormalA(T, face_a, n_a); // ≈ +n_a
     const n_b_face = faceNormalA(T, face_b, n_a.neg()); // ≈ −n_a
     const align_a: T = if (face_a.count >= 3) @abs(n_a_face.dot(n_a)) else 0;
@@ -191,43 +188,65 @@ fn generateManifold(
     const r_inc = if (a_is_ref) r_b else r_a;
     const ref_pt = ref.verts[0];
 
-    // Clip the incident polygon/segment against the reference side planes.
-    var clip_buf: [max_clip]Vec3T = undefined;
-    const clipped = clipIncident(T, inc, ref, rn, &clip_buf);
+    // FIX-1 (edge-edge): the reference face normal `rn` is the penetration axis
+    // ONLY when it aligns with the contact axis `n_a` (a genuine face-face). For
+    // an edge/vertex contact `n_a` is an edge-cross direction no box quad aligns
+    // with, so measuring penetration along `rn` is wrong (it diverges from the EPA
+    // depth). Detect it by `|rn · n_a|` and fall back to the witness-point single
+    // contact, whose depth is along `n_a` (EPA / GJK-closest).
+    const face_face_min: T = if (T == f32) 0.999 else 0.9999;
+    if (@abs(rn.dot(n_a)) < face_face_min) {
+        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, packFeatureId(ref.face_id, inc.face_id));
+    }
 
-    // Keep penetrating points; build contacts.
-    var points: [4]ContactPoint(T) = undefined;
+    // Clip the incident polygon/segment against the reference side planes,
+    // carrying a stable feature id per point (FIX-2).
+    var clip_buf: [max_clip]Vec3T = undefined;
+    var fid_buf: [max_clip]u32 = undefined;
+    const clipped = clipIncident(T, inc, ref, rn, &clip_buf, &fid_buf);
+
+    // Keep penetrating points IN A'S FRAME (FIX-4): reduce/dedup in A's frame so
+    // precision holds far from the world origin; map only the chosen ≤ 4 points to
+    // world at the very end.
     var raw: [max_clip]Candidate(T) = undefined;
     var raw_n: usize = 0;
     const keep_eps: T = if (T == f32) 1.0e-5 else 1.0e-10;
-    for (clipped) |v| {
+    for (clipped, 0..) |v, ci| {
         const s = v.sub(ref_pt).dot(rn);
         const pen = r_sum - s;
         if (pen < -keep_eps) continue;
         // Surface points: reference face + r_ref outward; incident core − r_inc.
         const foot = v.sub(rn.scale(s));
         const pos_a_frame = foot.add(v).scale(0.5).add(rn.scale((r_ref - r_inc) * 0.5));
-        raw[raw_n] = .{ .pos = rot_a.rotateVec3(pos_a_frame).add(pos_a), .pen = @max(pen, 0) };
+        raw[raw_n] = .{ .pos = pos_a_frame, .pen = @max(pen, 0), .fid = fid_buf[ci] };
         raw_n += 1;
     }
 
     if (raw_n == 0) {
-        // Degenerate clip (e.g. an oblique feature that clipped empty): fall back
-        // to the single witness-point contact so a genuine overlap is never lost.
-        const sa = closest_a.add(n_world.scale(r_a));
-        const sb = closest_b.sub(n_world.scale(r_b));
-        return oneContact(T, n_world, sa.add(sb).scale(0.5), @max(base_penetration, 0), packFeatureId(0, 0));
+        // Degenerate clip (an oblique feature that clipped empty): fall back to the
+        // single witness-point contact so a genuine overlap is never lost.
+        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, packFeatureId(ref.face_id, inc.face_id));
     }
 
-    // Reduce to ≤ 4 (deepest + area-maximising), deterministic.
+    // Reduce to ≤ 4 (A's frame, deepest + area-maximising), then map to world.
     var idx: [4]usize = undefined;
-    const count = reduceToFour(T, raw[0..raw_n], n_world, &idx);
+    const count = reduceToFour(T, raw[0..raw_n], n_a, &idx);
+    var points: [4]ContactPoint(T) = undefined;
     for (0..count) |i| {
         const c = raw[idx[i]];
-        points[i] = .{ .position = c.pos, .penetration = c.pen, .feature_id = packFeatureId(@intFromBool(!a_is_ref), @intCast(idx[i])) };
+        points[i] = .{ .position = rot_a.rotateVec3(c.pos).add(pos_a), .penetration = c.pen, .feature_id = c.fid };
     }
     for (count..4) |i| points[i] = .{ .position = Vec3T.zero, .penetration = 0, .feature_id = 0 };
     return .{ .normal = n_world, .points = points, .count = @intCast(count) };
+}
+
+/// The shared single-contact path (point core, edge/vertex contact, or a
+/// degenerate empty clip): one contact from the GJK/EPA witness points, on the
+/// contact plane midway between the two inflated surfaces, depth along `n_world`.
+fn pointCoreContact(comptime T: type, n_world: math.Vec(3, T), closest_a: math.Vec(3, T), closest_b: math.Vec(3, T), r_a: T, r_b: T, base_penetration: T, feature_id: u32) ContactManifold(T) {
+    const sa = closest_a.add(n_world.scale(r_a)); // A's surface toward B
+    const sb = closest_b.sub(n_world.scale(r_b)); // B's surface toward A
+    return oneContact(T, n_world, sa.add(sb).scale(0.5), @max(base_penetration, 0), feature_id);
 }
 
 // --- Internal helpers ---
@@ -236,9 +255,10 @@ fn generateManifold(
 /// quad (4) clipped against up to 4 reference side planes yields ≤ 8.
 const max_clip: usize = 8;
 
-/// A candidate contact before reduction: its world position and penetration.
+/// A candidate contact before reduction: its A-frame position, penetration, and
+/// stable feature id (FIX-2/FIX-4).
 fn Candidate(comptime T: type) type {
-    return struct { pos: math.Vec(3, T), pen: T };
+    return struct { pos: math.Vec(3, T), pen: T, fid: u32 };
 }
 
 /// A single-point manifold with the tail zeroed.
@@ -270,18 +290,31 @@ fn faceNormalA(comptime T: type, face: support.Face(T), expected_axis: math.Vec(
     return if (n.dot(expected_axis) < 0) n.neg() else n;
 }
 
+/// Pack an intersection point's stable feature id (FIX-2): a reference side plane
+/// (marked, 15-bit edge id) high, an incident edge (marked, the lower of the two
+/// endpoint feature ids) low — both marked distinct from a kept-vertex id.
+fn intersectionFid(plane_ref: u16, cur_fid: u32, nxt_fid: u32) u32 {
+    const ref16: u16 = 0x8000 | (plane_ref & 0x7fff);
+    const ci: u16 = @intCast(cur_fid & 0x7fff);
+    const ni: u16 = @intCast(nxt_fid & 0x7fff);
+    const inc16: u16 = 0x8000 | @min(ci, ni);
+    return (@as(u32, ref16) << 16) | @as(u32, inc16);
+}
+
 /// Clip the incident feature against the reference face's side planes (planes
 /// through each reference edge, perpendicular to the reference face, oriented
 /// inward; a segment reference contributes its two endpoint planes). A polygon
 /// incident (≥ 3 verts) is clipped by Sutherland-Hodgman; a segment incident
 /// (2 verts) is clipped as an OPEN segment (Liang-Barsky) — a closed-polygon
 /// clip would double-emit the crossing point (adversarial-review finding E).
+/// Threads a stable feature id per surviving point into `fid_buf` (FIX-2).
 /// Returns the surviving points as a slice into `buf`.
-fn clipIncident(comptime T: type, inc: support.Face(T), ref: support.Face(T), rn: math.Vec(3, T), buf: *[max_clip]math.Vec(3, T)) []math.Vec(3, T) {
+fn clipIncident(comptime T: type, inc: support.Face(T), ref: support.Face(T), rn: math.Vec(3, T), buf: *[max_clip]math.Vec(3, T), fid_buf: *[max_clip]u32) []math.Vec(3, T) {
     const Vec3T = math.Vec(3, T);
-    // Build the reference side planes (point + inward normal).
+    // Build the reference side planes (point + inward normal + stable ref-edge id).
     var plane_p: [4]Vec3T = undefined;
     var plane_n: [4]Vec3T = undefined;
+    var plane_ref: [4]u16 = undefined;
     var np: usize = 0;
     const centroid = faceCentroid(T, ref);
     if (ref.count >= 3) {
@@ -293,14 +326,15 @@ fn clipIncident(comptime T: type, inc: support.Face(T), ref: support.Face(T), rn
             if (pn.dot(pn) > 0) {
                 plane_p[np] = a;
                 plane_n[np] = pn;
+                plane_ref[np] = @as(u16, ref.face_id) * 4 + @as(u16, @intCast(i)); // stable ref-edge id
                 np += 1;
             }
         }
     } else { // segment reference: two endpoint planes ⟂ the segment axis
         const axis = ref.verts[1].sub(ref.verts[0]);
-        const ends = [2]struct { p: Vec3T, pn: Vec3T }{
-            .{ .p = ref.verts[0], .pn = axis },
-            .{ .p = ref.verts[1], .pn = axis.neg() },
+        const ends = [2]struct { p: Vec3T, pn: Vec3T, id: u16 }{
+            .{ .p = ref.verts[0], .pn = axis, .id = ref.vert_ids[0] },
+            .{ .p = ref.verts[1], .pn = axis.neg(), .id = ref.vert_ids[1] },
         };
         for (ends) |e| {
             var pn = e.pn;
@@ -308,37 +342,54 @@ fn clipIncident(comptime T: type, inc: support.Face(T), ref: support.Face(T), rn
             if (pn.dot(pn) > 0) {
                 plane_p[np] = e.p;
                 plane_n[np] = pn;
+                plane_ref[np] = e.id;
                 np += 1;
             }
         }
     }
 
-    if (inc.count == 2) return clipSegment(T, inc.verts[0], inc.verts[1], plane_p[0..np], plane_n[0..np], buf);
-    return clipPolygon(T, inc, plane_p[0..np], plane_n[0..np], buf);
+    // Initial incident feature ids: (reference face id) high, (incident vertex id) low.
+    var inc_fids: [4]u32 = undefined;
+    for (0..inc.count) |i| inc_fids[i] = (@as(u32, ref.face_id) << 16) | @as(u32, inc.vert_ids[i]);
+
+    if (inc.count == 2) return clipSegment(T, inc.verts[0], inc.verts[1], inc_fids[0], inc_fids[1], plane_p[0..np], plane_n[0..np], plane_ref[0..np], buf, fid_buf);
+    return clipPolygon(T, inc, inc_fids, plane_p[0..np], plane_n[0..np], plane_ref[0..np], buf, fid_buf);
 }
 
 /// Sutherland-Hodgman clip of a polygon incident against the reference side
-/// planes; ping-pongs two stack buffers. Returns a slice of `buf`.
-fn clipPolygon(comptime T: type, inc: support.Face(T), plane_p: []const math.Vec(3, T), plane_n: []const math.Vec(3, T), buf: *[max_clip]math.Vec(3, T)) []math.Vec(3, T) {
+/// planes; ping-pongs two stack buffers, threading a parallel feature-id buffer.
+fn clipPolygon(comptime T: type, inc: support.Face(T), inc_fids: [4]u32, plane_p: []const math.Vec(3, T), plane_n: []const math.Vec(3, T), plane_ref: []const u16, buf: *[max_clip]math.Vec(3, T), fid_buf: *[max_clip]u32) []math.Vec(3, T) {
     const Vec3T = math.Vec(3, T);
     var poly_a: [max_clip]Vec3T = undefined;
     var poly_b: [max_clip]Vec3T = undefined;
+    var fa: [max_clip]u32 = undefined;
+    var fb: [max_clip]u32 = undefined;
     var cur: []Vec3T = poly_a[0..inc.count];
-    for (0..inc.count) |i| cur[i] = inc.verts[i];
-    for (plane_p, plane_n) |p, pn| {
+    var cur_f: []u32 = fa[0..inc.count];
+    for (0..inc.count) |i| {
+        cur[i] = inc.verts[i];
+        cur_f[i] = inc_fids[i];
+    }
+    for (plane_p, plane_n, plane_ref) |p, pn, pref| {
         const dest_is_b = (cur.ptr == &poly_a);
-        const out_full: []Vec3T = if (dest_is_b) poly_b[0..] else poly_a[0..];
-        const out_n = clipAgainstPlane(T, cur, p, pn, out_full);
-        cur = out_full[0..out_n];
+        const out_v: []Vec3T = if (dest_is_b) poly_b[0..] else poly_a[0..];
+        const out_f: []u32 = if (dest_is_b) fb[0..] else fa[0..];
+        const out_n = clipAgainstPlane(T, cur, cur_f, p, pn, pref, out_v, out_f);
+        cur = out_v[0..out_n];
+        cur_f = out_f[0..out_n];
         if (out_n == 0) break;
     }
-    for (0..cur.len) |i| buf[i] = cur[i];
+    for (0..cur.len) |i| {
+        buf[i] = cur[i];
+        fid_buf[i] = cur_f[i];
+    }
     return buf[0..cur.len];
 }
 
 /// One Sutherland-Hodgman pass on a CLOSED polygon: keep the part on the inward
-/// side of the plane (point `p`, inward normal `pn`), inserting edge crossings.
-fn clipAgainstPlane(comptime T: type, poly: []const math.Vec(3, T), p: math.Vec(3, T), pn: math.Vec(3, T), out: []math.Vec(3, T)) usize {
+/// side of the plane (point `p`, inward normal `pn`), inserting edge crossings;
+/// threads feature ids (kept vertex → its id, intersection → `intersectionFid`).
+fn clipAgainstPlane(comptime T: type, poly: []const math.Vec(3, T), poly_f: []const u32, p: math.Vec(3, T), pn: math.Vec(3, T), plane_ref: u16, out_v: []math.Vec(3, T), out_f: []u32) usize {
     if (poly.len == 0) return 0;
     var n: usize = 0;
     var i: usize = 0;
@@ -348,8 +399,9 @@ fn clipAgainstPlane(comptime T: type, poly: []const math.Vec(3, T), p: math.Vec(
         const dc = cur.sub(p).dot(pn); // ≥ 0 inside
         const dn = nxt.sub(p).dot(pn);
         if (dc >= 0) {
-            if (n < out.len) {
-                out[n] = cur;
+            if (n < out_v.len) {
+                out_v[n] = cur;
+                out_f[n] = poly_f[i];
                 n += 1;
             }
         }
@@ -357,8 +409,9 @@ fn clipAgainstPlane(comptime T: type, poly: []const math.Vec(3, T), p: math.Vec(
             const denom = dc - dn;
             if (denom != 0) {
                 const t = dc / denom;
-                if (n < out.len) {
-                    out[n] = cur.add(nxt.sub(cur).scale(t));
+                if (n < out_v.len) {
+                    out_v[n] = cur.add(nxt.sub(cur).scale(t));
+                    out_f[n] = intersectionFid(plane_ref, poly_f[i], poly_f[(i + 1) % poly.len]);
                     n += 1;
                 }
             }
@@ -368,14 +421,16 @@ fn clipAgainstPlane(comptime T: type, poly: []const math.Vec(3, T), p: math.Vec(
 }
 
 /// Clip the OPEN segment `a`–`b` against the reference side half-spaces
-/// (Liang-Barsky over the parameter `t ∈ [0, 1]`). Emits the surviving segment's
-/// endpoints (2 points, or 1 if it collapses); empty if fully clipped away. No
-/// double-emit, unlike running a 2-vertex "polygon" through Sutherland-Hodgman.
-fn clipSegment(comptime T: type, a: math.Vec(3, T), b: math.Vec(3, T), plane_p: []const math.Vec(3, T), plane_n: []const math.Vec(3, T), buf: *[max_clip]math.Vec(3, T)) []math.Vec(3, T) {
+/// (Liang-Barsky over `t ∈ [0, 1]`). Emits the surviving segment's endpoints (2,
+/// or 1 if it collapses); empty if fully clipped away. A clipped endpoint takes an
+/// intersection feature id; an un-clipped one keeps its incident-vertex id.
+fn clipSegment(comptime T: type, a: math.Vec(3, T), b: math.Vec(3, T), a_fid: u32, b_fid: u32, plane_p: []const math.Vec(3, T), plane_n: []const math.Vec(3, T), plane_ref: []const u16, buf: *[max_clip]math.Vec(3, T), fid_buf: *[max_clip]u32) []math.Vec(3, T) {
     const dir = b.sub(a);
     var t0: T = 0;
     var t1: T = 1;
-    for (plane_p, plane_n) |p, pn| {
+    var f0 = a_fid;
+    var f1 = b_fid;
+    for (plane_p, plane_n, plane_ref) |p, pn, pref| {
         const num = a.sub(p).dot(pn); // value of (x−p)·pn at t = 0
         const den = dir.dot(pn); // d/dt of (x−p)·pn
         if (den == 0) {
@@ -383,17 +438,25 @@ fn clipSegment(comptime T: type, a: math.Vec(3, T), b: math.Vec(3, T), plane_p: 
         } else {
             const t = -num / den; // (x−p)·pn = 0 at this t
             if (den > 0) {
-                t0 = @max(t0, t); // entering the half-space
+                if (t > t0) {
+                    t0 = t; // entering the half-space
+                    f0 = intersectionFid(pref, a_fid, b_fid);
+                }
             } else {
-                t1 = @min(t1, t); // leaving it
+                if (t < t1) {
+                    t1 = t; // leaving it
+                    f1 = intersectionFid(pref, a_fid, b_fid);
+                }
             }
             if (t0 > t1) return buf[0..0];
         }
     }
     buf[0] = a.add(dir.scale(t0));
+    fid_buf[0] = f0;
     const eps: T = if (T == f32) 1.0e-6 else 1.0e-12;
     if (t1 - t0 <= eps) return buf[0..1];
     buf[1] = a.add(dir.scale(t1));
+    fid_buf[1] = f1;
     return buf[0..2];
 }
 
@@ -493,9 +556,18 @@ fn fallbackNormal(comptime T: type, pos_a: math.Vec(3, T), pos_b: math.Vec(3, T)
 
 /// Whether pair `(a, b)` is the reverse of canonical order — i.e. `collide`
 /// should compute `(b, a)` and negate. A strict, total, deterministic order on
-/// (shape, pose): position, then rotation, then radius, then core tag. Two
-/// distinct shapes/poses always compare unequal, so the winner is caller-
-/// independent — the basis of order-independence (F5).
+/// (shape, pose): position, then rotation, then radius, then core kind + extents.
+/// Two distinct shapes/poses always compare unequal, so the winner is caller-
+/// independent — the basis of order-independence.
+///
+/// Degenerate exception: two shapes with BIT-IDENTICAL pose AND geometry compare
+/// equal (neither `poseAfter(a,b)` nor `poseAfter(b,a)` is true). Then both call
+/// orders run the same `collideOrdered` and return the SAME normal — but for
+/// coincident identical shapes the A→B normal is geometrically undefined
+/// (measure-zero), so returning the same arbitrary unit vector is acceptable. The
+/// `collide`-level order-independence test excludes this case; `BodyManager`'s
+/// `collidePair` resolves it for real bodies by imposing a canonical body-id
+/// order (distinct bodies always break the tie).
 fn poseAfter(
     comptime T: type,
     shape_a: support.SupportShape(T),

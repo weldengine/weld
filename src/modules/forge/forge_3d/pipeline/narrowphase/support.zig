@@ -54,12 +54,24 @@ pub fn Vertex(comptime T: type) type {
 /// the valid prefix (point → 1, segment → 1 or 2, box → 4). The contact-manifold
 /// clipper (M1.1.3) takes `supportingFace(+n)` on A and `supportingFace(−n)` on
 /// B — where `n` is the contact normal A→B — and clips one against the other.
+///
+/// `face_id` and `vert_ids` carry STABLE, translation-invariant local feature
+/// identities (a box vertex id is its sign-pattern 0..7, a box face id is
+/// `axis·2 + sign`) so the manifold's `feature_id` survives a small pose change
+/// for M1.1.6 warm-starting (frame-stability is the point — a clip-buffer index
+/// is not stable).
 pub fn Face(comptime T: type) type {
     return struct {
         /// The feature vertices; only `[0..count]` is meaningful.
         verts: [4]math.Vec(3, T),
+        /// Stable local id of each vertex (aligned to `verts`): a box corner's
+        /// sign pattern 0..7; a segment endpoint 0 (+Y) / 1 (−Y); a point 0.
+        vert_ids: [4]u8,
         /// Number of valid vertices (1..4).
         count: u8,
+        /// Stable local id of the feature itself: box face `axis·2 + (sign<0)`
+        /// (0..5); segment 6; point 7.
+        face_id: u8,
     };
 }
 
@@ -130,8 +142,9 @@ pub fn SupportShape(comptime T: type) type {
         /// dominant axis of `dir` (first-index tie-break, mirroring `support`'s
         /// `>= 0` sign choice), wound CCW around its outward normal.
         pub fn supportingFace(self: Self, dir: Vec3T) Face(T) {
+            const zero = Vec3T.zero;
             switch (self.core) {
-                .point => return .{ .verts = .{ Vec3T.zero, Vec3T.zero, Vec3T.zero, Vec3T.zero }, .count = 1 },
+                .point => return .{ .verts = .{ zero, zero, zero, zero }, .vert_ids = .{ 0, 0, 0, 0 }, .count = 1, .face_id = 7 },
                 .segment => |half_height| {
                     const d = dir.toArray();
                     const perp_sq = d[0] * d[0] + d[2] * d[2];
@@ -142,10 +155,11 @@ pub fn SupportShape(comptime T: type) type {
                     const plus = Vec3T.fromArray(.{ 0, half_height, 0 });
                     const minus = Vec3T.fromArray(.{ 0, -half_height, 0 });
                     if (perp_sq <= aligned_rel * total_sq) {
-                        const endpoint = if (d[1] >= 0) plus else minus;
-                        return .{ .verts = .{ endpoint, Vec3T.zero, Vec3T.zero, Vec3T.zero }, .count = 1 };
+                        const plus_end = d[1] >= 0;
+                        const endpoint = if (plus_end) plus else minus;
+                        return .{ .verts = .{ endpoint, zero, zero, zero }, .vert_ids = .{ if (plus_end) 0 else 1, 0, 0, 0 }, .count = 1, .face_id = 6 };
                     }
-                    return .{ .verts = .{ plus, minus, Vec3T.zero, Vec3T.zero }, .count = 2 };
+                    return .{ .verts = .{ plus, minus, zero, zero }, .vert_ids = .{ 0, 1, 0, 0 }, .count = 2, .face_id = 6 };
                 },
                 .box => |half_extents| {
                     const d = dir.toArray();
@@ -170,13 +184,19 @@ pub fn SupportShape(comptime T: type) type {
                         .{ .{ -1, -1 }, .{ 1, -1 }, .{ 1, 1 }, .{ -1, 1 } }
                     else
                         .{ .{ -1, -1 }, .{ -1, 1 }, .{ 1, 1 }, .{ 1, -1 } };
-                    var face: Face(T) = .{ .verts = undefined, .count = 4 };
+                    var face: Face(T) = .{ .verts = undefined, .vert_ids = undefined, .count = 4, .face_id = @intCast(k * 2 + @intFromBool(s < 0)) };
                     for (loop, 0..) |o, i| {
                         var c: [3]T = undefined;
                         c[k] = s * he[k];
                         c[u] = o[0] * he[u];
                         c[v] = o[1] * he[v];
                         face.verts[i] = Vec3T.fromArray(c);
+                        // Stable corner id: one bit per axis, set when the sign is +.
+                        var sgn: [3]T = undefined;
+                        sgn[k] = s;
+                        sgn[u] = o[0];
+                        sgn[v] = o[1];
+                        face.vert_ids[i] = (@as(u8, @intFromBool(sgn[0] > 0))) | (@as(u8, @intFromBool(sgn[1] > 0)) << 1) | (@as(u8, @intFromBool(sgn[2] > 0)) << 2);
                     }
                     return face;
                 },
@@ -230,7 +250,9 @@ pub fn RelativePose(comptime T: type) type {
         pub fn supportingFaceB(self: Self, shape_b: SupportShapeT, dir: Vec3T) Face(T) {
             const local_dir = self.rot_rel.conjugate().rotateVec3(dir);
             const face_local = shape_b.supportingFace(local_dir);
-            var out: Face(T) = .{ .verts = .{ Vec3T.zero, Vec3T.zero, Vec3T.zero, Vec3T.zero }, .count = face_local.count };
+            // The rotation preserves feature identity, so `vert_ids`/`face_id`
+            // carry through unchanged.
+            var out: Face(T) = .{ .verts = .{ Vec3T.zero, Vec3T.zero, Vec3T.zero, Vec3T.zero }, .vert_ids = face_local.vert_ids, .count = face_local.count, .face_id = face_local.face_id };
             for (0..face_local.count) |i| {
                 out.verts[i] = self.rot_rel.rotateVec3(face_local.verts[i]).add(self.pos_rel);
             }

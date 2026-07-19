@@ -147,6 +147,78 @@ test "staggered capsule segment clips without a duplicate point" {
     for (0..m.count) |i| try testing.expectApproxEqAbs(@as(Real, 0.2), m.points[i].penetration, tol); // r_sum(1) − dist(0.8)
 }
 
+test "edge-edge penetration is measured along the contact axis" {
+    // Fix-1: for an oblique (edge/vertex) contact the EPA normal `n_a` is not a
+    // box-face normal, so measuring depth along the reference face normal `rn`
+    // diverges. The manifold depth must match the EPA depth along `n_a`.
+    const box = boxShape(1, 1, 1);
+    const yaw = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 4.0);
+    const pa = vr(0, 0, 0);
+    const pb = vr(1.35, 1.35, 0); // corner overlap ⇒ oblique closest features
+    // Reference EPA result.
+    const g = narrowphase.gjk(Real, box, pa, Quatr.identity, box, pb, yaw);
+    try testing.expectEqual(narrowphase.GjkResult(Real).Status.deep, g.status);
+    const relpose = narrowphase.RelativePose(Real).init(pa, Quatr.identity, pb, yaw);
+    const e = narrowphase.epa(Real, box, pa, Quatr.identity, relpose, box, g);
+    // Confirm the contact axis is genuinely oblique (not a face normal) so this
+    // exercises the edge path, not the face-face quad path.
+    const na = e.normal.toArray();
+    const max_comp = @max(@abs(na[0]), @max(@abs(na[1]), @abs(na[2])));
+    try testing.expect(max_comp < 0.999);
+
+    const m = collide(box, pa, Quatr.identity, box, pb, yaw).?;
+    // Normal agrees with EPA (no canonical swap here: A's position sorts first).
+    try testing.expect(m.normal.approxEql(e.normal, tol));
+    // Depth along the contact axis matches EPA (r_sum = 0), not the ~rn-projected
+    // value the old code produced.
+    var max_pen: Real = 0;
+    for (0..m.count) |i| max_pen = @max(max_pen, m.points[i].penetration);
+    try testing.expectApproxEqAbs(e.depth, max_pen, tol);
+}
+
+test "manifold feature ids are frame-stable" {
+    // Fix-2: feature_id must identify the physical feature, surviving a small pose
+    // change (a clip-buffer index would reorder). A smaller incident box seated on
+    // a larger reference face (so its four corners stay INSIDE the reference face
+    // under a tiny lateral shift, i.e. the incident vertices remain the kept
+    // features) translated ±0.0001 ⇒ the same set of feature_ids (same corners).
+    const big = boxShape(1, 1, 1);
+    const small = boxShape(0.5, 1, 0.5);
+    const m1 = collide(big, vr(0, 0, 0), Quatr.identity, small, vr(0, 1.5, 0), Quatr.identity).?;
+    const m2 = collide(big, vr(0, 0, 0), Quatr.identity, small, vr(0.0001, 1.5, -0.0001), Quatr.identity).?;
+    try testing.expectEqual(@as(u8, 4), m1.count);
+    try testing.expectEqual(m1.count, m2.count);
+    // Every m1 feature_id appears in m2 (same physical corners → same ids).
+    for (0..m1.count) |i| {
+        var found = false;
+        for (0..m2.count) |j| {
+            if (m1.points[i].feature_id == m2.points[j].feature_id) found = true;
+        }
+        try testing.expect(found);
+    }
+    // The four ids are distinct (four distinct corners).
+    for (0..m1.count) |i| {
+        for (i + 1..m1.count) |j| try testing.expect(m1.points[i].feature_id != m1.points[j].feature_id);
+    }
+}
+
+test "manifold reduction stays precise far from the origin" {
+    // Fix-4: keep the reduction in A's frame. Two coincident tiny boxes at a large
+    // world coordinate: the four A-frame contact corners (±0.001) are sub-ULP in
+    // f32 world space (they round together → a world-frame dedup collapses to 1),
+    // but are distinct in A's frame ⇒ a 4-point face manifold survives.
+    const tiny = boxShape(0.001, 0.001, 0.001);
+    const far = vr(100000, 100000, 100000);
+    const m = collide(tiny, far, Quatr.identity, tiny, far, Quatr.identity).?;
+    try testing.expectEqual(@as(u8, 4), m.count); // A-frame reduction keeps 4 (world-frame would collapse to 1)
+    // The four ids are distinct (distinct A-frame corners); world positions round
+    // together at f32 (that is exactly why the reduction must stay in A's frame).
+    for (0..m.count) |i| {
+        for (i + 1..m.count) |j| try testing.expect(m.points[i].feature_id != m.points[j].feature_id);
+        try testing.expectApproxEqAbs(@as(Real, 0.002), m.points[i].penetration, 1.0e-4); // full overlap 2·he
+    }
+}
+
 test "manifold is order-independent" {
     const g = Quatr.fromAxisAngle(vr(2, -1, 3).normalize(), 0.8);
     const Combo = struct { sa: SupportShape, pa: Vec3r, sb: SupportShape, pb: Vec3r };
@@ -285,4 +357,25 @@ test "broadphase pairs to manifolds via collidePair" {
     // Stale-handle pair ⇒ null.
     bm.removeBody(id_d);
     try testing.expect(bm.collidePair(&store, id_c, id_d) == null);
+}
+
+test "collidePair imposes a body-id order on identical geometry" {
+    // Fix-3: two bodies with bit-identical shape AND pose overlap degenerately —
+    // `collide`'s pose key cannot order them, so its normal is the same in both
+    // call orders. `collidePair` breaks the tie by body id (min first) and negates
+    // for the swapped caller, so the pair stays order-independent for real bodies.
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const box = try store.createShape(gpa, .{ .box = .{ .half_extents = ApiVec3.splat(0.5) } });
+    const id_a = try addBoxBodyAt(gpa, &bm, &store, box, 0, 0, 0, 0);
+    const id_b = try addBoxBodyAt(gpa, &bm, &store, box, 1, 0, 0, 0); // same pose as A
+
+    const ab = bm.collidePair(&store, id_a, id_b).?;
+    const ba = bm.collidePair(&store, id_b, id_a).?;
+    try testing.expect(ab.normal.approxEql(ba.normal.neg(), tol)); // negated by body-id order
+    try testing.expectEqual(ab.count, ba.count);
+    try testing.expect(finite3(ab.normal));
 }
