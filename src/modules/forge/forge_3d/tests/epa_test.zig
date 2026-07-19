@@ -154,6 +154,40 @@ test "epa expands a low-dimensional deep seed" {
     try testing.expectApproxEqAbs(@as(Real, 0), r2.depth, epa_tol);
 }
 
+test "epa handles eccentric thin-box deep overlaps" {
+    // Adversarial-review regime (finding 1): an eccentric (thin) box whose deep
+    // overlap makes the Minkowski polytope long/flat, so the loop expands over
+    // several iterations and the fan-face winding (inherited from the horizon,
+    // not reoriented against the near-coplanar interior) is exercised. Two thin
+    // boxes overlap 0.1 along Y (huge overlap along X and Z), so the min-
+    // penetration axis is +Y at depth 0.1. Canonical and globally rotated.
+    const g_rot = Quatr.fromAxisAngle(vr(1, -2, 3).normalize(), 0.9);
+    const g_trans = vr(3, -5, 2);
+    const thin = boxShape(5, 0.3, 4);
+    {
+        const r = deepEpa(thin, vr(0, 0, 0), Quatr.identity, thin, vr(0, 0.5, 0), Quatr.identity);
+        try testing.expectApproxEqAbs(@as(Real, 0.1), r.depth, epa_tol);
+        try testing.expect(r.normal.approxEql(vr(0, 1, 0), epa_tol));
+    }
+    {
+        const r = deepEpa(
+            thin,
+            g_rot.rotateVec3(vr(0, 0, 0)).add(g_trans),
+            g_rot,
+            thin,
+            g_rot.rotateVec3(vr(0, 0.5, 0)).add(g_trans),
+            g_rot,
+        );
+        try testing.expectApproxEqAbs(@as(Real, 0.1), r.depth, epa_tol);
+        try testing.expect(r.normal.approxEql(g_rot.rotateVec3(vr(0, 1, 0)), epa_tol));
+    }
+    // Order-independence must survive the eccentric polytope too.
+    const ab = deepEpa(thin, vr(0, 0, 0), Quatr.identity, thin, vr(0, 0.5, 0), Quatr.identity);
+    const ba = deepEpa(thin, vr(0, 0.5, 0), Quatr.identity, thin, vr(0, 0, 0), Quatr.identity);
+    try testing.expectApproxEqAbs(ab.depth, ba.depth, epa_tol);
+    try testing.expect(ab.normal.approxEql(ba.normal.neg(), epa_tol));
+}
+
 test "epa is deterministic and iteration-bounded" {
     // Determinism: a fixed oriented deep pair, run twice ⇒ bit-identical.
     const ra = Quatr.fromAxisAngle(vr(1, 1, 0).normalize(), 0.5);

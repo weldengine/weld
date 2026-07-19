@@ -106,12 +106,12 @@ pub fn epa(
     }
     for (0..vcount) |i| verts[i] = seed.simplex[i];
 
-    // Coordinate scale for the (relative) tolerances — the absolute support
-    // magnitude, the scale of the `w = support_a − support_b` rounding.
-    const scale = polytopeScale(T, verts[0..vcount]);
+    // Squared tolerance for the seed tetra-expansion (distinct / off-plane
+    // vertex tests) — relative to the seed's coordinate scale (the absolute
+    // support magnitude). The loop tolerances are recomputed post-expansion.
     const rel: T = if (T == f32) 1.0e-4 else 1.0e-10;
-    const tol = rel * scale;
-    const tol_sq = tol * tol;
+    const seed_tol = rel * polytopeScale(T, verts[0..vcount]);
+    const tol_sq = seed_tol * seed_tol;
 
     // --- Expand a low-dimensional seed to a non-degenerate tetrahedron ---
     if (!expandToTetra(T, shape_a, relpose, shape_b, &verts, &vcount, tol_sq)) {
@@ -119,11 +119,19 @@ pub fn epa(
     }
 
     // Interior reference point (the tetra centroid), strictly inside the
-    // non-degenerate seed tetra — used to orient every face outward (see
-    // `makeFace`). The polytope only grows, so this stays interior.
+    // non-degenerate seed tetra — used to orient the four INITIAL faces outward
+    // (see `makeFace`). Fan faces inherit their winding from the horizon instead,
+    // so the interior is not consulted during expansion.
     var interior = Vec3T.zero;
     for (0..vcount) |i| interior = interior.add(verts[i].w);
     interior = interior.scale(1.0 / @as(T, @floatFromInt(vcount)));
+
+    // Recompute the tolerances from the expanded polytope's coordinate scale
+    // (the seed's scale can be 0 for an origin-coincident low-dim seed; the
+    // expanded tetra always has real extent).
+    const loop_scale = polytopeScale(T, verts[0..vcount]);
+    const loop_tol = rel * loop_scale;
+    const loop_tol_sq = loop_tol * loop_tol;
 
     // --- Build the initial tetrahedron faces ---
     var faces: [max_faces]FaceT = undefined;
@@ -141,25 +149,34 @@ pub fn epa(
     }
 
     // --- Expanding-polytope loop ---
+    // `best` is set to the current closest face at the top of every iteration, so
+    // on any `break` it holds a valid face of the last complete polytope (a face
+    // copy — safe even if a bailed expansion left `faces` partially modified,
+    // since vertices are only ever appended). `expanded_ok` tracks the
+    // iteration-cap exit, where the final successful expansion left `best` one
+    // step stale and it must be refreshed against the (valid) grown polytope.
     var best = faces[closestFaceIndex(T, faces[0..fcount])];
+    var expanded_ok = false;
     var iter: u32 = 0;
     while (iter < max_epa_iterations) : (iter += 1) {
-        const ci = closestFaceIndex(T, faces[0..fcount]);
-        best = faces[ci];
+        expanded_ok = false;
+        best = faces[closestFaceIndex(T, faces[0..fcount])];
 
         const w = support.minkowskiSupport(T, shape_a, relpose, shape_b, best.normal);
         const d = w.w.dot(best.normal);
         // Converged: the support in the closest face's normal does not advance
         // past its plane beyond float noise ⇒ the face is on the surface.
-        if (d - best.dist <= tol) break;
+        if (d - best.dist <= loop_tol) break;
         // Anti-cycling: the support duplicates an existing polytope vertex.
-        if (duplicate(T, verts[0..vcount], w.w, tol_sq)) break;
+        if (duplicate(T, verts[0..vcount], w.w, loop_tol_sq)) break;
         if (vcount >= max_verts) break;
 
         // Re-triangulate: remove faces visible from `w`, add `w`, connect the
         // silhouette. If the geometry degenerates, keep the current best face.
-        if (!expandPolytope(T, &verts, &vcount, &faces, &fcount, w, interior)) break;
+        if (!expandPolytope(T, &verts, &vcount, &faces, &fcount, w)) break;
+        expanded_ok = true;
     }
+    if (expanded_ok) best = faces[closestFaceIndex(T, faces[0..fcount])];
 
     // --- Reconstruct closest points from the terminal face barycentrics ---
     const va = verts[best.a];
@@ -230,6 +247,24 @@ fn makeFace(comptime T: type, verts: *const [max_verts]support.Vertex(T), ia: u3
     return .{ .a = ia, .b = ib, .c = ic, .normal = normal, .dist = normal.dot(va) };
 }
 
+/// Build a fan face (a silhouette edge `ia→ib` closed to the new vertex `ic`),
+/// PRESERVING the inherited horizon winding rather than reorienting against the
+/// interior point. The horizon edges are collected from the (consistently
+/// outward-wound) visible faces, so `(ia, ib, ic)` is already outward-CCW and the
+/// resulting fan is winding-consistent with the kept neighbours by construction —
+/// no interior sign test, which can flip for a face near-tangent to the interior
+/// (adversarial-review finding 1). Returns null for a sliver (near-collinear)
+/// triangle, which the caller treats as a bail-out (keeping the current best
+/// face) rather than leaving a topological hole (finding 2).
+fn makeWoundFace(comptime T: type, verts: *const [max_verts]support.Vertex(T), ia: u32, ib: u32, ic: u32) ?Face(T) {
+    const va = verts[ia].w;
+    const n = verts[ib].w.sub(va).cross(verts[ic].w.sub(va));
+    const len_sq = n.dot(n);
+    if (!(len_sq > 0)) return null; // sliver / degenerate triangle
+    const normal = n.scale(1.0 / @sqrt(len_sq));
+    return .{ .a = ia, .b = ib, .c = ic, .normal = normal, .dist = normal.dot(va) };
+}
+
 /// Index of the face closest to the origin (minimum `dist`; first wins on ties —
 /// deterministic).
 fn closestFaceIndex(comptime T: type, faces: []const Face(T)) usize {
@@ -265,7 +300,6 @@ fn expandPolytope(
     faces: *[max_faces]Face(T),
     fcount: *usize,
     w: support.Vertex(T),
-    interior: math.Vec(3, T),
 ) bool {
     const FaceT = Face(T);
     var visible: [max_faces]bool = undefined;
@@ -312,13 +346,14 @@ fn expandPolytope(
     verts[vcount.*] = w;
     vcount.* += 1;
 
-    // Fan the silhouette to the new vertex.
+    // Fan the silhouette to the new vertex, preserving inherited winding. A
+    // sliver fan face would leave a topological hole (breaking the manifold
+    // invariant `twinAmongVisible` relies on), so bail out cleanly instead.
     for (sil[0..scount]) |e| {
-        if (makeFace(T, verts, e[0], e[1], wi, interior)) |f| {
-            if (fcount.* >= max_faces) return false;
-            faces[fcount.*] = f;
-            fcount.* += 1;
-        }
+        const f = makeWoundFace(T, verts, e[0], e[1], wi) orelse return false;
+        if (fcount.* >= max_faces) return false;
+        faces[fcount.*] = f;
+        fcount.* += 1;
     }
     return fcount.* >= 4;
 }
