@@ -161,6 +161,50 @@ test "intersection feature ids are unique among simultaneous contacts" {
     }
 }
 
+/// Feature-id set of a manifold (up to 4), for set comparison.
+fn fidSet(m: ContactManifold) [4]u32 {
+    var s: [4]u32 = .{ 0, 0, 0, 0 };
+    for (0..m.count) |i| s[i] = m.points[i].feature_id;
+    return s;
+}
+
+/// Whether every one of `a`'s first `n` ids appears in `b`'s first `n`.
+fn fidSetEq(a: [4]u32, b: [4]u32, n: u8) bool {
+    for (0..n) |i| {
+        var found = false;
+        for (0..n) |j| {
+            if (a[i] == b[j]) found = true;
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+test "staggered box overlap yields a reference-corner contact with a unique id" {
+    // Coverage of the reference-corner path (a clip point on TWO reference side
+    // planes — an intersection whose endpoint is already an intersection, so it
+    // exercises `incidentEdgeId`'s provenance-inheritance branch). Axis-aligned
+    // unit boxes stacked in Y with a partial lateral offset ⇒ the overlap
+    // rectangle's four corners are: one incident vertex, two edge×plane
+    // intersections, and one REFERENCE corner (a corner of A's top face).
+    const box = boxShape(1, 1, 1);
+    const m = collide(box, vr(0, 0, 0), Quatr.identity, box, vr(0.6, 1.5, 0.4), Quatr.identity).?;
+    try testing.expectEqual(@as(u8, 4), m.count);
+    // All four feature_ids pairwise distinct (the reference corner must not alias
+    // an edge×plane contact).
+    for (0..m.count) |i| {
+        for (i + 1..m.count) |j| try testing.expect(m.points[i].feature_id != m.points[j].feature_id);
+    }
+    // Frame-stable under a tiny lateral shift (same physical corners → same ids).
+    const s0 = fidSet(m);
+    const m2 = collide(box, vr(0, 0, 0), Quatr.identity, box, vr(0.6001, 1.5, 0.3999), Quatr.identity).?;
+    try testing.expectEqual(m.count, m2.count);
+    try testing.expect(fidSetEq(s0, fidSet(m2), m.count));
+    const m3 = collide(box, vr(0, 0, 0), Quatr.identity, box, vr(0.5999, 1.5, 0.4001), Quatr.identity).?;
+    try testing.expectEqual(m.count, m3.count);
+    try testing.expect(fidSetEq(s0, fidSet(m3), m.count));
+}
+
 test "edge-edge penetration is measured along the contact axis" {
     // Fix-1: for an oblique (edge/vertex) contact the EPA normal `n_a` is not a
     // box-face normal, so measuring depth along the reference face normal `rn`
