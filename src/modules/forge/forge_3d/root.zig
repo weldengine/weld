@@ -84,6 +84,33 @@ pub fn gjk(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: SupportSh
     return narrowphase.gjk(Real, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
 }
 
+// --- Narrowphase (EPA penetration + contact manifold) ---
+
+/// EPA penetration result (world normal A→B, core depth, world closest points)
+/// at solver precision.
+pub const EpaResult = narrowphase.EpaResult(Real);
+/// The EPA expansion iteration ceiling (scalar-independent).
+pub const max_epa_iterations = narrowphase.max_epa_iterations;
+/// The contact manifold between two shapes (world normal + up to 4 points) at
+/// solver precision.
+pub const ContactManifold = narrowphase.ContactManifold(Real);
+/// One contact point of a `ContactManifold` at solver precision.
+pub const ContactPoint = narrowphase.ContactPoint(Real);
+
+/// EPA over a `.deep` GJK seed — penetration axis + core depth. The `Real`-bound
+/// entry; `collide` runs it internally on the deep path.
+pub fn epa(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, relpose: RelativePose, shape_b: SupportShape, seed: GjkResult) EpaResult {
+    return narrowphase.epa(Real, shape_a, pos_a, rot_a, relpose, shape_b, seed);
+}
+
+/// Full narrowphase (GJK → shallow/deep contact manifold) between two support
+/// shapes at their world poses — the `Real`-bound entry; null when separated.
+/// `BodyManager.collidePair` is the `BodyId`-level adapter for the
+/// broadphase→narrowphase flow. Order-independent.
+pub fn collide(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: SupportShape, pos_b: Vec3r, rot_b: Quatr) ?ContactManifold {
+    return narrowphase.collide(Real, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
+}
+
 // Pins so the inline tests + the acceptance suite are analysed when this module
 // is built as a test target (engine-zig-conventions.md §13).
 comptime {

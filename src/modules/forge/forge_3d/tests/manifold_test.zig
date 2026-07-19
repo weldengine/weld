@@ -6,12 +6,21 @@ const std = @import("std");
 const config = @import("../config.zig");
 const narrowphase = @import("../pipeline/narrowphase/root.zig");
 const math = @import("foundation").math;
+const api = @import("weld_forge");
+const bm_mod = @import("../body_manager.zig");
+const shape_mod = @import("../shape.zig");
+const broadphase = @import("../pipeline/broadphase.zig");
 
 const Real = config.Real;
 const Vec3r = config.Vec3r;
 const Quatr = config.Quatr;
 const SupportShape = narrowphase.SupportShape(Real);
 const ContactManifold = narrowphase.ContactManifold(Real);
+const BodyManager = bm_mod.BodyManager;
+const ShapeStore = shape_mod.ShapeStore;
+const Broadphase = broadphase.Broadphase(Real);
+const BodyId = api.BodyId;
+const ApiVec3 = math.Vec3;
 const testing = std.testing;
 
 fn vr(x: Real, y: Real, z: Real) Vec3r {
@@ -207,4 +216,73 @@ test "shallow and deep manifolds are continuous" {
     try testing.expect(m.count >= 1 and m.count <= 4);
     try testing.expect(m.normal.approxEql(vr(0, 1, 0), tol));
     for (0..m.count) |i| try testing.expectApproxEqAbs(@as(Real, 0.5), m.points[i].penetration, tol); // r_sum(2) − dist(1.5)
+}
+
+// --- E4: broadphase → collidePair integration ---
+
+/// Add a `.dynamic` box body at (x,y,z). Descriptor positions are the f32 api Vec3.
+fn addBoxBodyAt(gpa: std.mem.Allocator, bm: *BodyManager, store: *const ShapeStore, shape: api.ShapeId, entity_index: u32, x: f32, y: f32, z: f32) !BodyId {
+    var d = api.BodyDescriptor{
+        .entity = .{ .index = entity_index, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = shape,
+    };
+    d.position = ApiVec3.fromArray(.{ x, y, z });
+    return bm.addBody(gpa, store, d);
+}
+
+/// Whether `p` is the unordered pair `{x, y}` (candidate pairs are canonical).
+fn isPair(p: Broadphase.Pair, x: BodyId, y: BodyId) bool {
+    return p.a == @min(x, y) and p.b == @max(x, y);
+}
+
+test "broadphase pairs to manifolds via collidePair" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    var bp = Broadphase.init(.{});
+    defer bp.deinit(gpa);
+
+    const box = try store.createShape(gpa, .{ .box = .{ .half_extents = ApiVec3.splat(0.5) } });
+
+    // A–B: tight AABBs 0.15 apart (disjoint) but fat AABBs (margin 0.1) overlap ⇒
+    // a broadphase fat-AABB false positive the narrowphase must reject (null).
+    const id_a = try addBoxBodyAt(gpa, &bm, &store, box, 0, 0, 0, 0);
+    const id_b = try addBoxBodyAt(gpa, &bm, &store, box, 1, 1.15, 0, 0);
+    // C–D: boxes genuinely overlap (0.7 along X) ⇒ a real deep contact manifold.
+    const id_c = try addBoxBodyAt(gpa, &bm, &store, box, 2, 10, 0, 0);
+    const id_d = try addBoxBodyAt(gpa, &bm, &store, box, 3, 10.3, 0, 0);
+
+    const ids = [_]BodyId{ id_a, id_b, id_c, id_d };
+    for (ids) |id| _ = try bp.insert(gpa, .dynamic, bm.bodyAabb(&store, id).?, id);
+
+    var pairs: std.ArrayListUnmanaged(Broadphase.Pair) = .empty;
+    defer pairs.deinit(gpa);
+    try bp.computePairs(gpa, &pairs);
+
+    var found_false_positive = false;
+    var found_overlap = false;
+    for (pairs.items) |p| {
+        const m = bm.collidePair(&store, p.a, p.b); // all four bodies still live
+        if (isPair(p, id_a, id_b)) {
+            found_false_positive = true;
+            try testing.expect(m == null); // separated ⇒ no manifold
+        } else if (isPair(p, id_c, id_d)) {
+            found_overlap = true;
+            const man = m.?;
+            try testing.expect(man.count >= 1 and man.count <= 4);
+            try testing.expectApproxEqAbs(@as(Real, 0.7), man.points[0].penetration, tol); // overlap along X
+            try testing.expect(finite3(man.normal));
+        }
+    }
+    // The broadphase surfaced the fat-AABB false positive (rejected as null) and
+    // the genuine overlap (a valid manifold).
+    try testing.expect(found_false_positive);
+    try testing.expect(found_overlap);
+
+    // Stale-handle pair ⇒ null.
+    bm.removeBody(id_d);
+    try testing.expect(bm.collidePair(&store, id_c, id_d) == null);
 }

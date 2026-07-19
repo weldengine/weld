@@ -33,6 +33,7 @@ const Shape = shape_mod.Shape;
 const Body = body_mod.Body;
 const MotionProperties = body_mod.MotionProperties;
 const GjkResult = narrowphase.GjkResult(Real);
+const ContactManifold = narrowphase.ContactManifold(Real);
 
 const ApiVec3 = @import("foundation").math.Vec3;
 const ApiQuat = @import("foundation").math.Quatf;
@@ -140,6 +141,28 @@ pub const BodyManager = struct {
         const shape_a = store.get(self.bodies.items(.shape)[ia]) orelse return null;
         const shape_b = store.get(self.bodies.items(.shape)[ib]) orelse return null;
         return narrowphase.gjk(
+            Real,
+            shape_mod.supportShape(shape_a),
+            self.bodies.items(.position)[ia],
+            self.bodies.items(.rotation)[ia],
+            shape_mod.supportShape(shape_b),
+            self.bodies.items(.position)[ib],
+            self.bodies.items(.rotation)[ib],
+        );
+    }
+
+    /// Full narrowphase (GJK → shallow/deep contact manifold) for the pair
+    /// `a`/`b`, resolving each body's world pose and support shape (via `store`).
+    /// Returns null if the pair is separated, or if either handle — or its shape
+    /// — is stale/invalid. The `BodyId`-level manifold adapter for the
+    /// broadphase→narrowphase flow (mirror of `gjkPair`): unpack a `computePairs`
+    /// candidate's `user_data` as a `BodyId` and call this per pair.
+    pub fn collidePair(self: *const BodyManager, store: *const ShapeStore, a: BodyId, b: BodyId) ?ContactManifold {
+        const ia = self.alloc.validate(a) orelse return null;
+        const ib = self.alloc.validate(b) orelse return null;
+        const shape_a = store.get(self.bodies.items(.shape)[ia]) orelse return null;
+        const shape_b = store.get(self.bodies.items(.shape)[ib]) orelse return null;
+        return narrowphase.collide(
             Real,
             shape_mod.supportShape(shape_a),
             self.bodies.items(.position)[ia],
