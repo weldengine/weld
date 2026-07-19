@@ -14,6 +14,7 @@
 
 const support = @import("support.zig");
 const gjk_mod = @import("gjk.zig");
+const manifold = @import("manifold.zig");
 
 // --- Support layer (support.zig) ---
 
@@ -23,6 +24,8 @@ pub const SupportShape = support.SupportShape;
 pub const RelativePose = support.RelativePose;
 /// A support sample on the Minkowski difference (`w` + the two source supports).
 pub const Vertex = support.Vertex;
+/// A shape's supporting feature (vertex / segment / quad) in a direction.
+pub const Face = support.Face;
 /// Support point of the Minkowski difference of two cores (`pub` for EPA/manifold).
 pub const minkowskiSupport = support.minkowskiSupport;
 
@@ -37,9 +40,17 @@ pub const max_gjk_iterations = gjk_mod.max_gjk_iterations;
 /// Distance-based GJK between two support shapes at their world poses.
 pub const gjk = gjk_mod.gjk;
 
+// --- Contact manifold (manifold.zig) ---
+
+/// The contact manifold between two shapes (world normal + up to 4 points).
+pub const ContactManifold = manifold.ContactManifold;
+/// One contact point of a `ContactManifold`.
+pub const ContactPoint = manifold.ContactPoint;
+
 // Pins so every package sub-file is analysed when forge_3d is built as a test
 // target (engine-zig-conventions.md §13 lazy-analysis guard).
 comptime {
     _ = support;
     _ = gjk_mod;
+    _ = manifold;
 }

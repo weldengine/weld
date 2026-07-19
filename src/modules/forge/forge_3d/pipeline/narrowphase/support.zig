@@ -48,6 +48,21 @@ pub fn Vertex(comptime T: type) type {
     };
 }
 
+/// The supporting **feature** of a core in a given direction: the polygon (or
+/// edge / vertex) whose points maximize `dir · p` on the core, in the core's
+/// local frame, radius excluded. Up to 4 vertices (a box face); `count` gives
+/// the valid prefix (point → 1, segment → 1 or 2, box → 4). The contact-manifold
+/// clipper (M1.1.3) takes `supportingFace(+n)` on A and `supportingFace(−n)` on
+/// B — where `n` is the contact normal A→B — and clips one against the other.
+pub fn Face(comptime T: type) type {
+    return struct {
+        /// The feature vertices; only `[0..count]` is meaningful.
+        verts: [4]math.Vec(3, T),
+        /// Number of valid vertices (1..4).
+        count: u8,
+    };
+}
+
 /// A convex support shape: a convex **core** (point / segment / box) plus an
 /// inflation `radius` around it (the Jolt convex-radius architecture). GJK/EPA
 /// run on the core alone and never see the inflated surface. `radius` is 0 for a
@@ -102,6 +117,71 @@ pub fn SupportShape(comptime T: type) type {
                 },
             }
         }
+
+        /// The supporting **feature** of the core in direction `dir` (local
+        /// frame, radius excluded): the vertex / segment / quad whose points
+        /// maximize `dir · p`. Contains `support(dir)`; the manifold clipper
+        /// consumes it (see `Face`). `dir` need not be normalized.
+        ///
+        /// Per core: a point core is always the single origin vertex; a segment
+        /// core is the single extremal endpoint when `dir` is essentially along
+        /// its ±Y axis (`perp² ≤ aligned_rel · |dir|²`), else the whole segment
+        /// (a line contact); a box core is the winning quad — the face on the
+        /// dominant axis of `dir` (first-index tie-break, mirroring `support`'s
+        /// `>= 0` sign choice), wound CCW around its outward normal.
+        pub fn supportingFace(self: Self, dir: Vec3T) Face(T) {
+            switch (self.core) {
+                .point => return .{ .verts = .{ Vec3T.zero, Vec3T.zero, Vec3T.zero, Vec3T.zero }, .count = 1 },
+                .segment => |half_height| {
+                    const d = dir.toArray();
+                    const perp_sq = d[0] * d[0] + d[2] * d[2];
+                    const total_sq = perp_sq + d[1] * d[1];
+                    // Essentially end-on ⇒ the single extremal endpoint (like
+                    // `support`, +Y on the `dir.y == 0` tie); else the segment.
+                    const aligned_rel: T = if (T == f32) 1.0e-6 else 1.0e-12;
+                    const plus = Vec3T.fromArray(.{ 0, half_height, 0 });
+                    const minus = Vec3T.fromArray(.{ 0, -half_height, 0 });
+                    if (perp_sq <= aligned_rel * total_sq) {
+                        const endpoint = if (d[1] >= 0) plus else minus;
+                        return .{ .verts = .{ endpoint, Vec3T.zero, Vec3T.zero, Vec3T.zero }, .count = 1 };
+                    }
+                    return .{ .verts = .{ plus, minus, Vec3T.zero, Vec3T.zero }, .count = 2 };
+                },
+                .box => |half_extents| {
+                    const d = dir.toArray();
+                    const he = half_extents.toArray();
+                    // Dominant axis of `dir` (first-index tie-break: strict `>`).
+                    var k: usize = 0;
+                    var best = @abs(d[0]);
+                    if (@abs(d[1]) > best) {
+                        k = 1;
+                        best = @abs(d[1]);
+                    }
+                    if (@abs(d[2]) > best) k = 2;
+                    // Face sign (`>= 0` tie to `+`, mirroring `support`).
+                    const s: T = if (d[k] >= 0) 1 else -1;
+                    const u = (k + 1) % 3;
+                    const v = (k + 2) % 3;
+                    // CCW winding around the outward normal `s·e_k`: for `s = +1`
+                    // the in-plane loop (−u,−v)→(+u,−v)→(+u,+v)→(−u,+v) is CCW
+                    // (since `e_u × e_v = e_k`); for `s = −1` the outward normal
+                    // flips, so the loop is reversed.
+                    const loop: [4][2]T = if (s >= 0)
+                        .{ .{ -1, -1 }, .{ 1, -1 }, .{ 1, 1 }, .{ -1, 1 } }
+                    else
+                        .{ .{ -1, -1 }, .{ -1, 1 }, .{ 1, 1 }, .{ 1, -1 } };
+                    var face: Face(T) = .{ .verts = undefined, .count = 4 };
+                    for (loop, 0..) |o, i| {
+                        var c: [3]T = undefined;
+                        c[k] = s * he[k];
+                        c[u] = o[0] * he[u];
+                        c[v] = o[1] * he[v];
+                        face.verts[i] = Vec3T.fromArray(c);
+                    }
+                    return face;
+                },
+            }
+        }
     };
 }
 
@@ -141,6 +221,21 @@ pub fn RelativePose(comptime T: type) type {
             const p_local = shape_b.support(local_dir);
             return self.rot_rel.rotateVec3(p_local).add(self.pos_rel);
         }
+
+        /// Supporting **feature** of shape B's core, expressed in A's frame, for
+        /// a direction `dir` given in A's frame (mirror of `supportB`, at the
+        /// feature grain). The direction is inverse-rotated into B's local frame,
+        /// B's local `supportingFace` is taken, then each vertex is mapped back
+        /// into A's frame; the winding is preserved (a proper rotation).
+        pub fn supportingFaceB(self: Self, shape_b: SupportShapeT, dir: Vec3T) Face(T) {
+            const local_dir = self.rot_rel.conjugate().rotateVec3(dir);
+            const face_local = shape_b.supportingFace(local_dir);
+            var out: Face(T) = .{ .verts = .{ Vec3T.zero, Vec3T.zero, Vec3T.zero, Vec3T.zero }, .count = face_local.count };
+            for (0..face_local.count) |i| {
+                out.verts[i] = self.rot_rel.rotateVec3(face_local.verts[i]).add(self.pos_rel);
+            }
+            return out;
+        }
     };
 }
 
@@ -158,4 +253,103 @@ pub fn minkowskiSupport(
     const sa = shape_a.support(dir);
     const sb = relpose.supportB(shape_b, dir.neg());
     return .{ .w = sa.sub(sb), .support_a = sa, .support_b = sb };
+}
+
+const testing = std.testing;
+
+test "supporting face returns the correct feature per core" {
+    const T = f32;
+    const SS = SupportShape(T);
+    const V = math.Vec(3, T);
+    const Q = math.Quat(T);
+    const tol: T = 1e-6;
+    const vf = struct {
+        fn f(x: T, y: T, z: T) V {
+            return V.fromArray(.{ x, y, z });
+        }
+    }.f;
+    // Whether `p` is among the face's first `count` vertices.
+    const inFace = struct {
+        fn f(face: Face(T), p: V) bool {
+            for (0..face.count) |i| {
+                if (face.verts[i].approxEql(p, tol)) return true;
+            }
+            return false;
+        }
+    }.f;
+
+    // Point core → always the single origin vertex, any direction.
+    const p = SS{ .core = .point, .radius = 0.5 };
+    {
+        const f = p.supportingFace(vf(1, 2, -3));
+        try testing.expectEqual(@as(u8, 1), f.count);
+        try testing.expect(f.verts[0].approxEql(V.zero, tol));
+    }
+
+    // Segment core: end-on (dir ≈ ±Y) → the single extremal endpoint; oblique
+    // (a real perpendicular component) → the whole segment (line contact, 2).
+    const seg = SS{ .core = .{ .segment = 0.9 }, .radius = 0.3 };
+    {
+        const up = seg.supportingFace(vf(0, 1, 0));
+        try testing.expectEqual(@as(u8, 1), up.count);
+        try testing.expect(up.verts[0].approxEql(vf(0, 0.9, 0), tol));
+
+        const down = seg.supportingFace(vf(0, -1, 0));
+        try testing.expectEqual(@as(u8, 1), down.count);
+        try testing.expect(down.verts[0].approxEql(vf(0, -0.9, 0), tol));
+
+        // A near-vertical direction is still end-on ⇒ single endpoint.
+        const near = seg.supportingFace(vf(0.0001, 1, 0));
+        try testing.expectEqual(@as(u8, 1), near.count);
+
+        // Perpendicular and oblique ⇒ the whole segment.
+        const side = seg.supportingFace(vf(1, 0, 0));
+        try testing.expectEqual(@as(u8, 2), side.count);
+        try testing.expect(inFace(side, vf(0, 0.9, 0)) and inFace(side, vf(0, -0.9, 0)));
+        const obl = seg.supportingFace(vf(1, 0.2, -0.5));
+        try testing.expectEqual(@as(u8, 2), obl.count);
+        // The feature contains `support(dir)` (the +Y endpoint on the `dir.y == 0` tie).
+        try testing.expect(inFace(seg.supportingFace(vf(1, 0, 0)), seg.support(vf(1, 0, 0))));
+    }
+
+    // Box core → the winning quad (4) on the dominant axis; support(dir) ∈ face;
+    // all four verts share the dominant-axis coordinate (one face).
+    const box = SS{ .core = .{ .box = vf(1, 2, 3) }, .radius = 0 };
+    {
+        const dirs = [_]V{ vf(1, 0, 0), vf(-1, 0, 0), vf(0, 1, 0), vf(0, 0, -1), vf(0.9, 0.1, -0.2), vf(1, 1, 0) };
+        for (dirs) |d| {
+            const f = box.supportingFace(d);
+            try testing.expectEqual(@as(u8, 4), f.count);
+            try testing.expect(inFace(f, box.support(d)));
+            // The four verts are coplanar on the winning face: the dominant axis
+            // coordinate is identical across all four.
+            const da = d.toArray();
+            var k: usize = 0;
+            var m = @abs(da[0]);
+            if (@abs(da[1]) > m) {
+                k = 1;
+                m = @abs(da[1]);
+            }
+            if (@abs(da[2]) > m) k = 2;
+            const c0 = f.verts[0].toArray()[k];
+            for (0..4) |i| try testing.expectApproxEqAbs(c0, f.verts[i].toArray()[k], tol);
+        }
+    }
+
+    // Through a non-trivial relative rotation (supportingFaceB): B is `box`,
+    // rotated +90° about +Z. For dir=+X in A's frame the count is preserved (4)
+    // and the feature contains `supportB(box, +X)`.
+    const rp = RelativePose(T).init(V.zero, Q.identity, V.zero, Q.fromAxisAngle(V.unit_z, std.math.pi / 2.0));
+    {
+        const f = rp.supportingFaceB(box, vf(1, 0, 0));
+        try testing.expectEqual(@as(u8, 4), f.count);
+        try testing.expect(inFace(f, rp.supportB(box, vf(1, 0, 0))));
+        // Segment B through the same rotation: perpendicular dir ⇒ 2-vert segment.
+        const seg_face = rp.supportingFaceB(seg, vf(0, 1, 0));
+        try testing.expectEqual(@as(u8, 2), seg_face.count);
+    }
+
+    // Byte-stable across runs: pure sign/threshold selection, no float noise.
+    try testing.expect(box.supportingFace(vf(0.9, 0.1, -0.2)).verts[2]
+        .eql(box.supportingFace(vf(0.9, 0.1, -0.2)).verts[2]));
 }
