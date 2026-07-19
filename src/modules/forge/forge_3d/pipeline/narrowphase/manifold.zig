@@ -320,16 +320,19 @@ fn featureId(ref16: u16, inc16: u16) u32 {
 }
 
 /// The stable feature id of a clip-intersection point crossed by reference side
-/// plane `qid`. A segment whose two endpoints share a reference plane `p` is a
-/// reference cut-edge, so the new point lies on `p` AND `qid` — a REFERENCE
-/// CORNER (a ref vertex), whose incident feature is the incident FACE. It must
-/// NOT inherit a neighbour's incident edge (Codex FIX-9: that aliased distinct
-/// contacts). Otherwise the point is an incident-edge × ref-edge crossing.
-fn intersectionFid(qid: u16, cur_fid: u32, nxt_fid: u32) u32 {
+/// plane `qid`, on the incident face `inc_face_id`. A segment whose two endpoints
+/// share a reference plane `p` is a reference cut-edge, so the new point lies on
+/// `p` AND `qid` — a REFERENCE CORNER (a ref vertex), whose incident feature is
+/// the incident FACE (`class_c | inc_face_id` — carrying which incident face, so
+/// a supporting-face flip inter-frame changes the id and warm-starting cannot
+/// mis-match two corners at the same ref vertex on different faces; Codex FIX-10).
+/// It must NOT inherit a neighbour's incident edge (Codex FIX-9: that aliased
+/// distinct contacts). Otherwise the point is an incident-edge × ref-edge crossing.
+fn intersectionFid(qid: u16, cur_fid: u32, nxt_fid: u32, inc_face_id: u16) u32 {
     const cur_ref: u16 = @intCast(cur_fid >> 16);
     const nxt_ref: u16 = @intCast(nxt_fid >> 16);
     if (commonRefPlane(cur_ref, nxt_ref)) |p| {
-        return featureId(class_c | refVertexId(p, qid), class_c);
+        return featureId(class_c | refVertexId(p, qid), class_c | (inc_face_id & id_mask));
     }
     const cur_inc: u16 = @intCast(cur_fid & 0xffff);
     const nxt_inc: u16 = @intCast(nxt_fid & 0xffff);
@@ -446,7 +449,7 @@ fn clipIncident(comptime T: type, inc: support.Face(T), ref: support.Face(T), rn
     var inc_fids: [4]u32 = undefined;
     for (0..inc.count) |i| inc_fids[i] = (@as(u32, ref.face_id) << 16) | @as(u32, inc.vert_ids[i]);
 
-    if (inc.count == 2) return clipSegment(T, inc.verts[0], inc.verts[1], inc_fids[0], inc_fids[1], plane_p[0..np], plane_n[0..np], plane_ref[0..np], buf, fid_buf);
+    if (inc.count == 2) return clipSegment(T, inc.verts[0], inc.verts[1], inc_fids[0], inc_fids[1], plane_p[0..np], plane_n[0..np], plane_ref[0..np], inc.face_id, buf, fid_buf);
     return clipPolygon(T, inc, inc_fids, plane_p[0..np], plane_n[0..np], plane_ref[0..np], buf, fid_buf);
 }
 
@@ -468,7 +471,7 @@ fn clipPolygon(comptime T: type, inc: support.Face(T), inc_fids: [4]u32, plane_p
         const dest_is_b = (cur.ptr == &poly_a);
         const out_v: []Vec3T = if (dest_is_b) poly_b[0..] else poly_a[0..];
         const out_f: []u32 = if (dest_is_b) fb[0..] else fa[0..];
-        const out_n = clipAgainstPlane(T, cur, cur_f, p, pn, pref, out_v, out_f);
+        const out_n = clipAgainstPlane(T, cur, cur_f, p, pn, pref, inc.face_id, out_v, out_f);
         cur = out_v[0..out_n];
         cur_f = out_f[0..out_n];
         if (out_n == 0) break;
@@ -483,7 +486,7 @@ fn clipPolygon(comptime T: type, inc: support.Face(T), inc_fids: [4]u32, plane_p
 /// One Sutherland-Hodgman pass on a CLOSED polygon: keep the part on the inward
 /// side of the plane (point `p`, inward normal `pn`), inserting edge crossings;
 /// threads feature ids (kept vertex → its id, intersection → `intersectionFid`).
-fn clipAgainstPlane(comptime T: type, poly: []const math.Vec(3, T), poly_f: []const u32, p: math.Vec(3, T), pn: math.Vec(3, T), plane_ref: u16, out_v: []math.Vec(3, T), out_f: []u32) usize {
+fn clipAgainstPlane(comptime T: type, poly: []const math.Vec(3, T), poly_f: []const u32, p: math.Vec(3, T), pn: math.Vec(3, T), plane_ref: u16, inc_face_id: u16, out_v: []math.Vec(3, T), out_f: []u32) usize {
     if (poly.len == 0) return 0;
     var n: usize = 0;
     var i: usize = 0;
@@ -505,7 +508,7 @@ fn clipAgainstPlane(comptime T: type, poly: []const math.Vec(3, T), poly_f: []co
                 const t = dc / denom;
                 if (n < out_v.len) {
                     out_v[n] = cur.add(nxt.sub(cur).scale(t));
-                    out_f[n] = intersectionFid(plane_ref, poly_f[i], poly_f[(i + 1) % poly.len]);
+                    out_f[n] = intersectionFid(plane_ref, poly_f[i], poly_f[(i + 1) % poly.len], inc_face_id);
                     n += 1;
                 }
             }
@@ -518,7 +521,7 @@ fn clipAgainstPlane(comptime T: type, poly: []const math.Vec(3, T), poly_f: []co
 /// (Liang-Barsky over `t ∈ [0, 1]`). Emits the surviving segment's endpoints (2,
 /// or 1 if it collapses); empty if fully clipped away. A clipped endpoint takes an
 /// intersection feature id; an un-clipped one keeps its incident-vertex id.
-fn clipSegment(comptime T: type, a: math.Vec(3, T), b: math.Vec(3, T), a_fid: u32, b_fid: u32, plane_p: []const math.Vec(3, T), plane_n: []const math.Vec(3, T), plane_ref: []const u16, buf: *[max_clip]math.Vec(3, T), fid_buf: *[max_clip]u32) []math.Vec(3, T) {
+fn clipSegment(comptime T: type, a: math.Vec(3, T), b: math.Vec(3, T), a_fid: u32, b_fid: u32, plane_p: []const math.Vec(3, T), plane_n: []const math.Vec(3, T), plane_ref: []const u16, inc_face_id: u16, buf: *[max_clip]math.Vec(3, T), fid_buf: *[max_clip]u32) []math.Vec(3, T) {
     const dir = b.sub(a);
     var t0: T = 0;
     var t1: T = 1;
@@ -534,12 +537,12 @@ fn clipSegment(comptime T: type, a: math.Vec(3, T), b: math.Vec(3, T), a_fid: u3
             if (den > 0) {
                 if (t > t0) {
                     t0 = t; // entering the half-space
-                    f0 = intersectionFid(pref, a_fid, b_fid);
+                    f0 = intersectionFid(pref, a_fid, b_fid, inc_face_id);
                 }
             } else {
                 if (t < t1) {
                     t1 = t; // leaving it
-                    f1 = intersectionFid(pref, a_fid, b_fid);
+                    f1 = intersectionFid(pref, a_fid, b_fid, inc_face_id);
                 }
             }
             if (t0 > t1) return buf[0..0];

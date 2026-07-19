@@ -180,6 +180,38 @@ fn fidSetEq(a: [4]u32, b: [4]u32, n: u8) bool {
     return true;
 }
 
+/// The feature_id of a reference-corner contact (reference half in the `class_c`
+/// range, top two bits `0b10`), or null if the manifold has none.
+fn refCornerFid(m: ContactManifold) ?u32 {
+    for (0..m.count) |i| {
+        const fid = m.points[i].feature_id;
+        if ((fid >> 16) & 0xc000 == 0x8000) return fid;
+    }
+    return null;
+}
+
+test "reference corner feature id encodes the incident face" {
+    // Codex FIX-10: a reference corner's incident half must carry which incident
+    // face it lies on, not a constant — else two corners at the SAME reference
+    // vertex on DIFFERENT incident faces (a supporting-face flip inter-frame)
+    // share a feature_id and warm-starting mis-matches them.
+    const box = boxShape(1, 1, 1);
+    // Same staggered overlap; B upright vs B rolled 90° about X ⇒ the SAME
+    // reference corner (a vertex of A's +Y face) but a DIFFERENT incident face.
+    const m1 = collide(box, vr(0, 0, 0), Quatr.identity, box, vr(0.6, 1.5, 0.4), Quatr.identity).?;
+    const roll = Quatr.fromAxisAngle(Vec3r.unit_x, std.math.pi / 2.0);
+    const m2 = collide(box, vr(0, 0, 0), Quatr.identity, box, vr(0.6, 1.5, 0.4), roll).?;
+    const c1 = refCornerFid(m1) orelse return error.NoReferenceCorner;
+    const c2 = refCornerFid(m2) orelse return error.NoReferenceCorner;
+    // Same reference vertex (high half) …
+    try testing.expectEqual(c1 >> 16, c2 >> 16);
+    // … but a different incident face (low half) ⇒ the face is encoded.
+    try testing.expect((c1 & 0xffff) != (c2 & 0xffff));
+    // The low half is a corner-face class (`class_c`) carrying a real face id 0..5.
+    try testing.expectEqual(@as(u32, 0x8000), c1 & 0xc000);
+    try testing.expect((c1 & 0x3fff) <= 5 and (c2 & 0x3fff) <= 5);
+}
+
 test "staggered box overlap yields a reference-corner contact with a unique id" {
     // Coverage of the reference-corner path (a clip point on TWO reference side
     // planes — an intersection whose endpoint is already an intersection, so it
@@ -494,6 +526,15 @@ test "pose sweep: feature ids are distinct and frame-stable" {
                     // (a) pairwise-distinct feature ids.
                     for (0..m.count) |i| {
                         for (i + 1..m.count) |j| try testing.expect(m.points[i].feature_id != m.points[j].feature_id);
+                    }
+                    // (a2, FIX-10) any reference corner carries an incident FACE in
+                    // its low half (class_c + a real face id 0..5), not a constant.
+                    for (0..m.count) |i| {
+                        const fid = m.points[i].feature_id;
+                        if ((fid >> 16) & 0xc000 == 0x8000) {
+                            try testing.expectEqual(@as(u32, 0x8000), fid & 0xc000);
+                            try testing.expect((fid & 0x3fff) <= 5);
+                        }
                     }
                     // (b) frame-stable id SET under the tiny shift — asserted only
                     // when the shift keeps the topology, i.e. same count AND a
