@@ -14,6 +14,7 @@
 
 const support = @import("support.zig");
 const gjk_mod = @import("gjk.zig");
+const epa_mod = @import("epa.zig");
 const manifold = @import("manifold.zig");
 
 // --- Support layer (support.zig) ---
@@ -40,6 +41,15 @@ pub const max_gjk_iterations = gjk_mod.max_gjk_iterations;
 /// Distance-based GJK between two support shapes at their world poses.
 pub const gjk = gjk_mod.gjk;
 
+// --- EPA (penetration axis + core depth, epa.zig) ---
+
+/// EPA penetration result (world normal A→B, core depth, world closest points).
+pub const EpaResult = epa_mod.EpaResult;
+/// The EPA expansion iteration ceiling (scalar-independent).
+pub const max_epa_iterations = epa_mod.max_epa_iterations;
+/// EPA over a `.deep` GJK seed — penetration axis + core depth.
+pub const epa = epa_mod.epa;
+
 // --- Contact manifold (manifold.zig) ---
 
 /// The contact manifold between two shapes (world normal + up to 4 points).
@@ -52,5 +62,6 @@ pub const ContactPoint = manifold.ContactPoint;
 comptime {
     _ = support;
     _ = gjk_mod;
+    _ = epa_mod;
     _ = manifold;
 }
