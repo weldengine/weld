@@ -18,7 +18,7 @@ const api = @import("weld_forge");
 const config = @import("config.zig");
 const shape_mod = @import("shape.zig");
 const body_mod = @import("body.zig");
-const narrowphase = @import("pipeline/narrowphase.zig");
+const narrowphase = @import("pipeline/narrowphase/root.zig");
 const IdAllocator = @import("slot_alloc.zig").IdAllocator;
 
 const Real = config.Real;

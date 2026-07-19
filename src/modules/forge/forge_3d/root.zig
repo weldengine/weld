@@ -2,11 +2,12 @@
 //! `engine-spec.md` §3.5). M1.1.0 laid the foundations: the `Real` scalar, the
 //! `ShapeStore`, per-body `MotionProperties` with analytic inertia, and the SoA
 //! `BodyManager`. M1.1.1 added the shared `pipeline/broadphase.zig` (a dynamic
-//! multi-layer AABB tree — BVH); M1.1.2 adds `pipeline/narrowphase.zig`
-//! (distance-based GJK convex detection). Both are re-exported here at `Real`.
-//! No stepping, EPA, island manager, scheduler, or `PhysicsModule` instantiation
-//! yet — those are later M1.1 sub-milestones. Depends only on `foundation/math`
-//! and `src/modules/forge/api/` (core entity/component types reach here through
+//! multi-layer AABB tree — BVH); M1.1.2 added `pipeline/narrowphase/`
+//! (distance-based GJK convex detection), promoted to a package at M1.1.3 with
+//! EPA + contact manifold as sibling files. All re-exported here at `Real`. No
+//! stepping, island manager, scheduler, or `PhysicsModule` instantiation yet —
+//! those are later M1.1 sub-milestones. Depends only on `foundation/math` and
+//! `src/modules/forge/api/` (core entity/component types reach here through
 //! `api/`).
 
 const config = @import("config.zig");
@@ -14,10 +15,11 @@ const shape = @import("shape.zig");
 const body = @import("body.zig");
 const body_manager = @import("body_manager.zig");
 const broadphase = @import("pipeline/broadphase.zig");
-// M1.1.2 — narrowphase (GJK convex detection). Re-exported at `Real` below; the
-// comptime pin analyses its acceptance tests (engine-zig-conventions.md §13
-// lazy-analysis guard — an unreferenced module's tests are silently skipped).
-const narrowphase = @import("pipeline/narrowphase.zig");
+// M1.1.2/3 — narrowphase package (GJK convex detection; EPA + manifold M1.1.3).
+// Re-exported at `Real` below; the comptime pin analyses its acceptance tests
+// (engine-zig-conventions.md §13 lazy-analysis guard — an unreferenced module's
+// tests are silently skipped).
+const narrowphase = @import("pipeline/narrowphase/root.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -93,5 +95,5 @@ comptime {
     _ = narrowphase;
     _ = @import("tests/body_manager_test.zig");
     _ = @import("tests/broadphase_test.zig");
-    _ = @import("tests/narrowphase_test.zig");
+    _ = @import("tests/gjk_test.zig");
 }

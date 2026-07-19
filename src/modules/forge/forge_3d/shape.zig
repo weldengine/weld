@@ -9,7 +9,7 @@
 const std = @import("std");
 const api = @import("weld_forge");
 const config = @import("config.zig");
-const narrowphase = @import("pipeline/narrowphase.zig");
+const narrowphase = @import("pipeline/narrowphase/root.zig");
 const IdAllocator = @import("slot_alloc.zig").IdAllocator;
 
 const Real = config.Real;

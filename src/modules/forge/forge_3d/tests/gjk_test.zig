@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const config = @import("../config.zig");
-const narrowphase = @import("../pipeline/narrowphase.zig");
+const narrowphase = @import("../pipeline/narrowphase/root.zig");
 const math = @import("foundation").math;
 const api = @import("weld_forge");
 const bm_mod = @import("../body_manager.zig");
