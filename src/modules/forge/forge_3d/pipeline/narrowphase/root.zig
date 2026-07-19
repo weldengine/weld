@@ -56,6 +56,9 @@ pub const epa = epa_mod.epa;
 pub const ContactManifold = manifold.ContactManifold;
 /// One contact point of a `ContactManifold`.
 pub const ContactPoint = manifold.ContactPoint;
+/// Full narrowphase (GJK → shallow/deep manifold) between two shapes; null when
+/// separated. Order-independent.
+pub const collide = manifold.collide;
 
 // Pins so every package sub-file is analysed when forge_3d is built as a test
 // target (engine-zig-conventions.md §13 lazy-analysis guard).

@@ -97,4 +97,5 @@ comptime {
     _ = @import("tests/broadphase_test.zig");
     _ = @import("tests/gjk_test.zig");
     _ = @import("tests/epa_test.zig");
+    _ = @import("tests/manifold_test.zig");
 }

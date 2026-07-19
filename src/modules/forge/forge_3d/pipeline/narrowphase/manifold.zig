@@ -1,18 +1,34 @@
 //! `forge_3d/pipeline/narrowphase/manifold.zig` — the contact manifold types and
 //! (M1.1.3/E3) the supporting-face clipping generator.
 //!
-//! M1.1.3/E1 lands the FROZEN `ContactManifold(T)` / `ContactPoint(T)` types and
-//! the normal / depth / feature-id convention (brief Notes) — no generator yet.
-//! E3 adds the single-shot generator: `supportingFace(+n)` on A clipped against
-//! `supportingFace(−n)` on B (Sutherland-Hodgman), reduced to ≤ 4 points, with
-//! the inflation radii applied to place surface points and per-point depth.
+//! M1.1.3/E1 landed the FROZEN `ContactManifold(T)` / `ContactPoint(T)` types and
+//! the normal / depth / feature-id convention. E3 adds the single-shot generator
+//! and the `collide` entry that drives both regimes.
 //!
-//! **Convention (FROZEN, brief Notes).** `normal` is unit, world-space, A→B (the
-//! axis to translate B along to reduce penetration). `penetration ≥ 0` when
-//! overlapping. Order-independence is a hard requirement: `collide(A,B)` and
-//! `collide(B,A)` give negated normals, equal `count`, the same point set, and
-//! equal per-point `penetration`. Depth is continuous across the shallow↔deep
-//! boundary: shallow `= r_sum − dist`, deep `= core_depth + r_sum`.
+//! **The generator runs in A's frame (brief Notes, Guy's E3 kickoff).** It takes
+//! a WORLD contact normal (shallow: `normalize(closest_b − closest_a)`; deep:
+//! `EpaResult.normal`), converts it ONCE to A's frame (`conj(rot_a)·n`, a unit
+//! vector rotation), takes `supportingFace(+n_a)` on A and `supportingFace(−n_a)`
+//! on B (mapped to A's frame by `supportingFaceB`), picks the reference face (the
+//! one whose outward normal is most aligned with the contact axis — a
+//! non-polygon feature counts as 0-aligned; tie → A), clips the incident feature
+//! against the reference's side planes (Sutherland-Hodgman), keeps the
+//! penetrating points, reduces to ≤ 4, applies the inflation radii, and maps the
+//! final normal + points to WORLD once. No clipping in world space — that would
+//! reintroduce the large-coordinate cancellation the frame-of-A choice (M1.1.14)
+//! avoids.
+//!
+//! **Per-point penetration (both regimes, continuous).** `r_sum − s`, where `s`
+//! is the incident core point's signed distance from the reference face plane:
+//! deep (`s < 0`) → `r_sum + |s|`, shallow (`s > 0`) → `r_sum − s`. A point-core
+//! contact (a sphere, or an end-on capsule → 1 vertex) yields a single point from
+//! the GJK/EPA closest points.
+//!
+//! **Order-independence (FROZEN hard requirement + F5).** `collide` computes the
+//! pair in a caller-independent CANONICAL order (a deterministic key on
+//! shape+pose) and negates the normal for the swapped caller, so `collide(A,B)`
+//! and `collide(B,A)` give the same points/depths with negated normals — even for
+//! the degenerate depth-0 configs whose normal axis is otherwise ambiguous.
 //!
 //! **Dependency discipline (brief Notes).** Imports `foundation` (math) and the
 //! sibling `support.zig` / `gjk.zig` / `epa.zig` ONLY — never `weld_forge`,
@@ -21,6 +37,9 @@
 
 const std = @import("std");
 const math = @import("foundation").math;
+const support = @import("support.zig");
+const gjk_mod = @import("gjk.zig");
+const epa_mod = @import("epa.zig");
 
 /// The contact manifold between two shapes: a shared world-space contact
 /// `normal` (A→B) plus up to 4 `ContactPoint`s. FROZEN convention (brief Notes);
@@ -49,6 +68,480 @@ pub fn ContactPoint(comptime T: type) type {
         /// warm-starting (reference-feature id << 16 | incident-feature id).
         /// Populated now; consumed at M1.1.6. Packing is an impl detail.
         feature_id: u32,
+    };
+}
+
+/// Full narrowphase for a convex pair at their world poses: GJK, then the
+/// contact manifold. Returns null when the pair is separated. The regimes wire
+/// through one generator — `.shallow` supplies the normal from the GJK closest
+/// points, `.deep` from EPA. Order-independence (a hard requirement, incl. the
+/// degenerate depth-0 configs) is guaranteed by computing the pair in a
+/// caller-independent canonical order and negating the normal for the swapped
+/// caller.
+pub fn collide(
+    comptime T: type,
+    shape_a: support.SupportShape(T),
+    pos_a: math.Vec(3, T),
+    rot_a: math.Quat(T),
+    shape_b: support.SupportShape(T),
+    pos_b: math.Vec(3, T),
+    rot_b: math.Quat(T),
+) ?ContactManifold(T) {
+    if (poseAfter(T, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b)) {
+        // Caller order is the reverse of canonical: compute canonically (B,A),
+        // then negate the normal so it points along the caller's A→B.
+        var m = collideOrdered(T, shape_b, pos_b, rot_b, shape_a, pos_a, rot_a) orelse return null;
+        m.normal = m.normal.neg();
+        return m;
+    }
+    return collideOrdered(T, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
+}
+
+/// `collide` for a fixed (already-canonical) shape order.
+fn collideOrdered(
+    comptime T: type,
+    shape_a: support.SupportShape(T),
+    pos_a: math.Vec(3, T),
+    rot_a: math.Quat(T),
+    shape_b: support.SupportShape(T),
+    pos_b: math.Vec(3, T),
+    rot_b: math.Quat(T),
+) ?ContactManifold(T) {
+    const Vec3T = math.Vec(3, T);
+    const g = gjk_mod.gjk(T, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
+    if (g.status == .separated) return null;
+
+    const relpose = support.RelativePose(T).init(pos_a, rot_a, pos_b, rot_b);
+    const r_sum = shape_a.radius + shape_b.radius;
+
+    var n_world: Vec3T = undefined;
+    var closest_a: Vec3T = undefined;
+    var closest_b: Vec3T = undefined;
+    var base_penetration: T = undefined;
+    if (g.status == .deep) {
+        const e = epa_mod.epa(T, shape_a, pos_a, rot_a, relpose, shape_b, g);
+        n_world = e.normal;
+        closest_a = e.closest_a;
+        closest_b = e.closest_b;
+        base_penetration = e.depth + r_sum; // deep: core overlap + inflation
+    } else { // shallow — cores disjoint, penetration from inflation only
+        closest_a = g.closest_a;
+        closest_b = g.closest_b;
+        const sep = closest_b.sub(closest_a);
+        const sep_len_sq = sep.dot(sep);
+        // n = normalize(closest_b − closest_a); guard the dist ≈ 0 boundary (the
+        // shallow↔deep seam) with the centre-to-centre search direction.
+        const noise: T = if (T == f32) 1.0e-12 else 1.0e-24;
+        n_world = if (sep_len_sq > noise) sep.scale(1.0 / @sqrt(sep_len_sq)) else fallbackNormal(T, pos_a, pos_b);
+        base_penetration = r_sum - g.distance;
+    }
+
+    return generateManifold(T, shape_a, pos_a, rot_a, relpose, shape_b, n_world, closest_a, closest_b, base_penetration);
+}
+
+/// Build the contact manifold from a resolved world contact normal (`n_world`,
+/// A→B) and the two shapes/poses, working in A's frame (see the file header).
+/// `closest_a`/`closest_b` (world core witness points) and `base_penetration`
+/// feed the single-point (point-core) path; the multi-point path derives per-
+/// point penetration from the clip.
+fn generateManifold(
+    comptime T: type,
+    shape_a: support.SupportShape(T),
+    pos_a: math.Vec(3, T),
+    rot_a: math.Quat(T),
+    relpose: support.RelativePose(T),
+    shape_b: support.SupportShape(T),
+    n_world: math.Vec(3, T),
+    closest_a: math.Vec(3, T),
+    closest_b: math.Vec(3, T),
+    base_penetration: T,
+) ContactManifold(T) {
+    const Vec3T = math.Vec(3, T);
+    const r_a = shape_a.radius;
+    const r_b = shape_b.radius;
+    const r_sum = r_a + r_b;
+
+    // Contact normal into A's frame (unit vector rotation — safe).
+    const n_a = rot_a.conjugate().rotateVec3(n_world);
+
+    // Supporting features, both in A's frame.
+    const face_a = shape_a.supportingFace(n_a);
+    const face_b = relpose.supportingFaceB(shape_b, n_a.neg());
+
+    // Point-core contact (a sphere, or an end-on capsule → 1 vertex): a single
+    // contact straight from the GJK/EPA witness points, mapped to the surfaces.
+    if (face_a.count == 1 or face_b.count == 1) {
+        const sa = closest_a.add(n_world.scale(r_a)); // A's surface toward B
+        const sb = closest_b.sub(n_world.scale(r_b)); // B's surface toward A
+        const position = sa.add(sb).scale(0.5);
+        return oneContact(T, n_world, position, @max(base_penetration, 0), packFeatureId(0, 0));
+    }
+
+    // --- Face-face / face-edge: reference vs incident, clipped in A's frame ---
+    const n_a_face = faceNormalA(T, face_a, n_a); // ≈ +n_a
+    const n_b_face = faceNormalA(T, face_b, n_a.neg()); // ≈ −n_a
+    const align_a: T = if (face_a.count >= 3) @abs(n_a_face.dot(n_a)) else 0;
+    const align_b: T = if (face_b.count >= 3) @abs(n_b_face.dot(n_a)) else 0;
+
+    const a_is_ref = align_a >= align_b; // tie → A
+    const ref = if (a_is_ref) face_a else face_b;
+    const inc = if (a_is_ref) face_b else face_a;
+    const rn = if (a_is_ref) n_a_face else n_b_face;
+    const r_ref = if (a_is_ref) r_a else r_b;
+    const r_inc = if (a_is_ref) r_b else r_a;
+    const ref_pt = ref.verts[0];
+
+    // Clip the incident polygon/segment against the reference side planes.
+    var clip_buf: [max_clip]Vec3T = undefined;
+    const clipped = clipIncident(T, inc, ref, rn, &clip_buf);
+
+    // Keep penetrating points; build contacts.
+    var points: [4]ContactPoint(T) = undefined;
+    var raw: [max_clip]Candidate(T) = undefined;
+    var raw_n: usize = 0;
+    const keep_eps: T = if (T == f32) 1.0e-5 else 1.0e-10;
+    for (clipped) |v| {
+        const s = v.sub(ref_pt).dot(rn);
+        const pen = r_sum - s;
+        if (pen < -keep_eps) continue;
+        // Surface points: reference face + r_ref outward; incident core − r_inc.
+        const foot = v.sub(rn.scale(s));
+        const pos_a_frame = foot.add(v).scale(0.5).add(rn.scale((r_ref - r_inc) * 0.5));
+        raw[raw_n] = .{ .pos = rot_a.rotateVec3(pos_a_frame).add(pos_a), .pen = @max(pen, 0) };
+        raw_n += 1;
+    }
+
+    if (raw_n == 0) {
+        // Degenerate clip (e.g. an oblique feature that clipped empty): fall back
+        // to the single witness-point contact so a genuine overlap is never lost.
+        const sa = closest_a.add(n_world.scale(r_a));
+        const sb = closest_b.sub(n_world.scale(r_b));
+        return oneContact(T, n_world, sa.add(sb).scale(0.5), @max(base_penetration, 0), packFeatureId(0, 0));
+    }
+
+    // Reduce to ≤ 4 (deepest + area-maximising), deterministic.
+    var idx: [4]usize = undefined;
+    const count = reduceToFour(T, raw[0..raw_n], n_world, &idx);
+    for (0..count) |i| {
+        const c = raw[idx[i]];
+        points[i] = .{ .position = c.pos, .penetration = c.pen, .feature_id = packFeatureId(@intFromBool(!a_is_ref), @intCast(idx[i])) };
+    }
+    for (count..4) |i| points[i] = .{ .position = Vec3T.zero, .penetration = 0, .feature_id = 0 };
+    return .{ .normal = n_world, .points = points, .count = @intCast(count) };
+}
+
+// --- Internal helpers ---
+
+/// Largest number of points the incident clip can transiently hold: an incident
+/// quad (4) clipped against up to 4 reference side planes yields ≤ 8.
+const max_clip: usize = 8;
+
+/// A candidate contact before reduction: its world position and penetration.
+fn Candidate(comptime T: type) type {
+    return struct { pos: math.Vec(3, T), pen: T };
+}
+
+/// A single-point manifold with the tail zeroed.
+fn oneContact(comptime T: type, normal: math.Vec(3, T), position: math.Vec(3, T), penetration: T, feature_id: u32) ContactManifold(T) {
+    const Vec3T = math.Vec(3, T);
+    const zero = ContactPoint(T){ .position = Vec3T.zero, .penetration = 0, .feature_id = 0 };
+    return .{
+        .normal = normal,
+        .points = .{ .{ .position = position, .penetration = penetration, .feature_id = feature_id }, zero, zero, zero },
+        .count = 1,
+    };
+}
+
+/// Deterministic per-contact identity (reference-feature id << 16 | incident id),
+/// consumed at M1.1.6. Packing is provisional (brief FROZEN convention).
+fn packFeatureId(ref_id: u32, inc_id: u32) u32 {
+    return (ref_id << 16) | (inc_id & 0xffff);
+}
+
+/// Outward normal of a face in A's frame: the polygon normal oriented toward
+/// `expected_axis` for a real face (≥ 3 verts); the axis itself as a proxy for a
+/// point / segment feature (which has no face normal).
+fn faceNormalA(comptime T: type, face: support.Face(T), expected_axis: math.Vec(3, T)) math.Vec(3, T) {
+    if (face.count < 3) return expected_axis;
+    var n = face.verts[1].sub(face.verts[0]).cross(face.verts[2].sub(face.verts[0]));
+    const l2 = n.dot(n);
+    if (!(l2 > 0)) return expected_axis;
+    n = n.scale(1.0 / @sqrt(l2));
+    return if (n.dot(expected_axis) < 0) n.neg() else n;
+}
+
+/// Clip the incident feature against the reference face's side planes (planes
+/// through each reference edge, perpendicular to the reference face, oriented
+/// inward; a segment reference contributes its two endpoint planes). A polygon
+/// incident (≥ 3 verts) is clipped by Sutherland-Hodgman; a segment incident
+/// (2 verts) is clipped as an OPEN segment (Liang-Barsky) — a closed-polygon
+/// clip would double-emit the crossing point (adversarial-review finding E).
+/// Returns the surviving points as a slice into `buf`.
+fn clipIncident(comptime T: type, inc: support.Face(T), ref: support.Face(T), rn: math.Vec(3, T), buf: *[max_clip]math.Vec(3, T)) []math.Vec(3, T) {
+    const Vec3T = math.Vec(3, T);
+    // Build the reference side planes (point + inward normal).
+    var plane_p: [4]Vec3T = undefined;
+    var plane_n: [4]Vec3T = undefined;
+    var np: usize = 0;
+    const centroid = faceCentroid(T, ref);
+    if (ref.count >= 3) {
+        for (0..ref.count) |i| {
+            const a = ref.verts[i];
+            const b = ref.verts[(i + 1) % ref.count];
+            var pn = rn.cross(b.sub(a)); // ⟂ the face and the edge
+            if (pn.dot(centroid.sub(a)) < 0) pn = pn.neg();
+            if (pn.dot(pn) > 0) {
+                plane_p[np] = a;
+                plane_n[np] = pn;
+                np += 1;
+            }
+        }
+    } else { // segment reference: two endpoint planes ⟂ the segment axis
+        const axis = ref.verts[1].sub(ref.verts[0]);
+        const ends = [2]struct { p: Vec3T, pn: Vec3T }{
+            .{ .p = ref.verts[0], .pn = axis },
+            .{ .p = ref.verts[1], .pn = axis.neg() },
+        };
+        for (ends) |e| {
+            var pn = e.pn;
+            if (pn.dot(centroid.sub(e.p)) < 0) pn = pn.neg();
+            if (pn.dot(pn) > 0) {
+                plane_p[np] = e.p;
+                plane_n[np] = pn;
+                np += 1;
+            }
+        }
+    }
+
+    if (inc.count == 2) return clipSegment(T, inc.verts[0], inc.verts[1], plane_p[0..np], plane_n[0..np], buf);
+    return clipPolygon(T, inc, plane_p[0..np], plane_n[0..np], buf);
+}
+
+/// Sutherland-Hodgman clip of a polygon incident against the reference side
+/// planes; ping-pongs two stack buffers. Returns a slice of `buf`.
+fn clipPolygon(comptime T: type, inc: support.Face(T), plane_p: []const math.Vec(3, T), plane_n: []const math.Vec(3, T), buf: *[max_clip]math.Vec(3, T)) []math.Vec(3, T) {
+    const Vec3T = math.Vec(3, T);
+    var poly_a: [max_clip]Vec3T = undefined;
+    var poly_b: [max_clip]Vec3T = undefined;
+    var cur: []Vec3T = poly_a[0..inc.count];
+    for (0..inc.count) |i| cur[i] = inc.verts[i];
+    for (plane_p, plane_n) |p, pn| {
+        const dest_is_b = (cur.ptr == &poly_a);
+        const out_full: []Vec3T = if (dest_is_b) poly_b[0..] else poly_a[0..];
+        const out_n = clipAgainstPlane(T, cur, p, pn, out_full);
+        cur = out_full[0..out_n];
+        if (out_n == 0) break;
+    }
+    for (0..cur.len) |i| buf[i] = cur[i];
+    return buf[0..cur.len];
+}
+
+/// One Sutherland-Hodgman pass on a CLOSED polygon: keep the part on the inward
+/// side of the plane (point `p`, inward normal `pn`), inserting edge crossings.
+fn clipAgainstPlane(comptime T: type, poly: []const math.Vec(3, T), p: math.Vec(3, T), pn: math.Vec(3, T), out: []math.Vec(3, T)) usize {
+    if (poly.len == 0) return 0;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < poly.len) : (i += 1) {
+        const cur = poly[i];
+        const nxt = poly[(i + 1) % poly.len];
+        const dc = cur.sub(p).dot(pn); // ≥ 0 inside
+        const dn = nxt.sub(p).dot(pn);
+        if (dc >= 0) {
+            if (n < out.len) {
+                out[n] = cur;
+                n += 1;
+            }
+        }
+        if ((dc >= 0) != (dn >= 0)) { // edge crosses ⇒ insert the intersection
+            const denom = dc - dn;
+            if (denom != 0) {
+                const t = dc / denom;
+                if (n < out.len) {
+                    out[n] = cur.add(nxt.sub(cur).scale(t));
+                    n += 1;
+                }
+            }
+        }
+    }
+    return n;
+}
+
+/// Clip the OPEN segment `a`–`b` against the reference side half-spaces
+/// (Liang-Barsky over the parameter `t ∈ [0, 1]`). Emits the surviving segment's
+/// endpoints (2 points, or 1 if it collapses); empty if fully clipped away. No
+/// double-emit, unlike running a 2-vertex "polygon" through Sutherland-Hodgman.
+fn clipSegment(comptime T: type, a: math.Vec(3, T), b: math.Vec(3, T), plane_p: []const math.Vec(3, T), plane_n: []const math.Vec(3, T), buf: *[max_clip]math.Vec(3, T)) []math.Vec(3, T) {
+    const dir = b.sub(a);
+    var t0: T = 0;
+    var t1: T = 1;
+    for (plane_p, plane_n) |p, pn| {
+        const num = a.sub(p).dot(pn); // value of (x−p)·pn at t = 0
+        const den = dir.dot(pn); // d/dt of (x−p)·pn
+        if (den == 0) {
+            if (num < 0) return buf[0..0]; // parallel and outside ⇒ nothing survives
+        } else {
+            const t = -num / den; // (x−p)·pn = 0 at this t
+            if (den > 0) {
+                t0 = @max(t0, t); // entering the half-space
+            } else {
+                t1 = @min(t1, t); // leaving it
+            }
+            if (t0 > t1) return buf[0..0];
+        }
+    }
+    buf[0] = a.add(dir.scale(t0));
+    const eps: T = if (T == f32) 1.0e-6 else 1.0e-12;
+    if (t1 - t0 <= eps) return buf[0..1];
+    buf[1] = a.add(dir.scale(t1));
+    return buf[0..2];
+}
+
+/// Centroid of a face's valid vertices (a reference interior point for inward
+/// plane orientation).
+fn faceCentroid(comptime T: type, face: support.Face(T)) math.Vec(3, T) {
+    const Vec3T = math.Vec(3, T);
+    var c = Vec3T.zero;
+    for (0..face.count) |i| c = c.add(face.verts[i]);
+    return c.scale(1.0 / @as(T, @floatFromInt(face.count)));
+}
+
+/// Reduce a contact set to ≤ 4 points. The contacts are coplanar (they lie on
+/// the contact plane, normal `normal`), so the 4th point is chosen by SIGNED area
+/// about the `k0`–`k1` axis — the two extreme points on each side of that axis —
+/// not by distance from the (also-coplanar) `k0`,`k1`,`k2` triangle plane, which
+/// is degenerate for a planar set (adversarial-review finding F). Coincident
+/// points are deduplicated first. Deterministic tie-breaks (strict `>`; first
+/// index wins). Writes the chosen `pts` indices into `idx`, returns the count.
+fn reduceToFour(comptime T: type, pts: []const Candidate(T), normal: math.Vec(3, T), idx: *[4]usize) usize {
+    const eps: T = if (T == f32) 1.0e-5 else 1.0e-10;
+    // Deduplicate coincident contacts (indices into `pts`).
+    var uniq: [max_clip]usize = undefined;
+    var un: usize = 0;
+    outer: for (pts, 0..) |c, i| {
+        for (0..un) |j| {
+            if (c.pos.approxEql(pts[uniq[j]].pos, eps)) continue :outer;
+        }
+        uniq[un] = i;
+        un += 1;
+    }
+    if (un <= 4) {
+        for (0..un) |i| idx[i] = uniq[i];
+        return un;
+    }
+
+    // 1: deepest. 2: farthest from it.
+    var k0 = uniq[0];
+    for (uniq[0..un]) |i| {
+        if (pts[i].pen > pts[k0].pen) k0 = i;
+    }
+    var k1 = uniq[0];
+    var best_d: T = -1;
+    for (uniq[0..un]) |i| {
+        const d = pts[i].pos.sub(pts[k0].pos).lengthSq();
+        if (d > best_d) {
+            best_d = d;
+            k1 = i;
+        }
+    }
+    // 3 & 4: extreme signed area on each side of the k0–k1 axis (coplanar set).
+    var k2 = k0;
+    var k3 = k0;
+    var best_pos: T = 0;
+    var best_neg: T = 0;
+    const axis = pts[k1].pos.sub(pts[k0].pos);
+    for (uniq[0..un]) |i| {
+        const area = pts[i].pos.sub(pts[k0].pos).cross(axis).dot(normal);
+        if (area > best_pos) {
+            best_pos = area;
+            k2 = i;
+        }
+        if (area < best_neg) {
+            best_neg = area;
+            k3 = i;
+        }
+    }
+    idx[0] = k0;
+    idx[1] = k1;
+    idx[2] = k2;
+    idx[3] = k3;
+    // Guard against a one-sided set leaving k2 or k3 latched onto k0.
+    var out: usize = 0;
+    var chosen: [4]usize = undefined;
+    for (idx.*) |c| {
+        var dup = false;
+        for (0..out) |j| {
+            if (chosen[j] == c) dup = true;
+        }
+        if (!dup) {
+            chosen[out] = c;
+            out += 1;
+        }
+    }
+    for (0..out) |i| idx[i] = chosen[i];
+    return out;
+}
+
+/// A deterministic separation normal for the shallow `dist ≈ 0` boundary — the
+/// centre-to-centre direction, falling back to +X if the centres coincide.
+fn fallbackNormal(comptime T: type, pos_a: math.Vec(3, T), pos_b: math.Vec(3, T)) math.Vec(3, T) {
+    const Vec3T = math.Vec(3, T);
+    const d = pos_b.sub(pos_a);
+    const l2 = d.dot(d);
+    return if (l2 > 0) d.scale(1.0 / @sqrt(l2)) else Vec3T.unit_x;
+}
+
+/// Whether pair `(a, b)` is the reverse of canonical order — i.e. `collide`
+/// should compute `(b, a)` and negate. A strict, total, deterministic order on
+/// (shape, pose): position, then rotation, then radius, then core tag. Two
+/// distinct shapes/poses always compare unequal, so the winner is caller-
+/// independent — the basis of order-independence (F5).
+fn poseAfter(
+    comptime T: type,
+    shape_a: support.SupportShape(T),
+    pos_a: math.Vec(3, T),
+    rot_a: math.Quat(T),
+    shape_b: support.SupportShape(T),
+    pos_b: math.Vec(3, T),
+    rot_b: math.Quat(T),
+) bool {
+    const pa = pos_a.toArray();
+    const pb = pos_b.toArray();
+    inline for (0..3) |i| {
+        if (pa[i] != pb[i]) return pa[i] > pb[i];
+    }
+    const ra = [4]T{ rot_a.x, rot_a.y, rot_a.z, rot_a.w };
+    const rb = [4]T{ rot_b.x, rot_b.y, rot_b.z, rot_b.w };
+    inline for (0..4) |i| {
+        if (ra[i] != rb[i]) return ra[i] > rb[i];
+    }
+    if (shape_a.radius != shape_b.radius) return shape_a.radius > shape_b.radius;
+    // Core kind (point < segment < box), then the core's full parameters
+    // lexicographically — a strict total order (no distinct cores compare equal,
+    // unlike a `|half_extents|`-only tag where e.g. (1,2,3) and (3,2,1) collide).
+    const ka = coreKind(T, shape_a);
+    const kb = coreKind(T, shape_b);
+    if (ka != kb) return ka > kb;
+    switch (shape_a.core) {
+        .point => return false,
+        .segment => |ha| return ha > shape_b.core.segment,
+        .box => |hea| {
+            const a = hea.toArray();
+            const b = shape_b.core.box.toArray();
+            inline for (0..3) |i| {
+                if (a[i] != b[i]) return a[i] > b[i];
+            }
+            return false;
+        },
+    }
+}
+
+/// Core-kind rank for the canonical order: point < segment < box.
+fn coreKind(comptime T: type, shape: support.SupportShape(T)) u8 {
+    return switch (shape.core) {
+        .point => 0,
+        .segment => 1,
+        .box => 2,
     };
 }
 
