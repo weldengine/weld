@@ -27,8 +27,11 @@
 //! **Order-independence (FROZEN hard requirement + F5).** `collide` computes the
 //! pair in a caller-independent CANONICAL order (a deterministic key on
 //! shape+pose) and negates the normal for the swapped caller, so `collide(A,B)`
-//! and `collide(B,A)` give the same points/depths with negated normals — even for
-//! the degenerate depth-0 configs whose normal axis is otherwise ambiguous.
+//! and `collide(B,A)` give the same points/depths with negated normals. Ratified
+//! exception (brief RD-4): two shapes with bit-identical pose AND geometry have no
+//! geometric A→B axis (measure-zero), so `collide` returns the SAME arbitrary
+//! normal in both orders there rather than a negated pair; `BodyManager.collidePair`
+//! restores full order-independence for real bodies via a canonical body-id order.
 //!
 //! **Dependency discipline (brief Notes).** Imports `foundation` (math) and the
 //! sibling `support.zig` / `gjk.zig` / `epa.zig` ONLY — never `weld_forge`,
@@ -74,10 +77,14 @@ pub fn ContactPoint(comptime T: type) type {
 /// Full narrowphase for a convex pair at their world poses: GJK, then the
 /// contact manifold. Returns null when the pair is separated. The regimes wire
 /// through one generator — `.shallow` supplies the normal from the GJK closest
-/// points, `.deep` from EPA. Order-independence (a hard requirement, incl. the
-/// degenerate depth-0 configs) is guaranteed by computing the pair in a
-/// caller-independent canonical order and negating the normal for the swapped
-/// caller.
+/// points, `.deep` from EPA. Order-independence is guaranteed by computing the
+/// pair in a caller-independent canonical POSE order and negating the normal for
+/// the swapped caller (with the ratified RD-4 exception for bit-identical
+/// pose+geometry). Because the canonical order is by POSE, the `feature_id`
+/// reference/incident ownership flips at a pose-order boundary — a caller that
+/// needs a FRAME-STABLE `feature_id` (M1.1.6 warm-starting) must drive the fixed
+/// `collideOrdered` in a stable external order instead; `BodyManager.collidePair`
+/// does this by body id.
 pub fn collide(
     comptime T: type,
     shape_a: support.SupportShape(T),
@@ -295,27 +302,97 @@ fn faceNormalA(comptime T: type, face: support.Face(T), expected_axis: math.Vec(
     return if (n.dot(expected_axis) < 0) n.neg() else n;
 }
 
-/// Pack an intersection point's stable feature id (FIX-2): a reference side plane
-/// (marked, 15-bit edge id) high, an incident edge (marked) low — both marked
-/// distinct from a kept-vertex id.
-fn intersectionFid(plane_ref: u16, cur_fid: u32, nxt_fid: u32) u32 {
-    const ref16: u16 = 0x8000 | (plane_ref & 0x7fff);
-    const inc16: u16 = incidentEdgeId(@intCast(cur_fid & 0xffff), @intCast(nxt_fid & 0xffff));
+// Feature-id classes, per 16-bit half (top two bits). A contact's `feature_id`
+// is `(reference_feature << 16) | incident_feature`; the class bits keep the
+// three contact kinds in DISTINCT id ranges so they never alias (Codex FIX-9):
+//   reference half: face (`class_a`), side plane / edge (`class_edge`), vertex /
+//     corner (`class_c`);  incident half: vertex (`class_a`), edge (`class_edge`),
+//     face (`class_c`).
+const class_a: u16 = 0x0000; // reference face / incident vertex
+const class_edge: u16 = 0x4000; // reference side plane / incident edge
+const class_c: u16 = 0x8000; // reference vertex (corner) / incident face
+const class_mask: u16 = 0xc000;
+const id_mask: u16 = 0x3fff;
+
+/// Pack a `feature_id` from a class-tagged reference half and incident half.
+fn featureId(ref16: u16, inc16: u16) u32 {
     return (@as(u32, ref16) << 16) | @as(u32, inc16);
 }
 
-/// Stable, collision-free incident-edge id from the two endpoint incident ids.
-/// If either endpoint is ALREADY an intersection (marker bit set) its original
-/// incident-edge provenance is carried through — a re-derived key would alias
-/// distinct edges (Codex P1a: a box vertex lies on 3 edges, so `min` is not
-/// unique). Otherwise the edge is the SORTED VERTEX PAIR `lo·8 + hi`, unique
-/// among the box's 12 edges, so two distinct simultaneous contacts never collide.
+/// The stable feature id of a clip-intersection point crossed by reference side
+/// plane `qid`. A segment whose two endpoints share a reference plane `p` is a
+/// reference cut-edge, so the new point lies on `p` AND `qid` — a REFERENCE
+/// CORNER (a ref vertex), whose incident feature is the incident FACE. It must
+/// NOT inherit a neighbour's incident edge (Codex FIX-9: that aliased distinct
+/// contacts). Otherwise the point is an incident-edge × ref-edge crossing.
+fn intersectionFid(qid: u16, cur_fid: u32, nxt_fid: u32) u32 {
+    const cur_ref: u16 = @intCast(cur_fid >> 16);
+    const nxt_ref: u16 = @intCast(nxt_fid >> 16);
+    if (commonRefPlane(cur_ref, nxt_ref)) |p| {
+        return featureId(class_c | refVertexId(p, qid), class_c);
+    }
+    const cur_inc: u16 = @intCast(cur_fid & 0xffff);
+    const nxt_inc: u16 = @intCast(nxt_fid & 0xffff);
+    return featureId(class_edge | (qid & id_mask), class_edge | incidentEdgeId(cur_inc, nxt_inc));
+}
+
+/// The incident-edge id (its two vertices, `lo·8 + hi`), carrying an existing
+/// incident-edge provenance when an endpoint is already an incident-edge
+/// intersection. A non-vertex endpoint — a reference corner (incident class
+/// `class_c`), which the Sutherland-Hodgman topology should keep out of this
+/// branch (a corner shares a plane with its neighbours, so `commonRefPlane`
+/// catches it), but defend anyway — self-pairs the vertex endpoint (`v·8 + v`,
+/// `lo == hi`) so it can NEVER alias a genuine two-vertex incident edge (`lo < hi`).
 fn incidentEdgeId(a_inc: u16, b_inc: u16) u16 {
-    if (a_inc & 0x8000 != 0) return a_inc; // carry cur's edge provenance
-    if (b_inc & 0x8000 != 0) return b_inc; // carry nxt's edge provenance
-    const lo = @min(a_inc, b_inc);
-    const hi = @max(a_inc, b_inc);
-    return 0x8000 | (lo * 8 + hi);
+    if ((a_inc & class_mask) == class_edge) return a_inc & id_mask;
+    if ((b_inc & class_mask) == class_edge) return b_inc & id_mask;
+    const a_vert = (a_inc & class_mask) == class_a;
+    const b_vert = (b_inc & class_mask) == class_a;
+    const av = a_inc & id_mask;
+    const bv = b_inc & id_mask;
+    if (a_vert and b_vert) return @min(av, bv) * 8 + @max(av, bv);
+    if (a_vert) return av * 8 + av;
+    if (b_vert) return bv * 8 + bv;
+    return 0;
+}
+
+/// The reference side planes an endpoint's reference feature lies on (0, 1, or 2),
+/// written into `out`: a face lies on none, an edge on one, a corner on its two.
+fn refPlaneSet(ref16: u16, out: *[2]u16) usize {
+    return switch (ref16 & class_mask) {
+        class_a => 0,
+        class_edge => blk: {
+            out[0] = ref16 & id_mask;
+            break :blk 1;
+        },
+        else => blk: { // class_c: a ref vertex = the sorted pair of side planes
+            const id = ref16 & id_mask;
+            out[0] = id / 32;
+            out[1] = id % 32;
+            break :blk 2;
+        },
+    };
+}
+
+/// A reference side plane both endpoints lie on (the segment is a ref cut-edge),
+/// or null.
+fn commonRefPlane(cur_ref: u16, nxt_ref: u16) ?u16 {
+    var ca: [2]u16 = undefined;
+    var cb: [2]u16 = undefined;
+    const na = refPlaneSet(cur_ref, &ca);
+    const nb = refPlaneSet(nxt_ref, &cb);
+    for (ca[0..na]) |a| {
+        for (cb[0..nb]) |b| {
+            if (a == b) return a;
+        }
+    }
+    return null;
+}
+
+/// A reference vertex id: the sorted pair of the two side-plane ids meeting there
+/// (`lo·32 + hi`; side-plane ids are ≤ ~23, so this stays inside `id_mask`).
+fn refVertexId(p: u16, q: u16) u16 {
+    return @min(p, q) * 32 + @max(p, q);
 }
 
 /// Clip the incident feature against the reference face's side planes (planes

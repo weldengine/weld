@@ -461,6 +461,68 @@ test "broadphase pairs to manifolds via collidePair" {
     try testing.expect(bm.collidePair(&store, id_c, id_d) == null);
 }
 
+test "pose sweep: feature ids are distinct and frame-stable" {
+    // The verification a single-point test cannot give (Codex FIX-9): a grid of
+    // deep box/box contacts — yaw × a light second-axis tilt × lateral offsets ×
+    // two Y overlaps, plus the two Codex repros — each checked for (a) pairwise-
+    // distinct feature_ids and (b) frame-stability of the feature_id SET under a
+    // ±1e-4 offset via `collidePair`'s body-id order.
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const box = try store.createShape(gpa, .{ .box = .{ .half_extents = ApiVec3.splat(1) } });
+    const id_a = try addBoxBodyAt(gpa, &bm, &store, box, 0, 0, 0, 0);
+
+    const yaws = [_]f32{ 0, 0.05, 0.125, 0.3, 0.6, 0.9 };
+    const tilts = [_]f32{ 0, 0.07 };
+    const offsets = [_][2]f32{ .{ -1, -1.9 }, .{ -0.9, -0.9 }, .{ -0.4, 0.3 }, .{ 0.5, -0.6 }, .{ 0.7, 0.4 } };
+    const ys = [_]f32{ 1.5, 1.9 }; // deeper / shallower overlaps (both deep for r=0 boxes)
+
+    var idx: u32 = 1;
+    for (yaws) |yw| {
+        for (tilts) |tl| {
+            for (offsets) |off| {
+                for (ys) |y| {
+                    const rot = math.Quatf.fromAxisAngle(math.Vec3.unit_y, yw)
+                        .mul(math.Quatf.fromAxisAngle(math.Vec3.unit_x, tl));
+                    const id_b = try addBoxBodyAtRot(gpa, &bm, &store, box, idx, off[0], y, off[1], rot);
+                    const id_s = try addBoxBodyAtRot(gpa, &bm, &store, box, idx + 1, off[0] + 0.0001, y, off[1] - 0.0001, rot);
+                    idx += 2;
+                    const m = bm.collidePair(&store, id_a, id_b) orelse continue;
+                    // (a) pairwise-distinct feature ids.
+                    for (0..m.count) |i| {
+                        for (i + 1..m.count) |j| try testing.expect(m.points[i].feature_id != m.points[j].feature_id);
+                    }
+                    // (b) frame-stable id SET under the tiny shift — asserted only
+                    // when the shift keeps the topology, i.e. same count AND a
+                    // stable contact normal. A tied min-penetration axis (equal
+                    // overlaps on two axes) legitimately flips the normal (and thus
+                    // the whole contact) under a 1e-4 nudge — that is a real
+                    // geometric transition, not a feature_id instability.
+                    if (bm.collidePair(&store, id_a, id_s)) |ms| {
+                        if (ms.count == m.count and m.normal.approxEql(ms.normal, tol)) {
+                            try testing.expect(fidSetEq(fidSet(m), fidSet(ms), m.count));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Explicit Codex repros (yaw about Y), asserted distinct.
+    inline for (.{ .{ -1.0, 1.9, -1.9, 0.125 }, .{ -0.9, 1.9, -0.9, 0.05 } }) |c| {
+        const rot = math.Quatf.fromAxisAngle(math.Vec3.unit_y, c[3]);
+        const id_r = try addBoxBodyAtRot(gpa, &bm, &store, box, idx, c[0], c[1], c[2], rot);
+        idx += 1;
+        const m = bm.collidePair(&store, id_a, id_r).?;
+        for (0..m.count) |i| {
+            for (i + 1..m.count) |j| try testing.expect(m.points[i].feature_id != m.points[j].feature_id);
+        }
+    }
+}
+
 test "collidePair imposes a body-id order on identical geometry" {
     // Fix-3: two bodies with bit-identical shape AND pose overlap degenerately —
     // `collide`'s pose key cannot order them, so its normal is the same in both
