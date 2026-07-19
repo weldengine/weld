@@ -111,6 +111,13 @@ pub fn collide(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: Suppo
     return narrowphase.collide(Real, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
 }
 
+/// `collide` for a FIXED shape order (no pose canonicalization) at solver
+/// precision — the `BodyId`-ordered path `BodyManager.collidePair` drives so the
+/// `feature_id` reference/incident ownership stays frame-stable.
+pub fn collideOrdered(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: SupportShape, pos_b: Vec3r, rot_b: Quatr) ?ContactManifold {
+    return narrowphase.collideOrdered(Real, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
+}
+
 // Pins so the inline tests + the acceptance suite are analysed when this module
 // is built as a test target (engine-zig-conventions.md §13).
 comptime {

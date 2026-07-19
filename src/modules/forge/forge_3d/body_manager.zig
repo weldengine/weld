@@ -172,14 +172,19 @@ pub const BodyManager = struct {
         return self.collidePairOrdered(store, a, b);
     }
 
-    /// `collidePair` for a fixed (already-canonical) body order — validates both
-    /// handles/shapes then runs the manifold pipeline.
+    /// `collidePair` for a fixed (already-canonical body-id) order — validates both
+    /// handles/shapes then runs the manifold pipeline in THIS order. Calls
+    /// `collideOrdered` (not `collide`): `collide` would re-canonicalize by pose,
+    /// so the `feature_id` reference/incident ownership would follow the pose and
+    /// flip across a lexicographic pose boundary (Codex P1b). Driving by the fixed
+    /// body-id order instead keeps the feature_id frame-stable; `collidePair`'s
+    /// normal negation still gives order-independence.
     fn collidePairOrdered(self: *const BodyManager, store: *const ShapeStore, a: BodyId, b: BodyId) ?ContactManifold {
         const ia = self.alloc.validate(a) orelse return null;
         const ib = self.alloc.validate(b) orelse return null;
         const shape_a = store.get(self.bodies.items(.shape)[ia]) orelse return null;
         const shape_b = store.get(self.bodies.items(.shape)[ib]) orelse return null;
-        return narrowphase.collide(
+        return narrowphase.collideOrdered(
             Real,
             shape_mod.supportShape(shape_a),
             self.bodies.items(.position)[ia],

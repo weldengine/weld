@@ -57,8 +57,11 @@ pub const ContactManifold = manifold.ContactManifold;
 /// One contact point of a `ContactManifold`.
 pub const ContactPoint = manifold.ContactPoint;
 /// Full narrowphase (GJK → shallow/deep manifold) between two shapes; null when
-/// separated. Order-independent.
+/// separated. Order-independent (pose-canonicalized).
 pub const collide = manifold.collide;
+/// `collide` for a FIXED shape order (no pose canonicalization) — for callers
+/// that own a stable external key (body ids) and need a frame-stable feature_id.
+pub const collideOrdered = manifold.collideOrdered;
 
 // Pins so every package sub-file is analysed when forge_3d is built as a test
 // target (engine-zig-conventions.md §13 lazy-analysis guard).

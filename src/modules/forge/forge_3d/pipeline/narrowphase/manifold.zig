@@ -97,8 +97,13 @@ pub fn collide(
     return collideOrdered(T, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
 }
 
-/// `collide` for a fixed (already-canonical) shape order.
-fn collideOrdered(
+/// `collide` for a FIXED shape order — no pose canonicalization. The manifold's
+/// normal is A→B and its `feature_id` reference/incident ownership follows the
+/// given `(a, b)` order. Callers that own a stable external key (e.g. body ids)
+/// use this directly so the feature_id stays frame-stable across a pose change
+/// that would flip `collide`'s pose-based order (Codex P1b); `BodyManager`'s
+/// `collidePair` drives it in a canonical body-id order.
+pub fn collideOrdered(
     comptime T: type,
     shape_a: support.SupportShape(T),
     pos_a: math.Vec(3, T),
@@ -291,14 +296,26 @@ fn faceNormalA(comptime T: type, face: support.Face(T), expected_axis: math.Vec(
 }
 
 /// Pack an intersection point's stable feature id (FIX-2): a reference side plane
-/// (marked, 15-bit edge id) high, an incident edge (marked, the lower of the two
-/// endpoint feature ids) low — both marked distinct from a kept-vertex id.
+/// (marked, 15-bit edge id) high, an incident edge (marked) low — both marked
+/// distinct from a kept-vertex id.
 fn intersectionFid(plane_ref: u16, cur_fid: u32, nxt_fid: u32) u32 {
     const ref16: u16 = 0x8000 | (plane_ref & 0x7fff);
-    const ci: u16 = @intCast(cur_fid & 0x7fff);
-    const ni: u16 = @intCast(nxt_fid & 0x7fff);
-    const inc16: u16 = 0x8000 | @min(ci, ni);
+    const inc16: u16 = incidentEdgeId(@intCast(cur_fid & 0xffff), @intCast(nxt_fid & 0xffff));
     return (@as(u32, ref16) << 16) | @as(u32, inc16);
+}
+
+/// Stable, collision-free incident-edge id from the two endpoint incident ids.
+/// If either endpoint is ALREADY an intersection (marker bit set) its original
+/// incident-edge provenance is carried through — a re-derived key would alias
+/// distinct edges (Codex P1a: a box vertex lies on 3 edges, so `min` is not
+/// unique). Otherwise the edge is the SORTED VERTEX PAIR `lo·8 + hi`, unique
+/// among the box's 12 edges, so two distinct simultaneous contacts never collide.
+fn incidentEdgeId(a_inc: u16, b_inc: u16) u16 {
+    if (a_inc & 0x8000 != 0) return a_inc; // carry cur's edge provenance
+    if (b_inc & 0x8000 != 0) return b_inc; // carry nxt's edge provenance
+    const lo = @min(a_inc, b_inc);
+    const hi = @max(a_inc, b_inc);
+    return 0x8000 | (lo * 8 + hi);
 }
 
 /// Clip the incident feature against the reference face's side planes (planes
@@ -560,14 +577,15 @@ fn fallbackNormal(comptime T: type, pos_a: math.Vec(3, T), pos_b: math.Vec(3, T)
 /// Two distinct shapes/poses always compare unequal, so the winner is caller-
 /// independent — the basis of order-independence.
 ///
-/// Degenerate exception: two shapes with BIT-IDENTICAL pose AND geometry compare
-/// equal (neither `poseAfter(a,b)` nor `poseAfter(b,a)` is true). Then both call
-/// orders run the same `collideOrdered` and return the SAME normal — but for
-/// coincident identical shapes the A→B normal is geometrically undefined
-/// (measure-zero), so returning the same arbitrary unit vector is acceptable. The
-/// `collide`-level order-independence test excludes this case; `BodyManager`'s
-/// `collidePair` resolves it for real bodies by imposing a canonical body-id
-/// order (distinct bodies always break the tie).
+/// Degenerate exception (RATIFIED, brief RD-4 / `engine-physics-forge.md`
+/// narrowphase §): two shapes with BIT-IDENTICAL pose AND geometry compare equal
+/// (neither `poseAfter(a,b)` nor `poseAfter(b,a)` is true). Then both call orders
+/// run the same `collideOrdered` and return the SAME normal — for coincident
+/// identical shapes the A→B axis is geometrically undefined (measure-zero), so
+/// the same deterministic-but-arbitrary unit vector in both orders is the ratified
+/// contract, not a negated pair. `BodyManager`'s `collidePair` restores full
+/// order-independence for real bodies via a canonical body-id order (distinct
+/// bodies always break the tie).
 fn poseAfter(
     comptime T: type,
     shape_a: support.SupportShape(T),

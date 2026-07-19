@@ -147,6 +147,20 @@ test "staggered capsule segment clips without a duplicate point" {
     for (0..m.count) |i| try testing.expectApproxEqAbs(@as(Real, 0.2), m.points[i].penetration, tol); // r_sum(1) − dist(0.8)
 }
 
+test "intersection feature ids are unique among simultaneous contacts" {
+    // Codex P1a repro: two unit boxes, B offset into a corner with a small yaw so
+    // the manifold points are edge×plane intersections. The old `@min(edge)` key
+    // aliased distinct box edges (a vertex is on 3 edges) → two contacts shared
+    // 0x800e8002; the sorted-pair key makes every simultaneous contact distinct.
+    const box = boxShape(1, 1, 1);
+    const yaw = Quatr.fromAxisAngle(Vec3r.unit_y, 0.05);
+    const m = collide(box, vr(0, 0, 0), Quatr.identity, box, vr(-0.9, 1.9, -0.9), yaw).?;
+    try testing.expect(m.count >= 2);
+    for (0..m.count) |i| {
+        for (i + 1..m.count) |j| try testing.expect(m.points[i].feature_id != m.points[j].feature_id);
+    }
+}
+
 test "edge-edge penetration is measured along the contact axis" {
     // Fix-1: for an oblique (edge/vertex) contact the EPA normal `n_a` is not a
     // box-face normal, so measuring depth along the reference face normal `rn`
@@ -306,6 +320,50 @@ fn addBoxBodyAt(gpa: std.mem.Allocator, bm: *BodyManager, store: *const ShapeSto
 /// Whether `p` is the unordered pair `{x, y}` (candidate pairs are canonical).
 fn isPair(p: Broadphase.Pair, x: BodyId, y: BodyId) bool {
     return p.a == @min(x, y) and p.b == @max(x, y);
+}
+
+/// Add a `.dynamic` box body at (x,y,z) with rotation `rot`.
+fn addBoxBodyAtRot(gpa: std.mem.Allocator, bm: *BodyManager, store: *const ShapeStore, shape: api.ShapeId, entity_index: u32, x: f32, y: f32, z: f32, rot: math.Quatf) !BodyId {
+    var d = api.BodyDescriptor{
+        .entity = .{ .index = entity_index, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = shape,
+    };
+    d.position = ApiVec3.fromArray(.{ x, y, z });
+    d.rotation = rot;
+    return bm.addBody(gpa, store, d);
+}
+
+test "collidePair feature ids are stable across a pose-order boundary" {
+    // Codex P1b: `collide` re-canonicalizes by pose, so the feature_id
+    // reference/incident ownership flips when a coordinate crosses the
+    // lexicographic order boundary (x = 0 here). `collidePair` drives a FIXED
+    // body-id order, so a tiny shift crossing that boundary leaves the feature_ids
+    // unchanged (same physical contacts).
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const box = try store.createShape(gpa, .{ .box = .{ .half_extents = ApiVec3.splat(1) } });
+    const yaw = math.Quatf.fromAxisAngle(math.Vec3.unit_y, std.math.pi / 4.0);
+
+    // A at the origin (identity); two B's yawed, straddling x = 0 by ±1e-4.
+    const id_a = try addBoxBodyAt(gpa, &bm, &store, box, 0, 0, 0, 0);
+    const id_neg = try addBoxBodyAtRot(gpa, &bm, &store, box, 1, -0.0001, 1.5, 0, yaw);
+    const id_pos = try addBoxBodyAtRot(gpa, &bm, &store, box, 2, 0.0001, 1.5, 0, yaw);
+
+    const m_neg = bm.collidePair(&store, id_a, id_neg).?;
+    const m_pos = bm.collidePair(&store, id_a, id_pos).?;
+    try testing.expectEqual(m_neg.count, m_pos.count);
+    // Every feature_id from one appears in the other (body-id order is stable).
+    for (0..m_neg.count) |i| {
+        var found = false;
+        for (0..m_pos.count) |j| {
+            if (m_neg.points[i].feature_id == m_pos.points[j].feature_id) found = true;
+        }
+        try testing.expect(found);
+    }
 }
 
 test "broadphase pairs to manifolds via collidePair" {
