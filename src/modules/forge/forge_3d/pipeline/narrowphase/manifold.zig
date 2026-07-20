@@ -183,7 +183,7 @@ fn generateManifold(
     // Point-core contact (a sphere, or an end-on capsule → 1 vertex): a single
     // contact straight from the GJK/EPA witness points, mapped to the surfaces.
     if (face_a.count == 1 or face_b.count == 1) {
-        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(face_a.face_id, face_b.face_id));
+        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(T, face_a, face_b));
     }
 
     // Reference/incident by alignment with the contact axis (non-polygon → 0; tie A).
@@ -208,7 +208,7 @@ fn generateManifold(
     // contact, whose depth is along `n_a` (EPA / GJK-closest).
     const face_face_min: T = if (T == f32) 0.999 else 0.9999;
     if (@abs(rn.dot(n_a)) < face_face_min) {
-        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(ref.face_id, inc.face_id));
+        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(T, ref, inc));
     }
 
     // Clip the incident polygon/segment against the reference side planes,
@@ -237,7 +237,7 @@ fn generateManifold(
     if (raw_n == 0) {
         // Degenerate clip (an oblique feature that clipped empty): fall back to the
         // single witness-point contact so a genuine overlap is never lost.
-        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(ref.face_id, inc.face_id));
+        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(T, ref, inc));
     }
 
     // Reduce to ≤ 4 (A's frame, deepest + area-maximising), then map to world.
@@ -285,14 +285,20 @@ fn oneContact(comptime T: type, normal: math.Vec(3, T), position: math.Vec(3, T)
 }
 
 /// The feature id of a SINGLE witness contact (point core, edge/vertex fallback,
-/// or degenerate empty clip): reference face (`class_a`) high, incident FACE
-/// (`class_c` — the incident-face class) low. The `(class_a, class_c)` class pair
-/// is used by NO clip-manifold id (kept vertex `(class_a, class_a)`, edge
-/// crossing `(class_edge, class_edge)`, reference corner `(class_c, class_c)`), so
-/// a single-contact id can never alias a clip id for the same body pair at the
-/// face-face↔fallback transition (Codex FIX-11). No untagged packer remains.
-fn singleContactFid(ref_face_id: u16, inc_face_id: u16) u32 {
-    return featureId(class_a | (ref_face_id & id_mask), class_c | (inc_face_id & id_mask));
+/// or degenerate empty clip): the reference side (`class_a`) high, the incident
+/// side (`class_c`) low. Each side encodes its REAL sub-feature — a count-1
+/// feature (a sphere point, or an end-on capsule endpoint) is a VERTEX (its
+/// `vert_id`), otherwise a FACE (its `face_id`) — so a capsule's `+Y` (vert 0)
+/// and `−Y` (vert 1) endpoints, and an end-on endpoint (here) vs a side segment
+/// (`clipSegment`), get distinct ids (Codex FIX-12). The `(class_a, class_c)`
+/// class pair is used by NO clip producer (kept vertex `(class_a, class_a)`, edge
+/// crossing `(class_edge, class_edge)`, reference corner `(class_c, class_c)`,
+/// `clipSegment` endpoints `(class_a, class_a)`), so a single-contact id can never
+/// alias a clip id for a body pair. No untagged packer remains.
+fn singleContactFid(comptime T: type, ref_face: support.Face(T), inc_face: support.Face(T)) u32 {
+    const feat_ref: u16 = if (ref_face.count == 1) ref_face.vert_ids[0] else ref_face.face_id;
+    const feat_inc: u16 = if (inc_face.count == 1) inc_face.vert_ids[0] else inc_face.face_id;
+    return featureId(class_a | (feat_ref & id_mask), class_c | (feat_inc & id_mask));
 }
 
 /// Outward normal of a face in A's frame: the polygon normal oriented toward

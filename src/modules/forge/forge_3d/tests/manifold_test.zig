@@ -190,6 +190,80 @@ fn refCornerFid(m: ContactManifold) ?u32 {
     return null;
 }
 
+/// Whether every id of `m` carries a valid class pair — one of the four
+/// producers: kept vertex (a,a), edge crossing (edge,edge), reference corner
+/// (c,c), single witness contact (a,c).
+fn validClassPairs(m: ContactManifold) bool {
+    for (0..m.count) |i| {
+        const fid = m.points[i].feature_id;
+        const r = (fid >> 16) & 0xc000;
+        const c = fid & 0xc000;
+        const ok = (r == 0x0000 and c == 0x0000) // kept vertex
+            or (r == 0x4000 and c == 0x4000) // edge × ref-edge
+            or (r == 0x8000 and c == 0x8000) // reference corner
+            or (r == 0x0000 and c == 0x8000); // single witness contact
+        if (!ok) return false;
+    }
+    return true;
+}
+
+test "capsule endpoint feature ids distinguish the two ends and the segment" {
+    // Codex FIX-12: an end-on capsule endpoint must encode WHICH endpoint (its
+    // vert id), not just the constant face_id 6 — else +Y and −Y ends share an
+    // id, and an endpoint (point-core) is indistinguishable from a side segment.
+    const cap = capsuleShape(1, 0.3);
+    const sph = sphereShape(0.5);
+    // Sphere beyond the +Y end vs the −Y end ⇒ the capsule presents its +Y (vert
+    // 0) vs −Y (vert 1) endpoint — distinct ids.
+    const id_plus = collide(cap, vr(0, 0, 0), Quatr.identity, sph, vr(0, 1.5, 0), Quatr.identity).?.points[0].feature_id;
+    const id_minus = collide(cap, vr(0, 0, 0), Quatr.identity, sph, vr(0, -1.5, 0), Quatr.identity).?.points[0].feature_id;
+    try testing.expect(id_plus != id_minus);
+    // Sphere beside the capsule ⇒ the capsule presents its SEGMENT (a face) — a
+    // different id from either endpoint (endpoint→segment changes the id).
+    const id_side = collide(cap, vr(0, 0, 0), Quatr.identity, sph, vr(0.7, 0, 0), Quatr.identity).?.points[0].feature_id;
+    try testing.expect(id_side != id_plus and id_side != id_minus);
+    // All three are single-contact ids (the disjoint (class_a, class_c) pair).
+    inline for (.{ id_plus, id_minus, id_side }) |fid| {
+        try testing.expectEqual(@as(u32, 0x0000), (fid >> 16) & 0xc000);
+        try testing.expectEqual(@as(u32, 0x8000), fid & 0xc000);
+    }
+}
+
+test "pose sweep: capsule pairs have distinct well-classed feature ids" {
+    // Extend the feature-id coverage to the capsule pairs (Codex FIX-12): every
+    // config's manifold has pairwise-distinct ids, each carrying a valid class
+    // pair, and no multi-point manifold carries the single-contact (a,c) pair.
+    const cap = capsuleShape(1, 0.3);
+    const cap2 = capsuleShape(0.6, 0.4);
+    const box = boxShape(1, 1, 1);
+    const sph = sphereShape(0.5);
+    const zrot = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
+    const Combo = struct { a: SupportShape, pb: Vec3r, b: SupportShape, rb: Quatr };
+    const combos = [_]Combo{
+        .{ .a = cap, .pb = vr(1.1, 0, 0), .b = box, .rb = Quatr.identity }, // capsule side vs box (clipSegment)
+        .{ .a = cap, .pb = vr(0, 1.6, 0), .b = box, .rb = Quatr.identity }, // capsule end-on vs box (point-core)
+        .{ .a = cap, .pb = vr(0, 0, 0), .b = cap, .rb = zrot }, // crossing capsules
+        .{ .a = cap, .pb = vr(0.4, 0.3, 0), .b = cap, .rb = Quatr.identity }, // parallel capsules
+        .{ .a = cap, .pb = vr(0.6, 0, 0), .b = sph, .rb = Quatr.identity }, // capsule radial vs sphere
+        .{ .a = cap, .pb = vr(0, 1.4, 0), .b = cap2, .rb = zrot }, // capsule end vs crossing capsule
+    };
+    const globals = [_]Quatr{ Quatr.identity, Quatr.fromAxisAngle(vr(1, 2, 3).normalize(), 0.7) };
+    for (combos) |c| {
+        for (globals) |g| {
+            const m = collide(c.a, g.rotateVec3(vr(0, 0, 0)), g, c.b, g.rotateVec3(c.pb), g.mul(c.rb)) orelse continue;
+            try testing.expect(validClassPairs(m));
+            for (0..m.count) |i| {
+                for (i + 1..m.count) |j| try testing.expect(m.points[i].feature_id != m.points[j].feature_id);
+                if (m.count > 1) {
+                    const fid = m.points[i].feature_id;
+                    const is_fallback = ((fid >> 16) & 0xc000 == 0x0000) and (fid & 0xc000 == 0x8000);
+                    try testing.expect(!is_fallback);
+                }
+            }
+        }
+    }
+}
+
 test "single-contact fallback id never aliases a clip id" {
     // Codex FIX-11 threshold repro (the two Codex angles straddle `face_face_min`
     // at f32; the threshold is precision-dependent — 0.999 f32 / 0.9999 f64 — so
