@@ -21,9 +21,9 @@
 //! **Status.** E1 laid the foundation (`ContactSeed`, `FastResult`, a no-op
 //! dispatcher). E2 wired the point-core pairs — **sphere/sphere** and
 //! **sphere/box** (both orders). E3 added **box/box** via a separating-axis test
-//! (15 candidate axes → the least-overlap axis → seed). capsule/capsule (E4)
-//! follows behind this same three-state contract. Anything not yet wired
-//! (capsule/*, a rounded box) returns `.not_handled`.
+//! (15 candidate axes → the least-overlap axis → seed). E4 added
+//! **capsule/capsule** via closest-segment analytics. capsule/box and
+//! sphere/capsule stay on the generic path; a rounded box returns `.not_handled`.
 //!
 //! **Classification parity with the generic oracle.** The `separated` decision
 //! mirrors `gjk.zig` exactly — `dist − r_sum > conv_k · floatEps(T) ·
@@ -88,8 +88,8 @@ pub fn FastResult(comptime T: type) type {
 /// closest-point ownership follow that order, so `generateManifold`'s feature_id
 /// halves swap with the order exactly as on the generic path.
 ///
-/// Wired: sphere/sphere, sphere/box (E2), and box/box SAT (E3), all orders.
-/// `.not_handled` for capsule/capsule (→ E4), capsule/box + sphere/capsule (stay
+/// Wired: sphere/sphere, sphere/box (E2), box/box SAT (E3), and capsule/capsule
+/// (E4), all orders. `.not_handled` for capsule/box + sphere/capsule (stay
 /// generic), and any box core with `radius > 0` (a rounded box — the kernels are
 /// radius-0-box only).
 pub fn fastSeed(
@@ -119,7 +119,11 @@ pub fn fastSeed(
             },
             .segment => return .not_handled, // box/capsule stays generic
         },
-        .segment => return .not_handled, // capsule/capsule → E4, others stay generic
+        .segment => |ha| switch (shape_b.core) {
+            // capsule/capsule.
+            .segment => |hb| return capsuleCapsule(T, pos_a, rot_a, ha, shape_a.radius, pos_b, rot_b, hb, shape_b.radius),
+            else => return .not_handled, // capsule/sphere, capsule/box stay generic
+        },
     }
 }
 
@@ -443,6 +447,61 @@ fn closestSegSeg(comptime T: type, p1: math.Vec(3, T), q1: math.Vec(3, T), p2: m
     return .{ p1.add(d1.scale(s)), p2.add(d2.scale(t)) };
 }
 
+/// The capsule/capsule seed: the two cores are Y-axis segments (`±half_height`
+/// in each local frame). Their closest points (Ericson `closestSegSeg`) plus the
+/// inflation radii give the seed; `.separated` past the inflated margin (mirrors
+/// `gjk.zig`, `coord_scale = |Δcentres| + half_height_a + half_height_b`). The
+/// THREE contact regimes are produced by the unchanged `generateManifold` from
+/// the segments' supporting features — end-on (a count-1 endpoint → 1 point),
+/// crossed / non-parallel (1 witness, via the E1 generator fix), and parallel
+/// projection overlap (2 points via `clipSegment`) — so the kernel only supplies
+/// `(normal, closest points, depth)`, skipping the GJK descent.
+fn capsuleCapsule(
+    comptime T: type,
+    ca: math.Vec(3, T),
+    ra: math.Quat(T),
+    ha: T,
+    r_a: T,
+    cb: math.Vec(3, T),
+    rb: math.Quat(T),
+    hb: T,
+    r_b: T,
+) FastResult(T) {
+    const Vec3T = math.Vec(3, T);
+    const ay = ra.rotateVec3(Vec3T.unit_y);
+    const by = rb.rotateVec3(Vec3T.unit_y);
+    // Segment endpoints (a degenerate `half_height == 0` collapses to a point —
+    // `closestSegSeg` guards the zero-length denominators).
+    const cp = closestSegSeg(T, ca.sub(ay.scale(ha)), ca.add(ay.scale(ha)), cb.sub(by.scale(hb)), cb.add(by.scale(hb)));
+    const d = cp[1].sub(cp[0]);
+    const dist_sq = d.dot(d);
+    const dist = @sqrt(dist_sq);
+    const r_sum = r_a + r_b;
+    const coord_scale = cb.sub(ca).length() + ha + hb;
+    if (dist - r_sum > contactMargin(T, coord_scale)) return .separated;
+    const coincidence: T = if (T == f32) 1.0e-12 else 1.0e-24;
+    const normal = if (dist_sq > coincidence) d.scale(1.0 / dist) else capsuleFallbackNormal(T, ay, by, cb.sub(ca));
+    return .{ .contact = .{
+        .normal = normal,
+        .closest_a = cp[0],
+        .closest_b = cp[1],
+        .base_penetration = r_sum - dist,
+    } };
+}
+
+/// A deterministic separation normal for the measure-zero case of two segment
+/// cores that touch (`dist ≈ 0`): the mutual perpendicular `axis_a × axis_b`
+/// (the natural crossed-segment separation), else the centre direction, else +X.
+fn capsuleFallbackNormal(comptime T: type, axis_a: math.Vec(3, T), axis_b: math.Vec(3, T), dcentre: math.Vec(3, T)) math.Vec(3, T) {
+    const cr = axis_a.cross(axis_b);
+    const cr2 = cr.dot(cr);
+    const noise: T = if (T == f32) 1.0e-12 else 1.0e-24;
+    if (cr2 > noise) return cr.scale(1.0 / @sqrt(cr2));
+    const dc2 = dcentre.dot(dcentre);
+    if (dc2 > noise) return dcentre.scale(1.0 / @sqrt(dc2));
+    return math.Vec(3, T).unit_x;
+}
+
 const testing = std.testing;
 
 test "fastSeed dispatch routing (E3 handles sphere and box pairs)" {
@@ -466,11 +525,12 @@ test "fastSeed dispatch routing (E3 handles sphere and box pairs)" {
     try testing.expect(fastSeed(T, sphere, V.zero, Q.identity, box, far, Q.identity) == .separated);
     try testing.expect(fastSeed(T, box, V.zero, Q.identity, box, near, Q.identity) == .contact); // box/box (E3)
     try testing.expect(fastSeed(T, box, V.zero, Q.identity, box, far, Q.identity) == .separated);
+    try testing.expect(fastSeed(T, capsule, V.zero, Q.identity, capsule, near, Q.identity) == .contact); // capsule/capsule (E4)
+    try testing.expect(fastSeed(T, capsule, V.zero, Q.identity, capsule, far, Q.identity) == .separated);
 
-    // Not-yet-wired / unsupported pairs → not_handled (fall through to generic).
-    try testing.expect(fastSeed(T, capsule, V.zero, Q.identity, capsule, near, Q.identity) == .not_handled); // E4
-    try testing.expect(fastSeed(T, capsule, V.zero, Q.identity, box, near, Q.identity) == .not_handled); // generic
-    try testing.expect(fastSeed(T, sphere, V.zero, Q.identity, capsule, near, Q.identity) == .not_handled); // generic
+    // Unsupported pairs → not_handled (fall through to generic).
+    try testing.expect(fastSeed(T, capsule, V.zero, Q.identity, box, near, Q.identity) == .not_handled); // capsule/box generic
+    try testing.expect(fastSeed(T, sphere, V.zero, Q.identity, capsule, near, Q.identity) == .not_handled); // sphere/capsule generic
     // Any rounded box → not_handled (kernels are radius-0-box only).
     try testing.expect(fastSeed(T, sphere, V.zero, Q.identity, rbox, near, Q.identity) == .not_handled);
     try testing.expect(fastSeed(T, rbox, V.zero, Q.identity, sphere, near, Q.identity) == .not_handled);

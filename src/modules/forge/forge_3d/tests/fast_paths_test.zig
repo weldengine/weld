@@ -192,15 +192,14 @@ fn isSingleWitnessClass(m: ContactManifold) bool {
 }
 
 test "not-yet-wired pairs equal the generic oracle exactly" {
-    // capsule/capsule (E4), capsule/box (stays generic), and any rounded box →
+    // capsule/box + sphere/capsule (stay generic) and any rounded box →
     // dispatcher returns `.not_handled`, so `collideOrdered` is the generic path
-    // verbatim. (sphere and box pairs are now wired — see the differentials.)
-    const zrot = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
+    // verbatim. (sphere, box and capsule/capsule pairs are now wired — see the
+    // differentials.)
     const Combo = struct { sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr };
     const combos = [_]Combo{
-        .{ .sa = capsuleShape(1, 0.5), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = capsuleShape(1, 0.5), .pb = vr(0.8, 0, 0), .rb = Quatr.identity },
-        .{ .sa = capsuleShape(1, 0.3), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = capsuleShape(1, 0.3), .pb = vr(0, 0, 0.5), .rb = zrot },
         .{ .sa = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = capsuleShape(0.5, 0.5), .pb = vr(1.3, 0, 0), .rb = Quatr.identity },
+        .{ .sa = sphereShape(0.5), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = capsuleShape(1, 0.3), .pb = vr(0.7, 0, 0), .rb = Quatr.identity },
         .{ .sa = roundedBoxShape(0.5, 0.5, 0.5, 1.0), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = roundedBoxShape(0.5, 0.5, 0.5, 1.0), .pb = vr(0, 2.5, 0), .rb = Quatr.identity },
         .{ .sa = sphereShape(0.5), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = roundedBoxShape(1, 1, 1, 0.2), .pb = vr(0, 1.3, 0), .rb = Quatr.identity },
         .{ .sa = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = roundedBoxShape(1, 1, 1, 0.2), .pb = vr(0, 1.5, 0), .rb = Quatr.identity },
@@ -511,4 +510,42 @@ test "box/box SAT deep rotated is correct (oracle-free)" {
             }
         }
     }
+}
+
+test "capsule/capsule differential vs generic (three regimes)" {
+    // Capsule/capsule is always shallow (segment cores are 1-D), so the generic
+    // GJK oracle is robust (no deep-EPA frame-dependence like box/box) — compared
+    // directly, both orders, fid-exact. The three regimes are produced by
+    // `generateManifold` from the segment features (E1-corrected generator).
+    const cap = capsuleShape(1, 0.3);
+    const cap2 = capsuleShape(0.6, 0.4);
+    const zrot = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
+    const globals = [_]Quatr{ Quatr.identity, Quatr.fromAxisAngle(vr(1, 2, 3).normalize(), 0.7) };
+    const Case = struct { a: SupportShape, pb: Vec3r, b: SupportShape, rb: Quatr, count: u8 };
+    const cases = [_]Case{
+        .{ .a = cap, .pb = vr(0, 2.2, 0), .b = cap, .rb = Quatr.identity, .count = 1 }, // end-on (collinear, stacked)
+        .{ .a = cap, .pb = vr(0, 0, 0.5), .b = cap, .rb = zrot, .count = 1 }, // crossed (E1 fix)
+        .{ .a = cap, .pb = vr(0, 0.3, 0.4), .b = cap2, .rb = zrot, .count = 1 }, // crossed, different sizes
+        .{ .a = cap, .pb = vr(0.5, 0, 0), .b = cap, .rb = Quatr.identity, .count = 2 }, // parallel side-by-side
+        .{ .a = cap, .pb = vr(0.5, 0.4, 0), .b = cap, .rb = Quatr.identity, .count = 2 }, // parallel, staggered along Y
+    };
+    for (globals) |g| {
+        for (cases) |c| {
+            const pa = g.rotateVec3(vr(0, 0, 0));
+            const pb = g.rotateVec3(c.pb);
+            const rb = g.mul(c.rb);
+            const m = ordered(c.a, pa, g, c.b, pb, rb) orelse return error.UnexpectedSeparation;
+            try testing.expectEqual(c.count, m.count); // exact count per regime
+            try expectBothOrdersUnordered(c.a, pa, g, c.b, pb, rb, true); // fast ≡ generic, fid-exact, both orders
+        }
+    }
+    // Separated → null (both).
+    try testing.expect(ordered(cap, vr(0, 0, 0), Quatr.identity, cap, vr(3, 0, 0), Quatr.identity) == null);
+    // Closed-form crossed (the E1 oracle geometry, now via the fast path): count
+    // 1, normal +Z, pen 0.1, contact at (0,0,0.25).
+    const mc = ordered(cap, vr(0, 0, 0), Quatr.identity, cap, vr(0, 0, 0.5), zrot).?;
+    try testing.expectEqual(@as(u8, 1), mc.count);
+    try testing.expect(mc.normal.approxEql(vr(0, 0, 1), diff_tol));
+    try testing.expectApproxEqAbs(@as(Real, 0.1), mc.points[0].penetration, diff_tol);
+    try testing.expect(mc.points[0].position.approxEql(vr(0, 0, 0.25), diff_tol));
 }
