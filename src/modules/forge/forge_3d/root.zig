@@ -2,11 +2,12 @@
 //! `engine-spec.md` §3.5). M1.1.0 laid the foundations: the `Real` scalar, the
 //! `ShapeStore`, per-body `MotionProperties` with analytic inertia, and the SoA
 //! `BodyManager`. M1.1.1 added the shared `pipeline/broadphase.zig` (a dynamic
-//! multi-layer AABB tree — BVH); M1.1.2 adds `pipeline/narrowphase.zig`
-//! (distance-based GJK convex detection). Both are re-exported here at `Real`.
-//! No stepping, EPA, island manager, scheduler, or `PhysicsModule` instantiation
-//! yet — those are later M1.1 sub-milestones. Depends only on `foundation/math`
-//! and `src/modules/forge/api/` (core entity/component types reach here through
+//! multi-layer AABB tree — BVH); M1.1.2 added `pipeline/narrowphase/`
+//! (distance-based GJK convex detection), promoted to a package at M1.1.3 with
+//! EPA + contact manifold as sibling files. All re-exported here at `Real`. No
+//! stepping, island manager, scheduler, or `PhysicsModule` instantiation yet —
+//! those are later M1.1 sub-milestones. Depends only on `foundation/math` and
+//! `src/modules/forge/api/` (core entity/component types reach here through
 //! `api/`).
 
 const config = @import("config.zig");
@@ -14,10 +15,11 @@ const shape = @import("shape.zig");
 const body = @import("body.zig");
 const body_manager = @import("body_manager.zig");
 const broadphase = @import("pipeline/broadphase.zig");
-// M1.1.2 — narrowphase (GJK convex detection). Re-exported at `Real` below; the
-// comptime pin analyses its acceptance tests (engine-zig-conventions.md §13
-// lazy-analysis guard — an unreferenced module's tests are silently skipped).
-const narrowphase = @import("pipeline/narrowphase.zig");
+// M1.1.2/3 — narrowphase package (GJK convex detection; EPA + manifold M1.1.3).
+// Re-exported at `Real` below; the comptime pin analyses its acceptance tests
+// (engine-zig-conventions.md §13 lazy-analysis guard — an unreferenced module's
+// tests are silently skipped).
+const narrowphase = @import("pipeline/narrowphase/root.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -82,6 +84,40 @@ pub fn gjk(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: SupportSh
     return narrowphase.gjk(Real, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
 }
 
+// --- Narrowphase (EPA penetration + contact manifold) ---
+
+/// EPA penetration result (world normal A→B, core depth, world closest points)
+/// at solver precision.
+pub const EpaResult = narrowphase.EpaResult(Real);
+/// The EPA expansion iteration ceiling (scalar-independent).
+pub const max_epa_iterations = narrowphase.max_epa_iterations;
+/// The contact manifold between two shapes (world normal + up to 4 points) at
+/// solver precision.
+pub const ContactManifold = narrowphase.ContactManifold(Real);
+/// One contact point of a `ContactManifold` at solver precision.
+pub const ContactPoint = narrowphase.ContactPoint(Real);
+
+/// EPA over a `.deep` GJK seed — penetration axis + core depth. The `Real`-bound
+/// entry; `collide` runs it internally on the deep path.
+pub fn epa(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, relpose: RelativePose, shape_b: SupportShape, seed: GjkResult) EpaResult {
+    return narrowphase.epa(Real, shape_a, pos_a, rot_a, relpose, shape_b, seed);
+}
+
+/// Full narrowphase (GJK → shallow/deep contact manifold) between two support
+/// shapes at their world poses — the `Real`-bound entry; null when separated.
+/// `BodyManager.collidePair` is the `BodyId`-level adapter for the
+/// broadphase→narrowphase flow. Order-independent.
+pub fn collide(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: SupportShape, pos_b: Vec3r, rot_b: Quatr) ?ContactManifold {
+    return narrowphase.collide(Real, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
+}
+
+/// `collide` for a FIXED shape order (no pose canonicalization) at solver
+/// precision — the `BodyId`-ordered path `BodyManager.collidePair` drives so the
+/// `feature_id` reference/incident ownership stays frame-stable.
+pub fn collideOrdered(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: SupportShape, pos_b: Vec3r, rot_b: Quatr) ?ContactManifold {
+    return narrowphase.collideOrdered(Real, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
+}
+
 // Pins so the inline tests + the acceptance suite are analysed when this module
 // is built as a test target (engine-zig-conventions.md §13).
 comptime {
@@ -93,5 +129,7 @@ comptime {
     _ = narrowphase;
     _ = @import("tests/body_manager_test.zig");
     _ = @import("tests/broadphase_test.zig");
-    _ = @import("tests/narrowphase_test.zig");
+    _ = @import("tests/gjk_test.zig");
+    _ = @import("tests/epa_test.zig");
+    _ = @import("tests/manifold_test.zig");
 }

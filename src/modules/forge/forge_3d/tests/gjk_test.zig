@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const config = @import("../config.zig");
-const narrowphase = @import("../pipeline/narrowphase.zig");
+const narrowphase = @import("../pipeline/narrowphase/root.zig");
 const math = @import("foundation").math;
 const api = @import("weld_forge");
 const bm_mod = @import("../body_manager.zig");
@@ -694,7 +694,7 @@ test "gjk deep pairs enclose the origin" {
     // this interior point `.separated`; the dimensionless product-of-edges
     // criterion classifies it correctly. (Aspect ratios beyond a moderate bound
     // are NOT guaranteed — a GJK f32 limitation on sharp cores, deferred to the
-    // M1.1.4 analytic box fast paths / M1.1.3 EPA; see `narrowphase.zig`.)
+    // M1.1.4 analytic box fast paths / M1.1.3 EPA; see `gjk.zig`.)
     try checkDeep(boxShape(50.13848, 0.23608336, 0.98368657), vr(0, 0, 0), Quatr.identity, sphereShape(0.5), vr(14.877217, 0.01973883, 0.07743414), Quatr.identity);
 }
 

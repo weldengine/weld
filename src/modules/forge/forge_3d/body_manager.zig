@@ -18,7 +18,7 @@ const api = @import("weld_forge");
 const config = @import("config.zig");
 const shape_mod = @import("shape.zig");
 const body_mod = @import("body.zig");
-const narrowphase = @import("pipeline/narrowphase.zig");
+const narrowphase = @import("pipeline/narrowphase/root.zig");
 const IdAllocator = @import("slot_alloc.zig").IdAllocator;
 
 const Real = config.Real;
@@ -33,6 +33,7 @@ const Shape = shape_mod.Shape;
 const Body = body_mod.Body;
 const MotionProperties = body_mod.MotionProperties;
 const GjkResult = narrowphase.GjkResult(Real);
+const ContactManifold = narrowphase.ContactManifold(Real);
 
 const ApiVec3 = @import("foundation").math.Vec3;
 const ApiQuat = @import("foundation").math.Quatf;
@@ -140,6 +141,50 @@ pub const BodyManager = struct {
         const shape_a = store.get(self.bodies.items(.shape)[ia]) orelse return null;
         const shape_b = store.get(self.bodies.items(.shape)[ib]) orelse return null;
         return narrowphase.gjk(
+            Real,
+            shape_mod.supportShape(shape_a),
+            self.bodies.items(.position)[ia],
+            self.bodies.items(.rotation)[ia],
+            shape_mod.supportShape(shape_b),
+            self.bodies.items(.position)[ib],
+            self.bodies.items(.rotation)[ib],
+        );
+    }
+
+    /// Full narrowphase (GJK → shallow/deep contact manifold) for the pair
+    /// `a`/`b`, resolving each body's world pose and support shape (via `store`).
+    /// Returns null if the pair is separated, or if either handle — or its shape
+    /// — is stale/invalid. The `BodyId`-level manifold adapter for the
+    /// broadphase→narrowphase flow (mirror of `gjkPair`): unpack a `computePairs`
+    /// candidate's `user_data` as a `BodyId` and call this per pair.
+    ///
+    /// The pipeline is driven in a canonical BODY-ID order (`min(a, b)` first),
+    /// negating the normal for the `a > b` caller. This makes the whole
+    /// narrowphase order-independent even for the measure-zero case `collide`'s
+    /// pose key cannot break — two bodies with bit-identical shape AND pose — and
+    /// gives a stable, body-id-keyed order for M1.1.6 warm-starting.
+    pub fn collidePair(self: *const BodyManager, store: *const ShapeStore, a: BodyId, b: BodyId) ?ContactManifold {
+        if (a > b) {
+            var m = self.collidePairOrdered(store, b, a) orelse return null;
+            m.normal = m.normal.neg(); // caller wants a→b = −(b→a)
+            return m;
+        }
+        return self.collidePairOrdered(store, a, b);
+    }
+
+    /// `collidePair` for a fixed (already-canonical body-id) order — validates both
+    /// handles/shapes then runs the manifold pipeline in THIS order. Calls
+    /// `collideOrdered` (not `collide`): `collide` would re-canonicalize by pose,
+    /// so the `feature_id` reference/incident ownership would follow the pose and
+    /// flip across a lexicographic pose boundary (Codex P1b). Driving by the fixed
+    /// body-id order instead keeps the feature_id frame-stable; `collidePair`'s
+    /// normal negation still gives order-independence.
+    fn collidePairOrdered(self: *const BodyManager, store: *const ShapeStore, a: BodyId, b: BodyId) ?ContactManifold {
+        const ia = self.alloc.validate(a) orelse return null;
+        const ib = self.alloc.validate(b) orelse return null;
+        const shape_a = store.get(self.bodies.items(.shape)[ia]) orelse return null;
+        const shape_b = store.get(self.bodies.items(.shape)[ib]) orelse return null;
+        return narrowphase.collideOrdered(
             Real,
             shape_mod.supportShape(shape_a),
             self.bodies.items(.position)[ia],
