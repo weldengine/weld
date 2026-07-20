@@ -1,13 +1,20 @@
 //! M1.1.4 acceptance suite for the forge_3d narrowphase fast paths. Keyed to
 //! `config.Real` so `-Dphysics_f64=true` sweeps the whole suite at f64 (local).
 //!
-//! **E1 (this file's current content).** The fast-path dispatcher is wired but
-//! returns `.not_handled` for every pair, so `collideOrdered` must be identical
-//! to the bypass oracle `collideOrderedGeneric`. Asserting that identity over a
-//! representative pair set proves the E1 extraction changed no behaviour and
-//! exercises `collideOrderedGeneric` (the §13 surface-coverage rule). The per-
-//! pair differential sweeps, the P1d closed-forms, the separated short-circuits,
-//! and the consolidated feature_id matrix land with the E2–E4 kernels.
+//! **Method.** A fast pair's `collideOrdered` (which dispatches the analytic
+//! kernel) must be GEOMETRICALLY EQUIVALENT to `collideOrderedGeneric` (the
+//! GJK/EPA bypass oracle): same `count`, normal/points/penetration within a
+//! named tolerance calibrated to the generic path's convergence residual (NOT
+//! `1e-6` — the fast path is in fact MORE accurate), and an EXACT `feature_id`
+//! away from alignment/axis ties (the seed feeds the SAME `generateManifold`, so
+//! the id is inherited). Where the generic oracle is documented invalid (P1d
+//! extreme-aspect box), a CLOSED-FORM oracle replaces it.
+//!
+//! **E2 content:** sphere/sphere + sphere/box differentials (both orders),
+//! separated short-circuits, touch-exact, sphere-internal / coincident, and the
+//! P1d point/box closed-form. Pairs not yet wired (box/box → E3, capsule/capsule
+//! → E4, capsule/box + rounded box → generic) are still bit-identical to the
+//! oracle, asserted below.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -44,9 +51,13 @@ fn generic(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, 
     return narrowphase.collideOrderedGeneric(Real, sa, pa, ra, sb, pb, rb);
 }
 
-/// Exact manifold equality (count, normal, every point's position/penetration/
-/// feature_id). Valid at E1 because the no-op dispatcher makes `collideOrdered`
-/// call `collideOrderedGeneric` directly — the results are bit-identical.
+/// Differential tolerance — calibrated to the generic GJK/EPA convergence
+/// residual (looser than an analytic-vs-exact bound; NOT `1e-6`). The fast path
+/// is more accurate, so this bounds the ORACLE's error, not the kernel's.
+const diff_tol: Real = if (Real == f32) 1.0e-3 else 1.0e-8;
+
+/// Exact manifold equality (bit-for-bit) — for pairs the dispatcher does NOT
+/// handle, where `collideOrdered` calls `collideOrderedGeneric` directly.
 fn manifoldsIdentical(a: ?ContactManifold, b: ?ContactManifold) bool {
     if (a == null or b == null) return (a == null) == (b == null);
     const ma = a.?;
@@ -61,34 +72,156 @@ fn manifoldsIdentical(a: ?ContactManifold, b: ?ContactManifold) bool {
     return true;
 }
 
-test "E1 dispatcher is a no-op: collideOrdered equals collideOrderedGeneric" {
-    const zrot = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
+/// Geometric equivalence of a fast manifold vs the generic oracle: same
+/// null-ness, same `count`, normal/position/penetration within `diff_tol`.
+/// `feature_id` is asserted exactly only when `check_fid` (i.e. away from an
+/// alignment tie). Point-core pairs are `count == 1`, so point matching is by
+/// index. `fast` may be MORE accurate than `gen`; the tolerance covers the gap.
+fn expectEquivalent(fast: ?ContactManifold, gen: ?ContactManifold, check_fid: bool) !void {
+    try testing.expectEqual(fast == null, gen == null);
+    if (fast == null) return;
+    const f = fast.?;
+    const g = gen.?;
+    try testing.expectEqual(g.count, f.count);
+    try testing.expect(f.normal.approxEql(g.normal, diff_tol));
+    for (0..f.count) |i| {
+        try testing.expect(f.points[i].position.approxEql(g.points[i].position, diff_tol));
+        try testing.expectApproxEqAbs(g.points[i].penetration, f.points[i].penetration, diff_tol);
+        if (check_fid) try testing.expectEqual(g.points[i].feature_id, f.points[i].feature_id);
+    }
+}
+
+/// Assert the dispatched path equals the generic oracle in BOTH A/B orders.
+fn expectBothOrders(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr, check_fid: bool) !void {
+    try expectEquivalent(ordered(sa, pa, ra, sb, pb, rb), generic(sa, pa, ra, sb, pb, rb), check_fid);
+    try expectEquivalent(ordered(sb, pb, rb, sa, pa, ra), generic(sb, pb, rb, sa, pa, ra), check_fid);
+}
+
+/// Whether a count-1 manifold carries the single-witness class pair
+/// (`class_a` reference, `class_c` incident) — the point-core producer.
+fn isSingleWitnessClass(m: ContactManifold) bool {
+    if (m.count != 1) return false;
+    const fid = m.points[0].feature_id;
+    return ((fid >> 16) & 0xc000) == 0x0000 and (fid & 0xc000) == 0x8000;
+}
+
+test "not-yet-wired pairs equal the generic oracle exactly" {
+    // box/box (E3), capsule/capsule (E4), capsule/box (stays generic), and any
+    // rounded box → dispatcher returns `.not_handled`, so `collideOrdered` is the
+    // generic path verbatim.
     const yaw = Quatr.fromAxisAngle(Vec3r.unit_y, std.math.pi / 4.0);
+    const zrot = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
     const Combo = struct { sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr };
     const combos = [_]Combo{
-        // sphere/sphere: overlapping and separated.
-        .{ .sa = sphereShape(1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = sphereShape(1), .pb = vr(1.2, 0, 0), .rb = Quatr.identity },
-        .{ .sa = sphereShape(1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = sphereShape(1), .pb = vr(2.5, 0, 0), .rb = Quatr.identity },
-        // sphere/box and box/sphere.
-        .{ .sa = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = sphereShape(0.5), .pb = vr(0, 0, 0.4), .rb = Quatr.identity },
-        .{ .sa = sphereShape(0.5), .pa = vr(0, 0, 0.4), .ra = Quatr.identity, .sb = boxShape(1, 1, 1), .pb = vr(0, 0, 0), .rb = Quatr.identity },
-        // box/box: face-face and yawed.
         .{ .sa = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = boxShape(1, 1, 1), .pb = vr(0, 1.5, 0), .rb = Quatr.identity },
         .{ .sa = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = boxShape(1, 1, 1), .pb = vr(0, 1.9, 0), .rb = yaw },
-        // capsule/capsule: parallel side-overlap and crossed.
         .{ .sa = capsuleShape(1, 0.5), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = capsuleShape(1, 0.5), .pb = vr(0.8, 0, 0), .rb = Quatr.identity },
         .{ .sa = capsuleShape(1, 0.3), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = capsuleShape(1, 0.3), .pb = vr(0, 0, 0.5), .rb = zrot },
-        // rounded box (radius > 0): must stay on the generic path too.
+        .{ .sa = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = capsuleShape(0.5, 0.5), .pb = vr(1.3, 0, 0), .rb = Quatr.identity },
         .{ .sa = roundedBoxShape(0.5, 0.5, 0.5, 1.0), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = roundedBoxShape(0.5, 0.5, 0.5, 1.0), .pb = vr(0, 2.5, 0), .rb = Quatr.identity },
+        .{ .sa = sphereShape(0.5), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = roundedBoxShape(1, 1, 1, 0.2), .pb = vr(0, 1.3, 0), .rb = Quatr.identity },
     };
-    const globals = [_]Quatr{ Quatr.identity, Quatr.fromAxisAngle(vr(1, 2, 3).normalize(), 0.7) };
     for (combos) |c| {
-        for (globals) |g| {
-            const pa = g.rotateVec3(c.pa);
-            const pb = g.rotateVec3(c.pb);
-            const disp = ordered(c.sa, pa, g.mul(c.ra), c.sb, pb, g.mul(c.rb));
-            const gen = generic(c.sa, pa, g.mul(c.ra), c.sb, pb, g.mul(c.rb));
-            try testing.expect(manifoldsIdentical(disp, gen));
+        try testing.expect(manifoldsIdentical(ordered(c.sa, c.pa, c.ra, c.sb, c.pb, c.rb), generic(c.sa, c.pa, c.ra, c.sb, c.pb, c.rb)));
+        try testing.expect(manifoldsIdentical(ordered(c.sb, c.pb, c.rb, c.sa, c.pa, c.ra), generic(c.sb, c.pb, c.rb, c.sa, c.pa, c.ra)));
+    }
+}
+
+test "sphere/sphere differential vs generic" {
+    const globals = [_]Quatr{ Quatr.identity, Quatr.fromAxisAngle(vr(1, 2, 3).normalize(), 0.7) };
+    // r_sum = 2. Offsets straddle shallow overlap (dist < 2) and clear separation.
+    const dists = [_]Real{ 0.3, 0.8, 1.5, 1.99, 2.5, 4.0 };
+    const dirs = [_]Vec3r{ vr(1, 0, 0), vr(0, 1, 0), vr(0.6, 0.8, 0), vr(1, 1, 1) };
+    for (globals) |g| {
+        for (dists) |d| {
+            for (dirs) |dir| {
+                const u = dir.normalize();
+                const pa = g.rotateVec3(vr(0, 0, 0));
+                const pb = g.rotateVec3(u.scale(d));
+                try expectBothOrders(sphereShape(1), pa, g, sphereShape(1), pb, g, true);
+            }
         }
+    }
+    // Separated → null (both).
+    try testing.expect(ordered(sphereShape(1), vr(0, 0, 0), Quatr.identity, sphereShape(1), vr(3, 0, 0), Quatr.identity) == null);
+    // Coincident centres: a degenerate tie (normal geometrically undefined), so
+    // only the weak contract holds — count 1, penetration → r_sum, finite unit
+    // normal. NOT compared to the generic normal.
+    const mc = ordered(sphereShape(1), vr(0, 0, 0), Quatr.identity, sphereShape(1), vr(0, 0, 0), Quatr.identity).?;
+    try testing.expectEqual(@as(u8, 1), mc.count);
+    try testing.expectApproxEqAbs(@as(Real, 2.0), mc.points[0].penetration, diff_tol);
+    try testing.expectApproxEqAbs(@as(Real, 1.0), mc.normal.length(), diff_tol);
+    try testing.expect(isSingleWitnessClass(mc));
+}
+
+test "sphere/box differential vs generic" {
+    const globals = [_]Quatr{ Quatr.identity, Quatr.fromAxisAngle(vr(2, -1, 3).normalize(), 0.6) };
+    const box = boxShape(2, 1, 3); // faces at x=±2, y=±1, z=±3; hy=1 the unique min
+    // Sphere r 0.5. Positions clearly off a single face (fid-exact), plus edge/
+    // corner-proximate (geometry only), plus interior (deep) and separated.
+    const FaceCase = struct { p: Vec3r, fid: bool };
+    const cases = [_]FaceCase{
+        .{ .p = vr(0, 0, 3.3), .fid = true }, // outside +Z face (dist 0.3)
+        .{ .p = vr(0, 0, -3.3), .fid = true }, // outside −Z face
+        .{ .p = vr(2.3, 0, 0), .fid = true }, // outside +X face
+        .{ .p = vr(0, 1.3, 0), .fid = true }, // outside +Y face
+        .{ .p = vr(2.3, 1.3, 0), .fid = false }, // near +X/+Y edge (tie band)
+        .{ .p = vr(2.3, 1.3, 3.3), .fid = false }, // near a corner (tie band)
+        .{ .p = vr(0, 0.3, 0), .fid = true }, // INTERIOR (deep) — nearest +Y face
+        .{ .p = vr(0.5, -0.4, 1), .fid = true }, // interior off-centre — nearest −Y face
+        .{ .p = vr(0, 0, 7), .fid = true }, // clearly separated → null==null
+    };
+    for (globals) |g| {
+        for (cases) |c| {
+            const pa = g.rotateVec3(vr(0, 0, 0));
+            const pb = g.rotateVec3(c.p);
+            try expectBothOrders(box, pa, g, sphereShape(0.5), pb, g, c.fid);
+        }
+    }
+    // Touch-exact: sphere just off the +X face at exactly r_sum ⇒ a contact with
+    // penetration ~0 (the frozen touch=shallow convention), count 1.
+    const touch = ordered(box, vr(0, 0, 0), Quatr.identity, sphereShape(0.5), vr(2.5, 0, 0), Quatr.identity).?;
+    try testing.expectEqual(@as(u8, 1), touch.count);
+    try testing.expectApproxEqAbs(@as(Real, 0.0), touch.points[0].penetration, diff_tol);
+    // Sphere centre exactly at the box centre (deep, unique nearest face +Y since
+    // hy=1 is the smallest half-extent): closed-form normal +Y, depth hy + r_sum.
+    const mc = ordered(box, vr(0, 0, 0), Quatr.identity, sphereShape(0.5), vr(0, 0, 0), Quatr.identity).?;
+    try testing.expectEqual(@as(u8, 1), mc.count);
+    try testing.expect(mc.normal.approxEql(vr(0, 1, 0), diff_tol));
+    try testing.expectApproxEqAbs(@as(Real, 1.0 + 0.5), mc.points[0].penetration, diff_tol);
+}
+
+test "sphere/box P1d deep extreme aspect (closed-form)" {
+    // A sphere deep inside a >50:1 radius-0 box: the generic GJK classification is
+    // documented invalid at this aspect (`gjk.zig` P1d; reliable to ~30:1), so the
+    // fast path is validated against a CLOSED-FORM oracle, not the generic path.
+    // Each case has a UNIQUE nearest face (no axis tie).
+    const Case = struct { he: Vec3r, c: Vec3r, r: Real, n: Vec3r, pen: Real, pos: Vec3r };
+    const cases = [_]Case{
+        // 100:1 box, sphere at centre ⇒ nearest +Y face (hy 0.5 the unique min).
+        // depth hy=0.5, base 1.0; sa=(0,0.5,0), sb=(0,-0.5,0) ⇒ pos (0,0,0).
+        .{ .he = vr(50, 0.5, 1), .c = vr(0, 0, 0), .r = 0.5, .n = vr(0, 1, 0), .pen = 1.0, .pos = vr(0, 0, 0) },
+        // 106:1 box, sphere off-centre ⇒ nearest +Y face (hy 1 < hz 2 < hx 106).
+        // depth 1, base 1.5; sa=(30,1,0.5), sb=(30,-0.5,0.5) ⇒ pos (30,0.25,0.5).
+        .{ .he = vr(106, 1, 2), .c = vr(30, 0, 0.5), .r = 0.5, .n = vr(0, 1, 0), .pen = 1.5, .pos = vr(30, 0.25, 0.5) },
+        // 212:1 box, sphere off-centre ⇒ nearest +Y face (hy 0.25 the unique min).
+        // depth 0.25, base 0.75; sa=(10,0.25,0.2), sb=(10,-0.5,0.2) ⇒ pos (10,-0.125,0.2).
+        .{ .he = vr(53, 0.25, 1), .c = vr(10, 0, 0.2), .r = 0.5, .n = vr(0, 1, 0), .pen = 0.75, .pos = vr(10, -0.125, 0.2) },
+    };
+    for (cases) |c| {
+        const box = SupportShape{ .core = .{ .box = c.he }, .radius = 0 };
+        // A = box, B = sphere ⇒ normal A→B is the box outward face normal.
+        const mb = ordered(box, vr(0, 0, 0), Quatr.identity, sphereShape(c.r), c.c, Quatr.identity).?;
+        try testing.expectEqual(@as(u8, 1), mb.count);
+        try testing.expect(mb.normal.approxEql(c.n, diff_tol));
+        try testing.expectApproxEqAbs(c.pen, mb.points[0].penetration, diff_tol);
+        try testing.expect(mb.points[0].position.approxEql(c.pos, diff_tol));
+        try testing.expect(isSingleWitnessClass(mb));
+        // A = sphere, B = box ⇒ the normal negates; count/penetration/position hold.
+        const ms = ordered(sphereShape(c.r), c.c, Quatr.identity, box, vr(0, 0, 0), Quatr.identity).?;
+        try testing.expectEqual(@as(u8, 1), ms.count);
+        try testing.expect(ms.normal.approxEql(c.n.neg(), diff_tol));
+        try testing.expectApproxEqAbs(c.pen, ms.points[0].penetration, diff_tol);
+        try testing.expect(ms.points[0].position.approxEql(c.pos, diff_tol));
     }
 }
