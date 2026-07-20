@@ -6,10 +6,10 @@
 
 | pair | dispatched (ns/pair) | generic (ns/pair) | ratio (disp/gen) |
 |---|---|---|---|
-| sphere/sphere | 37.59 | 66.78 | 0.563 |
-| sphere/box | 55.87 | 206.54 | 0.270 |
-| box/box | 197.41 | 732.42 | 0.270 |
-| capsule/capsule | 15.05 | 125.98 | 0.119 |
+| sphere/sphere | 37.41 | 67.75 | 0.552 |
+| sphere/box | 55.75 | 205.74 | 0.271 |
+| box/box | 196.46 | 717.90 | 0.274 |
+| capsule/capsule | 14.52 | 125.97 | 0.115 |
 
 **Verdict:** GO — the dispatched fast path must be strictly faster than
 the generic GJK/EPA oracle on every pair (ratio < 1). Absolute ns are only

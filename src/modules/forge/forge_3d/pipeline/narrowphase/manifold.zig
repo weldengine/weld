@@ -676,20 +676,25 @@ fn faceCentroid(comptime T: type, face: support.Face(T)) math.Vec(3, T) {
 /// points are deduplicated first. Deterministic tie-breaks (strict `>`; first
 /// index wins). Writes the chosen `pts` indices into `idx`, returns the count.
 fn reduceToFour(comptime T: type, pts: []const Candidate(T), normal: math.Vec(3, T), idx: *[4]usize) usize {
-    // Coincidence tolerance for the dedup: PER-AXIS relative to that axis's own
-    // A-frame coordinate scale (`eps[k] = 16·floatEps·max|pos[k]|`), NEVER an
-    // isotropic scalar (E8, class B). An isotropic eps driven by a large axis
-    // (e.g. a `he = (1.1e6, 1, 1)` box) would swamp a small axis and merge points
-    // genuinely separated along it. Two points coincide ⟺ `|Δ[k]| ≤ eps[k]` for
-    // ALL k — anisotropic-safe and coordinate-covariant. A-frame positions stay
-    // small far from the world origin, preserving the M1.1.3 reduction.
-    var coord_scale = [3]T{ 0, 0, 0 };
+    // Coincidence tolerance for the dedup: PER-AXIS relative to the candidates'
+    // own EXTENT on that axis (`eps[k] = 16·floatEps·(max−min) of pos[k]`), NEVER
+    // `max|pos[k]|` and NEVER an isotropic scalar (E9, class B). The extent is the
+    // only form invariant under all three: TRANSLATION (the contact-zone position
+    // in A's frame cancels in `max − min` — a small off-centre feature on a large
+    // body keeps a tiny eps), SCALE (covariant), and ANISOTROPY (per-axis). Two
+    // points coincide ⟺ `|Δ[k]| ≤ eps[k]` for ALL k; even if a distant duplicate
+    // is not merged, the count stays protected by the area-based reduction below.
+    var pmin = [3]T{ std.math.floatMax(T), std.math.floatMax(T), std.math.floatMax(T) };
+    var pmax = [3]T{ -std.math.floatMax(T), -std.math.floatMax(T), -std.math.floatMax(T) };
     for (pts) |c| {
         const p = c.pos.toArray();
-        inline for (0..3) |k| coord_scale[k] = @max(coord_scale[k], @abs(p[k]));
+        inline for (0..3) |k| {
+            pmin[k] = @min(pmin[k], p[k]);
+            pmax[k] = @max(pmax[k], p[k]);
+        }
     }
     var eps: [3]T = undefined;
-    inline for (0..3) |k| eps[k] = 16 * std.math.floatEps(T) * coord_scale[k];
+    inline for (0..3) |k| eps[k] = 16 * std.math.floatEps(T) * (pmax[k] - pmin[k]);
     // Deduplicate coincident contacts (indices into `pts`).
     var uniq: [max_clip]usize = undefined;
     var un: usize = 0;

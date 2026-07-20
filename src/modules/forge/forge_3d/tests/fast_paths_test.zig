@@ -650,13 +650,15 @@ fn scaleShape(sh: SupportShape, s: Real) SupportShape {
 /// penetration). Both sides are compared at unit scale, so the tolerance stays
 /// meaningful; it widens with the untranslate/unscale amplification of the f32
 /// rounding at the absolute coordinate magnitude.
-fn manifoldsEquivariant(base: ContactManifold, m: ContactManifold, s: Real, t: Vec3r) bool {
+fn manifoldsEquivariant(base: ContactManifold, m: ContactManifold, s: Real, t: Vec3r, ext: Real) bool {
     if (base.count != m.count) return false;
     if (!base.normal.approxEql(m.normal, diff_tol)) return false; // normal is scale/translation-INVARIANT
     const inv = 1.0 / s;
     const t_mag = t.length();
     const eps = std.math.floatEps(Real);
-    const pos_tol = diff_tol + 64 * eps * (t_mag + @abs(s) * 2.5) * inv;
+    // Untranslate/unscale amplifies the f32 rounding at the absolute magnitude
+    // (~floatEps·(s·ext + t_mag)) back to unit scale → floatEps·(ext + t_mag/s).
+    const pos_tol = diff_tol + 64 * eps * (ext + t_mag * inv);
     for (0..m.count) |i| {
         var matched = false;
         for (0..base.count) |j| {
@@ -676,14 +678,19 @@ test "fast paths are scale and translation invariant" {
     // classes broke this: an absolute floor (A) at extreme scale, a coord_scale
     // guard (A) at large translation, an isotropic dedup (B) for anisotropy.
     const zrot = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
-    const Cfg = struct { a: SupportShape, pa: Vec3r, ra: Quatr, b: SupportShape, pb: Vec3r, rb: Quatr };
+    // `mf` = smallest half-extent/radius (the feature that must stay above the f32
+    // resolution); `ext` = largest coordinate magnitude (positions + sizes).
+    const Cfg = struct { a: SupportShape, pa: Vec3r, ra: Quatr, b: SupportShape, pb: Vec3r, rb: Quatr, mf: Real, ext: Real };
     const cfgs = [_]Cfg{
-        .{ .a = sphereShape(1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = sphereShape(1), .pb = vr(1.2, 0, 0), .rb = Quatr.identity }, // sphere/sphere
-        .{ .a = sphereShape(0.5), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = boxShape(1, 1, 1), .pb = vr(0, 0, 1.3), .rb = Quatr.identity }, // sphere/box shallow
-        .{ .a = sphereShape(0.5), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = boxShape(1, 1, 1), .pb = vr(0, 0.3, 0), .rb = Quatr.identity }, // sphere/box deep
-        .{ .a = capsuleShape(1, 0.3), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = capsuleShape(1, 0.3), .pb = vr(0, 0, 0.5), .rb = zrot }, // capsule crossed
-        .{ .a = capsuleShape(1, 0.3), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = capsuleShape(1, 0.3), .pb = vr(0.5, 0, 0), .rb = Quatr.identity }, // capsule parallel
-        .{ .a = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = boxShape(1, 1, 1), .pb = vr(0, 1.5, 0), .rb = Quatr.identity }, // box/box face
+        .{ .a = sphereShape(1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = sphereShape(1), .pb = vr(1.2, 0, 0), .rb = Quatr.identity, .mf = 1, .ext = 2.2 }, // sphere/sphere
+        .{ .a = sphereShape(0.5), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = boxShape(1, 1, 1), .pb = vr(0, 0, 1.3), .rb = Quatr.identity, .mf = 0.5, .ext = 2.3 }, // sphere/box shallow
+        .{ .a = sphereShape(0.5), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = boxShape(1, 1, 1), .pb = vr(0, 0.3, 0), .rb = Quatr.identity, .mf = 0.5, .ext = 1.5 }, // sphere/box deep
+        .{ .a = capsuleShape(1, 0.3), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = capsuleShape(1, 0.3), .pb = vr(0, 0, 0.5), .rb = zrot, .mf = 0.3, .ext = 1.8 }, // capsule crossed
+        .{ .a = capsuleShape(1, 0.3), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = capsuleShape(1, 0.3), .pb = vr(0.5, 0, 0), .rb = Quatr.identity, .mf = 0.3, .ext = 1.5 }, // capsule parallel
+        .{ .a = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = boxShape(1, 1, 1), .pb = vr(0, 1.5, 0), .rb = Quatr.identity, .mf = 1, .ext = 2.5 }, // box/box face
+        // Off-centre small feature on a large body (Codex round-5 P2): the dedup
+        // extent (0.1), not the absolute position (55000), must set the eps.
+        .{ .a = boxShape(100000, 1, 100000), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = boxShape(0.05, 1, 0.05), .pb = vr(55000, 1.5, 0), .rb = Quatr.identity, .mf = 0.05, .ext = 100000 },
     };
     const scales = [_]Real{ 1e-6, 1, 1e6 };
     const translations = [_]Real{ 0, 1e6 };
@@ -693,17 +700,19 @@ test "fast paths are scale and translation invariant" {
         const base_ba = ordered(c.b, c.pb, c.rb, c.a, c.pa, c.ra).?;
         for (scales) |s| {
             for (translations) |tm| {
-                // Skip combos where the geometry (feature scale `s`) is lost under
-                // the f32 resolution at the absolute magnitude (`|t| + s·extent`) —
-                // genuinely unrepresentable, not a defect.
-                if (@abs(s) <= 256 * eps * (tm + @abs(s) * 2.5)) continue;
+                // Skip a combo only when the geometric FEATURE (`s·mf`) drops below
+                // the f32 resolution at the absolute magnitude (`~floatEps·(|t| +
+                // s·ext)`) — genuinely unrepresentable, not a defect (the documented
+                // precision boundary). Comparing feature-size to resolution (not `s`
+                // alone) keeps every s=1 / t=1e6 cell running.
+                if (@abs(s) * c.mf <= eps * (tm + @abs(s) * c.ext)) continue;
                 const t = vr(tm, tm, tm);
                 const sa = scaleShape(c.a, s);
                 const sb = scaleShape(c.b, s);
                 const m_ab = ordered(sa, c.pa.scale(s).add(t), c.ra, sb, c.pb.scale(s).add(t), c.rb).?;
-                try testing.expect(manifoldsEquivariant(base_ab, m_ab, s, t));
+                try testing.expect(manifoldsEquivariant(base_ab, m_ab, s, t, c.ext));
                 const m_ba = ordered(sb, c.pb.scale(s).add(t), c.rb, sa, c.pa.scale(s).add(t), c.ra).?;
-                try testing.expect(manifoldsEquivariant(base_ba, m_ba, s, t));
+                try testing.expect(manifoldsEquivariant(base_ba, m_ba, s, t, c.ext));
             }
         }
     }
@@ -740,6 +749,21 @@ test "anisotropic box face-face keeps four points (P2 class B)" {
     try testing.expectEqual(@as(u8, 4), ab.count);
     const ba = ordered(box, vr(0, 1.5, 0), Quatr.identity, box, vr(0, 0, 0), Quatr.identity) orelse return error.NoContactBA;
     try testing.expectEqual(@as(u8, 4), ba.count);
+}
+
+test "off-center small feature on a large body keeps four points (P2 class B, E9)" {
+    // Codex round-5 probe: the dedup eps must be relative to the candidates' local
+    // EXTENT, never `max|pos|`. A small box (he = 0.05×1×0.05) resting on a large
+    // ground face (he = 100000×1×100000) at x = 55000: its 4 bottom corners span
+    // only 0.1 in X and Z. The E8 `max|pos| ≈ 55000` inflated eps_x to ~0.1 and
+    // merged them in the ground→box order (count 2, order-dependent); the extent
+    // (0.1) keeps eps ~ 1.9e-7, so all 4 survive in BOTH orders.
+    const ground = boxShape(100000, 1, 100000);
+    const small = boxShape(0.05, 1, 0.05);
+    const gb = ordered(ground, vr(0, 0, 0), Quatr.identity, small, vr(55000, 1.5, 0), Quatr.identity) orelse return error.NoContactGB;
+    try testing.expectEqual(@as(u8, 4), gb.count);
+    const bg = ordered(small, vr(55000, 1.5, 0), Quatr.identity, ground, vr(0, 0, 0), Quatr.identity) orelse return error.NoContactBG;
+    try testing.expectEqual(@as(u8, 4), bg.count);
 }
 
 // --- E5: consolidated feature_id producer × pair × A/B-order matrix ---
