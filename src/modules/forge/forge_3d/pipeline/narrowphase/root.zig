@@ -1,4 +1,4 @@
-//! `forge_3d/pipeline/narrowphase/root.zig` — the narrowphase package façade.
+//! `forge_3d/pipeline/narrowphase/root.zig` — the narrowphase package facade.
 //!
 //! M1.1.3/E1 promoted the single-file `narrowphase.zig` to this package so the
 //! GJK stack (`support.zig` + `gjk.zig`), EPA (`epa.zig`), and the contact

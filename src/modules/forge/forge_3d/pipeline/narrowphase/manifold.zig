@@ -67,8 +67,17 @@ pub fn ContactPoint(comptime T: type) type {
         position: math.Vec(3, T),
         /// Surface penetration along `normal`, >= 0 when overlapping.
         penetration: T,
-        /// Deterministic, frame-stable per-contact identity for M1.1.6
-        /// warm-starting (reference-feature id << 16 | incident-feature id).
+        /// Deterministic per-contact identity for M1.1.6 warm-starting:
+        /// `(reference-feature id << 16) | incident-feature id`, each 16-bit half
+        /// class-tagged in its top 2 bits so the contact kinds occupy DISJOINT id
+        /// ranges — kept vertex `(class_a, class_a)`, edge×plane crossing
+        /// `(class_edge, class_edge)`, reference corner `(class_c, class_c)`, and
+        /// single witness `(class_a, class_c)` — with each half carrying its REAL
+        /// sub-feature (box vertex sign-pattern, box face `axis·2+sign`, segment
+        /// endpoint, side-plane pair). FRAME-STABLE only through
+        /// `BodyManager.collidePair` (fixed body-id order); the bare `collide`
+        /// entry is POSE-canonical, so reference/incident ownership flips at a
+        /// pose-order boundary and the id is NOT inter-frame stable there.
         /// Populated now; consumed at M1.1.6. Packing is an impl detail.
         feature_id: u32,
     };
