@@ -195,6 +195,20 @@ fn generateManifold(
         return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(T, face_a, face_b));
     }
 
+    // Segment × segment (M1.1.4): a NON-parallel (crossed) segment/segment pair
+    // is an edge-edge contact → a SINGLE witness contact along the EPA/GJK axis,
+    // NOT a 2-point clip. A segment reference forces `rn = n_a` (`faceNormalA`
+    // returns the axis for a count-2 feature), so FIX-1's `|rn·n_a|` test never
+    // trips, and `clipSegment` against a segment reference — whose two side
+    // planes constrain only along the reference's OWN axis — can retain both
+    // endpoints of a non-parallel incident segment (two geometrically wrong
+    // points). The 2-point manifold stays RESERVED to the parallel-projection
+    // overlap regime (two side-by-side capsules); a degenerate zero-length
+    // segment (a `half_height == 0` capsule) is a point, never that regime.
+    if (face_a.count == 2 and face_b.count == 2 and !segmentsParallel(T, face_a, face_b)) {
+        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(T, face_a, face_b));
+    }
+
     // Reference/incident by alignment with the contact axis (non-polygon → 0; tie A).
     const n_a_face = faceNormalA(T, face_a, n_a); // ≈ +n_a
     const n_b_face = faceNormalA(T, face_b, n_a.neg()); // ≈ −n_a
@@ -308,6 +322,29 @@ fn singleContactFid(comptime T: type, ref_face: support.Face(T), inc_face: suppo
     const feat_ref: u16 = if (ref_face.count == 1) ref_face.vert_ids[0] else ref_face.face_id;
     const feat_inc: u16 = if (inc_face.count == 1) inc_face.vert_ids[0] else inc_face.face_id;
     return featureId(class_a | (feat_ref & id_mask), class_c | (feat_inc & id_mask));
+}
+
+/// Whether two count-2 segment features are PARALLEL, non-degenerate line
+/// segments — the sole regime where a 2-point segment clip is a correct manifold
+/// (parallel-projection overlap, e.g. two side-by-side capsules). A zero-length
+/// segment (a `half_height == 0` capsule → a point) or a non-parallel (crossed)
+/// pair returns false, so the caller takes the single-witness path (M1.1.4).
+///
+/// Threshold: `sin²θ = |u×v|² / (|u|²·|v|²) ≤ parallel_rel`, the same relative
+/// float-noise form as `support.supportingFace`'s end-on `aligned_rel` (not a
+/// magic geometric angle). Symmetric under an A/B swap by construction — both
+/// `|u×v|²` and `|u|²·|v|²` are invariant when `u` and `v` are exchanged.
+fn segmentsParallel(comptime T: type, fa: support.Face(T), fb: support.Face(T)) bool {
+    const u = fa.verts[1].sub(fa.verts[0]);
+    const v = fb.verts[1].sub(fb.verts[0]);
+    const uu = u.dot(u);
+    const vv = v.dot(v);
+    // A degenerate (zero-length) segment is a point, never a parallel line pair
+    // (NaN-safe: a non-finite length also falls through to the single witness).
+    if (!(uu > 0) or !(vv > 0)) return false;
+    const cr = u.cross(v);
+    const parallel_rel: T = if (T == f32) 1.0e-6 else 1.0e-12;
+    return cr.dot(cr) <= parallel_rel * uu * vv;
 }
 
 /// Outward normal of a face in A's frame: the polygon normal oriented toward

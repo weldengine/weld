@@ -147,6 +147,79 @@ test "staggered capsule segment clips without a duplicate point" {
     for (0..m.count) |i| try testing.expectApproxEqAbs(@as(Real, 0.2), m.points[i].penetration, tol); // r_sum(1) − dist(0.8)
 }
 
+test "crossed capsules yield a single witness contact" {
+    // M1.1.4/E1 (RED on the pre-fix generator): a segment × segment contact whose
+    // axes are NOT parallel is an edge-edge crossing → ONE witness contact along
+    // the contact axis, not a 2-point segment clip. Pre-fix the segment reference
+    // forces `rn = n_a`, so FIX-1's |rn·n_a| test never trips and `clipSegment`
+    // retains BOTH endpoints of the crossed incident segment (count == 2, wrong).
+    //
+    // Closed-form: A is a Y-axis capsule at the origin; B is an X-axis capsule
+    // (Y-capsule yawed 90° about Z) centred at (0,0,0.5). The cores' closest
+    // approach is (0,0,0)↔(0,0,0.5), distance 0.5 < r_sum 0.6 ⇒ shallow, normal
+    // +Z, penetration 0.6 − 0.5 = 0.1, contact at the surface midpoint (0,0,0.25).
+    const cap = capsuleShape(1, 0.3);
+    const zrot = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
+    const m = collide(cap, vr(0, 0, 0), Quatr.identity, cap, vr(0, 0, 0.5), zrot).?;
+    try testing.expectEqual(@as(u8, 1), m.count);
+    try testing.expect(m.normal.approxEql(vr(0, 0, 1), tol));
+    try testing.expectApproxEqAbs(@as(Real, 0.1), m.points[0].penetration, tol);
+    try testing.expect(m.points[0].position.approxEql(vr(0, 0, 0.25), tol));
+}
+
+test "nearly-parallel capsules transition deterministically" {
+    // M1.1.4/E1: the parallel↔crossed classification is a pure function of the
+    // pose (no accumulated state), so re-running any config gives a byte-identical
+    // manifold — no flip under re-run. Sweep a small yaw band straddling the
+    // parallel threshold; every config is stable, and the point count only ever
+    // takes the two allowed values (2 = parallel line, 1 = crossed witness).
+    const cap = capsuleShape(1, 0.4);
+    var a: Real = 0;
+    while (a <= 0.20 + 1.0e-9) : (a += 0.01) {
+        const rot = Quatr.fromAxisAngle(Vec3r.unit_z, a);
+        // Cores 0.5 apart in Z, r_sum 0.8 ⇒ a genuine overlap at every angle.
+        const m1 = collide(cap, vr(0, 0, 0), Quatr.identity, cap, vr(0, 0, 0.5), rot).?;
+        const m2 = collide(cap, vr(0, 0, 0), Quatr.identity, cap, vr(0, 0, 0.5), rot).?;
+        // Deterministic: identical count, points, penetration, ids on re-run.
+        try testing.expectEqual(m1.count, m2.count);
+        try testing.expect(m1.count == 1 or m1.count == 2);
+        for (0..m1.count) |i| {
+            try testing.expect(m1.points[i].position.approxEql(m2.points[i].position, 1.0e-6));
+            try testing.expectEqual(m1.points[i].penetration, m2.points[i].penetration);
+            try testing.expectEqual(m1.points[i].feature_id, m2.points[i].feature_id);
+        }
+    }
+    // Exactly parallel (yaw 0) is the 2-point regime; a clear 0.2 rad yaw is a
+    // crossed single witness.
+    try testing.expectEqual(@as(u8, 2), collide(cap, vr(0, 0, 0), Quatr.identity, cap, vr(0, 0, 0.5), Quatr.identity).?.count);
+    const crossed = Quatr.fromAxisAngle(Vec3r.unit_z, 0.2);
+    try testing.expectEqual(@as(u8, 1), collide(cap, vr(0, 0, 0), Quatr.identity, cap, vr(0, 0, 0.5), crossed).?.count);
+}
+
+test "degenerate capsule (half_height == 0) behaves as a sphere" {
+    // M1.1.4/E1: a `half_height == 0` capsule has a zero-length segment core —
+    // geometrically a sphere. Its supporting feature is a count-2 segment with
+    // both verts coincident, which `segmentsParallel` treats as degenerate (a
+    // point), so the pair takes the single-witness path just like a sphere.
+    const degen = capsuleShape(0, 0.5); // sphere of radius 0.5
+    const cap = capsuleShape(1, 0.5); // real Y-axis capsule
+    // Degenerate capsule beside the real capsule's side: cores 0.8 apart in X,
+    // r_sum 1.0 ⇒ 1 contact, normal +X, penetration 0.2, at midpoint (0.4,0,0).
+    const m = collide(degen, vr(0, 0, 0), Quatr.identity, cap, vr(0.8, 0, 0), Quatr.identity).?;
+    try testing.expectEqual(@as(u8, 1), m.count);
+    try testing.expect(m.normal.approxEql(vr(1, 0, 0), tol));
+    try testing.expectApproxEqAbs(@as(Real, 0.2), m.points[0].penetration, tol);
+    try testing.expect(m.points[0].position.approxEql(vr(0.4, 0, 0), tol));
+
+    // Two degenerate capsules behave as sphere/sphere: cores 1.2 apart, r_sum 1.0
+    // ⇒ separated → null (matches sphere/sphere at the same separation).
+    try testing.expect(collide(degen, vr(0, 0, 0), Quatr.identity, degen, vr(1.2, 0, 0), Quatr.identity) == null);
+    // Overlapping (0.6 apart, r_sum 1.0) ⇒ 1 contact, penetration 0.4.
+    const mo = collide(degen, vr(0, 0, 0), Quatr.identity, degen, vr(0.6, 0, 0), Quatr.identity).?;
+    try testing.expectEqual(@as(u8, 1), mo.count);
+    try testing.expectApproxEqAbs(@as(Real, 0.4), mo.points[0].penetration, tol);
+}
+
 test "intersection feature ids are unique among simultaneous contacts" {
     // Codex P1a repro: two unit boxes, B offset into a corner with a small yaw so
     // the manifold points are edge×plane intersections. The old `@min(edge)` key
