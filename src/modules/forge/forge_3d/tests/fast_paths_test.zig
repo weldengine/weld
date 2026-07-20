@@ -92,11 +92,14 @@ fn satMinOverlap(pa: Vec3r, ra: Quatr, hea_v: Vec3r, pb: Vec3r, rb: Quatr, heb_v
     for (0..3) |k| mn = @min(mn, ov(axb[k], axa, hea, axb, heb, dc));
     for (0..3) |i| {
         for (0..3) |j| {
-            var L = axa[i].cross(axb[j]);
-            const l2 = L.dot(L);
-            if (l2 <= (if (Real == f32) @as(Real, 1.0e-6) else @as(Real, 1.0e-12))) continue;
-            L = L.scale(1.0 / @sqrt(l2));
-            mn = @min(mn, ov(L, axa, hea, axb, heb, dc));
+            const l_raw = axa[i].cross(axb[j]);
+            const l2 = l_raw.dot(l_raw);
+            // Independent of the kernel: test EVERY non-parallel edge axis (only a
+            // strictly-zero cross carries no info). The normalized overlap is
+            // `ov_raw / √l2` — no `1e-6` skip is copied, so this oracle would catch
+            // a kernel that dropped a separating/min axis.
+            if (l2 <= 0) continue;
+            mn = @min(mn, ov(l_raw, axa, hea, axb, heb, dc) / @sqrt(l2));
         }
     }
     return mn;
@@ -148,16 +151,21 @@ fn expectBothOrders(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb
 /// some generic point (position + penetration within tol; `feature_id` too when
 /// `check_fid`). Used for box/box, whose clip may emit points in a different
 /// order between the fast and generic paths.
-/// Whether world point `q` lies inside-or-on the box core (centre `c`, rotation
-/// `rot`, half-extents `he`) within `tol` — `q` mapped to the box's local frame
-/// must satisfy `|local[k]| ≤ he[k] + tol` on every axis.
-fn pointInBox(q: Vec3r, c: Vec3r, rot: Quatr, he: Vec3r, tol: Real) bool {
+/// Whether world point `q` lies ON the box core's SURFACE (centre `c`, rotation
+/// `rot`, half-extents `he`) within `tol`: `q` mapped to the box local frame must
+/// be inside-or-on every axis (`|local[k]| ≤ he[k] + tol`) AND touch at least one
+/// face (`|local[k]| ≥ he[k] − tol` for some `k`). Interiority alone is NOT
+/// enough — a surface witness must prove incidence, else a too-small penetration
+/// (a strictly-interior witness) would pass (P2-5).
+fn pointOnBoxSurface(q: Vec3r, c: Vec3r, rot: Quatr, he: Vec3r, tol: Real) bool {
     const local = rot.conjugate().rotateVec3(q.sub(c)).toArray();
     const h = he.toArray();
+    var on_face = false;
     for (0..3) |k| {
-        if (@abs(local[k]) > h[k] + tol) return false;
+        if (@abs(local[k]) > h[k] + tol) return false; // outside ⇒ not on the surface
+        if (@abs(local[k]) >= h[k] - tol) on_face = true; // touches this face
     }
-    return true;
+    return on_face;
 }
 
 fn expectEquivalentUnordered(fast: ?ContactManifold, gen: ?ContactManifold, check_fid: bool) !void {
@@ -496,16 +504,17 @@ test "box/box SAT deep rotated is correct (oracle-free)" {
                     try testing.expectApproxEqAbs(maxPen(m0), maxPen(mg), diff_tol);
                     try testing.expect(mg.normal.approxEql(g.rotateVec3(m0.normal), diff_tol));
                 }
-                // (d) each contact point sits midway between the two box surfaces
-                // along the normal: its witnesses `p ± (pen/2)·n` land one on each
-                // box (n is A→B, so the sign assignment is checked both ways).
+                // (d) each contact point sits midway between the two box SURFACES
+                // along the normal: its witnesses `p ± (pen/2)·n` each land ON a
+                // box surface (containment AND face incidence — P2-5), one per box
+                // (n is A→B, so the sign assignment is checked both ways).
                 const witness_tol: Real = if (Real == f32) 3.0e-3 else 1.0e-6;
                 for (0..m0.count) |i| {
                     const half = m0.normal.scale(m0.points[i].penetration * 0.5);
                     const wp = m0.points[i].position.add(half);
                     const wm = m0.points[i].position.sub(half);
-                    const a_side = pointInBox(wm, vr(0, 0, 0), Quatr.identity, p.a.core.box, witness_tol) and pointInBox(wp, o, r, p.b.core.box, witness_tol);
-                    const b_side = pointInBox(wp, vr(0, 0, 0), Quatr.identity, p.a.core.box, witness_tol) and pointInBox(wm, o, r, p.b.core.box, witness_tol);
+                    const a_side = pointOnBoxSurface(wm, vr(0, 0, 0), Quatr.identity, p.a.core.box, witness_tol) and pointOnBoxSurface(wp, o, r, p.b.core.box, witness_tol);
+                    const b_side = pointOnBoxSurface(wp, vr(0, 0, 0), Quatr.identity, p.a.core.box, witness_tol) and pointOnBoxSurface(wm, o, r, p.b.core.box, witness_tol);
                     try testing.expect(a_side or b_side);
                 }
             }
@@ -549,6 +558,50 @@ test "capsule/capsule differential vs generic (three regimes)" {
     try testing.expect(mc.normal.approxEql(vr(0, 0, 1), diff_tol));
     try testing.expectApproxEqAbs(@as(Real, 0.1), mc.points[0].penetration, diff_tol);
     try testing.expect(mc.points[0].position.approxEql(vr(0, 0, 0.25), diff_tol));
+}
+
+// --- E6: Codex review P1 regression repros (RED-first) ---
+
+test "degenerate-segment capsule pair is symmetric (P1-1)" {
+    // P1-1: `closestSegSeg` must handle a point (`h == 0`) segment in BOTH orders
+    // (Ericson RTCD §5.1.9 degenerate branches). A real capsule vs a
+    // sphere-degenerate capsule, cores 0.8 apart, r_sum 1.0 ⇒ contact pen 0.2 in
+    // EITHER order. Pre-fix the (h=1 then h=0) order took the `e ≤ eps` case as
+    // `s = 0` (no projection) ⇒ wrong distance ⇒ null.
+    const real = capsuleShape(1, 0.5);
+    const degen = capsuleShape(0, 0.5); // h = 0 ⇒ point core
+    const ab = ordered(real, vr(0, 0, 0), Quatr.identity, degen, vr(0.8, 0, 0), Quatr.identity) orelse return error.NoContactAB;
+    try testing.expectEqual(@as(u8, 1), ab.count);
+    try testing.expectApproxEqAbs(@as(Real, 0.2), ab.points[0].penetration, diff_tol);
+    const ba = ordered(degen, vr(0.8, 0, 0), Quatr.identity, real, vr(0, 0, 0), Quatr.identity) orelse return error.NoContactBA;
+    try testing.expectEqual(@as(u8, 1), ba.count);
+    try testing.expectApproxEqAbs(@as(Real, 0.2), ba.points[0].penetration, diff_tol);
+}
+
+test "SAT tests every edge axis for separation (P1-2)" {
+    // P1-2: a near-parallel edge×edge axis can be THE separating axis. Pre-fix the
+    // `par_eps = 1e-6` skip dropped it ⇒ a false contact (visible at f32). This
+    // Codex config separates on A.x×B.x with overlap ≈ −0.003 ⇒ must be `null`
+    // (separated) in both orders.
+    const a = boxShape(100, 0.5, 1);
+    const b = boxShape(80, 0.4, 0.8);
+    const rot = Quatr.fromAxisAngle(vr(-0.7067754, -0.9417722, -0.8722187), 0.00084793355);
+    const pb = vr(31.123383, -0.89649105, -1.8084037);
+    try testing.expect(ordered(a, vr(0, 0, 0), Quatr.identity, b, pb, rot) == null);
+    try testing.expect(ordered(b, pb, rot, a, vr(0, 0, 0), Quatr.identity) == null);
+}
+
+test "collinear capsules use a radial normal (P1-3)" {
+    // P1-3: two coaxial (collinear) Y-capsules with overlapping projections. The
+    // contact normal must be RADIAL (⊥ the shared Y axis), NOT axial — the
+    // parallel 2-point regime. Pre-fix the fallback returned +Y (axial) ⇒ count 1
+    // with an invalid point.
+    const cap = capsuleShape(1, 0.3);
+    const m = ordered(cap, vr(0, 0, 0), Quatr.identity, cap, vr(0, 0.4, 0), Quatr.identity) orelse return error.NoContact;
+    try testing.expectApproxEqAbs(@as(Real, 0), m.normal.toArray()[1], diff_tol); // ⊥ Y
+    try testing.expectApproxEqAbs(@as(Real, 1), m.normal.length(), diff_tol);
+    try testing.expectEqual(@as(u8, 2), m.count); // parallel projection overlap
+    for (0..m.count) |i| try testing.expectApproxEqAbs(@as(Real, 0.6), m.points[i].penetration, diff_tol);
 }
 
 // --- E5: consolidated feature_id producer × pair × A/B-order matrix ---
@@ -599,58 +652,75 @@ fn fidSetSubset(a: ContactManifold, b: ContactManifold) bool {
     return true;
 }
 
-/// Audit one fixed A/B order: every `feature_id` carries a valid producer class
-/// pair + a real in-range sub-feature, and all ids are pairwise distinct. When
-/// `frame_stable` (the config has no reduction tie), also assert the id SET is
-/// frame-stable under a ±1e-4 shift (same fixed order) while the topology (count
-/// + normal) is unchanged. A yawed face-face octagon is NOT frame_stable: its
-/// `reduceToFour` keeps a different — equally valid — 4 of the 8 clip points
-/// under a tiny shift (an area-tie reduction artifact, not a feature_id defect).
-fn auditOrder(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr, frame_stable: bool) !void {
-    const m = ordered(sa, pa, ra, sb, pb, rb) orelse return; // separated ⇒ no ids
+/// Audit one fixed A/B order. The config MUST produce a manifold — no silent
+/// return on separation (P2-6). Every `feature_id` carries a valid producer class
+/// pair + a real in-range sub-feature, all ids are pairwise distinct, and the
+/// config's EXPECTED producer class `(exp_ref, exp_inc)` appears at least once
+/// (a regression deleting that producer reddens). When `frame_stable` (no
+/// reduction tie), also assert the id SET is frame-stable under a ±1e-4 shift
+/// (same fixed order) while the topology (count + normal) is unchanged. A yawed
+/// face-face octagon is NOT frame_stable: `reduceToFour` keeps a different —
+/// equally valid — 4 of the 8 clip points under a tiny shift (an area-tie
+/// reduction artifact, not a feature_id defect).
+fn auditOrder(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr, frame_stable: bool, exp_ref: u32, exp_inc: u32) !bool {
+    const m = ordered(sa, pa, ra, sb, pb, rb) orelse return error.MatrixConfigUnexpectedlySeparated;
+    var has_expected = false;
     for (0..m.count) |i| {
-        try testing.expect(validClassPair(m.points[i].feature_id));
-        try testing.expect(validSubFeatures(m.points[i].feature_id));
+        const fid = m.points[i].feature_id;
+        try testing.expect(validClassPair(fid));
+        try testing.expect(validSubFeatures(fid));
+        if (((fid >> 16) & fid_class_mask) == exp_ref and (fid & fid_class_mask) == exp_inc) has_expected = true;
     }
     for (0..m.count) |i| {
         for (i + 1..m.count) |j| try testing.expect(m.points[i].feature_id != m.points[j].feature_id);
     }
-    if (!frame_stable) return;
-    inline for (.{ 1.0e-4, -1.0e-4 }) |d| {
-        const shifted = pb.add(vr(d, d, d));
-        if (ordered(sa, pa, ra, sb, shifted, rb)) |ms| {
-            if (ms.count == m.count and m.normal.approxEql(ms.normal, diff_tol)) {
-                try testing.expect(fidSetSubset(m, ms) and fidSetSubset(ms, m));
+    if (frame_stable) {
+        inline for (.{ 1.0e-4, -1.0e-4 }) |d| {
+            const shifted = pb.add(vr(d, d, d));
+            if (ordered(sa, pa, ra, sb, shifted, rb)) |ms| {
+                if (ms.count == m.count and m.normal.approxEql(ms.normal, diff_tol)) {
+                    try testing.expect(fidSetSubset(m, ms) and fidSetSubset(ms, m));
+                }
             }
         }
     }
+    return has_expected;
 }
 
 test "feature_id producer x pair x order matrix" {
     // Every fast pair × both orders × the regimes reachable per pair, asserting
     // the class-tagged disjoint producer ranges, real in-range sub-features,
-    // uniqueness per manifold, and frame-stability of the id SET (fixed order).
+    // uniqueness per manifold, a non-null contact carrying the EXPECTED producer
+    // class, and frame-stability of the id SET (fixed order).
     const zrot = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
     const yaw = Quatr.fromAxisAngle(Vec3r.unit_y, std.math.pi / 4.0);
     const cap = capsuleShape(1, 0.3);
     const box = boxShape(1, 1, 1);
     const sph = sphereShape(0.5);
-    const Cfg = struct { a: SupportShape, b: SupportShape, pb: Vec3r, rb: Quatr, fs: bool };
+    const a_a = fid_class_a; // reference face / incident vertex
+    const edge = fid_class_edge; // reference side plane / incident edge
+    const c_c = fid_class_c; // reference vertex (corner) / incident face
+    const Cfg = struct { a: SupportShape, b: SupportShape, pb: Vec3r, rb: Quatr, fs: bool, er: u32, ei: u32 };
     const cfgs = [_]Cfg{
-        .{ .a = sphereShape(1), .b = sphereShape(1), .pb = vr(1.2, 0, 0), .rb = Quatr.identity, .fs = true }, // sphere/sphere (a,c)
-        .{ .a = sph, .b = box, .pb = vr(0, 0, 1.3), .rb = Quatr.identity, .fs = true }, // sphere/box face (a,c)
-        .{ .a = sph, .b = box, .pb = vr(0, 0.3, 0), .rb = Quatr.identity, .fs = true }, // sphere/box deep interior (a,c)
-        .{ .a = box, .b = boxShape(0.5, 1, 0.5), .pb = vr(0, 1.5, 0), .rb = Quatr.identity, .fs = true }, // box/box kept vertices (a,a)
-        .{ .a = box, .b = box, .pb = vr(0, 1.9, 0), .rb = yaw, .fs = false }, // box/box yawed face-face — edge×plane (edge,edge); octagon reduction tie
-        .{ .a = box, .b = box, .pb = vr(0.6, 1.5, 0.4), .rb = Quatr.identity, .fs = true }, // box/box staggered — reference corner (c,c)
-        .{ .a = cap, .b = cap, .pb = vr(0, 2.2, 0), .rb = Quatr.identity, .fs = true }, // capsule end-on (a,c)
-        .{ .a = cap, .b = cap, .pb = vr(0, 0, 0.5), .rb = zrot, .fs = true }, // capsule crossed (a,c)
-        .{ .a = cap, .b = capsuleShape(0.6, 0.3), .pb = vr(0.5, 0, 0), .rb = Quatr.identity, .fs = true }, // capsule parallel (shorter B strictly inside ⇒ stable segment clip)
+        .{ .a = sphereShape(1), .b = sphereShape(1), .pb = vr(1.2, 0, 0), .rb = Quatr.identity, .fs = true, .er = a_a, .ei = c_c }, // sphere/sphere single witness (a,c)
+        .{ .a = sph, .b = box, .pb = vr(0, 0, 1.3), .rb = Quatr.identity, .fs = true, .er = a_a, .ei = c_c }, // sphere/box face (a,c)
+        .{ .a = sph, .b = box, .pb = vr(0, 0.3, 0), .rb = Quatr.identity, .fs = true, .er = a_a, .ei = c_c }, // sphere/box deep interior (a,c)
+        .{ .a = box, .b = boxShape(0.5, 1, 0.5), .pb = vr(0, 1.5, 0), .rb = Quatr.identity, .fs = true, .er = a_a, .ei = a_a }, // box/box kept vertices (a,a)
+        .{ .a = box, .b = box, .pb = vr(0, 1.9, 0), .rb = yaw, .fs = false, .er = edge, .ei = edge }, // box/box yawed — edge×plane (edge,edge)
+        .{ .a = box, .b = box, .pb = vr(0.6, 1.5, 0.4), .rb = Quatr.identity, .fs = true, .er = c_c, .ei = c_c }, // box/box staggered — reference corner (c,c)
+        .{ .a = cap, .b = cap, .pb = vr(0, 2.2, 0), .rb = Quatr.identity, .fs = true, .er = a_a, .ei = c_c }, // capsule end-on (a,c)
+        .{ .a = cap, .b = cap, .pb = vr(0, 0, 0.5), .rb = zrot, .fs = true, .er = a_a, .ei = c_c }, // capsule crossed (a,c)
+        .{ .a = cap, .b = capsuleShape(0.6, 0.3), .pb = vr(0.5, 0, 0), .rb = Quatr.identity, .fs = true, .er = a_a, .ei = a_a }, // capsule parallel — kept endpoints (a,a)
     };
     const pa = vr(0, 0, 0);
     const ra = Quatr.identity;
     for (cfgs) |c| {
-        try auditOrder(c.a, pa, ra, c.b, c.pb, c.rb, c.fs); // A/B order
-        try auditOrder(c.b, c.pb, c.rb, c.a, pa, ra, c.fs); // B/A order
+        // Both orders are fully audited (class pair, sub-features, uniqueness,
+        // frame-stability). The expected producer CLASS is order-dependent for a
+        // clip (the reference face is chosen by A/B order), so it must appear in
+        // AT LEAST ONE order — a regression deleting the producer reddens both.
+        const ab = try auditOrder(c.a, pa, ra, c.b, c.pb, c.rb, c.fs, c.er, c.ei);
+        const ba = try auditOrder(c.b, c.pb, c.rb, c.a, pa, ra, c.fs, c.er, c.ei);
+        try testing.expect(ab or ba);
     }
 }

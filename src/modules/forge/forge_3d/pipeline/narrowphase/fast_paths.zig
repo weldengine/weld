@@ -332,22 +332,33 @@ fn boxBox(
             face_axis = L;
         }
     }
-    // Edge×edge axes.
-    const par_eps: T = if (T == f32) 1.0e-6 else 1.0e-12;
+    // Edge×edge axes. SEPARATION is tested on EVERY non-zero cross axis using the
+    // NON-normalized `L_raw` (its overlap sign is preserved; the margin is scaled
+    // by `|L_raw| = √l2`) — a near-parallel edge pair can still be THE separating
+    // axis and must never be skipped for separation (P1-2). Only MTV CANDIDACY is
+    // gated by a true numerical floor `mtv_floor` (NOT `1e-6`): below it the
+    // normalized cross direction is numerical noise, and the parallel case's MTV
+    // is carried by the face axes anyway.
+    const mtv_floor: T = if (T == f32) 1.0e-10 else 1.0e-20;
     for (0..3) |i| {
         for (0..3) |j| {
-            var L = axa[i].cross(axb[j]);
-            const l2 = L.dot(L);
-            if (l2 <= par_eps) continue; // parallel edges — covered by the faces
-            L = L.scale(1.0 / @sqrt(l2));
-            const ov = boxOverlapOnAxis(T, L, axa, hea, axb, heb, dc);
-            if (ov < -margin) return .separated;
-            if (!have_edge or ov < edge_depth) {
-                edge_depth = ov;
-                edge_axis = L;
-                edge_i = i;
-                edge_j = j;
-                have_edge = true;
+            const l_raw = axa[i].cross(axb[j]);
+            const l2 = l_raw.dot(l_raw);
+            if (l2 <= 0) continue; // exactly parallel ⇒ the zero axis carries no info
+            // Separation on the raw axis: `ov_raw = √l2 · true_overlap`, so
+            // `ov_raw < −margin·√l2 ⇔ true_overlap < −margin`.
+            const ov_raw = boxOverlapOnAxis(T, l_raw, axa, hea, axb, heb, dc);
+            if (ov_raw < -margin * @sqrt(l2)) return .separated;
+            if (l2 > mtv_floor) {
+                const L = l_raw.scale(1.0 / @sqrt(l2));
+                const ov = boxOverlapOnAxis(T, L, axa, hea, axb, heb, dc);
+                if (!have_edge or ov < edge_depth) {
+                    edge_depth = ov;
+                    edge_axis = L;
+                    edge_i = i;
+                    edge_j = j;
+                    have_edge = true;
+                }
             }
         }
     }
@@ -422,27 +433,50 @@ fn contactEdge(comptime T: type, c: math.Vec(3, T), ax: [3]math.Vec(3, T), he: [
 }
 
 /// Closest points between two segments `p1`–`q1` and `p2`–`q2` (Ericson RTCD
-/// §5.1.9). Returns `[closest_on_1, closest_on_2]`. Both segments here are box
-/// edges (non-degenerate, `he > 0`), so the segment lengths are strictly
-/// positive; the parametric denominators are guarded regardless.
+/// §5.1.9, ALL degenerate branches). Returns `[closest_on_1, closest_on_2]`. A
+/// segment whose squared length is ≤ `seg_eps` is treated as a POINT: if both
+/// degenerate, `s = t = 0`; if only segment 1, `s = 0`, `t = clamp(f/e)` (project
+/// its point onto segment 2); if only segment 2, `t = 0`, `s = clamp(−c/a)`
+/// (project its point onto segment 1). A `half_height == 0` capsule reaches these
+/// point branches; box edges never do (P1-1).
 fn closestSegSeg(comptime T: type, p1: math.Vec(3, T), q1: math.Vec(3, T), p2: math.Vec(3, T), q2: math.Vec(3, T)) [2]math.Vec(3, T) {
     const d1 = q1.sub(p1);
     const d2 = q2.sub(p2);
     const r = p1.sub(p2);
-    const a = d1.dot(d1);
-    const e = d2.dot(d2);
+    const a = d1.dot(d1); // |seg1|²
+    const e = d2.dot(d2); // |seg2|²
     const f = d2.dot(r);
-    const c = d1.dot(r);
-    const b = d1.dot(d2);
-    const denom = a * e - b * b;
-    var s: T = if (denom > 0) std.math.clamp((b * f - c * e) / denom, 0, 1) else 0;
-    var t: T = if (e > 0) (b * s + f) / e else 0;
-    if (t < 0) {
+    const seg_eps: T = if (T == f32) 1.0e-10 else 1.0e-20;
+    var s: T = 0;
+    var t: T = 0;
+    if (a <= seg_eps and e <= seg_eps) {
+        // Both segments are points.
+        s = 0;
         t = 0;
-        s = if (a > 0) std.math.clamp(-c / a, 0, 1) else 0;
-    } else if (t > 1) {
-        t = 1;
-        s = if (a > 0) std.math.clamp((b - c) / a, 0, 1) else 0;
+    } else if (a <= seg_eps) {
+        // Segment 1 is a point ⇒ project it onto segment 2.
+        s = 0;
+        t = std.math.clamp(f / e, 0, 1);
+    } else {
+        const c = d1.dot(r);
+        if (e <= seg_eps) {
+            // Segment 2 is a point ⇒ project it onto segment 1.
+            t = 0;
+            s = std.math.clamp(-c / a, 0, 1);
+        } else {
+            // General non-degenerate case.
+            const b = d1.dot(d2);
+            const denom = a * e - b * b;
+            s = if (denom > 0) std.math.clamp((b * f - c * e) / denom, 0, 1) else 0;
+            t = (b * s + f) / e;
+            if (t < 0) {
+                t = 0;
+                s = std.math.clamp(-c / a, 0, 1);
+            } else if (t > 1) {
+                t = 1;
+                s = std.math.clamp((b - c) / a, 0, 1);
+            }
+        }
     }
     return .{ p1.add(d1.scale(s)), p2.add(d2.scale(t)) };
 }
@@ -490,16 +524,36 @@ fn capsuleCapsule(
 }
 
 /// A deterministic separation normal for the measure-zero case of two segment
-/// cores that touch (`dist ≈ 0`): the mutual perpendicular `axis_a × axis_b`
-/// (the natural crossed-segment separation), else the centre direction, else +X.
+/// cores that touch (`dist ≈ 0`). For CROSSED axes the natural separation is the
+/// mutual perpendicular `axis_a × axis_b`. For PARALLEL axes an axial normal is
+/// WRONG (the capsules separate radially, not along their shared axis): take the
+/// LATERAL (axis-perpendicular) component of `dcentre`; if that is zero too (a
+/// pure collinear overlap), pick a deterministic perpendicular to the axis. Never
+/// returns a component along the axis for a parallel pair (P1-3).
 fn capsuleFallbackNormal(comptime T: type, axis_a: math.Vec(3, T), axis_b: math.Vec(3, T), dcentre: math.Vec(3, T)) math.Vec(3, T) {
+    const noise: T = if (T == f32) 1.0e-12 else 1.0e-24;
     const cr = axis_a.cross(axis_b);
     const cr2 = cr.dot(cr);
-    const noise: T = if (T == f32) 1.0e-12 else 1.0e-24;
-    if (cr2 > noise) return cr.scale(1.0 / @sqrt(cr2));
-    const dc2 = dcentre.dot(dcentre);
-    if (dc2 > noise) return dcentre.scale(1.0 / @sqrt(dc2));
-    return math.Vec(3, T).unit_x;
+    if (cr2 > noise) return cr.scale(1.0 / @sqrt(cr2)); // crossed ⇒ mutual perpendicular
+    // Parallel axes: strip the axial component of `dcentre` → the radial direction.
+    const lateral = dcentre.sub(axis_a.scale(dcentre.dot(axis_a)));
+    const lat2 = lateral.dot(lateral);
+    if (lat2 > noise) return lateral.scale(1.0 / @sqrt(lat2));
+    return perpendicularTo(T, axis_a); // pure collinear ⇒ any axis-perpendicular
+}
+
+/// A deterministic unit vector perpendicular to `axis` (assumed unit): cross it
+/// with the world basis vector least aligned with it (so the cross is well away
+/// from zero), then normalize.
+fn perpendicularTo(comptime T: type, axis: math.Vec(3, T)) math.Vec(3, T) {
+    const Vec3T = math.Vec(3, T);
+    const a = axis.toArray();
+    const ax = @abs(a[0]);
+    const ay = @abs(a[1]);
+    const az = @abs(a[2]);
+    const basis = if (ax <= ay and ax <= az) Vec3T.unit_x else if (ay <= az) Vec3T.unit_y else Vec3T.unit_z;
+    const p = axis.cross(basis);
+    return p.scale(1.0 / @sqrt(p.dot(p)));
 }
 
 const testing = std.testing;

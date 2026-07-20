@@ -168,32 +168,47 @@ test "crossed capsules yield a single witness contact" {
 }
 
 test "nearly-parallel capsules transition deterministically" {
-    // M1.1.4/E1: the parallel↔crossed classification is a pure function of the
-    // pose (no accumulated state), so re-running any config gives a byte-identical
-    // manifold — no flip under re-run. Sweep a small yaw band straddling the
-    // parallel threshold; every config is stable, and the point count only ever
-    // takes the two allowed values (2 = parallel line, 1 = crossed witness).
+    // M1.1.4/E1 (P2-4): sample the ACTUAL scalar-specific parallel threshold —
+    // `sin²θ ≤ parallel_rel` (`1e-6` f32 / `1e-12` f64) ⇒ θ_thr ≈ `1e-3` f32 /
+    // `1e-6` f64 — just below / at / clearly above, in BOTH fixed A/B orders.
+    // Below ⇒ parallel 2-point; above ⇒ crossed single witness; every case is
+    // byte-deterministic on re-run. (A coarse 0.01-rad step skips the whole band.)
     const cap = capsuleShape(1, 0.4);
-    var a: Real = 0;
-    while (a <= 0.20 + 1.0e-9) : (a += 0.01) {
-        const rot = Quatr.fromAxisAngle(Vec3r.unit_z, a);
-        // Cores 0.5 apart in Z, r_sum 0.8 ⇒ a genuine overlap at every angle.
-        const m1 = collide(cap, vr(0, 0, 0), Quatr.identity, cap, vr(0, 0, 0.5), rot).?;
-        const m2 = collide(cap, vr(0, 0, 0), Quatr.identity, cap, vr(0, 0, 0.5), rot).?;
-        // Deterministic: identical count, points, penetration, ids on re-run.
-        try testing.expectEqual(m1.count, m2.count);
-        try testing.expect(m1.count == 1 or m1.count == 2);
-        for (0..m1.count) |i| {
-            try testing.expect(m1.points[i].position.approxEql(m2.points[i].position, 1.0e-6));
-            try testing.expectEqual(m1.points[i].penetration, m2.points[i].penetration);
-            try testing.expectEqual(m1.points[i].feature_id, m2.points[i].feature_id);
+    const thr: Real = if (Real == f32) 1.0e-3 else 1.0e-6;
+    const pa = vr(0, 0, 0);
+    const pb = vr(0, 0, 0.5); // cores 0.5 apart in Z ⇒ overlap at every angle
+    const co = struct {
+        fn f(sa: Vec3r, ra: Quatr, sb: Vec3r, rb: Quatr, cap_s: SupportShape) ContactManifold {
+            return narrowphase.collideOrdered(Real, cap_s, sa, ra, cap_s, sb, rb).?;
+        }
+    }.f;
+    const Case = struct { angle: Real, expect: u8 };
+    const cases = [_]Case{
+        .{ .angle = 0, .expect = 2 }, // exactly parallel
+        .{ .angle = 0.4 * thr, .expect = 2 }, // just below the threshold ⇒ parallel
+        .{ .angle = 4.0 * thr, .expect = 1 }, // clearly above ⇒ crossed
+    };
+    for (cases) |c| {
+        const rot = Quatr.fromAxisAngle(Vec3r.unit_z, c.angle);
+        inline for (.{ true, false }) |ab| {
+            const m1 = if (ab) co(pa, Quatr.identity, pb, rot, cap) else co(pb, rot, pa, Quatr.identity, cap);
+            const m2 = if (ab) co(pa, Quatr.identity, pb, rot, cap) else co(pb, rot, pa, Quatr.identity, cap);
+            try testing.expectEqual(c.expect, m1.count);
+            try testing.expectEqual(m1.count, m2.count); // deterministic on re-run
+            for (0..m1.count) |i| {
+                try testing.expect(m1.points[i].position.approxEql(m2.points[i].position, 1.0e-6));
+                try testing.expectEqual(m1.points[i].penetration, m2.points[i].penetration);
+                try testing.expectEqual(m1.points[i].feature_id, m2.points[i].feature_id);
+            }
         }
     }
-    // Exactly parallel (yaw 0) is the 2-point regime; a clear 0.2 rad yaw is a
-    // crossed single witness.
-    try testing.expectEqual(@as(u8, 2), collide(cap, vr(0, 0, 0), Quatr.identity, cap, vr(0, 0, 0.5), Quatr.identity).?.count);
-    const crossed = Quatr.fromAxisAngle(Vec3r.unit_z, 0.2);
-    try testing.expectEqual(@as(u8, 1), collide(cap, vr(0, 0, 0), Quatr.identity, cap, vr(0, 0, 0.5), crossed).?.count);
+    // At the threshold itself: the regime is a boundary (count 1 or 2), but the
+    // result is stable on re-run.
+    const at_rot = Quatr.fromAxisAngle(Vec3r.unit_z, thr);
+    const a1 = co(pa, Quatr.identity, pb, at_rot, cap);
+    const a2 = co(pa, Quatr.identity, pb, at_rot, cap);
+    try testing.expect(a1.count == 1 or a1.count == 2);
+    try testing.expectEqual(a1.count, a2.count);
 }
 
 test "degenerate capsule (half_height == 0) behaves as a sphere" {
