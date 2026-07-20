@@ -97,6 +97,35 @@ fn expectBothOrders(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb
     try expectEquivalent(ordered(sb, pb, rb, sa, pa, ra), generic(sb, pb, rb, sa, pa, ra), check_fid);
 }
 
+/// Geometric equivalence for MULTI-point manifolds, order-independent: same
+/// null-ness and `count`, same normal within tol, and every fast point matches
+/// some generic point (position + penetration within tol; `feature_id` too when
+/// `check_fid`). Used for box/box, whose clip may emit points in a different
+/// order between the fast and generic paths.
+fn expectEquivalentUnordered(fast: ?ContactManifold, gen: ?ContactManifold, check_fid: bool) !void {
+    try testing.expectEqual(fast == null, gen == null);
+    if (fast == null) return;
+    const f = fast.?;
+    const g = gen.?;
+    try testing.expectEqual(g.count, f.count);
+    try testing.expect(f.normal.approxEql(g.normal, diff_tol));
+    for (0..f.count) |i| {
+        var matched = false;
+        for (0..g.count) |j| {
+            const same_pos = f.points[i].position.approxEql(g.points[j].position, diff_tol);
+            const same_pen = @abs(f.points[i].penetration - g.points[j].penetration) <= diff_tol;
+            const same_fid = !check_fid or f.points[i].feature_id == g.points[j].feature_id;
+            if (same_pos and same_pen and same_fid) matched = true;
+        }
+        try testing.expect(matched);
+    }
+}
+
+fn expectBothOrdersUnordered(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr, check_fid: bool) !void {
+    try expectEquivalentUnordered(ordered(sa, pa, ra, sb, pb, rb), generic(sa, pa, ra, sb, pb, rb), check_fid);
+    try expectEquivalentUnordered(ordered(sb, pb, rb, sa, pa, ra), generic(sb, pb, rb, sa, pa, ra), check_fid);
+}
+
 /// Whether a count-1 manifold carries the single-witness class pair
 /// (`class_a` reference, `class_c` incident) — the point-core producer.
 fn isSingleWitnessClass(m: ContactManifold) bool {
@@ -106,20 +135,18 @@ fn isSingleWitnessClass(m: ContactManifold) bool {
 }
 
 test "not-yet-wired pairs equal the generic oracle exactly" {
-    // box/box (E3), capsule/capsule (E4), capsule/box (stays generic), and any
-    // rounded box → dispatcher returns `.not_handled`, so `collideOrdered` is the
-    // generic path verbatim.
-    const yaw = Quatr.fromAxisAngle(Vec3r.unit_y, std.math.pi / 4.0);
+    // capsule/capsule (E4), capsule/box (stays generic), and any rounded box →
+    // dispatcher returns `.not_handled`, so `collideOrdered` is the generic path
+    // verbatim. (sphere and box pairs are now wired — see the differentials.)
     const zrot = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
     const Combo = struct { sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr };
     const combos = [_]Combo{
-        .{ .sa = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = boxShape(1, 1, 1), .pb = vr(0, 1.5, 0), .rb = Quatr.identity },
-        .{ .sa = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = boxShape(1, 1, 1), .pb = vr(0, 1.9, 0), .rb = yaw },
         .{ .sa = capsuleShape(1, 0.5), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = capsuleShape(1, 0.5), .pb = vr(0.8, 0, 0), .rb = Quatr.identity },
         .{ .sa = capsuleShape(1, 0.3), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = capsuleShape(1, 0.3), .pb = vr(0, 0, 0.5), .rb = zrot },
         .{ .sa = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = capsuleShape(0.5, 0.5), .pb = vr(1.3, 0, 0), .rb = Quatr.identity },
         .{ .sa = roundedBoxShape(0.5, 0.5, 0.5, 1.0), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = roundedBoxShape(0.5, 0.5, 0.5, 1.0), .pb = vr(0, 2.5, 0), .rb = Quatr.identity },
         .{ .sa = sphereShape(0.5), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = roundedBoxShape(1, 1, 1, 0.2), .pb = vr(0, 1.3, 0), .rb = Quatr.identity },
+        .{ .sa = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .sb = roundedBoxShape(1, 1, 1, 0.2), .pb = vr(0, 1.5, 0), .rb = Quatr.identity },
     };
     for (combos) |c| {
         try testing.expect(manifoldsIdentical(ordered(c.sa, c.pa, c.ra, c.sb, c.pb, c.rb), generic(c.sa, c.pa, c.ra, c.sb, c.pb, c.rb)));
@@ -223,5 +250,110 @@ test "sphere/box P1d deep extreme aspect (closed-form)" {
         try testing.expect(ms.normal.approxEql(c.n.neg(), diff_tol));
         try testing.expectApproxEqAbs(c.pen, ms.points[0].penetration, diff_tol);
         try testing.expect(ms.points[0].position.approxEql(c.pos, diff_tol));
+    }
+}
+
+/// Whether the generic oracle is SELF-CONSISTENT on this pair — same null-ness,
+/// same `count`, and negated normal across the two A/B orders. `collideOrdered`
+/// is fixed-order and runs GJK/EPA in the frame of A; for a deep, rotated pair
+/// EPA can converge to DIFFERENT faces in the two frames (an M1.1.3 EPA
+/// frame-dependence, NOT a fast-path issue — the SAT fast path is order-
+/// independent by construction; see the order-independence test). Where generic
+/// disagrees with itself it is an unreliable oracle, so the differential skips
+/// it. This is the concrete motivation for the analytic fast path.
+fn genericConsistent(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr) bool {
+    const ab = generic(sa, pa, ra, sb, pb, rb);
+    const ba = generic(sb, pb, rb, sa, pa, ra);
+    if ((ab == null) != (ba == null)) return false;
+    if (ab == null) return true;
+    if (ab.?.count != ba.?.count) return false;
+    return ab.?.normal.approxEql(ba.?.normal.neg(), diff_tol);
+}
+
+test "box/box SAT differential vs generic (<=30:1)" {
+    // Cube A at the origin vs cube B rotated/offset — a broad sweep hitting the
+    // face-face, face-vertex and edge-edge regimes. Per config, `collideOrdered`
+    // is compared to the generic oracle in BOTH A/B orders, but only where that
+    // oracle is self-consistent across orders (deep rotated pairs where the
+    // generic EPA is frame-dependent — an M1.1.3 EPA limitation the SAT fast path
+    // does not share — are skipped via `genericConsistent`). Geometry-only (fid
+    // tie bands excluded); fid-exact is asserted on the clean explicit configs.
+    const box = boxShape(1, 1, 1);
+    const rots = [_]Quatr{
+        Quatr.identity,
+        Quatr.fromAxisAngle(Vec3r.unit_y, std.math.pi / 4.0), // yaw ⇒ face-face octagon→4
+        Quatr.fromAxisAngle(Vec3r.unit_x, 0.4), // tilt ⇒ edge/face
+        Quatr.fromAxisAngle(vr(1, 1, 1).normalize(), 0.62), // corner-lead ⇒ vertex/edge
+        Quatr.fromAxisAngle(Vec3r.unit_z, 0.5),
+    };
+    const offs = [_]Vec3r{ vr(0, 1.5, 0), vr(0.5, 1.5, 0.3), vr(0, 1.8, 0), vr(0.3, 1.6, -0.3) };
+    const globals = [_]Quatr{ Quatr.identity, Quatr.fromAxisAngle(vr(1, 2, 3).normalize(), 0.7) };
+    var saw_face = false; // a multi-point (clip) manifold
+    var saw_single = false; // a single-witness (edge/vertex) manifold
+    var compared: u32 = 0; // configs where the oracle was trustworthy
+    for (globals) |g| {
+        for (rots) |r| {
+            for (offs) |o| {
+                const pa = g.rotateVec3(vr(0, 0, 0));
+                const pb = g.rotateVec3(o);
+                const ra = g;
+                const rb = g.mul(r);
+                const m = ordered(box, pa, ra, box, pb, rb) orelse continue;
+                // Compare fast vs generic in both orders, only where the oracle
+                // is self-consistent (i.e. its EPA converged reliably).
+                if (genericConsistent(box, pa, ra, box, pb, rb)) {
+                    try expectBothOrdersUnordered(box, pa, ra, box, pb, rb, false);
+                    compared += 1;
+                }
+                if (m.count >= 3) saw_face = true;
+                if (m.count == 1) saw_single = true;
+            }
+        }
+    }
+    // The sweep genuinely exercised both a face-face clip and an edge/vertex
+    // single witness, and the trustworthy-oracle differential ran on many configs.
+    try testing.expect(saw_face and saw_single);
+    try testing.expect(compared >= 20);
+
+    // Clean explicit configs, fid-exact (away from ties), both orders:
+    // axis-aligned face-face (4 pts) and a 45°-yaw face-face (octagon→4 pts) —
+    // shallow, so the generic oracle is reliable in both orders.
+    try expectBothOrdersUnordered(box, vr(0, 0, 0), Quatr.identity, box, vr(0, 1.9, 0), Quatr.identity, true);
+    const yaw = Quatr.fromAxisAngle(Vec3r.unit_y, std.math.pi / 4.0);
+    try expectBothOrdersUnordered(box, vr(0, 0, 0), Quatr.identity, box, vr(0, 1.9, 0), yaw, true);
+
+    // Moderate aspect (up to 30:1) face-face — still the generic-reliable regime.
+    const aspects = [_]Real{ 5, 15, 30 };
+    for (aspects) |ar| {
+        const b = boxShape(ar, 1, ar * 0.5);
+        try expectBothOrdersUnordered(b, vr(0, 0, 0), Quatr.identity, b, vr(0, 1.9, 0), Quatr.identity, true);
+    }
+}
+
+test "box/box SAT extreme aspect (closed-form)" {
+    // A face-face overlap of two >50:1 boxes: SAT has no GJK degeneracy, so the
+    // fast path is correct at any aspect (the box/box P1d fix). The generic path
+    // is documented invalid here, so the oracle is CLOSED-FORM. Two equal boxes
+    // stacked 1.5 apart in Y (half-extents hy=1) ⇒ overlap 0.5, normal +Y, 4
+    // points on the plane y=0.75, spanning the full X/Z overlap rectangle.
+    const aspects = [_]Real{ 50, 100, 212 };
+    for (aspects) |hx| {
+        const box = boxShape(hx, 1, 1);
+        const m = ordered(box, vr(0, 0, 0), Quatr.identity, box, vr(0, 1.5, 0), Quatr.identity).?;
+        try testing.expectEqual(@as(u8, 4), m.count);
+        try testing.expect(m.normal.approxEql(vr(0, 1, 0), diff_tol));
+        var max_abs_x: Real = 0;
+        for (0..m.count) |i| {
+            try testing.expectApproxEqAbs(@as(Real, 0.5), m.points[i].penetration, diff_tol); // r_sum 0 ⇒ overlap 0.5
+            try testing.expectApproxEqAbs(@as(Real, 0.75), m.points[i].position.toArray()[1], diff_tol); // contact plane
+            max_abs_x = @max(max_abs_x, @abs(m.points[i].position.toArray()[0]));
+        }
+        // The manifold spans the full X overlap (proves the clip works at extreme
+        // aspect — a naive GJK/EPA would collapse or mis-classify here).
+        try testing.expectApproxEqAbs(hx, max_abs_x, diff_tol);
+        // Swapped order ⇒ the normal negates, geometry holds.
+        const ms = ordered(box, vr(0, 1.5, 0), Quatr.identity, box, vr(0, 0, 0), Quatr.identity).?;
+        try testing.expectEqual(@as(u8, 4), ms.count);
+        try testing.expect(ms.normal.approxEql(vr(0, -1, 0), diff_tol));
     }
 }

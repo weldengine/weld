@@ -20,10 +20,10 @@
 //!
 //! **Status.** E1 laid the foundation (`ContactSeed`, `FastResult`, a no-op
 //! dispatcher). E2 wired the point-core pairs — **sphere/sphere** and
-//! **sphere/box** (both orders) — each with a `separated` short-circuit (no
-//! GJK). Box/box SAT (E3) and capsule/capsule (E4) follow behind this same
-//! three-state contract. Anything not yet wired (capsule/*, box/box, a rounded
-//! box) returns `.not_handled`.
+//! **sphere/box** (both orders). E3 added **box/box** via a separating-axis test
+//! (15 candidate axes → the least-overlap axis → seed). capsule/capsule (E4)
+//! follows behind this same three-state contract. Anything not yet wired
+//! (capsule/*, a rounded box) returns `.not_handled`.
 //!
 //! **Classification parity with the generic oracle.** The `separated` decision
 //! mirrors `gjk.zig` exactly — `dist − r_sum > conv_k · floatEps(T) ·
@@ -88,10 +88,10 @@ pub fn FastResult(comptime T: type) type {
 /// closest-point ownership follow that order, so `generateManifold`'s feature_id
 /// halves swap with the order exactly as on the generic path.
 ///
-/// Wired (E2): sphere/sphere and sphere/box (both orders). `.not_handled` for
-/// everything else (box/box → E3, capsule/capsule → E4, capsule/box and
-/// sphere/capsule stay generic), and for any box core with `radius > 0` (a
-/// rounded box — the kernels are radius-0-box only).
+/// Wired: sphere/sphere, sphere/box (E2), and box/box SAT (E3), all orders.
+/// `.not_handled` for capsule/capsule (→ E4), capsule/box + sphere/capsule (stay
+/// generic), and any box core with `radius > 0` (a rounded box — the kernels are
+/// radius-0-box only).
 pub fn fastSeed(
     comptime T: type,
     shape_a: support.SupportShape(T),
@@ -112,7 +112,12 @@ pub fn fastSeed(
         .box => |he_a| switch (shape_b.core) {
             // box (A) / sphere (B).
             .point => return sphereBox(T, pos_b, shape_b.radius, pos_a, rot_a, he_a, shape_a.radius, .box_is_a),
-            else => return .not_handled, // box/box → E3, box/capsule stays generic
+            // box/box — SAT (both cores must be radius-0).
+            .box => |he_b| {
+                if (shape_a.radius != 0 or shape_b.radius != 0) return .not_handled; // rounded box → generic
+                return boxBox(T, pos_a, rot_a, he_a, pos_b, rot_b, he_b);
+            },
+            .segment => return .not_handled, // box/capsule stays generic
         },
         .segment => return .not_handled, // capsule/capsule → E4, others stay generic
     }
@@ -269,9 +274,175 @@ fn fallbackLocalNormal(comptime T: type, c_local: math.Vec(3, T)) math.Vec(3, T)
     return math.Vec(3, T).fromArray(axis);
 }
 
+/// The box/box separating-axis test → `ContactSeed` (both boxes radius 0). Tests
+/// the 15 candidate axes — 3 A-face normals, 3 B-face normals, 9 edge×edge cross
+/// products (degeneracy-guarded: a near-parallel edge pair is skipped, its
+/// separation already covered by the face axes) — and returns `.separated` on
+/// the first axis with no overlap. Otherwise the least-overlap axis is the
+/// contact normal + depth. A small face-preferring bias resolves face/edge ties
+/// (matching EPA, and killing edge-axis numerical jitter). SAT has NO GJK
+/// degeneracy, so this is robust at ANY aspect ratio (the box/box P1d fix).
+///
+/// The seed feeds the unchanged `generateManifold`: a FACE axis (`n_a` aligned
+/// with a box face) drives the supporting-face clip → the multi-point manifold
+/// (closest points + `base_penetration` unused there); an EDGE axis drives the
+/// FIX-1 single-witness fallback → the contact at the midpoint of the closest
+/// points of the two contributing edges (computed here).
+fn boxBox(
+    comptime T: type,
+    ca: math.Vec(3, T),
+    ra: math.Quat(T),
+    he_a: math.Vec(3, T),
+    cb: math.Vec(3, T),
+    rb: math.Quat(T),
+    he_b: math.Vec(3, T),
+) FastResult(T) {
+    const Vec3T = math.Vec(3, T);
+    const axa = [3]Vec3T{ ra.rotateVec3(Vec3T.unit_x), ra.rotateVec3(Vec3T.unit_y), ra.rotateVec3(Vec3T.unit_z) };
+    const axb = [3]Vec3T{ rb.rotateVec3(Vec3T.unit_x), rb.rotateVec3(Vec3T.unit_y), rb.rotateVec3(Vec3T.unit_z) };
+    const hea = he_a.toArray();
+    const heb = he_b.toArray();
+    const dc = cb.sub(ca);
+    const scale = dc.length() + he_a.length() + he_b.length();
+    const margin = contactMargin(T, scale);
+
+    // Track the least-overlap FACE axis and least-overlap EDGE axis separately so
+    // a small bias can prefer a face on a near-tie (edge cross products carry more
+    // rounding, and face contacts are the stable manifold).
+    var face_depth: T = std.math.floatMax(T);
+    var face_axis = Vec3T.unit_x;
+    var edge_depth: T = std.math.floatMax(T);
+    var edge_axis = Vec3T.unit_x;
+    var edge_i: usize = 0;
+    var edge_j: usize = 0;
+    var have_edge = false;
+
+    // Face axes (already unit).
+    for (0..6) |k| {
+        const L = if (k < 3) axa[k] else axb[k - 3];
+        const ov = boxOverlapOnAxis(T, L, axa, hea, axb, heb, dc);
+        if (ov < -margin) return .separated;
+        if (ov < face_depth) {
+            face_depth = ov;
+            face_axis = L;
+        }
+    }
+    // Edge×edge axes.
+    const par_eps: T = if (T == f32) 1.0e-6 else 1.0e-12;
+    for (0..3) |i| {
+        for (0..3) |j| {
+            var L = axa[i].cross(axb[j]);
+            const l2 = L.dot(L);
+            if (l2 <= par_eps) continue; // parallel edges — covered by the faces
+            L = L.scale(1.0 / @sqrt(l2));
+            const ov = boxOverlapOnAxis(T, L, axa, hea, axb, heb, dc);
+            if (ov < -margin) return .separated;
+            if (!have_edge or ov < edge_depth) {
+                edge_depth = ov;
+                edge_axis = L;
+                edge_i = i;
+                edge_j = j;
+                have_edge = true;
+            }
+        }
+    }
+
+    // Choose face vs edge (face-preferring on a tie), then orient the normal A→B.
+    const edge_bias: T = (if (T == f32) @as(T, 1.0e-3) else @as(T, 1.0e-6)) * scale;
+    const use_edge = have_edge and (edge_depth + edge_bias < face_depth);
+    var normal = if (use_edge) edge_axis else face_axis;
+    const depth = if (use_edge) edge_depth else face_depth;
+    if (dc.dot(normal) < 0) normal = normal.neg();
+
+    if (use_edge) {
+        // The two contributing edges: A's edge (parallel to axis edge_i) extremal
+        // toward +normal, B's edge (parallel to edge_j) extremal toward −normal.
+        const ea = contactEdge(T, ca, axa, hea, edge_i, normal);
+        const eb = contactEdge(T, cb, axb, heb, edge_j, normal.neg());
+        const cp = closestSegSeg(T, ea[0], ea[1], eb[0], eb[1]);
+        return .{ .contact = .{
+            .normal = normal,
+            .closest_a = cp[0],
+            .closest_b = cp[1],
+            .base_penetration = depth,
+        } };
+    }
+    // Face axis: the clip ignores the closest points, but supply sane support
+    // points (A's deepest toward +normal, B's toward −normal) for robustness.
+    return .{ .contact = .{
+        .normal = normal,
+        .closest_a = boxSupportPoint(T, ca, axa, hea, normal),
+        .closest_b = boxSupportPoint(T, cb, axb, heb, normal.neg()),
+        .base_penetration = depth,
+    } };
+}
+
+/// Signed overlap of the two OBBs projected onto unit axis `L`: `radius_a +
+/// radius_b − |Δcentre · L|`. Negative ⇒ `L` is a separating axis.
+fn boxOverlapOnAxis(comptime T: type, L: math.Vec(3, T), axa: [3]math.Vec(3, T), hea: [3]T, axb: [3]math.Vec(3, T), heb: [3]T, dc: math.Vec(3, T)) T {
+    var ra_proj: T = 0;
+    var rb_proj: T = 0;
+    for (0..3) |k| {
+        ra_proj += hea[k] * @abs(axa[k].dot(L));
+        rb_proj += heb[k] * @abs(axb[k].dot(L));
+    }
+    return ra_proj + rb_proj - @abs(dc.dot(L));
+}
+
+/// The box corner (world) farthest along `dir`: `centre + Σ_k axis_k ·
+/// sign(axis_k · dir) · he_k`.
+fn boxSupportPoint(comptime T: type, c: math.Vec(3, T), ax: [3]math.Vec(3, T), he: [3]T, dir: math.Vec(3, T)) math.Vec(3, T) {
+    var p = c;
+    for (0..3) |k| {
+        const s: T = if (ax[k].dot(dir) >= 0) 1 else -1;
+        p = p.add(ax[k].scale(s * he[k]));
+    }
+    return p;
+}
+
+/// The box edge (world segment) parallel to local axis `dir_idx` and extremal
+/// toward `toward`: the two axes perpendicular to `dir_idx` are pinned to the
+/// corner farthest along `toward`; the edge spans `±he[dir_idx]` along its axis.
+fn contactEdge(comptime T: type, c: math.Vec(3, T), ax: [3]math.Vec(3, T), he: [3]T, dir_idx: usize, toward: math.Vec(3, T)) [2]math.Vec(3, T) {
+    var center = c;
+    for (0..3) |k| {
+        if (k == dir_idx) continue;
+        const s: T = if (ax[k].dot(toward) >= 0) 1 else -1;
+        center = center.add(ax[k].scale(s * he[k]));
+    }
+    const half = ax[dir_idx].scale(he[dir_idx]);
+    return .{ center.sub(half), center.add(half) };
+}
+
+/// Closest points between two segments `p1`–`q1` and `p2`–`q2` (Ericson RTCD
+/// §5.1.9). Returns `[closest_on_1, closest_on_2]`. Both segments here are box
+/// edges (non-degenerate, `he > 0`), so the segment lengths are strictly
+/// positive; the parametric denominators are guarded regardless.
+fn closestSegSeg(comptime T: type, p1: math.Vec(3, T), q1: math.Vec(3, T), p2: math.Vec(3, T), q2: math.Vec(3, T)) [2]math.Vec(3, T) {
+    const d1 = q1.sub(p1);
+    const d2 = q2.sub(p2);
+    const r = p1.sub(p2);
+    const a = d1.dot(d1);
+    const e = d2.dot(d2);
+    const f = d2.dot(r);
+    const c = d1.dot(r);
+    const b = d1.dot(d2);
+    const denom = a * e - b * b;
+    var s: T = if (denom > 0) std.math.clamp((b * f - c * e) / denom, 0, 1) else 0;
+    var t: T = if (e > 0) (b * s + f) / e else 0;
+    if (t < 0) {
+        t = 0;
+        s = if (a > 0) std.math.clamp(-c / a, 0, 1) else 0;
+    } else if (t > 1) {
+        t = 1;
+        s = if (a > 0) std.math.clamp((b - c) / a, 0, 1) else 0;
+    }
+    return .{ p1.add(d1.scale(s)), p2.add(d2.scale(t)) };
+}
+
 const testing = std.testing;
 
-test "fastSeed dispatch routing (E2 handles the point-core pairs)" {
+test "fastSeed dispatch routing (E3 handles sphere and box pairs)" {
     const T = f32;
     const V = math.Vec(3, T);
     const Q = math.Quat(T);
@@ -284,19 +455,22 @@ test "fastSeed dispatch routing (E2 handles the point-core pairs)" {
     const near = V.fromArray(.{ 0.4, 0, 0 }); // overlapping
     const far = V.fromArray(.{ 9, 0, 0 }); // clearly separated
 
-    // Handled point-core pairs → contact (near) / separated (far).
+    // Handled pairs → contact (near) / separated (far).
     try testing.expect(fastSeed(T, sphere, V.zero, Q.identity, sphere, near, Q.identity) == .contact);
     try testing.expect(fastSeed(T, sphere, V.zero, Q.identity, sphere, far, Q.identity) == .separated);
     try testing.expect(fastSeed(T, sphere, V.zero, Q.identity, box, near, Q.identity) == .contact);
     try testing.expect(fastSeed(T, box, V.zero, Q.identity, sphere, near, Q.identity) == .contact);
     try testing.expect(fastSeed(T, sphere, V.zero, Q.identity, box, far, Q.identity) == .separated);
+    try testing.expect(fastSeed(T, box, V.zero, Q.identity, box, near, Q.identity) == .contact); // box/box (E3)
+    try testing.expect(fastSeed(T, box, V.zero, Q.identity, box, far, Q.identity) == .separated);
 
     // Not-yet-wired / unsupported pairs → not_handled (fall through to generic).
-    try testing.expect(fastSeed(T, box, V.zero, Q.identity, box, near, Q.identity) == .not_handled); // E3
     try testing.expect(fastSeed(T, capsule, V.zero, Q.identity, capsule, near, Q.identity) == .not_handled); // E4
     try testing.expect(fastSeed(T, capsule, V.zero, Q.identity, box, near, Q.identity) == .not_handled); // generic
     try testing.expect(fastSeed(T, sphere, V.zero, Q.identity, capsule, near, Q.identity) == .not_handled); // generic
-    // Rounded box in a sphere/box pair → not_handled (kernels are radius-0-box only).
+    // Any rounded box → not_handled (kernels are radius-0-box only).
     try testing.expect(fastSeed(T, sphere, V.zero, Q.identity, rbox, near, Q.identity) == .not_handled);
     try testing.expect(fastSeed(T, rbox, V.zero, Q.identity, sphere, near, Q.identity) == .not_handled);
+    try testing.expect(fastSeed(T, box, V.zero, Q.identity, rbox, near, Q.identity) == .not_handled);
+    try testing.expect(fastSeed(T, rbox, V.zero, Q.identity, rbox, near, Q.identity) == .not_handled);
 }
