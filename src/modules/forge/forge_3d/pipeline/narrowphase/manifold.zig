@@ -187,9 +187,12 @@ pub fn collideOrderedGeneric(
         const sep = closest_b.sub(closest_a);
         const sep_len_sq = sep.dot(sep);
         // n = normalize(closest_b − closest_a); guard the dist ≈ 0 boundary (the
-        // shallow↔deep seam) with the centre-to-centre search direction.
-        const noise: T = if (T == f32) 1.0e-12 else 1.0e-24;
-        n_world = if (sep_len_sq > noise) sep.scale(1.0 / @sqrt(sep_len_sq)) else fallbackNormal(T, pos_a, pos_b);
+        // shallow↔deep seam) with the centre-to-centre search direction. The floor
+        // is SCALE-RELATIVE to the absolute witness magnitude (never an absolute
+        // metric constant, E7) — the scale the `closest_b − closest_a` subtraction
+        // rounds over.
+        const noise_scale = 8 * std.math.floatEps(T) * (closest_a.length() + closest_b.length());
+        n_world = if (sep_len_sq > noise_scale * noise_scale) sep.scale(1.0 / @sqrt(sep_len_sq)) else fallbackNormal(T, pos_a, pos_b);
         base_penetration = r_sum - g.distance;
     }
 
@@ -285,10 +288,14 @@ pub fn generateManifold(
     // world at the very end.
     var raw: [max_clip]Candidate(T) = undefined;
     var raw_n: usize = 0;
-    const keep_eps: T = if (T == f32) 1.0e-5 else 1.0e-10;
     for (clipped, 0..) |v, ci| {
         const s = v.sub(ref_pt).dot(rn);
         const pen = r_sum - s;
+        // Keep points on the boundary within float noise; SCALE-RELATIVE (never an
+        // absolute metric constant, E7): the rounding of `pen = r_sum − s` is
+        // `~floatEps·(r_sum + |v − ref_pt|)`, so a point more negative than that is
+        // genuinely outside and dropped.
+        const keep_eps = 16 * std.math.floatEps(T) * (r_sum + v.sub(ref_pt).length());
         if (pen < -keep_eps) continue;
         // Surface points: reference face + r_ref outward; incident core − r_inc.
         const foot = v.sub(rn.scale(s));
@@ -671,7 +678,15 @@ fn faceCentroid(comptime T: type, face: support.Face(T)) math.Vec(3, T) {
 /// points are deduplicated first. Deterministic tie-breaks (strict `>`; first
 /// index wins). Writes the chosen `pts` indices into `idx`, returns the count.
 fn reduceToFour(comptime T: type, pts: []const Candidate(T), normal: math.Vec(3, T), idx: *[4]usize) usize {
-    const eps: T = if (T == f32) 1.0e-5 else 1.0e-10;
+    // Coincidence tolerance for the dedup: SCALE-RELATIVE to the point set's own
+    // A-frame extent (`k·floatEps·max|pos|`), never an absolute metric constant,
+    // so a manifold reduces identically at any scale (E7 — the class that broke
+    // small geometries). A-frame positions stay small even far from the world
+    // origin, so this also preserves the M1.1.3 far-from-origin reduction; at
+    // unit scale it is ≈ 1.6e-6 (f32), far below any distinct contact spacing.
+    var coord_scale: T = 0;
+    for (pts) |c| coord_scale = @max(coord_scale, c.pos.length());
+    const eps: T = 16 * std.math.floatEps(T) * coord_scale;
     // Deduplicate coincident contacts (indices into `pts`).
     var uniq: [max_clip]usize = undefined;
     var un: usize = 0;

@@ -142,6 +142,18 @@ fn contactMargin(comptime T: type, coord_scale: T) T {
     return conv_k * std.math.floatEps(T) * coord_scale;
 }
 
+/// Squared coincidence threshold: two witness points are numerically coincident
+/// (their difference is pure float rounding, so the A→B normal is undefined) when
+/// `dist² ≤ (noise_k · floatEps(T) · coord_scale)²`. `coord_scale` is the ABSOLUTE
+/// coordinate magnitude the `cb − ca` subtraction rounds over — NEVER an absolute
+/// metric constant, and NOT `|Δcentres|` (which vanishes near coincidence). This
+/// is the length-based-threshold discipline of `gjk.zig` / spec §315 (E7).
+fn coincidenceEpsSq(comptime T: type, coord_scale: T) T {
+    const noise_k: T = 8;
+    const eps = noise_k * std.math.floatEps(T) * coord_scale;
+    return eps * eps;
+}
+
 /// The sphere/sphere seed: cores are the two centres (radius excluded). Shallow
 /// for any non-zero centre distance (points are 0-D, never "deep" unless
 /// coincident); `.separated` past the inflated margin; a deterministic +X
@@ -153,8 +165,9 @@ fn sphereSphere(comptime T: type, ca: math.Vec(3, T), ra: T, cb: math.Vec(3, T),
     const dist = @sqrt(dist_sq);
     const r_sum = ra + rb;
     if (dist - r_sum > contactMargin(T, dist)) return .separated;
-    const coincidence: T = if (T == f32) 1.0e-12 else 1.0e-24;
-    const normal = if (dist_sq > coincidence) d.scale(1.0 / dist) else math.Vec(3, T).unit_x;
+    // Coincident ⟺ dist below the absolute-coordinate rounding scale (E7).
+    const coord_scale = ca.length() + cb.length();
+    const normal = if (dist_sq > coincidenceEpsSq(T, coord_scale)) d.scale(1.0 / dist) else math.Vec(3, T).unit_x;
     return .{ .contact = .{
         .normal = normal,
         .closest_a = ca,
@@ -210,10 +223,11 @@ fn sphereBox(
         const dist = @sqrt(dist_sq);
         const coord_scale = sphere_c.sub(box_c).length() + boxExtent(T, box_he);
         if (dist - r_sum > contactMargin(T, coord_scale)) return .separated;
-        const coincidence: T = if (T == f32) 1.0e-12 else 1.0e-24;
         // Normal from the box surface toward the sphere centre; on the surface
-        // (dist ≈ 0, the shallow↔deep seam) fall back to the centre direction.
-        const n_local = if (dist_sq > coincidence) delta.scale(1.0 / dist) else fallbackLocalNormal(T, c_local);
+        // (dist ≈ 0, the shallow↔deep seam) fall back to the least-penetration
+        // face axis. Coincidence scales with the ABSOLUTE coordinate magnitude (E7).
+        const coincidence_scale = sphere_c.length() + box_c.length() + boxExtent(T, box_he);
+        const n_local = if (dist_sq > coincidenceEpsSq(T, coincidence_scale)) delta.scale(1.0 / dist) else fallbackLocalNormal(T, c_local);
         n_bs = box_rot.rotateVec3(n_local);
         base_penetration = r_sum - dist;
     } else {
@@ -434,11 +448,14 @@ fn contactEdge(comptime T: type, c: math.Vec(3, T), ax: [3]math.Vec(3, T), he: [
 
 /// Closest points between two segments `p1`–`q1` and `p2`–`q2` (Ericson RTCD
 /// §5.1.9, ALL degenerate branches). Returns `[closest_on_1, closest_on_2]`. A
-/// segment whose squared length is ≤ `seg_eps` is treated as a POINT: if both
-/// degenerate, `s = t = 0`; if only segment 1, `s = 0`, `t = clamp(f/e)` (project
-/// its point onto segment 2); if only segment 2, `t = 0`, `s = clamp(−c/a)`
-/// (project its point onto segment 1). A `half_height == 0` capsule reaches these
-/// point branches; box edges never do (P1-1).
+/// segment of EXACTLY zero length (`a == 0` / `e == 0`) is treated as a POINT: if
+/// both degenerate, `s = t = 0`; if only segment 1, `s = 0`, `t = clamp(f/e)`
+/// (project its point onto segment 2); if only segment 2, `t = 0`, `s = clamp(−c/a)`
+/// (project its point onto segment 1). The test is EXACT zero — never an absolute
+/// metric floor — so a genuinely resolvable but tiny segment (e.g. `a = 6.4e-11`)
+/// takes the general branch (E7); a `half_height == 0` capsule gives `a == 0`
+/// exactly and takes the point branch. Every sub-branch's denominator is
+/// guarded (`a > 0`, `e > 0`, `denom > 0`) + clamped.
 fn closestSegSeg(comptime T: type, p1: math.Vec(3, T), q1: math.Vec(3, T), p2: math.Vec(3, T), q2: math.Vec(3, T)) [2]math.Vec(3, T) {
     const d1 = q1.sub(p1);
     const d2 = q2.sub(p2);
@@ -446,20 +463,19 @@ fn closestSegSeg(comptime T: type, p1: math.Vec(3, T), q1: math.Vec(3, T), p2: m
     const a = d1.dot(d1); // |seg1|²
     const e = d2.dot(d2); // |seg2|²
     const f = d2.dot(r);
-    const seg_eps: T = if (T == f32) 1.0e-10 else 1.0e-20;
     var s: T = 0;
     var t: T = 0;
-    if (a <= seg_eps and e <= seg_eps) {
-        // Both segments are points.
+    if (a <= 0 and e <= 0) {
+        // Both segments are points (exact zero length).
         s = 0;
         t = 0;
-    } else if (a <= seg_eps) {
+    } else if (a <= 0) {
         // Segment 1 is a point ⇒ project it onto segment 2.
         s = 0;
         t = std.math.clamp(f / e, 0, 1);
     } else {
         const c = d1.dot(r);
-        if (e <= seg_eps) {
+        if (e <= 0) {
             // Segment 2 is a point ⇒ project it onto segment 1.
             t = 0;
             s = std.math.clamp(-c / a, 0, 1);
@@ -513,8 +529,9 @@ fn capsuleCapsule(
     const r_sum = r_a + r_b;
     const coord_scale = cb.sub(ca).length() + ha + hb;
     if (dist - r_sum > contactMargin(T, coord_scale)) return .separated;
-    const coincidence: T = if (T == f32) 1.0e-12 else 1.0e-24;
-    const normal = if (dist_sq > coincidence) d.scale(1.0 / dist) else capsuleFallbackNormal(T, ay, by, cb.sub(ca));
+    // Coincident witnesses scale with the ABSOLUTE coordinate magnitude (E7).
+    const coincidence_scale = ca.length() + cb.length() + ha + hb;
+    const normal = if (dist_sq > coincidenceEpsSq(T, coincidence_scale)) d.scale(1.0 / dist) else capsuleFallbackNormal(T, ay, by, cb.sub(ca));
     return .{ .contact = .{
         .normal = normal,
         .closest_a = cp[0],
@@ -531,14 +548,20 @@ fn capsuleCapsule(
 /// pure collinear overlap), pick a deterministic perpendicular to the axis. Never
 /// returns a component along the axis for a parallel pair (P1-3).
 fn capsuleFallbackNormal(comptime T: type, axis_a: math.Vec(3, T), axis_b: math.Vec(3, T), dcentre: math.Vec(3, T)) math.Vec(3, T) {
-    const noise: T = if (T == f32) 1.0e-12 else 1.0e-24;
+    // `axis_a`, `axis_b` are UNIT, so `|axis_a × axis_b|² = sin²θ` is a
+    // DIMENSIONLESS parallelism test — a constant floor is correct here.
+    const sin2_floor: T = if (T == f32) 1.0e-12 else 1.0e-24;
     const cr = axis_a.cross(axis_b);
     const cr2 = cr.dot(cr);
-    if (cr2 > noise) return cr.scale(1.0 / @sqrt(cr2)); // crossed ⇒ mutual perpendicular
+    if (cr2 > sin2_floor) return cr.scale(1.0 / @sqrt(cr2)); // crossed ⇒ mutual perpendicular
     // Parallel axes: strip the axial component of `dcentre` → the radial direction.
+    // Collinear ⟺ the lateral fraction `lat2/dc2 = sin²(∠(dcentre, axis))` is
+    // negligible — a DIMENSIONLESS ratio (not an absolute length floor, E7). A
+    // pure collinear or coincident pair (`lat2 == 0`) picks a fixed perpendicular.
     const lateral = dcentre.sub(axis_a.scale(dcentre.dot(axis_a)));
     const lat2 = lateral.dot(lateral);
-    if (lat2 > noise) return lateral.scale(1.0 / @sqrt(lat2));
+    const dc2 = dcentre.dot(dcentre);
+    if (lat2 > sin2_floor * dc2) return lateral.scale(1.0 / @sqrt(lat2));
     return perpendicularTo(T, axis_a); // pure collinear ⇒ any axis-perpendicular
 }
 

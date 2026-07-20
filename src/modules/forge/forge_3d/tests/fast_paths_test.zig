@@ -604,6 +604,95 @@ test "collinear capsules use a radial normal (P1-3)" {
     for (0..m.count) |i| try testing.expectApproxEqAbs(@as(Real, 0.6), m.points[i].penetration, diff_tol);
 }
 
+// --- E7: scale-invariance / small-geometry class (RED-first) ---
+
+test "capsule endpoint segment resolves at tiny scale (P1)" {
+    // P1 (E7): `closestSegSeg`'s degeneracy test must be EXACT zero, not an
+    // absolute `1e-10`. A capsule with `a = (2·4e-6)² = 6.4e-11 > 0` is a
+    // resolvable segment, but the old `seg_eps = 1e-10` collapsed it to a point.
+    // A (h=4e-6, r=1e-6) segment vs B (h=0, r=1e-6) point at y=5.5e-6 ⇒ closest
+    // core distance 1.5e-6 < r_sum 2e-6 ⇒ contact pen 5e-7, BOTH orders.
+    const a = capsuleShape(4e-6, 1e-6);
+    const b = capsuleShape(0, 1e-6);
+    const ab = ordered(a, vr(0, 0, 0), Quatr.identity, b, vr(0, 5.5e-6, 0), Quatr.identity) orelse return error.NoContactAB;
+    try testing.expectApproxEqAbs(@as(Real, 5e-7), ab.points[0].penetration, 1e-8);
+    const ba = ordered(b, vr(0, 5.5e-6, 0), Quatr.identity, a, vr(0, 0, 0), Quatr.identity) orelse return error.NoContactBA;
+    try testing.expectApproxEqAbs(@as(Real, 5e-7), ba.points[0].penetration, 1e-8);
+}
+
+test "tiny spheres keep the center-to-center normal (P1)" {
+    // P1 (E7): the coincidence test on `dist_sq` must scale with the ABSOLUTE
+    // coordinate magnitude, not an absolute `1e-12`. Two r=3e-7 spheres 5e-7 apart
+    // in Y overlap (r_sum 6e-7 > 5e-7); the normal must be ±Y, not the +X
+    // coincidence fallback (`dist_sq = 2.5e-13` tripped the old absolute floor).
+    const s = sphereShape(3e-7);
+    const m = ordered(s, vr(0, 0, 0), Quatr.identity, s, vr(0, 5e-7, 0), Quatr.identity) orelse return error.NoContact;
+    try testing.expectEqual(@as(u8, 1), m.count);
+    const n = m.normal.toArray();
+    try testing.expectApproxEqAbs(@as(Real, 0), n[0], diff_tol); // ⊥ X
+    try testing.expectApproxEqAbs(@as(Real, 0), n[2], diff_tol); // ⊥ Z
+    try testing.expectApproxEqAbs(@as(Real, 1), @abs(n[1]), diff_tol); // along ±Y
+}
+
+/// Scale a support shape's core + radius by `s` (positions are scaled at the
+/// call site) — for the scale-invariance class test.
+fn scaleShape(sh: SupportShape, s: Real) SupportShape {
+    return switch (sh.core) {
+        .point => .{ .core = .point, .radius = sh.radius * s },
+        .segment => |h| .{ .core = .{ .segment = h * s }, .radius = sh.radius * s },
+        .box => |he| .{ .core = .{ .box = he.scale(s) }, .radius = sh.radius * s },
+    };
+}
+
+/// Every fast manifold point of `scaled`, unscaled by `1/s`, matches a point of
+/// the unit-scale `base` (position + penetration within `diff_tol` at unit
+/// scale) — the equivariance check, robust at any `s` because both sides are
+/// compared at unit scale.
+fn manifoldsScaleEquivalent(base: ContactManifold, scaled: ContactManifold, s: Real) bool {
+    if (base.count != scaled.count) return false;
+    if (!base.normal.approxEql(scaled.normal, diff_tol)) return false; // normal is scale-INVARIANT
+    const inv = 1.0 / s;
+    for (0..scaled.count) |i| {
+        var matched = false;
+        for (0..base.count) |j| {
+            if (scaled.points[i].position.scale(inv).approxEql(base.points[j].position, diff_tol) and
+                @abs(scaled.points[i].penetration * inv - base.points[j].penetration) <= diff_tol) matched = true;
+        }
+        if (!matched) return false;
+    }
+    return true;
+}
+
+test "fast paths are scale-invariant" {
+    // The guard the whole suite lacked (all other configs are ~unit scale): a
+    // fast manifold must be EQUIVARIANT under a uniform scale of positions AND
+    // sizes — normal invariant, positions + penetration scaled linearly, same
+    // count. Absolute metric thresholds (the P1 class) break this at ×1e-6 / ×1e6.
+    const zrot = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
+    const Cfg = struct { a: SupportShape, pa: Vec3r, ra: Quatr, b: SupportShape, pb: Vec3r, rb: Quatr };
+    const cfgs = [_]Cfg{
+        .{ .a = sphereShape(1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = sphereShape(1), .pb = vr(1.2, 0, 0), .rb = Quatr.identity }, // sphere/sphere
+        .{ .a = sphereShape(0.5), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = boxShape(1, 1, 1), .pb = vr(0, 0, 1.3), .rb = Quatr.identity }, // sphere/box shallow
+        .{ .a = sphereShape(0.5), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = boxShape(1, 1, 1), .pb = vr(0, 0.3, 0), .rb = Quatr.identity }, // sphere/box deep
+        .{ .a = capsuleShape(1, 0.3), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = capsuleShape(1, 0.3), .pb = vr(0, 0, 0.5), .rb = zrot }, // capsule crossed
+        .{ .a = capsuleShape(1, 0.3), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = capsuleShape(1, 0.3), .pb = vr(0.5, 0, 0), .rb = Quatr.identity }, // capsule parallel
+        .{ .a = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = boxShape(1, 1, 1), .pb = vr(0, 1.5, 0), .rb = Quatr.identity }, // box/box face
+    };
+    const scales = [_]Real{ 1e-6, 1e6 };
+    for (cfgs) |c| {
+        const base_ab = ordered(c.a, c.pa, c.ra, c.b, c.pb, c.rb).?;
+        const base_ba = ordered(c.b, c.pb, c.rb, c.a, c.pa, c.ra).?;
+        for (scales) |s| {
+            const sa = scaleShape(c.a, s);
+            const sb = scaleShape(c.b, s);
+            const m_ab = ordered(sa, c.pa.scale(s), c.ra, sb, c.pb.scale(s), c.rb).?;
+            try testing.expect(manifoldsScaleEquivalent(base_ab, m_ab, s));
+            const m_ba = ordered(sb, c.pb.scale(s), c.rb, sa, c.pa.scale(s), c.ra).?;
+            try testing.expect(manifoldsScaleEquivalent(base_ba, m_ba, s));
+        }
+    }
+}
+
 // --- E5: consolidated feature_id producer × pair × A/B-order matrix ---
 
 const fid_class_mask: u32 = 0xc000;
