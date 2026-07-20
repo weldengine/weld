@@ -186,13 +186,11 @@ pub fn collideOrderedGeneric(
         closest_b = g.closest_b;
         const sep = closest_b.sub(closest_a);
         const sep_len_sq = sep.dot(sep);
-        // n = normalize(closest_b − closest_a); guard the dist ≈ 0 boundary (the
-        // shallow↔deep seam) with the centre-to-centre search direction. The floor
-        // is SCALE-RELATIVE to the absolute witness magnitude (never an absolute
-        // metric constant, E7) — the scale the `closest_b − closest_a` subtraction
-        // rounds over.
-        const noise_scale = 8 * std.math.floatEps(T) * (closest_a.length() + closest_b.length());
-        n_world = if (sep_len_sq > noise_scale * noise_scale) sep.scale(1.0 / @sqrt(sep_len_sq)) else fallbackNormal(T, pos_a, pos_b);
+        // n = normalize(closest_b − closest_a); `normalize` is scale-equivariant,
+        // so the only guard needed is 0/0 — fall back to the centre-to-centre
+        // direction ONLY at true coincidence (`|sep|² ≤ floatMin`, the underflow
+        // floor, never a geometric scale) — E8 class A.
+        n_world = if (sep_len_sq > std.math.floatMin(T)) sep.scale(1.0 / @sqrt(sep_len_sq)) else fallbackNormal(T, pos_a, pos_b);
         base_penetration = r_sum - g.distance;
     }
 
@@ -678,21 +676,32 @@ fn faceCentroid(comptime T: type, face: support.Face(T)) math.Vec(3, T) {
 /// points are deduplicated first. Deterministic tie-breaks (strict `>`; first
 /// index wins). Writes the chosen `pts` indices into `idx`, returns the count.
 fn reduceToFour(comptime T: type, pts: []const Candidate(T), normal: math.Vec(3, T), idx: *[4]usize) usize {
-    // Coincidence tolerance for the dedup: SCALE-RELATIVE to the point set's own
-    // A-frame extent (`k·floatEps·max|pos|`), never an absolute metric constant,
-    // so a manifold reduces identically at any scale (E7 — the class that broke
-    // small geometries). A-frame positions stay small even far from the world
-    // origin, so this also preserves the M1.1.3 far-from-origin reduction; at
-    // unit scale it is ≈ 1.6e-6 (f32), far below any distinct contact spacing.
-    var coord_scale: T = 0;
-    for (pts) |c| coord_scale = @max(coord_scale, c.pos.length());
-    const eps: T = 16 * std.math.floatEps(T) * coord_scale;
+    // Coincidence tolerance for the dedup: PER-AXIS relative to that axis's own
+    // A-frame coordinate scale (`eps[k] = 16·floatEps·max|pos[k]|`), NEVER an
+    // isotropic scalar (E8, class B). An isotropic eps driven by a large axis
+    // (e.g. a `he = (1.1e6, 1, 1)` box) would swamp a small axis and merge points
+    // genuinely separated along it. Two points coincide ⟺ `|Δ[k]| ≤ eps[k]` for
+    // ALL k — anisotropic-safe and coordinate-covariant. A-frame positions stay
+    // small far from the world origin, preserving the M1.1.3 reduction.
+    var coord_scale = [3]T{ 0, 0, 0 };
+    for (pts) |c| {
+        const p = c.pos.toArray();
+        inline for (0..3) |k| coord_scale[k] = @max(coord_scale[k], @abs(p[k]));
+    }
+    var eps: [3]T = undefined;
+    inline for (0..3) |k| eps[k] = 16 * std.math.floatEps(T) * coord_scale[k];
     // Deduplicate coincident contacts (indices into `pts`).
     var uniq: [max_clip]usize = undefined;
     var un: usize = 0;
     outer: for (pts, 0..) |c, i| {
+        const cp = c.pos.toArray();
         for (0..un) |j| {
-            if (c.pos.approxEql(pts[uniq[j]].pos, eps)) continue :outer;
+            const up = pts[uniq[j]].pos.toArray();
+            var coincident = true;
+            inline for (0..3) |k| {
+                if (@abs(cp[k] - up[k]) > eps[k]) coincident = false;
+            }
+            if (coincident) continue :outer;
         }
         uniq[un] = i;
         un += 1;

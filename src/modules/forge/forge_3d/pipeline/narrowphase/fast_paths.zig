@@ -142,32 +142,21 @@ fn contactMargin(comptime T: type, coord_scale: T) T {
     return conv_k * std.math.floatEps(T) * coord_scale;
 }
 
-/// Squared coincidence threshold: two witness points are numerically coincident
-/// (their difference is pure float rounding, so the A→B normal is undefined) when
-/// `dist² ≤ (noise_k · floatEps(T) · coord_scale)²`. `coord_scale` is the ABSOLUTE
-/// coordinate magnitude the `cb − ca` subtraction rounds over — NEVER an absolute
-/// metric constant, and NOT `|Δcentres|` (which vanishes near coincidence). This
-/// is the length-based-threshold discipline of `gjk.zig` / spec §315 (E7).
-fn coincidenceEpsSq(comptime T: type, coord_scale: T) T {
-    const noise_k: T = 8;
-    const eps = noise_k * std.math.floatEps(T) * coord_scale;
-    return eps * eps;
-}
-
 /// The sphere/sphere seed: cores are the two centres (radius excluded). Shallow
 /// for any non-zero centre distance (points are 0-D, never "deep" unless
 /// coincident); `.separated` past the inflated margin; a deterministic +X
-/// fallback normal at coincidence (matching the generic `fallbackNormal`, where
-/// the A→B axis is geometrically undefined — a measure-zero tie).
+/// fallback normal ONLY at true coincidence.
 fn sphereSphere(comptime T: type, ca: math.Vec(3, T), ra: T, cb: math.Vec(3, T), rb: T) FastResult(T) {
     const d = cb.sub(ca);
     const dist_sq = d.dot(d);
     const dist = @sqrt(dist_sq);
     const r_sum = ra + rb;
     if (dist - r_sum > contactMargin(T, dist)) return .separated;
-    // Coincident ⟺ dist below the absolute-coordinate rounding scale (E7).
-    const coord_scale = ca.length() + cb.length();
-    const normal = if (dist_sq > coincidenceEpsSq(T, coord_scale)) d.scale(1.0 / dist) else math.Vec(3, T).unit_x;
+    // `normalize(d)` is scale-EQUIVARIANT, so the only thing to guard is 0/0. The
+    // fallback fires ONLY at true coincidence (`dist² ≤ floatMin` — the type's
+    // underflow floor, NOT a geometric scale): translation- and scale-invariant by
+    // construction (E8, class A).
+    const normal = if (dist_sq > std.math.floatMin(T)) d.scale(1.0 / dist) else math.Vec(3, T).unit_x;
     return .{ .contact = .{
         .normal = normal,
         .closest_a = ca,
@@ -225,9 +214,9 @@ fn sphereBox(
         if (dist - r_sum > contactMargin(T, coord_scale)) return .separated;
         // Normal from the box surface toward the sphere centre; on the surface
         // (dist ≈ 0, the shallow↔deep seam) fall back to the least-penetration
-        // face axis. Coincidence scales with the ABSOLUTE coordinate magnitude (E7).
-        const coincidence_scale = sphere_c.length() + box_c.length() + boxExtent(T, box_he);
-        const n_local = if (dist_sq > coincidenceEpsSq(T, coincidence_scale)) delta.scale(1.0 / dist) else fallbackLocalNormal(T, c_local);
+        // face axis. `normalize(delta)` is scale-equivariant, so the fallback fires
+        // ONLY at true coincidence (`dist² ≤ floatMin`, E8 class A).
+        const n_local = if (dist_sq > std.math.floatMin(T)) delta.scale(1.0 / dist) else fallbackLocalNormal(T, c_local);
         n_bs = box_rot.rotateVec3(n_local);
         base_penetration = r_sum - dist;
     } else {
@@ -529,9 +518,10 @@ fn capsuleCapsule(
     const r_sum = r_a + r_b;
     const coord_scale = cb.sub(ca).length() + ha + hb;
     if (dist - r_sum > contactMargin(T, coord_scale)) return .separated;
-    // Coincident witnesses scale with the ABSOLUTE coordinate magnitude (E7).
-    const coincidence_scale = ca.length() + cb.length() + ha + hb;
-    const normal = if (dist_sq > coincidenceEpsSq(T, coincidence_scale)) d.scale(1.0 / dist) else capsuleFallbackNormal(T, ay, by, cb.sub(ca));
+    // `normalize(d)` is scale-equivariant ⇒ guard only 0/0: the fallback (radial /
+    // mutual-perpendicular) fires ONLY at true coincidence (`dist² ≤ floatMin`,
+    // e.g. collinear cores whose closest points coincide exactly) — E8 class A.
+    const normal = if (dist_sq > std.math.floatMin(T)) d.scale(1.0 / dist) else capsuleFallbackNormal(T, ay, by, cb.sub(ca));
     return .{ .contact = .{
         .normal = normal,
         .closest_a = cp[0],

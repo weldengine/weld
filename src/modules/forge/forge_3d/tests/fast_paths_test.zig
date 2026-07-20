@@ -644,30 +644,37 @@ fn scaleShape(sh: SupportShape, s: Real) SupportShape {
     };
 }
 
-/// Every fast manifold point of `scaled`, unscaled by `1/s`, matches a point of
-/// the unit-scale `base` (position + penetration within `diff_tol` at unit
-/// scale) — the equivariance check, robust at any `s` because both sides are
-/// compared at unit scale.
-fn manifoldsScaleEquivalent(base: ContactManifold, scaled: ContactManifold, s: Real) bool {
-    if (base.count != scaled.count) return false;
-    if (!base.normal.approxEql(scaled.normal, diff_tol)) return false; // normal is scale-INVARIANT
+/// Equivariance of `m` (computed at scale `s` and global translation `t`) versus
+/// the unit-scale/origin `base`: the normal is INVARIANT, and every point of `m`,
+/// untranslated by `t` then unscaled by `1/s`, matches a `base` point (position +
+/// penetration). Both sides are compared at unit scale, so the tolerance stays
+/// meaningful; it widens with the untranslate/unscale amplification of the f32
+/// rounding at the absolute coordinate magnitude.
+fn manifoldsEquivariant(base: ContactManifold, m: ContactManifold, s: Real, t: Vec3r) bool {
+    if (base.count != m.count) return false;
+    if (!base.normal.approxEql(m.normal, diff_tol)) return false; // normal is scale/translation-INVARIANT
     const inv = 1.0 / s;
-    for (0..scaled.count) |i| {
+    const t_mag = t.length();
+    const eps = std.math.floatEps(Real);
+    const pos_tol = diff_tol + 64 * eps * (t_mag + @abs(s) * 2.5) * inv;
+    for (0..m.count) |i| {
         var matched = false;
         for (0..base.count) |j| {
-            if (scaled.points[i].position.scale(inv).approxEql(base.points[j].position, diff_tol) and
-                @abs(scaled.points[i].penetration * inv - base.points[j].penetration) <= diff_tol) matched = true;
+            if (m.points[i].position.sub(t).scale(inv).approxEql(base.points[j].position, pos_tol) and
+                @abs(m.points[i].penetration * inv - base.points[j].penetration) <= pos_tol) matched = true;
         }
         if (!matched) return false;
     }
     return true;
 }
 
-test "fast paths are scale-invariant" {
-    // The guard the whole suite lacked (all other configs are ~unit scale): a
-    // fast manifold must be EQUIVARIANT under a uniform scale of positions AND
-    // sizes — normal invariant, positions + penetration scaled linearly, same
-    // count. Absolute metric thresholds (the P1 class) break this at ×1e-6 / ×1e6.
+test "fast paths are scale and translation invariant" {
+    // The class guard the suite lacked (every other config is ~unit scale at the
+    // origin): a fast manifold must be EQUIVARIANT under a uniform scale of
+    // positions AND sizes AND a global translation — normal invariant, positions
+    // + penetration scaled/translated consistently, same count. The threshold
+    // classes broke this: an absolute floor (A) at extreme scale, a coord_scale
+    // guard (A) at large translation, an isotropic dedup (B) for anisotropy.
     const zrot = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
     const Cfg = struct { a: SupportShape, pa: Vec3r, ra: Quatr, b: SupportShape, pb: Vec3r, rb: Quatr };
     const cfgs = [_]Cfg{
@@ -678,19 +685,61 @@ test "fast paths are scale-invariant" {
         .{ .a = capsuleShape(1, 0.3), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = capsuleShape(1, 0.3), .pb = vr(0.5, 0, 0), .rb = Quatr.identity }, // capsule parallel
         .{ .a = boxShape(1, 1, 1), .pa = vr(0, 0, 0), .ra = Quatr.identity, .b = boxShape(1, 1, 1), .pb = vr(0, 1.5, 0), .rb = Quatr.identity }, // box/box face
     };
-    const scales = [_]Real{ 1e-6, 1e6 };
+    const scales = [_]Real{ 1e-6, 1, 1e6 };
+    const translations = [_]Real{ 0, 1e6 };
+    const eps = std.math.floatEps(Real);
     for (cfgs) |c| {
         const base_ab = ordered(c.a, c.pa, c.ra, c.b, c.pb, c.rb).?;
         const base_ba = ordered(c.b, c.pb, c.rb, c.a, c.pa, c.ra).?;
         for (scales) |s| {
-            const sa = scaleShape(c.a, s);
-            const sb = scaleShape(c.b, s);
-            const m_ab = ordered(sa, c.pa.scale(s), c.ra, sb, c.pb.scale(s), c.rb).?;
-            try testing.expect(manifoldsScaleEquivalent(base_ab, m_ab, s));
-            const m_ba = ordered(sb, c.pb.scale(s), c.rb, sa, c.pa.scale(s), c.ra).?;
-            try testing.expect(manifoldsScaleEquivalent(base_ba, m_ba, s));
+            for (translations) |tm| {
+                // Skip combos where the geometry (feature scale `s`) is lost under
+                // the f32 resolution at the absolute magnitude (`|t| + s·extent`) —
+                // genuinely unrepresentable, not a defect.
+                if (@abs(s) <= 256 * eps * (tm + @abs(s) * 2.5)) continue;
+                const t = vr(tm, tm, tm);
+                const sa = scaleShape(c.a, s);
+                const sb = scaleShape(c.b, s);
+                const m_ab = ordered(sa, c.pa.scale(s).add(t), c.ra, sb, c.pb.scale(s).add(t), c.rb).?;
+                try testing.expect(manifoldsEquivariant(base_ab, m_ab, s, t));
+                const m_ba = ordered(sb, c.pb.scale(s).add(t), c.rb, sa, c.pa.scale(s).add(t), c.ra).?;
+                try testing.expect(manifoldsEquivariant(base_ba, m_ba, s, t));
+            }
         }
     }
+}
+
+test "unit spheres far from the origin keep the center normal (P1 class A)" {
+    // Codex round-4 probe: `normalize(d)` is scale-EQUIVARIANT, so its 0/0 guard
+    // must fire only at TRUE zero, never a coord_scale floor. Two UNIT spheres at
+    // (1e6,1e6,1e6), 1.2 apart in Y: `d = cb − ca` is clean (≠ 0), so the normal
+    // must be ±Y. The E7 coord_scale threshold classed them coincident at this
+    // magnitude and returned +X (RED at f32).
+    const s = sphereShape(1);
+    const base = vr(1e6, 1e6, 1e6);
+    inline for (.{ true, false }) |ab| {
+        const m = if (ab)
+            ordered(s, base, Quatr.identity, s, base.add(vr(0, 1.2, 0)), Quatr.identity).?
+        else
+            ordered(s, base.add(vr(0, 1.2, 0)), Quatr.identity, s, base, Quatr.identity).?;
+        const n = m.normal.toArray();
+        try testing.expectEqual(@as(u8, 1), m.count);
+        try testing.expectApproxEqAbs(@as(Real, 0), n[0], diff_tol); // ⊥ X
+        try testing.expectApproxEqAbs(@as(Real, 0), n[2], diff_tol); // ⊥ Z
+        try testing.expectApproxEqAbs(@as(Real, 1), @abs(n[1]), diff_tol); // along ±Y
+    }
+}
+
+test "anisotropic box face-face keeps four points (P2 class B)" {
+    // Codex round-4 probe: the dedup tolerance must be PER-AXIS, not an isotropic
+    // scalar. Two he=(1.1e6,1,1) boxes stacked 0.5 in Y: the 4 contact corners
+    // differ by 2.2e6 in X and only 2 in Z. An isotropic eps (driven by X → ~2.1)
+    // merged the Z-separated pair → count 2 (RED); per-axis keeps all 4.
+    const box = boxShape(1_100_000, 1, 1);
+    const ab = ordered(box, vr(0, 0, 0), Quatr.identity, box, vr(0, 1.5, 0), Quatr.identity) orelse return error.NoContactAB;
+    try testing.expectEqual(@as(u8, 4), ab.count);
+    const ba = ordered(box, vr(0, 1.5, 0), Quatr.identity, box, vr(0, 0, 0), Quatr.identity) orelse return error.NoContactBA;
+    try testing.expectEqual(@as(u8, 4), ba.count);
 }
 
 // --- E5: consolidated feature_id producer × pair × A/B-order matrix ---
