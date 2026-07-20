@@ -147,6 +147,18 @@ fn expectBothOrders(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb
 /// some generic point (position + penetration within tol; `feature_id` too when
 /// `check_fid`). Used for box/box, whose clip may emit points in a different
 /// order between the fast and generic paths.
+/// Whether world point `q` lies inside-or-on the box core (centre `c`, rotation
+/// `rot`, half-extents `he`) within `tol` — `q` mapped to the box's local frame
+/// must satisfy `|local[k]| ≤ he[k] + tol` on every axis.
+fn pointInBox(q: Vec3r, c: Vec3r, rot: Quatr, he: Vec3r, tol: Real) bool {
+    const local = rot.conjugate().rotateVec3(q.sub(c)).toArray();
+    const h = he.toArray();
+    for (0..3) |k| {
+        if (@abs(local[k]) > h[k] + tol) return false;
+    }
+    return true;
+}
+
 fn expectEquivalentUnordered(fast: ?ContactManifold, gen: ?ContactManifold, check_fid: bool) !void {
     try testing.expectEqual(fast == null, gen == null);
     if (fast == null) return;
@@ -439,7 +451,11 @@ test "box/box SAT deep rotated is correct (oracle-free)" {
     //   (b) the reported depth equals an INDEPENDENT inline 15-axis SAT scan (the
     //       true MTV — proves the depth is not a mis-converged EPA value);
     //   (c) frame-invariance: under a rigid global transform the count/depth are
-    //       invariant and the normal rotates with the transform.
+    //       invariant and the normal rotates with the transform;
+    //   (d) every contact point's two surface witnesses `p ± (pen/2)·n` land on
+    //       the two box surfaces — a per-point geometric validity check that pins
+    //       the multi-point POSITIONS oracle-free (each point is midway between
+    //       the two box surfaces along the normal, at half its own penetration).
     const Pair = struct { a: SupportShape, b: SupportShape };
     const pairs = [_]Pair{
         .{ .a = boxShape(1, 1, 1), .b = boxShape(1, 1, 1) }, // 1:1
@@ -472,13 +488,25 @@ test "box/box SAT deep rotated is correct (oracle-free)" {
                 // depth invariant, normal rotated by g. (The exact 4-point SUBSET
                 // can differ under rotation when `reduceToFour` breaks an
                 // octagon→quad area tie differently at float noise — a reduction
-                // artifact, not a depth/normal defect — so the point set is
-                // validated by containment (d), not by frame-equivariance.)
+                // artifact, not a depth/normal defect — so multi-point positions
+                // are validated by (d) below, not by frame-equivariance.)
                 for (globals) |g| {
                     const mg = ordered(p.a, g.rotateVec3(vr(0, 0, 0)), g, p.b, g.rotateVec3(o), g.mul(r)).?;
                     try testing.expectEqual(m0.count, mg.count);
                     try testing.expectApproxEqAbs(maxPen(m0), maxPen(mg), diff_tol);
                     try testing.expect(mg.normal.approxEql(g.rotateVec3(m0.normal), diff_tol));
+                }
+                // (d) each contact point sits midway between the two box surfaces
+                // along the normal: its witnesses `p ± (pen/2)·n` land one on each
+                // box (n is A→B, so the sign assignment is checked both ways).
+                const witness_tol: Real = if (Real == f32) 3.0e-3 else 1.0e-6;
+                for (0..m0.count) |i| {
+                    const half = m0.normal.scale(m0.points[i].penetration * 0.5);
+                    const wp = m0.points[i].position.add(half);
+                    const wm = m0.points[i].position.sub(half);
+                    const a_side = pointInBox(wm, vr(0, 0, 0), Quatr.identity, p.a.core.box, witness_tol) and pointInBox(wp, o, r, p.b.core.box, witness_tol);
+                    const b_side = pointInBox(wp, vr(0, 0, 0), Quatr.identity, p.a.core.box, witness_tol) and pointInBox(wm, o, r, p.b.core.box, witness_tol);
+                    try testing.expect(a_side or b_side);
                 }
             }
         }
