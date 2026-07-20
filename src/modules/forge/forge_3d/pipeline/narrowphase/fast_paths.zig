@@ -279,9 +279,10 @@ fn fallbackLocalNormal(comptime T: type, c_local: math.Vec(3, T)) math.Vec(3, T)
 /// products (degeneracy-guarded: a near-parallel edge pair is skipped, its
 /// separation already covered by the face axes) — and returns `.separated` on
 /// the first axis with no overlap. Otherwise the least-overlap axis is the
-/// contact normal + depth. A small face-preferring bias resolves face/edge ties
-/// (matching EPA, and killing edge-axis numerical jitter). SAT has NO GJK
-/// degeneracy, so this is robust at ANY aspect ratio (the box/box P1d fix).
+/// contact normal + depth (a FACE wins an exact face/edge tie — the stable
+/// manifold — so the reported depth is always the true SAT min-overlap / MTV).
+/// SAT has NO GJK degeneracy, so this is robust at ANY aspect ratio (the box/box
+/// P1d fix) and order-independent by construction.
 ///
 /// The seed feeds the unchanged `generateManifold`: a FACE axis (`n_a` aligned
 /// with a box face) drives the supporting-face clip → the multi-point manifold
@@ -347,9 +348,11 @@ fn boxBox(
         }
     }
 
-    // Choose face vs edge (face-preferring on a tie), then orient the normal A→B.
-    const edge_bias: T = (if (T == f32) @as(T, 1.0e-3) else @as(T, 1.0e-6)) * scale;
-    const use_edge = have_edge and (edge_depth + edge_bias < face_depth);
+    // Choose the least-overlap axis. Strict `<` makes a FACE win an exact face/
+    // edge tie (the stable manifold, and deterministic); the reported depth is
+    // therefore always the true SAT min-overlap (the MTV), never inflated by a
+    // bias — the oracle-free depth test relies on this. Then orient the normal A→B.
+    const use_edge = have_edge and (edge_depth < face_depth);
     var normal = if (use_edge) edge_axis else face_axis;
     const depth = if (use_edge) edge_depth else face_depth;
     if (dc.dot(normal) < 0) normal = normal.neg();
