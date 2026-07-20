@@ -16,6 +16,7 @@ const support = @import("support.zig");
 const gjk_mod = @import("gjk.zig");
 const epa_mod = @import("epa.zig");
 const manifold = @import("manifold.zig");
+const fast_paths = @import("fast_paths.zig");
 
 // --- Support layer (support.zig) ---
 
@@ -61,7 +62,23 @@ pub const ContactPoint = manifold.ContactPoint;
 pub const collide = manifold.collide;
 /// `collide` for a FIXED shape order (no pose canonicalization) — for callers
 /// that own a stable external key (body ids) and need a frame-stable feature_id.
+/// Dispatches the M1.1.4 analytic fast paths, falling through to
+/// `collideOrderedGeneric`.
 pub const collideOrdered = manifold.collideOrdered;
+/// `collideOrdered` with the fast-path dispatcher bypassed — the generic GJK/EPA
+/// manifold path. The differential oracle + bench baseline for the M1.1.4 fast
+/// paths. (`generateManifold` stays package-internal — not re-exported here.)
+pub const collideOrderedGeneric = manifold.collideOrderedGeneric;
+
+// --- Fast paths (analytic per-pair seeds, fast_paths.zig) ---
+
+/// The `(normal, closest points, base penetration)` seed a fast path supplies to
+/// the shared manifold generator (the quantities the generic GJK/EPA block computes).
+pub const ContactSeed = fast_paths.ContactSeed;
+/// The three-state fast-path dispatcher result (not_handled / separated / contact).
+pub const FastResult = fast_paths.FastResult;
+/// Analytic per-pair narrowphase dispatcher (`.not_handled` until a kernel lands).
+pub const fastSeed = fast_paths.fastSeed;
 
 // Pins so every package sub-file is analysed when forge_3d is built as a test
 // target (engine-zig-conventions.md §13 lazy-analysis guard).
@@ -70,4 +87,5 @@ comptime {
     _ = gjk_mod;
     _ = epa_mod;
     _ = manifold;
+    _ = fast_paths;
 }

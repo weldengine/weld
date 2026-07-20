@@ -43,6 +43,7 @@ const math = @import("foundation").math;
 const support = @import("support.zig");
 const gjk_mod = @import("gjk.zig");
 const epa_mod = @import("epa.zig");
+const fast_paths = @import("fast_paths.zig");
 
 /// The contact manifold between two shapes: a shared world-space contact
 /// `normal` (A→B) plus up to 4 `ContactPoint`s. FROZEN convention (brief Notes);
@@ -119,7 +120,42 @@ pub fn collide(
 /// use this directly so the feature_id stays frame-stable across a pose change
 /// that would flip `collide`'s pose-based order (Codex P1b); `BodyManager`'s
 /// `collidePair` drives it in a canonical body-id order.
+///
+/// M1.1.4: an analytic fast path is dispatched first (`fast_paths.fastSeed`).
+/// `.not_handled` falls through to the generic GJK/EPA oracle
+/// (`collideOrderedGeneric`); `.separated` returns `null`; `.contact` feeds the
+/// seed to the SAME `generateManifold` the generic path uses — so the manifold
+/// producers, clipping, reduction, order-independence, and frame-stability are
+/// inherited identically. The dispatch is a pure function of the shape cores, so
+/// a fast pair always takes its fast path (never alternates across frames).
 pub fn collideOrdered(
+    comptime T: type,
+    shape_a: support.SupportShape(T),
+    pos_a: math.Vec(3, T),
+    rot_a: math.Quat(T),
+    shape_b: support.SupportShape(T),
+    pos_b: math.Vec(3, T),
+    rot_b: math.Quat(T),
+) ?ContactManifold(T) {
+    switch (fast_paths.fastSeed(T, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b)) {
+        .not_handled => return collideOrderedGeneric(T, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b),
+        .separated => return null,
+        .contact => |seed| {
+            const relpose = support.RelativePose(T).init(pos_a, rot_a, pos_b, rot_b);
+            return generateManifold(T, shape_a, pos_a, rot_a, relpose, shape_b, seed.normal, seed.closest_a, seed.closest_b, seed.base_penetration);
+        },
+    }
+}
+
+/// `collideOrdered` with the fast-path dispatcher BYPASSED — always the generic
+/// GJK → shallow/deep → `generateManifold` path. This is the differential ORACLE
+/// the M1.1.4 fast-path tests compare against (and the bench baseline): a fast
+/// pair's `collideOrdered` must be geometrically equivalent to its
+/// `collideOrderedGeneric` (within a named tolerance on normal/points/depth,
+/// exact `count`/`feature_id` away from documented topological-flip bands). It
+/// computes the seed — `(normal, closest points, base penetration)` — from GJK
+/// (shallow) or EPA (deep), exactly what a fast kernel reproduces analytically.
+pub fn collideOrderedGeneric(
     comptime T: type,
     shape_a: support.SupportShape(T),
     pos_a: math.Vec(3, T),
@@ -150,10 +186,11 @@ pub fn collideOrdered(
         closest_b = g.closest_b;
         const sep = closest_b.sub(closest_a);
         const sep_len_sq = sep.dot(sep);
-        // n = normalize(closest_b − closest_a); guard the dist ≈ 0 boundary (the
-        // shallow↔deep seam) with the centre-to-centre search direction.
-        const noise: T = if (T == f32) 1.0e-12 else 1.0e-24;
-        n_world = if (sep_len_sq > noise) sep.scale(1.0 / @sqrt(sep_len_sq)) else fallbackNormal(T, pos_a, pos_b);
+        // n = normalize(closest_b − closest_a); `normalize` is scale-equivariant,
+        // so the only guard needed is 0/0 — fall back to the centre-to-centre
+        // direction ONLY at true coincidence (`|sep|² ≤ floatMin`, the underflow
+        // floor, never a geometric scale) — E8 class A.
+        n_world = if (sep_len_sq > std.math.floatMin(T)) sep.scale(1.0 / @sqrt(sep_len_sq)) else fallbackNormal(T, pos_a, pos_b);
         base_penetration = r_sum - g.distance;
     }
 
@@ -165,7 +202,11 @@ pub fn collideOrdered(
 /// `closest_a`/`closest_b` (world core witness points) and `base_penetration`
 /// feed the single-point (point-core) path; the multi-point path derives per-
 /// point penetration from the clip.
-fn generateManifold(
+///
+/// File-`pub` (M1.1.4): consumed by `collideOrdered`'s fast-path arm as well as
+/// the generic arm, so a fast kernel's seed produces a manifold identical to the
+/// generic one. NOT re-exported by the package facade — it stays package-internal.
+pub fn generateManifold(
     comptime T: type,
     shape_a: support.SupportShape(T),
     pos_a: math.Vec(3, T),
@@ -192,6 +233,20 @@ fn generateManifold(
     // Point-core contact (a sphere, or an end-on capsule → 1 vertex): a single
     // contact straight from the GJK/EPA witness points, mapped to the surfaces.
     if (face_a.count == 1 or face_b.count == 1) {
+        return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(T, face_a, face_b));
+    }
+
+    // Segment × segment (M1.1.4): a NON-parallel (crossed) segment/segment pair
+    // is an edge-edge contact → a SINGLE witness contact along the EPA/GJK axis,
+    // NOT a 2-point clip. A segment reference forces `rn = n_a` (`faceNormalA`
+    // returns the axis for a count-2 feature), so FIX-1's `|rn·n_a|` test never
+    // trips, and `clipSegment` against a segment reference — whose two side
+    // planes constrain only along the reference's OWN axis — can retain both
+    // endpoints of a non-parallel incident segment (two geometrically wrong
+    // points). The 2-point manifold stays RESERVED to the parallel-projection
+    // overlap regime (two side-by-side capsules); a degenerate zero-length
+    // segment (a `half_height == 0` capsule) is a point, never that regime.
+    if (face_a.count == 2 and face_b.count == 2 and !segmentsParallel(T, face_a, face_b)) {
         return pointCoreContact(T, n_world, closest_a, closest_b, r_a, r_b, base_penetration, singleContactFid(T, face_a, face_b));
     }
 
@@ -231,10 +286,14 @@ fn generateManifold(
     // world at the very end.
     var raw: [max_clip]Candidate(T) = undefined;
     var raw_n: usize = 0;
-    const keep_eps: T = if (T == f32) 1.0e-5 else 1.0e-10;
     for (clipped, 0..) |v, ci| {
         const s = v.sub(ref_pt).dot(rn);
         const pen = r_sum - s;
+        // Keep points on the boundary within float noise; SCALE-RELATIVE (never an
+        // absolute metric constant, E7): the rounding of `pen = r_sum − s` is
+        // `~floatEps·(r_sum + |v − ref_pt|)`, so a point more negative than that is
+        // genuinely outside and dropped.
+        const keep_eps = 16 * std.math.floatEps(T) * (r_sum + v.sub(ref_pt).length());
         if (pen < -keep_eps) continue;
         // Surface points: reference face + r_ref outward; incident core − r_inc.
         const foot = v.sub(rn.scale(s));
@@ -308,6 +367,29 @@ fn singleContactFid(comptime T: type, ref_face: support.Face(T), inc_face: suppo
     const feat_ref: u16 = if (ref_face.count == 1) ref_face.vert_ids[0] else ref_face.face_id;
     const feat_inc: u16 = if (inc_face.count == 1) inc_face.vert_ids[0] else inc_face.face_id;
     return featureId(class_a | (feat_ref & id_mask), class_c | (feat_inc & id_mask));
+}
+
+/// Whether two count-2 segment features are PARALLEL, non-degenerate line
+/// segments — the sole regime where a 2-point segment clip is a correct manifold
+/// (parallel-projection overlap, e.g. two side-by-side capsules). A zero-length
+/// segment (a `half_height == 0` capsule → a point) or a non-parallel (crossed)
+/// pair returns false, so the caller takes the single-witness path (M1.1.4).
+///
+/// Threshold: `sin²θ = |u×v|² / (|u|²·|v|²) ≤ parallel_rel`, the same relative
+/// float-noise form as `support.supportingFace`'s end-on `aligned_rel` (not a
+/// magic geometric angle). Symmetric under an A/B swap by construction — both
+/// `|u×v|²` and `|u|²·|v|²` are invariant when `u` and `v` are exchanged.
+fn segmentsParallel(comptime T: type, fa: support.Face(T), fb: support.Face(T)) bool {
+    const u = fa.verts[1].sub(fa.verts[0]);
+    const v = fb.verts[1].sub(fb.verts[0]);
+    const uu = u.dot(u);
+    const vv = v.dot(v);
+    // A degenerate (zero-length) segment is a point, never a parallel line pair
+    // (NaN-safe: a non-finite length also falls through to the single witness).
+    if (!(uu > 0) or !(vv > 0)) return false;
+    const cr = u.cross(v);
+    const parallel_rel: T = if (T == f32) 1.0e-6 else 1.0e-12;
+    return cr.dot(cr) <= parallel_rel * uu * vv;
 }
 
 /// Outward normal of a face in A's frame: the polygon normal oriented toward
@@ -594,13 +676,37 @@ fn faceCentroid(comptime T: type, face: support.Face(T)) math.Vec(3, T) {
 /// points are deduplicated first. Deterministic tie-breaks (strict `>`; first
 /// index wins). Writes the chosen `pts` indices into `idx`, returns the count.
 fn reduceToFour(comptime T: type, pts: []const Candidate(T), normal: math.Vec(3, T), idx: *[4]usize) usize {
-    const eps: T = if (T == f32) 1.0e-5 else 1.0e-10;
+    // Coincidence tolerance for the dedup: PER-AXIS relative to the candidates'
+    // own EXTENT on that axis (`eps[k] = 16·floatEps·(max−min) of pos[k]`), NEVER
+    // `max|pos[k]|` and NEVER an isotropic scalar (E9, class B). The extent is the
+    // only form invariant under all three: TRANSLATION (the contact-zone position
+    // in A's frame cancels in `max − min` — a small off-centre feature on a large
+    // body keeps a tiny eps), SCALE (covariant), and ANISOTROPY (per-axis). Two
+    // points coincide ⟺ `|Δ[k]| ≤ eps[k]` for ALL k; even if a distant duplicate
+    // is not merged, the count stays protected by the area-based reduction below.
+    var pmin = [3]T{ std.math.floatMax(T), std.math.floatMax(T), std.math.floatMax(T) };
+    var pmax = [3]T{ -std.math.floatMax(T), -std.math.floatMax(T), -std.math.floatMax(T) };
+    for (pts) |c| {
+        const p = c.pos.toArray();
+        inline for (0..3) |k| {
+            pmin[k] = @min(pmin[k], p[k]);
+            pmax[k] = @max(pmax[k], p[k]);
+        }
+    }
+    var eps: [3]T = undefined;
+    inline for (0..3) |k| eps[k] = 16 * std.math.floatEps(T) * (pmax[k] - pmin[k]);
     // Deduplicate coincident contacts (indices into `pts`).
     var uniq: [max_clip]usize = undefined;
     var un: usize = 0;
     outer: for (pts, 0..) |c, i| {
+        const cp = c.pos.toArray();
         for (0..un) |j| {
-            if (c.pos.approxEql(pts[uniq[j]].pos, eps)) continue :outer;
+            const up = pts[uniq[j]].pos.toArray();
+            var coincident = true;
+            inline for (0..3) |k| {
+                if (@abs(cp[k] - up[k]) > eps[k]) coincident = false;
+            }
+            if (coincident) continue :outer;
         }
         uniq[un] = i;
         un += 1;

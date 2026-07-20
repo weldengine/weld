@@ -113,10 +113,21 @@ pub fn collide(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: Suppo
 
 /// `collide` for a FIXED shape order (no pose canonicalization) at solver
 /// precision — the `BodyId`-ordered path `BodyManager.collidePair` drives so the
-/// `feature_id` reference/incident ownership stays frame-stable.
+/// `feature_id` reference/incident ownership stays frame-stable. Dispatches the
+/// M1.1.4 analytic fast paths, falling through to `collideOrderedGeneric`.
 pub fn collideOrdered(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: SupportShape, pos_b: Vec3r, rot_b: Quatr) ?ContactManifold {
     return narrowphase.collideOrdered(Real, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
 }
+
+/// `collideOrdered` with the fast-path dispatcher bypassed (the generic GJK/EPA
+/// oracle) at solver precision — the differential oracle + bench baseline for the
+/// M1.1.4 fast paths.
+pub fn collideOrderedGeneric(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, shape_b: SupportShape, pos_b: Vec3r, rot_b: Quatr) ?ContactManifold {
+    return narrowphase.collideOrderedGeneric(Real, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b);
+}
+
+/// The `(normal, closest points, base penetration)` fast-path seed at solver precision.
+pub const ContactSeed = narrowphase.ContactSeed(Real);
 
 // Pins so the inline tests + the acceptance suite are analysed when this module
 // is built as a test target (engine-zig-conventions.md §13).
@@ -132,4 +143,5 @@ comptime {
     _ = @import("tests/gjk_test.zig");
     _ = @import("tests/epa_test.zig");
     _ = @import("tests/manifold_test.zig");
+    _ = @import("tests/fast_paths_test.zig");
 }
