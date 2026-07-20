@@ -904,6 +904,33 @@ pub fn build(b: *std.Build) void {
     );
     bench_step.dependOn(&bench_run.step);
 
+    // ------------------------------ M1.1.4 forge narrowphase fast-path bench --
+    //
+    // Per-pair dispatched `collideOrdered` vs the generic GJK/EPA oracle
+    // `collideOrderedGeneric`, same pose set, contact + separated, checksum
+    // anti-DCE. Writes `bench/results/forge_narrowphase.md`. ReleaseFast for the
+    // absolute ns; the dispatched/generic ratio is meaningful in any mode.
+    const forge_np_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/forge_narrowphase.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    forge_np_bench_module.addImport("forge_3d", forge_3d_module);
+    const forge_np_bench_exe = b.addExecutable(.{
+        .name = "forge-narrowphase-bench",
+        .root_module = forge_np_bench_module,
+    });
+    b.installArtifact(forge_np_bench_exe);
+    const forge_np_bench_run = b.addRunArtifact(forge_np_bench_exe);
+    forge_np_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| forge_np_bench_run.addArgs(args);
+    const forge_np_bench_step = b.step(
+        "bench-forge-narrowphase",
+        "Run the M1.1.4 forge narrowphase fast-path bench (dispatched vs generic per pair, writes bench/results/forge_narrowphase.md)",
+    );
+    forge_np_bench_step.dependOn(&forge_np_bench_run.step);
+
     // -------------------------------------- M1.0.5 scene loader bench --------
     //
     // `loadFromBytes` on a ~10k-entity image synthesized in-bench via the

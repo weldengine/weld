@@ -10,11 +10,12 @@
 //! the id is inherited). Where the generic oracle is documented invalid (P1d
 //! extreme-aspect box), a CLOSED-FORM oracle replaces it.
 //!
-//! **E2 content:** sphere/sphere + sphere/box differentials (both orders),
-//! separated short-circuits, touch-exact, sphere-internal / coincident, and the
-//! P1d point/box closed-form. Pairs not yet wired (box/box → E3, capsule/capsule
-//! → E4, capsule/box + rounded box → generic) are still bit-identical to the
-//! oracle, asserted below.
+//! **Coverage.** sphere/sphere + sphere/box (E2), box/box (E3), capsule/capsule
+//! (E4) differentials + closed-forms + separated short-circuits; the deep+rotated
+//! box/box oracle-free suite (order-independence, inline-SAT MTV, frame-invariance,
+//! surface-witness positions); and the consolidated `feature_id` producer × pair
+//! × A/B-order matrix (E5). Pairs that stay on the generic path (capsule/box,
+//! sphere/capsule, rounded box) are asserted bit-identical to the oracle.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -548,4 +549,108 @@ test "capsule/capsule differential vs generic (three regimes)" {
     try testing.expect(mc.normal.approxEql(vr(0, 0, 1), diff_tol));
     try testing.expectApproxEqAbs(@as(Real, 0.1), mc.points[0].penetration, diff_tol);
     try testing.expect(mc.points[0].position.approxEql(vr(0, 0, 0.25), diff_tol));
+}
+
+// --- E5: consolidated feature_id producer × pair × A/B-order matrix ---
+
+const fid_class_mask: u32 = 0xc000;
+const fid_id_mask: u32 = 0x3fff;
+const fid_class_a: u32 = 0x0000; // reference face / incident vertex
+const fid_class_edge: u32 = 0x4000; // reference side plane / incident edge
+const fid_class_c: u32 = 0x8000; // reference vertex (corner) / incident face
+
+/// Whether a `feature_id`'s class pair is one of the FOUR producers (class-tagged
+/// disjoint ranges): kept vertex `(a,a)`, edge×ref-edge `(edge,edge)`, reference
+/// corner `(c,c)`, or single witness `(a,c)`.
+fn validClassPair(fid: u32) bool {
+    const r = (fid >> 16) & fid_class_mask;
+    const c = fid & fid_class_mask;
+    return (r == fid_class_a and c == fid_class_a) or
+        (r == fid_class_edge and c == fid_class_edge) or
+        (r == fid_class_c and c == fid_class_c) or
+        (r == fid_class_a and c == fid_class_c);
+}
+
+/// Whether both halves carry a REAL sub-feature id in range for their class:
+/// reference face 0..7 (box `axis·2+sign` 0..5 / segment 6 / point 7), reference
+/// side-plane ≤ 23, reference vertex ≤ 759; incident vertex 0..7 (box sign-pattern
+/// / segment endpoint 0/1 / point 0), incident edge ≤ 63, incident face 0..7.
+fn validSubFeatures(fid: u32) bool {
+    const ref = fid >> 16;
+    const inc = fid & 0xffff;
+    const ref_class = ref & fid_class_mask;
+    const ref_id = ref & fid_id_mask;
+    const inc_class = inc & fid_class_mask;
+    const inc_id = inc & fid_id_mask;
+    const ref_ok = if (ref_class == fid_class_a) ref_id <= 7 else if (ref_class == fid_class_edge) ref_id <= 23 else ref_id <= 759;
+    const inc_ok = if (inc_class == fid_class_a) inc_id <= 7 else if (inc_class == fid_class_edge) inc_id <= 63 else inc_id <= 7;
+    return ref_ok and inc_ok;
+}
+
+/// Whether every `feature_id` in the first `n` entries of `a` appears in `b`.
+fn fidSetSubset(a: ContactManifold, b: ContactManifold) bool {
+    for (0..a.count) |i| {
+        var found = false;
+        for (0..b.count) |j| {
+            if (a.points[i].feature_id == b.points[j].feature_id) found = true;
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+/// Audit one fixed A/B order: every `feature_id` carries a valid producer class
+/// pair + a real in-range sub-feature, and all ids are pairwise distinct. When
+/// `frame_stable` (the config has no reduction tie), also assert the id SET is
+/// frame-stable under a ±1e-4 shift (same fixed order) while the topology (count
+/// + normal) is unchanged. A yawed face-face octagon is NOT frame_stable: its
+/// `reduceToFour` keeps a different — equally valid — 4 of the 8 clip points
+/// under a tiny shift (an area-tie reduction artifact, not a feature_id defect).
+fn auditOrder(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr, frame_stable: bool) !void {
+    const m = ordered(sa, pa, ra, sb, pb, rb) orelse return; // separated ⇒ no ids
+    for (0..m.count) |i| {
+        try testing.expect(validClassPair(m.points[i].feature_id));
+        try testing.expect(validSubFeatures(m.points[i].feature_id));
+    }
+    for (0..m.count) |i| {
+        for (i + 1..m.count) |j| try testing.expect(m.points[i].feature_id != m.points[j].feature_id);
+    }
+    if (!frame_stable) return;
+    inline for (.{ 1.0e-4, -1.0e-4 }) |d| {
+        const shifted = pb.add(vr(d, d, d));
+        if (ordered(sa, pa, ra, sb, shifted, rb)) |ms| {
+            if (ms.count == m.count and m.normal.approxEql(ms.normal, diff_tol)) {
+                try testing.expect(fidSetSubset(m, ms) and fidSetSubset(ms, m));
+            }
+        }
+    }
+}
+
+test "feature_id producer x pair x order matrix" {
+    // Every fast pair × both orders × the regimes reachable per pair, asserting
+    // the class-tagged disjoint producer ranges, real in-range sub-features,
+    // uniqueness per manifold, and frame-stability of the id SET (fixed order).
+    const zrot = Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / 2.0);
+    const yaw = Quatr.fromAxisAngle(Vec3r.unit_y, std.math.pi / 4.0);
+    const cap = capsuleShape(1, 0.3);
+    const box = boxShape(1, 1, 1);
+    const sph = sphereShape(0.5);
+    const Cfg = struct { a: SupportShape, b: SupportShape, pb: Vec3r, rb: Quatr, fs: bool };
+    const cfgs = [_]Cfg{
+        .{ .a = sphereShape(1), .b = sphereShape(1), .pb = vr(1.2, 0, 0), .rb = Quatr.identity, .fs = true }, // sphere/sphere (a,c)
+        .{ .a = sph, .b = box, .pb = vr(0, 0, 1.3), .rb = Quatr.identity, .fs = true }, // sphere/box face (a,c)
+        .{ .a = sph, .b = box, .pb = vr(0, 0.3, 0), .rb = Quatr.identity, .fs = true }, // sphere/box deep interior (a,c)
+        .{ .a = box, .b = boxShape(0.5, 1, 0.5), .pb = vr(0, 1.5, 0), .rb = Quatr.identity, .fs = true }, // box/box kept vertices (a,a)
+        .{ .a = box, .b = box, .pb = vr(0, 1.9, 0), .rb = yaw, .fs = false }, // box/box yawed face-face — edge×plane (edge,edge); octagon reduction tie
+        .{ .a = box, .b = box, .pb = vr(0.6, 1.5, 0.4), .rb = Quatr.identity, .fs = true }, // box/box staggered — reference corner (c,c)
+        .{ .a = cap, .b = cap, .pb = vr(0, 2.2, 0), .rb = Quatr.identity, .fs = true }, // capsule end-on (a,c)
+        .{ .a = cap, .b = cap, .pb = vr(0, 0, 0.5), .rb = zrot, .fs = true }, // capsule crossed (a,c)
+        .{ .a = cap, .b = capsuleShape(0.6, 0.3), .pb = vr(0.5, 0, 0), .rb = Quatr.identity, .fs = true }, // capsule parallel (shorter B strictly inside ⇒ stable segment clip)
+    };
+    const pa = vr(0, 0, 0);
+    const ra = Quatr.identity;
+    for (cfgs) |c| {
+        try auditOrder(c.a, pa, ra, c.b, c.pb, c.rb, c.fs); // A/B order
+        try auditOrder(c.b, c.pb, c.rb, c.a, pa, ra, c.fs); // B/A order
+    }
 }
