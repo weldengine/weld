@@ -43,6 +43,7 @@ const math = @import("foundation").math;
 const support = @import("support.zig");
 const gjk_mod = @import("gjk.zig");
 const epa_mod = @import("epa.zig");
+const fast_paths = @import("fast_paths.zig");
 
 /// The contact manifold between two shapes: a shared world-space contact
 /// `normal` (A→B) plus up to 4 `ContactPoint`s. FROZEN convention (brief Notes);
@@ -119,7 +120,42 @@ pub fn collide(
 /// use this directly so the feature_id stays frame-stable across a pose change
 /// that would flip `collide`'s pose-based order (Codex P1b); `BodyManager`'s
 /// `collidePair` drives it in a canonical body-id order.
+///
+/// M1.1.4: an analytic fast path is dispatched first (`fast_paths.fastSeed`).
+/// `.not_handled` falls through to the generic GJK/EPA oracle
+/// (`collideOrderedGeneric`); `.separated` returns `null`; `.contact` feeds the
+/// seed to the SAME `generateManifold` the generic path uses — so the manifold
+/// producers, clipping, reduction, order-independence, and frame-stability are
+/// inherited identically. The dispatch is a pure function of the shape cores, so
+/// a fast pair always takes its fast path (never alternates across frames).
 pub fn collideOrdered(
+    comptime T: type,
+    shape_a: support.SupportShape(T),
+    pos_a: math.Vec(3, T),
+    rot_a: math.Quat(T),
+    shape_b: support.SupportShape(T),
+    pos_b: math.Vec(3, T),
+    rot_b: math.Quat(T),
+) ?ContactManifold(T) {
+    switch (fast_paths.fastSeed(T, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b)) {
+        .not_handled => return collideOrderedGeneric(T, shape_a, pos_a, rot_a, shape_b, pos_b, rot_b),
+        .separated => return null,
+        .contact => |seed| {
+            const relpose = support.RelativePose(T).init(pos_a, rot_a, pos_b, rot_b);
+            return generateManifold(T, shape_a, pos_a, rot_a, relpose, shape_b, seed.normal, seed.closest_a, seed.closest_b, seed.base_penetration);
+        },
+    }
+}
+
+/// `collideOrdered` with the fast-path dispatcher BYPASSED — always the generic
+/// GJK → shallow/deep → `generateManifold` path. This is the differential ORACLE
+/// the M1.1.4 fast-path tests compare against (and the bench baseline): a fast
+/// pair's `collideOrdered` must be geometrically equivalent to its
+/// `collideOrderedGeneric` (within a named tolerance on normal/points/depth,
+/// exact `count`/`feature_id` away from documented topological-flip bands). It
+/// computes the seed — `(normal, closest points, base penetration)` — from GJK
+/// (shallow) or EPA (deep), exactly what a fast kernel reproduces analytically.
+pub fn collideOrderedGeneric(
     comptime T: type,
     shape_a: support.SupportShape(T),
     pos_a: math.Vec(3, T),
@@ -165,7 +201,11 @@ pub fn collideOrdered(
 /// `closest_a`/`closest_b` (world core witness points) and `base_penetration`
 /// feed the single-point (point-core) path; the multi-point path derives per-
 /// point penetration from the clip.
-fn generateManifold(
+///
+/// File-`pub` (M1.1.4): consumed by `collideOrdered`'s fast-path arm as well as
+/// the generic arm, so a fast kernel's seed produces a manifold identical to the
+/// generic one. NOT re-exported by the package facade — it stays package-internal.
+pub fn generateManifold(
     comptime T: type,
     shape_a: support.SupportShape(T),
     pos_a: math.Vec(3, T),
