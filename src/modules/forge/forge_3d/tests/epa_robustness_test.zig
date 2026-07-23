@@ -341,6 +341,29 @@ test "deep-boundary GJK stall classifies deep, not near-zero shallow (RD-4)" {
     }
 }
 
+test "collide is invariant under the quaternion double cover" {
+    // A deep, non-tie pitch-0.4-X box/box config (the E1(c)(iii) family).
+    // `collide(A, B(q))` vs `collide(A, B(-q))`: -q is the double-cover partner and
+    // `rotateVec3` is EVEN in the sign of q (every term a product of two quaternion
+    // components — verified against foundation/math/quat.zig), so the geometry is
+    // bit-identical; but `poseAfter`'s lexicographic quaternion compare flips the
+    // internal canonical order, running `collideOrdered` in opposite orders. The
+    // caller's A→B manifold must be INVARIANT: equal count, depth within tol, and
+    // normals within tol of EACH OTHER (NOT negated — `collide` returns the caller's
+    // A→B in both). `feature_id` is NOT asserted (bare `collide` is pose-canonical,
+    // no fid stability contract — see manifold.zig).
+    const box = boxShape(1, 1, 1);
+    const q = Quatr.fromAxisAngle(Vec3r.unit_x, 0.4);
+    const nq = Quatr{ .x = -q.x, .y = -q.y, .z = -q.z, .w = -q.w };
+    const pa = vr(0, 0, 0);
+    const pb = vr(0.2, 0.4, 0.1);
+    const m_q = narrowphase.collide(Real, box, pa, Quatr.identity, box, pb, q).?;
+    const m_nq = narrowphase.collide(Real, box, pa, Quatr.identity, box, pb, nq).?;
+    try testing.expectEqual(m_q.count, m_nq.count);
+    try testing.expectApproxEqAbs(maxPen(m_q), maxPen(m_nq), depth_tol);
+    try testing.expect(m_q.normal.approxEql(m_nq.normal, normal_tol));
+}
+
 test "separated radius-0 boxes stay separated (RD-4 band lower boundary)" {
     // Two unit boxes with a small but REAL core gap (~145·contact_margin at unit
     // scale) must classify separated — the RD-4 deep band (`dist <= m`) must not
