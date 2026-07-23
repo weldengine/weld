@@ -596,10 +596,12 @@ fn faceWithEdge(comptime FaceT: type, faces: []const FaceT, skip: usize, x: u32,
     return null;
 }
 
-/// Progressively add supports to reach a non-degenerate origin-enclosing
-/// tetrahedron from a 1..4-vertex seed. Returns false when the Minkowski
-/// difference is genuinely < 3-D (no tetra exists) — the caller then returns a
-/// degenerate (zero-penetration) result. Blow-up directions are deterministic.
+/// Progressively add supports to reach a non-degenerate tetrahedron around the
+/// seed from a 1..4-vertex seed — origin-enclosing for a genuine deep seed; for an
+/// RD-4 band seed (m1.1.3-hf) the origin may lie marginally outside (the
+/// downstream depth clamp handles it). Returns false when the Minkowski difference
+/// is genuinely < 3-D (no tetra exists) — the caller then returns a degenerate
+/// (zero-penetration) result. Blow-up directions are deterministic.
 fn expandToTetra(
     comptime T: type,
     shape_a: support.SupportShape(T),
