@@ -4,6 +4,12 @@
 //! integrates against; `computeMotion` derives them from a `BodyDescriptor` and
 //! its `Shape`. Static and kinematic bodies have zero inverse mass and inertia
 //! (infinite effective mass). `Body` is the SoA row `BodyManager` stores.
+//!
+//! The `force`/`torque` columns are world-space per-tick accumulators (N, N·m):
+//! `BodyManager.addForce`/`addTorque` add into them and `integrate` (E2) reads
+//! then clears them each fixed tick (the `engine-physics-forge.md` §2 per-tick
+//! reset contract). Being independent SoA columns, they leave the
+//! position/rotation bulk-sync layout invariant (M1.1.15) untouched.
 
 const std = @import("std");
 const api = @import("weld_forge");
@@ -52,6 +58,12 @@ pub const Body = struct {
     linear_velocity: Vec3r,
     /// World-space angular velocity.
     angular_velocity: Vec3r,
+    /// Accumulated world-space force (N) for the current tick; `addForce`
+    /// accumulates, `integrate` reads then clears it each fixed tick.
+    force: Vec3r,
+    /// Accumulated world-space torque (N·m) for the current tick; `addTorque`
+    /// accumulates, `integrate` reads then clears it each fixed tick.
+    torque: Vec3r,
     /// Derived inverse mass/inertia + damping/gravity.
     motion: MotionProperties,
     /// Collision-shape handle (into a `ShapeStore`).

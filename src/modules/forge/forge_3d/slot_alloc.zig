@@ -94,4 +94,14 @@ pub const IdAllocator = struct {
         if (!meta.alive or meta.generation != p.generation) return null;
         return p.index;
     }
+
+    /// Whether the slot at bare column `index` is currently live. Distinct from
+    /// `validate` (which takes a packed id and checks the generation): `free`
+    /// does NOT compact, so `slots.items.len` is the high-water mark including
+    /// dead slots. An index-ascending pass (the integrator) walks that range and
+    /// must filter liveness per slot — a bare index carries no generation, so
+    /// `validate` cannot serve here.
+    pub fn isAliveIndex(self: *const IdAllocator, index: u32) bool {
+        return index < self.slots.items.len and self.slots.items[index].alive;
+    }
 };

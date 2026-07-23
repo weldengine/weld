@@ -12,6 +12,15 @@
 //! Execution-log note flagging this against decision 7. Id allocation is
 //! deterministic (no hash-map on the path — M1.1.14). World AABBs are computed
 //! exactly per primitive on demand.
+//!
+//! Velocity/force/torque mutators (`setLinearVelocity`/`setAngularVelocity`,
+//! `addForce`/`addTorque`/`addImpulse`) and their getters validate the handle
+//! and no-op / return null on a stale one (parity with `position`/`rotation`).
+//! `addForce`/`addTorque` accumulate into the per-tick `force`/`torque` columns
+//! (cleared by `integrate`); `addImpulse` is an immediate `Δv = impulse·inv_mass`
+//! (a natural no-op on static/kinematic bodies, `inv_mass == 0`). `addTorque`
+//! and `setAngularVelocity` are INTERNAL — the public `PhysicsModule` 3D
+//! interface (frozen M1.1.15) carries no angular mutators.
 
 const std = @import("std");
 const api = @import("weld_forge");
@@ -65,6 +74,8 @@ pub const BodyManager = struct {
             .rotation = convQuat(desc.rotation),
             .linear_velocity = Vec3r.zero,
             .angular_velocity = Vec3r.zero,
+            .force = Vec3r.zero,
+            .torque = Vec3r.zero,
             .motion = body_mod.computeMotion(desc, shape),
             .shape = desc.shape,
             .body_type = desc.body_type,
@@ -118,6 +129,62 @@ pub const BodyManager = struct {
     pub fn collisionLayer(self: *const BodyManager, id: BodyId) ?u8 {
         const idx = self.alloc.validate(id) orelse return null;
         return self.bodies.items(.collision_layer)[idx];
+    }
+
+    /// Safe getter: world-space linear velocity, or null if `id` is stale/invalid.
+    pub fn linearVelocity(self: *const BodyManager, id: BodyId) ?Vec3r {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.linear_velocity)[idx];
+    }
+
+    /// Safe getter: world-space angular velocity, or null if `id` is stale/invalid.
+    pub fn angularVelocity(self: *const BodyManager, id: BodyId) ?Vec3r {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.angular_velocity)[idx];
+    }
+
+    /// Set the world-space linear velocity. No-op on a stale/invalid handle.
+    pub fn setLinearVelocity(self: *BodyManager, id: BodyId, velocity: Vec3r) void {
+        const idx = self.alloc.validate(id) orelse return;
+        self.bodies.items(.linear_velocity)[idx] = velocity;
+    }
+
+    /// Set the world-space angular velocity. No-op on a stale/invalid handle.
+    /// Internal to `BodyManager`: the public `PhysicsModule` 3D interface has no
+    /// angular-velocity mutator (frozen decision at M1.1.15).
+    pub fn setAngularVelocity(self: *BodyManager, id: BodyId, velocity: Vec3r) void {
+        const idx = self.alloc.validate(id) orelse return;
+        self.bodies.items(.angular_velocity)[idx] = velocity;
+    }
+
+    /// Accumulate a world-space force (N) into the body's per-tick force
+    /// accumulator. No-op on a stale/invalid handle. Any live body accumulates
+    /// (the per-tick clear in `integrate` is uniform); a force must be
+    /// re-applied every tick it should act.
+    pub fn addForce(self: *BodyManager, id: BodyId, force: Vec3r) void {
+        const idx = self.alloc.validate(id) orelse return;
+        const forces = self.bodies.items(.force);
+        forces[idx] = forces[idx].add(force);
+    }
+
+    /// Accumulate a world-space torque (N·m) into the body's per-tick torque
+    /// accumulator. No-op on a stale/invalid handle. Internal to `BodyManager`
+    /// (the interface has no torque mutator — see `setAngularVelocity`).
+    pub fn addTorque(self: *BodyManager, id: BodyId, torque: Vec3r) void {
+        const idx = self.alloc.validate(id) orelse return;
+        const torques = self.bodies.items(.torque);
+        torques[idx] = torques[idx].add(torque);
+    }
+
+    /// Apply an instantaneous linear impulse (N·s) as an IMMEDIATE velocity
+    /// change `Δv = impulse · inv_mass`. No-op on a stale/invalid handle, and
+    /// naturally a no-op on a static/kinematic body (`inv_mass == 0`) — no
+    /// `body_type` branch needed.
+    pub fn addImpulse(self: *BodyManager, id: BodyId, impulse: Vec3r) void {
+        const idx = self.alloc.validate(id) orelse return;
+        const inv_mass = self.bodies.items(.motion)[idx].inv_mass;
+        const vel = self.bodies.items(.linear_velocity);
+        vel[idx] = vel[idx].add(impulse.scale(inv_mass));
     }
 
     /// Safe getter: the exact world-space AABB of the body's shape, or null if

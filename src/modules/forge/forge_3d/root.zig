@@ -20,6 +20,9 @@ const broadphase = @import("pipeline/broadphase.zig");
 // (engine-zig-conventions.md §13 lazy-analysis guard — an unreferenced module's
 // tests are silently skipped).
 const narrowphase = @import("pipeline/narrowphase/root.zig");
+// M1.1.5 — semi-implicit Euler integration over the `BodyManager` SoA store.
+// Re-exported at `Real` below; the comptime pin analyses its acceptance tests.
+const integration = @import("pipeline/integration.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -129,6 +132,16 @@ pub fn collideOrderedGeneric(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, 
 /// The `(normal, closest points, base penetration)` fast-path seed at solver precision.
 pub const ContactSeed = narrowphase.ContactSeed(Real);
 
+// --- Integration (semi-implicit Euler) ---
+
+/// Advance every live body one fixed tick of `dt` under world-space `gravity`
+/// (m/s²) with semi-implicit Euler + gravity·gravity_factor + clamped-linear
+/// damping — the `Real`-bound entry. Free-flight only (no contacts); called by
+/// the `step` orchestrator at M1.1.15.
+pub fn integrate(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
+    return integration.integrate(bm, dt, gravity);
+}
+
 // Pins so the inline tests + the acceptance suite are analysed when this module
 // is built as a test target (engine-zig-conventions.md §13).
 comptime {
@@ -138,7 +151,9 @@ comptime {
     _ = body_manager;
     _ = broadphase;
     _ = narrowphase;
+    _ = integration;
     _ = @import("tests/body_manager_test.zig");
+    _ = @import("tests/integration_test.zig");
     _ = @import("tests/broadphase_test.zig");
     _ = @import("tests/gjk_test.zig");
     _ = @import("tests/epa_test.zig");
