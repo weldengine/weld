@@ -14,15 +14,24 @@ const math = @import("foundation").math;
 
 const Real = config.Real;
 const Vec3r = config.Vec3r;
+const Quatr = config.Quatr;
+const Mat3r = config.Mat3r;
 const ShapeStore = shape_mod.ShapeStore;
 const BodyManager = bm_mod.BodyManager;
 const Vec3 = math.Vec3; // f32 descriptor vector
+const Quatf = math.Quatf; // f32 descriptor quaternion
 const testing = std.testing;
 
 // --- helpers -----------------------------------------------------------------
 
 fn vr(x: Real, y: Real, z: Real) Vec3r {
     return Vec3r.fromArray(.{ x, y, z });
+}
+
+/// Euclidean norm of a quaternion (Quat.length is not public).
+fn quatNorm(q: Quatr) Real {
+    const a = q.toArray();
+    return @sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2] + a[3] * a[3]);
 }
 
 /// A dynamic descriptor with damping forced to 0 (the descriptor default is
@@ -226,39 +235,53 @@ test "static and kinematic bodies are not integrated" {
     const dt: Real = 1.0 / 60.0;
     const g = vr(0, -9.81, 0);
 
-    // Static at a fixed pose, with a force applied.
+    const rot = Quatf.fromAxisAngle(Vec3.unit_y, 0.7);
+    const rot_r = Quatr.fromArray(.{ rot.x, rot.y, rot.z, rot.w });
+
+    // Static at a fixed pose + orientation, with a force and torque applied.
     var stat = api.BodyDescriptor{
         .entity = .{ .index = 0, .generation = 0 },
         .body_type = .static,
         .shape = s,
     };
     stat.position = Vec3.fromArray(.{ 1, 2, 3 });
+    stat.rotation = rot;
     const id_stat = try bm.addBody(gpa, &store, stat);
     bm.addForce(id_stat, vr(50, 50, 50));
+    bm.addTorque(id_stat, vr(9, 9, 9));
 
-    // Kinematic with a velocity set (no position-from-velocity in M1.1.5) and a force.
+    // Kinematic with a velocity set (no position-from-velocity in M1.1.5),
+    // an orientation, and a force + torque.
     var kin = api.BodyDescriptor{
         .entity = .{ .index = 1, .generation = 0 },
         .body_type = .kinematic,
         .shape = s,
     };
     kin.position = Vec3.fromArray(.{ 4, 5, 6 });
+    kin.rotation = rot;
     const id_kin = try bm.addBody(gpa, &store, kin);
     bm.setLinearVelocity(id_kin, vr(1, 0, 0));
+    bm.setAngularVelocity(id_kin, vr(0, 2, 0));
     bm.addForce(id_kin, vr(50, 50, 50));
+    bm.addTorque(id_kin, vr(9, 9, 9));
 
     integration.integrate(&bm, dt, g);
 
-    // Neither moved.
+    // Neither moved or rotated.
     try testing.expect(bm.position(id_stat).?.approxEql(vr(1, 2, 3), 0));
     try testing.expect(bm.position(id_kin).?.approxEql(vr(4, 5, 6), 0));
-    // Kinematic velocity is untouched (not consumed as position-from-velocity).
+    try testing.expect(bm.rotation(id_stat).?.approxEql(rot_r, 0));
+    try testing.expect(bm.rotation(id_kin).?.approxEql(rot_r, 0));
+    // Kinematic velocities are untouched (not consumed in M1.1.5).
     try testing.expect(bm.linearVelocity(id_kin).?.approxEql(vr(1, 0, 0), 0));
+    try testing.expect(bm.angularVelocity(id_kin).?.approxEql(vr(0, 2, 0), 0));
     // But their accumulators ARE cleared (§2 uniform reset).
     const i_stat = bm.alloc.validate(id_stat).?;
     const i_kin = bm.alloc.validate(id_kin).?;
     try testing.expect(bm.bodies.items(.force)[i_stat].approxEql(Vec3r.zero, 0));
     try testing.expect(bm.bodies.items(.force)[i_kin].approxEql(Vec3r.zero, 0));
+    try testing.expect(bm.bodies.items(.torque)[i_stat].approxEql(Vec3r.zero, 0));
+    try testing.expect(bm.bodies.items(.torque)[i_kin].approxEql(Vec3r.zero, 0));
 }
 
 test "freed slots are skipped" {
@@ -293,22 +316,32 @@ test "freed slots are skipped" {
 
 test "integration is deterministic" {
     const gpa = testing.allocator;
+    const Out = struct {
+        pos: [4][3]Real = undefined,
+        vel: [4][3]Real = undefined,
+        rot: [4][4]Real = undefined,
+        ang: [4][3]Real = undefined,
+    };
     const Runner = struct {
-        fn run(g_alloc: std.mem.Allocator, out_pos: *[4][3]Real, out_vel: *[4][3]Real) !void {
+        fn run(g_alloc: std.mem.Allocator, out: *Out) !void {
             var store = ShapeStore{};
             defer store.deinit(g_alloc);
             var bm = BodyManager{};
             defer bm.deinit(g_alloc);
-            const s = try store.createShape(g_alloc, .{ .sphere = .{} });
+            const box = try store.createShape(g_alloc, .{ .box = .{ .half_extents = Vec3.fromArray(.{ 1, 2, 3 }) } });
 
             var ids: [4]api.BodyId = undefined;
             inline for (0..4) |k| {
-                var d = dynDesc(@intCast(k), s);
-                // `mass`/`gravity_factor` are f32 descriptor fields regardless of `Real`.
-                d.mass = @as(f32, @floatFromInt(k)) + 1.0;
-                d.gravity_factor = 1.0 - @as(f32, @floatFromInt(k)) * 0.2;
+                const kf = @as(f32, @floatFromInt(k)); // f32 descriptor fields
+                const kr = @as(Real, @floatFromInt(k)); // Real velocities/torques
+                var d = dynDesc(@intCast(k), box);
+                d.mass = kf + 1.0;
+                d.gravity_factor = 1.0 - kf * 0.2;
+                d.rotation = Quatf.fromAxisAngle(Vec3.fromArray(.{ 1, kf + 1, 0.5 }).normalize(), 0.3 + kf * 0.2);
                 ids[k] = try bm.addBody(g_alloc, &store, d);
-                bm.setLinearVelocity(ids[k], vr(@floatFromInt(k), 0, -@as(Real, @floatFromInt(k))));
+                bm.setLinearVelocity(ids[k], vr(kr, 0, -kr));
+                bm.setAngularVelocity(ids[k], vr(0.5 * kr, 1.0, -0.3 * kr));
+                bm.addTorque(ids[k], vr(kr, 0.5, -kr)); // consumed on the first tick
             }
 
             const dt: Real = 1.0 / 60.0;
@@ -317,19 +350,137 @@ test "integration is deterministic" {
             while (step < 45) : (step += 1) integration.integrate(&bm, dt, g);
 
             inline for (0..4) |k| {
-                out_pos[k] = bm.position(ids[k]).?.toArray();
-                out_vel[k] = bm.linearVelocity(ids[k]).?.toArray();
+                out.pos[k] = bm.position(ids[k]).?.toArray();
+                out.vel[k] = bm.linearVelocity(ids[k]).?.toArray();
+                out.rot[k] = bm.rotation(ids[k]).?.toArray();
+                out.ang[k] = bm.angularVelocity(ids[k]).?.toArray();
             }
         }
     };
-    var p1: [4][3]Real = undefined;
-    var v1: [4][3]Real = undefined;
-    var p2: [4][3]Real = undefined;
-    var v2: [4][3]Real = undefined;
-    try Runner.run(gpa, &p1, &v1);
-    try Runner.run(gpa, &p2, &v2);
+    var a: Out = .{};
+    var b: Out = .{};
+    try Runner.run(gpa, &a);
+    try Runner.run(gpa, &b);
     inline for (0..4) |k| {
-        try testing.expectEqual(p1[k], p2[k]); // bit-identical
-        try testing.expectEqual(v1[k], v2[k]);
+        try testing.expectEqual(a.pos[k], b.pos[k]); // bit-identical
+        try testing.expectEqual(a.vel[k], b.vel[k]);
+        try testing.expectEqual(a.rot[k], b.rot[k]);
+        try testing.expectEqual(a.ang[k], b.ang[k]);
     }
+}
+
+// --- E3 angular tests --------------------------------------------------------
+
+test "torque on a rotated anisotropic box" {
+    // With angular_damping = 0 and ω₀ = 0, one step gives
+    // ω = (R·I_local_inv·Rᵀ)·τ·dt for the pre-step rotation R = fromQuat(q₀) and
+    // the diagonal local inverse inertia — recomputed independently here.
+    // Named tolerance: O(1) values over one step, f32 ~1e-5.
+    const angular_tol: Real = 1e-5;
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const box = try store.createShape(gpa, .{ .box = .{ .half_extents = Vec3.fromArray(.{ 1, 2, 3 }) } });
+
+    var d = dynDesc(0, box);
+    d.mass = 6;
+    d.angular_damping = 0; // isolate the closed form
+    d.rotation = Quatf.fromAxisAngle(Vec3.fromArray(.{ 0.3, 1, 0.2 }).normalize(), 0.9);
+    const id = try bm.addBody(gpa, &store, d);
+
+    const torque = vr(5, -3, 2);
+    bm.addTorque(id, torque);
+
+    // Capture the pre-step pose + inertia the integrator will use.
+    const rot_before = bm.rotation(id).?;
+    const local_inv_inertia = bm.motionProperties(id).?.local_inv_inertia;
+
+    const dt: Real = 1.0 / 60.0;
+    integration.integrate(&bm, dt, vr(0, 0, 0)); // no gravity
+
+    const r = Mat3r.fromQuat(rot_before);
+    const i_world_inv = r.mul(local_inv_inertia).mul(r.transpose());
+    const expected = i_world_inv.mulVec(torque).scale(dt);
+    try testing.expect(bm.angularVelocity(id).?.approxEql(expected, angular_tol));
+}
+
+test "angular damping and clamp" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+    const dt: Real = 1.0 / 60.0;
+    const no_gravity = vr(0, 0, 0);
+
+    // Reduce: d > 0, no torque, initial ω ⇒ |ω| strictly smaller after one step.
+    var damped = dynDesc(0, s);
+    damped.angular_damping = 0.5;
+    const id_damped = try bm.addBody(gpa, &store, damped);
+    bm.setAngularVelocity(id_damped, vr(0, 4, 0));
+    integration.integrate(&bm, dt, no_gravity);
+    const w = bm.angularVelocity(id_damped).?.toArray()[1];
+    try testing.expect(w > 0 and w < 4); // damped toward zero, not past it
+
+    // Clamp: d·dt > 1 ⇒ factor max(0, 1−d·dt) = 0 ⇒ ω zeroed, no sign flip.
+    var clamp = dynDesc(1, s);
+    clamp.angular_damping = 100; // 100/60 = 1.667 > 1
+    const id_clamp = try bm.addBody(gpa, &store, clamp);
+    bm.setAngularVelocity(id_clamp, vr(1, -2, 3));
+    integration.integrate(&bm, dt, no_gravity);
+    try testing.expect(bm.angularVelocity(id_clamp).?.approxEql(Vec3r.zero, 0));
+}
+
+test "orientation quaternion stays unit" {
+    // The first-order update renormalises each step, so |q| stays ≈ 1 even after
+    // many steps of nonzero spin. Named tolerance: accumulated f32 renormalise
+    // noise over 120 steps is well under 1e-5.
+    const unit_tol: Real = 1e-5;
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+
+    var d = dynDesc(0, s);
+    d.angular_damping = 0;
+    d.rotation = Quatf.fromAxisAngle(Vec3.unit_z, 0.3);
+    const id = try bm.addBody(gpa, &store, d);
+    bm.setAngularVelocity(id, vr(1.5, -2.0, 0.7));
+
+    const dt: Real = 1.0 / 60.0;
+    var step: u32 = 0;
+    while (step < 120) : (step += 1) integration.integrate(&bm, dt, vr(0, 0, 0));
+
+    try testing.expectApproxEqAbs(@as(Real, 1), quatNorm(bm.rotation(id).?), unit_tol);
+}
+
+test "zero angular velocity leaves orientation unchanged" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+
+    const q0 = Quatf.fromAxisAngle(Vec3.fromArray(.{ 1, 1, 0 }).normalize(), 0.6);
+    var d = dynDesc(0, s);
+    d.angular_damping = 0;
+    d.rotation = q0;
+    const id = try bm.addBody(gpa, &store, d);
+    // ω = 0 (default); no torque. The first-order path never divides by |ω|.
+
+    const dt: Real = 1.0 / 60.0;
+    var step: u32 = 0;
+    while (step < 60) : (step += 1) integration.integrate(&bm, dt, vr(0, 0, 0));
+
+    const q = bm.rotation(id).?;
+    const q0r = Quatr.fromArray(.{ q0.x, q0.y, q0.z, q0.w });
+    try testing.expect(q.approxEql(q0r, 1e-6)); // unchanged
+    // No NaN produced by the ω = 0 path.
+    for (q.toArray()) |c| try testing.expect(!std.math.isNan(c));
 }
