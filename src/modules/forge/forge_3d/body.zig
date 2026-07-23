@@ -7,9 +7,9 @@
 //!
 //! The `force`/`torque` columns are world-space per-tick accumulators (N, N·m):
 //! `BodyManager.addForce`/`addTorque` add into them and `integrate` (E2) reads
-//! then clears them each fixed tick (`engine-physics-forge.md` §2 "reset chaque
-//! fixed tick"). Being independent SoA columns, they leave the position/rotation
-//! bulk-sync layout invariant (M1.1.15) untouched.
+//! then clears them each fixed tick (the `engine-physics-forge.md` §2 per-tick
+//! reset contract). Being independent SoA columns, they leave the
+//! position/rotation bulk-sync layout invariant (M1.1.15) untouched.
 
 const std = @import("std");
 const api = @import("weld_forge");
