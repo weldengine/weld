@@ -342,26 +342,48 @@ test "deep-boundary GJK stall classifies deep, not near-zero shallow (RD-4)" {
 }
 
 test "collide is invariant under the quaternion double cover" {
-    // A deep, non-tie pitch-0.4-X box/box config (the E1(c)(iii) family).
-    // `collide(A, B(q))` vs `collide(A, B(-q))`: -q is the double-cover partner and
-    // `rotateVec3` is EVEN in the sign of q (every term a product of two quaternion
-    // components — verified against foundation/math/quat.zig), so the geometry is
-    // bit-identical; but `poseAfter`'s lexicographic quaternion compare flips the
-    // internal canonical order, running `collideOrdered` in opposite orders. The
-    // caller's A→B manifold must be INVARIANT: equal count, depth within tol, and
-    // normals within tol of EACH OTHER (NOT negated — `collide` returns the caller's
-    // A→B in both). `feature_id` is NOT asserted (bare `collide` is pose-canonical,
-    // no fid stability contract — see manifold.zig).
+    // `-q` is the double-cover partner (RD-6: the E4(c) design presumed poseAfter's
+    // quaternion compare is reached — false for any distinct-position pair, since
+    // poseAfter compares positions FIRST). Two legs:
     const box = boxShape(1, 1, 1);
-    const q = Quatr.fromAxisAngle(Vec3r.unit_x, 0.4);
-    const nq = Quatr{ .x = -q.x, .y = -q.y, .z = -q.z, .w = -q.w };
-    const pa = vr(0, 0, 0);
-    const pb = vr(0.2, 0.4, 0.1);
-    const m_q = narrowphase.collide(Real, box, pa, Quatr.identity, box, pb, q).?;
-    const m_nq = narrowphase.collide(Real, box, pa, Quatr.identity, box, pb, nq).?;
-    try testing.expectEqual(m_q.count, m_nq.count);
-    try testing.expectApproxEqAbs(maxPen(m_q), maxPen(m_nq), depth_tol);
-    try testing.expect(m_q.normal.approxEql(m_nq.normal, normal_tol));
+    // Leg 1 — DISTINCT positions (pb.x = 0.2): poseAfter decides on POSITION and
+    // never reaches the quaternion compare, so the SAME internal order runs both
+    // sides. `rotateVec3` is even in q's sign (verified against quat.zig), so the
+    // manifold is BIT-IDENTICAL — a regression pin that the quaternion
+    // representative's sign never leaks into the result (full manifold, exact).
+    {
+        const q = Quatr.fromAxisAngle(Vec3r.unit_x, 0.4);
+        const nq = Quatr{ .x = -q.x, .y = -q.y, .z = -q.z, .w = -q.w };
+        const m_q = narrowphase.collide(Real, box, vr(0, 0, 0), Quatr.identity, box, vr(0.2, 0.4, 0.1), q).?;
+        const m_nq = narrowphase.collide(Real, box, vr(0, 0, 0), Quatr.identity, box, vr(0.2, 0.4, 0.1), nq).?;
+        try testing.expectEqual(m_q.count, m_nq.count);
+        try testing.expect(m_q.normal.eql(m_nq.normal));
+        for (0..m_q.count) |i| {
+            try testing.expect(m_q.points[i].position.eql(m_nq.points[i].position));
+            try testing.expectEqual(m_q.points[i].penetration, m_nq.points[i].penetration);
+            try testing.expectEqual(m_q.points[i].feature_id, m_nq.points[i].feature_id);
+        }
+    }
+    // Leg 2 — COINCIDENT positions (both at the origin) force poseAfter to the
+    // quaternion compare, where q's sign flips the canonical order at the first
+    // component (capsule identity x=0 vs box q.x=±0.199 for pitch-0.4-X). The
+    // caller's A→B manifold must still be invariant. The capsule's Y segment runs
+    // through the box centre ⇒ deep; the MTV is core ~1.0 on ±X but BILATERAL
+    // (t = dc·X = 0), so the normal AXIS is asserted, its SIGN is free.
+    {
+        const cap = capsuleShape(1, 0.5);
+        const q = Quatr.fromAxisAngle(Vec3r.unit_x, 0.4);
+        const nq = Quatr{ .x = -q.x, .y = -q.y, .z = -q.z, .w = -q.w };
+        const o = vr(0, 0, 0);
+        const m_q = narrowphase.collide(Real, cap, o, Quatr.identity, box, o, q).?;
+        const m_nq = narrowphase.collide(Real, cap, o, Quatr.identity, box, o, nq).?;
+        try testing.expectEqual(m_q.count, m_nq.count);
+        try testing.expectApproxEqAbs(maxPen(m_q), maxPen(m_nq), depth_tol);
+        try testing.expect(@abs(m_q.normal.dot(m_nq.normal)) > 1 - normal_tol);
+        // Manifold penetration = core MTV (satSegBox) + r_sum (capsule radius 0.5).
+        const sat = satSegBox(o, Quatr.identity, 1, o, q, vr(1, 1, 1));
+        try testing.expectApproxEqAbs(sat.depth + 0.5, maxPen(m_q), depth_tol);
+    }
 }
 
 test "separated radius-0 boxes stay separated (RD-4 band lower boundary)" {

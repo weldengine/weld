@@ -459,21 +459,20 @@ test "box/box SAT differential vs generic (<=30:1)" {
                     try expectBothOrdersUnordered(box, pa, ra, box, pb, rb, false);
                     compared += 1;
                 } else {
-                    // Post-fix, a residual cross-order inconsistency is legitimate
-                    // ONLY as one of two classified cases; anything else (a null-ness,
-                    // depth, or NORMAL divergence) is the frame-dependence defect and
-                    // fails (E4(b)):
-                    //  - an exact MTV tie, SAT-confirmed (>= 2 minimal directions), or
-                    //  - the documented M1.1.4 `collideOrdered` COUNT-order-dependence:
-                    //    both orders agree on null-ness, depth AND the negated normal,
-                    //    differing only in the reduced point count at a topological
-                    //    contact-count boundary (a clip vertex below f32 resolution).
+                    // A residual inconsistency is classified, never silently skipped
+                    // (E4(b)). UNCONDITIONAL: null-ness AND depth must always agree —
+                    // a null-ness or depth divergence is the frame-dependence class
+                    // and fails, tie or not. The residual (normal not negated, or a
+                    // differing count) is then legitimate iff an exact MTV tie (SAT,
+                    // >= 2 minimal directions) OR the documented M1.1.4 `collideOrdered`
+                    // COUNT-order-dependence (the normal still negates; depth already
+                    // asserted equal) — RD-5.
+                    const ab = generic(box, pa, ra, box, pb, rb);
+                    const ba = generic(box, pb, rb, box, pa, ra);
+                    try testing.expect(ab != null and ba != null);
+                    try testing.expectApproxEqAbs(maxPen(ab.?), maxPen(ba.?), diff_tol);
                     const tie = satBoxBox(pa, ra, box.core.box, pb, rb, box.core.box).tie_count >= 2;
-                    const count_only = blk: {
-                        const ab = generic(box, pa, ra, box, pb, rb) orelse break :blk false;
-                        const ba = generic(box, pb, rb, box, pa, ra) orelse break :blk false;
-                        break :blk ab.normal.approxEql(ba.normal.neg(), diff_tol) and @abs(maxPen(ab) - maxPen(ba)) <= diff_tol;
-                    };
+                    const count_only = ab.?.normal.approxEql(ba.?.normal.neg(), diff_tol);
                     try testing.expect(tie or count_only);
                 }
                 if (m.count >= 3) saw_face = true;
