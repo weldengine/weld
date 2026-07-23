@@ -51,6 +51,7 @@ const normal_tol: Real = if (Real == f32) 5.0e-3 else 1.0e-6;
 const red_gate_s1 = false; // un-gated at E2: epa.zig Fix A lands (S1 green both orders)
 const red_gate_s3 = false; // un-gated at E3: intrinsic point⊖segment normal (bit-negated)
 const red_gate_sweep = true;
+const red_gate_rd4 = true; // RD-4: gjk.zig deep/shallow stall fix (design decided at E4 review)
 
 fn vr(x: Real, y: Real, z: Real) Vec3r {
     return Vec3r.fromArray(.{ x, y, z });
@@ -312,6 +313,33 @@ test "on-axis sphere-capsule normal is exactly negated across orders" {
 // ---------------------------------------------------------------------------
 // Order-equivalence sweep with SAT classification (E1(e); GREEN at E4)
 // ---------------------------------------------------------------------------
+
+test "deep-boundary GJK stall classifies deep, not near-zero shallow (RD-4)" {
+    if (red_gate_rd4) return error.SkipZigTest; // un-gated when the gjk.zig stall fix lands
+    // The frozen pitch-X offset is a GJK deep/shallow-boundary stall: GJK converges
+    // to a non-enclosing terminal ~2.66·floatEps·scale from the origin on a
+    // genuinely-deep overlap, and (the noise floor being tighter) mis-reports
+    // `.shallow` with dist≈0 — a pen-0-vs-MTV error of the S1 class, produced by the
+    // GJK stage instead of EPA. It flips with scalar/scale/order (RD-4). The generic
+    // manifold's max penetration must match the SAT oracle at every scale, both
+    // orders — never the ~0 of the mis-classified shallow.
+    const rb = Quatr.fromAxisAngle(Vec3r.unit_x, 0.4);
+    const off_unit = vr(0.1, 0.1, 0.1);
+    const scales = [_]Real{ 0.01, 1, 100 };
+    for (scales) |k| {
+        const box = boxShape(k, k, k);
+        const off = off_unit.scale(k);
+        const dtol = depth_tol * k;
+        const o0 = satBoxBox(vr(0, 0, 0), Quatr.identity, box.core.box, off, rb, box.core.box);
+        const m0 = narrowphase.collideOrderedGeneric(Real, box, vr(0, 0, 0), Quatr.identity, box, off, rb);
+        try testing.expect(m0 != null);
+        try testing.expectApproxEqAbs(o0.depth, maxPen(m0.?), dtol);
+        const o1 = satBoxBox(off, rb, box.core.box, vr(0, 0, 0), Quatr.identity, box.core.box);
+        const m1 = narrowphase.collideOrderedGeneric(Real, box, off, rb, box, vr(0, 0, 0), Quatr.identity);
+        try testing.expect(m1 != null);
+        try testing.expectApproxEqAbs(o1.depth, maxPen(m1.?), dtol);
+    }
+}
 
 const PairKind = enum { box_box, cap_box, sph_cap };
 
