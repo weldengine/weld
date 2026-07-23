@@ -283,11 +283,17 @@ test "on-axis sphere-capsule normal is exactly negated across orders" {
         try testing.expectApproxEqAbs(r_sum, maxPen(ab.?), depth_tol);
         try testing.expectApproxEqAbs(r_sum, maxPen(ba.?), depth_tol);
 
-        // EPA-level: the RAW epa() normals of the two orders are EXACT bit
-        // negations (E3 intrinsic world derivation). We assert the epa() normal,
-        // NOT the manifold normal, because generateManifold round-trips the normal
-        // through A's frame (rot_a differs per order), which loses bit-exactness;
-        // the negation contract is on the EPA normal (brief E1(d)).
+        // Manifold-level EXACT bit negation — the CONSUMER guarantee (M1.1.6
+        // warm-start consumes manifolds, not EpaResults). On the count-1 point-core
+        // path, generateManifold's A-frame rotation is used ONLY for supporting-face
+        // selection; pointCoreContact returns `.normal = n_world` VERBATIM, so the
+        // E3 EPA bit-negation propagates to the manifold unchanged (a pure copy,
+        // platform-independent — no arithmetic on the normal between e.normal and
+        // the manifold).
+        try testing.expect(ab.?.normal.eql(ba.?.normal.neg()));
+
+        // Complement — the same bit negation at its SOURCE, the raw epa() normal
+        // (the E3 intrinsic point⊖segment derivation), documenting where it arises.
         const g_ab = narrowphase.gjk(Real, sphere, center, Quatr.identity, cap, center, rc);
         const g_ba = narrowphase.gjk(Real, cap, center, rc, sphere, center, Quatr.identity);
         try testing.expectEqual(GjkResult.Status.deep, g_ab.status);
