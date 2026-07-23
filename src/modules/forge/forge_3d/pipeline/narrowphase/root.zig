@@ -46,6 +46,9 @@ pub const gjk = gjk_mod.gjk;
 
 /// EPA penetration result (world normal A→B, core depth, world closest points).
 pub const EpaResult = epa_mod.EpaResult;
+/// Optional per-call EPA diagnostics (exit kind, iterations, skips, fallback) —
+/// a test/tooling seam, not part of the frozen `EpaResult` contract.
+pub const EpaDiagnostics = epa_mod.EpaDiagnostics;
 /// The EPA expansion iteration ceiling (scalar-independent).
 pub const max_epa_iterations = epa_mod.max_epa_iterations;
 /// EPA over a `.deep` GJK seed — penetration axis + core depth.

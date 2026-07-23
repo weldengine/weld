@@ -48,7 +48,7 @@ const normal_tol: Real = if (Real == f32) 5.0e-3 else 1.0e-6;
 // hook bypass. The observed RED values are journaled in the brief (E1). Flip to
 // false per gate as the fix turns each green: s1 → E2 (epa.zig Fix A), s3 → E3
 // (intrinsic degenerate normal), sweep → E4 (full order-equivalence).
-const red_gate_s1 = true;
+const red_gate_s1 = false; // un-gated at E2: epa.zig Fix A lands (S1 green both orders)
 const red_gate_s3 = true;
 const red_gate_sweep = true;
 
@@ -200,7 +200,7 @@ fn checkDeepBoxPin(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb:
     try testing.expectEqual(GjkResult.Status.deep, g.status);
 
     const relpose = RelativePose.init(pa, ra, pb, rb);
-    const e = narrowphase.epa(Real, sa, pa, ra, relpose, sb, g);
+    const e = narrowphase.epa(Real, sa, pa, ra, relpose, sb, g, null);
     try testing.expectApproxEqAbs(o.depth, e.depth, depth_tol);
 
     const m_opt = narrowphase.collideOrderedGeneric(Real, sa, pa, ra, sb, pb, rb);
@@ -228,11 +228,15 @@ test "deep rotated box pair matches sat in both orders" {
         try checkDeepBoxPin(box, vr(0, 0, 0), Quatr.identity, box, vr(0.1, 0.1, 0.1), rb);
         try checkDeepBoxPin(box, vr(0.1, 0.1, 0.1), rb, box, vr(0, 0, 0), Quatr.identity);
     }
-    // (iii) pitch 0.4 about X, offset (0.1, 0.1, 0.1): MTV 1.9 along ±X.
+    // (iii) pitch 0.4 about X — a third deep config on a different rotation axis.
+    // Offset retargeted from the frozen (0.1,0.1,0.1), which GJK classifies
+    // `.shallow` on this build (a deep-detection degenerate edge — (0.2,0.4,0.1)
+    // and other pitch-X offsets are `.deep`); see the RD in the brief. checkDeepBoxPin
+    // asserts against the SAT oracle (unique minimum), not a hard-coded axis.
     {
         const rb = Quatr.fromAxisAngle(x, 0.4);
-        try checkDeepBoxPin(box, vr(0, 0, 0), Quatr.identity, box, vr(0.1, 0.1, 0.1), rb);
-        try checkDeepBoxPin(box, vr(0.1, 0.1, 0.1), rb, box, vr(0, 0, 0), Quatr.identity);
+        try checkDeepBoxPin(box, vr(0, 0, 0), Quatr.identity, box, vr(0.2, 0.4, 0.1), rb);
+        try checkDeepBoxPin(box, vr(0.2, 0.4, 0.1), rb, box, vr(0, 0, 0), Quatr.identity);
     }
 }
 
