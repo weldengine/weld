@@ -13,7 +13,7 @@ knowledge base — see § Quick links spec.
 | Current milestone | `m1.1.3-hf-epa-frame-dependence` — narrowphase EPA deep-path order-dependence hotfix — code-complete, PR open. M1.1.5 (integration) CLOSED, merged + tagged `v0.11.5-integration-euler`. |
 | Last released tag | `v0.11.5-integration-euler` (posted by Guy after merge) |
 | Active branch | `phase-1/forge/epa-frame-dependence-hotfix` (PR open, not merged) |
-| Next planned milestone | The standalone hotfix `m1.1.3-hf-epa-frame-dependence` (scheduled BEFORE M1.1.6 — its first real consumer; see Open decisions), then M1.1.6 — contact solver (Sequential Impulses, warm-start consuming the M1.1.3/4 `feature_id`s), seventh core sub-milestone of the M1.1 rigid arc (M1.1.0–15, `PhysicsModule` freeze at M1.1.15). M1.1.0 (foundations), M1.1.1 (broadphase BVH), M1.1.2 (narrowphase GJK), M1.1.3 (narrowphase EPA + manifold), M1.1.4 (narrowphase analytic fast paths ss/sb/cc/bb), and M1.1.5 (integration) are CLOSED. The M1.0 core-language series (M1.0.0–M1.0.18) is CLOSED — C1.6 tag `v0.10.18-extension-additive-warning`. Reserved (Tier-1-dependent, NOT core gaps): `future`, `override`, `quantize`. |
+| Next planned milestone | M1.1.6 — contact solver (Sequential Impulses, warm-start consuming the M1.1.3/4 `feature_id`s), seventh core sub-milestone of the M1.1 rigid arc (M1.1.0–15, `PhysicsModule` freeze at M1.1.15). M1.1.0–M1.1.5 CLOSED (tags `v0.11.0`–`v0.11.5`); the standalone hotfix `m1.1.3-hf-epa-frame-dependence` is the CURRENT milestone (see Current milestone row), untagged by hotfix policy. The M1.0 core-language series (M1.0.0–M1.0.18) is CLOSED — C1.6 tag `v0.10.18-extension-additive-warning`. Reserved (Tier-1-dependent, NOT core gaps): `future`, `override`, `quantize`. |
 
 ## Tags
 
