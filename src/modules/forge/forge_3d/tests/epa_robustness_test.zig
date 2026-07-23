@@ -395,6 +395,73 @@ test "separated radius-0 boxes stay separated (RD-4 band lower boundary)" {
     try testing.expect(narrowphase.collideOrderedGeneric(Real, box, vr(0, 0, 0), Quatr.identity, box, vr(2 + gap, 0, 0), Quatr.identity) == null);
 }
 
+test "rd-4 in-band false-deep is benign" {
+    // Complement of the "stay separated" boundary pin above: a core gap INSIDE the
+    // RD-4 band (`dist <= contact_margin`) must classify `.deep` (a non-enclosing
+    // terminal at noise distance from the origin) yet stay BENIGN downstream —
+    // near-zero penetration for hard cores, and the correct inflated depth for
+    // spheres — in BOTH A/B orders.
+    //
+    // PRECISION: the gap is RELATIVE to the band, recomputed at `Real`. The band is
+    // `m = conv_k · floatEps(Real) · coord_scale`, `coord_scale = |Δpos| +
+    // coreExtent(a) + coreExtent(b)` (gjk.zig classifier). For two unit boxes
+    // (`coreExtent(box) = |(1,1,1)| = √3`) at centres 0 / (2+gap): `coord_scale =
+    // (2+gap) + 2·√3`. We size `m0` at gap≈0 (Δpos = 2); `contact_margin` is
+    // monotone INCREASING in gap, so `m0 ≤ contact_margin(gap)` for every gap ≥ 0,
+    // hence `gap = m0/2 < m0 ≤ contact_margin(gap)` is PROVABLY in-band at any
+    // `Real` — no fixed-point iteration needed. (An absolute gap like 3e-6 would be
+    // in-band in f32 but ~1e8× OUT of band in f64 — the trap this avoids.)
+    const conv_k: Real = 16; // gjk.zig contact-margin constant (kept in sync)
+    const eps = std.math.floatEps(Real);
+    const core_ext_box: Real = @sqrt(@as(Real, 3)); // |(1,1,1)| — gjk.zig coreExtent(box)
+    const coord_scale0: Real = 2 + 2 * core_ext_box; // Δpos = 2 at gap ≈ 0
+    const m0: Real = conv_k * eps * coord_scale0;
+    const gap: Real = m0 / 2; // provably ≤ contact_margin(gap) ⇒ in-band
+
+    // Leg 1 — radius-0 boxes: the band fires on a HARD-core near-touch (cores
+    // disjoint by `dist ≈ gap`, no enclosure). Both orders: `.deep` (the RD-4
+    // band, a non-enclosing terminal, `dist ≈ gap ≈ 4× the in-loop noise floor,
+    // 0.5× the contact margin`); generic non-null; count ≥ 1; penetration BENIGN
+    // (the non-enclosing seed clamps EPA depth to ≈ 0 — the false-deep must NOT
+    // fabricate a spurious depth, the S1 defect class). The normal DIRECTION is
+    // left unasserted: at pen ≈ 0 it is noise-dominated.
+    {
+        const box = boxShape(1, 1, 1);
+        const a = vr(0, 0, 0);
+        const b = vr(2 + gap, 0, 0);
+        const pen_tol: Real = 8 * m0; // band scale
+        inline for (.{ .{ a, b }, .{ b, a } }) |o| { // A→B, then B→A
+            const pa = o[0];
+            const pb = o[1];
+            const g = narrowphase.gjk(Real, box, pa, Quatr.identity, box, pb, Quatr.identity);
+            try testing.expectEqual(GjkResult.Status.deep, g.status);
+            const m = narrowphase.collideOrderedGeneric(Real, box, pa, Quatr.identity, box, pb, Quatr.identity);
+            try testing.expect(m != null);
+            try testing.expect(m.?.count >= 1);
+            try testing.expect(maxPen(m.?) <= pen_tol);
+        }
+    }
+
+    // Leg 2 (inflated) — two r-0.5 spheres, centres `gap` apart: a genuine deep
+    // inflated overlap. Core `dist ≈ gap` (tiny), so the manifold penetration is
+    // `≈ r_sum − dist ≈ 1.0` — pinning that the classifier recovers "the former
+    // shallow result to within ε" (gjk.zig RD-4 comment) with the CORRECT inflated
+    // depth, in both orders. (Point cores have `coreExtent = 0`, so this pair sits
+    // on the shallow side of its own tiny band — it exercises the depth-magnitude
+    // complement of Leg 1's near-zero benignity.)
+    {
+        const sph = sphereShape(0.5);
+        const a = vr(0, 0, 0);
+        const b = vr(gap, 0, 0);
+        const r_sum: Real = 1.0;
+        const ab = narrowphase.collideOrderedGeneric(Real, sph, a, Quatr.identity, sph, b, Quatr.identity);
+        const ba = narrowphase.collideOrderedGeneric(Real, sph, b, Quatr.identity, sph, a, Quatr.identity);
+        try testing.expect(ab != null and ba != null);
+        try testing.expectApproxEqAbs(r_sum, maxPen(ab.?), depth_tol);
+        try testing.expectApproxEqAbs(r_sum, maxPen(ba.?), depth_tol);
+    }
+}
+
 const PairKind = enum { box_box, cap_box, sph_cap };
 
 fn pairShapes(pk: PairKind, k: Real) [2]SupportShape {
