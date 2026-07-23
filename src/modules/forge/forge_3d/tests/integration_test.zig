@@ -297,9 +297,28 @@ test "freed slots are skipped" {
 
     const a = try bm.addBody(gpa, &store, dynDesc(0, s));
     const b = try bm.addBody(gpa, &store, dynDesc(1, s));
+
+    // Seed a's slot with a distinctive velocity + force before freeing it, so the
+    // snapshot below can prove the dead slot was left untouched by `integrate`.
+    bm.setLinearVelocity(a, vr(7, 3, -2));
+    bm.addForce(a, vr(11, 0, 5));
+    const ia = api.PackedId.unpack(a).index;
     bm.removeBody(a); // dead slot between live ones — must be skipped, no crash
 
+    // Snapshot the dead slot's raw columns after the free, before integrating.
+    const pos_dead = bm.bodies.items(.position)[ia].toArray();
+    const vel_dead = bm.bodies.items(.linear_velocity)[ia].toArray();
+    const force_dead = bm.bodies.items(.force)[ia].toArray();
+
     integration.integrate(&bm, dt, g); // step 1: b falls one step, a's slot skipped
+
+    // Double lock on the `isAliveIndex` filter: the dead slot is bit-unchanged —
+    // position not integrated, velocity not touched by gravity, AND the stale
+    // force NOT cleared (the §2 uniform reset runs only for LIVE slots, so a dead
+    // slot keeps its stale accumulator). Checked before `c` overwrites the slot.
+    try testing.expectEqual(pos_dead, bm.bodies.items(.position)[ia].toArray());
+    try testing.expectEqual(vel_dead, bm.bodies.items(.linear_velocity)[ia].toArray());
+    try testing.expectEqual(force_dead, bm.bodies.items(.force)[ia].toArray());
 
     // A body created in the reused slot integrates correctly from its own start.
     const c = try bm.addBody(gpa, &store, dynDesc(2, s));
@@ -483,4 +502,42 @@ test "zero angular velocity leaves orientation unchanged" {
     try testing.expect(q.approxEql(q0r, 1e-6)); // unchanged
     // No NaN produced by the ω = 0 path.
     for (q.toArray()) |c| try testing.expect(!std.math.isNan(c));
+}
+
+test "orientation update uses the left (world-space) quaternion product" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+
+    // Non-commutative config: an X-axis initial orientation with a Y-axis spin,
+    // so the left and right quaternion products give distinct results.
+    var d = dynDesc(0, s);
+    d.angular_damping = 0;
+    const q0 = Quatf.fromAxisAngle(Vec3.unit_x, 0.8);
+    d.rotation = q0;
+    const id = try bm.addBody(gpa, &store, d);
+    bm.setAngularVelocity(id, vr(0, 3, 0));
+
+    const dt: Real = 1.0 / 60.0;
+    integration.integrate(&bm, dt, vr(0, 0, 0)); // no gravity, no torque
+
+    // Oracle: replicate the first-order formula both ways. The engine uses the
+    // LEFT product (world-space ω): q ← normalize(q + ½·dt·(ω_quat ⊗ q)).
+    const w_quat = Quatr{ .x = 0, .y = 3, .z = 0, .w = 0 };
+    const q0r = Quatr.fromArray(.{ q0.x, q0.y, q0.z, q0.w });
+    const left = q0r.add(w_quat.mul(q0r).scale(0.5 * dt)).normalize();
+    const right = q0r.add(q0r.mul(w_quat).scale(0.5 * dt)).normalize();
+
+    // Discrimination guard: this (q0, ω) is non-commutative, so left ≠ right —
+    // protects the test's discriminating power if q0/ω are ever changed.
+    const discrimination_tol: Real = 1e-4;
+    try testing.expect(!left.approxEql(right, discrimination_tol));
+
+    // The engine matches the LEFT product, and NOT the right one.
+    const match_tol: Real = 1e-6;
+    try testing.expect(bm.rotation(id).?.approxEql(left, match_tol));
+    try testing.expect(!bm.rotation(id).?.approxEql(right, discrimination_tol));
 }
