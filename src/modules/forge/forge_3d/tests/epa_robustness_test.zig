@@ -27,6 +27,7 @@ const SupportShape = narrowphase.SupportShape(Real);
 const GjkResult = narrowphase.GjkResult(Real);
 const ContactManifold = narrowphase.ContactManifold(Real);
 const RelativePose = narrowphase.RelativePose(Real);
+const EpaDiagnostics = narrowphase.EpaDiagnostics;
 const testing = std.testing;
 
 const satBoxBox = fast_paths_test.satBoxBox;
@@ -50,7 +51,6 @@ const normal_tol: Real = if (Real == f32) 5.0e-3 else 1.0e-6;
 // (intrinsic degenerate normal), sweep → E4 (full order-equivalence).
 const red_gate_s1 = false; // un-gated at E2: epa.zig Fix A lands (S1 green both orders)
 const red_gate_s3 = false; // un-gated at E3: intrinsic point⊖segment normal (bit-negated)
-const red_gate_sweep = true;
 const red_gate_rd4 = false; // un-gated at E4: RD-4 gjk.zig deep-band fix (C′) lands
 
 fn vr(x: Real, y: Real, z: Real) Vec3r {
@@ -383,6 +383,22 @@ fn satTieCount(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec
 /// must agree on null-ness and depth (depth is order-independent even at a tie),
 /// and agree on count + negated normal EXCEPT inside a SAT-confirmed MTV tie
 /// (≥ 2 minimal axes). Any divergence not classified as a tie fails.
+/// Drive `epa()` with diagnostics on a deep config and assert the corrupt paths
+/// never fire post-fix (E4(a)): no exhaustion fallback, and the exit is only
+/// `converged` (the expanding path) or `degenerate_low_dim` (a genuine < 3-D
+/// Minkowski, e.g. an on-axis point⊖segment). `iteration_cap` /
+/// `fallback_exhausted` / `defensive_non_deep_seed` would signal a residual
+/// non-convergence. A no-op on non-deep configs (epa is not called there).
+fn assertEpaDiagClean(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr) !void {
+    const g = narrowphase.gjk(Real, sa, pa, ra, sb, pb, rb);
+    if (g.status != GjkResult.Status.deep) return;
+    const relpose = RelativePose.init(pa, ra, pb, rb);
+    var diag: EpaDiagnostics = undefined;
+    _ = narrowphase.epa(Real, sa, pa, ra, relpose, sb, rb, g, &diag);
+    try testing.expect(!diag.fallback_used);
+    try testing.expect(diag.exit == EpaDiagnostics.Exit.converged or diag.exit == EpaDiagnostics.Exit.degenerate_low_dim);
+}
+
 fn assertOrderEquivalent(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr, dtol: Real) !void {
     const ab = narrowphase.collideOrderedGeneric(Real, sa, pa, ra, sb, pb, rb);
     const ba = narrowphase.collideOrderedGeneric(Real, sb, pb, rb, sa, pa, ra);
@@ -400,7 +416,6 @@ fn assertOrderEquivalent(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShap
 }
 
 test "generic deep path is order-equivalent over the sweep" {
-    if (red_gate_sweep) return error.SkipZigTest; // RED at E1 (unclassified cross-order divergence); un-gate at E4
     const rot_a_set = [_]Quatr{
         Quatr.identity,
         Quatr.fromAxisAngle(vr(3, 1, 2).normalize(), 0.9),
@@ -429,7 +444,12 @@ test "generic deep path is order-equivalent over the sweep" {
             for (rot_a_set) |ra| {
                 for (rot_b_set) |rb| {
                     for (offsets) |off| {
-                        try assertOrderEquivalent(s[0], vr(0, 0, 0), ra, s[1], off.scale(k), rb, dtol);
+                        const pb = off.scale(k);
+                        try assertOrderEquivalent(s[0], vr(0, 0, 0), ra, s[1], pb, rb, dtol);
+                        // E4(a): the corrupt EPA paths (fallback / iteration-cap /
+                        // defensive) must never fire post-fix, either order.
+                        try assertEpaDiagClean(s[0], vr(0, 0, 0), ra, s[1], pb, rb);
+                        try assertEpaDiagClean(s[1], pb, rb, s[0], vr(0, 0, 0), ra);
                     }
                 }
             }
