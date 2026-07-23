@@ -269,14 +269,14 @@ pub fn epa(
 
     if (did_converge) {
         writeDiag(diag, .converged, iter, faces_skipped, false);
-        const t = terminalFace(T, verts[0..vcount], faces[0..fcount], loop_tol);
+        const t = terminalFace(T, verts[0..vcount], faces[0..fcount], skipped[0..fcount], loop_tol);
         return reconstructFromFace(T, verts[0..vcount], faces[t], rot_a, pos_a);
     }
     // Not converged: an iteration-cap exit (a non-skipped face still selectable)
     // returns the best terminal face; only true exhaustion (all skipped) falls back.
     if (closestNonSkipped(T, faces[0..fcount], skipped[0..fcount])) |_| {
         writeDiag(diag, .iteration_cap, iter, faces_skipped, false);
-        const t = terminalFace(T, verts[0..vcount], faces[0..fcount], loop_tol);
+        const t = terminalFace(T, verts[0..vcount], faces[0..fcount], skipped[0..fcount], loop_tol);
         return reconstructFromFace(T, verts[0..vcount], faces[t], rot_a, pos_a);
     }
     writeDiag(diag, .fallback_exhausted, iter, faces_skipped, true);
@@ -297,23 +297,32 @@ fn writeDiag(diag: ?*EpaDiagnostics, exit: EpaDiagnostics.Exit, iterations: u32,
     };
 }
 
-/// The terminal face to reconstruct from: among faces within `tol` of the
-/// minimal plane distance, the one whose triangle is GENUINELY closest to the
+/// The terminal face to reconstruct from: among NON-SKIPPED faces within `tol` of
+/// the minimal plane distance, the one whose triangle is GENUINELY closest to the
 /// origin. A flat contact face is triangulated into several coplanar triangles
 /// that all share the minimal `dist`, but only the one containing the origin's
 /// projection yields the true closest point — picking the first by index (as
 /// `closestNonSkipped` does for expansion) can clamp the reconstructed closest
 /// point to the wrong sub-triangle. Scanning by actual closest-point magnitude
 /// resolves the flat-face ambiguity without moving the depth (the winner is a
-/// minimal-`dist` face, so its `dist` == the plane distance). Deterministic
+/// minimal-`dist` face, so its `dist` == the plane distance). SKIPPED faces are
+/// excluded from BOTH the minimal-distance scan and the band: a skipped face is
+/// one that failed to prove convergence (E2(d)), so reconstructing from it — and
+/// returning its polytope distance as the depth — is exactly the S1 form E2(d)
+/// forbids ("NEVER returns that face's distance"). The caller guarantees at least
+/// one non-skipped face (the converged / iteration-cap face). Deterministic
 /// (first wins on ties).
-fn terminalFace(comptime T: type, verts: []const support.Vertex(T), faces: []const Face(T), tol: T) usize {
-    var min_dist: T = faces[0].dist;
-    for (faces) |f| min_dist = @min(min_dist, f.dist);
+fn terminalFace(comptime T: type, verts: []const support.Vertex(T), faces: []const Face(T), skipped: []const bool, tol: T) usize {
+    var min_dist: T = std.math.floatMax(T);
+    for (faces, 0..) |f, i| {
+        if (skipped[i]) continue;
+        min_dist = @min(min_dist, f.dist);
+    }
     var best: usize = 0;
     var best_c2: T = std.math.floatMax(T);
     for (faces, 0..) |f, i| {
-        if (f.dist - min_dist > tol) continue; // only near-minimal-plane faces
+        if (skipped[i]) continue;
+        if (f.dist - min_dist > tol) continue; // only near-minimal-plane non-skipped faces
         const tri = gjk_mod.Simplex(T).closestOriginTriangle(verts[f.a].w, verts[f.b].w, verts[f.c].w);
         const c2 = tri.closest.dot(tri.closest);
         if (c2 < best_c2) {
@@ -776,4 +785,28 @@ test "epa fallback selection is deterministic (first wins on ties)" {
     fb.consider(1.0, V.unit_x, V.zero, V.zero);
     fb.consider(1.0, V.unit_y, V.zero, V.zero); // equal depth must NOT replace (strict <)
     try std.testing.expect(fb.n.eql(V.unit_x));
+}
+
+test "epa terminalFace ignores a skipped face holding the global minimum" {
+    const V = math.Vec(3, f32);
+    const Vx = support.Vertex(f32);
+    const z = V.zero;
+    // Face 0 (SKIPPED): plane x = 0.5, closest-to-origin 0.5 — the global minimum.
+    // Face 1 (kept):    plane y = 1.0, closest-to-origin 1.0.
+    // A skip-unaware terminalFace would anchor the band on face 0 and return its
+    // 0.5 distance (the S1 form E2(d) forbids); skip-aware, it must return face 1.
+    const verts = [_]Vx{
+        .{ .w = V.fromArray(.{ 0.5, -1, -1 }), .support_a = z, .support_b = z },
+        .{ .w = V.fromArray(.{ 0.5, 1, -1 }), .support_a = z, .support_b = z },
+        .{ .w = V.fromArray(.{ 0.5, 0, 1 }), .support_a = z, .support_b = z },
+        .{ .w = V.fromArray(.{ -1, 1, -1 }), .support_a = z, .support_b = z },
+        .{ .w = V.fromArray(.{ 1, 1, -1 }), .support_a = z, .support_b = z },
+        .{ .w = V.fromArray(.{ 0, 1, 1 }), .support_a = z, .support_b = z },
+    };
+    const faces = [_]Face(f32){
+        .{ .a = 0, .b = 1, .c = 2, .normal = V.unit_x, .dist = 0.5 },
+        .{ .a = 3, .b = 4, .c = 5, .normal = V.unit_y, .dist = 1.0 },
+    };
+    const skipped = [_]bool{ true, false };
+    try std.testing.expectEqual(@as(usize, 1), terminalFace(f32, &verts, &faces, &skipped, 1.0e-4));
 }

@@ -210,6 +210,18 @@ fn checkDeepBoxPin(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb:
     try testing.expect(@abs(m.normal.dot(o.axis)) > 1 - normal_tol);
 }
 
+/// Run the deep box pin ONLY where this build classifies the pair `.deep`. Used
+/// for the frozen (0.1,0.1,0.1) pitch-X config (iii), which GJK classifies
+/// `.deep` on x86-64/Linux but `.shallow` on this arm64/macOS build — a
+/// cross-platform float divergence on the deep/shallow boundary (RD-3; GJK is out
+/// of scope). Skipping the assertion when `.shallow` (rather than failing) keeps
+/// coverage on platforms that reach EPA, without falsely asserting deep here.
+fn checkDeepBoxPinIfDeep(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr) !void {
+    const g = narrowphase.gjk(Real, sa, pa, ra, sb, pb, rb);
+    if (g.status != GjkResult.Status.deep) return; // not deep on this platform
+    try checkDeepBoxPin(sa, pa, ra, sb, pb, rb);
+}
+
 test "deep rotated box pair matches sat in both orders" {
     if (red_gate_s1) return error.SkipZigTest; // RED at E1 (EPA depth 0.0 vs oracle 1.9); un-gate at E2
     const box = boxShape(1, 1, 1);
@@ -228,13 +240,16 @@ test "deep rotated box pair matches sat in both orders" {
         try checkDeepBoxPin(box, vr(0, 0, 0), Quatr.identity, box, vr(0.1, 0.1, 0.1), rb);
         try checkDeepBoxPin(box, vr(0.1, 0.1, 0.1), rb, box, vr(0, 0, 0), Quatr.identity);
     }
-    // (iii) pitch 0.4 about X — a third deep config on a different rotation axis.
-    // Offset retargeted from the frozen (0.1,0.1,0.1), which GJK classifies
-    // `.shallow` on this build (a deep-detection degenerate edge — (0.2,0.4,0.1)
-    // and other pitch-X offsets are `.deep`); see the RD in the brief. checkDeepBoxPin
-    // asserts against the SAT oracle (unique minimum), not a hard-coded axis.
+    // (iii) pitch 0.4 about X. The FROZEN offset (0.1,0.1,0.1) is `.deep` on
+    // x86-64/Linux but `.shallow` on this arm64/macOS build (RD-3) — run
+    // conditionally on status so it covers platforms that reach EPA without
+    // falsely asserting deep here. The retargeted (0.2,0.4,0.1) is `.deep` on both
+    // and is the unconditional third pin. checkDeepBoxPin asserts against the SAT
+    // oracle (unique minimum), not a hard-coded axis.
     {
         const rb = Quatr.fromAxisAngle(x, 0.4);
+        try checkDeepBoxPinIfDeep(box, vr(0, 0, 0), Quatr.identity, box, vr(0.1, 0.1, 0.1), rb);
+        try checkDeepBoxPinIfDeep(box, vr(0.1, 0.1, 0.1), rb, box, vr(0, 0, 0), Quatr.identity);
         try checkDeepBoxPin(box, vr(0, 0, 0), Quatr.identity, box, vr(0.2, 0.4, 0.1), rb);
         try checkDeepBoxPin(box, vr(0.2, 0.4, 0.1), rb, box, vr(0, 0, 0), Quatr.identity);
     }
