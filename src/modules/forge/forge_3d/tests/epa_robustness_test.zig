@@ -139,21 +139,26 @@ fn satSegBox(seg_center: Vec3r, seg_rot: Quatr, half_height: Real, box_center: V
     }
     const coord_scale = dc.length() + half_height + he_v.length();
     const band = sat_tie_k * std.math.floatEps(Real) * coord_scale;
-    // Count DISTINCT minimal-band directions (colinear slots merged, v/−v same).
+    // Count DISTINCT minimal-band directions (colinear slots merged, v/−v same); a
+    // BILATERAL minimal direction (`|dc·axis| <= band`) counts twice — both signs
+    // are equally-minimal MTV, so the generic normal may pick the same absolute
+    // axis (not negated) across orders (Codex (a)).
     var seen: [6]Vec3r = undefined;
+    var seen_count: usize = 0;
     var tie_count: u32 = 0;
     for (0..n) |i| {
         if (cand_ov[i] - depth > band) continue;
         var is_new = true;
-        for (0..tie_count) |j| {
+        for (0..seen_count) |j| {
             if (@abs(cand_axis[i].dot(seen[j])) > sat_dir_colinear) {
                 is_new = false;
                 break;
             }
         }
         if (is_new) {
-            seen[tie_count] = cand_axis[i];
-            tie_count += 1;
+            seen[seen_count] = cand_axis[i];
+            seen_count += 1;
+            tie_count += if (@abs(dc.dot(cand_axis[i])) <= band) 2 else 1;
         }
     }
     return .{ .depth = depth, .axis = axis, .tie_count = tie_count };

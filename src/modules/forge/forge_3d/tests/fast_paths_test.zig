@@ -92,7 +92,9 @@ pub const sat_dir_colinear: Real = 0.999;
 /// not canonicalized), and `tie_count` — how many DISTINCT directions (colinear
 /// slots merged via `sat_dir_colinear`, v and −v identical) lie within the
 /// `sat_tie_k` band of the minimum. ≥ 2 marks a genuine MTV tie; the same
-/// direction re-derived as several candidate axes counts once.
+/// direction re-derived as several candidate axes counts once, but a BILATERAL
+/// minimal direction (centers aligned along it within the band, so both signs are
+/// equally-minimal MTV) counts twice.
 pub const BoxSatResult = struct {
     depth: Real,
     axis: Vec3r,
@@ -163,21 +165,27 @@ pub fn satBoxBox(pa: Vec3r, ra: Quatr, hea_v: Vec3r, pb: Vec3r, rb: Quatr, heb_v
     const coord_scale = dc.length() + hea_v.length() + heb_v.length();
     const band = sat_tie_k * std.math.floatEps(Real) * coord_scale;
     // Count DISTINCT minimal-band directions: collapse colinear candidate slots
-    // (the same geometric axis re-derived as face + edge-cross) to one.
+    // (the same geometric axis re-derived as face + edge-cross) to one. A minimal
+    // direction whose center-separation projection is within the band
+    // (`|dc·axis| <= band`) is BILATERAL — both signs are equally-minimal MTV
+    // directions, and the generic normal can pick the same absolute axis (NOT
+    // negated) in the two orders — so it counts as TWO tie directions (Codex (a)).
     var seen: [15]Vec3r = undefined;
+    var seen_count: usize = 0;
     var tie_count: u32 = 0;
     for (0..n) |i| {
         if (cand_ov[i] - depth > band) continue;
         var is_new = true;
-        for (0..tie_count) |j| {
+        for (0..seen_count) |j| {
             if (@abs(cand_axis[i].dot(seen[j])) > sat_dir_colinear) {
                 is_new = false;
                 break;
             }
         }
         if (is_new) {
-            seen[tie_count] = cand_axis[i];
-            tie_count += 1;
+            seen[seen_count] = cand_axis[i];
+            seen_count += 1;
+            tie_count += if (@abs(dc.dot(cand_axis[i])) <= band) 2 else 1;
         }
     }
     return .{ .depth = depth, .axis = axis, .tie_count = tie_count };
