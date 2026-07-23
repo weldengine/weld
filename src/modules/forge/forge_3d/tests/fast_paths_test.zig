@@ -66,11 +66,46 @@ fn maxPen(m: ContactManifold) Real {
     return p;
 }
 
-/// An INDEPENDENT box/box separating-axis min-overlap scan, recomputed inline in
-/// the test (a second, trivial SAT) so the fast kernel's reported depth can be
-/// checked against the true MTV WITHOUT any GJK/EPA oracle. Returns the least
-/// overlap over the 15 axes (both boxes assumed radius 0 and overlapping).
-fn satMinOverlap(pa: Vec3r, ra: Quatr, hea_v: Vec3r, pb: Vec3r, rb: Quatr, heb_v: Vec3r) Real {
+/// Tie-band scale for SAT minimal-axis classification. Two axes whose TRUE
+/// overlaps are equal (an MTV tie) must count together, while a real geometric
+/// gap (e.g. the S1 pins' 1.9 vs 1.957 next axis) stays a unique minimum. The
+/// band `sat_tie_k · floatEps(T) · coordScale` bounds the accumulated
+/// projection/normalization rounding of the per-axis overlaps; `coordScale` is
+/// symmetric (`|Δpos| + |he_a| + |he_b|`), mirroring the gjk.zig contact-margin
+/// scale. 128 sits ~8× above the observed f32 projection noise (~7e-6 at unit
+/// scale) and ~950× below the S1 geometric gap (~0.057). Shared by the
+/// epa_robustness_test.zig cross-order tie classification (M1.1.3-HF E4).
+pub const sat_tie_k: Real = 128;
+
+/// Colinearity threshold for deduplicating minimal-band axes into DISTINCT
+/// directions: two unit axes with `|u·w| > sat_dir_colinear` are the same
+/// direction (v and −v identical). A single geometric MTV direction is
+/// re-derived as several candidate axes — e.g. a roll-about-Z box pair yields
+/// ±Z as face-A Z, face-B Z, AND four edge-crosses — so slots must be collapsed
+/// to directions before counting a tie. 0.999 ≈ 2.6°, far below the angular
+/// separation of genuinely distinct minimal MTV axes.
+pub const sat_dir_colinear: Real = 0.999;
+
+/// Result of the independent box/box separating-axis oracle: the MTV `depth`
+/// (least overlap over the 15 axes), the normalized minimal-overlap `axis`
+/// (first-wins on ties, sign per the raw axis — a separating direction, sign
+/// not canonicalized), and `tie_count` — how many DISTINCT directions (colinear
+/// slots merged via `sat_dir_colinear`, v and −v identical) lie within the
+/// `sat_tie_k` band of the minimum. ≥ 2 marks a genuine MTV tie; the same
+/// direction re-derived as several candidate axes counts once.
+pub const BoxSatResult = struct {
+    depth: Real,
+    axis: Vec3r,
+    tie_count: u32,
+};
+
+/// An INDEPENDENT box/box separating-axis scan over the 15 axes (3 face axes of
+/// A, 3 of B, 9 edge crosses), recomputed WITHOUT any GJK/EPA — the true MTV
+/// oracle. Both boxes are radius 0 and assumed overlapping. `depth` is
+/// byte-identical to the former inline `satMinOverlap` (same axis order, same
+/// `@min` selection, same `ov_raw / √l2` normalization); `axis` and `tie_count`
+/// are added so the M1.1.3-HF suite can SAT-classify cross-order divergences.
+pub fn satBoxBox(pa: Vec3r, ra: Quatr, hea_v: Vec3r, pb: Vec3r, rb: Quatr, heb_v: Vec3r) BoxSatResult {
     const axa = [3]Vec3r{ ra.rotateVec3(Vec3r.unit_x), ra.rotateVec3(Vec3r.unit_y), ra.rotateVec3(Vec3r.unit_z) };
     const axb = [3]Vec3r{ rb.rotateVec3(Vec3r.unit_x), rb.rotateVec3(Vec3r.unit_y), rb.rotateVec3(Vec3r.unit_z) };
     const hea = hea_v.toArray();
@@ -87,22 +122,65 @@ fn satMinOverlap(pa: Vec3r, ra: Quatr, hea_v: Vec3r, pb: Vec3r, rb: Quatr, heb_v
             return rap + rbp - @abs(d.dot(L));
         }
     }.f;
-    var mn: Real = std.math.floatMax(Real);
-    for (0..3) |k| mn = @min(mn, ov(axa[k], axa, hea, axb, heb, dc));
-    for (0..3) |k| mn = @min(mn, ov(axb[k], axa, hea, axb, heb, dc));
+
+    // Collect (unit axis, overlap) in the fixed order face-A, face-B, edge-cross.
+    // The overlap of an edge axis is `ov(l_raw) / √l2` (NOT `ov(l_raw)·(1/√l2)`)
+    // so the reduced minimum is bit-identical to the former satMinOverlap.
+    var cand_axis: [15]Vec3r = undefined;
+    var cand_ov: [15]Real = undefined;
+    var n: usize = 0;
+    for (0..3) |k| {
+        cand_axis[n] = axa[k];
+        cand_ov[n] = ov(axa[k], axa, hea, axb, heb, dc);
+        n += 1;
+    }
+    for (0..3) |k| {
+        cand_axis[n] = axb[k];
+        cand_ov[n] = ov(axb[k], axa, hea, axb, heb, dc);
+        n += 1;
+    }
     for (0..3) |i| {
         for (0..3) |j| {
             const l_raw = axa[i].cross(axb[j]);
             const l2 = l_raw.dot(l_raw);
-            // Independent of the kernel: test EVERY non-parallel edge axis (only a
-            // strictly-zero cross carries no info). The normalized overlap is
-            // `ov_raw / √l2` — no `1e-6` skip is copied, so this oracle would catch
-            // a kernel that dropped a separating/min axis.
+            // Only a strictly-zero cross (parallel edges) carries no info.
             if (l2 <= 0) continue;
-            mn = @min(mn, ov(l_raw, axa, hea, axb, heb, dc) / @sqrt(l2));
+            const sq = @sqrt(l2);
+            cand_axis[n] = l_raw.scale(1.0 / sq);
+            cand_ov[n] = ov(l_raw, axa, hea, axb, heb, dc) / sq;
+            n += 1;
         }
     }
-    return mn;
+
+    var depth: Real = std.math.floatMax(Real);
+    var axis: Vec3r = Vec3r.unit_x;
+    for (0..n) |i| {
+        if (cand_ov[i] < depth) {
+            depth = cand_ov[i];
+            axis = cand_axis[i];
+        }
+    }
+    const coord_scale = dc.length() + hea_v.length() + heb_v.length();
+    const band = sat_tie_k * std.math.floatEps(Real) * coord_scale;
+    // Count DISTINCT minimal-band directions: collapse colinear candidate slots
+    // (the same geometric axis re-derived as face + edge-cross) to one.
+    var seen: [15]Vec3r = undefined;
+    var tie_count: u32 = 0;
+    for (0..n) |i| {
+        if (cand_ov[i] - depth > band) continue;
+        var is_new = true;
+        for (0..tie_count) |j| {
+            if (@abs(cand_axis[i].dot(seen[j])) > sat_dir_colinear) {
+                is_new = false;
+                break;
+            }
+        }
+        if (is_new) {
+            seen[tie_count] = cand_axis[i];
+            tie_count += 1;
+        }
+    }
+    return .{ .depth = depth, .axis = axis, .tie_count = tie_count };
 }
 
 /// Exact manifold equality (bit-for-bit) — for pairs the dispatcher does NOT
@@ -490,7 +568,7 @@ test "box/box SAT deep rotated is correct (oracle-free)" {
                 // (a) order-independence.
                 try expectOrderIndependent(p.a, vr(0, 0, 0), Quatr.identity, p.b, o, r);
                 // (b) depth == the true MTV (independent inline SAT scan).
-                const mtv = satMinOverlap(vr(0, 0, 0), Quatr.identity, p.a.core.box, o, r, p.b.core.box);
+                const mtv = satBoxBox(vr(0, 0, 0), Quatr.identity, p.a.core.box, o, r, p.b.core.box).depth;
                 try testing.expectApproxEqAbs(mtv, maxPen(m0), diff_tol);
                 // (c) frame-invariance under a rigid global transform: count and
                 // depth invariant, normal rotated by g. (The exact 4-point SUBSET
