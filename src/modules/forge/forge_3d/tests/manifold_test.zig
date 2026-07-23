@@ -442,7 +442,7 @@ test "edge-edge penetration is measured along the contact axis" {
     const g = narrowphase.gjk(Real, box, pa, Quatr.identity, box, pb, yaw);
     try testing.expectEqual(narrowphase.GjkResult(Real).Status.deep, g.status);
     const relpose = narrowphase.RelativePose(Real).init(pa, Quatr.identity, pb, yaw);
-    const e = narrowphase.epa(Real, box, pa, Quatr.identity, relpose, box, g, null);
+    const e = narrowphase.epa(Real, box, pa, Quatr.identity, relpose, box, yaw, g, null);
     // Confirm the contact axis is genuinely oblique (not a face normal) so this
     // exercises the edge path, not the face-face quad path.
     const na = e.normal.toArray();

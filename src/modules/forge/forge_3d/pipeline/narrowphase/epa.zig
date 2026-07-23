@@ -148,7 +148,11 @@ fn Fallback(comptime T: type) type {
 /// EPA on the cores of `shape_a`/`shape_b` at their world poses, seeded from the
 /// GJK terminal `.deep` simplex. Computes in A's frame (B via `relpose`), maps
 /// the result to world via `rot_a`/`pos_a`. See the file header for the frame,
-/// the low-dimensional-seed contract, and determinism.
+/// the low-dimensional-seed contract, and determinism. `rot_b` (B's world
+/// rotation, exact input bits) is consumed ONLY by the point⊖segment degenerate
+/// branch (E3): it derives the world normal intrinsically from the segment
+/// owner's rotation so the two call orders bit-negate — a quantity `relpose`
+/// (which folds in `conj(rot_a)`) cannot reproduce bit-exactly.
 pub fn epa(
     comptime T: type,
     shape_a: support.SupportShape(T),
@@ -156,6 +160,7 @@ pub fn epa(
     rot_a: math.Quat(T),
     relpose: support.RelativePose(T),
     shape_b: support.SupportShape(T),
+    rot_b: math.Quat(T),
     seed: gjk_mod.GjkResult(T),
     diag: ?*EpaDiagnostics,
 ) EpaResult(T) {
@@ -184,7 +189,7 @@ pub fn epa(
     // --- Expand a low-dimensional seed to a non-degenerate tetrahedron ---
     if (!expandToTetra(T, shape_a, relpose, shape_b, &verts, &vcount, tol_sq)) {
         writeDiag(diag, .degenerate_low_dim, 0, 0, false);
-        return degenerateResult(T, shape_a, rot_a, pos_a, relpose, shape_b, verts[0..vcount]);
+        return degenerateResult(T, shape_a, rot_a, pos_a, relpose, shape_b, rot_b, verts[0..vcount]);
     }
 
     // Interior reference point (the tetra centroid), strictly inside the
@@ -217,7 +222,7 @@ pub fn epa(
     if (fcount < 4) {
         // A degenerate seed tetra (collinear/coplanar 4th vertex slipped through).
         writeDiag(diag, .degenerate_low_dim, 0, 0, false);
-        return degenerateResult(T, shape_a, rot_a, pos_a, relpose, shape_b, verts[0..vcount]);
+        return degenerateResult(T, shape_a, rot_a, pos_a, relpose, shape_b, rot_b, verts[0..vcount]);
     }
 
     // --- Expanding-polytope loop (brief E2(d)/(e)/(f)) ---
@@ -664,6 +669,18 @@ fn distToLineSq(comptime T: type, p: math.Vec(3, T), a: math.Vec(3, T), b: math.
     return p.sub(closest).dot(p.sub(closest));
 }
 
+/// If exactly one core is a segment and the other a point, returns whether the
+/// segment is `shape_a` (`true`) or `shape_b` (`false`); `null` otherwise. Drives
+/// the E3 intrinsic world-space degenerate normal (point⊖segment only).
+fn pointSegmentPair(comptime T: type, shape_a: support.SupportShape(T), shape_b: support.SupportShape(T)) ?bool {
+    const Tag = std.meta.Tag(support.SupportShape(T).Core);
+    const ta = std.meta.activeTag(shape_a.core);
+    const tb = std.meta.activeTag(shape_b.core);
+    if (ta == Tag.segment and tb == Tag.point) return true; // segment is shape_a
+    if (ta == Tag.point and tb == Tag.segment) return false; // segment is shape_b
+    return null;
+}
+
 /// Degenerate result for a < 3-D Minkowski difference (the cores touch along a
 /// point / line / plane — zero core penetration). Returns a deterministic unit
 /// separation normal and depth 0, with the closest points on the touching
@@ -676,13 +693,12 @@ fn degenerateResult(
     pos_a: math.Vec(3, T),
     relpose: support.RelativePose(T),
     shape_b: support.SupportShape(T),
+    rot_b: math.Quat(T),
     verts: []const support.Vertex(T),
 ) EpaResult(T) {
     const Vec3T = math.Vec(3, T);
     const S = gjk_mod.Simplex(T);
-    _ = shape_a;
     _ = relpose;
-    _ = shape_b;
 
     switch (verts.len) {
         1 => {
@@ -690,16 +706,37 @@ fn degenerateResult(
             return worldResult(T, rot_a, pos_a, Vec3T.unit_x, 0, verts[0].support_a, verts[0].support_b);
         },
         2 => {
-            // Segment-like: normal ⟂ the segment; closest on the segment.
+            // Segment-like: closest on the segment; normal ⟂ the segment.
             const seg = S.closestOriginSegment(verts[0].w, verts[1].w);
-            const n = perpAxis(T, verts[1].w.sub(verts[0].w));
             var ca = Vec3T.zero;
             var cb = Vec3T.zero;
             for (0..seg.count) |i| {
                 ca = ca.add(verts[seg.indices[i]].support_a.scale(seg.bary[i]));
                 cb = cb.add(verts[seg.indices[i]].support_b.scale(seg.bary[i]));
             }
-            return worldResult(T, rot_a, pos_a, n, @max(@sqrt(seg.closest.dot(seg.closest)), 0), ca, cb);
+            const depth = @max(@sqrt(seg.closest.dot(seg.closest)), 0);
+            // E3 — point⊖segment (a 1-D Minkowski difference) derives its
+            // perpendicular normal INTRINSICALLY in world from the segment-owning
+            // shape's world rotation with EXACT input bits and an explicit
+            // ownership sign, so `v_world(B,A) = −v_world(A,B)` and (perpAxis being
+            // odd with a `|·|`-invariant axis) the two call orders return exact bit
+            // negations. `n_world` is already world, so it bypasses the `worldResult`
+            // `rot_a` mapping; closest points stay barycentric + `rot_a`-mapped.
+            if (pointSegmentPair(T, shape_a, shape_b)) |seg_is_a| {
+                const rot_seg = if (seg_is_a) rot_a else rot_b;
+                const s: T = if (seg_is_a) 1 else -1;
+                const v_world = rot_seg.rotateVec3(Vec3T.unit_y).scale(s);
+                return .{
+                    .normal = perpAxis(T, v_world),
+                    .depth = depth,
+                    .closest_a = rot_a.rotateVec3(ca).add(pos_a),
+                    .closest_b = rot_a.rotateVec3(cb).add(pos_a),
+                };
+            }
+            // Other 2-vertex cases (segment⊖segment collinear, …): the A-frame
+            // segment direction, best-effort (no cross-order exactness claimed).
+            const n = perpAxis(T, verts[1].w.sub(verts[0].w));
+            return worldResult(T, rot_a, pos_a, n, depth, ca, cb);
         },
         else => {
             // Planar (≥ 3 verts): normal = the plane normal; closest on the triangle.

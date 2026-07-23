@@ -49,7 +49,7 @@ const normal_tol: Real = if (Real == f32) 5.0e-3 else 1.0e-6;
 // false per gate as the fix turns each green: s1 → E2 (epa.zig Fix A), s3 → E3
 // (intrinsic degenerate normal), sweep → E4 (full order-equivalence).
 const red_gate_s1 = false; // un-gated at E2: epa.zig Fix A lands (S1 green both orders)
-const red_gate_s3 = true;
+const red_gate_s3 = false; // un-gated at E3: intrinsic point⊖segment normal (bit-negated)
 const red_gate_sweep = true;
 
 fn vr(x: Real, y: Real, z: Real) Vec3r {
@@ -200,7 +200,7 @@ fn checkDeepBoxPin(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb:
     try testing.expectEqual(GjkResult.Status.deep, g.status);
 
     const relpose = RelativePose.init(pa, ra, pb, rb);
-    const e = narrowphase.epa(Real, sa, pa, ra, relpose, sb, g, null);
+    const e = narrowphase.epa(Real, sa, pa, ra, relpose, sb, rb, g, null);
     try testing.expectApproxEqAbs(o.depth, e.depth, depth_tol);
 
     const m_opt = narrowphase.collideOrderedGeneric(Real, sa, pa, ra, sb, pb, rb);
@@ -274,18 +274,27 @@ test "on-axis sphere-capsule normal is exactly negated across orders" {
         Quatr.identity,
     };
     for (rots) |rc| {
+        // Manifold-level: a single witness contact, penetration = r_sum, both orders.
         const ab = narrowphase.collideOrderedGeneric(Real, sphere, center, Quatr.identity, cap, center, rc);
         const ba = narrowphase.collideOrderedGeneric(Real, cap, center, rc, sphere, center, Quatr.identity);
         try testing.expect(ab != null and ba != null);
-        const ma = ab.?;
-        const mb = ba.?;
-        try testing.expectEqual(@as(u8, 1), ma.count);
-        try testing.expectEqual(@as(u8, 1), mb.count);
-        try testing.expectApproxEqAbs(r_sum, maxPen(ma), depth_tol);
-        try testing.expectApproxEqAbs(r_sum, maxPen(mb), depth_tol);
-        // The two orders must return EXACT bit negations of each other (E3: the
-        // world-space intrinsic derivation makes this achievable). RED at E1.
-        try testing.expect(ma.normal.eql(mb.normal.neg()));
+        try testing.expectEqual(@as(u8, 1), ab.?.count);
+        try testing.expectEqual(@as(u8, 1), ba.?.count);
+        try testing.expectApproxEqAbs(r_sum, maxPen(ab.?), depth_tol);
+        try testing.expectApproxEqAbs(r_sum, maxPen(ba.?), depth_tol);
+
+        // EPA-level: the RAW epa() normals of the two orders are EXACT bit
+        // negations (E3 intrinsic world derivation). We assert the epa() normal,
+        // NOT the manifold normal, because generateManifold round-trips the normal
+        // through A's frame (rot_a differs per order), which loses bit-exactness;
+        // the negation contract is on the EPA normal (brief E1(d)).
+        const g_ab = narrowphase.gjk(Real, sphere, center, Quatr.identity, cap, center, rc);
+        const g_ba = narrowphase.gjk(Real, cap, center, rc, sphere, center, Quatr.identity);
+        try testing.expectEqual(GjkResult.Status.deep, g_ab.status);
+        try testing.expectEqual(GjkResult.Status.deep, g_ba.status);
+        const e_ab = narrowphase.epa(Real, sphere, center, Quatr.identity, RelativePose.init(center, Quatr.identity, center, rc), cap, rc, g_ab, null);
+        const e_ba = narrowphase.epa(Real, cap, center, rc, RelativePose.init(center, rc, center, Quatr.identity), sphere, Quatr.identity, g_ba, null);
+        try testing.expect(e_ab.normal.eql(e_ba.normal.neg()));
     }
 }
 

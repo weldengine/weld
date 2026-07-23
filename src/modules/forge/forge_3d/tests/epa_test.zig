@@ -45,7 +45,7 @@ fn finite3(v: Vec3r) bool {
 fn deepEpa(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr) EpaResult {
     const relpose = RelativePose.init(pa, ra, pb, rb);
     const g = narrowphase.gjk(Real, sa, pa, ra, sb, pb, rb);
-    return narrowphase.epa(Real, sa, pa, ra, relpose, sb, g, null);
+    return narrowphase.epa(Real, sa, pa, ra, relpose, sb, rb, g, null);
 }
 
 test "epa penetration axis and depth match analytic" {

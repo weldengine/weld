@@ -176,7 +176,7 @@ pub fn collideOrderedGeneric(
     var closest_b: Vec3T = undefined;
     var base_penetration: T = undefined;
     if (g.status == .deep) {
-        const e = epa_mod.epa(T, shape_a, pos_a, rot_a, relpose, shape_b, g, null);
+        const e = epa_mod.epa(T, shape_a, pos_a, rot_a, relpose, shape_b, rot_b, g, null);
         n_world = e.normal;
         closest_a = e.closest_a;
         closest_b = e.closest_b;
