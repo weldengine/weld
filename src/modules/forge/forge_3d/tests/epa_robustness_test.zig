@@ -51,7 +51,7 @@ const normal_tol: Real = if (Real == f32) 5.0e-3 else 1.0e-6;
 const red_gate_s1 = false; // un-gated at E2: epa.zig Fix A lands (S1 green both orders)
 const red_gate_s3 = false; // un-gated at E3: intrinsic point⊖segment normal (bit-negated)
 const red_gate_sweep = true;
-const red_gate_rd4 = true; // RD-4: gjk.zig deep/shallow stall fix (design decided at E4 review)
+const red_gate_rd4 = false; // un-gated at E4: RD-4 gjk.zig deep-band fix (C′) lands
 
 fn vr(x: Real, y: Real, z: Real) Vec3r {
     return Vec3r.fromArray(.{ x, y, z });
@@ -339,6 +339,15 @@ test "deep-boundary GJK stall classifies deep, not near-zero shallow (RD-4)" {
         try testing.expect(m1 != null);
         try testing.expectApproxEqAbs(o1.depth, maxPen(m1.?), dtol);
     }
+}
+
+test "separated radius-0 boxes stay separated (RD-4 band lower boundary)" {
+    // Two unit boxes with a small but REAL core gap (~145·contact_margin at unit
+    // scale) must classify separated — the RD-4 deep band (`dist <= m`) must not
+    // swallow a genuine separation just above it. collideOrderedGeneric → null.
+    const box = boxShape(1, 1, 1);
+    const gap: Real = 1.0e-3;
+    try testing.expect(narrowphase.collideOrderedGeneric(Real, box, vr(0, 0, 0), Quatr.identity, box, vr(2 + gap, 0, 0), Quatr.identity) == null);
 }
 
 const PairKind = enum { box_box, cap_box, sph_cap };

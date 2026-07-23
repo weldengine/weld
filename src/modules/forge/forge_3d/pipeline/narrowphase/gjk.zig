@@ -497,6 +497,28 @@ pub fn gjk(
     const r_sum = shape_a.radius + shape_b.radius;
     const coord_scale = pos_b.sub(pos_a).length() + coreExtent(T, shape_a) + coreExtent(T, shape_b);
     const contact_margin = conv_k * std.math.floatEps(T) * coord_scale;
+    // RD-4 — deep band (m1.1.3-hf, C′). A terminal within `contact_margin` of the
+    // ORIGIN is a POSITIVE witness of enclosure: a Minkowski point at noise
+    // distance from the origin ⇒ the cores touch to measurement precision ⇒ the
+    // deep regime by definition. This holds at EVERY loop exit — the progress-test
+    // break, the anti-cycling duplicate break, and the iteration bound — so a
+    // single post-loop test covers all three (a convergence stall can leave a
+    // NON-enclosing terminal ~2.66·floatEps·scale from the origin, above the
+    // `degenerateOriginReached` noise floor, which then read `.shallow` at dist ≈ 0
+    // on a genuinely-deep overlap: the arm64 f32-unit / f64-×0.01 stall). The
+    // margin REUSES `contact_margin` in its existing role — the accumulated
+    // `dist`-rounding bound — applied to the origin-side boundary of the SAME
+    // classification; `noise_k` (the distinct in-loop point-noise floor) is
+    // UNTOUCHED, so the P1b/P2 calibration is preserved. `coord_scale` is symmetric
+    // under an A/B swap by construction (see above), so the band is
+    // order-independent. Three bands result: `[0, m]` deep, `(m, r_sum + m]`
+    // shallow, beyond `m` separated — the inflated touch `dist == r_sum` stays
+    // shallow (frozen convention); for `r_sum == 0` the `[0, m]` band is deep (hard
+    // cores want EPA's MTV, not a pen ≈ 0 witness). A false-deep on a true
+    // near-touch (`dist ∈ (0, m]`, cores actually disjoint) seeds EPA from a
+    // non-enclosing terminal → depth clamps to 0 → manifold penetration
+    // `r_sum − 0`, the former shallow result to within ε — safe.
+    if (dist <= contact_margin) return deepResult(T, verts, count);
     return .{
         .status = if (dist - r_sum > contact_margin) Res.Status.separated else Res.Status.shallow,
         .distance = dist,
