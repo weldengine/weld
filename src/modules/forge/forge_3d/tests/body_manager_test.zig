@@ -302,3 +302,138 @@ test "rotation getter round-trips and rejects stale handles" {
     bm.removeBody(id);
     try testing.expect(bm.rotation(id) == null);
 }
+
+// --- E1 velocity / force / torque / impulse mutators & getters ---------------
+
+test "linear and angular velocity set/get round-trip and reject stale handles" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+    const id = try bm.addBody(gpa, &store, descOf(0, .dynamic, s));
+
+    // Velocities start at zero.
+    try testing.expect(bm.linearVelocity(id).?.approxEql(Vec3r.zero, 0));
+    try testing.expect(bm.angularVelocity(id).?.approxEql(Vec3r.zero, 0));
+
+    const lin = vr(1, -2, 3);
+    const ang = vr(-0.5, 4, 0.25);
+    bm.setLinearVelocity(id, lin);
+    bm.setAngularVelocity(id, ang);
+    try testing.expect(bm.linearVelocity(id).?.approxEql(lin, 0));
+    try testing.expect(bm.angularVelocity(id).?.approxEql(ang, 0));
+
+    // Stale handle ⇒ getters null, setters no-op (no crash).
+    bm.removeBody(id);
+    try testing.expect(bm.linearVelocity(id) == null);
+    try testing.expect(bm.angularVelocity(id) == null);
+    bm.setLinearVelocity(id, vr(9, 9, 9)); // no-op
+    bm.setAngularVelocity(id, vr(9, 9, 9)); // no-op
+    try testing.expect(!bm.isValid(id));
+}
+
+test "addForce and addTorque accumulate into the per-tick columns" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+    const id = try bm.addBody(gpa, &store, descOf(0, .dynamic, s));
+    const idx = bm.alloc.validate(id).?;
+
+    // Accumulators start at zero.
+    try testing.expect(bm.bodies.items(.force)[idx].approxEql(Vec3r.zero, 0));
+    try testing.expect(bm.bodies.items(.torque)[idx].approxEql(Vec3r.zero, 0));
+
+    bm.addForce(id, vr(1, 0, 0));
+    bm.addForce(id, vr(0, 2, -1));
+    bm.addTorque(id, vr(0, 0, 3));
+    bm.addTorque(id, vr(1, 0, 0));
+    try testing.expect(bm.bodies.items(.force)[idx].approxEql(vr(1, 2, -1), 1e-6));
+    try testing.expect(bm.bodies.items(.torque)[idx].approxEql(vr(1, 0, 3), 1e-6));
+
+    // Stale handle ⇒ no-op.
+    bm.removeBody(id);
+    bm.addForce(id, vr(5, 5, 5)); // no-op, no crash
+    bm.addTorque(id, vr(5, 5, 5)); // no-op, no crash
+    try testing.expect(!bm.isValid(id));
+}
+
+test "addForce accumulates on a static body too" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+    const id = try bm.addBody(gpa, &store, descOf(0, .static, s));
+    const idx = bm.alloc.validate(id).?;
+
+    // Any live body accumulates; the uniform per-tick clear is `integrate`'s job.
+    bm.addForce(id, vr(7, 0, 0));
+    try testing.expect(bm.bodies.items(.force)[idx].approxEql(vr(7, 0, 0), 1e-6));
+}
+
+test "impulse is an immediate velocity change and is a no-op on a static body" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+
+    // Dynamic: Δv = impulse · inv_mass, applied immediately (no integrate).
+    var dyn = descOf(0, .dynamic, s);
+    dyn.mass = 4;
+    const dyn_id = try bm.addBody(gpa, &store, dyn);
+    bm.addImpulse(dyn_id, vr(8, 0, -4));
+    try testing.expect(bm.linearVelocity(dyn_id).?.approxEql(vr(2, 0, -1), 1e-6)); // /4
+
+    // A second impulse accumulates onto the current velocity.
+    bm.addImpulse(dyn_id, vr(0, 4, 0));
+    try testing.expect(bm.linearVelocity(dyn_id).?.approxEql(vr(2, 1, -1), 1e-6));
+
+    // Static: inv_mass == 0 ⇒ no velocity change.
+    const stat_id = try bm.addBody(gpa, &store, descOf(1, .static, s));
+    bm.addImpulse(stat_id, vr(100, 100, 100));
+    try testing.expect(bm.linearVelocity(stat_id).?.approxEql(Vec3r.zero, 0));
+
+    // Stale handle ⇒ no-op.
+    bm.removeBody(dyn_id);
+    bm.addImpulse(dyn_id, vr(1, 1, 1)); // no-op, no crash
+    try testing.expect(!bm.isValid(dyn_id));
+}
+
+test "isAliveIndex tracks liveness across create, free, and reuse" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+
+    // Bare index 0 is not alive before any slot exists.
+    try testing.expect(!bm.alloc.isAliveIndex(0));
+
+    const a = try bm.addBody(gpa, &store, descOf(0, .dynamic, s));
+    const b = try bm.addBody(gpa, &store, descOf(1, .dynamic, s));
+    const ia = api.PackedId.unpack(a).index;
+    const ib = api.PackedId.unpack(b).index;
+    try testing.expect(bm.alloc.isAliveIndex(ia));
+    try testing.expect(bm.alloc.isAliveIndex(ib));
+    try testing.expect(!bm.alloc.isAliveIndex(ib + 1)); // out of range
+
+    // Free b: `removeBody` does NOT compact, so the slot count is unchanged but
+    // that index is now dead — exactly what an index-ascending pass must skip.
+    bm.removeBody(b);
+    try testing.expect(bm.alloc.isAliveIndex(ia));
+    try testing.expect(!bm.alloc.isAliveIndex(ib));
+
+    // Reuse b's slot (LIFO): the same bare index goes live again.
+    const c = try bm.addBody(gpa, &store, descOf(2, .dynamic, s));
+    try testing.expectEqual(ib, api.PackedId.unpack(c).index);
+    try testing.expect(bm.alloc.isAliveIndex(ib));
+}
