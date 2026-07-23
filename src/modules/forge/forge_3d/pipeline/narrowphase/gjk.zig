@@ -310,9 +310,12 @@ pub const max_gjk_iterations: u32 = 32;
 ///  - `.separated` / `.shallow`: `distance` (core distance) and `closest_a` /
 ///    `closest_b` (the closest points on each core, **world** space) are valid;
 ///    `simplex_count` is 0.
-///  - `.deep`: `simplex[0..simplex_count]` is the terminal origin-enclosing
-///    simplex — the EPA seed for M1.1.3; `distance` is 0 and the closest points
-///    are unspecified. No depth / normal is computed here (that is M1.1.3).
+///  - `.deep`: `simplex[0..simplex_count]` is the terminal simplex — either an
+///    origin-ENCLOSING simplex, OR (M1.1.3-HF RD-4) a terminal within the
+///    accumulated-rounding band of the origin (a Minkowski witness at noise
+///    distance from the origin, NOT necessarily enclosing) — the EPA seed;
+///    `distance` is 0 and the closest points are unspecified. No depth / normal is
+///    computed here (that is M1.1.3 / EPA).
 pub fn GjkResult(comptime T: type) type {
     return struct {
         const Vec3T = math.Vec(3, T);
@@ -331,7 +334,8 @@ pub fn GjkResult(comptime T: type) type {
         closest_a: Vec3T,
         /// Closest point on B's core, world space (`.separated`/`.shallow`).
         closest_b: Vec3T,
-        /// Terminal origin-enclosing simplex (`.deep`; entries `[0..simplex_count]`).
+        /// Terminal `.deep` simplex — origin-enclosing OR the RD-4 rounding-band
+        /// terminal (not necessarily enclosing); entries `[0..simplex_count]`.
         simplex: [4]Vertex,
         /// Number of valid `simplex` entries (`.deep`: 1..4; otherwise 0).
         simplex_count: u8,
