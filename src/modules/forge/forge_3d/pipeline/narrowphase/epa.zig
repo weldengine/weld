@@ -116,6 +116,14 @@ const max_silhouette: usize = 4 * max_epa_iterations; // 128
 // gjk.zig `conv_k` magnitude.
 const vis_k = 16;
 
+// Coplanarity factor for `terminalFace` (brief E2 / Codex P3): a candidate face
+// whose normal has `n·n_sel >= 1 - term_k·floatEps(T)` counts as on the SAME plane
+// as the converged/selected face. Coplanar re-fan triangles differ only by
+// per-triangle normalization noise (a few ULP), far inside this band; a genuinely
+// distinct contact plane differs by a real angle and is rejected. Bounds float
+// noise only.
+const term_k = 64;
+
 /// Realizable-fallback accumulator (brief E2(e)): the minimum-depth supporting
 /// hyperplane seen across the expansion's support queries. Each recorded
 /// candidate `(n, d = support(n)·n)` defines a supporting plane of the Minkowski
@@ -232,8 +240,9 @@ pub fn epa(
     // fails, or `max_verts` is reached — is marked SKIPPED (excluded from
     // selection, topology untouched) and the loop retries the next-closest
     // non-skipped face; it NEVER returns that face's distance. A successful
-    // expansion rebuilds the face list, so the index-keyed skip marks reset.
-    // Every support query records a realizable fallback candidate; on exhaustion
+    // expansion rebuilds the face list, so the index-keyed skip marks are REMAPPED
+    // in lockstep with the compaction (a kept face keeps its flag). Every support
+    // query records a realizable fallback candidate; on exhaustion
     // (no selectable face) the minimum-depth candidate is returned instead of any
     // rejected face's distance.
     var skipped: [max_faces]bool = undefined;
@@ -241,7 +250,7 @@ pub fn epa(
     var faces_skipped: u32 = 0;
     var fb: Fallback(T) = .{};
 
-    var did_converge = false;
+    var converged: ?FaceT = null;
     var iter: u32 = 0;
     while (iter < max_epa_iterations) : (iter += 1) {
         const sel = closestNonSkipped(T, faces[0..fcount], skipped[0..fcount]) orelse break;
@@ -255,7 +264,7 @@ pub fn epa(
 
         // Converged: the support does not advance past the plane beyond noise.
         if (d - best.dist <= loop_tol) {
-            did_converge = true;
+            converged = best;
             break;
         }
         // Non-convergence: this face cannot advance the polytope → skip it.
@@ -264,25 +273,29 @@ pub fn epa(
             faces_skipped += 1;
             continue;
         }
-        if (expandPolytope(T, &verts, &vcount, &faces, &fcount, w, sel, vis_eps)) {
-            @memset(skipped[0..fcount], false); // topology changed → skip marks stale
-        } else {
+        // Transactional expansion remaps the skip flags in lockstep with the face
+        // compaction (kept faces keep their flag, new fan faces start fresh), so a
+        // face that failed duplicate-progress STAYS skipped rather than being
+        // resurrected to re-fail identically — its support/dist are unchanged since
+        // vertices are only ever appended (Codex P2).
+        if (!expandPolytope(T, &verts, &vcount, &faces, &fcount, skipped[0..], w, sel, vis_eps)) {
             skipped[sel] = true;
             faces_skipped += 1;
         }
     }
 
-    if (did_converge) {
+    if (converged) |sel| {
         writeDiag(diag, .converged, iter, faces_skipped, false);
-        const t = terminalFace(T, verts[0..vcount], faces[0..fcount], skipped[0..fcount], loop_tol);
-        return reconstructFromFace(T, verts[0..vcount], faces[t], rot_a, pos_a);
+        const term = terminalFace(T, verts[0..vcount], faces[0..fcount], skipped[0..fcount], sel, loop_tol);
+        return reconstructFromFace(T, verts[0..vcount], term, rot_a, pos_a);
     }
     // Not converged: an iteration-cap exit (a non-skipped face still selectable)
-    // returns the best terminal face; only true exhaustion (all skipped) falls back.
-    if (closestNonSkipped(T, faces[0..fcount], skipped[0..fcount])) |_| {
+    // returns the best terminal face on the selected plane; only true exhaustion
+    // (all skipped) falls back.
+    if (closestNonSkipped(T, faces[0..fcount], skipped[0..fcount])) |sel_i| {
         writeDiag(diag, .iteration_cap, iter, faces_skipped, false);
-        const t = terminalFace(T, verts[0..vcount], faces[0..fcount], skipped[0..fcount], loop_tol);
-        return reconstructFromFace(T, verts[0..vcount], faces[t], rot_a, pos_a);
+        const term = terminalFace(T, verts[0..vcount], faces[0..fcount], skipped[0..fcount], faces[sel_i], loop_tol);
+        return reconstructFromFace(T, verts[0..vcount], term, rot_a, pos_a);
     }
     writeDiag(diag, .fallback_exhausted, iter, faces_skipped, true);
     if (fb.have) {
@@ -302,37 +315,38 @@ fn writeDiag(diag: ?*EpaDiagnostics, exit: EpaDiagnostics.Exit, iterations: u32,
     };
 }
 
-/// The terminal face to reconstruct from: among NON-SKIPPED faces within `tol` of
-/// the minimal plane distance, the one whose triangle is GENUINELY closest to the
-/// origin. A flat contact face is triangulated into several coplanar triangles
-/// that all share the minimal `dist`, but only the one containing the origin's
-/// projection yields the true closest point — picking the first by index (as
-/// `closestNonSkipped` does for expansion) can clamp the reconstructed closest
-/// point to the wrong sub-triangle. Scanning by actual closest-point magnitude
-/// resolves the flat-face ambiguity without moving the depth (the winner is a
-/// minimal-`dist` face, so its `dist` == the plane distance). SKIPPED faces are
-/// excluded from BOTH the minimal-distance scan and the band: a skipped face is
-/// one that failed to prove convergence (E2(d)), so reconstructing from it — and
-/// returning its polytope distance as the depth — is exactly the S1 form E2(d)
-/// forbids ("NEVER returns that face's distance"). The caller guarantees at least
-/// one non-skipped face (the converged / iteration-cap face). Deterministic
-/// (first wins on ties).
-fn terminalFace(comptime T: type, verts: []const support.Vertex(T), faces: []const Face(T), skipped: []const bool, tol: T) usize {
-    var min_dist: T = std.math.floatMax(T);
+/// Squared distance from the origin to a face's triangle (its closest point).
+fn triClosestSq(comptime T: type, verts: []const support.Vertex(T), f: Face(T)) T {
+    const tri = gjk_mod.Simplex(T).closestOriginTriangle(verts[f.a].w, verts[f.b].w, verts[f.c].w);
+    return tri.closest.dot(tri.closest);
+}
+
+/// The terminal face to reconstruct from, given the SELECTED converged / cap face
+/// `sel`. Among NON-SKIPPED faces COPLANAR with `sel` (normal within
+/// `term_k·floatEps(T)` of parallel AND plane distance within `tol` of `sel.dist`),
+/// the one whose triangle is genuinely closest to the origin. A flat contact face
+/// is split by the re-fan into coplanar triangles that all share the minimal
+/// `dist`, but only the one containing the origin's projection yields the true
+/// closest point, and picking first-by-index (as `closestNonSkipped` does for
+/// expansion) can clamp the reconstructed point to the wrong sub-triangle.
+/// Restricting to `sel`'s PLANE (not merely near-minimal distance) guarantees we
+/// never adopt a DIFFERENT-normal face that was never proven converged, and never
+/// move the depth (a coplanar face shares `sel.dist`). SKIPPED faces are excluded
+/// (returning a skipped face's distance is the S1 form E2(d) forbids). Falls back
+/// to `sel` when no coplanar candidate is closer (Codex P3). Deterministic (first
+/// wins on ties).
+fn terminalFace(comptime T: type, verts: []const support.Vertex(T), faces: []const Face(T), skipped: []const bool, sel: Face(T), tol: T) Face(T) {
+    const coplanar_min: T = 1 - term_k * std.math.floatEps(T);
+    var best = sel;
+    var best_c2 = triClosestSq(T, verts, sel);
     for (faces, 0..) |f, i| {
         if (skipped[i]) continue;
-        min_dist = @min(min_dist, f.dist);
-    }
-    var best: usize = 0;
-    var best_c2: T = std.math.floatMax(T);
-    for (faces, 0..) |f, i| {
-        if (skipped[i]) continue;
-        if (f.dist - min_dist > tol) continue; // only near-minimal-plane non-skipped faces
-        const tri = gjk_mod.Simplex(T).closestOriginTriangle(verts[f.a].w, verts[f.b].w, verts[f.c].w);
-        const c2 = tri.closest.dot(tri.closest);
+        if (f.normal.dot(sel.normal) < coplanar_min) continue; // not coplanar with sel's plane
+        if (@abs(f.dist - sel.dist) > tol) continue;
+        const c2 = triClosestSq(T, verts, f);
         if (c2 < best_c2) {
             best_c2 = c2;
-            best = i;
+            best = f;
         }
     }
     return best;
@@ -468,12 +482,16 @@ fn duplicate(comptime T: type, verts: []const support.Vertex(T), w: math.Vec(3, 
 ///  (c) fan the component's silhouette to `w`, validating all fan faces first.
 /// Returns false (no mutation) when the closest face is not visible, the
 /// silhouette is empty, a fan face is a sliver, or the buffers cannot hold it.
+/// On commit, `skipped` is remapped in lockstep with the face compaction — a kept
+/// face carries its flag to its new index, a new fan face starts unskipped — so a
+/// face known to fail is not resurrected (Codex P2).
 fn expandPolytope(
     comptime T: type,
     verts: *[max_verts]support.Vertex(T),
     vcount: *usize,
     faces: *[max_faces]Face(T),
     fcount: *usize,
+    skipped: []bool,
     w: support.Vertex(T),
     closest: usize,
     vis_eps: T,
@@ -543,11 +561,15 @@ fn expandPolytope(
         fan[si] = makeWoundFaceAt(T, verts, sil[si][0], sil[si][1], wi, w.w) orelse return false;
     }
 
-    // Commit: compact out removed faces, append the vertex, append the fan.
+    // Commit: compact out removed faces (remapping `skipped` in lockstep — a kept
+    // face carries its flag to its new index), append the vertex, append the fan
+    // (new faces start unskipped). `nf <= fi` throughout, so the in-place remap
+    // never overwrites an unread entry.
     var nf: usize = 0;
     for (0..n) |fi| {
         if (!remove[fi]) {
             faces[nf] = faces[fi];
+            skipped[nf] = skipped[fi];
             nf += 1;
         }
     }
@@ -555,6 +577,7 @@ fn expandPolytope(
     verts[vcount.*] = w;
     vcount.* += 1;
     for (0..scount) |si| {
+        skipped[fcount.*] = false;
         faces[fcount.*] = fan[si];
         fcount.* += 1;
     }
@@ -824,26 +847,85 @@ test "epa fallback selection is deterministic (first wins on ties)" {
     try std.testing.expect(fb.n.eql(V.unit_x));
 }
 
-test "epa terminalFace ignores a skipped face holding the global minimum" {
+test "epa terminalFace ignores a skipped coplanar face with a smaller closest" {
     const V = math.Vec(3, f32);
     const Vx = support.Vertex(f32);
     const z = V.zero;
-    // Face 0 (SKIPPED): plane x = 0.5, closest-to-origin 0.5 — the global minimum.
-    // Face 1 (kept):    plane y = 1.0, closest-to-origin 1.0.
-    // A skip-unaware terminalFace would anchor the band on face 0 and return its
-    // 0.5 distance (the S1 form E2(d) forbids); skip-aware, it must return face 1.
+    // sel (face 0): plane y = 1, a FAR triangle whose closest-to-origin (~4.4) is
+    // clamped to its edge (projection outside it). Face 1: a COPLANAR sibling on
+    // y = 1 containing the projection (closest 1.0), but SKIPPED. terminalFace must
+    // return sel — a skipped face's distance is never adopted (E2(d)).
     const verts = [_]Vx{
-        .{ .w = V.fromArray(.{ 0.5, -1, -1 }), .support_a = z, .support_b = z },
-        .{ .w = V.fromArray(.{ 0.5, 1, -1 }), .support_a = z, .support_b = z },
-        .{ .w = V.fromArray(.{ 0.5, 0, 1 }), .support_a = z, .support_b = z },
+        .{ .w = V.fromArray(.{ 3, 1, 3 }), .support_a = z, .support_b = z },
+        .{ .w = V.fromArray(.{ 4, 1, 3 }), .support_a = z, .support_b = z },
+        .{ .w = V.fromArray(.{ 3.5, 1, 4 }), .support_a = z, .support_b = z },
         .{ .w = V.fromArray(.{ -1, 1, -1 }), .support_a = z, .support_b = z },
         .{ .w = V.fromArray(.{ 1, 1, -1 }), .support_a = z, .support_b = z },
         .{ .w = V.fromArray(.{ 0, 1, 1 }), .support_a = z, .support_b = z },
     };
-    const faces = [_]Face(f32){
-        .{ .a = 0, .b = 1, .c = 2, .normal = V.unit_x, .dist = 0.5 },
-        .{ .a = 3, .b = 4, .c = 5, .normal = V.unit_y, .dist = 1.0 },
+    const sel = Face(f32){ .a = 0, .b = 1, .c = 2, .normal = V.unit_y, .dist = 1.0 };
+    const faces = [_]Face(f32){ sel, .{ .a = 3, .b = 4, .c = 5, .normal = V.unit_y, .dist = 1.0 } };
+    const skipped = [_]bool{ false, true };
+    const t = terminalFace(f32, &verts, &faces, &skipped, sel, 1.0e-4);
+    try std.testing.expect(t.a == 0 and t.b == 1 and t.c == 2); // sel, not the skipped sibling
+}
+
+test "epa terminalFace rejects a different-normal face in the distance band" {
+    const V = math.Vec(3, f32);
+    const Vx = support.Vertex(f32);
+    const z = V.zero;
+    // sel (face 0): plane x = 1, closest-to-origin 1.0. Face 1: plane y = 0.7
+    // (a DIFFERENT normal) within the distance band, whose closest 0.7 is smaller
+    // — a plane-agnostic scan would adopt it, but its normal was never proven
+    // converged, so terminalFace must reject it and keep sel's plane (Codex P3).
+    const verts = [_]Vx{
+        .{ .w = V.fromArray(.{ 1, -1, -1 }), .support_a = z, .support_b = z },
+        .{ .w = V.fromArray(.{ 1, 1, -1 }), .support_a = z, .support_b = z },
+        .{ .w = V.fromArray(.{ 1, 0, 1 }), .support_a = z, .support_b = z },
+        .{ .w = V.fromArray(.{ -1, 0.7, -1 }), .support_a = z, .support_b = z },
+        .{ .w = V.fromArray(.{ 1, 0.7, -1 }), .support_a = z, .support_b = z },
+        .{ .w = V.fromArray(.{ 0, 0.7, 1 }), .support_a = z, .support_b = z },
     };
-    const skipped = [_]bool{ true, false };
-    try std.testing.expectEqual(@as(usize, 1), terminalFace(f32, &verts, &faces, &skipped, 1.0e-4));
+    const sel = Face(f32){ .a = 0, .b = 1, .c = 2, .normal = V.unit_x, .dist = 1.0 };
+    const faces = [_]Face(f32){ sel, .{ .a = 3, .b = 4, .c = 5, .normal = V.unit_y, .dist = 0.7 } };
+    const skipped = [_]bool{ false, false };
+    const t = terminalFace(f32, &verts, &faces, &skipped, sel, 0.5);
+    try std.testing.expect(t.normal.eql(V.unit_x)); // kept sel's plane, rejected the +Y face
+}
+
+test "epa expandPolytope keeps a kept face's skip flag through a successful expansion" {
+    const V = math.Vec(3, f32);
+    const Vx = support.Vertex(f32);
+    const z = V.zero;
+    // A regular tetra around the origin; expand beyond face 0 only (faces 1-3 kept).
+    // Mark kept face 1 skipped BEFORE the expansion — the lockstep remap must carry
+    // the flag to its new compacted index (Codex P2: no resurrection).
+    var verts: [max_verts]Vx = undefined;
+    verts[0] = .{ .w = V.fromArray(.{ 1, 1, 1 }), .support_a = z, .support_b = z };
+    verts[1] = .{ .w = V.fromArray(.{ 1, -1, -1 }), .support_a = z, .support_b = z };
+    verts[2] = .{ .w = V.fromArray(.{ -1, 1, -1 }), .support_a = z, .support_b = z };
+    verts[3] = .{ .w = V.fromArray(.{ -1, -1, 1 }), .support_a = z, .support_b = z };
+    var vcount: usize = 4;
+    var faces: [max_faces]Face(f32) = undefined;
+    var fcount: usize = 0;
+    const tetra = [4][3]u32{ .{ 0, 1, 2 }, .{ 0, 1, 3 }, .{ 0, 2, 3 }, .{ 1, 2, 3 } };
+    for (tetra) |t| {
+        faces[fcount] = makeFace(f32, &verts, t[0], t[1], t[2], V.zero).?;
+        fcount += 1;
+    }
+    var skipped: [max_faces]bool = undefined;
+    @memset(skipped[0..fcount], false);
+    const kept = faces[1]; // a face NOT beyond `w` → kept
+    skipped[1] = true;
+    // `w` just past face 0's plane makes ONLY face 0 visible (the others sit behind).
+    const w = Vx{ .w = faces[0].normal.scale(faces[0].dist + 1), .support_a = z, .support_b = z };
+    try std.testing.expect(expandPolytope(f32, &verts, &vcount, &faces, &fcount, skipped[0..], w, 0, 1.0e-5));
+    var found = false;
+    for (0..fcount) |i| {
+        if (faces[i].a == kept.a and faces[i].b == kept.b and faces[i].c == kept.c) {
+            try std.testing.expect(skipped[i]); // flag survived the compaction
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
 }
