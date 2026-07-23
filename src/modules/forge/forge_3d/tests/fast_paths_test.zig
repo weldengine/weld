@@ -405,13 +405,13 @@ test "sphere/box P1d deep extreme aspect (closed-form)" {
 }
 
 /// Whether the generic oracle is SELF-CONSISTENT on this pair — same null-ness,
-/// same `count`, and negated normal across the two A/B orders. `collideOrdered`
-/// is fixed-order and runs GJK/EPA in the frame of A; for a deep, rotated pair
-/// EPA can converge to DIFFERENT faces in the two frames (an M1.1.3 EPA
-/// frame-dependence, NOT a fast-path issue — the SAT fast path is order-
-/// independent by construction; see the order-independence test). Where generic
-/// disagrees with itself it is an unreliable oracle, so the differential skips
-/// it. This is the concrete motivation for the analytic fast path.
+/// same `count`, and negated normal across the two A/B orders. The M1.1.3 generic
+/// EPA deep-rotated frame-dependence is FIXED in M1.1.3-HF (`epa.zig` expansion
+/// robustness + the `gjk.zig` deep band), so the generic oracle is now order-
+/// consistent except at exact MTV ties — where the two orders may pick the same
+/// absolute axis (a bilateral minimum) or different equally-minimal axes, giving
+/// a non-negated or count-differing normal. The caller SAT-classifies any
+/// inconsistency: an exact tie is skipped, anything else fails (E4(b)).
 fn genericConsistent(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr) bool {
     const ab = generic(sa, pa, ra, sb, pb, rb);
     const ba = generic(sb, pb, rb, sa, pa, ra);
@@ -424,11 +424,11 @@ fn genericConsistent(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, p
 test "box/box SAT differential vs generic (<=30:1)" {
     // Cube A at the origin vs cube B rotated/offset — a broad sweep hitting the
     // face-face, face-vertex and edge-edge regimes. Per config, `collideOrdered`
-    // is compared to the generic oracle in BOTH A/B orders, but only where that
-    // oracle is self-consistent across orders (deep rotated pairs where the
-    // generic EPA is frame-dependent — an M1.1.3 EPA limitation the SAT fast path
-    // does not share — are skipped via `genericConsistent`). Geometry-only (fid
-    // tie bands excluded); fid-exact is asserted on the clean explicit configs.
+    // is compared to the generic oracle in BOTH A/B orders where that oracle is
+    // self-consistent; a residual inconsistency (post-M1.1.3-HF, only at an exact
+    // MTV tie) is SAT-confirmed as a tie before it is skipped — an unclassified
+    // one fails (E4(b)). Geometry-only (fid tie bands excluded); fid-exact is
+    // asserted on the clean explicit configs.
     const box = boxShape(1, 1, 1);
     const rots = [_]Quatr{
         Quatr.identity,
@@ -450,11 +450,31 @@ test "box/box SAT differential vs generic (<=30:1)" {
                 const ra = g;
                 const rb = g.mul(r);
                 const m = ordered(box, pa, ra, box, pb, rb) orelse continue;
-                // Compare fast vs generic in both orders, only where the oracle
-                // is self-consistent (i.e. its EPA converged reliably).
+                // Compare fast vs generic in both orders where the oracle is
+                // self-consistent. Post-fix (M1.1.3-HF), a residual cross-order
+                // inconsistency is permitted ONLY as an exact MTV tie, SAT-confirmed
+                // (>= 2 minimal directions / a bilateral axis); anything else is a
+                // defect (E4(b)) — never a silent skip.
                 if (genericConsistent(box, pa, ra, box, pb, rb)) {
                     try expectBothOrdersUnordered(box, pa, ra, box, pb, rb, false);
                     compared += 1;
+                } else {
+                    // Post-fix, a residual cross-order inconsistency is legitimate
+                    // ONLY as one of two classified cases; anything else (a null-ness,
+                    // depth, or NORMAL divergence) is the frame-dependence defect and
+                    // fails (E4(b)):
+                    //  - an exact MTV tie, SAT-confirmed (>= 2 minimal directions), or
+                    //  - the documented M1.1.4 `collideOrdered` COUNT-order-dependence:
+                    //    both orders agree on null-ness, depth AND the negated normal,
+                    //    differing only in the reduced point count at a topological
+                    //    contact-count boundary (a clip vertex below f32 resolution).
+                    const tie = satBoxBox(pa, ra, box.core.box, pb, rb, box.core.box).tie_count >= 2;
+                    const count_only = blk: {
+                        const ab = generic(box, pa, ra, box, pb, rb) orelse break :blk false;
+                        const ba = generic(box, pb, rb, box, pa, ra) orelse break :blk false;
+                        break :blk ab.normal.approxEql(ba.normal.neg(), diff_tol) and @abs(maxPen(ab) - maxPen(ba)) <= diff_tol;
+                    };
+                    try testing.expect(tie or count_only);
                 }
                 if (m.count >= 3) saw_face = true;
                 if (m.count == 1) saw_single = true;
