@@ -3,7 +3,9 @@
 //! `MotionProperties` holds the inverse mass + inverse local inertia the solver
 //! integrates against; `computeMotion` derives them from a `BodyDescriptor` and
 //! its `Shape`. Static and kinematic bodies have zero inverse mass and inertia
-//! (infinite effective mass). `Body` is the SoA row `BodyManager` stores.
+//! (infinite effective mass). `Body` is the SoA row `BodyManager` stores. The
+//! `friction`/`restitution` columns are the per-body material coefficients the
+//! Sequential Impulses contact solver reads (M1.1.6).
 //!
 //! The `force`/`torque` columns are world-space per-tick accumulators (N, N·m):
 //! `BodyManager.addForce`/`addTorque` add into them and `integrate` (E2) reads
@@ -66,6 +68,14 @@ pub const Body = struct {
     torque: Vec3r,
     /// Derived inverse mass/inertia + damping/gravity.
     motion: MotionProperties,
+    /// Coulomb friction coefficient (>= 0), stored from the descriptor. Consumed
+    /// by the Sequential Impulses contact solver (M1.1.6); the M1.1.5 `addBody`
+    /// dropped it.
+    friction: Real,
+    /// Restitution / bounciness in [0, 1], stored from the descriptor. Consumed
+    /// by the Sequential Impulses contact solver (M1.1.6); the M1.1.5 `addBody`
+    /// dropped it.
+    restitution: Real,
     /// Collision-shape handle (into a `ShapeStore`).
     shape: ShapeId,
     /// Simulation class.
