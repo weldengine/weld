@@ -310,9 +310,12 @@ pub const max_gjk_iterations: u32 = 32;
 ///  - `.separated` / `.shallow`: `distance` (core distance) and `closest_a` /
 ///    `closest_b` (the closest points on each core, **world** space) are valid;
 ///    `simplex_count` is 0.
-///  - `.deep`: `simplex[0..simplex_count]` is the terminal origin-enclosing
-///    simplex — the EPA seed for M1.1.3; `distance` is 0 and the closest points
-///    are unspecified. No depth / normal is computed here (that is M1.1.3).
+///  - `.deep`: `simplex[0..simplex_count]` is the terminal simplex — either an
+///    origin-ENCLOSING simplex, OR (M1.1.3-HF RD-4) a terminal within the
+///    accumulated-rounding band of the origin (a Minkowski witness at noise
+///    distance from the origin, NOT necessarily enclosing) — the EPA seed;
+///    `distance` is 0 and the closest points are unspecified. No depth / normal is
+///    computed here (that is M1.1.3 / EPA).
 pub fn GjkResult(comptime T: type) type {
     return struct {
         const Vec3T = math.Vec(3, T);
@@ -331,7 +334,8 @@ pub fn GjkResult(comptime T: type) type {
         closest_a: Vec3T,
         /// Closest point on B's core, world space (`.separated`/`.shallow`).
         closest_b: Vec3T,
-        /// Terminal origin-enclosing simplex (`.deep`; entries `[0..simplex_count]`).
+        /// Terminal `.deep` simplex — origin-enclosing OR the RD-4 rounding-band
+        /// terminal (not necessarily enclosing); entries `[0..simplex_count]`.
         simplex: [4]Vertex,
         /// Number of valid `simplex` entries (`.deep`: 1..4; otherwise 0).
         simplex_count: u8,
@@ -348,10 +352,17 @@ pub fn GjkResult(comptime T: type) type {
 ///
 /// Classification (brief Notes): if the terminal simplex encloses the origin the
 /// cores intersect → `.deep`; otherwise the converged core distance `dist` gives
-/// `.separated` iff `dist − (r_a + r_b)` exceeds the contact margin (an absolute
-/// float-noise margin `conv_k · floatEps(T) · coordScale`, see the tolerance
-/// block), else `.shallow`. An exact inflated touch (`dist == r_a + r_b`), and a
-/// separation within that noise margin, both count as shallow.
+/// `.deep` iff `dist ≤ the contact margin` (the RD-4 witness band, m1.1.3-hf — a
+/// Minkowski point at noise distance from the origin; the terminal is NOT
+/// necessarily enclosing), `.separated` iff `dist − (r_a + r_b)` exceeds it, else
+/// `.shallow`. The contact margin is an absolute float-noise bound
+/// `conv_k · floatEps(T) · coordScale` (see the tolerance block). An exact inflated
+/// touch (`dist == r_a + r_b`) stays shallow iff `r_sum > contact_margin` — the
+/// RD-4 band is evaluated FIRST, so a sub-noise inflation radius
+/// (`0 < r_sum <= contact_margin`) classifies deep; benign either way: EPA clamps
+/// depth to ~0 and the manifold penetration is ~`r_sum` in both regimes. For hard
+/// cores (`r_sum == 0`) the shallow band is empty — an exact touch (`dist == 0`) is
+/// the RD-4 deep band.
 pub fn gjk(
     comptime T: type,
     shape_a: support.SupportShape(T),
@@ -492,11 +503,38 @@ pub fn gjk(
     // independent — unlike the terminal simplex's A-frame support magnitude,
     // which after cancellation reflects only who is A and made a tangency read
     // `.separated` in one order and `.shallow` in the other (P1c). The comparison
-    // is additive on the already-computed `dist`; the frozen convention keeps an
-    // exact inflated touch (`dist == r_sum`) shallow.
+    // is additive on the already-computed `dist`. It is reached only after the
+    // RD-4 band below (`dist <= contact_margin`) did not fire, so the frozen
+    // convention keeps an exact inflated touch (`dist == r_sum`) shallow exactly
+    // when `r_sum > contact_margin` — a sub-noise `r_sum` is caught deep above.
     const r_sum = shape_a.radius + shape_b.radius;
     const coord_scale = pos_b.sub(pos_a).length() + coreExtent(T, shape_a) + coreExtent(T, shape_b);
     const contact_margin = conv_k * std.math.floatEps(T) * coord_scale;
+    // RD-4 — deep band (m1.1.3-hf, C′). A terminal within `contact_margin` of the
+    // ORIGIN is a POSITIVE witness of enclosure: a Minkowski point at noise
+    // distance from the origin ⇒ the cores touch to measurement precision ⇒ the
+    // deep regime by definition. This holds at EVERY loop exit — the progress-test
+    // break, the anti-cycling duplicate break, and the iteration bound — so a
+    // single post-loop test covers all three (a convergence stall can leave a
+    // NON-enclosing terminal ~2.66·floatEps·scale from the origin, above the
+    // `degenerateOriginReached` noise floor, which then read `.shallow` at dist ≈ 0
+    // on a genuinely-deep overlap: the arm64 f32-unit / f64-×0.01 stall). The
+    // margin REUSES `contact_margin` in its existing role — the accumulated
+    // `dist`-rounding bound — applied to the origin-side boundary of the SAME
+    // classification; `noise_k` (the distinct in-loop point-noise floor) is
+    // UNTOUCHED, so the P1b/P2 calibration is preserved. `coord_scale` is symmetric
+    // under an A/B swap by construction (see above), so the band is
+    // order-independent. Three bands result: `[0, m]` deep, `(m, r_sum + m]`
+    // shallow, beyond `r_sum + m` separated — the inflated touch `dist == r_sum`
+    // stays shallow IFF `r_sum > m` (the `[0, m]` deep band is checked FIRST, so a
+    // sub-noise radius `0 < r_sum <= m` lands the touch in the deep band); for
+    // `r_sum == 0` the `[0, m]` band absorbs `dist == 0` (hard cores want EPA's MTV,
+    // not a pen ≈ 0 witness). Benign either way — EPA clamps depth to ≈ 0 and the
+    // manifold penetration is ≈ r_sum in both regimes. A false-deep on a true
+    // near-touch (`dist ∈ (0, m]`, cores actually disjoint) seeds EPA from a
+    // non-enclosing terminal → depth clamps to 0 → manifold penetration
+    // `r_sum − 0`, the former shallow result to within ε — safe.
+    if (dist <= contact_margin) return deepResult(T, verts, count);
     return .{
         .status = if (dist - r_sum > contact_margin) Res.Status.separated else Res.Status.shallow,
         .distance = dist,

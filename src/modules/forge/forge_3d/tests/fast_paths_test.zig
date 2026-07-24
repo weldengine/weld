@@ -66,11 +66,48 @@ fn maxPen(m: ContactManifold) Real {
     return p;
 }
 
-/// An INDEPENDENT box/box separating-axis min-overlap scan, recomputed inline in
-/// the test (a second, trivial SAT) so the fast kernel's reported depth can be
-/// checked against the true MTV WITHOUT any GJK/EPA oracle. Returns the least
-/// overlap over the 15 axes (both boxes assumed radius 0 and overlapping).
-fn satMinOverlap(pa: Vec3r, ra: Quatr, hea_v: Vec3r, pb: Vec3r, rb: Quatr, heb_v: Vec3r) Real {
+/// Tie-band scale for SAT minimal-axis classification. Two axes whose TRUE
+/// overlaps are equal (an MTV tie) must count together, while a real geometric
+/// gap (e.g. the S1 pins' 1.9 vs 1.957 next axis) stays a unique minimum. The
+/// band `sat_tie_k · floatEps(T) · coordScale` bounds the accumulated
+/// projection/normalization rounding of the per-axis overlaps; `coordScale` is
+/// symmetric (`|Δpos| + |he_a| + |he_b|`), mirroring the gjk.zig contact-margin
+/// scale. 128 sits ~8× above the observed f32 projection noise (~7e-6 at unit
+/// scale) and ~950× below the S1 geometric gap (~0.057). Shared by the
+/// epa_robustness_test.zig cross-order tie classification (M1.1.3-HF E4).
+pub const sat_tie_k: Real = 128;
+
+/// Colinearity threshold for deduplicating minimal-band axes into DISTINCT
+/// directions: two unit axes with `|u·w| > sat_dir_colinear` are the same
+/// direction (v and −v identical). A single geometric MTV direction is
+/// re-derived as several candidate axes — e.g. a roll-about-Z box pair yields
+/// ±Z as face-A Z, face-B Z, AND four edge-crosses — so slots must be collapsed
+/// to directions before counting a tie. 0.999 ≈ 2.6°, far below the angular
+/// separation of genuinely distinct minimal MTV axes.
+pub const sat_dir_colinear: Real = 0.999;
+
+/// Result of the independent box/box separating-axis oracle: the MTV `depth`
+/// (least overlap over the 15 axes), the normalized minimal-overlap `axis`
+/// (first-wins on ties, sign per the raw axis — a separating direction, sign
+/// not canonicalized), and `tie_count` — how many DISTINCT directions (colinear
+/// slots merged via `sat_dir_colinear`, v and −v identical) lie within the
+/// `sat_tie_k` band of the minimum. ≥ 2 marks a genuine MTV tie; the same
+/// direction re-derived as several candidate axes counts once, but a BILATERAL
+/// minimal direction (centers aligned along it within the band, so both signs are
+/// equally-minimal MTV) counts twice.
+pub const BoxSatResult = struct {
+    depth: Real,
+    axis: Vec3r,
+    tie_count: u32,
+};
+
+/// An INDEPENDENT box/box separating-axis scan over the 15 axes (3 face axes of
+/// A, 3 of B, 9 edge crosses), recomputed WITHOUT any GJK/EPA — the true MTV
+/// oracle. Both boxes are radius 0 and assumed overlapping. `depth` is
+/// byte-identical to the former inline `satMinOverlap` (same axis order, same
+/// `@min` selection, same `ov_raw / √l2` normalization); `axis` and `tie_count`
+/// are added so the M1.1.3-HF suite can SAT-classify cross-order divergences.
+pub fn satBoxBox(pa: Vec3r, ra: Quatr, hea_v: Vec3r, pb: Vec3r, rb: Quatr, heb_v: Vec3r) BoxSatResult {
     const axa = [3]Vec3r{ ra.rotateVec3(Vec3r.unit_x), ra.rotateVec3(Vec3r.unit_y), ra.rotateVec3(Vec3r.unit_z) };
     const axb = [3]Vec3r{ rb.rotateVec3(Vec3r.unit_x), rb.rotateVec3(Vec3r.unit_y), rb.rotateVec3(Vec3r.unit_z) };
     const hea = hea_v.toArray();
@@ -87,22 +124,71 @@ fn satMinOverlap(pa: Vec3r, ra: Quatr, hea_v: Vec3r, pb: Vec3r, rb: Quatr, heb_v
             return rap + rbp - @abs(d.dot(L));
         }
     }.f;
-    var mn: Real = std.math.floatMax(Real);
-    for (0..3) |k| mn = @min(mn, ov(axa[k], axa, hea, axb, heb, dc));
-    for (0..3) |k| mn = @min(mn, ov(axb[k], axa, hea, axb, heb, dc));
+
+    // Collect (unit axis, overlap) in the fixed order face-A, face-B, edge-cross.
+    // The overlap of an edge axis is `ov(l_raw) / √l2` (NOT `ov(l_raw)·(1/√l2)`)
+    // so the reduced minimum is bit-identical to the former satMinOverlap.
+    var cand_axis: [15]Vec3r = undefined;
+    var cand_ov: [15]Real = undefined;
+    var n: usize = 0;
+    for (0..3) |k| {
+        cand_axis[n] = axa[k];
+        cand_ov[n] = ov(axa[k], axa, hea, axb, heb, dc);
+        n += 1;
+    }
+    for (0..3) |k| {
+        cand_axis[n] = axb[k];
+        cand_ov[n] = ov(axb[k], axa, hea, axb, heb, dc);
+        n += 1;
+    }
     for (0..3) |i| {
         for (0..3) |j| {
             const l_raw = axa[i].cross(axb[j]);
             const l2 = l_raw.dot(l_raw);
-            // Independent of the kernel: test EVERY non-parallel edge axis (only a
-            // strictly-zero cross carries no info). The normalized overlap is
-            // `ov_raw / √l2` — no `1e-6` skip is copied, so this oracle would catch
-            // a kernel that dropped a separating/min axis.
+            // Only a strictly-zero cross (parallel edges) carries no info.
             if (l2 <= 0) continue;
-            mn = @min(mn, ov(l_raw, axa, hea, axb, heb, dc) / @sqrt(l2));
+            const sq = @sqrt(l2);
+            cand_axis[n] = l_raw.scale(1.0 / sq);
+            cand_ov[n] = ov(l_raw, axa, hea, axb, heb, dc) / sq;
+            n += 1;
         }
     }
-    return mn;
+
+    var depth: Real = std.math.floatMax(Real);
+    var axis: Vec3r = Vec3r.unit_x;
+    for (0..n) |i| {
+        if (cand_ov[i] < depth) {
+            depth = cand_ov[i];
+            axis = cand_axis[i];
+        }
+    }
+    const coord_scale = dc.length() + hea_v.length() + heb_v.length();
+    const band = sat_tie_k * std.math.floatEps(Real) * coord_scale;
+    // Count DISTINCT minimal-band directions: collapse colinear candidate slots
+    // (the same geometric axis re-derived as face + edge-cross) to one. A minimal
+    // direction whose center-separation projection is within the band
+    // (`|dc·axis| <= band`) is BILATERAL — both signs are equally-minimal MTV
+    // directions, and the generic normal can pick the same absolute axis (NOT
+    // negated) in the two orders — so it counts as TWO tie directions (Codex (a)).
+    var seen: [15]Vec3r = undefined;
+    var seen_count: usize = 0;
+    var tie_count: u32 = 0;
+    for (0..n) |i| {
+        if (cand_ov[i] - depth > band) continue;
+        var is_new = true;
+        for (0..seen_count) |j| {
+            if (@abs(cand_axis[i].dot(seen[j])) > sat_dir_colinear) {
+                is_new = false;
+                break;
+            }
+        }
+        if (is_new) {
+            seen[seen_count] = cand_axis[i];
+            seen_count += 1;
+            tie_count += if (@abs(dc.dot(cand_axis[i])) <= band) 2 else 1;
+        }
+    }
+    return .{ .depth = depth, .axis = axis, .tie_count = tie_count };
 }
 
 /// Exact manifold equality (bit-for-bit) — for pairs the dispatcher does NOT
@@ -319,13 +405,13 @@ test "sphere/box P1d deep extreme aspect (closed-form)" {
 }
 
 /// Whether the generic oracle is SELF-CONSISTENT on this pair — same null-ness,
-/// same `count`, and negated normal across the two A/B orders. `collideOrdered`
-/// is fixed-order and runs GJK/EPA in the frame of A; for a deep, rotated pair
-/// EPA can converge to DIFFERENT faces in the two frames (an M1.1.3 EPA
-/// frame-dependence, NOT a fast-path issue — the SAT fast path is order-
-/// independent by construction; see the order-independence test). Where generic
-/// disagrees with itself it is an unreliable oracle, so the differential skips
-/// it. This is the concrete motivation for the analytic fast path.
+/// same `count`, and negated normal across the two A/B orders. The M1.1.3 generic
+/// EPA deep-rotated frame-dependence is FIXED in M1.1.3-HF (`epa.zig` expansion
+/// robustness + the `gjk.zig` deep band), so the generic oracle is now order-
+/// consistent except at exact MTV ties — where the two orders may pick the same
+/// absolute axis (a bilateral minimum) or different equally-minimal axes, giving
+/// a non-negated or count-differing normal. The caller SAT-classifies any
+/// inconsistency: an exact tie is skipped, anything else fails (E4(b)).
 fn genericConsistent(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, pb: Vec3r, rb: Quatr) bool {
     const ab = generic(sa, pa, ra, sb, pb, rb);
     const ba = generic(sb, pb, rb, sa, pa, ra);
@@ -338,11 +424,11 @@ fn genericConsistent(sa: SupportShape, pa: Vec3r, ra: Quatr, sb: SupportShape, p
 test "box/box SAT differential vs generic (<=30:1)" {
     // Cube A at the origin vs cube B rotated/offset — a broad sweep hitting the
     // face-face, face-vertex and edge-edge regimes. Per config, `collideOrdered`
-    // is compared to the generic oracle in BOTH A/B orders, but only where that
-    // oracle is self-consistent across orders (deep rotated pairs where the
-    // generic EPA is frame-dependent — an M1.1.3 EPA limitation the SAT fast path
-    // does not share — are skipped via `genericConsistent`). Geometry-only (fid
-    // tie bands excluded); fid-exact is asserted on the clean explicit configs.
+    // is compared to the generic oracle in BOTH A/B orders where that oracle is
+    // self-consistent; a residual inconsistency (post-M1.1.3-HF, only at an exact
+    // MTV tie) is SAT-confirmed as a tie before it is skipped — an unclassified
+    // one fails (E4(b)). Geometry-only (fid tie bands excluded); fid-exact is
+    // asserted on the clean explicit configs.
     const box = boxShape(1, 1, 1);
     const rots = [_]Quatr{
         Quatr.identity,
@@ -364,11 +450,30 @@ test "box/box SAT differential vs generic (<=30:1)" {
                 const ra = g;
                 const rb = g.mul(r);
                 const m = ordered(box, pa, ra, box, pb, rb) orelse continue;
-                // Compare fast vs generic in both orders, only where the oracle
-                // is self-consistent (i.e. its EPA converged reliably).
+                // Compare fast vs generic in both orders where the oracle is
+                // self-consistent. Post-fix (M1.1.3-HF), a residual cross-order
+                // inconsistency is permitted ONLY as an exact MTV tie, SAT-confirmed
+                // (>= 2 minimal directions / a bilateral axis); anything else is a
+                // defect (E4(b)) — never a silent skip.
                 if (genericConsistent(box, pa, ra, box, pb, rb)) {
                     try expectBothOrdersUnordered(box, pa, ra, box, pb, rb, false);
                     compared += 1;
+                } else {
+                    // A residual inconsistency is classified, never silently skipped
+                    // (E4(b)). UNCONDITIONAL: null-ness AND depth must always agree —
+                    // a null-ness or depth divergence is the frame-dependence class
+                    // and fails, tie or not. The residual (normal not negated, or a
+                    // differing count) is then legitimate iff an exact MTV tie (SAT,
+                    // >= 2 minimal directions) OR the documented M1.1.4 `collideOrdered`
+                    // COUNT-order-dependence (the normal still negates; depth already
+                    // asserted equal) — RD-5.
+                    const ab = generic(box, pa, ra, box, pb, rb);
+                    const ba = generic(box, pb, rb, box, pa, ra);
+                    try testing.expect(ab != null and ba != null);
+                    try testing.expectApproxEqAbs(maxPen(ab.?), maxPen(ba.?), diff_tol);
+                    const tie = satBoxBox(pa, ra, box.core.box, pb, rb, box.core.box).tie_count >= 2;
+                    const count_only = ab.?.normal.approxEql(ba.?.normal.neg(), diff_tol);
+                    try testing.expect(tie or count_only);
                 }
                 if (m.count >= 3) saw_face = true;
                 if (m.count == 1) saw_single = true;
@@ -490,7 +595,7 @@ test "box/box SAT deep rotated is correct (oracle-free)" {
                 // (a) order-independence.
                 try expectOrderIndependent(p.a, vr(0, 0, 0), Quatr.identity, p.b, o, r);
                 // (b) depth == the true MTV (independent inline SAT scan).
-                const mtv = satMinOverlap(vr(0, 0, 0), Quatr.identity, p.a.core.box, o, r, p.b.core.box);
+                const mtv = satBoxBox(vr(0, 0, 0), Quatr.identity, p.a.core.box, o, r, p.b.core.box).depth;
                 try testing.expectApproxEqAbs(mtv, maxPen(m0), diff_tol);
                 // (c) frame-invariance under a rigid global transform: count and
                 // depth invariant, normal rotated by g. (The exact 4-point SUBSET

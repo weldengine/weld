@@ -442,7 +442,7 @@ test "edge-edge penetration is measured along the contact axis" {
     const g = narrowphase.gjk(Real, box, pa, Quatr.identity, box, pb, yaw);
     try testing.expectEqual(narrowphase.GjkResult(Real).Status.deep, g.status);
     const relpose = narrowphase.RelativePose(Real).init(pa, Quatr.identity, pb, yaw);
-    const e = narrowphase.epa(Real, box, pa, Quatr.identity, relpose, box, g);
+    const e = narrowphase.epa(Real, box, pa, Quatr.identity, relpose, box, yaw, g, null);
     // Confirm the contact axis is genuinely oblique (not a face normal) so this
     // exercises the edge path, not the face-face quad path.
     const na = e.normal.toArray();
@@ -630,6 +630,53 @@ test "collidePair feature ids are stable across a pose-order boundary" {
         var found = false;
         for (0..m_pos.count) |j| {
             if (m_neg.points[i].feature_id == m_pos.points[j].feature_id) found = true;
+        }
+        try testing.expect(found);
+    }
+}
+
+test "collidePair deep generic manifold is stable across a pose-order boundary" {
+    // M1.1.3-HF E4(d): the same pose-order-boundary guard on the GENERIC deep path
+    // (a capsule/box pair — no box/box fast path — so it runs GJK/EPA). A capsule
+    // at the origin, two boxes straddling the poseAfter x = 0 lexicographic boundary
+    // by ±1e-4, deep-overlapping. `collidePair` drives a FIXED body-id order, so
+    // count, normal and the feature_id SET are stable across the boundary — a
+    // regression pin that nothing pose-order-dependent remains in `collidePair`'s
+    // seed path (guarding against any future seed-canonicalization, the withdrawn
+    // "Fix B").
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const cap = try store.createShape(gpa, .{ .capsule = .{ .radius = 0.5, .half_height = 1 } });
+    const box = try store.createShape(gpa, .{ .box = .{ .half_extents = ApiVec3.splat(1) } });
+    // A = capsule at the origin; two B boxes straddling x = 0 by ±1e-4. y = 1.2
+    // makes the MTV a UNIQUE +Y (~0.8, the box's lower face vs the segment) below
+    // the ~1.0 X/Z penetrations, so the normal is stable under the tiny X-straddle
+    // (a near-tie config would legitimately tip the normal). Deep: the capsule's
+    // Y-axis segment (y∈[-1,1]) passes through the box core (y∈[0.2,2.2]).
+    // addBoxBodyAt is a generic shape+position helper (name is historical).
+    const id_a = try addBoxBodyAt(gpa, &bm, &store, cap, 0, 0, 0, 0);
+    const id_neg = try addBoxBodyAt(gpa, &bm, &store, box, 1, -0.0001, 1.2, 0);
+    const id_pos = try addBoxBodyAt(gpa, &bm, &store, box, 2, 0.0001, 1.2, 0);
+
+    const m_neg = bm.collidePair(&store, id_a, id_neg).?;
+    const m_pos = bm.collidePair(&store, id_a, id_pos).?;
+    try testing.expectEqual(m_neg.count, m_pos.count);
+    try testing.expect(m_neg.normal.approxEql(m_pos.normal, tol));
+    // feature_id SET equality across the boundary, both directions.
+    for (0..m_neg.count) |i| {
+        var found = false;
+        for (0..m_pos.count) |j| {
+            if (m_neg.points[i].feature_id == m_pos.points[j].feature_id) found = true;
+        }
+        try testing.expect(found);
+    }
+    for (0..m_pos.count) |i| {
+        var found = false;
+        for (0..m_neg.count) |j| {
+            if (m_pos.points[i].feature_id == m_neg.points[j].feature_id) found = true;
         }
         try testing.expect(found);
     }

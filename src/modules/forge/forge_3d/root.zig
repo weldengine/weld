@@ -102,8 +102,8 @@ pub const ContactPoint = narrowphase.ContactPoint(Real);
 
 /// EPA over a `.deep` GJK seed — penetration axis + core depth. The `Real`-bound
 /// entry; `collide` runs it internally on the deep path.
-pub fn epa(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, relpose: RelativePose, shape_b: SupportShape, seed: GjkResult) EpaResult {
-    return narrowphase.epa(Real, shape_a, pos_a, rot_a, relpose, shape_b, seed);
+pub fn epa(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, relpose: RelativePose, shape_b: SupportShape, rot_b: Quatr, seed: GjkResult) EpaResult {
+    return narrowphase.epa(Real, shape_a, pos_a, rot_a, relpose, shape_b, rot_b, seed, null);
 }
 
 /// Full narrowphase (GJK → shallow/deep contact manifold) between two support
@@ -159,4 +159,5 @@ comptime {
     _ = @import("tests/epa_test.zig");
     _ = @import("tests/manifold_test.zig");
     _ = @import("tests/fast_paths_test.zig");
+    _ = @import("tests/epa_robustness_test.zig");
 }
