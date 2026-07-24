@@ -129,9 +129,12 @@ fn solveNormalPoint(bm: *BodyManager, c: *const ContactConstraint, pt: *cc.Const
     const v_n = c.normal.dot(v_rel);
 
     // Restitution bias — the solver's ONLY velocity bias (no Baumgarte, no
-    // positional bias): target a separating speed −e·v_n⁻ when the pre-solve
-    // approach speed exceeds the threshold, otherwise target rest (0).
-    const restitution_bias: Real = if (@abs(pt.rel_normal_velocity) > cfg.restitution_threshold)
+    // positional bias): when the pre-solve contact is APPROACHING faster than the
+    // threshold (v_n⁻ < −threshold), target a separating rebound speed −e·v_n⁻
+    // (> 0); otherwise target rest (0). Keyed on the approach direction, never on
+    // |v_n⁻|, so a capture-time SEPARATING contact never yields a negative target
+    // that would under-enforce non-penetration.
+    const restitution_bias: Real = if (pt.rel_normal_velocity < -cfg.restitution_threshold)
         -c.restitution * pt.rel_normal_velocity
     else
         0;
@@ -435,4 +438,36 @@ test "solveRange solves only the given constraint index range" {
 
     try testing.expectApproxEqAbs(@as(Real, 0), bm.linearVelocity(id_a0).?.toArray()[0], 1e-5);
     try testing.expectApproxEqAbs(@as(Real, 3), bm.linearVelocity(id_a1).?.toArray()[0], 1e-5);
+}
+
+test "capture-time separating contact still enforces non-penetration" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const ids = try sphereHitScene(gpa, &store, &bm, 0.8);
+
+    // At capture (build/prepare) the contact is SEPARATING faster than the
+    // threshold (v_n⁻ = +3 > 1.0), so restitution must NOT arm here — a bias
+    // keyed on |v_n⁻| would (wrongly) target a NEGATIVE separating speed.
+    bm.setLinearVelocity(ids[0], vr(-3, 0, 0));
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    try cc.build(gpa, &constraints, &bm, &store, &.{pairKey(ids[0], ids[1])});
+
+    // The body then actually approaches at solve time (relative v_n = −2). A
+    // capture-time separating velocity must not grant a penetration allowance:
+    // the solve must still drive v_n to rest (≈ 0), never to a negative target.
+    bm.setLinearVelocity(ids[0], vr(2, 0, 0));
+    solveRange(&bm, constraints.items, 0, constraints.items.len, .{});
+
+    const c = constraints.items[0];
+    const va = bm.linearVelocity(ids[0]).?;
+    const wa = bm.angularVelocity(ids[0]).?;
+    const vb = bm.linearVelocity(ids[1]).?;
+    const wb = bm.angularVelocity(ids[1]).?;
+    const v_rel = vb.add(wb.cross(c.points[0].r_b)).sub(va.add(wa.cross(c.points[0].r_a)));
+    const v_n = c.normal.dot(v_rel);
+    try testing.expectApproxEqAbs(@as(Real, 0), v_n, 1e-4);
 }
