@@ -13,7 +13,9 @@
 //!   - `build`, which turns canonical broadphase candidate pairs into a
 //!     deterministically-ordered constraint array, running the narrowphase and
 //!     the per-point `prepare` precompute (lever arms, world inverse inertias,
-//!     normal + two tangent effective masses, pre-solve normal velocity `v_n⁻`).
+//!     normal + two tangent effective masses, pre-solve normal velocity `v_n⁻`,
+//!     and — for the NGS position pass — the two body-local surface anchors plus
+//!     the pose-invariant local inverse inertias).
 //!
 //! Import discipline (brief): `foundation`, `weld_forge` (handle types),
 //! `../config.zig`, `../body_manager.zig`, `../pipeline/narrowphase/root.zig`.
@@ -21,9 +23,12 @@
 //! keys), never re-derived — and never any `pipeline/` file beyond the
 //! narrowphase facade.
 //!
-//! M1.1.6 is a VELOCITY solver: it carries NO positional bias (no Baumgarte, no
-//! split impulse). `ContactPoint.penetration` is carried but unconsumed here; the
-//! NGS position solver (M1.1.7) is the spec's position-correction answer.
+//! The velocity solver carries NO positional bias (no Baumgarte, no split
+//! impulse) — position error is entirely the NGS position pass's business
+//! (`engine-physics-forge.md` §1.7). `ContactPoint.penetration` is consumed HERE
+//! and only here, at `prepare`, to derive the two surface anchors; the position
+//! iterations then re-derive the separation from the current poses instead of
+//! re-reading the frozen manifold (§1.7.2).
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -110,9 +115,22 @@ pub const ConstraintPoint = struct {
     /// Pre-solve relative normal velocity `v_n⁻` captured in `prepare` (for the
     /// restitution bias in E4). Negative when the bodies are approaching.
     rel_normal_velocity: Real,
-    /// Surface penetration along the normal (≥ 0). Carried but UNCONSUMED in
-    /// M1.1.6 (no positional bias); the NGS position solver reads it at M1.1.7.
+    /// Surface penetration along the normal (≥ 0). Consumed ONCE, here at
+    /// `prepare`, to derive the two surface anchors below; it is never re-read from
+    /// the frozen manifold during the position iterations — the NGS pass re-derives
+    /// the separation from the CURRENT poses, which is what makes it non-linear
+    /// (`engine-physics-forge.md` §1.7.2). The velocity pass carries no positional
+    /// bias and never reads it.
     penetration: Real,
+    /// Contact anchor in body A's LOCAL frame: A's surface point at prepare time,
+    /// `conj(q_a)·(surface_a − x_a)` — rigidly attached, so the NGS position pass
+    /// re-derives its world position from A's current pose.
+    local_anchor_a: Vec3r,
+    /// Contact anchor in body B's LOCAL frame (mirror of `local_anchor_a`, on B's
+    /// surface). The two anchors are `penetration` apart along the normal at
+    /// prepare time; their world separation is what the position pass drives to
+    /// `−penetration_slop`.
+    local_anchor_b: Vec3r,
     /// Per-contact feature id — the warm-start matching key (E3). Frame-stable
     /// via `BodyManager.collidePair`'s BodyId order.
     feature_id: u32,
@@ -147,6 +165,13 @@ pub const ContactConstraint = struct {
     inv_mass_b: Real,
     inv_inertia_a: Mat3r,
     inv_inertia_b: Mat3r,
+    /// Pose-invariant LOCAL inverse inertia per body, copied from
+    /// `MotionProperties`. The NGS position pass rebuilds the world tensor
+    /// `R_current · I_local⁻¹ · R_currentᵀ` from the CURRENT rotation on every
+    /// point/iteration (it moves the poses it reads), so it never calls
+    /// `motionProperties` in its inner loop.
+    local_inv_inertia_a: Mat3r,
+    local_inv_inertia_b: Mat3r,
     /// Per-point solver data.
     points: [4]ConstraintPoint,
     /// Valid entries in `points`, 1..4.
@@ -218,6 +243,8 @@ fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, manifold
         .inv_mass_b = mp_b.inv_mass,
         .inv_inertia_a = inv_inertia_a,
         .inv_inertia_b = inv_inertia_b,
+        .local_inv_inertia_a = mp_a.local_inv_inertia,
+        .local_inv_inertia_b = mp_b.local_inv_inertia,
         .points = undefined,
         .count = manifold.count,
     };
@@ -232,6 +259,16 @@ fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, manifold
         const v_pa = vel_a.add(ang_a.cross(r_a));
         const v_pb = vel_b.add(ang_b.cross(r_b));
 
+        // Surface anchors for the NGS position pass. The manifold point IS the
+        // midpoint of the two surface points (`pipeline/narrowphase/manifold.zig`
+        // `ContactPoint`), so they reconstruct exactly from the penetration:
+        // A's surface sits half a penetration toward B, B's half a penetration
+        // back. Each is stored in its OWN body's local frame below ⇒ rigidly
+        // attached (`engine-physics-forge.md` §1.7.2).
+        const half_penetration = p.penetration * 0.5;
+        const surface_a = p.position.add(normal.scale(half_penetration));
+        const surface_b = p.position.sub(normal.scale(half_penetration));
+
         c.points[i] = .{
             .r_a = r_a,
             .r_b = r_b,
@@ -240,6 +277,8 @@ fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, manifold
             .tangent2_mass = effectiveMass(c.inv_mass_a, c.inv_mass_b, inv_inertia_a, inv_inertia_b, r_a, r_b, tb.t2),
             .rel_normal_velocity = normal.dot(v_pb.sub(v_pa)),
             .penetration = p.penetration,
+            .local_anchor_a = rot_a.conjugate().rotateVec3(surface_a.sub(pos_a)),
+            .local_anchor_b = rot_b.conjugate().rotateVec3(surface_b.sub(pos_b)),
             .feature_id = p.feature_id,
         };
     }
@@ -297,6 +336,119 @@ fn descOf(entity_index: u32, body_type: api.BodyType, shape: api.ShapeId) api.Bo
 
 fn pairKey(a: BodyId, b: BodyId) u64 {
     return (@as(u64, @min(a, b)) << 32) | @max(a, b);
+}
+
+fn av3(x: f32, y: f32, z: f32) foundation.math.Vec3 {
+    return foundation.math.Vec3.fromArray(.{ x, y, z });
+}
+
+/// Float-noise tolerance for a unit-scale world-anchor reconstruction. The anchor
+/// round-trip runs the narrowphase, one conjugate quaternion rotation per body and
+/// one subtraction of same-magnitude world coordinates, so the residue is a few
+/// ULPs of an O(1) coordinate (the re-posed scene adds the f32 rounding of its
+/// descriptor positions). Not a geometric threshold — nothing is classified by it.
+const anchor_tol: Real = 1e-5;
+
+/// Two overlapping unit-mass spheres (radius 0.5, centres 0.9 apart along the
+/// scene's local +X ⇒ 0.1 of penetration), re-posed by the rigid transform
+/// (`rot`, `translation`) applied to BOTH bodies. Returns the single prepared
+/// constraint.
+fn twoSpheresPosed(
+    gpa: std.mem.Allocator,
+    store: *ShapeStore,
+    bm: *BodyManager,
+    constraints: *std.ArrayListUnmanaged(ContactConstraint),
+    rot: foundation.math.Quatf,
+    translation: foundation.math.Vec3,
+) !ContactConstraint {
+    const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+    var da = descOf(0, .dynamic, s);
+    da.mass = 1;
+    da.rotation = rot;
+    da.position = rot.rotateVec3(av3(0, 0, 0)).add(translation);
+    var db = descOf(1, .dynamic, s);
+    db.mass = 1;
+    db.rotation = rot;
+    db.position = rot.rotateVec3(av3(0.9, 0, 0)).add(translation);
+    const id_a = try bm.addBody(gpa, store, da);
+    const id_b = try bm.addBody(gpa, store, db);
+
+    try build(gpa, constraints, bm, store, &.{pairKey(id_a, id_b)});
+    try testing.expectEqual(@as(usize, 1), constraints.items.len);
+    return constraints.items[0];
+}
+
+test "prepare stores body-local surface anchors that reproduce the penetration" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+
+    const c = try twoSpheresPosed(gpa, &store, &bm, &constraints, .identity, av3(0, 0, 0));
+    const pt = c.points[0];
+    try testing.expect(pt.penetration > 0.05); // ≈ 0.1 — well above the float noise
+
+    // Reconstruct both world anchors at the prepare-time pose (`x + q·local`): the
+    // two surface points must be `penetration` apart along the normal, B's behind
+    // A's — `(p_b − p_a)·n == −penetration`. A single midpoint anchor stored twice
+    // would give 0 here.
+    const p_a = bm.position(c.body_a).?.add(bm.rotation(c.body_a).?.rotateVec3(pt.local_anchor_a));
+    const p_b = bm.position(c.body_b).?.add(bm.rotation(c.body_b).?.rotateVec3(pt.local_anchor_b));
+    try testing.expectApproxEqAbs(-pt.penetration, p_b.sub(p_a).dot(c.normal), anchor_tol);
+
+    // Pose-invariance: the SAME physical contact, with both bodies re-posed by one
+    // rigid transform (scene rotated 0.7 rad about Z, then translated), stores the
+    // same BODY-LOCAL anchors — that is what makes them rigidly attached.
+    var store2 = ShapeStore{};
+    defer store2.deinit(gpa);
+    var bm2 = BodyManager{};
+    defer bm2.deinit(gpa);
+    var constraints2: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints2.deinit(gpa);
+    const rot = foundation.math.Quatf.fromAxisAngle(av3(0, 0, 1), 0.7);
+    const c2 = try twoSpheresPosed(gpa, &store2, &bm2, &constraints2, rot, av3(3, -2, 1));
+
+    try testing.expect(c2.points[0].local_anchor_a.approxEql(pt.local_anchor_a, anchor_tol));
+    try testing.expect(c2.points[0].local_anchor_b.approxEql(pt.local_anchor_b, anchor_tol));
+}
+
+test "prepare caches the pose-invariant local inverse inertias" {
+    const gpa = testing.allocator;
+    // One dynamic body against an infinite-mass one: the pair survives the
+    // true-zero skip, and the infinite-mass side must carry a zero local inverse
+    // inertia (both static and kinematic).
+    inline for (.{ api.BodyType.static, api.BodyType.kinematic }) |bt| {
+        var store = ShapeStore{};
+        defer store.deinit(gpa);
+        var bm = BodyManager{};
+        defer bm.deinit(gpa);
+        const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+        var da = descOf(0, .dynamic, s);
+        da.mass = 2;
+        var db = descOf(1, bt, s);
+        db.position = av3(0.9, 0, 0);
+        const id_a = try bm.addBody(gpa, &store, da);
+        const id_b = try bm.addBody(gpa, &store, db);
+
+        var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+        defer constraints.deinit(gpa);
+        try build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)});
+        try testing.expectEqual(@as(usize, 1), constraints.items.len);
+        const c = constraints.items[0];
+
+        // An exact copy of `MotionProperties.local_inv_inertia` (pose-invariant, so
+        // the position pass rebuilds the world tensor from the current rotation
+        // without touching `motionProperties`).
+        const local_a = bm.motionProperties(id_a).?.local_inv_inertia;
+        inline for (0..3) |k| {
+            try testing.expect(c.local_inv_inertia_a.cols[k].approxEql(local_a.cols[k], 0));
+            try testing.expect(c.local_inv_inertia_b.cols[k].approxEql(Vec3r.zero, 0));
+        }
+        try testing.expect(local_a.cols[0].toArray()[0] > 0); // the dynamic side is non-zero
+    }
 }
 
 test "combine rules: friction is the geometric mean, restitution is the max" {
