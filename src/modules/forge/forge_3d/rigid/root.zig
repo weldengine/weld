@@ -1,9 +1,9 @@
 //! `forge_3d/rigid/root.zig` — facade for the rigid-body branch (Sequential
-//! Impulses + NGS position solver; `engine-physics-forge.md` §1.2). M1.1.6 lands
-//! the velocity-level contact constraint setup (combine rules, tangent basis,
-//! `ContactConstraint`, build/prepare); the contact cache (E3) and velocity
-//! solver (E4/E5) land here as additive sibling files, and the NGS position
-//! solver (M1.1.7) + joints follow the same way.
+//! Impulses + NGS position solver; `engine-physics-forge.md` §1.2). M1.1.6 landed
+//! the velocity half: contact constraint setup (combine rules, tangent basis,
+//! `ContactConstraint`, build/prepare), the warm-start cache, and the velocity
+//! solver. M1.1.7 adds the shared `solver_config.zig` and the NGS position pass;
+//! joints follow the same additive-sibling way.
 //!
 //! Re-exported at `Real` by `forge_3d/root.zig`. The comptime pin analyses the
 //! package's inline tests when built as a test target (engine-zig-conventions.md
@@ -11,6 +11,7 @@
 
 const contact_constraint = @import("contact_constraint.zig");
 const contact_cache = @import("contact_cache.zig");
+const solver_config = @import("solver_config.zig");
 const velocity_solver = @import("velocity_solver.zig");
 
 /// One manifold's velocity-solver contact constraint (≤ 4 inline points).
@@ -36,8 +37,9 @@ pub const CacheKey = contact_cache.CacheKey;
 /// A warm-start cache value (accumulated normal + world tangent impulse).
 pub const CacheValue = contact_cache.CacheValue;
 
-/// Velocity-solver tuning (iteration count, restitution threshold).
-pub const SolverConfig = velocity_solver.SolverConfig;
+/// Rigid contact-solver tuning, shared by the velocity and position passes
+/// (iteration counts, restitution threshold, NGS slop/factor/clamp).
+pub const SolverConfig = solver_config.SolverConfig;
 
 /// Warm-start constraints from the previous tick's cache (tangent reprojection).
 pub const warmStart = velocity_solver.warmStart;
@@ -49,5 +51,6 @@ pub const solveRange = velocity_solver.solveRange;
 comptime {
     _ = contact_constraint;
     _ = contact_cache;
+    _ = solver_config;
     _ = velocity_solver;
 }

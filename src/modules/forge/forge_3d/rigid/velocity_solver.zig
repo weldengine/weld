@@ -9,7 +9,8 @@
 //! iterative solve converge in a handful of passes.
 //!
 //! Import discipline (brief): `foundation`, `weld_forge`, `../config.zig`,
-//! `../body_manager.zig`, sibling `contact_constraint.zig`/`contact_cache.zig`.
+//! `../body_manager.zig`, sibling `contact_constraint.zig`/`contact_cache.zig`/
+//! `solver_config.zig`.
 //! Velocities are read/written through `BodyManager`'s stale-safe getters/setters
 //! (immediate Gauss-Seidel propagation across contacts and points).
 
@@ -18,24 +19,17 @@ const config = @import("../config.zig");
 const bm_mod = @import("../body_manager.zig");
 const cc = @import("contact_constraint.zig");
 const cache_mod = @import("contact_cache.zig");
+const solver_config = @import("solver_config.zig");
 
 const Real = config.Real;
 const Vec3r = config.Vec3r;
 const BodyManager = bm_mod.BodyManager;
 const ContactConstraint = cc.ContactConstraint;
 const ContactCache = cache_mod.ContactCache;
-
-/// Velocity-solver tuning.
-pub const SolverConfig = struct {
-    /// Gauss-Seidel velocity iteration passes per tick (named for the M1.1.7
-    /// `position_iterations` sibling). 0 is allowed — warm start only, no solve.
-    velocity_iterations: u32 = 8,
-    /// Restitution cutoff (m/s): a bounce is applied only when the pre-solve
-    /// relative normal speed exceeds this — a PHYSICAL velocity constant (config
-    /// field), not a geometric epsilon. Below it, low-speed contacts settle
-    /// without jitter.
-    restitution_threshold: Real = 1.0,
-};
+/// Solver tuning, owned by `solver_config.zig` since M1.1.7 (one struct shared by
+/// the velocity and position passes belongs to neither solver). The velocity half
+/// — `velocity_iterations`, `restitution_threshold` — is unchanged by the move.
+const SolverConfig = solver_config.SolverConfig;
 
 /// Apply a world-space impulse `p` at the contact levers `r_a`/`r_b` to both
 /// bodies' velocities: body A receives −p, body B receives +p (the normal is
