@@ -357,9 +357,12 @@ pub fn GjkResult(comptime T: type) type {
 /// necessarily enclosing), `.separated` iff `dist − (r_a + r_b)` exceeds it, else
 /// `.shallow`. The contact margin is an absolute float-noise bound
 /// `conv_k · floatEps(T) · coordScale` (see the tolerance block). An exact inflated
-/// touch (`dist == r_a + r_b`, `r_sum > 0`) stays shallow; for hard cores
-/// (`r_sum == 0`) the shallow band is empty — an exact touch (`dist == 0`) is the
-/// RD-4 deep band.
+/// touch (`dist == r_a + r_b`) stays shallow iff `r_sum > contact_margin` — the
+/// RD-4 band is evaluated FIRST, so a sub-noise inflation radius
+/// (`0 < r_sum <= contact_margin`) classifies deep; benign either way: EPA clamps
+/// depth to ~0 and the manifold penetration is ~`r_sum` in both regimes. For hard
+/// cores (`r_sum == 0`) the shallow band is empty — an exact touch (`dist == 0`) is
+/// the RD-4 deep band.
 pub fn gjk(
     comptime T: type,
     shape_a: support.SupportShape(T),
@@ -500,8 +503,10 @@ pub fn gjk(
     // independent — unlike the terminal simplex's A-frame support magnitude,
     // which after cancellation reflects only who is A and made a tangency read
     // `.separated` in one order and `.shallow` in the other (P1c). The comparison
-    // is additive on the already-computed `dist`; the frozen convention keeps an
-    // exact inflated touch (`dist == r_sum`) shallow.
+    // is additive on the already-computed `dist`. It is reached only after the
+    // RD-4 band below (`dist <= contact_margin`) did not fire, so the frozen
+    // convention keeps an exact inflated touch (`dist == r_sum`) shallow exactly
+    // when `r_sum > contact_margin` — a sub-noise `r_sum` is caught deep above.
     const r_sum = shape_a.radius + shape_b.radius;
     const coord_scale = pos_b.sub(pos_a).length() + coreExtent(T, shape_a) + coreExtent(T, shape_b);
     const contact_margin = conv_k * std.math.floatEps(T) * coord_scale;
@@ -520,9 +525,12 @@ pub fn gjk(
     // UNTOUCHED, so the P1b/P2 calibration is preserved. `coord_scale` is symmetric
     // under an A/B swap by construction (see above), so the band is
     // order-independent. Three bands result: `[0, m]` deep, `(m, r_sum + m]`
-    // shallow, beyond `m` separated — the inflated touch `dist == r_sum` stays
-    // shallow (frozen convention); for `r_sum == 0` the `[0, m]` band is deep (hard
-    // cores want EPA's MTV, not a pen ≈ 0 witness). A false-deep on a true
+    // shallow, beyond `r_sum + m` separated — the inflated touch `dist == r_sum`
+    // stays shallow IFF `r_sum > m` (the `[0, m]` deep band is checked FIRST, so a
+    // sub-noise radius `0 < r_sum <= m` lands the touch in the deep band); for
+    // `r_sum == 0` the `[0, m]` band absorbs `dist == 0` (hard cores want EPA's MTV,
+    // not a pen ≈ 0 witness). Benign either way — EPA clamps depth to ≈ 0 and the
+    // manifold penetration is ≈ r_sum in both regimes. A false-deep on a true
     // near-touch (`dist ∈ (0, m]`, cores actually disjoint) seeds EPA from a
     // non-enclosing terminal → depth clamps to 0 → manifold penetration
     // `r_sum − 0`, the former shallow result to within ε — safe.
