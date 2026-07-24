@@ -69,6 +69,12 @@ pub const BodyManager = struct {
     /// `error.InvalidShape` on a stale/invalid `desc.shape`.
     pub fn addBody(self: *BodyManager, gpa: std.mem.Allocator, store: *const ShapeStore, desc: BodyDescriptor) !BodyId {
         const shape = store.get(desc.shape) orelse return error.InvalidShape;
+        // Material domain guards (debug-only; the M1.1.0 `mass > 0` precedent).
+        // Friction is a non-negative Coulomb coefficient; restitution is a [0, 1]
+        // ratio. Both must be finite. Typed-error descriptor validation is a later
+        // milestone; this guards the otherwise-unchecked material path.
+        std.debug.assert(std.math.isFinite(desc.friction) and desc.friction >= 0);
+        std.debug.assert(std.math.isFinite(desc.restitution) and desc.restitution >= 0 and desc.restitution <= 1);
         const body = Body{
             .position = convVec3(desc.position),
             .rotation = convQuat(desc.rotation),
@@ -77,6 +83,8 @@ pub const BodyManager = struct {
             .force = Vec3r.zero,
             .torque = Vec3r.zero,
             .motion = body_mod.computeMotion(desc, shape),
+            .friction = desc.friction,
+            .restitution = desc.restitution,
             .shape = desc.shape,
             .body_type = desc.body_type,
             .collision_layer = desc.collision_layer,
@@ -122,6 +130,20 @@ pub const BodyManager = struct {
     pub fn motionProperties(self: *const BodyManager, id: BodyId) ?MotionProperties {
         const idx = self.alloc.validate(id) orelse return null;
         return self.bodies.items(.motion)[idx];
+    }
+
+    /// Safe getter: the Coulomb friction coefficient, or null if `id` is
+    /// stale/invalid. Consumed by the Sequential Impulses contact solver (M1.1.6).
+    pub fn friction(self: *const BodyManager, id: BodyId) ?Real {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.friction)[idx];
+    }
+
+    /// Safe getter: the restitution / bounciness, or null if `id` is
+    /// stale/invalid. Consumed by the Sequential Impulses contact solver (M1.1.6).
+    pub fn restitution(self: *const BodyManager, id: BodyId) ?Real {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.restitution)[idx];
     }
 
     /// Safe getter: the body's object collision-layer index, or null if `id` is

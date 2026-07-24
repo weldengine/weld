@@ -437,3 +437,28 @@ test "isAliveIndex tracks liveness across create, free, and reuse" {
     try testing.expectEqual(ib, api.PackedId.unpack(c).index);
     try testing.expect(bm.alloc.isAliveIndex(ib));
 }
+
+test "friction and restitution survive addBody" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{} });
+
+    // The descriptor material coefficients are dropped by M1.1.5's `addBody`;
+    // M1.1.6 stores them on `Body` for the Sequential Impulses solver. 0.25 and
+    // 0.75 are exactly representable in f32 and f64, so the f32→Real widening
+    // (and the f64 build) both read back the literal exactly.
+    var desc = descOf(0, .dynamic, s);
+    desc.friction = 0.25;
+    desc.restitution = 0.75;
+    const id = try bm.addBody(gpa, &store, desc);
+    try testing.expectEqual(@as(Real, 0.25), bm.friction(id).?);
+    try testing.expectEqual(@as(Real, 0.75), bm.restitution(id).?);
+
+    // Stale handle ⇒ null (parity with the other stale-safe getters).
+    bm.removeBody(id);
+    try testing.expectEqual(@as(?Real, null), bm.friction(id));
+    try testing.expectEqual(@as(?Real, null), bm.restitution(id));
+}
