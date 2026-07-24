@@ -36,10 +36,15 @@ pub const CacheKey = contact_cache.CacheKey;
 /// A warm-start cache value (accumulated normal + world tangent impulse).
 pub const CacheValue = contact_cache.CacheValue;
 
+/// Velocity-solver tuning (iteration count, restitution threshold).
+pub const SolverConfig = velocity_solver.SolverConfig;
+
 /// Warm-start constraints from the previous tick's cache (tangent reprojection).
 pub const warmStart = velocity_solver.warmStart;
 /// Harvest solved constraint impulses into the cache's current buffer.
 pub const storeContacts = velocity_solver.storeContacts;
+/// Solve the velocity constraints over an index range (M1.1.6 passes the full range).
+pub const solveRange = velocity_solver.solveRange;
 
 comptime {
     _ = contact_constraint;

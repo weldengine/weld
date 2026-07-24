@@ -171,4 +171,5 @@ comptime {
     _ = @import("tests/manifold_test.zig");
     _ = @import("tests/fast_paths_test.zig");
     _ = @import("tests/epa_robustness_test.zig");
+    _ = @import("tests/solver_test.zig");
 }
