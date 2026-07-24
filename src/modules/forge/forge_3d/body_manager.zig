@@ -37,7 +37,10 @@ const Mat3r = config.Mat3r;
 const Aabbr = config.Aabbr;
 const BodyId = api.BodyId;
 const BodyDescriptor = api.BodyDescriptor;
-const ShapeStore = shape_mod.ShapeStore;
+/// Generational store of collision shapes. Re-exported so sibling packages (the
+/// `rigid/` solver) can name the `collidePair` store parameter type without
+/// importing `shape.zig` directly (import-discipline boundary).
+pub const ShapeStore = shape_mod.ShapeStore;
 const Shape = shape_mod.Shape;
 const Body = body_mod.Body;
 const MotionProperties = body_mod.MotionProperties;
