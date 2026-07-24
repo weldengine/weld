@@ -28,7 +28,7 @@ const ContactCache = cache_mod.ContactCache;
 /// Velocity-solver tuning.
 pub const SolverConfig = struct {
     /// Gauss-Seidel velocity iteration passes per tick (named for the M1.1.7
-    /// `position_iterations` sibling).
+    /// `position_iterations` sibling). 0 is allowed — warm start only, no solve.
     velocity_iterations: u32 = 8,
     /// Restitution cutoff (m/s): a bounce is applied only when the pre-solve
     /// relative normal speed exceeds this — a PHYSICAL velocity constant (config
@@ -107,6 +107,10 @@ pub fn storeContacts(gpa: std.mem.Allocator, cache: *ContactCache, constraints: 
 /// island-additivity seam (M1.1.8 sorts constraints into contiguous per-island
 /// ranges — purely additive).
 pub fn solveRange(bm: *BodyManager, constraints: []ContactConstraint, from: usize, to: usize, cfg: SolverConfig) void {
+    // A finite, non-negative restitution threshold — a negative one would rearm
+    // the E4 defect (restitution bias applied to a separating contact). Zero
+    // `velocity_iterations` is legal (warm start only) and needs no guard.
+    std.debug.assert(std.math.isFinite(cfg.restitution_threshold) and cfg.restitution_threshold >= 0);
     var iter: u32 = 0;
     while (iter < cfg.velocity_iterations) : (iter += 1) {
         for (constraints[from..to]) |*c| {
