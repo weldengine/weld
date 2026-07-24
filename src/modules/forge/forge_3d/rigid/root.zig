@@ -13,6 +13,7 @@ const contact_constraint = @import("contact_constraint.zig");
 const contact_cache = @import("contact_cache.zig");
 const solver_config = @import("solver_config.zig");
 const velocity_solver = @import("velocity_solver.zig");
+const position_solver = @import("position_solver.zig");
 
 /// One manifold's velocity-solver contact constraint (≤ 4 inline points).
 pub const ContactConstraint = contact_constraint.ContactConstraint;
@@ -48,9 +49,15 @@ pub const storeContacts = velocity_solver.storeContacts;
 /// Solve the velocity constraints over an index range (M1.1.6 passes the full range).
 pub const solveRange = velocity_solver.solveRange;
 
+/// Telemetry of one NGS position pass (iterations run, minimum separation seen).
+pub const PositionSolveResult = position_solver.PositionSolveResult;
+/// Resorb penetration over an index range by correcting poses (NGS, §1.7.2).
+pub const solvePositionRange = position_solver.solvePositionRange;
+
 comptime {
     _ = contact_constraint;
     _ = contact_cache;
     _ = solver_config;
     _ = velocity_solver;
+    _ = position_solver;
 }
