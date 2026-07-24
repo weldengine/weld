@@ -1,12 +1,23 @@
 //! `forge_3d/pipeline/integration.zig` — semi-implicit (symplectic) Euler
-//! integration over the live `BodyManager` SoA store.
+//! integration over the live `BodyManager` SoA store, split into a velocity pass
+//! and a position pass.
 //!
-//! One pure per-tick pass in ascending slot-index order (deterministic — no hash
-//! container on the path, the `BodyManager` discipline; M1.1.14). The store does
-//! not compact, so the pass walks `0..bodies.len` and filters liveness with
-//! `IdAllocator.isAliveIndex`. This is FREE-FLIGHT integration: broadphase and
-//! narrowphase exist but are NOT invoked here, and there is no contact response
-//! (Sequential Impulses is M1.1.6) — a dynamic body under gravity follows an
+//! `integrateVelocities` applies gravity + the force/torque accumulators + the
+//! clamped damping (and clears the accumulators); `integratePositions` advances
+//! position and orientation from the CURRENT velocity. `integrate` is their exact
+//! composition. The split exists because the Sequential Impulses contact solver
+//! (M1.1.6) must run BETWEEN the two — it corrects velocities after gravity but
+//! before positions advance. Solving around the fused pass would leave the
+//! per-tick `g·dt` residual advancing positions (a resting body would sink
+//! ≈ g·dt² per tick). With no solve in between, the two halves reproduce the
+//! fused pass bit-for-bit (pinned by `tests/integration_test.zig`).
+//!
+//! Each pass is one pure per-tick sweep in ascending slot-index order
+//! (deterministic — no hash container on the path, the `BodyManager` discipline;
+//! M1.1.14). The store does not compact, so each walks `0..bodies.len` and filters
+//! liveness with `IdAllocator.isAliveIndex`. This is FREE-FLIGHT integration:
+//! broadphase and narrowphase exist but are NOT invoked here, and contact response
+//! is the solver's job (M1.1.6) — under gravity alone a dynamic body follows an
 //! unobstructed trajectory.
 //!
 //! Semi-implicit Euler: velocity is integrated first, position from the *new*
@@ -15,18 +26,18 @@
 //! clamped-linear form `v *= max(0, 1 − d·dt)`; the clamp is physical (it
 //! prevents a sign flip when `d·dt > 1`), not a geometric epsilon. The
 //! `force`/`torque` accumulators are reset every fixed tick for ALL live bodies
-//! (`engine-physics-forge.md` §2). `integrate` applies damping exactly once with
-//! the `dt` it is given and has no opinion on substeps — call cadence is the
-//! orchestrator's concern (M1.1.15).
+//! (`engine-physics-forge.md` §2) by the velocity pass. `integrateVelocities`
+//! applies damping exactly once with the `dt` it is given and has no opinion on
+//! substeps — call cadence is the orchestrator's concern (M1.1.15).
 //!
 //! Angular integration mirrors the linear half: the torque is mapped through the
 //! world-space inverse inertia `I_world_inv = R · I_local_inv · Rᵀ`, `ω` is
-//! integrated then clamp-damped, and the orientation advances by the first-order
-//! (linearized) rule `q ← normalize(q + ½·dt·(ω_quat ⊗ q))` with the world-space
-//! `ω` on the LEFT. That form divides by no `|ω|`, so it is singularity-free at
-//! `ω = 0` (no zero guard needed — the M1.1.4 threshold discipline is honoured).
-//! The gyroscopic term `ω × (I·ω)` is dropped (Jolt/PhysX/Bevy default; its
-//! explicit integration injects energy).
+//! integrated then clamp-damped (velocity pass), and the orientation advances by
+//! the first-order (linearized) rule `q ← normalize(q + ½·dt·(ω_quat ⊗ q))` with
+//! the world-space `ω` on the LEFT (position pass). That form divides by no `|ω|`,
+//! so it is singularity-free at `ω = 0` (no zero guard needed — the M1.1.4
+//! threshold discipline is honoured). The gyroscopic term `ω × (I·ω)` is dropped
+//! (Jolt/PhysX/Bevy default; its explicit integration injects energy).
 
 const config = @import("../config.zig");
 const body_manager = @import("../body_manager.zig");
@@ -37,21 +48,17 @@ const Quatr = config.Quatr;
 const Mat3r = config.Mat3r;
 const BodyManager = body_manager.BodyManager;
 
-/// Advance every live body one fixed tick of `dt` seconds under world-space
-/// `gravity` (m/s²), in ascending slot-index order.
+/// Integrate velocities one fixed tick of `dt` seconds under world-space
+/// `gravity` (m/s²), in ascending slot-index order, then clear the per-tick
+/// force/torque accumulators for every live body.
 ///
 /// For each DYNAMIC body — linear: `a = gravity·gravity_factor + force·inv_mass`;
-/// `v += a·dt`; `v *= max(0, 1 − linear_damping·dt)`; `x += v·dt` (position from
-/// the new velocity). Angular: `α = (R·I_local_inv·Rᵀ)·torque`; `ω += α·dt`;
-/// `ω *= max(0, 1 − angular_damping·dt)`; `q ← normalize(q + ½·dt·(ω_quat ⊗ q))`
-/// with world-space `ω` on the left. Static and kinematic bodies are not moved
-/// (kinematic position-from-velocity is a later additive concern). Every live
-/// body then has its `force`/`torque` accumulators cleared for the next tick.
-///
-/// This is a pure function of the store and `(dt, gravity)`: no broadphase,
-/// narrowphase, contacts, or sleeping. The gyroscopic term is dropped.
-pub fn integrate(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
-    const positions = bm.bodies.items(.position);
+/// `v += a·dt`; `v *= max(0, 1 − linear_damping·dt)`. Angular:
+/// `α = (R·I_local_inv·Rᵀ)·torque`; `ω += α·dt`;
+/// `ω *= max(0, 1 − angular_damping·dt)`. Static and kinematic bodies keep their
+/// velocity. Positions and orientations are NOT touched — `integratePositions`
+/// advances them (in the full pipeline, after the contact solver has run).
+pub fn integrateVelocities(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
     const rotations = bm.bodies.items(.rotation);
     const linear_velocities = bm.bodies.items(.linear_velocity);
     const angular_velocities = bm.bodies.items(.angular_velocity);
@@ -74,12 +81,9 @@ pub fn integrate(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
             // Gravity as an acceleration (mass-independent), plus the accumulated
             // force divided by mass. Read `force` before the clear below.
             const accel = gravity.scale(mp.gravity_factor).add(forces[i].scale(mp.inv_mass));
-            // Integrate velocity first (symplectic), then damp, then position.
-            var v = linear_velocities[i].add(accel.scale(dt));
+            const v = linear_velocities[i].add(accel.scale(dt));
             const damp = @max(@as(Real, 0), 1 - mp.linear_damping * dt);
-            v = v.scale(damp);
-            linear_velocities[i] = v;
-            positions[i] = positions[i].add(v.scale(dt));
+            linear_velocities[i] = v.scale(damp);
 
             // --- Angular ---
             // World-space inverse inertia I_world_inv = R · I_local_inv · Rᵀ
@@ -87,16 +91,9 @@ pub fn integrate(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
             const r = Mat3r.fromQuat(rotations[i]);
             const i_world_inv = r.mul(mp.local_inv_inertia).mul(r.transpose());
             const alpha = i_world_inv.mulVec(torques[i]);
-            var w = angular_velocities[i].add(alpha.scale(dt));
+            const w = angular_velocities[i].add(alpha.scale(dt));
             const ang_damp = @max(@as(Real, 0), 1 - mp.angular_damping * dt);
-            w = w.scale(ang_damp);
-            angular_velocities[i] = w;
-            // First-order orientation update: q ← normalize(q + ½·dt·(ω_quat ⊗ q)),
-            // world-space ω on the LEFT. No |ω| division ⇒ singularity-free at ω = 0.
-            const wa = w.toArray();
-            const w_quat = Quatr{ .x = wa[0], .y = wa[1], .z = wa[2], .w = 0 };
-            const dq = w_quat.mul(rotations[i]).scale(0.5 * dt);
-            rotations[i] = rotations[i].add(dq).normalize();
+            angular_velocities[i] = w.scale(ang_damp);
         }
 
         // Reset the per-tick accumulators for every live body (§2), including
@@ -104,4 +101,47 @@ pub fn integrate(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
         forces[i] = Vec3r.zero;
         torques[i] = Vec3r.zero;
     }
+}
+
+/// Advance every live DYNAMIC body's position and orientation one fixed tick of
+/// `dt` seconds from its CURRENT velocity, in ascending slot-index order. Call
+/// this AFTER `integrateVelocities` (in the full pipeline, after the contact
+/// solver has corrected velocities).
+///
+/// Linear: `x += linear_velocity·dt`. Angular (first-order, world-space `ω` on
+/// the left): `q ← normalize(q + ½·dt·(ω_quat ⊗ q))`. Static and kinematic bodies
+/// are not moved (kinematic position-from-velocity is a later additive concern).
+pub fn integratePositions(bm: *BodyManager, dt: Real) void {
+    const positions = bm.bodies.items(.position);
+    const rotations = bm.bodies.items(.rotation);
+    const linear_velocities = bm.bodies.items(.linear_velocity);
+    const angular_velocities = bm.bodies.items(.angular_velocity);
+    const body_types = bm.bodies.items(.body_type);
+
+    const n: u32 = @intCast(bm.bodies.len);
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        if (!bm.alloc.isAliveIndex(i)) continue;
+        if (body_types[i] != .dynamic) continue;
+
+        // Position from the current (post-solve) velocity.
+        positions[i] = positions[i].add(linear_velocities[i].scale(dt));
+
+        // First-order orientation update: q ← normalize(q + ½·dt·(ω_quat ⊗ q)),
+        // world-space ω on the LEFT. No |ω| division ⇒ singularity-free at ω = 0.
+        const wa = angular_velocities[i].toArray();
+        const w_quat = Quatr{ .x = wa[0], .y = wa[1], .z = wa[2], .w = 0 };
+        const dq = w_quat.mul(rotations[i]).scale(0.5 * dt);
+        rotations[i] = rotations[i].add(dq).normalize();
+    }
+}
+
+/// Advance every live body one fixed tick of `dt` seconds under world-space
+/// `gravity` (m/s²): the exact composition of `integrateVelocities` then
+/// `integratePositions`, with no contact solve between (free flight). Existing
+/// M1.1.5 call sites and tests use this fused form unchanged; the full pipeline
+/// (M1.1.15) calls the two halves directly with the solver in between.
+pub fn integrate(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
+    integrateVelocities(bm, dt, gravity);
+    integratePositions(bm, dt);
 }

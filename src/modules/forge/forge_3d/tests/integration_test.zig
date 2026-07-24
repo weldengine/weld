@@ -3,6 +3,10 @@
 //! the new velocity) plus the discrete free-fall oracle, force consumption,
 //! impulse, static/kinematic invariance, freed-slot skipping, and determinism.
 //! E3 adds the angular tests to this same file.
+//!
+//! M1.1.6 adds the velocity/position split: `integrate` is now the composition
+//! of `integrateVelocities` + `integratePositions`, and the composition is pinned
+//! bit-for-bit here so the Sequential Impulses solve can sit between the two.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -540,4 +544,71 @@ test "orientation update uses the left (world-space) quaternion product" {
     const match_tol: Real = 1e-6;
     try testing.expect(bm.rotation(id).?.approxEql(left, match_tol));
     try testing.expect(!bm.rotation(id).?.approxEql(right, discrimination_tol));
+}
+
+// --- M1.1.6 integration split ------------------------------------------------
+
+test "split integration composes to the monolithic pass" {
+    // The Sequential Impulses solve (M1.1.6) sits BETWEEN the velocity and
+    // position updates, so `integrate` is split into `integrateVelocities` +
+    // `integratePositions`. Running the two halves back-to-back (no solve
+    // between) must reproduce the fused `integrate` BIT-FOR-BIT — the composition
+    // contract that lets the solver slot in without perturbing free flight.
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .box = .{ .half_extents = Vec3.fromArray(.{ 1, 0.5, 0.25 }) } });
+
+    // Two identical worlds: `fused` driven by `integrate`, `split` by the halves.
+    var bm_fused = BodyManager{};
+    defer bm_fused.deinit(gpa);
+    var bm_split = BodyManager{};
+    defer bm_split.deinit(gpa);
+
+    // A dynamic, rotated, spinning, damped body exercises every term both passes
+    // touch: gravity, force·inv_mass, clamped linear + angular damping, the
+    // R·I·Rᵀ torque map, and the left-product orientation update.
+    var desc = dynDesc(0, s);
+    desc.mass = 2;
+    desc.linear_damping = 0.1;
+    desc.angular_damping = 0.2;
+    desc.rotation = Quatf.fromAxisAngle(Vec3.unit_z, 0.5);
+    const id_fused = try bm_fused.addBody(gpa, &store, desc);
+    const id_split = try bm_split.addBody(gpa, &store, desc);
+    bm_fused.setLinearVelocity(id_fused, vr(1, 2, -3));
+    bm_split.setLinearVelocity(id_split, vr(1, 2, -3));
+    bm_fused.setAngularVelocity(id_fused, vr(0.3, -0.6, 0.9));
+    bm_split.setAngularVelocity(id_split, vr(0.3, -0.6, 0.9));
+
+    const dt: Real = 1.0 / 60.0;
+    const g = vr(0, -9.81, 0);
+    var step: u32 = 0;
+    while (step < 45) : (step += 1) {
+        // Standing force + torque re-applied each tick (both are cleared per tick
+        // by the velocity pass, so the two drivers see the same accumulator state).
+        bm_fused.addForce(id_fused, vr(5, 0, 0));
+        bm_split.addForce(id_split, vr(5, 0, 0));
+        bm_fused.addTorque(id_fused, vr(0, 0.4, 0));
+        bm_split.addTorque(id_split, vr(0, 0.4, 0));
+
+        integration.integrate(&bm_fused, dt, g);
+        integration.integrateVelocities(&bm_split, dt, g);
+        integration.integratePositions(&bm_split, dt);
+    }
+
+    // Bit-identical position, linear + angular velocity, and orientation.
+    const pf = bm_fused.position(id_fused).?.toArray();
+    const ps = bm_split.position(id_split).?.toArray();
+    const vf = bm_fused.linearVelocity(id_fused).?.toArray();
+    const vs = bm_split.linearVelocity(id_split).?.toArray();
+    const wf = bm_fused.angularVelocity(id_fused).?.toArray();
+    const ws = bm_split.angularVelocity(id_split).?.toArray();
+    inline for (0..3) |k| {
+        try testing.expectEqual(pf[k], ps[k]);
+        try testing.expectEqual(vf[k], vs[k]);
+        try testing.expectEqual(wf[k], ws[k]);
+    }
+    const qf = bm_fused.rotation(id_fused).?.toArray();
+    const qs = bm_split.rotation(id_split).?.toArray();
+    inline for (0..4) |k| try testing.expectEqual(qf[k], qs[k]);
 }
