@@ -43,10 +43,13 @@ const ContactManifold = narrowphase.ContactManifold(Real);
 
 // --- Material combine rules (Box2D/Jolt convention) --------------------------
 
-/// Combined friction for a contact pair: the geometric mean √(a·b). Both inputs
-/// are non-negative (the `addBody` domain guard), so the product is ≥ 0.
+/// Combined friction for a contact pair: the geometric mean √(a·b), computed as
+/// √a·√b. Both inputs are non-negative (the `addBody` domain guard). The √-first
+/// form is the identical geometric mean but stays finite across the whole finite
+/// domain — it avoids the intermediate `a*b` overflow (→ inf, then `inf·0 = NaN`
+/// in the friction clamp when λₙ = 0) and underflow of a naive `√(a·b)`.
 pub fn combineFriction(a: Real, b: Real) Real {
-    return @sqrt(a * b);
+    return @sqrt(a) * @sqrt(b);
 }
 
 /// Combined restitution for a contact pair: the maximum. A single bouncy surface
@@ -301,6 +304,14 @@ test "combine rules: friction is the geometric mean, restitution is the max" {
     try testing.expectEqual(@as(Real, 0), combineFriction(0, 0.9));
     try testing.expectEqual(@as(Real, 0.8), combineRestitution(0.2, 0.8));
     try testing.expectEqual(@as(Real, 0.8), combineRestitution(0.8, 0.2)); // symmetric
+}
+
+test "combineFriction stays finite and positive across the domain" {
+    // The sqrt-first form avoids the intermediate a*b overflow/underflow of a
+    // naive √(a·b): at f32, a*b = 1e40 overflows (→ inf) and 1e-60 underflows (→ 0).
+    const big = combineFriction(1e20, 1e20);
+    try testing.expect(std.math.isFinite(big) and big > 0);
+    try testing.expect(combineFriction(1e-30, 1e-30) > 0);
 }
 
 test "tangent basis is orthonormal, right-handed, and deterministic" {
