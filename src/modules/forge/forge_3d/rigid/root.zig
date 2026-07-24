@@ -10,6 +10,8 @@
 //! §13 lazy-analysis guard).
 
 const contact_constraint = @import("contact_constraint.zig");
+const contact_cache = @import("contact_cache.zig");
+const velocity_solver = @import("velocity_solver.zig");
 
 /// One manifold's velocity-solver contact constraint (≤ 4 inline points).
 pub const ContactConstraint = contact_constraint.ContactConstraint;
@@ -27,6 +29,20 @@ pub const tangentBasis = contact_constraint.tangentBasis;
 /// Build a deterministically-ordered constraint array from canonical pairs.
 pub const build = contact_constraint.build;
 
+/// The Sequential Impulses warm-start cache (double-buffered, sorted flat).
+pub const ContactCache = contact_cache.ContactCache;
+/// A warm-start cache key (pair + sub-shape + feature).
+pub const CacheKey = contact_cache.CacheKey;
+/// A warm-start cache value (accumulated normal + world tangent impulse).
+pub const CacheValue = contact_cache.CacheValue;
+
+/// Warm-start constraints from the previous tick's cache (tangent reprojection).
+pub const warmStart = velocity_solver.warmStart;
+/// Harvest solved constraint impulses into the cache's current buffer.
+pub const storeContacts = velocity_solver.storeContacts;
+
 comptime {
     _ = contact_constraint;
+    _ = contact_cache;
+    _ = velocity_solver;
 }
