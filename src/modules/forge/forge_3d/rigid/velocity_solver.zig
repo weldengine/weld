@@ -111,7 +111,10 @@ pub fn solveRange(bm: *BodyManager, constraints: []ContactConstraint, from: usiz
     while (iter < cfg.velocity_iterations) : (iter += 1) {
         for (constraints[from..to]) |*c| {
             for (0..c.count) |i| {
+                // Jolt order: the normal impulse first, then friction clamped
+                // against the CURRENT accumulated normal impulse of this point.
                 solveNormalPoint(bm, c, &c.points[i], cfg);
+                solveFrictionPoint(bm, c, &c.points[i]);
             }
         }
     }
@@ -145,6 +148,47 @@ fn solveNormalPoint(bm: *BodyManager, c: *const ContactConstraint, pt: *cc.Const
     const applied = new_lambda - pt.normal_impulse;
     pt.normal_impulse = new_lambda;
     applyImpulse(bm, c, pt.r_a, pt.r_b, c.normal.scale(applied));
+}
+
+/// One Gauss-Seidel friction update for a contact point (run after the normal
+/// update): two INDEPENDENT per-axis tangential impulses driving the tangential
+/// velocity toward 0 (coupling ignored — Jolt convention), then a CIRCULAR clamp
+/// of the accumulated `(λ_t1, λ_t2)` pair to the friction cone `‖λ_t‖ ≤ μ·λₙ`
+/// (against the current accumulated normal impulse). The circular clamp is
+/// isotropic and basis-independent — coherent with the world-space tangent cache;
+/// the box clamp is anisotropic (up to √2·μ·λₙ on the diagonal) and basis-biased.
+fn solveFrictionPoint(bm: *BodyManager, c: *const ContactConstraint, pt: *cc.ConstraintPoint) void {
+    const v_a = bm.linearVelocity(c.body_a).?;
+    const w_a = bm.angularVelocity(c.body_a).?;
+    const v_b = bm.linearVelocity(c.body_b).?;
+    const w_b = bm.angularVelocity(c.body_b).?;
+    const v_rel = v_b.add(w_b.cross(pt.r_b)).sub(v_a.add(w_a.cross(pt.r_a)));
+
+    // Independent per-axis tangential impulses driving each axis toward 0.
+    const v_t1 = c.tangent1.dot(v_rel);
+    const v_t2 = c.tangent2.dot(v_rel);
+    var new_t1 = pt.tangent1_impulse - pt.tangent1_mass * v_t1;
+    var new_t2 = pt.tangent2_impulse - pt.tangent2_mass * v_t2;
+
+    // Circular (isotropic, basis-independent) clamp of the accumulated tangent
+    // pair to the friction cone μ·λₙ — rescale the vector, never per-axis (the box
+    // form is anisotropic, up to √2·μ·λₙ on the diagonal, and basis-biased). The
+    // branch guarantees `len_sq > max_friction² ≥ 0`, so the √ divisor is nonzero.
+    const max_friction = c.friction * pt.normal_impulse;
+    const len_sq = new_t1 * new_t1 + new_t2 * new_t2;
+    if (len_sq > max_friction * max_friction) {
+        const scale = max_friction / @sqrt(len_sq);
+        new_t1 *= scale;
+        new_t2 *= scale;
+    }
+
+    // Apply the accumulated delta on both axes.
+    const applied_t1 = new_t1 - pt.tangent1_impulse;
+    const applied_t2 = new_t2 - pt.tangent2_impulse;
+    pt.tangent1_impulse = new_t1;
+    pt.tangent2_impulse = new_t2;
+    const impulse = c.tangent1.scale(applied_t1).add(c.tangent2.scale(applied_t2));
+    applyImpulse(bm, c, pt.r_a, pt.r_b, impulse);
 }
 
 // --- tests -------------------------------------------------------------------
@@ -470,4 +514,79 @@ test "capture-time separating contact still enforces non-penetration" {
     const v_rel = vb.add(wb.cross(c.points[0].r_b)).sub(va.add(wa.cross(c.points[0].r_a)));
     const v_n = c.normal.dot(v_rel);
     try testing.expectApproxEqAbs(@as(Real, 0), v_n, 1e-4);
+}
+
+test "friction cancels tangential sliding below the cone" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+    var da = descOf(0, .dynamic, s);
+    da.mass = 1;
+    da.friction = 1;
+    var db = descOf(1, .dynamic, s);
+    db.mass = 1;
+    db.friction = 1;
+    db.position = foundation.math.Vec3.fromArray(.{ 0.9, 0, 0 });
+    const id_a = try bm.addBody(gpa, &store, da);
+    const id_b = try bm.addBody(gpa, &store, db);
+    bm.setLinearVelocity(id_a, vr(0, 2, 0)); // sliding tangentially (+Y)
+
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    try cc.build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)});
+    const c = &constraints.items[0];
+    c.points[0].normal_impulse = 10; // large λₙ ⇒ wide cone ⇒ no clamp
+    solveFrictionPoint(&bm, c, &c.points[0]);
+
+    // The relative contact-point tangential velocity is driven to ≈ 0.
+    const va = bm.linearVelocity(id_a).?;
+    const wa = bm.angularVelocity(id_a).?;
+    const vb = bm.linearVelocity(id_b).?;
+    const wb = bm.angularVelocity(id_b).?;
+    const v_rel = vb.add(wb.cross(c.points[0].r_b)).sub(va.add(wa.cross(c.points[0].r_a)));
+    try testing.expectApproxEqAbs(@as(Real, 0), c.tangent1.dot(v_rel), 1e-5);
+    try testing.expectApproxEqAbs(@as(Real, 0), c.tangent2.dot(v_rel), 1e-5);
+}
+
+/// Clamped friction impulse magnitude for a body sliding at `slide` against a
+/// fixed normal impulse λₙ = 1 (cone μ·λₙ = 1). Used to compare slide directions.
+fn frictionMagnitude(gpa: std.mem.Allocator, slide: Vec3r) !Real {
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+    var da = descOf(0, .dynamic, s);
+    da.mass = 1;
+    da.friction = 1;
+    var db = descOf(1, .dynamic, s);
+    db.mass = 1;
+    db.friction = 1;
+    db.position = foundation.math.Vec3.fromArray(.{ 0.9, 0, 0 });
+    const id_a = try bm.addBody(gpa, &store, da);
+    const id_b = try bm.addBody(gpa, &store, db);
+    bm.setLinearVelocity(id_a, slide);
+
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    try cc.build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)});
+    const c = &constraints.items[0];
+    c.points[0].normal_impulse = 1;
+    solveFrictionPoint(&bm, c, &c.points[0]);
+    const pt = c.points[0];
+    return @sqrt(pt.tangent1_impulse * pt.tangent1_impulse + pt.tangent2_impulse * pt.tangent2_impulse);
+}
+
+test "friction clamp is isotropic (circular, basis-independent)" {
+    const gpa = testing.allocator;
+    // Slide fast (10 m/s) so the cone μ·λₙ = 1 clamps. Along a single tangent axis
+    // vs the tangent-plane diagonal must yield the SAME clamped magnitude (circular
+    // clamp); a box clamp would give √2 on the diagonal.
+    const along = try frictionMagnitude(gpa, vr(0, 10, 0));
+    const diagonal = try frictionMagnitude(gpa, vr(0, 7.0710678, 7.0710678));
+    try testing.expectApproxEqAbs(@as(Real, 1), along, 1e-4); // clamped to μ·λₙ = 1
+    try testing.expectApproxEqAbs(along, diagonal, 1e-4); // isotropic
 }
