@@ -25,6 +25,18 @@ const BodyManager = bm_mod.BodyManager;
 const ContactConstraint = cc.ContactConstraint;
 const ContactCache = cache_mod.ContactCache;
 
+/// Velocity-solver tuning.
+pub const SolverConfig = struct {
+    /// Gauss-Seidel velocity iteration passes per tick (named for the M1.1.7
+    /// `position_iterations` sibling).
+    velocity_iterations: u32 = 8,
+    /// Restitution cutoff (m/s): a bounce is applied only when the pre-solve
+    /// relative normal speed exceeds this — a PHYSICAL velocity constant (config
+    /// field), not a geometric epsilon. Below it, low-speed contacts settle
+    /// without jitter.
+    restitution_threshold: Real = 1.0,
+};
+
 /// Apply a world-space impulse `p` at the contact levers `r_a`/`r_b` to both
 /// bodies' velocities: body A receives −p, body B receives +p (the normal is
 /// A→B). Naturally a no-op on an infinite-mass body (inv_mass and inv_inertia
@@ -86,6 +98,50 @@ pub fn storeContacts(gpa: std.mem.Allocator, cache: *ContactCache, constraints: 
             );
         }
     }
+}
+
+/// Solve the velocity constraints over the constraint index range `[from, to)`
+/// with `cfg.velocity_iterations` Gauss-Seidel passes. Constraints are visited in
+/// ascending pair-key order (as `build` sorted them) and points in manifold
+/// order. M1.1.6 always passes the full range; the explicit range is the
+/// island-additivity seam (M1.1.8 sorts constraints into contiguous per-island
+/// ranges — purely additive).
+pub fn solveRange(bm: *BodyManager, constraints: []ContactConstraint, from: usize, to: usize, cfg: SolverConfig) void {
+    var iter: u32 = 0;
+    while (iter < cfg.velocity_iterations) : (iter += 1) {
+        for (constraints[from..to]) |*c| {
+            for (0..c.count) |i| {
+                solveNormalPoint(bm, c, &c.points[i], cfg);
+            }
+        }
+    }
+}
+
+/// One Gauss-Seidel normal-impulse update for a contact point: drive the relative
+/// normal velocity toward its restitution target, with the accumulated-impulse
+/// clamp `λₙ ≥ 0` (Catto — the solver can only push, never pull).
+fn solveNormalPoint(bm: *BodyManager, c: *const ContactConstraint, pt: *cc.ConstraintPoint, cfg: SolverConfig) void {
+    const v_a = bm.linearVelocity(c.body_a).?;
+    const w_a = bm.angularVelocity(c.body_a).?;
+    const v_b = bm.linearVelocity(c.body_b).?;
+    const w_b = bm.angularVelocity(c.body_b).?;
+    const v_rel = v_b.add(w_b.cross(pt.r_b)).sub(v_a.add(w_a.cross(pt.r_a)));
+    const v_n = c.normal.dot(v_rel);
+
+    // Restitution bias — the solver's ONLY velocity bias (no Baumgarte, no
+    // positional bias): target a separating speed −e·v_n⁻ when the pre-solve
+    // approach speed exceeds the threshold, otherwise target rest (0).
+    const restitution_bias: Real = if (@abs(pt.rel_normal_velocity) > cfg.restitution_threshold)
+        -c.restitution * pt.rel_normal_velocity
+    else
+        0;
+
+    // Impulse driving v_n toward the target (Δv_n = kₙ·Δλ, kₙ = 1/normal_mass).
+    const dlambda = pt.normal_mass * (restitution_bias - v_n);
+    const new_lambda = @max(@as(Real, 0), pt.normal_impulse + dlambda);
+    const applied = new_lambda - pt.normal_impulse;
+    pt.normal_impulse = new_lambda;
+    applyImpulse(bm, c, pt.r_a, pt.r_b, c.normal.scale(applied));
 }
 
 // --- tests -------------------------------------------------------------------
@@ -240,4 +296,143 @@ test "solved impulses round-trip through the cache to the next tick's warm start
 
     try testing.expectApproxEqAbs(@as(Real, 7), constraints.items[0].points[0].normal_impulse, 1e-5);
     try testing.expectEqual(@as(u32, 1), cache.hits);
+}
+
+/// Dynamic sphere A at origin + static sphere B at +0.9X (overlapping along +X),
+/// both with restitution `e`. The caller sets A's approach velocity, builds, and
+/// solves.
+fn sphereHitScene(gpa: std.mem.Allocator, store: *ShapeStore, bm: *BodyManager, e: f32) ![2]api.BodyId {
+    const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+    var da = descOf(0, .dynamic, s);
+    da.mass = 1;
+    da.restitution = e;
+    var db = descOf(1, .static, s);
+    db.position = foundation.math.Vec3.fromArray(.{ 0.9, 0, 0 });
+    db.restitution = e;
+    const id_a = try bm.addBody(gpa, store, da);
+    const id_b = try bm.addBody(gpa, store, db);
+    return .{ id_a, id_b };
+}
+
+test "solver config defaults" {
+    const cfg = SolverConfig{};
+    try testing.expectEqual(@as(u32, 8), cfg.velocity_iterations);
+    try testing.expectEqual(@as(Real, 1), cfg.restitution_threshold);
+}
+
+test "normal solve kills the approach velocity at e = 0" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const ids = try sphereHitScene(gpa, &store, &bm, 0);
+    bm.setLinearVelocity(ids[0], vr(3, 0, 0)); // approaching +X
+
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    try cc.build(gpa, &constraints, &bm, &store, &.{pairKey(ids[0], ids[1])});
+    solveRange(&bm, constraints.items, 0, constraints.items.len, .{});
+
+    // Approach killed; the static body never moves; λₙ respected the Catto clamp.
+    try testing.expectApproxEqAbs(@as(Real, 0), bm.linearVelocity(ids[0]).?.toArray()[0], 1e-5);
+    try testing.expect(bm.linearVelocity(ids[1]).?.approxEql(Vec3r.zero, 0));
+    try testing.expect(constraints.items[0].points[0].normal_impulse >= 0);
+}
+
+test "restitution bounces above the threshold and is inert below it" {
+    const gpa = testing.allocator;
+
+    // Above threshold: 3 m/s approach, e = 0.8 ⇒ rebound at 0.8·3 = 2.4 m/s (−X).
+    {
+        var store = ShapeStore{};
+        defer store.deinit(gpa);
+        var bm = BodyManager{};
+        defer bm.deinit(gpa);
+        const ids = try sphereHitScene(gpa, &store, &bm, 0.8);
+        bm.setLinearVelocity(ids[0], vr(3, 0, 0));
+        var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+        defer constraints.deinit(gpa);
+        try cc.build(gpa, &constraints, &bm, &store, &.{pairKey(ids[0], ids[1])});
+        solveRange(&bm, constraints.items, 0, constraints.items.len, .{});
+        try testing.expectApproxEqAbs(@as(Real, -2.4), bm.linearVelocity(ids[0]).?.toArray()[0], 1e-4);
+    }
+
+    // Below threshold: 0.5 m/s approach < 1.0 ⇒ no bounce, approach killed.
+    {
+        var store = ShapeStore{};
+        defer store.deinit(gpa);
+        var bm = BodyManager{};
+        defer bm.deinit(gpa);
+        const ids = try sphereHitScene(gpa, &store, &bm, 0.8);
+        bm.setLinearVelocity(ids[0], vr(0.5, 0, 0));
+        var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+        defer constraints.deinit(gpa);
+        try cc.build(gpa, &constraints, &bm, &store, &.{pairKey(ids[0], ids[1])});
+        solveRange(&bm, constraints.items, 0, constraints.items.len, .{});
+        try testing.expectApproxEqAbs(@as(Real, 0), bm.linearVelocity(ids[0]).?.toArray()[0], 1e-5);
+    }
+}
+
+test "accumulated normal impulse stays non-negative (Catto clamp)" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const ids = try sphereHitScene(gpa, &store, &bm, 0);
+    bm.setLinearVelocity(ids[0], vr(-3, 0, 0)); // moving AWAY (separating)
+
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    try cc.build(gpa, &constraints, &bm, &store, &.{pairKey(ids[0], ids[1])});
+    solveRange(&bm, constraints.items, 0, constraints.items.len, .{});
+
+    // A separating contact needs no push: the clamp keeps λₙ at 0 (never pulls)
+    // and A keeps moving away unchanged.
+    try testing.expectEqual(@as(Real, 0), constraints.items[0].points[0].normal_impulse);
+    try testing.expectApproxEqAbs(@as(Real, -3), bm.linearVelocity(ids[0]).?.toArray()[0], 1e-5);
+}
+
+test "solveRange solves only the given constraint index range" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const s = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+
+    // Pair (0,1) near the origin, pair (2,3) ten metres away — both a dynamic A
+    // approaching a static B along +X. pair_key(0,1) = 1 < pair_key(2,3), so the
+    // first pair is constraint 0.
+    var a0 = descOf(0, .dynamic, s);
+    a0.mass = 1;
+    a0.restitution = 0;
+    var b0 = descOf(1, .static, s);
+    b0.position = foundation.math.Vec3.fromArray(.{ 0.9, 0, 0 });
+    b0.restitution = 0;
+    var a1 = descOf(2, .dynamic, s);
+    a1.mass = 1;
+    a1.restitution = 0;
+    a1.position = foundation.math.Vec3.fromArray(.{ 10, 0, 0 });
+    var b1 = descOf(3, .static, s);
+    b1.position = foundation.math.Vec3.fromArray(.{ 10.9, 0, 0 });
+    b1.restitution = 0;
+    const id_a0 = try bm.addBody(gpa, &store, a0);
+    const id_b0 = try bm.addBody(gpa, &store, b0);
+    const id_a1 = try bm.addBody(gpa, &store, a1);
+    const id_b1 = try bm.addBody(gpa, &store, b1);
+    bm.setLinearVelocity(id_a0, vr(3, 0, 0));
+    bm.setLinearVelocity(id_a1, vr(3, 0, 0));
+
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    try cc.build(gpa, &constraints, &bm, &store, &.{ pairKey(id_a0, id_b0), pairKey(id_a1, id_b1) });
+    try testing.expectEqual(@as(usize, 2), constraints.items.len);
+
+    // Solve only the first constraint's range; the second pair is untouched.
+    solveRange(&bm, constraints.items, 0, 1, .{});
+
+    try testing.expectApproxEqAbs(@as(Real, 0), bm.linearVelocity(id_a0).?.toArray()[0], 1e-5);
+    try testing.expectApproxEqAbs(@as(Real, 3), bm.linearVelocity(id_a1).?.toArray()[0], 1e-5);
 }
