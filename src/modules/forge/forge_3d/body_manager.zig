@@ -18,9 +18,11 @@
 //! and no-op / return null on a stale one (parity with `position`/`rotation`).
 //! `addForce`/`addTorque` accumulate into the per-tick `force`/`torque` columns
 //! (cleared by `integrate`); `addImpulse` is an immediate `Δv = impulse·inv_mass`
-//! (a natural no-op on static/kinematic bodies, `inv_mass == 0`). `addTorque`
-//! and `setAngularVelocity` are INTERNAL — the public `PhysicsModule` 3D
-//! interface (frozen M1.1.15) carries no angular mutators.
+//! (a natural no-op on static/kinematic bodies, `inv_mass == 0`). The pose
+//! mutators `setPosition`/`setRotation` (M1.1.7, written by the NGS position
+//! solver) validate the handle the same way. `addTorque`, `setAngularVelocity`,
+//! `setPosition` and `setRotation` are INTERNAL — the public `PhysicsModule` 3D
+//! interface (frozen M1.1.15) carries no angular and no pose mutators.
 
 const std = @import("std");
 const api = @import("weld_forge");
@@ -182,6 +184,24 @@ pub const BodyManager = struct {
         self.bodies.items(.angular_velocity)[idx] = velocity;
     }
 
+    /// Set the world-space position. No-op on a stale/invalid handle. INTERNAL to
+    /// `forge_3d` (like `addTorque`/`setAngularVelocity`): the day-1
+    /// `PhysicsModule` 3D surface carries no pose mutator — flagged for the M1.1.15
+    /// freeze review. The NGS position solver (M1.1.7) writes its corrected poses
+    /// through it.
+    pub fn setPosition(self: *BodyManager, id: BodyId, new_position: Vec3r) void {
+        const idx = self.alloc.validate(id) orelse return;
+        self.bodies.items(.position)[idx] = new_position;
+    }
+
+    /// Set the world-space orientation (mirror of `setPosition`; the caller owns
+    /// normalization). No-op on a stale/invalid handle. INTERNAL — see
+    /// `setPosition`.
+    pub fn setRotation(self: *BodyManager, id: BodyId, new_rotation: Quatr) void {
+        const idx = self.alloc.validate(id) orelse return;
+        self.bodies.items(.rotation)[idx] = new_rotation;
+    }
+
     /// Accumulate a world-space force (N) into the body's per-tick force
     /// accumulator. No-op on a stale/invalid handle. Any live body accumulates
     /// (the per-tick clear in `integrate` is uniform); a force must be
@@ -332,4 +352,48 @@ fn convVec3(v: ApiVec3) Vec3r {
 fn convQuat(q: ApiQuat) Quatr {
     const a = q.toArray();
     return Quatr.fromArray(.{ a[0], a[1], a[2], a[3] });
+}
+
+// --- tests -------------------------------------------------------------------
+// The bulk of the `BodyManager` acceptance suite lives in
+// `tests/body_manager_test.zig`; the pose mutators are covered inline here
+// (M1.1.7) because their contract is exactly the handle validation of this file.
+
+const testing = std.testing;
+
+test "pose mutators write the pose and no-op on a stale handle" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const shape = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+
+    const kept = try bm.addBody(gpa, &store, .{
+        .entity = .{ .index = 0, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = shape,
+    });
+    const doomed = try bm.addBody(gpa, &store, .{
+        .entity = .{ .index = 1, .generation = 0 },
+        .body_type = .dynamic,
+        .shape = shape,
+    });
+
+    const p = Vec3r.fromArray(.{ 1, 2, 3 });
+    const q = Quatr.fromAxisAngle(Vec3r.unit_z, 0.5);
+    bm.setPosition(kept, p);
+    bm.setRotation(kept, q);
+    try testing.expect(bm.position(kept).?.approxEql(p, 0));
+    try testing.expect(bm.rotation(kept).?.approxEql(q, 0));
+
+    // A stale handle (freed slot, bumped generation) writes nothing — neither into
+    // its own freed slot nor anywhere else.
+    bm.removeBody(doomed);
+    bm.setPosition(doomed, Vec3r.fromArray(.{ 9, 9, 9 }));
+    bm.setRotation(doomed, Quatr.fromAxisAngle(Vec3r.unit_x, 1.0));
+    try testing.expectEqual(@as(?Vec3r, null), bm.position(doomed));
+    try testing.expectEqual(@as(?Quatr, null), bm.rotation(doomed));
+    try testing.expect(bm.position(kept).?.approxEql(p, 0));
+    try testing.expect(bm.rotation(kept).?.approxEql(q, 0));
 }
