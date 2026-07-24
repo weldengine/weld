@@ -11,13 +11,20 @@
 //!   (6) `storeContacts` (harvest) → `cache.endTick` (sort + swap)
 //!   (7) broadphase proxy updates.
 //!
-//! `computePairs` is moved-driven (it reports only pairs touching a proxy that
-//! moved since the last call), so the harness keeps a PERSISTENT candidate set
-//! (`active`, a sorted-deduped key list): it merges each tick's deltas and, after
-//! the solve, retains only the pairs that produced a constraint (contacting
-//! ones), so a resting contact — whose proxies stop moving and thus stop being
-//! reported — stays live and keeps being solved (no sinking). A real `step()` /
-//! `PhysicsWorld` at M1.1.15 owns the same persistent pair set.
+//! `computePairs` is moved-driven with fat-AABB hysteresis (it reports a pair only
+//! when a proxy moves enough to exit its fat AABB), so the consumer keeps a
+//! PERSISTENT candidate set (`active`, a sorted-deduped key list) and merges each
+//! tick's deltas into it. NORMATIVE retention rule for the M1.1.15
+//! `step()`/`PhysicsWorld` (b2ContactManager semantics): a pair is retained while
+//! the two FAT broadphase AABBs overlap, dropped only when they separate — which
+//! is safe, since any later re-contact first requires a proxy to exit its fat
+//! AABB, which re-marks it moved and re-emits the pair. This test harness keeps
+//! EVERY emitted pair (never drops) — a conservative superset of that rule, valid
+//! in test: the narrowphase filters non-touching pairs (a pair with no manifold
+//! produces no constraint), so a retained separated pair only costs a redundant
+//! `collidePair`, never a wrong contact. Dropping a contacting pair on transient
+//! separation (e.g. a small hop within the fat margin), by contrast, would lose
+//! the contact until the body sank past the margin.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -128,10 +135,9 @@ const World = struct {
         try rigid.storeContacts(gpa, &self.cache, self.constraints.items);
         self.cache.endTick();
 
-        // Persist only contacting pairs; separated ones drop (re-added by
-        // computePairs when their proxies move back into overlap).
-        self.active.clearRetainingCapacity();
-        for (self.constraints.items) |c| try self.active.append(gpa, c.pair_key);
+        // `active` is NOT pruned — every emitted pair is retained (see the file
+        // header). The narrowphase filters non-touching pairs at `build`, so a
+        // retained separated pair costs only a redundant `collidePair`.
 
         // (7) broadphase proxy updates to the new poses.
         for (self.bodies.items) |b| {
@@ -163,23 +169,57 @@ test "box dropped on a static ground comes to rest without sinking (e = 0)" {
     defer world.deinit(gpa);
     const box = try groundAndBox(gpa, &world, 2.0, 0);
 
-    // Settle (2 s).
+    // Run 5 s. Capture the height at the FIRST tick that produces a contact
+    // constraint (impact), then require the box never sinks below it afterwards —
+    // the AC's "penetration bounded by its at-impact value" (absolute non-recovery
+    // accepted until the NGS position solver, M1.1.7).
+    var y_impact: ?Real = null;
+    var min_after_impact: Real = 1e30;
     var t: u32 = 0;
-    while (t < 120) : (t += 1) try world.step(gpa);
-    const y_settled = world.bm.position(box).?.toArray()[1];
-
-    // Run 3 more seconds — the box must not sink further.
-    while (t < 300) : (t += 1) try world.step(gpa);
+    while (t < 300) : (t += 1) {
+        try world.step(gpa);
+        const y = world.bm.position(box).?.toArray()[1];
+        if (y_impact == null and world.constraints.items.len > 0) y_impact = y;
+        if (y_impact != null and y < min_after_impact) min_after_impact = y;
+    }
     const y_final = world.bm.position(box).?.toArray()[1];
     const v_final = world.bm.linearVelocity(box).?.toArray()[1];
 
-    // Analytical rest y = ground_top(0.5) + box_half(0.5) = 1.0; the velocity
-    // solver leaves a small constant penetration (no NGS recovery until M1.1.7).
-    try testing.expect(y_final > 0.5); // never fell through
-    try testing.expect(y_final < 1.02); // resting at/near the contact
-    try testing.expect(y_final > 0.8); // penetration bounded (< 0.2)
-    try testing.expect(@abs(y_final - y_settled) < 1e-3); // no sinking after settling
-    try testing.expect(@abs(v_final) < 0.05); // at rest
+    // The box made contact and never sank below the at-impact height thereafter.
+    try testing.expect(y_impact != null);
+    try testing.expect(min_after_impact >= y_impact.? - 1e-3);
+    // Envelope: analytical rest y = ground_top(0.5) + box_half(0.5) = 1.0; a small
+    // constant penetration remains (no NGS recovery until M1.1.7). Never fell
+    // through, rests at/near the contact, penetration bounded, at rest.
+    try testing.expect(y_final > 0.8 and y_final < 1.02);
+    try testing.expect(@abs(v_final) < 0.05);
+}
+
+test "small hop within the fat margin keeps the contact pair alive" {
+    const gpa = testing.allocator;
+    var world = World.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const box = try groundAndBox(gpa, &world, 1.0, 0); // starts flush, e = 0
+
+    // Settle, then record the resting height.
+    var t: u32 = 0;
+    while (t < 120) : (t += 1) try world.step(gpa);
+    const y_rest = world.bm.position(box).?.toArray()[1];
+
+    // A small upward hop: apex ≈ v²/2g = 0.25/19.62 ≈ 1.3 cm, well within the
+    // broadphase fat-AABB margin (0.1 m). The box never moves far enough to be
+    // re-emitted by the moved-driven `computePairs`, so retaining the pair is what
+    // keeps the contact live and catches the box on its way down. Dropping the pair
+    // on separation would lose it until the box sank past the fat margin (~0.1 m).
+    world.bm.addImpulse(box, vr(0, 0.5, 0));
+    var min_y: Real = y_rest;
+    t = 0;
+    while (t < 120) : (t += 1) {
+        try world.step(gpa);
+        const y = world.bm.position(box).?.toArray()[1];
+        if (y < min_y) min_y = y;
+    }
+    try testing.expect(min_y >= y_rest - 0.02);
 }
 
 test "solve is deterministic across identical runs" {
