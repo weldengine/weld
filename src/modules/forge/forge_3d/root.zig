@@ -23,6 +23,9 @@ const narrowphase = @import("pipeline/narrowphase/root.zig");
 // M1.1.5 — semi-implicit Euler integration over the `BodyManager` SoA store.
 // Re-exported at `Real` below; the comptime pin analyses its acceptance tests.
 const integration = @import("pipeline/integration.zig");
+// M1.1.6 — rigid-body branch (Sequential Impulses contact solver). Re-exported
+// as the `rigid` namespace below; the comptime pin analyses its inline tests.
+const rigid_mod = @import("rigid/root.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -142,6 +145,13 @@ pub fn integrate(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
     return integration.integrate(bm, dt, gravity);
 }
 
+// --- Rigid solver (Sequential Impulses contact solver) ---
+
+/// The rigid-body branch: contact constraint setup + material combine rules +
+/// tangent basis (M1.1.6), with the contact cache + velocity solver as additive
+/// siblings. Bound to `Real` through the package's `../config.zig` import.
+pub const rigid = rigid_mod;
+
 // Pins so the inline tests + the acceptance suite are analysed when this module
 // is built as a test target (engine-zig-conventions.md §13).
 comptime {
@@ -152,6 +162,7 @@ comptime {
     _ = broadphase;
     _ = narrowphase;
     _ = integration;
+    _ = rigid_mod;
     _ = @import("tests/body_manager_test.zig");
     _ = @import("tests/integration_test.zig");
     _ = @import("tests/broadphase_test.zig");
