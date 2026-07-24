@@ -19,11 +19,13 @@
 //!
 //! **Low-dimensional seeds (brief flag-6 contract).** A `simplex_count < 4` seed
 //! (coincident cores, point-on-segment, crossing segments) is tetra-expanded to a
-//! non-degenerate origin-enclosing tetrahedron before the loop. When the
-//! Minkowski difference is genuinely < 3-D (the cores touch along a point / line /
-//! plane — a zero core penetration), no tetra exists; EPA returns the best
-//! lower-dimensional feature: a unit separation normal and depth 0 (the deep↔
-//! shallow boundary; the manifold's deep depth is then `0 + r_sum`).
+//! non-degenerate tetrahedron around the seed before the loop — origin-enclosing
+//! for a genuine deep seed; an RD-4 band seed (m1.1.3-hf) may expand to a
+//! NON-enclosing tetra (origin marginally outside; the downstream depth clamp
+//! returns ≈ 0). When the Minkowski difference is genuinely < 3-D (the cores touch
+//! along a point / line / plane — a zero core penetration), no tetra exists; EPA
+//! returns the best lower-dimensional feature: a unit separation normal and depth
+//! 0 (the deep↔shallow boundary; the manifold's deep depth is then `0 + r_sum`).
 //!
 //! **Dependency discipline (brief Notes).** Imports `foundation` (math) + the
 //! sibling `support.zig` / `gjk.zig` ONLY. Determinism by construction: no hash
@@ -88,7 +90,10 @@ pub const EpaDiagnostics = struct {
 
 /// One polytope face over the Minkowski difference of the cores: three vertex
 /// indices (CCW as seen from outside), the outward unit normal (away from the
-/// enclosed origin), and the origin-to-plane distance (`normal · vertex`, ≥ 0).
+/// enclosed origin), and the origin-to-plane distance (`normal · vertex`): ≥ 0 for
+/// an enclosing polytope; may be marginally NEGATIVE on a non-enclosing RD-4 band
+/// seed (m1.1.3-hf), where the origin lies just outside — the downstream depth
+/// clamp handles it.
 fn Face(comptime T: type) type {
     return struct {
         a: u32,

@@ -400,7 +400,7 @@ test "rd-4 in-band false-deep is benign" {
     // RD-4 band (`dist <= contact_margin`) must classify `.deep` (a non-enclosing
     // terminal at noise distance from the origin) yet stay BENIGN downstream —
     // near-zero penetration for hard cores, and the correct inflated depth for
-    // spheres — in BOTH A/B orders.
+    // inflated boxes — in BOTH A/B orders.
     //
     // PRECISION: the gap is RELATIVE to the band, recomputed at `Real`. The band is
     // `m = conv_k · floatEps(Real) · coord_scale`, `coord_scale = |Δpos| +
@@ -442,23 +442,30 @@ test "rd-4 in-band false-deep is benign" {
         }
     }
 
-    // Leg 2 (inflated) — two r-0.5 spheres, centres `gap` apart: a genuine deep
-    // inflated overlap. Core `dist ≈ gap` (tiny), so the manifold penetration is
-    // `≈ r_sum − dist ≈ 1.0` — pinning that the classifier recovers "the former
-    // shallow result to within ε" (gjk.zig RD-4 comment) with the CORRECT inflated
-    // depth, in both orders. (Point cores have `coreExtent = 0`, so this pair sits
-    // on the shallow side of its own tiny band — it exercises the depth-magnitude
-    // complement of Leg 1's near-zero benignity.)
+    // Leg 2 (inflated) — two INFLATED boxes (unit box core + radius 0.5, `r_sum =
+    // 1.0`), centres `2 + gap` apart with the SAME `gap = m0/2`. The box cores keep
+    // `coreExtent = √3`, so `coord_scale` — hence the band — is identical to Leg 1
+    // and `gap` is in-band: `gjk` classifies `.deep` on a GENUINELY-DISJOINT pair
+    // (cores separated by `dist ≈ gap`, terminal NON-enclosing). The non-enclosing
+    // seed clamps EPA depth to ≈ 0, so the manifold recovers the former-shallow
+    // penetration `r_sum − 0 ≈ 1.0` — the "r_sum added after a false-deep" path.
+    // Point cores CANNOT exercise this: a sphere pair's `coreExtent = 0` ⇒
+    // `coord_scale = gap` ⇒ the gap is OUT of its own tiny band (`.shallow`), never
+    // reaching the deep-band + EPA path this leg pins. Both orders.
     {
-        const sph = sphereShape(0.5);
+        const infl = SupportShape{ .core = .{ .box = vr(1, 1, 1) }, .radius = 0.5 };
         const a = vr(0, 0, 0);
-        const b = vr(gap, 0, 0);
+        const b = vr(2 + gap, 0, 0);
         const r_sum: Real = 1.0;
-        const ab = narrowphase.collideOrderedGeneric(Real, sph, a, Quatr.identity, sph, b, Quatr.identity);
-        const ba = narrowphase.collideOrderedGeneric(Real, sph, b, Quatr.identity, sph, a, Quatr.identity);
-        try testing.expect(ab != null and ba != null);
-        try testing.expectApproxEqAbs(r_sum, maxPen(ab.?), depth_tol);
-        try testing.expectApproxEqAbs(r_sum, maxPen(ba.?), depth_tol);
+        inline for (.{ .{ a, b }, .{ b, a } }) |o| { // A→B, then B→A
+            const pa = o[0];
+            const pb = o[1];
+            const g = narrowphase.gjk(Real, infl, pa, Quatr.identity, infl, pb, Quatr.identity);
+            try testing.expectEqual(GjkResult.Status.deep, g.status);
+            const m = narrowphase.collideOrderedGeneric(Real, infl, pa, Quatr.identity, infl, pb, Quatr.identity);
+            try testing.expect(m != null);
+            try testing.expectApproxEqAbs(r_sum, maxPen(m.?), depth_tol);
+        }
     }
 }
 

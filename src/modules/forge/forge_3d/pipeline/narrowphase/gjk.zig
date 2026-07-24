@@ -357,7 +357,9 @@ pub fn GjkResult(comptime T: type) type {
 /// necessarily enclosing), `.separated` iff `dist − (r_a + r_b)` exceeds it, else
 /// `.shallow`. The contact margin is an absolute float-noise bound
 /// `conv_k · floatEps(T) · coordScale` (see the tolerance block). An exact inflated
-/// touch (`dist == r_a + r_b`) stays shallow.
+/// touch (`dist == r_a + r_b`, `r_sum > 0`) stays shallow; for hard cores
+/// (`r_sum == 0`) the shallow band is empty — an exact touch (`dist == 0`) is the
+/// RD-4 deep band.
 pub fn gjk(
     comptime T: type,
     shape_a: support.SupportShape(T),
