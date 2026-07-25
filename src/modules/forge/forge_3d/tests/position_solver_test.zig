@@ -330,16 +330,25 @@ test "reference face carried by B still resorbs penetration" {
     var world = World.init(vr(0, gravity, 0), fixed_dt);
     defer world.deinit(gpa);
 
-    // The sphere is added FIRST so it holds the lower BodyId: the canonical pair is
-    // (sphere = A, box = B), hence `a_is_ref == false` — the reference face is the
-    // BOX's top face, the case §1.7.2 cites for why the normal may not be attached
-    // to A.
-    const sphere_shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.3 } });
-    var sphere = api.BodyDescriptor{ .entity = .{ .index = 0, .generation = 0 }, .body_type = .dynamic, .shape = sphere_shape };
-    sphere.mass = 1;
-    sphere.restitution = 0;
-    sphere.position = av3(0, 0.74, 0); // flush would be 0.8 ⇒ 6 cm of penetration
-    const sphere_id = try world.addBody(gpa, sphere);
+    // A LYING capsule against a static box, capsule added FIRST so it holds the
+    // lower BodyId and is the canonical A. This is the scene that actually reaches
+    // `manifold.zig`'s reference/incident selection with `a_is_ref == false`:
+    //   - a lying capsule's supporting face is its two-endpoint segment, so
+    //     `face_a.count == 2` — not the `count == 1` point-core short-circuit (a
+    //     sphere core, or an END-ON capsule, IS a point and takes that exit, which
+    //     is why neither can exercise the selection at all);
+    //   - `face_b.count == 4`, so the segment×segment exit does not apply either;
+    //   - `align_a` is 0 (a non-polygon feature scores 0) against `align_b ≈ 1`, so
+    //     `a_is_ref = (align_a >= align_b)` is FALSE and the box owns the reference
+    //     face — the case §1.7.2 cites for why the normal may not follow A.
+    // The capsule's local axis is +Y, so a quarter turn about Z lays it along X.
+    const capsule_shape = try world.store.createShape(gpa, .{ .capsule = .{ .radius = 0.2, .half_height = 0.5 } });
+    var capsule = api.BodyDescriptor{ .entity = .{ .index = 0, .generation = 0 }, .body_type = .dynamic, .shape = capsule_shape };
+    capsule.mass = 1;
+    capsule.restitution = 0;
+    capsule.rotation = foundation.math.Quatf.fromAxisAngle(av3(0, 0, 1), std.math.pi / 2.0);
+    capsule.position = av3(0, 0.64, 0); // flush would be 0.5 + 0.2 ⇒ 6 cm of penetration
+    const capsule_id = try world.addBody(gpa, capsule);
 
     const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(3, 0.5, 3) } });
     var box = api.BodyDescriptor{ .entity = .{ .index = 1, .generation = 0 }, .body_type = .static, .shape = box_shape };
@@ -348,9 +357,12 @@ test "reference face carried by B still resorbs penetration" {
 
     try world.step(gpa);
     try testing.expectEqual(@as(usize, 1), world.constraints.items.len);
-    // Indirect assertion that the reference feature is B's face: the contact axis is
-    // the box top face's normal (negated, since it points A→B = sphere→box). A
-    // sphere carries no face, so an A-owned reference could not produce this axis.
+    // COVERAGE assertion, not a presumption: a 2-point manifold here can only come
+    // from clipping the incident SEGMENT against a reference FACE, which is only
+    // reachable through the reference/incident selection. If that branch ever stops
+    // being taken, this count changes and the test fails instead of passing blind.
+    try testing.expectEqual(@as(u8, 2), world.constraints.items[0].count);
+    // The contact axis is the box top face's normal, negated (A→B = capsule→box).
     try testing.expect(world.constraints.items[0].normal.approxEql(vr(0, -1, 0), 1e-4));
     try testing.expect(world.constraints.items[0].points[0].penetration > 0.05);
 
@@ -358,9 +370,9 @@ test "reference face carried by B still resorbs penetration" {
     while (t < 300) : (t += 1) try world.step(gpa);
 
     try testing.expect(deepestPenetration(&world) <= world.cfg.penetration_slop + noiseMargin(1.0));
-    const y = world.bm.position(sphere_id).?.toArray()[1];
-    try testing.expect(y >= 0.8 - (world.cfg.penetration_slop + rest_margin));
-    try testing.expect(y <= 0.8 + rest_overshoot);
+    const y = world.bm.position(capsule_id).?.toArray()[1];
+    try testing.expect(y >= 0.7 - (world.cfg.penetration_slop + rest_margin));
+    try testing.expect(y <= 0.7 + rest_overshoot);
 }
 
 test "BodyId order permutation converges to the same poses" {
