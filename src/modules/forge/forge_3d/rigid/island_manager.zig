@@ -405,7 +405,7 @@ pub const IslandManager = struct {
             if (dense_a != null and dense_b != null) continue; // no non-member here
             const member_dense = dense_a orelse dense_b orelse unreachable; // see `rankOfConstraint`
             const non_member = if (dense_a == null) c.body_a else c.body_b;
-            if (!isMoving(bm, non_member)) continue;
+            if (!sleep.isMoving(bm, non_member)) continue;
             self.islands.items[self.dense_rank.items[member_dense]].touches_moving_non_member = true;
         }
     }
@@ -419,14 +419,6 @@ pub const IslandManager = struct {
         }
     }
 };
-
-/// Whether `id`'s velocity is not exactly zero — a true-zero test, not a threshold:
-/// this classifies nothing, it asks whether the body is being driven at all.
-fn isMoving(bm: *const BodyManager, id: BodyId) bool {
-    const linear = bm.linearVelocity(id) orelse return false;
-    const angular = bm.angularVelocity(id) orelse return false;
-    return !linear.eql(Vec3r.zero) or !angular.eql(Vec3r.zero);
-}
 
 fn lessByBodyId(_: void, x: Member, y: Member) bool {
     return x.id < y.id;

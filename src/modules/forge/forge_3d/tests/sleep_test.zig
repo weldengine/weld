@@ -621,3 +621,221 @@ test "a stale handle is inert on every sleep entry" {
     sleep.putToSleep(&bm, box);
     sleep.updateWindows(&bm, dt, SleepConfig{}); // the dead slot is skipped
 }
+
+// --- the wake fixpoint in `build` (§1.8.5) ---------------------------------------
+
+/// A stack of `n` unit boxes at x = 0, each 0.99 above the previous, all dynamic.
+fn stackOfBoxes(
+    gpa: std.mem.Allocator,
+    store: *ShapeStore,
+    bm: *BodyManager,
+    comptime n: usize,
+    base_y: f32,
+) ![n]BodyId {
+    const s = try store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    var ids: [n]BodyId = undefined;
+    for (0..n) |i| {
+        var d = descOf(@intCast(i), .dynamic, s);
+        d.mass = 1;
+        d.position = av3(0, base_y + @as(f32, @floatFromInt(i)) * 0.99, 0);
+        ids[i] = try bm.addBody(gpa, store, d);
+    }
+    return ids;
+}
+
+/// Every pair of `ids`, sorted ascending — the candidate set `build` consumes.
+fn allPairs(gpa: std.mem.Allocator, out: *std.ArrayListUnmanaged(u64), ids: []const BodyId) !void {
+    out.clearRetainingCapacity();
+    for (ids, 0..) |a, i| {
+        for (ids[i + 1 ..]) |b| try out.append(gpa, pairKey(a, b));
+    }
+    std.mem.sort(u64, out.items, {}, std.sort.asc(u64));
+}
+
+test "build skips a pair whose endpoints are both non-awake" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    var constraints: std.ArrayListUnmanaged(rigid.ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+
+    const ground_shape = try store.createShape(gpa, .{ .box = .{ .half_extents = av3(20, 0.5, 20) } });
+    const box_shape = try store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    const ground = try bm.addBody(gpa, &store, descOf(0, .static, ground_shape));
+    var box_desc = descOf(1, .dynamic, box_shape);
+    box_desc.mass = 1;
+    box_desc.position = av3(0, 0.99, 0);
+    const box = try bm.addBody(gpa, &store, box_desc);
+    const pairs = [_]u64{pairKey(ground, box)};
+
+    // Awake: the contact is built as usual.
+    try rigid.build(gpa, &constraints, &bm, &store, &pairs);
+    try testing.expectEqual(@as(usize, 1), constraints.items.len);
+
+    // Asleep against a STATIC ground: both endpoints are non-awake, so the pair is
+    // skipped — zero narrowphase, zero `prepare`, no constraint. Note the static
+    // ground has no `sleeping` flag of its own (the window sweep never touches it),
+    // which is exactly why the predicate cannot be "both flags set".
+    sleep.putToSleep(&bm, box);
+    try rigid.build(gpa, &constraints, &bm, &store, &pairs);
+    try testing.expectEqual(@as(usize, 0), constraints.items.len);
+    try testing.expect(bm.isSleeping(box).?); // and nothing woke it
+}
+
+test "build wakes a sleeping endpoint as soon as a manifold appears" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    var constraints: std.ArrayListUnmanaged(rigid.ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+
+    const ids = try stackOfBoxes(gpa, &store, &bm, 2, 0);
+    sleep.putToSleep(&bm, ids[0]);
+    try testing.expect(bm.isSleeping(ids[0]).?);
+    try testing.expect(!bm.isSleeping(ids[1]).?); // the other stays awake
+
+    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(ids[0], ids[1])});
+
+    try testing.expectEqual(@as(usize, 1), constraints.items.len);
+    try testing.expect(!bm.isSleeping(ids[0]).?);
+    try testing.expectEqual(@as(Real, 0), bm.sleepTime(ids[0]).?); // window restarted
+}
+
+test "the wake fixpoint reaches a whole sleeping chain in one build" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    var constraints: std.ArrayListUnmanaged(rigid.ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    var pairs: std.ArrayListUnmanaged(u64) = .empty;
+    defer pairs.deinit(gpa);
+
+    // Three stacked boxes, all asleep, plus an awake impactor arriving from below.
+    // Only the impactor↔bottom pair has an awake endpoint on the first scan; without
+    // the fixpoint the wake would crawl up one layer per tick, leaving the bottom box
+    // awake with the rest of the stack still frozen on top of it.
+    const stack = try stackOfBoxes(gpa, &store, &bm, 3, 0);
+    const impactor_shape = try store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    var impactor_desc = descOf(3, .dynamic, impactor_shape);
+    impactor_desc.mass = 1;
+    impactor_desc.position = av3(0, -0.99, 0);
+    const impactor = try bm.addBody(gpa, &store, impactor_desc);
+
+    for (stack) |id| sleep.putToSleep(&bm, id);
+    for (stack) |id| try testing.expect(bm.isSleeping(id).?);
+
+    const all = [_]BodyId{ stack[0], stack[1], stack[2], impactor };
+    try allPairs(gpa, &pairs, &all);
+    try rigid.build(gpa, &constraints, &bm, &store, pairs.items);
+
+    // ONE build call: every member of the chain is awake and its internal contacts
+    // are back — the impactor's plus the stack's two.
+    for (stack) |id| try testing.expect(!bm.isSleeping(id).?);
+    try testing.expectEqual(@as(usize, 3), constraints.items.len);
+
+    // Output order is unaffected by the deferred re-scan: still ascending pair key.
+    for (constraints.items, 0..) |c, i| {
+        if (i > 0) try testing.expect(constraints.items[i - 1].pair_key < c.pair_key);
+    }
+}
+
+test "a moving kinematic support wakes the sleeper resting on it" {
+    const gpa = testing.allocator;
+    // The case W3 cannot close, because W3 only protects island MEMBERS and a
+    // sleeping body is not one. At step 4 the poses have not been integrated yet, so
+    // the manifold with the platform still exists; treating a MOVING kinematic body
+    // as awake is what keeps that pair narrowphased, and the fixpoint then wakes the
+    // box. From the next tick on it is a member and W3 takes over.
+    inline for (.{ true, false }) |platform_moves| {
+        var store = ShapeStore{};
+        defer store.deinit(gpa);
+        var bm = BodyManager{};
+        defer bm.deinit(gpa);
+        var constraints: std.ArrayListUnmanaged(rigid.ContactConstraint) = .empty;
+        defer constraints.deinit(gpa);
+
+        const platform_shape = try store.createShape(gpa, .{ .box = .{ .half_extents = av3(20, 0.5, 20) } });
+        const box_shape = try store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+        const platform = try bm.addBody(gpa, &store, descOf(0, .kinematic, platform_shape));
+        var box_desc = descOf(1, .dynamic, box_shape);
+        box_desc.mass = 1;
+        box_desc.position = av3(0, 0.99, 0);
+        const box = try bm.addBody(gpa, &store, box_desc);
+
+        sleep.putToSleep(&bm, box);
+        if (platform_moves) bm.setLinearVelocity(platform, vr(1, 0, 0));
+        try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(platform, box)});
+
+        if (platform_moves) {
+            try testing.expect(!bm.isSleeping(box).?);
+            try testing.expectEqual(@as(usize, 1), constraints.items.len);
+        } else {
+            // A kinematic platform at rest is not a motion source: both endpoints are
+            // non-awake and the pair costs nothing.
+            try testing.expect(bm.isSleeping(box).?);
+            try testing.expectEqual(@as(usize, 0), constraints.items.len);
+        }
+    }
+}
+
+// --- integration skips (§1.8.6) --------------------------------------------------
+
+test "integration skips a sleeping body but still clears its accumulators" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const box = try loneBox(gpa, &store, &bm);
+    const no_gravity = Vec3r.zero;
+
+    // `addForce` is activating, so the force lands on an awake body; put it to sleep
+    // straight after, leaving a pending force on a sleeper.
+    bm.addForce(box, vr(0, 100, 0));
+    sleep.putToSleep(&bm, box);
+
+    integration.integrateVelocities(&bm, dt, no_gravity);
+    // Not integrated: the 100 N never became velocity.
+    inline for (0..3) |k| try testing.expectEqual(@as(Real, 0), bm.linearVelocity(box).?.toArray()[k]);
+
+    // But the accumulator WAS cleared — the reset is uniform over every live body
+    // (§2). Waking the body and integrating again must not fire a stale force.
+    bm.wakeBody(box);
+    integration.integrateVelocities(&bm, dt, no_gravity);
+    inline for (0..3) |k| try testing.expectEqual(@as(Real, 0), bm.linearVelocity(box).?.toArray()[k]);
+}
+
+test "integratePositions leaves a sleeping body bit-frozen" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const box = try loneBox(gpa, &store, &bm);
+
+    sleep.putToSleep(&bm, box);
+    // A NON-activating write, so the body stays asleep while carrying a velocity that
+    // would move it a long way — exactly what the skip has to ignore.
+    bm.setLinearVelocity(box, vr(5, 0, 0));
+    bm.setAngularVelocity(box, vr(0, 3, 0));
+    const before_position = bm.position(box).?.toArray();
+    const before_rotation = bm.rotation(box).?.toArray();
+
+    var t: u32 = 0;
+    while (t < 60) : (t += 1) integration.integratePositions(&bm, dt);
+
+    inline for (0..3) |k| try testing.expectEqual(before_position[k], bm.position(box).?.toArray()[k]);
+    inline for (0..4) |k| try testing.expectEqual(before_rotation[k], bm.rotation(box).?.toArray()[k]);
+
+    // Waking it re-enters the integration, so the freeze was the sleep and not the
+    // velocity being ignored outright.
+    bm.wakeBody(box);
+    integration.integratePositions(&bm, dt);
+    try testing.expect(bm.position(box).?.toArray()[0] > before_position[0]);
+}

@@ -18,10 +18,11 @@
 //!     the pose-invariant local inverse inertias).
 //!
 //! Import discipline (brief): `foundation`, `weld_forge` (handle types),
-//! `../config.zig`, `../body_manager.zig`, `../pipeline/narrowphase/root.zig`.
-//! NEVER `broadphase.zig` — candidate pairs are consumed as data (packed `u64`
-//! keys), never re-derived — and never any `pipeline/` file beyond the
-//! narrowphase facade.
+//! `../config.zig`, `../body_manager.zig`, `../pipeline/narrowphase/root.zig`, and
+//! since M1.1.8 `../pipeline/sleep.zig` — `build` is where the wake fixpoint lives,
+//! so it needs the awake predicate; `rigid/island_manager.zig` already depends on
+//! the same file. NEVER `broadphase.zig`: candidate pairs are consumed as data
+//! (packed `u64` keys), never re-derived.
 //!
 //! The velocity solver carries NO positional bias (no Baumgarte, no split
 //! impulse) — position error is entirely the NGS position pass's business
@@ -34,6 +35,7 @@ const std = @import("std");
 const config = @import("../config.zig");
 const bm_mod = @import("../body_manager.zig");
 const narrowphase = @import("../pipeline/narrowphase/root.zig");
+const sleep = @import("../pipeline/sleep.zig");
 const api = @import("weld_forge");
 const foundation = @import("foundation");
 
@@ -291,27 +293,110 @@ fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, manifold
 /// `bm.collidePair` (canonical BodyId order → frame-stable feature ids); a
 /// non-null manifold becomes one `ContactConstraint` with per-point data
 /// precomputed by `prepare`.
+///
+/// **This is also the wake fixpoint** (`engine-physics-forge.md` §1.8.5), which is
+/// why `bm` is mutable here. A sleeping island's internal contacts are not built,
+/// so on the tick a projectile lands on top of a sleeping stack only the
+/// projectile↔top pair produces a manifold; waking those two alone would leave the
+/// top of the stack awake with no support under it and propagate the wake one layer
+/// per tick. Instead:
+///
+///   1. a pair with NEITHER endpoint awake is skipped — zero narrowphase, zero
+///      `prepare` — and recorded in a deferred list;
+///   2. a pair that produces a manifold WAKES any sleeping endpoint, whatever the
+///      other endpoint is: dynamic, static, or a moving kinematic platform;
+///   3. the deferred list is re-scanned while a pass wakes at least one body.
+///
+/// Termination is bounded by the number of sleeping bodies, since each round that
+/// continues has strictly reduced it. The narrowphase work is exactly that of the
+/// contacts which end up in the array — nothing is spent twice. At rest the
+/// deferred list wakes nobody and the second pass does not happen: zero cost.
+/// Determinism is preserved — the scan follows the sorted pair order and the output
+/// is re-sorted by pair key.
 pub fn build(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(ContactConstraint),
-    bm: *const BodyManager,
+    bm: *BodyManager,
     store: *const ShapeStore,
     pairs: []const u64,
 ) !void {
     out.clearRetainingCapacity();
-    for (pairs) |key| {
-        const a: BodyId = @intCast(key >> 32);
-        const b: BodyId = @intCast(key & 0xFFFF_FFFF);
-        // Pairs arrive canonical; the solver asserts the order, never re-derives it.
-        std.debug.assert(a <= b);
-        const manifold = bm.collidePair(store, a, b) orelse continue; // separated
-        const constraint = prepare(bm, a, b, key, manifold) orelse continue;
-        try out.append(gpa, constraint);
+
+    // Indices into `pairs`, not keys: the list only ever holds skipped pairs, so it
+    // stays empty — and unallocated — in a fully awake scene.
+    var deferred: std.ArrayListUnmanaged(u32) = .empty;
+    defer deferred.deinit(gpa);
+
+    for (pairs, 0..) |key, index| {
+        if (bothAsleep(bm, key)) {
+            try deferred.append(gpa, @intCast(index));
+            continue;
+        }
+        _ = try emitPair(gpa, out, bm, store, key);
     }
+
+    var woke_someone = true;
+    while (woke_someone and deferred.items.len > 0) {
+        woke_someone = false;
+        var kept: usize = 0;
+        for (deferred.items) |index| {
+            const key = pairs[index];
+            if (bothAsleep(bm, key)) {
+                deferred.items[kept] = index;
+                kept += 1;
+                continue;
+            }
+            if (try emitPair(gpa, out, bm, store, key)) woke_someone = true;
+        }
+        deferred.shrinkRetainingCapacity(kept);
+    }
+
     // Deterministic iteration order: sort ascending by the packed pair key (a
     // total order; the pairs are deduped so keys are unique). No hash containers
     // anywhere on the path (M1.1.14).
     std.mem.sort(ContactConstraint, out.items, {}, lessByPairKey);
+}
+
+/// Whether neither endpoint of `key` is a motion source — the pair the fixpoint
+/// defers.
+fn bothAsleep(bm: *const BodyManager, key: u64) bool {
+    const a: BodyId = @intCast(key >> 32);
+    const b: BodyId = @intCast(key & 0xFFFF_FFFF);
+    return !sleep.isAwake(bm, a) and !sleep.isAwake(bm, b);
+}
+
+/// Narrowphase one candidate pair; on a manifold, wake any sleeping endpoint and
+/// append the prepared constraint. Returns whether a body was woken — which is the
+/// fixpoint's progress signal, since only a wake can make another deferred pair
+/// processable.
+fn emitPair(
+    gpa: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(ContactConstraint),
+    bm: *BodyManager,
+    store: *const ShapeStore,
+    key: u64,
+) !bool {
+    const a: BodyId = @intCast(key >> 32);
+    const b: BodyId = @intCast(key & 0xFFFF_FFFF);
+    // Pairs arrive canonical; the solver asserts the order, never re-derives it.
+    std.debug.assert(a <= b);
+
+    const manifold = bm.collidePair(store, a, b) orelse return false; // separated
+
+    // Wake BEFORE preparing, so the constraint is prepared against a body that is
+    // already a simulation participant. Waking changes no velocity — only the flag
+    // and the sleep window — so `prepare`'s inputs are the same either way.
+    var woke = false;
+    for ([_]BodyId{ a, b }) |id| {
+        if (bm.isSleeping(id) orelse false) {
+            bm.wakeBody(id);
+            woke = true;
+        }
+    }
+
+    const constraint = prepare(bm, a, b, key, manifold) orelse return woke;
+    try out.append(gpa, constraint);
+    return woke;
 }
 
 fn lessByPairKey(_: void, x: ContactConstraint, y: ContactConstraint) bool {

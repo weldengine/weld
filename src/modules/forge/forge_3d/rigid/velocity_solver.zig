@@ -94,19 +94,37 @@ pub fn storeContacts(gpa: std.mem.Allocator, cache: *ContactCache, constraints: 
     }
 }
 
-/// Solve the velocity constraints over the constraint index range `[from, to)`
-/// with `cfg.velocity_iterations` Gauss-Seidel passes. Constraints are visited in
-/// ascending pair-key order (as `build` sorted them) and points in manifold
-/// order. M1.1.6 always passes the full range; the explicit range is the
-/// island-additivity seam (M1.1.8 sorts constraints into contiguous per-island
-/// ranges — purely additive).
-pub fn solveRange(bm: *BodyManager, constraints: []ContactConstraint, from: usize, to: usize, cfg: SolverConfig) void {
+/// What one `solveRangeReport` pass observed.
+///
+/// TELEMETRY ONLY — never a control input. Feeds `get_solver_iterations_stats`
+/// (`PhysicsDebugProvider`, `engine-physics-forge.md` §1.10), symmetrically to the
+/// position pass's `PositionSolveResult`.
+pub const VelocitySolveResult = struct {
+    /// Velocity iterations actually run, `<= cfg.velocity_iterations`. The pass
+    /// stops on the first iteration that applies no impulse at all.
+    iterations_run: u32 = 0,
+};
+
+/// `solveRange` with the iteration telemetry returned — the SIBLING entry
+/// (`engine-physics-forge.md` §1.8.2). The `void` entry keeps its exact signature,
+/// so the range seam the island manager consumes does not move.
+pub fn solveRangeReport(
+    bm: *BodyManager,
+    constraints: []ContactConstraint,
+    from: usize,
+    to: usize,
+    cfg: SolverConfig,
+) VelocitySolveResult {
     // A finite, non-negative restitution threshold — a negative one would rearm
-    // the E4 defect (restitution bias applied to a separating contact). Zero
+    // the M1.1.6 defect (restitution bias applied to a separating contact). Zero
     // `velocity_iterations` is legal (warm start only) and needs no guard.
     std.debug.assert(std.math.isFinite(cfg.restitution_threshold) and cfg.restitution_threshold >= 0);
+
+    var result: VelocitySolveResult = .{};
     var iter: u32 = 0;
     while (iter < cfg.velocity_iterations) : (iter += 1) {
+        result.iterations_run = iter + 1;
+        var applied_any = false;
         for (constraints[from..to]) |*c| {
             for (0..c.count) |i| {
                 // Normal impulse first, then friction clamped against the CURRENT
@@ -122,17 +140,38 @@ pub fn solveRange(bm: *BodyManager, constraints: []ContactConstraint, from: usiz
                 // Recorded deviations). Porting the reference friction model is a
                 // whole-model change (order + per-manifold aggregation + twist
                 // friction), tracked as an open design item.
-                solveNormalPoint(bm, c, &c.points[i], cfg);
-                solveFrictionPoint(bm, c, &c.points[i]);
+                if (solveNormalPoint(bm, c, &c.points[i], cfg)) applied_any = true;
+                if (solveFrictionPoint(bm, c, &c.points[i])) applied_any = true;
             }
         }
+        // An iteration that applied NO impulse ends the pass. The equivalence is
+        // exact, not approximate: velocities change only through an applied `Δλ`,
+        // so an iteration that applies nothing leaves the next one reading an
+        // identical state, which will likewise apply nothing. The test is at TRUE
+        // ZERO — never an epsilon — so `velocity_iterations` is a rarely-reached
+        // ceiling rather than a fixed cost, which is what makes a high global floor
+        // affordable (§1.8.2). The position pass already terminates the same way.
+        if (!applied_any) break;
     }
+    return result;
+}
+
+/// Solve the velocity constraints over the constraint index range `[from, to)`
+/// with at most `cfg.velocity_iterations` Gauss-Seidel passes. Constraints are
+/// visited in ascending pair-key order (as `build` sorted them) and points in
+/// manifold order. The explicit range is the island seam: `rigid/island_manager.zig`
+/// sorts constraints into contiguous per-island ranges and this is called once per
+/// range. Signature unchanged since M1.1.6 — the iteration telemetry arrives
+/// through `solveRangeReport`, never through a changed return type.
+pub fn solveRange(bm: *BodyManager, constraints: []ContactConstraint, from: usize, to: usize, cfg: SolverConfig) void {
+    _ = solveRangeReport(bm, constraints, from, to, cfg);
 }
 
 /// One Gauss-Seidel normal-impulse update for a contact point: drive the relative
 /// normal velocity toward its restitution target, with the accumulated-impulse
-/// clamp `λₙ ≥ 0` (Catto — the solver can only push, never pull).
-fn solveNormalPoint(bm: *BodyManager, c: *const ContactConstraint, pt: *cc.ConstraintPoint, cfg: SolverConfig) void {
+/// clamp `λₙ ≥ 0` (Catto — the solver can only push, never pull). Returns whether a
+/// non-zero impulse was applied, at TRUE ZERO — the early-out's progress signal.
+fn solveNormalPoint(bm: *BodyManager, c: *const ContactConstraint, pt: *cc.ConstraintPoint, cfg: SolverConfig) bool {
     const v_a = bm.linearVelocity(c.body_a).?;
     const w_a = bm.angularVelocity(c.body_a).?;
     const v_b = bm.linearVelocity(c.body_b).?;
@@ -157,6 +196,7 @@ fn solveNormalPoint(bm: *BodyManager, c: *const ContactConstraint, pt: *cc.Const
     const applied = new_lambda - pt.normal_impulse;
     pt.normal_impulse = new_lambda;
     applyImpulse(bm, c, pt.r_a, pt.r_b, c.normal.scale(applied));
+    return applied != 0;
 }
 
 /// One Gauss-Seidel friction update for a contact point (run after the normal
@@ -166,7 +206,9 @@ fn solveNormalPoint(bm: *BodyManager, c: *const ContactConstraint, pt: *cc.Const
 /// (against the current accumulated normal impulse). The circular clamp is
 /// isotropic and basis-independent — coherent with the world-space tangent cache;
 /// the box clamp is anisotropic (up to √2·μ·λₙ on the diagonal) and basis-biased.
-fn solveFrictionPoint(bm: *BodyManager, c: *const ContactConstraint, pt: *cc.ConstraintPoint) void {
+/// Returns whether a non-zero impulse was applied, at TRUE ZERO (see
+/// `solveNormalPoint`).
+fn solveFrictionPoint(bm: *BodyManager, c: *const ContactConstraint, pt: *cc.ConstraintPoint) bool {
     const v_a = bm.linearVelocity(c.body_a).?;
     const w_a = bm.angularVelocity(c.body_a).?;
     const v_b = bm.linearVelocity(c.body_b).?;
@@ -198,6 +240,7 @@ fn solveFrictionPoint(bm: *BodyManager, c: *const ContactConstraint, pt: *cc.Con
     pt.tangent2_impulse = new_t2;
     const impulse = c.tangent1.scale(applied_t1).add(c.tangent2.scale(applied_t2));
     applyImpulse(bm, c, pt.r_a, pt.r_b, impulse);
+    return applied_t1 != 0 or applied_t2 != 0;
 }
 
 // --- tests -------------------------------------------------------------------
@@ -551,7 +594,7 @@ test "friction cancels tangential sliding below the cone" {
     try cc.build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)});
     const c = &constraints.items[0];
     c.points[0].normal_impulse = 10; // large λₙ ⇒ wide cone ⇒ no clamp
-    solveFrictionPoint(&bm, c, &c.points[0]);
+    _ = solveFrictionPoint(&bm, c, &c.points[0]);
 
     // The relative contact-point tangential velocity is driven to ≈ 0.
     const va = bm.linearVelocity(id_a).?;
@@ -587,7 +630,7 @@ fn frictionMagnitude(gpa: std.mem.Allocator, slide: Vec3r) !Real {
     try cc.build(gpa, &constraints, &bm, &store, &.{pairKey(id_a, id_b)});
     const c = &constraints.items[0];
     c.points[0].normal_impulse = 1;
-    solveFrictionPoint(&bm, c, &c.points[0]);
+    _ = solveFrictionPoint(&bm, c, &c.points[0]);
     const pt = c.points[0];
     return @sqrt(pt.tangent1_impulse * pt.tangent1_impulse + pt.tangent2_impulse * pt.tangent2_impulse);
 }
@@ -601,4 +644,150 @@ test "friction clamp is isotropic (circular, basis-independent)" {
     const diagonal = try frictionMagnitude(gpa, vr(0, 7.0710678, 7.0710678));
     try testing.expectApproxEqAbs(@as(Real, 1), along, 1e-4); // clamped to μ·λₙ = 1
     try testing.expectApproxEqAbs(along, diagonal, 1e-4); // isotropic
+}
+
+/// A dynamic unit-mass sphere at the origin overlapping a STATIC one at +0.9X, with
+/// zero restitution. The lever arm is parallel to the normal, so the rotational term
+/// of the effective mass vanishes exactly and the single-contact solve is exact
+/// arithmetic at both precisions — which is what lets the iteration counts below be
+/// asserted as equalities rather than bounds.
+fn earlyOutScene(gpa: std.mem.Allocator, store: *ShapeStore, bm: *BodyManager, approach: Real) ![2]api.BodyId {
+    const ids = try sphereHitScene(gpa, store, bm, 0);
+    bm.setLinearVelocity(ids[0], vr(approach, 0, 0));
+    return ids;
+}
+
+test "the velocity pass stops as soon as an iteration applies nothing" {
+    const gpa = testing.allocator;
+
+    // Approaching: the single contact converges in a couple of iterations and the
+    // pass ends well short of its budget. The exact count is NOT asserted — it is the
+    // last-bit behaviour of a float convergence and legitimately differs between f32
+    // and f64. What is asserted is the contract: the pass stops early, and once
+    // stopped the state is a fixed point — solving it again spends exactly ONE
+    // iteration, the one that finds nothing to apply, and moves nothing.
+    {
+        var store = ShapeStore{};
+        defer store.deinit(gpa);
+        var bm = BodyManager{};
+        defer bm.deinit(gpa);
+        const ids = try earlyOutScene(gpa, &store, &bm, 3);
+        var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+        defer constraints.deinit(gpa);
+        try cc.build(gpa, &constraints, &bm, &store, &.{pairKey(ids[0], ids[1])});
+
+        const cfg = SolverConfig{};
+        const first = solveRangeReport(&bm, constraints.items, 0, constraints.items.len, cfg);
+        try testing.expect(first.iterations_run < cfg.velocity_iterations);
+        try testing.expectApproxEqAbs(@as(Real, 0), bm.linearVelocity(ids[0]).?.toArray()[0], 1e-6);
+
+        const settled = bm.linearVelocity(ids[0]).?.toArray();
+        const again = solveRangeReport(&bm, constraints.items, 0, constraints.items.len, cfg);
+        try testing.expectEqual(@as(u32, 1), again.iterations_run);
+        inline for (0..3) |k| {
+            try testing.expectEqual(settled[k], bm.linearVelocity(ids[0]).?.toArray()[k]);
+        }
+    }
+
+    // Separating: the Catto clamp holds λₙ at zero and friction's cone is zero-wide,
+    // so the very first iteration applies nothing at all.
+    {
+        var store = ShapeStore{};
+        defer store.deinit(gpa);
+        var bm = BodyManager{};
+        defer bm.deinit(gpa);
+        const ids = try earlyOutScene(gpa, &store, &bm, -3);
+        var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+        defer constraints.deinit(gpa);
+        try cc.build(gpa, &constraints, &bm, &store, &.{pairKey(ids[0], ids[1])});
+
+        const result = solveRangeReport(&bm, constraints.items, 0, constraints.items.len, .{});
+        try testing.expectEqual(@as(u32, 1), result.iterations_run);
+    }
+
+    // A zero budget is legal and runs nothing (warm start only).
+    {
+        var store = ShapeStore{};
+        defer store.deinit(gpa);
+        var bm = BodyManager{};
+        defer bm.deinit(gpa);
+        const ids = try earlyOutScene(gpa, &store, &bm, 3);
+        var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+        defer constraints.deinit(gpa);
+        try cc.build(gpa, &constraints, &bm, &store, &.{pairKey(ids[0], ids[1])});
+
+        const result = solveRangeReport(&bm, constraints.items, 0, constraints.items.len, .{ .velocity_iterations = 0 });
+        try testing.expectEqual(@as(u32, 0), result.iterations_run);
+        try testing.expectEqual(@as(Real, 3), bm.linearVelocity(ids[0]).?.toArray()[0]); // untouched
+    }
+}
+
+/// Solve `earlyOutScene` with `iterations` of budget and return the resulting
+/// velocity of the dynamic body plus the telemetry.
+fn solveWithBudget(gpa: std.mem.Allocator, iterations: u32) !struct { velocity: Vec3r, result: VelocitySolveResult } {
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const ids = try earlyOutScene(gpa, &store, &bm, 3);
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    try cc.build(gpa, &constraints, &bm, &store, &.{pairKey(ids[0], ids[1])});
+    const result = solveRangeReport(&bm, constraints.items, 0, constraints.items.len, .{ .velocity_iterations = iterations });
+    return .{ .velocity = bm.linearVelocity(ids[0]).?, .result = result };
+}
+
+/// A static ground carrying three stacked dynamic boxes, all driven downward —
+/// multi-point face-face manifolds in a chain, so the impulse has to propagate from
+/// the ground up and the pass does NOT converge in a couple of iterations. Returns
+/// the top box's velocity and the telemetry.
+fn solveStackWithBudget(gpa: std.mem.Allocator, iterations: u32) !struct { velocity: Vec3r, result: VelocitySolveResult } {
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const box_shape = try store.createShape(gpa, .{ .box = .{ .half_extents = foundation.math.Vec3.fromArray(.{ 0.5, 0.5, 0.5 }) } });
+    const ground_shape = try store.createShape(gpa, .{ .box = .{ .half_extents = foundation.math.Vec3.fromArray(.{ 20, 0.5, 20 }) } });
+
+    const ground = try bm.addBody(gpa, &store, descOf(0, .static, ground_shape));
+    var ids: [3]api.BodyId = undefined;
+    for (0..3) |i| {
+        var d = descOf(@intCast(i + 1), .dynamic, box_shape);
+        d.mass = 1;
+        d.position = foundation.math.Vec3.fromArray(.{ 0, 0.99 + @as(f32, @floatFromInt(i)) * 0.99, 0 });
+        ids[i] = try bm.addBody(gpa, &store, d);
+        bm.setLinearVelocity(ids[i], vr(0, -2, 0));
+    }
+
+    var constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    try cc.build(gpa, &constraints, &bm, &store, &.{
+        pairKey(ground, ids[0]), pairKey(ids[0], ids[1]), pairKey(ids[1], ids[2]),
+    });
+    const result = solveRangeReport(&bm, constraints.items, 0, constraints.items.len, .{ .velocity_iterations = iterations });
+    return .{ .velocity = bm.linearVelocity(ids[2]).?, .result = result };
+}
+
+test "the early-out is bit-exact against a larger iteration budget" {
+    const gpa = testing.allocator;
+
+    // The equivalence claim: once an iteration applies nothing, every further
+    // iteration reads an identical state and likewise applies nothing. So raising
+    // the budget past the early-out cannot change the answer — bit for bit.
+    const at_16 = try solveWithBudget(gpa, 16);
+    const at_64 = try solveWithBudget(gpa, 64);
+    try testing.expect(at_16.result.iterations_run < 16); // the early-out really fired
+    try testing.expectEqual(at_16.result.iterations_run, at_64.result.iterations_run);
+    inline for (0..3) |k| {
+        try testing.expectEqual(at_16.velocity.toArray()[k], at_64.velocity.toArray()[k]);
+    }
+
+    // Discrimination guard. On a scene that does NOT converge inside the budget the
+    // count genuinely matters: the pass runs to the ceiling and 4 iterations give a
+    // different velocity from 16. So the bit-identity above is the early-out being
+    // exact, not the iteration count being irrelevant.
+    const stack_4 = try solveStackWithBudget(gpa, 4);
+    const stack_16 = try solveStackWithBudget(gpa, 16);
+    try testing.expectEqual(@as(u32, 4), stack_4.result.iterations_run); // ceiling reached
+    try testing.expect(!stack_4.velocity.approxEql(stack_16.velocity, 1e-6));
 }

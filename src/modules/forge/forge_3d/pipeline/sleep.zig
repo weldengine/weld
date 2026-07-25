@@ -164,6 +164,38 @@ pub fn isEligible(bm: *const BodyManager, id: BodyId, cfg: SleepConfig) bool {
     return bm.bodies.items(.sleep_time)[idx] >= cfg.time_before_sleep;
 }
 
+/// Whether `id`'s velocity is not exactly zero. A TRUE-ZERO test, not a threshold:
+/// it classifies nothing, it asks whether the body is being driven at all. False on
+/// a stale/invalid handle.
+pub fn isMoving(bm: *const BodyManager, id: BodyId) bool {
+    const idx = bm.alloc.validate(id) orelse return false;
+    return !bm.bodies.items(.linear_velocity)[idx].eql(Vec3r.zero) or
+        !bm.bodies.items(.angular_velocity)[idx].eql(Vec3r.zero);
+}
+
+/// Whether `id` is a MOTION SOURCE this tick. False on a stale/invalid handle.
+///
+/// This is the predicate the `build` skip is written on (§1.8.6): a candidate pair
+/// is skipped, and deferred to the wake fixpoint, only when NEITHER endpoint
+/// satisfies it. A dynamic body qualifies unless it is sleeping. A non-dynamic body
+/// is never sleeping — the window sweep skips it entirely — so what makes it a
+/// motion source is a non-zero velocity.
+///
+/// Writing the skip as "both endpoints sleeping" instead would be wrong twice over.
+/// A static body never has the flag set, so a sleeping stack on the ground would
+/// keep narrowphasing every one of its ground pairs and the whole saving would
+/// vanish. And a sleeping box on a MOVING kinematic platform would count as a
+/// both-ends-asleep pair and be skipped, leaving the box frozen on a conveyor: W3
+/// cannot rescue it, because W3 only protects island MEMBERS and a sleeping body is
+/// not one. Treating the moving platform as awake is what keeps that pair
+/// narrowphased, so the fixpoint sees the manifold and wakes the box.
+pub fn isAwake(bm: *const BodyManager, id: BodyId) bool {
+    const idx = bm.alloc.validate(id) orelse return false;
+    if (bm.bodies.items(.flags)[idx].sleeping) return false;
+    if (bm.bodies.items(.body_type)[idx] == .dynamic) return true;
+    return isMoving(bm, id);
+}
+
 /// Put `id` to sleep: raise the flag and zero BOTH velocities exactly. No-op on a
 /// stale/invalid handle.
 ///

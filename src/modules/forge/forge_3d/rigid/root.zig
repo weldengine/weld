@@ -47,8 +47,12 @@ pub const SolverConfig = solver_config.SolverConfig;
 pub const warmStart = velocity_solver.warmStart;
 /// Harvest solved constraint impulses into the cache's current buffer.
 pub const storeContacts = velocity_solver.storeContacts;
-/// Solve the velocity constraints over an index range (M1.1.6 passes the full range).
+/// Solve the velocity constraints over an index range — one call per island range.
 pub const solveRange = velocity_solver.solveRange;
+/// `solveRange` returning its iteration telemetry (the §1.8.2 sibling entry).
+pub const solveRangeReport = velocity_solver.solveRangeReport;
+/// Telemetry of one velocity pass (iterations actually run before the early-out).
+pub const VelocitySolveResult = velocity_solver.VelocitySolveResult;
 
 /// Telemetry of one NGS position pass (iterations run, minimum separation seen).
 pub const PositionSolveResult = position_solver.PositionSolveResult;
