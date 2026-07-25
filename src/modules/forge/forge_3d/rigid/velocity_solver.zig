@@ -109,8 +109,19 @@ pub fn solveRange(bm: *BodyManager, constraints: []ContactConstraint, from: usiz
     while (iter < cfg.velocity_iterations) : (iter += 1) {
         for (constraints[from..to]) |*c| {
             for (0..c.count) |i| {
-                // Jolt order: the normal impulse first, then friction clamped
-                // against the CURRENT accumulated normal impulse of this point.
+                // Normal impulse first, then friction clamped against the CURRENT
+                // accumulated normal impulse of this point. This is a DELIBERATE
+                // DIVERGENCE from both references, which solve friction first and
+                // non-penetration last, clamping the cone with the previous
+                // iteration's λₙ (Jolt `ContactConstraintManager.cpp`
+                // `sSolveVelocityConstraint`; Box2D `b2_contact_solver.cpp`). An
+                // earlier comment here credited this order to Jolt — that
+                // attribution was wrong. No performance or accuracy motive is
+                // claimed for the divergence: swapping the order was measured at
+                // M1.1.7 and did not improve the five-box stack (see that brief's
+                // Recorded deviations). Porting the reference friction model is a
+                // whole-model change (order + per-manifold aggregation + twist
+                // friction), tracked as an open design item.
                 solveNormalPoint(bm, c, &c.points[i], cfg);
                 solveFrictionPoint(bm, c, &c.points[i]);
             }
@@ -361,7 +372,10 @@ fn sphereHitScene(gpa: std.mem.Allocator, store: *ShapeStore, bm: *BodyManager, 
 
 test "solver config defaults" {
     const cfg = SolverConfig{};
-    try testing.expectEqual(@as(u32, 8), cfg.velocity_iterations);
+    // 16 since M1.1.7 (was 8 at M1.1.6): a 3D face patch is four points and a
+    // five-deep stack forty, and 8 does not bring such a stack to rest. See the
+    // field's doc in `solver_config.zig`.
+    try testing.expectEqual(@as(u32, 16), cfg.velocity_iterations);
     try testing.expectEqual(@as(Real, 1), cfg.restitution_threshold);
 }
 

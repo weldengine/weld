@@ -32,7 +32,18 @@ pub const SolverConfig = struct {
 
     /// Gauss-Seidel velocity iteration passes per tick. 0 is allowed — warm start
     /// only, no solve.
-    velocity_iterations: u32 = 8,
+    ///
+    /// 16, not the 8 of the Box2D tuning family: that number is 2D, where a contact
+    /// patch is two points and a rotation is one scalar. A 3D face patch carries
+    /// four points and a five-deep stack forty, and 8 is under-provisioned at that
+    /// depth — measured at M1.1.7, a five-box stack never comes to rest at 8 and
+    /// stops dead at 16. Jolt does not use a global constant at all: it derives the
+    /// budget PER ISLAND (`PhysicsSystem.cpp`,
+    /// `steps_calculator.GetNumVelocitySteps()`), so a deep stack automatically
+    /// gets more iterations. That mechanism arrives with the island manager
+    /// (M1.1.8), which turns this field into a FLOOR under an island-derived
+    /// budget; until then a global default has to cover the worst case we accept.
+    velocity_iterations: u32 = 16,
     /// Restitution cutoff (m/s): a bounce is applied only when the pre-solve
     /// relative normal speed exceeds this — a PHYSICAL velocity constant (config
     /// field), not a geometric epsilon. Below it, low-speed contacts settle
@@ -47,9 +58,10 @@ pub const SolverConfig = struct {
     /// Stationary overlap allowed at rest (m). Its role is contact PERSISTENCE:
     /// a small steady overlap keeps the contact — and therefore its warm-start
     /// cache entry — alive instead of oscillating between contact and no contact.
-    /// The 5 mm is the Box2D tuning family (coherent with `velocity_iterations = 8`),
-    /// not Jolt's 2 cm, which is coupled to its speculative-contact distance (a
-    /// number without its reason until speculative contacts ship).
+    /// The 5 mm is the Box2D tuning family, not Jolt's 2 cm, which is coupled to
+    /// its speculative-contact distance (a number without its reason until
+    /// speculative contacts ship). It is independent of the iteration budget: the
+    /// slop sets WHERE the position pass stops, not how fast either pass converges.
     penetration_slop: Real = 0.005,
     /// NGS under-relaxation: the fraction of the measured error a pass resorbs.
     /// NOT a Baumgarte velocity bias — the velocity pass carries none. Above 1 it
@@ -84,8 +96,9 @@ test "solver config position defaults" {
     try testing.expectEqual(@as(Real, 0.005), cfg.penetration_slop);
     try testing.expectEqual(@as(Real, 0.2), cfg.position_correction_factor);
     try testing.expectEqual(@as(Real, 0.2), cfg.max_penetration_correction);
-    // The velocity half is carried over unchanged by the relocation.
-    try testing.expectEqual(@as(u32, 8), cfg.velocity_iterations);
+    // The velocity half: `restitution_threshold` carried over unchanged by the
+    // relocation, `velocity_iterations` raised 8 → 16 at M1.1.7 (see its doc).
+    try testing.expectEqual(@as(u32, 16), cfg.velocity_iterations);
     try testing.expectEqual(@as(Real, 1.0), cfg.restitution_threshold);
     // The defaults are inside the domain the position entry asserts.
     assertPositionDomain(cfg);
