@@ -52,11 +52,15 @@ pub const SolverConfig = struct {
     /// the global default when none is set. No heuristic of any kind reads the
     /// topology: under Jolt a deep stack receives exactly the global default.
     ///
-    /// So this stays a global default and a floor. What makes a high floor
-    /// affordable is not a topology-derived count but the velocity pass's EARLY-OUT
-    /// (§1.8.2): an iteration that applies no impulse ends the pass, so this is a
-    /// ceiling rarely reached rather than a fixed cost. A per-body override channel
-    /// is purely additive and has no Phase-1 consumer.
+    /// So this stays a global default and a floor. The velocity pass's EARLY-OUT
+    /// (§1.8.2) is EXACT and free, but its yield is scene- AND precision-dependent,
+    /// because the predicate is a true-zero test: it fires only once `Δλ` underflows
+    /// to exactly zero, which happens sooner in coarser precision. Measured on a
+    /// resting five-box stack (40 contact points), ceiling 16: 11 iterations at f32,
+    /// all 16 at f64. The unambiguous saving is the position pass — 1 of 3 at rest at
+    /// both precisions. So this field is NOT a ceiling that is generally left
+    /// unreached; it remains a MEASURED floor, and raising it locally is what the
+    /// additive per-body override channel is for (no Phase-1 consumer).
     velocity_iterations: u32 = 16,
     /// Restitution cutoff (m/s): a bounce is applied only when the pre-solve
     /// relative normal speed exceeds this — a PHYSICAL velocity constant (config

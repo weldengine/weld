@@ -933,6 +933,42 @@ test "a resting island sleeps and stops costing" {
     }
 }
 
+/// The CONTROL for the wake transient: the identical scene and the identical impact,
+/// on a stack that never slept. Settles for `settle_ticks` — the same number of ticks
+/// the sleeping run needed — then takes the impact and returns the worst penetration
+/// over the impact tick and the five following, the same window the woken island is
+/// measured on.
+///
+/// Its cache is LIVE when the impact lands — it is warm-starting its resting contacts,
+/// asserted below — where the woken island's entries were evicted by the sleep. That
+/// contrast is the whole difference between the two runs.
+fn neverSleptImpactTransient(gpa: std.mem.Allocator, settle_ticks: u32) !Real {
+    var world = harness.World.initNoSleep(vr(0, -9.81, 0), dt);
+    defer world.deinit(gpa);
+    const boxes = try groundAndStack(gpa, &world, 5);
+
+    var t: u32 = 0;
+    while (t < settle_ticks) : (t += 1) try world.step(gpa);
+    try testing.expect(world.cache.hits > 0); // its resting contacts ARE warm-started
+
+    const top_y = world.bm.position(boxes[4]).?.toArray()[1];
+    const impactor_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    var impactor_desc = descOf(99, .dynamic, impactor_shape);
+    impactor_desc.mass = 1;
+    impactor_desc.restitution = 0;
+    impactor_desc.position = av3(0, @floatCast(top_y + 1.0 - 0.005), 0);
+    const impactor = try world.addBody(gpa, impactor_desc);
+    world.bm.setLinearVelocity(impactor, vr(0, -3, 0));
+
+    var worst: Real = 0;
+    t = 0;
+    while (t < 6) : (t += 1) {
+        try world.step(gpa);
+        worst = @max(worst, deepestPenetration(&world));
+    }
+    return worst;
+}
+
 test "an impact wakes the whole sleeping stack in one tick with its internal contacts" {
     const gpa = testing.allocator;
     var world = harness.World.init(vr(0, -9.81, 0), dt);
@@ -967,10 +1003,15 @@ test "an impact wakes the whole sleeping stack in one tick with its internal con
     try testing.expectEqual(settled.pre_sleep + 1, world.constraints.items.len);
     try testing.expectEqual(@as(usize, 6), world.islands.islandsSlice()[0].member_to);
 
+    // The cold start is real and not merely asserted in prose: the cache evicted the
+    // island's entries while it slept, so NOTHING warm-starts on the wake tick. This
+    // is the property the control below is the baseline for.
+    try testing.expectEqual(@as(u32, 0), world.cache.hits);
+    try testing.expect(world.cache.misses > 0);
+
     // Cold-start transient. The warm-start cache evicted the island's entries while it
     // slept (`endTick` keeps only what was re-stored), so these contacts restart from
-    // λ = 0 for one tick — exactly the regime of any new contact. The envelope was
-    // PRE-REGISTERED in the brief and in §1.8.5 and is not widened here.
+    // λ = 0 for one tick — exactly the regime of any new contact.
     var worst_transient = deepestPenetration(&world);
     var t: u32 = 0;
     while (t < 5) : (t += 1) {
@@ -979,19 +1020,25 @@ test "an impact wakes the whole sleeping stack in one tick with its internal con
     }
     try testing.expect(worst_transient <= 5 * world.cfg.penetration_slop);
 
-    // The envelope's SECOND clause — back to `penetration_slop + O(floatEps·coordScale)`
-    // within 30 ticks — is NOT asserted here, pending the decision recorded under
-    // "Blockers encountered" in `briefs/M1.1.8-islands-sleep.md`. It is not being
-    // widened: it is measured, and the measurement shows it is not a property of the
-    // WAKE. An island that never slept, taking the same impact with a fully warm cache
-    // (zero misses), fails the same clause harder and never returns within 200 ticks,
-    // while the woken island here recovers in 80 (f32) / 52 (f64). What the clause
-    // actually bounds is the M1.1.7 RD-1 characteristic — the slop is a fixed point
-    // approached from above — evaluated on a SIX-deep chain instead of the single box
-    // it was calibrated on.
-    //
-    // What is asserted instead, and is the substance of "the island recovers": the
-    // disturbance dies out and the island settles back to sleep.
+    // (2a) DIFFERENTIAL against a control that never slept. This is the question the
+    // cold start actually raises — does it cost anything? — and it can only be asked
+    // against a baseline. An absolute bound here would pin the position pass's fixed
+    // point, not the wake: the control fails such a bound HARDER (see the Recorded
+    // deviation). Measured: the woken island does better at f32 (0.006984 vs
+    // 0.010330), because `putToSleep` zeroed its velocities so it meets the impact
+    // from exact rest, where the control still carries its settling creep. The named
+    // tolerance covers f64, where the control is marginally better (by 1.7e-4, three
+    // per cent of one slop).
+    const control_transient = try neverSleptImpactTransient(gpa, settled.ticks);
+    const differential_tolerance = world.cfg.penetration_slop;
+    try testing.expect(worst_transient <= control_transient + differential_tolerance);
+
+    // (2b) EXTINCTION. The transient dies out and the whole island settles back to
+    // sleep. A generous ceiling on purpose — its job is to catch a wake that
+    // DESTABILISES the stack, not to tune a threshold. Deliberately no bound on the
+    // absolute penetration reached: the scene now has six contacts where it had five,
+    // so its fixed point is not the one it had before sleeping, and demanding the
+    // pre-sleep value back would be asking for something false.
     while (t < 200) : (t += 1) {
         try world.step(gpa);
         if (world.constraints.items.len == 0) break;

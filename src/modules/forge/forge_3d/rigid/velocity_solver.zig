@@ -148,9 +148,17 @@ pub fn solveRangeReport(
         // exact, not approximate: velocities change only through an applied `Δλ`,
         // so an iteration that applies nothing leaves the next one reading an
         // identical state, which will likewise apply nothing. The test is at TRUE
-        // ZERO — never an epsilon — so `velocity_iterations` is a rarely-reached
-        // ceiling rather than a fixed cost, which is what makes a high global floor
-        // affordable (§1.8.2). The position pass already terminates the same way.
+        // ZERO — never an epsilon; an epsilon would break the bit-exact equivalence
+        // and the threshold discipline both.
+        //
+        // The early-out is exact and free, but its YIELD is scene- and
+        // precision-dependent, precisely because the predicate is a true-zero test:
+        // it fires only once `Δλ` underflows to exactly zero, which happens sooner in
+        // coarser precision. Measured on a resting five-box stack (40 contact points),
+        // ceiling 16: 11 iterations at f32, all 16 at f64. So this is not generally a
+        // rarely-reached ceiling — see `solver_config.zig`'s `velocity_iterations`.
+        // The position pass already terminates the same way, and there the saving is
+        // unambiguous: 1 iteration of 3 at rest, at both precisions.
         if (!applied_any) break;
     }
     return result;
