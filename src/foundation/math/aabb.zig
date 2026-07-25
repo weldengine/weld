@@ -114,14 +114,19 @@ pub fn Aabb(comptime T: type) type {
             const hi = self.max.data;
 
             // Domain assertion at the entry, the shape of `sleep.assertDomain`
-            // and `assertPositionDomain`: a finite origin, and a non-zero
-            // reciprocal on every lane the mask does not cover (equivalently, a
-            // finite direction). This is what excludes `inf · 0` and so makes
-            // the NaN repair below exact. The box corners stay covered by the
-            // doc comment alone — they are engine-produced, and an assert per
-            // visited node would cost for nothing.
+            // and `assertPositionDomain`: a finite origin, and a reciprocal that
+            // is neither zero nor NaN on every lane the mask does not cover
+            // (equivalently, a finite direction — `1 / NaN` is NaN and `1 / inf`
+            // is zero, so both non-finite directions are caught). This is what
+            // excludes `inf · 0` and so makes the NaN repair below exact. An
+            // INFINITE reciprocal is legal and must stay so: it is the subnormal
+            // direction component, the very case the repair exists for. The box
+            // corners stay covered by the doc comment alone — they are
+            // engine-produced, and an assert per visited node would cost for
+            // nothing.
             std.debug.assert(@reduce(.And, @abs(o) < @as(Simd, @splat(std.math.inf(T)))));
-            std.debug.assert(@reduce(.And, dir_is_zero | (inv_dir.data != @as(Simd, @splat(0)))));
+            std.debug.assert(@reduce(.And, dir_is_zero |
+                ((inv_dir.data != @as(Simd, @splat(0))) & (inv_dir.data == inv_dir.data))));
 
             // A direction component that is EXACTLY zero makes the ray parallel
             // to that pair of slab planes. The axis leaves the product and is
