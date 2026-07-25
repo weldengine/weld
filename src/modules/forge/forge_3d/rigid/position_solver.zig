@@ -25,9 +25,10 @@
 //!
 //! The contact normal, by contrast, stays FIXED in world for the whole pass and is
 //! attached to no body. Normative reason (§1.7.2): the frozen `ContactManifold`
-//! does not carry the reference-face owner, and that owner is not necessarily A —
-//! `pipeline/narrowphase/manifold.zig` picks it by alignment with the contact axis,
-//! so for a sphere against a box the reference is the box. Following one body's
+//! does not carry the reference-face owner at all, and that owner is not
+//! necessarily A — `pipeline/narrowphase/manifold.zig` picks it by alignment with
+//! the contact axis, and a LYING CAPSULE against a box gives the box the reference
+//! face (`tests/position_solver_test.zig` witnesses it). Following one body's
 //! rotation would require extending the frozen manifold. (Box2D may attach its
 //! normal to the reference face only because it records which one that is.)
 //!
@@ -425,9 +426,16 @@ test "the contact normal is not attached to body A" {
     defer store.deinit(gpa);
     var bm = BodyManager{};
     defer bm.deinit(gpa);
-    // Sphere A under a static box B: the reference face of a sphere-vs-box contact
-    // is the BOX's (the narrowphase picks the reference by alignment with the
-    // contact axis), which is exactly why the normal may not follow A.
+    // Sphere A under a static box B. A sphere is the right shape HERE because
+    // rotating it is physically a no-op, so the spin below changes nothing about
+    // the contact except which way A's stored anchor points.
+    //
+    // The reason the normal may not follow A is NOT anything about this pair: it is
+    // that the frozen `ContactManifold` carries no reference-face owner at all, and
+    // that owner can be B. The witness for that is the LYING-CAPSULE-against-box
+    // scene in `tests/position_solver_test.zig` — sphere-vs-box cannot be the
+    // witness, because a sphere core is a point and `manifold.zig:235` exits
+    // through `pointCoreContact` before the reference/incident selection ever runs.
     const sphere = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
     const box = try store.createShape(gpa, .{ .box = .{ .half_extents = av3(2, 0.5, 2) } });
     var da = descOf(0, .dynamic, sphere);
