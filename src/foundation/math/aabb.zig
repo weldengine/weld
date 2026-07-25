@@ -85,13 +85,23 @@ pub fn Aabb(comptime T: type) type {
         /// misses (an empty interval).
         ///
         /// `inv_dir` is the componentwise reciprocal of the direction and
-        /// `dir_is_zero` marks the direction components that are **exactly**
-        /// zero; the `inv_dir` lanes so marked are never read, so any value
-        /// there is legal. Nothing here is clamped: `enter` may be negative when
-        /// the origin lies inside the box, and the caller intersects the
-        /// interval with its own `[0, max_distance]` window. Face contact is a
-        /// hit — `enter == exit` counts — matching the inclusive convention of
-        /// `overlaps` and `contains`.
+        /// `dir_is_zero` marks the direction components that are **exactly** zero.
+        /// The masked lanes still take part in the product below and their result is
+        /// discarded, so any DEFINED value is legal there — `undefined` is not. The
+        /// natural caller value is what `1 / 0` yields, an infinity.
+        ///
+        /// Preconditions: `origin` and both box corners are finite, and every lane of
+        /// `inv_dir` not marked in `dir_is_zero` is non-zero (equivalently: the
+        /// direction is finite). They are what makes the NaN repair below exact —
+        /// `0 · inf` is then the only NaN reachable, and the exact quotient of an
+        /// exactly-zero numerator is zero. `inf · 0`, whose repair to zero would be
+        /// wrong, is excluded by these preconditions.
+        ///
+        /// Nothing here is clamped: `enter` may be negative when the origin lies
+        /// inside the box, and the caller intersects the interval with its own
+        /// `[0, max_distance]` window. Face contact is a hit — `enter == exit`
+        /// counts — matching the inclusive convention of `overlaps` and
+        /// `contains`.
         pub fn rayInterval(
             self: Self,
             origin: Vec3T,
@@ -102,6 +112,16 @@ pub fn Aabb(comptime T: type) type {
             const o = origin.data;
             const lo = self.min.data;
             const hi = self.max.data;
+
+            // Domain assertion at the entry, the shape of `sleep.assertDomain`
+            // and `assertPositionDomain`: a finite origin, and a non-zero
+            // reciprocal on every lane the mask does not cover (equivalently, a
+            // finite direction). This is what excludes `inf · 0` and so makes
+            // the NaN repair below exact. The box corners stay covered by the
+            // doc comment alone — they are engine-produced, and an assert per
+            // visited node would cost for nothing.
+            std.debug.assert(@reduce(.And, @abs(o) < @as(Simd, @splat(std.math.inf(T)))));
+            std.debug.assert(@reduce(.And, dir_is_zero | (inv_dir.data != @as(Simd, @splat(0)))));
 
             // A direction component that is EXACTLY zero makes the ray parallel
             // to that pair of slab planes. The axis leaves the product and is
