@@ -21,9 +21,61 @@
 //! `slot_alloc.zig`, but internal and without generation packing), and a tree
 //! shape that is a pure function of the op sequence. SAH ties resolve to the
 //! second child, balance ties to the shorter-rotation branch — both fixed.
+//!
+//! **Two traversals, two collector contracts (M1.1.9).** `queryAabb` asks its
+//! collector for `add(user_data)` and nothing else. `queryRay` asks for `add`
+//! plus `maxDistance()`, which it **re-reads before every descent** and prunes
+//! on, turning the traversal into *branch and bound*; the descent is near-first
+//! so that bound tightens as early as possible (`engine-physics-forge.md`
+//! §1.11.2). A query mutates nothing, wakes nobody, and visits every layer tree
+//! (§1.11.1) — it never touches the moved-logs nor the retained pair set.
 
 const std = @import("std");
 const math = @import("foundation").math;
+
+/// A ray in world space, carrying the reciprocal form `Aabb.rayInterval` wants.
+/// Build it with `init` so the derived fields cannot disagree with `direction`.
+///
+/// The traversal itself reads only `origin`, `inv_dir` and `dir_is_zero`;
+/// `direction` rides along because a ray without it is not a ray and every
+/// caller needs it for the exact kernel. There is no `max_distance` field: the
+/// bound belongs to the collector, which is what lets it tighten mid-traversal
+/// (`engine-physics-forge.md` §1.11.2).
+pub fn Ray(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        const Vec3T = math.Vec(3, T);
+
+        /// Ray origin in world space.
+        origin: Vec3T,
+        /// Ray direction. Normalised by the query entry, not by this type.
+        direction: Vec3T,
+        /// Componentwise reciprocal of `direction`.
+        inv_dir: Vec3T,
+        /// Lanes of `direction` that are exactly zero.
+        dir_is_zero: @Vector(3, bool),
+
+        /// Ray from an origin and a direction, deriving the reciprocal form.
+        ///
+        /// A direction of exactly zero is representable here and yields a
+        /// degenerate ray: the query ENTRY rejects it with an empty result
+        /// (`engine-physics-forge.md` §1.11.4), the traversal holds no opinion
+        /// on it. What is a programming error, and asserted, is a non-finite
+        /// direction — `rayInterval`'s repair of `0 · inf` is exact only under
+        /// that precondition.
+        pub fn init(origin: Vec3T, direction: Vec3T) Self {
+            const Simd = @Vector(3, T);
+            std.debug.assert(@reduce(.And, @abs(direction.data) < @as(Simd, @splat(std.math.inf(T)))));
+            const ones: Simd = @splat(1);
+            return .{
+                .origin = origin,
+                .direction = direction,
+                .inv_dir = .{ .data = ones / direction.data },
+                .dir_is_zero = direction.data == @as(Simd, @splat(0)),
+            };
+        }
+    };
+}
 
 /// Broadphase tuning, carried by `Bvh(T).init`.
 pub fn BroadphaseConfig(comptime T: type) type {
@@ -189,6 +241,98 @@ pub fn Bvh(comptime T: type) type {
             }
             return 1 + self.queryNode(node.child1, query, collector) +
                 self.queryNode(node.child2, query, collector);
+        }
+
+        /// Ray type for this scalar.
+        pub const RayT = Ray(T);
+
+        /// Ray query, *branch and bound*: `collector.add(user_data)` for every
+        /// proxy whose stored (fat) AABB the ray crosses within the collector's
+        /// current bound. Returns the number of nodes visited — the metric the
+        /// logarithmic-cost test asserts on.
+        ///
+        /// `collector` is a pointer to any value exposing the `queryAabb`
+        /// contract plus one method:
+        ///
+        ///   - `fn add(self, user_data: u32) void` — a candidate. The exact
+        ///     kernel is the collector's business, not the traversal's.
+        ///   - `fn maxDistance(self) T` — the distance beyond which it accepts
+        ///     nothing more. **Re-read before every descent**, so a collector
+        ///     that tightens it inside `add` prunes the rest of the traversal
+        ///     immediately: that is what makes a closest-hit sub-linear. A
+        ///     `closest` collector tightens on each accepted hit, an `any`
+        ///     collector drops the bound to zero at the first, an `all`
+        ///     collector never tightens.
+        ///
+        /// The interval is intersected with `[0, maxDistance()]`, closed at both
+        /// ends: a box behind the origin is pruned, a box entered exactly at the
+        /// bound is not. The fat AABBs are traversed as stored — the surplus
+        /// candidates are the exact kernel's to reject, never the box's to
+        /// shrink (§1.11.2).
+        pub fn queryRay(self: *const Self, ray: RayT, collector: anytype) u32 {
+            if (self.root == null_index) return 0;
+            const iv = self.rayInterval(self.root, ray);
+            if (!accepts(iv, collector.maxDistance())) return 1; // visited then pruned
+            return self.queryRayNode(self.root, ray, collector);
+        }
+
+        /// Recursive half of `queryRay`. Precondition: `index`'s own interval has
+        /// already been tested and accepted, so each node's slab test runs
+        /// exactly once and each node contributes exactly one visit.
+        ///
+        /// The descent is **near-first**: of the two children, the one with the
+        /// smaller entry parameter goes first, so the bound tightens as early as
+        /// possible. That order is a pure function of the tree shape and the ray,
+        /// hence deterministic — but it is NOT invariant under a different
+        /// creation order, which builds a different tree. Only the RESULT is
+        /// invariant (§1.11.6); the visited-node count never is.
+        fn queryRayNode(self: *const Self, index: u32, ray: RayT, collector: anytype) u32 {
+            const node = self.nodes.items[index];
+            if (isLeaf(node)) {
+                collector.add(node.user_data);
+                return 1;
+            }
+
+            const iv1 = self.rayInterval(node.child1, ray);
+            const iv2 = self.rayInterval(node.child2, ray);
+            // A missed child sorts last; ties keep `child1` first (fixed
+            // tie-break, the SAH/balance convention of this file).
+            const e1 = if (iv1) |v| v.enter else std.math.inf(T);
+            const e2 = if (iv2) |v| v.enter else std.math.inf(T);
+            const first_is_1 = e1 <= e2;
+            const children: [2]u32 = if (first_is_1)
+                .{ node.child1, node.child2 }
+            else
+                .{ node.child2, node.child1 };
+            const intervals: [2]?AabbT.RayInterval = if (first_is_1)
+                .{ iv1, iv2 }
+            else
+                .{ iv2, iv1 };
+
+            var visited: u32 = 1;
+            for (children, intervals) |child, iv| {
+                // The bound is re-read HERE, once per descent, so a tightening
+                // performed while the near child was being explored prunes the
+                // far one.
+                if (accepts(iv, collector.maxDistance())) {
+                    visited += self.queryRayNode(child, ray, collector);
+                } else {
+                    visited += 1; // tested then pruned
+                }
+            }
+            return visited;
+        }
+
+        /// Slab interval of `ray` against node `index`'s stored AABB.
+        fn rayInterval(self: *const Self, index: u32, ray: RayT) ?AabbT.RayInterval {
+            return self.nodes.items[index].aabb.rayInterval(ray.origin, ray.inv_dir, ray.dir_is_zero);
+        }
+
+        /// Whether an interval survives the `[0, bound]` window, closed at both
+        /// ends.
+        fn accepts(interval: ?AabbT.RayInterval, bound: T) bool {
+            const iv = interval orelse return false;
+            return iv.exit >= 0 and iv.enter <= bound;
         }
 
         // --- Node pool ---
@@ -631,6 +775,26 @@ pub fn Broadphase(comptime T: type) type {
         pub fn queryAabb(self: *const Self, query: AabbT, collector: anytype) u32 {
             var visited: u32 = 0;
             for (&self.trees) |*t| visited += t.queryAabb(query, collector);
+            return visited;
+        }
+
+        /// Ray type for this scalar.
+        pub const RayT = Ray(T);
+
+        /// Ray query across every layer, summing the visited counts exactly as
+        /// `queryAabb` does. All four trees are visited: a query has no second
+        /// body, so no row of the layer-pair matrix applies to it, and its
+        /// filtering is a mask on the candidate's OBJECT layer, decided on the
+        /// forge_3d side (`engine-physics-forge.md` §1.11.1). A broad-layer
+        /// filter would be an additive optimisation, never a substitute for that
+        /// mask.
+        ///
+        /// The collector's bound carries across the trees — the tightening a
+        /// hit in the first tree performs prunes the next — so the sum is not a
+        /// per-tree independent cost.
+        pub fn queryRay(self: *const Self, ray: RayT, collector: anytype) u32 {
+            var visited: u32 = 0;
+            for (&self.trees) |*t| visited += t.queryRay(ray, collector);
             return visited;
         }
 
