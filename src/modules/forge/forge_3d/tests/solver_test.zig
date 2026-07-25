@@ -2,18 +2,27 @@
 //! M1.1.7 with the NGS position pass.
 //!
 //! `World` composes the full per-tick pipeline IN TESTS ONLY (the production
-//! `step()` orchestration is M1.1.15). Normative per-tick cycle
-//! (`engine-physics-forge.md` §1.7):
-//!   (1) `Broadphase.computePairs` on the current poses (moved-driven deltas)
-//!   (2) candidate-pair retention: merge the deltas into a PERSISTENT set
-//!   (3) `integrateVelocities(dt, gravity)`
-//!   (4) velocity pass — `cache.beginTick` → `build` (narrowphase `collidePair`
-//!       per candidate) + `prepare` (captures v_n⁻) → `warmStart` → `solveRange`
-//!       × `velocity_iterations`
-//!   (5) `integratePositions(dt)`
-//!   (6) NGS position pass — `solvePositionRange` × `position_iterations` (§1.7.2)
-//!   (7) `storeContacts` (harvest) → `cache.endTick` (sort + swap)
-//!   (8) broadphase proxy updates on the corrected poses.
+//! `step()` orchestration is M1.1.15). The eleven normative steps
+//! (`engine-physics-forge.md` §1.7), in order:
+//!   (1)  `Broadphase.computePairs` on the current poses (moved-driven deltas)
+//!   (2)  candidate-pair retention: merge the deltas into a PERSISTENT set
+//!   (3)  `integrateVelocities(dt, gravity)` — skips sleeping bodies
+//!   (4)  `cache.beginTick` → `build` (narrowphase `collidePair` per candidate +
+//!        `prepare`, and the wake fixpoint of §1.8.5)
+//!   (5)  island partition + activation (W2, W3) — never puts anything to sleep
+//!   (6)  velocity pass — `warmStart`, then the iterations ONCE PER ISLAND RANGE
+//!   (7)  `integratePositions(dt)` — skips sleeping bodies
+//!   (8)  NGS position pass, once per island range (§1.7.2)
+//!   (9)  `storeContacts` (harvest) → `cache.endTick` (sort + swap)
+//!   (10) broadphase proxy updates on the corrected poses — skips sleeping bodies
+//!   (11) sleep window sweep on the POST-SOLVE state, then the sleep transition:
+//!        the only point in the cycle where a body falls asleep.
+//!
+//! Sleeping is ENABLED by default here. Every inherited convergence measurement
+//! — resting box, five-box stack, mass ratio, drift — sets
+//! `sleep_cfg.allow_sleeping = false`, which is normative and not a convenience
+//! (§1.8.3): a displacement-bounded criterion lets a slowly creeping body sleep,
+//! so a converging-or-not question must be asked with sleeping off.
 //!
 //! `computePairs` is moved-driven with fat-AABB hysteresis (it reports a pair only
 //! when a proxy moves enough to exit its fat AABB), so the consumer keeps a
@@ -36,6 +45,7 @@ const shape_mod = @import("../shape.zig");
 const bm_mod = @import("../body_manager.zig");
 const broadphase = @import("../pipeline/broadphase.zig");
 const integration = @import("../pipeline/integration.zig");
+const sleep = @import("../pipeline/sleep.zig");
 const rigid = @import("../rigid/root.zig");
 const api = @import("weld_forge");
 const foundation = @import("foundation");
@@ -91,18 +101,49 @@ pub const World = struct {
     bp: Bp,
     cache: ContactCache = .{},
     cfg: SolverConfig = .{},
+    /// Sleep tuning. Enabled by default; convergence measurements switch it off.
+    sleep_cfg: sleep.SleepConfig = .{},
     gravity: Vec3r,
     dt: Real,
     bodies: std.ArrayListUnmanaged(BodyProxy) = .empty,
     active: std.ArrayListUnmanaged(u64) = .empty,
     constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty,
     scratch: std.ArrayListUnmanaged(Bp.Pair) = .empty,
-    /// Telemetry of the last tick's NGS position pass (step 6).
+    /// The island partition of the last tick (step 5).
+    islands: rigid.IslandManager = .{},
+    /// Last tick's NGS telemetry, AGGREGATED over the islands solved at step 8:
+    /// the largest iteration count and the smallest separation any island saw.
+    /// Identical to the single island's own result in a one-island scene, which is
+    /// what the inherited tests read.
     position_result: rigid.PositionSolveResult = .{},
+    /// Last tick's velocity-pass telemetry, aggregated the same way (step 6) — the
+    /// largest number of iterations any island actually ran before its early-out.
+    velocity_result: rigid.VelocitySolveResult = .{},
+    /// Islands put to sleep at step 11 of the last tick.
+    slept_last_tick: u32 = 0,
 
-    /// A world with the given gravity and fixed timestep. Default `SolverConfig`.
+    /// A world with the given gravity and fixed timestep. Default `SolverConfig`,
+    /// sleeping ENABLED.
     pub fn init(gravity: Vec3r, dt: Real) World {
         return .{ .bp = Bp.init(.{}), .gravity = gravity, .dt = dt };
+    }
+
+    /// `init` with sleeping switched off — the world every MEASUREMENT of the
+    /// solver uses: settling, penetration recovery, drift, friction decay,
+    /// determinism of the solve.
+    ///
+    /// Normative, not a convenience (`engine-physics-forge.md` §1.8.3). The sleep
+    /// criterion is a displacement bound over a window, so a body creeping at
+    /// 5 mm/s moves 2.5 mm per 0.5 s window against a 15 mm bound and falls asleep
+    /// while still creeping. Ask "does this settle?" with sleeping on and the answer
+    /// you measure is "it fell asleep", which is not the same question. Several of
+    /// these tests would also stop testing anything: a resting body that sleeps has
+    /// its pose frozen, so a no-sinking or no-drift assertion becomes vacuous, and a
+    /// non-activating `setLinearVelocity` would no longer restart it.
+    pub fn initNoSleep(gravity: Vec3r, dt: Real) World {
+        var world = init(gravity, dt);
+        world.sleep_cfg.allow_sleeping = false;
+        return world;
     }
 
     /// Release every owned buffer.
@@ -115,6 +156,7 @@ pub const World = struct {
         self.active.deinit(gpa);
         self.constraints.deinit(gpa);
         self.scratch.deinit(gpa);
+        self.islands.deinit(gpa);
         self.* = undefined;
     }
 
@@ -127,9 +169,13 @@ pub const World = struct {
         return id;
     }
 
-    /// Advance one fixed tick through the normative cycle (file header, steps 1-8).
+    /// Advance one fixed tick through the normative cycle (file header, steps 1-11).
     pub fn step(self: *World, gpa: std.mem.Allocator) !void {
-        // (1) broadphase candidate deltas → persistent active set.
+        // (1) broadphase candidate deltas → (2) persistent active set. Never pruned:
+        // every emitted pair is retained, which is a CORRECTNESS condition of sleep
+        // (§1.8.7) and not just warm-start persistence — a sleeping island emits
+        // nothing in broadphase, so its retained pairs are the graph the wake
+        // fixpoint re-scans to rebuild its internal contacts.
         try self.bp.computePairs(gpa, &self.scratch);
         for (self.scratch.items) |p| try self.active.append(gpa, (@as(u64, p.a) << 32) | p.b);
         sortDedup(&self.active);
@@ -137,37 +183,71 @@ pub const World = struct {
         // (3) integrate velocities (gravity + accumulators + clamped damping).
         integration.integrateVelocities(&self.bm, self.dt, self.gravity);
 
-        // (4) solve: prepare captures v_n⁻ (post-gravity), then warm start + iterate.
+        // (4) build: narrowphase per candidate, `prepare` captures v_n⁻
+        // (post-gravity), and the wake fixpoint runs.
         self.cache.beginTick();
         try rigid.build(gpa, &self.constraints, &self.bm, &self.store, self.active.items);
-        rigid.warmStart(&self.bm, &self.cache, self.constraints.items);
-        rigid.solveRange(&self.bm, self.constraints.items, 0, self.constraints.items.len, self.cfg);
 
-        // (5) integrate positions from the solved velocities.
+        // (5) partition into islands and arbitrate activation. Reorders the
+        // constraint array into one contiguous range per island. Wakes only.
+        try self.islands.partition(gpa, &self.bm, self.constraints.items);
+
+        // (6) velocity pass: warm start over the whole array, then the Gauss-Seidel
+        // iterations ONCE PER ISLAND RANGE.
+        rigid.warmStart(&self.bm, &self.cache, self.constraints.items);
+        self.velocity_result = .{};
+        for (self.islands.islandsSlice()) |isl| {
+            const result = rigid.solveRangeReport(
+                &self.bm,
+                self.constraints.items,
+                isl.constraint_from,
+                isl.constraint_to,
+                self.cfg,
+            );
+            self.velocity_result.iterations_run = @max(self.velocity_result.iterations_run, result.iterations_run);
+        }
+
+        // (7) integrate positions from the solved velocities.
         integration.integratePositions(&self.bm, self.dt);
 
-        // (6) NGS position pass — resorb the residual penetration by correcting
-        // poses only (no velocity is touched, no accumulated impulse is modified).
-        self.position_result = rigid.solvePositionRange(
-            &self.bm,
-            self.constraints.items,
-            0,
-            self.constraints.items.len,
-            self.cfg,
-        );
+        // (8) NGS position pass per island — resorb the residual penetration by
+        // correcting poses only (no velocity is touched, no accumulated impulse is
+        // modified). Termination is per range, never global: each island converges
+        // independently.
+        self.position_result = .{};
+        for (self.islands.islandsSlice()) |isl| {
+            const result = rigid.solvePositionRange(
+                &self.bm,
+                self.constraints.items,
+                isl.constraint_from,
+                isl.constraint_to,
+                self.cfg,
+            );
+            self.position_result.iterations_run = @max(self.position_result.iterations_run, result.iterations_run);
+            if (result.min_separation) |separation| {
+                self.position_result.min_separation = if (self.position_result.min_separation) |current|
+                    @min(current, separation)
+                else
+                    separation;
+            }
+        }
 
-        // (7) harvest solved impulses into the cache, then finalize (sort + swap).
+        // (9) harvest solved impulses into the cache, then finalize (sort + swap).
         try rigid.storeContacts(gpa, &self.cache, self.constraints.items);
         self.cache.endTick();
 
-        // `active` is NOT pruned — every emitted pair is retained (see the file
-        // header). The narrowphase filters non-touching pairs at `build`, so a
-        // retained separated pair costs only a redundant `collidePair`.
-
-        // (8) broadphase proxy updates to the poses corrected by step (6).
+        // (10) broadphase proxy updates to the poses corrected by step (8).
         for (self.bodies.items) |b| {
+            const sleeping = self.bm.isSleeping(b.id) orelse continue; // stale handle
+            if (sleeping) continue; // a sleeper's AABB is unchanged by construction
             if (self.bm.bodyAabb(&self.store, b.id)) |aabb| try self.bp.update(gpa, b.proxy, aabb);
         }
+
+        // (11) advance the sleep windows on the POST-SOLVE state, then put to sleep
+        // every island all of whose members are eligible. The only place in the
+        // cycle where a body falls asleep and its velocities are zeroed.
+        sleep.updateWindows(&self.bm, self.dt, self.sleep_cfg);
+        self.slept_last_tick = self.islands.sleepEligibleIslands(&self.bm, self.sleep_cfg);
     }
 };
 
@@ -190,7 +270,7 @@ pub fn groundAndBox(gpa: std.mem.Allocator, world: *World, drop_y: Real, e: f32)
 
 test "box dropped on a static ground comes to rest without sinking (e = 0)" {
     const gpa = testing.allocator;
-    var world = World.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
     defer world.deinit(gpa);
     const box = try groundAndBox(gpa, &world, 2.0, 0);
 
@@ -247,7 +327,7 @@ test "box dropped on a static ground comes to rest without sinking (e = 0)" {
 
 test "small hop within the fat margin keeps the contact pair alive" {
     const gpa = testing.allocator;
-    var world = World.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
     defer world.deinit(gpa);
     const box = try groundAndBox(gpa, &world, 1.0, 0); // starts flush, e = 0
 
@@ -275,10 +355,10 @@ test "small hop within the fat margin keeps the contact pair alive" {
 test "solve is deterministic across identical runs" {
     const gpa = testing.allocator;
 
-    var w1 = World.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    var w1 = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
     defer w1.deinit(gpa);
     const b1 = try groundAndBox(gpa, &w1, 2.0, 0.5);
-    var w2 = World.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    var w2 = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
     defer w2.deinit(gpa);
     const b2 = try groundAndBox(gpa, &w2, 2.0, 0.5);
 
@@ -304,7 +384,7 @@ test "solve is deterministic across identical runs" {
 /// Max upward (+Y) velocity the dropped box reaches over `ticks` — the rebound
 /// speed after impact (≈ 0 when it does not bounce).
 fn maxReboundVy(gpa: std.mem.Allocator, drop_y: Real, e: f32, ticks: u32) !Real {
-    var world = World.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
     defer world.deinit(gpa);
     const box = try groundAndBox(gpa, &world, drop_y, e);
     var max_vy: Real = -1e30;
@@ -331,7 +411,7 @@ test "restitution bounces above the threshold and not below it" {
 
 test "restitution is captured before warm start" {
     const gpa = testing.allocator;
-    var world = World.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
     defer world.deinit(gpa);
     const box = try groundAndBox(gpa, &world, 1.0, 0.8); // starts flush, e = 0.8
 
@@ -358,7 +438,7 @@ test "restitution is captured before warm start" {
 /// Along-surface displacement of a box placed flush on a static incline (rotated
 /// θ about Z) with combined friction from `mu`, after `ticks`.
 fn inclineDrift(gpa: std.mem.Allocator, theta: Real, mu: f32, ticks: u32) !Real {
-    var world = World.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
     defer world.deinit(gpa);
     const ground_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(5, 0.5, 5) } });
     const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
@@ -395,7 +475,7 @@ test "inclined static box holds below the friction angle and slides above it" {
 /// Horizontal speed of a box sliding on flat ground after `ticks`, given the
 /// initial horizontal velocity `v0` (default friction 0.5 on both).
 fn slideSpeedAfter(gpa: std.mem.Allocator, v0: Vec3r, ticks: u32) !Real {
-    var world = World.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
     defer world.deinit(gpa);
     const box = try groundAndBox(gpa, &world, 1.0, 0); // starts flush on the ground
     world.bm.setLinearVelocity(box, v0);
@@ -494,7 +574,7 @@ test "warm start hits a resting contact and misses on generation reuse" {
 
     // Part A: a resting box in the full pipeline warm-starts (cache hits > 0).
     {
-        var world = World.init(vr(0, -9.81, 0), 1.0 / 60.0);
+        var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
         defer world.deinit(gpa);
         _ = try groundAndBox(gpa, &world, 1.0, 0);
         var t: u32 = 0;

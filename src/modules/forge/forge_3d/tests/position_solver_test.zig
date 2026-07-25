@@ -65,7 +65,7 @@ fn lateralOffset(world: *const World, id: BodyId, base_x: Real, base_z: Real) Re
 
 test "position_iterations = 0 reproduces the velocity-only resting behaviour" {
     const gpa = testing.allocator;
-    var world = World.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    var world = World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
     defer world.deinit(gpa);
     // The M1.1.6 configuration: velocity pass only, no position correction at all.
     world.cfg.position_iterations = 0;
@@ -159,7 +159,7 @@ fn deepestPenetration(world: *const World) Real {
 
 test "a stack of five boxes is stable" {
     const gpa = testing.allocator;
-    var world = World.init(vr(0, gravity, 0), fixed_dt);
+    var world = World.initNoSleep(vr(0, gravity, 0), fixed_dt);
     defer world.deinit(gpa);
     _ = try addGround(gpa, &world, 0);
     var boxes: [5]BodyId = undefined;
@@ -201,7 +201,7 @@ test "a stack of five boxes is stable" {
     try testing.expect(max_speed_late <= settle_speed);
 
     // Determinism: an identical second run reproduces every pose bit-for-bit.
-    var replay = World.init(vr(0, gravity, 0), fixed_dt);
+    var replay = World.initNoSleep(vr(0, gravity, 0), fixed_dt);
     defer replay.deinit(gpa);
     _ = try addGround(gpa, &replay, 0);
     var replay_boxes: [5]BodyId = undefined;
@@ -220,7 +220,7 @@ test "a stack of five boxes is stable" {
 
 test "a heavy box resting on a light box does not sink through" {
     const gpa = testing.allocator;
-    var world = World.init(vr(0, gravity, 0), fixed_dt);
+    var world = World.initNoSleep(vr(0, gravity, 0), fixed_dt);
     defer world.deinit(gpa);
     _ = try addGround(gpa, &world, 0);
     const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
@@ -258,7 +258,7 @@ test "a stack far from the origin along the contact normal still settles" {
     // characteristic §1.7.2 documents, with a positive but thin margin. An offset
     // PERPENDICULAR to the normal would not exercise it.
     const base: f32 = 5000;
-    var world = World.init(vr(0, gravity, 0), fixed_dt);
+    var world = World.initNoSleep(vr(0, gravity, 0), fixed_dt);
     defer world.deinit(gpa);
     _ = try addGround(gpa, &world, base);
     var boxes: [3]BodyId = undefined;
@@ -286,7 +286,7 @@ test "a stack far from the origin along the contact normal still settles" {
 
 test "a tilted anisotropic box resorbs penetration without lateral drift" {
     const gpa = testing.allocator;
-    var world = World.init(vr(0, gravity, 0), fixed_dt);
+    var world = World.initNoSleep(vr(0, gravity, 0), fixed_dt);
     defer world.deinit(gpa);
     _ = try addGround(gpa, &world, 0);
     const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(2, 0.1, 0.5) } });
@@ -327,7 +327,7 @@ test "a tilted anisotropic box resorbs penetration without lateral drift" {
 
 test "reference face carried by B still resorbs penetration" {
     const gpa = testing.allocator;
-    var world = World.init(vr(0, gravity, 0), fixed_dt);
+    var world = World.initNoSleep(vr(0, gravity, 0), fixed_dt);
     defer world.deinit(gpa);
 
     // A LYING capsule against a static box, capsule added FIRST so it holds the
@@ -381,13 +381,13 @@ test "BodyId order permutation converges to the same poses" {
     // the canonical pair flips (`A`/`B` roles, normal sign, reference face), so the
     // two runs are NOT bit-identical — they must nonetheless converge to the same
     // rest.
-    var ground_first = World.init(vr(0, gravity, 0), fixed_dt);
+    var ground_first = World.initNoSleep(vr(0, gravity, 0), fixed_dt);
     defer ground_first.deinit(gpa);
     _ = try addGround(gpa, &ground_first, 0);
     var boxes_a: [1]BodyId = undefined;
     try addStack(gpa, &ground_first, &boxes_a, 0, 1);
 
-    var box_first = World.init(vr(0, gravity, 0), fixed_dt);
+    var box_first = World.initNoSleep(vr(0, gravity, 0), fixed_dt);
     defer box_first.deinit(gpa);
     const shape = try box_first.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
     var box = api.BodyDescriptor{ .entity = .{ .index = 0, .generation = 0 }, .body_type = .dynamic, .shape = shape };

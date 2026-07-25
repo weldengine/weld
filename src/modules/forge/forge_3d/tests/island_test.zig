@@ -197,6 +197,26 @@ const Rig = struct {
         self.* = undefined;
     }
 
+    /// Add a dynamic sphere of `radius` at `pos`.
+    fn addSphere(
+        self: *Rig,
+        gpa: std.mem.Allocator,
+        pos: foundation.math.Vec3,
+        radius: f32,
+    ) !BodyId {
+        const s = try self.store.createShape(gpa, .{ .sphere = .{ .radius = radius } });
+        var d = api.BodyDescriptor{
+            .entity = .{ .index = @intCast(self.ids.items.len), .generation = 0 },
+            .body_type = .dynamic,
+            .shape = s,
+        };
+        d.mass = 1;
+        d.position = pos;
+        const id = try self.bm.addBody(gpa, &self.store, d);
+        try self.ids.append(gpa, id);
+        return id;
+    }
+
     /// Add a box of `half` half-extents at `pos`. Entity index mirrors the creation
     /// order so a test can name a body independently of the handle it received.
     fn addBox(
@@ -484,4 +504,103 @@ test "island partition is invariant under body add-order permutation" {
         }
         try testing.expectEqualSlices(u32, &expected, &labels);
     }
+}
+
+/// Two disjoint islands with FRANKLY different convergence rates: a sphere pair,
+/// whose single contact point settles in a couple of iterations, and a three-box
+/// stack driven hard, whose face-face manifolds run to the iteration ceiling. The
+/// gap is the point — per-island solving lets the sphere pair stop while the stack
+/// is still working, which is exactly what a global range cannot do and what the
+/// equivalence claim has to survive.
+fn buildTwoIslands(gpa: std.mem.Allocator, rig: *Rig) !void {
+    const half = av3(unit_half, unit_half, unit_half);
+    const left = try rig.addSphere(gpa, av3(0, 0, 0), unit_half);
+    _ = try rig.addSphere(gpa, av3(0.9, 0, 0), unit_half);
+    rig.bm.setLinearVelocity(left, Vec3r.fromArray(.{ 1, 0, 0 }));
+
+    _ = try rig.addBox(gpa, .dynamic, av3(50, 0, 0), half);
+    _ = try rig.addBox(gpa, .dynamic, av3(50, 0.99, 0), half);
+    const top = try rig.addBox(gpa, .dynamic, av3(50, 1.98, 0), half);
+    rig.bm.setLinearVelocity(top, Vec3r.fromArray(.{ 0, -5, 0 }));
+}
+
+/// Every body of `a` and `b`, in creation order, holds a bit-identical pose and
+/// velocity.
+fn expectSameStates(a: *const Rig, b: *const Rig) !void {
+    try testing.expectEqual(a.ids.items.len, b.ids.items.len);
+    for (a.ids.items, b.ids.items) |id_a, id_b| {
+        inline for (0..3) |k| {
+            try testing.expectEqual(a.bm.position(id_a).?.toArray()[k], b.bm.position(id_b).?.toArray()[k]);
+            try testing.expectEqual(a.bm.linearVelocity(id_a).?.toArray()[k], b.bm.linearVelocity(id_b).?.toArray()[k]);
+            try testing.expectEqual(a.bm.angularVelocity(id_a).?.toArray()[k], b.bm.angularVelocity(id_b).?.toArray()[k]);
+        }
+        inline for (0..4) |k| {
+            try testing.expectEqual(a.bm.rotation(id_a).?.toArray()[k], b.bm.rotation(id_b).?.toArray()[k]);
+        }
+    }
+}
+
+test "per-island solve equals global solve bit-exactly on disjoint islands" {
+    const gpa = testing.allocator;
+    const cfg = rigid.SolverConfig{};
+
+    // Both worlds are built and partitioned identically, so the constraint ARRAY and
+    // its order are the same in each. The only variable is whether the two passes are
+    // driven once per island range or once over the whole array — which is the claim:
+    // for genuinely disjoint islands the two are bit-for-bit equivalent, no update of
+    // one island touching an input of the other, and an early-out on a converged range
+    // cannot open a gap.
+    var per_island = Rig{};
+    defer per_island.deinit(gpa);
+    try buildTwoIslands(gpa, &per_island);
+    try per_island.partitionAll(gpa);
+
+    var global = Rig{};
+    defer global.deinit(gpa);
+    try buildTwoIslands(gpa, &global);
+    try global.partitionAll(gpa);
+
+    try testing.expectEqual(@as(usize, 2), per_island.manager.islandsSlice().len);
+    try testing.expectEqual(global.constraints.items.len, per_island.constraints.items.len);
+
+    var slowest_island: u32 = 0;
+    var fastest_island: u32 = std.math.maxInt(u32);
+    for (per_island.manager.islandsSlice()) |isl| {
+        const result = rigid.solveRangeReport(
+            &per_island.bm,
+            per_island.constraints.items,
+            isl.constraint_from,
+            isl.constraint_to,
+            cfg,
+        );
+        slowest_island = @max(slowest_island, result.iterations_run);
+        fastest_island = @min(fastest_island, result.iterations_run);
+    }
+    for (per_island.manager.islandsSlice()) |isl| {
+        _ = rigid.solvePositionRange(
+            &per_island.bm,
+            per_island.constraints.items,
+            isl.constraint_from,
+            isl.constraint_to,
+            cfg,
+        );
+    }
+
+    const global_velocity = rigid.solveRangeReport(
+        &global.bm,
+        global.constraints.items,
+        0,
+        global.constraints.items.len,
+        cfg,
+    );
+    _ = rigid.solvePositionRange(&global.bm, global.constraints.items, 0, global.constraints.items.len, cfg);
+
+    // Discrimination guard: the two strategies really did run different iteration
+    // counts. The sphere pair stops early on its own range, while the global range
+    // keeps iterating over it until the stack has converged too — so the equality
+    // below is the early-out being exact, not the two runs being one computation.
+    try testing.expect(fastest_island < global_velocity.iterations_run);
+    try testing.expectEqual(slowest_island, global_velocity.iterations_run);
+
+    try expectSameStates(&global, &per_island);
 }
