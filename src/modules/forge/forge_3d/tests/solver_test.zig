@@ -209,6 +209,9 @@ test "box dropped on a static ground comes to rest without sinking (e = 0)" {
     const v_final = world.bm.linearVelocity(box).?.toArray()[1];
 
     // The box made contact and never sank below the at-impact height thereafter.
+    // NOTE: since M1.1.7 the box RISES from its at-impact height (the position pass
+    // resorbs the penetration), so this floor is vacuous by construction — it is
+    // kept as the M1.1.6 no-sinking statement, not as an active assertion.
     try testing.expect(y_impact != null);
     try testing.expect(min_after_impact >= y_impact.? - 1e-3);
 

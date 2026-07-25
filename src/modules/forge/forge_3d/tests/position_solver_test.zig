@@ -50,6 +50,7 @@ test "position_iterations = 0 reproduces the velocity-only resting behaviour" {
     // Discrimination guard: this rest is measurably BELOW the envelope the same
     // scene satisfies with the position pass enabled (`solver_test.zig`'s tightened
     // resting test), so the pin really observes the absence of NGS, not a scene
-    // that happens to land near the analytic rest anyway.
-    try testing.expect(y_final < 1.0 - 2 * @as(Real, 0.005));
+    // that happens to land near the analytic rest anyway. Read from the config, so
+    // the guard follows the slop instead of decoupling if the default moves.
+    try testing.expect(y_final < 1.0 - 2 * world.cfg.penetration_slop);
 }
