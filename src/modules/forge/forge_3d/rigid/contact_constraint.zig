@@ -309,10 +309,18 @@ fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, manifold
 ///
 /// Termination is bounded by the number of sleeping bodies, since each round that
 /// continues has strictly reduced it. The narrowphase work is exactly that of the
-/// contacts which end up in the array — nothing is spent twice. At rest the
-/// deferred list wakes nobody and the second pass does not happen: zero cost.
-/// Determinism is preserved — the scan follows the sorted pair order and the output
-/// is re-sorted by pair key.
+/// contacts which end up in the array — nothing is spent twice. Determinism is
+/// preserved — the scan follows the sorted pair order and the output is re-sorted by
+/// pair key.
+///
+/// At rest nothing wakes, so the fixpoint loop does not run at all — the
+/// deferred list is built and never re-scanned. What a resting tick still
+/// costs is one awake test per candidate pair and one `u32` appended per
+/// deferred pair, including that list's allocation; what the skip removes is
+/// the narrowphase and the `prepare` of every one of those pairs, which is
+/// the whole of the saving. Should that per-tick buffer ever matter, it moves
+/// to the orchestrator's scratch when `step()` lands (M1.1.15) — it is not
+/// reusable from here, `build` owning no state.
 pub fn build(
     gpa: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(ContactConstraint),
@@ -327,15 +335,19 @@ pub fn build(
     var deferred: std.ArrayListUnmanaged(u32) = .empty;
     defer deferred.deinit(gpa);
 
+    // The first pass CARRIES its wake signal into the loop condition rather than
+    // discarding it: `bothAsleep` can only change through a wake, so if this pass
+    // woke nobody, no deferred pair has become processable and the loop below must
+    // not run at all.
+    var woke_someone = false;
     for (pairs, 0..) |key, index| {
         if (bothAsleep(bm, key)) {
             try deferred.append(gpa, @intCast(index));
             continue;
         }
-        _ = try emitPair(gpa, out, bm, store, key);
+        if (try emitPair(gpa, out, bm, store, key)) woke_someone = true;
     }
 
-    var woke_someone = true;
     while (woke_someone and deferred.items.len > 0) {
         woke_someone = false;
         var kept: usize = 0;
