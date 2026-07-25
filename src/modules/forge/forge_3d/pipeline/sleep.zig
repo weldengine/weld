@@ -27,6 +27,18 @@
 //! the displacement of every material point of the body, which is conservative in
 //! the right direction — it never makes sleeping easier than it should be.
 //!
+//! The bound is on the NET displacement from the reference pose, not on path
+//! length. A rotation that brings the body back to (near) its reference
+//! orientation therefore reads as no displacement at all — `2·sin(θ/2)` peaks
+//! at θ = π and returns to zero at θ = 2π — so a rotation rate aliased to a
+//! whole turn per tick is invisible to this criterion, and such a body can
+//! sleep while spinning. This is inherent to ANY pose-sampled criterion:
+//! Jolt's three tracked points alias in exactly the same way. Two things
+//! bound the exposure: the decision is per ISLAND, so any moving member keeps
+//! the group awake (§1.8.3), and the escalation, should it ever be observed,
+//! is an ADDITIVE angular-rate guard — never a switch back to an
+//! instantaneous-velocity criterion, which §1.8.3 rejects on its own merits.
+//!
 //! Two things the instantaneous-velocity criterion this replaces would get wrong,
 //! and which the tests pin: it resets on a single noisy tick, and it never sleeps a
 //! jittering body — which is one of the things sleeping exists to kill.
@@ -39,7 +51,9 @@
 //! `maxDisplacement()` during the window") with no accumulation, by bounding
 //! instead of measuring a spread. One corollary of Jolt's choice disappears here: a
 //! body spinning about the axis through its two test points moves neither of them
-//! and can sleep under Jolt, whereas a radius bound sees every rotation.
+//! and can sleep under Jolt, whereas a radius bound sees any rotation that leaves
+//! the body's orientation away from its reference — subject to the aliasing caveat
+//! above.
 //!
 //! **The sleep masks slow drift, by construction.** A displacement bound lets a body
 //! that creeps while staying under `maxDisplacement()` per window fall asleep: a

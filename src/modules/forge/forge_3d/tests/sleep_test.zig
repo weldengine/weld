@@ -148,6 +148,60 @@ test "rotation alone resets the window through the sleep radius" {
     try testing.expect(sleep.isEligible(&bm, box, cfg));
 }
 
+test "a rotation aliased to a whole turn per tick is invisible to the window (documented limit)" {
+    const gpa = testing.allocator;
+    // Documents a LIMIT, not a desired behaviour: the criterion measures net
+    // displacement from the reference pose, so a body completing an exact
+    // revolution every tick samples as motionless and sleeps while spinning at
+    // 2π/dt ≈ 377 rad/s. Inherent to any pose-sampled criterion (Jolt's tracked
+    // points alias identically). Pinned so the claim in `sleep.zig`'s header
+    // stays true and so a later change cannot silently alter the regime.
+    const tau: Real = 2 * std.math.pi;
+    const cfg = SleepConfig{};
+
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const box = try loneBox(gpa, &store, &bm);
+    const radius = bm.sleepRadius(box).?;
+
+    var t: u32 = 1;
+    while (t <= 40) : (t += 1) {
+        const q = Quatr.fromAxisAngle(Vec3r.unit_z, tau * @as(Real, @floatFromInt(t)));
+        bm.setRotation(box, q);
+        // Sanity: the sampled chord — the very quantity the sweep measures against
+        // the creation reference, which never resets here — really is negligible.
+        // What is being observed is the ALIASING, not a rotation the test forgot to
+        // apply.
+        const v = q.toArray();
+        const chord = 2 * radius * @sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        try testing.expect(chord < cfg.maxDisplacement());
+        sleep.updateWindows(&bm, dt, cfg);
+    }
+    try testing.expect(sleep.isEligible(&bm, box, cfg));
+
+    // Discrimination guard: the SAME loop at a half turn per tick sweeps a chord of
+    // 2·r ≈ 1.73 m and never becomes eligible. So the sleep above is the aliasing of
+    // a rotation that genuinely happened, not a test that rotates nothing.
+    var store_half = ShapeStore{};
+    defer store_half.deinit(gpa);
+    var bm_half = BodyManager{};
+    defer bm_half.deinit(gpa);
+    const spinner = try loneBox(gpa, &store_half, &bm_half);
+
+    t = 1;
+    while (t <= 40) : (t += 1) {
+        bm_half.setRotation(spinner, Quatr.fromAxisAngle(
+            Vec3r.unit_z,
+            std.math.pi * @as(Real, @floatFromInt(t)),
+        ));
+        sleep.updateWindows(&bm_half, dt, cfg);
+    }
+    try testing.expect(!sleep.isEligible(&bm_half, spinner, cfg));
+    try testing.expectEqual(@as(Real, 0), bm_half.sleepTime(spinner).?);
+}
+
 // --- write-intent separation (§1.8.4) ------------------------------------------
 
 /// Ground (static box, top face at y = 0.5) plus a dynamic unit box dropped from
