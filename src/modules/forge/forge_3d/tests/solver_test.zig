@@ -1,15 +1,19 @@
-//! M1.1.6 acceptance suite for the Sequential Impulses contact solver.
+//! M1.1.6 acceptance suite for the Sequential Impulses contact solver, extended at
+//! M1.1.7 with the NGS position pass.
 //!
 //! `World` composes the full per-tick pipeline IN TESTS ONLY (the production
-//! `step()` orchestration is M1.1.15). Normative per-tick cycle (brief E6):
+//! `step()` orchestration is M1.1.15). Normative per-tick cycle
+//! (`engine-physics-forge.md` §1.7):
 //!   (1) `Broadphase.computePairs` on the current poses (moved-driven deltas)
-//!   (2) narrowphase `collidePair` per candidate — done inside `rigid.build`
+//!   (2) candidate-pair retention: merge the deltas into a PERSISTENT set
 //!   (3) `integrateVelocities(dt, gravity)`
-//!   (4) `cache.beginTick` → `build` + `prepare` (captures v_n⁻) → `warmStart`
-//!       → `solveRange` × `velocity_iterations`
+//!   (4) velocity pass — `cache.beginTick` → `build` (narrowphase `collidePair`
+//!       per candidate) + `prepare` (captures v_n⁻) → `warmStart` → `solveRange`
+//!       × `velocity_iterations`
 //!   (5) `integratePositions(dt)`
-//!   (6) `storeContacts` (harvest) → `cache.endTick` (sort + swap)
-//!   (7) broadphase proxy updates.
+//!   (6) NGS position pass — `solvePositionRange` × `position_iterations` (§1.7.2)
+//!   (7) `storeContacts` (harvest) → `cache.endTick` (sort + swap)
+//!   (8) broadphase proxy updates on the corrected poses.
 //!
 //! `computePairs` is moved-driven with fat-AABB hysteresis (it reports a pair only
 //! when a proxy moves enough to exit its fat AABB), so the consumer keeps a
@@ -47,11 +51,13 @@ const ContactCache = rigid.ContactCache;
 const SolverConfig = rigid.SolverConfig;
 const testing = std.testing;
 
-fn vr(x: Real, y: Real, z: Real) Vec3r {
+/// A `Vec3r` literal at solver precision.
+pub fn vr(x: Real, y: Real, z: Real) Vec3r {
     return Vec3r.fromArray(.{ x, y, z });
 }
 
-fn av3(x: f32, y: f32, z: f32) foundation.math.Vec3 {
+/// A descriptor-precision (`f32`) `Vec3` literal.
+pub fn av3(x: f32, y: f32, z: f32) foundation.math.Vec3 {
     return foundation.math.Vec3.fromArray(.{ x, y, z });
 }
 
@@ -76,7 +82,10 @@ fn sortDedup(list: *std.ArrayListUnmanaged(u64)) void {
 const BodyProxy = struct { id: BodyId, proxy: Bp.Proxy };
 
 /// A minimal physics world composing the full contact-solver pipeline for tests.
-const World = struct {
+/// The single definition of the normative per-tick cycle (see the file header):
+/// `tests/position_solver_test.zig` drives this same harness rather than copying
+/// it, so the cycle cannot drift between the two suites.
+pub const World = struct {
     store: ShapeStore = .{},
     bm: BodyManager = .{},
     bp: Bp,
@@ -88,12 +97,16 @@ const World = struct {
     active: std.ArrayListUnmanaged(u64) = .empty,
     constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty,
     scratch: std.ArrayListUnmanaged(Bp.Pair) = .empty,
+    /// Telemetry of the last tick's NGS position pass (step 6).
+    position_result: rigid.PositionSolveResult = .{},
 
-    fn init(gravity: Vec3r, dt: Real) World {
+    /// A world with the given gravity and fixed timestep. Default `SolverConfig`.
+    pub fn init(gravity: Vec3r, dt: Real) World {
         return .{ .bp = Bp.init(.{}), .gravity = gravity, .dt = dt };
     }
 
-    fn deinit(self: *World, gpa: std.mem.Allocator) void {
+    /// Release every owned buffer.
+    pub fn deinit(self: *World, gpa: std.mem.Allocator) void {
         self.store.deinit(gpa);
         self.bm.deinit(gpa);
         self.bp.deinit(gpa);
@@ -105,7 +118,8 @@ const World = struct {
         self.* = undefined;
     }
 
-    fn addBody(self: *World, gpa: std.mem.Allocator, desc: api.BodyDescriptor) !BodyId {
+    /// Create a body and insert its broadphase proxy on the matching layer.
+    pub fn addBody(self: *World, gpa: std.mem.Allocator, desc: api.BodyDescriptor) !BodyId {
         const id = try self.bm.addBody(gpa, &self.store, desc);
         const aabb = self.bm.bodyAabb(&self.store, id).?;
         const proxy = try self.bp.insert(gpa, broadphaseLayer(desc.body_type), aabb, id);
@@ -113,7 +127,8 @@ const World = struct {
         return id;
     }
 
-    fn step(self: *World, gpa: std.mem.Allocator) !void {
+    /// Advance one fixed tick through the normative cycle (file header, steps 1-8).
+    pub fn step(self: *World, gpa: std.mem.Allocator) !void {
         // (1) broadphase candidate deltas → persistent active set.
         try self.bp.computePairs(gpa, &self.scratch);
         for (self.scratch.items) |p| try self.active.append(gpa, (@as(u64, p.a) << 32) | p.b);
@@ -131,7 +146,17 @@ const World = struct {
         // (5) integrate positions from the solved velocities.
         integration.integratePositions(&self.bm, self.dt);
 
-        // (6) harvest solved impulses into the cache, then finalize (sort + swap).
+        // (6) NGS position pass — resorb the residual penetration by correcting
+        // poses only (no velocity is touched, no accumulated impulse is modified).
+        self.position_result = rigid.solvePositionRange(
+            &self.bm,
+            self.constraints.items,
+            0,
+            self.constraints.items.len,
+            self.cfg,
+        );
+
+        // (7) harvest solved impulses into the cache, then finalize (sort + swap).
         try rigid.storeContacts(gpa, &self.cache, self.constraints.items);
         self.cache.endTick();
 
@@ -139,7 +164,7 @@ const World = struct {
         // header). The narrowphase filters non-touching pairs at `build`, so a
         // retained separated pair costs only a redundant `collidePair`.
 
-        // (7) broadphase proxy updates to the new poses.
+        // (8) broadphase proxy updates to the poses corrected by step (6).
         for (self.bodies.items) |b| {
             if (self.bm.bodyAabb(&self.store, b.id)) |aabb| try self.bp.update(gpa, b.proxy, aabb);
         }
@@ -148,7 +173,7 @@ const World = struct {
 
 /// Ground (static box, top at y = 0.5) + a dynamic unit box dropped from y = `drop_y`.
 /// Returns the dynamic box's BodyId. Restitution `e` on both.
-fn groundAndBox(gpa: std.mem.Allocator, world: *World, drop_y: Real, e: f32) !BodyId {
+pub fn groundAndBox(gpa: std.mem.Allocator, world: *World, drop_y: Real, e: f32) !BodyId {
     const ground_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(5, 0.5, 5) } });
     const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
 
@@ -170,9 +195,7 @@ test "box dropped on a static ground comes to rest without sinking (e = 0)" {
     const box = try groundAndBox(gpa, &world, 2.0, 0);
 
     // Run 5 s. Capture the height at the FIRST tick that produces a contact
-    // constraint (impact), then require the box never sinks below it afterwards —
-    // the AC's "penetration bounded by its at-impact value" (absolute non-recovery
-    // accepted until the NGS position solver, M1.1.7).
+    // constraint (impact), then require the box never sinks below it afterwards.
     var y_impact: ?Real = null;
     var min_after_impact: Real = 1e30;
     var t: u32 = 0;
@@ -188,10 +211,34 @@ test "box dropped on a static ground comes to rest without sinking (e = 0)" {
     // The box made contact and never sank below the at-impact height thereafter.
     try testing.expect(y_impact != null);
     try testing.expect(min_after_impact >= y_impact.? - 1e-3);
-    // Envelope: analytical rest y = ground_top(0.5) + box_half(0.5) = 1.0; a small
-    // constant penetration remains (no NGS recovery until M1.1.7). Never fell
-    // through, rests at/near the contact, penetration bounded, at rest.
-    try testing.expect(y_final > 0.8 and y_final < 1.02);
+
+    // RECOVERY (M1.1.7). The M1.1.6 statement — "penetration bounded at its
+    // at-impact value, absolute non-recovery accepted" — is obsolete: the NGS
+    // position pass resorbs the impact penetration down to the slop, which is
+    // precisely where it stops so the contact (and its warm-start entry) stays
+    // alive instead of oscillating between contact and no contact.
+    try testing.expectEqual(@as(usize, 1), world.constraints.items.len);
+    var resting_penetration: Real = 0;
+    for (0..world.constraints.items[0].count) |i| {
+        resting_penetration = @max(resting_penetration, world.constraints.items[0].points[i].penetration);
+    }
+    // The rest sits exactly at the NGS fixed point `separation = −penetration_slop`
+    // (a contraction never crosses its fixed point), so the resting penetration
+    // equals the slop up to the float noise of reconstructing it — a difference of
+    // two world coordinates of magnitude ≈ 1 m. Measured: 0 at f64, 5.9e-7 at f32
+    // (≈ 5 ULP of 1.0). `noise_margin` is that noise floor in the M1.1.4 form
+    // `k·floatEps(Real)·coordScale`, NOT a geometric threshold: the physical
+    // statement is the recovery from the ≈ 7 cm at-impact penetration down to the
+    // 5 mm slop, a factor of ~14.
+    const coord_scale: Real = 1.0; // the contact sits at y ≈ 1 m
+    const noise_margin: Real = 16 * std.math.floatEps(Real) * coord_scale;
+    try testing.expect(resting_penetration <= world.cfg.penetration_slop + noise_margin);
+
+    // Envelope: analytic rest y = ground_top(0.5) + box_half(0.5) = 1.0, and NGS
+    // converges to `1.0 − penetration_slop` from below. Never fell through, rests
+    // one slop under the analytic height, at rest.
+    try testing.expect(y_final > 1.0 - 2 * world.cfg.penetration_slop);
+    try testing.expect(y_final < 1.0 + 1e-4);
     try testing.expect(@abs(v_final) < 0.05);
 }
 
