@@ -8,7 +8,19 @@
 
 const std = @import("std");
 const island = @import("../pipeline/island.zig");
+const config = @import("../config.zig");
+const shape_mod = @import("../shape.zig");
+const bm_mod = @import("../body_manager.zig");
+const rigid = @import("../rigid/root.zig");
+const api = @import("weld_forge");
+const foundation = @import("foundation");
 
+const Real = config.Real;
+const Vec3r = config.Vec3r;
+const ShapeStore = shape_mod.ShapeStore;
+const BodyManager = bm_mod.BodyManager;
+const BodyId = api.BodyId;
+const ContactConstraint = rigid.ContactConstraint;
 const testing = std.testing;
 
 // --- neutral core -------------------------------------------------------------
@@ -149,6 +161,327 @@ test "island core grouping is invariant under link-order permutation" {
             uf.link(l[0], l[1]);
         }
         canonicalLabels(&uf, &labels);
+        try testing.expectEqualSlices(u32, &expected, &labels);
+    }
+}
+
+// --- rigid partition ------------------------------------------------------------
+
+fn av3(x: f32, y: f32, z: f32) foundation.math.Vec3 {
+    return foundation.math.Vec3.fromArray(.{ x, y, z });
+}
+
+fn pairKey(a: BodyId, b: BodyId) u64 {
+    return (@as(u64, @min(a, b)) << 32) | @max(a, b);
+}
+
+/// A minimal scene for partition tests: bodies, every pair fed to `build`, and the
+/// island manager over the result. No broadphase and no solver — the partition is a
+/// function of the awake dynamic set and the sorted constraint array, and nothing
+/// else, so nothing else is composed here.
+const Rig = struct {
+    store: ShapeStore = .{},
+    bm: BodyManager = .{},
+    constraints: std.ArrayListUnmanaged(ContactConstraint) = .empty,
+    pairs: std.ArrayListUnmanaged(u64) = .empty,
+    manager: rigid.IslandManager = .{},
+    ids: std.ArrayListUnmanaged(BodyId) = .empty,
+
+    fn deinit(self: *Rig, gpa: std.mem.Allocator) void {
+        self.store.deinit(gpa);
+        self.bm.deinit(gpa);
+        self.constraints.deinit(gpa);
+        self.pairs.deinit(gpa);
+        self.manager.deinit(gpa);
+        self.ids.deinit(gpa);
+        self.* = undefined;
+    }
+
+    /// Add a box of `half` half-extents at `pos`. Entity index mirrors the creation
+    /// order so a test can name a body independently of the handle it received.
+    fn addBox(
+        self: *Rig,
+        gpa: std.mem.Allocator,
+        body_type: api.BodyType,
+        pos: foundation.math.Vec3,
+        half: foundation.math.Vec3,
+    ) !BodyId {
+        const s = try self.store.createShape(gpa, .{ .box = .{ .half_extents = half } });
+        var d = api.BodyDescriptor{
+            .entity = .{ .index = @intCast(self.ids.items.len), .generation = 0 },
+            .body_type = body_type,
+            .shape = s,
+        };
+        d.mass = 1;
+        d.position = pos;
+        const id = try self.bm.addBody(gpa, &self.store, d);
+        try self.ids.append(gpa, id);
+        return id;
+    }
+
+    /// Feed every body pair to `build`, then partition.
+    fn partitionAll(self: *Rig, gpa: std.mem.Allocator) !void {
+        self.pairs.clearRetainingCapacity();
+        for (self.ids.items, 0..) |a, i| {
+            for (self.ids.items[i + 1 ..]) |b| try self.pairs.append(gpa, pairKey(a, b));
+        }
+        std.mem.sort(u64, self.pairs.items, {}, std.sort.asc(u64));
+        try rigid.build(gpa, &self.constraints, &self.bm, &self.store, self.pairs.items);
+        try self.manager.partition(gpa, &self.bm, self.constraints.items);
+    }
+
+    /// The rank of the island `id` belongs to, or null if it is not a member.
+    fn rankOf(self: *const Rig, id: BodyId) ?u32 {
+        for (self.manager.islandsSlice(), 0..) |isl, rank| {
+            for (self.manager.islandMembers(isl)) |member| {
+                if (member == id) return @intCast(rank);
+            }
+        }
+        return null;
+    }
+
+    /// Every constraint sits in exactly one island range, and the ranges tile the
+    /// array from 0 to its length with no hole and no overlap.
+    fn expectRangesTileTheArray(self: *const Rig) !void {
+        var cursor: u32 = 0;
+        for (self.manager.islandsSlice()) |isl| {
+            try testing.expectEqual(cursor, isl.constraint_from);
+            try testing.expect(isl.constraint_to >= isl.constraint_from);
+            cursor = isl.constraint_to;
+        }
+        try testing.expectEqual(@as(u32, @intCast(self.constraints.items.len)), cursor);
+    }
+};
+
+/// A unit box (half-extents 0.5): two of them 0.99 apart overlap by 0.01.
+const unit_half: f32 = 0.5;
+
+test "two separated stacks partition into two islands" {
+    const gpa = testing.allocator;
+    var rig = Rig{};
+    defer rig.deinit(gpa);
+    const half = av3(unit_half, unit_half, unit_half);
+
+    // Two stacked pairs, 50 m apart — no ground, so the only contacts are the two
+    // internal ones.
+    const a0 = try rig.addBox(gpa, .dynamic, av3(0, 0, 0), half);
+    const a1 = try rig.addBox(gpa, .dynamic, av3(0, 0.99, 0), half);
+    const b0 = try rig.addBox(gpa, .dynamic, av3(50, 0, 0), half);
+    const b1 = try rig.addBox(gpa, .dynamic, av3(50, 0.99, 0), half);
+    try rig.partitionAll(gpa);
+
+    try testing.expectEqual(@as(usize, 2), rig.constraints.items.len);
+    try testing.expectEqual(@as(usize, 2), rig.manager.islandsSlice().len);
+    try testing.expectEqual(rig.rankOf(a0).?, rig.rankOf(a1).?);
+    try testing.expectEqual(rig.rankOf(b0).?, rig.rankOf(b1).?);
+    try testing.expect(rig.rankOf(a0).? != rig.rankOf(b0).?);
+    for (rig.manager.islandsSlice()) |isl| {
+        try testing.expectEqual(@as(u32, 2), isl.member_to - isl.member_from);
+        try testing.expectEqual(@as(u32, 1), isl.constraint_to - isl.constraint_from);
+    }
+    try rig.expectRangesTileTheArray();
+}
+
+test "a static ground does not link the bodies resting on it" {
+    const gpa = testing.allocator;
+    var rig = Rig{};
+    defer rig.deinit(gpa);
+    const half = av3(unit_half, unit_half, unit_half);
+
+    // One ground, two boxes resting on it far enough apart not to touch each other.
+    // Linking through the static would fuse them — the classic trap this refuses.
+    _ = try rig.addBox(gpa, .static, av3(0, 0, 0), av3(20, 0.5, 20));
+    const left = try rig.addBox(gpa, .dynamic, av3(-3, 0.99, 0), half);
+    const right = try rig.addBox(gpa, .dynamic, av3(3, 0.99, 0), half);
+    try rig.partitionAll(gpa);
+
+    // Two islands of one body each — and the ground is a member of neither.
+    try testing.expectEqual(@as(usize, 2), rig.manager.islandsSlice().len);
+    try testing.expect(rig.rankOf(left).? != rig.rankOf(right).?);
+    try testing.expectEqual(@as(?u32, null), rig.rankOf(rig.ids.items[0]));
+
+    // Each ground contact belongs to its own dynamic body's island: no constraint is
+    // left unassigned, which is what would strand a resting box without its support.
+    try testing.expectEqual(@as(usize, 2), rig.constraints.items.len);
+    for (rig.manager.islandsSlice()) |isl| {
+        try testing.expectEqual(@as(u32, 1), isl.member_to - isl.member_from);
+        try testing.expectEqual(@as(u32, 1), isl.constraint_to - isl.constraint_from);
+    }
+    try rig.expectRangesTileTheArray();
+}
+
+test "a moving kinematic platform does not link but forces its islands awake" {
+    const gpa = testing.allocator;
+    var rig = Rig{};
+    defer rig.deinit(gpa);
+    const half = av3(unit_half, unit_half, unit_half);
+
+    const platform = try rig.addBox(gpa, .kinematic, av3(0, 0, 0), av3(20, 0.5, 20));
+    const left = try rig.addBox(gpa, .dynamic, av3(-3, 0.99, 0), half);
+    const right = try rig.addBox(gpa, .dynamic, av3(3, 0.99, 0), half);
+    rig.bm.setLinearVelocity(platform, Vec3r.fromArray(.{ 1, 0, 0 }));
+    try rig.partitionAll(gpa);
+
+    // No fusion through the kinematic body — it is not a member, so it links nothing.
+    try testing.expectEqual(@as(usize, 2), rig.manager.islandsSlice().len);
+    try testing.expect(rig.rankOf(left).? != rig.rankOf(right).?);
+    try testing.expectEqual(@as(?u32, null), rig.rankOf(platform));
+
+    // But both islands see it moving (W3). Without the flag they would show nothing
+    // but eligible members and fall asleep on a support that is moving.
+    for (rig.manager.islandsSlice()) |isl| try testing.expect(isl.touches_moving_non_member);
+
+    // The flag is about MOTION, not about the body type: the same scene with the
+    // platform at rest raises nothing.
+    var still = Rig{};
+    defer still.deinit(gpa);
+    _ = try still.addBox(gpa, .kinematic, av3(0, 0, 0), av3(20, 0.5, 20));
+    _ = try still.addBox(gpa, .dynamic, av3(-3, 0.99, 0), half);
+    _ = try still.addBox(gpa, .dynamic, av3(3, 0.99, 0), half);
+    try still.partitionAll(gpa);
+    for (still.manager.islandsSlice()) |isl| try testing.expect(!isl.touches_moving_non_member);
+}
+
+test "a dynamic body with no constraint is a singleton island" {
+    const gpa = testing.allocator;
+    var rig = Rig{};
+    defer rig.deinit(gpa);
+    const half = av3(unit_half, unit_half, unit_half);
+
+    const a = try rig.addBox(gpa, .dynamic, av3(0, 0, 0), half);
+    const b = try rig.addBox(gpa, .dynamic, av3(0, 0.99, 0), half);
+    const lone = try rig.addBox(gpa, .dynamic, av3(100, 0, 0), half);
+    try rig.partitionAll(gpa);
+
+    try testing.expectEqual(@as(usize, 2), rig.manager.islandsSlice().len);
+    try testing.expectEqual(rig.rankOf(a).?, rig.rankOf(b).?);
+
+    // Present in the table with an EMPTY constraint range — a first-class island that
+    // can fall asleep like any other, not an absence.
+    const singleton = rig.manager.islandsSlice()[rig.rankOf(lone).?];
+    try testing.expectEqual(@as(u32, 1), singleton.member_to - singleton.member_from);
+    try testing.expectEqual(lone, rig.manager.islandMembers(singleton)[0]);
+    try testing.expectEqual(singleton.constraint_from, singleton.constraint_to);
+    try rig.expectRangesTileTheArray();
+}
+
+/// Chain `L0–L1–L2` at the origin plus the pair `L3–L4` fifty metres away, with the
+/// bodies created in `order` (a permutation of the five logical indices). Returns the
+/// handle each logical body received.
+fn buildTwoGroupScene(gpa: std.mem.Allocator, rig: *Rig, order: []const usize) ![5]BodyId {
+    const half = av3(unit_half, unit_half, unit_half);
+    const positions = [5]foundation.math.Vec3{
+        av3(0, 0, 0),
+        av3(0.99, 0, 0),
+        av3(1.98, 0, 0), // 1.98 from L0 ⇒ touches L1 only
+        av3(50, 0, 0),
+        av3(50.99, 0, 0),
+    };
+    var handles: [5]BodyId = undefined;
+    for (order) |logical| {
+        handles[logical] = try rig.addBox(gpa, .dynamic, positions[logical], half);
+    }
+    return handles;
+}
+
+test "island ranks are ordered by minimum member BodyId" {
+    const gpa = testing.allocator;
+    var rig = Rig{};
+    defer rig.deinit(gpa);
+    _ = try buildTwoGroupScene(gpa, &rig, &.{ 0, 3, 4, 1, 2 });
+    try rig.partitionAll(gpa);
+    try testing.expect(rig.manager.islandsSlice().len >= 2);
+
+    // Members come out ascending inside an island, so element 0 IS the minimum. Ranks
+    // must be strictly increasing in it — strictly, because membership partitions the
+    // awake dynamic set, so no two islands can share a minimum and no tie-break
+    // exists or is needed.
+    var previous_min: ?BodyId = null;
+    for (rig.manager.islandsSlice()) |isl| {
+        const members = rig.manager.islandMembers(isl);
+        try testing.expect(members.len > 0);
+        for (members[1..], 0..) |id, i| try testing.expect(members[i] < id);
+        if (previous_min) |prev| try testing.expect(prev < members[0]);
+        previous_min = members[0];
+    }
+}
+
+test "constraint ranges are contiguous and pair-key ascending inside each island" {
+    const gpa = testing.allocator;
+    var rig = Rig{};
+    defer rig.deinit(gpa);
+
+    // Creation order 0,3,4,1,2 gives handles L0=0, L3=1, L4=2, L1=3, L2=4. The chain
+    // is then {0,3,4} (rank 0, minimum handle 0) and the far pair {1,2} (rank 1). Its
+    // point: the chain owns the constraint (3,4), whose pair key is the LARGEST of
+    // the three, while (1,2) belongs to the higher-ranked island. Sorting by pair key
+    // alone would interleave them; the composite key must not.
+    const handles = try buildTwoGroupScene(gpa, &rig, &.{ 0, 3, 4, 1, 2 });
+    try rig.partitionAll(gpa);
+    try testing.expectEqual(@as(usize, 3), rig.constraints.items.len);
+    try testing.expectEqual(@as(usize, 2), rig.manager.islandsSlice().len);
+
+    // The discriminator really is present in this scene: the far pair's key sits
+    // strictly between the chain's two keys.
+    const chain_low = pairKey(handles[0], handles[1]);
+    const chain_high = pairKey(handles[1], handles[2]);
+    const far = pairKey(handles[3], handles[4]);
+    try testing.expect(chain_low < far and far < chain_high);
+
+    try rig.expectRangesTileTheArray();
+
+    // Rank 0 holds the chain's two constraints, in ascending pair-key order, BEFORE
+    // the far pair — which pure pair-key order would have placed between them.
+    const first = rig.manager.islandsSlice()[0];
+    try testing.expectEqual(@as(u32, 0), first.constraint_from);
+    try testing.expectEqual(@as(u32, 2), first.constraint_to);
+    try testing.expectEqual(chain_low, rig.constraints.items[0].pair_key);
+    try testing.expectEqual(chain_high, rig.constraints.items[1].pair_key);
+    try testing.expectEqual(far, rig.constraints.items[2].pair_key);
+
+    // And the general invariant: ascending pair keys within every range, each
+    // constraint really belonging to the island whose range holds it.
+    for (rig.manager.islandsSlice(), 0..) |isl, rank| {
+        const range = rig.constraints.items[isl.constraint_from..isl.constraint_to];
+        for (range, 0..) |c, i| {
+            if (i > 0) try testing.expect(range[i - 1].pair_key < c.pair_key);
+            const owner = rig.rankOf(c.body_a) orelse rig.rankOf(c.body_b).?;
+            try testing.expectEqual(@as(u32, @intCast(rank)), owner);
+        }
+    }
+}
+
+test "island partition is invariant under body add-order permutation" {
+    const gpa = testing.allocator;
+    // The partition — WHICH bodies are grouped together — must not depend on the
+    // order the bodies were created in. Bit-exactness is NOT asserted and must not
+    // be: permuting the add order changes the `BodyId`s, hence the pair keys, hence
+    // the solve order.
+    const expected = [5]u32{ 0, 0, 0, 3, 3 }; // {L0,L1,L2} and {L3,L4}
+
+    var order: [5]usize = undefined;
+    for (0..120) |k| {
+        nthPermutation(5, k, &order);
+        var rig = Rig{};
+        defer rig.deinit(gpa);
+        const handles = try buildTwoGroupScene(gpa, &rig, &order);
+        try rig.partitionAll(gpa);
+
+        // Canonical labelling over LOGICAL indices (handles differ per permutation):
+        // each logical body is labelled with the smallest logical index sharing its
+        // island.
+        var labels: [5]u32 = undefined;
+        for (0..5) |logical| {
+            const rank = rig.rankOf(handles[logical]).?;
+            var smallest: u32 = @intCast(logical);
+            for (0..logical) |other| {
+                if (rig.rankOf(handles[other]).? == rank) {
+                    smallest = @intCast(other);
+                    break;
+                }
+            }
+            labels[logical] = smallest;
+        }
         try testing.expectEqualSlices(u32, &expected, &labels);
     }
 }

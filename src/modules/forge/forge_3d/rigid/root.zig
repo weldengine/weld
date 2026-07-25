@@ -14,6 +14,7 @@ const contact_cache = @import("contact_cache.zig");
 const solver_config = @import("solver_config.zig");
 const velocity_solver = @import("velocity_solver.zig");
 const position_solver = @import("position_solver.zig");
+const island_manager = @import("island_manager.zig");
 
 /// One manifold's velocity-solver contact constraint (≤ 4 inline points).
 pub const ContactConstraint = contact_constraint.ContactConstraint;
@@ -54,10 +55,18 @@ pub const PositionSolveResult = position_solver.PositionSolveResult;
 /// Resorb penetration over an index range by correcting poses (NGS, §1.7.2).
 pub const solvePositionRange = position_solver.solvePositionRange;
 
+/// Partitions the awake dynamic bodies into islands, gives each a contiguous
+/// constraint range for the two range-shaped solver passes, and arbitrates
+/// activation (step 5) and the sleep transition (step 11).
+pub const IslandManager = island_manager.IslandManager;
+/// One island: its constraint range, its member range, and its W3 flag.
+pub const Island = island_manager.Island;
+
 comptime {
     _ = contact_constraint;
     _ = contact_cache;
     _ = solver_config;
     _ = velocity_solver;
     _ = position_solver;
+    _ = island_manager;
 }

@@ -95,6 +95,17 @@ pub const IdAllocator = struct {
         return p.index;
     }
 
+    /// The packed handle of the live slot at bare column `index`, or null if that
+    /// slot is dead or out of range — the inverse of `validate`.
+    ///
+    /// An index-ascending sweep sees columns, and a column carries no generation;
+    /// the island partition ranks its groups by `BodyId`, which does. Rebuilding
+    /// the handle belongs here, where the packing lives, rather than at the sweep.
+    pub fn idAtIndex(self: *const IdAllocator, index: u32) ?u32 {
+        if (!self.isAliveIndex(index)) return null;
+        return api.PackedId.pack(@intCast(index), self.slots.items[index].generation);
+    }
+
     /// Whether the slot at bare column `index` is currently live. Distinct from
     /// `validate` (which takes a packed id and checks the generation): `free`
     /// does NOT compact, so `slots.items.len` is the high-water mark including

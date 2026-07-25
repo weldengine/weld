@@ -353,6 +353,110 @@ test "an activating mutator also resets the window of an already-awake body" {
     try testing.expect(!sleep.isEligible(&bm, box, cfg));
 }
 
+test "a moving non-member wakes the island resting on it (W3)" {
+    const gpa = testing.allocator;
+    // The W3 half the partition test in `island_test.zig` leaves to this suite: a
+    // kinematic platform is NOT an island member, so an island resting on it would
+    // otherwise show nothing but eligible members and fall asleep on a support that
+    // is moving.
+    const cfg = SleepConfig{};
+
+    inline for (.{ true, false }) |platform_moves| {
+        var store = ShapeStore{};
+        defer store.deinit(gpa);
+        var bm = BodyManager{};
+        defer bm.deinit(gpa);
+        var constraints: std.ArrayListUnmanaged(rigid.ContactConstraint) = .empty;
+        defer constraints.deinit(gpa);
+        var manager = rigid.IslandManager{};
+        defer manager.deinit(gpa);
+
+        const platform_shape = try store.createShape(gpa, .{ .box = .{ .half_extents = av3(20, 0.5, 20) } });
+        const box_shape = try store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+        const platform = try bm.addBody(gpa, &store, descOf(0, .kinematic, platform_shape));
+        var box_desc = descOf(1, .dynamic, box_shape);
+        box_desc.mass = 1;
+        box_desc.position = av3(0, 0.99, 0);
+        const box = try bm.addBody(gpa, &store, box_desc);
+        if (platform_moves) bm.setLinearVelocity(platform, vr(1, 0, 0));
+
+        // Fill the box's window: on its own it is perfectly eligible.
+        var t: u32 = 0;
+        while (t < 40) : (t += 1) sleep.updateWindows(&bm, dt, cfg);
+        try testing.expect(sleep.isEligible(&bm, box, cfg));
+
+        try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(platform, box)});
+        try testing.expectEqual(@as(usize, 1), constraints.items.len);
+        try manager.partition(gpa, &bm, constraints.items);
+        try testing.expectEqual(@as(usize, 1), manager.islandsSlice().len);
+
+        if (platform_moves) {
+            // W3 is a real wake: the window is restarted, so the island cannot
+            // accumulate toward sleep while the support moves.
+            try testing.expect(manager.islandsSlice()[0].touches_moving_non_member);
+            try testing.expectEqual(@as(Real, 0), bm.sleepTime(box).?);
+            try testing.expect(!sleep.isEligible(&bm, box, cfg));
+            try testing.expectEqual(@as(u32, 0), manager.sleepEligibleIslands(&bm, cfg));
+            try testing.expect(!bm.isSleeping(box).?);
+        } else {
+            // Same scene, platform at rest: nothing is disturbed and the island sleeps.
+            try testing.expect(!manager.islandsSlice()[0].touches_moving_non_member);
+            try testing.expect(sleep.isEligible(&bm, box, cfg));
+            try testing.expectEqual(@as(u32, 1), manager.sleepEligibleIslands(&bm, cfg));
+            try testing.expect(bm.isSleeping(box).?);
+            // The kinematic platform is not a member, so it is never put to sleep.
+            try testing.expect(!bm.isSleeping(platform).?);
+        }
+    }
+}
+
+test "an island sleeps only when every member is eligible (W2)" {
+    const gpa = testing.allocator;
+    const cfg = SleepConfig{};
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    var constraints: std.ArrayListUnmanaged(rigid.ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    var manager = rigid.IslandManager{};
+    defer manager.deinit(gpa);
+
+    // Two boxes in contact ⇒ one island of two members.
+    const s = try store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    var lower = descOf(0, .dynamic, s);
+    lower.mass = 1;
+    var upper = descOf(1, .dynamic, s);
+    upper.mass = 1;
+    upper.position = av3(0, 0.99, 0);
+    const a = try bm.addBody(gpa, &store, lower);
+    const b = try bm.addBody(gpa, &store, upper);
+
+    var t: u32 = 0;
+    while (t < 40) : (t += 1) sleep.updateWindows(&bm, dt, cfg);
+    try rigid.build(gpa, &constraints, &bm, &store, &.{pairKey(a, b)});
+    try manager.partition(gpa, &bm, constraints.items);
+    try testing.expectEqual(@as(usize, 1), manager.islandsSlice().len);
+    try testing.expectEqual(@as(u32, 2), manager.islandsSlice()[0].member_to);
+
+    // One member forbidden to sleep keeps the WHOLE island awake — the AND over
+    // members, which is W2 in its operative form.
+    bm.setCanSleep(b, false);
+    try testing.expectEqual(@as(u32, 0), manager.sleepEligibleIslands(&bm, cfg));
+    try testing.expect(!bm.isSleeping(a).?);
+    try testing.expect(!bm.isSleeping(b).?);
+
+    // Allowing it again is not enough on its own: `setCanSleep(false)` woke it, so
+    // its window has to refill before the island qualifies.
+    bm.setCanSleep(b, true);
+    try testing.expectEqual(@as(u32, 0), manager.sleepEligibleIslands(&bm, cfg));
+    t = 0;
+    while (t < 40) : (t += 1) sleep.updateWindows(&bm, dt, cfg);
+    try testing.expectEqual(@as(u32, 1), manager.sleepEligibleIslands(&bm, cfg));
+    try testing.expect(bm.isSleeping(a).?);
+    try testing.expect(bm.isSleeping(b).?);
+}
+
 // --- the two switches -----------------------------------------------------------
 
 test "can_sleep false never sleeps" {
