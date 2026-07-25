@@ -37,12 +37,26 @@ pub const SolverConfig = struct {
     /// patch is two points and a rotation is one scalar. A 3D face patch carries
     /// four points and a five-deep stack forty, and 8 is under-provisioned at that
     /// depth — measured at M1.1.7, a five-box stack never comes to rest at 8 and
-    /// stops dead at 16. Jolt does not use a global constant at all: it derives the
-    /// budget PER ISLAND (`PhysicsSystem.cpp`,
-    /// `steps_calculator.GetNumVelocitySteps()`), so a deep stack automatically
-    /// gets more iterations. That mechanism arrives with the island manager
-    /// (M1.1.8), which turns this field into a FLOOR under an island-derived
-    /// budget; until then a global default has to cover the worst case we accept.
+    /// stops dead at 16. 16 is a measured FLOOR, not a first-principles result:
+    /// there is no derivation of the required budget from chain depth, patch size or
+    /// mass ratio, only the measurement that 16 puts this configuration inside the
+    /// convergence basin.
+    ///
+    /// A claim written here at M1.1.7 — that Jolt uses no global constant and
+    /// derives the budget per island, so a deep stack automatically gets more
+    /// iterations — was READ ON THE SOURCE at M1.1.8 and is false in both halves
+    /// (`engine-physics-forge.md` §1.8.2). Jolt does carry global defaults
+    /// (`PhysicsSettings.h`: `mNumVelocitySteps = 10`, `mNumPositionSteps = 2`), and
+    /// its per-island aggregation (`CalculateSolverSteps.h`) is a MAXIMUM over
+    /// overrides supplied by the author on bodies and constraints, falling back on
+    /// the global default when none is set. No heuristic of any kind reads the
+    /// topology: under Jolt a deep stack receives exactly the global default.
+    ///
+    /// So this stays a global default and a floor. What makes a high floor
+    /// affordable is not a topology-derived count but the velocity pass's EARLY-OUT
+    /// (§1.8.2): an iteration that applies no impulse ends the pass, so this is a
+    /// ceiling rarely reached rather than a fixed cost. A per-body override channel
+    /// is purely additive and has no Phase-1 consumer.
     velocity_iterations: u32 = 16,
     /// Restitution cutoff (m/s): a bounce is applied only when the pre-solve
     /// relative normal speed exceeds this — a PHYSICAL velocity constant (config

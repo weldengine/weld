@@ -169,6 +169,30 @@ pub const World = struct {
         return id;
     }
 
+    /// Remove a body, applying wake cause W4 (`engine-physics-forge.md` §1.8.5)
+    /// first: every sleeper retained in a candidate pair with it is woken, because
+    /// removing it changes what supports them and a sleeper emits nothing in
+    /// broadphase that could notice.
+    ///
+    /// W4 lives with whoever OWNS the retained candidate set — here the harness, in
+    /// production the `step()` orchestrator at M1.1.15. That is the whole reason it
+    /// is proven at this level: there is no other owner yet.
+    pub fn removeBody(self: *World, id: BodyId) void {
+        for (self.active.items) |key| {
+            const a: BodyId = @intCast(key >> 32);
+            const b: BodyId = @intCast(key & 0xFFFF_FFFF);
+            if (a != id and b != id) continue;
+            self.bm.wakeBody(if (a == id) b else a);
+        }
+        for (self.bodies.items, 0..) |entry, i| {
+            if (entry.id != id) continue;
+            self.bp.remove(entry.proxy);
+            _ = self.bodies.orderedRemove(i); // ordered: the sweep order stays stable
+            break;
+        }
+        self.bm.removeBody(id);
+    }
+
     /// Advance one fixed tick through the normative cycle (file header, steps 1-11).
     pub fn step(self: *World, gpa: std.mem.Allocator) !void {
         // (1) broadphase candidate deltas → (2) persistent active set. Never pruned:
