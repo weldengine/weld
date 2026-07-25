@@ -1020,6 +1020,11 @@ test "an impact wakes the whole sleeping stack in one tick with its internal con
     }
     try testing.expect(worst_transient <= 5 * world.cfg.penetration_slop);
 
+    // Clause 2 of the frozen envelope is REPLACED, not widened: see RD-1 in
+    // `briefs/M1.1.8-islands-sleep.md` (Claude.ai round-trip, 2026-07-25). The
+    // absolute form measured the position pass, not the wake — the never-slept
+    // control fails it harder.
+    //
     // (2a) DIFFERENTIAL against a control that never slept. This is the question the
     // cold start actually raises — does it cost anything? — and it can only be asked
     // against a baseline. An absolute bound here would pin the position pass's fixed
