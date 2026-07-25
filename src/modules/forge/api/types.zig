@@ -156,6 +156,10 @@ pub const BodyDescriptor = struct {
     gravity_factor: f32 = 1.0,
     /// Continuous collision detection for fast movers.
     continuous: bool = false,
+    /// Whether the body is allowed to fall asleep. Mirrors `RigidBody.can_sleep`
+    /// (`engine-physics-forge.md` §2), which the descriptor dropped until M1.1.8 —
+    /// the same gap class as the `friction`/`restitution` drop closed at M1.1.6.
+    can_sleep: bool = true,
 };
 
 /// A physics pose — position + orientation, no scale. Distinct from the ECS
@@ -211,6 +215,7 @@ test "BodyDescriptor defaults match the brief" {
     try testing.expectEqual(@as(u8, 0), d.collision_layer);
     try testing.expectEqual(@as(f32, 1.0), d.gravity_factor);
     try testing.expectEqual(false, d.continuous);
+    try testing.expectEqual(true, d.can_sleep);
     try testing.expect(d.position.eql(Vec3.zero));
     try testing.expect(d.rotation.approxEql(Quatf.identity, 0));
 }

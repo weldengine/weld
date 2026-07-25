@@ -30,6 +30,10 @@ const rigid_mod = @import("rigid/root.zig");
 // indices). Scalar-free, so it is re-exported as a namespace rather than bound to
 // `Real`; the comptime pin analyses its acceptance tests.
 const island_mod = @import("pipeline/island.zig");
+// M1.1.8 — sleep detection (displacement window sweep + eligibility + transition)
+// over the `BodyManager` SoA store, at the same pipeline level as integration.
+// Re-exported as the `sleep` namespace below; the comptime pin analyses its tests.
+const sleep_mod = @import("pipeline/sleep.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -146,6 +150,12 @@ pub const ContactSeed = narrowphase.ContactSeed(Real);
 /// adapter that maps bodies and constraints onto it lives in `rigid/`.
 pub const island = island_mod;
 
+/// Sleep detection at solver precision (`engine-physics-forge.md` §1.8.3): the
+/// `SleepConfig` tuning, the per-body displacement-window sweep, the eligibility
+/// predicate, and the sleep transition. The per-island decision that consumes them
+/// lives in `rigid/`.
+pub const sleep = sleep_mod;
+
 // --- Integration (semi-implicit Euler) ---
 
 /// Advance every live body one fixed tick of `dt` under world-space `gravity`
@@ -175,6 +185,7 @@ comptime {
     _ = integration;
     _ = rigid_mod;
     _ = island_mod;
+    _ = sleep_mod;
     _ = @import("tests/body_manager_test.zig");
     _ = @import("tests/integration_test.zig");
     _ = @import("tests/broadphase_test.zig");
@@ -186,4 +197,5 @@ comptime {
     _ = @import("tests/solver_test.zig");
     _ = @import("tests/position_solver_test.zig");
     _ = @import("tests/island_test.zig");
+    _ = @import("tests/sleep_test.zig");
 }

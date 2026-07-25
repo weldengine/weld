@@ -23,6 +23,19 @@
 //! solver) validate the handle the same way. `addTorque`, `setAngularVelocity`,
 //! `setPosition` and `setRotation` are INTERNAL — the public `PhysicsModule` 3D
 //! interface (frozen M1.1.15) carries no angular and no pose mutators.
+//!
+//! Those mutators split into two INTENTS, and the split is a contract, not an
+//! implementation detail (`engine-physics-forge.md` §1.8.4). The four setters
+//! (`setLinearVelocity`, `setAngularVelocity`, `setPosition`, `setRotation`) are the
+//! SOLVER's own write path and are NON-ACTIVATING: they neither wake a body nor
+//! restart its sleep window. Both solver passes write velocities and poses on every
+//! contacting body every tick, so were those writes counted as external mutations,
+//! nothing in contact would ever sleep. `addForce`, `addTorque` and `addImpulse`
+//! come from outside the simulation and are ACTIVATING: they wake and restart the
+//! window, even on an already-awake body. `wakeBody` and `setCanSleep` are the two
+//! explicit primitives. Composing a wake with a write for the gameplay-facing
+//! setters is the interface boundary's job at M1.1.15 — the Jolt split between
+//! `Body::SetLinearVelocity` and `BodyInterface::SetLinearVelocity`.
 
 const std = @import("std");
 const api = @import("weld_forge");
@@ -93,7 +106,13 @@ pub const BodyManager = struct {
             .shape = desc.shape,
             .body_type = desc.body_type,
             .collision_layer = desc.collision_layer,
-            .flags = .{ .continuous = desc.continuous },
+            .flags = .{ .continuous = desc.continuous, .can_sleep = desc.can_sleep },
+            // The sleep window opens at the creation pose, closed (`sleep_time`
+            // zero) — a fresh body has not yet stood still for any length of time.
+            .sleep_time = 0,
+            .sleep_ref_position = convVec3(desc.position),
+            .sleep_ref_rotation = convQuat(desc.rotation),
+            .sleep_radius = body_mod.computeSleepRadius(shape),
             .entity = desc.entity,
         };
         try self.alloc.ensureUnusedCapacity(gpa, 1);
@@ -158,6 +177,70 @@ pub const BodyManager = struct {
         return self.bodies.items(.collision_layer)[idx];
     }
 
+    /// Safe getter: whether the body is currently asleep, or null if `id` is
+    /// stale/invalid.
+    pub fn isSleeping(self: *const BodyManager, id: BodyId) ?bool {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.flags)[idx].sleeping;
+    }
+
+    /// Safe getter: seconds accumulated in the body's current sleep window, or null
+    /// if `id` is stale/invalid. Eligibility compares it against
+    /// `SleepConfig.time_before_sleep`; it also feeds the Sleep-state debug overlay
+    /// (`engine-physics-forge.md` §1.8.9).
+    pub fn sleepTime(self: *const BodyManager, id: BodyId) ?Real {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.sleep_time)[idx];
+    }
+
+    /// Safe getter: whether the body is allowed to fall asleep, or null if `id` is
+    /// stale/invalid.
+    pub fn canSleep(self: *const BodyManager, id: BodyId) ?bool {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.flags)[idx].can_sleep;
+    }
+
+    /// Safe getter: the body's sleep radius (distance from its centre to the
+    /// furthest corner of its shape's local AABB), or null if `id` is
+    /// stale/invalid. Pose-invariant, computed once at creation.
+    pub fn sleepRadius(self: *const BodyManager, id: BodyId) ?Real {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.sleep_radius)[idx];
+    }
+
+    /// Wake the body and restart its sleep window at the current pose. Idempotent
+    /// on an already-awake body (the window still restarts — an external
+    /// solicitation is a solicitation either way, §1.8.4). No-op on a
+    /// stale/invalid handle.
+    ///
+    /// This is one of the two EXPLICIT sleep primitives (`setCanSleep` is the
+    /// other): every other wake in the engine either calls it or is one of the
+    /// activating mutators below.
+    pub fn wakeBody(self: *BodyManager, id: BodyId) void {
+        const idx = self.alloc.validate(id) orelse return;
+        self.wakeIndex(idx);
+    }
+
+    /// Allow or forbid this body falling asleep. Forbidding it also WAKES it
+    /// (`engine-physics-forge.md` §1.8.5, wake cause W1): a body that may no longer
+    /// sleep must not stay asleep. Allowing it does not put it to sleep — that is
+    /// the island arbitration's decision, and only at step 11 of the cycle. No-op
+    /// on a stale/invalid handle.
+    pub fn setCanSleep(self: *BodyManager, id: BodyId, value: bool) void {
+        const idx = self.alloc.validate(id) orelse return;
+        self.bodies.items(.flags)[idx].can_sleep = value;
+        if (!value) self.wakeIndex(idx);
+    }
+
+    /// Clear the sleeping flag and restart the sleep window at the current pose.
+    /// The index form both explicit primitives and the activating mutators share.
+    fn wakeIndex(self: *BodyManager, idx: u24) void {
+        self.bodies.items(.flags)[idx].sleeping = false;
+        self.bodies.items(.sleep_time)[idx] = 0;
+        self.bodies.items(.sleep_ref_position)[idx] = self.bodies.items(.position)[idx];
+        self.bodies.items(.sleep_ref_rotation)[idx] = self.bodies.items(.rotation)[idx];
+    }
+
     /// Safe getter: world-space linear velocity, or null if `id` is stale/invalid.
     pub fn linearVelocity(self: *const BodyManager, id: BodyId) ?Vec3r {
         const idx = self.alloc.validate(id) orelse return null;
@@ -171,6 +254,16 @@ pub const BodyManager = struct {
     }
 
     /// Set the world-space linear velocity. No-op on a stale/invalid handle.
+    ///
+    /// NON-ACTIVATING BY CONTRACT (`engine-physics-forge.md` §1.8.4): it neither
+    /// wakes the body nor restarts its sleep window. This is the SOLVER's own write
+    /// path — both passes write velocities and poses on every body in contact,
+    /// every tick, so treating those writes as external mutations would mean no
+    /// body in contact ever sleeps. Composing the wake with the write for the
+    /// gameplay-facing setters is the interface boundary's job
+    /// (`PhysicsModule`/`PhysicsWorld`, frozen M1.1.15) — exactly Jolt's
+    /// `Body::SetLinearVelocity` (inert) versus `BodyInterface::SetLinearVelocity`
+    /// (activating).
     pub fn setLinearVelocity(self: *BodyManager, id: BodyId, velocity: Vec3r) void {
         const idx = self.alloc.validate(id) orelse return;
         self.bodies.items(.linear_velocity)[idx] = velocity;
@@ -179,6 +272,8 @@ pub const BodyManager = struct {
     /// Set the world-space angular velocity. No-op on a stale/invalid handle.
     /// Internal to `BodyManager`: the public `PhysicsModule` 3D interface has no
     /// angular-velocity mutator (frozen decision at M1.1.15).
+    ///
+    /// NON-ACTIVATING BY CONTRACT — see `setLinearVelocity`.
     pub fn setAngularVelocity(self: *BodyManager, id: BodyId, velocity: Vec3r) void {
         const idx = self.alloc.validate(id) orelse return;
         self.bodies.items(.angular_velocity)[idx] = velocity;
@@ -189,6 +284,9 @@ pub const BodyManager = struct {
     /// `PhysicsModule` 3D surface carries no pose mutator — flagged for the M1.1.15
     /// freeze review. The NGS position solver (M1.1.7) writes its corrected poses
     /// through it.
+    ///
+    /// NON-ACTIVATING BY CONTRACT — see `setLinearVelocity`. Teleporting a body
+    /// from gameplay is `wakeBody` composed with this call, never this call alone.
     pub fn setPosition(self: *BodyManager, id: BodyId, new_position: Vec3r) void {
         const idx = self.alloc.validate(id) orelse return;
         self.bodies.items(.position)[idx] = new_position;
@@ -197,6 +295,8 @@ pub const BodyManager = struct {
     /// Set the world-space orientation (mirror of `setPosition`; the caller owns
     /// normalization). No-op on a stale/invalid handle. INTERNAL — see
     /// `setPosition`.
+    ///
+    /// NON-ACTIVATING BY CONTRACT — see `setLinearVelocity`.
     pub fn setRotation(self: *BodyManager, id: BodyId, new_rotation: Quatr) void {
         const idx = self.alloc.validate(id) orelse return;
         self.bodies.items(.rotation)[idx] = new_rotation;
@@ -206,30 +306,45 @@ pub const BodyManager = struct {
     /// accumulator. No-op on a stale/invalid handle. Any live body accumulates
     /// (the per-tick clear in `integrate` is uniform); a force must be
     /// re-applied every tick it should act.
+    ///
+    /// ACTIVATING (`engine-physics-forge.md` §1.8.4, wake cause W1): an externally
+    /// applied force is a solicitation, so it wakes the body and restarts its sleep
+    /// window — even if the body was already awake. This is the intent boundary the
+    /// non-activating setters above sit on the other side of.
     pub fn addForce(self: *BodyManager, id: BodyId, force: Vec3r) void {
         const idx = self.alloc.validate(id) orelse return;
         const forces = self.bodies.items(.force);
         forces[idx] = forces[idx].add(force);
+        self.wakeIndex(idx);
     }
 
     /// Accumulate a world-space torque (N·m) into the body's per-tick torque
     /// accumulator. No-op on a stale/invalid handle. Internal to `BodyManager`
     /// (the interface has no torque mutator — see `setAngularVelocity`).
+    ///
+    /// ACTIVATING — see `addForce`.
     pub fn addTorque(self: *BodyManager, id: BodyId, torque: Vec3r) void {
         const idx = self.alloc.validate(id) orelse return;
         const torques = self.bodies.items(.torque);
         torques[idx] = torques[idx].add(torque);
+        self.wakeIndex(idx);
     }
 
     /// Apply an instantaneous linear impulse (N·s) as an IMMEDIATE velocity
     /// change `Δv = impulse · inv_mass`. No-op on a stale/invalid handle, and
     /// naturally a no-op on a static/kinematic body (`inv_mass == 0`) — no
     /// `body_type` branch needed.
+    ///
+    /// ACTIVATING — see `addForce`. Note the asymmetry with `setLinearVelocity`,
+    /// which writes the same column and does NOT wake: the difference is the
+    /// INTENT, not the field touched. An impulse comes from outside the simulation;
+    /// a solver velocity write is the simulation itself.
     pub fn addImpulse(self: *BodyManager, id: BodyId, impulse: Vec3r) void {
         const idx = self.alloc.validate(id) orelse return;
         const inv_mass = self.bodies.items(.motion)[idx].inv_mass;
         const vel = self.bodies.items(.linear_velocity);
         vel[idx] = vel[idx].add(impulse.scale(inv_mass));
+        self.wakeIndex(idx);
     }
 
     /// Safe getter: the exact world-space AABB of the body's shape, or null if
