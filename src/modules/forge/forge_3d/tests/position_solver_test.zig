@@ -105,31 +105,42 @@ test "position_iterations = 0 reproduces the velocity-only resting behaviour" {
 // Every margin below is a measured value with headroom, never a tuning knob.
 //
 // `rest_margin` — how far under `n · penetration_slop` a body in an n-deep contact
-// chain may sit. The slop is the exact fixed point of ONE contact; a chain also
-// accumulates, per contact, the residual the velocity pass has not propagated down
-// it at the default 8 iterations (measured ≈ 1.4 mm per contact). Worst case over
-// the suite: 6.1 mm below 5·slop for the top box of the five-box stack (f64;
-// 2.8 mm at f32). 10 mm leaves 1.6× headroom.
-const rest_margin: Real = 1e-2;
+// chain may sit. The slop is the exact fixed point of ONE contact; a chain may add
+// the residual the velocity pass has not propagated down it. At the default 16
+// velocity iterations the five-box stack settles INSIDE `n · slop` at both
+// precisions (worst sink 16.4 mm against a 25 mm budget at f32, 8.2 mm at f64), so
+// this margin is pure headroom for the shorter chains; 5 mm keeps it honest.
+const rest_margin: Real = 5e-3;
 // `rest_overshoot` — NGS approaches its fixed point from below and never crosses
 // it, so a body may not sit ABOVE its analytic rest height by more than float
 // noise. Same bound as the tightened M1.1.6 resting test.
 const rest_overshoot: Real = 1e-4;
-// `settle_speed` — residual speed allowed in the last second of a run. The bound is
-// PHYSICAL, not fitted: the speed a free-falling body picks up in a single tick
-// (`g·dt`). Below it, no body is in sustained free fall — every contact is removing
-// its gravity impulse each tick, which is what "not bouncing" means. A single box
-// and short chains stop dead (measured 0.0 m/s); a five-deep chain keeps a residual
-// motion at the default 8 velocity iterations (measured 0.047 m/s at f32, 0.075 at
-// f64, and 0.0 from 16 iterations on) — a Sequential Impulses convergence property
-// of the ITERATION BUDGET, not of the position pass. Worst case is 2.2× inside.
+// `settle_speed` — the anti-BOUNCE ceiling: the speed a free-falling body picks up
+// in a single tick (`g·dt`). Below it no body is in sustained free fall, i.e. every
+// contact removes its gravity impulse each tick. PHYSICAL, not fitted. It bounds
+// what a contact must do; it does NOT say a body has stopped — `rest_speed` does.
 const settle_speed: Real = 9.81 * fixed_dt;
-// `lateral_bound` — sideways creep allowed over the run. Gauss-Seidel visits the
-// four points of a face manifold in sequence, so each pass leaves a small residual
-// tilt; in a tall chain that the velocity pass has not fully equilibrated, the tilt
-// walks the stack. Measured 0.081 m for the top box of the five-box stack at tick
-// 600 (0.022 m at 16 velocity iterations); 0.15 m leaves 1.9× headroom.
-const lateral_bound: Real = 0.15;
+// `rest_speed` — the IMMOBILITY criterion, two orders of magnitude below
+// `settle_speed`: 1 mm/s is stopped, not merely slow. Measured residual speed of
+// the five-box stack over the last second of a 1800-tick run at the default 16
+// velocity iterations: 1.2e-7 m/s (f32), 0.0 (f64). Headroom is enormous on
+// purpose — the assertion is meant to separate "at rest" from "creeping", and the
+// creeping regime it must reject sat at 4.7e-2 m/s.
+const rest_speed: Real = 1e-3;
+// `lateral_bound` — sideways offset a body may end up with. Gauss-Seidel visits the
+// four points of a face manifold in sequence, so the settling transient leaves a
+// small asymmetric offset; at the default 16 velocity iterations it is acquired
+// during settling and then FROZEN (see `lateral_creep_bound`). Measured worst over
+// a 1800-tick run: 0.0219 m for the top box of the five-box stack (f32; 0.0082 m at
+// f64). 0.04 m leaves 1.8× headroom.
+const lateral_bound: Real = 4e-2;
+// `lateral_creep_bound` — how much that offset may still GROW over the second half
+// of the run. This is what rejects a WALKING stack, independently of how large the
+// settling transient happened to be: at 8 velocity iterations the top box gained
+// 0.10 m between tick 600 and tick 1800; at 16 it changes by 6e-8 (f32) and 7e-8
+// (f64) — a decrease, not a growth. 1 mm sits four orders above the measured value
+// and four orders below the rejected regime.
+const lateral_creep_bound: Real = 1e-3;
 // `noise_margin` — float noise of a separation reconstructed from two world
 // coordinates, in the M1.1.4 `k·floatEps·coordScale` form. `coord_scale` is passed
 // per scene because the far-from-origin test works at 5 km.
@@ -154,24 +165,39 @@ test "a stack of five boxes is stable" {
     var boxes: [5]BodyId = undefined;
     try addStack(gpa, &world, &boxes, 0, 1);
 
+    // 1200 ticks (20 s): long enough that a creeping stack has to reveal itself —
+    // at 8 velocity iterations the top box gains another 6 cm over the second half,
+    // at the default 16 it is frozen.
+    var lateral_mid: [5]Real = undefined;
     var max_speed_late: Real = 0;
     var t: u32 = 0;
-    while (t < 600) : (t += 1) {
+    while (t < 1200) : (t += 1) {
         try world.step(gpa);
-        if (t >= 540) { // the last second
+        if (t == 599) {
+            for (boxes, 0..) |b, i| lateral_mid[i] = lateralOffset(&world, b, 0, 0);
+        }
+        if (t >= 1140) { // the last second
             for (boxes) |b| max_speed_late = @max(max_speed_late, world.bm.linearVelocity(b).?.length());
         }
     }
 
     for (boxes, 0..) |b, i| {
-        // Box `i` rests on `i + 1` contacts, each holding one slop of overlap.
+        // Box `i` rests on `i + 1` contacts, each holding at most one slop of overlap.
         const analytic = 1.0 + @as(Real, @floatFromInt(i));
         const allowed_sink = @as(Real, @floatFromInt(i + 1)) * world.cfg.penetration_slop + rest_margin;
         const y = world.bm.position(b).?.toArray()[1];
         try testing.expect(y >= analytic - allowed_sink);
         try testing.expect(y <= analytic + rest_overshoot);
-        try testing.expect(lateralOffset(&world, b, 0, 0) <= lateral_bound);
+
+        // Bounded sideways offset, and — the statement that actually rejects a
+        // walking stack — that offset must not still be GROWING in the second half.
+        const lateral_end = lateralOffset(&world, b, 0, 0);
+        try testing.expect(lateral_end <= lateral_bound);
+        try testing.expect(lateral_end - lateral_mid[i] <= lateral_creep_bound);
     }
+    // The stack is STOPPED, not merely slow: `rest_speed` is two orders below the
+    // `settle_speed` anti-bounce ceiling, which is asserted too.
+    try testing.expect(max_speed_late <= rest_speed);
     try testing.expect(max_speed_late <= settle_speed);
 
     // Determinism: an identical second run reproduces every pose bit-for-bit.
@@ -181,7 +207,7 @@ test "a stack of five boxes is stable" {
     var replay_boxes: [5]BodyId = undefined;
     try addStack(gpa, &replay, &replay_boxes, 0, 1);
     t = 0;
-    while (t < 600) : (t += 1) try replay.step(gpa);
+    while (t < 1200) : (t += 1) try replay.step(gpa);
     for (boxes, replay_boxes) |a, b| {
         const pa = world.bm.position(a).?.toArray();
         const pb = replay.bm.position(b).?.toArray();
