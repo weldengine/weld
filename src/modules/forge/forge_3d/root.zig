@@ -26,6 +26,10 @@ const integration = @import("pipeline/integration.zig");
 // M1.1.6 — rigid-body branch (Sequential Impulses contact solver). Re-exported
 // as the `rigid` namespace below; the comptime pin analyses its inline tests.
 const rigid_mod = @import("rigid/root.zig");
+// M1.1.8 — branch-neutral island partition core (union-find over opaque element
+// indices). Scalar-free, so it is re-exported as a namespace rather than bound to
+// `Real`; the comptime pin analyses its acceptance tests.
+const island_mod = @import("pipeline/island.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -135,6 +139,13 @@ pub fn collideOrderedGeneric(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, 
 /// The `(normal, closest points, base penetration)` fast-path seed at solver precision.
 pub const ContactSeed = narrowphase.ContactSeed(Real);
 
+// --- Islands (branch-neutral partition core) ---
+
+/// The island partition core: a union-find over opaque element indices, shared by
+/// both solver branches (`engine-physics-forge.md` §1.8.1). Scalar-free — the rigid
+/// adapter that maps bodies and constraints onto it lives in `rigid/`.
+pub const island = island_mod;
+
 // --- Integration (semi-implicit Euler) ---
 
 /// Advance every live body one fixed tick of `dt` under world-space `gravity`
@@ -163,6 +174,7 @@ comptime {
     _ = narrowphase;
     _ = integration;
     _ = rigid_mod;
+    _ = island_mod;
     _ = @import("tests/body_manager_test.zig");
     _ = @import("tests/integration_test.zig");
     _ = @import("tests/broadphase_test.zig");
@@ -173,4 +185,5 @@ comptime {
     _ = @import("tests/epa_robustness_test.zig");
     _ = @import("tests/solver_test.zig");
     _ = @import("tests/position_solver_test.zig");
+    _ = @import("tests/island_test.zig");
 }
