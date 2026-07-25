@@ -18,7 +18,9 @@
 //!   - **Purity.** The partition is a function of the SET of links alone, never of
 //!     the order they arrive in — union by size with a fixed tie-break, path
 //!     compression, no hash container, no address-dependent enumeration
-//!     (determinism by construction, M1.1.14).
+//!     (determinism by construction, M1.1.14). The REPRESENTATIVE is not: only the
+//!     partition is set-invariant. Which element ends up a group's root depends on
+//!     the link sequence, so a root is never a group identity — see `find`.
 //!
 //! Path compression means `find` mutates: it re-points the nodes it walks straight
 //! at their root. That changes the tree SHAPE, never the partition, and the shape
@@ -68,6 +70,12 @@ pub const UnionFind = struct {
     /// The representative index of `x`'s group. Two elements are in the same group
     /// iff their representatives are equal. Mutates: the walk is path-compressed,
     /// which changes the tree shape but never the partition.
+    ///
+    /// The representative is NOT canonical: which element ends up the root
+    /// depends on the link SEQUENCE, not just the link set (union by size decides
+    /// it). Never use it as a group identity, an ordering key, or a stable name —
+    /// derive those from the membership instead (the rigid adapter ranks islands
+    /// by minimum member `BodyId`, `engine-physics-forge.md` §1.8.1).
     pub fn find(self: *UnionFind, x: u32) u32 {
         std.debug.assert(x < self.parent.items.len);
         var root = x;

@@ -54,7 +54,7 @@ test "island core seeds singletons and links only seeded indices" {
     try testing.expectEqual(root_before, uf.find(1));
     try testing.expectEqual(root_before, uf.find(3));
 
-    // Symmetric: the reversed link is the same operation.
+    // Idempotent in the other endpoint order too: the pair is already merged.
     uf.link(3, 1);
     try testing.expectEqual(root_before, uf.find(1));
     try testing.expectEqual(root_before, uf.find(3));
@@ -74,6 +74,28 @@ test "island core seeds singletons and links only seeded indices" {
     try testing.expectEqual(@as(u32, 3), uf.count());
     i = 0;
     while (i < 3) : (i += 1) try testing.expectEqual(i, uf.find(i));
+}
+
+test "island core link is symmetric in endpoint order" {
+    const gpa = testing.allocator;
+    // Same link SET applied to two fresh instances, endpoints swapped in the
+    // second. Shape equality (`parent` and `size` element-wise), not just
+    // partition equality: the doc comment on `link` claims the reversed call
+    // is the same operation, so the resulting trees must be identical, and a
+    // canonical-label comparison would not catch a shape divergence.
+    const links = [_][2]u32{ .{ 0, 1 }, .{ 2, 1 }, .{ 3, 4 }, .{ 5, 6 }, .{ 4, 5 } };
+    var forward = island.UnionFind{};
+    defer forward.deinit(gpa);
+    var reversed = island.UnionFind{};
+    defer reversed.deinit(gpa);
+    try forward.seed(gpa, 8);
+    try reversed.seed(gpa, 8);
+    for (links) |l| {
+        forward.link(l[0], l[1]);
+        reversed.link(l[1], l[0]);
+    }
+    try testing.expectEqualSlices(u32, forward.parent.items, reversed.parent.items);
+    try testing.expectEqualSlices(u32, forward.size.items, reversed.size.items);
 }
 
 /// Decode `k` (`0 <= k < n!`) into the `k`-th permutation of `0..n` in
