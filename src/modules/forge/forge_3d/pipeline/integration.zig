@@ -52,6 +52,11 @@ const BodyManager = body_manager.BodyManager;
 /// `gravity` (m/s²), in ascending slot-index order, then clear the per-tick
 /// force/torque accumulators for every live body.
 ///
+/// SLEEPING bodies are skipped (`engine-physics-forge.md` §1.8.6) — but only for
+/// the integration itself: the accumulator reset stays uniform over all live
+/// bodies, sleepers included, so a force applied to a sleeper (which wakes it) is
+/// never left to fire twice.
+///
 /// For each DYNAMIC body — linear: `a = gravity·gravity_factor + force·inv_mass`;
 /// `v += a·dt`; `v *= max(0, 1 − linear_damping·dt)`. Angular:
 /// `α = (R·I_local_inv·Rᵀ)·torque`; `ω += α·dt`;
@@ -66,6 +71,7 @@ pub fn integrateVelocities(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
     const torques = bm.bodies.items(.torque);
     const motions = bm.bodies.items(.motion);
     const body_types = bm.bodies.items(.body_type);
+    const flags = bm.bodies.items(.flags);
 
     const n: u32 = @intCast(bm.bodies.len);
     var i: u32 = 0;
@@ -74,7 +80,9 @@ pub fn integrateVelocities(bm: *BodyManager, dt: Real, gravity: Vec3r) void {
         // them (their stale data must not be integrated).
         if (!bm.alloc.isAliveIndex(i)) continue;
 
-        if (body_types[i] == .dynamic) {
+        // A sleeper is not simulated (§1.8.6). Note the skip is on the INTEGRATION
+        // only: the accumulator reset below stays uniform over every live body.
+        if (body_types[i] == .dynamic and !flags[i].sleeping) {
             const mp = motions[i];
 
             // --- Linear ---
@@ -117,12 +125,14 @@ pub fn integratePositions(bm: *BodyManager, dt: Real) void {
     const linear_velocities = bm.bodies.items(.linear_velocity);
     const angular_velocities = bm.bodies.items(.angular_velocity);
     const body_types = bm.bodies.items(.body_type);
+    const flags = bm.bodies.items(.flags);
 
     const n: u32 = @intCast(bm.bodies.len);
     var i: u32 = 0;
     while (i < n) : (i += 1) {
         if (!bm.alloc.isAliveIndex(i)) continue;
         if (body_types[i] != .dynamic) continue;
+        if (flags[i].sleeping) continue; // a sleeper's pose is frozen (§1.8.6)
 
         // Position from the current (post-solve) velocity.
         positions[i] = positions[i].add(linear_velocities[i].scale(dt));

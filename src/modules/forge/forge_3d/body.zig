@@ -31,7 +31,16 @@ const EntityId = api.EntityId;
 pub const BodyFlags = packed struct(u8) {
     /// Continuous collision detection for fast movers (stored, unused until CCD).
     continuous: bool = false,
-    _reserved: u7 = 0,
+    /// Whether this body is ALLOWED to fall asleep. `false` forbids it — and
+    /// therefore forbids any island it belongs to from sleeping, since an island
+    /// sleeps only if every member can (`engine-physics-forge.md` §1.8.3).
+    can_sleep: bool = true,
+    /// Whether this body is currently asleep. A sleeper is not simulated: it is
+    /// skipped by both integration passes and by the broadphase proxy update, its
+    /// pairs produce no narrowphase work, and its sleep window stops advancing
+    /// (§1.8.6).
+    sleeping: bool = false,
+    _reserved: u5 = 0,
 };
 
 /// The inverse quantities the integrator/solver act on. Static and kinematic
@@ -86,9 +95,37 @@ pub const Body = struct {
     collision_layer: u8,
     /// Per-body flags.
     flags: BodyFlags,
+    /// Seconds the body has stayed within `SleepConfig.maxDisplacement()` of its
+    /// reference pose. Eligibility is `sleep_time >= time_before_sleep`
+    /// (`engine-physics-forge.md` §1.8.3). The window lives on the BODY and never
+    /// on the island: an island is rebuilt every tick and its identity is not
+    /// persistent, so a timer attached to one would be incoherent by construction.
+    sleep_time: Real,
+    /// Position at the start of the current sleep window. The criterion is a
+    /// DISPLACEMENT bound measured against this reference, never an instantaneous
+    /// velocity — a velocity criterion resets on a single noisy tick and never
+    /// sleeps a jittering body.
+    sleep_ref_position: Vec3r,
+    /// Orientation at the start of the current sleep window (see
+    /// `sleep_ref_position`).
+    sleep_ref_rotation: Quatr,
+    /// Distance from the body centre to the furthest corner of its shape's LOCAL
+    /// AABB, computed once at creation. It converts the rotation since the
+    /// reference pose into the displacement of the body's furthest material point,
+    /// so one bound in metres covers both translation and rotation.
+    sleep_radius: Real,
     /// Owning ECS entity.
     entity: EntityId,
 };
+
+/// The body's sleep radius: the distance from its centre to the furthest corner
+/// of `shape`'s local AABB (`engine-physics-forge.md` §1.8.3). Taking the
+/// component-wise maximum of `|min|` and `|max|` picks that corner without
+/// enumerating all eight — the furthest one is the one furthest along every axis
+/// at once. Computed once, at body creation: it is pose-invariant.
+pub fn computeSleepRadius(shape: Shape) Real {
+    return shape.local_aabb.min.abs().max(shape.local_aabb.max.abs()).length();
+}
 
 /// Derive `MotionProperties` from a descriptor and its shape. Inertia is the
 /// shape's unit-mass diagonal scaled by `desc.mass`, then inverted per axis.

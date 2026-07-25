@@ -57,7 +57,7 @@ const SolverConfig = solver_config.SolverConfig;
 ///
 /// TELEMETRY ONLY — never a control input: the pass's own decisions read the poses
 /// and the config, nothing else. Feeds `get_solver_iterations_stats`
-/// (`PhysicsDebugProvider`, `engine-physics-forge.md` §1.9); no other consumer is
+/// (`PhysicsDebugProvider`, `engine-physics-forge.md` §1.10); no other consumer is
 /// claimed at M1.1.7.
 pub const PositionSolveResult = struct {
     /// Position iterations actually run, `<= cfg.position_iterations`. The pass
