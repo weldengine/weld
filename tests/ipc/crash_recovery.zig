@@ -166,7 +166,7 @@ test "runtime kill -9 → the editor's receive ends in EOF" {
     // 62-67 ms under the load `zig build test` creates for itself, and it did
     // cross a 100 ms bound on one such run. Its home is the controlled
     // measurement in `validation/s6-go-nogo.md` G4, per
-    // `engine-zig-conventions.md` §13 "Benchmarks séparés des tests".
+    // `engine-zig-conventions.md` §13, which keeps benchmarks out of tests.
     var scratch: [256]u8 = undefined;
     const detect_res = server.connection().recvFrame(&scratch);
     try std.testing.expectError(error.UnexpectedEof, detect_res);

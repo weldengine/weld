@@ -931,6 +931,33 @@ pub fn build(b: *std.Build) void {
     );
     forge_np_bench_step.dependOn(&forge_np_bench_run.step);
 
+    // ------------------------------------- M1.1.9 forge raycast bench --------
+    //
+    // Closest / any / all raycast throughput over a 10 000-body STATIC scene,
+    // plus a short-bound variant. Writes `bench/results/forge_3d_raycast.md`.
+    // REPORTED, not gated — no envelope is pre-registered (bench header).
+    const forge_ray_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/forge_3d_raycast.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    forge_ray_bench_module.addImport("forge_3d", forge_3d_module);
+    forge_ray_bench_module.addImport("weld_forge", forge_api_module);
+    const forge_ray_bench_exe = b.addExecutable(.{
+        .name = "forge-raycast-bench",
+        .root_module = forge_ray_bench_module,
+    });
+    b.installArtifact(forge_ray_bench_exe);
+    const forge_ray_bench_run = b.addRunArtifact(forge_ray_bench_exe);
+    forge_ray_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| forge_ray_bench_run.addArgs(args);
+    const forge_ray_bench_step = b.step(
+        "bench-forge-raycast",
+        "Run the M1.1.9 forge raycast throughput bench (closest/any/all over 10k static bodies, writes bench/results/forge_3d_raycast.md)",
+    );
+    forge_ray_bench_step.dependOn(&forge_ray_bench_run.step);
+
     // -------------------------------------- M1.0.5 scene loader bench --------
     //
     // `loadFromBytes` on a ~10k-entity image synthesized in-bench via the
