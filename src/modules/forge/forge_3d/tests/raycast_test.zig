@@ -1420,24 +1420,24 @@ const CountingRayCollector = struct {
     }
 };
 
-/// Lower and upper bound on the LENGTH of any normal this kernel returns, at any
-/// distance. Distance-INDEPENDENT on purpose: a bound that grows with range would
-/// eventually admit a degenerate normal, which is the very defect F1 corrected.
+/// Slack on the returned normal's LENGTH, in ulps of 1. The kernel normalises the
+/// vector it returns, so this is an INVARIANT and not a distance-dependent
+/// tolerance (§1.11.4 bis): it holds at every distance, with no envelope. MEASURED
+/// worst case over a sweep out to 1e9 radii, sphere and capsule wall, at both
+/// precisions: 0.5 ulp.
 ///
-/// Calibrated on measurements, not taste. It must ADMIT the worst legitimate value
-/// the oblique sweep produced — `0.8557` at 2e6 radii — and REJECT the two failure
-/// modes actually observed: `0.0` (the pre-F1 kernel, whose hit point was
-/// `o + t·d`) and `0.49995` (solving the general quadratic in f32, see the test
-/// below). `0.75` sits 0.10 above the first and 0.25 below the second.
-const normal_length_floor: Real = 0.75;
-const normal_length_ceiling: Real = 1.25;
+/// A range wide enough to accommodate drift would mask exactly the defect the
+/// conditioning corrected, so the two failure modes are rejected by this invariant
+/// itself rather than by a calibrated band: `0.0` (the pre-F1 kernel, whose hit
+/// point was `o + t·d`) and `0.4999512` (solving the general quadratic in f32) are
+/// each thousands of ulps away.
+const normal_unit_k: Real = 4;
 
-/// The distance at which the scalar stops resolving a unit vector at all: one ulp
-/// of the coordinate reaches the shape's own radius. Beyond it a geometric
-/// statement about the normal is not merely imprecise, it is meaningless — so the
-/// precision assertion is made only inside this envelope, and the unitarity bound
-/// above carries the rest.
-fn resolvesUnitVectorAt(distance: Real, radius: Real) bool {
+/// The distance at which the scalar stops resolving the shape's geometry: one ulp
+/// of the coordinate reaches the shape's radius. Beyond it a statement about the
+/// normal's ORIENTATION is meaningless — the norm, being an invariant, is asserted
+/// regardless (§1.11.4 bis).
+fn resolvesGeometryAt(distance: Real, radius: Real) bool {
     return std.math.floatEps(Real) * distance < radius;
 }
 
@@ -1445,28 +1445,27 @@ test "the far-field conditioning holds on an OBLIQUE ray, and the kernel is the 
     // The earlier far-field tests are all aligned on +X, the one direction where the
     // perpendicular offset is zero and the arithmetic comes out EXACT: case (3)
     // below returns 1.0 exactly, which is why that coverage could not see any
-    // residue.
+    // residue. The oblique case is mandatory (§1.11.4 bis).
     //
     // MEASURED at f32 on origin (−3000.4, −3999.7, 0), direction (0.6, 0.8, 0)
     // normalised, r = 1 — ~5 000 m out and genuinely oblique. Four forms of the same
-    // geometry:
+    // geometry, comparing the HIT POINT's distance from the centre:
     //
-    //   1. this kernel, all f32 .............................. 0.9999154
-    //   2. general quadratic `a = d·d`, f64 arithmetic ........ 0.9999999
-    //   3. general quadratic, all f32 ........................ 0.4999512  (disc = 0)
-    //   4. perpendicular form corrected by `a`, all f32 ....... 0.9999154  (identical to 1)
+    //   1. this kernel's offset, all f32 ...................... 0.9999154
+    //   2. general quadratic `a = d·d`, f64 arithmetic ......... 0.9999999
+    //   3. general quadratic, all f32 ......................... 0.4999512  (disc = 0)
+    //   4. perpendicular form corrected by `a`, all f32 ........ 0.9999154  (identical to 1)
     //
-    // What these establish, and why the kernel stays as it is: the information IS
-    // present in the f32 inputs — line 2 extracts it — but f32 ARITHMETIC does not,
-    // and no reformulation recovers it. Line 4 shows why: for this direction
+    // The information IS present in the f32 inputs — line 2 extracts it — but f32
+    // ARITHMETIC does not, and no reformulation recovers it: for this direction
     // `|d|² − 1` rounds to exactly ZERO in f32, so the corrective factor `a` carries
-    // no information and the corrected form is bit-identical to the plain one. Line 3
-    // shows that solving the general quadratic in f32 is strictly WORSE — the
-    // discriminant cancels to zero and the normal comes back at half length. The
-    // residue is the representation of a 5 km coordinate in f32; `offset = w − root·d`
-    // already removed the only avoidable cancellation.
+    // nothing and line 4 is bit-identical to line 1, while line 3 shows the general
+    // quadratic is strictly worse. What the kernel then does is NORMALISE that
+    // offset, which is why the returned normal's LENGTH is unit to 0.5 ulp at any
+    // range while its ORIENTATION keeps the residue.
     const sphere = SupportShapeR{ .core = .point, .radius = 1 };
     const capsule = SupportShapeR{ .core = .{ .segment = 3 }, .radius = 1 };
+    const unit_tol = normal_unit_k * std.math.floatEps(Real);
 
     // (1) Sphere, oblique in the XY plane, at 5 000 m.
     {
@@ -1474,15 +1473,13 @@ test "the far-field conditioning holds on an OBLIQUE ray, and the kernel is the 
         const hit = (try narrowphase.rayShape(Real, sphere, v(-3000.4, -3999.7, 0), d)).?;
         try testing.expect(hit.distance >= 0);
         try testing.expect(hit.normal.dot(d) <= 0);
-        // The always-true bound first.
-        try testing.expect(hit.normal.length() >= normal_length_floor);
-        try testing.expect(hit.normal.length() <= normal_length_ceiling);
-        // Then the geometric statement, inside the envelope where it means anything.
-        try testing.expect(resolvesUnitVectorAt(5000, 1));
-        try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), std.math.floatEps(Real) * 5000);
-        // Closed-form incidence: `o · d = −5000` exactly here, so `w = o + 5000·d =
-        // (−0.4, 0, 0.3)`, an impact parameter of 0.5 on a unit sphere, hence
-        // `normal · d = −√(1 − 0.25)`.
+        // The NORM: tight, no envelope.
+        try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), unit_tol);
+        // The ORIENTATION: closed form — `o · d = −5000` exactly here, so
+        // `w = o + 5000·d = (−0.4, 0, 0.3)`, an impact parameter of 0.5 on a unit
+        // sphere, hence `normal · d = −√(1 − 0.25)` — bounded by the scalar's
+        // resolution at this distance, and only because that envelope holds here.
+        try testing.expect(resolvesGeometryAt(5000, 1));
         try testing.expectApproxEqAbs(-@sqrt(@as(Real, 0.75)), hit.normal.dot(d), std.math.floatEps(Real) * 5000);
     }
 
@@ -1493,10 +1490,8 @@ test "the far-field conditioning holds on an OBLIQUE ray, and the kernel is the 
     {
         const d = dir(0.6, 0, 0.8);
         const hit = (try narrowphase.rayShape(Real, capsule, v(-3000.4, 0, -3999.7), d)).?;
-        try testing.expect(hit.normal.length() >= normal_length_floor);
-        try testing.expect(hit.normal.length() <= normal_length_ceiling);
+        try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), unit_tol);
         try testing.expectEqual(@as(Real, 0), hit.normal.toArray()[1]); // radial: no Y
-        try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), std.math.floatEps(Real) * 5000);
         try testing.expectApproxEqAbs(-@sqrt(@as(Real, 0.75)), hit.normal.dot(d), std.math.floatEps(Real) * 5000);
     }
 
@@ -1508,31 +1503,40 @@ test "the far-field conditioning holds on an OBLIQUE ray, and the kernel is the 
         try testing.expectEqual(@as(Real, 4999), aligned.distance);
     }
 
-    // (4) Across a decade sweep out to 1e9 radii, the BOUNDED invariant holds
-    // everywhere — that is the assertion which can never accept a degenerate normal
-    // — while the geometric one is asserted only where the scalar still resolves a
-    // unit vector. MEASURED at f32: the error tracks `ulp(distance)` across the whole
-    // range (8.5e-5 against 1.2e-3 at 1e4; 1.4e-1 against 2.4e-1 at 2e6), the worst
-    // legitimate length is 0.8557 at 2e6, and past 2e7 the perpendicular offset
-    // itself rounds away so the normal returns exactly unit again. At f64 the
-    // envelope covers the entire sweep, with the error four orders inside it.
+    // (4) A decade sweep out to 1e9 radii. The NORM is asserted at every distance
+    // with the same tight bound — that is the invariant, and it can never accept a
+    // degenerate normal. The ORIENTATION is asserted only inside the envelope where
+    // the scalar still resolves the geometry. MEASURED at f32: norm error 0-0.5 ulp
+    // across the whole range, orientation error 2.1e-6 at 1e2 rising to 2.1e-1 past
+    // 1e7, tracking `ulp(distance)` throughout. At f64 both are four orders inside
+    // their bounds until 1e9.
+    //
+    // Every ray here is CONSTRUCTED to hit — the origin is placed at `distance` along
+    // −d with a 0.5 impact parameter — so a miss is a false negative and fails hard,
+    // naming the distance. A `continue` would have let the silent miss through the
+    // very test meant to detect it (§1.11.4 bis).
     {
         const d = dir(0.6, 0.8, 0);
         const perp = v(-d.toArray()[1], d.toArray()[0], 0).scale(0.5);
-        var checked_geometric: u32 = 0;
+        const want_cos = -@sqrt(@as(Real, 0.75));
+        var checked_orientation: u32 = 0;
         for ([_]Real{ 1e2, 1e4, 1e5, 1e6, 2e6, 1e7, 1e8, 1e9 }) |distance| {
             const origin = d.scale(-distance).add(perp);
-            const hit = (try narrowphase.rayShape(Real, sphere, origin, d)) orelse continue;
-            try testing.expect(hit.normal.length() >= normal_length_floor);
-            try testing.expect(hit.normal.length() <= normal_length_ceiling);
+            const maybe = try narrowphase.rayShape(Real, sphere, origin, d);
+            if (maybe == null) {
+                std.debug.print("false negative: constructed hit missed at distance {d}\n", .{distance});
+                return error.ConstructedRayMissed;
+            }
+            const hit = maybe.?;
+            try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), unit_tol);
             try testing.expect(hit.normal.dot(d) <= 0);
-            if (resolvesUnitVectorAt(distance, 1)) {
-                try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), std.math.floatEps(Real) * distance);
-                checked_geometric += 1;
+            if (resolvesGeometryAt(distance, 1)) {
+                try testing.expectApproxEqAbs(want_cos, hit.normal.dot(d), std.math.floatEps(Real) * distance);
+                checked_orientation += 1;
             }
         }
-        // The envelope is not empty at either precision, so the geometric assertion
-        // really ran — at f32 it covers everything below ~8.4e6 radii.
-        try testing.expect(checked_geometric >= 5);
+        // The orientation envelope is not empty at either precision, so that half of
+        // the assertion really ran — at f32 it covers everything below ~8.4e6 radii.
+        try testing.expect(checked_orientation >= 5);
     }
 }

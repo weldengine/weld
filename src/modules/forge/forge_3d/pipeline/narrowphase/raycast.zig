@@ -185,13 +185,24 @@ fn sphereEntryFromOutside(
 
 /// Outward normal of the sphere of radius `r` from the hit point's `offset`
 /// relative to the sphere centre.
+///
+/// The vector is NORMALISED, not merely divided by `r`. That makes the returned
+/// length a structural invariant — exactly unit to a few ulp at ANY distance,
+/// §1.11.4 bis — instead of a quantity that drifts with range: `|offset|` is only
+/// `r` to the precision of the coordinates it was built from, so `offset / r`
+/// inherited that drift and measured 0.8557 at 2e6 radii. What the conditioning
+/// cannot recover is the ORIENTATION, and separating the two is the point: a
+/// degenerate or short normal is now always a defect and never an effect of
+/// distance. The cost is one `sqrt` per ACCEPTED hit, not per candidate.
 fn sphereNormal(comptime T: type, r: T, offset: math.Vec(3, T), direction: math.Vec(3, T)) math.Vec(3, T) {
     // Guard at TRUE ZERO, not at an epsilon: `r == 0` is a degenerate
     // point-sphere, whose surface point IS its centre, so there is no outward
     // direction to report. `−direction` is the same choice §1.11.4 makes for the
-    // distance-zero case, and it keeps `normal · direction <= 0` true here too.
+    // distance-zero case, it keeps `normal · direction <= 0` true here too, and it
+    // is already unit — so it bypasses the normalisation rather than dividing by a
+    // zero-length offset.
     if (r == 0) return direction.neg();
-    return offset.scale(1 / r);
+    return offset.normalize();
 }
 
 /// Ray against a box core of half-extents `he` (radius 0, centred on the local
@@ -326,11 +337,14 @@ fn rayCapsule(
 
 /// Radial outward normal of the capsule wall from the hit point's radial offset
 /// from the axis. The Y component is zero on the cylindrical part.
+///
+/// Normalised for the same reason as `sphereNormal`: the length is an invariant,
+/// only the orientation carries the far-field residue (§1.11.4 bis).
 fn capsuleRadialNormal(comptime T: type, r: T, offset_x: T, offset_z: T, direction: math.Vec(3, T)) math.Vec(3, T) {
     // TRUE ZERO guard, same reasoning as `sphereNormal`: `r == 0` is a bare
-    // segment with no wall to carry a normal.
+    // segment with no wall to carry a normal, and `−direction` is already unit.
     if (r == 0) return direction.neg();
-    return math.Vec(3, T).fromArray(.{ offset_x / r, 0, offset_z / r });
+    return math.Vec(3, T).fromArray(.{ offset_x, 0, offset_z }).normalize();
 }
 
 /// Nearest entry on either cap sphere of the capsule, the origin being strictly

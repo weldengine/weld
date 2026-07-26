@@ -7,12 +7,12 @@
 
 | mode | ns/ray | rays/s | rays per 16.67 ms frame | hit rate |
 |---|---|---|---|---|
-| closest | 784.9 | 1274048 | 21234 | 0.88 |
-| any | 535.9 | 1866020 | 31100 | 0.88 |
-| all (buffer 32) | 1530.0 | 653595 | 10893 | 0.88 |
-| closest (5 m bound) | 374.9 | 2667378 | 44456 | 0.19 |
-| closest (swept order) | 171.7 | 5824112 | 97069 | 1.00 |
-| closest (swept, permuted) | 240.1 | 4164931 | 69416 | 1.00 |
+| closest | 746.3 | 1339944 | 22332 | 0.88 |
+| any | 546.0 | 1831502 | 30525 | 0.88 |
+| all (buffer 32) | 1532.4 | 652571 | 10876 | 0.88 |
+| closest (5 m bound) | 386.4 | 2587992 | 43133 | 0.19 |
+| closest (swept order) | 185.7 | 5385030 | 89750 | 1.00 |
+| closest (swept, permuted) | 253.7 | 3941663 | 65694 | 1.00 |
 
 **Reported, not gated.** No envelope is pre-registered: this is the first
 measurement of this path, and registering a bound before measuring its

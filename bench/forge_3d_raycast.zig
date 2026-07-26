@@ -149,7 +149,26 @@ fn report(name: []const u8, total_ns: i64, rays: usize, hits: usize) Measure {
 }
 
 pub fn main(init: std.process.Init) !void {
-    const gpa = init.gpa;
+    _ = init;
+    // An explicit leak-checking allocator, NOT `init.gpa`: in ReleaseFast that one
+    // does not detect leaks, which is why seven of them here — a report header plus
+    // six table rows, each `allocPrint`ed and then copied away — survived three
+    // rounds of review invisibly. Every allocation on this path is setup or report
+    // writing, outside the timed loops, so the checking cost is not measured.
+    // `safety` is FORCED true. Its default is `std.debug.runtime_safety`, which is
+    // false in ReleaseFast — so `DebugAllocator(.{})` here would have tracked
+    // nothing and reported "no leaks" unconditionally. Verified by reintroducing one
+    // of the leaks: with the default it stayed silent, with this it reports.
+    var debug_allocator: std.heap.DebugAllocator(.{ .safety = true }) = .init;
+    const gpa = debug_allocator.allocator();
+    defer {
+        const leaked = debug_allocator.deinit();
+        if (leaked == .leak) {
+            std.debug.print("LEAK DETECTED: the bench leaked memory (see the trace above)\n", .{});
+        } else {
+            std.debug.print("  allocator: no leaks\n", .{});
+        }
+    }
     if (builtin.mode != .ReleaseFast) {
         std.debug.print("warning: build mode is {s}; absolute ns are only meaningful in ReleaseFast\n", .{@tagName(builtin.mode)});
     }
@@ -363,7 +382,10 @@ pub fn main(init: std.process.Init) !void {
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(gpa);
-    try buf.appendSlice(gpa, try std.fmt.allocPrint(gpa,
+    // Formatted straight into the list. The previous form was
+    // `appendSlice(gpa, try allocPrint(gpa, ...))`, which allocated a temporary for
+    // every row, copied it in, and never freed it.
+    try buf.print(gpa,
         \\# forge_3d raycast throughput bench
         \\
         \\- Build mode: {s}
@@ -374,11 +396,11 @@ pub fn main(init: std.process.Init) !void {
         \\| mode | ns/ray | rays/s | rays per 16.67 ms frame | hit rate |
         \\|---|---|---|---|---|
         \\
-    , .{ @tagName(builtin.mode), n_bodies, n_rays, n_reps, checksum }));
+    , .{ @tagName(builtin.mode), n_bodies, n_rays, n_reps, checksum });
     for (measures) |m| {
-        try buf.appendSlice(gpa, try std.fmt.allocPrint(gpa, "| {s} | {d:.1} | {d:.0} | {d:.0} | {d:.2} |\n", .{
+        try buf.print(gpa, "| {s} | {d:.1} | {d:.0} | {d:.0} | {d:.2} |\n", .{
             m.name, m.ns_per_ray, m.rays_per_s, frame_ns / m.ns_per_ray, m.hit_rate,
-        }));
+        });
     }
     try buf.appendSlice(gpa,
         \\
