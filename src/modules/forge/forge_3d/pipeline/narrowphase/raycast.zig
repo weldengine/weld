@@ -74,6 +74,13 @@ pub fn rayShape(
 ) error{UnsupportedShape}!?LocalHit(T) {
     std.debug.assert(@abs(direction.lengthSq() - 1) <= unit_k * std.math.floatEps(T));
 
+    // The shape rejection comes FIRST, before anything looks at the origin: a
+    // rounded box is unsupported as a SHAPE, and that answer cannot depend on
+    // where the ray starts. Placed after the membership test below, an origin
+    // inside the core would have returned a distance-zero hit and never reached
+    // the rejection — the exact silent miss this file promises not to allow.
+    if (shape.core == .box and shape.radius != 0) return error.UnsupportedShape;
+
     // Solid convex: inside — boundary included — is a hit at distance zero, and
     // the normal is `−direction` because no surface normal is defined there
     // (§1.11.4). Testing membership up front also removes every negative-root
@@ -86,8 +93,10 @@ pub fn rayShape(
     switch (shape.core) {
         .point => return raySphere(T, shape.radius, origin, direction),
         .box => |half_extents| {
-            // A rounded box is out of this milestone's shape set. Fail loud.
-            if (shape.radius != 0) return error.UnsupportedShape;
+            // Defensive: the hoisted check above already rejected a rounded box,
+            // so this cannot fire — it is kept so a future edit that moves the
+            // rejection breaks here loudly instead of silently approximating.
+            std.debug.assert(shape.radius == 0);
             return rayBox(T, half_extents, origin, direction);
         },
         .segment => |half_height| return rayCapsule(T, half_height, shape.radius, origin, direction),
@@ -96,13 +105,20 @@ pub fn rayShape(
 
 /// Whether `p` lies in the solid shape, boundary INCLUDED (the body is closed,
 /// and this matches the face-inclusive convention of `Aabb.contains`).
+///
+/// Precondition: a box core carries `radius == 0`. A rounded box is not part of
+/// this shape set and its inflated volume is NOT what the box arm measures, so
+/// asking this function about one is a programming error — asserted here rather
+/// than left to the caller's protection, since this is `pub` and reachable
+/// directly through the package facade. Same shape of invariant as `supportShape`
+/// and `worldAabb`, which carry theirs explicitly instead of tacitly.
 pub fn containsPoint(comptime T: type, shape: support.SupportShape(T), p: math.Vec(3, T)) bool {
     const r = shape.radius;
     switch (shape.core) {
         .point => return p.lengthSq() <= r * r,
         .box => |half_extents| {
-            // The inflation radius of a box is 0 in this shape set; a rounded box
-            // is rejected by `rayShape` before it can reach here.
+            // rounded box: rejected by `rayShape`, unsupported here
+            std.debug.assert(r == 0);
             const a = p.abs();
             return @reduce(.And, a.data <= half_extents.data);
         },

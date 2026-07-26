@@ -435,6 +435,25 @@ test "a rounded box fails loud instead of missing silently" {
     // shape set. It must be an error, never a null (which would read as "no hit")
     // and never a plain box (which would under-report the surface).
     const rounded = SupportShapeR{ .core = .{ .box = v(1, 1, 1) }, .radius = 0.25 };
+
+    // The DISCRIMINATING case: an origin INSIDE the core. It is the only one that
+    // tells a rejection carried by the SHAPE from a rejection carried by the
+    // trajectory — with the check placed after the solid-membership test, this
+    // input returned a distance-zero hit and never reached the rejection at all,
+    // while the exterior case below passed for an apparent reason that did not
+    // cover it. No mutation of the kernels could have surfaced that: mutation
+    // tests the code against the tests present, never the tests against the
+    // inputs absent.
+    try testing.expectError(
+        error.UnsupportedShape,
+        narrowphase.rayShape(Real, rounded, Vec3r.zero, dir(1, 0, 0)),
+    );
+    // On a face of the core, likewise inside for the membership test.
+    try testing.expectError(
+        error.UnsupportedShape,
+        narrowphase.rayShape(Real, rounded, v(1, 0, 0), dir(1, 0, 0)),
+    );
+    // The exterior origin stays — it costs nothing and covers the ordinary path.
     try testing.expectError(
         error.UnsupportedShape,
         narrowphase.rayShape(Real, rounded, v(-10, 0, 0), dir(1, 0, 0)),
