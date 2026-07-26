@@ -1046,3 +1046,461 @@ test "queryRay node count grows logarithmically" {
     try std.testing.expect(counts[1] >= counts[0] * 10);
     try std.testing.expect(visited_at[1] < visited_at[0] * 3);
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.10 / E2 — swept-volume traversal (`queryCast`)
+// ---------------------------------------------------------------------------
+//
+// `queryCast` is `queryRay` with one difference: each node's stored box is inflated
+// by the cast volume's half-extents before the slab test, and the ray starts at the
+// CENTRE of the cast shape's initial world AABB (`engine-physics-forge.md` §1.11.10).
+// `queryRay` is now that call at a zero extent, so the first test below is the
+// refactor's proof and asserts counts MEASURED BEFORE it.
+
+/// Cast sink: the swept counterpart of `RayCollector`, which is left untouched so
+/// the bit-identity test exercises the M1.1.9 collector as delivered.
+///
+/// Its exact test is the same slab predicate on the INFLATED box — the brute-force
+/// reference every test here compares against, and the stand-in for the exact kernel
+/// E3 will write.
+const CastCollector = struct {
+    gpa: std.mem.Allocator,
+    boxes: []const Aabbf,
+    ray: BvhF.RayT,
+    extent: Vec3,
+    tighten: bool,
+
+    items: std.ArrayListUnmanaged(u32) = .empty,
+    bound: f32 = std.math.inf(f32),
+    best_distance: f32 = std.math.inf(f32),
+    best_ud: ?u32 = null,
+
+    pub fn add(self: *CastCollector, user_data: u32) void {
+        self.items.append(self.gpa, user_data) catch @panic("collector OOM");
+        const inflated = self.boxes[user_data].inflate(self.extent);
+        const iv = inflated.rayInterval(self.ray.origin, self.ray.inv_dir, self.ray.dir_is_zero) orelse
+            return; // a fat-box candidate the exact test rejects
+        const distance = @max(iv.enter, 0); // already overlapping at t = 0
+        if (distance < self.best_distance) {
+            self.best_distance = distance;
+            self.best_ud = user_data;
+            if (self.tighten) self.bound = distance;
+        }
+    }
+
+    pub fn maxDistance(self: *const CastCollector) f32 {
+        return self.bound;
+    }
+
+    pub fn shouldStop(_: *const CastCollector) bool {
+        return false;
+    }
+
+    fn deinit(self: *CastCollector) void {
+        self.items.deinit(self.gpa);
+    }
+    fn sortedOwned(self: *CastCollector) []u32 {
+        std.mem.sort(u32, self.items.items, {}, std.sort.asc(u32));
+        return self.items.items;
+    }
+};
+
+/// The 800-box random cloud of `queryRay collects every proxy the ray crosses`,
+/// reproduced construction for construction — same seed, same order, same zero
+/// margin. The reproduction is not taken on trust: the visited counts baked into the
+/// bit-identity test were measured through this exact sequence, so a divergence from
+/// the M1.1.9 scene would show up there.
+fn buildCloud(gpa: std.mem.Allocator, tree: *BvhF, boxes: *std.ArrayListUnmanaged(Aabbf)) !void {
+    var prng = std.Random.DefaultPrng.init(0x2A11_D0C5);
+    const rng = prng.random();
+    var i: u32 = 0;
+    while (i < 800) : (i += 1) {
+        const box = boxCe(.{
+            rng.float(f32) * 60 - 30,
+            rng.float(f32) * 60 - 30,
+            rng.float(f32) * 60 - 30,
+        }, 0.3 + rng.float(f32) * 1.5);
+        _ = try tree.insert(gpa, box, i);
+        try boxes.append(gpa, box);
+    }
+}
+
+/// The five rays that cloud is queried with: axis-aligned (two zero lanes), the full
+/// diagonal, one starting inside the cloud, one that misses everything, and one
+/// reversed.
+const cloud_rays = [_]BvhF.RayT{
+    BvhF.RayT.init(Vec3.fromArray(.{ -50, 0, 0 }), Vec3.unit_x),
+    BvhF.RayT.init(Vec3.fromArray(.{ -50, -50, -50 }), Vec3.one),
+    BvhF.RayT.init(Vec3.zero, Vec3.fromArray(.{ 1, 2, -3 })),
+    BvhF.RayT.init(Vec3.fromArray(.{ -50, 100, 0 }), Vec3.unit_x),
+    BvhF.RayT.init(Vec3.fromArray(.{ 50, 0, 0 }), Vec3.unit_x.neg()),
+};
+
+/// The 200-box line of `queryRay prunes with the collector bound`, inserted
+/// FAR-TO-NEAR so the tree's child order and the ray's near order disagree.
+fn buildLine(gpa: std.mem.Allocator, tree: *BvhF, boxes: *std.ArrayListUnmanaged(Aabbf)) !void {
+    try boxes.resize(gpa, 200);
+    var ud: u32 = 200;
+    while (ud > 0) {
+        ud -= 1;
+        const box = boxCe(.{ @as(f32, @floatFromInt(ud)) * 4, 0, 0 }, 0.5);
+        boxes.items[ud] = box;
+        _ = try tree.insert(gpa, box, ud);
+    }
+}
+
+test "queryRay at zero extent is bit-identical to M1.1.9" {
+    const gpa = std.testing.allocator;
+
+    // THE REFACTOR'S PROOF. `queryRay` is now `queryCast` at a zero extent, and a
+    // zero added to a float is not unconditionally a no-op: `max + 0` maps a `−0.0`
+    // bound to `+0.0` (`Bvh.queryRay` carries the full argument for why nothing
+    // downstream can see the difference). The claim is settled by measurement, not
+    // by the argument alone.
+    //
+    // The counts below were MEASURED on the pre-refactor traversal, through the
+    // scene builders above, before `queryCast` existed. Two of them are independently
+    // corroborated: the 399 / 17 of the line are the figures the M1.1.9 pruning test
+    // already records in its own comment, and they were re-read off the running code
+    // rather than copied from it.
+    //
+    // Visited counts are asserted as EXACT literals here and nowhere else. That is
+    // legitimate precisely because the claim is "unchanged by this refactor" on a
+    // fixed scene; §1.11.6's rule that a visited count is never invariant is about
+    // creation order, which this test holds constant on purpose.
+    const cloud_expect = [cloud_rays.len]struct { all_visited: u32, all_collected: usize, closest_visited: u32, closest_collected: usize }{
+        .{ .all_visited = 91, .all_collected = 1, .closest_visited = 77, .closest_collected = 1 },
+        .{ .all_visited = 181, .all_collected = 3, .closest_visited = 125, .closest_collected = 1 },
+        .{ .all_visited = 115, .all_collected = 2, .closest_visited = 89, .closest_collected = 1 },
+        .{ .all_visited = 1, .all_collected = 0, .closest_visited = 1, .closest_collected = 0 },
+        .{ .all_visited = 91, .all_collected = 1, .closest_visited = 91, .closest_collected = 1 },
+    };
+
+    var tree = BvhF.init(.{ .margin = 0 });
+    defer tree.deinit(gpa);
+    var boxes: std.ArrayListUnmanaged(Aabbf) = .empty;
+    defer boxes.deinit(gpa);
+    try buildCloud(gpa, &tree, &boxes);
+    tree.validate();
+
+    for (cloud_rays, cloud_expect) |ray, want| {
+        inline for (.{ false, true }) |tighten| {
+            const expect_visited = if (tighten) want.closest_visited else want.all_visited;
+            const expect_collected = if (tighten) want.closest_collected else want.all_collected;
+
+            var via_ray = RayCollector{ .gpa = gpa, .boxes = boxes.items, .ray = ray, .tighten = tighten };
+            defer via_ray.deinit();
+            const visited_ray = tree.queryRay(ray, &via_ray);
+
+            // (1) the count and the set are what the pre-refactor traversal produced
+            try std.testing.expectEqual(expect_visited, visited_ray);
+            try std.testing.expectEqual(expect_collected, via_ray.items.items.len);
+
+            // (2) and the explicit zero-extent cast agrees with it exactly — same
+            // count, same set, so the delegation is not merely plausible
+            var via_cast = CastCollector{
+                .gpa = gpa,
+                .boxes = boxes.items,
+                .ray = ray,
+                .extent = Vec3.zero,
+                .tighten = tighten,
+            };
+            defer via_cast.deinit();
+            const visited_cast = tree.queryCast(ray, Vec3.zero, &via_cast);
+            try std.testing.expectEqual(visited_ray, visited_cast);
+            try std.testing.expectEqualSlices(u32, via_ray.sortedOwned(), via_cast.sortedOwned());
+        }
+    }
+
+    // The line scene, both selection modes, same two claims.
+    var line = BvhF.init(.{ .margin = 0 });
+    defer line.deinit(gpa);
+    var lboxes: std.ArrayListUnmanaged(Aabbf) = .empty;
+    defer lboxes.deinit(gpa);
+    try buildLine(gpa, &line, &lboxes);
+    line.validate();
+
+    const lray = BvhF.RayT.init(Vec3.fromArray(.{ -10, 0, 0 }), Vec3.unit_x);
+    const line_expect = [2]struct { visited: u32, collected: usize }{
+        .{ .visited = 399, .collected = 200 }, // all
+        .{ .visited = 17, .collected = 1 }, // closest
+    };
+    inline for (.{ false, true }, line_expect) |tighten, want| {
+        var via_ray = RayCollector{ .gpa = gpa, .boxes = lboxes.items, .ray = lray, .tighten = tighten };
+        defer via_ray.deinit();
+        try std.testing.expectEqual(want.visited, line.queryRay(lray, &via_ray));
+        try std.testing.expectEqual(want.collected, via_ray.items.items.len);
+
+        var via_cast = CastCollector{
+            .gpa = gpa,
+            .boxes = lboxes.items,
+            .ray = lray,
+            .extent = Vec3.zero,
+            .tighten = tighten,
+        };
+        defer via_cast.deinit();
+        try std.testing.expectEqual(want.visited, line.queryCast(lray, Vec3.zero, &via_cast));
+        try std.testing.expectEqualSlices(u32, via_ray.sortedOwned(), via_cast.sortedOwned());
+    }
+
+    // A COUNT AND A SET ARE NOT ENOUGH, and this was measured rather than reasoned:
+    // delegating at an extent of 0.001 instead of zero left every count and every set
+    // above unchanged — the cloud's boxes are far apart and the line's are spaced 4 —
+    // so the two scenes are blind to a small non-zero extent. The M1.1.9 suite caught
+    // it, on the one assertion in it that is sensitive at the ulp: a bound placed
+    // exactly at a box's entry parameter.
+    //
+    // That sensitivity belongs in this test too, since this is the one that claims to
+    // be the refactor's proof. A single box entered at exactly t == 10 by a unit ray
+    // from the origin: any inflation lowers that entry, so a bound one ulp BELOW 10
+    // stops rejecting it. Both entries are driven through the same two bounds.
+    {
+        var one = BvhF.init(.{ .margin = 0 });
+        defer one.deinit(gpa);
+        const box = Aabbf.fromMinMax(Vec3.fromArray(.{ 10, -1, -1 }), Vec3.fromArray(.{ 12, 1, 1 }));
+        _ = try one.insert(gpa, box, 0);
+        const single = [_]Aabbf{box};
+        const uray = BvhF.RayT.init(Vec3.zero, Vec3.unit_x);
+        const just_below: f32 = @bitCast(@as(u32, @bitCast(@as(f32, 10))) - 1);
+
+        const bounds = [2]f32{ 10, just_below };
+        const admitted = [2]usize{ 1, 0 }; // closed at the bound; one ulp below, out
+        for (bounds, admitted) |bound, want_len| {
+            var via_ray = RayCollector{ .gpa = gpa, .boxes = &single, .ray = uray, .tighten = false, .bound = bound };
+            defer via_ray.deinit();
+            _ = one.queryRay(uray, &via_ray);
+            try std.testing.expectEqual(want_len, via_ray.items.items.len);
+
+            var via_cast = CastCollector{
+                .gpa = gpa,
+                .boxes = &single,
+                .ray = uray,
+                .extent = Vec3.zero,
+                .tighten = false,
+                .bound = bound,
+            };
+            defer via_cast.deinit();
+            _ = one.queryCast(uray, Vec3.zero, &via_cast);
+            try std.testing.expectEqual(want_len, via_cast.items.items.len);
+        }
+
+        // And the entry parameter itself is exact: 10, not 10 minus an inflation.
+        var exact = RayCollector{ .gpa = gpa, .boxes = &single, .ray = uray, .tighten = true };
+        defer exact.deinit();
+        _ = one.queryRay(uray, &exact);
+        try std.testing.expectEqual(@as(f32, 10), exact.best_distance);
+    }
+}
+
+test "queryCast collects every proxy the swept box crosses" {
+    const gpa = std.testing.allocator;
+    // margin 0 → stored box == tight box, so the brute-force reference is the same
+    // inflated-slab predicate over every leaf.
+    var tree = BvhF.init(.{ .margin = 0 });
+    defer tree.deinit(gpa);
+    var boxes: std.ArrayListUnmanaged(Aabbf) = .empty;
+    defer boxes.deinit(gpa);
+    try buildCloud(gpa, &tree, &boxes);
+    tree.validate();
+
+    // Zero (the ray case), isotropic, strongly anisotropic, and one large enough to
+    // sweep a good fraction of the cloud — so the reference is exercised where the
+    // candidate set is small AND where it is large.
+    const extents = [_]Vec3{
+        Vec3.zero,
+        Vec3.splat(1),
+        Vec3.fromArray(.{ 0.2, 2.5, 0.05 }),
+        Vec3.splat(6),
+    };
+
+    var total_collected: usize = 0;
+    for (extents) |extent| {
+        for (cloud_rays) |ray| {
+            var got = CastCollector{
+                .gpa = gpa,
+                .boxes = boxes.items,
+                .ray = ray,
+                .extent = extent,
+                .tighten = false,
+            };
+            defer got.deinit();
+            _ = tree.queryCast(ray, extent, &got);
+
+            var want: std.ArrayListUnmanaged(u32) = .empty;
+            defer want.deinit(gpa);
+            for (boxes.items, 0..) |box, ud| {
+                const iv = box.inflate(extent).rayInterval(ray.origin, ray.inv_dir, ray.dir_is_zero) orelse continue;
+                if (iv.exit >= 0) try want.append(gpa, @intCast(ud));
+            }
+
+            std.mem.sort(u32, want.items, {}, std.sort.asc(u32));
+            try std.testing.expectEqualSlices(u32, want.items, got.sortedOwned());
+            total_collected += want.items.len;
+        }
+    }
+    // The sweep really found things: an all-empty reference would satisfy every
+    // `expectEqualSlices` above and prove nothing.
+    try std.testing.expect(total_collected > 100);
+}
+
+test "the extent widens the candidate set by exactly the Minkowski sum" {
+    const gpa = std.testing.allocator;
+    // One unit box centred at (10, 2, 0): its Y span is [1.5, 2.5]. A ray from the
+    // origin along +X travels at Y = 0 and misses it by 1.5 exactly.
+    //
+    // Inflating the node by `e` on Y moves its lower face to `1.5 − e`, so the ray
+    // is admitted exactly when `e >= 1.5` — face-inclusive, like every other
+    // predicate in `Aabb`. Below, at, and above that value are all asserted, which
+    // is what makes this a two-sided test of the inflation rather than a
+    // demonstration that a big extent collects more.
+    var tree = BvhF.init(.{ .margin = 0 });
+    defer tree.deinit(gpa);
+    const box = boxCe(.{ 10, 2, 0 }, 0.5);
+    _ = try tree.insert(gpa, box, 0);
+    const boxes = [_]Aabbf{box};
+    const ray = BvhF.RayT.init(Vec3.zero, Vec3.unit_x);
+
+    const cases = [_]struct { e: f32, hit: bool }{
+        .{ .e = 0, .hit = false }, // the ray case: misses
+        .{ .e = 1.4, .hit = false }, // still short of the gap
+        .{ .e = 1.5, .hit = true }, // exactly the gap → inclusive
+        .{ .e = 1.6, .hit = true }, // past it
+    };
+    for (cases) |case| {
+        const extent = Vec3.fromArray(.{ 0, case.e, 0 });
+        var got = CastCollector{
+            .gpa = gpa,
+            .boxes = &boxes,
+            .ray = ray,
+            .extent = extent,
+            .tighten = false,
+        };
+        defer got.deinit();
+        _ = tree.queryCast(ray, extent, &got);
+        try std.testing.expectEqual(@as(usize, if (case.hit) 1 else 0), got.items.items.len);
+        // A hit at `e = 1.5` also has to arrive at the right PARAMETER: the swept box
+        // first touches at x = 10 − 0.5 = 9.5, the ray starting at the origin.
+        if (case.hit) try std.testing.expectApproxEqAbs(@as(f32, 9.5), got.best_distance, 1e-5);
+    }
+
+    // Inflation on an axis the gap is not on changes nothing — the widening is
+    // per-axis, not a scalar radius.
+    const wrong_axis = Vec3.fromArray(.{ 5, 0, 5 });
+    var none = CastCollector{
+        .gpa = gpa,
+        .boxes = &boxes,
+        .ray = ray,
+        .extent = wrong_axis,
+        .tighten = false,
+    };
+    defer none.deinit();
+    _ = tree.queryCast(ray, wrong_axis, &none);
+    try std.testing.expectEqual(@as(usize, 0), none.items.items.len);
+}
+
+test "queryCast prunes with the collector bound" {
+    const gpa = std.testing.allocator;
+    var tree = BvhF.init(.{ .margin = 0 });
+    defer tree.deinit(gpa);
+    var boxes: std.ArrayListUnmanaged(Aabbf) = .empty;
+    defer boxes.deinit(gpa);
+    try buildLine(gpa, &tree, &boxes);
+    tree.validate();
+
+    // A non-zero extent, so the pruning being measured is the SWEPT traversal's and
+    // not the ray path's. The boxes are half-extent 0.5 spaced 4 apart, so a 0.25
+    // inflation leaves them disjoint and all 200 stay reachable.
+    const extent = Vec3.splat(0.25);
+    const ray = BvhF.RayT.init(Vec3.fromArray(.{ -10, 0, 0 }), Vec3.unit_x);
+
+    var all = CastCollector{ .gpa = gpa, .boxes = boxes.items, .ray = ray, .extent = extent, .tighten = false };
+    defer all.deinit();
+    const visited_all = tree.queryCast(ray, extent, &all);
+
+    var closest = CastCollector{ .gpa = gpa, .boxes = boxes.items, .ray = ray, .extent = extent, .tighten = true };
+    defer closest.deinit();
+    const visited_closest = tree.queryCast(ray, extent, &closest);
+
+    // DISCRIMINATION GUARD. Without it the test would pass on a traversal that
+    // ignores `maxDistance()` altogether: both runs would return the same count and
+    // agree on the winner, and nothing would be proven. The strict `<` is both the
+    // assertion and the guard — it fails if the bound prunes nothing.
+    try std.testing.expect(visited_closest < visited_all);
+
+    // Pruning must not change the answer: the nearest box is the one at x = 0, whose
+    // inflated near face is at 0 − 0.75 = −0.75, reached from x = −10 at t = 9.25.
+    try std.testing.expectEqual(all.best_ud, closest.best_ud);
+    try std.testing.expectEqual(@as(?u32, 0), closest.best_ud);
+    try std.testing.expectEqual(all.best_distance, closest.best_distance);
+    try std.testing.expectApproxEqAbs(@as(f32, 9.25), closest.best_distance, 1e-5);
+
+    // The `all` collector really did see the whole line — otherwise "strictly fewer"
+    // would be measuring two prunings against each other.
+    try std.testing.expectEqual(@as(usize, 200), all.items.items.len);
+    try std.testing.expect(closest.items.items.len < all.items.items.len);
+}
+
+test "queryCast visits all four layer trees" {
+    const gpa = std.testing.allocator;
+    var bph = BphF.init(.{ .margin = 0 });
+    defer bph.deinit(gpa);
+
+    // One proxy per layer on the +X axis, all OFFSET to Y ∈ [1, 3]. A ray along +X
+    // from the origin travels at Y = 0 and reaches none of them, so a zero extent
+    // collects nothing and the extent is what carries the query into every tree —
+    // this test cannot pass on a traversal that walks the four trees but drops the
+    // inflation.
+    var boxes: [broadphase.layer_count]Aabbf = undefined;
+    for (0..broadphase.layer_count) |i| {
+        boxes[i] = boxCe(.{ @as(f32, @floatFromInt(i)) * 10 + 5, 2, 0 }, 1);
+    }
+    _ = try bph.insert(gpa, .static, boxes[0], 0);
+    _ = try bph.insert(gpa, .dynamic, boxes[1], 1);
+    _ = try bph.insert(gpa, .debris, boxes[2], 2);
+    _ = try bph.insert(gpa, .trigger, boxes[3], 3);
+
+    const ray = BphF.RayT.init(Vec3.zero, Vec3.unit_x);
+    const extent = Vec3.fromArray(.{ 0, 1.5, 0 });
+
+    // Zero extent: nothing, in any tree.
+    var flat = CastCollector{ .gpa = gpa, .boxes = &boxes, .ray = ray, .extent = Vec3.zero, .tighten = false };
+    defer flat.deinit();
+    _ = bph.queryCast(ray, Vec3.zero, &flat);
+    try std.testing.expectEqual(@as(usize, 0), flat.items.items.len);
+
+    // With the extent: all four, one per layer. The layer-pair matrix does not
+    // apply to a query — it has no second body (§1.11.1).
+    var got = CastCollector{ .gpa = gpa, .boxes = &boxes, .ray = ray, .extent = extent, .tighten = false };
+    defer got.deinit();
+    const visited = bph.queryCast(ray, extent, &got);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3 }, got.sortedOwned());
+    try std.testing.expect(visited >= broadphase.layer_count); // every tree entered
+
+    // The bound carries ACROSS the trees: a closest collector keeps the nearest of
+    // the four, the static one, whatever order the trees are walked in.
+    var closest = CastCollector{ .gpa = gpa, .boxes = &boxes, .ray = ray, .extent = extent, .tighten = true };
+    defer closest.deinit();
+    _ = bph.queryCast(ray, extent, &closest);
+    try std.testing.expectEqual(@as(?u32, 0), closest.best_ud);
+}
+
+test "queryCast is empty on an empty tree" {
+    const gpa = std.testing.allocator;
+    var tree = BvhF.init(.{ .margin = 0 });
+    defer tree.deinit(gpa);
+
+    const boxes = [_]Aabbf{};
+    const ray = BvhF.RayT.init(Vec3.zero, Vec3.unit_x);
+    const extent = Vec3.splat(2);
+    var got = CastCollector{ .gpa = gpa, .boxes = &boxes, .ray = ray, .extent = extent, .tighten = false };
+    defer got.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), tree.queryCast(ray, extent, &got));
+    try std.testing.expectEqual(@as(usize, 0), got.items.items.len);
+
+    // Same on the multi-layer aggregate, whose four trees are all empty.
+    var bph = BphF.init(.{ .margin = 0 });
+    defer bph.deinit(gpa);
+    try std.testing.expectEqual(@as(u32, 0), bph.queryCast(ray, extent, &got));
+    try std.testing.expectEqual(@as(usize, 0), got.items.items.len);
+}

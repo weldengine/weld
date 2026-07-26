@@ -22,18 +22,24 @@
 //! shape that is a pure function of the op sequence. SAH ties resolve to the
 //! second child, balance ties to the shorter-rotation branch — both fixed.
 //!
-//! **Two traversals, two collector contracts (M1.1.9).** `queryAabb` asks its
-//! collector for `add(user_data)` and nothing else. `queryRay` asks for `add`
+//! **Two collector contracts, three entries (M1.1.9, M1.1.10).** `queryAabb` asks
+//! its collector for `add(user_data)` and nothing else. `queryCast` asks for `add`
 //! plus TWO more, both required of every collector: `maxDistance()`, which it
 //! re-reads before every descent and prunes on — turning the traversal into
 //! *branch and bound*, with a near-first descent so the bound tightens as early as
 //! possible (`engine-physics-forge.md` §1.11.2) — and `shouldStop()`, which ends
 //! the traversal outright. The two are not interchangeable: a zero bound is still
 //! a BOUND, so every node whose interval contains the ray origin survives it, and
-//! `Broadphase.queryRay` would still walk the remaining layer trees. An `any`
+//! `Broadphase.queryCast` would still walk the remaining layer trees. An `any`
 //! query that must "terminate at the first candidate" needs the second. Same split
 //! as the reference, which exposes `GetEarlyOutFraction` alongside `ShouldEarlyOut`
 //! / `ForceEarlyOut` (`CollisionCollector.h`).
+//!
+//! `queryRay` is the third entry and shares the second contract: a ray IS a cast of
+//! a zero-extent volume, so it delegates to `queryCast` rather than duplicating the
+//! descent (§1.11.10). The swept traversal differs from the ray traversal in exactly
+//! one thing — each node's stored box is inflated by the cast volume's half-extents
+//! before the slab test, which stays byte-for-byte the same function.
 //!
 //! A query mutates nothing, wakes nobody, and visits every layer tree unless the
 //! collector stops it (§1.11.1) — it never touches the moved-logs nor the retained
@@ -255,10 +261,79 @@ pub fn Bvh(comptime T: type) type {
         /// Ray type for this scalar.
         pub const RayT = Ray(T);
 
+        /// Swept-volume query, *branch and bound* (`engine-physics-forge.md`
+        /// §1.11.10): `collector.add(user_data)` for every proxy whose stored (fat)
+        /// AABB, **inflated by `extent`**, the ray crosses within the collector's
+        /// current bound. Returns the number of nodes visited.
+        ///
+        /// Additive on the ray traversal in the strict sense: same collector
+        /// contract, same near-first descent, same slab test unchanged, same visited
+        /// accounting. The single difference is the inflation, and `queryRay` below
+        /// is this function at a zero extent.
+        ///
+        /// **What the caller must pass.** `extent` is the half-extents of the cast
+        /// shape's INITIAL world AABB, and `ray.origin` is the CENTRE `c₀` of that
+        /// same AABB — not the shape's position. The AABB is a constant of the query:
+        /// the sweep is a pure translation, so the shape's rotation does not change
+        /// during it, and the caller computes the box once at entry. For the three
+        /// shapes the store builds today the centre and the position coincide, their
+        /// local AABB being centred on the origin, but that is a property of THOSE
+        /// SHAPES and not of the model — a decentred volume (a compound, a mesh)
+        /// breaks the equality, which is why the contract is written on `c₀`. The
+        /// returned parameter is the same either way, the sweep being a translation.
+        ///
+        /// **Why inflating the node is exact.** The Minkowski sum of two boxes is a
+        /// box, so `node.inflate(extent)` is exactly the set of centres at which the
+        /// swept box overlaps the node (`Aabb.inflate`); testing the ray from `c₀`
+        /// against it therefore IS the swept-box-versus-node test, not an
+        /// approximation. It stays conservative with respect to the SHAPE — whose
+        /// AABB is larger than it is — and never with respect to the boxes, and the
+        /// surplus candidates are the exact kernel's to reject (§1.11.2). The
+        /// inflation is an ADDITION, not a threshold: no constant appears.
+        ///
+        /// The entry parameter of an inflated node is a LOWER BOUND of the true time
+        /// of impact against any leaf it contains, so branch and bound stays valid
+        /// and a `closest` collector may tighten on the best accepted time of impact
+        /// exactly as it does for a ray.
+        ///
+        /// What is deliberately NOT done: enclosing the whole sweep in a single AABB
+        /// and handing it to `queryAabb`. That loses the bound entirely — a 50 m cast
+        /// would visit the whole corridor — turning a sub-linear query into one linear
+        /// in the proxies of the swept volume (§1.11.10).
+        pub fn queryCast(self: *const Self, ray: RayT, extent: Vec3T, collector: anytype) u32 {
+            if (self.root == null_index) return 0;
+            // Checked before the root too, so a collector that has already stopped
+            // costs nothing per remaining tree in `Broadphase.queryCast`.
+            if (collector.shouldStop()) return 0;
+            const iv = self.castInterval(self.root, ray, extent);
+            if (!accepts(iv, collector.maxDistance())) return 1; // visited then pruned
+            return self.queryCastNode(self.root, ray, extent, collector);
+        }
+
         /// Ray query, *branch and bound*: `collector.add(user_data)` for every
         /// proxy whose stored (fat) AABB the ray crosses within the collector's
         /// current bound. Returns the number of nodes visited — the metric the
         /// logarithmic-cost test asserts on.
+        ///
+        /// A ray is a cast of a zero-extent volume, and this is literally that call
+        /// — one traversal, not two. **Its behaviour is unchanged by the
+        /// re-expression**, and the argument is worth writing down because a zero
+        /// added to a float is not always a no-op:
+        ///
+        ///   - `min − 0` is exact and preserves the sign of a zero bound.
+        ///   - `max + 0` maps a `−0.0` bound to `+0.0`. Every other value is
+        ///     unchanged, and no other bound can change at all.
+        ///   - Nothing downstream distinguishes the two zeros. The parallel-slab
+        ///     test compares with `<` and `>`; the slab products then differ at most
+        ///     in a zero's sign; `@min`/`@max` treat `±0.0` as equal; the
+        ///     `enter > exit` rejection, `accepts`'s `exit >= 0` and `enter <= bound`,
+        ///     and the near-first `e1 <= e2` ordering are all blind to it.
+        ///   - The `0 · inf` NaN repair is untouched: both signed zeros times an
+        ///     infinity are NaN, and the repair is unconditional.
+        ///
+        /// So the traversal's two observables — the visited count and the collected
+        /// set — are identical, which the M1.1.9 traversal suite asserts against
+        /// counts measured before the refactor.
         ///
         /// `collector` is a pointer to any value exposing the `queryAabb`
         /// contract plus one method:
@@ -285,16 +360,10 @@ pub fn Bvh(comptime T: type) type {
         /// candidates are the exact kernel's to reject, never the box's to
         /// shrink (§1.11.2).
         pub fn queryRay(self: *const Self, ray: RayT, collector: anytype) u32 {
-            if (self.root == null_index) return 0;
-            // Checked before the root too, so a collector that has already stopped
-            // costs nothing per remaining tree in `Broadphase.queryRay`.
-            if (collector.shouldStop()) return 0;
-            const iv = self.rayInterval(self.root, ray);
-            if (!accepts(iv, collector.maxDistance())) return 1; // visited then pruned
-            return self.queryRayNode(self.root, ray, collector);
+            return self.queryCast(ray, Vec3T.zero, collector);
         }
 
-        /// Recursive half of `queryRay`. Precondition: `index`'s own interval has
+        /// Recursive half of `queryCast`. Precondition: `index`'s own interval has
         /// already been tested and accepted, so each node's slab test runs
         /// exactly once and each node contributes exactly one visit.
         ///
@@ -304,15 +373,15 @@ pub fn Bvh(comptime T: type) type {
         /// hence deterministic — but it is NOT invariant under a different
         /// creation order, which builds a different tree. Only the RESULT is
         /// invariant (§1.11.6); the visited-node count never is.
-        fn queryRayNode(self: *const Self, index: u32, ray: RayT, collector: anytype) u32 {
+        fn queryCastNode(self: *const Self, index: u32, ray: RayT, extent: Vec3T, collector: anytype) u32 {
             const node = self.nodes.items[index];
             if (isLeaf(node)) {
                 collector.add(node.user_data);
                 return 1;
             }
 
-            const iv1 = self.rayInterval(node.child1, ray);
-            const iv2 = self.rayInterval(node.child2, ray);
+            const iv1 = self.castInterval(node.child1, ray, extent);
+            const iv2 = self.castInterval(node.child2, ray, extent);
             // A missed child sorts last; ties keep `child1` first (fixed
             // tie-break, the SAH/balance convention of this file).
             const e1 = if (iv1) |v| v.enter else std.math.inf(T);
@@ -335,7 +404,7 @@ pub fn Bvh(comptime T: type) type {
                 // narrowing it.
                 if (collector.shouldStop()) break;
                 if (accepts(iv, collector.maxDistance())) {
-                    visited += self.queryRayNode(child, ray, collector);
+                    visited += self.queryCastNode(child, ray, extent, collector);
                 } else {
                     visited += 1; // tested then pruned
                 }
@@ -343,9 +412,13 @@ pub fn Bvh(comptime T: type) type {
             return visited;
         }
 
-        /// Slab interval of `ray` against node `index`'s stored AABB.
-        fn rayInterval(self: *const Self, index: u32, ray: RayT) ?AabbT.RayInterval {
-            return self.nodes.items[index].aabb.rayInterval(ray.origin, ray.inv_dir, ray.dir_is_zero);
+        /// Slab interval of `ray` against node `index`'s stored AABB inflated by
+        /// `extent`. The slab test itself is `Aabb.rayInterval`, unchanged: the
+        /// swept traversal differs from the ray traversal only in the box it is
+        /// handed (§1.11.10).
+        fn castInterval(self: *const Self, index: u32, ray: RayT, extent: Vec3T) ?AabbT.RayInterval {
+            return self.nodes.items[index].aabb.inflate(extent)
+                .rayInterval(ray.origin, ray.inv_dir, ray.dir_is_zero);
         }
 
         /// Whether an interval survives the `[0, bound]` window, closed at both
@@ -702,6 +775,7 @@ pub fn Broadphase(comptime T: type) type {
         const Self = @This();
         const BvhT = Bvh(T);
         const AabbT = math.Aabb(T);
+        const Vec3T = math.Vec(3, T);
 
         /// Tuning config type for this scalar.
         pub const Config = BroadphaseConfig(T);
@@ -801,26 +875,35 @@ pub fn Broadphase(comptime T: type) type {
         /// Ray type for this scalar.
         pub const RayT = Ray(T);
 
-        /// Ray query across every layer, summing the visited counts exactly as
-        /// `queryAabb` does. All four trees are visited: a query has no second
-        /// body, so no row of the layer-pair matrix applies to it, and its
-        /// filtering is a mask on the candidate's OBJECT layer, decided on the
-        /// forge_3d side (`engine-physics-forge.md` §1.11.1). A broad-layer
-        /// filter would be an additive optimisation, never a substitute for that
-        /// mask.
+        /// Swept-volume query across every layer, summing the visited counts exactly
+        /// as `queryAabb` does. See `Bvh.queryCast` for the `extent`/`c₀` contract
+        /// and for why inflating each node is exact (`engine-physics-forge.md`
+        /// §1.11.10).
+        ///
+        /// All four trees are visited: a query has no second body, so no row of the
+        /// layer-pair matrix applies to it, and its filtering is a mask on the
+        /// candidate's OBJECT layer, decided on the forge_3d side (§1.11.1). A
+        /// broad-layer filter would be an additive optimisation, never a substitute
+        /// for that mask.
         ///
         /// The collector's bound carries across the trees — the tightening a
         /// hit in the first tree performs prunes the next — so the sum is not a
         /// per-tree independent cost. And `shouldStop()` is honoured BETWEEN trees,
         /// which is the half a bound cannot express: without it an `any` query that
         /// found its candidate in the first tree would still walk the other three.
-        pub fn queryRay(self: *const Self, ray: RayT, collector: anytype) u32 {
+        pub fn queryCast(self: *const Self, ray: RayT, extent: Vec3T, collector: anytype) u32 {
             var visited: u32 = 0;
             for (&self.trees) |*t| {
                 if (collector.shouldStop()) break;
-                visited += t.queryRay(ray, collector);
+                visited += t.queryCast(ray, extent, collector);
             }
             return visited;
+        }
+
+        /// Ray query across every layer — `queryCast` at a zero extent, with the
+        /// unchanged-behaviour argument written out on `Bvh.queryRay`.
+        pub fn queryRay(self: *const Self, ray: RayT, collector: anytype) u32 {
+            return self.queryCast(ray, Vec3T.zero, collector);
         }
 
         /// Fill `out` with the deterministic candidate pairs among moved proxies
