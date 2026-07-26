@@ -1,0 +1,511 @@
+//! `forge_3d/tests/shapecast_test.zig` — the shape-cast kernel and its closed-form
+//! oracles (M1.1.10 / E3).
+//!
+//! Every expectation here is a closed form DERIVED in the comment above it, never a
+//! value read back from the implementation. The cast is a raycast against the
+//! Minkowski difference of the two cores inflated by `r_a + r_b`
+//! (`engine-physics-forge.md` §1.11.11), so each oracle is written on the geometry —
+//! where the swept core first comes within `r_sum` of the other core — and the
+//! kernel is asked to agree.
+//!
+//! The full acceptance suites of the five query entries, and the initial-contact
+//! witness, are E6's. This file is the kernel and its oracles.
+
+const std = @import("std");
+const math = @import("foundation").math;
+const narrowphase = @import("../pipeline/narrowphase/root.zig");
+const config = @import("../config.zig");
+
+const testing = std.testing;
+const Real = config.Real;
+const Vec3r = config.Vec3r;
+const Quatr = config.Quatr;
+const SS = narrowphase.SupportShape(Real);
+const RP = narrowphase.RelativePose(Real);
+
+/// Relative slack for a distance oracle: float noise at the scale of the tens of
+/// metres these scenes use, not geometric slack.
+const tol: Real = if (Real == f32) 1e-4 else 1e-11;
+
+/// Slack on the normal's unit norm, in ULPs of 1. The comparison is against 1, so
+/// this is pure float noise — the same constant and the same role as
+/// `raycast_test.zig`'s `normal_unit_k`.
+const normal_unit_k: Real = 8;
+const unit_tol: Real = normal_unit_k * std.math.floatEps(Real);
+
+fn v(x: Real, y: Real, z: Real) Vec3r {
+    return Vec3r.fromArray(.{ x, y, z });
+}
+
+/// A sphere support shape: a point core of inflation radius `r`.
+fn sphere(r: Real) SS {
+    return .{ .core = .point, .radius = r };
+}
+
+/// A box support shape: a box core of the given half-extents, radius 0 (the only
+/// form the store builds — a rounded box is what the RAY kernels reject and what the
+/// cast, having a support map, does not need to).
+fn box(hx: Real, hy: Real, hz: Real) SS {
+    return .{ .core = .{ .box = v(hx, hy, hz) }, .radius = 0 };
+}
+
+/// A capsule support shape: a Y-axis segment core of half-height `h`, radius `r`.
+fn capsule(h: Real, r: Real) SS {
+    return .{ .core = .{ .segment = h }, .radius = r };
+}
+
+/// B's pose relative to an A that sits at the origin with identity rotation, which
+/// is how every scene below is framed: A's frame IS world, so the returned witness
+/// and normal are directly comparable to the world-space oracle.
+fn poseAt(position: Vec3r, rotation: Quatr) RP {
+    return RP.init(Vec3r.zero, Quatr.identity, position, rotation);
+}
+
+fn poseTranslated(position: Vec3r) RP {
+    return poseAt(position, Quatr.identity);
+}
+
+/// The two invariants every hit carries, whatever the pair (§1.11.11): the normal is
+/// UNIT — asserted tight, so a degenerate normal is always a defect and never an
+/// effect of distance — and it opposes the cast direction.
+fn expectHitInvariants(hit: narrowphase.CastHit(Real), direction: Vec3r) !void {
+    try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), unit_tol);
+    try testing.expect(hit.normal.dot(direction.normalize()) <= 0);
+    try testing.expect(hit.distance >= 0);
+}
+
+// ---------------------------------------------------------------------------
+// Sphere against sphere — three obliquities, one of them not axis-aligned
+// ---------------------------------------------------------------------------
+
+test "sphere cast against a sphere matches the closed form at three obliquities" {
+    // Two point cores of radii `r_a`, `r_b`: A's centre travels `t·d̂` and touches
+    // when it reaches `r_sum = r_a + r_b` of B's centre `c`. So `t` is the smaller
+    // root of `|c − t·d̂|² = r_sum²`:
+    //
+    //     t = (c · d̂) − √((c · d̂)² − |c|² + r_sum²)
+    //
+    // At the contact, B's outward normal points from `c` toward A's centre `t·d̂`,
+    // that is `−(c − t·d̂)/r_sum`, and B's surface witness is `c + r_b · normal` —
+    // which must also equal A's surface witness `t·d̂ + r_a·(−normal)`, the two
+    // coinciding exactly at a non-zero time of impact. Each case below states all
+    // three and the coincidence is asserted, not assumed.
+    const Case = struct {
+        name: []const u8,
+        r_a: Real,
+        r_b: Real,
+        centre: Vec3r,
+        direction: Vec3r,
+        toi: Real,
+    };
+    const cases = [_]Case{
+        // (1) Head-on, axis-aligned. c·d̂ = 10, |c|² = 100, r_sum = 3
+        //     → disc = 100 − 100 + 9 = 9 → t = 10 − 3 = 7.
+        .{ .name = "head-on", .r_a = 1, .r_b = 2, .centre = v(10, 0, 0), .direction = v(1, 0, 0), .toi = 7 },
+        // (2) Oblique approach, axis-aligned direction. c·d̂ = 10, |c|² = 116,
+        //     r_sum = 5 → disc = 100 − 116 + 25 = 9 → t = 10 − 3 = 7.
+        .{ .name = "oblique", .r_a = 2, .r_b = 3, .centre = v(10, 4, 0), .direction = v(1, 0, 0), .toi = 7 },
+        // (3) Oblique approach AND a direction on no axis: d̂ = (3,4,0)/5, and
+        //     c = 10·d̂ + (0,0,4) = (6,8,4). c·d̂ = 3.6 + 6.4 = 10, |c|² = 116,
+        //     r_sum = 5 → disc = 9 → t = 7. The perpendicular offset is on Z, which
+        //     is orthogonal to d̂ by construction, so the algebra stays integral.
+        .{ .name = "oblique off-axis", .r_a = 2, .r_b = 3, .centre = v(6, 8, 4), .direction = v(3, 4, 0), .toi = 7 },
+    };
+
+    for (cases) |case| {
+        const shape_a = sphere(case.r_a);
+        const shape_b = sphere(case.r_b);
+        const relpose = poseTranslated(case.centre);
+        const hit = narrowphase.castShape(Real, shape_a, relpose, shape_b, case.direction, 100) orelse {
+            std.debug.print("case '{s}': constructed hit missed\n", .{case.name});
+            return error.ConstructedCastMissed;
+        };
+        try expectHitInvariants(hit, case.direction);
+        try testing.expectApproxEqAbs(case.toi, hit.distance, tol);
+
+        // The closed-form normal and witness, computed here from the geometry.
+        const unit_d = case.direction.normalize();
+        const a_centre = unit_d.scale(case.toi);
+        const gap = case.centre.sub(a_centre);
+        const r_sum = case.r_a + case.r_b;
+        try testing.expectApproxEqAbs(r_sum, gap.length(), tol); // the contact really is at r_sum
+        const want_normal = gap.scale(-1 / r_sum);
+        try testing.expect(hit.normal.approxEql(want_normal, tol));
+
+        const want_point = case.centre.add(want_normal.scale(case.r_b));
+        try testing.expect(hit.point.approxEql(want_point, tol));
+        // …and the same point seen from A: the two witnesses coincide beyond a zero
+        // time of impact, which is why only B's is computed.
+        const from_a = a_centre.add(want_normal.scale(-case.r_a));
+        try testing.expect(from_a.approxEql(want_point, tol));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Box against box — face, edge, vertex
+// ---------------------------------------------------------------------------
+
+test "box cast against a box on a face, an edge and a vertex" {
+    const shape_a = box(1, 1, 1);
+    const shape_b = box(1, 1, 1);
+    const direction = v(1, 0, 0);
+
+    // FACE. Both boxes axis-aligned, B centred at (10, 0, 0). A's +X face starts at
+    // x = 1 and travels with A; B's −X face is fixed at x = 9. Contact at t = 8.
+    // The contact feature is a whole face, so the witness's Y and Z are not unique —
+    // only its X is, and it must lie inside B's face.
+    {
+        const hit = narrowphase.castShape(Real, shape_a, poseTranslated(v(10, 0, 0)), shape_b, direction, 100).?;
+        try expectHitInvariants(hit, direction);
+        try testing.expectApproxEqAbs(@as(Real, 8), hit.distance, tol);
+        try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
+        const p = hit.point.toArray();
+        try testing.expectApproxEqAbs(@as(Real, 9), p[0], tol);
+        try testing.expect(@abs(p[1]) <= 1 + tol and @abs(p[2]) <= 1 + tol);
+    }
+
+    // EDGE. B rotated 45° about Z presents a single vertical EDGE toward −X, at
+    // x = 10 − √2 (the rotated half-diagonal of its XY cross-section). A's +X face
+    // reaches it at t = 9 − √2 ≈ 7.5858. The edge runs along Z, so the witness has
+    // y = 0 and a free z inside [−1, 1].
+    {
+        const rot = Quatr.fromAxisAngle(v(0, 0, 1), std.math.pi / 4.0);
+        const hit = narrowphase.castShape(Real, shape_a, poseAt(v(10, 0, 0), rot), shape_b, direction, 100).?;
+        try expectHitInvariants(hit, direction);
+        try testing.expectApproxEqAbs(9 - @sqrt(@as(Real, 2)), hit.distance, tol);
+        try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
+        const p = hit.point.toArray();
+        try testing.expectApproxEqAbs(10 - @sqrt(@as(Real, 2)), p[0], tol);
+        try testing.expectApproxEqAbs(@as(Real, 0), p[1], tol);
+        try testing.expect(@abs(p[2]) <= 1 + tol);
+    }
+
+    // VERTEX. B rotated so its local (1,1,1) diagonal points along world −X: the
+    // rotation about `normalize((1,1,1) × (−1,0,0)) = (0,−1,1)/√2` by
+    // `acos(−1/√3)`. Its −X extremum is then the single vertex at x = 10 − √3, and
+    // A's +X face reaches it at t = 9 − √3 ≈ 7.2679. A vertex contact has a UNIQUE
+    // witness, so all three coordinates are pinned.
+    {
+        const axis = v(0, -1, 1).normalize();
+        const angle = std.math.acos(-1.0 / @sqrt(@as(Real, 3)));
+        const rot = Quatr.fromAxisAngle(axis, angle);
+        const hit = narrowphase.castShape(Real, shape_a, poseAt(v(10, 0, 0), rot), shape_b, direction, 100).?;
+        try expectHitInvariants(hit, direction);
+        try testing.expectApproxEqAbs(9 - @sqrt(@as(Real, 3)), hit.distance, tol);
+        try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
+        try testing.expect(hit.point.approxEql(v(10 - @sqrt(@as(Real, 3)), 0, 0), tol));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Capsule against box, capsule against capsule
+// ---------------------------------------------------------------------------
+
+test "capsule cast against a box and against a capsule" {
+    const direction = v(1, 0, 0);
+
+    // Capsule (Y segment, half-height 1, radius 0.5) against an axis-aligned unit
+    // box at (10, 0, 0). The capsule's CORE is the segment through the origin, whose
+    // distance to the box's −X face (x = 9) is 9; contact when that closes to
+    // r_sum = 0.5, so t = 8.5. The witness lies on the −X face, y free inside the
+    // overlap of the segment and the face, z = 0.
+    {
+        const hit = narrowphase.castShape(Real, capsule(1, 0.5), poseTranslated(v(10, 0, 0)), box(1, 1, 1), direction, 100).?;
+        try expectHitInvariants(hit, direction);
+        try testing.expectApproxEqAbs(@as(Real, 8.5), hit.distance, tol);
+        try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
+        const p = hit.point.toArray();
+        try testing.expectApproxEqAbs(@as(Real, 9), p[0], tol);
+        try testing.expect(@abs(p[1]) <= 1 + tol);
+        try testing.expectApproxEqAbs(@as(Real, 0), p[2], tol);
+    }
+
+    // Capsule against a PARALLEL capsule: both cores are Y segments, B's at
+    // (10, 0, 0). The core distance is 10 and closes to r_sum = 1 at t = 9. Parallel
+    // segments have a non-unique closest pair, so only the witness's X is pinned:
+    // 10 − r_b = 9.5.
+    {
+        const hit = narrowphase.castShape(Real, capsule(1, 0.5), poseTranslated(v(10, 0, 0)), capsule(1, 0.5), direction, 100).?;
+        try expectHitInvariants(hit, direction);
+        try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
+        try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
+        const p = hit.point.toArray();
+        try testing.expectApproxEqAbs(@as(Real, 9.5), p[0], tol);
+        try testing.expect(@abs(p[1]) <= 1 + tol);
+    }
+
+    // Capsule against a CROSSED capsule: B rotated 90° about X, so its core is a Z
+    // segment at (10, 0, 0). The two skew segments are closest at their centres, at
+    // distance 10, closing to r_sum = 1 at t = 9 — and here the closest pair IS
+    // unique, so the witness is pinned in all three coordinates:
+    // (10, 0, 0) + 0.5·(−1, 0, 0) = (9.5, 0, 0).
+    {
+        const rot = Quatr.fromAxisAngle(v(1, 0, 0), std.math.pi / 2.0);
+        const hit = narrowphase.castShape(Real, capsule(1, 0.5), poseAt(v(10, 0, 0), rot), capsule(1, 0.5), direction, 100).?;
+        try expectHitInvariants(hit, direction);
+        try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
+        try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
+        try testing.expect(hit.point.approxEql(v(9.5, 0, 0), tol));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Domain: the closed interval, a zero bound, a zero direction
+// ---------------------------------------------------------------------------
+
+/// The box-against-box FACE scene, whose time of impact is reached EXACTLY and in a
+/// single advance: the Minkowski difference of two unit boxes is a box of
+/// half-extents (2,2,2) centred at (−10,0,0), the ray along (−1,0,0) enters its
+/// x-slab at exactly 8, and the first advance lands on that plane. Being exact is
+/// what lets the interval be probed at the bound and one ulp below it.
+fn faceSceneCast(max_distance: Real, ceiling: u32, diag: ?*narrowphase.CastDiagnostics) ?narrowphase.CastHit(Real) {
+    return narrowphase.castShapeBounded(
+        Real,
+        box(1, 1, 1),
+        poseTranslated(v(10, 0, 0)),
+        box(1, 1, 1),
+        v(1, 0, 0),
+        max_distance,
+        ceiling,
+        diag,
+    );
+}
+
+fn nextBelow(x: Real) Real {
+    const Bits = if (Real == f32) u32 else u64;
+    return @bitCast(@as(Bits, @bitCast(x)) - 1);
+}
+
+test "max_distance is a closed interval" {
+    // The exact time of impact is 8 (see `faceSceneCast`). A bound of exactly 8
+    // admits it — the interval is closed (§1.11.11) — and a bound one ulp below
+    // refuses it. Both are exact comparisons: no tolerance appears on either side.
+    const at_bound = faceSceneCast(8, narrowphase.max_shapecast_iterations, null);
+    try testing.expect(at_bound != null);
+    try testing.expectEqual(@as(Real, 8), at_bound.?.distance);
+
+    var diag: narrowphase.CastDiagnostics = undefined;
+    const below = faceSceneCast(nextBelow(8), narrowphase.max_shapecast_iterations, &diag);
+    try testing.expect(below == null);
+    // …and it is the BOUND that refused it, not some other exit taking the blame.
+    try testing.expectEqual(narrowphase.CastExit.beyond_bound, diag.exit);
+}
+
+test "max_distance zero degenerates to an overlap test at the start pose" {
+    // A pair that is clear at the start pose: the parameter would have to reach 8,
+    // so a zero bound is a miss, and the bound is what says so.
+    var diag: narrowphase.CastDiagnostics = undefined;
+    try testing.expect(faceSceneCast(0, narrowphase.max_shapecast_iterations, &diag) == null);
+    try testing.expectEqual(narrowphase.CastExit.beyond_bound, diag.exit);
+
+    // A pair that already overlaps at the start pose: two unit boxes 1 apart on X
+    // overlap, so the configuration-space origin lies inside the Minkowski
+    // difference and the answer is a hit at distance ZERO even with a zero bound.
+    const overlapping = narrowphase.castShape(Real, box(1, 1, 1), poseTranslated(v(1, 0, 0)), box(1, 1, 1), v(1, 0, 0), 0).?;
+    try testing.expectEqual(@as(Real, 0), overlapping.distance);
+    try expectHitInvariants(overlapping, v(1, 0, 0));
+}
+
+test "a zero direction returns nothing, and a denormal one is served" {
+    // EXACTLY zero is the only degenerate direction, and the guard is at true zero on
+    // the largest absolute component — which is zero exactly when all three are.
+    try testing.expect(narrowphase.castShape(Real, box(1, 1, 1), poseTranslated(v(10, 0, 0)), box(1, 1, 1), Vec3r.zero, 100) == null);
+
+    // A direction whose SQUARED length underflows to zero is not degenerate: it
+    // normalises exactly and must be served (§1.11.4). Squaring first would read it
+    // as zero; reducing by the largest component first does not.
+    const tiny = std.math.floatTrueMin(Real);
+    try testing.expectEqual(@as(Real, 0), tiny * tiny); // the square really does underflow
+    const denormal = narrowphase.castShape(Real, box(1, 1, 1), poseTranslated(v(10, 0, 0)), box(1, 1, 1), v(tiny, 0, 0), 100).?;
+    const unit = narrowphase.castShape(Real, box(1, 1, 1), poseTranslated(v(10, 0, 0)), box(1, 1, 1), v(1, 0, 0), 100).?;
+    try testing.expectEqual(unit.distance, denormal.distance);
+    try testing.expectEqual(unit.normal.toArray()[0], denormal.normal.toArray()[0]);
+
+    // And the other end of the range: a huge finite direction whose square overflows
+    // to infinity is equally legitimate.
+    const huge: Real = if (Real == f32) 1e20 else 1e160;
+    try testing.expect(std.math.isInf(huge * huge)); // the square really does overflow
+    const large = narrowphase.castShape(Real, box(1, 1, 1), poseTranslated(v(10, 0, 0)), box(1, 1, 1), v(huge, 0, 0), 100).?;
+    try testing.expectEqual(unit.distance, large.distance);
+}
+
+// ---------------------------------------------------------------------------
+// The iteration ceiling
+// ---------------------------------------------------------------------------
+
+/// The oblique off-axis sphere pair of the first test — closed-form time of impact
+/// 7 — which the march reaches in FOUR iterations rather than one. That is what
+/// makes it usable as a ceiling probe: a scene converging in a single advance could
+/// not distinguish a cap from a convergence.
+fn obliqueSphereCast(ceiling: u32, diag: *narrowphase.CastDiagnostics) ?narrowphase.CastHit(Real) {
+    return narrowphase.castShapeBounded(
+        Real,
+        sphere(2),
+        poseTranslated(v(6, 8, 4)),
+        sphere(3),
+        v(3, 4, 0),
+        100,
+        ceiling,
+        diag,
+    );
+}
+
+test "the iteration ceiling returns a hit at the current parameter" {
+    // §1.11.11 is normative here and the semantics is not left to the implementation:
+    // exhausting the ceiling returns a HIT at the current parameter, never a miss.
+    // A miss would fabricate a false negative, hence tunnelling; the current
+    // parameter fabricates a contact announced EARLY, which is the safe failure
+    // direction — and it is safe precisely because the parameter is at every step a
+    // LOWER BOUND of the true time of impact.
+    //
+    // The ceiling is driven small through the same code path, because on the three
+    // cores the store builds the real ceiling of 32 is unreachable: this scene
+    // converges in 4. Only the constant differs between this run and production.
+    var converged_diag: narrowphase.CastDiagnostics = undefined;
+    const converged = obliqueSphereCast(narrowphase.max_shapecast_iterations, &converged_diag).?;
+    try testing.expectEqual(narrowphase.CastExit.converged, converged_diag.exit);
+    try testing.expectApproxEqAbs(@as(Real, 7), converged.distance, tol);
+
+    // DISCRIMINATION GUARD. Each capped run must (a) really have been capped and
+    // (b) really have returned something DIFFERENT — a strictly smaller parameter.
+    // Without (b) the test would pass on a kernel that converges before the cap can
+    // bite, and the normative fallback would never have been exercised at all.
+    var capped_any = false;
+    for ([_]u32{ 1, 2, 3 }) |ceiling| {
+        var diag: narrowphase.CastDiagnostics = undefined;
+        const hit = obliqueSphereCast(ceiling, &diag);
+        try testing.expectEqual(narrowphase.CastExit.iteration_cap, diag.exit);
+        try testing.expectEqual(ceiling, diag.iterations);
+        // A HIT, not a miss. This is the whole normative point.
+        try testing.expect(hit != null);
+        try expectHitInvariants(hit.?, v(3, 4, 0));
+        // Announced EARLY: at or below the true time of impact, never past it.
+        try testing.expect(hit.?.distance < converged.distance);
+        try testing.expect(hit.?.distance > 0);
+        capped_any = true;
+    }
+    try testing.expect(capped_any);
+
+    // And the parameter really is monotone across the caps — it is a lower bound
+    // that tightens, which is the property the fallback rests on.
+    var previous: Real = 0;
+    for ([_]u32{ 1, 2, 3 }) |ceiling| {
+        var diag: narrowphase.CastDiagnostics = undefined;
+        const hit = obliqueSphereCast(ceiling, &diag).?;
+        try testing.expect(hit.distance > previous);
+        previous = hit.distance;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What the cast buys that the ray kernels cannot
+// ---------------------------------------------------------------------------
+
+test "sphere cast against a box does not error, where the ray kernel refuses" {
+    // The discriminating test for the whole design (§1.11.11). Casting a sphere of
+    // radius `r_a` against a box IS, in configuration space, a ray against a box
+    // inflated by `r_a` — a ROUNDED box, precisely the shape the ray kernels reject.
+    // Both facts are asserted here, in the same test, so the claim that the cast
+    // covers what the ray kernel refuses is proven rather than stated.
+    const r_a: Real = 0.5;
+    const direction = v(1, 0, 0);
+
+    // (1) The ray kernel refuses the rounded box, loudly.
+    const rounded: SS = .{ .core = .{ .box = v(1, 1, 1) }, .radius = r_a };
+    try testing.expectError(error.UnsupportedShape, narrowphase.rayShape(Real, rounded, v(-10, 0, 0), direction));
+
+    // (2) The cast answers the same geometry with no error channel at all. A sphere
+    // of radius 0.5 sweeping +X against a unit box at (10, 0, 0): its centre must
+    // reach x = 9 − 0.5 = 8.5.
+    const hit = narrowphase.castShape(Real, sphere(r_a), poseTranslated(v(10, 0, 0)), box(1, 1, 1), direction, 100).?;
+    try expectHitInvariants(hit, direction);
+    try testing.expectApproxEqAbs(@as(Real, 8.5), hit.distance, tol);
+    try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
+    // The box carries no inflation, so its witness is on the core face itself.
+    const p = hit.point.toArray();
+    try testing.expectApproxEqAbs(@as(Real, 9), p[0], tol);
+}
+
+// ---------------------------------------------------------------------------
+// Far-field conditioning (§1.11.4 bis)
+// ---------------------------------------------------------------------------
+
+/// The distance at which the scalar stops resolving the shape's geometry: one ulp of
+/// the coordinate reaches the shape's radius. Beyond it a statement about the
+/// normal's ORIENTATION is meaningless — the norm, being an invariant, is asserted
+/// regardless (§1.11.4 bis). Same helper, same rule, as `raycast_test.zig`.
+fn resolvesGeometryAt(distance: Real, radius: Real) bool {
+    return std.math.floatEps(Real) * distance < radius;
+}
+
+test "an oblique cast in the far field keeps a unit normal" {
+    // §1.11.4 bis is contraignante on this kernel and names the case that must be
+    // exercised: an OBLIQUE sweep. An axis-aligned one proves exactly nothing, the
+    // cancellation being identically zero there.
+    //
+    // Two unit-summing radii sweep along d̂ = (3,4,0)/5 with a perpendicular offset
+    // of 0.5 on p̂ = (−4,3,0)/5. B's centre is `c = D·d̂ + 0.5·p̂`, so
+    // `c · d̂ = D` and `|c|² = D² + 0.25`, giving
+    //
+    //     t = D − √(D² − D² − 0.25 + 1) = D − √0.75
+    //
+    // at EVERY distance, and the contact normal is
+    // `−(√0.75·d̂ + 0.5·p̂)`, whose projection on d̂ is `−√0.75` — independent of D.
+    // That D-independence is what makes the sweep a conditioning test rather than a
+    // geometry test.
+    const unit_d = v(3, 4, 0).normalize();
+    const perp = v(-4, 3, 0).normalize();
+    const want_cos = -@sqrt(@as(Real, 0.75));
+
+    var checked_orientation: u32 = 0;
+    for ([_]Real{ 1e2, 1e3, 1e4, 1e5, 1e6, 2e6, 1e7, 1e8 }) |distance| {
+        const centre = unit_d.scale(distance).add(perp.scale(0.5));
+        var diag: narrowphase.CastDiagnostics = undefined;
+        const maybe = narrowphase.castShapeBounded(
+            Real,
+            sphere(0.5),
+            poseTranslated(centre),
+            sphere(0.5),
+            unit_d,
+            2 * distance,
+            narrowphase.max_shapecast_iterations,
+            &diag,
+        );
+        // Every configuration here is CONSTRUCTED to hit, so a miss is a false
+        // negative and fails hard, naming the distance. A `continue` would let the
+        // silent miss through the very test meant to detect it.
+        if (maybe == null) {
+            std.debug.print("false negative: constructed cast missed at distance {d} (exit {s})\n", .{ distance, @tagName(diag.exit) });
+            return error.ConstructedCastMissed;
+        }
+        const hit = maybe.?;
+
+        // THE NORM IS THE INVARIANT: asserted tight, at every distance, without
+        // exception. A degenerate normal is always a defect and never an effect of
+        // distance, because the kernel normalises rather than dividing by a radius.
+        try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), unit_tol);
+        try testing.expect(hit.normal.dot(unit_d) <= 0);
+        // A structural bound on the parameter, valid at every scale: the sweep
+        // travels at most to B's centre and at least to within `r_sum` of it.
+        try testing.expect(hit.distance <= distance);
+        try testing.expect(hit.distance >= distance - 1);
+
+        // THE ORIENTATION is bounded only INSIDE the envelope where the scalar still
+        // resolves the geometry, and the bound is a function of the distance. A
+        // tolerance that grew without an upper limit would stop being an assertion.
+        if (resolvesGeometryAt(distance, 1)) {
+            try testing.expectApproxEqAbs(want_cos, hit.normal.dot(unit_d), std.math.floatEps(Real) * distance * 8);
+            checked_orientation += 1;
+        }
+    }
+    // The orientation envelope is not empty at either precision, so that half of the
+    // assertion really ran.
+    try testing.expect(checked_orientation >= 4);
+
+    // The aligned contrast, at the same distance: exactly the closed form, because an
+    // axis-aligned sweep has no cancellation at all. This is the case §1.11.4 bis
+    // says proves nothing on its own — kept here only to show the contrast.
+    const aligned = narrowphase.castShape(Real, sphere(0.5), poseTranslated(v(1e6, 0.5, 0)), sphere(0.5), v(1, 0, 0), 2e6).?;
+    try testing.expectApproxEqAbs(@as(Real, 1), aligned.normal.length(), unit_tol);
+    try testing.expect(aligned.normal.dot(v(1, 0, 0)) <= 0);
+}

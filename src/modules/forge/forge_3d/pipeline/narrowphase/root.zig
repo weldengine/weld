@@ -18,6 +18,7 @@ const epa_mod = @import("epa.zig");
 const manifold = @import("manifold.zig");
 const fast_paths = @import("fast_paths.zig");
 const raycast_mod = @import("raycast.zig");
+const shapecast_mod = @import("shapecast.zig");
 
 // --- Support layer (support.zig) ---
 
@@ -94,6 +95,24 @@ pub const rayShape = raycast_mod.rayShape;
 /// Whether a point lies in the solid shape, boundary included.
 pub const containsPoint = raycast_mod.containsPoint;
 
+// --- Shape-cast kernel (GJK ray march on the Minkowski difference, shapecast.zig) ---
+
+/// One cast hit in A's frame: time of impact, witness on the hit body, outward normal.
+pub const CastHit = shapecast_mod.CastHit;
+/// Which row of `engine-physics-forge.md` §1.11.11's termination table ended a march.
+pub const CastExit = shapecast_mod.CastExit;
+/// Observability channel for the march (exit row, iterations, advances, restart).
+pub const CastDiagnostics = shapecast_mod.CastDiagnostics;
+/// Named, obligatory iteration ceiling; exhaustion returns a hit at the current
+/// parameter (§1.11.11).
+pub const max_shapecast_iterations = shapecast_mod.max_shapecast_iterations;
+/// Cast a shape along a direction against another; `null` on a miss. No error
+/// channel: a support map covers every bounded convex, so nothing is rejected.
+pub const castShape = shapecast_mod.castShape;
+/// `castShape` with the ceiling and the diagnostics exposed — the seam that makes the
+/// normative fallback observable rather than merely documented.
+pub const castShapeBounded = shapecast_mod.castShapeBounded;
+
 // Pins so every package sub-file is analysed when forge_3d is built as a test
 // target (engine-zig-conventions.md §13 lazy-analysis guard).
 comptime {
@@ -103,4 +122,5 @@ comptime {
     _ = manifold;
     _ = fast_paths;
     _ = raycast_mod;
+    _ = shapecast_mod;
 }

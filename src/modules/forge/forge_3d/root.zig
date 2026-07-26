@@ -227,4 +227,5 @@ comptime {
     _ = @import("tests/island_test.zig");
     _ = @import("tests/sleep_test.zig");
     _ = @import("tests/raycast_test.zig");
+    _ = @import("tests/shapecast_test.zig");
 }
