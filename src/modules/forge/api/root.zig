@@ -44,6 +44,27 @@ pub const BodyDescriptor = types.BodyDescriptor;
 /// Physics pose (position + rotation, no scale).
 pub const Transform = types.Transform;
 
+// --- Queries (the complete frozen family, `engine-tier-interfaces.md` §1) ---
+
+/// Number of object layers a query mask can address; `addBody` rejects a body
+/// beyond this domain with `error.InvalidCollisionLayer`.
+pub const collision_layer_count = types.collision_layer_count;
+/// Filtering shared by the whole query family (object-layer mask + exclusions).
+/// Distinct from the `QueryFilter` of §6 `AIModule`.
+pub const PhysicsQueryFilter = types.PhysicsQueryFilter;
+/// A world-space ray query.
+pub const RaycastQuery = types.RaycastQuery;
+/// A cast of an arbitrary shape (one entry for sphere / box / capsule).
+pub const ShapeCastQuery = types.ShapeCastQuery;
+/// An overlap test of an arbitrary shape.
+pub const OverlapQuery = types.OverlapQuery;
+/// One ray hit.
+pub const RaycastHit = types.RaycastHit;
+/// One shape-cast hit (two sub-shapes: the cast one and the one hit).
+pub const ShapeCastHit = types.ShapeCastHit;
+/// Result of `closestPoint`.
+pub const ClosestPointResult = types.ClosestPointResult;
+
 // Pins so the inline tests in the sub-files are analysed when this module is
 // built as a test target (engine-zig-conventions.md §13).
 comptime {

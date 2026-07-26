@@ -740,3 +740,309 @@ test "update is atomic under allocation failure (no hysteresis poisoning)" {
     try bph.computePairs(gpa, &pairs);
     try std.testing.expect(hasPair(pairs.items, 2, 3));
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.9 / E2 — ray traversal (`queryRay`)
+// ---------------------------------------------------------------------------
+
+/// Ray sink over a scene whose `user_data` IS its index into `boxes`, so the
+/// collector can resolve a candidate's box and turn it into a distance — the
+/// stand-in, at broadphase level, for the exact kernel E4 will call.
+///
+/// `tighten` selects the two selection modes this gate can express: a `closest`
+/// collector that lowers its bound on every accepted candidate, and an `all`
+/// collector that never does.
+const RayCollector = struct {
+    gpa: std.mem.Allocator,
+    boxes: []const Aabbf,
+    ray: BvhF.RayT,
+    tighten: bool,
+
+    items: std.ArrayListUnmanaged(u32) = .empty,
+    bound: f32 = std.math.inf(f32),
+    best_distance: f32 = std.math.inf(f32),
+    best_ud: ?u32 = null,
+
+    pub fn add(self: *RayCollector, user_data: u32) void {
+        self.items.append(self.gpa, user_data) catch @panic("collector OOM");
+        const iv = self.boxes[user_data].rayInterval(self.ray.origin, self.ray.inv_dir, self.ray.dir_is_zero) orelse
+            return; // a fat-box candidate the exact test rejects
+        const distance = @max(iv.enter, 0); // origin inside → distance zero
+        if (distance < self.best_distance) {
+            self.best_distance = distance;
+            self.best_ud = user_data;
+            if (self.tighten) self.bound = distance;
+        }
+    }
+
+    pub fn maxDistance(self: *const RayCollector) f32 {
+        return self.bound;
+    }
+
+    /// Part of the required contract, like `maxDistance`. This collector expresses
+    /// `closest` and `all`, neither of which stops early; the terminating `any`
+    /// behaviour is exercised by `StoppingRayCollector` below.
+    pub fn shouldStop(_: *const RayCollector) bool {
+        return false;
+    }
+
+    fn deinit(self: *RayCollector) void {
+        self.items.deinit(self.gpa);
+    }
+    fn sortedOwned(self: *RayCollector) []u32 {
+        std.mem.sort(u32, self.items.items, {}, std.sort.asc(u32));
+        return self.items.items;
+    }
+};
+
+test "queryRay collects every proxy the ray crosses" {
+    const gpa = std.testing.allocator;
+    // margin 0 → stored box == tight box, so the brute-force reference is the
+    // same slab predicate over every leaf.
+    var tree = BvhF.init(.{ .margin = 0 });
+    defer tree.deinit(gpa);
+
+    var boxes: std.ArrayListUnmanaged(Aabbf) = .empty;
+    defer boxes.deinit(gpa);
+
+    var prng = std.Random.DefaultPrng.init(0x2A11_D0C5);
+    const rng = prng.random();
+
+    var i: u32 = 0;
+    while (i < 800) : (i += 1) {
+        const box = boxCe(.{
+            rng.float(f32) * 60 - 30,
+            rng.float(f32) * 60 - 30,
+            rng.float(f32) * 60 - 30,
+        }, 0.3 + rng.float(f32) * 1.5);
+        _ = try tree.insert(gpa, box, i);
+        try boxes.append(gpa, box);
+    }
+    tree.validate();
+
+    const rays = [_]BvhF.RayT{
+        BvhF.RayT.init(Vec3.fromArray(.{ -50, 0, 0 }), Vec3.unit_x), // axis-aligned, zero lanes
+        BvhF.RayT.init(Vec3.fromArray(.{ -50, -50, -50 }), Vec3.one), // full diagonal
+        BvhF.RayT.init(Vec3.zero, Vec3.fromArray(.{ 1, 2, -3 })), // from inside the cloud
+        BvhF.RayT.init(Vec3.fromArray(.{ -50, 100, 0 }), Vec3.unit_x), // misses everything
+        BvhF.RayT.init(Vec3.fromArray(.{ 50, 0, 0 }), Vec3.unit_x.neg()), // reversed
+    };
+
+    for (rays) |ray| {
+        var got = RayCollector{ .gpa = gpa, .boxes = boxes.items, .ray = ray, .tighten = false };
+        defer got.deinit();
+        _ = tree.queryRay(ray, &got);
+
+        var want: std.ArrayListUnmanaged(u32) = .empty;
+        defer want.deinit(gpa);
+        for (boxes.items, 0..) |box, ud| {
+            const iv = box.rayInterval(ray.origin, ray.inv_dir, ray.dir_is_zero) orelse continue;
+            if (iv.exit >= 0) try want.append(gpa, @intCast(ud));
+        }
+
+        std.mem.sort(u32, want.items, {}, std.sort.asc(u32));
+        try std.testing.expectEqualSlices(u32, want.items, got.sortedOwned());
+    }
+}
+
+test "queryRay prunes with the collector bound" {
+    const gpa = std.testing.allocator;
+    var tree = BvhF.init(.{ .margin = 0 });
+    defer tree.deinit(gpa);
+
+    // A line of 200 unit boxes along +X, spaced 4 apart, inserted FAR-TO-NEAR so
+    // the tree's child order and the ray's near order genuinely disagree.
+    var boxes: std.ArrayListUnmanaged(Aabbf) = .empty;
+    defer boxes.deinit(gpa);
+    try boxes.resize(gpa, 200);
+    var ud: u32 = 200;
+    while (ud > 0) {
+        ud -= 1;
+        const box = boxCe(.{ @as(f32, @floatFromInt(ud)) * 4, 0, 0 }, 0.5);
+        boxes.items[ud] = box;
+        _ = try tree.insert(gpa, box, ud);
+    }
+    tree.validate();
+
+    const ray = BvhF.RayT.init(Vec3.fromArray(.{ -10, 0, 0 }), Vec3.unit_x);
+
+    var all = RayCollector{ .gpa = gpa, .boxes = boxes.items, .ray = ray, .tighten = false };
+    defer all.deinit();
+    const visited_all = tree.queryRay(ray, &all);
+
+    var closest = RayCollector{ .gpa = gpa, .boxes = boxes.items, .ray = ray, .tighten = true };
+    defer closest.deinit();
+    const visited_closest = tree.queryRay(ray, &closest);
+
+    // DISCRIMINATION GUARD. Without this the test would pass on a traversal that
+    // ignores `maxDistance()` entirely: both runs would return the same count and
+    // agree on the winner, and nothing would be proven. The strict `<` is the
+    // assertion AND the guard — it fails if the bound prunes nothing.
+    //
+    // MEASURED, by disabling each mechanism in turn: near-first + bound gives
+    // 399 visited / 17 visited / 1 candidate. Forcing child1-first (the boxes
+    // being inserted far-to-near, `child1` is then the far side) gives
+    // 399 / 399 / 200 — the bound tightens only after everything has been
+    // visited, so pruning vanishes and this line fails. This test therefore pins
+    // BOTH the bound re-read and the near-first order, not just the former.
+    try std.testing.expect(visited_closest < visited_all);
+
+    // Pruning must not change the answer.
+    try std.testing.expectEqual(all.best_ud, closest.best_ud);
+    try std.testing.expectEqual(@as(?u32, 0), closest.best_ud);
+    try std.testing.expectEqual(all.best_distance, closest.best_distance);
+
+    // The `all` collector really did see the whole line — otherwise "strictly
+    // fewer" would be measuring two prunings against each other.
+    try std.testing.expectEqual(@as(usize, 200), all.items.items.len);
+    try std.testing.expect(closest.items.items.len < all.items.items.len);
+}
+
+test "queryRay treats the collector bound as closed" {
+    const gpa = std.testing.allocator;
+    var tree = BvhF.init(.{ .margin = 0 });
+    defer tree.deinit(gpa);
+
+    // One box entered at exactly t == 10 for a unit ray from the origin.
+    const box = Aabbf.fromMinMax(Vec3.fromArray(.{ 10, -1, -1 }), Vec3.fromArray(.{ 12, 1, 1 }));
+    _ = try tree.insert(gpa, box, 0);
+    const boxes = [_]Aabbf{box};
+    const ray = BvhF.RayT.init(Vec3.zero, Vec3.unit_x);
+
+    // A collector bounded exactly at the entry parameter still receives it.
+    var at_bound = RayCollector{ .gpa = gpa, .boxes = &boxes, .ray = ray, .tighten = false, .bound = 10 };
+    defer at_bound.deinit();
+    _ = tree.queryRay(ray, &at_bound);
+    try std.testing.expectEqualSlices(u32, &.{0}, at_bound.sortedOwned());
+
+    // One ulp below the entry parameter, it does not.
+    var below = RayCollector{
+        .gpa = gpa,
+        .boxes = &boxes,
+        .ray = ray,
+        .tighten = false,
+        .bound = @bitCast(@as(u32, @bitCast(@as(f32, 10))) - 1),
+    };
+    defer below.deinit();
+    _ = tree.queryRay(ray, &below);
+    try std.testing.expectEqual(@as(usize, 0), below.items.items.len);
+}
+
+test "queryRay visits all four layer trees" {
+    const gpa = std.testing.allocator;
+    var bph = BphF.init(.{ .margin = 0 });
+    defer bph.deinit(gpa);
+
+    // One proxy per layer, all on the +X axis at increasing distance. A query has
+    // no second body, so the layer-pair matrix does not apply and all four must
+    // come back — `static × static` and `trigger × trigger` being forbidden for
+    // PAIRS is irrelevant here.
+    var boxes: [broadphase.layer_count]Aabbf = undefined;
+    for (0..broadphase.layer_count) |i| {
+        boxes[i] = boxCe(.{ @as(f32, @floatFromInt(i)) * 10 + 5, 0, 0 }, 1);
+    }
+    _ = try bph.insert(gpa, .static, boxes[0], 0);
+    _ = try bph.insert(gpa, .dynamic, boxes[1], 1);
+    _ = try bph.insert(gpa, .debris, boxes[2], 2);
+    _ = try bph.insert(gpa, .trigger, boxes[3], 3);
+
+    const ray = BphF.RayT.init(Vec3.zero, Vec3.unit_x);
+    var got = RayCollector{ .gpa = gpa, .boxes = &boxes, .ray = ray, .tighten = false };
+    defer got.deinit();
+    const visited = bph.queryRay(ray, &got);
+
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3 }, got.sortedOwned());
+    try std.testing.expect(visited >= broadphase.layer_count); // every tree entered
+
+    // The bound carries ACROSS the trees: a closest collector keeps only the
+    // nearest of the four and reports the static one, whatever the tree order.
+    var closest = RayCollector{ .gpa = gpa, .boxes = &boxes, .ray = ray, .tighten = true };
+    defer closest.deinit();
+    _ = bph.queryRay(ray, &closest);
+    try std.testing.expectEqual(@as(?u32, 0), closest.best_ud);
+}
+
+test "queryRay is empty on an empty tree" {
+    const gpa = std.testing.allocator;
+    var tree = BvhF.init(.{ .margin = 0 });
+    defer tree.deinit(gpa);
+
+    const boxes = [_]Aabbf{};
+    const ray = BvhF.RayT.init(Vec3.zero, Vec3.unit_x);
+    var got = RayCollector{ .gpa = gpa, .boxes = &boxes, .ray = ray, .tighten = false };
+    defer got.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), tree.queryRay(ray, &got));
+    try std.testing.expectEqual(@as(usize, 0), got.items.items.len);
+
+    // Same on the multi-layer aggregate, whose four trees are all empty.
+    var bph = BphF.init(.{ .margin = 0 });
+    defer bph.deinit(gpa);
+    try std.testing.expectEqual(@as(u32, 0), bph.queryRay(ray, &got));
+    try std.testing.expectEqual(@as(usize, 0), got.items.items.len);
+}
+
+/// Build a `side³` grid of unit boxes spaced 2 apart, `user_data == index`, and
+/// return the boxes. Used by the logarithmic-cost test at two decades of size.
+fn buildGrid(gpa: std.mem.Allocator, tree: *BvhF, boxes: *std.ArrayListUnmanaged(Aabbf), side: usize) !void {
+    var ud: u32 = 0;
+    for (0..side) |x| {
+        for (0..side) |y| {
+            for (0..side) |z| {
+                const box = boxCe(.{
+                    @as(f32, @floatFromInt(x)) * 2,
+                    @as(f32, @floatFromInt(y)) * 2,
+                    @as(f32, @floatFromInt(z)) * 2,
+                }, 0.5);
+                _ = try tree.insert(gpa, box, ud);
+                try boxes.append(gpa, box);
+                ud += 1;
+            }
+        }
+    }
+}
+
+test "queryRay node count grows logarithmically" {
+    const gpa = std.testing.allocator;
+
+    // A decade apart: 10³ = 1 000 and 22³ = 10 648 proxies.
+    const sides = [_]usize{ 10, 22 };
+    var visited_at: [sides.len]u32 = undefined;
+    var counts: [sides.len]usize = undefined;
+
+    for (sides, 0..) |side, k| {
+        var tree = BvhF.init(.{ .margin = 0 });
+        defer tree.deinit(gpa);
+        var boxes: std.ArrayListUnmanaged(Aabbf) = .empty;
+        defer boxes.deinit(gpa);
+        try buildGrid(gpa, &tree, &boxes, side);
+        counts[k] = boxes.items.len;
+
+        // Closest-hit along −X into the row y = z = 0, from beyond the far end:
+        // the tightening bound is what keeps the traversal off the rest of the
+        // grid, so this measures branch and bound, not a plain slab filter.
+        const far = @as(f32, @floatFromInt(side)) * 2 + 10;
+        const ray = BvhF.RayT.init(Vec3.fromArray(.{ far, 0, 0 }), Vec3.unit_x.neg());
+        var closest = RayCollector{ .gpa = gpa, .boxes = boxes.items, .ray = ray, .tighten = true };
+        defer closest.deinit();
+        visited_at[k] = tree.queryRay(ray, &closest);
+
+        // It found the nearest box on that row: the last cell of the x range.
+        try std.testing.expectEqual(@as(?u32, @intCast((side - 1) * side * side)), closest.best_ud);
+
+        // Generous c·log2(n) envelope, same shape as the `queryAabb` cost test.
+        // MEASURED: 31 nodes at n = 1 000 and 29 at n = 10 648 with near-first,
+        // against 99 and 273 when the order is forced to child1-first — the
+        // second of which breaks this envelope. So this test pins the near-first
+        // descent at scale, and the envelope is not vacuous.
+        const log2n = std.math.log2(@as(f32, @floatFromInt(counts[k])));
+        const envelope: u32 = @intFromFloat(@ceil(log2n * 12));
+        try std.testing.expect(visited_at[k] <= envelope);
+    }
+
+    // Ten times the proxies must not cost ten times the nodes. Asserted as a
+    // BOUND on the growth, never as an exact count — the visited count depends
+    // on the tree shape, hence on creation order (§1.11.6).
+    try std.testing.expect(counts[1] >= counts[0] * 10);
+    try std.testing.expect(visited_at[1] < visited_at[0] * 3);
+}

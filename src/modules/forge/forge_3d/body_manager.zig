@@ -43,6 +43,9 @@ const config = @import("config.zig");
 const shape_mod = @import("shape.zig");
 const body_mod = @import("body.zig");
 const narrowphase = @import("pipeline/narrowphase/root.zig");
+// M1.1.9 — only for the `Ray` type `raycastBody` takes; the broadphase itself is
+// the caller's, not this store's.
+const broadphase_mod = @import("pipeline/broadphase.zig");
 const IdAllocator = @import("slot_alloc.zig").IdAllocator;
 
 const Real = config.Real;
@@ -61,9 +64,16 @@ const Body = body_mod.Body;
 const MotionProperties = body_mod.MotionProperties;
 const GjkResult = narrowphase.GjkResult(Real);
 const ContactManifold = narrowphase.ContactManifold(Real);
+const RayR = broadphase_mod.Ray(Real);
 
 const ApiVec3 = @import("foundation").math.Vec3;
 const ApiQuat = @import("foundation").math.Quatf;
+
+/// Slack allowed on the descriptor rotation's unit norm, in ULPs of 1 at `f32` —
+/// the precision the descriptor is expressed in. A quaternion built by
+/// `fromAxisAngle` from f32 trigonometry lands a few ULPs off unit; anything
+/// further out is a caller error, not rounding.
+const descriptor_rotation_unit_k: comptime_int = 16;
 
 /// SoA store of rigid bodies with generational, deterministic handles.
 pub const BodyManager = struct {
@@ -87,15 +97,37 @@ pub const BodyManager = struct {
     /// `error.InvalidShape` on a stale/invalid `desc.shape`.
     pub fn addBody(self: *BodyManager, gpa: std.mem.Allocator, store: *const ShapeStore, desc: BodyDescriptor) !BodyId {
         const shape = store.get(desc.shape) orelse return error.InvalidShape;
+        // A TYPED error, not a debug assert: the query mask is 32 bits, so a body
+        // beyond that domain would be invisible to every query with no diagnostic
+        // at all — the silent-miss class the shape invariant forbids
+        // (`engine-physics-forge.md` §1.11.5). Distinct from the deferred
+        // descriptor-validation policy for degenerate mass and geometry, which
+        // stays a debug assert below.
+        if (desc.collision_layer >= api.collision_layer_count) return error.InvalidCollisionLayer;
         // Material domain guards (debug-only; the M1.1.0 `mass > 0` precedent).
         // Friction is a non-negative Coulomb coefficient; restitution is a [0, 1]
         // ratio. Both must be finite. Typed-error descriptor validation is a later
         // milestone; this guards the otherwise-unchecked material path.
         std.debug.assert(std.math.isFinite(desc.friction) and desc.friction >= 0);
         std.debug.assert(std.math.isFinite(desc.restitution) and desc.restitution >= 0 and desc.restitution <= 1);
+        // The descriptor rotation must already be a unit quaternion, to `f32`
+        // tolerance — it IS `f32`. Without this guard the normalisation below
+        // would silently repair ANY input, turning a zero quaternion into NaN;
+        // with it, the normalisation is total in what it does: it corrects the
+        // widening, it does not rescue an invalid input.
+        {
+            const q = desc.rotation.toArray();
+            const norm_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+            std.debug.assert(@abs(norm_sq - 1) <= descriptor_rotation_unit_k * std.math.floatEps(f32));
+        }
+        // Normalised ONCE, here, and shared by both rotation fields below (see
+        // `Body.rotation` for the invariant this establishes). Deliberately NOT
+        // folded into `convQuat`: that name says "convert", and hiding a semantic
+        // operation behind it would make the invariant invisible at the call site.
+        const rotation_r = convQuat(desc.rotation).normalize();
         const body = Body{
             .position = convVec3(desc.position),
-            .rotation = convQuat(desc.rotation),
+            .rotation = rotation_r,
             .linear_velocity = Vec3r.zero,
             .angular_velocity = Vec3r.zero,
             .force = Vec3r.zero,
@@ -111,7 +143,12 @@ pub const BodyManager = struct {
             // zero) — a fresh body has not yet stood still for any length of time.
             .sleep_time = 0,
             .sleep_ref_position = convVec3(desc.position),
-            .sleep_ref_rotation = convQuat(desc.rotation),
+            // The SAME normalised value as `.rotation`, not a second conversion.
+            // Were the reference left un-normalised, the first window sweep would
+            // read `Δq = q ⊗ conj(q_ref)` as a near-identity offset by the
+            // widening error and report a phantom displacement — tiny against the
+            // 15 mm bound, and wrong regardless.
+            .sleep_ref_rotation = rotation_r,
             .sleep_radius = body_mod.computeSleepRadius(shape),
             .entity = desc.entity,
         };
@@ -355,6 +392,39 @@ pub const BodyManager = struct {
         const rot = self.bodies.items(.rotation)[idx];
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
         return worldAabb(shape, pos, rot);
+    }
+
+    /// Ray against one body's shape, resolving its world pose and support shape
+    /// (via `store`). Returns null if the handle — or its shape — is
+    /// stale/invalid, or if the ray misses; `error.UnsupportedShape` if the shape
+    /// is outside the kernel's set (a rounded box). The `BodyId`-level ray
+    /// adapter for the broadphase→kernel flow, mirroring `gjkPair` /
+    /// `collidePair`: unpack a `queryRay` candidate's `user_data` as a `BodyId`
+    /// and call this per candidate.
+    ///
+    /// The hit comes back in the shape's LOCAL frame, which is enough: a rigid
+    /// transform preserves distances and the direction is unit on both sides, so
+    /// `distance` is already the world distance and only the normal needs
+    /// rotating — which the caller does, having its own reason to hold the pose.
+    ///
+    /// The local direction is NOT re-normalised after the inverse rotation. A
+    /// quaternion conjugate rotation preserves the norm to within a few ULPs,
+    /// which is exactly what the kernel's unit-direction assert budgets; a
+    /// re-normalisation would cost a square root per body AND mask a genuine
+    /// drift, so if that assert ever fires it is a signal, not a threshold to
+    /// widen.
+    pub fn raycastBody(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        id: BodyId,
+        ray: RayR,
+    ) error{UnsupportedShape}!?narrowphase.LocalHit(Real) {
+        const idx = self.alloc.validate(id) orelse return null;
+        const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
+        const inv_rot = self.bodies.items(.rotation)[idx].conjugate();
+        const local_origin = inv_rot.rotateVec3(ray.origin.sub(self.bodies.items(.position)[idx]));
+        const local_direction = inv_rot.rotateVec3(ray.direction);
+        return narrowphase.rayShape(Real, shape_mod.supportShape(shape), local_origin, local_direction);
     }
 
     /// Run distance-based GJK on the pair `a`/`b`, resolving each body's world

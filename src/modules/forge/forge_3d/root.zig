@@ -34,6 +34,10 @@ const island_mod = @import("pipeline/island.zig");
 // over the `BodyManager` SoA store, at the same pipeline level as integration.
 // Re-exported as the `sleep` namespace below; the comptime pin analyses its tests.
 const sleep_mod = @import("pipeline/sleep.zig");
+// M1.1.9 — `Real`-bound spatial queries (stateless orchestration over the
+// broadphase ray traversal + the exact kernels). Re-exported as the `query`
+// namespace below; the comptime pin analyses its acceptance tests.
+const query_mod = @import("query.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -77,6 +81,10 @@ pub const Broadphase = broadphase.Broadphase(Real);
 pub const BroadphaseLayer = broadphase.BroadphaseLayer;
 /// Broadphase tuning at solver precision.
 pub const BroadphaseConfig = broadphase.BroadphaseConfig(Real);
+/// A world-space ray (origin + direction + the reciprocal form the slab test
+/// wants) at solver precision — the input to both the broadphase ray traversal
+/// and the exact kernels.
+pub const Ray = broadphase.Ray(Real);
 
 // --- Narrowphase (GJK convex detection) ---
 
@@ -143,6 +151,25 @@ pub fn collideOrderedGeneric(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, 
 /// The `(normal, closest points, base penetration)` fast-path seed at solver precision.
 pub const ContactSeed = narrowphase.ContactSeed(Real);
 
+// --- Ray kernels + queries ---
+
+/// A ray hit on one shape in that shape's LOCAL frame (distance + outward
+/// normal) at solver precision — what `BodyManager.raycastBody` returns.
+pub const LocalHit = narrowphase.LocalHit(Real);
+
+/// Nearest ray↔shape intersection in the shape's local frame, at solver
+/// precision — the `Real`-bound kernel entry. `BodyManager.raycastBody` is the
+/// `BodyId`-level adapter the query traversal drives.
+pub fn rayShape(support_shape: SupportShape, origin: Vec3r, direction: Vec3r) error{UnsupportedShape}!?LocalHit {
+    return narrowphase.rayShape(Real, support_shape, origin, direction);
+}
+
+/// Spatial queries at solver precision (`engine-physics-forge.md` §1.11): the
+/// shared `Filter`, the `RayQuery`/`RayHit` types, and the three raycast entries
+/// `raycast` / `raycastAny` / `raycastAll`. Stateless — each entry takes
+/// `(bp, bm, store)`.
+pub const query = query_mod;
+
 // --- Islands (branch-neutral partition core) ---
 
 /// The island partition core: a union-find over opaque element indices, shared by
@@ -186,6 +213,7 @@ comptime {
     _ = rigid_mod;
     _ = island_mod;
     _ = sleep_mod;
+    _ = query_mod;
     _ = @import("tests/body_manager_test.zig");
     _ = @import("tests/integration_test.zig");
     _ = @import("tests/broadphase_test.zig");
@@ -198,4 +226,5 @@ comptime {
     _ = @import("tests/position_solver_test.zig");
     _ = @import("tests/island_test.zig");
     _ = @import("tests/sleep_test.zig");
+    _ = @import("tests/raycast_test.zig");
 }
