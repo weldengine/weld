@@ -49,11 +49,11 @@ const Broadphase = broadphase_mod.Broadphase(Real);
 /// precision.
 pub const Ray = broadphase_mod.Ray(Real);
 
-/// Number of object layers a 32-bit mask can address. A body declared outside
-/// `[0, layer_bits)` would be invisible to every query with no diagnostic, so
-/// `addBody` rejects it (`error.InvalidCollisionLayer`, E5) — the assert in
-/// `Filter.accepts` is the defensive echo of that.
-pub const layer_bits: u8 = 32;
+/// Number of object layers a 32-bit mask can address — the public contract's
+/// constant, not a second copy of it. `addBody` rejects a body beyond this domain
+/// with `error.InvalidCollisionLayer`, and the assert in `Filter.accepts` is the
+/// defensive echo of that rejection.
+pub const layer_bits: u8 = api.collision_layer_count;
 
 /// Errors a query can surface. `UnsupportedShape` comes from the exact kernel —
 /// a rounded box today — and is propagated rather than read as a miss.
@@ -187,6 +187,92 @@ pub fn raycastAll(
     const written = collector.count;
     std.mem.sort(RayHit, out[0..written], {}, hitLess);
     return written;
+}
+
+// --- The rest of the frozen family: Phase-1 stubs ---
+//
+// The five entries below carry their FROZEN signatures — `engine-tier-interfaces.md`
+// §1, at the f32 public boundary — and are owned by M1.1.10. They exist here, now,
+// because a comptime strategy interface cannot gain a method after its freeze
+// without breaking every Tier 3 solver (§1.11.7).
+//
+// Their bodies `@panic`, and that is a decision rather than laziness. The
+// `error.NotImplemented` pattern of §1.5 works for `createJoint` because it
+// returns `anyerror!JointId` and therefore HAS somewhere to put the error. These
+// signatures have no error channel — `shapeCast` returns `?ShapeCastHit`, the
+// three others return a `u32` count — so a stub returning `null` or `0` would be
+// a silent lie in the caller's own vocabulary ("no hit", "no entities"), the exact
+// class this milestone has been closing since E3. Failing loud costs nothing and
+// touches nothing that freezes.
+//
+// The raycast trio is NOT stubbed here: it is implemented, at `Real`, above. Its
+// f32 wrapper belongs to the interface tier (M1.1.15), which is the only place
+// that ever knows both scalars.
+
+/// Cast a shape along a direction — **M1.1.10**. Signature frozen here.
+pub fn shapeCast(
+    bp: *const Broadphase,
+    bm: *const BodyManager,
+    store: *const ShapeStore,
+    q: api.ShapeCastQuery,
+) ?api.ShapeCastHit {
+    _ = .{ bp, bm, store, q };
+    @panic("shapeCast is M1.1.10; its signature freezes at M1.1.9");
+}
+
+/// Entities overlapping a shape — **M1.1.10**. Signature frozen here.
+pub fn overlapShape(
+    bp: *const Broadphase,
+    bm: *const BodyManager,
+    store: *const ShapeStore,
+    q: api.OverlapQuery,
+    out: []api.EntityId,
+) u32 {
+    _ = .{ bp, bm, store, q, out };
+    @panic("overlapShape is M1.1.10; its signature freezes at M1.1.9");
+}
+
+/// Entities overlapping a world AABB — **M1.1.10**. Signature frozen here. The
+/// cheapest query of the family: it stops at the broadphase, and
+/// `Bvh.queryAabb` already implements the traversal it needs.
+pub fn overlapAabb(
+    bp: *const Broadphase,
+    bm: *const BodyManager,
+    min: Vec3r,
+    max: Vec3r,
+    filter: api.PhysicsQueryFilter,
+    out: []api.EntityId,
+) u32 {
+    _ = .{ bp, bm, min, max, filter, out };
+    @panic("overlapAabb is M1.1.10; its signature freezes at M1.1.9");
+}
+
+/// Entities containing a point (shapes solid, §1.11.4) — **M1.1.10**. Signature
+/// frozen here.
+pub fn pointQuery(
+    bp: *const Broadphase,
+    bm: *const BodyManager,
+    store: *const ShapeStore,
+    point: Vec3r,
+    filter: api.PhysicsQueryFilter,
+    out: []api.EntityId,
+) u32 {
+    _ = .{ bp, bm, store, point, filter, out };
+    @panic("pointQuery is M1.1.10; its signature freezes at M1.1.9");
+}
+
+/// Closest point on the closest collider within `max_distance` — **M1.1.10**.
+/// Signature frozen here.
+pub fn closestPoint(
+    bp: *const Broadphase,
+    bm: *const BodyManager,
+    store: *const ShapeStore,
+    point: Vec3r,
+    max_distance: Real,
+    filter: api.PhysicsQueryFilter,
+) ?api.ClosestPointResult {
+    _ = .{ bp, bm, store, point, max_distance, filter };
+    @panic("closestPoint is M1.1.10; its signature freezes at M1.1.9");
 }
 
 /// Total order on hits: distance first, then `BodyId`. The composite key makes

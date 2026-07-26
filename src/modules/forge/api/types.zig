@@ -150,7 +150,10 @@ pub const BodyDescriptor = struct {
     linear_damping: f32 = 0.05,
     /// Angular velocity damping per second.
     angular_damping: f32 = 0.05,
-    /// Collision-layer index.
+    /// Collision-layer index. Bounded to `[0, collision_layer_count)`: the query
+    /// mask is 32 bits, so `addBody` REJECTS anything beyond with
+    /// `error.InvalidCollisionLayer` instead of creating a body no query could
+    /// ever see (§1.11.5).
     collision_layer: u8 = 0,
     /// Per-body gravity multiplier.
     gravity_factor: f32 = 1.0,
@@ -160,6 +163,142 @@ pub const BodyDescriptor = struct {
     /// (`engine-physics-forge.md` §2), which the descriptor dropped until M1.1.8 —
     /// the same gap class as the `friction`/`restitution` drop closed at M1.1.6.
     can_sleep: bool = true,
+};
+
+// --- Queries (the complete family, frozen before the interface freeze) ---
+//
+// Mirrors `engine-tier-interfaces.md` §1 verbatim. The family is settled IN FULL
+// here even where the body is a Phase-1 stub: adding a method to a comptime
+// strategy interface after its freeze (M1.1.15) breaks every Tier 3 solver, so
+// deferring a signature is not admissible (`engine-physics-forge.md` §1.11.7).
+//
+// These types are the f32 PUBLIC boundary, deliberately distinct from their
+// solver-side counterparts in `forge_3d/query.zig` (`Filter`, `RayQuery`,
+// `RayHit`) which carry the solver scalar. Two levels by design, not duplication:
+// §1.11.8 makes the public surface f32 — consistent with `BodyDescriptor`, the
+// interface `Transform` and the ECS `Transform` — and widening it is one decision
+// over all of them at once, at M1.1.15. The conversion between the two levels is
+// the interface tier's, and it is the only place that ever knows both.
+
+/// Number of object layers a query mask can address. The mask is 32 bits, so a
+/// body on a layer outside `[0, collision_layer_count)` would be invisible to
+/// EVERY query with no diagnostic — which is why `addBody` rejects it with
+/// `error.InvalidCollisionLayer` rather than accepting it (§1.11.5). Consistent
+/// with the eight default layers of `engine-physics-forge.md` §3.
+pub const collision_layer_count: u8 = 32;
+
+/// Filtering shared by the whole query family (`engine-physics-forge.md`
+/// §1.11.5). The mask applies to the OBJECT layer of the shape hit, never to the
+/// broadphase's broad layers, and a layer is bounded to
+/// `[0, collision_layer_count)`.
+///
+/// Named `PhysicsQueryFilter`, not `QueryFilter`: §6 `AIModule` already carries a
+/// `QueryFilter` for its spatial queries. The two are distinct types and neither
+/// renames the other.
+pub const PhysicsQueryFilter = struct {
+    /// A candidate passes when `(1 << layer) & layer_mask` is non-zero.
+    layer_mask: u32 = 0xFFFFFFFF,
+    /// Bodies ignored. Dominant case: myself.
+    exclude: []const BodyId = &.{},
+};
+
+/// A world-space ray query. `direction` need not be normalised — it is at the
+/// entry. The tested interval is CLOSED, `[0, max_distance]`, and an origin
+/// inside a shape produces a hit at distance zero (convexes are solid, §1.11.4).
+pub const RaycastQuery = struct {
+    /// Ray origin (metres).
+    origin: Vec3,
+    /// Ray direction.
+    direction: Vec3,
+    /// Maximum distance; finite and `>= 0`, and `0` degenerates to a point test.
+    max_distance: f32,
+    /// Object-layer mask + exclusions.
+    filter: PhysicsQueryFilter = .{},
+};
+
+/// A cast of an arbitrary shape. Replaces the former `SphereCastQuery`: ONE entry
+/// serves sphere, box and capsule, and the three Etch forms of
+/// `engine-physics-forge.md` §13 are wrappers over it (§1.11.7). Symmetric with
+/// `ShapeCastQuery2D`.
+pub const ShapeCastQuery = struct {
+    /// The shape being cast.
+    shape: ShapeId,
+    /// Start position of the cast shape (metres).
+    origin: Vec3,
+    /// Orientation of the cast shape.
+    rotation: Quatf = Quatf.identity,
+    /// Sweep direction.
+    direction: Vec3,
+    /// Maximum sweep distance.
+    max_distance: f32,
+    /// Object-layer mask + exclusions.
+    filter: PhysicsQueryFilter = .{},
+};
+
+/// An overlap test of an arbitrary shape. Same construction as the cast: the
+/// sphere and box overlaps of §13 are wrappers over this one entry.
+pub const OverlapQuery = struct {
+    /// The shape being tested.
+    shape: ShapeId,
+    /// Its position (metres).
+    position: Vec3,
+    /// Its orientation.
+    rotation: Quatf = Quatf.identity,
+    /// Object-layer mask + exclusions.
+    filter: PhysicsQueryFilter = .{},
+};
+
+/// One ray hit. `subshape_id` identifies the sub-shape hit and is 0 while one
+/// shape is one body; the service derives `physics_material` from it, because the
+/// solver result carries the sub-shape identity and never the material itself
+/// (§1.11.7 — the same construction as the reference's `CastResult.h`).
+pub const RaycastHit = struct {
+    /// Entity owning the body hit.
+    entity: EntityId,
+    /// The body hit.
+    body: BodyId,
+    /// Sub-shape hit; 0 while one shape is one body.
+    subshape_id: u32 = 0,
+    /// World-space hit point.
+    position: Vec3,
+    /// World-space outward surface normal at the hit point.
+    normal: Vec3,
+    /// Distance from the ray origin — a distance, never a fraction (§1.11.4).
+    distance: f32,
+};
+
+/// One shape-cast hit. Distinct from `RaycastHit` (parity with `ShapeCastHit2D`):
+/// a cast has TWO sub-shapes, the one being cast and the one hit.
+pub const ShapeCastHit = struct {
+    /// Entity owning the body hit.
+    entity: EntityId,
+    /// The body hit.
+    body: BodyId,
+    /// Sub-shape of the body that was hit.
+    subshape_id: u32 = 0,
+    /// Sub-shape of the CAST shape that made contact.
+    cast_subshape_id: u32 = 0,
+    /// World-space contact point.
+    position: Vec3,
+    /// World-space contact normal.
+    normal: Vec3,
+    /// Sweep distance at contact.
+    distance: f32,
+};
+
+/// Result of `closestPoint`: the closest point on the closest collider within the
+/// requested radius.
+pub const ClosestPointResult = struct {
+    /// Entity owning the collider.
+    entity: EntityId,
+    /// The body.
+    body: BodyId,
+    /// Sub-shape carrying the closest point.
+    subshape_id: u32 = 0,
+    /// World-space closest point on the collider.
+    position: Vec3,
+    /// Distance from the queried point.
+    distance: f32,
 };
 
 /// A physics pose — position + orientation, no scale. Distinct from the ECS
@@ -226,4 +365,60 @@ test "ShapeType and BodyType are u8-backed" {
     try testing.expectEqual(@as(u8, 11), @intFromEnum(ShapeType.empty));
     try testing.expectEqual(@as(u8, 0), @intFromEnum(BodyType.static));
     try testing.expectEqual(@as(u8, 2), @intFromEnum(BodyType.dynamic));
+}
+
+test "the frozen query family mirrors engine-tier-interfaces.md §1" {
+    // Field NAMES and defaults are the contract: this is a verbatim mirror, and a
+    // rename here is a break for every Tier 3 solver after the M1.1.15 freeze.
+    const f = PhysicsQueryFilter{};
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), f.layer_mask);
+    try testing.expectEqual(@as(usize, 0), f.exclude.len);
+    try testing.expectEqual(@as(u8, 32), collision_layer_count);
+
+    const ray = RaycastQuery{ .origin = Vec3.zero, .direction = Vec3.unit_x, .max_distance = 10 };
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), ray.filter.layer_mask);
+
+    const cast = ShapeCastQuery{ .shape = 0, .origin = Vec3.zero, .direction = Vec3.unit_x, .max_distance = 1 };
+    try testing.expect(cast.rotation.approxEql(Quatf.identity, 0));
+
+    const overlap = OverlapQuery{ .shape = 0, .position = Vec3.zero };
+    try testing.expect(overlap.rotation.approxEql(Quatf.identity, 0));
+
+    // `subshape_id` defaults to 0 — one shape is one body today, and it is by this
+    // field that the service derives the material, never from the solver result.
+    const hit = RaycastHit{
+        .entity = .{ .index = 0, .generation = 0 },
+        .body = 0,
+        .position = Vec3.zero,
+        .normal = Vec3.unit_y,
+        .distance = 1,
+    };
+    try testing.expectEqual(@as(u32, 0), hit.subshape_id);
+
+    const cast_hit = ShapeCastHit{
+        .entity = .{ .index = 0, .generation = 0 },
+        .body = 0,
+        .position = Vec3.zero,
+        .normal = Vec3.unit_y,
+        .distance = 1,
+    };
+    // A cast has TWO sub-shapes; that second field is what distinguishes this
+    // type from `RaycastHit` and why they are not merged.
+    try testing.expectEqual(@as(u32, 0), cast_hit.subshape_id);
+    try testing.expectEqual(@as(u32, 0), cast_hit.cast_subshape_id);
+
+    const closest = ClosestPointResult{
+        .entity = .{ .index = 0, .generation = 0 },
+        .body = 0,
+        .position = Vec3.zero,
+        .distance = 2,
+    };
+    try testing.expectEqual(@as(u32, 0), closest.subshape_id);
+
+    // The public boundary is f32 (§1.11.8) — pinned, because widening it is a
+    // single decision over `BodyDescriptor`, the interface pose, the query results
+    // and the ECS `Transform` together, at M1.1.15, and never one of them alone.
+    try testing.expectEqual(f32, @TypeOf(hit.distance));
+    try testing.expectEqual(f32, @TypeOf(ray.max_distance));
+    try testing.expectEqual(f32, @TypeOf(closest.distance));
 }

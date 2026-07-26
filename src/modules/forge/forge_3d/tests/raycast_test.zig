@@ -518,6 +518,8 @@ test "containsPoint is the solid membership the zero-distance rule rests on" {
 
 const harness = @import("solver_test.zig");
 const query = @import("../query.zig");
+const body_manager_mod = @import("../body_manager.zig");
+const broadphase_mod = @import("../pipeline/broadphase.zig");
 const api = @import("weld_forge");
 const foundation_math = @import("foundation").math;
 
@@ -663,4 +665,87 @@ test "no reachable shape makes a query fail, and the error channel is not dead c
     try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, q)) != null);
     try testing.expect(try query.raycastAny(&world.bp, &world.bm, &world.store, q));
     try testing.expectEqual(@as(u32, 3), try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
+}
+
+// ---------------------------------------------------------------------------
+// M1.1.9 / E5 — the frozen family and the collision-layer domain
+// ---------------------------------------------------------------------------
+
+test "a body on layer 32 or above is refused at creation" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+
+    // The last legal layer is accepted...
+    const ok = try world.bm.addBody(gpa, &world.store, .{
+        .shape = shape,
+        .collision_layer = api.collision_layer_count - 1,
+        .body_type = .static,
+        .entity = .{ .index = 0, .generation = 0 },
+    });
+    try testing.expect(world.bm.isValid(ok));
+    const count_before = world.bm.count();
+
+    // ...and the first illegal one is a TYPED error, not a body no query could see.
+    for ([_]u8{ api.collision_layer_count, 33, 200, 255 }) |layer| {
+        try testing.expectError(error.InvalidCollisionLayer, world.bm.addBody(gpa, &world.store, .{
+            .shape = shape,
+            .collision_layer = layer,
+            .body_type = .static,
+            .entity = .{ .index = 1, .generation = 0 },
+        }));
+    }
+    // Nothing was created on the way: the rejection precedes every mutation.
+    try testing.expectEqual(count_before, world.bm.count());
+}
+
+test "the five deferred query entries carry their frozen signatures" {
+    // A `@panic` body cannot be exercised by a test, by construction — so what is
+    // pinned here is the SURFACE, at comptime: the exact signature each entry will
+    // still have after the M1.1.15 freeze. This is the comptime-interface-check
+    // pattern of `engine-zig-conventions.md` §13, which validates the signature and
+    // explicitly not the body. The body is M1.1.10's, and it fails loud rather than
+    // returning the `null` or `0` that these error-free return types would
+    // otherwise force — "no hit" and "no entities" are not true.
+    const BM = body_manager_mod.BodyManager;
+    const SS = body_manager_mod.ShapeStore;
+    const BP = broadphase_mod.Broadphase(Real);
+
+    try testing.expectEqual(
+        fn (*const BP, *const BM, *const SS, api.ShapeCastQuery) ?api.ShapeCastHit,
+        @TypeOf(query.shapeCast),
+    );
+    try testing.expectEqual(
+        fn (*const BP, *const BM, *const SS, api.OverlapQuery, []api.EntityId) u32,
+        @TypeOf(query.overlapShape),
+    );
+    try testing.expectEqual(
+        fn (*const BP, *const BM, Vec3r, Vec3r, api.PhysicsQueryFilter, []api.EntityId) u32,
+        @TypeOf(query.overlapAabb),
+    );
+    try testing.expectEqual(
+        fn (*const BP, *const BM, *const SS, Vec3r, api.PhysicsQueryFilter, []api.EntityId) u32,
+        @TypeOf(query.pointQuery),
+    );
+    try testing.expectEqual(
+        fn (*const BP, *const BM, *const SS, Vec3r, Real, api.PhysicsQueryFilter) ?api.ClosestPointResult,
+        @TypeOf(query.closestPoint),
+    );
+
+    // The three raycast entries are NOT stubs: they are implemented at `Real` and
+    // return the solver-side `RayHit`, with the error channel the kernel needs.
+    // Their f32 public wrapper is the interface tier's (M1.1.15).
+    try testing.expectEqual(
+        fn (*const BP, *const BM, *const SS, query.RayQuery) query.Error!?query.RayHit,
+        @TypeOf(query.raycast),
+    );
+    try testing.expectEqual(
+        fn (*const BP, *const BM, *const SS, query.RayQuery) query.Error!bool,
+        @TypeOf(query.raycastAny),
+    );
+    try testing.expectEqual(
+        fn (*const BP, *const BM, *const SS, query.RayQuery, []query.RayHit) query.Error!u32,
+        @TypeOf(query.raycastAll),
+    );
 }

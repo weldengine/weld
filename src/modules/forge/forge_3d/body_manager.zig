@@ -97,6 +97,13 @@ pub const BodyManager = struct {
     /// `error.InvalidShape` on a stale/invalid `desc.shape`.
     pub fn addBody(self: *BodyManager, gpa: std.mem.Allocator, store: *const ShapeStore, desc: BodyDescriptor) !BodyId {
         const shape = store.get(desc.shape) orelse return error.InvalidShape;
+        // A TYPED error, not a debug assert: the query mask is 32 bits, so a body
+        // beyond that domain would be invisible to every query with no diagnostic
+        // at all — the silent-miss class the shape invariant forbids
+        // (`engine-physics-forge.md` §1.11.5). Distinct from the deferred
+        // descriptor-validation policy for degenerate mass and geometry, which
+        // stays a debug assert below.
+        if (desc.collision_layer >= api.collision_layer_count) return error.InvalidCollisionLayer;
         // Material domain guards (debug-only; the M1.1.0 `mass > 0` precedent).
         // Friction is a non-negative Coulomb coefficient; restitution is a [0, 1]
         // ratio. Both must be finite. Typed-error descriptor validation is a later
