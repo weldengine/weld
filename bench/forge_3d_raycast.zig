@@ -2,8 +2,10 @@
 //!
 //! Closest-hit raycast over a STATIC scene of 10 000 bodies (spheres, boxes and
 //! capsules on a grid), plus the `any` and `all` selection modes over the same
-//! ray set, and a shuffled-ray variant so the numbers are not read off one
-//! favourable traversal order. A running checksum over the hits defeats dead-code
+//! ray set, and a shuffled-ray variant (Fisher-Yates from the same fixed seed) so
+//! the numbers are not read off one favourable traversal order: the ray set is
+//! fixed and the scene is a grid, so consecutive rays otherwise land in
+//! neighbouring cells. A running checksum over the hits defeats dead-code
 //! elimination.
 //!
 //! **Reported, not gated.** No numeric envelope is pre-registered: the baseline
@@ -177,7 +179,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var checksum: f64 = 0;
-    var measures: [4]Measure = undefined;
+    var measures: [5]Measure = undefined;
 
     // (1) closest — the dominant mode.
     {
@@ -265,6 +267,40 @@ pub fn main(init: std.process.Init) !void {
             if (dt < best_ns) best_ns = dt;
         }
         measures[3] = report("closest (5 m bound)", best_ns, n_rays, hits / n_reps);
+    }
+
+    // (5) closest over a SHUFFLED ray order. The ray set is fixed and the scene is a
+    // grid, so consecutive rays land in neighbouring cells and the traversal walks a
+    // favourable, cache-warm order; shuffling breaks that correlation without
+    // changing the work. Fisher-Yates from the SAME fixed seed stream as the rest of
+    // this bench, so the permutation is reproducible run to run.
+    {
+        const order = try gpa.alloc(u32, n_rays);
+        defer gpa.free(order);
+        for (order, 0..) |*ix, i| ix.* = @intCast(i);
+        var i: usize = n_rays - 1;
+        while (i > 0) : (i -= 1) {
+            const j = rng.intRangeAtMost(usize, 0, i);
+            const tmp = order[i];
+            order[i] = order[j];
+            order[j] = tmp;
+        }
+
+        var hits: usize = 0;
+        var best_ns: i64 = std.math.maxInt(i64);
+        for (0..n_reps) |_| {
+            const t0 = nowNs();
+            for (order) |ix| {
+                const q = query.RayQuery{ .origin = origins[ix], .direction = directions[ix], .max_distance = 200 };
+                if (try query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                    hits += 1;
+                    checksum += @floatCast(hit.distance);
+                }
+            }
+            const dt = nowNs() - t0;
+            if (dt < best_ns) best_ns = dt;
+        }
+        measures[4] = report("closest (shuffled order)", best_ns, n_rays, hits / n_reps);
     }
 
     const frame_ns: f64 = @as(f64, std.time.ns_per_s) / 60.0;

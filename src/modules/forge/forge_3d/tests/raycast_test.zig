@@ -1419,3 +1419,82 @@ const CountingRayCollector = struct {
         return self.stop_on_first and self.accepted > 0;
     }
 };
+
+/// The residual error a unit normal carries at `distance` from the shape: the
+/// scalar's own resolution of a coordinate out there, mapped onto a vector of
+/// length `radius`. NOT a comfort tolerance — it is the §1.11.8 precision
+/// boundary written as a formula, so it scales with the scalar instead of being
+/// two literals that could each be wrong on the other precision.
+fn farNormalTolerance(distance: Real, radius: Real) Real {
+    return std.math.floatEps(Real) * distance / radius;
+}
+
+test "the far-field conditioning holds on an OBLIQUE ray, to the scalar's resolution" {
+    // The earlier far-field tests are all aligned on +X, which is precisely the
+    // direction where the perpendicular offset is zero and the arithmetic comes out
+    // EXACT: the aligned case below returns |normal| = 1.0000000, which is why that
+    // coverage could not see a residue at all.
+    //
+    // MEASURED at f32 on origin (−3000.4, −3999.7, 0), direction (0.6, 0.8, 0),
+    // r = 1 — ~5 000 m out and genuinely oblique:
+    //
+    //   this kernel                                  |offset| = 0.9999154  (8.458e-5)
+    //   EXACT arithmetic on the same f32-rounded inputs        = 0.9997935  (2.065e-4)
+    //   f64, same inputs                                       = 1.0000000  (7.871e-14)
+    //
+    // The kernel is BETTER than a perfect computation on its own inputs, so what is
+    // left is the REPRESENTATION of a 5 km coordinate in f32, not the algorithm:
+    // `offset = w − root·d` already removed the only avoidable cancellation, and
+    // there is nothing further to recover. The assertion below therefore bounds the
+    // error by the scalar's resolution at that distance and says so.
+    const far: Real = 5000;
+    const tolerance = farNormalTolerance(far, 1);
+
+    const sphere = SupportShapeR{ .core = .point, .radius = 1 };
+    const capsule = SupportShapeR{ .core = .{ .segment = 3 }, .radius = 1 };
+
+    // (1) Sphere, oblique in the XY plane.
+    {
+        const d = dir(0.6, 0.8, 0);
+        const hit = (try narrowphase.rayShape(Real, sphere, v(-3000.4, -3999.7, 0), d)).?;
+        try testing.expect(hit.distance >= 0);
+        try testing.expect(hit.normal.dot(d) <= 0);
+        try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), tolerance);
+        // The incidence has a CLOSED FORM, so it is asserted as one rather than
+        // against an invented threshold: `o · d = −5000` exactly here, so the
+        // perpendicular offset is `w = o + 5000·d = (−0.4, 0, 0.3)`, an impact
+        // parameter of 0.5 on a unit sphere — hence `normal · d = −√(1 − 0.25)`.
+        try testing.expectApproxEqAbs(-@sqrt(@as(Real, 0.75)), hit.normal.dot(d), tolerance);
+    }
+
+    // (2) Capsule WALL, oblique in the RADIAL plane. The obliquity has to be in XZ:
+    // an XY-oblique ray is oblique along the capsule's own axis, which the radial
+    // quadratic ignores, and it comes back exactly unit — a case that would have
+    // looked like coverage without being any.
+    {
+        const d = dir(0.6, 0, 0.8);
+        const hit = (try narrowphase.rayShape(Real, capsule, v(-3000.4, 0, -3999.7), d)).?;
+        try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), tolerance);
+        try testing.expectEqual(@as(Real, 0), hit.normal.toArray()[1]); // radial: no Y
+        // Same impact parameter, same closed-form incidence, in the radial plane.
+        try testing.expectApproxEqAbs(-@sqrt(@as(Real, 0.75)), hit.normal.dot(d), tolerance);
+    }
+
+    // (3) The aligned contrast: exactly 1, at both precisions. This is the reason
+    // the previous far-field coverage was blind to the oblique residue.
+    {
+        const d = dir(1, 0, 0);
+        const aligned = (try narrowphase.rayShape(Real, sphere, v(-far, 0, 0), d)).?;
+        try testing.expectEqual(@as(Real, 1), aligned.normal.length());
+        try testing.expectEqual(@as(Real, 4999), aligned.distance);
+    }
+
+    // (4) The bound is not vacuous: at f64 the same oblique ray is unit to ~1e-13,
+    // four orders inside the f64 form of the same formula, so this tolerance tracks
+    // the scalar rather than papering over a fixed slack.
+    if (Real == f64) {
+        const d = dir(0.6, 0.8, 0);
+        const hit = (try narrowphase.rayShape(Real, sphere, v(-3000.4, -3999.7, 0), d)).?;
+        try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), 1e-12);
+    }
+}
