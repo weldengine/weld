@@ -269,13 +269,28 @@ test "static and kinematic bodies are not integrated" {
     bm.addForce(id_kin, vr(50, 50, 50));
     bm.addTorque(id_kin, vr(9, 9, 9));
 
+    // Captured BEFORE the pass, so what follows is a statement about
+    // `integrate` alone. Comparing the stored rotation against a locally
+    // re-widened `rot_r` instead mixed this test's claim with a claim about what
+    // `addBody` stores — and `addBody` now normalises the widened descriptor
+    // rotation (`Body.rotation`'s invariant, M1.1.9), so that comparison was
+    // asserting creation semantics under the name of integration semantics. Form
+    // taken from `position_solver_test.zig:402`, which already captures the pose
+    // before its pass and asserts it bit-unchanged after.
+    const before_rot_stat = bm.rotation(id_stat).?;
+    const before_rot_kin = bm.rotation(id_kin).?;
+
     integration.integrate(&bm, dt, g);
 
     // Neither moved or rotated.
     try testing.expect(bm.position(id_stat).?.approxEql(vr(1, 2, 3), 0));
     try testing.expect(bm.position(id_kin).?.approxEql(vr(4, 5, 6), 0));
-    try testing.expect(bm.rotation(id_stat).?.approxEql(rot_r, 0));
-    try testing.expect(bm.rotation(id_kin).?.approxEql(rot_r, 0));
+    try testing.expect(bm.rotation(id_stat).?.approxEql(before_rot_stat, 0));
+    try testing.expect(bm.rotation(id_kin).?.approxEql(before_rot_kin, 0));
+    // And the stored rotation IS the descriptor's, to the widening's precision —
+    // the creation-side claim, kept but stated separately and at the right
+    // tolerance instead of bit-exactly.
+    try testing.expect(bm.rotation(id_stat).?.approxEql(rot_r, 16 * std.math.floatEps(f32)));
     // Kinematic velocities are untouched (not consumed in M1.1.5).
     try testing.expect(bm.linearVelocity(id_kin).?.approxEql(vr(1, 0, 0), 0));
     try testing.expect(bm.angularVelocity(id_kin).?.approxEql(vr(0, 2, 0), 0));
