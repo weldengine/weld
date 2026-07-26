@@ -520,6 +520,7 @@ const harness = @import("solver_test.zig");
 const query = @import("../query.zig");
 const body_manager_mod = @import("../body_manager.zig");
 const broadphase_mod = @import("../pipeline/broadphase.zig");
+const vr = harness.vr;
 const api = @import("weld_forge");
 const foundation_math = @import("foundation").math;
 
@@ -702,8 +703,13 @@ test "a body on layer 32 or above is refused at creation" {
 
 test "the five deferred query entries carry their frozen signatures" {
     // A `@panic` body cannot be exercised by a test, by construction — so what is
-    // pinned here is the SURFACE, at comptime: the exact signature each entry will
-    // still have after the M1.1.15 freeze. This is the comptime-interface-check
+    // pinned here is the SURFACE, at comptime. What it is NOT is a statement about
+    // the post-freeze shape: the five stubs take the f32 PUBLIC types while the
+    // implemented raycast trio takes `Real` ones, so the two halves of the family
+    // sit on opposite sides of the precision boundary and one of them will move, at
+    // M1.1.10 or at M1.1.15. What this pin buys is a CHANGE DETECTOR on
+    // `api/types.zig`: a rename or a retyped field there fails here instead of
+    // surfacing at the freeze. This is the comptime-interface-check
     // pattern of `engine-zig-conventions.md` §13, which validates the signature and
     // explicitly not the body. The body is M1.1.10's, and it fails loud rather than
     // returning the `null` or `0` that these error-free return types would
@@ -748,4 +754,472 @@ test "the five deferred query entries carry their frozen signatures" {
         fn (*const BP, *const BM, *const SS, query.RayQuery, []query.RayHit) query.Error!u32,
         @TypeOf(query.raycastAll),
     );
+}
+
+// ---------------------------------------------------------------------------
+// M1.1.9 / E6 — the query-level acceptance suite
+// ---------------------------------------------------------------------------
+
+/// A unit sphere body at `centre` on layer `layer`, `entity_index` distinct so a
+/// scene can be rebuilt in a different order and still be the same scene.
+fn addSphereAt(gpa: std.mem.Allocator, world: *harness.World, centre: [3]f32, layer: u8, entity_index: u32) !api.BodyId {
+    const shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    return world.addBody(gpa, .{
+        .shape = shape,
+        .position = harness.av3(centre[0], centre[1], centre[2]),
+        .body_type = .static,
+        .collision_layer = layer,
+        .entity = .{ .index = entity_index, .generation = 0 },
+    });
+}
+
+/// The ray every simple scene below shoots: from the origin along +X, long enough
+/// to reach everything placed on that axis.
+fn axisQuery(max_distance: Real) query.RayQuery {
+    return .{ .origin = Vec3r.zero, .direction = v(1, 0, 0), .max_distance = max_distance };
+}
+
+test "closest hit wins over several candidates" {
+    const gpa = std.testing.allocator;
+    // Three spheres at 10, 20, 30 on the +X axis. Built in all six creation
+    // orders: the nearest must win in each, so the answer comes from the geometry
+    // and not from insertion order or tree shape.
+    const centres = [3][3]f32{ .{ 10, 0, 0 }, .{ 20, 0, 0 }, .{ 30, 0, 0 } };
+    const orders = [6][3]usize{
+        .{ 0, 1, 2 }, .{ 0, 2, 1 }, .{ 1, 0, 2 },
+        .{ 1, 2, 0 }, .{ 2, 0, 1 }, .{ 2, 1, 0 },
+    };
+    for (orders) |order| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var ids: [3]api.BodyId = undefined;
+        for (order) |which| {
+            ids[which] = try addSphereAt(gpa, &world, centres[which], 0, @intCast(which));
+        }
+        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
+        try testing.expectEqual(ids[0], hit.body);
+        try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
+    }
+}
+
+test "equal distance is broken by the smaller BodyId" {
+    const gpa = std.testing.allocator;
+    // Two spheres of radius 1.5 centred at (10, ±1, 0). Their local ray origins are
+    // (−10, ∓1, 0), whose squared lengths and dot products with +X are identical
+    // term for term, so the two entry distances are BIT-identical — which this test
+    // asserts as a PRECONDITION. Without it, the test would merely be reporting
+    // whichever hit came out nearer and would prove nothing about the tie-break.
+    inline for (.{ true, false }) |low_first| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        const shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1.5 } });
+        const first_y: f32 = if (low_first) 1 else -1;
+        const a = try world.addBody(gpa, .{
+            .shape = shape,
+            .position = harness.av3(10, first_y, 0),
+            .body_type = .static,
+            .entity = .{ .index = 0, .generation = 0 },
+        });
+        const b = try world.addBody(gpa, .{
+            .shape = shape,
+            .position = harness.av3(10, -first_y, 0),
+            .body_type = .static,
+            .entity = .{ .index = 1, .generation = 0 },
+        });
+
+        // PRECONDITION: the two exact distances are bit-identical.
+        const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
+        const hit_a = (try world.bm.raycastBody(&world.store, a, ray)).?;
+        const hit_b = (try world.bm.raycastBody(&world.store, b, ray)).?;
+        try testing.expectEqual(hit_a.distance, hit_b.distance);
+
+        // Only then does the winner mean anything: the SMALLER BodyId.
+        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
+        try testing.expectEqual(@min(a, b), hit.body);
+        try testing.expectEqual(hit_a.distance, hit.distance);
+
+        // `all` sorts on the same composite key, so the tie orders by BodyId too.
+        var buf: [4]query.RayHit = undefined;
+        const n = try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &buf);
+        try testing.expectEqual(@as(u32, 2), n);
+        try testing.expectEqual(buf[0].distance, buf[1].distance);
+        try testing.expect(buf[0].body < buf[1].body);
+    }
+}
+
+test "a sleeping body is hit and stays asleep" {
+    const gpa = std.testing.allocator;
+    // The PUBLISHED harness, sleeping ENABLED — not a copy, and not `initNoSleep`:
+    // the point is a genuinely sleeping island.
+    var world = harness.World.init(vr(0, -9.81, 0), 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const ground_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = harness.av3(20, 0.5, 20) } });
+    const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = harness.av3(0.5, 0.5, 0.5) } });
+    _ = try world.addBody(gpa, .{
+        .shape = ground_shape,
+        .body_type = .static,
+        .restitution = 0,
+        .entity = .{ .index = 0, .generation = 0 },
+    });
+    const box = try world.addBody(gpa, .{
+        .shape = box_shape,
+        .position = harness.av3(0, 1, 0),
+        .body_type = .dynamic,
+        .mass = 1,
+        .restitution = 0,
+        .entity = .{ .index = 1, .generation = 0 },
+    });
+
+    // Drive until the island is asleep (the constraint array empties after having
+    // been non-empty — the normative observable of §1.8.6).
+    var had_contact = false;
+    var t: u32 = 0;
+    const asleep = while (t < 600) : (t += 1) {
+        try world.step(gpa);
+        if (world.constraints.items.len > 0) {
+            had_contact = true;
+        } else if (had_contact) break true;
+    } else false;
+    try testing.expect(asleep);
+    try testing.expect(world.bm.isSleeping(box).?);
+
+    // A downward ray hits the sleeping box's top face at y = 1.5, so distance 8.5.
+    // A sleeper's proxy stays in the tree: step 10 of the cycle skips its UPDATE,
+    // it does not remove it (§1.11.1).
+    const down = query.RayQuery{ .origin = v(0, 10, 0), .direction = v(0, -1, 0), .max_distance = 100 };
+    const hit = (try query.raycast(&world.bp, &world.bm, &world.store, down)).?;
+    try testing.expectEqual(box, hit.body);
+    try testing.expectApproxEqAbs(@as(Real, 8.5), hit.distance, 1e-2);
+    // The oracle for the normal is the BODY'S OWN transported local +Y, not the
+    // world +Y: a settled box carries a residual physical tilt from the position
+    // pass, and at f64 that tilt is larger than the float-noise tolerance the
+    // kernel tests use. Comparing against the transported face normal is exact and
+    // independent of how much it tilted; the coarse check below is what still says
+    // the face is the top one.
+    const up_local = world.bm.rotation(box).?.rotateVec3(v(0, 1, 0));
+    try testing.expect(hit.normal.approxEql(up_local, tol));
+    try testing.expect(hit.normal.dot(v(0, 1, 0)) > 0.999);
+
+    // AND it is still asleep: a query is not a solicitation in the §1.8.4 sense.
+    // Both halves are needed — a query that woke the body would still have returned
+    // this hit, so the hit alone proves nothing about the wake contract.
+    try testing.expect(world.bm.isSleeping(box).?);
+    _ = try query.raycastAny(&world.bp, &world.bm, &world.store, down);
+    var buf: [4]query.RayHit = undefined;
+    _ = try query.raycastAll(&world.bp, &world.bm, &world.store, down, &buf);
+    try testing.expect(world.bm.isSleeping(box).?);
+}
+
+test "the object mask filters" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    // Three spheres at 10 / 20 / 30, on layers 0 / 1 / 2.
+    const near = try addSphereAt(gpa, &world, .{ 10, 0, 0 }, 0, 0);
+    const mid = try addSphereAt(gpa, &world, .{ 20, 0, 0 }, 1, 1);
+    const far = try addSphereAt(gpa, &world, .{ 30, 0, 0 }, 2, 2);
+
+    const cases = [_]struct { mask: u32, expect: ?api.BodyId, count: u32 }{
+        .{ .mask = 0xFFFF_FFFF, .expect = near, .count = 3 }, // full mask
+        .{ .mask = 0, .expect = null, .count = 0 }, // empty mask
+        .{ .mask = 1 << 0, .expect = near, .count = 1 },
+        .{ .mask = 1 << 1, .expect = mid, .count = 1 }, // skips a NEARER body
+        .{ .mask = 1 << 2, .expect = far, .count = 1 },
+        .{ .mask = (1 << 1) | (1 << 2), .expect = mid, .count = 2 },
+        .{ .mask = 1 << 31, .expect = null, .count = 0 }, // the mask's top bit
+    };
+    for (cases) |case| {
+        var q = axisQuery(100);
+        q.filter.layer_mask = case.mask;
+        const hit = try query.raycast(&world.bp, &world.bm, &world.store, q);
+        if (case.expect) |want| {
+            try testing.expectEqual(want, hit.?.body);
+        } else {
+            try testing.expect(hit == null);
+        }
+        try testing.expectEqual(case.expect != null, try query.raycastAny(&world.bp, &world.bm, &world.store, q));
+        var buf: [8]query.RayHit = undefined;
+        try testing.expectEqual(case.count, try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
+    }
+}
+
+test "exclusions are honoured" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const near = try addSphereAt(gpa, &world, .{ 10, 0, 0 }, 0, 0);
+    const mid = try addSphereAt(gpa, &world, .{ 20, 0, 0 }, 0, 1);
+    const far = try addSphereAt(gpa, &world, .{ 30, 0, 0 }, 0, 2);
+
+    // Excluding the nearest yields the next one — the dominant real case being
+    // "myself".
+    {
+        var q = axisQuery(100);
+        q.filter.exclude = &.{near};
+        try testing.expectEqual(mid, (try query.raycast(&world.bp, &world.bm, &world.store, q)).?.body);
+    }
+    // Excluding two yields the third.
+    {
+        var q = axisQuery(100);
+        q.filter.exclude = &.{ near, mid };
+        try testing.expectEqual(far, (try query.raycast(&world.bp, &world.bm, &world.store, q)).?.body);
+    }
+    // Excluding all three yields nothing, in all three modes.
+    {
+        var q = axisQuery(100);
+        q.filter.exclude = &.{ near, mid, far };
+        try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, q)) == null);
+        try testing.expect(!try query.raycastAny(&world.bp, &world.bm, &world.store, q));
+        var buf: [8]query.RayHit = undefined;
+        try testing.expectEqual(@as(u32, 0), try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
+    }
+}
+
+test "max_distance is a closed interval" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    _ = try addSphereAt(gpa, &world, .{ 10, 0, 0 }, 0, 0);
+
+    // The surface is at exactly 9. A bound of 9 counts; one ulp below does not.
+    const at = try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(9));
+    try testing.expect(at != null);
+    try testing.expectApproxEqAbs(@as(Real, 9), at.?.distance, tol);
+    try testing.expect(try query.raycastAny(&world.bp, &world.bm, &world.store, axisQuery(9)));
+
+    const just_below = nextBelow(9);
+    try testing.expect(just_below < 9); // the ulp step is real at this scale
+    try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(just_below))) == null);
+    try testing.expect(!try query.raycastAny(&world.bp, &world.bm, &world.store, axisQuery(just_below)));
+    var buf: [4]query.RayHit = undefined;
+    try testing.expectEqual(@as(u32, 0), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(just_below), &buf));
+}
+
+test "max_distance zero degenerates to a point test" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    // A sphere CONTAINING the origin, and one that does not.
+    const containing = try addSphereAt(gpa, &world, .{ 0, 0, 0 }, 0, 0);
+    _ = try addSphereAt(gpa, &world, .{ 10, 0, 0 }, 0, 1);
+
+    // Inside → a hit at distance zero, whatever the direction.
+    for ([_]Vec3r{ v(1, 0, 0), v(0, -1, 0), v(1, 2, -3) }) |d| {
+        const q = query.RayQuery{ .origin = Vec3r.zero, .direction = d, .max_distance = 0 };
+        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+        try testing.expectEqual(containing, hit.body);
+        try testing.expectEqual(@as(Real, 0), hit.distance);
+        // The distance-zero normal is the negated (normalised) direction.
+        try testing.expect(hit.normal.approxEql(d.normalize().neg(), tol));
+    }
+
+    // Outside every shape → nothing, even though a body sits 10 m down the ray.
+    const outside = query.RayQuery{ .origin = v(5, 0, 0), .direction = v(1, 0, 0), .max_distance = 0 };
+    try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, outside)) == null);
+    try testing.expect(!try query.raycastAny(&world.bp, &world.bm, &world.store, outside));
+}
+
+test "any terminates and agrees with closest on existence" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    var prng = std.Random.DefaultPrng.init(0x5EED_A11F);
+    const rng = prng.random();
+
+    var centres: [40][3]f32 = undefined;
+    var i: u32 = 0;
+    while (i < centres.len) : (i += 1) {
+        centres[i] = .{
+            rng.float(f32) * 40 - 20,
+            rng.float(f32) * 40 - 20,
+            rng.float(f32) * 40 - 20,
+        };
+        _ = try addSphereAt(gpa, &world, centres[i], @intCast(i % 4), i);
+    }
+
+    // A sweep of rays over which `any` must be true exactly when `raycast` is
+    // non-null. Half are AIMED at a body centre so hits are plentiful, half are
+    // free directions and mostly miss; short bounds and a partial layer mask are
+    // mixed in so the agreement is tested where each mode can disagree.
+    var checked_true: u32 = 0;
+    var checked_false: u32 = 0;
+    var k: u32 = 0;
+    while (k < 200) : (k += 1) {
+        const origin = v(
+            rng.float(f32) * 60 - 30,
+            rng.float(f32) * 60 - 30,
+            rng.float(f32) * 60 - 30,
+        );
+        const raw = if (k % 2 == 0) blk: {
+            const target = centres[rng.intRangeLessThan(usize, 0, centres.len)];
+            break :blk v(target[0], target[1], target[2]).sub(origin);
+        } else v(
+            rng.float(f32) * 2 - 1,
+            rng.float(f32) * 2 - 1,
+            rng.float(f32) * 2 - 1,
+        );
+        if (raw.lengthSq() == 0) continue;
+        var q = query.RayQuery{
+            .origin = origin,
+            .direction = raw,
+            .max_distance = if (k % 3 == 0) 5 else 200,
+        };
+        q.filter.layer_mask = if (k % 5 == 0) 0b0011 else 0xFFFF_FFFF;
+
+        const closest = try query.raycast(&world.bp, &world.bm, &world.store, q);
+        const any = try query.raycastAny(&world.bp, &world.bm, &world.store, q);
+        try testing.expectEqual(closest != null, any);
+        if (any) checked_true += 1 else checked_false += 1;
+    }
+    // Both outcomes really occurred, so the equality is not vacuously true on one
+    // branch — the failure mode a sparser scene produced on the first attempt.
+    try testing.expect(checked_true > 10);
+    try testing.expect(checked_false > 10);
+}
+
+test "all returns every hit sorted by distance then BodyId" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const a = try addSphereAt(gpa, &world, .{ 10, 0, 0 }, 0, 0);
+    const b = try addSphereAt(gpa, &world, .{ 20, 0, 0 }, 0, 1);
+    const c = try addSphereAt(gpa, &world, .{ 30, 0, 0 }, 0, 2);
+
+    var buf: [8]query.RayHit = undefined;
+    const n = try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &buf);
+    try testing.expectEqual(@as(u32, 3), n);
+    try testing.expectEqual(a, buf[0].body);
+    try testing.expectEqual(b, buf[1].body);
+    try testing.expectEqual(c, buf[2].body);
+    // Strictly ascending on the composite key.
+    for (1..n) |i| {
+        try testing.expect(buf[i - 1].distance < buf[i].distance or
+            (buf[i - 1].distance == buf[i].distance and buf[i - 1].body < buf[i].body));
+    }
+
+    // Caller-buffer overflow: the count is what was WRITTEN, never more than the
+    // buffer, and the ones kept are the NEAREST — a full buffer replaces its worst
+    // entry rather than dropping late arrivals, so the answer does not depend on
+    // the order the traversal happened to reach them in.
+    var small: [2]query.RayHit = undefined;
+    try testing.expectEqual(@as(u32, 2), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &small));
+    try testing.expectEqual(a, small[0].body);
+    try testing.expectEqual(b, small[1].body);
+
+    var one: [1]query.RayHit = undefined;
+    try testing.expectEqual(@as(u32, 1), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &one));
+    try testing.expectEqual(a, one[0].body);
+
+    // The overflow assertions above do NOT discriminate on their own, and a
+    // mutation proved it: with the near-first descent the candidates already arrive
+    // in ascending distance for bodies strung along the ray, so simply DROPPING
+    // late arrivals keeps the same two. The scene below breaks that coincidence —
+    // a sphere's AABB is its bounding cube, so a large sphere offset in Y has its
+    // AABB entered EARLIER than a small sphere on the axis while its own surface is
+    // hit LATER:
+    //   big:   r = 5 at (20, 4.9, 0) → AABB entered at x = 15, surface at ≈ 19.005
+    //   small: r = 1 at (17, 0,   0) → AABB entered at x = 16, surface at    16
+    // The traversal therefore offers `big` first. A one-slot buffer must still come
+    // back with `small`.
+    {
+        var skew = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer skew.deinit(gpa);
+        const big_shape = try skew.store.createShape(gpa, .{ .sphere = .{ .radius = 5 } });
+        const big = try skew.addBody(gpa, .{
+            .shape = big_shape,
+            .position = harness.av3(20, 4.9, 0),
+            .body_type = .static,
+            .entity = .{ .index = 0, .generation = 0 },
+        });
+        const small_sphere = try addSphereAt(gpa, &skew, .{ 17, 0, 0 }, 0, 1);
+
+        // The premise, asserted rather than assumed: `big` really is hit LATER.
+        const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
+        const big_hit = (try skew.bm.raycastBody(&skew.store, big, ray)).?;
+        const small_hit = (try skew.bm.raycastBody(&skew.store, small_sphere, ray)).?;
+        try testing.expect(small_hit.distance < big_hit.distance);
+        // ...and its AABB really is entered EARLIER, which is what makes the
+        // traversal offer it first.
+        try testing.expect(skew.bm.bodyAabb(&skew.store, big).?.min.toArray()[0] <
+            skew.bm.bodyAabb(&skew.store, small_sphere).?.min.toArray()[0]);
+
+        var slot: [1]query.RayHit = undefined;
+        try testing.expectEqual(@as(u32, 1), try query.raycastAll(&skew.bp, &skew.bm, &skew.store, axisQuery(100), &slot));
+        try testing.expectEqual(small_sphere, slot[0].body);
+        try testing.expectEqual(small_hit.distance, slot[0].distance);
+    }
+
+    // A zero-length buffer writes nothing and says so.
+    var none: [0]query.RayHit = undefined;
+    try testing.expectEqual(@as(u32, 0), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &none));
+}
+
+/// Compare two hits FIELD BY FIELD with exact equality — the bitwise comparison the
+/// invariance and determinism tests need.
+fn expectHitBitIdentical(x: query.RayHit, y: query.RayHit) !void {
+    try testing.expectEqual(x.body, y.body);
+    try testing.expectEqual(x.subshape_id, y.subshape_id);
+    try testing.expectEqual(x.distance, y.distance);
+    inline for (0..3) |i| {
+        try testing.expectEqual(x.position.toArray()[i], y.position.toArray()[i]);
+        try testing.expectEqual(x.normal.toArray()[i], y.normal.toArray()[i]);
+    }
+}
+
+test "the result is invariant under creation-order permutation" {
+    const gpa = std.testing.allocator;
+    // The same scene built in six different orders. Bodies are identified by their
+    // ENTITY index, which is stable across orders, and the BodyId a body receives
+    // therefore differs from run to run — which is exactly the pressure this test
+    // applies. The hit must be bit-identical in position, normal and distance.
+    //
+    // The visited-node count is deliberately NOT asserted here or anywhere else: it
+    // depends on the tree shape, hence on creation order (§1.11.6). Only the RESULT
+    // is invariant.
+    const centres = [4][3]f32{ .{ 12, 0, 0 }, .{ 25, 1, 0 }, .{ 33, -1, 0 }, .{ 41, 0, 0 } };
+    const orders = [6][4]usize{
+        .{ 0, 1, 2, 3 }, .{ 3, 2, 1, 0 }, .{ 1, 3, 0, 2 },
+        .{ 2, 0, 3, 1 }, .{ 0, 3, 1, 2 }, .{ 3, 0, 2, 1 },
+    };
+    var reference: ?query.RayHit = null;
+    for (orders) |order| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        for (order) |which| _ = try addSphereAt(gpa, &world, centres[which], 0, @intCast(which));
+
+        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
+        if (reference) |ref| {
+            // Same geometry hit, same distance, same point, same normal — bitwise.
+            try testing.expectEqual(ref.distance, hit.distance);
+            inline for (0..3) |i| {
+                try testing.expectEqual(ref.position.toArray()[i], hit.position.toArray()[i]);
+                try testing.expectEqual(ref.normal.toArray()[i], hit.normal.toArray()[i]);
+            }
+        } else {
+            reference = hit;
+            try testing.expectApproxEqAbs(@as(Real, 11), hit.distance, tol);
+        }
+    }
+}
+
+test "two identical runs are bit-identical" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    _ = try addSphereAt(gpa, &world, .{ 10, 0.25, 0 }, 0, 0);
+    _ = try addSphereAt(gpa, &world, .{ 20, -0.5, 0 }, 0, 1);
+
+    const q = axisQuery(100);
+    const first = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+    const second = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+    try expectHitBitIdentical(first, second);
+
+    // And in a second, independently built world with the same construction — the
+    // full record, not just the distance.
+    var twin = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer twin.deinit(gpa);
+    _ = try addSphereAt(gpa, &twin, .{ 10, 0.25, 0 }, 0, 0);
+    _ = try addSphereAt(gpa, &twin, .{ 20, -0.5, 0 }, 0, 1);
+    const twin_hit = (try query.raycast(&twin.bp, &twin.bm, &twin.store, q)).?;
+    try expectHitBitIdentical(first, twin_hit);
 }
