@@ -55,6 +55,7 @@ const Mat3r = config.Mat3r;
 const Aabbr = config.Aabbr;
 const BodyId = api.BodyId;
 const BodyDescriptor = api.BodyDescriptor;
+const EntityId = api.EntityId;
 /// Generational store of collision shapes. Re-exported so sibling packages (the
 /// `rigid/` solver) can name the `collidePair` store parameter type without
 /// importing `shape.zig` directly (import-discipline boundary).
@@ -212,6 +213,24 @@ pub const BodyManager = struct {
     pub fn collisionLayer(self: *const BodyManager, id: BodyId) ?u8 {
         const idx = self.alloc.validate(id) orelse return null;
         return self.bodies.items(.collision_layer)[idx];
+    }
+
+    /// Safe getter: the ECS entity owning this body, or null if `id` is
+    /// stale/invalid.
+    ///
+    /// The column has existed since M1.1.0 and was never exposed, because nothing
+    /// needed it: the solver's identity is the BODY. What needs it is the query
+    /// ORDER (`engine-physics-forge.md` §1.11.14). `BodyId` is a slot index, so it
+    /// encodes creation order and cannot rank a result without making the answer a
+    /// function of the order the scene was built in; the owning entity is the only
+    /// identity that survives a permutation of that order, so it is the key, and
+    /// `BodyId` is only the final tie-break.
+    ///
+    /// Nothing here forces one body per entity, which is exactly why that final
+    /// tie-break exists (the residual §1.11.14 names).
+    pub fn entity(self: *const BodyManager, id: BodyId) ?EntityId {
+        const idx = self.alloc.validate(id) orelse return null;
+        return self.bodies.items(.entity)[idx];
     }
 
     /// Safe getter: whether the body is currently asleep, or null if `id` is

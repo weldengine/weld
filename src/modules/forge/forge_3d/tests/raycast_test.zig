@@ -512,7 +512,7 @@ test "containsPoint is the solid membership the zero-distance rule rests on" {
 // This section is the EMPIRICAL CONSUMER the surface-coverage rule asks for
 // (`engine-zig-conventions.md` §13): a compile-green proves the signatures agree
 // with their call sites, never that the bodies are right. The full acceptance
-// matrix — selection modes over a scene sweep, filtering cases, the `BodyId`
+// matrix — selection modes over a scene sweep, filtering cases, the ordering-key
 // tie-break with its bit-identical precondition, sleeping bodies, the closed
 // `max_distance`, creation-order invariance — is E6's.
 
@@ -846,30 +846,41 @@ test "closest hit wins over several candidates" {
     }
 }
 
-test "equal distance is broken by the smaller BodyId" {
+test "equal distance is broken by the owning entity" {
     const gpa = std.testing.allocator;
-    // Two spheres of radius 1.5 centred at (10, ±1, 0). Their local ray origins are
+    // A SECOND tie geometry, independent of the one in the E1 section below: two
+    // spheres of radius 1.5 centred at (10, ±1, 0). Their local ray origins are
     // (−10, ∓1, 0), whose squared lengths and dot products with +X are identical
     // term for term, so the two entry distances are BIT-identical — which this test
     // asserts as a PRECONDITION. Without it, the test would merely be reporting
     // whichever hit came out nearer and would prove nothing about the tie-break.
-    inline for (.{ true, false }) |low_first| {
+    //
+    // The entity indices are attached to the POSITIONS and not to the creation order:
+    // the sphere at −1 always carries entity 4 and the one at +1 always entity 9,
+    // while the loop builds them in both orders. So the winner is decided by the
+    // entity in both legs, and a `BodyId`-only tie-break — the M1.1.9 rule this test
+    // asserted before M1.1.10 — would answer the two legs differently (§1.11.14).
+    const low_y_entity: u32 = 4;
+    const high_y_entity: u32 = 9;
+    inline for (.{ true, false }) |high_first| {
         var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
         defer world.deinit(gpa);
         const shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1.5 } });
-        const first_y: f32 = if (low_first) 1 else -1;
+        const first_y: f32 = if (high_first) 1 else -1;
         const a = try world.addBody(gpa, .{
             .shape = shape,
             .position = harness.av3(10, first_y, 0),
             .body_type = .static,
-            .entity = .{ .index = 0, .generation = 0 },
+            .entity = .{ .index = if (high_first) high_y_entity else low_y_entity, .generation = 0 },
         });
         const b = try world.addBody(gpa, .{
             .shape = shape,
             .position = harness.av3(10, -first_y, 0),
             .body_type = .static,
-            .entity = .{ .index = 1, .generation = 0 },
+            .entity = .{ .index = if (high_first) low_y_entity else high_y_entity, .generation = 0 },
         });
+        // The body at y = −1, carrying the lower entity, whichever order built it.
+        const want = if (high_first) b else a;
 
         // PRECONDITION: the two exact distances are bit-identical.
         const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
@@ -877,17 +888,19 @@ test "equal distance is broken by the smaller BodyId" {
         const hit_b = (try world.bm.raycastBody(&world.store, b, ray)).?;
         try testing.expectEqual(hit_a.distance, hit_b.distance);
 
-        // Only then does the winner mean anything: the SMALLER BodyId.
+        // Only then does the winner mean anything: the LOWER ENTITY.
         const hit = (try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
-        try testing.expectEqual(@min(a, b), hit.body);
+        try testing.expectEqual(want, hit.body);
+        try testing.expectEqual(@as(u32, low_y_entity), hit.entity.index);
         try testing.expectEqual(hit_a.distance, hit.distance);
 
-        // `all` sorts on the same composite key, so the tie orders by BodyId too.
+        // `all` sorts on the same composite key, so the tie orders by entity too.
         var buf: [4]query.RayHit = undefined;
         const n = try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &buf);
         try testing.expectEqual(@as(u32, 2), n);
         try testing.expectEqual(buf[0].distance, buf[1].distance);
-        try testing.expect(buf[0].body < buf[1].body);
+        try testing.expect(buf[0].entity.index < buf[1].entity.index);
+        try testing.expectEqual(want, buf[0].body);
     }
 }
 
@@ -1202,6 +1215,7 @@ test "all returns every hit sorted by distance then BodyId" {
 /// invariance and determinism tests need.
 fn expectHitBitIdentical(x: query.RayHit, y: query.RayHit) !void {
     try testing.expectEqual(x.body, y.body);
+    try testing.expectEqual(x.entity, y.entity);
     try testing.expectEqual(x.subshape_id, y.subshape_id);
     try testing.expectEqual(x.distance, y.distance);
     inline for (0..3) |i| {
@@ -1553,13 +1567,13 @@ test "the far-field conditioning holds on an OBLIQUE ray, and the kernel is the 
 // tie-break (`engine-physics-forge.md` §1.11.14, which is normative on this and says
 // in as many words that without it §1.11.6 is false on an exact distance tie).
 //
-// RED-FIRST: this commit carries the tests ALONE, against the M1.1.9 code, so the
-// state in which the first of them FAILS is a commit anyone can check out and re-run.
-// The fix follows in the next commit.
+// The first of the two tests below was written and RUN against the M1.1.9 code
+// before the fix, and was RED there. That is what makes it a test of the RULE rather
+// than a transcription of the implementation.
 
-/// Perpendicular offset of the tie scene's two spheres from the +X axis. Named so
-/// the two tests below cannot drift apart on the geometry that makes their
-/// precondition hold.
+/// Perpendicular offset of the tie scene's two unit spheres, centred at
+/// `(20, ±tie_offset, 0)`, from the +X axis. Named so the two tests below cannot
+/// drift apart on the geometry that makes their precondition hold.
 const tie_offset: f32 = 0.5;
 
 /// Closed-form entry distance of the tie scene's spheres, computed here and never
@@ -1617,9 +1631,16 @@ test "an exact distance tie is broken by entity, not by creation order" {
         try testing.expectEqual(d_first, d_second);
         try testing.expectEqual(tieDistance(), d_first);
 
+        // PRECONDITION 3 — the store really carries the entities the descriptors
+        // named, read back through the getter the ordering key consults. Without
+        // this, "the low entity won" would rest on the test's own bookkeeping.
+        try testing.expectEqual(low_entity, world.bm.entity(want).?.index);
+        try testing.expectEqual(high_entity, world.bm.entity(if (high_first) first else second).?.index);
+
         // The closest hit is the LOW-entity body under BOTH creation orders.
         const hit = (try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
         try testing.expectEqual(want, hit.body);
+        try testing.expectEqual(low_entity, hit.entity.index);
         try testing.expectEqual(tieDistance(), hit.distance);
 
         // And so is the answer TRUNCATED TO ONE SLOT: `all` retains the best under
@@ -1627,12 +1648,15 @@ test "an exact distance tie is broken by entity, not by creation order" {
         var one: [1]query.RayHit = undefined;
         try testing.expectEqual(@as(u32, 1), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &one));
         try testing.expectEqual(want, one[0].body);
+        try testing.expectEqual(low_entity, one[0].entity.index);
 
         // Full buffer: the tie orders by entity, so the low-entity body comes first.
         var both: [2]query.RayHit = undefined;
         try testing.expectEqual(@as(u32, 2), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &both));
         try testing.expectEqual(both[0].distance, both[1].distance);
         try testing.expectEqual(want, both[0].body);
+        try testing.expectEqual(low_entity, both[0].entity.index);
+        try testing.expectEqual(high_entity, both[1].entity.index);
     }
 
     // The bit-identity precondition is a real constraint on the geometry and not a
@@ -1660,8 +1684,9 @@ test "two bodies on the same entity fall back on BodyId" {
     // test asserts that non-invariance instead of hiding it, so the residual is a
     // recorded property and not a surprise.
     //
-    // It is GREEN against the M1.1.9 code as well, and that is correct: where the
-    // entities are equal, the entity key and the `BodyId`-only key coincide.
+    // It was GREEN against the M1.1.9 code too, and that is correct rather than a
+    // weakness: where the entities are equal, the entity key and the `BodyId`-only
+    // key coincide, so only the sibling test above can tell the two rules apart.
     const shared: u32 = 11;
     var winner_y: [2]Real = undefined;
 
@@ -1673,6 +1698,10 @@ test "two bodies on the same entity fall back on BodyId" {
         const first = try addSphereAt(gpa, &world, .{ 20, first_y, 0 }, 0, shared);
         const second = try addSphereAt(gpa, &world, .{ 20, -first_y, 0 }, 0, shared);
         try testing.expect(first < second);
+
+        // PRECONDITION — the two really do share one entity, so the key's leading
+        // term is genuinely equal and the fallback is genuinely what decides.
+        try testing.expectEqual(world.bm.entity(first).?, world.bm.entity(second).?);
 
         const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
         const d_first = (try world.bm.raycastBody(&world.store, first, ray)).?.distance;

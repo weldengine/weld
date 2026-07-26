@@ -16,9 +16,14 @@
 //!
 //! **Three selection modes, one traversal, three collectors** (§1.11.6):
 //! `closest` tightens its bound on every accepted hit, `any` drops it to zero at
-//! the first, `all` never tightens. On an exactly equal distance — compared
-//! exactly, with no tolerance — the smaller `BodyId` wins, the only total order
-//! this engine has established.
+//! the first, `all` never tightens.
+//!
+//! **The order is `(distance, entity, BodyId)`** (§1.11.14). Distances are compared
+//! EXACTLY, with no tolerance; the owning entity breaks an exact tie, and `BodyId`
+//! only breaks a tie between two bodies of the same entity. `BodyId` cannot lead
+//! that key: it is a slot index, so it encodes creation order, and preferring the
+//! smallest prefers the bodies created first — the inverse of the invariance
+//! §1.11.6 claims.
 //!
 //! **The exact kernel can fail, and the collector contract cannot.**
 //! `queryRay`'s collector exposes `add(u32) void`, so a kernel error is LATCHED
@@ -41,6 +46,7 @@ const api = @import("weld_forge");
 const Real = config.Real;
 const Vec3r = config.Vec3r;
 const BodyId = api.BodyId;
+const EntityId = api.EntityId;
 const BodyManager = body_manager_mod.BodyManager;
 const ShapeStore = body_manager_mod.ShapeStore;
 const Broadphase = broadphase_mod.Broadphase(Real);
@@ -97,12 +103,16 @@ pub const RayQuery = struct {
     filter: Filter = .{},
 };
 
-/// One ray hit at solver precision. The public `RaycastHit` (f32, with the
-/// entity) is the interface tier's business; nothing in this milestone converts
-/// to it.
+/// One ray hit at solver precision — the mirror of the public `RaycastHit`
+/// (`engine-tier-interfaces.md` §1) at `Real`. Converting to that f32 form is the
+/// interface tier's business (M1.1.15); nothing in this milestone does it.
 pub const RayHit = struct {
     /// The body hit.
     body: BodyId,
+    /// The ECS entity owning that body — the ordering key's leading identity
+    /// (§1.11.14), carried here rather than resolved at every comparison. The public
+    /// `RaycastHit` carries it too, so the mirror is not widened by holding it.
+    entity: EntityId,
     /// Which sub-shape of that body was hit; 0 while one shape is one body.
     subshape_id: u32 = 0,
     /// World-space hit point.
@@ -158,14 +168,15 @@ pub fn raycastAny(
 }
 
 /// Every hit within `max_distance`, written into `out` and sorted by
-/// `(distance, BodyId)`. Returns the number WRITTEN, never more than `out.len`.
+/// `(distance, entity, BodyId)`. Returns the number WRITTEN, never more than
+/// `out.len`.
 ///
-/// When more bodies are hit than `out` can hold, the ones kept are the NEAREST —
-/// a full buffer replaces its current worst entry rather than dropping whatever
-/// arrives late. That is what keeps the result invariant under a permutation of
-/// creation order (§1.11.6), which a traversal-order truncation would not be. The
-/// bound is still never tightened, so the traversal cost is the same as an
-/// unbounded `all`.
+/// When more bodies are hit than `out` can hold, the ones kept are the BEST under
+/// that key — a full buffer replaces its current worst entry rather than dropping
+/// whatever arrives late. That is what keeps the result invariant under a
+/// permutation of creation order (§1.11.6, §1.11.14), which a traversal-order
+/// truncation would not be. The bound is still never tightened, so the traversal
+/// cost is the same as an unbounded `all`.
 pub fn raycastAll(
     bp: *const Broadphase,
     bm: *const BodyManager,
@@ -275,10 +286,47 @@ pub fn closestPoint(
     @panic("closestPoint is M1.1.10; its signature freezes at M1.1.9");
 }
 
-/// Total order on hits: distance first, then `BodyId`. The composite key makes
-/// the sort's outcome independent of its stability.
+/// Total order on entity identity, as one sortable integer: `index` major,
+/// `generation` minor.
+///
+/// Deliberately NOT `@bitCast`. `EntityId` is a `packed struct(u64)` whose `index`
+/// occupies the LOW 32 bits, so a bitcast would order by `generation` first — a
+/// layout accident, not a decision. What the key actually has to be is a function of
+/// the entity identity ALONE, so that it is invariant under a permutation of
+/// creation order (§1.11.14); both orders satisfy that, and this one also reads the
+/// way entities are named.
+///
+/// `EntityId.dead` (both fields `maxInt`) sorts last and needs no special case.
+fn entityKey(e: EntityId) u64 {
+    return (@as(u64, e.index) << 32) | @as(u64, e.generation);
+}
+
+/// Total order on hits: distance, then the OWNING ENTITY, then `BodyId`. The
+/// composite key makes the sort's outcome independent of its stability.
+///
+/// **Why `BodyId` cannot lead this key.** It is a slot index, so it encodes creation
+/// order; retaining the smallest retains the bodies created FIRST, which is the
+/// inverse of the invariance §1.11.6 claims for the family. The only identity stable
+/// under a permutation of creation order is the scene's, that is the owning entity
+/// (§1.11.14). MEASURED on `main` at the M1.1.9 tag, at f32: two unit spheres at
+/// `(20, ±0.5, 0)` against a ray from the origin along +X both return
+/// `19.133974075`, bit-identical because the squared perpendicular offset is `0.25`
+/// on either side, and exchanging the two creation orders exchanged the entity
+/// answered — for the closest hit as much as for the answer truncated to one slot.
+/// A symmetric scene is not a measure-zero case: mirrored cover, or props on a grid,
+/// produce it.
+///
+/// The distance comparison is EXACT, with no tolerance: a tie here means
+/// bit-identical, and any tolerance would make the order depend on a threshold.
+///
+/// `BodyId` survives as the FINAL tie-break, for the residual §1.11.14 names:
+/// nothing forces one body per entity, and two bodies of the same entity at an
+/// exactly equal distance are not invariant under creation order.
 fn hitLess(_: void, x: RayHit, y: RayHit) bool {
     if (x.distance != y.distance) return x.distance < y.distance;
+    const x_entity = entityKey(x.entity);
+    const y_entity = entityKey(y.entity);
+    if (x_entity != y_entity) return x_entity < y_entity;
     return x.body < y.body;
 }
 
@@ -335,8 +383,10 @@ fn evaluate(
 
     const local = (try bm.raycastBody(store, body, ray)) orelse return null;
     const rotation = bm.rotation(body) orelse return null;
+    const owner = bm.entity(body) orelse return null;
     return .{
         .body = body,
+        .entity = owner,
         .position = ray.origin.add(ray.direction.scale(local.distance)),
         // The kernel answers in the body's local frame; the distance is invariant
         // under a rigid transform (a rotation and a translation preserve it, and
@@ -365,10 +415,11 @@ const ClosestCollector = struct {
         }) orelse return;
         if (hit.distance > self.bound) return; // beyond the window, closed at the bound
         if (self.best) |best| {
-            // Exact comparison, no tolerance. On a bit-identical distance the
-            // smaller `BodyId` wins (§1.11.6).
-            if (hit.distance > best.distance) return;
-            if (hit.distance == best.distance and hit.body >= best.body) return;
+            // The SAME total order the sort uses (`(distance, entity, BodyId)`,
+            // §1.11.14), so `closest` and an `all` truncated to one slot cannot
+            // disagree — sharing the comparator is what makes that structural rather
+            // than a coincidence of two hand-written comparisons.
+            if (!hitLess(void{}, hit, best)) return;
         }
         self.best = hit;
         // Tightened TO the hit distance, not below it, so a body at exactly the
@@ -446,8 +497,8 @@ const AllCollector = struct {
         }
         if (self.out.len == 0) return;
 
-        // Full: replace the current worst by `(distance, BodyId)` if this hit is
-        // better, so the retained set is the nearest `out.len` whatever the order
+        // Full: replace the current worst under `(distance, entity, BodyId)` if this
+        // hit is better, so the retained set is the best `out.len` whatever the order
         // of arrival. Linear in the buffer, which only matters once the caller has
         // already accepted a truncated answer.
         var worst: usize = 0;
