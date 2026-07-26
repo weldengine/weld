@@ -43,6 +43,9 @@ const config = @import("config.zig");
 const shape_mod = @import("shape.zig");
 const body_mod = @import("body.zig");
 const narrowphase = @import("pipeline/narrowphase/root.zig");
+// M1.1.9 — only for the `Ray` type `raycastBody` takes; the broadphase itself is
+// the caller's, not this store's.
+const broadphase_mod = @import("pipeline/broadphase.zig");
 const IdAllocator = @import("slot_alloc.zig").IdAllocator;
 
 const Real = config.Real;
@@ -61,6 +64,7 @@ const Body = body_mod.Body;
 const MotionProperties = body_mod.MotionProperties;
 const GjkResult = narrowphase.GjkResult(Real);
 const ContactManifold = narrowphase.ContactManifold(Real);
+const RayR = broadphase_mod.Ray(Real);
 
 const ApiVec3 = @import("foundation").math.Vec3;
 const ApiQuat = @import("foundation").math.Quatf;
@@ -355,6 +359,39 @@ pub const BodyManager = struct {
         const rot = self.bodies.items(.rotation)[idx];
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
         return worldAabb(shape, pos, rot);
+    }
+
+    /// Ray against one body's shape, resolving its world pose and support shape
+    /// (via `store`). Returns null if the handle — or its shape — is
+    /// stale/invalid, or if the ray misses; `error.UnsupportedShape` if the shape
+    /// is outside the kernel's set (a rounded box). The `BodyId`-level ray
+    /// adapter for the broadphase→kernel flow, mirroring `gjkPair` /
+    /// `collidePair`: unpack a `queryRay` candidate's `user_data` as a `BodyId`
+    /// and call this per candidate.
+    ///
+    /// The hit comes back in the shape's LOCAL frame, which is enough: a rigid
+    /// transform preserves distances and the direction is unit on both sides, so
+    /// `distance` is already the world distance and only the normal needs
+    /// rotating — which the caller does, having its own reason to hold the pose.
+    ///
+    /// The local direction is NOT re-normalised after the inverse rotation. A
+    /// quaternion conjugate rotation preserves the norm to within a few ULPs,
+    /// which is exactly what the kernel's unit-direction assert budgets; a
+    /// re-normalisation would cost a square root per body AND mask a genuine
+    /// drift, so if that assert ever fires it is a signal, not a threshold to
+    /// widen.
+    pub fn raycastBody(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        id: BodyId,
+        ray: RayR,
+    ) error{UnsupportedShape}!?narrowphase.LocalHit(Real) {
+        const idx = self.alloc.validate(id) orelse return null;
+        const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
+        const inv_rot = self.bodies.items(.rotation)[idx].conjugate();
+        const local_origin = inv_rot.rotateVec3(ray.origin.sub(self.bodies.items(.position)[idx]));
+        const local_direction = inv_rot.rotateVec3(ray.direction);
+        return narrowphase.rayShape(Real, shape_mod.supportShape(shape), local_origin, local_direction);
     }
 
     /// Run distance-based GJK on the pair `a`/`b`, resolving each body's world

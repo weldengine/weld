@@ -498,3 +498,169 @@ test "containsPoint is the solid membership the zero-distance rule rests on" {
     try testing.expect(!narrowphase.containsPoint(Real, capsule, v(0, 4.001, 0)));
     try testing.expect(!narrowphase.containsPoint(Real, capsule, v(0.8, 3.8, 0))); // outside the cap dome
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.9 / E4 — the `Real`-bound query entries over a real broadphase
+// ---------------------------------------------------------------------------
+//
+// The harness is NOT duplicated: `World` comes from `tests/solver_test.zig`, the
+// same published harness the solver, position-solver and sleep suites drive. It
+// owns the `(store, bm, bp)` triple the query entries take, and its `addBody`
+// inserts the broadphase proxy with `user_data == BodyId`, which is exactly the
+// identity `query.zig` unpacks.
+//
+// This section is the EMPIRICAL CONSUMER the surface-coverage rule asks for
+// (`engine-zig-conventions.md` §13): a compile-green proves the signatures agree
+// with their call sites, never that the bodies are right. The full acceptance
+// matrix — selection modes over a scene sweep, filtering cases, the `BodyId`
+// tie-break with its bit-identical precondition, sleeping bodies, the closed
+// `max_distance`, creation-order invariance — is E6's.
+
+const harness = @import("solver_test.zig");
+const query = @import("../query.zig");
+const api = @import("weld_forge");
+const foundation_math = @import("foundation").math;
+
+/// A unit-radius sphere body at `centre`, dynamic, on collision layer `layer`.
+fn addSphere(gpa: std.mem.Allocator, world: *harness.World, centre: Vec3r, layer: u8) !api.BodyId {
+    const shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    return world.addBody(gpa, .{
+        .shape = shape,
+        .position = harness.av3(@floatCast(centre.data[0]), @floatCast(centre.data[1]), @floatCast(centre.data[2])),
+        .body_type = .dynamic,
+        .collision_layer = layer,
+        .entity = .{ .index = 0, .generation = 0 },
+    });
+}
+
+test "the three query entries agree over a real broadphase" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+
+    // Three spheres on the +X axis at 10, 20, 30, inserted NEAREST-LAST so the
+    // answer cannot come from insertion order.
+    const far = try addSphere(gpa, &world, v(30, 0, 0), 0);
+    const mid = try addSphere(gpa, &world, v(20, 0, 0), 0);
+    const near = try addSphere(gpa, &world, v(10, 0, 0), 0);
+
+    const q = query.RayQuery{ .origin = Vec3r.zero, .direction = v(1, 0, 0), .max_distance = 100 };
+
+    // closest → the nearest of the three, at its closed-form surface distance.
+    const hit = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+    try testing.expectEqual(near, hit.body);
+    try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
+    try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
+    try testing.expect(hit.position.approxEql(v(9, 0, 0), tol));
+
+    // any → true, and it agrees with closest on existence.
+    try testing.expect(try query.raycastAny(&world.bp, &world.bm, &world.store, q));
+
+    // all → the three, sorted by distance.
+    var buf: [8]query.RayHit = undefined;
+    const n = try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf);
+    try testing.expectEqual(@as(u32, 3), n);
+    try testing.expectEqual(near, buf[0].body);
+    try testing.expectEqual(mid, buf[1].body);
+    try testing.expectEqual(far, buf[2].body);
+    try testing.expect(buf[0].distance < buf[1].distance and buf[1].distance < buf[2].distance);
+
+    // A ray pointing away hits nothing, in all three modes.
+    const away = query.RayQuery{ .origin = Vec3r.zero, .direction = v(-1, 0, 0), .max_distance = 100 };
+    try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, away)) == null);
+    try testing.expect(!try query.raycastAny(&world.bp, &world.bm, &world.store, away));
+    try testing.expectEqual(@as(u32, 0), try query.raycastAll(&world.bp, &world.bm, &world.store, away, &buf));
+}
+
+test "raycastBody transports the ray by the inverse pose" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+
+    // A box at (10, 0, 0) rotated 90° about +Z: its local +X half-extent (1) now
+    // points along world +Y, and the local +Y half-extent (3) along world −X. A
+    // world ray along +X therefore enters the face whose LOCAL normal is +Y, and
+    // the world normal comes back as −X after the rotation.
+    const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = harness.av3(1, 3, 1) } });
+    const rot = foundation_math.Quatf.fromAxisAngle(harness.av3(0, 0, 1), std.math.pi / 2.0);
+    const id = try world.addBody(gpa, .{
+        .shape = shape,
+        .position = harness.av3(10, 0, 0),
+        .rotation = rot,
+        .body_type = .static,
+        .entity = .{ .index = 0, .generation = 0 },
+    });
+
+    const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
+    const local = (try world.bm.raycastBody(&world.store, id, ray)).?;
+    // World entry at x = 10 − 3 = 7 (the local +Y extent faces −X).
+    try testing.expectApproxEqAbs(@as(Real, 7), local.distance, tol);
+    // The LOCAL normal is +Y; rotating it by the body's rotation gives world −X.
+    try testing.expect(local.normal.approxEql(v(0, 1, 0), tol));
+    try testing.expect(world.bm.rotation(id).?.rotateVec3(local.normal).approxEql(v(-1, 0, 0), tol));
+
+    // And the full query agrees, position included.
+    const q = query.RayQuery{ .origin = Vec3r.zero, .direction = v(1, 0, 0), .max_distance = 100 };
+    const hit = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+    try testing.expectApproxEqAbs(@as(Real, 7), hit.distance, tol);
+    try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
+
+    // A stale handle answers null rather than reading garbage.
+    world.removeBody(id);
+    try testing.expect((try world.bm.raycastBody(&world.store, id, ray)) == null);
+}
+
+test "a zero direction returns an empty result in every mode" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    _ = try addSphere(gpa, &world, v(10, 0, 0), 0);
+
+    // The guard is at TRUE ZERO on `d · d`, and a direction small enough to be
+    // unusable underflows to exactly that at both precisions — so this covers the
+    // denormal case without an epsilon.
+    const tiny = std.math.floatTrueMin(Real);
+    for ([_]Vec3r{ Vec3r.zero, v(tiny, 0, 0), v(tiny, tiny, tiny) }) |d| {
+        const q = query.RayQuery{ .origin = Vec3r.zero, .direction = d, .max_distance = 100 };
+        try testing.expectEqual(@as(Real, 0), d.lengthSq()); // the square really underflows
+        try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, q)) == null);
+        try testing.expect(!try query.raycastAny(&world.bp, &world.bm, &world.store, q));
+        var buf: [4]query.RayHit = undefined;
+        try testing.expectEqual(@as(u32, 0), try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
+    }
+}
+
+test "no reachable shape makes a query fail, and the error channel is not dead code" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+
+    // RECORDED, because it changes what this milestone can claim: through
+    // `BodyManager.raycastBody`, `error.UnsupportedShape` is currently
+    // UNREACHABLE. `shape.supportShape` maps a box to `radius = 0`
+    // unconditionally, and `ShapeStore` holds only sphere / box / capsule, so no
+    // `SupportShape` reaching the kernel can be a rounded box. The error channel
+    // is therefore structurally required — the kernel's signature carries it and
+    // E3 pins it at the kernel level — but it cannot be exercised end-to-end
+    // until a shape whose `SupportShape` can carry an unsupported combination
+    // exists (Plane / MeshShape, M1.1.11). This test asserts what IS reachable:
+    // every shape the store can build answers a query without error.
+    const sphere = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    const box = try world.store.createShape(gpa, .{ .box = .{ .half_extents = harness.av3(1, 1, 1) } });
+    const capsule = try world.store.createShape(gpa, .{ .capsule = .{ .radius = 0.5, .half_height = 1 } });
+    for ([_]api.ShapeId{ sphere, box, capsule }, 0..) |shape_id, i| {
+        _ = try world.addBody(gpa, .{
+            .shape = shape_id,
+            .position = harness.av3(10 + @as(f32, @floatFromInt(i)) * 10, 0, 0),
+            .body_type = .static,
+            .entity = .{ .index = @intCast(i), .generation = 0 },
+        });
+    }
+
+    const q = query.RayQuery{ .origin = Vec3r.zero, .direction = v(1, 0, 0), .max_distance = 100 };
+    var buf: [8]query.RayHit = undefined;
+    // No error, and all three bodies answer.
+    try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, q)) != null);
+    try testing.expect(try query.raycastAny(&world.bp, &world.bm, &world.store, q));
+    try testing.expectEqual(@as(u32, 3), try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
+}
