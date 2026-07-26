@@ -139,36 +139,59 @@ fn closestPointOnAxis(comptime T: type, half_height: T, p: math.Vec(3, T)) math.
 /// strictly outside. Roots of `|o + t·d|² = r²` with `|d| = 1`, so the quadratic
 /// is monic: `t² + 2(o·d)·t + (|o|² − r²) = 0`.
 fn raySphere(comptime T: type, r: T, origin: math.Vec(3, T), direction: math.Vec(3, T)) ?LocalHit(T) {
-    const t = sphereEntryFromOutside(T, r, origin, direction) orelse return null;
-    const p = origin.add(direction.scale(t));
-    return .{ .distance = t, .normal = sphereNormal(T, r, p, direction) };
+    const entry = sphereEntryFromOutside(T, r, origin, direction) orelse return null;
+    return .{ .distance = entry.t, .normal = sphereNormal(T, r, entry.offset, direction) };
 }
 
-/// Nearest root `>= 0` of the sphere of radius `r` centred on the origin of
-/// `rel_origin`'s frame, assuming `rel_origin` is strictly outside it.
+/// Entry of the sphere of radius `r` centred on the origin of `rel_origin`'s
+/// frame, assuming `rel_origin` is strictly outside it: the parameter `t` and the
+/// hit point's offset FROM THE CENTRE.
 ///
-/// Both roots then share the sign of their product `|o|² − r² > 0`, so a
-/// negative near root means the whole sphere is behind the ray — no separate
-/// far-root branch is needed.
-fn sphereEntryFromOutside(comptime T: type, r: T, rel_origin: math.Vec(3, T), direction: math.Vec(3, T)) ?T {
+/// Both roots share the sign of their product `|o|² − r² > 0`, so a negative near
+/// root means the whole sphere is behind the ray — no separate far-root branch is
+/// needed.
+///
+/// Neither output is computed by subtracting large near-equal quantities, and that
+/// is the whole point of this shape:
+///
+///   - the discriminant is `r² − |w|²` where `w = o − (o · d)·d` is the
+///     PERPENDICULAR offset, not `b² − c`. The two are equal algebraically — with
+///     `d` unit, `|w|² = |o|² − b²` — but `b²` and `c` are both of order `|o|²`
+///     and their difference is of order `r²`, so the subtraction cancels
+///     catastrophically far from the shape. At f32, a radius-1 sphere 5 000 m away
+///     gives `b² = c = 2.5e7` after rounding, hence `disc = 0`: an entry short by
+///     exactly the radius.
+///   - the hit offset is `w − √disc · d`, not `o + t·d`. The latter adds a large
+///     `t` to a large `o` to land on a point of magnitude `r`, losing the absolute
+///     precision of the large operands; both terms of the former are bounded by
+///     `r`. This one matters for the NORMAL, which is that offset over `r` — the
+///     same cancellation as the discriminant, one step later, and found by the
+///     test written for the first.
+fn sphereEntryFromOutside(
+    comptime T: type,
+    r: T,
+    rel_origin: math.Vec(3, T),
+    direction: math.Vec(3, T),
+) ?struct { t: T, offset: math.Vec(3, T) } {
     const b = rel_origin.dot(direction);
-    const c = rel_origin.lengthSq() - r * r;
-    const disc = b * b - c;
+    const w = rel_origin.sub(direction.scale(b));
+    const disc = r * r - w.lengthSq();
     if (disc < 0) return null;
-    const t = -b - @sqrt(disc);
+    const root = @sqrt(disc);
+    const t = -b - root;
     if (t < 0) return null; // sphere entirely behind the origin
-    return t;
+    return .{ .t = t, .offset = w.sub(direction.scale(root)) };
 }
 
-/// Outward normal of the sphere of radius `r` at surface point `p` (sphere
-/// centred on the local origin).
-fn sphereNormal(comptime T: type, r: T, p: math.Vec(3, T), direction: math.Vec(3, T)) math.Vec(3, T) {
+/// Outward normal of the sphere of radius `r` from the hit point's `offset`
+/// relative to the sphere centre.
+fn sphereNormal(comptime T: type, r: T, offset: math.Vec(3, T), direction: math.Vec(3, T)) math.Vec(3, T) {
     // Guard at TRUE ZERO, not at an epsilon: `r == 0` is a degenerate
     // point-sphere, whose surface point IS its centre, so there is no outward
     // direction to report. `−direction` is the same choice §1.11.4 makes for the
     // distance-zero case, and it keeps `normal · direction <= 0` true here too.
     if (r == 0) return direction.neg();
-    return p.scale(1 / r);
+    return offset.scale(1 / r);
 }
 
 /// Ray against a box core of half-extents `he` (radius 0, centred on the local
@@ -250,6 +273,10 @@ fn rayCapsule(
     // Radial (XZ) quadratic of the infinite cylinder.
     const a = d[0] * d[0] + d[2] * d[2];
     const b = o[0] * d[0] + o[2] * d[2];
+    // `c` survives only for the axis-parallel branch below, where the radial
+    // offset is bounded by the ray's own distance from the axis — small by
+    // construction — so it carries none of the far-field cancellation the
+    // discriminant had.
     const c = o[0] * o[0] + o[2] * o[2] - r * r;
 
     // TRUE ZERO, no epsilon: zero radial speed means the ray runs parallel to
@@ -261,17 +288,35 @@ fn rayCapsule(
         return capEntry(T, half_height, r, origin, direction);
     }
 
-    const disc = b * b - a * c;
+    // Same cancellation-free form as the sphere, in the two radial axes: at the
+    // parameter of closest radial approach `t_ca = −b/a`, the radial offset is
+    // `w`, and `a·(r² − |w|²) == b² − a·c` algebraically while squaring only small
+    // quantities. Verified as an identity before being written, and the f32
+    // far-field failure of the `b² − a·c` form is the same one the sphere had.
+    const t_ca = -b / a;
+    const wx = o[0] + t_ca * d[0];
+    const wz = o[2] + t_ca * d[2];
+    const disc = a * (r * r - (wx * wx + wz * wz));
     // The capsule is contained in its infinite cylinder (both caps have radial
     // extent `r`), so missing the cylinder misses the capsule.
     if (disc < 0) return null;
 
-    const t_cyl = (-b - @sqrt(disc)) / a;
+    const root = @sqrt(disc);
+    const t_cyl = (-b - root) / a;
     if (t_cyl >= 0) {
         const y = o[1] + t_cyl * d[1];
         if (@abs(y) <= half_height) {
-            const p = origin.add(direction.scale(t_cyl));
-            return .{ .distance = t_cyl, .normal = capsuleRadialNormal(T, r, p, direction) };
+            // Radial offset built the same cancellation-free way as the sphere's:
+            // `w_xz − (√disc / a)·d_xz`, both terms bounded by `r`, rather than
+            // `o_xz + t·d_xz`, which lands on a point of magnitude `r` by
+            // subtracting two quantities of magnitude `|o_xz|`.
+            const step = root / a;
+            const offset_x = wx - step * d[0];
+            const offset_z = wz - step * d[2];
+            return .{
+                .distance = t_cyl,
+                .normal = capsuleRadialNormal(T, r, offset_x, offset_z, direction),
+            };
         }
     }
     // Either the cylinder entry is behind the origin, or it lies beyond a cap
@@ -279,14 +324,13 @@ fn rayCapsule(
     return capEntry(T, half_height, r, origin, direction);
 }
 
-/// Radial outward normal of the capsule wall at surface point `p`: the XZ
-/// component, the Y component being zero on the cylindrical part.
-fn capsuleRadialNormal(comptime T: type, r: T, p: math.Vec(3, T), direction: math.Vec(3, T)) math.Vec(3, T) {
+/// Radial outward normal of the capsule wall from the hit point's radial offset
+/// from the axis. The Y component is zero on the cylindrical part.
+fn capsuleRadialNormal(comptime T: type, r: T, offset_x: T, offset_z: T, direction: math.Vec(3, T)) math.Vec(3, T) {
     // TRUE ZERO guard, same reasoning as `sphereNormal`: `r == 0` is a bare
     // segment with no wall to carry a normal.
     if (r == 0) return direction.neg();
-    const pa = p.toArray();
-    return math.Vec(3, T).fromArray(.{ pa[0] / r, 0, pa[2] / r });
+    return math.Vec(3, T).fromArray(.{ offset_x / r, 0, offset_z / r });
 }
 
 /// Nearest entry on either cap sphere of the capsule, the origin being strictly
@@ -302,31 +346,19 @@ fn capEntry(
     const top = Vec3T.fromArray(.{ 0, half_height, 0 });
     const bottom = Vec3T.fromArray(.{ 0, -half_height, 0 });
 
-    const t_top = sphereEntryFromOutside(T, r, origin.sub(top), direction);
-    const t_bottom = sphereEntryFromOutside(T, r, origin.sub(bottom), direction);
+    const hit_top = sphereEntryFromOutside(T, r, origin.sub(top), direction);
+    const hit_bottom = sphereEntryFromOutside(T, r, origin.sub(bottom), direction);
 
     // Fixed tie-break on an exact tie: the `+Y` cap, mirroring `support`'s
     // `dir.y >= 0` choice.
-    var t: T = undefined;
-    var centre: Vec3T = undefined;
-    if (t_top) |tt| {
-        if (t_bottom) |tb| {
-            if (tb < tt) {
-                t = tb;
-                centre = bottom;
-            } else {
-                t = tt;
-                centre = top;
-            }
-        } else {
-            t = tt;
-            centre = top;
+    const chosen = if (hit_top) |ht| blk: {
+        if (hit_bottom) |hb| {
+            break :blk if (hb.t < ht.t) hb else ht;
         }
-    } else if (t_bottom) |tb| {
-        t = tb;
-        centre = bottom;
-    } else return null;
+        break :blk ht;
+    } else if (hit_bottom) |hb| hb else return null;
 
-    const p = origin.add(direction.scale(t));
-    return .{ .distance = t, .normal = sphereNormal(T, r, p.sub(centre), direction) };
+    // The offset is already relative to the chosen cap's centre and free of the
+    // far-field cancellation, so the normal needs no world point at all.
+    return .{ .distance = chosen.t, .normal = sphereNormal(T, r, chosen.offset, direction) };
 }

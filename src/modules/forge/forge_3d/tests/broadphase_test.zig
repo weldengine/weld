@@ -779,6 +779,13 @@ const RayCollector = struct {
         return self.bound;
     }
 
+    /// Part of the required contract, like `maxDistance`. This collector expresses
+    /// `closest` and `all`, neither of which stops early; the terminating `any`
+    /// behaviour is exercised by `StoppingRayCollector` below.
+    pub fn shouldStop(_: *const RayCollector) bool {
+        return false;
+    }
+
     fn deinit(self: *RayCollector) void {
         self.items.deinit(self.gpa);
     }

@@ -286,22 +286,35 @@ fn hitLess(_: void, x: RayHit, y: RayHit) bool {
 /// query is degenerate and its result is empty by definition.
 ///
 /// The domain assert mirrors the solver passes (§1.11.4): finite origin and
-/// direction, finite `max_distance >= 0`. The zero-direction guard is at TRUE
-/// ZERO on `d · d` — the square underflows for any unusably small direction at
-/// both precisions, so the true-zero test covers the denormal case for free and
-/// no epsilon is needed. A zero direction is a degenerate query, not a
-/// programming error, so it returns an empty result rather than firing.
+/// direction, finite `max_distance >= 0`.
+///
+/// The direction is reduced by its LARGEST COMPONENT before anything is squared,
+/// which is what keeps both ends of the float range safe. Squaring first is unsafe
+/// at both: `(1e20, 0, 0)` is perfectly finite and passes the domain assert, yet
+/// `lengthSq()` overflows to infinity at f32; and a direction so small that its
+/// square underflows would read as zero. After the reduction every component is in
+/// `[0, 1]`, so the squared length lies in `[1, 3]` and can do neither.
+///
+/// The reduction is a component-wise DIVISION, deliberately not a multiplication by
+/// `1 / scale`: for a denormal direction that reciprocal overflows to infinity and
+/// the defect reappears at the other end of the range.
+///
+/// The `scale == 0` test is at TRUE ZERO and subsumes the old `d · d == 0` guard —
+/// the largest absolute component is zero exactly when all three are. A zero
+/// direction is a degenerate query, not a programming error, so it returns an empty
+/// result rather than firing.
 fn prepare(query: RayQuery) ?Ray {
     std.debug.assert(std.math.isFinite(query.max_distance) and query.max_distance >= 0);
     std.debug.assert(@reduce(.And, @abs(query.origin.data) < @as(@Vector(3, Real), @splat(std.math.inf(Real)))));
     std.debug.assert(@reduce(.And, @abs(query.direction.data) < @as(@Vector(3, Real), @splat(std.math.inf(Real)))));
 
-    const len_sq = query.direction.lengthSq();
-    if (len_sq == 0) return null;
+    const scale = @reduce(.Max, @abs(query.direction.data));
+    if (scale == 0) return null;
+    const reduced: Vec3r = .{ .data = query.direction.data / @as(@Vector(3, Real), @splat(scale)) };
     // Normalised ONCE, here. Everything downstream — the traversal, the kernels,
     // the returned distance — is in units of this unit direction, which is why a
     // hit carries a distance and never a fraction.
-    return Ray.init(query.origin, query.direction.scale(1 / @sqrt(len_sq)));
+    return Ray.init(query.origin, reduced.scale(1 / reduced.length()));
 }
 
 /// The exact per-candidate test every collector runs: filter, then kernel, then
@@ -366,10 +379,18 @@ const ClosestCollector = struct {
     pub fn maxDistance(self: *const ClosestCollector) Real {
         return self.bound;
     }
+
+    /// Never stops early: the minimum is only known once the traversal is done.
+    pub fn shouldStop(_: *const ClosestCollector) bool {
+        return false;
+    }
 };
 
-/// `any`: drops its bound to zero at the first accepted hit, which prunes every
-/// remaining descent that does not contain the ray origin.
+/// `any`: STOPS at the first accepted hit. It also drops its bound to zero, which
+/// prunes anything still in flight, but the bound alone would not terminate — a
+/// zero bound still admits every node whose interval contains the ray origin, and
+/// says nothing about the layer trees not yet walked. `shouldStop` is what makes
+/// "terminates at the first candidate" true.
 const AnyCollector = struct {
     bm: *const BodyManager,
     store: *const ShapeStore,
@@ -392,6 +413,11 @@ const AnyCollector = struct {
 
     pub fn maxDistance(self: *const AnyCollector) Real {
         return self.bound;
+    }
+
+    /// True from the first accepted hit — the traversal ends, trees included.
+    pub fn shouldStop(self: *const AnyCollector) bool {
+        return self.found;
     }
 };
 
@@ -433,5 +459,10 @@ const AllCollector = struct {
 
     pub fn maxDistance(self: *const AllCollector) Real {
         return self.bound;
+    }
+
+    /// Never stops early — every hit within the window is wanted.
+    pub fn shouldStop(_: *const AllCollector) bool {
+        return false;
     }
 };

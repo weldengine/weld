@@ -24,11 +24,20 @@
 //!
 //! **Two traversals, two collector contracts (M1.1.9).** `queryAabb` asks its
 //! collector for `add(user_data)` and nothing else. `queryRay` asks for `add`
-//! plus `maxDistance()`, which it **re-reads before every descent** and prunes
-//! on, turning the traversal into *branch and bound*; the descent is near-first
-//! so that bound tightens as early as possible (`engine-physics-forge.md`
-//! §1.11.2). A query mutates nothing, wakes nobody, and visits every layer tree
-//! (§1.11.1) — it never touches the moved-logs nor the retained pair set.
+//! plus TWO more, both required of every collector: `maxDistance()`, which it
+//! re-reads before every descent and prunes on — turning the traversal into
+//! *branch and bound*, with a near-first descent so the bound tightens as early as
+//! possible (`engine-physics-forge.md` §1.11.2) — and `shouldStop()`, which ends
+//! the traversal outright. The two are not interchangeable: a zero bound is still
+//! a BOUND, so every node whose interval contains the ray origin survives it, and
+//! `Broadphase.queryRay` would still walk the remaining layer trees. An `any`
+//! query that must "terminate at the first candidate" needs the second. Same split
+//! as the reference, which exposes `GetEarlyOutFraction` alongside `ShouldEarlyOut`
+//! / `ForceEarlyOut` (`CollisionCollector.h`).
+//!
+//! A query mutates nothing, wakes nobody, and visits every layer tree unless the
+//! collector stops it (§1.11.1) — it never touches the moved-logs nor the retained
+//! pair set.
 
 const std = @import("std");
 const math = @import("foundation").math;
@@ -260,9 +269,15 @@ pub fn Bvh(comptime T: type) type {
         ///     nothing more. **Re-read before every descent**, so a collector
         ///     that tightens it inside `add` prunes the rest of the traversal
         ///     immediately: that is what makes a closest-hit sub-linear. A
-        ///     `closest` collector tightens on each accepted hit, an `any`
-        ///     collector drops the bound to zero at the first, an `all`
+        ///     `closest` collector tightens on each accepted hit, an `all`
         ///     collector never tightens.
+        ///   - `fn shouldStop(self) bool` — whether to abandon the traversal
+        ///     entirely. **Re-read before every descent** as well, and checked
+        ///     again by `Broadphase.queryRay` between layer trees. A bound of zero
+        ///     does NOT express this: it still admits every node whose interval
+        ///     contains the origin, and it says nothing about the trees not yet
+        ///     visited. An `any` collector returns true from its first accepted
+        ///     hit; `closest` and `all` never stop early.
         ///
         /// The interval is intersected with `[0, maxDistance()]`, closed at both
         /// ends: a box behind the origin is pruned, a box entered exactly at the
@@ -271,6 +286,9 @@ pub fn Bvh(comptime T: type) type {
         /// shrink (§1.11.2).
         pub fn queryRay(self: *const Self, ray: RayT, collector: anytype) u32 {
             if (self.root == null_index) return 0;
+            // Checked before the root too, so a collector that has already stopped
+            // costs nothing per remaining tree in `Broadphase.queryRay`.
+            if (collector.shouldStop()) return 0;
             const iv = self.rayInterval(self.root, ray);
             if (!accepts(iv, collector.maxDistance())) return 1; // visited then pruned
             return self.queryRayNode(self.root, ray, collector);
@@ -311,9 +329,11 @@ pub fn Bvh(comptime T: type) type {
 
             var visited: u32 = 1;
             for (children, intervals) |child, iv| {
-                // The bound is re-read HERE, once per descent, so a tightening
-                // performed while the near child was being explored prunes the
-                // far one.
+                // Both are re-read HERE, once per descent: a tightening performed
+                // while the near child was being explored prunes the far one, and a
+                // collector that has seen enough ends the walk instead of merely
+                // narrowing it.
+                if (collector.shouldStop()) break;
                 if (accepts(iv, collector.maxDistance())) {
                     visited += self.queryRayNode(child, ray, collector);
                 } else {
@@ -791,10 +811,15 @@ pub fn Broadphase(comptime T: type) type {
         ///
         /// The collector's bound carries across the trees — the tightening a
         /// hit in the first tree performs prunes the next — so the sum is not a
-        /// per-tree independent cost.
+        /// per-tree independent cost. And `shouldStop()` is honoured BETWEEN trees,
+        /// which is the half a bound cannot express: without it an `any` query that
+        /// found its candidate in the first tree would still walk the other three.
         pub fn queryRay(self: *const Self, ray: RayT, collector: anytype) u32 {
             var visited: u32 = 0;
-            for (&self.trees) |*t| visited += t.queryRay(ray, collector);
+            for (&self.trees) |*t| {
+                if (collector.shouldStop()) break;
+                visited += t.queryRay(ray, collector);
+            }
             return visited;
         }
 

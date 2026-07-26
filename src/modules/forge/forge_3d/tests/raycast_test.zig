@@ -613,23 +613,67 @@ test "raycastBody transports the ray by the inverse pose" {
     try testing.expect((try world.bm.raycastBody(&world.store, id, ray)) == null);
 }
 
-test "a zero direction returns an empty result in every mode" {
+test "only an exactly zero direction is empty; both float extremes work" {
     const gpa = std.testing.allocator;
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
     _ = try addSphere(gpa, &world, v(10, 0, 0), 0);
+    var buf: [4]query.RayHit = undefined;
 
-    // The guard is at TRUE ZERO on `d · d`, and a direction small enough to be
-    // unusable underflows to exactly that at both precisions — so this covers the
-    // denormal case without an epsilon.
-    const tiny = std.math.floatTrueMin(Real);
-    for ([_]Vec3r{ Vec3r.zero, v(tiny, 0, 0), v(tiny, tiny, tiny) }) |d| {
-        const q = query.RayQuery{ .origin = Vec3r.zero, .direction = d, .max_distance = 100 };
-        try testing.expectEqual(@as(Real, 0), d.lengthSq()); // the square really underflows
+    // EXACTLY zero → empty in all three modes. The guard is at true zero on the
+    // largest absolute component, which is zero exactly when all three are.
+    {
+        const q = query.RayQuery{ .origin = Vec3r.zero, .direction = Vec3r.zero, .max_distance = 100 };
         try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, q)) == null);
         try testing.expect(!try query.raycastAny(&world.bp, &world.bm, &world.store, q));
-        var buf: [4]query.RayHit = undefined;
         try testing.expectEqual(@as(u32, 0), try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
+    }
+
+    // A HUGE direction is finite, passes the domain assert, and must give the same
+    // answer as the unit one. Discrimination guard: its squared length really is
+    // INFINITE, so a normalisation that squared first would have produced a NaN
+    // direction here — this test aims at that defect and not near it. The component
+    // is derived from `floatMax` rather than written as a literal, because the
+    // overflow threshold is the scalar's: `1e20` overflows f32's square and is
+    // perfectly comfortable in f64, so a literal would have quietly disarmed this
+    // guard at one of the two precisions (and did, until the f64 leg said so).
+    {
+        const huge_component: Real = @sqrt(std.math.floatMax(Real)) * 4;
+        const huge = v(huge_component, 0, 0);
+        try testing.expect(std.math.isFinite(huge_component)); // still a legal direction
+        try testing.expect(std.math.isInf(huge.lengthSq()));
+        const q = query.RayQuery{ .origin = Vec3r.zero, .direction = huge, .max_distance = 100 };
+        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+        try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
+        try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
+        try testing.expect(try query.raycastAny(&world.bp, &world.bm, &world.store, q));
+        try testing.expectEqual(@as(u32, 1), try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
+    }
+
+    // A DENORMAL direction, likewise. Discrimination guard the other way: its
+    // squared length UNDERFLOWS to exactly zero, so the previous
+    // `if (d · d == 0) return null` read it as a zero direction and answered "no
+    // hit" — a silent miss for a perfectly usable direction, and the reason the
+    // reduction divides by the largest component instead of squaring.
+    {
+        const tiny = v(std.math.floatTrueMin(Real), 0, 0);
+        try testing.expectEqual(@as(Real, 0), tiny.lengthSq());
+        const q = query.RayQuery{ .origin = Vec3r.zero, .direction = tiny, .max_distance = 100 };
+        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+        try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
+        try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
+    }
+
+    // And a denormal on every axis at once — the reduction must not depend on which
+    // component is the largest.
+    {
+        const t = std.math.floatTrueMin(Real);
+        const q = query.RayQuery{ .origin = v(-10, -10, -10), .direction = v(t, t, t), .max_distance = 100 };
+        try testing.expectEqual(@as(Real, 0), v(t, t, t).lengthSq());
+        // Aimed at the sphere's centre line from (−10,−10,−10) the ray misses it,
+        // but what matters is that it is a real ray: `any` and `closest` agree.
+        const closest = try query.raycast(&world.bp, &world.bm, &world.store, q);
+        try testing.expectEqual(closest != null, try query.raycastAny(&world.bp, &world.bm, &world.store, q));
     }
 }
 
@@ -1223,3 +1267,155 @@ test "two identical runs are bit-identical" {
     const twin_hit = (try query.raycast(&twin.bp, &twin.bm, &twin.store, q)).?;
     try expectHitBitIdentical(first, twin_hit);
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.9 / F1 — far-field conditioning of the quadratic kernels
+// ---------------------------------------------------------------------------
+
+/// Absolute tolerance for a distance measured at ~5 000 m: the f32 spacing there
+/// is ≈ 4.9e-4, so this is float noise at THAT scale, not geometric slack.
+const far_tol: Real = if (Real == f32) 1e-2 else 1e-9;
+
+test "the sphere kernel is conditioned far from the shape" {
+    // A radius-1 sphere with the ray origin 5 000 m away. The old discriminant
+    // form `b² − c` has both terms at 2.5e7 and their difference at r² = 1, which
+    // at f32 cancels completely.
+    //
+    // MEASURED under the pre-fix forms, in an isolated probe rather than predicted
+    // (f32): on-axis `t = 5000.000000` with `|normal| = 0.000000` — a hit reported
+    // ON the centre — and off-axis at y = 0.5, `t = 5000.000000` with
+    // `|normal| = 0.500000`. Both distances are short by exactly the radius and
+    // neither normal is unit. The same probe at f64 returned `4999.000000` and
+    // `4999.133975` with unit normals, so THIS test discriminates at f32 and not at
+    // f64: 5 000 m is inside f64's comfortable range and the old form only fails
+    // further out. Worth stating rather than implying a guard at both precisions.
+    const sphere = SupportShapeR{ .core = .point, .radius = 1 };
+    const d = dir(1, 0, 0);
+    const hit = (try narrowphase.rayShape(Real, sphere, v(-5000, 0, 0), d)).?;
+    try expectHitInvariants(hit, d); // includes |normal| == 1, which the old form failed
+    try testing.expectApproxEqAbs(@as(Real, 4999), hit.distance, far_tol);
+    try testing.expect(hit.normal.approxEql(v(-1, 0, 0), 1e-4));
+
+    // Off-axis at the same range, so the perpendicular term is not zero either.
+    const oblique = (try narrowphase.rayShape(Real, sphere, v(-5000, 0.5, 0), d)).?;
+    try expectHitInvariants(oblique, d);
+    // x² + 0.25 = 1 ⇒ x = −√0.75, so t = 5000 − √0.75.
+    try testing.expectApproxEqAbs(5000 - @sqrt(@as(Real, 0.75)), oblique.distance, far_tol);
+}
+
+test "the capsule kernel is conditioned far from the shape" {
+    // Same regime, both capsule surfaces. MEASURED under the pre-fix forms at f32:
+    // the wall came back at `t = 5000.000000` with `|normal| = 0.000000`, and the
+    // cap — which runs through the same sphere routine, offset to the cap centre —
+    // at `t = 5000.000000` with `|normal| = 0.500000`. Both short by the radius,
+    // neither normal unit. At f64 the old form still held at this range, so the
+    // discrimination here is f32's.
+    const capsule = SupportShapeR{ .core = .{ .segment = 3 }, .radius = 1 };
+    const d = dir(1, 0, 0);
+
+    // Cylinder wall at mid-height.
+    const wall = (try narrowphase.rayShape(Real, capsule, v(-5000, 0, 0), d)).?;
+    try expectHitInvariants(wall, d);
+    try testing.expectApproxEqAbs(@as(Real, 4999), wall.distance, far_tol);
+    try testing.expect(wall.normal.approxEql(v(-1, 0, 0), 1e-4));
+    try testing.expectEqual(@as(Real, 0), wall.normal.toArray()[1]); // radial: no Y
+
+    // Top cap: the cap sphere is centred (0, 3, 0), so at y = 3.5 the chord gives
+    // x = −√0.75 and t = 5000 − √0.75, with the normal (−√0.75, 0.5, 0).
+    const cap = (try narrowphase.rayShape(Real, capsule, v(-5000, 3.5, 0), d)).?;
+    try expectHitInvariants(cap, d);
+    const x: Real = @sqrt(@as(Real, 0.75));
+    try testing.expectApproxEqAbs(5000 - x, cap.distance, far_tol);
+    try testing.expect(cap.normal.approxEql(v(-x, 0.5, 0), 1e-4));
+    try testing.expect(@abs(cap.normal.toArray()[1]) > 0.1); // really the cap, not the wall
+
+    // And a genuine far-field MISS is still a miss: 1.5 m off a 1 m radius.
+    try testing.expect((try narrowphase.rayShape(Real, capsule, v(-5000, 0, 1.5), d)) == null);
+}
+
+test "any terminates the traversal, it does not merely bound it" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+
+    // FOUR static spheres along the ray, so the first tree walked has more nodes
+    // AFTER the nearest hit — that is what makes the per-descent stop observable.
+    // Plus, in the other three layers, spheres whose fat AABBs CONTAIN the ray
+    // origin: their interval is `[negative, positive]` and survives ANY bound, zero
+    // included, so only a stop can keep the traversal out of them. Their surfaces
+    // are missed (centres 1.56 m off the axis against a 1 m radius), so they never
+    // change the answer — they only cost visits.
+    for ([_]f32{ 10, 20, 30, 40 }, 0..) |x, i| {
+        _ = try addSphereAt(gpa, &world, .{ x, 0, 0 }, 0, @intCast(i));
+    }
+    const shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    var next_entity: u32 = 4;
+    for ([_]api.BodyType{ .dynamic, .kinematic, .dynamic }) |body_type| {
+        for ([_][3]f32{ .{ 0.9, 0.9, 0.9 }, .{ -0.9, 0.9, -0.9 }, .{ 0.9, -0.9, 0.9 } }) |c| {
+            _ = try world.addBody(gpa, .{
+                .shape = shape,
+                .position = harness.av3(c[0], c[1], c[2]),
+                .body_type = body_type,
+                .entity = .{ .index = next_entity, .generation = 0 },
+            });
+            next_entity += 1;
+        }
+    }
+
+    const q = axisQuery(100);
+    const closest = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+    try testing.expectApproxEqAbs(@as(Real, 9), closest.distance, tol);
+    try testing.expect(try query.raycastAny(&world.bp, &world.bm, &world.store, q));
+
+    // The terminating property, measured on the traversal's own node counts. This is
+    // the ONE place in the milestone where a visited-node count is a legitimate
+    // assertion: it is a statement about TERMINATION, not about invariance, and it
+    // compares two collectors over the SAME tree rather than two trees.
+    //
+    // Neither collector touches its bound — that is the whole point. A stopping
+    // collector that also dropped its bound to zero would make this pass on the
+    // bound alone, which is the trap the first version of this test fell into.
+    const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
+    var walk_all = CountingRayCollector{ .bound = 100, .stop_on_first = false };
+    const visited_all = world.bp.queryRay(ray, &walk_all);
+    var walk_any = CountingRayCollector{ .bound = 100, .stop_on_first = true };
+    const visited_any = world.bp.queryRay(ray, &walk_any);
+
+    // (a) Kills the per-descent read: without it the first tree keeps descending
+    // past the accepted candidate.
+    try testing.expect(visited_any < visited_all);
+    try testing.expectEqual(@as(u32, 1), walk_any.accepted);
+    try testing.expect(walk_all.accepted > walk_any.accepted);
+
+    // (b) Kills the tree-level reads: a stopped collector must cost NOTHING on the
+    // layer trees not yet visited, so walking the whole broadphase costs exactly
+    // what walking the first tree alone costs. The two read sites — the `break`
+    // between trees and the check before the root — are deliberately redundant:
+    // either one alone satisfies this, the first being the cheaper expression and
+    // the second the backstop for any other entry into a tree.
+    var walk_static = CountingRayCollector{ .bound = 100, .stop_on_first = true };
+    const visited_static_only = world.bp.trees[@intFromEnum(broadphase_mod.BroadphaseLayer.static)]
+        .queryRay(ray, &walk_static);
+    try testing.expectEqual(visited_static_only, visited_any);
+    try testing.expectEqual(@as(u32, 1), walk_static.accepted);
+}
+
+/// A minimal collector that counts what the traversal offers it and, optionally,
+/// stops at the first candidate — with NO bound tightening in either mode, so a
+/// difference in visited nodes can only come from `shouldStop`.
+const CountingRayCollector = struct {
+    bound: Real,
+    stop_on_first: bool,
+    accepted: u32 = 0,
+
+    pub fn add(self: *CountingRayCollector, user_data: u32) void {
+        _ = user_data;
+        self.accepted += 1;
+    }
+    pub fn maxDistance(self: *const CountingRayCollector) Real {
+        return self.bound;
+    }
+    pub fn shouldStop(self: *const CountingRayCollector) bool {
+        return self.stop_on_first and self.accepted > 0;
+    }
+};

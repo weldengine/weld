@@ -137,7 +137,7 @@ fn reap(io: std.Io, proc: *platform_process.Process) void {
     }
 }
 
-test "runtime kill -9 → editor detects EOF in <100ms" {
+test "runtime kill -9 → the editor's receive ends in EOF" {
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
