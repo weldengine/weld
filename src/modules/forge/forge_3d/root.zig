@@ -198,4 +198,5 @@ comptime {
     _ = @import("tests/position_solver_test.zig");
     _ = @import("tests/island_test.zig");
     _ = @import("tests/sleep_test.zig");
+    _ = @import("tests/raycast_test.zig");
 }

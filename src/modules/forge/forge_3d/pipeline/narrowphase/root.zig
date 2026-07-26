@@ -17,6 +17,7 @@ const gjk_mod = @import("gjk.zig");
 const epa_mod = @import("epa.zig");
 const manifold = @import("manifold.zig");
 const fast_paths = @import("fast_paths.zig");
+const raycast_mod = @import("raycast.zig");
 
 // --- Support layer (support.zig) ---
 
@@ -83,6 +84,16 @@ pub const FastResult = fast_paths.FastResult;
 /// Analytic per-pair narrowphase dispatcher (`.not_handled` until a kernel lands).
 pub const fastSeed = fast_paths.fastSeed;
 
+// --- Ray kernels (analytic ray↔core, raycast.zig) ---
+
+/// A ray hit on one shape, in that shape's local frame (distance + outward normal).
+pub const LocalHit = raycast_mod.LocalHit;
+/// Nearest ray↔shape intersection in the shape's local frame; `null` on a miss,
+/// `error.UnsupportedShape` for a rounded box.
+pub const rayShape = raycast_mod.rayShape;
+/// Whether a point lies in the solid shape, boundary included.
+pub const containsPoint = raycast_mod.containsPoint;
+
 // Pins so every package sub-file is analysed when forge_3d is built as a test
 // target (engine-zig-conventions.md §13 lazy-analysis guard).
 comptime {
@@ -91,4 +102,5 @@ comptime {
     _ = epa_mod;
     _ = manifold;
     _ = fast_paths;
+    _ = raycast_mod;
 }
