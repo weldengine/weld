@@ -2,11 +2,14 @@
 //!
 //! Closest-hit raycast over a STATIC scene of 10 000 bodies (spheres, boxes and
 //! capsules on a grid), plus the `any` and `all` selection modes over the same
-//! ray set, and a shuffled-ray variant (Fisher-Yates from the same fixed seed) so
-//! the numbers are not read off one favourable traversal order: the ray set is
-//! fixed and the scene is a grid, so consecutive rays otherwise land in
-//! neighbouring cells. A running checksum over the hits defeats dead-code
-//! elimination.
+//! ray set, plus a pair that isolates traversal-order locality: a ray set SWEPT
+//! through the grid cell by cell (consecutive rays land in neighbouring cells, so
+//! consecutive traversals reuse the same tree nodes) against the SAME set permuted
+//! by Fisher-Yates from a fixed seed. The randomly-aimed set used by the first
+//! three rows has no spatial order to begin with, so permuting THAT would have
+//! measured array-access locality and nothing about traversal — the swept pair is
+//! the comparison the question deserves. A running checksum over the hits defeats
+//! dead-code elimination.
 //!
 //! **Reported, not gated.** No numeric envelope is pre-registered: the baseline
 //! has never been measured, and inventing a bound before measuring it is the
@@ -179,7 +182,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var checksum: f64 = 0;
-    var measures: [5]Measure = undefined;
+    var measures: [6]Measure = undefined;
 
     // (1) closest — the dominant mode.
     {
@@ -269,12 +272,35 @@ pub fn main(init: std.process.Init) !void {
         measures[3] = report("closest (5 m bound)", best_ns, n_rays, hits / n_reps);
     }
 
-    // (5) closest over a SHUFFLED ray order. The ray set is fixed and the scene is a
-    // grid, so consecutive rays land in neighbouring cells and the traversal walks a
-    // favourable, cache-warm order; shuffling breaks that correlation without
-    // changing the work. Fisher-Yates from the SAME fixed seed stream as the rest of
-    // this bench, so the permutation is reproducible run to run.
+    // (5) and (6) — the traversal-locality pair. Rays are SWEPT through the grid,
+    // one per cell in `x, y, z` order, each shooting +Z through its own column: so
+    // consecutive rays traverse overlapping parts of the tree. Then the SAME rays in
+    // a Fisher-Yates permutation from the fixed seed stream. The only difference
+    // between the two rows is the order, and the work is identical ray for ray.
     {
+        const swept_origins = try gpa.alloc(Vec3r, n_rays);
+        defer gpa.free(swept_origins);
+        const swept_dirs = try gpa.alloc(Vec3r, n_rays);
+        defer gpa.free(swept_dirs);
+        var made: usize = 0;
+        var gx: u32 = 0;
+        sweep: while (gx < 22) : (gx += 1) {
+            var gy: u32 = 0;
+            while (gy < 22) : (gy += 1) {
+                var gz: u32 = 0;
+                while (gz < 21) : (gz += 1) {
+                    if (made == n_rays) break :sweep;
+                    swept_origins[made] = Vec3r.fromArray(.{
+                        @as(Real, @floatFromInt(gx)) * 3,
+                        @as(Real, @floatFromInt(gy)) * 3,
+                        -20,
+                    });
+                    swept_dirs[made] = Vec3r.fromArray(.{ 0, 0, 1 });
+                    made += 1;
+                }
+            }
+        }
+
         const order = try gpa.alloc(u32, n_rays);
         defer gpa.free(order);
         for (order, 0..) |*ix, i| ix.* = @intCast(i);
@@ -286,21 +312,43 @@ pub fn main(init: std.process.Init) !void {
             order[j] = tmp;
         }
 
-        var hits: usize = 0;
-        var best_ns: i64 = std.math.maxInt(i64);
-        for (0..n_reps) |_| {
-            const t0 = nowNs();
-            for (order) |ix| {
-                const q = query.RayQuery{ .origin = origins[ix], .direction = directions[ix], .max_distance = 200 };
-                if (try query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
-                    hits += 1;
-                    checksum += @floatCast(hit.distance);
+        // Swept order.
+        {
+            var hits: usize = 0;
+            var best_ns: i64 = std.math.maxInt(i64);
+            for (0..n_reps) |_| {
+                const t0 = nowNs();
+                for (swept_origins, swept_dirs) |o, d| {
+                    const q = query.RayQuery{ .origin = o, .direction = d, .max_distance = 200 };
+                    if (try query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                        hits += 1;
+                        checksum += @floatCast(hit.distance);
+                    }
                 }
+                const dt = nowNs() - t0;
+                if (dt < best_ns) best_ns = dt;
             }
-            const dt = nowNs() - t0;
-            if (dt < best_ns) best_ns = dt;
+            measures[4] = report("closest (swept order)", best_ns, n_rays, hits / n_reps);
         }
-        measures[4] = report("closest (shuffled order)", best_ns, n_rays, hits / n_reps);
+
+        // The same rays, permuted.
+        {
+            var hits: usize = 0;
+            var best_ns: i64 = std.math.maxInt(i64);
+            for (0..n_reps) |_| {
+                const t0 = nowNs();
+                for (order) |ix| {
+                    const q = query.RayQuery{ .origin = swept_origins[ix], .direction = swept_dirs[ix], .max_distance = 200 };
+                    if (try query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                        hits += 1;
+                        checksum += @floatCast(hit.distance);
+                    }
+                }
+                const dt = nowNs() - t0;
+                if (dt < best_ns) best_ns = dt;
+            }
+            measures[5] = report("closest (swept, permuted)", best_ns, n_rays, hits / n_reps);
+        }
     }
 
     const frame_ns: f64 = @as(f64, std.time.ns_per_s) / 60.0;
