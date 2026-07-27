@@ -92,24 +92,10 @@ const unit_dir_k: comptime_int = 16;
 /// proximity into a contact.
 const noise_k: comptime_int = 2;
 
-/// One cast hit, in A's frame.
-pub fn CastHit(comptime T: type) type {
-    return struct {
-        /// Distance along the (unit) cast direction at first touch, in
-        /// `[0, max_distance]`. Zero when the shapes already overlap at the start
-        /// pose.
-        distance: T,
-        /// Witness point on B — the HIT body — on its INFLATED surface, A's frame.
-        /// Reconstructed from the terminal simplex's barycentric weights over B's
-        /// support points plus the `r_b` offset along the outward normal; no EPA is
-        /// involved. Beyond a zero distance this is also the witness on the moved A,
-        /// the two coinciding exactly (see `terminal`).
-        point: math.Vec(3, T),
-        /// Outward unit normal of the HIT body at the witness, A's frame. Satisfies
-        /// `normal · direction <= 0` on every hit.
-        normal: math.Vec(3, T),
-    };
-}
+/// One cast hit, in A's frame. Defined in `support.zig` since M1.1.11, for the reason
+/// `LocalHit` is: `plane.zig` produces the same type from a closed form and
+/// `BodyManager.castShapeBody` dispatches between the two by the hit body's class.
+const CastHit = support.CastHit;
 
 /// How the march terminated — one variant per row of §1.11.11's termination table.
 /// Mirrors `epa.zig`'s `EpaDiagnostics.Exit`.

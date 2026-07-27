@@ -45,17 +45,11 @@ const std = @import("std");
 const math = @import("foundation").math;
 const support = @import("support.zig");
 
-/// A ray hit on one shape, in that shape's local frame.
-pub fn LocalHit(comptime T: type) type {
-    return struct {
-        /// Distance along the (unit) direction, `>= 0`. Zero when the origin is
-        /// inside the solid shape.
-        distance: T,
-        /// Outward unit surface normal at the hit point, local frame. At distance
-        /// zero it is `−direction` (§1.11.4).
-        normal: math.Vec(3, T),
-    };
-}
+/// A ray hit on one shape, in that shape's local frame. Defined in `support.zig`
+/// since M1.1.11: `plane.zig` produces the same type for the half-space, and the
+/// `BodyId`-level adapter that dispatches between the two by shape class returns one
+/// type rather than two identical ones.
+const LocalHit = support.LocalHit;
 
 /// Slack allowed on the unit-direction domain assert, in ULPs of 1. The caller
 /// normalises, then a quaternion inverse-rotation into the local frame costs a
@@ -101,9 +95,17 @@ pub fn rayShape(
 
     // The shape precondition comes FIRST, before anything looks at the origin: a
     // rounded box is unsupported as a SHAPE, and that answer cannot depend on
-    // where the ray starts. Placed after the membership test below, an origin
-    // inside the core would have returned a distance-zero hit and never reached
-    // the check — the exact silent miss this file promises not to allow.
+    // where the ray starts. When this was a typed error placed AFTER the membership
+    // test below, an origin inside the core returned a distance-zero hit and never
+    // reached the check — the exact silent miss this file promises not to allow.
+    //
+    // The placement is now REDUNDANTLY protected, and the redundancy is the point:
+    // `containsPoint`'s box arm carries its own unconditional `assert(r == 0)`, taken
+    // for ANY point, so moving this line below the membership test would not
+    // reintroduce a silent miss — it would panic one frame deeper, at every origin.
+    // That is a structural guarantee rather than a sampled one. It is also why
+    // `containsPoint`'s assert must not be deleted as redundant: it is what makes
+    // THIS line's position unable to fail silently.
     std.debug.assert(raySupportsShape(T, shape));
 
     // Solid convex: inside — boundary included — is a hit at distance zero, and
@@ -142,7 +144,14 @@ pub fn containsPoint(comptime T: type, shape: support.SupportShape(T), p: math.V
     switch (shape.core) {
         .point => return p.lengthSq() <= r * r,
         .box => |half_extents| {
-            // rounded box: rejected by `rayShape`, unsupported here
+            // A rounded box is outside this shape set: the test below measures the
+            // CORE, so it would under-report the inflated volume by the radius.
+            //
+            // **DO NOT DELETE THIS AS REDUNDANT.** It is unconditional and taken for
+            // ANY point, which is precisely what makes `rayShape`'s precondition
+            // unable to fail silently if a future edit moves it below the membership
+            // test: the failure would land here, at every origin, instead of becoming
+            // a distance-zero hit. The two asserts are one mechanism.
             std.debug.assert(r == 0);
             const a = p.abs();
             return @reduce(.And, a.data <= half_extents.data);

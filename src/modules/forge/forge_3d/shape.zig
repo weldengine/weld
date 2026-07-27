@@ -223,6 +223,19 @@ fn descriptorNormalIsUnit(normal: ApiVec3) bool {
     return @abs(norm_sq - 1) <= descriptor_normal_unit_k * std.math.floatEps(f32);
 }
 
+/// Convert an immutable `Shape` to the narrowphase `HalfSpace` at solver precision,
+/// in the shape's LOCAL frame — the sibling of `supportShape`, one per category.
+///
+/// **This is the HALF-SPACE ARM, and its precondition is asserted**, symmetric with
+/// `supportShape`'s: the category is chosen upstream by `Shape.class()` and calling
+/// this with a convex is a programming error. The normal needs no normalisation here
+/// — `createShape` established that invariant once, which is the whole reason it is
+/// established there (`engine-physics-forge.md` §1.11.15).
+pub fn halfSpace(shape: Shape) narrowphase.plane.HalfSpace(Real) {
+    std.debug.assert(shape.class() == .half_space);
+    return .{ .normal = shape.normal, .distance = shape.distance };
+}
+
 /// Build the `Shape` for a descriptor (sphere/box/capsule/plane), computing its
 /// local AABB and unit-mass inertia for the bounded convexes. Other shapes →
 /// `error.UnsupportedShape`.

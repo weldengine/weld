@@ -520,7 +520,16 @@ pub const BodyManager = struct {
         const inv_rot = self.bodies.items(.rotation)[idx].conjugate();
         const local_origin = inv_rot.rotateVec3(ray.origin.sub(self.bodies.items(.position)[idx]));
         const local_direction = inv_rot.rotateVec3(ray.direction);
-        return narrowphase.rayShape(Real, shape_mod.supportShape(shape), local_origin, local_direction);
+        // Dispatch by CATEGORY, above the support map and never inside it (§1.11.15).
+        // Exhaustive with no `else`: the mesh (M1.1.11.1) is a compile error here.
+        // The half-space arm needs no transport of its own — the plane is stored in
+        // this body's local frame, which is the frame the ray has just been brought
+        // into, and both kernels return the SAME `LocalHit` so this adapter has one
+        // return type rather than a union of two.
+        return switch (shape.class()) {
+            .convex => narrowphase.rayShape(Real, shape_mod.supportShape(shape), local_origin, local_direction),
+            .half_space => narrowphase.plane.rayShape(Real, shape_mod.halfSpace(shape), local_origin, local_direction),
+        };
     }
 
     /// Run distance-based GJK on the pair `a`/`b`, resolving each body's world
@@ -586,14 +595,32 @@ pub const BodyManager = struct {
             self.bodies.items(.rotation)[idx],
         );
         const local_dir = cast_rotation.conjugate().rotateVec3(direction);
-        const hit = narrowphase.castShape(
-            Real,
-            cast_shape,
-            relpose,
-            shape_mod.supportShape(shape),
-            local_dir,
-            max_distance,
-        ) orelse return null;
+        // The CAST shape is always a bounded convex — the query entry refuses an
+        // unbounded probe with a typed error (§1.11.7) — so only the HIT body's
+        // category is dispatched on. Exhaustive, no `else`.
+        //
+        // The half-space arm transports the plane INTO A's frame rather than
+        // transporting A: the sweep is a pure translation of A, so A's support in the
+        // fixed direction `−n` is a constant of the whole sweep, and one support call
+        // answers it in closed form. `RelativePose` already carries B-relative-to-A,
+        // which is exactly the pose the transport needs.
+        const hit = switch (shape.class()) {
+            .convex => narrowphase.castShape(
+                Real,
+                cast_shape,
+                relpose,
+                shape_mod.supportShape(shape),
+                local_dir,
+                max_distance,
+            ),
+            .half_space => narrowphase.plane.castShape(
+                Real,
+                shape_mod.halfSpace(shape).transformed(relpose.rot_rel, relpose.pos_rel),
+                cast_shape,
+                local_dir,
+                max_distance,
+            ),
+        } orelse return null;
         return .{
             // A distance is invariant under a rigid transform, so it needs no mapping.
             .distance = hit.distance,
@@ -620,16 +647,36 @@ pub const BodyManager = struct {
     ) ?bool {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
-        const result = narrowphase.gjk(
-            Real,
-            query_shape,
-            query_position,
-            query_rotation,
-            shape_mod.supportShape(shape),
-            self.bodies.items(.position)[idx],
-            self.bodies.items(.rotation)[idx],
-        );
-        return result.status != .separated;
+        switch (shape.class()) {
+            .convex => {
+                const result = narrowphase.gjk(
+                    Real,
+                    query_shape,
+                    query_position,
+                    query_rotation,
+                    shape_mod.supportShape(shape),
+                    self.bodies.items(.position)[idx],
+                    self.bodies.items(.rotation)[idx],
+                );
+                return result.status != .separated;
+            },
+            // The half-space is A and the probe is B, which is the orientation
+            // §1.11.15's separation formula is written in — `sep = n · supportCore_B(−n)
+            // − r_b − d`, one support call. The SIGN of that separation is the whole
+            // classification, exactly: no GJK margin enters, and none should, since
+            // there is no accumulated rounding here to absorb.
+            .half_space => return narrowphase.plane.separation(
+                Real,
+                shape_mod.halfSpace(shape),
+                narrowphase.RelativePose(Real).init(
+                    self.bodies.items(.position)[idx],
+                    self.bodies.items(.rotation)[idx],
+                    query_position,
+                    query_rotation,
+                ),
+                query_shape,
+            ) <= 0,
+        }
     }
 
     /// Whether the world-space `point` lies inside body `id`, boundary INCLUDED —
@@ -648,7 +695,10 @@ pub const BodyManager = struct {
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
         const local = self.bodies.items(.rotation)[idx].conjugate()
             .rotateVec3(point.sub(self.bodies.items(.position)[idx]));
-        return narrowphase.containsPoint(Real, shape_mod.supportShape(shape), local);
+        return switch (shape.class()) {
+            .convex => narrowphase.containsPoint(Real, shape_mod.supportShape(shape), local),
+            .half_space => narrowphase.plane.containsPoint(Real, shape_mod.halfSpace(shape), local),
+        };
     }
 
     /// Closest point on body `id`'s SURFACE to the world-space `point`, with the
@@ -687,6 +737,26 @@ pub const BodyManager = struct {
     ) ?BodyClosestPoint {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
+
+        // The half-space answers in closed form, and it answers BOTH regimes at once:
+        // `closestPoint` carries the solidity convention itself, returning distance 0
+        // and the queried point for an interior point rather than projecting it onto
+        // the boundary. The point is transported into the body's local frame the way
+        // `containsPointBody` transports one, and only the POSITION needs mapping back
+        // — a distance is invariant under a rigid transform.
+        if (shape.class() == .half_space) {
+            const projection = narrowphase.plane.closestPoint(
+                Real,
+                shape_mod.halfSpace(shape),
+                self.bodies.items(.rotation)[idx].conjugate()
+                    .rotateVec3(point.sub(self.bodies.items(.position)[idx])),
+            );
+            return .{
+                .distance = projection.distance,
+                .position = self.bodies.items(.rotation)[idx].rotateVec3(projection.position)
+                    .add(self.bodies.items(.position)[idx]),
+            };
+        }
         const shape_b = shape_mod.supportShape(shape);
 
         // Inside the solid — boundary included — is distance 0 at the point itself.

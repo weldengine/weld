@@ -1169,6 +1169,19 @@ test "shapeCast separates a stale handle, an inadmissible probe and a miss" {
     })).?;
     try testing.expectApproxEqAbs(@as(Real, 8.5), hit.distance, tol);
 
+    // PRECEDENCE, pinned: an inadmissible probe OUTRANKS a degenerate direction. Both
+    // conditions hold at once here — a plane handle AND a zero direction — and the
+    // answer is `error.UnsupportedShape`, never `null`. Until this assertion the order
+    // was correct in the code and argued in a comment, with nothing holding it: swapping
+    // the two lines would have turned a malformed probe into an ordinary empty answer
+    // and no test would have noticed.
+    try testing.expectError(error.UnsupportedShape, query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
+        .shape = plane,
+        .origin = Vec3r.zero,
+        .direction = Vec3r.zero,
+        .max_distance = 100,
+    }));
+
     // A ZERO DIRECTION stays a MISS, not an error (§1.11.11 domain table): the query
     // is degenerate, its answer is empty, and the probe is perfectly well formed. The
     // distinction matters — folding it into the error channel would make a legal

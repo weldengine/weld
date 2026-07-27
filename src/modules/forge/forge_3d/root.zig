@@ -154,6 +154,19 @@ pub fn collideOrderedGeneric(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, 
 /// The `(normal, closest points, base penetration)` fast-path seed at solver precision.
 pub const ContactSeed = narrowphase.ContactSeed(Real);
 
+// --- Half-space kernels (M1.1.11) ---
+
+/// A solid half-space `{ x : n·x <= d }` at solver precision — the geometry a `.plane`
+/// shape carries, and the input to every kernel of the `plane` namespace below.
+pub const HalfSpace = narrowphase.plane.HalfSpace(Real);
+
+/// The analytic half-space kernels (`engine-physics-forge.md` §1.11.15): separation
+/// against a bounded convex, ray, shape cast, solid membership, closest point, and the
+/// AABB corner predicate. Closed-form and iteration-free — a half-space has no support
+/// map, so it traverses neither GJK, EPA nor the cast march. Scalar-generic, so
+/// re-exported as a namespace; `BodyManager`'s five adapters bind it at `Real`.
+pub const plane = narrowphase.plane;
+
 // --- Ray kernels + queries ---
 
 /// A ray hit on one shape in that shape's LOCAL frame (distance + outward

@@ -76,6 +76,39 @@ pub fn Aabb(comptime T: type) type {
                 @reduce(.And, other.min.data <= self.max.data);
         }
 
+        /// Whether this box intersects the CLOSED half-space `{ x : normal·x <= distance }`.
+        ///
+        /// Exact, eight branches, no infinity and no constant. The minimum of `normal·x`
+        /// over a box separates per axis — `min_i(n_i·x_i)` is `n_i·min_i` when `n_i >= 0`
+        /// and `n_i·max_i` otherwise — so that minimum is attained at ONE corner, the
+        /// lowest one along `normal`, read component by component. The box meets the
+        /// half-space exactly when that corner does, which is what this computes; the
+        /// inline test below checks it against an enumeration of all eight corners, for
+        /// all eight sign patterns of the normal.
+        ///
+        /// CLOSED half-space: a corner exactly on the boundary plane counts, matching the
+        /// face-inclusive convention of `overlaps` and `contains`. The `>= 0` selection
+        /// is a fixed tie-break for a zero component, which contributes nothing to the
+        /// dot product either way.
+        ///
+        /// `normal` is expected unit — the caller's invariant, not this function's
+        /// concern: the predicate is scale-invariant in `normal` only if `distance`
+        /// scales with it, so the two travel together and the physics side normalises at
+        /// shape creation.
+        ///
+        /// **Why it lives here.** An unbounded shape has no AABB to compare, so its
+        /// broadphase role is this PREDICATE rather than a box (`engine-physics-forge.md`
+        /// §1.11.15), and two callers need it: the broadphase, which imports only
+        /// `foundation`, and the narrowphase's half-space kernels. Same first-consumer
+        /// placement as `surfaceArea`, `rayInterval` and `inflate` — pure box geometry,
+        /// no threshold, no physical semantics — and the alternative was the same eight
+        /// branches written twice in two files that would drift.
+        pub fn overlapsHalfSpace(self: Self, normal: Vec3T, distance: T) bool {
+            const zeros: @Vector(3, T) = @splat(0);
+            const lowest = @select(T, normal.data >= zeros, self.min.data, self.max.data);
+            return @reduce(.Add, normal.data * lowest) <= distance;
+        }
+
         /// Geometric center.
         pub fn center(self: Self) Vec3T {
             return self.min.add(self.max).scale(0.5);
@@ -300,6 +333,100 @@ test "inflate is the Minkowski sum: overlap equals containment of the centre" {
     // the equality above while proving nothing.
     try testing.expect(overlaps > 0);
     try testing.expect(disjoint > 0);
+}
+
+/// The minimum of `normal·x` over the box's eight corners, by ENUMERATION — the oracle
+/// `overlapsHalfSpace`'s per-axis closed form is checked against.
+fn minDotOverCorners(comptime T: type, box: Aabb(T), normal: vec.Vec(3, T)) T {
+    const lo = box.min.toArray();
+    const hi = box.max.toArray();
+    const n = normal.toArray();
+    var best: ?T = null;
+    for ([_]usize{ 0, 1 }) |i| {
+        for ([_]usize{ 0, 1 }) |j| {
+            for ([_]usize{ 0, 1 }) |k| {
+                const x = if (i == 0) lo[0] else hi[0];
+                const y = if (j == 0) lo[1] else hi[1];
+                const z = if (k == 0) lo[2] else hi[2];
+                const dot = n[0] * x + n[1] * y + n[2] * z;
+                best = if (best) |b| @min(b, dot) else dot;
+            }
+        }
+    }
+    return best.?;
+}
+
+test "overlapsHalfSpace agrees with a corner enumeration on all eight sign patterns" {
+    // The per-axis corner selection has EIGHT branches, one per sign pattern of the
+    // normal, and a test written on the pattern the author happened to pick exercises
+    // one. So: all eight, each against the enumerated minimum over the eight corners,
+    // on a box that is neither centred nor cubic — a symmetric box would let a wrong
+    // corner give the right answer.
+    const box = Aabbf.fromMinMax(Vec3.fromArray(.{ 1, 2, 3 }), Vec3.fromArray(.{ 4, 8, 5 }));
+    const inv_root3: f32 = 1.0 / @sqrt(@as(f32, 3));
+
+    var accepted: u32 = 0;
+    var rejected: u32 = 0;
+    for ([_]f32{ 1, -1 }) |sx| {
+        for ([_]f32{ 1, -1 }) |sy| {
+            for ([_]f32{ 1, -1 }) |sz| {
+                const n = Vec3.fromArray(.{ sx * inv_root3, sy * inv_root3, sz * inv_root3 });
+                const lowest = minDotOverCorners(f32, box, n);
+                // Sweep `distance` across the whole projected extent of the box, so each
+                // pattern sees the predicate answer true AND false, and sees the exact
+                // boundary case `distance == lowest` — which must be a HIT, the
+                // half-space being closed.
+                try testing.expect(box.overlapsHalfSpace(n, lowest)); // exactly on it
+                try testing.expect(box.overlapsHalfSpace(n, lowest + 1)); // beyond
+                try testing.expect(!box.overlapsHalfSpace(n, lowest - 1)); // short of it
+                accepted += 2;
+                rejected += 1;
+                // And agreement with the oracle over a fine sweep of offsets.
+                var step: i32 = -12;
+                while (step <= 12) : (step += 1) {
+                    const d = lowest + @as(f32, @floatFromInt(step)) * 0.5;
+                    try testing.expectEqual(lowest <= d, box.overlapsHalfSpace(n, d));
+                }
+            }
+        }
+    }
+    // Both verdicts really occurred for every pattern — 8 patterns × (2 hits, 1 miss).
+    try testing.expectEqual(@as(u32, 16), accepted);
+    try testing.expectEqual(@as(u32, 8), rejected);
+
+    // Axis-aligned normals, where a component is EXACTLY zero and the `>= 0` tie-break
+    // decides which face is read. A zero component contributes nothing to the dot
+    // product, so either corner is correct — asserted against the same oracle rather
+    // than trusted.
+    for ([_]Vec3{
+        Vec3.unit_x,                  Vec3.unit_y,                   Vec3.unit_z,
+        Vec3.unit_x.neg(),            Vec3.unit_y.neg(),             Vec3.unit_z.neg(),
+        Vec3.fromArray(.{ 0, 1, 0 }), Vec3.fromArray(.{ 0, 0, -1 }),
+    }) |n| {
+        const lowest = minDotOverCorners(f32, box, n);
+        try testing.expect(box.overlapsHalfSpace(n, lowest));
+        try testing.expect(!box.overlapsHalfSpace(n, lowest - 0.5));
+    }
+
+    // A DEGENERATE box (a point) is a legal region and answers by its single corner.
+    const point = Aabbf.fromMinMax(Vec3.fromArray(.{ 1, 1, 1 }), Vec3.fromArray(.{ 1, 1, 1 }));
+    try testing.expect(point.overlapsHalfSpace(Vec3.unit_y, 1)); // exactly on the plane
+    try testing.expect(!point.overlapsHalfSpace(Vec3.unit_y, 0.5));
+}
+
+test "overlapsHalfSpace at f64 matches the f32 closed form" {
+    const A = Aabb(f64);
+    const V = vec.Vec(3, f64);
+    // Unit box [0,1]³ against `{ y <= d }`: the lowest corner along +Y is y = 0, so the
+    // box meets the half-space for every `d >= 0` and no negative one.
+    const box = A.fromMinMax(V.zero, V.one);
+    try testing.expect(box.overlapsHalfSpace(V.unit_y, 0));
+    try testing.expect(box.overlapsHalfSpace(V.unit_y, 1e-300));
+    try testing.expect(!box.overlapsHalfSpace(V.unit_y, -1e-300));
+    // Along −Y the lowest corner is y = 1, giving `−1 <= d`.
+    try testing.expect(box.overlapsHalfSpace(V.unit_y.neg(), -1));
+    try testing.expect(!box.overlapsHalfSpace(V.unit_y.neg(), -1.0000000000000002));
+    try testing.expectEqual(@as(f64, -1), minDotOverCorners(f64, box, V.unit_y.neg()));
 }
 
 test "generic Aabb f64 instantiation compiles" {
