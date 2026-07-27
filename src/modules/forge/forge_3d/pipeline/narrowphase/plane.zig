@@ -25,16 +25,32 @@
 //! the division is reached. The only named tolerances are the unit-domain asserts,
 //! compared against 1, which are float noise and not geometry.
 //!
-//! **Conditioning.** The contact normal is the STORED `n`, returned verbatim: its
-//! norm is exactly that of a value normalised once at shape creation, at any
-//! distance from the world origin, with no arithmetic in between. So unlike the
-//! ray kernels of §1.11.4 bis — where the normal is reconstructed and only its
-//! length is invariant — here BOTH the length and the orientation are exact. What
-//! carries the far-field residue instead is the scalar `signedDistance`, which is
-//! `n·p − d`, a difference of two quantities that both grow with distance from the
-//! origin; its absolute error therefore grows like `floatEps(T)·|p|`. That is the
-//! same structural worldspace limit `-Dphysics_f64` answers, characterised and not
-//! hidden.
+//! **A true-zero guard is exact IN THE FRAME IT IS EVALUATED IN, AND THAT DOES NOT
+//! COMPOSE** (§1.11.15). The kernels below work in a local frame, and a rigid
+//! transform does not preserve EXACT orthogonality: a ray parallel to the boundary in
+//! WORLD, transported into the body's frame by a quaternion built in floating point,
+//! arrives with a dot product about one ULP from zero rather than at zero. The guard
+//! therefore does not fire, and the kernel reports — correctly — a crossing at
+//! `sep / |n·dir|`, of the order of `sep / floatEps(T)`; measured for `sep = 10 m` at
+//! 8.3886120e7 m in f32 and 4.5035996e16 m in f64.
+//!
+//! That is not a kernel defect and **it is not fixed with an epsilon.** The kernel has
+//! no range of its own, and inventing one would make the answer depend on a constant —
+//! the refusal §1.11.12 already states for the broadphase margin. What rejects such a
+//! ray is the query entry's FINITE `max_distance`, which §1.11.4 requires to be finite
+//! anyway.
+//!
+//! **A half-space's conditioning does NOT decompose the way §1.11.4 bis does**
+//! (§1.11.15). There the normal is reconstructed and only its length is invariant with
+//! distance. Here the contact normal is the STORED `n` returned VERBATIM, with no
+//! intermediate arithmetic at all: length AND orientation are exact at any range, and
+//! they are asserted as BIT EQUALITY rather than through a bound. The far-field residue
+//! therefore moves entirely into the scalar `signedDistance = n·p − d`, a difference of
+//! two quantities that both grow with distance from the origin, whose absolute error
+//! grows like `floatEps(T)·|p|`. That is the same structural worldspace limit
+//! `-Dphysics_f64` answers, characterised and not hidden — so an acceptance suite on
+//! this shape asserts the normal TIGHT AND EVERYWHERE, and reserves the scale-relative
+//! bound for the scalar alone.
 //!
 //! **Dependency discipline.** Imports `foundation` (math) and the sibling
 //! `support.zig` ONLY — never `gjk.zig`, `epa.zig`, `manifold.zig`, `raycast.zig`,
@@ -175,6 +191,12 @@ pub fn containsPoint(comptime T: type, plane: HalfSpace(T), p: math.Vec(3, T)) b
 /// (`> 0`) and the PARALLEL one (`== 0`). No epsilon, and no separate branch for the
 /// parallel case — which is why a ray parallel to the boundary from outside misses
 /// while one parallel from inside was already answered above.
+///
+/// Exact IN THIS FRAME, and that does not compose: a ray parallel in WORLD arrives here
+/// through a rigid transform about one ULP off orthogonal, so the guard does not fire
+/// and the answer is a crossing at `sep / |n·dir|` (§1.11.15, and the file header). The
+/// caller's finite `max_distance` is what rejects it; this kernel has no range of its
+/// own and must not invent one.
 ///
 /// The returned normal is the boundary's outward normal, `plane.normal` verbatim: no
 /// arithmetic, hence unit at any distance and with an exact orientation, which is

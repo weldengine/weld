@@ -93,7 +93,12 @@ const Scene = struct {
 /// A 22 × 22 × 21 grid (10 164 cells, truncated to `n_bodies`) of alternating
 /// spheres / boxes / capsules, spaced 3 m apart — all STATIC, which is the scene a
 /// query cares about: the broadphase tree is built once and never moved.
-fn buildScene(gpa: std.mem.Allocator) !Scene {
+/// Build the bench scene. With `with_plane`, one static half-space `{ y <= 0 }` joins the
+/// SAME scene — the M1.1.11 delta measurement. The grid starts at y = 0, so the plane is
+/// genuinely in contact with its lowest layer; and an unbounded list has no box to prune
+/// on, which is precisely why it is not in a tree, so EVERY ray is offered to it and the
+/// exact kernel runs on every one. That is the worst case, and the honest one to report.
+fn buildScene(gpa: std.mem.Allocator, with_plane: bool) !Scene {
     var scene = Scene{ .bp = Broadphase.init(.{}) };
     const sphere = try scene.store.createShape(gpa, .{ .sphere = .{ .radius = 0.6 } });
     const box = try scene.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
@@ -128,7 +133,61 @@ fn buildScene(gpa: std.mem.Allocator) !Scene {
             }
         }
     }
+    if (with_plane) {
+        const plane = try scene.store.createShape(gpa, .{ .plane = .{ .normal = av3(0, 1, 0), .distance = 0 } });
+        const id = try scene.bm.addBody(gpa, &scene.store, .{
+            .shape = plane,
+            .body_type = .static,
+            .entity = .{ .index = n_bodies, .generation = 0 },
+        });
+        // The body is at the DEFAULT pose — identity rotation, origin position — so the
+        // world half-space IS the local one and no transport is needed. Stated rather than
+        // silently relied on: a posed plane needs
+        // `shape.halfSpace(...).transformed(rotation, position)`, which is what the test
+        // harness does.
+        _ = try scene.bp.insertUnbounded(gpa, .static, .{ .normal = Vec3r.unit_y, .distance = 0 }, id);
+    }
     return scene;
+}
+
+/// One ray SELECTION MODE, timed on one scene — the M1.1.11 delta harness.
+///
+/// One function rather than three copied loops, and both scenes measured through it in the
+/// same process, back to back: a delta between two separate runs would carry the machine's
+/// thermal drift and a differently compiled code path, which is not the quantity asked
+/// for. The only difference between the two scenes is the unbounded list.
+const RayMode = enum { closest, any, all };
+
+fn timeMode(
+    mode: RayMode,
+    scene: *Scene,
+    origins: []const Vec3r,
+    directions: []const Vec3r,
+    checksum: *f64,
+) i64 {
+    var buf: [32]query.RayHit = undefined;
+    var best_ns: i64 = std.math.maxInt(i64);
+    for (0..n_reps) |_| {
+        const t0 = nowNs();
+        for (origins, directions) |o, d| {
+            const q = query.RayQuery{ .origin = o, .direction = d, .max_distance = 200 };
+            switch (mode) {
+                .closest => if (query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                    checksum.* += @floatCast(hit.distance);
+                },
+                .any => if (query.raycastAny(&scene.bp, &scene.bm, &scene.store, q)) {
+                    checksum.* += 1;
+                },
+                .all => {
+                    const n = query.raycastAll(&scene.bp, &scene.bm, &scene.store, q, &buf);
+                    if (n > 0) checksum.* += @floatCast(buf[0].distance);
+                },
+            }
+        }
+        const dt = nowNs() - t0;
+        if (dt < best_ns) best_ns = dt;
+    }
+    return best_ns;
 }
 
 const Measure = struct {
@@ -173,7 +232,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("warning: build mode is {s}; absolute ns are only meaningful in ReleaseFast\n", .{@tagName(builtin.mode)});
     }
 
-    var scene = try buildScene(gpa);
+    var scene = try buildScene(gpa, false);
     defer scene.deinit(gpa);
     std.debug.assert(scene.bm.count() == n_bodies);
 
@@ -367,6 +426,28 @@ pub fn main(init: std.process.Init) !void {
                 if (dt < best_ns) best_ns = dt;
             }
             measures[5] = report("closest (swept, permuted)", best_ns, n_rays, hits / n_reps);
+        }
+    }
+
+    // --- M1.1.11: the cost of one half-space in the scene, REPORTED, never gated ---
+    //
+    // The same 10 000 rays, the same code, the same process — once against the grid alone
+    // and once against the grid plus one static half-space in the layer's unbounded list.
+    // No envelope is pre-registered: it is a measurement, and what it measures is that an
+    // unbounded list has no box to prune on, so the exact kernel runs on EVERY ray.
+    {
+        var scene_plane = try buildScene(gpa, true);
+        defer scene_plane.deinit(gpa);
+        std.debug.assert(scene_plane.bm.count() == n_bodies + 1);
+        std.debug.print("\n  half-space delta (10k rays, same process, best of {d}):\n", .{n_reps});
+        for ([_]RayMode{ .closest, .any, .all }) |mode| {
+            const without = timeMode(mode, &scene, origins, directions, &checksum);
+            const with = timeMode(mode, &scene_plane, origins, directions, &checksum);
+            const ns_without = @as(f64, @floatFromInt(without)) / @as(f64, n_rays);
+            const ns_with = @as(f64, @floatFromInt(with)) / @as(f64, n_rays);
+            std.debug.print("    {s: <18} {d: >9.1} ns -> {d: >9.1} ns   delta {d: >8.1} ns  ({d: >5.2}x)\n", .{
+                @tagName(mode), ns_without, ns_with, ns_with - ns_without, ns_with / ns_without,
+            });
         }
     }
 

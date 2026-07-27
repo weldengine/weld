@@ -266,16 +266,27 @@ pub const OverlapQuery = struct {
     filter: PhysicsQueryFilter = .{},
 };
 
-/// One ray hit. `subshape_id` identifies the sub-shape hit and is 0 while one
-/// shape is one body; the service derives `physics_material` from it, because the
-/// solver result carries the sub-shape identity and never the material itself
-/// (§1.11.7 — the same construction as the reference's `CastResult.h`).
+/// One ray hit.
+///
+/// `subshape_id` is an OPAQUE PATH decoded by the ROOT shape, never a global index: its
+/// width is a property of the SHAPE and not of the value, and a shape with no sub-shape
+/// consumes ZERO BITS, so the `0` default is not read at all (§1.11.16). Sphere, box,
+/// capsule and plane all carry zero sub-shapes. That is NOT the same statement as the
+/// M1.1.9/M1.1.10 wording it replaces ("0 while one shape is one body"), and the
+/// difference is what makes the encoding forward-compatible: wrapping a shape in a
+/// compound shifts its index up and inserts the child's below, extending the encoding
+/// without reinterpreting any value already written.
+///
+/// The service derives `physics_material` from it, because the solver result carries the
+/// sub-shape identity and never the material itself (§1.11.7 — the same construction as
+/// the reference's `CastResult.h`).
 pub const RaycastHit = struct {
     /// Entity owning the body hit.
     entity: EntityId,
     /// The body hit.
     body: BodyId,
-    /// Sub-shape hit; 0 while one shape is one body.
+    /// Sub-shape hit — an opaque path, zero bits wide for a shape with no sub-shape,
+    /// so the `0` is not read (§1.11.16; the type doc above carries the reasoning).
     subshape_id: u32 = 0,
     /// World-space hit point.
     position: Vec3,
@@ -411,8 +422,10 @@ test "the frozen query family mirrors engine-tier-interfaces.md §1" {
     const overlap = OverlapQuery{ .shape = 0, .position = Vec3.zero };
     try testing.expect(overlap.rotation.approxEql(Quatf.identity, 0));
 
-    // `subshape_id` defaults to 0 — one shape is one body today, and it is by this
-    // field that the service derives the material, never from the solver result.
+    // `subshape_id` defaults to 0, and §1.11.16 is why that default is safe rather than
+    // provisional: it is an opaque PATH whose width the shape declares, and a shape with
+    // no sub-shape consumes zero bits, so the value is not read. It is by this field that
+    // the service derives the material, never from the solver result.
     const hit = RaycastHit{
         .entity = .{ .index = 0, .generation = 0 },
         .body = 0,

@@ -539,12 +539,13 @@ test "shape cast against a half-space" {
 }
 
 test "an oblique far-field configuration keeps a unit normal" {
-    // The §1.11.4 bis obligation, and for a half-space it splits differently than for
-    // the ray kernels. There, the normal is RECONSTRUCTED, so only its length is a
-    // structural invariant and its orientation carries the far-field residue. Here the
-    // normal is the STORED `n`, returned with no arithmetic at all — so BOTH its length
-    // and its orientation are exact at any distance, and the assertion is bit-equality
-    // rather than a tolerance.
+    // The §1.11.4 bis obligation, and §1.11.15 states how it decomposes DIFFERENTLY for
+    // a half-space. There the normal is RECONSTRUCTED, so only its length is invariant
+    // with distance. Here it is the STORED `n` returned VERBATIM, with no intermediate
+    // arithmetic at all — so length AND orientation are exact at any range, and the
+    // assertion is BIT EQUALITY rather than a bound. Which is why this suite asserts the
+    // normal tight and everywhere, and reserves the scale-relative bound for the scalar
+    // alone.
     //
     // What carries the residue instead is the SCALAR `signedDistance = n·p − d`, a
     // difference of two quantities that both grow with `|p|`. Its absolute error grows
@@ -676,15 +677,18 @@ test "raycastBody hits the world half-space and its normal rotates back to n_wor
     // Away from the solid: `+X` reversed recedes, so no hit.
     const receding = broadphase_mod.Ray(Real).init(vr(0, 1, 2), Vec3r.unit_x.neg());
     try testing.expect(scene.bm.raycastBody(&scene.store, scene.body, receding) == null);
-    // PARALLEL to the boundary, from outside — and here the composition says something
-    // the kernel alone does not, so it is asserted rather than assumed.
+    // PARALLEL to the boundary, from outside — and §1.11.15 is explicit about what this
+    // composition does: **a true-zero guard is exact in the frame it is evaluated in, and
+    // that does not compose.** A rigid transform does not preserve EXACT orthogonality:
+    // this ray is parallel in WORLD, but `raycastBody` transports it into the body's
+    // local frame through a quaternion built in floating point, and the transported dot
+    // product arrives about one ULP from zero rather than at zero. The guard does not
+    // fire, and the kernel reports — correctly — a crossing at `sep / |n·dir|`.
     //
-    // The guard on `n·dir` is at TRUE ZERO, which is exact IN THE FRAME IT IS EVALUATED
-    // IN. A rigid transform does not preserve exact orthogonality: this ray is parallel
-    // in WORLD, but `raycastBody` transports it into the body's local frame through a
-    // quaternion built from `f32`/`f64` trigonometry, and the transported dot product
-    // comes out at one ULP of the scalar instead of zero. So the kernel correctly
-    // reports a crossing, at `sep / |n·dir|`.
+    // The corollary §1.11.15 draws is the one this test obeys: **a test that expects
+    // `null` from a ray parallel in WORLD is testing a property the model does not
+    // promise.** The exactly-parallel case, where the guard does fire, is exercised at
+    // KERNEL grain in local coordinates, in the raycast test above.
     //
     // MEASURED, in the build, at both precisions — and the two quantities are separated
     // because only one of them is exact:
@@ -1341,4 +1345,86 @@ test "a full tick cycle runs with a plane body, and a falling box comes to rest 
     // Nothing became NaN on the way — the poison of E2 never entered an arithmetic path.
     for (world.bm.position(box).?.toArray()) |v| try testing.expect(!std.math.isNan(v));
     for (world.bm.linearVelocity(box).?.toArray()) |v| try testing.expect(!std.math.isNan(v));
+}
+
+// ---------------------------------------------------------------------------
+// E7 / I1 — the bit-agreement between the overlap predicate and the generator
+// ---------------------------------------------------------------------------
+
+test "overlapShapeBody and collidePlane agree to the bit on whether a pair touches" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const ground = try addPlaneBody(gpa, &world, av3(0, 1, 0), 0, 0);
+
+    // E6 CLAIMED this agreement as a consequence of NOT copying the generic generator's
+    // `keep_eps`: the query predicate is `separation(...) <= 0` and the generator's
+    // per-vertex criterion is `sep <= 0`, both exact, so they cannot disagree. A claim
+    // of agreement that is never exercised is a plea, so here it is exercised — on
+    // configurations that BRACKET the contact, which is the only place a disagreement
+    // could hide.
+    //
+    // For each shape the offsets place its lowest surface point above the boundary,
+    // EXACTLY on it, and one ULP below. `nextAfter` walks the actual representable
+    // neighbour rather than subtracting a made-up small number, so "one ulp" is one ulp.
+    // `rest_y` is `f32`, not `Real`: it is a DESCRIPTOR height, and the whole point is to
+    // step to f32's own representable neighbours — the precision the body's position is
+    // actually stored in (§1.11.8), whatever the solver scalar.
+    const Case = struct { name: []const u8, shape: api.ShapeDescriptor, rest_y: f32 };
+    const cases = [_]Case{
+        // A box of half-extent 1/2: its bottom face is at `centre − 0.5`, so a centre of
+        // exactly 0.5 puts that face exactly on the boundary.
+        .{ .name = "box", .shape = .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } }, .rest_y = 0.5 },
+        // A sphere of radius 1: its lowest surface point is `centre − 1`.
+        .{ .name = "sphere", .shape = .{ .sphere = .{ .radius = 1 } }, .rest_y = 1 },
+        // A capsule r = 1/4, h = 7/8, standing: lowest point is `centre − 1.125`.
+        .{ .name = "capsule", .shape = .{ .capsule = .{ .radius = 0.25, .half_height = 0.875 } }, .rest_y = 1.125 },
+    };
+
+    var agreements: u32 = 0;
+    var touching: u32 = 0;
+    var separated: u32 = 0;
+    for (cases) |c| {
+        const shape_id = try world.store.createShape(gpa, c.shape);
+        const probe = shape_mod.supportShape(world.store.get(shape_id).?);
+        // ABOVE, EXACTLY ON, and ONE ULP BELOW the resting height — plus a clearly
+        // separated and a clearly penetrating control, so the sample is not all boundary.
+        const heights = [_]f32{
+            c.rest_y + 1,
+            std.math.nextAfter(f32, c.rest_y, 1e30), // one ulp above ⇒ separated
+            c.rest_y, // exactly on ⇒ touching, the half-space being closed
+            std.math.nextAfter(f32, c.rest_y, -1e30), // one ulp below ⇒ touching
+            c.rest_y - 0.25,
+        };
+        for (heights) |h| {
+            const body = try world.addBody(gpa, .{
+                .shape = shape_id,
+                .body_type = .dynamic,
+                .position = av3(0, h, 0),
+                .entity = .{ .index = 1, .generation = 0 },
+            });
+            // THE TWO ANSWERS, on the same pose: the query predicate at the body grain,
+            // and the generator's own verdict (a manifold, or null when separated).
+            const by_overlap = world.bm.overlapShapeBody(
+                &world.store,
+                ground,
+                probe,
+                vr(0, h, 0),
+                Quatr.identity,
+            ).?;
+            const by_manifold = world.bm.collidePair(&world.store, ground, body) != null;
+            try testing.expectEqual(by_overlap, by_manifold);
+            agreements += 1;
+            if (by_overlap) touching += 1 else separated += 1;
+            world.removeBody(body);
+        }
+    }
+    // The sample really straddled the boundary — an all-touching or all-separated sweep
+    // would satisfy the equality above while proving nothing.
+    try testing.expectEqual(@as(u32, 15), agreements);
+    try testing.expect(touching > 0 and separated > 0);
+    // And each shape contributed both verdicts: 2 separated (above, one ulp above) and
+    // 3 touching (exactly on, one ulp below, well below) per shape.
+    try testing.expectEqual(@as(u32, 6), separated);
+    try testing.expectEqual(@as(u32, 9), touching);
 }

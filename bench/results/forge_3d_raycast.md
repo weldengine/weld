@@ -3,16 +3,16 @@
 - Build mode: ReleaseFast
 - Scene: 10000 STATIC bodies (spheres / boxes / capsules on a 3 m grid)
 - Rays: 10000 per rep, 10 reps, best rep reported
-- Anti-DCE checksum: 10635397.257
+- Anti-DCE checksum: 24596700.872
 
 | mode | ns/ray | rays/s | rays per 16.67 ms frame | hit rate |
 |---|---|---|---|---|
-| closest | 746.3 | 1339944 | 22332 | 0.88 |
-| any | 546.0 | 1831502 | 30525 | 0.88 |
-| all (buffer 32) | 1532.4 | 652571 | 10876 | 0.88 |
-| closest (5 m bound) | 386.4 | 2587992 | 43133 | 0.19 |
-| closest (swept order) | 185.7 | 5385030 | 89750 | 1.00 |
-| closest (swept, permuted) | 253.7 | 3941663 | 65694 | 1.00 |
+| closest | 830.1 | 1204674 | 20078 | 0.88 |
+| any | 575.7 | 1737016 | 28950 | 0.88 |
+| all (buffer 32) | 1555.1 | 643045 | 10717 | 0.88 |
+| closest (5 m bound) | 374.9 | 2667378 | 44456 | 0.19 |
+| closest (swept order) | 184.7 | 5414185 | 90236 | 1.00 |
+| closest (swept, permuted) | 239.0 | 4184100 | 69735 | 1.00 |
 
 **Reported, not gated.** No envelope is pre-registered: this is the first
 measurement of this path, and registering a bound before measuring its

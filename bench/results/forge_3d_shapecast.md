@@ -4,16 +4,16 @@
 - Scene: 10000 STATIC bodies (spheres / boxes / capsules on a 3 m grid) — the
   raycast bench's scene, so the two tables are comparable
 - Queries: 10000 per rep, 10 reps, best rep reported
-- Anti-DCE checksum: 14262579.523
+- Anti-DCE checksum: 19343205.471
 
 | mode | ns/query | queries/s | queries per 16.67 ms frame | hit rate |
 |---|---|---|---|---|
-| sphere cast | 1292.9 | 773455 | 12891 | 0.98 |
-| box cast | 1343.7 | 744214 | 12404 | 0.98 |
-| capsule cast | 1276.1 | 783638 | 13061 | 0.98 |
-| shape overlap (buffer 32) | 292.3 | 3421143 | 57019 | 0.19 |
-| point cast (radius 0) | 1452.3 | 688563 | 11476 | 0.89 |
-| raycast (same rays) | 926.1 | 1079797 | 17997 | 0.89 |
+| sphere cast | 1216.0 | 822368 | 13706 | 0.98 |
+| box cast | 1253.3 | 797894 | 13298 | 0.98 |
+| capsule cast | 1222.1 | 818264 | 13638 | 0.98 |
+| shape overlap (buffer 32) | 233.1 | 4290004 | 71500 | 0.19 |
+| point cast (radius 0) | 1249.2 | 800512 | 13342 | 0.89 |
+| raycast (same rays) | 771.5 | 1296176 | 21603 | 0.89 |
 
 **Reported, not gated.** No envelope is pre-registered: this is the first
 measurement of this path, and registering a bound before measuring its

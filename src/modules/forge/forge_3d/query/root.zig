@@ -163,7 +163,8 @@ pub const RayHit = struct {
     /// (§1.11.14), carried here rather than resolved at every comparison. The public
     /// `RaycastHit` carries it too, so the mirror is not widened by holding it.
     entity: EntityId,
-    /// Which sub-shape of that body was hit; 0 while one shape is one body.
+    /// Which sub-shape of that body was hit — an OPAQUE PATH decoded by the root shape,
+    /// zero bits wide for a shape with no sub-shape, so the `0` is not read (§1.11.16).
     subshape_id: u32 = 0,
     /// World-space hit point.
     position: Vec3r,
@@ -195,7 +196,7 @@ pub const CastHit = struct {
     body: BodyId,
     /// The ECS entity owning it — the ordering key's leading identity (§1.11.14).
     entity: EntityId,
-    /// Which sub-shape of the hit body; 0 while one shape is one body.
+    /// Which sub-shape of the hit body — an opaque path, zero bits wide here (§1.11.16).
     subshape_id: u32 = 0,
     /// Which sub-shape of the CAST shape; 0 for the same reason.
     cast_subshape_id: u32 = 0,
@@ -225,7 +226,7 @@ pub const ClosestPointHit = struct {
     body: BodyId,
     /// The ECS entity owning it.
     entity: EntityId,
-    /// Which sub-shape; 0 while one shape is one body.
+    /// Which sub-shape — an opaque path, zero bits wide here (§1.11.16).
     subshape_id: u32 = 0,
     /// World-space point on that body's surface, or the queried point when inside.
     position: Vec3r,
