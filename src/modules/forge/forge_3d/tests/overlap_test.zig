@@ -1,10 +1,17 @@
 //! `forge_3d/tests/overlap_test.zig` — the overlap, point-query and closest-point
-//! entries (M1.1.10 / E5: one minimal scene per entry, so no body ships bare).
+//! acceptance suites (M1.1.10, opened at E5 and completed at E6).
 //!
-//! The full acceptance matrix — filtering, sleeping bodies, buffer overflow under the
-//! retention key, creation-order invariance, bit-identity between runs — is E6's.
-//! What is here is the strict minimum: each entry answers the right thing on a scene
-//! whose expected answer is written from the geometry.
+//! Every expectation is written from the geometry, in the comment above it. The first
+//! section is the per-entry behaviour — what each one returns, and what it refuses —
+//! and the second is what the four share: the object mask and the exclusion list at
+//! both ends of their domain, a sleeping body, a caller buffer that overflows, and
+//! invariance under a permutation of creation order asserted on the IDENTITY of the
+//! bodies returned rather than on their count.
+//!
+//! Two E5 tests were removed at E6 rather than left beside their successors: a
+//! sphere-only point-query test strictly subsumed by the three-shape one, and a
+//! closest-point test whose three claims each acquired a dedicated test. One item of
+//! the brief, one test.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -108,47 +115,481 @@ test "overlapAabb rejects a body inside the fat margin but outside the tight box
     try testing.expectEqual(body, out[0]);
 }
 
-test "pointQuery is solid with the boundary included" {
-    const gpa = std.testing.allocator;
-    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
-    defer world.deinit(gpa);
-    const body = try addSphere(gpa, &world, .{ 0, 0, 0 }, 1, 0);
-    _ = try addSphere(gpa, &world, .{ 10, 0, 0 }, 1, 1);
+// ---------------------------------------------------------------------------
+// M1.1.10 / E6 — the overlap, point-query and closest-point acceptance suites
+// ---------------------------------------------------------------------------
 
-    var out: [8]api.BodyId = undefined;
-    // Strictly inside, and exactly ON the boundary — both are hits, the shape being
-    // SOLID and closed (§1.11.4).
-    for ([_]Vec3r{ Vec3r.zero, v(0.5, 0, 0), v(1, 0, 0) }) |p| {
-        try testing.expectEqual(@as(u32, 1), query.pointQuery(&world.bp, &world.bm, &world.store, p, .{}, &out));
-        try testing.expectEqual(body, out[0]);
-    }
-    // Just outside is not.
-    try testing.expectEqual(@as(u32, 0), query.pointQuery(&world.bp, &world.bm, &world.store, v(1.001, 0, 0), .{}, &out));
+const narrowphase = @import("../pipeline/narrowphase/root.zig");
+const shape_mod = @import("../shape.zig");
+const cast_tests = @import("shapecast_test.zig");
+const Quatr = config.Quatr;
+
+/// A static body of the given shape descriptor at `centre`, on `entity_index` and
+/// `layer`. Returns both handles: several tests need the shape to rebuild the
+/// support form for a guard.
+const Placed = struct { id: api.BodyId, shape: api.ShapeId };
+
+fn place(
+    gpa: std.mem.Allocator,
+    world: *harness.World,
+    desc: api.ShapeDescriptor,
+    centre: [3]f32,
+    entity_index: u32,
+    layer: u8,
+) !Placed {
+    const shape = try world.store.createShape(gpa, desc);
+    const id = try world.addBody(gpa, .{
+        .shape = shape,
+        .position = harness.av3(centre[0], centre[1], centre[2]),
+        .body_type = .static,
+        .collision_layer = layer,
+        .entity = .{ .index = entity_index, .generation = 0 },
+    });
+    return .{ .id = id, .shape = shape };
 }
 
-test "closestPoint returns the nearest surface within the bound" {
+test "overlapShape accepts bodies inside and touching, and rejects those clear of it" {
     const gpa = std.testing.allocator;
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
-    // Unit spheres at 10 and 30 on +X: from the origin their surfaces are at 9 and 29.
-    const near = try addSphere(gpa, &world, .{ 10, 0, 0 }, 1, 0);
-    _ = try addSphere(gpa, &world, .{ 30, 0, 0 }, 1, 1);
+
+    // A unit-sphere probe at the origin against three unit spheres: concentric,
+    // exactly TOUCHING at 2 (r_sum = 2, so the inflated surfaces meet — which the
+    // frozen convention counts as contact, not separation), and clear at 5.
+    const inside = (try place(gpa, &world, .{ .sphere = .{ .radius = 1 } }, .{ 0, 0, 0 }, 0, 0)).id;
+    const touching = (try place(gpa, &world, .{ .sphere = .{ .radius = 1 } }, .{ 2, 0, 0 }, 1, 0)).id;
+    _ = try place(gpa, &world, .{ .sphere = .{ .radius = 1 } }, .{ 5, 0, 0 }, 2, 0);
+
+    const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    var out: [8]api.BodyId = undefined;
+    const n = query.overlapShape(&world.bp, &world.bm, &world.store, .{
+        .shape = probe,
+        .position = Vec3r.zero,
+    }, &out);
+    try testing.expectEqual(@as(u32, 2), n);
+    try testing.expectEqual(inside, out[0]);
+    try testing.expectEqual(touching, out[1]);
+}
+
+test "overlapAabb is face-inclusive" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    // A unit box at the origin: its tight world AABB is exactly [-1, 1]³.
+    const body = (try place(gpa, &world, .{ .box = .{ .half_extents = harness.av3(1, 1, 1) } }, .{ 0, 0, 0 }, 0, 0)).id;
+    var out: [4]api.BodyId = undefined;
+
+    // A query box whose MIN corner is exactly the body's MAX corner shares one point
+    // and counts — the same inclusive convention as `Aabb.overlaps`, `contains` and
+    // the ray slab test.
+    try testing.expectEqual(@as(u32, 1), query.overlapAabb(&world.bp, &world.bm, &world.store, v(1, 1, 1), v(3, 3, 3), .{}, &out));
+    try testing.expectEqual(body, out[0]);
+    // A degenerate query box ON the face is still a hit.
+    try testing.expectEqual(@as(u32, 1), query.overlapAabb(&world.bp, &world.bm, &world.store, v(1, 0, 0), v(1, 0, 0), .{}, &out));
+    // One ulp past the face is not, and that is the discrimination: without it
+    // "inclusive" would be indistinguishable from "generous".
+    const past: Real = @bitCast(@as(if (Real == f32) u32 else u64, @bitCast(@as(Real, 1))) + 1);
+    try testing.expectEqual(@as(u32, 0), query.overlapAabb(&world.bp, &world.bm, &world.store, v(past, past, past), v(3, 3, 3), .{}, &out));
+}
+
+test "pointQuery is solid with the boundary included, for each of the three shapes" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+
+    // Each shape gets its own body, far enough apart that no probe can reach two.
+    // Per shape: a point strictly inside, one exactly ON the boundary, one just
+    // outside — the three cases §1.11.4's solidity convention distinguishes.
+    const sphere_body = (try place(gpa, &world, .{ .sphere = .{ .radius = 2 } }, .{ 0, 0, 0 }, 0, 0)).id;
+    const box_body = (try place(gpa, &world, .{ .box = .{ .half_extents = harness.av3(1, 2, 3) } }, .{ 50, 0, 0 }, 1, 0)).id;
+    const capsule_body = (try place(gpa, &world, .{ .capsule = .{ .radius = 0.5, .half_height = 1 } }, .{ 100, 0, 0 }, 2, 0)).id;
+
+    const Case = struct { body: api.BodyId, inside: Vec3r, boundary: Vec3r, outside: Vec3r };
+    const cases = [_]Case{
+        // Sphere radius 2 at the origin.
+        .{ .body = sphere_body, .inside = v(1, 0, 0), .boundary = v(2, 0, 0), .outside = v(2.001, 0, 0) },
+        // Box half-extents (1, 2, 3) at x = 50 — the boundary point is a face centre,
+        // and the outside one clears the SHORT axis, not the long ones.
+        .{ .body = box_body, .inside = v(50, 1, 2), .boundary = v(51, 0, 0), .outside = v(51.001, 0, 0) },
+        // Capsule (Y segment ±1, radius 0.5) at x = 100: the boundary point is on the
+        // cylindrical wall at the segment's midpoint.
+        .{ .body = capsule_body, .inside = v(100, 0.5, 0), .boundary = v(100.5, 0, 0), .outside = v(100.501, 0, 0) },
+    };
+
+    var out: [4]api.BodyId = undefined;
+    for (cases) |case| {
+        for ([_]Vec3r{ case.inside, case.boundary }) |p| {
+            try testing.expectEqual(@as(u32, 1), query.pointQuery(&world.bp, &world.bm, &world.store, p, .{}, &out));
+            try testing.expectEqual(case.body, out[0]);
+        }
+        try testing.expectEqual(@as(u32, 0), query.pointQuery(&world.bp, &world.bm, &world.store, case.outside, .{}, &out));
+    }
+}
+
+test "closestPoint on a point inside the solid returns zero and the point itself" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const body = (try place(gpa, &world, .{ .box = .{ .half_extents = harness.av3(2, 2, 2) } }, .{ 0, 0, 0 }, 0, 0)).id;
+
+    // Strictly inside, and exactly ON the boundary — both are "inside the solid"
+    // under §1.11.13's convention, decided upstream of any GJK classification.
+    for ([_]Vec3r{ Vec3r.zero, v(1, -1, 0.5), v(2, 0, 0) }) |p| {
+        const hit = query.closestPoint(&world.bp, &world.bm, &world.store, p, 100, .{}).?;
+        try testing.expectEqual(body, hit.body);
+        try testing.expectEqual(@as(Real, 0), hit.distance);
+        // The closest point is the queried point ITSELF, exactly — not a projection
+        // onto the surface, which is what "distance to the solid" means.
+        inline for (0..3) |i| try testing.expectEqual(p.toArray()[i], hit.position.toArray()[i]);
+    }
+}
+
+test "closestPoint in the shallow band returns a positive surface distance" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    // `.shallow` means the CORES are disjoint beyond the noise floor while the
+    // INFLATED surfaces touch or overlap: a real separation absorbed by the numeric
+    // margin, and NOT an interior. Collapsing it into `.deep` would return 0 for a
+    // point that is measurably outside — the defect this test exists to catch.
+    //
+    // For a point probe (radius 0) against a sphere of radius `r`, the regime is
+    // `shallow` exactly when `r < dist <= r + margin`, the margin being GJK's
+    // accumulated-rounding bound `conv_k · floatEps · coordScale` with `conv_k = 16`
+    // and, here, `coordScale ≈ r`. The band is therefore a few ULPs wide BY
+    // CONSTRUCTION, so the probe is placed inside it in those units and not in
+    // metres: 8 ULPs of the coordinate scale sits above the `noise_k = 2` deep floor
+    // and below the 16-ULP contact margin.
+    const radius: Real = 2;
+    const delta: Real = 8 * std.math.floatEps(Real) * radius;
+    const placed = try place(gpa, &world, .{ .sphere = .{ .radius = 2 } }, .{ 0, 0, 0 }, 0, 0);
+    const probe_point = v(radius + delta, 0, 0);
+
+    // The point is OUTSIDE the solid — otherwise the solidity gate would answer
+    // first and the shallow path would never run.
+    try testing.expect(!world.bm.containsPointBody(&world.store, placed.id, probe_point).?);
+
+    // DISCRIMINATION GUARD. GJK really classified this pair `.shallow`. Without it
+    // the test would pass on a `.separated` pair, where a positive distance is
+    // trivially right and proves nothing about the shallow path — which is precisely
+    // the path §1.11.13 says must not be read as an interior.
+    const point_core: narrowphase.SupportShape(Real) = .{ .core = .point, .radius = 0 };
+    const regime = narrowphase.gjk(
+        Real,
+        point_core,
+        probe_point,
+        Quatr.identity,
+        shape_mod.supportShape(world.store.get(placed.shape).?),
+        Vec3r.zero,
+        Quatr.identity,
+    );
+    try testing.expectEqual(narrowphase.GjkResult(Real).Status.shallow, regime.status);
+
+    // THE CLAIM: a positive surface distance, not zero.
+    const hit = query.closestPoint(&world.bp, &world.bm, &world.store, probe_point, 100, .{}).?;
+    try testing.expectEqual(placed.id, hit.body);
+    try testing.expect(hit.distance > 0);
+    try testing.expectApproxEqAbs(delta, hit.distance, 4 * std.math.floatEps(Real) * radius);
+}
+
+test "closestPoint projects onto the inflated surface" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    // Two shapes whose CORE distance and SURFACE distance differ by the radius, so a
+    // projection that forgot the inflation would be visible in both.
+    const ball = (try place(gpa, &world, .{ .sphere = .{ .radius = 2 } }, .{ 0, 0, 0 }, 0, 0)).id;
+    const pill = (try place(gpa, &world, .{ .capsule = .{ .radius = 0.5, .half_height = 1 } }, .{ 100, 0, 0 }, 1, 0)).id;
+
+    // SPHERE. Core = the centre. From (10, 0, 0) the core distance is 10, so the
+    // surface distance is 10 − 2 = 8 and the surface point is (2, 0, 0).
+    {
+        const hit = query.closestPoint(&world.bp, &world.bm, &world.store, v(10, 0, 0), 100, .{}).?;
+        try testing.expectEqual(ball, hit.body);
+        try testing.expectApproxEqAbs(@as(Real, 8), hit.distance, tol);
+        try testing.expect(hit.position.approxEql(v(2, 0, 0), tol));
+    }
+
+    // CAPSULE. Core = the Y segment ±1 at x = 100. From (110, 5, 0) the closest core
+    // point is the +Y endpoint (100, 1, 0), so the core offset is (10, 4, 0) of
+    // length √116, the surface distance is √116 − 0.5, and the surface point is that
+    // endpoint plus 0.5 along the unit offset.
+    {
+        const point = v(110, 5, 0);
+        const endpoint = v(100, 1, 0);
+        const offset = point.sub(endpoint);
+        const hit = query.closestPoint(&world.bp, &world.bm, &world.store, point, 100, .{}).?;
+        try testing.expectEqual(pill, hit.body);
+        try testing.expectApproxEqAbs(@sqrt(@as(Real, 116)) - 0.5, hit.distance, tol);
+        try testing.expect(hit.position.approxEql(endpoint.add(offset.normalize().scale(0.5)), tol));
+    }
+}
+
+test "closestPoint selects among several candidates by SURFACE distance" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    // The discriminating scene: the body whose CENTRE is nearest is NOT the body
+    // whose SURFACE is nearest. A small sphere at 5 has its surface at 4.5; a large
+    // one at 10 has its surface at 1. Ranking on the centre — or on the GJK core
+    // distance without subtracting the radius — would answer the small one.
+    _ = try place(gpa, &world, .{ .sphere = .{ .radius = 0.5 } }, .{ 5, 0, 0 }, 0, 0);
+    const big = (try place(gpa, &world, .{ .sphere = .{ .radius = 9 } }, .{ 10, 0, 0 }, 1, 0)).id;
 
     const hit = query.closestPoint(&world.bp, &world.bm, &world.store, Vec3r.zero, 100, .{}).?;
-    try testing.expectEqual(near, hit.body);
-    try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
-    try testing.expect(hit.position.approxEql(v(9, 0, 0), tol));
+    try testing.expectEqual(big, hit.body);
+    try testing.expectApproxEqAbs(@as(Real, 1), hit.distance, tol);
+    try testing.expect(hit.position.approxEql(v(1, 0, 0), tol));
+}
 
-    // The bound is real: nothing is within 5.
-    try testing.expect(query.closestPoint(&world.bp, &world.bm, &world.store, Vec3r.zero, 5, .{}) == null);
-    // …and CLOSED: a bound of exactly the surface distance still answers.
+test "closestPoint returns nothing beyond max_distance" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    _ = try place(gpa, &world, .{ .sphere = .{ .radius = 1 } }, .{ 10, 0, 0 }, 0, 0);
+
+    // The surface is at 9. The bound is CLOSED, so 9 answers and one ulp below does
+    // not — the same convention, and the same pair of assertions, as the ray's.
     try testing.expect(query.closestPoint(&world.bp, &world.bm, &world.store, Vec3r.zero, 9, .{}) != null);
+    const just_below: Real = @bitCast(@as(if (Real == f32) u32 else u64, @bitCast(@as(Real, 9))) - 1);
+    try testing.expect(query.closestPoint(&world.bp, &world.bm, &world.store, Vec3r.zero, just_below, .{}) == null);
+    try testing.expect(query.closestPoint(&world.bp, &world.bm, &world.store, Vec3r.zero, 0, .{}) == null);
+}
 
-    // Inside the solid — boundary included — the distance is 0 and the closest point
-    // is the queried point ITSELF, decided upstream of any GJK classification
-    // (§1.11.13).
-    const interior = query.closestPoint(&world.bp, &world.bm, &world.store, v(10.5, 0, 0), 100, .{}).?;
-    try testing.expectEqual(near, interior.body);
-    try testing.expectEqual(@as(Real, 0), interior.distance);
-    try testing.expect(interior.position.approxEql(v(10.5, 0, 0), tol));
+// --- Shared across the four entries -----------------------------------------
+//
+// The three multi-result entries share a shape, so they share a driver: five
+// radius-3 spheres clustered on the origin, each containing it, each overlapping a
+// unit probe there, each inside the query box. Every one of them therefore answers
+// all three entries, and the behaviour under test is the filtering, the retention
+// and the ordering — not the geometry, which has its own tests above.
+
+const Entry = enum { shape, aabb, point };
+
+const entry_names = [_][]const u8{ "overlapShape", "overlapAabb", "pointQuery" };
+
+fn buildCluster(gpa: std.mem.Allocator, world: *harness.World, order: []const usize) !void {
+    const centres = [5][3]f32{ .{ 0, 0, 0 }, .{ 0.5, 0, 0 }, .{ -0.5, 0, 0 }, .{ 0, 0.5, 0 }, .{ 0, -0.5, 0 } };
+    for (order) |which| {
+        _ = try place(gpa, world, .{ .sphere = .{ .radius = 3 } }, centres[which], @intCast(which), @intCast(which));
+    }
+}
+
+fn runEntry(world: *harness.World, entry: Entry, probe: api.ShapeId, filter: query.Filter, out: []api.BodyId) u32 {
+    return switch (entry) {
+        .shape => query.overlapShape(&world.bp, &world.bm, &world.store, .{
+            .shape = probe,
+            .position = Vec3r.zero,
+            .filter = filter,
+        }, out),
+        .aabb => query.overlapAabb(&world.bp, &world.bm, &world.store, v(-1, -1, -1), v(1, 1, 1), filter, out),
+        .point => query.pointQuery(&world.bp, &world.bm, &world.store, Vec3r.zero, filter, out),
+    };
+}
+
+/// The entity indices behind a returned body slice, in order.
+fn entitiesOf(world: *const harness.World, ids: []const api.BodyId, buf: []u32) []u32 {
+    for (ids, 0..) |id, i| buf[i] = world.bm.entity(id).?.index;
+    return buf[0..ids.len];
+}
+
+test "the object mask filters every overlap entry" {
+    const gpa = std.testing.allocator;
+    inline for (@typeInfo(Entry).@"enum".fields, 0..) |field, ei| {
+        const entry: Entry = @enumFromInt(field.value);
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        try buildCluster(gpa, &world, &.{ 0, 1, 2, 3, 4 });
+        const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+        var out: [8]api.BodyId = undefined;
+        var ents: [8]u32 = undefined;
+
+        // FULL mask: all five, ordered by entity.
+        const all = runEntry(&world, entry, probe, .{}, &out);
+        try testing.expectEqual(@as(u32, 5), all);
+        try testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4 }, entitiesOf(&world, out[0..all], &ents));
+
+        // A mask naming layers 1 and 3 — the layer IS the entity index here.
+        const two = runEntry(&world, entry, probe, .{ .layer_mask = (@as(u32, 1) << 1) | (@as(u32, 1) << 3) }, &out);
+        if (two != 2) {
+            std.debug.print("{s}: masked to two layers, got {d}\n", .{ entry_names[ei], two });
+            return error.MaskIgnored;
+        }
+        try testing.expectEqualSlices(u32, &.{ 1, 3 }, entitiesOf(&world, out[0..two], &ents));
+
+        // EMPTY mask: nothing at all, which is the other end of the domain.
+        try testing.expectEqual(@as(u32, 0), runEntry(&world, entry, probe, .{ .layer_mask = 0 }, &out));
+    }
+}
+
+test "exclusions are honoured by every overlap entry" {
+    const gpa = std.testing.allocator;
+    inline for (@typeInfo(Entry).@"enum".fields) |field| {
+        const entry: Entry = @enumFromInt(field.value);
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        try buildCluster(gpa, &world, &.{ 0, 1, 2, 3, 4 });
+        const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+        var out: [8]api.BodyId = undefined;
+        var ents: [8]u32 = undefined;
+
+        const all = runEntry(&world, entry, probe, .{}, &out);
+        try testing.expectEqual(@as(u32, 5), all);
+        // Exclude two of them by handle — the dominant real case being "myself".
+        const excluded = [_]api.BodyId{ out[0], out[2] };
+        const rest = runEntry(&world, entry, probe, .{ .exclude = &excluded }, &out);
+        try testing.expectEqual(@as(u32, 3), rest);
+        try testing.expectEqualSlices(u32, &.{ 1, 3, 4 }, entitiesOf(&world, out[0..rest], &ents));
+    }
+}
+
+test "a caller buffer that overflows keeps the best set under the ordering key" {
+    const gpa = std.testing.allocator;
+    // Five candidates into a two-slot buffer. The retained pair must be entities 0
+    // and 1 — the best under `(entity, BodyId)` — WHATEVER order the scene was built
+    // in, which is the whole point: a retention keyed on `BodyId` would keep the two
+    // created first and answer differently in each order.
+    const orders = [3][5]usize{ .{ 0, 1, 2, 3, 4 }, .{ 4, 3, 2, 1, 0 }, .{ 2, 4, 0, 3, 1 } };
+    inline for (@typeInfo(Entry).@"enum".fields) |field| {
+        const entry: Entry = @enumFromInt(field.value);
+        for (orders) |order| {
+            var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+            defer world.deinit(gpa);
+            try buildCluster(gpa, &world, &order);
+            const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+
+            var two: [2]api.BodyId = undefined;
+            var ents: [2]u32 = undefined;
+            const n = runEntry(&world, entry, probe, .{}, &two);
+            try testing.expectEqual(@as(u32, 2), n);
+            try testing.expectEqualSlices(u32, &.{ 0, 1 }, entitiesOf(&world, two[0..n], &ents));
+
+            // A zero-length buffer writes nothing and says so, rather than
+            // overrunning or reporting what it could not store.
+            var none: [0]api.BodyId = undefined;
+            try testing.expectEqual(@as(u32, 0), runEntry(&world, entry, probe, .{}, &none));
+        }
+    }
+}
+
+test "every overlap entry is invariant under creation-order permutation" {
+    const gpa = std.testing.allocator;
+    // The same scene in six orders. The answer is a SEQUENCE OF ENTITIES and it must
+    // be identical every time — identity, not merely cardinality, which is what the
+    // M1.1.9 ray test stopped short of asserting.
+    const orders = [6][5]usize{
+        .{ 0, 1, 2, 3, 4 }, .{ 4, 3, 2, 1, 0 }, .{ 2, 0, 4, 1, 3 },
+        .{ 1, 4, 0, 3, 2 }, .{ 3, 2, 4, 0, 1 }, .{ 0, 4, 1, 2, 3 },
+    };
+    inline for (@typeInfo(Entry).@"enum".fields) |field| {
+        const entry: Entry = @enumFromInt(field.value);
+        for (orders) |order| {
+            var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+            defer world.deinit(gpa);
+            try buildCluster(gpa, &world, &order);
+            const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+            var out: [8]api.BodyId = undefined;
+            var ents: [8]u32 = undefined;
+            const n = runEntry(&world, entry, probe, .{}, &out);
+            try testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4 }, entitiesOf(&world, out[0..n], &ents));
+
+            // Two identical runs in the same world return bit-identical slices.
+            var again: [8]api.BodyId = undefined;
+            const m = runEntry(&world, entry, probe, .{}, &again);
+            try testing.expectEqual(n, m);
+            try testing.expectEqualSlices(api.BodyId, out[0..n], again[0..m]);
+        }
+    }
+}
+
+test "closestPoint filters, is invariant, and is bit-identical twice" {
+    const gpa = std.testing.allocator;
+    const orders = [4][3]usize{ .{ 0, 1, 2 }, .{ 2, 1, 0 }, .{ 1, 0, 2 }, .{ 2, 0, 1 } };
+    // Three spheres whose SURFACES sit at 4, 9 and 14 from the origin, on layers
+    // equal to their entity indices.
+    const centres = [3][3]f32{ .{ 5, 0, 0 }, .{ 10, 0, 0 }, .{ 15, 0, 0 } };
+    var reference: ?Real = null;
+    for (orders) |order| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        var ids: [3]api.BodyId = undefined;
+        for (order) |which| {
+            ids[which] = (try place(gpa, &world, .{ .sphere = .{ .radius = 1 } }, centres[which], @intCast(which), @intCast(which))).id;
+        }
+
+        // Nearest surface wins, and it is the same ENTITY under every order.
+        const hit = query.closestPoint(&world.bp, &world.bm, &world.store, Vec3r.zero, 100, .{}).?;
+        try testing.expectEqual(ids[0], hit.body);
+        try testing.expectEqual(@as(u32, 0), hit.entity.index);
+        try testing.expectApproxEqAbs(@as(Real, 4), hit.distance, tol);
+        if (reference) |ref| {
+            try testing.expectEqual(ref, hit.distance); // bit-identical across worlds
+        } else reference = hit.distance;
+
+        // Two identical runs are bit-identical, field by field.
+        const again = query.closestPoint(&world.bp, &world.bm, &world.store, Vec3r.zero, 100, .{}).?;
+        try testing.expectEqual(hit.body, again.body);
+        try testing.expectEqual(hit.entity, again.entity);
+        try testing.expectEqual(hit.distance, again.distance);
+        inline for (0..3) |i| try testing.expectEqual(hit.position.toArray()[i], again.position.toArray()[i]);
+
+        // The mask skips the nearest and answers the next; the empty mask answers
+        // nothing; an exclusion does the same by handle.
+        const masked = query.closestPoint(&world.bp, &world.bm, &world.store, Vec3r.zero, 100, .{
+            .layer_mask = (@as(u32, 1) << 1) | (@as(u32, 1) << 2),
+        }).?;
+        try testing.expectEqual(ids[1], masked.body);
+        try testing.expectApproxEqAbs(@as(Real, 9), masked.distance, tol);
+        try testing.expect(query.closestPoint(&world.bp, &world.bm, &world.store, Vec3r.zero, 100, .{ .layer_mask = 0 }) == null);
+        const excluded = query.closestPoint(&world.bp, &world.bm, &world.store, Vec3r.zero, 100, .{ .exclude = &.{ids[0]} }).?;
+        try testing.expectEqual(ids[1], excluded.body);
+    }
+}
+
+test "a sleeping body answers every overlap entry and stays asleep" {
+    const gpa = std.testing.allocator;
+    inline for (@typeInfo(Entry).@"enum".fields) |field| {
+        const entry: Entry = @enumFromInt(field.value);
+        var world = harness.World.init(harness.vr(0, -9.81, 0), 1.0 / 60.0);
+        defer world.deinit(gpa);
+        const sleeper = try cast_tests.sleepingBox(gpa, &world);
+        const centre = world.bm.position(sleeper).?;
+        const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.25 } });
+
+        // Every entry is aimed at the sleeper's own settled pose, so the scene does
+        // not depend on where the solver left it.
+        var out: [8]api.BodyId = undefined;
+        const n = switch (entry) {
+            .shape => query.overlapShape(&world.bp, &world.bm, &world.store, .{ .shape = probe, .position = centre }, &out),
+            .aabb => query.overlapAabb(&world.bp, &world.bm, &world.store, centre.sub(v(0.1, 0.1, 0.1)), centre.add(v(0.1, 0.1, 0.1)), .{}, &out),
+            .point => query.pointQuery(&world.bp, &world.bm, &world.store, centre, .{}, &out),
+        };
+        // The ground is static and huge, so it may answer too; what matters is that
+        // the SLEEPER is in the answer.
+        var found = false;
+        for (out[0..n]) |id| {
+            if (id == sleeper) found = true;
+        }
+        try testing.expect(found);
+        // Asleep BEFORE (asserted inside `sleepingBox`) and asleep AFTER.
+        try testing.expect(world.bm.isSleeping(sleeper).?);
+        // …and still asleep once the cycle has been advanced again.
+        try world.step(gpa);
+        try testing.expect(world.bm.isSleeping(sleeper).?);
+    }
+}
+
+test "closestPoint answers a sleeping body and leaves it asleep" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.init(harness.vr(0, -9.81, 0), 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const sleeper = try cast_tests.sleepingBox(gpa, &world);
+    const centre = world.bm.position(sleeper).?;
+
+    // Its own centre is inside it, so the distance is 0 and the point is itself.
+    const inside = query.closestPoint(&world.bp, &world.bm, &world.store, centre, 100, .{}).?;
+    try testing.expectEqual(@as(Real, 0), inside.distance);
+    try testing.expect(world.bm.isSleeping(sleeper).?);
+    try world.step(gpa);
+    try testing.expect(world.bm.isSleeping(sleeper).?);
 }

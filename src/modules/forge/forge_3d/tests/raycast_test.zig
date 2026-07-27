@@ -1282,6 +1282,14 @@ test "the result is invariant under creation-order permutation" {
     // The visited-node count is deliberately NOT asserted here or anywhere else: it
     // depends on the tree shape, hence on creation order (§1.11.6). Only the RESULT
     // is invariant.
+    //
+    // M1.1.10 / E6 strengthens this: the M1.1.9 form asserted the GEOMETRY —
+    // distance, position, normal — and not the IDENTITY of the body returned. On a
+    // scene where two bodies sit at different distances the geometry pins the
+    // identity implicitly, so the gap was latent rather than active; but "invariant"
+    // is a claim about the ANSWER, and the answer names a body and an entity. Both
+    // are now asserted, which is what makes this test fail if the ordering key ever
+    // reverts to something creation-order-dependent.
     const centres = [4][3]f32{ .{ 12, 0, 0 }, .{ 25, 1, 0 }, .{ 33, -1, 0 }, .{ 41, 0, 0 } };
     const orders = [6][4]usize{
         .{ 0, 1, 2, 3 }, .{ 3, 2, 1, 0 }, .{ 1, 3, 0, 2 },
@@ -1294,8 +1302,14 @@ test "the result is invariant under creation-order permutation" {
         for (order) |which| _ = try addSphereAt(gpa, &world, centres[which], 0, @intCast(which));
 
         const hit = (try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
+        // The ENTITY is the identity that survives a permutation; the `BodyId` does
+        // not, and asserting it here would be asserting the wrong thing — on this
+        // scene the nearest body happens to be created first in some orders and last
+        // in others.
+        try testing.expectEqual(@as(u32, 0), hit.entity.index);
         if (reference) |ref| {
-            // Same geometry hit, same distance, same point, same normal — bitwise.
+            // Same body ANSWERED, and the same geometry — bitwise.
+            try testing.expectEqual(ref.entity, hit.entity);
             try testing.expectEqual(ref.distance, hit.distance);
             inline for (0..3) |i| {
                 try testing.expectEqual(ref.position.toArray()[i], hit.position.toArray()[i]);
@@ -1305,6 +1319,12 @@ test "the result is invariant under creation-order permutation" {
             reference = hit;
             try testing.expectApproxEqAbs(@as(Real, 11), hit.distance, tol);
         }
+
+        // …and the FULL answer, not just the closest: `all` must return the four
+        // entities in the same order under every permutation.
+        var buf: [4]query.RayHit = undefined;
+        try testing.expectEqual(@as(u32, 4), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &buf));
+        for (buf, 0..) |h, i| try testing.expectEqual(@as(u32, @intCast(i)), h.entity.index);
     }
 }
 

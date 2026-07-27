@@ -845,3 +845,259 @@ test "shapeCast returns the nearest body along the sweep" {
     still.direction = Vec3r.zero;
     try testing.expect(query_mod.shapeCast(&world.bp, &world.bm, &world.store, still) == null);
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.10 / E6 — the `shapeCast` acceptance suite
+// ---------------------------------------------------------------------------
+//
+// The iteration ceiling is NOT re-tested here: it is pinned in the E3 section above
+// (`the iteration ceiling returns a hit at the current parameter`), with the
+// discrimination guard proving the cap actually bound. Doubling it would add a
+// second control over one behaviour and dilute which one is load-bearing.
+
+/// A static body carrying a box of the given half-extents, on `entity_index`.
+fn addBoxBody(gpa: std.mem.Allocator, world: *harness.World, centre: [3]f32, he: [3]f32, entity_index: u32, layer: u8) !api.BodyId {
+    const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = harness.av3(he[0], he[1], he[2]) } });
+    return world.addBody(gpa, .{
+        .shape = shape,
+        .position = harness.av3(centre[0], centre[1], centre[2]),
+        .body_type = .static,
+        .collision_layer = layer,
+        .entity = .{ .index = entity_index, .generation = 0 },
+    });
+}
+
+test "the normal at the time of impact is the outward normal of the hit body" {
+    // The SIGN is the claim, and it is pinned by a closed-form oracle rather than
+    // transcribed: at the contact, B's outward normal points from B's witness back
+    // toward the swept A, so for two spheres it is `−(c − t·d̂)/r_sum`. Casting the
+    // SAME pair from four different directions walks that vector around the sphere,
+    // so a sign error cannot hide behind one lucky axis.
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    // A radius-2 sphere at the origin; the probe is a unit sphere started 10 away in
+    // each direction and swept back toward it, so `t = 10 − 3 = 7` every time.
+    const body = (try addSphereBody(gpa, &world, .{ 0, 0, 0 }, 2)).id;
+    const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+
+    const dirs = [_]Vec3r{ v(1, 0, 0), v(0, -1, 0), v(0, 0, 1), v(3, 4, 0).normalize() };
+    for (dirs) |unit_d| {
+        const start = unit_d.scale(-10);
+        const hit = query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
+            .shape = probe,
+            .origin = start,
+            .direction = unit_d,
+            .max_distance = 100,
+        }).?;
+        try testing.expectEqual(body, hit.body);
+        try testing.expectApproxEqAbs(@as(Real, 7), hit.distance, tol);
+
+        // Unit, TIGHT — a degenerate normal is a defect, never an effect of the pose.
+        try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), unit_tol);
+        // And opposing the sweep, on every hit.
+        try testing.expect(hit.normal.dot(unit_d) <= 0);
+        // The closed form: A's centre ends at `start + 7·d̂`, three units from the
+        // origin, and B's outward normal there points from B's centre toward it —
+        // which for this construction is exactly `−d̂`.
+        const a_centre = start.add(unit_d.scale(7));
+        const want = Vec3r.zero.sub(a_centre).scale(1 / a_centre.length()).neg();
+        try testing.expect(hit.normal.approxEql(want, tol));
+        try testing.expect(hit.normal.approxEql(unit_d.neg(), tol));
+        // The witness sits on B's surface, two units from its centre.
+        try testing.expectApproxEqAbs(@as(Real, 2), hit.position.length(), tol);
+    }
+}
+
+test "initial contact returns a witness on the hit body" {
+    // Two shapes ALREADY intersecting at the start pose: distance 0, and the witness
+    // lies on or inside the HIT body — which the cast shape's own origin need not.
+    //
+    // The scene is built so that origin-versus-witness is a real distinction and not
+    // a coincidence: the cast shape is a long bar centred at the world origin,
+    // spanning x ∈ [−5, 5], and the hit body is a unit box at x = 4.5 spanning
+    // [3.5, 5.5]. They overlap over [3.5, 5], so the contact is genuine — and the
+    // bar's CENTRE, the cast origin, is at x = 0, nowhere near the body. Both facts
+    // are asserted; without the second the test could not tell the rule §1.11.11
+    // states from the one it refutes (returning `cast.origin`).
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const body = try addBoxBody(gpa, &world, .{ 4.5, 0, 0 }, .{ 1, 1, 1 }, 0, 0);
+    const bar = try world.store.createShape(gpa, .{ .box = .{ .half_extents = harness.av3(5, 0.5, 0.5) } });
+
+    const cast_origin = Vec3r.zero;
+    // PRECONDITION — the cast origin is DEMONSTRABLY outside the hit body.
+    try testing.expect(!world.bm.containsPointBody(&world.store, body, cast_origin).?);
+    // …and the two really do overlap at the start pose, so this is an initial
+    // contact and not a short sweep.
+    try testing.expect(world.bm.overlapShapeBody(
+        &world.store,
+        body,
+        shape_mod.supportShape(world.store.get(bar).?),
+        cast_origin,
+        Quatr.identity,
+    ).?);
+
+    const hit = query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
+        .shape = bar,
+        .origin = cast_origin,
+        .direction = v(1, 0, 0),
+        .max_distance = 100,
+    }).?;
+    try testing.expectEqual(body, hit.body);
+    try testing.expectEqual(@as(Real, 0), hit.distance);
+    // THE CLAIM: the witness is a point OF THE HIT BODY, boundary included.
+    try testing.expect(world.bm.containsPointBody(&world.store, body, hit.position).?);
+    // …and it is therefore NOT the cast origin, which the assertion above placed
+    // outside. Stated separately so the two cannot be confused for one another.
+    try testing.expect(!hit.position.approxEql(cast_origin, tol));
+    try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), unit_tol);
+    try testing.expect(hit.normal.dot(v(1, 0, 0)) <= 0);
+}
+
+test "shapeCast honours the object mask and the exclusion list" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    // Two unit spheres on +X: the near one on layer 3, the far one on layer 7.
+    const near = try addBoxBody(gpa, &world, .{ 10, 0, 0 }, .{ 1, 1, 1 }, 0, 3);
+    const far = try addBoxBody(gpa, &world, .{ 20, 0, 0 }, .{ 1, 1, 1 }, 1, 7);
+    const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+
+    const base = query_mod.CastQuery{
+        .shape = probe,
+        .origin = Vec3r.zero,
+        .direction = v(1, 0, 0),
+        .max_distance = 100,
+    };
+    // The FULL mask sees the near one.
+    try testing.expectEqual(near, query_mod.shapeCast(&world.bp, &world.bm, &world.store, base).?.body);
+    // A mask naming only layer 7 skips it and answers the far one.
+    var only_far = base;
+    only_far.filter = .{ .layer_mask = @as(u32, 1) << 7 };
+    try testing.expectEqual(far, query_mod.shapeCast(&world.bp, &world.bm, &world.store, only_far).?.body);
+    // The EMPTY mask sees nothing at all.
+    var none = base;
+    none.filter = .{ .layer_mask = 0 };
+    try testing.expect(query_mod.shapeCast(&world.bp, &world.bm, &world.store, none) == null);
+    // Exclusions are tested on the body, upstream of the kernel.
+    var without_near = base;
+    without_near.filter = .{ .exclude = &.{near} };
+    try testing.expectEqual(far, query_mod.shapeCast(&world.bp, &world.bm, &world.store, without_near).?.body);
+    var without_both = base;
+    without_both.filter = .{ .exclude = &.{ near, far } };
+    try testing.expect(query_mod.shapeCast(&world.bp, &world.bm, &world.store, without_both) == null);
+}
+
+test "shapeCast answers a sleeping body and leaves it asleep" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.init(harness.vr(0, -9.81, 0), 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const sleeper = try sleepingBox(gpa, &world);
+    const centre = world.bm.position(sleeper).?;
+    const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.25 } });
+
+    const hit = query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
+        .shape = probe,
+        .origin = v(centre.toArray()[0], 10, centre.toArray()[2]),
+        .direction = v(0, -1, 0),
+        .max_distance = 100,
+    }).?;
+    try testing.expectEqual(sleeper, hit.body);
+    try testing.expect(world.bm.isSleeping(sleeper).?);
+}
+
+test "shapeCast is invariant under creation-order permutation and bit-identical twice" {
+    const gpa = std.testing.allocator;
+    // Four unit boxes on +X, built in six orders. The answer must name the same
+    // ENTITY every time — the identity that survives a permutation — and be
+    // bit-identical in distance, position and normal.
+    const centres = [4][3]f32{ .{ 12, 0, 0 }, .{ 25, 0, 0 }, .{ 33, 0, 0 }, .{ 41, 0, 0 } };
+    const orders = [6][4]usize{
+        .{ 0, 1, 2, 3 }, .{ 3, 2, 1, 0 }, .{ 1, 3, 0, 2 },
+        .{ 2, 0, 3, 1 }, .{ 0, 3, 1, 2 }, .{ 3, 0, 2, 1 },
+    };
+    var reference: ?query_mod.CastHit = null;
+    for (orders) |order| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        for (order) |which| _ = try addBoxBody(gpa, &world, centres[which], .{ 1, 1, 1 }, @intCast(which), 0);
+        const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+        const q = query_mod.CastQuery{
+            .shape = probe,
+            .origin = Vec3r.zero,
+            .direction = v(1, 0, 0),
+            .max_distance = 100,
+        };
+
+        const hit = query_mod.shapeCast(&world.bp, &world.bm, &world.store, q).?;
+        // Two identical runs in the same world are bit-identical.
+        const again = query_mod.shapeCast(&world.bp, &world.bm, &world.store, q).?;
+        try expectCastBitIdentical(hit, again);
+
+        // The ENTITY, not the `BodyId`: the latter follows creation order by
+        // construction and is not what invariance is about.
+        try testing.expectEqual(@as(u32, 0), hit.entity.index);
+        if (reference) |ref| {
+            try testing.expectEqual(ref.entity, hit.entity);
+            try expectCastGeometryIdentical(ref, hit);
+        } else {
+            reference = hit;
+            // 12 − 1 (the box's face) − 1 (the probe's radius) = 10.
+            try testing.expectApproxEqAbs(@as(Real, 10), hit.distance, tol);
+        }
+    }
+}
+
+/// Field-by-field exact comparison of two cast hits, identity included.
+fn expectCastBitIdentical(x: query_mod.CastHit, y: query_mod.CastHit) !void {
+    try testing.expectEqual(x.body, y.body);
+    try testing.expectEqual(x.entity, y.entity);
+    try testing.expectEqual(x.subshape_id, y.subshape_id);
+    try testing.expectEqual(x.cast_subshape_id, y.cast_subshape_id);
+    try expectCastGeometryIdentical(x, y);
+}
+
+/// The geometry alone — used across worlds, where the `BodyId` legitimately differs.
+fn expectCastGeometryIdentical(x: query_mod.CastHit, y: query_mod.CastHit) !void {
+    try testing.expectEqual(x.distance, y.distance);
+    inline for (0..3) |i| {
+        try testing.expectEqual(x.position.toArray()[i], y.position.toArray()[i]);
+        try testing.expectEqual(x.normal.toArray()[i], y.normal.toArray()[i]);
+    }
+}
+
+/// Drive the published harness until a box falls asleep on the ground, and return it.
+/// Shared by the per-entry sleeping tests: a query takes `*const BodyManager` and so
+/// cannot wake anything even in principle, but a structural argument never observed
+/// is still only an argument.
+pub fn sleepingBox(gpa: std.mem.Allocator, world: *harness.World) !api.BodyId {
+    const ground_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = harness.av3(20, 0.5, 20) } });
+    const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = harness.av3(0.5, 0.5, 0.5) } });
+    _ = try world.addBody(gpa, .{
+        .shape = ground_shape,
+        .body_type = .static,
+        .restitution = 0,
+        .entity = .{ .index = 0, .generation = 0 },
+    });
+    const sleeper = try world.addBody(gpa, .{
+        .shape = box_shape,
+        .position = harness.av3(0, 1, 0),
+        .body_type = .dynamic,
+        .mass = 1,
+        .restitution = 0,
+        .entity = .{ .index = 1, .generation = 0 },
+    });
+    var had_contact = false;
+    var t: u32 = 0;
+    const asleep = while (t < 600) : (t += 1) {
+        try world.step(gpa);
+        if (world.constraints.items.len > 0) {
+            had_contact = true;
+        } else if (had_contact) break true;
+    } else false;
+    try testing.expect(asleep);
+    try testing.expect(world.bm.isSleeping(sleeper).?);
+    return sleeper;
+}
