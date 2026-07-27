@@ -1,4 +1,5 @@
-//! `forge_3d/query.zig` — the `Real`-bound spatial-query orchestration (M1.1.9).
+//! `forge_3d/query/root.zig` — the `Real`-bound spatial-query orchestration
+//! (M1.1.9; moved into the `query/` package unchanged at M1.1.10 / E5).
 //!
 //! **Owns no state.** It takes `(bp, bm, store)` as parameters, the shape of
 //! `rigid.build`. A query mutates nothing, wakes nobody, and appears nowhere in
@@ -37,11 +38,13 @@
 //! not in this file.
 
 const std = @import("std");
-const config = @import("config.zig");
-const broadphase_mod = @import("pipeline/broadphase.zig");
-const narrowphase = @import("pipeline/narrowphase/root.zig");
-const body_manager_mod = @import("body_manager.zig");
+const config = @import("../config.zig");
+const broadphase_mod = @import("../pipeline/broadphase.zig");
+const body_manager_mod = @import("../body_manager.zig");
 const api = @import("weld_forge");
+// The ray collectors, split out at M1.1.10/E5 and moved unchanged. Aliased here so
+// every construction site below stays textually identical to the M1.1.9 code.
+const ray_mod = @import("ray.zig");
 
 const Real = config.Real;
 const Vec3r = config.Vec3r;
@@ -50,6 +53,9 @@ const EntityId = api.EntityId;
 const BodyManager = body_manager_mod.BodyManager;
 const ShapeStore = body_manager_mod.ShapeStore;
 const Broadphase = broadphase_mod.Broadphase(Real);
+const ClosestCollector = ray_mod.ClosestCollector;
+const AnyCollector = ray_mod.AnyCollector;
+const AllCollector = ray_mod.AllCollector;
 
 /// The world-space ray the broadphase traversal and the kernels share, at solver
 /// precision.
@@ -322,7 +328,7 @@ fn entityKey(e: EntityId) u64 {
 /// `BodyId` survives as the FINAL tie-break, for the residual §1.11.14 names:
 /// nothing forces one body per entity, and two bodies of the same entity at an
 /// exactly equal distance are not invariant under creation order.
-fn hitLess(_: void, x: RayHit, y: RayHit) bool {
+pub fn hitLess(_: void, x: RayHit, y: RayHit) bool {
     if (x.distance != y.distance) return x.distance < y.distance;
     const x_entity = entityKey(x.entity);
     const y_entity = entityKey(y.entity);
@@ -364,156 +370,3 @@ fn prepare(query: RayQuery) ?Ray {
     // hit carries a distance and never a fraction.
     return Ray.init(query.origin, reduced.scale(1 / reduced.length()));
 }
-
-/// The exact per-candidate test every collector runs: filter, then kernel, then
-/// world-space assembly. `null` means "no hit to offer" — a filtered candidate, a
-/// stale handle, or a genuine miss; an error means the shape is unsupported and
-/// is latched by the caller.
-fn evaluate(
-    bm: *const BodyManager,
-    store: *const ShapeStore,
-    filter: Filter,
-    ray: Ray,
-    user_data: u32,
-) Error!?RayHit {
-    const body: BodyId = user_data;
-    // The layer getter also answers staleness: a freed handle has no layer.
-    const layer = bm.collisionLayer(body) orelse return null;
-    if (!filter.accepts(layer, body)) return null;
-
-    const local = (try bm.raycastBody(store, body, ray)) orelse return null;
-    const rotation = bm.rotation(body) orelse return null;
-    const owner = bm.entity(body) orelse return null;
-    return .{
-        .body = body,
-        .entity = owner,
-        .position = ray.origin.add(ray.direction.scale(local.distance)),
-        // The kernel answers in the body's local frame; the distance is invariant
-        // under a rigid transform (a rotation and a translation preserve it, and
-        // the direction is unit in both frames), so only the normal is carried
-        // back to world.
-        .normal = rotation.rotateVec3(local.normal),
-        .distance = local.distance,
-    };
-}
-
-/// `closest`: tightens its bound to every accepted hit, so the rest of the
-/// traversal is pruned against the best distance so far.
-const ClosestCollector = struct {
-    bm: *const BodyManager,
-    store: *const ShapeStore,
-    filter: Filter,
-    ray: Ray,
-    bound: Real,
-    best: ?RayHit = null,
-    err: ?Error = null,
-
-    pub fn add(self: *ClosestCollector, user_data: u32) void {
-        const hit = (evaluate(self.bm, self.store, self.filter, self.ray, user_data) catch |e| {
-            self.err = e;
-            return;
-        }) orelse return;
-        if (hit.distance > self.bound) return; // beyond the window, closed at the bound
-        if (self.best) |best| {
-            // The SAME total order the sort uses (`(distance, entity, BodyId)`,
-            // §1.11.14), so `closest` and an `all` truncated to one slot cannot
-            // disagree — sharing the comparator is what makes that structural rather
-            // than a coincidence of two hand-written comparisons.
-            if (!hitLess(void{}, hit, best)) return;
-        }
-        self.best = hit;
-        // Tightened TO the hit distance, not below it, so a body at exactly the
-        // same distance still reaches the tie-break above.
-        self.bound = hit.distance;
-    }
-
-    pub fn maxDistance(self: *const ClosestCollector) Real {
-        return self.bound;
-    }
-
-    /// Never stops early: the minimum is only known once the traversal is done.
-    pub fn shouldStop(_: *const ClosestCollector) bool {
-        return false;
-    }
-};
-
-/// `any`: STOPS at the first accepted hit. It also drops its bound to zero, which
-/// prunes anything still in flight, but the bound alone would not terminate — a
-/// zero bound still admits every node whose interval contains the ray origin, and
-/// says nothing about the layer trees not yet walked. `shouldStop` is what makes
-/// "terminates at the first candidate" true.
-const AnyCollector = struct {
-    bm: *const BodyManager,
-    store: *const ShapeStore,
-    filter: Filter,
-    ray: Ray,
-    bound: Real,
-    found: bool = false,
-    err: ?Error = null,
-
-    pub fn add(self: *AnyCollector, user_data: u32) void {
-        if (self.found) return;
-        const hit = (evaluate(self.bm, self.store, self.filter, self.ray, user_data) catch |e| {
-            self.err = e;
-            return;
-        }) orelse return;
-        if (hit.distance > self.bound) return;
-        self.found = true;
-        self.bound = 0;
-    }
-
-    pub fn maxDistance(self: *const AnyCollector) Real {
-        return self.bound;
-    }
-
-    /// True from the first accepted hit — the traversal ends, trees included.
-    pub fn shouldStop(self: *const AnyCollector) bool {
-        return self.found;
-    }
-};
-
-/// `all`: never tightens. Keeps the nearest `out.len` hits (see `raycastAll`).
-const AllCollector = struct {
-    bm: *const BodyManager,
-    store: *const ShapeStore,
-    filter: Filter,
-    ray: Ray,
-    bound: Real,
-    out: []RayHit,
-    count: u32 = 0,
-    err: ?Error = null,
-
-    pub fn add(self: *AllCollector, user_data: u32) void {
-        const hit = (evaluate(self.bm, self.store, self.filter, self.ray, user_data) catch |e| {
-            self.err = e;
-            return;
-        }) orelse return;
-        if (hit.distance > self.bound) return;
-
-        if (self.count < self.out.len) {
-            self.out[self.count] = hit;
-            self.count += 1;
-            return;
-        }
-        if (self.out.len == 0) return;
-
-        // Full: replace the current worst under `(distance, entity, BodyId)` if this
-        // hit is better, so the retained set is the best `out.len` whatever the order
-        // of arrival. Linear in the buffer, which only matters once the caller has
-        // already accepted a truncated answer.
-        var worst: usize = 0;
-        for (self.out[1..], 1..) |candidate, i| {
-            if (hitLess(void{}, self.out[worst], candidate)) worst = i;
-        }
-        if (hitLess(void{}, hit, self.out[worst])) self.out[worst] = hit;
-    }
-
-    pub fn maxDistance(self: *const AllCollector) Real {
-        return self.bound;
-    }
-
-    /// Never stops early — every hit within the window is wanted.
-    pub fn shouldStop(_: *const AllCollector) bool {
-        return false;
-    }
-};

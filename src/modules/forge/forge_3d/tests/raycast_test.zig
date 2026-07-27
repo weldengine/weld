@@ -517,7 +517,7 @@ test "containsPoint is the solid membership the zero-distance rule rests on" {
 // `max_distance`, creation-order invariance — is E6's.
 
 const harness = @import("solver_test.zig");
-const query = @import("../query.zig");
+const query = @import("../query/root.zig");
 const body_manager_mod = @import("../body_manager.zig");
 const broadphase_mod = @import("../pipeline/broadphase.zig");
 const vr = harness.vr;
