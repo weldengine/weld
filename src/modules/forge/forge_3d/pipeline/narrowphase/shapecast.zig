@@ -12,9 +12,11 @@
 //!
 //! That is the core + inflation-radius convention of §1.11.3, never a second one,
 //! and it has a structural consequence worth stating: a sphere cast against a box is
-//! a ray against a ROUNDED box, precisely the shape `raycast.zig` rejects with
-//! `error.UnsupportedShape`. A cast is not expressible over the ray kernels — hence
-//! this file. And because a support map covers every BOUNDED convex, this kernel has
+//! a ray against a ROUNDED box, precisely the shape `raycast.zig` does not cover —
+//! its asserted precondition `raySupportsShape` is false there (a typed
+//! `error.UnsupportedShape` until M1.1.11, when the refusal moved to the query entries
+//! a caller can provoke it from, §1.11.7). A cast is not expressible over the ray
+//! kernels — hence this file. And because a support map covers every BOUNDED convex, this kernel has
 //! no shape to reject and so **no error channel at all**: the frozen signature
 //! carrying none is evidence for the design, not a constraint on it.
 //!
@@ -177,7 +179,9 @@ pub fn castShape(
 ///
 /// The ceiling is a parameter for ONE reason: the normative fallback of §1.11.11 —
 /// exhaustion returns a hit at the current parameter — is unreachable in practice on
-/// the three cores the store builds, which converge in a handful of iterations. A
+/// the three cores the store builds — still three since M1.1.11, a half-space having
+/// no core at all and never reaching this kernel — which converge in a handful of
+/// iterations. A
 /// guard never observed to fire is a comment with extra syntax, so a test drives a
 /// small ceiling through the SAME code path and asserts both that the cap fired and
 /// that what came back is a hit at a parameter at or below the true time of impact.

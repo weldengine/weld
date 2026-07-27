@@ -89,9 +89,12 @@ pub const fastSeed = fast_paths.fastSeed;
 
 /// A ray hit on one shape, in that shape's local frame (distance + outward normal).
 pub const LocalHit = raycast_mod.LocalHit;
-/// Nearest ray↔shape intersection in the shape's local frame; `null` on a miss,
-/// `error.UnsupportedShape` for a rounded box.
+/// Nearest ray↔shape intersection in the shape's local frame; `null` on a miss.
+/// Precondition: `raySupportsShape` (no error channel since M1.1.11).
 pub const rayShape = raycast_mod.rayShape;
+/// Whether the ray kernels cover a support shape — `rayShape`'s precondition, exposed
+/// so a caller can decide admissibility instead of relying on a debug assert.
+pub const raySupportsShape = raycast_mod.raySupportsShape;
 /// Whether a point lies in the solid shape, boundary included.
 pub const containsPoint = raycast_mod.containsPoint;
 

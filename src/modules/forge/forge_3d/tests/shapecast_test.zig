@@ -401,18 +401,25 @@ test "the iteration ceiling returns a hit at the current parameter" {
 // What the cast buys that the ray kernels cannot
 // ---------------------------------------------------------------------------
 
-test "sphere cast against a box does not error, where the ray kernel refuses" {
+test "sphere cast against a box answers where the ray kernel's precondition refuses" {
     // The discriminating test for the whole design (§1.11.11). Casting a sphere of
     // radius `r_a` against a box IS, in configuration space, a ray against a box
-    // inflated by `r_a` — a ROUNDED box, precisely the shape the ray kernels reject.
-    // Both facts are asserted here, in the same test, so the claim that the cast
+    // inflated by `r_a` — a ROUNDED box, precisely the shape the ray kernels do not
+    // cover. Both facts are asserted here, in the same test, so the claim that the cast
     // covers what the ray kernel refuses is proven rather than stated.
+    //
+    // RE-EXPRESSED at M1.1.11/E3: clause (1) was
+    // `expectError(error.UnsupportedShape, rayShape(...))` and is now the same
+    // refusal read off the kernel's asserted precondition, the error having left the
+    // ray path (see `raycast_test.zig`'s rounded-box test for why). The claim — the ray
+    // kernel refuses this shape, the cast answers it — is identical.
     const r_a: Real = 0.5;
     const direction = v(1, 0, 0);
 
-    // (1) The ray kernel refuses the rounded box, loudly.
+    // (1) The ray kernel does not cover the rounded box, and says so before being
+    // called rather than by failing inside.
     const rounded: SS = .{ .core = .{ .box = v(1, 1, 1) }, .radius = r_a };
-    try testing.expectError(error.UnsupportedShape, narrowphase.rayShape(Real, rounded, v(-10, 0, 0), direction));
+    try testing.expect(!narrowphase.raySupportsShape(Real, rounded));
 
     // (2) The cast answers the same geometry with no error channel at all. A sphere
     // of radius 0.5 sweeping +X against a unit box at (10, 0, 0): its centre must
@@ -821,7 +828,7 @@ test "shapeCast returns the nearest body along the sweep" {
         .direction = v(1, 0, 0),
         .max_distance = 100,
     };
-    const hit = query_mod.shapeCast(&world.bp, &world.bm, &world.store, q).?;
+    const hit = (try query_mod.shapeCast(&world.bp, &world.bm, &world.store, q)).?;
     try testing.expectEqual(near, hit.body);
     try testing.expectApproxEqAbs(@as(Real, 8), hit.distance, tol);
     try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
@@ -832,18 +839,18 @@ test "shapeCast returns the nearest body along the sweep" {
     // it — the bound being CLOSED, exactly 8 still answers.
     var away = q;
     away.direction = v(-1, 0, 0);
-    try testing.expect(query_mod.shapeCast(&world.bp, &world.bm, &world.store, away) == null);
+    try testing.expect(try query_mod.shapeCast(&world.bp, &world.bm, &world.store, away) == null);
     var short = q;
     short.max_distance = 7.9;
-    try testing.expect(query_mod.shapeCast(&world.bp, &world.bm, &world.store, short) == null);
+    try testing.expect(try query_mod.shapeCast(&world.bp, &world.bm, &world.store, short) == null);
     var exact = q;
     exact.max_distance = 8;
-    try testing.expect(query_mod.shapeCast(&world.bp, &world.bm, &world.store, exact) != null);
+    try testing.expect(try query_mod.shapeCast(&world.bp, &world.bm, &world.store, exact) != null);
 
     // A zero direction is degenerate and empty, the ray family's guard reused.
     var still = q;
     still.direction = Vec3r.zero;
-    try testing.expect(query_mod.shapeCast(&world.bp, &world.bm, &world.store, still) == null);
+    try testing.expect(try query_mod.shapeCast(&world.bp, &world.bm, &world.store, still) == null);
 }
 
 // ---------------------------------------------------------------------------
@@ -884,12 +891,12 @@ test "the normal at the time of impact is the outward normal of the hit body" {
     const dirs = [_]Vec3r{ v(1, 0, 0), v(0, -1, 0), v(0, 0, 1), v(3, 4, 0).normalize() };
     for (dirs) |unit_d| {
         const start = unit_d.scale(-10);
-        const hit = query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
+        const hit = (try query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
             .shape = probe,
             .origin = start,
             .direction = unit_d,
             .max_distance = 100,
-        }).?;
+        })).?;
         try testing.expectEqual(body, hit.body);
         try testing.expectApproxEqAbs(@as(Real, 7), hit.distance, tol);
 
@@ -939,12 +946,12 @@ test "initial contact returns a witness on the hit body" {
         Quatr.identity,
     ).?);
 
-    const hit = query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
+    const hit = (try query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
         .shape = bar,
         .origin = cast_origin,
         .direction = v(1, 0, 0),
         .max_distance = 100,
-    }).?;
+    })).?;
     try testing.expectEqual(body, hit.body);
     try testing.expectEqual(@as(Real, 0), hit.distance);
     // THE CLAIM: the witness is a point OF THE HIT BODY, boundary included.
@@ -972,22 +979,22 @@ test "shapeCast honours the object mask and the exclusion list" {
         .max_distance = 100,
     };
     // The FULL mask sees the near one.
-    try testing.expectEqual(near, query_mod.shapeCast(&world.bp, &world.bm, &world.store, base).?.body);
+    try testing.expectEqual(near, (try query_mod.shapeCast(&world.bp, &world.bm, &world.store, base)).?.body);
     // A mask naming only layer 7 skips it and answers the far one.
     var only_far = base;
     only_far.filter = .{ .layer_mask = @as(u32, 1) << 7 };
-    try testing.expectEqual(far, query_mod.shapeCast(&world.bp, &world.bm, &world.store, only_far).?.body);
+    try testing.expectEqual(far, (try query_mod.shapeCast(&world.bp, &world.bm, &world.store, only_far)).?.body);
     // The EMPTY mask sees nothing at all.
     var none = base;
     none.filter = .{ .layer_mask = 0 };
-    try testing.expect(query_mod.shapeCast(&world.bp, &world.bm, &world.store, none) == null);
+    try testing.expect(try query_mod.shapeCast(&world.bp, &world.bm, &world.store, none) == null);
     // Exclusions are tested on the body, upstream of the kernel.
     var without_near = base;
     without_near.filter = .{ .exclude = &.{near} };
-    try testing.expectEqual(far, query_mod.shapeCast(&world.bp, &world.bm, &world.store, without_near).?.body);
+    try testing.expectEqual(far, (try query_mod.shapeCast(&world.bp, &world.bm, &world.store, without_near)).?.body);
     var without_both = base;
     without_both.filter = .{ .exclude = &.{ near, far } };
-    try testing.expect(query_mod.shapeCast(&world.bp, &world.bm, &world.store, without_both) == null);
+    try testing.expect(try query_mod.shapeCast(&world.bp, &world.bm, &world.store, without_both) == null);
 }
 
 test "shapeCast answers a sleeping body and leaves it asleep" {
@@ -998,12 +1005,12 @@ test "shapeCast answers a sleeping body and leaves it asleep" {
     const centre = world.bm.position(sleeper).?;
     const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.25 } });
 
-    const hit = query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
+    const hit = (try query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
         .shape = probe,
         .origin = v(centre.toArray()[0], 10, centre.toArray()[2]),
         .direction = v(0, -1, 0),
         .max_distance = 100,
-    }).?;
+    })).?;
     try testing.expectEqual(sleeper, hit.body);
     try testing.expect(world.bm.isSleeping(sleeper).?);
 }
@@ -1031,9 +1038,9 @@ test "shapeCast is invariant under creation-order permutation and bit-identical 
             .max_distance = 100,
         };
 
-        const hit = query_mod.shapeCast(&world.bp, &world.bm, &world.store, q).?;
+        const hit = (try query_mod.shapeCast(&world.bp, &world.bm, &world.store, q)).?;
         // Two identical runs in the same world are bit-identical.
-        const again = query_mod.shapeCast(&world.bp, &world.bm, &world.store, q).?;
+        const again = (try query_mod.shapeCast(&world.bp, &world.bm, &world.store, q)).?;
         try expectCastBitIdentical(hit, again);
 
         // The ENTITY, not the `BodyId`: the latter follows creation order by
@@ -1100,4 +1107,76 @@ pub fn sleepingBox(gpa: std.mem.Allocator, world: *harness.World) !api.BodyId {
     try testing.expect(asleep);
     try testing.expect(world.bm.isSleeping(sleeper).?);
     return sleeper;
+}
+
+// ---------------------------------------------------------------------------
+// M1.1.11 / E3 — the three-way outcome of the two entries taking a shape handle
+// ---------------------------------------------------------------------------
+
+test "shapeCast separates a stale handle, an inadmissible probe and a miss" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+
+    // THREE outcomes a single `null` used to conflate (`engine-physics-forge.md`
+    // §1.11.7). MEASURED on the pre-E3 tree, which is `main` for this entry: a stale
+    // probe handle returned `null` and a live probe aimed at empty space returned
+    // `null` — byte-identical, so no caller could tell a malformed query from a
+    // negative answer. That is the silent-false-negative class §1.11.3 forbids by
+    // name.
+    const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+    const plane = try world.store.createShape(gpa, .{ .plane = .{} });
+    const doomed = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+    world.store.destroyShape(doomed);
+    _ = try addSphereBody(gpa, &world, .{ 10, 0, 0 }, 1);
+
+    // (1) STALE HANDLE → a typed error. The shape the caller named is gone.
+    try testing.expectError(error.InvalidShape, query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
+        .shape = doomed,
+        .origin = Vec3r.zero,
+        .direction = v(1, 0, 0),
+        .max_distance = 100,
+    }));
+
+    // (2) INADMISSIBLE PROBE → a distinct typed error. The cast kernel is a ray march
+    // on the Minkowski difference of the two CORES, and a half-space has no bounded
+    // core to difference: it is not a probe the kernel can express at all. Returning
+    // an empty answer would tell the caller "nothing was hit", which is false.
+    try testing.expectError(error.UnsupportedShape, query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
+        .shape = plane,
+        .origin = Vec3r.zero,
+        .direction = v(1, 0, 0),
+        .max_distance = 100,
+    }));
+
+    // (3) REAL MISS → `null`, and only now. A live sphere probe swept +Y, away from
+    // the only body in the scene at (10, 0, 0).
+    try testing.expectEqual(@as(?query_mod.CastHit, null), try query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
+        .shape = probe,
+        .origin = Vec3r.zero,
+        .direction = v(0, 1, 0),
+        .max_distance = 100,
+    }));
+
+    // And the positive control, so the three refusals above are not the entry
+    // refusing everything: the same probe swept +X reaches the body. A radius-0.5
+    // sphere against a unit sphere at x = 10 first touches at 10 − 1 − 0.5 = 8.5.
+    const hit = (try query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
+        .shape = probe,
+        .origin = Vec3r.zero,
+        .direction = v(1, 0, 0),
+        .max_distance = 100,
+    })).?;
+    try testing.expectApproxEqAbs(@as(Real, 8.5), hit.distance, tol);
+
+    // A ZERO DIRECTION stays a MISS, not an error (§1.11.11 domain table): the query
+    // is degenerate, its answer is empty, and the probe is perfectly well formed. The
+    // distinction matters — folding it into the error channel would make a legal
+    // query look malformed.
+    try testing.expectEqual(@as(?query_mod.CastHit, null), try query_mod.shapeCast(&world.bp, &world.bm, &world.store, .{
+        .shape = probe,
+        .origin = Vec3r.zero,
+        .direction = Vec3r.zero,
+        .max_distance = 100,
+    }));
 }

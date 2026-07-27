@@ -230,7 +230,7 @@ pub fn main(init: std.process.Init) !void {
                     .direction = d,
                     .max_distance = 200,
                 };
-                if (query.shapeCast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                if (try query.shapeCast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
                     hits += 1;
                     checksum += @floatCast(hit.distance);
                 }
@@ -249,7 +249,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..n_reps) |_| {
             const t0 = nowNs();
             for (centres) |c| {
-                const n = query.overlapShape(&scene.bp, &scene.bm, &scene.store, .{
+                const n = try query.overlapShape(&scene.bp, &scene.bm, &scene.store, .{
                     .shape = cast_sphere,
                     .position = c,
                 }, &out);
@@ -281,7 +281,7 @@ pub fn main(init: std.process.Init) !void {
                     .direction = d,
                     .max_distance = 200,
                 };
-                if (query.shapeCast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                if (try query.shapeCast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
                     hits += 1;
                     checksum += @floatCast(hit.distance);
                 }
@@ -298,7 +298,7 @@ pub fn main(init: std.process.Init) !void {
             const t0 = nowNs();
             for (origins, directions) |o, d| {
                 const q = query.RayQuery{ .origin = o, .direction = d, .max_distance = 200 };
-                if (try query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                if (query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
                     hits += 1;
                     checksum += @floatCast(hit.distance);
                 }

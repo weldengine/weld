@@ -484,11 +484,19 @@ pub const BodyManager = struct {
 
     /// Ray against one body's shape, resolving its world pose and support shape
     /// (via `store`). Returns null if the handle — or its shape — is
-    /// stale/invalid, or if the ray misses; `error.UnsupportedShape` if the shape
-    /// is outside the kernel's set (a rounded box). The `BodyId`-level ray
+    /// stale/invalid, or if the ray misses. The `BodyId`-level ray
     /// adapter for the broadphase→kernel flow, mirroring `gjkPair` /
     /// `collidePair`: unpack a `queryRay` candidate's `user_data` as a `BodyId`
     /// and call this per candidate.
+    ///
+    /// **No error channel since M1.1.11.** It carried `error.UnsupportedShape` from
+    /// the kernel's rounded-box latch, and no path could reach it: `supportShape`
+    /// gives every stored box `radius = 0`, so a `SupportShape` built from a body is
+    /// never a rounded box. The kernel's refusal is an asserted precondition now
+    /// (`narrowphase.raySupportsShape`) and the typed refusal lives at the two query
+    /// entries taking a caller-supplied shape handle (§1.11.7). What this adapter
+    /// resolves is a BODY's shape, which the store validated at creation, so there is
+    /// nothing here for a caller to get wrong.
     ///
     /// The hit comes back in the shape's LOCAL frame, which is enough: a rigid
     /// transform preserves distances and the direction is unit on both sides, so
@@ -506,7 +514,7 @@ pub const BodyManager = struct {
         store: *const ShapeStore,
         id: BodyId,
         ray: RayR,
-    ) error{UnsupportedShape}!?narrowphase.LocalHit(Real) {
+    ) ?narrowphase.LocalHit(Real) {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
         const inv_rot = self.bodies.items(.rotation)[idx].conjugate();

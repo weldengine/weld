@@ -5,12 +5,14 @@
 //! sphere is a point of radius `r`, a capsule a Y-segment of radius `r`, a box
 //! the box itself of radius 0 — exactly the `SupportShape(T).Core` split GJK/EPA
 //! and the fast paths already run on (`engine-physics-forge.md` §1.11.3). A
-//! rounded box (`radius > 0` on a box core) is **rejected**, never silently
-//! approximated: it FAILS LOUD with `error.UnsupportedShape` rather than miss a
-//! hit quietly, the same invariant `createShape` enforces. A core this file does
-//! not know cannot exist silently either — the `switch` is exhaustive, so a
-//! future `Core` case is a compile error here, which is fail-loud at the earliest
-//! possible moment.
+//! rounded box (`radius > 0` on a box core) is outside this kernel's shape set: it
+//! is an ASSERTED PRECONDITION (`raySupportsShape`), never silently approximated.
+//! The typed refusal lives where a CALLER can provoke one, at the two query entries
+//! taking a caller-supplied shape handle (§1.11.7, M1.1.11) — through this kernel
+//! the error was reachable by no path at all, every stored box converting with
+//! `radius = 0`. A core this file does not know cannot exist silently either — the
+//! `switch` is exhaustive, so a future `Core` case is a compile error here, which is
+//! fail-loud at the earliest possible moment.
 //!
 //! **Everything is in the shape's LOCAL frame.** The caller transports the ray
 //! by the inverse pose and rotates the returned normal back to world (that is
@@ -61,25 +63,48 @@ pub fn LocalHit(comptime T: type) type {
 /// noise at scale 1 and not a geometric tolerance.
 const unit_k: comptime_int = 16;
 
+/// Whether the ray kernels cover `shape`: every core, EXCEPT a box carrying a
+/// non-zero inflation radius. A rounded box's inflated surface is measured by no arm
+/// below — the box arm would under-report it by the radius — so it is not part of
+/// this kernel's shape set.
+///
+/// **The PRECONDITION of `rayShape`, exposed as a predicate** (M1.1.11). Two things
+/// it makes structural rather than merely tested: it takes no origin, so the
+/// rejection provably belongs to the SHAPE and not to the trajectory; and the two
+/// callers that need to decide admissibility ahead of a call test the same condition
+/// the assert tests, instead of restating it.
+pub fn raySupportsShape(comptime T: type, shape: support.SupportShape(T)) bool {
+    return !(shape.core == .box and shape.radius != 0);
+}
+
 /// Nearest ray↔shape intersection, or `null` when the ray misses.
 ///
 /// `origin` and `direction` are in `shape`'s local frame and `direction` must be
-/// unit (asserted). A rounded box returns `error.UnsupportedShape` — see the file
-/// header on why that is an error and not an approximation.
+/// unit (asserted).
+///
+/// **PRECONDITION: `raySupportsShape(T, shape)`.** It was a typed
+/// `error.UnsupportedShape` until M1.1.11, and the error was reachable through no
+/// path at all: `shape.supportShape` gives every box `radius = 0` unconditionally, so
+/// no `SupportShape` built from a stored shape can be a rounded box, and a control
+/// that has never been seen to fire is a comment with syntax rather than a check
+/// (§1.11.3). The typed refusal moved to where a CALLER can cause it — the two query
+/// entries taking a caller-supplied shape handle (§1.11.7) — and what stays here is
+/// the assert. If Weld ever gives boxes a convex radius, as the reference does, this
+/// kernel gains the CASE; it does not regain an error.
 pub fn rayShape(
     comptime T: type,
     shape: support.SupportShape(T),
     origin: math.Vec(3, T),
     direction: math.Vec(3, T),
-) error{UnsupportedShape}!?LocalHit(T) {
+) ?LocalHit(T) {
     std.debug.assert(@abs(direction.lengthSq() - 1) <= unit_k * std.math.floatEps(T));
 
-    // The shape rejection comes FIRST, before anything looks at the origin: a
+    // The shape precondition comes FIRST, before anything looks at the origin: a
     // rounded box is unsupported as a SHAPE, and that answer cannot depend on
     // where the ray starts. Placed after the membership test below, an origin
     // inside the core would have returned a distance-zero hit and never reached
-    // the rejection — the exact silent miss this file promises not to allow.
-    if (shape.core == .box and shape.radius != 0) return error.UnsupportedShape;
+    // the check — the exact silent miss this file promises not to allow.
+    std.debug.assert(raySupportsShape(T, shape));
 
     // Solid convex: inside — boundary included — is a hit at distance zero, and
     // the normal is `−direction` because no surface normal is defined there

@@ -211,7 +211,7 @@ pub fn main(init: std.process.Init) !void {
             const t0 = nowNs();
             for (origins, directions) |o, d| {
                 const q = query.RayQuery{ .origin = o, .direction = d, .max_distance = 200 };
-                if (try query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                if (query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
                     hits += 1;
                     checksum += @floatCast(hit.distance);
                 }
@@ -230,7 +230,7 @@ pub fn main(init: std.process.Init) !void {
             const t0 = nowNs();
             for (origins, directions) |o, d| {
                 const q = query.RayQuery{ .origin = o, .direction = d, .max_distance = 200 };
-                if (try query.raycastAny(&scene.bp, &scene.bm, &scene.store, q)) {
+                if (query.raycastAny(&scene.bp, &scene.bm, &scene.store, q)) {
                     hits += 1;
                     checksum += 1;
                 }
@@ -250,7 +250,7 @@ pub fn main(init: std.process.Init) !void {
             const t0 = nowNs();
             for (origins, directions) |o, d| {
                 const q = query.RayQuery{ .origin = o, .direction = d, .max_distance = 200 };
-                const n = try query.raycastAll(&scene.bp, &scene.bm, &scene.store, q, &buf);
+                const n = query.raycastAll(&scene.bp, &scene.bm, &scene.store, q, &buf);
                 if (n > 0) {
                     hits += 1;
                     checksum += @floatCast(buf[0].distance);
@@ -280,7 +280,7 @@ pub fn main(init: std.process.Init) !void {
             const t0 = nowNs();
             for (inside, directions) |o, d| {
                 const q = query.RayQuery{ .origin = o, .direction = d, .max_distance = 5 };
-                if (try query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                if (query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
                     hits += 1;
                     checksum += @floatCast(hit.distance);
                 }
@@ -339,7 +339,7 @@ pub fn main(init: std.process.Init) !void {
                 const t0 = nowNs();
                 for (swept_origins, swept_dirs) |o, d| {
                     const q = query.RayQuery{ .origin = o, .direction = d, .max_distance = 200 };
-                    if (try query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                    if (query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
                         hits += 1;
                         checksum += @floatCast(hit.distance);
                     }
@@ -358,7 +358,7 @@ pub fn main(init: std.process.Init) !void {
                 const t0 = nowNs();
                 for (order) |ix| {
                     const q = query.RayQuery{ .origin = swept_origins[ix], .direction = swept_dirs[ix], .max_distance = 200 };
-                    if (try query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                    if (query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
                         hits += 1;
                         checksum += @floatCast(hit.distance);
                     }

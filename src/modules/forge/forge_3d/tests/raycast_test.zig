@@ -50,7 +50,7 @@ test "ray hits a sphere at the closed-form point and normal" {
     // outward normal is −X.
     {
         const d = dir(1, 0, 0);
-        const hit = (try narrowphase.rayShape(Real, sphere, v(-10, 0, 0), d)).?;
+        const hit = (narrowphase.rayShape(Real, sphere, v(-10, 0, 0), d)).?;
         try expectHitInvariants(hit, d);
         try testing.expectApproxEqAbs(@as(Real, 8), hit.distance, tol);
         try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
@@ -60,7 +60,7 @@ test "ray hits a sphere at the closed-form point and normal" {
     // x = −√3 at entry, t = 10 − √3, and the normal is (−√3, 1, 0)/2.
     {
         const d = dir(1, 0, 0);
-        const hit = (try narrowphase.rayShape(Real, sphere, v(-10, 1, 0), d)).?;
+        const hit = (narrowphase.rayShape(Real, sphere, v(-10, 1, 0), d)).?;
         try expectHitInvariants(hit, d);
         const root3: Real = @sqrt(@as(Real, 3));
         try testing.expectApproxEqAbs(10 - root3, hit.distance, tol);
@@ -74,7 +74,7 @@ test "ray hits a sphere at the closed-form point and normal" {
     // x = 0, t = 10, normal +Y.
     {
         const d = dir(1, 0, 0);
-        const hit = (try narrowphase.rayShape(Real, sphere, v(-10, 2, 0), d)).?;
+        const hit = (narrowphase.rayShape(Real, sphere, v(-10, 2, 0), d)).?;
         try expectHitInvariants(hit, d);
         try testing.expectApproxEqAbs(@as(Real, 10), hit.distance, tol);
         try testing.expect(hit.normal.approxEql(v(0, 1, 0), tol));
@@ -88,7 +88,7 @@ test "ray hits a sphere at the closed-form point and normal" {
         const o = v(-3, -3, 0);
         const d = dir(1, 1, 0);
         const inv_root2: Real = 1 / @sqrt(@as(Real, 2));
-        const hit = (try narrowphase.rayShape(Real, sphere, o, d)).?;
+        const hit = (narrowphase.rayShape(Real, sphere, o, d)).?;
         try expectHitInvariants(hit, d);
         try testing.expectApproxEqAbs(3 * @sqrt(@as(Real, 2)) - sphere.radius, hit.distance, tol);
         try testing.expect(hit.normal.approxEql(v(-inv_root2, -inv_root2, 0), tol));
@@ -99,12 +99,12 @@ test "ray hits a sphere at the closed-form point and normal" {
     // A genuine miss with a non-axis-aligned direction, to show the discriminant
     // branch is reached and not merely the silhouette test: from (−6, 0, 0) along
     // (1, 1, 0)/√2 the closest approach is 6/√2 ≈ 4.24, well past r = 2.
-    try testing.expect((try narrowphase.rayShape(Real, sphere, v(-6, 0, 0), dir(1, 1, 0))) == null);
+    try testing.expect((narrowphase.rayShape(Real, sphere, v(-6, 0, 0), dir(1, 1, 0))) == null);
 
     // Misses: past the silhouette, and pointing away from a sphere in front.
     {
-        try testing.expect((try narrowphase.rayShape(Real, sphere, v(-10, 2.001, 0), dir(1, 0, 0))) == null);
-        try testing.expect((try narrowphase.rayShape(Real, sphere, v(-10, 0, 0), dir(-1, 0, 0))) == null);
+        try testing.expect((narrowphase.rayShape(Real, sphere, v(-10, 2.001, 0), dir(1, 0, 0))) == null);
+        try testing.expect((narrowphase.rayShape(Real, sphere, v(-10, 0, 0), dir(-1, 0, 0))) == null);
     }
 }
 
@@ -127,7 +127,7 @@ test "ray hits a rotated box on the correct face" {
         .{ .origin = v(0, 0, 10), .d = dir(0, 0, -1), .distance = 7, .normal = v(0, 0, 1) },
     };
     for (cases) |case| {
-        const hit = (try narrowphase.rayShape(Real, box, case.origin, case.d)).?;
+        const hit = (narrowphase.rayShape(Real, box, case.origin, case.d)).?;
         try expectHitInvariants(hit, case.d);
         try testing.expectApproxEqAbs(case.distance, hit.distance, tol);
         try testing.expect(hit.normal.approxEql(case.normal, tol));
@@ -142,7 +142,7 @@ test "ray hits a rotated box on the correct face" {
         const raw = v(-1, 0.25, 0);
         const d = raw.normalize();
         const t = 4 / @abs(d.toArray()[0]);
-        const hit = (try narrowphase.rayShape(Real, box, o, d)).?;
+        const hit = (narrowphase.rayShape(Real, box, o, d)).?;
         try expectHitInvariants(hit, d);
         try testing.expectApproxEqAbs(t, hit.distance, tol);
         try testing.expect(hit.normal.approxEql(v(1, 0, 0), tol));
@@ -156,15 +156,15 @@ test "ray hits a rotated box on the correct face" {
     // box in x still enters at x = −1, and the entry axis is X.
     {
         const d = dir(1, 0, 0);
-        const hit = (try narrowphase.rayShape(Real, box, v(-10, 0, -3), d)).?;
+        const hit = (narrowphase.rayShape(Real, box, v(-10, 0, -3), d)).?;
         try expectHitInvariants(hit, d);
         try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
         try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
     }
 
     // Misses: beside the box, and behind the ray.
-    try testing.expect((try narrowphase.rayShape(Real, box, v(-10, 5, 0), dir(1, 0, 0))) == null);
-    try testing.expect((try narrowphase.rayShape(Real, box, v(-10, 0, 0), dir(-1, 0, 0))) == null);
+    try testing.expect((narrowphase.rayShape(Real, box, v(-10, 5, 0), dir(1, 0, 0))) == null);
+    try testing.expect((narrowphase.rayShape(Real, box, v(-10, 0, 0), dir(-1, 0, 0))) == null);
 }
 
 test "an exact edge entry resolves to the first axis" {
@@ -184,7 +184,7 @@ test "an exact edge entry resolves to the first axis" {
     const t_y = (-1 - o.toArray()[1]) / da[1];
     try testing.expectEqual(t_x, t_y); // the tie is EXACT, not approximate
 
-    const hit = (try narrowphase.rayShape(Real, box, o, d)).?;
+    const hit = (narrowphase.rayShape(Real, box, o, d)).?;
     try expectHitInvariants(hit, d);
     try testing.expectApproxEqAbs(t_x, hit.distance, tol);
     // X is axis 0, so the −X face wins; a last-axis-wins tie-break would report
@@ -206,7 +206,7 @@ test "the capsule wall and cap agree exactly on the frontier" {
 
     // Entry exactly at y == h: the wall gives x = −r, the top cap sphere centred
     // (0, h, 0) also gives x = −r, and both normals are (−1, 0, 0).
-    const hit = (try narrowphase.rayShape(Real, capsule, v(-10, h, 0), d)).?;
+    const hit = (narrowphase.rayShape(Real, capsule, v(-10, h, 0), d)).?;
     try expectHitInvariants(hit, d);
     try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
     try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
@@ -219,7 +219,7 @@ test "a zero-half-height capsule is a sphere and the cap tie is harmless" {
     // cannot be observed. Recorded rather than claimed: the branch is defensive.
     const capsule = SupportShapeR{ .core = .{ .segment = 0 }, .radius = 2 };
     const d = dir(0, -1, 0);
-    const hit = (try narrowphase.rayShape(Real, capsule, v(0, 10, 0), d)).?;
+    const hit = (narrowphase.rayShape(Real, capsule, v(0, 10, 0), d)).?;
     try expectHitInvariants(hit, d);
     try testing.expectApproxEqAbs(@as(Real, 8), hit.distance, tol);
     try testing.expect(hit.normal.approxEql(v(0, 1, 0), tol));
@@ -231,8 +231,8 @@ test "a zero-half-height capsule is a sphere and the cap tie is harmless" {
     const from = v(-8, 1, 0.5);
     const target = v(0.5, 0.5, 0); // inside both shapes
     const oblique = target.sub(from).normalize();
-    const as_capsule = (try narrowphase.rayShape(Real, capsule, from, oblique)).?;
-    const as_sphere = (try narrowphase.rayShape(Real, sphere, from, oblique)).?;
+    const as_capsule = (narrowphase.rayShape(Real, capsule, from, oblique)).?;
+    const as_sphere = (narrowphase.rayShape(Real, sphere, from, oblique)).?;
     try testing.expectApproxEqAbs(as_sphere.distance, as_capsule.distance, tol);
     try testing.expect(as_sphere.normal.approxEql(as_capsule.normal, tol));
 }
@@ -276,7 +276,7 @@ test "the box kernel and Aabb.rayInterval agree on the interval" {
         const inv = Vec3r{ .data = @as(@Vector(3, Real), @splat(1)) / d.data };
         const zero_mask = d.data == @as(@Vector(3, Real), @splat(0));
         const interval = aabb.rayInterval(o, inv, zero_mask);
-        const hit = try narrowphase.rayShape(Real, box, o, d);
+        const hit = narrowphase.rayShape(Real, box, o, d);
 
         if (interval) |iv| {
             if (iv.exit < 0) {
@@ -305,7 +305,7 @@ test "ray hits a capsule on the cylinder and on each cap" {
     // is at x = −1, so t = 9 and the normal is −X (purely radial, zero in Y).
     {
         const d = dir(1, 0, 0);
-        const hit = (try narrowphase.rayShape(Real, capsule, v(-10, 0, 0), d)).?;
+        const hit = (narrowphase.rayShape(Real, capsule, v(-10, 0, 0), d)).?;
         try expectHitInvariants(hit, d);
         try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
         try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
@@ -315,7 +315,7 @@ test "ray hits a capsule on the cylinder and on each cap" {
     // Cylinder wall just BELOW the top cap plane (y = 2.9 < h): still the wall.
     {
         const d = dir(1, 0, 0);
-        const hit = (try narrowphase.rayShape(Real, capsule, v(-10, 2.9, 0), d)).?;
+        const hit = (narrowphase.rayShape(Real, capsule, v(-10, 2.9, 0), d)).?;
         try expectHitInvariants(hit, d);
         try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
         try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
@@ -326,7 +326,7 @@ test "ray hits a capsule on the cylinder and on each cap" {
     // t = 10 − √0.75. The normal is (−√0.75, 0.5, 0).
     {
         const d = dir(1, 0, 0);
-        const hit = (try narrowphase.rayShape(Real, capsule, v(-10, 3.5, 0), d)).?;
+        const hit = (narrowphase.rayShape(Real, capsule, v(-10, 3.5, 0), d)).?;
         try expectHitInvariants(hit, d);
         const x: Real = @sqrt(@as(Real, 0.75));
         try testing.expectApproxEqAbs(10 - x, hit.distance, tol);
@@ -339,7 +339,7 @@ test "ray hits a capsule on the cylinder and on each cap" {
     // Bottom cap, mirrored: from (−10, −3.5, 0) along +X.
     {
         const d = dir(1, 0, 0);
-        const hit = (try narrowphase.rayShape(Real, capsule, v(-10, -3.5, 0), d)).?;
+        const hit = (narrowphase.rayShape(Real, capsule, v(-10, -3.5, 0), d)).?;
         try expectHitInvariants(hit, d);
         const x: Real = @sqrt(@as(Real, 0.75));
         try testing.expectApproxEqAbs(10 - x, hit.distance, tol);
@@ -350,7 +350,7 @@ test "ray hits a capsule on the cylinder and on each cap" {
     // top cap at y = h + r = 4, so t = 6 and the normal is +Y.
     {
         const d = dir(0, -1, 0);
-        const hit = (try narrowphase.rayShape(Real, capsule, v(0, 10, 0), d)).?;
+        const hit = (narrowphase.rayShape(Real, capsule, v(0, 10, 0), d)).?;
         try expectHitInvariants(hit, d);
         try testing.expectApproxEqAbs(@as(Real, 6), hit.distance, tol);
         try testing.expect(hit.normal.approxEql(v(0, 1, 0), tol));
@@ -361,11 +361,11 @@ test "ray hits a capsule on the cylinder and on each cap" {
     // non-zero. This is the frontier the `|y| <= half_height` slab decides.
     {
         const d = dir(1, 0, 0);
-        const below = (try narrowphase.rayShape(Real, capsule, v(-10, nextBelow(h), 0), d)).?;
+        const below = (narrowphase.rayShape(Real, capsule, v(-10, nextBelow(h), 0), d)).?;
         try testing.expectEqual(@as(Real, 0), below.normal.toArray()[1]);
         try testing.expectApproxEqAbs(@as(Real, 9), below.distance, tol);
 
-        const above = (try narrowphase.rayShape(Real, capsule, v(-10, nextAbove(h), 0), d)).?;
+        const above = (narrowphase.rayShape(Real, capsule, v(-10, nextAbove(h), 0), d)).?;
         try testing.expect(above.normal.toArray()[1] != 0);
         // Just past the cap plane the cap is all but tangent to the wall, so the
         // distance is continuous across the frontier.
@@ -377,17 +377,17 @@ test "ray hits a capsule on the cylinder and on each cap" {
     // however long it runs.
     {
         const d = dir(0, -1, 0);
-        const inside = (try narrowphase.rayShape(Real, capsule, v(0.5, 10, 0), d)).?;
+        const inside = (narrowphase.rayShape(Real, capsule, v(0.5, 10, 0), d)).?;
         try expectHitInvariants(inside, d);
         // Cap sphere centred (0, 3, 0), r = 1, at x = 0.5 → y = 3 + √0.75.
         try testing.expectApproxEqAbs(10 - (3 + @sqrt(@as(Real, 0.75))), inside.distance, tol);
 
-        try testing.expect((try narrowphase.rayShape(Real, capsule, v(1.5, 10, 0), d)) == null);
+        try testing.expect((narrowphase.rayShape(Real, capsule, v(1.5, 10, 0), d)) == null);
     }
 
     // Misses: past the silhouette, and pointing away.
-    try testing.expect((try narrowphase.rayShape(Real, capsule, v(-10, 4.001, 0), dir(1, 0, 0))) == null);
-    try testing.expect((try narrowphase.rayShape(Real, capsule, v(-10, 0, 0), dir(-1, 0, 0))) == null);
+    try testing.expect((narrowphase.rayShape(Real, capsule, v(-10, 4.001, 0), dir(1, 0, 0))) == null);
+    try testing.expect((narrowphase.rayShape(Real, capsule, v(-10, 0, 0), dir(-1, 0, 0))) == null);
 }
 
 /// The next representable value below `x` — used to straddle an exact frontier
@@ -409,7 +409,7 @@ test "an origin inside a shape hits at distance zero with the negated direction"
         .{ .core = .{ .segment = 3 }, .radius = 1 },
     };
     for (shapes) |shape| {
-        const hit = (try narrowphase.rayShape(Real, shape, Vec3r.zero, d)).?;
+        const hit = (narrowphase.rayShape(Real, shape, Vec3r.zero, d)).?;
         try expectHitInvariants(hit, d);
         try testing.expectEqual(@as(Real, 0), hit.distance);
         try testing.expect(hit.normal.eql(d.neg())); // exactly, not approximately
@@ -424,44 +424,50 @@ test "an origin inside a shape hits at distance zero with the negated direction"
         .{ .shape = shapes[2], .origin = v(0, 4, 0) },
     };
     for (on_surface) |case| {
-        const hit = (try narrowphase.rayShape(Real, case.shape, case.origin, d)).?;
+        const hit = (narrowphase.rayShape(Real, case.shape, case.origin, d)).?;
         try testing.expectEqual(@as(Real, 0), hit.distance);
         try testing.expect(hit.normal.eql(d.neg()));
     }
 }
 
-test "a rounded box fails loud instead of missing silently" {
-    // A box core with a non-zero inflation radius is outside this milestone's
-    // shape set. It must be an error, never a null (which would read as "no hit")
-    // and never a plain box (which would under-report the surface).
+test "a rounded box is refused by the ray kernel's precondition, whatever the origin" {
+    // A box core with a non-zero inflation radius is outside the ray kernels' shape
+    // set: no arm measures its inflated surface, so the box arm would under-report it
+    // by the radius.
+    //
+    // RE-EXPRESSED at M1.1.11/E3, and the claim is unchanged. It was three
+    // `expectError(error.UnsupportedShape, rayShape(...))` calls at three origins; the
+    // kernel no longer carries an error, because through `supportShape` — which gives
+    // every stored box `radius = 0` — that error was reachable by no path at all, and
+    // a control never seen to fire is a comment with syntax (§1.11.3). The typed
+    // refusal moved to the two query entries taking a caller-supplied shape handle,
+    // where a caller can provoke it; here it is `raySupportsShape`, an ASSERTED
+    // precondition.
+    //
+    // What the three origins existed to prove — that the refusal belongs to the SHAPE
+    // and not to the trajectory, the interior origin having once returned a
+    // distance-zero hit before ever reaching the check — is now STRUCTURAL: the
+    // predicate takes no origin at all, so no origin can change its answer. That is a
+    // stronger statement than three samples, and it is the reason the re-expression is
+    // not a weakening. The assert's placement before the membership test is what keeps
+    // the interior case covered, and it was observed to fire at all three origins by
+    // hand.
     const rounded = SupportShapeR{ .core = .{ .box = v(1, 1, 1) }, .radius = 0.25 };
+    try testing.expect(!narrowphase.raySupportsShape(Real, rounded));
 
-    // The DISCRIMINATING case: an origin INSIDE the core. It is the only one that
-    // tells a rejection carried by the SHAPE from a rejection carried by the
-    // trajectory — with the check placed after the solid-membership test, this
-    // input returned a distance-zero hit and never reached the rejection at all,
-    // while the exterior case below passed for an apparent reason that did not
-    // cover it. No mutation of the kernels could have surfaced that: mutation
-    // tests the code against the tests present, never the tests against the
-    // inputs absent.
-    try testing.expectError(
-        error.UnsupportedShape,
-        narrowphase.rayShape(Real, rounded, Vec3r.zero, dir(1, 0, 0)),
-    );
-    // On a face of the core, likewise inside for the membership test.
-    try testing.expectError(
-        error.UnsupportedShape,
-        narrowphase.rayShape(Real, rounded, v(1, 0, 0), dir(1, 0, 0)),
-    );
-    // The exterior origin stays — it costs nothing and covers the ordinary path.
-    try testing.expectError(
-        error.UnsupportedShape,
-        narrowphase.rayShape(Real, rounded, v(-10, 0, 0), dir(1, 0, 0)),
-    );
-    // A radius-0 box on the same geometry is fine — so the error is about the
-    // radius and not about the box.
+    // A radius-0 box on the same geometry is admissible AND answers — so the refusal
+    // is about the radius and not about the box, and the predicate is not simply
+    // false everywhere.
     const plain = SupportShapeR{ .core = .{ .box = v(1, 1, 1) }, .radius = 0 };
-    try testing.expect((try narrowphase.rayShape(Real, plain, v(-10, 0, 0), dir(1, 0, 0))) != null);
+    try testing.expect(narrowphase.raySupportsShape(Real, plain));
+    try testing.expect(narrowphase.rayShape(Real, plain, v(-10, 0, 0), dir(1, 0, 0)) != null);
+
+    // The other two cores are admissible at ANY radius: only a box has a core whose
+    // inflation the kernel cannot express, which is what makes the predicate's
+    // condition specific rather than a blanket radius test.
+    try testing.expect(narrowphase.raySupportsShape(Real, .{ .core = .point, .radius = 0.25 }));
+    try testing.expect(narrowphase.raySupportsShape(Real, .{ .core = .{ .segment = 1 }, .radius = 0.25 }));
+    try testing.expect(narrowphase.raySupportsShape(Real, .{ .core = .point, .radius = 0 }));
 }
 
 test "a degenerate zero radius never divides by zero" {
@@ -472,12 +478,12 @@ test "a degenerate zero radius never divides by zero" {
     // the invariants rather than come out NaN.
     const point_sphere = SupportShapeR{ .core = .point, .radius = 0 };
     const d = dir(1, 0, 0);
-    const through_centre = (try narrowphase.rayShape(Real, point_sphere, v(-10, 0, 0), d)).?;
+    const through_centre = (narrowphase.rayShape(Real, point_sphere, v(-10, 0, 0), d)).?;
     try expectHitInvariants(through_centre, d);
     try testing.expectApproxEqAbs(@as(Real, 10), through_centre.distance, tol);
 
     const bare_segment = SupportShapeR{ .core = .{ .segment = 3 }, .radius = 0 };
-    const at_axis = (try narrowphase.rayShape(Real, bare_segment, v(-10, 1, 0), d)).?;
+    const at_axis = (narrowphase.rayShape(Real, bare_segment, v(-10, 1, 0), d)).?;
     try expectHitInvariants(at_axis, d);
     try testing.expectApproxEqAbs(@as(Real, 10), at_axis.distance, tol);
 }
@@ -550,18 +556,18 @@ test "the three query entries agree over a real broadphase" {
     const q = query.RayQuery{ .origin = Vec3r.zero, .direction = v(1, 0, 0), .max_distance = 100 };
 
     // closest → the nearest of the three, at its closed-form surface distance.
-    const hit = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+    const hit = (query.raycast(&world.bp, &world.bm, &world.store, q)).?;
     try testing.expectEqual(near, hit.body);
     try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
     try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
     try testing.expect(hit.position.approxEql(v(9, 0, 0), tol));
 
     // any → true, and it agrees with closest on existence.
-    try testing.expect(try query.raycastAny(&world.bp, &world.bm, &world.store, q));
+    try testing.expect(query.raycastAny(&world.bp, &world.bm, &world.store, q));
 
     // all → the three, sorted by distance.
     var buf: [8]query.RayHit = undefined;
-    const n = try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf);
+    const n = query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf);
     try testing.expectEqual(@as(u32, 3), n);
     try testing.expectEqual(near, buf[0].body);
     try testing.expectEqual(mid, buf[1].body);
@@ -570,9 +576,9 @@ test "the three query entries agree over a real broadphase" {
 
     // A ray pointing away hits nothing, in all three modes.
     const away = query.RayQuery{ .origin = Vec3r.zero, .direction = v(-1, 0, 0), .max_distance = 100 };
-    try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, away)) == null);
-    try testing.expect(!try query.raycastAny(&world.bp, &world.bm, &world.store, away));
-    try testing.expectEqual(@as(u32, 0), try query.raycastAll(&world.bp, &world.bm, &world.store, away, &buf));
+    try testing.expect((query.raycast(&world.bp, &world.bm, &world.store, away)) == null);
+    try testing.expect(!query.raycastAny(&world.bp, &world.bm, &world.store, away));
+    try testing.expectEqual(@as(u32, 0), query.raycastAll(&world.bp, &world.bm, &world.store, away, &buf));
 }
 
 test "raycastBody transports the ray by the inverse pose" {
@@ -595,7 +601,7 @@ test "raycastBody transports the ray by the inverse pose" {
     });
 
     const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
-    const local = (try world.bm.raycastBody(&world.store, id, ray)).?;
+    const local = (world.bm.raycastBody(&world.store, id, ray)).?;
     // World entry at x = 10 − 3 = 7 (the local +Y extent faces −X).
     try testing.expectApproxEqAbs(@as(Real, 7), local.distance, tol);
     // The LOCAL normal is +Y; rotating it by the body's rotation gives world −X.
@@ -604,13 +610,13 @@ test "raycastBody transports the ray by the inverse pose" {
 
     // And the full query agrees, position included.
     const q = query.RayQuery{ .origin = Vec3r.zero, .direction = v(1, 0, 0), .max_distance = 100 };
-    const hit = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+    const hit = (query.raycast(&world.bp, &world.bm, &world.store, q)).?;
     try testing.expectApproxEqAbs(@as(Real, 7), hit.distance, tol);
     try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
 
     // A stale handle answers null rather than reading garbage.
     world.removeBody(id);
-    try testing.expect((try world.bm.raycastBody(&world.store, id, ray)) == null);
+    try testing.expect((world.bm.raycastBody(&world.store, id, ray)) == null);
 }
 
 test "only an exactly zero direction is empty; both float extremes work" {
@@ -624,9 +630,9 @@ test "only an exactly zero direction is empty; both float extremes work" {
     // largest absolute component, which is zero exactly when all three are.
     {
         const q = query.RayQuery{ .origin = Vec3r.zero, .direction = Vec3r.zero, .max_distance = 100 };
-        try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, q)) == null);
-        try testing.expect(!try query.raycastAny(&world.bp, &world.bm, &world.store, q));
-        try testing.expectEqual(@as(u32, 0), try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
+        try testing.expect((query.raycast(&world.bp, &world.bm, &world.store, q)) == null);
+        try testing.expect(!query.raycastAny(&world.bp, &world.bm, &world.store, q));
+        try testing.expectEqual(@as(u32, 0), query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
     }
 
     // A HUGE direction is finite, passes the domain assert, and must give the same
@@ -643,11 +649,11 @@ test "only an exactly zero direction is empty; both float extremes work" {
         try testing.expect(std.math.isFinite(huge_component)); // still a legal direction
         try testing.expect(std.math.isInf(huge.lengthSq()));
         const q = query.RayQuery{ .origin = Vec3r.zero, .direction = huge, .max_distance = 100 };
-        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+        const hit = (query.raycast(&world.bp, &world.bm, &world.store, q)).?;
         try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
         try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
-        try testing.expect(try query.raycastAny(&world.bp, &world.bm, &world.store, q));
-        try testing.expectEqual(@as(u32, 1), try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
+        try testing.expect(query.raycastAny(&world.bp, &world.bm, &world.store, q));
+        try testing.expectEqual(@as(u32, 1), query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
     }
 
     // A DENORMAL direction, likewise. Discrimination guard the other way: its
@@ -659,7 +665,7 @@ test "only an exactly zero direction is empty; both float extremes work" {
         const tiny = v(std.math.floatTrueMin(Real), 0, 0);
         try testing.expectEqual(@as(Real, 0), tiny.lengthSq());
         const q = query.RayQuery{ .origin = Vec3r.zero, .direction = tiny, .max_distance = 100 };
-        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+        const hit = (query.raycast(&world.bp, &world.bm, &world.store, q)).?;
         try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
         try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
     }
@@ -672,26 +678,29 @@ test "only an exactly zero direction is empty; both float extremes work" {
         try testing.expectEqual(@as(Real, 0), v(t, t, t).lengthSq());
         // Aimed at the sphere's centre line from (−10,−10,−10) the ray misses it,
         // but what matters is that it is a real ray: `any` and `closest` agree.
-        const closest = try query.raycast(&world.bp, &world.bm, &world.store, q);
-        try testing.expectEqual(closest != null, try query.raycastAny(&world.bp, &world.bm, &world.store, q));
+        const closest = query.raycast(&world.bp, &world.bm, &world.store, q);
+        try testing.expectEqual(closest != null, query.raycastAny(&world.bp, &world.bm, &world.store, q));
     }
 }
 
-test "no reachable shape makes a query fail, and the error channel is not dead code" {
+test "every shape the store can build answers a ray query, and the ray path is total" {
     const gpa = std.testing.allocator;
     var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
     defer world.deinit(gpa);
 
-    // RECORDED, because it changes what this milestone can claim: through
-    // `BodyManager.raycastBody`, `error.UnsupportedShape` is currently
-    // UNREACHABLE. `shape.supportShape` maps a box to `radius = 0`
-    // unconditionally, and `ShapeStore` holds only sphere / box / capsule, so no
-    // `SupportShape` reaching the kernel can be a rounded box. The error channel
-    // is therefore structurally required — the kernel's signature carries it and
-    // E3 pins it at the kernel level — but it cannot be exercised end-to-end
-    // until a shape whose `SupportShape` can carry an unsupported combination
-    // exists (Plane / MeshShape, M1.1.11). This test asserts what IS reachable:
-    // every shape the store can build answers a query without error.
+    // RE-EXPRESSED at M1.1.11/E3, and this is the test whose PREMISE the milestone
+    // closed. It recorded a dated unreachability: through `BodyManager.raycastBody`,
+    // `error.UnsupportedShape` could not be produced by any shape the store held,
+    // because `shape.supportShape` gives every box `radius = 0` — so the ray path
+    // carried an error channel no input could reach, and the record said the date was
+    // M1.1.11. It is: the channel is GONE from the ray path (the kernel's refusal is an
+    // asserted precondition) and the typed refusal now lives at the two query entries
+    // taking a caller-supplied shape handle, where a caller can provoke it and where
+    // `shapecast_test.zig` / `overlap_test.zig` exercise both of its members.
+    //
+    // What SURVIVES here is the positive claim the old test also made, unchanged: every
+    // shape the store can build answers a ray query. It is now stated without a `try`,
+    // which is itself the observable — the entries are total.
     const sphere = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
     const box = try world.store.createShape(gpa, .{ .box = .{ .half_extents = harness.av3(1, 1, 1) } });
     const capsule = try world.store.createShape(gpa, .{ .capsule = .{ .radius = 0.5, .half_height = 1 } });
@@ -706,10 +715,10 @@ test "no reachable shape makes a query fail, and the error channel is not dead c
 
     const q = query.RayQuery{ .origin = Vec3r.zero, .direction = v(1, 0, 0), .max_distance = 100 };
     var buf: [8]query.RayHit = undefined;
-    // No error, and all three bodies answer.
-    try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, q)) != null);
-    try testing.expect(try query.raycastAny(&world.bp, &world.bm, &world.store, q));
-    try testing.expectEqual(@as(u32, 3), try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
+    // All three bodies answer, and no `try` appears on any of the three calls.
+    try testing.expect((query.raycast(&world.bp, &world.bm, &world.store, q)) != null);
+    try testing.expect(query.raycastAny(&world.bp, &world.bm, &world.store, q));
+    try testing.expectEqual(@as(u32, 3), query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
 }
 
 // ---------------------------------------------------------------------------
@@ -745,6 +754,18 @@ test "a body on layer 32 or above is refused at creation" {
     try testing.expectEqual(count_before, world.bm.count());
 }
 
+/// Whether a function type returns an error union. The property a TOTAL query entry
+/// has is its negation, and naming it is what lets the pin below assert an ABSENCE of
+/// error rather than merely a type equality that happens not to mention one.
+fn returnsErrorUnion(comptime F: type) bool {
+    return @typeInfo(@typeInfo(F).@"fn".return_type.?) == .error_union;
+}
+
+/// The error set of a fallible function type.
+fn errorSetOf(comptime F: type) type {
+    return @typeInfo(@typeInfo(F).@"fn".return_type.?).error_union.error_set;
+}
+
 test "the family carries its Real signatures, and the public types stay frozen" {
     // TWO pins, and they are deliberately not the same claim.
     //
@@ -768,26 +789,32 @@ test "the family carries its Real signatures, and the public types stay frozen" 
     const SS = body_manager_mod.ShapeStore;
     const BP = broadphase_mod.Broadphase(Real);
 
-    // (1) The three ray entries.
+    // (1) The three ray entries. TOTAL since M1.1.11/E3 — they carried
+    //     `query.Error!` while the kernel's rounded-box latch existed, and that error
+    //     was reachable through no body at all (`supportShape` gives every stored box
+    //     `radius = 0`), so it became an asserted precondition and the latch went with
+    //     it (§1.11.3, §1.11.7).
     try testing.expectEqual(
-        fn (*const BP, *const BM, *const SS, query.RayQuery) query.Error!?query.RayHit,
+        fn (*const BP, *const BM, *const SS, query.RayQuery) ?query.RayHit,
         @TypeOf(query.raycast),
     );
     try testing.expectEqual(
-        fn (*const BP, *const BM, *const SS, query.RayQuery) query.Error!bool,
+        fn (*const BP, *const BM, *const SS, query.RayQuery) bool,
         @TypeOf(query.raycastAny),
     );
     try testing.expectEqual(
-        fn (*const BP, *const BM, *const SS, query.RayQuery, []query.RayHit) query.Error!u32,
+        fn (*const BP, *const BM, *const SS, query.RayQuery, []query.RayHit) u32,
         @TypeOf(query.raycastAll),
     );
-    // …and the five that were stubs, now at `Real` with `[]BodyId` outputs.
+    // …and the five that were stubs, now at `Real` with `[]BodyId` outputs. The two
+    // taking a caller-supplied SHAPE HANDLE carry `query.Error` (§1.11.7); the three
+    // that take none do not.
     try testing.expectEqual(
-        fn (*const BP, *const BM, *const SS, query.CastQuery) ?query.CastHit,
+        fn (*const BP, *const BM, *const SS, query.CastQuery) query.Error!?query.CastHit,
         @TypeOf(query.shapeCast),
     );
     try testing.expectEqual(
-        fn (*const BP, *const BM, *const SS, query.OverlapRequest, []api.BodyId) u32,
+        fn (*const BP, *const BM, *const SS, query.OverlapRequest, []api.BodyId) query.Error!u32,
         @TypeOf(query.overlapShape),
     );
     try testing.expectEqual(
@@ -842,6 +869,37 @@ test "the family carries its Real signatures, and the public types stay frozen" 
     try testing.expectEqual(Vec3f, @FieldType(api.ClosestPointResult, "position"));
     try testing.expectEqual(f32, @FieldType(api.ClosestPointResult, "distance"));
 
+    // (3) WHICH entries carry an error, stated in the test's own vocabulary rather
+    //     than left implied by the type equalities above. An absence pinned only by a
+    //     type equality reads as an accident; pinned as an absence, a later widening
+    //     is a deliberate act — which is the whole reason §1.11.7 settles the family
+    //     before the freeze.
+    //
+    //     SIX entries are TOTAL, and they are exactly the six that receive no
+    //     caller-supplied shape handle: there is nothing about them a caller can get
+    //     wrong that a `null`, a `false` or a `0` misreports.
+    inline for (.{
+        @TypeOf(query.raycast),
+        @TypeOf(query.raycastAny),
+        @TypeOf(query.raycastAll),
+        @TypeOf(query.overlapAabb),
+        @TypeOf(query.pointQuery),
+        @TypeOf(query.closestPoint),
+    }) |Total| {
+        try testing.expect(!returnsErrorUnion(Total));
+    }
+    //     TWO carry the channel, and its error SET is pinned member by member: a
+    //     stale handle and an inadmissible probe, distinct from each other and from a
+    //     real miss. One-for-one with the frozen `WeldQueryStatus` of
+    //     `engine-c-api.md`.
+    inline for (.{ @TypeOf(query.shapeCast), @TypeOf(query.overlapShape) }) |Fallible| {
+        try testing.expect(returnsErrorUnion(Fallible));
+        try testing.expectEqual(query.Error, errorSetOf(Fallible));
+    }
+    try testing.expectEqual(@as(usize, 2), @typeInfo(query.Error).error_set.?.len);
+    try testing.expectError(error.InvalidShape, @as(query.Error!void, error.InvalidShape));
+    try testing.expectError(error.UnsupportedShape, @as(query.Error!void, error.UnsupportedShape));
+
     // The layer domain is one constant shared by the mask and by `addBody`'s
     // rejection, not two copies of 32.
     try testing.expectEqual(@as(u8, 32), api.collision_layer_count);
@@ -888,7 +946,7 @@ test "closest hit wins over several candidates" {
         for (order) |which| {
             ids[which] = try addSphereAt(gpa, &world, centres[which], 0, @intCast(which));
         }
-        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
+        const hit = (query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
         try testing.expectEqual(ids[0], hit.body);
         try testing.expectApproxEqAbs(@as(Real, 9), hit.distance, tol);
     }
@@ -932,19 +990,19 @@ test "equal distance is broken by the owning entity" {
 
         // PRECONDITION: the two exact distances are bit-identical.
         const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
-        const hit_a = (try world.bm.raycastBody(&world.store, a, ray)).?;
-        const hit_b = (try world.bm.raycastBody(&world.store, b, ray)).?;
+        const hit_a = (world.bm.raycastBody(&world.store, a, ray)).?;
+        const hit_b = (world.bm.raycastBody(&world.store, b, ray)).?;
         try testing.expectEqual(hit_a.distance, hit_b.distance);
 
         // Only then does the winner mean anything: the LOWER ENTITY.
-        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
+        const hit = (query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
         try testing.expectEqual(want, hit.body);
         try testing.expectEqual(@as(u32, low_y_entity), hit.entity.index);
         try testing.expectEqual(hit_a.distance, hit.distance);
 
         // `all` sorts on the same composite key, so the tie orders by entity too.
         var buf: [4]query.RayHit = undefined;
-        const n = try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &buf);
+        const n = query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &buf);
         try testing.expectEqual(@as(u32, 2), n);
         try testing.expectEqual(buf[0].distance, buf[1].distance);
         try testing.expect(buf[0].entity.index < buf[1].entity.index);
@@ -992,7 +1050,7 @@ test "a sleeping body is hit and stays asleep" {
     // A sleeper's proxy stays in the tree: step 10 of the cycle skips its UPDATE,
     // it does not remove it (§1.11.1).
     const down = query.RayQuery{ .origin = v(0, 10, 0), .direction = v(0, -1, 0), .max_distance = 100 };
-    const hit = (try query.raycast(&world.bp, &world.bm, &world.store, down)).?;
+    const hit = (query.raycast(&world.bp, &world.bm, &world.store, down)).?;
     try testing.expectEqual(box, hit.body);
     try testing.expectApproxEqAbs(@as(Real, 8.5), hit.distance, 1e-2);
     // The oracle for the normal is the BODY'S OWN transported local +Y, not the
@@ -1009,9 +1067,9 @@ test "a sleeping body is hit and stays asleep" {
     // Both halves are needed — a query that woke the body would still have returned
     // this hit, so the hit alone proves nothing about the wake contract.
     try testing.expect(world.bm.isSleeping(box).?);
-    _ = try query.raycastAny(&world.bp, &world.bm, &world.store, down);
+    _ = query.raycastAny(&world.bp, &world.bm, &world.store, down);
     var buf: [4]query.RayHit = undefined;
-    _ = try query.raycastAll(&world.bp, &world.bm, &world.store, down, &buf);
+    _ = query.raycastAll(&world.bp, &world.bm, &world.store, down, &buf);
     try testing.expect(world.bm.isSleeping(box).?);
 }
 
@@ -1036,15 +1094,15 @@ test "the object mask filters" {
     for (cases) |case| {
         var q = axisQuery(100);
         q.filter.layer_mask = case.mask;
-        const hit = try query.raycast(&world.bp, &world.bm, &world.store, q);
+        const hit = query.raycast(&world.bp, &world.bm, &world.store, q);
         if (case.expect) |want| {
             try testing.expectEqual(want, hit.?.body);
         } else {
             try testing.expect(hit == null);
         }
-        try testing.expectEqual(case.expect != null, try query.raycastAny(&world.bp, &world.bm, &world.store, q));
+        try testing.expectEqual(case.expect != null, query.raycastAny(&world.bp, &world.bm, &world.store, q));
         var buf: [8]query.RayHit = undefined;
-        try testing.expectEqual(case.count, try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
+        try testing.expectEqual(case.count, query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
     }
 }
 
@@ -1061,22 +1119,22 @@ test "exclusions are honoured" {
     {
         var q = axisQuery(100);
         q.filter.exclude = &.{near};
-        try testing.expectEqual(mid, (try query.raycast(&world.bp, &world.bm, &world.store, q)).?.body);
+        try testing.expectEqual(mid, (query.raycast(&world.bp, &world.bm, &world.store, q)).?.body);
     }
     // Excluding two yields the third.
     {
         var q = axisQuery(100);
         q.filter.exclude = &.{ near, mid };
-        try testing.expectEqual(far, (try query.raycast(&world.bp, &world.bm, &world.store, q)).?.body);
+        try testing.expectEqual(far, (query.raycast(&world.bp, &world.bm, &world.store, q)).?.body);
     }
     // Excluding all three yields nothing, in all three modes.
     {
         var q = axisQuery(100);
         q.filter.exclude = &.{ near, mid, far };
-        try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, q)) == null);
-        try testing.expect(!try query.raycastAny(&world.bp, &world.bm, &world.store, q));
+        try testing.expect((query.raycast(&world.bp, &world.bm, &world.store, q)) == null);
+        try testing.expect(!query.raycastAny(&world.bp, &world.bm, &world.store, q));
         var buf: [8]query.RayHit = undefined;
-        try testing.expectEqual(@as(u32, 0), try query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
+        try testing.expectEqual(@as(u32, 0), query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
     }
 }
 
@@ -1087,17 +1145,17 @@ test "max_distance is a closed interval" {
     _ = try addSphereAt(gpa, &world, .{ 10, 0, 0 }, 0, 0);
 
     // The surface is at exactly 9. A bound of 9 counts; one ulp below does not.
-    const at = try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(9));
+    const at = query.raycast(&world.bp, &world.bm, &world.store, axisQuery(9));
     try testing.expect(at != null);
     try testing.expectApproxEqAbs(@as(Real, 9), at.?.distance, tol);
-    try testing.expect(try query.raycastAny(&world.bp, &world.bm, &world.store, axisQuery(9)));
+    try testing.expect(query.raycastAny(&world.bp, &world.bm, &world.store, axisQuery(9)));
 
     const just_below = nextBelow(9);
     try testing.expect(just_below < 9); // the ulp step is real at this scale
-    try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(just_below))) == null);
-    try testing.expect(!try query.raycastAny(&world.bp, &world.bm, &world.store, axisQuery(just_below)));
+    try testing.expect((query.raycast(&world.bp, &world.bm, &world.store, axisQuery(just_below))) == null);
+    try testing.expect(!query.raycastAny(&world.bp, &world.bm, &world.store, axisQuery(just_below)));
     var buf: [4]query.RayHit = undefined;
-    try testing.expectEqual(@as(u32, 0), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(just_below), &buf));
+    try testing.expectEqual(@as(u32, 0), query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(just_below), &buf));
 }
 
 test "max_distance zero degenerates to a point test" {
@@ -1111,7 +1169,7 @@ test "max_distance zero degenerates to a point test" {
     // Inside → a hit at distance zero, whatever the direction.
     for ([_]Vec3r{ v(1, 0, 0), v(0, -1, 0), v(1, 2, -3) }) |d| {
         const q = query.RayQuery{ .origin = Vec3r.zero, .direction = d, .max_distance = 0 };
-        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+        const hit = (query.raycast(&world.bp, &world.bm, &world.store, q)).?;
         try testing.expectEqual(containing, hit.body);
         try testing.expectEqual(@as(Real, 0), hit.distance);
         // The distance-zero normal is the negated (normalised) direction.
@@ -1120,8 +1178,8 @@ test "max_distance zero degenerates to a point test" {
 
     // Outside every shape → nothing, even though a body sits 10 m down the ray.
     const outside = query.RayQuery{ .origin = v(5, 0, 0), .direction = v(1, 0, 0), .max_distance = 0 };
-    try testing.expect((try query.raycast(&world.bp, &world.bm, &world.store, outside)) == null);
-    try testing.expect(!try query.raycastAny(&world.bp, &world.bm, &world.store, outside));
+    try testing.expect((query.raycast(&world.bp, &world.bm, &world.store, outside)) == null);
+    try testing.expect(!query.raycastAny(&world.bp, &world.bm, &world.store, outside));
 }
 
 test "any terminates and agrees with closest on existence" {
@@ -1171,8 +1229,8 @@ test "any terminates and agrees with closest on existence" {
         };
         q.filter.layer_mask = if (k % 5 == 0) 0b0011 else 0xFFFF_FFFF;
 
-        const closest = try query.raycast(&world.bp, &world.bm, &world.store, q);
-        const any = try query.raycastAny(&world.bp, &world.bm, &world.store, q);
+        const closest = query.raycast(&world.bp, &world.bm, &world.store, q);
+        const any = query.raycastAny(&world.bp, &world.bm, &world.store, q);
         try testing.expectEqual(closest != null, any);
         if (any) checked_true += 1 else checked_false += 1;
     }
@@ -1191,7 +1249,7 @@ test "all returns every hit sorted by distance then BodyId" {
     const c = try addSphereAt(gpa, &world, .{ 30, 0, 0 }, 0, 2);
 
     var buf: [8]query.RayHit = undefined;
-    const n = try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &buf);
+    const n = query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &buf);
     try testing.expectEqual(@as(u32, 3), n);
     try testing.expectEqual(a, buf[0].body);
     try testing.expectEqual(b, buf[1].body);
@@ -1207,12 +1265,12 @@ test "all returns every hit sorted by distance then BodyId" {
     // entry rather than dropping late arrivals, so the answer does not depend on
     // the order the traversal happened to reach them in.
     var small: [2]query.RayHit = undefined;
-    try testing.expectEqual(@as(u32, 2), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &small));
+    try testing.expectEqual(@as(u32, 2), query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &small));
     try testing.expectEqual(a, small[0].body);
     try testing.expectEqual(b, small[1].body);
 
     var one: [1]query.RayHit = undefined;
-    try testing.expectEqual(@as(u32, 1), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &one));
+    try testing.expectEqual(@as(u32, 1), query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &one));
     try testing.expectEqual(a, one[0].body);
 
     // The overflow assertions above do NOT discriminate on their own, and a
@@ -1240,8 +1298,8 @@ test "all returns every hit sorted by distance then BodyId" {
 
         // The premise, asserted rather than assumed: `big` really is hit LATER.
         const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
-        const big_hit = (try skew.bm.raycastBody(&skew.store, big, ray)).?;
-        const small_hit = (try skew.bm.raycastBody(&skew.store, small_sphere, ray)).?;
+        const big_hit = (skew.bm.raycastBody(&skew.store, big, ray)).?;
+        const small_hit = (skew.bm.raycastBody(&skew.store, small_sphere, ray)).?;
         try testing.expect(small_hit.distance < big_hit.distance);
         // ...and its AABB really is entered EARLIER, which is what makes the
         // traversal offer it first.
@@ -1249,14 +1307,14 @@ test "all returns every hit sorted by distance then BodyId" {
             skew.bm.bodyAabb(&skew.store, small_sphere).?.min.toArray()[0]);
 
         var slot: [1]query.RayHit = undefined;
-        try testing.expectEqual(@as(u32, 1), try query.raycastAll(&skew.bp, &skew.bm, &skew.store, axisQuery(100), &slot));
+        try testing.expectEqual(@as(u32, 1), query.raycastAll(&skew.bp, &skew.bm, &skew.store, axisQuery(100), &slot));
         try testing.expectEqual(small_sphere, slot[0].body);
         try testing.expectEqual(small_hit.distance, slot[0].distance);
     }
 
     // A zero-length buffer writes nothing and says so.
     var none: [0]query.RayHit = undefined;
-    try testing.expectEqual(@as(u32, 0), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &none));
+    try testing.expectEqual(@as(u32, 0), query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &none));
 }
 
 /// Compare two hits FIELD BY FIELD with exact equality — the bitwise comparison the
@@ -1301,7 +1359,7 @@ test "the result is invariant under creation-order permutation" {
         defer world.deinit(gpa);
         for (order) |which| _ = try addSphereAt(gpa, &world, centres[which], 0, @intCast(which));
 
-        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
+        const hit = (query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
         // The ENTITY is the identity that survives a permutation; the `BodyId` does
         // not, and asserting it here would be asserting the wrong thing — on this
         // scene the nearest body happens to be created first in some orders and last
@@ -1323,7 +1381,7 @@ test "the result is invariant under creation-order permutation" {
         // …and the FULL answer, not just the closest: `all` must return the four
         // entities in the same order under every permutation.
         var buf: [4]query.RayHit = undefined;
-        try testing.expectEqual(@as(u32, 4), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &buf));
+        try testing.expectEqual(@as(u32, 4), query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &buf));
         for (buf, 0..) |h, i| try testing.expectEqual(@as(u32, @intCast(i)), h.entity.index);
     }
 }
@@ -1336,8 +1394,8 @@ test "two identical runs are bit-identical" {
     _ = try addSphereAt(gpa, &world, .{ 20, -0.5, 0 }, 0, 1);
 
     const q = axisQuery(100);
-    const first = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
-    const second = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+    const first = (query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+    const second = (query.raycast(&world.bp, &world.bm, &world.store, q)).?;
     try expectHitBitIdentical(first, second);
 
     // And in a second, independently built world with the same construction — the
@@ -1346,7 +1404,7 @@ test "two identical runs are bit-identical" {
     defer twin.deinit(gpa);
     _ = try addSphereAt(gpa, &twin, .{ 10, 0.25, 0 }, 0, 0);
     _ = try addSphereAt(gpa, &twin, .{ 20, -0.5, 0 }, 0, 1);
-    const twin_hit = (try query.raycast(&twin.bp, &twin.bm, &twin.store, q)).?;
+    const twin_hit = (query.raycast(&twin.bp, &twin.bm, &twin.store, q)).?;
     try expectHitBitIdentical(first, twin_hit);
 }
 
@@ -1373,13 +1431,13 @@ test "the sphere kernel is conditioned far from the shape" {
     // further out. Worth stating rather than implying a guard at both precisions.
     const sphere = SupportShapeR{ .core = .point, .radius = 1 };
     const d = dir(1, 0, 0);
-    const hit = (try narrowphase.rayShape(Real, sphere, v(-5000, 0, 0), d)).?;
+    const hit = (narrowphase.rayShape(Real, sphere, v(-5000, 0, 0), d)).?;
     try expectHitInvariants(hit, d); // includes |normal| == 1, which the old form failed
     try testing.expectApproxEqAbs(@as(Real, 4999), hit.distance, far_tol);
     try testing.expect(hit.normal.approxEql(v(-1, 0, 0), 1e-4));
 
     // Off-axis at the same range, so the perpendicular term is not zero either.
-    const oblique = (try narrowphase.rayShape(Real, sphere, v(-5000, 0.5, 0), d)).?;
+    const oblique = (narrowphase.rayShape(Real, sphere, v(-5000, 0.5, 0), d)).?;
     try expectHitInvariants(oblique, d);
     // x² + 0.25 = 1 ⇒ x = −√0.75, so t = 5000 − √0.75.
     try testing.expectApproxEqAbs(5000 - @sqrt(@as(Real, 0.75)), oblique.distance, far_tol);
@@ -1396,7 +1454,7 @@ test "the capsule kernel is conditioned far from the shape" {
     const d = dir(1, 0, 0);
 
     // Cylinder wall at mid-height.
-    const wall = (try narrowphase.rayShape(Real, capsule, v(-5000, 0, 0), d)).?;
+    const wall = (narrowphase.rayShape(Real, capsule, v(-5000, 0, 0), d)).?;
     try expectHitInvariants(wall, d);
     try testing.expectApproxEqAbs(@as(Real, 4999), wall.distance, far_tol);
     try testing.expect(wall.normal.approxEql(v(-1, 0, 0), 1e-4));
@@ -1404,7 +1462,7 @@ test "the capsule kernel is conditioned far from the shape" {
 
     // Top cap: the cap sphere is centred (0, 3, 0), so at y = 3.5 the chord gives
     // x = −√0.75 and t = 5000 − √0.75, with the normal (−√0.75, 0.5, 0).
-    const cap = (try narrowphase.rayShape(Real, capsule, v(-5000, 3.5, 0), d)).?;
+    const cap = (narrowphase.rayShape(Real, capsule, v(-5000, 3.5, 0), d)).?;
     try expectHitInvariants(cap, d);
     const x: Real = @sqrt(@as(Real, 0.75));
     try testing.expectApproxEqAbs(5000 - x, cap.distance, far_tol);
@@ -1412,7 +1470,7 @@ test "the capsule kernel is conditioned far from the shape" {
     try testing.expect(@abs(cap.normal.toArray()[1]) > 0.1); // really the cap, not the wall
 
     // And a genuine far-field MISS is still a miss: 1.5 m off a 1 m radius.
-    try testing.expect((try narrowphase.rayShape(Real, capsule, v(-5000, 0, 1.5), d)) == null);
+    try testing.expect((narrowphase.rayShape(Real, capsule, v(-5000, 0, 1.5), d)) == null);
 }
 
 test "any terminates the traversal, it does not merely bound it" {
@@ -1445,9 +1503,9 @@ test "any terminates the traversal, it does not merely bound it" {
     }
 
     const q = axisQuery(100);
-    const closest = (try query.raycast(&world.bp, &world.bm, &world.store, q)).?;
+    const closest = (query.raycast(&world.bp, &world.bm, &world.store, q)).?;
     try testing.expectApproxEqAbs(@as(Real, 9), closest.distance, tol);
-    try testing.expect(try query.raycastAny(&world.bp, &world.bm, &world.store, q));
+    try testing.expect(query.raycastAny(&world.bp, &world.bm, &world.store, q));
 
     // The terminating property, measured on the traversal's own node counts. This is
     // the ONE place in the milestone where a visited-node count is a legitimate
@@ -1552,7 +1610,7 @@ test "the far-field conditioning holds on an OBLIQUE ray, and the kernel is the 
     // (1) Sphere, oblique in the XY plane, at 5 000 m.
     {
         const d = dir(0.6, 0.8, 0);
-        const hit = (try narrowphase.rayShape(Real, sphere, v(-3000.4, -3999.7, 0), d)).?;
+        const hit = (narrowphase.rayShape(Real, sphere, v(-3000.4, -3999.7, 0), d)).?;
         try testing.expect(hit.distance >= 0);
         try testing.expect(hit.normal.dot(d) <= 0);
         // The NORM: tight, no envelope.
@@ -1571,7 +1629,7 @@ test "the far-field conditioning holds on an OBLIQUE ray, and the kernel is the 
     // like coverage without being any.
     {
         const d = dir(0.6, 0, 0.8);
-        const hit = (try narrowphase.rayShape(Real, capsule, v(-3000.4, 0, -3999.7), d)).?;
+        const hit = (narrowphase.rayShape(Real, capsule, v(-3000.4, 0, -3999.7), d)).?;
         try testing.expectApproxEqAbs(@as(Real, 1), hit.normal.length(), unit_tol);
         try testing.expectEqual(@as(Real, 0), hit.normal.toArray()[1]); // radial: no Y
         try testing.expectApproxEqAbs(-@sqrt(@as(Real, 0.75)), hit.normal.dot(d), std.math.floatEps(Real) * 5000);
@@ -1580,7 +1638,7 @@ test "the far-field conditioning holds on an OBLIQUE ray, and the kernel is the 
     // (3) The aligned contrast: exactly 1, at both precisions.
     {
         const d = dir(1, 0, 0);
-        const aligned = (try narrowphase.rayShape(Real, sphere, v(-5000, 0, 0), d)).?;
+        const aligned = (narrowphase.rayShape(Real, sphere, v(-5000, 0, 0), d)).?;
         try testing.expectEqual(@as(Real, 1), aligned.normal.length());
         try testing.expectEqual(@as(Real, 4999), aligned.distance);
     }
@@ -1604,7 +1662,7 @@ test "the far-field conditioning holds on an OBLIQUE ray, and the kernel is the 
         var checked_orientation: u32 = 0;
         for ([_]Real{ 1e2, 1e4, 1e5, 1e6, 2e6, 1e7, 1e8, 1e9 }) |distance| {
             const origin = d.scale(-distance).add(perp);
-            const maybe = try narrowphase.rayShape(Real, sphere, origin, d);
+            const maybe = narrowphase.rayShape(Real, sphere, origin, d);
             if (maybe == null) {
                 std.debug.print("false negative: constructed hit missed at distance {d}\n", .{distance});
                 return error.ConstructedRayMissed;
@@ -1694,8 +1752,8 @@ test "an exact distance tie is broken by entity, not by creation order" {
         // PRECONDITION 2 — the two exact distances are bit-identical, and both equal
         // the closed form.
         const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
-        const d_first = (try world.bm.raycastBody(&world.store, first, ray)).?.distance;
-        const d_second = (try world.bm.raycastBody(&world.store, second, ray)).?.distance;
+        const d_first = (world.bm.raycastBody(&world.store, first, ray)).?.distance;
+        const d_second = (world.bm.raycastBody(&world.store, second, ray)).?.distance;
         try testing.expectEqual(d_first, d_second);
         try testing.expectEqual(tieDistance(), d_first);
 
@@ -1706,7 +1764,7 @@ test "an exact distance tie is broken by entity, not by creation order" {
         try testing.expectEqual(high_entity, world.bm.entity(if (high_first) first else second).?.index);
 
         // The closest hit is the LOW-entity body under BOTH creation orders.
-        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
+        const hit = (query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
         try testing.expectEqual(want, hit.body);
         try testing.expectEqual(low_entity, hit.entity.index);
         try testing.expectEqual(tieDistance(), hit.distance);
@@ -1714,13 +1772,13 @@ test "an exact distance tie is broken by entity, not by creation order" {
         // And so is the answer TRUNCATED TO ONE SLOT: `all` retains the best under
         // the same key, so a one-slot buffer must agree with `closest`.
         var one: [1]query.RayHit = undefined;
-        try testing.expectEqual(@as(u32, 1), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &one));
+        try testing.expectEqual(@as(u32, 1), query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &one));
         try testing.expectEqual(want, one[0].body);
         try testing.expectEqual(low_entity, one[0].entity.index);
 
         // Full buffer: the tie orders by entity, so the low-entity body comes first.
         var both: [2]query.RayHit = undefined;
-        try testing.expectEqual(@as(u32, 2), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &both));
+        try testing.expectEqual(@as(u32, 2), query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &both));
         try testing.expectEqual(both[0].distance, both[1].distance);
         try testing.expectEqual(want, both[0].body);
         try testing.expectEqual(low_entity, both[0].entity.index);
@@ -1736,8 +1794,8 @@ test "an exact distance tie is broken by entity, not by creation order" {
         const a = try addSphereAt(gpa, &world, .{ 20, tie_offset, 0 }, 0, low_entity);
         const b = try addSphereAt(gpa, &world, .{ 20, -0.6, 0 }, 0, high_entity);
         const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
-        const d_a = (try world.bm.raycastBody(&world.store, a, ray)).?.distance;
-        const d_b = (try world.bm.raycastBody(&world.store, b, ray)).?.distance;
+        const d_a = (world.bm.raycastBody(&world.store, a, ray)).?.distance;
+        const d_b = (world.bm.raycastBody(&world.store, b, ray)).?.distance;
         try testing.expect(d_a != d_b);
     }
 }
@@ -1772,16 +1830,16 @@ test "two bodies on the same entity fall back on BodyId" {
         try testing.expectEqual(world.bm.entity(first).?, world.bm.entity(second).?);
 
         const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
-        const d_first = (try world.bm.raycastBody(&world.store, first, ray)).?.distance;
-        const d_second = (try world.bm.raycastBody(&world.store, second, ray)).?.distance;
+        const d_first = (world.bm.raycastBody(&world.store, first, ray)).?.distance;
+        const d_second = (world.bm.raycastBody(&world.store, second, ray)).?.distance;
         try testing.expectEqual(d_first, d_second);
 
         // Entities equal ⇒ the smaller `BodyId` decides, which here is the
         // first-created body.
-        const hit = (try query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
+        const hit = (query.raycast(&world.bp, &world.bm, &world.store, axisQuery(100))).?;
         try testing.expectEqual(first, hit.body);
         var one: [1]query.RayHit = undefined;
-        try testing.expectEqual(@as(u32, 1), try query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &one));
+        try testing.expectEqual(@as(u32, 1), query.raycastAll(&world.bp, &world.bm, &world.store, axisQuery(100), &one));
         try testing.expectEqual(first, one[0].body);
 
         winner_y[run] = world.bm.position(hit.body).?.toArray()[1];

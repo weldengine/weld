@@ -8,7 +8,7 @@
 //! the point of splitting in its own commit is that the diff can be read at `-M` and
 //! seen to move rather than change.
 //!
-//! `root.zig` owns the shared vocabulary (`Filter`, `Ray`, `RayHit`, `Error`) and the
+//! `root.zig` owns the shared vocabulary (`Filter`, `Ray`, `RayHit`) and the
 //! ordering key; this file owns only the three selection modes and the exact
 //! per-candidate test. The two import each other, which Zig resolves lazily at file
 //! granularity — the same shape the narrowphase package already has between
@@ -27,26 +27,31 @@ const ShapeStore = body_manager_mod.ShapeStore;
 const Ray = root.Ray;
 const Filter = root.Filter;
 const RayHit = root.RayHit;
-const Error = root.Error;
 const hitLess = root.hitLess;
 
 /// The exact per-candidate test every collector runs: filter, then kernel, then
 /// world-space assembly. `null` means "no hit to offer" — a filtered candidate, a
-/// stale handle, or a genuine miss; an error means the shape is unsupported and
-/// is latched by the caller.
+/// stale handle, or a genuine miss.
+///
+/// **Total since M1.1.11.** It returned `Error!?RayHit` because the kernel could
+/// answer `error.UnsupportedShape`, and each collector latched that error in a field
+/// for its entry to surface. The kernel's rounded-box refusal is an asserted
+/// precondition now, and it was reachable through no body anyway — every stored box
+/// converts with `radius = 0`. Nothing a candidate BODY can be makes this test fail,
+/// so there is no latch left to keep (§1.11.7).
 fn evaluate(
     bm: *const BodyManager,
     store: *const ShapeStore,
     filter: Filter,
     ray: Ray,
     user_data: u32,
-) Error!?RayHit {
+) ?RayHit {
     const body: BodyId = user_data;
     // The layer getter also answers staleness: a freed handle has no layer.
     const layer = bm.collisionLayer(body) orelse return null;
     if (!filter.accepts(layer, body)) return null;
 
-    const local = (try bm.raycastBody(store, body, ray)) orelse return null;
+    const local = bm.raycastBody(store, body, ray) orelse return null;
     const rotation = bm.rotation(body) orelse return null;
     const owner = bm.entity(body) orelse return null;
     return .{
@@ -71,13 +76,9 @@ pub const ClosestCollector = struct {
     ray: Ray,
     bound: Real,
     best: ?RayHit = null,
-    err: ?Error = null,
 
     pub fn add(self: *ClosestCollector, user_data: u32) void {
-        const hit = (evaluate(self.bm, self.store, self.filter, self.ray, user_data) catch |e| {
-            self.err = e;
-            return;
-        }) orelse return;
+        const hit = evaluate(self.bm, self.store, self.filter, self.ray, user_data) orelse return;
         if (hit.distance > self.bound) return; // beyond the window, closed at the bound
         if (self.best) |best| {
             // The SAME total order the sort uses (`(distance, entity, BodyId)`,
@@ -114,14 +115,10 @@ pub const AnyCollector = struct {
     ray: Ray,
     bound: Real,
     found: bool = false,
-    err: ?Error = null,
 
     pub fn add(self: *AnyCollector, user_data: u32) void {
         if (self.found) return;
-        const hit = (evaluate(self.bm, self.store, self.filter, self.ray, user_data) catch |e| {
-            self.err = e;
-            return;
-        }) orelse return;
+        const hit = evaluate(self.bm, self.store, self.filter, self.ray, user_data) orelse return;
         if (hit.distance > self.bound) return;
         self.found = true;
         self.bound = 0;
@@ -146,13 +143,9 @@ pub const AllCollector = struct {
     bound: Real,
     out: []RayHit,
     count: u32 = 0,
-    err: ?Error = null,
 
     pub fn add(self: *AllCollector, user_data: u32) void {
-        const hit = (evaluate(self.bm, self.store, self.filter, self.ray, user_data) catch |e| {
-            self.err = e;
-            return;
-        }) orelse return;
+        const hit = evaluate(self.bm, self.store, self.filter, self.ray, user_data) orelse return;
         if (hit.distance > self.bound) return;
 
         if (self.count < self.out.len) {
