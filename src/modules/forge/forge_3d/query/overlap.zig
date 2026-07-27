@@ -166,6 +166,13 @@ pub const ClosestPointCollector = struct {
 
 /// The queried point's degenerate AABB, inflated by `max_distance` — the candidate
 /// set of §1.11.13.
+///
+/// Well-formed (`min <= max`) BECAUSE the entry asserts `max_distance >= 0`: a negative
+/// bound would invert this box on every axis. The two are one statement — an inverted
+/// box denotes the empty set (§1.11.12), which is not what a negative radius should
+/// silently mean. `pointAabb` needs no such condition, being degenerate by
+/// construction, and the two shape-posed entries build theirs from `worldAabb`, whose
+/// extents are sums of non-negative terms.
 pub fn closestPointCandidates(point: Vec3r, max_distance: Real) Aabbr {
     return Aabbr.fromMinMax(point, point).inflate(Vec3r.splat(max_distance));
 }

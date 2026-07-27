@@ -703,3 +703,60 @@ test "max_distance zero answers only for a point inside the solid" {
         try testing.expect(query.closestPoint(&world.bp, &world.bm, &world.store, p, 0, .{}) == null);
     }
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.10 / E9 — an inverted query box denotes the empty set (P1)
+// ---------------------------------------------------------------------------
+
+test "overlapAabb rejects an inverted query box and returns nothing" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    // A box body whose TIGHT world AABB is exactly [−2, 2]³ — the scene the rule's
+    // three measurements are stated against (§1.11.12).
+    const body = (try place(gpa, &world, .{ .box = .{ .half_extents = harness.av3(2, 2, 2) } }, .{ 0, 0, 0 }, 0, 0)).id;
+    var out: [8]api.BodyId = undefined;
+
+    // The answer to a malformed box was not merely "sometimes non-empty": it was
+    // ARBITRARY, following the AMPLITUDE and the AXES of the inversion. The overlap
+    // predicate is written for well-formed boxes and reduces, on an inverted one, to
+    // "does the body enclose both bounds" — which the three cases below satisfy
+    // differently. Each is annotated with what it returned before the fix.
+    const Malformed = struct { name: []const u8, min: Vec3r, max: Vec3r, was: u32 };
+    const malformed = [_]Malformed{
+        // self.min(−2) <= other.max(−1) and other.min(1) <= self.max(2) → accepted.
+        .{ .name = "fully inverted, inside the body", .min = v(1, 1, 1), .max = v(-1, -1, -1), .was = 1 },
+        // self.min(−2) <= other.max(−9) is FALSE → rejected, by accident of amplitude.
+        .{ .name = "fully inverted, outside the body", .min = v(9, 9, 9), .max = v(-9, -9, -9), .was = 0 },
+        // Two axes inverted, one well-formed → accepted again.
+        .{ .name = "inverted on two axes only", .min = v(1, 1, -2), .max = v(-1, -1, 2), .was = 1 },
+    };
+
+    for (malformed) |case| {
+        // GUARD — the malformation is real: at least one component has `min > max`.
+        try testing.expect(@reduce(.Or, case.min.data > case.max.data));
+        // THE CLAIM: zero, on all three, whatever the amplitude and whatever the axes.
+        const n = query.overlapAabb(&world.bp, &world.bm, &world.store, case.min, case.max, .{}, &out);
+        if (n != 0) {
+            std.debug.print("'{s}': returned {d}, was {d} before the fix\n", .{ case.name, n, case.was });
+            return error.InvertedBoxAccepted;
+        }
+    }
+
+    // THE OTHER SIDE, and it is what makes the rejection a rejection rather than a
+    // refusal: the WELL-FORMED equivalent of the first case — the same two corners,
+    // ordered — must still answer the body. A rejection that were even slightly too
+    // wide would take this with it.
+    try testing.expectEqual(@as(u32, 1), query.overlapAabb(&world.bp, &world.bm, &world.store, v(-1, -1, -1), v(1, 1, 1), .{}, &out));
+    try testing.expectEqual(body, out[0]);
+    // …and the well-formed equivalents of the other two, which straddle and enclose
+    // the body respectively.
+    try testing.expectEqual(@as(u32, 1), query.overlapAabb(&world.bp, &world.bm, &world.store, v(-9, -9, -9), v(9, 9, 9), .{}, &out));
+    try testing.expectEqual(@as(u32, 1), query.overlapAabb(&world.bp, &world.bm, &world.store, v(-1, -1, -2), v(1, 1, 2), .{}, &out));
+
+    // A DEGENERATE box is not an inverted one: `min == max` on every axis is a single
+    // point, a legal region, and it still answers.
+    try testing.expectEqual(@as(u32, 1), query.overlapAabb(&world.bp, &world.bm, &world.store, Vec3r.zero, Vec3r.zero, .{}, &out));
+    // Degenerate on ONE axis only, well-formed on the others: still legal.
+    try testing.expectEqual(@as(u32, 1), query.overlapAabb(&world.bp, &world.bm, &world.store, v(0, -1, -1), v(0, 1, 1), .{}, &out));
+}

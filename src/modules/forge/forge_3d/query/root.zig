@@ -368,6 +368,10 @@ pub fn overlapShape(
 /// Bodies whose TIGHT world AABB overlaps `[min, max]`, faces included, written into
 /// `out` and sorted by `(entity, BodyId)`.
 ///
+/// An INVERTED box — any component with `min > max` — denotes the empty set and
+/// returns 0 without traversing (§1.11.12). A DEGENERATE box, `min == max`, is a legal
+/// region and is answered normally.
+///
 /// **This is why the entry takes `store`.** The trees hold FAT boxes
 /// (`BroadphaseConfig.margin`, default 0.1 m), so returning the candidate set would
 /// report bodies that do not overlap the query — and the error would be a function
@@ -387,10 +391,31 @@ pub fn overlapAabb(
 ) u32 {
     assertFiniteVec(min);
     assertFiniteVec(max);
-    // `min <= max` is deliberately NOT asserted: §1.11.12 states no such constraint,
-    // and an inverted box is a well-defined query whose answer is empty — `overlaps`
-    // rejects everything against it. Inventing the constraint would refuse a caller
-    // the spec permits.
+    // An INVERTED query box denotes the EMPTY SET and returns zero bodies, by an
+    // explicit rejection here (§1.11.12). A component with `min > max` describes an
+    // empty region on that axis, hence an empty region outright, so the entry answers
+    // `0` WITHOUT TRAVERSING.
+    //
+    // Three things this is not, each for its own reason:
+    //
+    //   - Not an ASSERTION. It holds in debug only, and would leave the answer
+    //     arbitrary where the engine actually runs — on an entry that returns a `u32`
+    //     with no error channel, so a caller could not learn of the malformation even
+    //     if it wanted to.
+    //   - Not the overlap PREDICATE's job. `Aabb.overlaps` is written for well-formed
+    //     boxes and serves the broadphase's hot path; on an inverted box it reduces to
+    //     "does the body enclose both bounds", which is not a rejection at all.
+    //   - Not defensive padding. It is the SEMANTICS of the region the caller
+    //     described, and the rejection lives at the entry because that is where the
+    //     caller's bounds cross the boundary.
+    //
+    // MEASURED before the fix, against a body whose tight AABB is `[−2, 2]³`: the box
+    // `min = (1,1,1)`, `max = (−1,−1,−1)` returned ONE body, `min = (9,9,9)`,
+    // `max = (−9,−9,−9)` returned ZERO, and an inversion on two axes only returned
+    // ONE — the answer followed the amplitude and the axes of the malformation. A
+    // DEGENERATE box (`min == max` on some or all axes) is a legal region, a point or
+    // a slice, and is deliberately NOT rejected: the test is strict `>`.
+    if (@reduce(.Or, min.data > max.data)) return 0;
     const query_box = Aabbr.fromMinMax(min, max);
     var collector = overlap_mod.OverlapCollector{
         .bm = bm,
