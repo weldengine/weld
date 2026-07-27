@@ -258,6 +258,37 @@ pub fn Bvh(comptime T: type) type {
                 self.queryNode(node.child2, query, collector);
         }
 
+        /// Half-space query: `collector.add(user_data)` for every proxy whose stored (fat)
+        /// AABB meets the CLOSED half-space `{ x : normal·x <= distance }`. Returns the
+        /// number of nodes visited.
+        ///
+        /// An exact mirror of `queryAabb` with one predicate swapped — the eight-branch
+        /// corner test of `Aabb.overlapsHalfSpace` instead of the box overlap. This is
+        /// the broadphase role of an unbounded shape: it is never asked for a box, it is
+        /// asked whether it meets one (`engine-physics-forge.md` §1.11.15).
+        ///
+        /// Pruning on the FAT box is conservative in the safe direction: the fat box
+        /// contains the tight one, so a subtree the half-space does not meet contains no
+        /// body it could touch. The surplus candidates a fat box admits are the exact
+        /// kernel's to reject, exactly as for `queryAabb` (§1.11.2).
+        pub fn queryHalfSpace(self: *const Self, normal: Vec3T, distance: T, collector: anytype) u32 {
+            if (self.root == null_index) return 0;
+            return self.queryHalfSpaceNode(self.root, normal, distance, collector);
+        }
+
+        /// Recursive half of `queryHalfSpace` — prune on non-overlap, collect leaves,
+        /// descend otherwise. Each touched node counts as one visit.
+        fn queryHalfSpaceNode(self: *const Self, index: u32, normal: Vec3T, distance: T, collector: anytype) u32 {
+            const node = self.nodes.items[index];
+            if (!node.aabb.overlapsHalfSpace(normal, distance)) return 1; // visited then pruned
+            if (isLeaf(node)) {
+                collector.add(node.user_data);
+                return 1;
+            }
+            return 1 + self.queryHalfSpaceNode(node.child1, normal, distance, collector) +
+                self.queryHalfSpaceNode(node.child2, normal, distance, collector);
+        }
+
         /// Ray type for this scalar.
         pub const RayT = Ray(T);
 
@@ -780,10 +811,50 @@ pub fn Broadphase(comptime T: type) type {
         /// Tuning config type for this scalar.
         pub const Config = BroadphaseConfig(T);
 
-        /// A proxy handle: the owning layer plus its tree-local proxy id.
+        /// Which structure a `Proxy` names. An UNBOUNDED shape has no AABB, so it
+        /// cannot live in a tree at all (`engine-physics-forge.md` §1.11.15): it lives in
+        /// a flat per-layer list, and the handle has to say which of the two it indexes.
+        pub const ProxyKind = enum {
+            /// A leaf of the layer's `Bvh` — `id` is a node-pool index.
+            tree,
+            /// A slot of the layer's unbounded list — `id` is a list index.
+            unbounded,
+        };
+
+        /// A proxy handle: the owning layer, WHICH STRUCTURE it lives in, and its
+        /// structure-local id.
         pub const Proxy = struct {
             layer: BroadphaseLayer,
+            /// Added at M1.1.11. Every consumer switches on it exhaustively, so the
+            /// third structure a later shape category might need is a compile error at
+            /// each site rather than a silent mis-index into the wrong pool.
+            kind: ProxyKind = .tree,
             id: u32,
+        };
+
+        /// An unbounded shape as the broadphase sees it: NOT a box, a half-space
+        /// `{ x : normal·x <= distance }` in WORLD space, carried by value.
+        ///
+        /// Deliberately a local type rather than a shared one with the narrowphase's
+        /// `plane.HalfSpace`: this file imports `foundation` only, and what is shared is
+        /// the FORMULA — `Aabb.overlapsHalfSpace`, which lives in `foundation/math`
+        /// precisely so both callers use one copy of it. Two field names are not a
+        /// duplicated formula.
+        pub const UnboundedShape = struct {
+            /// Outward unit normal; the solid is the `normal·x <= distance` side.
+            normal: Vec3T,
+            /// Offset along `normal` (metres).
+            distance: T,
+        };
+
+        /// One slot of a layer's unbounded list. RETIRED IN PLACE on removal rather than
+        /// compacted: the list is insertion-ordered and a live `Proxy` holds a list
+        /// index, so shifting a later entry down would silently re-point it. Same
+        /// discipline as the tree's `isLiveLeaf`, one level up.
+        const UnboundedSlot = struct {
+            shape: UnboundedShape,
+            user_data: u32,
+            live: bool,
         };
 
         /// A candidate overlap between two proxies, by `user_data`, canonical
@@ -799,19 +870,35 @@ pub fn Broadphase(comptime T: type) type {
         /// `computePairs`; may hold duplicates or stale ids — both are handled
         /// there (pair-set dedup; `isLiveLeaf` skip for a freed id).
         moved: [layer_count]std.ArrayListUnmanaged(u32),
+        /// Per-layer flat list of UNBOUNDED shapes, insertion-ordered, outside the
+        /// trees (§1.11.15). No hashed container, here as everywhere on this path
+        /// (determinism by construction, M1.1.14).
+        unbounded: [layer_count]std.ArrayListUnmanaged(UnboundedSlot),
+        /// Per-layer log of unbounded slots inserted since the last `computePairs` —
+        /// the second pairing direction's driver. Consumed (cleared) there.
+        ///
+        /// A separate log from `moved`, and not merely for tidiness: the two are
+        /// crossed against DIFFERENT structures. A moved bounded proxy is crossed with
+        /// the unbounded LISTS; a newly inserted unbounded shape is crossed with the
+        /// TREES. Sharing one log would lose which of the two a given id needs.
+        moved_unbounded: [layer_count]std.ArrayListUnmanaged(u32),
 
         /// A broadphase with the given tuning and no proxies.
         pub fn init(config: Config) Self {
-            var self: Self = .{ .trees = undefined, .moved = undefined };
+            var self: Self = .{ .trees = undefined, .moved = undefined, .unbounded = undefined, .moved_unbounded = undefined };
             for (&self.trees) |*t| t.* = BvhT.init(config);
             for (&self.moved) |*m| m.* = .empty;
+            for (&self.unbounded) |*u| u.* = .empty;
+            for (&self.moved_unbounded) |*m| m.* = .empty;
             return self;
         }
 
-        /// Release every layer tree and moved-log.
+        /// Release every layer tree, moved-log and unbounded list.
         pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
             for (&self.trees) |*t| t.deinit(gpa);
             for (&self.moved) |*m| m.deinit(gpa);
+            for (&self.unbounded) |*u| u.deinit(gpa);
+            for (&self.moved_unbounded) |*m| m.deinit(gpa);
             self.* = undefined;
         }
 
@@ -835,13 +922,46 @@ pub fn Broadphase(comptime T: type) type {
             try self.moved[li].ensureUnusedCapacity(gpa, 1);
             const id = try self.trees[li].insert(gpa, tight_aabb, user_data);
             self.moved[li].appendAssumeCapacity(id);
-            return .{ .layer = layer, .id = id };
+            return .{ .layer = layer, .kind = .tree, .id = id };
         }
 
-        /// Remove a proxy. A lingering moved-log entry for it is harmless — the
-        /// freed slot fails `isLiveLeaf` and is skipped by `computePairs`.
+        /// Insert an UNBOUNDED shape into `layer`'s flat list, outside the trees, and log
+        /// it so the next `computePairs` crosses it with the existing leaves.
+        ///
+        /// Precondition: `user_data` unique across ALL proxies of every layer and every
+        /// structure — the same requirement `insert` carries, and for the same reason
+        /// (`computePairs` treats it as the identity that excludes a self-match).
+        ///
+        /// Atomic: on error (OOM) the broadphase is unchanged. Both slots are reserved
+        /// before either list is appended to, so an entry can never exist unlogged — the
+        /// same reserve-then-mutate ordering `insert` uses, and here it matters more: an
+        /// unlogged unbounded shape would never be crossed with the existing leaves at
+        /// all, and nothing would ever log it again (a half-space is static and never
+        /// re-enters a moved log).
+        pub fn insertUnbounded(self: *Self, gpa: std.mem.Allocator, layer: BroadphaseLayer, shape: UnboundedShape, user_data: u32) !Proxy {
+            const li = @intFromEnum(layer);
+            try self.unbounded[li].ensureUnusedCapacity(gpa, 1);
+            try self.moved_unbounded[li].ensureUnusedCapacity(gpa, 1);
+            const id: u32 = @intCast(self.unbounded[li].items.len);
+            self.unbounded[li].appendAssumeCapacity(.{ .shape = shape, .user_data = user_data, .live = true });
+            self.moved_unbounded[li].appendAssumeCapacity(id);
+            return .{ .layer = layer, .kind = .unbounded, .id = id };
+        }
+
+        /// Remove a proxy. A lingering moved-log entry for it is harmless — a freed tree
+        /// slot fails `isLiveLeaf` and a retired unbounded slot fails its `live` flag, and
+        /// `computePairs` skips both.
+        ///
+        /// Exhaustive on `ProxyKind`, no `else`: a third structure would be a compile
+        /// error here rather than a removal that silently indexes the wrong pool.
         pub fn remove(self: *Self, proxy: Proxy) void {
-            self.trees[@intFromEnum(proxy.layer)].remove(proxy.id);
+            const li = @intFromEnum(proxy.layer);
+            switch (proxy.kind) {
+                .tree => self.trees[li].remove(proxy.id),
+                // Retired IN PLACE, never compacted: a live `Proxy` holds a list index,
+                // so shifting later entries down would re-point it at another shape.
+                .unbounded => self.unbounded[li].items[proxy.id].live = false,
+            }
         }
 
         /// Move a proxy to `tight_aabb`. Marks it moved only when the tree
@@ -856,6 +976,13 @@ pub fn Broadphase(comptime T: type) type {
         /// lost forever. The reserve is unconditional; `computePairs` retains
         /// the log's capacity, so in steady state it is a no-op.
         pub fn update(self: *Self, gpa: std.mem.Allocator, proxy: Proxy, tight_aabb: AabbT) !void {
+            // An UNBOUNDED shape has no box to move to, and it cannot move at all: a
+            // half-space forces a STATIC body (`addBody` rejects any other with
+            // `error.ShapeMustBeStatic`, §1.11.15), so it never re-enters a moved log and
+            // its pairs are established once, at insertion, and then carried by the
+            // retention rule of §1.7 step 2. Asking it to move is a caller error rather
+            // than a no-op to absorb.
+            std.debug.assert(proxy.kind == .tree);
             const li = @intFromEnum(proxy.layer);
             try self.moved[li].ensureUnusedCapacity(gpa, 1);
             if (self.trees[li].update(proxy.id, tight_aabb)) {
@@ -869,7 +996,27 @@ pub fn Broadphase(comptime T: type) type {
         pub fn queryAabb(self: *const Self, query: AabbT, collector: anytype) u32 {
             var visited: u32 = 0;
             for (&self.trees) |*t| visited += t.queryAabb(query, collector);
+            self.visitUnbounded(query, collector);
             return visited;
+        }
+
+        /// Offer every live unbounded shape the `query` box MEETS to `collector`
+        /// (M1.1.11, §1.11.1 point 3 as amended). Shared by the three query entries so
+        /// they cannot drift in which structures they visit.
+        ///
+        /// The returned visited-node count is deliberately NOT incremented by these
+        /// entries: that metric attests the TREES' logarithmic property, which the
+        /// acceptance suite asserts on, and the unbounded lists are an explicitly LINEAR
+        /// cost in a per-layer count that is one in a normal scene. Folding the two
+        /// together would make a logarithmic claim unreadable.
+        fn visitUnbounded(self: *const Self, query: AabbT, collector: anytype) void {
+            for (&self.unbounded) |*list| {
+                for (list.items) |slot| {
+                    if (!slot.live) continue;
+                    if (!query.overlapsHalfSpace(slot.shape.normal, slot.shape.distance)) continue;
+                    collector.add(slot.user_data);
+                }
+            }
         }
 
         /// Ray type for this scalar.
@@ -897,6 +1044,19 @@ pub fn Broadphase(comptime T: type) type {
                 if (collector.shouldStop()) break;
                 visited += t.queryCast(ray, extent, collector);
             }
+            // The UNBOUNDED lists, after the trees (M1.1.11). Offered UNCONDITIONALLY —
+            // there is no box to run the slab test against, which is the very reason a
+            // half-space is not in a tree — so the collector's exact kernel decides, and
+            // the bound cannot prune here. `shouldStop()` is still honoured, exactly as it
+            // is between the four trees: an `any` query that already found its candidate
+            // walks nothing further.
+            for (&self.unbounded) |*list| {
+                for (list.items) |slot| {
+                    if (collector.shouldStop()) return visited;
+                    if (!slot.live) continue;
+                    collector.add(slot.user_data);
+                }
+            }
             return visited;
         }
 
@@ -915,6 +1075,10 @@ pub fn Broadphase(comptime T: type) type {
             out.clearRetainingCapacity();
 
             var sink = PairSink{ .out = out, .gpa = gpa };
+
+            // DIRECTION (1) — a moved BOUNDED proxy is crossed with the trees it may pair
+            // with, and (M1.1.11) with their UNBOUNDED LISTS as well. Omitting the second
+            // half makes a body created after a plane collide with nothing.
             for (0..layer_count) |li| {
                 for (self.moved[li].items) |proxy| {
                     if (!self.trees[li].isLiveLeaf(proxy)) continue; // stale id
@@ -923,12 +1087,43 @@ pub fn Broadphase(comptime T: type) type {
                     for (0..layer_count) |lj| {
                         if (!default_layer_pairs[li][lj]) continue;
                         _ = self.trees[lj].queryAabb(p_aabb, &sink);
+                        for (self.unbounded[lj].items) |slot| {
+                            if (!slot.live) continue;
+                            if (!p_aabb.overlapsHalfSpace(slot.shape.normal, slot.shape.distance)) continue;
+                            sink.add(slot.user_data);
+                        }
+                    }
+                }
+            }
+
+            // DIRECTION (2) — a newly inserted UNBOUNDED shape enumerates the existing
+            // leaves of the layers it may pair with. **The omission of this direction is
+            // invisible in any scene that creates the plane first**, which is every
+            // naively written test: pair generation is moved-driven, so the bodies' own
+            // insertions would have covered it. Create the plane last and only this loop
+            // can produce those pairs.
+            //
+            // An unbounded shape is NOT crossed with the other unbounded lists. Two
+            // half-spaces have no narrowphase kernel — §1.11.15's table is a half-space
+            // against a bounded convex — and the only reachable combination is forbidden
+            // anyway: a half-space forces a static body, and `default_layer_pairs` has
+            // static×static false. A dated unreachability, named rather than left to be
+            // discovered.
+            for (0..layer_count) |li| {
+                for (self.moved_unbounded[li].items) |slot_id| {
+                    const slot = self.unbounded[li].items[slot_id];
+                    if (!slot.live) continue; // retired before the pairs were computed
+                    sink.moved_ud = slot.user_data;
+                    for (0..layer_count) |lj| {
+                        if (!default_layer_pairs[li][lj]) continue;
+                        _ = self.trees[lj].queryHalfSpace(slot.shape.normal, slot.shape.distance, &sink);
                     }
                 }
             }
             if (sink.err) |e| return e;
 
             for (&self.moved) |*m| m.clearRetainingCapacity();
+            for (&self.moved_unbounded) |*m| m.clearRetainingCapacity();
 
             std.mem.sort(Pair, out.items, {}, pairLess);
             dedupAdjacent(out);

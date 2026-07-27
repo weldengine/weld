@@ -18,6 +18,8 @@ const shape_mod = @import("../shape.zig");
 const narrowphase = @import("../pipeline/narrowphase/root.zig");
 const bm_mod = @import("../body_manager.zig");
 const broadphase_mod = @import("../pipeline/broadphase.zig");
+const query = @import("../query/root.zig");
+const harness = @import("solver_test.zig");
 const api = @import("weld_forge");
 const foundation = @import("foundation");
 
@@ -681,15 +683,26 @@ test "raycastBody hits the world half-space and its normal rotates back to n_wor
     // IN. A rigid transform does not preserve exact orthogonality: this ray is parallel
     // in WORLD, but `raycastBody` transports it into the body's local frame through a
     // quaternion built from `f32`/`f64` trigonometry, and the transported dot product
-    // comes out at ONE ULP of the scalar instead of zero. So the kernel correctly
-    // reports a crossing — at a distance of `sep / |n·dir| ≈ sep / floatEps(Real)`.
+    // comes out at one ULP of the scalar instead of zero. So the kernel correctly
+    // reports a crossing, at `sep / |n·dir|`.
     //
-    // MEASURED, and the closed form is confirmed by both legs: 8.388612e7 m at f32
-    // (`10 / 1.19e-7`) and 4.503600e16 m at f64 (`10 / 2.22e-16`). What rejects such a
-    // ray is the QUERY entry's finite `max_distance`, which §1.11.4 requires to be
-    // finite — not the kernel, which has no bound of its own and no business inventing a
-    // geometric epsilon to fabricate one. The EXACTLY-parallel case, where the guard
-    // does fire, is the kernel-level test above.
+    // MEASURED, in the build, at both precisions — and the two quantities are separated
+    // because only one of them is exact:
+    //
+    //   leg   transported n·dir        ratio to floatEps   returned t
+    //   f32   −1.1920929e-7            1.000000000         8.388612e7
+    //   f64   −2.220446049250313e-16   1.000000000         4.503599627370497e16
+    //
+    // The dot product is EXACTLY `−floatEps(Real)` on both legs, which is why `t` is of
+    // order `sep / floatEps(Real)`. It is not exactly `10 / floatEps(Real)`
+    // (8.388608e7 and 4.503599627370496e16): the excess is `sep`'s own rounding, the
+    // transported signed distance being 10 m only to the precision the same rotation
+    // carries. Both figures recompute from the table.
+    //
+    // What rejects such a ray is the QUERY entry's finite `max_distance`, which §1.11.4
+    // requires to be finite — not the kernel, which has no bound of its own and no
+    // business inventing a geometric epsilon to fabricate one. The EXACTLY-parallel
+    // case, where the guard does fire, is the kernel-level test above.
     const parallel = broadphase_mod.Ray(Real).init(vr(0, 1, 2), Vec3r.unit_y);
     const grazing = scene.bm.raycastBody(&scene.store, scene.body, parallel).?;
     try testing.expect(grazing.distance >= 10 / (8 * std.math.floatEps(Real)));
@@ -780,4 +793,266 @@ test "overlapShapeBody answers by the sign of the separation" {
     const box_probe = narrowphase.SupportShape(Real){ .core = .{ .box = vr(2, 1, 1) }, .radius = 0 };
     try testing.expect(!scene.bm.overlapShapeBody(&scene.store, scene.body, box_probe, vr(7, 1, 2), Quatr.identity).?);
     try testing.expect(scene.bm.overlapShapeBody(&scene.store, scene.body, box_probe, vr(8.5, 1, 2), Quatr.identity).?);
+}
+
+// ---------------------------------------------------------------------------
+// E5 — the eight query entries, at ENTRY grain, with a plane in the scene
+// ---------------------------------------------------------------------------
+//
+// Unblocked by the harness learning the half-space: until E5 a plane body could not be
+// added to a `harness.World` at all, `addBody` calling `bodyAabb` to build a broadphase
+// proxy. Now it goes into the layer's unbounded list instead, and the entries can be
+// exercised where a caller actually meets them.
+//
+// The scene is a GROUND plane — local `{ y <= 0 }` at identity pose, so the world
+// half-space is the same `{ y <= 0 }` — plus, where a second body is needed, a unit
+// sphere centred at `(0, 3, 0)` whose lowest point is `y = 2`. Every closed form below
+// reads off those two.
+
+/// Add the ground plane `{ y <= 0 }` to `world` as a static body.
+fn addGround(gpa: std.mem.Allocator, world: *harness.World, entity_index: u32) !api.BodyId {
+    const shape = try world.store.createShape(gpa, .{ .plane = .{ .normal = av3(0, 1, 0), .distance = 0 } });
+    return world.addBody(gpa, .{
+        .shape = shape,
+        .body_type = .static,
+        .entity = .{ .index = entity_index, .generation = 0 },
+    });
+}
+
+/// Add a unit sphere at `centre`, static so nothing has to be stepped.
+fn addUnitSphere(gpa: std.mem.Allocator, world: *harness.World, centre: [3]f32, entity_index: u32) !api.BodyId {
+    const shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    return world.addBody(gpa, .{
+        .shape = shape,
+        .body_type = .static,
+        .position = av3(centre[0], centre[1], centre[2]),
+        .entity = .{ .index = entity_index, .generation = 0 },
+    });
+}
+
+test "all eight query entries answer a half-space body" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const ground = try addGround(gpa, &world, 0);
+
+    // (1) raycast — from (0, 5, 0) straight down: the boundary is at y = 0, so t = 5,
+    // the hit point is the origin and the normal is +Y.
+    const hit = query.raycast(&world.bp, &world.bm, &world.store, .{
+        .origin = vr(0, 5, 0),
+        .direction = vr(0, -1, 0),
+        .max_distance = 100,
+    }).?;
+    try testing.expectEqual(ground, hit.body);
+    try testing.expectApproxEqAbs(@as(Real, 5), hit.distance, tol);
+    try testing.expect(hit.position.approxEql(Vec3r.zero, tol));
+    try testing.expect(hit.normal.approxEql(Vec3r.unit_y, tol));
+
+    // (2) raycastAny — the same ray, as a boolean.
+    try testing.expect(query.raycastAny(&world.bp, &world.bm, &world.store, .{
+        .origin = vr(0, 5, 0),
+        .direction = vr(0, -1, 0),
+        .max_distance = 100,
+    }));
+    // …and a ray pointing away answers false, so the entry is not answering true
+    // unconditionally now that an unbounded shape is offered to every collector.
+    try testing.expect(!query.raycastAny(&world.bp, &world.bm, &world.store, .{
+        .origin = vr(0, 5, 0),
+        .direction = vr(0, 1, 0),
+        .max_distance = 100,
+    }));
+
+    // (3) raycastAll — with a sphere at (0, 3, 0) the same downward ray meets its top at
+    // y = 4 (t = 1) and then the plane at y = 0 (t = 5), in that order.
+    const sphere_body = try addUnitSphere(gpa, &world, .{ 0, 3, 0 }, 1);
+    var hits: [4]query.RayHit = undefined;
+    const n = query.raycastAll(&world.bp, &world.bm, &world.store, .{
+        .origin = vr(0, 5, 0),
+        .direction = vr(0, -1, 0),
+        .max_distance = 100,
+    }, &hits);
+    try testing.expectEqual(@as(u32, 2), n);
+    try testing.expectEqual(sphere_body, hits[0].body);
+    try testing.expectApproxEqAbs(@as(Real, 1), hits[0].distance, tol);
+    try testing.expectEqual(ground, hits[1].body);
+    try testing.expectApproxEqAbs(@as(Real, 5), hits[1].distance, tol);
+
+    // (4) shapeCast — a sphere probe of radius 0.5 from (0, 5, 0) downward: its surface
+    // is at y = 4.5, so it travels 4.5 to touch the boundary, witness at the origin. The
+    // sphere body at (0, 3, 0) is nearer, so aim past it in X to isolate the plane.
+    const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+    const cast = (try query.shapeCast(&world.bp, &world.bm, &world.store, .{
+        .shape = probe,
+        .origin = vr(20, 5, 0),
+        .direction = vr(0, -1, 0),
+        .max_distance = 100,
+    })).?;
+    try testing.expectEqual(ground, cast.body);
+    try testing.expectApproxEqAbs(@as(Real, 4.5), cast.distance, tol);
+    try testing.expect(cast.position.approxEql(vr(20, 0, 0), tol));
+    try testing.expect(cast.normal.approxEql(Vec3r.unit_y, tol));
+
+    // (5) overlapShape — a unit-sphere probe centred at (20, 0.5, 0) reaches y = −0.5,
+    // inside the solid; at (20, 1.5, 0) it reaches y = 0.5 and does not.
+    var bodies: [4]api.BodyId = undefined;
+    const probe_unit = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    try testing.expectEqual(@as(u32, 1), try query.overlapShape(&world.bp, &world.bm, &world.store, .{
+        .shape = probe_unit,
+        .position = vr(20, 0.5, 0),
+    }, &bodies));
+    try testing.expectEqual(ground, bodies[0]);
+    try testing.expectEqual(@as(u32, 0), try query.overlapShape(&world.bp, &world.bm, &world.store, .{
+        .shape = probe_unit,
+        .position = vr(20, 1.5, 0),
+    }, &bodies));
+
+    // (6) overlapAabb — THE OBLIGATION DEFERRED FROM E2. Its collector used to call
+    // `bodyAabb` on every candidate, which asserts on a half-space; it goes through
+    // `aabbOverlapsBody` now, whose half-space arm is the corner predicate. A box
+    // straddling y = 0 meets the solid; one entirely above does not.
+    try testing.expectEqual(@as(u32, 1), query.overlapAabb(&world.bp, &world.bm, &world.store, vr(19, -1, -1), vr(21, 1, 1), .{}, &bodies));
+    try testing.expectEqual(ground, bodies[0]);
+    try testing.expectEqual(@as(u32, 0), query.overlapAabb(&world.bp, &world.bm, &world.store, vr(19, 1, -1), vr(21, 2, 1), .{}, &bodies));
+    // A box exactly touching the boundary from above counts — the half-space is CLOSED.
+    try testing.expectEqual(@as(u32, 1), query.overlapAabb(&world.bp, &world.bm, &world.store, vr(19, 0, -1), vr(21, 2, 1), .{}, &bodies));
+
+    // (7) pointQuery — solid, boundary included.
+    try testing.expectEqual(@as(u32, 1), query.pointQuery(&world.bp, &world.bm, &world.store, vr(20, -1, 0), .{}, &bodies));
+    try testing.expectEqual(ground, bodies[0]);
+    try testing.expectEqual(@as(u32, 1), query.pointQuery(&world.bp, &world.bm, &world.store, vr(20, 0, 0), .{}, &bodies));
+    try testing.expectEqual(@as(u32, 0), query.pointQuery(&world.bp, &world.bm, &world.store, vr(20, 1, 0), .{}, &bodies));
+
+    // (8) closestPoint — from (20, 5, 0) the nearest solid point is (20, 0, 0), 5 m away.
+    const closest = query.closestPoint(&world.bp, &world.bm, &world.store, vr(20, 5, 0), 10, .{}).?;
+    try testing.expectEqual(ground, closest.body);
+    try testing.expectApproxEqAbs(@as(Real, 5), closest.distance, tol);
+    try testing.expect(closest.position.approxEql(vr(20, 0, 0), tol));
+    // Outside the radius: nothing.
+    try testing.expect(query.closestPoint(&world.bp, &world.bm, &world.store, vr(20, 5, 0), 4, .{}) == null);
+}
+
+test "the object mask and the exclusions filter a half-space body" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const shape = try world.store.createShape(gpa, .{ .plane = .{ .normal = av3(0, 1, 0), .distance = 0 } });
+    const ground = try world.bm.addBody(gpa, &world.store, .{
+        .shape = shape,
+        .body_type = .static,
+        .collision_layer = 3,
+        .entity = .{ .index = 0, .generation = 0 },
+    });
+    const world_plane = shape_mod.halfSpace(world.store.get(shape).?)
+        .transformed(world.bm.rotation(ground).?, world.bm.position(ground).?);
+    _ = try world.bp.insertUnbounded(gpa, .static, .{ .normal = world_plane.normal, .distance = world_plane.distance }, ground);
+
+    const down = query.RayQuery{ .origin = vr(0, 5, 0), .direction = vr(0, -1, 0), .max_distance = 100 };
+    // The full mask sees it; a mask naming only layer 3 sees it; one naming only layer 4
+    // does not — so the mask is read from the body and not ignored for an unbounded one.
+    try testing.expect(query.raycast(&world.bp, &world.bm, &world.store, down) != null);
+    var only_3 = down;
+    only_3.filter.layer_mask = @as(u32, 1) << 3;
+    try testing.expect(query.raycast(&world.bp, &world.bm, &world.store, only_3) != null);
+    var only_4 = down;
+    only_4.filter.layer_mask = @as(u32, 1) << 4;
+    try testing.expect(query.raycast(&world.bp, &world.bm, &world.store, only_4) == null);
+
+    // Excluding the body itself removes it, on every entry that takes a filter.
+    var excluded = down;
+    const exclude_list = [_]api.BodyId{ground};
+    excluded.filter.exclude = &exclude_list;
+    try testing.expect(query.raycast(&world.bp, &world.bm, &world.store, excluded) == null);
+    try testing.expect(!query.raycastAny(&world.bp, &world.bm, &world.store, excluded));
+    var bodies: [4]api.BodyId = undefined;
+    try testing.expectEqual(@as(u32, 0), query.pointQuery(&world.bp, &world.bm, &world.store, vr(0, -1, 0), .{ .exclude = &exclude_list }, &bodies));
+    try testing.expectEqual(@as(u32, 0), query.overlapAabb(&world.bp, &world.bm, &world.store, vr(-1, -1, -1), vr(1, 1, 1), .{ .exclude = &exclude_list }, &bodies));
+    try testing.expect(query.closestPoint(&world.bp, &world.bm, &world.store, vr(0, 5, 0), 10, .{ .exclude = &exclude_list }) == null);
+}
+
+test "a sleeping body answers and stays asleep with a plane in the scene" {
+    const gpa = testing.allocator;
+    var world = harness.World.init(vr(0, -9.81, 0), 1.0 / 60.0); // sleeping ENABLED
+    defer world.deinit(gpa);
+
+    // The plane is added LAST, on purpose and twice over: it is the pairing direction a
+    // naive suite omits, and adding a body must not wake anyone — insertion touches no
+    // other body, and the wake fixpoint lives in `build`, which is not run here.
+    const box = try harness.groundAndBox(gpa, &world, 1.0, 0);
+    var ticks: u32 = 0;
+    while (ticks < 400 and !(world.bm.isSleeping(box) orelse false)) : (ticks += 1) {
+        try world.step(gpa);
+    }
+    try testing.expect(world.bm.isSleeping(box).?);
+
+    const ground = try addGround(gpa, &world, 9);
+    try testing.expect(world.bm.isSleeping(box).?); // adding the plane woke nobody
+
+    // Both answer, and the sleeper is still asleep afterwards: a query takes
+    // `*const BodyManager`, so it cannot wake anything — structurally, not by
+    // convention.
+    var bodies: [8]api.BodyId = undefined;
+    const found = query.overlapAabb(&world.bp, &world.bm, &world.store, vr(-10, -10, -10), vr(10, 10, 10), .{}, &bodies);
+    try testing.expect(found >= 2);
+    var saw_plane = false;
+    var saw_sleeper = false;
+    for (bodies[0..found]) |b| {
+        if (b == ground) saw_plane = true;
+        if (b == box) saw_sleeper = true;
+    }
+    try testing.expect(saw_plane and saw_sleeper);
+    try testing.expect(world.bm.isSleeping(box).?);
+}
+
+test "the answer is invariant under creation-order permutation, and two runs are bit-identical" {
+    const gpa = testing.allocator;
+
+    // The SAME scene built in two orders — plane first, then plane last — must give the
+    // same answer, identities included. That is §1.11.6's invariance, and here it also
+    // exercises BOTH pairing directions at entry grain: with the plane first the bodies'
+    // own insertions cross it, with the plane last only the unbounded-insertion path can.
+    const Answer = struct { body: api.BodyId, entity: u32, distance: Real, position: [3]Real };
+    var answers: [2]Answer = undefined;
+    for (0..2) |order| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        if (order == 0) {
+            _ = try addGround(gpa, &world, 0);
+            _ = try addUnitSphere(gpa, &world, .{ 0, 3, 0 }, 1);
+        } else {
+            _ = try addUnitSphere(gpa, &world, .{ 0, 3, 0 }, 1);
+            _ = try addGround(gpa, &world, 0);
+        }
+        // Aim past the sphere so the plane is the answer, and the answer's ENTITY is what
+        // is compared — `BodyId` is a slot index and encodes creation order, which is
+        // exactly what must not leak into the result (§1.11.14).
+        const hit = query.raycast(&world.bp, &world.bm, &world.store, .{
+            .origin = vr(20, 5, 0),
+            .direction = vr(0, -1, 0),
+            .max_distance = 100,
+        }).?;
+        answers[order] = .{
+            .body = hit.body,
+            .entity = world.bm.entity(hit.body).?.index,
+            .distance = hit.distance,
+            .position = hit.position.toArray(),
+        };
+    }
+    // The ENTITY is identical across the two orders, and so are the geometric answers —
+    // bit-identically, no tolerance: the same arithmetic ran on the same inputs.
+    try testing.expectEqual(@as(u32, 0), answers[0].entity);
+    try testing.expectEqual(answers[0].entity, answers[1].entity);
+    try testing.expectEqual(answers[0].distance, answers[1].distance);
+    inline for (0..3) |i| try testing.expectEqual(answers[0].position[i], answers[1].position[i]);
+
+    // And two identical runs in one world are bit-identical.
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    _ = try addGround(gpa, &world, 0);
+    const q = query.RayQuery{ .origin = vr(20, 5, 0), .direction = vr(0, -1, 0), .max_distance = 100 };
+    const first = query.raycast(&world.bp, &world.bm, &world.store, q).?;
+    const again = query.raycast(&world.bp, &world.bm, &world.store, q).?;
+    try testing.expectEqual(first.body, again.body);
+    try testing.expectEqual(first.distance, again.distance);
+    inline for (0..3) |i| try testing.expectEqual(first.position.toArray()[i], again.position.toArray()[i]);
+    inline for (0..3) |i| try testing.expectEqual(first.normal.toArray()[i], again.normal.toArray()[i]);
 }

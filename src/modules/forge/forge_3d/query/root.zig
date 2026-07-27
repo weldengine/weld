@@ -429,10 +429,14 @@ pub fn overlapShape(
 /// (`BroadphaseConfig.margin`, default 0.1 m), so returning the candidate set would
 /// report bodies that do not overlap the query — and the error would be a function
 /// of a TUNING CONSTANT, so changing the margin would change a query's answer. The
-/// exact kernel is therefore the body's tight world AABB, which `bodyAabb` computes
-/// from the shape and the pose and which consequently needs the store. The entry
-/// stops at AABB GRANULARITY, which is not the same thing as stopping at the
-/// broadphase (§1.11.12).
+/// exact kernel is therefore the body's tight world AABB, which
+/// `BodyManager.aabbOverlapsBody` computes from the shape and the pose and which
+/// consequently needs the store. The entry stops at AABB GRANULARITY, which is not the
+/// same thing as stopping at the broadphase (§1.11.12).
+///
+/// An UNBOUNDED candidate has no world AABB to compare, so that adapter answers it by
+/// the corner PREDICATE instead (§1.11.15). Both arms decide the same question — does
+/// this body meet the queried box — without sharing a representation of the body.
 pub fn overlapAabb(
     bp: *const Broadphase,
     bm: *const BodyManager,

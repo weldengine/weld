@@ -679,6 +679,44 @@ pub const BodyManager = struct {
         }
     }
 
+    /// Whether body `id`'s exact geometry meets the world AABB `query_box`, faces
+    /// included. Null on a stale/invalid handle or shape — distinct from `false`, which
+    /// is a real answer.
+    ///
+    /// **A SIXTH adapter, and item 6 of E5 is why it exists.** `overlapAabb`'s collector
+    /// used to call `bodyAabb` on every candidate, which is correct for a bounded convex
+    /// and PANICS on a half-space — the class assert — and in ReleaseFast, where that
+    /// assert is compiled out, would fall through to `worldAabb`'s `unreachable`. Putting
+    /// the dispatch here rather than in the collector keeps all class dispatch in one
+    /// file, beside the other five, and keeps `query/overlap.zig` from needing the
+    /// half-space transport.
+    ///
+    /// The convex arm is the body's TIGHT world AABB and never the broadphase leaf's fat
+    /// box, so the answer is not a function of a tuning constant (§1.11.12). The
+    /// half-space arm is the corner PREDICATE, which never builds a box at all — the two
+    /// arms agree on what "meets" means without sharing a representation.
+    pub fn aabbOverlapsBody(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        id: BodyId,
+        query_box: Aabbr,
+    ) ?bool {
+        const idx = self.alloc.validate(id) orelse return null;
+        const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
+        return switch (shape.class()) {
+            .convex => worldAabb(shape, self.bodies.items(.position)[idx], self.bodies.items(.rotation)[idx])
+                .overlaps(query_box),
+            .half_space => narrowphase.plane.aabbOverlaps(
+                Real,
+                shape_mod.halfSpace(shape).transformed(
+                    self.bodies.items(.rotation)[idx],
+                    self.bodies.items(.position)[idx],
+                ),
+                query_box,
+            ),
+        };
+    }
+
     /// Whether the world-space `point` lies inside body `id`, boundary INCLUDED —
     /// the same solidity convention as a ray origin inside a shape (§1.11.4). Null
     /// on a stale/invalid handle or shape.
