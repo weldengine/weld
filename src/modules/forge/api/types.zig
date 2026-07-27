@@ -66,7 +66,9 @@ pub const BodyType = enum(u8) {
 /// Collision-shape kind. `u8`-backed (component tag). C1.1-complete set —
 /// the spec §1 enum is a subset; the extension (plane, tapered_cylinder,
 /// height_field, mutable_compound, empty) is additive and pre-freeze
-/// (Notes decision 3b). M1.1.0 constructs only sphere/box/capsule.
+/// (Notes decision 3b). `createShape` constructs sphere/box/capsule (M1.1.0) and
+/// plane (M1.1.11); every other variant returns `error.UnsupportedShape` until its
+/// own sub-milestone.
 pub const ShapeType = enum(u8) {
     /// Sphere (radius).
     sphere,
@@ -97,8 +99,10 @@ pub const ShapeType = enum(u8) {
 /// Shape parameters, a tagged union discriminated by `ShapeType`. The spec §1
 /// flat struct self-describes as a simplification of a discriminated union;
 /// the union IS the specified design (Notes decision 3a).
-/// M1.1.0 carries payloads for sphere/box/capsule; the rest are `void`
-/// placeholders whose payloads land at their own sub-milestones (pre-freeze).
+/// M1.1.0 carries payloads for sphere/box/capsule and M1.1.11 adds plane; the
+/// rest are `void` placeholders whose payloads land at their own sub-milestones
+/// (pre-freeze extension, explicitly permitted by `engine-tier-interfaces.md`
+/// §1: "les variantes sans payload le reçoivent à leur sous-milestone").
 pub const ShapeDescriptor = union(ShapeType) {
     /// Sphere of `radius` metres.
     sphere: struct { radius: f32 = 0.5 },
@@ -112,8 +116,21 @@ pub const ShapeDescriptor = union(ShapeType) {
     tapered_cylinder: void,
     /// Placeholder — payload lands at the convex-hull sub-milestone.
     convex_hull: void,
-    /// Placeholder — payload lands at the plane sub-milestone.
-    plane: void,
+    /// Solid half-space `n·x <= d`: `normal` unit, `distance` in metres, both in
+    /// the shape's local frame and transported by the body pose (M1.1.11,
+    /// `engine-physics-forge.md` §1.11.15).
+    ///
+    /// The body carrying it must be STATIC: a half-space has neither a finite
+    /// volume, nor an inertia tensor, nor a local AABB, so mass, inertia and sleep
+    /// radius are undefined on it. `addBody` rejects a dynamic or kinematic body
+    /// carrying one with a typed error, BEFORE any computation derived from a local
+    /// AABB — the ordering is normative, the sleep radius being computed with no
+    /// branch on body type. Same invariant as the reference, whose plane declares
+    /// `MustBeStatic`.
+    ///
+    /// `normal` is expected unit and is asserted so at creation; the stored value
+    /// is normalised once there, so no call site ever re-normalises.
+    plane: struct { normal: Vec3 = Vec3.unit_y, distance: f32 = 0 },
     /// Placeholder — payload lands at the triangle-mesh sub-milestone.
     triangle_mesh: void,
     /// Placeholder — payload lands at the height-field sub-milestone.
@@ -338,6 +355,15 @@ test "ShapeDescriptor payload defaults" {
     const c = ShapeDescriptor{ .capsule = .{} };
     try testing.expectEqual(@as(f32, 0.3), c.capsule.radius);
     try testing.expectEqual(@as(f32, 0.5), c.capsule.half_height);
+
+    // The plane payload (M1.1.11), on the same footing as the other three: its
+    // default is `{x : y <= 0}`, a ground plane through the origin, and the default
+    // normal is EXACTLY unit — which is what lets `.plane = .{}` pass the
+    // creation-time domain assert of `forge_3d/shape.zig` unchanged.
+    const p = ShapeDescriptor{ .plane = .{} };
+    try testing.expect(p.plane.normal.eql(Vec3.unit_y));
+    try testing.expectEqual(@as(f32, 0), p.plane.distance);
+    try testing.expectEqual(@as(f32, 1), p.plane.normal.lengthSq());
 }
 
 test "BodyDescriptor defaults match the brief" {

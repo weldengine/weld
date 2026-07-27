@@ -56,6 +56,9 @@ pub const Aabbr = config.Aabbr;
 
 /// Immutable per-shape data (geometry + local AABB + unit-mass inertia).
 pub const Shape = shape.Shape;
+/// The narrowphase CATEGORY of a shape — bounded convex or half-space (M1.1.11,
+/// `engine-physics-forge.md` §1.11.15). Scalar-free, so re-exported as-is.
+pub const ShapeClass = shape.ShapeClass;
 /// Generational store of collision shapes.
 pub const ShapeStore = shape.ShapeStore;
 
@@ -229,4 +232,5 @@ comptime {
     _ = @import("tests/raycast_test.zig");
     _ = @import("tests/shapecast_test.zig");
     _ = @import("tests/overlap_test.zig");
+    _ = @import("tests/plane_test.zig");
 }

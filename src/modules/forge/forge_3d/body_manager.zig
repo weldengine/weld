@@ -801,8 +801,13 @@ pub fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
             const cap1 = Aabbr.fromMinMax(p1.sub(rr), p1.add(rr));
             return cap0.merge(cap1);
         },
-        // ShapeStore only admits sphere/box/capsule (createShape rejects the
-        // rest with error.UnsupportedShape), so no other tag can reach here.
+        // The store admits sphere/box/capsule and — since M1.1.11 — the plane; it
+        // rejects every other variant with `error.UnsupportedShape`, so no other tag
+        // can reach here. A HALF-SPACE has no world AABB at all and must not reach
+        // here either: it is unbounded, and an infinite box does not degrade the BVH,
+        // it destroys it (`engine-physics-forge.md` §1.11.15). The class precondition
+        // that states this, and the `addBody` rejection that makes a half-space body
+        // static-only, land at E2 of the same milestone.
         else => unreachable,
     }
 }
