@@ -89,16 +89,27 @@ test "the stored plane normal is unit, and independent of distance" {
     // The LENGTH is a structural invariant of the normalisation, so it is asserted
     // TIGHT at the SOLVER precision: `|n|² == 1` up to the float noise of
     // `normalize` itself — the squared length costs ~1.5 ulp, the square root 0.5,
-    // the reciprocal 0.5 and the product 0.5, so under 8 ulp of 1. MEASURED: 0.21
-    // ulp of `Real` at f32, 1.0 ulp at f64.
+    // the reciprocal 0.5 and the product 0.5, so under 8 ulp of 1.
     const length_tight: Real = 8 * std.math.floatEps(Real);
     // The ORIENTATION can only ever carry the resolution of its INPUT, and the input
     // is `f32` by design (§1.11.8: the public surface stays f32 whatever the solver
     // scalar). So the direction is pinned to one ulp of `f32` AT BOTH PRECISIONS —
     // asserting it at `floatEps(Real)` would be asserting that an f64 solver recovers
-    // information the f32 descriptor never carried. MEASURED against the exact
-    // rational below: 0.107 ulp of f32 at f32, 0.077 ulp at f64.
+    // information the f32 descriptor never carried.
     const direction_tol: Real = std.math.floatEps(f32);
+    // MEASURED on the oblique normal below, in the build, at both precisions:
+    //
+    //   leg   |n|² − 1                     direction vs the comparison target
+    //   f32   0            (0 ulp f32)     0            (0 ulp f32)
+    //   f64   2.220446e-16 (1 ulp f64)     9.123160e-9  (0.0765 ulp f32)
+    //
+    // The f32 leg is EXACTLY zero on both, and that is a property rather than a
+    // coincidence: the descriptor is already an f32-unit vector, so its squared
+    // length rounds to exactly 1, the square root of 1 is 1, its reciprocal is 1,
+    // and multiplying by 1 is the identity — at f32 the normalisation costs nothing
+    // because it has nothing to correct, and the comparison target `vr(2/7, …)` is
+    // bit-identical to the `av3(2/7, …)` that was stored. The f64 leg is where the
+    // widening it exists to correct is visible at all.
 
     // `distance` cannot enter the normal — it is an offset along it — and the sweep
     // spans nine orders of magnitude to say so with evidence rather than by
@@ -139,7 +150,8 @@ test "a non-unit plane normal is normalised at creation, direction preserved" {
     // rather than by luck: the three components are EQUAL, and normalising `(c, c, c)`
     // yields `(1/√3, 1/√3, 1/√3)` whatever `c` is, so the f32 quantisation of the
     // input cancels out entirely instead of surviving into the direction the way it
-    // does for the oblique normal above. MEASURED: 1.1e-16 at f64.
+    // does for the oblique normal above. MEASURED, in the build: 5.960465e-8 at f32
+    // and 1.110223e-16 at f64 — half an ulp of `Real` on both legs.
     const nearly = av3(1, 1, 1).normalize();
     const id = try store.createShape(gpa, .{ .plane = .{ .normal = nearly } });
     const record = store.get(id).?;
@@ -186,4 +198,48 @@ test "a plane shape occupies a store slot like any other and reuses it LIFO" {
     try testing.expectEqual(api.PackedId.unpack(b).generation +% 1, api.PackedId.unpack(c).generation);
     try testing.expectEqual(ShapeClass.half_space, store.get(a).?.class());
     try testing.expectEqual(ShapeClass.convex, store.get(c).?.class());
+}
+
+// ---------------------------------------------------------------------------
+// E2 — the two poisoned fields, observable
+// ---------------------------------------------------------------------------
+
+test "a plane's local aabb and unit inertia are NaN on every component" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+
+    // The poison is a PINNED BEHAVIOUR, not an intention in a comment. `local_aabb`
+    // and `unit_inertia` have no meaning for an unbounded shape with no finite volume,
+    // and their readers assert `class() == .convex` — but a `std.debug.assert` is
+    // compiled OUT of ReleaseFast, which is the mode the benches run in with a plane in
+    // the scene. So the fields carry NaN as well: the assert is the primary guard in a
+    // safe build, the NaN is the one that outlives it and propagates loudly through any
+    // arithmetic that reaches it.
+    //
+    // The alternative was measured on the E1 commit, where the fields were `undefined`:
+    // a plane's sleep radius came out 5.2510e-13 at f32 and 6.4444e-104 at f64, and the
+    // Debug 0xAA fill reads as −3.0316e-13 — all three finite, small and entirely
+    // plausible, which is precisely why nobody would ever notice one.
+    const id = try store.createShape(gpa, .{ .plane = .{ .normal = av3(0, 0, 1), .distance = 5 } });
+    const record = store.get(id).?;
+    inline for (0..3) |i| {
+        try testing.expect(std.math.isNan(record.local_aabb.min.toArray()[i]));
+        try testing.expect(std.math.isNan(record.local_aabb.max.toArray()[i]));
+        try testing.expect(std.math.isNan(record.unit_inertia.toArray()[i]));
+    }
+
+    // The geometry that DOES have meaning is untouched by the poison, so a reader that
+    // wants the plane finds it: the normal, the offset, and a zero radius.
+    try testing.expect(record.normal.approxEql(vr(0, 0, 1), 0));
+    try testing.expectEqual(@as(Real, 5), record.distance);
+    try testing.expectEqual(@as(Real, 0), record.radius);
+
+    // A convex keeps both fields finite — the poison is the half-space's, not a
+    // property of the store.
+    const sphere = store.get(try store.createShape(gpa, .{ .sphere = .{ .radius = 1 } })).?;
+    inline for (0..3) |i| {
+        try testing.expect(!std.math.isNan(sphere.local_aabb.min.toArray()[i]));
+        try testing.expect(!std.math.isNan(sphere.unit_inertia.toArray()[i]));
+    }
 }

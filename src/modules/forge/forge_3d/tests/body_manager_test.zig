@@ -462,3 +462,119 @@ test "friction and restitution survive addBody" {
     try testing.expectEqual(@as(?Real, null), bm.friction(id));
     try testing.expectEqual(@as(?Real, null), bm.restitution(id));
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.11 / E2 — a half-space forces a static body, and the class preconditions
+// ---------------------------------------------------------------------------
+
+test "a dynamic or kinematic body carrying a half-space is rejected, before any derived computation" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const plane = try store.createShape(gpa, .{ .plane = .{} });
+
+    // A half-space has no finite volume, no inertia tensor and no local AABB, so
+    // mass, inertia and sleep radius are not defined on it: a non-static body
+    // carrying one is refused by a TYPED error (`engine-physics-forge.md` §1.11.15),
+    // not accepted with unusual numbers.
+    for ([_]api.BodyType{ .dynamic, .kinematic }) |body_type| {
+        try testing.expectError(
+            error.ShapeMustBeStatic,
+            bm.addBody(gpa, &store, descOf(0, body_type, plane)),
+        );
+    }
+    // Nothing was created on the way: the refusal precedes every mutation.
+    try testing.expectEqual(@as(u32, 0), bm.count());
+
+    // THE ORDERING, observed rather than asserted in a comment. Both quantities the
+    // literal derives — `computeMotion` on its dynamic path, and the sleep radius —
+    // carry a class precondition, and the plane's `unit_inertia` / `local_aabb` are
+    // NaN. So had the refusal come after the `Body` literal, the `.dynamic` case above
+    // would have PANICKED on `computeMotion`'s assert in this Debug/ReleaseSafe build
+    // instead of returning. `expectError` returning at all is the proof the refusal
+    // arrived first; the counter-factual was run once by hand, moving the refusal below
+    // the literal, and the panic was observed at `body.zig`'s assert.
+    //
+    // And the shape resolution still comes FIRST, since the refusal reads the class:
+    // a stale shape handle is `error.InvalidShape`, not `error.ShapeMustBeStatic`.
+    var doomed = ShapeStore{};
+    defer doomed.deinit(gpa);
+    const gone = try doomed.createShape(gpa, .{ .plane = .{} });
+    doomed.destroyShape(gone);
+    try testing.expectError(
+        error.InvalidShape,
+        bm.addBody(gpa, &doomed, descOf(1, .dynamic, gone)),
+    );
+}
+
+test "a static body carrying a half-space is accepted" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+    const plane = try store.createShape(gpa, .{ .plane = .{ .normal = Vec3.unit_y, .distance = -2 } });
+
+    const id = try bm.addBody(gpa, &store, descOf(7, .static, plane));
+    try testing.expect(bm.isValid(id));
+    try testing.expectEqual(@as(u32, 1), bm.count());
+    // A static body carries zero inverse mass and inertia whatever its shape, and
+    // `computeMotion` returns before touching the NaN `unit_inertia` — so the accepted
+    // body's motion properties are the ordinary static ones, not NaN.
+    const mp = bm.motionProperties(id).?;
+    try testing.expectEqual(@as(Real, 0), mp.inv_mass);
+    inline for (0..3) |i| {
+        try testing.expect(mp.local_inv_inertia.cols[i].approxEql(Vec3r.zero, 0));
+    }
+    // Its sleep radius is NaN and nothing reads it: `sleep.updateWindows` and the
+    // island seeding both skip a non-dynamic body before they touch the radius, and a
+    // half-space has no local AABB to derive one from.
+    try testing.expect(std.math.isNan(bm.sleepRadius(id).?));
+    // The pose round-trips like any other body's.
+    try testing.expect(bm.position(id).?.approxEql(Vec3r.zero, 0));
+}
+
+test "the class precondition of every reader discriminates both ways" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+
+    // The four readers — `computeSleepRadius`, `computeMotion`'s dynamic path,
+    // `worldAabb` and `bodyAabb` — all guard on the SAME predicate,
+    // `shape.class() == .convex`. A Zig assert cannot be caught in a test, so what is
+    // discriminated here is the predicate itself, on both answers; each assert sits
+    // one line from its read, and each was observed to fire once by hand.
+    const sphere_id = try store.createShape(gpa, .{ .sphere = .{ .radius = 2 } });
+    const plane_id = try store.createShape(gpa, .{ .plane = .{} });
+    const sphere = store.get(sphere_id).?;
+    const plane = store.get(plane_id).?;
+    try testing.expect(sphere.class() == .convex); // the readers proceed
+    try testing.expect(plane.class() != .convex); // the readers refuse
+
+    // POSITIVE sense, executed: every reader answers on a convex, so the guards are
+    // not simply refusing everything. Sleep radius of a radius-2 sphere: its local
+    // AABB is `[−2, 2]³`, whose furthest corner is at `√(4+4+4) = 2√3`.
+    try testing.expectApproxEqAbs(
+        @as(Real, 2 * @sqrt(@as(Real, 3))),
+        body_mod.computeSleepRadius(sphere),
+        1e-5,
+    );
+    const dyn = bm_mod.worldAabb(sphere, vr(1, 0, 0), config.Quatr.identity);
+    try testing.expect(dyn.min.approxEql(vr(-1, -2, -2), 1e-6));
+    const body = try bm.addBody(gpa, &store, descOf(0, .dynamic, sphere_id));
+    try testing.expect(bm.bodyAabb(&store, body) != null);
+    try testing.expect(bm.motionProperties(body).?.inv_mass > 0);
+
+    // NEGATIVE sense, on the data rather than through the guard: the plane's two
+    // fields really are the poison the readers are guarded against, so the guards
+    // protect something. NaN and not a finite placeholder — a `std.debug.assert` is
+    // compiled out of ReleaseFast, and MEASURED on the E1 commit an `undefined`
+    // `local_aabb` gave a plane a sleep radius of 5.2510e-13 at f32: finite, small
+    // and plausible enough that nobody would see it go past.
+    try testing.expect(std.math.isNan(plane.local_aabb.min.toArray()[0]));
+    try testing.expect(std.math.isNan(plane.unit_inertia.toArray()[0]));
+}

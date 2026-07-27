@@ -117,10 +117,36 @@ pub const BodyManager = struct {
     }
 
     /// Create a body from `desc`, resolving its shape in `store` for the
-    /// inertia. Returns the new handle. Velocity starts at zero. Fails with
-    /// `error.InvalidShape` on a stale/invalid `desc.shape`.
+    /// inertia. Returns the new handle. Velocity starts at zero.
+    ///
+    /// Three typed failures, in the order they are tested: `error.InvalidShape` on a
+    /// stale/invalid `desc.shape`; `error.ShapeMustBeStatic` when the shape is a
+    /// half-space and `desc.body_type` is not `.static` (§1.11.15); and
+    /// `error.InvalidCollisionLayer` outside `[0, collision_layer_count)` (§1.11.5).
+    /// On any of them nothing is mutated and no handle is allocated.
     pub fn addBody(self: *BodyManager, gpa: std.mem.Allocator, store: *const ShapeStore, desc: BodyDescriptor) !BodyId {
         const shape = store.get(desc.shape) orelse return error.InvalidShape;
+        // A HALF-SPACE FORCES A STATIC BODY, and the refusal is a TYPED error
+        // (`engine-physics-forge.md` §1.11.15). It has no finite volume, no inertia
+        // tensor and no local AABB, so mass, inertia and sleep radius are not defined
+        // on it — a dynamic or kinematic body carrying one is not a body with unusual
+        // numbers, it is a body whose numbers do not exist. Same invariant as the
+        // reference, whose plane declares `MustBeStatic`.
+        //
+        // **The ORDER is normative, not stylistic.** It sits immediately after the
+        // shape resolution — which it depends on — and BEFORE every computation
+        // derived from the local AABB or the inertia: both `computeMotion` (on its
+        // dynamic path) and the sleep radius live in the `Body` literal below, with no
+        // branch on body type of their own. Moved after that literal, a dynamic
+        // half-space would reach `computeMotion`'s class assert in a safe build and,
+        // in ReleaseFast where that assert is compiled out, would silently store a NaN
+        // inverse inertia.
+        //
+        // Named for the invariant rather than for the shape: `MeshShape` is static-only
+        // too (§2), so M1.1.11.1 reuses this error instead of minting a second one.
+        if (shape.class() == .half_space and desc.body_type != .static) {
+            return error.ShapeMustBeStatic;
+        }
         // A TYPED error, not a debug assert: the query mask is 32 bits, so a body
         // beyond that domain would be invisible to every query with no diagnostic
         // at all — the silent-miss class the shape invariant forbids
@@ -173,7 +199,20 @@ pub const BodyManager = struct {
             // widening error and report a phantom displacement — tiny against the
             // 15 mm bound, and wrong regardless.
             .sleep_ref_rotation = rotation_r,
-            .sleep_radius = body_mod.computeSleepRadius(shape),
+            // A switch on the CLASS, exhaustive and with no `else` arm, so the mesh
+            // (M1.1.11.1) is a compile error here and must state its own answer.
+            //
+            // A half-space has no local AABB, hence no sleep radius — and needs none:
+            // it can only be STATIC (rejected above otherwise), and nothing ever reads
+            // a static body's radius, both `sleep.updateWindows` and the island seeding
+            // skipping a non-dynamic body before they touch it. NaN rather than a
+            // plausible zero, for the reason the two shape fields it derives from carry
+            // NaN: the class asserts guarding them are compiled out of ReleaseFast, and
+            // a finite placeholder there would pass unnoticed.
+            .sleep_radius = switch (shape.class()) {
+                .convex => body_mod.computeSleepRadius(shape),
+                .half_space => std.math.nan(Real),
+            },
             .entity = desc.entity,
         };
         try self.alloc.ensureUnusedCapacity(gpa, 1);
@@ -281,7 +320,9 @@ pub const BodyManager = struct {
 
     /// Safe getter: the body's sleep radius (distance from its centre to the
     /// furthest corner of its shape's local AABB), or null if `id` is
-    /// stale/invalid. Pose-invariant, computed once at creation.
+    /// stale/invalid. Pose-invariant, computed once at creation. NaN for a body
+    /// carrying a half-space, which has no local AABB and no sleep window — see
+    /// `Body.sleep_radius`.
     pub fn sleepRadius(self: *const BodyManager, id: BodyId) ?Real {
         const idx = self.alloc.validate(id) orelse return null;
         return self.bodies.items(.sleep_radius)[idx];
@@ -433,6 +474,11 @@ pub const BodyManager = struct {
         const pos = self.bodies.items(.position)[idx];
         const rot = self.bodies.items(.rotation)[idx];
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
+        // The same precondition `worldAabb` carries, asserted again at the BODY grain
+        // — this is where a caller holds a `BodyId` and can be told which body it
+        // asked about. A body carrying a half-space is asked a PREDICATE ("do you
+        // overlap this box"), never a box (§1.11.15).
+        std.debug.assert(shape.class() == .convex);
         return worldAabb(shape, pos, rot);
     }
 
@@ -774,7 +820,17 @@ fn deepCoreWitness(simplex: []const narrowphase.Simplex(Real).Vertex) Vec3r {
 /// `pub` since M1.1.10 / E5: a shape CAST needs the initial world AABB of a shape
 /// that is not a body — the query's own — to size the swept traversal
 /// (`engine-physics-forge.md` §1.11.10). `bodyAabb` is the body-level wrapper.
+///
+/// **PRECONDITION: the shape is a bounded CONVEX.** A half-space has no world AABB
+/// at all, and an infinite box does not degrade the BVH, it destroys it: its centre
+/// is `(−inf + inf)·0.5`, i.e. NaN, which is the ray origin a shape cast derives
+/// from a box; its surface area is infinite, so the SAH cost is infinite at every
+/// candidate; and the union carries the infinity to the root, after which every
+/// query visits every node (§1.11.15). The plane is asked a PREDICATE instead. The
+/// class is asserted rather than left to fall through to the `unreachable` below,
+/// because the class is the information the failure should carry.
 pub fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
+    std.debug.assert(shape.class() == .convex);
     switch (shape.shape_type) {
         .sphere => return Aabbr.fromCenterHalfExtents(pos, Vec3r.splat(shape.radius)),
         .box => {
@@ -801,13 +857,10 @@ pub fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
             const cap1 = Aabbr.fromMinMax(p1.sub(rr), p1.add(rr));
             return cap0.merge(cap1);
         },
-        // The store admits sphere/box/capsule and — since M1.1.11 — the plane; it
-        // rejects every other variant with `error.UnsupportedShape`, so no other tag
-        // can reach here. A HALF-SPACE has no world AABB at all and must not reach
-        // here either: it is unbounded, and an infinite box does not degrade the BVH,
-        // it destroys it (`engine-physics-forge.md` §1.11.15). The class precondition
-        // that states this, and the `addBody` rejection that makes a half-space body
-        // static-only, land at E2 of the same milestone.
+        // The store admits sphere/box/capsule and — since M1.1.11 — the plane, and
+        // rejects every other variant with `error.UnsupportedShape`. The plane is
+        // excluded by the class precondition above, so the three arms are exhaustive
+        // over what can reach here.
         else => unreachable,
     }
 }

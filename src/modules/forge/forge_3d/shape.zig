@@ -83,22 +83,25 @@ pub const Shape = struct {
     distance: Real = 0,
     /// Local-space (untransformed) bounding box.
     ///
-    /// **NOT VALID for a half-space**, which is unbounded: `undefined` there, and
-    /// every reader asserts `class() == .convex` first (`body.computeSleepRadius`,
-    /// `body_manager.worldAabb`, `body_manager.bodyAabb`). An infinite box is not
-    /// the alternative — its centre is `(−inf + inf)·0.5`, i.e. NaN, which is the
-    /// ray origin a shape cast derives from a box; its surface area is infinite, so
-    /// the SAH cost is infinite at every candidate; and the union propagates the
-    /// infinity to the root, after which every query visits every node. A finite
-    /// substitute box is refused too: it is a tuning constant that changes a
-    /// query's answer (§1.11.15).
+    /// **NOT VALID for a half-space**, which is unbounded: every component is NaN
+    /// there, and its sole reader — `body.computeSleepRadius` — asserts
+    /// `class() == .convex` first. (`body_manager.worldAabb` and `bodyAabb` assert
+    /// the same class for a DIFFERENT reason: they never read this field, they
+    /// compute a world box per primitive, and a half-space simply has none.)
+    ///
+    /// An infinite box is not the alternative — its centre is `(−inf + inf)·0.5`,
+    /// i.e. NaN, which is the ray origin a shape cast derives from a box; its
+    /// surface area is infinite, so the SAH cost is infinite at every candidate;
+    /// and the union propagates the infinity to the root, after which every query
+    /// visits every node. A finite substitute box is refused too: it is a tuning
+    /// constant that changes a query's answer (§1.11.15).
     local_aabb: Aabbr,
     /// Unit-mass local inertia diagonal (principal axes).
     ///
-    /// **NOT VALID for a half-space**, which has no finite volume: `undefined`
-    /// there. `body.computeMotion` reads it only on the dynamic path, and asserts
-    /// the class there — a dynamic body carrying a half-space never gets that far,
-    /// `addBody` rejecting it with a typed error first.
+    /// **NOT VALID for a half-space**, which has no finite volume: NaN there.
+    /// `body.computeMotion` reads it only on the dynamic path and asserts the class
+    /// there — a dynamic body carrying a half-space never gets that far, `addBody`
+    /// rejecting it with `error.ShapeMustBeStatic` first.
     unit_inertia: Vec3r,
 
     /// The narrowphase category of this shape — the dispatch every consumer makes
@@ -193,6 +196,12 @@ pub fn supportShape(shape: Shape) narrowphase.SupportShape(Real) {
     };
 }
 
+/// The poison value the half-space carries in the two fields that have no meaning
+/// for it, `local_aabb` and `unit_inertia` (see their field docs). NaN and not a
+/// finite placeholder: it survives ReleaseFast, where the class asserts guarding
+/// those fields are compiled out.
+const nan: Real = std.math.nan(Real);
+
 /// Slack allowed on the descriptor normal's unit norm, in ULPs of 1 at `f32` — the
 /// precision the descriptor is expressed in. A normal built by normalising an `f32`
 /// vector, or from `f32` trigonometry, lands a few ULPs off unit; anything further
@@ -276,10 +285,28 @@ fn buildShape(desc: ShapeDescriptor) error{UnsupportedShape}!Shape {
                 .normal = Vec3r.fromArray(.{ n[0], n[1], n[2] }).normalize(),
                 .distance = p.distance,
                 // NOT VALID for a half-space (see the field docs): unbounded, so no
-                // local AABB, and no finite volume, so no inertia. Every reader
-                // asserts `class() == .convex` before touching either.
-                .local_aabb = undefined,
-                .unit_inertia = undefined,
+                // local AABB, and no finite volume, so no inertia.
+                //
+                // **POISONED WITH NaN, not left `undefined`**, and the two mechanisms
+                // guarding these fields are COMPLEMENTARY rather than redundant. The
+                // class assert on each reader is a `std.debug.assert`, so it is
+                // compiled OUT of ReleaseFast — which is the mode the benches run in,
+                // with a plane in the scene. `undefined` there is whatever the memory
+                // held; in Debug it is the 0xAA fill, which reads as a perfectly
+                // ordinary small number: MEASURED on the E1 commit, a plane's sleep
+                // radius came out 5.2510e-13 at f32 and 6.4444e-104 at f64 — finite,
+                // small and plausible, so nobody would ever see it go past. A NaN
+                // survives ReleaseFast and propagates loudly through every arithmetic
+                // path instead. The assert is the primary guard in a safe build; the
+                // NaN is the one that outlives it.
+                //
+                // Safe because NOTHING compares or hashes a `Shape` by value — the
+                // 34 `store.get` sites all read individual fields, and `shapes.items`
+                // is touched only inside this file. A future `expectEqual` on a whole
+                // `Shape`, or a `Shape`-keyed map, would break on `NaN != NaN`; that
+                // is the one thing this choice forbids.
+                .local_aabb = Aabbr.fromMinMax(Vec3r.splat(nan), Vec3r.splat(nan)),
+                .unit_inertia = Vec3r.splat(nan),
             };
         },
         else => return error.UnsupportedShape,

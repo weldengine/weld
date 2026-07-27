@@ -100,9 +100,10 @@ pub const ShapeType = enum(u8) {
 /// flat struct self-describes as a simplification of a discriminated union;
 /// the union IS the specified design (Notes decision 3a).
 /// M1.1.0 carries payloads for sphere/box/capsule and M1.1.11 adds plane; the
-/// rest are `void` placeholders whose payloads land at their own sub-milestones
-/// (pre-freeze extension, explicitly permitted by `engine-tier-interfaces.md`
-/// §1: "les variantes sans payload le reçoivent à leur sous-milestone").
+/// rest are `void` placeholders whose payloads land at their own sub-milestones —
+/// a pre-freeze extension of the union that `engine-tier-interfaces.md` §1
+/// explicitly permits, each payload-less variant receiving its payload at the
+/// sub-milestone that delivers the shape.
 pub const ShapeDescriptor = union(ShapeType) {
     /// Sphere of `radius` metres.
     sphere: struct { radius: f32 = 0.5 },
@@ -123,10 +124,10 @@ pub const ShapeDescriptor = union(ShapeType) {
     /// The body carrying it must be STATIC: a half-space has neither a finite
     /// volume, nor an inertia tensor, nor a local AABB, so mass, inertia and sleep
     /// radius are undefined on it. `addBody` rejects a dynamic or kinematic body
-    /// carrying one with a typed error, BEFORE any computation derived from a local
-    /// AABB — the ordering is normative, the sleep radius being computed with no
-    /// branch on body type. Same invariant as the reference, whose plane declares
-    /// `MustBeStatic`.
+    /// carrying one with `error.ShapeMustBeStatic`, BEFORE any computation derived
+    /// from a local AABB or an inertia — the ordering is normative, both of those
+    /// living in the body literal with no branch on body type of their own. Same
+    /// invariant as the reference, whose plane declares `MustBeStatic`.
     ///
     /// `normal` is expected unit and is asserted so at creation; the stored value
     /// is normalised once there, so no call site ever re-normalises.

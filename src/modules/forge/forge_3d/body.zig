@@ -126,6 +126,11 @@ pub const Body = struct {
     /// AABB, computed once at creation. It converts the rotation since the
     /// reference pose into the displacement of the body's furthest material point,
     /// so one bound in metres covers both translation and rotation.
+    ///
+    /// **NaN for a half-space**, which has no local AABB to derive it from. Nothing
+    /// reads it there: such a body can only be `.static` (`addBody` rejects any other
+    /// type with `error.ShapeMustBeStatic`), and both `sleep.updateWindows` and the
+    /// island seeding skip a non-dynamic body before touching the radius.
     sleep_radius: Real,
     /// Owning ECS entity.
     entity: EntityId,
@@ -136,13 +141,27 @@ pub const Body = struct {
 /// component-wise maximum of `|min|` and `|max|` picks that corner without
 /// enumerating all eight — the furthest one is the one furthest along every axis
 /// at once. Computed once, at body creation: it is pose-invariant.
+///
+/// **PRECONDITION: the shape is a bounded CONVEX** (M1.1.11, §1.11.15). This reads
+/// `local_aabb`, and a half-space has none — the field is NaN there. `addBody`
+/// never asks: a non-static body carrying a half-space is rejected with
+/// `error.ShapeMustBeStatic` before the `Body` literal is built, and for a static
+/// one the literal branches on the class instead of calling this, a static body
+/// having no sleep window at all (`sleep.updateWindows` and the island seeding both
+/// skip a non-dynamic body before reading the radius).
 pub fn computeSleepRadius(shape: Shape) Real {
+    std.debug.assert(shape.class() == .convex);
     return shape.local_aabb.min.abs().max(shape.local_aabb.max.abs()).length();
 }
 
 /// Derive `MotionProperties` from a descriptor and its shape. Inertia is the
 /// shape's unit-mass diagonal scaled by `desc.mass`, then inverted per axis.
 /// Static/kinematic bodies get zero inverse mass and inertia.
+///
+/// The class precondition is on the DYNAMIC PATH ONLY, and deliberately not at the
+/// entry: a STATIC body carrying a half-space is legal (§1.11.15) and takes the
+/// early return below without ever touching `unit_inertia`. Asserting at the entry
+/// would refuse the one body type a half-space is allowed to have.
 pub fn computeMotion(desc: BodyDescriptor, shape: Shape) MotionProperties {
     const ld: Real = desc.linear_damping;
     const ad: Real = desc.angular_damping;
@@ -158,6 +177,12 @@ pub fn computeMotion(desc: BodyDescriptor, shape: Shape) MotionProperties {
         };
     }
 
+    // The dynamic path reads `unit_inertia`, which a half-space does not have (NaN
+    // there). Unreachable from `addBody`, which rejects a dynamic body carrying one
+    // with `error.ShapeMustBeStatic` before building the `Body` — this is what makes
+    // that rejection's ORDERING load-bearing rather than stylistic (§1.11.15): move
+    // it after the literal and a dynamic half-space lands here instead.
+    std.debug.assert(shape.class() == .convex);
     // A dynamic body must have positive mass (inv_mass/inertia divide by it).
     // Full descriptor validation (typed errors, degenerate geometry) is a later
     // milestone; this guards the unchecked dynamic path.
