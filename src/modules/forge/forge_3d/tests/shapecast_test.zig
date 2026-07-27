@@ -509,3 +509,289 @@ test "an oblique cast in the far field keeps a unit normal" {
     try testing.expectApproxEqAbs(@as(Real, 1), aligned.normal.length(), unit_tol);
     try testing.expect(aligned.normal.dot(v(1, 0, 0)) <= 0);
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.10 / E4 — the `BodyManager` adapters
+// ---------------------------------------------------------------------------
+//
+// Four adapters resolve a BODY's pose and support shape through `store` and call the
+// exact kernel: `castShapeBody`, `overlapShapeBody`, `containsPointBody`,
+// `closestPointBody`. They mirror `raycastBody` / `gjkPair` / `collidePair`, take
+// `*const BodyManager` — a query cannot wake anything, structurally, not by
+// convention — and answer null on a stale HANDLE and on a stale SHAPE, which are two
+// distinct ways to be gone.
+//
+// The query-level suites of the five entries are E6's; this section is the wiring.
+
+const harness = @import("solver_test.zig");
+const body_manager_mod = @import("../body_manager.zig");
+const api = @import("weld_forge");
+const shape_mod = @import("../shape.zig");
+
+/// A body carrying a sphere at `centre`, static, so a scene can be built without the
+/// solver moving anything. Both handles come back: the tests need the SHAPE id to
+/// destroy it independently of the body, and `BodyManager` deliberately grows no
+/// getter for it here — E4's scope is the four adapters.
+const SphereBody = struct { id: api.BodyId, shape: api.ShapeId };
+
+fn addSphereBody(gpa: std.mem.Allocator, world: *harness.World, centre: [3]f32, radius: f32) !SphereBody {
+    const shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = radius } });
+    const id = try world.addBody(gpa, .{
+        .shape = shape,
+        .position = harness.av3(centre[0], centre[1], centre[2]),
+        .body_type = .static,
+        .entity = .{ .index = 0, .generation = 0 },
+    });
+    return .{ .id = id, .shape = shape };
+}
+
+test "the adapters call the kernel, bit for bit, and do not reimplement it" {
+    // THE GUARD THAT IS MOST OFTEN MISSING HERE. An adapter that quietly grew its own
+    // geometry would satisfy every value assertion in this file that was written from
+    // the same wrong geometry. So the oracle is not a number: it is the KERNEL
+    // ITSELF, called directly from the test on the same inputs, and compared BIT FOR
+    // BIT — not to a tolerance, which would leave room for a near-miss reimplementation.
+    //
+    // The scene is arranged so the adapter's frame conversions are the IDENTITY — the
+    // cast shape at the origin with identity rotation, the body unrotated — which is
+    // what makes bit-equality the right assertion rather than an optimistic one. The
+    // conversions themselves are exercised by the rotated scenes further down.
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const created = try addSphereBody(gpa, &world, .{ 10, 0, 0 }, 2);
+    const body = created.id;
+    const body_shape = shape_mod.supportShape(world.store.get(created.shape).?);
+
+    // (1) castShapeBody against castShape.
+    {
+        const cast_shape = sphere(1);
+        const relpose = RP.init(Vec3r.zero, Quatr.identity, v(10, 0, 0), Quatr.identity);
+        const direct = narrowphase.castShape(Real, cast_shape, relpose, body_shape, v(1, 0, 0), 100).?;
+        const through = world.bm.castShapeBody(&world.store, body, cast_shape, Vec3r.zero, Quatr.identity, v(1, 0, 0), 100).?;
+        try testing.expectEqual(direct.distance, through.distance);
+        inline for (0..3) |i| {
+            try testing.expectEqual(direct.point.toArray()[i], through.position.toArray()[i]);
+            try testing.expectEqual(direct.normal.toArray()[i], through.normal.toArray()[i]);
+        }
+        // …and the closed form the geometry gives independently: a unit sphere
+        // sweeping +X onto a radius-2 sphere at x = 10 touches at 10 − 3 = 7.
+        try testing.expectApproxEqAbs(@as(Real, 7), through.distance, tol);
+    }
+
+    // (2) overlapShapeBody against gjk's own regime test.
+    {
+        const probe = sphere(1);
+        for ([_]Real{ 8, 12.9, 13.5 }) |x| {
+            const direct = narrowphase.gjk(Real, probe, v(x, 0, 0), Quatr.identity, body_shape, v(10, 0, 0), Quatr.identity);
+            const through = world.bm.overlapShapeBody(&world.store, body, probe, v(x, 0, 0), Quatr.identity).?;
+            try testing.expectEqual(direct.status != .separated, through);
+        }
+    }
+
+    // (3) containsPointBody against containsPoint in the body's local frame.
+    {
+        for ([_]Vec3r{ v(10, 0, 0), v(12, 0, 0), v(12.001, 0, 0), v(10, 1.5, 0) }) |p| {
+            const direct = narrowphase.containsPoint(Real, body_shape, p.sub(v(10, 0, 0)));
+            const through = world.bm.containsPointBody(&world.store, body, p).?;
+            try testing.expectEqual(direct, through);
+        }
+    }
+
+    // (4) closestPointBody against the §1.11.13 derivation applied to gjk's output.
+    {
+        const p = v(20, 5, 0);
+        const probe: SS = .{ .core = .point, .radius = 0 };
+        const direct = narrowphase.gjk(Real, probe, p, Quatr.identity, body_shape, v(10, 0, 0), Quatr.identity);
+        const through = world.bm.closestPointBody(&world.store, body, p).?;
+        try testing.expectEqual(@max(0, direct.distance - 2), through.distance);
+        // A point core's closest point on a sphere core is the sphere's centre, so
+        // the surface projection is the whole of the geometry here and it is exact:
+        // |(20,5,0) − (10,0,0)| = √125, so the surface distance is √125 − 2 and the
+        // surface point is the centre plus 2 along the unit offset.
+        const offset = p.sub(v(10, 0, 0));
+        try testing.expectApproxEqAbs(@sqrt(@as(Real, 125)) - 2, through.distance, tol);
+        try testing.expect(through.position.approxEql(v(10, 0, 0).add(offset.normalize().scale(2)), tol));
+    }
+}
+
+test "the adapters honour a rotated body pose" {
+    // The identity-frame test above cannot see a dropped or transposed rotation. This
+    // one can: a 3×1×1 box rotated 90° about +Z has its long axis along world Y, so
+    // its −X face sits at x = 10 − 1 = 9 and NOT at 10 − 3 = 7.
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = harness.av3(3, 1, 1) } });
+    const rot = math.Quatf.fromAxisAngle(harness.av3(0, 0, 1), std.math.pi / 2.0);
+    const body = try world.addBody(gpa, .{
+        .shape = shape,
+        .position = harness.av3(10, 0, 0),
+        .rotation = rot,
+        .body_type = .static,
+        .entity = .{ .index = 0, .generation = 0 },
+    });
+
+    // A unit sphere sweeping +X from the origin reaches x = 9 − 1 = 8.
+    const hit = world.bm.castShapeBody(&world.store, body, sphere(1), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100).?;
+    try testing.expectApproxEqAbs(@as(Real, 8), hit.distance, tol);
+    try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
+    try testing.expectApproxEqAbs(@as(Real, 9), hit.position.toArray()[0], tol);
+
+    // Membership follows the rotation too: (10, 2.5, 0) is inside the rotated box
+    // (its half-extent along world Y is 3) and (12.5, 0, 0) is outside (its
+    // half-extent along world X is 1). Both would answer the opposite unrotated.
+    try testing.expect(world.bm.containsPointBody(&world.store, body, v(10, 2.5, 0)).?);
+    try testing.expect(!world.bm.containsPointBody(&world.store, body, v(12.5, 0, 0)).?);
+
+    // And so does the closest point: from (14, 0, 0) the nearest surface point is on
+    // the −X…+X face pair at x = 11, so the distance is 3.
+    const closest = world.bm.closestPointBody(&world.store, body, v(14, 0, 0)).?;
+    try testing.expectApproxEqAbs(@as(Real, 3), closest.distance, tol);
+    try testing.expectApproxEqAbs(@as(Real, 11), closest.position.toArray()[0], tol);
+}
+
+test "a rotated cast frame is transported, not ignored" {
+    // The cast shape's own rotation must reach the kernel and come back out. A
+    // capsule is the discriminating shape: its core is a Y segment, so rotating it
+    // 90° about +Z lays it along world X and changes what it sweeps with.
+    //
+    // Upright (half-height 2, radius 0.5) sweeping +X onto a unit box at (10, 0, 0):
+    // the segment is at x = 0, the box's −X face at x = 9, so the core gap closes to
+    // r_sum = 0.5 at t = 8.5. Laid along X, the segment's leading end starts at
+    // x = +2, so the same contact happens 2 earlier, at t = 6.5.
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = harness.av3(1, 1, 1) } });
+    const body = try world.addBody(gpa, .{
+        .shape = shape,
+        .position = harness.av3(10, 0, 0),
+        .body_type = .static,
+        .entity = .{ .index = 0, .generation = 0 },
+    });
+
+    const upright = world.bm.castShapeBody(&world.store, body, capsule(2, 0.5), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100).?;
+    try testing.expectApproxEqAbs(@as(Real, 8.5), upright.distance, tol);
+
+    // A CAST rotation is at the solver scalar (`Quatr`), unlike a descriptor rotation
+    // which is `f32` by design (§1.11.8). The two coincide at f32 and do not at f64,
+    // so building this one with `Quatf` compiles in one leg and not the other.
+    const laid = Quatr.fromAxisAngle(v(0, 0, 1), -std.math.pi / 2.0);
+    const along = world.bm.castShapeBody(&world.store, body, capsule(2, 0.5), Vec3r.zero, laid, v(1, 0, 0), 100).?;
+    try testing.expectApproxEqAbs(@as(Real, 6.5), along.distance, tol);
+    // A cast origin offset moves the answer by exactly that offset, the sweep being a
+    // pure translation.
+    const offset = world.bm.castShapeBody(&world.store, body, capsule(2, 0.5), v(1, 0, 0), laid, v(1, 0, 0), 100).?;
+    try testing.expectApproxEqAbs(@as(Real, 5.5), offset.distance, tol);
+}
+
+test "every adapter answers null on a stale handle and on a stale shape" {
+    // TWO distinct ways to be gone, checked separately — a body whose handle is still
+    // live but whose SHAPE has been destroyed is not the same failure as a removed
+    // body, and an adapter that only validated the handle would read a freed shape.
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+
+    const doomed_body = try addSphereBody(gpa, &world, .{ 10, 0, 0 }, 2);
+    const doomed = doomed_body.id;
+    const survivor = (try addSphereBody(gpa, &world, .{ 30, 0, 0 }, 2)).id;
+
+    // Everything answers while both are live — otherwise "null afterwards" would
+    // prove nothing.
+    try testing.expect(world.bm.castShapeBody(&world.store, doomed, sphere(1), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100) != null);
+    try testing.expect(world.bm.overlapShapeBody(&world.store, doomed, sphere(1), v(10, 0, 0), Quatr.identity) != null);
+    try testing.expect(world.bm.containsPointBody(&world.store, doomed, v(10, 0, 0)) != null);
+    try testing.expect(world.bm.closestPointBody(&world.store, doomed, v(20, 0, 0)) != null);
+
+    // (a) STALE SHAPE, live handle: destroy the shape and leave the body alone.
+    world.store.destroyShape(doomed_body.shape);
+    try testing.expect(world.bm.isValid(doomed)); // the handle really is still live
+    try testing.expect(world.bm.castShapeBody(&world.store, doomed, sphere(1), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100) == null);
+    try testing.expect(world.bm.overlapShapeBody(&world.store, doomed, sphere(1), v(10, 0, 0), Quatr.identity) == null);
+    try testing.expect(world.bm.containsPointBody(&world.store, doomed, v(10, 0, 0)) == null);
+    try testing.expect(world.bm.closestPointBody(&world.store, doomed, v(20, 0, 0)) == null);
+
+    // (b) STALE HANDLE, on a body whose shape is untouched.
+    world.removeBody(survivor);
+    try testing.expect(!world.bm.isValid(survivor));
+    try testing.expect(world.bm.castShapeBody(&world.store, survivor, sphere(1), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100) == null);
+    try testing.expect(world.bm.overlapShapeBody(&world.store, survivor, sphere(1), v(30, 0, 0), Quatr.identity) == null);
+    try testing.expect(world.bm.containsPointBody(&world.store, survivor, v(30, 0, 0)) == null);
+    try testing.expect(world.bm.closestPointBody(&world.store, survivor, v(40, 0, 0)) == null);
+}
+
+test "a sleeping body answers every adapter and stays asleep" {
+    // The PUBLISHED harness with sleeping ENABLED — a genuinely sleeping island, not
+    // a flag set by hand. A query takes `*const BodyManager`, so it cannot wake
+    // anything even in principle; this drives the whole cycle to sleep anyway and
+    // checks `isSleeping` before AND after each of the four adapters, because a
+    // structural argument that is never observed is still only an argument.
+    const gpa = std.testing.allocator;
+    var world = harness.World.init(harness.vr(0, -9.81, 0), 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const ground_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = harness.av3(20, 0.5, 20) } });
+    const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = harness.av3(0.5, 0.5, 0.5) } });
+    _ = try world.addBody(gpa, .{
+        .shape = ground_shape,
+        .body_type = .static,
+        .restitution = 0,
+        .entity = .{ .index = 0, .generation = 0 },
+    });
+    const sleeper = try world.addBody(gpa, .{
+        .shape = box_shape,
+        .position = harness.av3(0, 1, 0),
+        .body_type = .dynamic,
+        .mass = 1,
+        .restitution = 0,
+        .entity = .{ .index = 1, .generation = 0 },
+    });
+
+    // Drive until the island is asleep: the constraint array empties after having
+    // been non-empty, the normative observable of §1.8.6.
+    var had_contact = false;
+    var t: u32 = 0;
+    const asleep = while (t < 600) : (t += 1) {
+        try world.step(gpa);
+        if (world.constraints.items.len > 0) {
+            had_contact = true;
+        } else if (had_contact) break true;
+    } else false;
+    try testing.expect(asleep);
+    try testing.expect(world.bm.isSleeping(sleeper).?);
+
+    // The settled box's top face sits near y = 1; its centre is wherever the solver
+    // left it, so every oracle below is written against the body's OWN pose rather
+    // than a predicted one — this test is about answering and not waking, not about
+    // where the box came to rest.
+    const centre = world.bm.position(sleeper).?;
+
+    // (1) A cast from above reaches the sleeper: a unit sphere dropped along −Y from
+    // 10 m up must stop at or before its centre.
+    const cast_origin = v(centre.toArray()[0], 10, centre.toArray()[2]);
+    const hit = world.bm.castShapeBody(&world.store, sleeper, sphere(0.25), cast_origin, Quatr.identity, v(0, -1, 0), 100).?;
+    try testing.expect(hit.distance > 0 and hit.distance < 10 - centre.toArray()[1]);
+    try testing.expect(world.bm.isSleeping(sleeper).?);
+
+    // (2) A probe sphere centred on the sleeper overlaps it.
+    try testing.expect(world.bm.overlapShapeBody(&world.store, sleeper, sphere(0.25), centre, Quatr.identity).?);
+    try testing.expect(world.bm.isSleeping(sleeper).?);
+
+    // (3) Its own centre is inside it.
+    try testing.expect(world.bm.containsPointBody(&world.store, sleeper, centre).?);
+    try testing.expect(world.bm.isSleeping(sleeper).?);
+
+    // (4) …so the closest point to that centre is the centre itself, at distance 0;
+    // and a point 5 m to the side is at a positive distance.
+    const inside = world.bm.closestPointBody(&world.store, sleeper, centre).?;
+    try testing.expectEqual(@as(Real, 0), inside.distance);
+    const outside = world.bm.closestPointBody(&world.store, sleeper, centre.add(v(5, 0, 0))).?;
+    try testing.expect(outside.distance > 4 and outside.distance < 5);
+    try testing.expect(world.bm.isSleeping(sleeper).?);
+
+    // Still asleep after all four, and the island really did stay down: one more tick
+    // must not resurrect it either.
+    try world.step(gpa);
+    try testing.expect(world.bm.isSleeping(sleeper).?);
+}

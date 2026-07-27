@@ -70,6 +70,29 @@ const RayR = broadphase_mod.Ray(Real);
 const ApiVec3 = @import("foundation").math.Vec3;
 const ApiQuat = @import("foundation").math.Quatf;
 
+/// A shape cast against ONE body, in WORLD space (`castShapeBody`). Distinct from
+/// the kernel's `CastHit`, whose fields are in the cast shape's frame: the frames
+/// differ, so the types do too rather than one being quietly reinterpreted.
+pub const BodyCastHit = struct {
+    /// Distance along the cast direction at first touch, in `[0, max_distance]`.
+    distance: Real,
+    /// World-space witness on the HIT BODY's inflated surface.
+    position: Vec3r,
+    /// World-space outward unit normal of the hit body; `normal · direction <= 0`.
+    normal: Vec3r,
+};
+
+/// The closest point on ONE body to a queried point, in WORLD space
+/// (`closestPointBody`). `distance` is to the SOLID, so it is 0 for an interior
+/// point — boundary included — and the position is then the queried point itself
+/// (`engine-physics-forge.md` §1.11.13).
+pub const BodyClosestPoint = struct {
+    /// Distance from the queried point to the body's solid; 0 inside it.
+    distance: Real,
+    /// World-space point on the body's surface, or the queried point when inside.
+    position: Vec3r,
+};
+
 /// Slack allowed on the descriptor rotation's unit norm, in ULPs of 1 at `f32` —
 /// the precision the descriptor is expressed in. A quaternion built by
 /// `fromAxisAngle` from f32 trigonometry lands a few ULPs off unit; anything
@@ -465,6 +488,184 @@ pub const BodyManager = struct {
             self.bodies.items(.position)[ib],
             self.bodies.items(.rotation)[ib],
         );
+    }
+
+    /// Cast `cast_shape`, posed at (`cast_origin`, `cast_rotation`), along
+    /// `direction` against body `id`. Returns the first touch within
+    /// `[0, max_distance]` (a CLOSED interval), or null on a miss — and null on a
+    /// stale/invalid handle OR a stale/invalid shape, which are two distinct ways to
+    /// be gone and are both checked. The `BodyId`-level cast adapter for the
+    /// broadphase→kernel flow, mirroring `raycastBody` / `gjkPair` / `collidePair`:
+    /// unpack a `queryCast` candidate's `user_data` as a `BodyId` and call this per
+    /// candidate.
+    ///
+    /// **The core + inflation-radius convention is honoured HERE**, at the one place
+    /// a second convention could slip in unseen: the body's `Shape` becomes a
+    /// `SupportShape` through `shape_mod.supportShape` — core plus radius, the same
+    /// translation `gjkPair`, `collidePair` and `raycastBody` all use — and nothing
+    /// on this path adds a margin of its own. `cast_shape` arrives already in that
+    /// form because the CALLER owns it; it is not a body.
+    ///
+    /// **Frames.** The kernel works in the cast shape's frame; this adapter takes and
+    /// returns WORLD space. The direction is rotated in by the conjugate and is NOT
+    /// re-normalised — the kernel normalises once itself, which absorbs the few ULPs
+    /// a conjugate rotation costs. Unlike `raycastBody`, whose local frame is the
+    /// BODY's and differs per candidate, the cast's frame is the QUERY's and is a
+    /// constant of the whole traversal, so returning it would hand the caller a
+    /// contract in a frame that has nothing to do with the body it just asked about.
+    pub fn castShapeBody(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        id: BodyId,
+        cast_shape: narrowphase.SupportShape(Real),
+        cast_origin: Vec3r,
+        cast_rotation: Quatr,
+        direction: Vec3r,
+        max_distance: Real,
+    ) ?BodyCastHit {
+        const idx = self.alloc.validate(id) orelse return null;
+        const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
+        const relpose = narrowphase.RelativePose(Real).init(
+            cast_origin,
+            cast_rotation,
+            self.bodies.items(.position)[idx],
+            self.bodies.items(.rotation)[idx],
+        );
+        const local_dir = cast_rotation.conjugate().rotateVec3(direction);
+        const hit = narrowphase.castShape(
+            Real,
+            cast_shape,
+            relpose,
+            shape_mod.supportShape(shape),
+            local_dir,
+            max_distance,
+        ) orelse return null;
+        return .{
+            // A distance is invariant under a rigid transform, so it needs no mapping.
+            .distance = hit.distance,
+            .position = cast_rotation.rotateVec3(hit.point).add(cast_origin),
+            .normal = cast_rotation.rotateVec3(hit.normal),
+        };
+    }
+
+    /// Whether `query_shape`, posed at (`query_position`, `query_rotation`),
+    /// overlaps body `id`. Null on a stale/invalid handle or shape — distinct from
+    /// `false`, which is a real answer.
+    ///
+    /// The exact kernel is GJK on the cores and the predicate is "the regime is not
+    /// `separated`" (`engine-physics-forge.md` §1.11.12). No threshold is introduced
+    /// here: the contact margin is the one GJK's own classification carries, and a
+    /// second margin proper to queries is exactly what §1.11.12 forbids.
+    pub fn overlapShapeBody(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        id: BodyId,
+        query_shape: narrowphase.SupportShape(Real),
+        query_position: Vec3r,
+        query_rotation: Quatr,
+    ) ?bool {
+        const idx = self.alloc.validate(id) orelse return null;
+        const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
+        const result = narrowphase.gjk(
+            Real,
+            query_shape,
+            query_position,
+            query_rotation,
+            shape_mod.supportShape(shape),
+            self.bodies.items(.position)[idx],
+            self.bodies.items(.rotation)[idx],
+        );
+        return result.status != .separated;
+    }
+
+    /// Whether the world-space `point` lies inside body `id`, boundary INCLUDED —
+    /// the same solidity convention as a ray origin inside a shape (§1.11.4). Null
+    /// on a stale/invalid handle or shape.
+    ///
+    /// The point is transported into the body's local frame by the inverse pose, the
+    /// way `raycastBody` transports a ray, and the membership predicate runs there.
+    pub fn containsPointBody(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        id: BodyId,
+        point: Vec3r,
+    ) ?bool {
+        const idx = self.alloc.validate(id) orelse return null;
+        const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
+        const local = self.bodies.items(.rotation)[idx].conjugate()
+            .rotateVec3(point.sub(self.bodies.items(.position)[idx]));
+        return narrowphase.containsPoint(Real, shape_mod.supportShape(shape), local);
+    }
+
+    /// Closest point on body `id`'s SURFACE to the world-space `point`, with the
+    /// distance to the SOLID. Null on a stale/invalid handle or shape.
+    ///
+    /// `engine-physics-forge.md` §1.11.13, in its order and for its reasons:
+    ///
+    ///   - Solidity is decided FIRST, by the same per-sub-shape membership predicate
+    ///     the point query uses, UPSTREAM of any classification. A point inside —
+    ///     boundary included — is at distance 0 and its closest point is ITSELF.
+    ///   - Outside, GJK runs between a degenerate POINT core placed at the queried
+    ///     point and the body, and the surface quantities are derived from the CORE
+    ///     ones: `distance = max(0, core_distance − r_b)` and
+    ///     `position = closest_b + r_b · normalize(closest_a − closest_b)`.
+    ///   - The closest points are valid for `separated` AND `shallow`, and that
+    ///     second inclusion is normative: `shallow` is NOT an interior, it is a real
+    ///     separation absorbed by the numeric margin, and treating it as one would
+    ///     return 0 for a measurably external point.
+    pub fn closestPointBody(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        id: BodyId,
+        point: Vec3r,
+    ) ?BodyClosestPoint {
+        const idx = self.alloc.validate(id) orelse return null;
+        const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
+        const shape_b = shape_mod.supportShape(shape);
+
+        // Inside the solid — boundary included — is distance 0 at the point itself.
+        const local = self.bodies.items(.rotation)[idx].conjugate()
+            .rotateVec3(point.sub(self.bodies.items(.position)[idx]));
+        if (narrowphase.containsPoint(Real, shape_b, local)) {
+            return .{ .distance = 0, .position = point };
+        }
+
+        // Outside: a degenerate point core at the queried point against the body.
+        const probe: narrowphase.SupportShape(Real) = .{ .core = .point, .radius = 0 };
+        const result = narrowphase.gjk(
+            Real,
+            probe,
+            point,
+            Quatr.identity,
+            shape_b,
+            self.bodies.items(.position)[idx],
+            self.bodies.items(.rotation)[idx],
+        );
+        // `.deep` means the CORES intersect, which cannot happen for a point that the
+        // membership test above has just placed outside the SOLID (the solid contains
+        // the core). It stays handled rather than asserted away because the
+        // alternative to answering here is a silently wrong position, and the two
+        // tests sit on opposite sides of GJK's noise band.
+        if (result.status == .deep) return .{ .distance = 0, .position = point };
+
+        const radius_b = shape_b.radius;
+        const surface_distance = @max(0, result.distance - radius_b);
+        if (radius_b == 0) {
+            // A hard core IS its own surface: no projection, and in particular no
+            // normalisation to guard.
+            return .{ .distance = surface_distance, .position = result.closest_b };
+        }
+        const away = result.closest_a.sub(result.closest_b);
+        const scale = @reduce(.Max, @abs(away.data));
+        if (scale == 0) {
+            // Unreachable after the membership test — the two closest points are
+            // `core_distance > radius_b > 0` apart — and guarded at TRUE ZERO anyway,
+            // because `foundation`'s `normalize` is unguarded and would answer NaN.
+            return .{ .distance = surface_distance, .position = result.closest_b };
+        }
+        const reduced: Vec3r = .{ .data = away.data / @as(@Vector(3, Real), @splat(scale)) };
+        const unit = reduced.scale(1 / reduced.length());
+        return .{ .distance = surface_distance, .position = result.closest_b.add(unit.scale(radius_b)) };
     }
 
     /// Full narrowphase (GJK → shallow/deep contact manifold) for the pair
