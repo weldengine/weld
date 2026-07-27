@@ -890,15 +890,64 @@ pub const BodyManager = struct {
         const ib = self.alloc.validate(b) orelse return null;
         const shape_a = store.get(self.bodies.items(.shape)[ia]) orelse return null;
         const shape_b = store.get(self.bodies.items(.shape)[ib]) orelse return null;
-        return narrowphase.collideOrdered(
-            Real,
-            shape_mod.supportShape(shape_a),
-            self.bodies.items(.position)[ia],
-            self.bodies.items(.rotation)[ia],
-            shape_mod.supportShape(shape_b),
-            self.bodies.items(.position)[ib],
-            self.bodies.items(.rotation)[ib],
-        );
+        const pos_a = self.bodies.items(.position)[ia];
+        const rot_a = self.bodies.items(.rotation)[ia];
+        const pos_b = self.bodies.items(.position)[ib];
+        const rot_b = self.bodies.items(.rotation)[ib];
+
+        // Dispatch on the pair of CATEGORIES, nested and exhaustive with no `else` on
+        // either level: the mesh (M1.1.11.1) is a compile error at all four arms, each of
+        // which owes it a decision.
+        //
+        // The half-space arm is written with the PLANE as A, which is the orientation
+        // §1.11.15's formulas are stated in. When the plane is B — reachable, since this
+        // order is the body-id order and the plane may have been created either side —
+        // the pair is computed the other way round and the normal negated, which is
+        // exactly what `collidePair` does one level up for the caller's order. Position
+        // and penetration are order-independent, so nothing else needs mirroring, and
+        // `contact_constraint.prepare` reconstructs the two anchors from
+        // `position ± ½·penetration·normal` with no case for this shape.
+        switch (shape_a.class()) {
+            .convex => switch (shape_b.class()) {
+                .convex => return narrowphase.collideOrdered(
+                    Real,
+                    shape_mod.supportShape(shape_a),
+                    pos_a,
+                    rot_a,
+                    shape_mod.supportShape(shape_b),
+                    pos_b,
+                    rot_b,
+                ),
+                .half_space => {
+                    var m = narrowphase.collidePlane(
+                        Real,
+                        shape_mod.halfSpace(shape_b),
+                        pos_b,
+                        rot_b,
+                        narrowphase.RelativePose(Real).init(pos_b, rot_b, pos_a, rot_a),
+                        shape_mod.supportShape(shape_a),
+                    ) orelse return null;
+                    m.normal = m.normal.neg(); // computed B→A; the caller asked A→B
+                    return m;
+                },
+            },
+            .half_space => switch (shape_b.class()) {
+                .convex => return narrowphase.collidePlane(
+                    Real,
+                    shape_mod.halfSpace(shape_a),
+                    pos_a,
+                    rot_a,
+                    narrowphase.RelativePose(Real).init(pos_a, rot_a, pos_b, rot_b),
+                    shape_mod.supportShape(shape_b),
+                ),
+                // Two half-spaces have NO narrowphase kernel — §1.11.15's table is a
+                // half-space against a BOUNDED CONVEX — and the pair is unreachable: a
+                // half-space forces a static body (`error.ShapeMustBeStatic`) and
+                // `default_layer_pairs` has static×static false, so the broadphase never
+                // emits it. A dated unreachability, asserted rather than answered.
+                .half_space => unreachable,
+            },
+        }
     }
 };
 

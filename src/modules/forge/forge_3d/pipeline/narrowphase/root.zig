@@ -77,6 +77,16 @@ pub const collide = manifold.collide;
 /// Dispatches the M1.1.4 analytic fast paths, falling through to
 /// `collideOrderedGeneric`.
 pub const collideOrdered = manifold.collideOrdered;
+/// The HALF-SPACE arm of the manifold generator — a half-space against a bounded
+/// convex, no clipping (`engine-physics-forge.md` §1.11.15). Null when separated.
+pub const collidePlane = manifold.collidePlane;
+/// The `feature_id` reference-class tag of the half-space producer, and the 2-bit class
+/// mask. Public so a test can assert the producer's disjointness BY MASK rather than by
+/// enumerating which of the existing pairs happen to be taken.
+pub const feature_class_plane = manifold.class_plane;
+/// The 2-bit `feature_id` class mask (see `feature_class_plane`).
+pub const feature_class_mask = manifold.class_mask;
+
 /// `collideOrdered` with the fast-path dispatcher bypassed — the generic GJK/EPA
 /// manifold path. The differential oracle + bench baseline for the M1.1.4 fast
 /// paths. (`generateManifold` stays package-internal — not re-exported here.)

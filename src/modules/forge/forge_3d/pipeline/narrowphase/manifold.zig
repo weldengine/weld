@@ -44,6 +44,9 @@ const support = @import("support.zig");
 const gjk_mod = @import("gjk.zig");
 const epa_mod = @import("epa.zig");
 const fast_paths = @import("fast_paths.zig");
+// M1.1.11 — the half-space geometry the plane arm works on. A sibling import: `plane.zig`
+// does not import this file, so there is no cycle.
+const plane_mod = @import("plane.zig");
 
 /// The contact manifold between two shapes: a shared world-space contact
 /// `normal` (A→B) plus up to 4 `ContactPoint`s. FROZEN convention (brief Notes);
@@ -329,6 +332,87 @@ fn pointCoreContact(comptime T: type, n_world: math.Vec(3, T), closest_a: math.V
     return oneContact(T, n_world, sa.add(sb).scale(0.5), @max(base_penetration, 0), feature_id);
 }
 
+/// **The half-space arm of the manifold generator** (`engine-physics-forge.md`
+/// §1.11.15). `plane` is expressed in A's frame — A being the HALF-SPACE — and
+/// `relpose` carries B relative to A, the same shape GJK and `separation` take.
+/// Returns `null` when the pair is separated, exactly as `collideOrdered` does.
+///
+/// The supporting face of B in direction `−n` yields up to four CORE vertices with
+/// their stable local ids; each one whose surface point lies below the boundary is a
+/// contact.
+///
+/// **NO CLIPPING RUNS, and that is a property rather than an omission.** The clip
+/// exists to cut an incident polygon against the reference face's SIDE PLANES, and a
+/// half-space has none: it is unbounded, there is nothing to cut against, so the
+/// costlier half of `generateManifold` — `clipIncident`, the ≤4 reduction, the
+/// reference/incident selection and the `faceNormalA` alignment test — has nothing to
+/// do here. The face already has at most four vertices and they are already the
+/// answer.
+///
+/// **The retained criterion is `sep <= 0`, EXACTLY, and `keep_eps` is deliberately not
+/// copied.** The generic generator carries a scale-relative epsilon because its
+/// candidates come out of a CLIP: each intersection point is a solved crossing of two
+/// planes, so `pen = r_sum − s` accumulates the rounding of that solve and a point
+/// genuinely on the boundary can land either side of zero. Here a vertex's separation
+/// is one dot product and one subtraction on a support point — nothing accumulates, so
+/// the sign IS the classification, exactly, as §1.11.15 states. Two things follow:
+/// `overlapShapeBody`'s exact `separation(...) <= 0` and this generator agree to the
+/// bit on whether a pair touches, and the 3-versus-4 count at EXACTLY zero penetration
+/// stays inside §3's documented topological-flip band instead of being papered over.
+///
+/// The returned `position` is the MIDPOINT of the convex's surface point
+/// `core_vertex − r_b·n` and its projection on the boundary, which is §3's definition
+/// verbatim: with `penetration = −sep` and the normal A→B, `position + ½·pen·n` is A's
+/// surface point and `position − ½·pen·n` is B's — the two anchors
+/// `contact_constraint.prepare` reconstructs, with no special case for this shape.
+pub fn collidePlane(
+    comptime T: type,
+    plane: plane_mod.HalfSpace(T),
+    pos_a: math.Vec(3, T),
+    rot_a: math.Quat(T),
+    relpose: support.RelativePose(T),
+    shape_b: support.SupportShape(T),
+) ?ContactManifold(T) {
+    const Vec3T = math.Vec(3, T);
+    plane.assertUnit();
+    const n_a = plane.normal;
+    const r_b = shape_b.radius;
+
+    // B's supporting feature in the direction that digs into the solid, in A's frame.
+    // Its `vert_ids` are the stable local identities `feature_id` needs (a box corner's
+    // sign pattern, a segment endpoint's index), NOT buffer positions.
+    const face_b = relpose.supportingFaceB(shape_b, n_a.neg());
+
+    var points: [4]ContactPoint(T) = undefined;
+    var count: usize = 0;
+    for (0..face_b.count) |i| {
+        // The convex's SURFACE point: the core vertex pushed out by the inflation
+        // radius toward the solid. Omitting `r_b` here would place a sphere's contact
+        // at its centre — the failure the core + radius convention exists to prevent.
+        const surface_b = face_b.verts[i].sub(n_a.scale(r_b));
+        const sep = plane.signedDistance(surface_b);
+        if (sep > 0) continue;
+        points[count] = .{
+            .position = rot_a.rotateVec3(surface_b.sub(n_a.scale(sep * 0.5))).add(pos_a),
+            .penetration = -sep,
+            .feature_id = featureId(
+                class_plane | plane_face_id,
+                class_a | (@as(u16, face_b.vert_ids[i]) & id_mask),
+            ),
+        };
+        count += 1;
+    }
+
+    // `count == 0` IS the separated verdict, and it needs no separate test: the
+    // supporting face in direction `−n` contains `supportCore_B(−n)`, so its own
+    // separation is the pair's, and no vertex is below the boundary exactly when the
+    // pair is disjoint.
+    if (count == 0) return null;
+    const zero = ContactPoint(T){ .position = Vec3T.zero, .penetration = 0, .feature_id = 0 };
+    for (count..4) |i| points[i] = zero;
+    return .{ .normal = rot_a.rotateVec3(n_a), .points = points, .count = @intCast(count) };
+}
+
 // --- Internal helpers ---
 
 /// Largest number of points the incident clip can transiently hold: an incident
@@ -410,11 +494,44 @@ fn faceNormalA(comptime T: type, face: support.Face(T), expected_axis: math.Vec(
 //   reference half: face (`class_a`), side plane / edge (`class_edge`), vertex /
 //     corner (`class_c`);  incident half: vertex (`class_a`), edge (`class_edge`),
 //     face (`class_c`).
-const class_a: u16 = 0x0000; // reference face / incident vertex
-const class_edge: u16 = 0x4000; // reference side plane / incident edge
-const class_c: u16 = 0x8000; // reference vertex (corner) / incident face
-const class_mask: u16 = 0xc000;
+/// Class tag: a reference FACE, or an incident VERTEX.
+pub const class_a: u16 = 0x0000;
+/// Class tag: a reference SIDE PLANE, or an incident EDGE.
+pub const class_edge: u16 = 0x4000;
+/// Class tag: a reference VERTEX (a corner), or an incident FACE.
+pub const class_c: u16 = 0x8000;
+/// The HALF-SPACE producer's reference tag (M1.1.11): the plane's boundary face.
+///
+/// A FOURTH class value rather than a free PAIR of the existing three, and the
+/// difference is what makes the disjointness structural: the four existing producers
+/// OR only `class_a` / `class_edge` / `class_c` into either half, so no value they can
+/// emit carries `class_plane` in its reference half, and a test asserts the plane
+/// producer's id by MASK instead of by enumerating which pairs happen to be taken. The
+/// pair `(class_a, class_c)` was already the single-witness producer's, so a free pair
+/// was not free.
+pub const class_plane: u16 = 0xc000;
+/// The 2-bit class field of a `feature_id` half. Masking a half with this yields its
+/// producer class, which is how the half-space producer's disjointness is asserted.
+pub const class_mask: u16 = 0xc000;
 const id_mask: u16 = 0x3fff;
+
+comptime {
+    // The four tags are pairwise distinct, and each is exactly a value of the 2-bit
+    // class field. This is the BY-CONSTRUCTION half of the disjointness claim: the
+    // producers below OR one of these into each half and nothing else, so a tag that is
+    // distinct here cannot be emitted by another producer there.
+    const tags = [_]u16{ class_a, class_edge, class_c, class_plane };
+    for (tags, 0..) |x, i| {
+        std.debug.assert(x & id_mask == 0);
+        std.debug.assert(x & class_mask == x);
+        for (tags[i + 1 ..]) |y| std.debug.assert(x != y);
+    }
+}
+
+/// The plane's own reference feature id, under `class_plane`. A half-space has exactly
+/// ONE face — its boundary — so this is a constant rather than a selection, and the
+/// remaining `id_mask` space stays free for whatever a later unbounded shape needs.
+const plane_face_id: u16 = 0;
 
 /// Pack a `feature_id` from a class-tagged reference half and incident half.
 fn featureId(ref16: u16, inc16: u16) u32 {

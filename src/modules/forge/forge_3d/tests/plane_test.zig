@@ -1056,3 +1056,289 @@ test "the answer is invariant under creation-order permutation, and two runs are
     inline for (0..3) |i| try testing.expectEqual(first.position.toArray()[i], again.position.toArray()[i]);
     inline for (0..3) |i| try testing.expectEqual(first.normal.toArray()[i], again.normal.toArray()[i]);
 }
+
+// ---------------------------------------------------------------------------
+// E6 — the contact path
+// ---------------------------------------------------------------------------
+
+/// A static plane body carrying the LOCAL half-space `(normal, distance)` at the
+/// origin, added through the harness (so it lands in the layer's unbounded list).
+fn addPlaneBody(gpa: std.mem.Allocator, world: *harness.World, normal: ApiVec3, distance: f32, entity_index: u32) !api.BodyId {
+    const shape = try world.store.createShape(gpa, .{ .plane = .{ .normal = normal, .distance = distance } });
+    return world.addBody(gpa, .{
+        .shape = shape,
+        .body_type = .static,
+        .entity = .{ .index = entity_index, .generation = 0 },
+    });
+}
+
+/// A dynamic box of half-extents `he` at `centre`.
+fn addBox(gpa: std.mem.Allocator, world: *harness.World, he: [3]f32, centre: [3]f32, entity_index: u32) !api.BodyId {
+    const shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(he[0], he[1], he[2]) } });
+    return world.addBody(gpa, .{
+        .shape = shape,
+        .body_type = .dynamic,
+        .position = av3(centre[0], centre[1], centre[2]),
+        .entity = .{ .index = entity_index, .generation = 0 },
+    });
+}
+
+test "a plane manifold puts a box on four contacts" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+
+    // Ground `{ y <= 0 }` and a unit box (half-extents 0.5) centred at y = 0.375, so its
+    // bottom face sits at y = −0.125. CLOSED FORMS, all four identical by symmetry:
+    //
+    //   surface point of the box    y = −0.125      ⇒ sep = −0.125
+    //   penetration                 −sep = 0.125
+    //   contact position            midpoint of y = −0.125 and its projection y = 0
+    //                                              ⇒ y = −0.0625, x = ±0.5, z = ±0.5
+    //   normal (A→B, plane→box)     +Y
+    //
+    // **Every literal here is a dyadic rational — 3/8, 1/2, 1/8, 1/16 — exactly
+    // representable at `f32` AND at `f64`.** That is deliberate and it is not decoration:
+    // a body's position comes from an `f32` DESCRIPTOR (§1.11.8 keeps the public surface
+    // f32 whatever the solver scalar), so a centre of 0.4 is stored as 0.4000000059604645
+    // and the penetration is not 0.1 but 0.09999999403953552 — which passes at f32, where
+    // the tolerance is coarse, and fails at f64, where it is not. Choosing exact inputs
+    // removes the quantisation instead of widening a bound to tolerate it.
+    const ground = try addPlaneBody(gpa, &world, av3(0, 1, 0), 0, 0);
+    const box = try addBox(gpa, &world, .{ 0.5, 0.5, 0.5 }, .{ 0, 0.375, 0 }, 1);
+
+    const m = world.bm.collidePair(&world.store, ground, box).?;
+    try testing.expectEqual(@as(u8, 4), m.count);
+    try testing.expect(m.normal.approxEql(Vec3r.unit_y, tol));
+
+    var seen_ids: [4]u32 = undefined;
+    for (0..4) |i| {
+        const p = m.points[i];
+        try testing.expectApproxEqAbs(@as(Real, 0.125), p.penetration, tol);
+        try testing.expectApproxEqAbs(@as(Real, -0.0625), p.position.toArray()[1], tol);
+        // The four are the bottom face's corners: |x| = |z| = 0.5.
+        try testing.expectApproxEqAbs(@as(Real, 0.5), @abs(p.position.toArray()[0]), tol);
+        try testing.expectApproxEqAbs(@as(Real, 0.5), @abs(p.position.toArray()[2]), tol);
+        seen_ids[i] = p.feature_id;
+    }
+    // The four ids are DISTINCT — the warm-start cache keys on them, so two contacts of
+    // one manifold sharing an id would collapse into a single cached impulse.
+    for (0..4) |i| {
+        for (i + 1..4) |j| try testing.expect(seen_ids[i] != seen_ids[j]);
+    }
+
+    // …and the two anchors §3 defines reconstruct exactly, which is what makes the NGS
+    // position pass need no case for this shape: `position + ½·pen·n` is the PLANE's
+    // surface point (y = 0) and `position − ½·pen·n` is the BOX's (y = −0.1).
+    for (0..4) |i| {
+        const p = m.points[i];
+        const surface_a = p.position.add(m.normal.scale(p.penetration * 0.5));
+        const surface_b = p.position.sub(m.normal.scale(p.penetration * 0.5));
+        try testing.expectApproxEqAbs(@as(Real, 0), surface_a.toArray()[1], tol);
+        try testing.expectApproxEqAbs(@as(Real, -0.125), surface_b.toArray()[1], tol);
+    }
+
+    // Order-independence: the swapped call negates the normal and leaves the positions
+    // and penetrations alone (§3's contract, inherited here rather than re-derived).
+    const swapped = world.bm.collidePair(&world.store, box, ground).?;
+    try testing.expectEqual(m.count, swapped.count);
+    try testing.expect(swapped.normal.approxEql(Vec3r.unit_y.neg(), tol));
+    for (0..4) |i| {
+        try testing.expectApproxEqAbs(m.points[i].penetration, swapped.points[i].penetration, tol);
+        try testing.expect(m.points[i].position.approxEql(swapped.points[i].position, tol));
+    }
+}
+
+test "the half-space feature-id class is disjoint from every other producer, by mask" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const ground = try addPlaneBody(gpa, &world, av3(0, 1, 0), 0, 0);
+    const box = try addBox(gpa, &world, .{ 0.5, 0.5, 0.5 }, .{ 0, 0.375, 0 }, 1);
+
+    // BY CONSTRUCTION, on the MASK — not by enumerating which of the existing pairs
+    // happen to be taken. `class_plane` is a FOURTH value of the 2-bit class field, and
+    // `manifold.zig`'s comptime block asserts the four tags are pairwise distinct and
+    // each exactly a class value. So a producer that ORs one of the other three into its
+    // reference half cannot emit this one, whatever pair of halves it chooses — and the
+    // pair `(class_a, class_c)` was already the single-witness producer's, which is why a
+    // free pair would not have been free.
+    const m = world.bm.collidePair(&world.store, ground, box).?;
+    for (0..m.count) |i| {
+        const reference_half: u16 = @intCast(m.points[i].feature_id >> 16);
+        try testing.expectEqual(narrowphase.feature_class_plane, reference_half & narrowphase.feature_class_mask);
+    }
+
+    // A convex pair through the SAME entry never carries that class in its reference
+    // half — the other side of the disjointness, measured rather than assumed.
+    const other = try addBox(gpa, &world, .{ 0.5, 0.5, 0.5 }, .{ 0, 1.25, 0 }, 2);
+    const convex = world.bm.collidePair(&world.store, box, other).?;
+    for (0..convex.count) |i| {
+        const reference_half: u16 = @intCast(convex.points[i].feature_id >> 16);
+        try testing.expect(reference_half & narrowphase.feature_class_mask != narrowphase.feature_class_plane);
+    }
+}
+
+test "a sphere and a capsule on a plane get the contact count their supporting face returns" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const ground = try addPlaneBody(gpa, &world, av3(0, 1, 0), 0, 0);
+
+    // A SPHERE's core is a single POINT, so its supporting face has ONE vertex whatever
+    // the direction — one contact, not the several a curved surface might suggest.
+    // Radius 1 centred at y = 0.875 (7/8, exact at both precisions — see the four-contact
+    // test on why every literal here is dyadic): surface point y = −0.125, penetration
+    // 0.125, contact at y = −0.0625 on the axis.
+    const sphere_shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    const ball = try world.addBody(gpa, .{
+        .shape = sphere_shape,
+        .body_type = .dynamic,
+        .position = av3(0, 0.875, 0),
+        .entity = .{ .index = 1, .generation = 0 },
+    });
+    const ms = world.bm.collidePair(&world.store, ground, ball).?;
+    try testing.expectEqual(@as(u8, 1), ms.count);
+    try testing.expectApproxEqAbs(@as(Real, 0.125), ms.points[0].penetration, tol);
+    try testing.expect(ms.points[0].position.approxEql(vr(0, -0.0625, 0), tol));
+
+    // A STANDING capsule is END-ON to `−n`, so `supportingFace` returns its single
+    // extremal endpoint: ONE contact. Radius 0.25, half-height 0.875, centred at y = 1 ⇒
+    // the lower cap's surface is at 1 − 0.875 − 0.25 = −0.125.
+    const cap_shape = try world.store.createShape(gpa, .{ .capsule = .{ .radius = 0.25, .half_height = 0.875 } });
+    const standing = try world.addBody(gpa, .{
+        .shape = cap_shape,
+        .body_type = .dynamic,
+        .position = av3(4, 1, 0),
+        .entity = .{ .index = 2, .generation = 0 },
+    });
+    const mc = world.bm.collidePair(&world.store, ground, standing).?;
+    try testing.expectEqual(@as(u8, 1), mc.count);
+    try testing.expectApproxEqAbs(@as(Real, 0.125), mc.points[0].penetration, tol);
+
+    // A LYING capsule is PERPENDICULAR to `−n`, so the same feature is the whole
+    // segment: TWO contacts, one per endpoint, 2·half_height apart. Rotated +90° about
+    // +Z maps its local +Y axis onto world −X. Centred at y = 0.125 ⇒ the wall's surface
+    // is at 0.125 − 0.25 = −0.125.
+    const lying = try world.addBody(gpa, .{
+        .shape = cap_shape,
+        .body_type = .dynamic,
+        .position = av3(8, 0.125, 0),
+        .rotation = foundation.math.Quatf.fromAxisAngle(ApiVec3.unit_z, std.math.pi / 2.0),
+        .entity = .{ .index = 3, .generation = 0 },
+    });
+    const ml = world.bm.collidePair(&world.store, ground, lying).?;
+    try testing.expectEqual(@as(u8, 2), ml.count);
+    for (0..2) |i| {
+        try testing.expectApproxEqAbs(@as(Real, 0.125), ml.points[i].penetration, tol);
+        try testing.expectApproxEqAbs(@as(Real, -0.0625), ml.points[i].position.toArray()[1], tol);
+    }
+    // …and they are 2·half_height = 1.75 m apart along the capsule's axis, world X here.
+    const span = @abs(ml.points[0].position.toArray()[0] - ml.points[1].position.toArray()[0]);
+    try testing.expectApproxEqAbs(@as(Real, 1.75), span, tol);
+    // Distinct ids: the two endpoints carry `vert_id` 0 and 1.
+    try testing.expect(ml.points[0].feature_id != ml.points[1].feature_id);
+}
+
+test "an oblique plane against a rotated box keeps the stored normal as the contact normal" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+
+    // A plane whose normal is NOT axis-aligned — `(2, −3, 6)/7`, the exact Pythagorean
+    // quadruple — and a box rotated off every axis. The contact normal must be the
+    // STORED normal mapped to world, tight: it is returned with no arithmetic beyond one
+    // rotation, so unlike a reconstructed normal it carries no residue of the geometry.
+    const n = av3(2.0 / 7.0, -3.0 / 7.0, 6.0 / 7.0);
+    const ground = try addPlaneBody(gpa, &world, n, 0, 0);
+
+    const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+    const spun = try world.addBody(gpa, .{
+        .shape = box_shape,
+        .body_type = .dynamic,
+        // Placed just inside the solid along the normal, so contact is guaranteed
+        // whatever face the rotation turns toward the plane.
+        .position = av3(-0.2 * 2.0 / 7.0, 0.2 * 3.0 / 7.0, -0.2 * 6.0 / 7.0),
+        .rotation = foundation.math.Quatf.fromAxisAngle(av3(1, 2, 3).normalize(), 0.7),
+        .entity = .{ .index = 1, .generation = 0 },
+    });
+
+    const m = world.bm.collidePair(&world.store, ground, spun).?;
+    try testing.expect(m.count >= 1);
+    // TWO bounds again, and the SAME rule as the creation test above — see "the stored
+    // plane normal is unit, and independent of distance" for the measurement.
+    //
+    // The NORM is tight at the SOLVER scalar: the plane body is at identity rotation, so
+    // the returned normal is the stored unit value carried through one rotation and
+    // nothing else.
+    try testing.expectApproxEqAbs(@as(Real, 1), m.normal.length(), 8 * std.math.floatEps(Real));
+    // The ORIENTATION is pinned at one ulp of `f32`, because that is the resolution its
+    // INPUT had: `(2, −3, 6)/7` reached the store through an `f32` descriptor, and
+    // comparing it against the exact `f64` rational at `floatEps(Real)` would be
+    // asserting that an f64 solver recovers information the descriptor never carried.
+    // Measured at 0.077 ulp of f32 on the f64 leg.
+    try testing.expect(m.normal.approxEql(vr(2.0 / 7.0, -3.0 / 7.0, 6.0 / 7.0), std.math.floatEps(f32)));
+    // Every contact is genuinely penetrating and its anchors straddle the boundary.
+    const plane_world = narrowphase.plane.HalfSpace(Real){
+        .normal = vr(2.0 / 7.0, -3.0 / 7.0, 6.0 / 7.0),
+        .distance = 0,
+    };
+    for (0..m.count) |i| {
+        const p = m.points[i];
+        try testing.expect(p.penetration > 0);
+        const surface_a = p.position.add(m.normal.scale(p.penetration * 0.5));
+        // The oracle plane is built from the EXACT rational while the body's is the f32
+        // descriptor's, so the residual is the descriptor's resolution at this scale —
+        // the same budget as the orientation above, not `tol`.
+        const budget: Real = 8 * std.math.floatEps(f32) * (1 + surface_a.length());
+        try testing.expectApproxEqAbs(@as(Real, 0), plane_world.signedDistance(surface_a), @max(budget, tol));
+    }
+}
+
+test "a full tick cycle runs with a plane body, and a falling box comes to rest on it" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
+    defer world.deinit(gpa);
+
+    // THE RESIDUAL E5 NAMED, CLOSED. Until this gate `world.step()` panicked in
+    // `collidePair` the moment the broadphase emitted a pair containing a plane body:
+    // the plane reached `supportShape`, whose precondition is the convex class. A FULL
+    // cycle now, all eleven steps, not a kernel call.
+    const plane_body = try addPlaneBody(gpa, &world, av3(0, 1, 0), 0, 0);
+    const box = try addBox(gpa, &world, .{ 0.5, 0.5, 0.5 }, .{ 0, 3, 0 }, 1);
+
+    var ticks: u32 = 0;
+    while (ticks < 400) : (ticks += 1) try world.step(gpa);
+
+    // It fell, it stopped, and it stopped ON the plane. The resting centre is the box's
+    // half-extent above the boundary, less the residual penetration the NGS pass leaves
+    // at its fixed point — the slop, `SolverConfig.penetration_slop = 0.005`.
+    //
+    // MEASURED at 400 ticks, both legs:
+    //
+    //   leg   resting centre_y   penetration   vy
+    //   f32   0.495073940        0.004926056   −3.7252903e-9
+    //   f64   0.495074006        0.004925994    6.9388939e-18
+    //
+    // and the settled manifold carries FOUR contacts, one constraint. Worth recording:
+    // it settles just BELOW the slop, where M1.1.7's RD-1 measured a box on a BOX
+    // settling just above it (0.00500059 at f32). The difference is not a discrepancy —
+    // the correction factor is 0.2, so the last step lands within one step of the fixed
+    // point on either side — but the plane's `sep` is a dot product against a stored unit
+    // normal with no clip behind it, so nothing pushes it to approach from one side.
+    //
+    // The bound is therefore stated on the slop and one correction step, not on an exact
+    // zero and not as a loose window that would pass on a box halfway through its fall.
+    const slop: Real = world.cfg.penetration_slop;
+    const centre_y = world.bm.position(box).?.toArray()[1];
+    const penetration = 0.5 - centre_y;
+    try testing.expect(penetration > 0); // it IS resting on the plane, not hovering
+    try testing.expect(penetration <= 2 * slop); // and it did NOT sink through
+    const velocity_y = world.bm.linearVelocity(box).?.toArray()[1];
+    try testing.expectApproxEqAbs(@as(Real, 0), velocity_y, 1e-6);
+    // The settled contact is the FOUR-point face manifold, not a degenerate single point.
+    try testing.expectEqual(@as(u8, 4), world.bm.collidePair(&world.store, plane_body, box).?.count);
+    // Nothing became NaN on the way — the poison of E2 never entered an arithmetic path.
+    for (world.bm.position(box).?.toArray()) |v| try testing.expect(!std.math.isNan(v));
+    for (world.bm.linearVelocity(box).?.toArray()) |v| try testing.expect(!std.math.isNan(v));
+}
