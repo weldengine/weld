@@ -958,6 +958,35 @@ pub fn build(b: *std.Build) void {
     );
     forge_ray_bench_step.dependOn(&forge_ray_bench_run.step);
 
+    // ---------------------------------- M1.1.10 forge shapecast bench --------
+    //
+    // Sphere / box / capsule casts and shape overlaps over the SAME 10 000-body
+    // static scene as the raycast bench, plus a point-cast / raycast pair that
+    // isolates the GJK march against the analytic ray kernels. Writes
+    // `bench/results/forge_3d_shapecast.md`. REPORTED, not gated — no envelope is
+    // pre-registered (bench header).
+    const forge_cast_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/forge_3d_shapecast.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    forge_cast_bench_module.addImport("forge_3d", forge_3d_module);
+    forge_cast_bench_module.addImport("weld_forge", forge_api_module);
+    const forge_cast_bench_exe = b.addExecutable(.{
+        .name = "forge-shapecast-bench",
+        .root_module = forge_cast_bench_module,
+    });
+    b.installArtifact(forge_cast_bench_exe);
+    const forge_cast_bench_run = b.addRunArtifact(forge_cast_bench_exe);
+    forge_cast_bench_run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| forge_cast_bench_run.addArgs(args);
+    const forge_cast_bench_step = b.step(
+        "bench-forge-shapecast",
+        "Run the M1.1.10 forge shapecast/overlap throughput bench (10k static bodies, writes bench/results/forge_3d_shapecast.md)",
+    );
+    forge_cast_bench_step.dependOn(&forge_cast_bench_run.step);
+
     // -------------------------------------- M1.0.5 scene loader bench --------
     //
     // `loadFromBytes` on a ~10k-entity image synthesized in-bench via the

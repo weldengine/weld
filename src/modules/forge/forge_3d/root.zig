@@ -37,7 +37,7 @@ const sleep_mod = @import("pipeline/sleep.zig");
 // M1.1.9 — `Real`-bound spatial queries (stateless orchestration over the
 // broadphase ray traversal + the exact kernels). Re-exported as the `query`
 // namespace below; the comptime pin analyses its acceptance tests.
-const query_mod = @import("query.zig");
+const query_mod = @import("query/root.zig");
 
 // --- Solver scalar + math aliases ---
 
@@ -227,4 +227,6 @@ comptime {
     _ = @import("tests/island_test.zig");
     _ = @import("tests/sleep_test.zig");
     _ = @import("tests/raycast_test.zig");
+    _ = @import("tests/shapecast_test.zig");
+    _ = @import("tests/overlap_test.zig");
 }

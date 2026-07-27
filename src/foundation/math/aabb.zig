@@ -40,6 +40,30 @@ pub fn Aabb(comptime T: type) type {
             return .{ .min = self.min.min(point), .max = self.max.max(point) };
         }
 
+        /// Box grown by `half_extents` on every axis: `min − e`, `max + e`.
+        ///
+        /// This is the Minkowski sum of `self` with the box `[−e, e]`, and therefore
+        /// the exact set of CENTRES at which a box of half-extents `e` overlaps
+        /// `self` — the sum of two boxes being a box. That equivalence is what makes
+        /// the swept-volume traversal of `engine-physics-forge.md` §1.11.10 an exact
+        /// ray test against inflated nodes rather than an approximation of one, and
+        /// the inline test below pins it in both directions.
+        ///
+        /// An ADDITION, not a threshold: no constant appears, and `half_extents` is
+        /// a geometric quantity the caller measured. Distinct verb from
+        /// `merge`/`expand`, which grow to CONTAIN something; this grows BY a given
+        /// amount. `half_extents` is expected non-negative (the same doc-level
+        /// expectation as `fromCenterHalfExtents`); a negative component shrinks the
+        /// box and can invert it.
+        ///
+        /// At a zero `half_extents` the result COMPARES equal to `self` on all six
+        /// bounds, though it is not necessarily bit-identical: `max + 0` maps a
+        /// `−0.0` bound to `+0.0`. Nothing downstream distinguishes the two zeros
+        /// (see `broadphase.queryRay`, which rests on exactly this).
+        pub fn inflate(self: Self, half_extents: Vec3T) Self {
+            return .{ .min = self.min.sub(half_extents), .max = self.max.add(half_extents) };
+        }
+
         /// Whether `point` lies inside (inclusive of the faces).
         pub fn contains(self: Self, point: Vec3T) bool {
             return @reduce(.And, self.min.data <= point.data) and
@@ -213,6 +237,69 @@ test "expand grows the box to include a point" {
     box = box.expand(Vec3.fromArray(.{ -1, 2, 0.5 }));
     try testing.expect(box.min.approxEql(Vec3.fromArray(.{ -1, 0, 0 }), 1e-6));
     try testing.expect(box.max.approxEql(Vec3.fromArray(.{ 1, 2, 1 }), 1e-6));
+}
+
+test "inflate grows every axis and is exact at zero" {
+    // 2×3×4 box with its min at the origin, grown by (1, 2, 3): each axis loses `e`
+    // at the min and gains `e` at the max, so min = (−1, −2, −3) and
+    // max = (2+1, 3+2, 4+3) = (3, 5, 7).
+    const box = Aabbf.fromMinMax(Vec3.zero, Vec3.fromArray(.{ 2, 3, 4 }));
+    const grown = box.inflate(Vec3.fromArray(.{ 1, 2, 3 }));
+    try testing.expect(grown.min.approxEql(Vec3.fromArray(.{ -1, -2, -3 }), 0));
+    try testing.expect(grown.max.approxEql(Vec3.fromArray(.{ 3, 5, 7 }), 0));
+
+    // A zero extent COMPARES equal on all six bounds. Compared, not bit-compared:
+    // `max + 0` maps a `−0.0` bound to `+0.0` and the two compare equal, which is
+    // precisely what lets `broadphase.queryRay` be `queryCast` at a zero extent
+    // without changing behaviour.
+    const same = box.inflate(Vec3.zero);
+    inline for (0..3) |i| {
+        try testing.expectEqual(box.min.toArray()[i], same.min.toArray()[i]);
+        try testing.expectEqual(box.max.toArray()[i], same.max.toArray()[i]);
+    }
+
+    // And the `−0.0` case itself, stated rather than assumed: the max bound changes
+    // its sign of zero, the min bound keeps it, and both still compare equal.
+    const signed = Aabbf.fromMinMax(Vec3.fromArray(.{ -0.0, 0, 0 }), Vec3.fromArray(.{ -0.0, 1, 1 }));
+    const signed_same = signed.inflate(Vec3.zero);
+    try testing.expectEqual(@as(f32, -0.0), signed_same.min.toArray()[0]);
+    try testing.expect(std.math.signbit(signed_same.min.toArray()[0]));
+    try testing.expectEqual(@as(f32, -0.0), signed_same.max.toArray()[0]); // compares equal…
+    try testing.expect(!std.math.signbit(signed_same.max.toArray()[0])); // …but is now +0.0
+}
+
+test "inflate is the Minkowski sum: overlap equals containment of the centre" {
+    // The decisive property of §1.11.10, pinned in BOTH directions: a box of
+    // half-extents `e` centred at `c` overlaps `box` exactly when `c` lies in
+    // `box.inflate(e)`. Swept over a lattice of centres straddling every face,
+    // edge and corner of the reference box, so both a true and a false verdict
+    // occur many times — the counters below prove the sweep is not one-sided.
+    const box = Aabbf.fromMinMax(Vec3.zero, Vec3.fromArray(.{ 2, 3, 4 }));
+    const e = Vec3.fromArray(.{ 0.5, 1, 1.5 });
+    const grown = box.inflate(e);
+
+    var overlaps: u32 = 0;
+    var disjoint: u32 = 0;
+    var c: [3]f32 = undefined;
+    for (0..13) |ix| {
+        c[0] = @as(f32, @floatFromInt(ix)) * 0.5 - 1.5;
+        for (0..13) |iy| {
+            c[1] = @as(f32, @floatFromInt(iy)) * 0.5 - 1.5;
+            for (0..13) |iz| {
+                c[2] = @as(f32, @floatFromInt(iz)) * 0.5 - 1.5;
+                const centre = Vec3.fromArray(c);
+                const moving = Aabbf.fromCenterHalfExtents(centre, e);
+                const by_overlap = box.overlaps(moving);
+                const by_containment = grown.contains(centre);
+                try testing.expectEqual(by_overlap, by_containment);
+                if (by_overlap) overlaps += 1 else disjoint += 1;
+            }
+        }
+    }
+    // Both verdicts really occurred: an all-true or all-false sweep would satisfy
+    // the equality above while proving nothing.
+    try testing.expect(overlaps > 0);
+    try testing.expect(disjoint > 0);
 }
 
 test "generic Aabb f64 instantiation compiles" {
