@@ -745,47 +745,30 @@ test "a body on layer 32 or above is refused at creation" {
     try testing.expectEqual(count_before, world.bm.count());
 }
 
-test "the five deferred query entries carry their frozen signatures" {
-    // A `@panic` body cannot be exercised by a test, by construction — so what is
-    // pinned here is the SURFACE, at comptime. What it is NOT is a statement about
-    // the post-freeze shape: the five stubs take the f32 PUBLIC types while the
-    // implemented raycast trio takes `Real` ones, so the two halves of the family
-    // sit on opposite sides of the precision boundary and one of them will move, at
-    // M1.1.10 or at M1.1.15. What this pin buys is a CHANGE DETECTOR on
-    // `api/types.zig`: a rename or a retyped field there fails here instead of
-    // surfacing at the freeze. This is the comptime-interface-check
-    // pattern of `engine-zig-conventions.md` §13, which validates the signature and
-    // explicitly not the body. The body is M1.1.10's, and it fails loud rather than
-    // returning the `null` or `0` that these error-free return types would
-    // otherwise force — "no hit" and "no entities" are not true.
+test "the family carries its Real signatures, and the public types stay frozen" {
+    // TWO pins, and they are deliberately not the same claim.
+    //
+    // (1) THE EIGHT SOLVER-SIDE ENTRIES, AT `Real`. Until M1.1.10/E5 five of them
+    //     carried the f32 PUBLIC aggregates while the raycast trio took `Real`, so
+    //     the family straddled the precision boundary and this pin recorded that one
+    //     half would have to move. It moved: `engine-physics-forge.md` §1.11.8's
+    //     structural corollary says an entry typed `f32` INSIDE the solver forces the
+    //     conversion into the solver — under `-Dphysics_f64`, a time of impact
+    //     narrowed to f32 before leaving the kernel and widened again at the
+    //     interface tier, two conversions of which one is invisible. The family is
+    //     uniform now and the single f32 wrapper lands at M1.1.15.
+    //
+    // (2) THE PUBLIC TYPES OF `api/types.zig`, PINNED FIELD BY FIELD. They used to be
+    //     pinned INCIDENTALLY, by appearing in the stubs' signatures. Now that no
+    //     solver entry mentions them, a rename or a retype there would break nothing
+    //     and would surface only at the freeze — so they are pinned deliberately
+    //     instead. The change detector has to survive the entries that stopped
+    //     referencing it, or it was never a detector.
     const BM = body_manager_mod.BodyManager;
     const SS = body_manager_mod.ShapeStore;
     const BP = broadphase_mod.Broadphase(Real);
 
-    try testing.expectEqual(
-        fn (*const BP, *const BM, *const SS, api.ShapeCastQuery) ?api.ShapeCastHit,
-        @TypeOf(query.shapeCast),
-    );
-    try testing.expectEqual(
-        fn (*const BP, *const BM, *const SS, api.OverlapQuery, []api.EntityId) u32,
-        @TypeOf(query.overlapShape),
-    );
-    try testing.expectEqual(
-        fn (*const BP, *const BM, Vec3r, Vec3r, api.PhysicsQueryFilter, []api.EntityId) u32,
-        @TypeOf(query.overlapAabb),
-    );
-    try testing.expectEqual(
-        fn (*const BP, *const BM, *const SS, Vec3r, api.PhysicsQueryFilter, []api.EntityId) u32,
-        @TypeOf(query.pointQuery),
-    );
-    try testing.expectEqual(
-        fn (*const BP, *const BM, *const SS, Vec3r, Real, api.PhysicsQueryFilter) ?api.ClosestPointResult,
-        @TypeOf(query.closestPoint),
-    );
-
-    // The three raycast entries are NOT stubs: they are implemented at `Real` and
-    // return the solver-side `RayHit`, with the error channel the kernel needs.
-    // Their f32 public wrapper is the interface tier's (M1.1.15).
+    // (1) The three ray entries.
     try testing.expectEqual(
         fn (*const BP, *const BM, *const SS, query.RayQuery) query.Error!?query.RayHit,
         @TypeOf(query.raycast),
@@ -798,6 +781,71 @@ test "the five deferred query entries carry their frozen signatures" {
         fn (*const BP, *const BM, *const SS, query.RayQuery, []query.RayHit) query.Error!u32,
         @TypeOf(query.raycastAll),
     );
+    // …and the five that were stubs, now at `Real` with `[]BodyId` outputs.
+    try testing.expectEqual(
+        fn (*const BP, *const BM, *const SS, query.CastQuery) ?query.CastHit,
+        @TypeOf(query.shapeCast),
+    );
+    try testing.expectEqual(
+        fn (*const BP, *const BM, *const SS, query.OverlapRequest, []api.BodyId) u32,
+        @TypeOf(query.overlapShape),
+    );
+    try testing.expectEqual(
+        fn (*const BP, *const BM, *const SS, Vec3r, Vec3r, query.Filter, []api.BodyId) u32,
+        @TypeOf(query.overlapAabb),
+    );
+    try testing.expectEqual(
+        fn (*const BP, *const BM, *const SS, Vec3r, query.Filter, []api.BodyId) u32,
+        @TypeOf(query.pointQuery),
+    );
+    try testing.expectEqual(
+        fn (*const BP, *const BM, *const SS, Vec3r, Real, query.Filter) ?query.ClosestPointHit,
+        @TypeOf(query.closestPoint),
+    );
+
+    // (2) The frozen public surface, field by field. `f32` here is the point: this
+    //     boundary does NOT follow the solver scalar (§1.11.8), and a leg built with
+    //     `-Dphysics_f64` must still see f32 on every one of these.
+    const Vec3f = foundation_math.Vec3;
+    try testing.expectEqual(u32, @FieldType(api.PhysicsQueryFilter, "layer_mask"));
+    try testing.expectEqual([]const api.BodyId, @FieldType(api.PhysicsQueryFilter, "exclude"));
+
+    try testing.expectEqual(Vec3f, @FieldType(api.RaycastQuery, "origin"));
+    try testing.expectEqual(Vec3f, @FieldType(api.RaycastQuery, "direction"));
+    try testing.expectEqual(f32, @FieldType(api.RaycastQuery, "max_distance"));
+    try testing.expectEqual(api.PhysicsQueryFilter, @FieldType(api.RaycastQuery, "filter"));
+
+    try testing.expectEqual(api.ShapeId, @FieldType(api.ShapeCastQuery, "shape"));
+    try testing.expectEqual(Vec3f, @FieldType(api.ShapeCastQuery, "origin"));
+    try testing.expectEqual(foundation_math.Quatf, @FieldType(api.ShapeCastQuery, "rotation"));
+    try testing.expectEqual(Vec3f, @FieldType(api.ShapeCastQuery, "direction"));
+    try testing.expectEqual(f32, @FieldType(api.ShapeCastQuery, "max_distance"));
+
+    try testing.expectEqual(api.ShapeId, @FieldType(api.OverlapQuery, "shape"));
+    try testing.expectEqual(Vec3f, @FieldType(api.OverlapQuery, "position"));
+    try testing.expectEqual(foundation_math.Quatf, @FieldType(api.OverlapQuery, "rotation"));
+
+    try testing.expectEqual(api.EntityId, @FieldType(api.RaycastHit, "entity"));
+    try testing.expectEqual(api.BodyId, @FieldType(api.RaycastHit, "body"));
+    try testing.expectEqual(u32, @FieldType(api.RaycastHit, "subshape_id"));
+    try testing.expectEqual(Vec3f, @FieldType(api.RaycastHit, "position"));
+    try testing.expectEqual(Vec3f, @FieldType(api.RaycastHit, "normal"));
+    try testing.expectEqual(f32, @FieldType(api.RaycastHit, "distance"));
+
+    try testing.expectEqual(api.EntityId, @FieldType(api.ShapeCastHit, "entity"));
+    try testing.expectEqual(u32, @FieldType(api.ShapeCastHit, "cast_subshape_id"));
+    try testing.expectEqual(Vec3f, @FieldType(api.ShapeCastHit, "normal"));
+    try testing.expectEqual(f32, @FieldType(api.ShapeCastHit, "distance"));
+
+    try testing.expectEqual(api.EntityId, @FieldType(api.ClosestPointResult, "entity"));
+    try testing.expectEqual(api.BodyId, @FieldType(api.ClosestPointResult, "body"));
+    try testing.expectEqual(Vec3f, @FieldType(api.ClosestPointResult, "position"));
+    try testing.expectEqual(f32, @FieldType(api.ClosestPointResult, "distance"));
+
+    // The layer domain is one constant shared by the mask and by `addBody`'s
+    // rejection, not two copies of 32.
+    try testing.expectEqual(@as(u8, 32), api.collision_layer_count);
+    try testing.expectEqual(api.collision_layer_count, query.layer_bits);
 }
 
 // ---------------------------------------------------------------------------

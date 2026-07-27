@@ -714,7 +714,11 @@ pub const BodyManager = struct {
 };
 
 /// Exact world-space AABB of a shape at pose (`pos`, `rot`).
-fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
+///
+/// `pub` since M1.1.10 / E5: a shape CAST needs the initial world AABB of a shape
+/// that is not a body — the query's own — to size the swept traversal
+/// (`engine-physics-forge.md` §1.11.10). `bodyAabb` is the body-level wrapper.
+pub fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
     switch (shape.shape_type) {
         .sphere => return Aabbr.fromCenterHalfExtents(pos, Vec3r.splat(shape.radius)),
         .box => {

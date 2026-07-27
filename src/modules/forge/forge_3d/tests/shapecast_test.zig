@@ -527,6 +527,7 @@ const harness = @import("solver_test.zig");
 const body_manager_mod = @import("../body_manager.zig");
 const api = @import("weld_forge");
 const shape_mod = @import("../shape.zig");
+const query_mod = @import("../query/root.zig");
 
 /// A body carrying a sphere at `centre`, static, so a scene can be built without the
 /// solver moving anything. Both handles come back: the tests need the SHAPE id to
@@ -794,4 +795,53 @@ test "a sleeping body answers every adapter and stays asleep" {
     // must not resurrect it either.
     try world.step(gpa);
     try testing.expect(world.bm.isSleeping(sleeper).?);
+}
+
+// ---------------------------------------------------------------------------
+// M1.1.10 / E5 — the `shapeCast` entry
+// ---------------------------------------------------------------------------
+
+test "shapeCast returns the nearest body along the sweep" {
+    // The strict minimum so the body does not ship bare; the full acceptance matrix
+    // is E6's. Three unit spheres on +X at 10, 20 and 30, inserted NEAREST-LAST so
+    // the answer cannot come from insertion order. A unit sphere swept from the
+    // origin along +X first touches the one at 10 when its centre reaches
+    // 10 − (1 + 1) = 8.
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    _ = (try addSphereBody(gpa, &world, .{ 30, 0, 0 }, 1)).id;
+    _ = (try addSphereBody(gpa, &world, .{ 20, 0, 0 }, 1)).id;
+    const near = (try addSphereBody(gpa, &world, .{ 10, 0, 0 }, 1)).id;
+
+    const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    const q = query_mod.CastQuery{
+        .shape = probe,
+        .origin = Vec3r.zero,
+        .direction = v(1, 0, 0),
+        .max_distance = 100,
+    };
+    const hit = query_mod.shapeCast(&world.bp, &world.bm, &world.store, q).?;
+    try testing.expectEqual(near, hit.body);
+    try testing.expectApproxEqAbs(@as(Real, 8), hit.distance, tol);
+    try testing.expect(hit.normal.approxEql(v(-1, 0, 0), tol));
+    // The witness is on the HIT body's surface, at x = 10 − 1 = 9.
+    try testing.expect(hit.position.approxEql(v(9, 0, 0), tol));
+
+    // A sweep pointing away hits nothing, and a bound short of the contact refuses
+    // it — the bound being CLOSED, exactly 8 still answers.
+    var away = q;
+    away.direction = v(-1, 0, 0);
+    try testing.expect(query_mod.shapeCast(&world.bp, &world.bm, &world.store, away) == null);
+    var short = q;
+    short.max_distance = 7.9;
+    try testing.expect(query_mod.shapeCast(&world.bp, &world.bm, &world.store, short) == null);
+    var exact = q;
+    exact.max_distance = 8;
+    try testing.expect(query_mod.shapeCast(&world.bp, &world.bm, &world.store, exact) != null);
+
+    // A zero direction is degenerate and empty, the ray family's guard reused.
+    var still = q;
+    still.direction = Vec3r.zero;
+    try testing.expect(query_mod.shapeCast(&world.bp, &world.bm, &world.store, still) == null);
 }
