@@ -593,3 +593,113 @@ test "closestPoint answers a sleeping body and leaves it asleep" {
     try world.step(gpa);
     try testing.expect(world.bm.isSleeping(sleeper).?);
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.10 / E8 — the deep-band exterior answer (P1)
+// ---------------------------------------------------------------------------
+//
+// **The band, MEASURED, and what bounds its reach.** GJK classifies `.deep` when the
+// core distance falls inside `conv_k · floatEps · coordScale` with `conv_k = 16` and
+// `coordScale = |pos_b − pos_a| + coreExtent(b)` (`gjk.zig`). For `closestPointBody`,
+// `pos_a` is the QUERIED POINT — so `coordScale` is RELATIVE geometry, about
+// `1 + √3 = 2.732` for a unit box probed near its face, and it does NOT grow with the
+// world coordinate. The band width is therefore CONSTANT: 5.211e-6 at f32,
+// 9.706e-15 at f64, at 1 m as at 10 km.
+//
+// What does grow is `ulp(coordinate)`, and that is what bounds the band's REACH.
+// Measured, stepping in absolute multiples of `floatEps` (a coordinate-relative step
+// is already coarser than the band at 100 m and misses it entirely — the blind spot
+// that made a first sweep report nothing):
+//
+//   | scale   | band      | ulp(coord) | representable steps | outside AND deep |
+//   |---------|-----------|------------|---------------------|------------------|
+//   | 1 m     | 5.211e-6  | 2.384e-7   | 13                  | 5, widest 3.815e-6 |
+//   | 100 m   | 5.211e-6  | 1.204e-5   | 8                   | 0                |
+//   | 10 km   | 5.211e-6  | 1.192e-3   | 1                   | 0                |
+//
+// So the defect is reachable only where `ulp(coordinate) < band`, i.e. near the
+// origin. At 100 m and beyond no REPRESENTABLE point lies strictly inside it: the
+// nearest float outside the face is already past the band. That is an absence of
+// reachability, not an absence of defect — and it is why a probe that steps by a
+// coordinate-relative amount sees nothing at scale. f64 shows the identical structure
+// shifted by the eps ratio.
+
+test "a point outside the solid but inside GJK's deep band gets an EXTERIOR answer" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    // A unit box at the ORIGIN — the only scale at which the band is representable.
+    // Its +X face is at x = 1.
+    const placed = try place(gpa, &world, .{ .box = .{ .half_extents = harness.av3(1, 1, 1) } }, .{ 0, 0, 0 }, 0, 0);
+    const body_shape = shape_mod.supportShape(world.store.get(placed.shape).?);
+    const point_core: narrowphase.SupportShape(Real) = .{ .core = .point, .radius = 0 };
+    const eps = std.math.floatEps(Real);
+
+    // TWO SIDES, and both are load-bearing. 16 eps sits inside the band (measured
+    // widest defective 32 eps); 64 eps sits outside it (band ≈ 43.7 eps). A test that
+    // exercised only the band would not notice a fix that broke the healthy path.
+    const Side = struct { name: []const u8, delta: Real, want_deep: bool };
+    const sides = [_]Side{
+        .{ .name = "inside the band", .delta = 16 * eps, .want_deep = true },
+        .{ .name = "outside the band", .delta = 64 * eps, .want_deep = false },
+    };
+
+    for (sides) |side| {
+        const p = v(1 + side.delta, 0, 0);
+        // The step must be representable, or the point falls back onto the face and
+        // the membership gate answers instead.
+        try testing.expect(p.toArray()[0] != @as(Real, 1));
+
+        // GUARD 1 — the membership test, which is the AUTHORITY on solidity, says
+        // OUTSIDE. Everything below is therefore an exterior answer or a defect.
+        try testing.expect(!world.bm.containsPointBody(&world.store, placed.id, p).?);
+
+        // GUARD 2 — the regime really is the one this side means to exercise. Without
+        // it the "inside the band" case could silently be a `.shallow` and prove
+        // nothing about the deep path.
+        const regime = narrowphase.gjk(Real, point_core, p, Quatr.identity, body_shape, Vec3r.zero, Quatr.identity);
+        if (side.want_deep) {
+            try testing.expectEqual(narrowphase.GjkResult(Real).Status.deep, regime.status);
+        } else {
+            try testing.expect(regime.status != .deep);
+        }
+
+        const hit = query.closestPoint(&world.bp, &world.bm, &world.store, p, 100, .{}).?;
+        try testing.expectEqual(placed.id, hit.body);
+
+        // THE CLAIM, identical on both sides because the membership test's verdict is
+        // identical on both sides: an exterior point gets an exterior answer.
+        //
+        //   - `position` is a point OF THE BODY's surface, boundary included…
+        try testing.expect(world.bm.containsPointBody(&world.store, placed.id, hit.position).?);
+        //   - …and specifically the face point, never the queried point.
+        try testing.expectApproxEqAbs(@as(Real, 1), hit.position.toArray()[0], 4 * eps);
+        try testing.expect(hit.position.toArray()[0] != p.toArray()[0]);
+        //   - and the distance is the real separation, not zero.
+        try testing.expectApproxEqAbs(side.delta, hit.distance, 4 * eps);
+        try testing.expect(hit.distance > 0);
+    }
+}
+
+test "max_distance zero answers only for a point inside the solid" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const placed = try place(gpa, &world, .{ .box = .{ .half_extents = harness.av3(1, 1, 1) } }, .{ 0, 0, 0 }, 0, 0);
+    const eps = std.math.floatEps(Real);
+
+    // INTERIOR — boundary included — is at distance 0, so a zero bound admits it.
+    for ([_]Vec3r{ Vec3r.zero, v(0.5, 0, 0), v(1, 0, 0) }) |p| {
+        const hit = query.closestPoint(&world.bp, &world.bm, &world.store, p, 0, .{}).?;
+        try testing.expectEqual(placed.id, hit.body);
+        try testing.expectEqual(@as(Real, 0), hit.distance);
+    }
+
+    // EXTERIOR is not, however little, and that includes the deep band: an answer
+    // there would mean the band had been read as an interior after all.
+    for ([_]Real{ 16 * eps, 64 * eps, 0.001, 1 }) |delta| {
+        const p = v(1 + delta, 0, 0);
+        try testing.expect(!world.bm.containsPointBody(&world.store, placed.id, p).?);
+        try testing.expect(query.closestPoint(&world.bp, &world.bm, &world.store, p, 0, .{}) == null);
+    }
+}

@@ -608,11 +608,23 @@ pub const BodyManager = struct {
     ///   - Outside, GJK runs between a degenerate POINT core placed at the queried
     ///     point and the body, and the surface quantities are derived from the CORE
     ///     ones: `distance = max(0, core_distance − r_b)` and
-    ///     `position = closest_b + r_b · normalize(closest_a − closest_b)`.
+    ///     `position = closest_b + r_b · normalize(point − closest_b)`. `closest_a`
+    ///     needs no lookup: A's core is a single point, so it IS the queried point in
+    ///     every regime.
     ///   - The closest points are valid for `separated` AND `shallow`, and that
     ///     second inclusion is normative: `shallow` is NOT an interior, it is a real
     ///     separation absorbed by the numeric margin, and treating it as one would
     ///     return 0 for a measurably external point.
+    ///   - `.deep` is REACHABLE for an exterior point, and its closest points are
+    ///     UNSPECIFIED (`gjk.zig`: `closest_b` is the zero vector, `distance` is 0).
+    ///     The regime fires whenever the core distance falls inside
+    ///     `conv_k · floatEps · coordScale`, and for a point probe `coordScale` is
+    ///     relative geometry — `|body_pos − point| + coreExtent(b)` — so a point a few
+    ///     ULPs outside a hard core lands there while the membership test above, which
+    ///     is the AUTHORITY on solidity, says outside. The witness is then
+    ///     reconstructed from the one thing `.deep` does specify, the terminal simplex,
+    ///     whose vertices carry `support_b`; the answer stays an EXTERIOR answer, with
+    ///     `position` on the body's surface and never the queried point.
     pub fn closestPointBody(
         self: *const BodyManager,
         store: *const ShapeStore,
@@ -641,31 +653,46 @@ pub const BodyManager = struct {
             self.bodies.items(.position)[idx],
             self.bodies.items(.rotation)[idx],
         );
-        // `.deep` means the CORES intersect, which cannot happen for a point that the
-        // membership test above has just placed outside the SOLID (the solid contains
-        // the core). It stays handled rather than asserted away because the
-        // alternative to answering here is a silently wrong position, and the two
-        // tests sit on opposite sides of GJK's noise band.
-        if (result.status == .deep) return .{ .distance = 0, .position = point };
+
+        // The closest point on B's CORE, and the core distance to it — one pair per
+        // regime, because `gjk.zig` specifies different fields in each. `closest_a`
+        // never needs a lookup: A's core is a single point, so it IS `point`.
+        const CoreWitness = struct { b: Vec3r, distance: Real };
+        const core: CoreWitness = switch (result.status) {
+            // Both specified.
+            .separated, .shallow => .{ .b = result.closest_b, .distance = result.distance },
+            // NEITHER specified: `closest_b` is the zero vector and `distance` is 0.
+            // The terminal simplex is what `.deep` does carry, and its vertices hold
+            // `support_b` — points on B's core, in the PROBE's frame, which for a
+            // point core at `point` with identity rotation is world translated by
+            // `point`. So the witness comes from there, and the distance is measured
+            // against it rather than read from a field that does not hold one.
+            .deep => blk: {
+                const b = deepCoreWitness(result.simplex[0..result.simplex_count]).add(point);
+                break :blk .{ .b = b, .distance = point.sub(b).length() };
+            },
+        };
 
         const radius_b = shape_b.radius;
-        const surface_distance = @max(0, result.distance - radius_b);
+        const surface_distance = @max(0, core.distance - radius_b);
         if (radius_b == 0) {
             // A hard core IS its own surface: no projection, and in particular no
             // normalisation to guard.
-            return .{ .distance = surface_distance, .position = result.closest_b };
+            return .{ .distance = surface_distance, .position = core.b };
         }
-        const away = result.closest_a.sub(result.closest_b);
+        const away = point.sub(core.b);
         const scale = @reduce(.Max, @abs(away.data));
         if (scale == 0) {
-            // Unreachable after the membership test — the two closest points are
-            // `core_distance > radius_b > 0` apart — and guarded at TRUE ZERO anyway,
+            // The queried point coincides with the core witness. Reachable only in the
+            // deep band, where the two are within float noise of each other; the
+            // witness is still a point of the core, hence of the surface for a hard
+            // core, so answering it keeps the exterior contract. Guarded at TRUE ZERO
             // because `foundation`'s `normalize` is unguarded and would answer NaN.
-            return .{ .distance = surface_distance, .position = result.closest_b };
+            return .{ .distance = surface_distance, .position = core.b };
         }
         const reduced: Vec3r = .{ .data = away.data / @as(@Vector(3, Real), @splat(scale)) };
         const unit = reduced.scale(1 / reduced.length());
-        return .{ .distance = surface_distance, .position = result.closest_b.add(unit.scale(radius_b)) };
+        return .{ .distance = surface_distance, .position = core.b.add(unit.scale(radius_b)) };
     }
 
     /// Full narrowphase (GJK → shallow/deep contact manifold) for the pair
@@ -712,6 +739,35 @@ pub const BodyManager = struct {
         );
     }
 };
+
+/// Closest point on B's CORE reconstructed from a `.deep` terminal simplex, in the
+/// PROBE's frame.
+///
+/// `.deep` specifies the simplex and nothing else — no distance, no closest points
+/// (`gjk.zig`). Its vertices are `support.Vertex(T)` triplets carrying `support_a` /
+/// `support_b` alongside the Minkowski point `w`, so re-solving the closest-origin
+/// problem over the `w`s recovers the barycentric weights and the same weights
+/// combine the `support_b`s into a point of B's core. This is the reconstruction
+/// `shapecast.zig` performs at its own terminal, for the same reason and from the same
+/// data.
+///
+/// The result is in the frame GJK ran in, which is A's; the caller maps it out.
+fn deepCoreWitness(simplex: []const narrowphase.Simplex(Real).Vertex) Vec3r {
+    const S = narrowphase.Simplex(Real);
+    std.debug.assert(simplex.len >= 1 and simplex.len <= 4);
+    const res = switch (simplex.len) {
+        1 => S.closestOriginPoint(simplex[0].w),
+        2 => S.closestOriginSegment(simplex[0].w, simplex[1].w),
+        3 => S.closestOriginTriangle(simplex[0].w, simplex[1].w, simplex[2].w),
+        4 => S.closestOriginTetra(simplex[0].w, simplex[1].w, simplex[2].w, simplex[3].w),
+        else => unreachable,
+    };
+    var acc = Vec3r.zero;
+    for (res.indices[0..res.count], res.bary[0..res.count]) |i, weight| {
+        acc = acc.add(simplex[i].support_b.scale(weight));
+    }
+    return acc;
+}
 
 /// Exact world-space AABB of a shape at pose (`pos`, `rot`).
 ///

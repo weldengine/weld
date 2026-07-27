@@ -308,7 +308,13 @@ pub fn shapeCast(
     store: *const ShapeStore,
     query: CastQuery,
 ) ?CastHit {
+    // The full §1.11.11 domain, asserted BEFORE the handle is resolved so a stale
+    // shape cannot short-circuit it: origin, rotation unitary, direction finite, bound
+    // finite and non-negative.
     std.debug.assert(std.math.isFinite(query.max_distance) and query.max_distance >= 0);
+    assertFiniteVec(query.origin);
+    assertFiniteVec(query.direction);
+    assertUnitRotation(query.rotation);
     const record = store.get(query.shape) orelse return null;
     const direction = unitDirection(query.direction) orelse return null;
 
@@ -340,6 +346,9 @@ pub fn overlapShape(
     request: OverlapRequest,
     out: []BodyId,
 ) u32 {
+    // Before the handle resolution, for the reason `assertFiniteVec` gives.
+    assertFiniteVec(request.position);
+    assertUnitRotation(request.rotation);
     const record = store.get(request.shape) orelse return 0;
     var collector = overlap_mod.OverlapCollector{
         .bm = bm,
@@ -376,6 +385,12 @@ pub fn overlapAabb(
     filter: Filter,
     out: []BodyId,
 ) u32 {
+    assertFiniteVec(min);
+    assertFiniteVec(max);
+    // `min <= max` is deliberately NOT asserted: §1.11.12 states no such constraint,
+    // and an inverted box is a well-defined query whose answer is empty — `overlaps`
+    // rejects everything against it. Inventing the constraint would refuse a caller
+    // the spec permits.
     const query_box = Aabbr.fromMinMax(min, max);
     var collector = overlap_mod.OverlapCollector{
         .bm = bm,
@@ -399,6 +414,7 @@ pub fn pointQuery(
     filter: Filter,
     out: []BodyId,
 ) u32 {
+    assertFiniteVec(point);
     var collector = overlap_mod.OverlapCollector{
         .bm = bm,
         .store = store,
@@ -426,6 +442,7 @@ pub fn closestPoint(
     filter: Filter,
 ) ?ClosestPointHit {
     std.debug.assert(std.math.isFinite(max_distance) and max_distance >= 0);
+    assertFiniteVec(point);
     var collector = overlap_mod.ClosestPointCollector{
         .bm = bm,
         .store = store,
@@ -530,6 +547,33 @@ fn prepare(query: RayQuery) ?Ray {
     // the returned distance — is in units of this unit direction, which is why a
     // hit carries a distance and never a fraction.
     return Ray.init(query.origin, unitDirection(query.direction) orelse return null);
+}
+
+/// Slack on a rotation's unit norm, in ULPs of 1. The comparison is against 1, so
+/// this is pure float noise — the same constant and the same role as
+/// `body_manager.zig`'s `descriptor_rotation_unit_k` and `shapecast.zig`'s
+/// `unit_dir_k`.
+const rotation_unit_k: comptime_int = 16;
+
+/// Every geometric input of a query is FINITE. §1.11.11 requires the domain "verified
+/// by a domain assertion at the entry", and the entry is BEFORE the handle resolution:
+/// a `store.get(...) orelse return null` on a stale shape would otherwise
+/// short-circuit the check, so a NaN pose would pass unnoticed on every call that
+/// happened to carry a dead handle and then reach the kernel on the next one that did
+/// not. `@abs(NaN) < inf` is false, so this catches NaN as well as infinity.
+fn assertFiniteVec(vector: Vec3r) void {
+    std.debug.assert(@reduce(.And, @abs(vector.data) < @as(@Vector(3, Real), @splat(std.math.inf(Real)))));
+}
+
+/// A rotation is UNIT. Not cosmetic: every one of these rotations is used as an
+/// inverse BY CONJUGATION, and the conjugate is the inverse only for a unit
+/// quaternion. M1.1.9 burned on exactly this — an f32-unit quaternion widened to f64
+/// is off by `3.4e-8`, which scaled a static collider's frame by that factor, 0.34 mm
+/// at 10 km, the regime `-Dphysics_f64` exists for.
+fn assertUnitRotation(rotation: Quatr) void {
+    const q = rotation.toArray();
+    const norm_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+    std.debug.assert(@abs(norm_sq - 1) <= rotation_unit_k * std.math.floatEps(Real));
 }
 
 /// Unit direction, or `null` when the input is EXACTLY zero — the §1.11.4 guard,
