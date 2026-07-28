@@ -1769,7 +1769,7 @@ test "removing an unbounded proxy retires it from the list and from pairing" {
     try std.testing.expectEqual(@as(u32, 0), c.count);
 }
 
-test "the unbounded list is bounded by the LIVE count, not by the total ever created" {
+test "the unbounded list stops growing with the total ever created; its bound is the live PEAK" {
     const gpa = std.testing.allocator;
     var bp = BphF.init(.{});
     defer bp.deinit(gpa);
@@ -1779,16 +1779,20 @@ test "the unbounded list is bounded by the LIVE count, not by the total ever cre
     // `remove` only cleared the `live` flag, so 64 create/destroy cycles left 64 slots in
     // the list and `visitUnbounded` walked all of them for every query — a monotonic cost
     // in the number of planes ever created. With the LIFO free-list the same sequence
-    // leaves exactly ONE.
+    // leaves exactly ONE, because the PEAK of simultaneously live slots is one throughout.
+    //
+    // The distinction is not pedantry and the last block of this test is what proves it:
+    // `items.len` never decreases, so the bound is that peak and NOT the live count. What
+    // the free-list removed is the dependence on the total, which was the pathology.
     var live: BphF.Proxy = try bp.insertUnbounded(gpa, .static, ground, 0);
     try std.testing.expectEqual(@as(usize, 1), list.items.len);
     var i: u32 = 1;
     while (i < 64) : (i += 1) {
         bp.remove(live);
         live = try bp.insertUnbounded(gpa, .static, ground, i);
-        // The list never grows past the live count, at any point of the sequence — not
-        // just at the end, which a single final assertion would not distinguish from a
-        // list that grew and was compacted.
+        // The list stays at the peak, at every point of the sequence — not just at the
+        // end, which a single final assertion would not distinguish from a list that grew
+        // and was compacted.
         try std.testing.expectEqual(@as(usize, 1), list.items.len);
         // …and the recycled slot is the SAME index every time: LIFO, one live entry.
         try std.testing.expectEqual(@as(u32, 0), live.id);
@@ -1819,12 +1823,21 @@ test "the unbounded list is bounded by the LIVE count, not by the total ever cre
     try std.testing.expectEqual(@as(u32, 1), c.count);
     try std.testing.expectEqual(@as(u32, 63), c.seen[0]);
 
-    // N live at once still occupies N slots — the free-list recycles, it does not merge.
+    // THE PEAK, isolated. Nine live at once occupies nine slots — the free-list recycles,
+    // it does not merge.
     var held: [8]BphF.Proxy = undefined;
     for (&held, 0..) |*h, k| h.* = try bp.insertUnbounded(gpa, .static, ground, 100 + @as(u32, @intCast(k)));
     try std.testing.expectEqual(@as(usize, 9), list.items.len); // 1 live + 8 new
-    // Freeing them all and re-inserting one reuses a slot rather than appending a tenth.
+
+    // And it does not come back down. Freeing all eight leaves ONE live shape and NINE
+    // slots — the length tracks the peak, not the live count, which is the true bound
+    // stated on the `unbounded` field. A dense list would read 1 here; this one reads 9,
+    // and that is the deliberate design, not a defect.
     for (held) |h| bp.remove(h);
+    try std.testing.expectEqual(@as(usize, 9), list.items.len);
+
+    // Re-inserting reuses a slot rather than appending a tenth: the peak is a ceiling the
+    // list returns to, never a floor it climbs past.
     _ = try bp.insertUnbounded(gpa, .static, ground, 200);
     try std.testing.expectEqual(@as(usize, 9), list.items.len);
 }
@@ -1858,4 +1871,47 @@ test "a retired unbounded slot never surfaces in a pair after its index is reuse
     }
     try std.testing.expectEqual(@as(u32, 0), involving_dead);
     try std.testing.expectEqual(@as(u32, 1), involving_live); // once, not twice
+}
+
+test "at full capacity with a free slot, an insertion needs no allocation at all" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+    const list = &bp.unbounded[@intFromEnum(Layer.static)];
+    var pairs: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pairs.deinit(gpa);
+
+    // The ONE configuration that separates an unconditional reserve from a conditional
+    // one, and it is not reachable by accident: the slot list must be EXACTLY at capacity
+    // (so `ensureUnusedCapacity(gpa, 1)` would grow it) while a free slot is available (so
+    // no growth is actually needed). `ensureUnusedCapacity` guarantees room for `len + 1`,
+    // which is why "at capacity" is the discriminating state and "below capacity" is not.
+    var held: [64]BphF.Proxy = undefined;
+    var n: usize = 0;
+    while (list.items.len != list.capacity or n == 0) {
+        std.debug.assert(n < held.len);
+        held[n] = try bp.insertUnbounded(gpa, .static, ground, @intCast(n));
+        n += 1;
+    }
+    try std.testing.expectEqual(list.capacity, list.items.len);
+
+    // Drain the moved log so ITS unconditional reserve is genuinely free: it keeps its
+    // capacity across `clearRetainingCapacity`, so after this the only allocation the
+    // insertion could still want is the slot-list growth under test.
+    try bp.computePairs(gpa, &pairs);
+    try std.testing.expectEqual(@as(usize, 0), bp.moved_unbounded[@intFromEnum(Layer.static)].items.len);
+    try std.testing.expect(bp.moved_unbounded[@intFromEnum(Layer.static)].capacity >= 1);
+
+    // One free slot, list still exactly at capacity.
+    bp.remove(held[0]);
+    try std.testing.expectEqual(list.capacity, list.items.len);
+
+    // Fail the very next allocation. With the conditional reserve the insertion performs
+    // NONE, so it must succeed; with the unconditional one it grows the slot list and
+    // returns `error.OutOfMemory`.
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    const p = try bp.insertUnbounded(failing.allocator(), .static, ground, 999);
+    try std.testing.expectEqual(held[0].id, p.id); // the recycled slot, not a new one
+    try std.testing.expectEqual(list.capacity, list.items.len); // and nothing grew
+    try std.testing.expectEqual(@as(usize, 0), failing.allocations);
 }

@@ -860,7 +860,8 @@ pub fn Broadphase(comptime T: type) type {
         /// free-list hands the same index back to a new shape and moves nothing — which is
         /// exactly what `Bvh` does one level up with `freeNode` / `allocateNodeAssumeCapacity`
         /// in this same file. Without the free-list the list grew monotonically with every
-        /// plane ever created, and its visit cost with it (M1.1.11/E7-J3).
+        /// plane ever created, and its visit cost with it (M1.1.11/E7-J3); with it, the
+        /// bound becomes the live PEAK, which is stated on the `unbounded` field.
         ///
         /// A dead slot links to the next free one through `user_data`, which is meaningless
         /// while dead — the same field-reuse `Bvh` performs on a free node's `parent`.
@@ -894,6 +895,29 @@ pub fn Broadphase(comptime T: type) type {
         /// Per-layer flat list of UNBOUNDED shapes, insertion-ordered, outside the
         /// trees (§1.11.15). No hashed container, here as everywhere on this path
         /// (determinism by construction, M1.1.14).
+        ///
+        /// **The length is the PEAK of SIMULTANEOUSLY live slots in this layer, not the
+        /// live count.** `items.len` never decreases: retirement recycles a slot, it does
+        /// not remove it, so a layer that once held nine half-spaces at once keeps nine
+        /// slots forever even when eight are dead. What the free-list removed is the
+        /// growth with the TOTAL EVER CREATED, which was the pathology — an unbounded
+        /// monotonic visit cost in the number of planes a session has ever built — and
+        /// that is strictly better without being dense.
+        ///
+        /// The peak is acceptable because of what a half-space IS here: `addBody` rejects
+        /// any non-static body carrying one (`error.ShapeMustBeStatic`, §1.11.15), so the
+        /// population is authored level geometry rather than gameplay churn, and its peak
+        /// is a quantity the scene author controls directly. MEASURED at 1 in every scene
+        /// in this repo, including the two benches.
+        ///
+        /// A DENSE list was considered and deliberately NOT built. The only form that
+        /// keeps iteration O(live) *and* the insertion order §1.11.15 makes normative is
+        /// an ORDERED dense list with O(n) removal — shifting the tail down. A
+        /// swap-remove would be O(1) and is what one reaches for first; it moves the last
+        /// element into the hole and therefore destroys that order, which is the one
+        /// property the model does not let us trade. The trigger for paying the O(n)
+        /// removal is a real scene that CHURNS half-spaces — creating and destroying them
+        /// during play rather than at load — and no such scene exists yet.
         unbounded: [layer_count]std.ArrayListUnmanaged(UnboundedSlot),
         /// Per-layer LIFO free-list head over `unbounded`, or `null_slot` when empty. A
         /// dead slot's `user_data` is the link to the next (see `UnboundedSlot`).
@@ -965,18 +989,25 @@ pub fn Broadphase(comptime T: type) type {
         /// re-enters a moved log).
         pub fn insertUnbounded(self: *Self, gpa: std.mem.Allocator, layer: BroadphaseLayer, shape: UnboundedShape, user_data: u32) !Proxy {
             const li = @intFromEnum(layer);
-            // Reserved BEFORE either list is touched, so an entry can never exist unlogged
-            // — see the doc comment. The capacity reserve is unconditional even when the
-            // free-list will serve the slot: `ensureUnusedCapacity` on a list at capacity
-            // is a no-op, and making the reserve conditional would put a fallible step
-            // after the mutation.
-            try self.unbounded[li].ensureUnusedCapacity(gpa, 1);
+            // Both fallible steps precede EVERY mutation, so an OOM leaves the broadphase
+            // bit-unchanged and the call is retryable — and an entry can never exist
+            // unlogged (see the doc comment).
+            //
+            // The two reserves are NOT symmetric, and the asymmetry is the point.
+            // `moved_unbounded` always receives an entry, so its reserve is unconditional.
+            // `unbounded` receives one only when the free-list is empty, and
+            // `ensureUnusedCapacity(gpa, 1)` guarantees room for `len + 1` — so at
+            // `len == capacity` it GROWS the list. Reserving it unconditionally would
+            // therefore allocate for a slot the free-list is about to hand back, and would
+            // fail an insertion that already has every byte it needs. Reading the head
+            // before the reserve mutates nothing, so the ordering guarantee is intact.
+            const head = self.unbounded_free[li];
             try self.moved_unbounded[li].ensureUnusedCapacity(gpa, 1);
+            if (head == null_slot) try self.unbounded[li].ensureUnusedCapacity(gpa, 1);
             const id = blk: {
                 // LIFO reuse first (the `Bvh.allocateNodeAssumeCapacity` shape): an
                 // identical op sequence therefore reuses indices identically, which is what
                 // keeps the whole path a pure function of that sequence (M1.1.14).
-                const head = self.unbounded_free[li];
                 if (head != null_slot) {
                     self.unbounded_free[li] = self.unbounded[li].items[head].user_data; // next free
                     self.unbounded[li].items[head] = .{ .shape = shape, .user_data = user_data, .live = true };
@@ -1002,8 +1033,10 @@ pub fn Broadphase(comptime T: type) type {
                 .tree => self.trees[li].remove(proxy.id),
                 // Retired IN PLACE and pushed onto the LIFO free-list: the slot's INDEX
                 // must not move (a live `Proxy` holds one), but the slot itself is
-                // recycled, so creating and destroying planes leaves the list bounded by
-                // the LIVE count rather than the total ever created.
+                // recycled, so creating and destroying planes stops growing the list with
+                // the TOTAL EVER CREATED. `items.len` does not decrease — the bound is the
+                // peak of simultaneously live slots, and why that is acceptable, plus the
+                // dense-list option and its trigger, are on the `unbounded` field.
                 .unbounded => {
                     self.unbounded[li].items[proxy.id].live = false;
                     self.unbounded[li].items[proxy.id].user_data = self.unbounded_free[li];
