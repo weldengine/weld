@@ -1428,3 +1428,109 @@ test "overlapShapeBody and collidePlane agree to the bit on whether a pair touch
     try testing.expectEqual(@as(u32, 6), separated);
     try testing.expectEqual(@as(u32, 9), touching);
 }
+
+// ---------------------------------------------------------------------------
+// E7 / J1 — `normal · direction <= 0` on EVERY hit, the four kernels agreeing
+// ---------------------------------------------------------------------------
+
+test "an outward cast from inside a half-space reports minus-direction, not the plane normal" {
+    // THE TEST THAT DID NOT EXIST. `plane.castShape` returned `plane.normal` at initial
+    // overlap whatever the sweep direction, so a cast aimed OUT of the solid — along `+n`,
+    // to leave it — answered `normal · direction = +1`, breaking the invariant
+    // `shapecast.zig`'s `terminal` states as "the only one keeping
+    // `normal · direction <= 0` on every hit". The inward cases below always had
+    // `normal · direction = −1` by luck of aim, which is why the existing suite passed
+    // through the defect: changing the returned normal moved no test.
+    const plane = HS{ .normal = Vec3r.unit_y, .distance = 0 }; // solid `y <= 0`
+    // A sphere of radius 1/2 centred at y = −2: entirely inside, so `sep₀ < 0` on every
+    // direction and every case below is an INITIAL OVERLAP.
+    const probe = sphere(0.5);
+    const inside_plane = HS{ .normal = Vec3r.unit_y, .distance = 2 }; // A's frame: origin is 2 m in
+
+    for ([_]Vec3r{
+        Vec3r.unit_y, // straight OUT — the case that was wrong
+        Vec3r.unit_y.neg(), // straight in
+        Vec3r.unit_x, // along the boundary
+        Vec3r.unit_y.add(Vec3r.unit_x).normalize(), // obliquely out
+        Vec3r.unit_y.neg().add(Vec3r.unit_z).normalize(), // obliquely in
+    }) |d| {
+        const hit = narrowphase.plane.castShape(Real, inside_plane, probe, d, 100).?;
+        try testing.expectEqual(@as(Real, 0), hit.distance); // initial overlap
+        // THE invariant, on every one of them.
+        try testing.expect(hit.normal.dot(d) <= 0);
+        // …and specifically `−direction`, which is what the other three kernels return at
+        // a zero parameter.
+        try testing.expect(hit.normal.eql(d.neg()));
+        // The witness still lies ON the boundary — the geometry is unchanged, only the
+        // normal's rule is.
+        try testing.expectApproxEqAbs(@as(Real, 0), inside_plane.signedDistance(hit.point), tol);
+    }
+
+    // A cast that is NOT an initial overlap still reports the plane's normal, so the rule
+    // above is confined to the degenerate case and has not swallowed the ordinary one.
+    _ = plane;
+    const above = HS{ .normal = Vec3r.unit_y, .distance = -10 }; // solid `y <= −10`
+    const real_hit = narrowphase.plane.castShape(Real, above, probe, Vec3r.unit_y.neg(), 100).?;
+    try testing.expect(real_hit.distance > 0);
+    try testing.expect(real_hit.normal.eql(Vec3r.unit_y));
+    try testing.expect(real_hit.normal.dot(Vec3r.unit_y.neg()) <= 0);
+}
+
+test "the four kernels agree on the normal at a zero parameter" {
+    // `raycast.zig` for an origin inside a convex, `plane.rayShape` for an origin inside
+    // the half-space, `plane.castShape` at initial overlap, and `shapecast.zig` when its
+    // own axis has collapsed — all four answer `−direction`, and the invariant
+    // `normal · direction <= 0` holds on every hit of every one of them.
+    const d = vr(2.0 / 7.0, -3.0 / 7.0, 6.0 / 7.0); // oblique unit direction
+
+    // (1) convex ray kernel, origin inside a unit sphere.
+    const ray_convex = narrowphase.rayShape(Real, sphere(1), Vec3r.zero, d).?;
+    try testing.expectEqual(@as(Real, 0), ray_convex.distance);
+    try testing.expect(ray_convex.normal.eql(d.neg()));
+    try testing.expect(ray_convex.normal.dot(d) <= 0);
+
+    // (2) half-space ray kernel, origin inside the solid.
+    const inside = HS{ .normal = Vec3r.unit_y, .distance = 5 };
+    const ray_plane = narrowphase.plane.rayShape(Real, inside, Vec3r.zero, d).?;
+    try testing.expectEqual(@as(Real, 0), ray_plane.distance);
+    try testing.expect(ray_plane.normal.eql(d.neg()));
+    try testing.expect(ray_plane.normal.dot(d) <= 0);
+
+    // (3) half-space cast kernel, initial overlap.
+    const cast_plane = narrowphase.plane.castShape(Real, inside, sphere(0.5), d, 100).?;
+    try testing.expectEqual(@as(Real, 0), cast_plane.distance);
+    try testing.expect(cast_plane.normal.eql(d.neg()));
+    try testing.expect(cast_plane.normal.dot(d) <= 0);
+
+    // (4) the convex cast kernel, two coincident spheres — the hard-core collapse its
+    // `terminal` documents. Whatever axis it settles on, the invariant holds.
+    const cast_convex = narrowphase.castShape(
+        Real,
+        sphere(1),
+        narrowphase.RelativePose(Real).init(Vec3r.zero, Quatr.identity, Vec3r.zero, Quatr.identity),
+        sphere(1),
+        d,
+        100,
+    ).?;
+    try testing.expectEqual(@as(Real, 0), cast_convex.distance);
+    try testing.expect(cast_convex.normal.dot(d) <= 0);
+}
+
+test "castShapeBody transports the normal without disturbing the invariant" {
+    const gpa = testing.allocator;
+    var scene = try PlaneScene.init(gpa);
+    defer scene.deinit(gpa);
+
+    // The adapter only ROTATES the kernel's normal into world. A rotation preserves the
+    // dot product with the equally rotated direction, so the invariant is carried
+    // exactly — which is why J1's fix is local to the kernel and needed no adapter change.
+    // Asserted rather than argued: the scene's solid is `x >= 10`, so a probe at x = 50 is
+    // deep inside it and every direction below is an initial overlap.
+    const probe = narrowphase.SupportShape(Real){ .core = .point, .radius = 0.5 };
+    for ([_]Vec3r{ Vec3r.unit_x, Vec3r.unit_x.neg(), Vec3r.unit_y, vr(1, 1, 1).normalize() }) |d| {
+        const hit = scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(50, 1, 2), Quatr.identity, d, 100).?;
+        try testing.expectEqual(@as(Real, 0), hit.distance);
+        try testing.expect(hit.normal.dot(d) <= 0);
+        try testing.expect(hit.normal.approxEql(d.neg(), 8 * std.math.floatEps(Real)));
+    }
+}

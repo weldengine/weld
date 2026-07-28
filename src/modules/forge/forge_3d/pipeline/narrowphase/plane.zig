@@ -239,11 +239,30 @@ pub fn rayShape(
 /// ```
 ///
 /// **Initial contact** (`sep₀ <= 0`, already overlapping at the start pose): distance
-/// 0, and the witness is on the HIT BODY — the boundary plane — never the cast
-/// origin. §1.11.11 is explicit that the ray analogy does not carry here: a ray's
-/// origin necessarily belongs to the body it hit, whereas the centre of a cast shape
-/// can be entirely outside it, so returning the origin would give a point that is
-/// neither a contact point nor a point of the collider.
+/// 0, the witness on the HIT BODY — the boundary plane — never the cast origin, and the
+/// normal `−direction`.
+///
+/// The witness rule is §1.11.11's: a ray's origin necessarily belongs to the body it
+/// hit, whereas the centre of a cast shape can be entirely outside it, so returning the
+/// origin would give a point that is neither a contact point nor a point of the
+/// collider.
+///
+/// **The normal is `−direction`, not `n`, and no information is lost by that.** All four
+/// kernels say the same thing at a zero parameter — `raycast.zig` for an origin inside a
+/// convex, `plane.rayShape` for an origin inside the half-space, and `shapecast.zig`,
+/// whose `terminal` documents `−direction` as "the only one keeping
+/// `normal · direction <= 0` on every hit". Returning `n` here broke that invariant
+/// outright for a cast aimed OUT of the solid: sweeping along `+n` to leave the
+/// half-space gave `normal · direction = +1`.
+///
+/// Nothing is lost because a cast does not measure penetration geometry. It answers WHEN
+/// two shapes touch, and at an initial overlap there is no time of impact and no unique
+/// separating axis to report — §1.11.11 says as much, deferring the deepest point at a
+/// zero parameter to an EPA it deliberately does not run. The question `n` answers is the
+/// MANIFOLD's, and `collidePlane` answers it exactly, with `n` and a penetration. And for
+/// this shape specifically the caller can always recover `n`: it is a stored field of the
+/// shape. The invariant, by contrast, is what every consumer relies on and cannot
+/// reconstruct.
 ///
 /// The guard on `n·dir` is the file's SECOND and last, at TRUE ZERO, and it rejects
 /// the receding sweep and the parallel one together for the reason `rayShape` gives.
@@ -265,11 +284,14 @@ pub fn castShape(
     const sep0 = plane.signedDistance(deepest);
 
     if (sep0 <= 0) {
-        // Already overlapping: the witness is `deepest` projected onto the boundary.
+        // Already overlapping: the witness is `deepest` projected onto the boundary, and
+        // the normal is `−direction` (see the doc comment). The two are along different
+        // axes, which is the same shape of answer `shapecast.zig` gives when its own axis
+        // has collapsed: a witness from the geometry, a normal from the invariant.
         return .{
             .distance = 0,
             .point = deepest.sub(plane.normal.scale(sep0)),
-            .normal = plane.normal,
+            .normal = direction.neg(),
         };
     }
 
