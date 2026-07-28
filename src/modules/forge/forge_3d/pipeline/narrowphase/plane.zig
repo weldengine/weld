@@ -112,11 +112,31 @@ pub fn HalfSpace(comptime T: type) type {
             return self.normal.dot(p) - self.distance;
         }
 
-        /// Domain assertion: the normal is unit. Not cosmetic — every kernel treats it
-        /// as unit when it divides by `n·dir`, projects along it, or returns it as a
-        /// contact normal, and a non-unit normal would scale `signedDistance` silently.
-        pub fn assertUnit(self: Self) void {
+        /// Domain assertion: the normal is UNIT and the distance is FINITE. Renamed from
+        /// `assertUnit` at M1.1.11/E7-J2, when the second half was added — a name that
+        /// promised one check while performing two would be worse than either.
+        ///
+        /// Neither half is cosmetic. Every kernel treats the normal as unit when it
+        /// divides by `n·dir`, projects along it, or returns it as a contact normal, and a
+        /// non-unit normal would scale `signedDistance` silently.
+        ///
+        /// A non-finite `distance` is worse, because it produces TWO silent behaviours
+        /// that CONTRADICT each other. MEASURED with `distance = NaN`, identically at both
+        /// precisions:
+        ///
+        ///   - `signedDistance` is NaN, so `sep > 0` is FALSE, so the generator's
+        ///     `if (sep > 0) continue;` does not fire and a contact is emitted — for a
+        ///     unit sphere 1000 m OUTSIDE the solid, `collidePlane` returned a manifold
+        ///     with one point. The plane reports contact with everything.
+        ///   - every comparison in `Aabb.overlapsHalfSpace` is FALSE against a NaN bound,
+        ///     so the predicate answers false for a box at the origin AND for a box 5000 m
+        ///     deep inside. The plane meets nothing and vanishes from the broadphase.
+        ///
+        /// One malformed input, and the narrowphase says "touching everything" while the
+        /// broadphase says "touching nothing". Neither is an error the caller can see.
+        pub fn assertDomain(self: Self) void {
             std.debug.assert(@abs(self.normal.lengthSq() - 1) <= unit_k * std.math.floatEps(T));
+            std.debug.assert(std.math.isFinite(self.distance));
         }
     };
 }
@@ -161,7 +181,7 @@ pub fn separation(
     relpose: support.RelativePose(T),
     shape_b: support.SupportShape(T),
 ) T {
-    plane.assertUnit();
+    plane.assertDomain();
     // B's core support in the direction that digs INTO the solid, expressed in A's
     // frame. One support call: that is the whole cost of this kernel.
     const deepest_core = relpose.supportB(shape_b, plane.normal.neg());
@@ -172,7 +192,7 @@ pub fn separation(
 /// convention as a ray origin inside a shape (§1.11.4) and the same predicate the
 /// point query and `closestPoint` consult first (§1.11.12, §1.11.13).
 pub fn containsPoint(comptime T: type, plane: HalfSpace(T), p: math.Vec(3, T)) bool {
-    plane.assertUnit();
+    plane.assertDomain();
     return plane.signedDistance(p) <= 0;
 }
 
@@ -207,7 +227,7 @@ pub fn rayShape(
     origin: math.Vec(3, T),
     direction: math.Vec(3, T),
 ) ?support.LocalHit(T) {
-    plane.assertUnit();
+    plane.assertDomain();
     std.debug.assert(@abs(direction.lengthSq() - 1) <= unit_k * std.math.floatEps(T));
 
     const sep = plane.signedDistance(origin);
@@ -273,7 +293,7 @@ pub fn castShape(
     direction: math.Vec(3, T),
     max_distance: T,
 ) ?support.CastHit(T) {
-    plane.assertUnit();
+    plane.assertDomain();
     std.debug.assert(@abs(direction.lengthSq() - 1) <= unit_k * std.math.floatEps(T));
     std.debug.assert(std.math.isFinite(max_distance) and max_distance >= 0);
 
@@ -324,7 +344,7 @@ pub fn castShape(
 /// No guard: there is no division. The projection subtracts `sep·n` from `p`, both
 /// terms being of the caller's own scale.
 pub fn closestPoint(comptime T: type, plane: HalfSpace(T), p: math.Vec(3, T)) Projection(T) {
-    plane.assertUnit();
+    plane.assertDomain();
     const sep = plane.signedDistance(p);
     if (sep <= 0) return .{ .distance = 0, .position = p };
     return .{ .distance = sep, .position = p.sub(plane.normal.scale(sep)) };
@@ -340,6 +360,6 @@ pub fn closestPoint(comptime T: type, plane: HalfSpace(T), p: math.Vec(3, T)) Pr
 /// therefore names the kernel and delegates to it. RD-1 of the milestone records the
 /// placement.
 pub fn aabbOverlaps(comptime T: type, plane: HalfSpace(T), box: math.Aabb(T)) bool {
-    plane.assertUnit();
+    plane.assertDomain();
     return box.overlapsHalfSpace(plane.normal, plane.distance);
 }

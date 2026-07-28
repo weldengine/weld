@@ -374,7 +374,7 @@ pub fn collidePlane(
     shape_b: support.SupportShape(T),
 ) ?ContactManifold(T) {
     const Vec3T = math.Vec(3, T);
-    plane.assertUnit();
+    plane.assertDomain();
     const n_a = plane.normal;
     const r_b = shape_b.radius;
 

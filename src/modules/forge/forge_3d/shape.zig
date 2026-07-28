@@ -288,6 +288,14 @@ fn buildShape(desc: ShapeDescriptor) error{UnsupportedShape}!Shape {
             // total in what it does: it corrects the widening, it does not rescue an
             // invalid input. The `Body.rotation` pattern verbatim.
             std.debug.assert(descriptorNormalIsUnit(p.normal));
+            // And the offset is FINITE, for the same reason in the same place: it is the
+            // other half of the caller-supplied domain, and a non-finite one is not a
+            // plane with an unusual position, it is two silent and MUTUALLY CONTRADICTORY
+            // behaviours — the narrowphase reporting contact with everything (`sep > 0` is
+            // false against a NaN) while the broadphase reports contact with nothing
+            // (every comparison against a NaN bound is false). Measured both ways; see
+            // `plane.HalfSpace.assertDomain`.
+            std.debug.assert(std.math.isFinite(p.distance));
             const n = p.normal.toArray();
             return .{
                 .shape_type = .plane,

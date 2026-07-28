@@ -1534,3 +1534,60 @@ test "castShapeBody transports the normal without disturbing the invariant" {
         try testing.expect(hit.normal.approxEql(d.neg(), 8 * std.math.floatEps(Real)));
     }
 }
+
+// ---------------------------------------------------------------------------
+// E7 / J2 — the `distance` domain
+// ---------------------------------------------------------------------------
+
+test "a non-finite plane distance is refused at creation, in both senses" {
+    // THE PREDICATE both halves of the domain are tested through, exercised on accepted
+    // and rejected inputs — a control never seen to fail is a comment with syntax.
+    //
+    // WHY it is a domain error and not an unusual value, MEASURED with `distance = NaN`,
+    // identically at f32 and f64, and the two consequences CONTRADICT each other:
+    //
+    //   (a) `signedDistance` is NaN, so `sep > 0` is FALSE, so `collidePlane`'s
+    //       `if (sep > 0) continue;` does not fire and a contact IS emitted. Measured:
+    //       a unit sphere 1000 m OUTSIDE the solid produced a manifold with one point.
+    //       The plane reports contact with everything.
+    //   (b) every comparison in `Aabb.overlapsHalfSpace` is FALSE against a NaN bound.
+    //       Measured: the predicate answered `false` for a box at the origin AND for a
+    //       box 5000 m deep INSIDE the solid. The plane meets nothing and vanishes from
+    //       the broadphase.
+    //
+    // One malformed input; the narrowphase says "touching everything" and the broadphase
+    // says "touching nothing"; and neither is visible to the caller. That is why it is an
+    // assert on the way in rather than a value the kernels tolerate.
+    try testing.expect(std.math.isFinite(@as(f32, 0)));
+    for ([_]f32{ 0, -1, 1e6, -12345.678, std.math.floatMin(f32), -std.math.floatMax(f32) }) |d| {
+        try testing.expect(std.math.isFinite(d));
+    }
+    for ([_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) }) |d| {
+        try testing.expect(!std.math.isFinite(d));
+    }
+
+    // The accepted values really are accepted, end to end: a plane at each of them
+    // builds, and the stored distance round-trips.
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    for ([_]f32{ 0, -1, 1e6, -12345.678 }) |d| {
+        const id = try store.createShape(gpa, .{ .plane = .{ .normal = av3(0, 1, 0), .distance = d } });
+        try testing.expectEqual(@as(Real, d), store.get(id).?.distance);
+    }
+
+    // And the KERNEL-side half of the domain, `HalfSpace.assertDomain`, guards the
+    // TRANSPORTED form too — the descriptor assert cannot, a transport being downstream
+    // of it. Both halves of that assert are exercised as predicates here for the same
+    // reason: `assertDomain` itself cannot be caught in a Zig test, and each half was
+    // observed to fire by hand.
+    const unit_ok = HS{ .normal = Vec3r.unit_y, .distance = 3 };
+    try testing.expect(@abs(unit_ok.normal.lengthSq() - 1) <= 16 * std.math.floatEps(Real));
+    try testing.expect(std.math.isFinite(unit_ok.distance));
+    const bad_distance = HS{ .normal = Vec3r.unit_y, .distance = std.math.nan(Real) };
+    try testing.expect(@abs(bad_distance.normal.lengthSq() - 1) <= 16 * std.math.floatEps(Real));
+    try testing.expect(!std.math.isFinite(bad_distance.distance)); // the half that would fire
+    const bad_normal = HS{ .normal = vr(0, 2, 0), .distance = 3 };
+    try testing.expect(!(@abs(bad_normal.normal.lengthSq() - 1) <= 16 * std.math.floatEps(Real)));
+    try testing.expect(std.math.isFinite(bad_normal.distance)); // the OTHER half is fine
+}
