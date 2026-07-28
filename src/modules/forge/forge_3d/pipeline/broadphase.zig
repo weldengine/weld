@@ -783,6 +783,10 @@ pub const BroadphaseLayer = enum(u8) {
 /// Number of broad layers.
 pub const layer_count = @typeInfo(BroadphaseLayer).@"enum".fields.len;
 
+/// Sentinel for "no free unbounded slot" — a list index that can never exist, the same
+/// role `Bvh`'s `null_index` plays for its node pool.
+const null_slot: u32 = std.math.maxInt(u32);
+
 /// Default layer-pair matrix — symmetric; `true` = the two layers produce
 /// candidate pairs. Indexed by `@intFromEnum(BroadphaseLayer)`
 /// (static=0, dynamic=1, debris=2, trigger=3). Allowed: dynamic×dynamic,
@@ -847,12 +851,29 @@ pub fn Broadphase(comptime T: type) type {
             distance: T,
         };
 
-        /// One slot of a layer's unbounded list. RETIRED IN PLACE on removal rather than
-        /// compacted: the list is insertion-ordered and a live `Proxy` holds a list
-        /// index, so shifting a later entry down would silently re-point it. Same
-        /// discipline as the tree's `isLiveLeaf`, one level up.
+        /// One slot of a layer's unbounded list.
+        ///
+        /// **What the in-place retirement defends is the slot's IDENTITY, not its
+        /// existence.** A live `Proxy` holds a list INDEX, so no operation may move
+        /// another slot: compaction would shift later entries down and silently re-point
+        /// every `Proxy` past the hole. REUSE is a different matter and is fine — a LIFO
+        /// free-list hands the same index back to a new shape and moves nothing — which is
+        /// exactly what `Bvh` does one level up with `freeNode` / `allocateNodeAssumeCapacity`
+        /// in this same file. Without the free-list the list grew monotonically with every
+        /// plane ever created, and its visit cost with it (M1.1.11/E7-J3).
+        ///
+        /// A dead slot links to the next free one through `user_data`, which is meaningless
+        /// while dead — the same field-reuse `Bvh` performs on a free node's `parent`.
+        ///
+        /// The stale-index exposure a free-list carries is BOUNDED here, and by more than
+        /// precedent. A `moved_unbounded` entry naming a slot that was freed and reused
+        /// before `computePairs` ran now names the NEW occupant — which was itself logged
+        /// on insertion, so the effect is a duplicate entry, and `computePairs` sorts and
+        /// adjacent-dedupes its output. A freed and NOT reused slot fails `live` and is
+        /// skipped. Neither produces a wrong pair.
         const UnboundedSlot = struct {
             shape: UnboundedShape,
+            /// The caller's opaque payload while live; the next free slot index while dead.
             user_data: u32,
             live: bool,
         };
@@ -874,6 +895,9 @@ pub fn Broadphase(comptime T: type) type {
         /// trees (§1.11.15). No hashed container, here as everywhere on this path
         /// (determinism by construction, M1.1.14).
         unbounded: [layer_count]std.ArrayListUnmanaged(UnboundedSlot),
+        /// Per-layer LIFO free-list head over `unbounded`, or `null_slot` when empty. A
+        /// dead slot's `user_data` is the link to the next (see `UnboundedSlot`).
+        unbounded_free: [layer_count]u32,
         /// Per-layer log of unbounded slots inserted since the last `computePairs` —
         /// the second pairing direction's driver. Consumed (cleared) there.
         ///
@@ -885,10 +909,11 @@ pub fn Broadphase(comptime T: type) type {
 
         /// A broadphase with the given tuning and no proxies.
         pub fn init(config: Config) Self {
-            var self: Self = .{ .trees = undefined, .moved = undefined, .unbounded = undefined, .moved_unbounded = undefined };
+            var self: Self = .{ .trees = undefined, .moved = undefined, .unbounded = undefined, .unbounded_free = undefined, .moved_unbounded = undefined };
             for (&self.trees) |*t| t.* = BvhT.init(config);
             for (&self.moved) |*m| m.* = .empty;
             for (&self.unbounded) |*u| u.* = .empty;
+            for (&self.unbounded_free) |*f| f.* = null_slot;
             for (&self.moved_unbounded) |*m| m.* = .empty;
             return self;
         }
@@ -940,10 +965,27 @@ pub fn Broadphase(comptime T: type) type {
         /// re-enters a moved log).
         pub fn insertUnbounded(self: *Self, gpa: std.mem.Allocator, layer: BroadphaseLayer, shape: UnboundedShape, user_data: u32) !Proxy {
             const li = @intFromEnum(layer);
+            // Reserved BEFORE either list is touched, so an entry can never exist unlogged
+            // — see the doc comment. The capacity reserve is unconditional even when the
+            // free-list will serve the slot: `ensureUnusedCapacity` on a list at capacity
+            // is a no-op, and making the reserve conditional would put a fallible step
+            // after the mutation.
             try self.unbounded[li].ensureUnusedCapacity(gpa, 1);
             try self.moved_unbounded[li].ensureUnusedCapacity(gpa, 1);
-            const id: u32 = @intCast(self.unbounded[li].items.len);
-            self.unbounded[li].appendAssumeCapacity(.{ .shape = shape, .user_data = user_data, .live = true });
+            const id = blk: {
+                // LIFO reuse first (the `Bvh.allocateNodeAssumeCapacity` shape): an
+                // identical op sequence therefore reuses indices identically, which is what
+                // keeps the whole path a pure function of that sequence (M1.1.14).
+                const head = self.unbounded_free[li];
+                if (head != null_slot) {
+                    self.unbounded_free[li] = self.unbounded[li].items[head].user_data; // next free
+                    self.unbounded[li].items[head] = .{ .shape = shape, .user_data = user_data, .live = true };
+                    break :blk head;
+                }
+                const fresh: u32 = @intCast(self.unbounded[li].items.len);
+                self.unbounded[li].appendAssumeCapacity(.{ .shape = shape, .user_data = user_data, .live = true });
+                break :blk fresh;
+            };
             self.moved_unbounded[li].appendAssumeCapacity(id);
             return .{ .layer = layer, .kind = .unbounded, .id = id };
         }
@@ -958,9 +1000,15 @@ pub fn Broadphase(comptime T: type) type {
             const li = @intFromEnum(proxy.layer);
             switch (proxy.kind) {
                 .tree => self.trees[li].remove(proxy.id),
-                // Retired IN PLACE, never compacted: a live `Proxy` holds a list index,
-                // so shifting later entries down would re-point it at another shape.
-                .unbounded => self.unbounded[li].items[proxy.id].live = false,
+                // Retired IN PLACE and pushed onto the LIFO free-list: the slot's INDEX
+                // must not move (a live `Proxy` holds one), but the slot itself is
+                // recycled, so creating and destroying planes leaves the list bounded by
+                // the LIVE count rather than the total ever created.
+                .unbounded => {
+                    self.unbounded[li].items[proxy.id].live = false;
+                    self.unbounded[li].items[proxy.id].user_data = self.unbounded_free[li];
+                    self.unbounded_free[li] = proxy.id;
+                },
             }
         }
 

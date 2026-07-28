@@ -1768,3 +1768,94 @@ test "removing an unbounded proxy retires it from the list and from pairing" {
     _ = bp.queryAabb(boxCe(.{ 100, 0, 100 }, 0.5), &c); // meets the half-space geometrically
     try std.testing.expectEqual(@as(u32, 0), c.count);
 }
+
+test "the unbounded list is bounded by the LIVE count, not by the total ever created" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+    const list = &bp.unbounded[@intFromEnum(Layer.static)];
+
+    // MEASURED BOTH WAYS rather than asserted once (M1.1.11/E7-J3). Before the free-list,
+    // `remove` only cleared the `live` flag, so 64 create/destroy cycles left 64 slots in
+    // the list and `visitUnbounded` walked all of them for every query — a monotonic cost
+    // in the number of planes ever created. With the LIFO free-list the same sequence
+    // leaves exactly ONE.
+    var live: BphF.Proxy = try bp.insertUnbounded(gpa, .static, ground, 0);
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    var i: u32 = 1;
+    while (i < 64) : (i += 1) {
+        bp.remove(live);
+        live = try bp.insertUnbounded(gpa, .static, ground, i);
+        // The list never grows past the live count, at any point of the sequence — not
+        // just at the end, which a single final assertion would not distinguish from a
+        // list that grew and was compacted.
+        try std.testing.expectEqual(@as(usize, 1), list.items.len);
+        // …and the recycled slot is the SAME index every time: LIFO, one live entry.
+        try std.testing.expectEqual(@as(u32, 0), live.id);
+    }
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+
+    // The surviving shape is the LAST one inserted, not a stale earlier one: a query sees
+    // `user_data` 63 and nothing else. This is the discrimination that a reused slot
+    // carries its new occupant's payload and not the dead one's.
+    const Collect = struct {
+        seen: [8]u32 = undefined,
+        count: u32 = 0,
+        pub fn add(self: *@This(), ud: u32) void {
+            if (self.count < self.seen.len) {
+                self.seen[self.count] = ud;
+                self.count += 1;
+            }
+        }
+        pub fn maxDistance(_: *const @This()) f32 {
+            return 1e9;
+        }
+        pub fn shouldStop(_: *const @This()) bool {
+            return false;
+        }
+    };
+    var c = Collect{};
+    _ = bp.queryAabb(boxCe(.{ 0, 0, 0 }, 0.5), &c);
+    try std.testing.expectEqual(@as(u32, 1), c.count);
+    try std.testing.expectEqual(@as(u32, 63), c.seen[0]);
+
+    // N live at once still occupies N slots — the free-list recycles, it does not merge.
+    var held: [8]BphF.Proxy = undefined;
+    for (&held, 0..) |*h, k| h.* = try bp.insertUnbounded(gpa, .static, ground, 100 + @as(u32, @intCast(k)));
+    try std.testing.expectEqual(@as(usize, 9), list.items.len); // 1 live + 8 new
+    // Freeing them all and re-inserting one reuses a slot rather than appending a tenth.
+    for (held) |h| bp.remove(h);
+    _ = try bp.insertUnbounded(gpa, .static, ground, 200);
+    try std.testing.expectEqual(@as(usize, 9), list.items.len);
+}
+
+test "a retired unbounded slot never surfaces in a pair after its index is reused" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+    var pairs: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pairs.deinit(gpa);
+
+    // The stale-index exposure a free-list carries, exercised at its worst point: the
+    // slot is logged as moved, then freed, then REUSED by a different shape, all before
+    // `computePairs` runs. The moved entry now names the new occupant — which was itself
+    // logged on insertion — so the effect is a duplicate log entry, and the output is
+    // sorted and adjacent-deduped. The pair set must therefore name the NEW shape once
+    // and the dead one never.
+    _ = try bp.insert(gpa, .dynamic, boxCe(.{ 0, 0, 0 }, 0.5), 100);
+    const doomed = try bp.insertUnbounded(gpa, .static, ground, 7);
+    bp.remove(doomed);
+    const reborn = try bp.insertUnbounded(gpa, .static, ground, 8);
+    try std.testing.expectEqual(doomed.id, reborn.id); // the same slot, reused
+    try bp.computePairs(gpa, &pairs);
+
+    try std.testing.expect(hasPair(pairs.items, 8, 100));
+    var involving_dead: u32 = 0;
+    var involving_live: u32 = 0;
+    for (pairs.items) |p| {
+        if (p.a == 7 or p.b == 7) involving_dead += 1;
+        if (p.a == 8 or p.b == 8) involving_live += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 0), involving_dead);
+    try std.testing.expectEqual(@as(u32, 1), involving_live); // once, not twice
+}
