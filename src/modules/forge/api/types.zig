@@ -129,8 +129,19 @@ pub const ShapeDescriptor = union(ShapeType) {
     /// living in the body literal with no branch on body type of their own. Same
     /// invariant as the reference, whose plane declares `MustBeStatic`.
     ///
-    /// `normal` is expected unit and is asserted so at creation; the stored value
-    /// is normalised once there, so no call site ever re-normalises.
+    /// **Domain, asserted at creation.** `normal` must be unit and `distance` must be
+    /// finite. Both are checked in `createShape`; the stored normal is normalised once
+    /// there, so no call site ever re-normalises.
+    ///
+    /// `distance` earns its own clause because a non-finite one is not caught downstream
+    /// by anything — it is silently accepted, and two consumers then disagree about it.
+    /// MEASURED with a NaN distance, identically at f32 and f64: the contact generator
+    /// reported a contact point for a unit sphere 1000 m OUTSIDE the solid, since its
+    /// `sep > 0` skip is FALSE when `sep` is NaN; while the broadphase corner predicate
+    /// reported no overlap for a box at the origin AND for a box 5000 m INSIDE, since its
+    /// `<=` is false in the other direction. One malformed field, two silent behaviours
+    /// that contradict each other — which is why this is a precondition and not a
+    /// tolerance.
     plane: struct { normal: Vec3 = Vec3.unit_y, distance: f32 = 0 },
     /// Placeholder — payload lands at the triangle-mesh sub-milestone.
     triangle_mesh: void,
