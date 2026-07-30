@@ -5,7 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .weld = .{
-            // Path local — Phase 0 monolithic repo (cf. engine-spec.md §3.5),
+            // Path local — Phase 0 monolithic repo (cf. ARCH-017),
             // three levels up from bench/fixtures/synth_100/.
             .path = "../../..",
         },
