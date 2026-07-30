@@ -52,7 +52,7 @@ Second spike of Phase −1. Validates the core architectural hypothesis of Weld'
 
 ## Documents to read first
 
-1. `engine-spec.md` — §2 (ECS overview), §3.5 (in-tree extraction criterion), §22.3.0 sub-section S1 (canonical milestone definition).
+1. `ARCH-005` (ECS overview; detail `engine-ecs-internals.md`), `ARCH-017` (in-tree extraction criterion), `engine-phase-minus-1-archive.md` S1 (canonical milestone definition).
 2. `engine-ecs-internals.md` — §1 (architecture overview), §2 (chunk SoA layout), §4 (query compilation), §12 (comparison with other ECS).
 3. `engine-zig-conventions.md` — full read; in particular naming, allocator passing, `extern struct` POD components, doc comments on public API, ban on `@cImport` outside `*_c` modules and on `usingnamespace`.
 4. `engine-development-workflow.md` — §2 (milestone model), §3 (brief format), §4 (git conventions, hooks, squash-merge), §5 (Claude review cycle).

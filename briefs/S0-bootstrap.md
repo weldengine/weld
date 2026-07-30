@@ -49,7 +49,7 @@ S0 is the first milestone of Phase −1 and the first milestone of the entire We
 
 ## Spec documents to read first
 
-1. `engine-spec.md` — §22.3.0 (Phase −1 spike list, S0 entry) and §3.5 (in-tree default, no `spec/` in repo)
+1. `engine-phase-minus-1-archive.md` (Phase −1 spike list, S0 entry) and `ARCH-017` (in-tree default, no `spec/` in repo)
 2. `engine-development-workflow.md` — §2 (milestone model), §3 (brief format), §3.4 (`CLAUDE.md` lifecycle), §4 (git conventions: branches, tags, Conventional Commits, PRs, lefthook, squash-and-merge)
 3. `engine-zig-conventions.md` — §17 (Zig version policy: 0.16.x strict, patches accepted, minor refused)
 4. `engine-phase-0-criteria.md` — context on what comes next (informs `CLAUDE.md` content; no implementation impact at S0)
@@ -232,9 +232,9 @@ None. Benchmark infrastructure is deferred to S1+.
 - The custom Zig linter mentioned in `engine-development-workflow.md` §4.5 (`zig build lint`, `zig build lint-commit`) does not exist at S0. The `commit-msg` hook uses `bash scripts/check-commit-msg.sh` instead. When the Zig linter ships in a later Phase 0 milestone, `lefthook.yml` and the workflow doc will be amended together.
 - `mlugg/setup-zig@v2` is the established standard for Zig in GitHub Actions and supports semver ranges (`0.16.x`). Patch pinning is intentionally avoided — the `build.zig` version guard enforces the minor invariant, patches are fluid.
 - Pinning `ubuntu-24.04` and `windows-2025` (not `*-latest`) is deliberate. `*-latest` aliases shift unpredictably and have caused silent CI breaks across the GitHub-hosted runners ecosystem; pinning gives the project explicit control over runner version bumps via dedicated PRs.
-- `engine-spec.md` §22.3.0 originally listed `Fedora 44` as the Linux CI target. GitHub Actions does not provide a hosted Fedora runner; using `ubuntu-24.04` for CI is the pragmatic choice. Spec amendment to be applied by Guy in claude.ai knowledge base alongside this milestone.
-- `engine-spec.md` §22.3.0 also listed `.vscode/` in the skeleton without specifying its content. The S0 scope refines this to a minimal project-level pair (`extensions.json` + `settings.json`), with personal IDE files explicitly gitignored.
-- `CLAUDE.md` was not present in the original `engine-spec.md` §22.3.0 deliverables list. It is added at S0 because Claude Code reads it at every session start (`engine-development-workflow.md` §3.4); shipping S1 without it would mean a blind first session.
+- `engine-phase-minus-1-archive.md` originally listed `Fedora 44` as the Linux CI target. GitHub Actions does not provide a hosted Fedora runner; using `ubuntu-24.04` for CI is the pragmatic choice. Spec amendment to be applied by Guy in claude.ai knowledge base alongside this milestone.
+- `engine-phase-minus-1-archive.md` also listed `.vscode/` in the skeleton without specifying its content. The S0 scope refines this to a minimal project-level pair (`extensions.json` + `settings.json`), with personal IDE files explicitly gitignored.
+- `CLAUDE.md` was not present in the original `engine-phase-minus-1-archive.md` deliverables list. It is added at S0 because Claude Code reads it at every session start (`engine-development-workflow.md` §3.4); shipping S1 without it would mean a blind first session.
 - `engine-zig-conventions.md` §17: minor version bumps require a dedicated migration milestone, never a silent change. The build-time guard enforces this.
 
 ---
@@ -276,7 +276,7 @@ None. Benchmark infrastructure is deferred to S1+.
 
 *Modifications to the FROZEN SECTION made mid-milestone after a Claude.ai round-trip. Each deviation references the commit that enacts it. Empty at end of milestone is the nominal case.*
 
-- `429de07` — `.github/workflows/ci.yml` step 2 pinned to `version: 0.16.0` instead of the brief's `version: 0.16.x` (cf. § Files to create or modify → `.github/workflows/ci.yml` specification, step 2). **Reason:** `mlugg/setup-zig@v2` — the action mandated by both the brief and `engine-spec.md` §22.3.0 — takes the version string literally and tries to fetch `zig-x86_64-{linux,windows}-0.16.x.tar.xz`, which 404s on every mirror. Tool capability fact, not a design choice. The brief's underlying intent (run on the latest 0.16 patch automatically) is preserved as future work once the action supports semver ranges, or via `version-file: build.zig.zon`. The `build.zig` minor-version guard continues to enforce the 0.16.x invariant on the local toolchain. Mechanical deviation — no Claude.ai round-trip; flagged here for review and surfaced in the PR's review notes.
+- `429de07` — `.github/workflows/ci.yml` step 2 pinned to `version: 0.16.0` instead of the brief's `version: 0.16.x` (cf. § Files to create or modify → `.github/workflows/ci.yml` specification, step 2). **Reason:** `mlugg/setup-zig@v2` — the action mandated by both the brief and `engine-phase-minus-1-archive.md` — takes the version string literally and tries to fetch `zig-x86_64-{linux,windows}-0.16.x.tar.xz`, which 404s on every mirror. Tool capability fact, not a design choice. The brief's underlying intent (run on the latest 0.16 patch automatically) is preserved as future work once the action supports semver ranges, or via `version-file: build.zig.zon`. The `build.zig` minor-version guard continues to enforce the 0.16.x invariant on the local toolchain. Mechanical deviation — no Claude.ai round-trip; flagged here for review and surfaced in the PR's review notes.
 
 - `6cfaf07` — `src/main.zig` rewritten: print now includes the build mode via `@tagName(builtin.mode)` instead of the static phase tag, and the I/O path is condensed (single `print` + `flush` on a 128-byte stack buffer instead of the original 256-byte version with separate writer variable). The brief's "minimal hello-world" intent is preserved; the change is a refinement, not a scope expansion. Decided in Claude.ai post-review.
 

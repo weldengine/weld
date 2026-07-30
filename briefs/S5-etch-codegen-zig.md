@@ -16,7 +16,7 @@
 
 ## Context
 
-S5 is the sixth and penultimate spike of Phase -1. It validates the structural shipping hypothesis of the Etch execution layer: **Etch → Zig source → compilation by Zig** is viable in terms of build time (cf. `engine-spec.md` §25.3 / S5). This is *the* major structural risk of Phase -1 — if compile times explode (e.g. > 1 minute for a single-line incremental edit), the shipping strategy is revisited before Phase 0.2 and alternatives (VM bytecode as primary backend, minimal Zig subset codegen, hybrid Zig release / bytecode dev) are arbitrated. S5 must therefore measure honestly, not work around the comptime path that is precisely what the spike is meant to exercise. The diff harness built in S4 (generic `Runner` interface + `runner_interp` over 20 differential programs) is reused as-is by plugging a new `runner_codegen` — this is the "design on day one, implement progressively" angle that S4 paid for.
+S5 is the sixth and penultimate spike of Phase -1. It validates the structural shipping hypothesis of the Etch execution layer: **Etch → Zig source → compilation by Zig** is viable in terms of build time (cf. `engine-phase-minus-1-archive.md` S5). This is *the* major structural risk of Phase -1 — if compile times explode (e.g. > 1 minute for a single-line incremental edit), the shipping strategy is revisited before Phase 0.2 and alternatives (VM bytecode as primary backend, minimal Zig subset codegen, hybrid Zig release / bytecode dev) are arbitrated. S5 must therefore measure honestly, not work around the comptime path that is precisely what the spike is meant to exercise. The diff harness built in S4 (generic `Runner` interface + `runner_interp` over 20 differential programs) is reused as-is by plugging a new `runner_codegen` — this is the "design on day one, implement progressively" angle that S4 paid for.
 
 ## Scope
 
@@ -25,7 +25,7 @@ S5 is the sixth and penultimate spike of Phase -1. It validates the structural s
 - Codegen invoked as an automatic step of `zig build`: input `.etch` files declared in `build.zig`, regenerated before Zig compile when source mtime/content hash has changed
 - Codegen cache keyed by xxHash of source `.etch` content, per-file granularity, stored at `zig-out/etch-gen/.cache/`
 - Generated programs consume the comptime archetype path of S1 (`world.query(.{T1, T2, ...})`, comptime monomorphisations), not the dynamic path of S4 — the spike must exercise the production target
-- Component / resource Etch declarations mapped 1:1 to `extern struct` Zig declarations under matching names (no prefix), declared in the generated file; resources spawned as singleton entities at program init (consistent with `engine-spec.md` §2.9)
+- Component / resource Etch declarations mapped 1:1 to `extern struct` Zig declarations under matching names (no prefix), declared in the generated file; resources spawned as singleton entities at program init (consistent with `ARCH-006`)
 - Type mapping fixed for S5 and Phase 0.2: `int` → `i64`, `float` → `f64`, `bool` → `bool`. Values in generated code are native Zig types, flow-typed from the S3 typechecker output — no `Value` tagged union on the hot path
 - Differential test harness reuse: a new `Runner` implementation `runner_codegen` plugged into the existing generic driver `tests/etch_interp/diff_runner.zig` (built in S4), consuming the same 20 sidecar pairs `tests/etch_interp/<NN>-*.{etch,input.json,expected.json}` without modification of the sidecar format
 - Differential test binary consolidating the 20 programs (one Zig module per cooked program, dispatched by program name), compiled statically — no JIT, no runtime `.so` loading
@@ -56,7 +56,7 @@ S5 is the sixth and penultimate spike of Phase -1. It validates the structural s
 
 ## Spec documents to read first
 
-1. `engine-spec.md` — §25.3 / S5 (canonical milestone definition), §25.3 / S4 (shared invariants reminder), §25.3 / S3 + S1 (delivered contracts), §3.5 (in-tree Phase 1-4)
+1. `engine-phase-minus-1-archive.md` — S5 (canonical milestone definition), S4 (shared invariants reminder), S3 + S1 (delivered contracts); `ARCH-017` (in-tree Phase 1-4)
 2. `etch-grammar.md` — §5 (component, resource, struct, enum), §6 (when clauses), §7 (rules), §19 (design decisions v0.6) — only as needed for the S3 subset
 3. `etch-reference-part1.md` — §3 (type system), §5 (memory model surface), §8 (functions) — only as needed for S3 subset semantics
 4. `etch-reference-part2.md` — §3 (component access patterns), §4 (resources) — only the parts in scope for S5
@@ -181,7 +181,7 @@ S5 is the sixth and penultimate spike of Phase -1. It validates the structural s
 - `zig build` clean, zero warning, on the Ubuntu 24.04 + Windows 2025 matrix (existing matrix unchanged)
 - `zig build test` green in `debug` and `ReleaseSafe` — within an accepted wall-clock budget for S5: **< 120 s on the CI matrix** (acknowledged tradeoff of the spike, recorded in § Notes)
 - `zig fmt --check` clean across all hand-written sources (generated Zig under `zig-out/etch-gen/` excluded from the check, as it lives in the build artifacts directory)
-- `zig build lint` clean if the custom linter is present at the time the milestone is run; otherwise skipped (consistent with the post-S1 lint milestone deferral noted in `engine-spec.md` §25.3 / S0)
+- `zig build lint` clean if the custom linter is present at the time the milestone is run; otherwise skipped (consistent with the post-S1 lint milestone deferral noted in `engine-phase-minus-1-archive.md` S0)
 - `commit-msg` hook green on all commits of the branch (Conventional Commits)
 - Benchmark CI artifact: `bench/results/S5-codegen-zig.md` committed and updated by the bench run
 
@@ -203,7 +203,7 @@ For metric (b) the Zig cache is wiped via `rm -rf .zig-cache` (POSIX) or its Win
 
 ### Why the comptime archetype path, not the S4 dynamic path
 
-The spec gate "no explosion of degenerate comptime monomorphisations" can only be measured by *generating* those monomorphisations. The dynamic path (registry, `query_dynamic`) is the documented post-spike fallback in case the comptime path explodes — it is not a way of avoiding the measurement. If the comptime path explodes, that is the spike outcome: stop, journal, return to Claude.ai for re-design. The spec text in `engine-spec.md` §25.3 / S5 (on failure, the shipping strategy is revisited before Phase 0.2 and alternatives are arbitrated then) places the arbitration *after* the spike, not during.
+The spec gate "no explosion of degenerate comptime monomorphisations" can only be measured by *generating* those monomorphisations. The dynamic path (registry, `query_dynamic`) is the documented post-spike fallback in case the comptime path explodes — it is not a way of avoiding the measurement. If the comptime path explodes, that is the spike outcome: stop, journal, return to Claude.ai for re-design. The spec text in `engine-phase-minus-1-archive.md` S5 (on failure, the shipping strategy is revisited before Phase 0.2 and alternatives are arbitrated then) places the arbitration *after* the spike, not during.
 
 ### Why one Zig file per `.etch`, in `zig-out/etch-gen/`
 
@@ -227,7 +227,7 @@ Per-declaration granularity (cache per component, per rule) is over-engineering 
 
 ### Resources as singleton entities
 
-Resources are spawned as singleton entities at program init, exposed via accessors generated for `get(R)` / `get_mut(R)` over the singleton handle. This is consistent with `engine-spec.md` §2.9 and reuses the S1 + S4 ECS APIs without introducing a separate resource storage. The generated `init(world)` function spawns one entity per resource declared in the cooked file and attaches the resource as a component on that entity.
+Resources are spawned as singleton entities at program init, exposed via accessors generated for `get(R)` / `get_mut(R)` over the singleton handle. This is consistent with `ARCH-006` and reuses the S1 + S4 ECS APIs without introducing a separate resource storage. The generated `init(world)` function spawns one entity per resource declared in the cooked file and attaches the resource as a component on that entity.
 
 ### Generated file layout — readable, not minified
 
@@ -251,7 +251,7 @@ The debts inherited from S2 (5), S3 (10), S4 (9) are listed in § Out-of-scope. 
 
 ### Failure mode is a legitimate blocker
 
-If during implementation the comptime path produces compile times that exceed the spec gates by an order of magnitude (e.g. cold > 60 s, incremental > 10 s) and the cause is clearly the codegen strategy (not, say, a bug in the bench harness or in the generated code), this is a legitimate blocker per `engine-development-workflow.md` §2.4: stop, journal under "Blockers encountered", return to Claude.ai. The spec arbitration of fallback strategies (`engine-spec.md` §25.3 / S5, alternatives to arbitrate) happens in a new conversation, with the bench numbers as input. Claude Code must not silently switch to the dynamic path to "make it pass."
+If during implementation the comptime path produces compile times that exceed the spec gates by an order of magnitude (e.g. cold > 60 s, incremental > 10 s) and the cause is clearly the codegen strategy (not, say, a bug in the bench harness or in the generated code), this is a legitimate blocker per `engine-development-workflow.md` §2.4: stop, journal under "Blockers encountered", return to Claude.ai. The spec arbitration of fallback strategies (`engine-phase-minus-1-archive.md` S5, alternatives to arbitrate) happens in a new conversation, with the bench numbers as input. Claude Code must not silently switch to the dynamic path to "make it pass."
 
 ---
 

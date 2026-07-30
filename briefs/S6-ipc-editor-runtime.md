@@ -16,7 +16,7 @@
 
 ## Context
 
-S6 is the seventh and final spike of Phase -1. It validates the IPC editor↔runtime protocol specified in `engine-ipc.md` on a real two-process workload: an editor stub that spawns a runtime stub, exchanges typed framed messages over a Unix-domain socket / Win32 named pipe, shares a viewport framebuffer via POSIX shm / `CreateFileMapping`, and recovers from a `kill -9` of the runtime by detecting EOF, restarting, and re-handshaking. The hypothesis under test is that the wire protocol, the shared-memory layout, the handshake versioning, and the OS-handle passing primitives (`SCM_RIGHTS` on POSIX) all hold together as designed (cf. `engine-spec.md` §25.3 / S6). This is the last structural risk of Phase -1 — if IPC fails its gates, the two-process editor architecture is revised before Phase 0.
+S6 is the seventh and final spike of Phase -1. It validates the IPC editor↔runtime protocol specified in `engine-ipc.md` on a real two-process workload: an editor stub that spawns a runtime stub, exchanges typed framed messages over a Unix-domain socket / Win32 named pipe, shares a viewport framebuffer via POSIX shm / `CreateFileMapping`, and recovers from a `kill -9` of the runtime by detecting EOF, restarting, and re-handshaking. The hypothesis under test is that the wire protocol, the shared-memory layout, the handshake versioning, and the OS-handle passing primitives (`SCM_RIGHTS` on POSIX) all hold together as designed (cf. `engine-phase-minus-1-archive.md` S6). This is the last structural risk of Phase -1 — if IPC fails its gates, the two-process editor architecture is revised before Phase 0.
 
 ## Scope
 
@@ -47,7 +47,7 @@ S6 is the seventh and final spike of Phase -1. It validates the IPC editor↔run
 | `LogMessage` | R→E | unidirectional event | validates the event direction without ack |
 
 Total = 12 messages (the table sums 13 because `LogMessage` was added below the count). The fire-and-forget event direction is covered by `LogMessage`. `Echo` is transactional but cheap: the runtime stub replies immediately, no state change.
-- **`ProtocolHello.capabilities: u32`** — bitflags, bit 0 = `GPU_SHARED_FB`. Published to 0 by the runtime stub in S6 (no GPU shared support). Reserved-for-future bits are zero. Posted now to stabilize the `schema_hash` of `ProtocolHello` against Phase 3 introduction (cf. `engine-spec.md` §25.3 / S6 and `engine-ipc.md` §4.7).
+- **`ProtocolHello.capabilities: u32`** — bitflags, bit 0 = `GPU_SHARED_FB`. Published to 0 by the runtime stub in S6 (no GPU shared support). Reserved-for-future bits are zero. Posted now to stabilize the `schema_hash` of `ProtocolHello` against Phase 3 introduction (cf. `engine-phase-minus-1-archive.md` S6 and `engine-ipc.md` §4.7).
 - **Two binaries** at canonical locations per `engine-directory-structure.md` §9.1:
   - `src/editor/main.zig` — editor stub. Owns the listen socket and the shm region. Spawns the runtime via `platform.process.spawn_process` passing the socket path, the shm region name, and the editor PID in argv. Opens a window (reuses S2 `Window` + Vulkan setup), runs a fullscreen-quad blit pipeline that samples the viewport texture each frame and presents it. Drains the IPC inbox on its main thread.
   - `src/runtime/main.zig` — runtime stub. Connects to the socket, attaches the shm region, sends `ProtocolHello`, awaits `ProtocolHelloAck`. Renders a CPU-side moving color mire (gradient with frame-counter modulation) at 60 Hz into the viewport shm using the double-buffer atomics. Drains the IPC inbox on a dedicated reader thread that pushes into an MPSC queue consumed by the main loop.
@@ -100,7 +100,7 @@ Total = 12 messages (the table sums 13 because `LogMessage` was added below the 
 - **Job system S1 integration** — the IPC reader thread does **not** use the work-stealing scheduler. A dedicated OS thread is the right primitive; coupling to S1 would be gratuitous.
 - **Windows `sendWithHandles` / `recvWithHandles` implementation** via `DuplicateHandle`. Phase 3 (cf. `engine-ipc.md` §4.7).
 - **GPU shared framebuffer** per `engine-ipc.md` §4.7 — `VK_KHR_external_memory`, `ViewportConfig` / `ViewportTexturesShared`, exportable Vulkan semaphores. Phase 3.
-- **GAL renderer abstraction** — S6 uses raw Vulkan exactly like S2 (cf. `engine-spec.md` §25.3 / S2 — no GAL before Phase 0.4).
+- **GAL renderer abstraction** — S6 uses raw Vulkan exactly like S2 (cf. `engine-phase-minus-1-archive.md` S2 — no GAL before Phase 0.4).
 - **Inverse heartbeat** runtime→editor (cf. `engine-ipc.md` §6.3).
 - **CRDT op format coupling** — the wire `IpcMessage` is deliberately decoupled from `CrdtOp` in S6 (the format freeze is Phase 1 per `engine-collaboration.md`).
 - **Cross-endian support** — `comptime` panic if `builtin.cpu.arch.endian() != .little`.
@@ -108,7 +108,7 @@ Total = 12 messages (the table sums 13 because `LogMessage` was added below the 
 
 ## Spec documents to read first
 
-1. `engine-spec.md` — §25.3 / S6 (canonical definition), §25.3 / S2 (design precisions — pattern for raw Vulkan + window reuse), §1.3 (process separation), §3.5 (in-tree Phase 1-4)
+1. `engine-phase-minus-1-archive.md` — S6 (canonical definition), S2 (design precisions — pattern for raw Vulkan + window reuse); `ARCH-012` (process separation), `ARCH-017` (in-tree Phase 1-4)
 2. `engine-ipc.md` — full document (§1 architecture, §2 transport, §3 messages and serialization, §4 shared memory including §4.7 GPU shared framebuffer Phase 3, §5 handshake and versioning, §6 heartbeat, §7 command-log replay, §8 security, §9 testing, §10 phasing)
 3. `engine-tools-editor.md` — §2.2 threading model, §2.5 state management overview, §2.6 IPC dispatcher (especially §2.6.8 Phase 1 topics, §2.6.9 plugin MsgKind range), §2.7 crash recovery (especially §2.7.3 CommandLog and §2.7.4 best-effort replay — out of scope but read for context)
 4. `engine-platform.md` — Process (spawn / wait / read_stdout), Memory (mmap, virtual_alloc), Threading (Mutex, atomics), FileSystem
@@ -233,7 +233,7 @@ Target machine: dev-primary Apple Silicon ReleaseSafe (consistent with S1, S3, S
 
 ### Best-effort replay — recorded descope
 
-The `engine-spec.md` §25.3 / S6 criterion calls for best-effort replay to remain functional after a `kill -9` of the runtime. In S6 this criterion is interpreted narrowly as **detection + restart + re-handshake + first post-restart command round-trips OK**. The replay of pending commands via a `CommandLog` and `SaveProject` ack mechanism (cf. `engine-tools-editor.md` §2.7.3 and `engine-ipc.md` §7) is **out of scope** for S6 and postponed to Phase 0.6. Rationale: the `CommandLog` depends on `SaveProject` acks which depend on a real save pipeline, none of which exist in Phase -1. Synthesizing a mini-CommandLog for S6 would be throwaway code. The hard part of the criterion — detecting the crash, killing orphan resources, spawning a new runtime, re-establishing the handshake, validating the connection is alive — is fully tested in G4 and `tests/ipc/crash_recovery.zig`. A design-precisions subsection is appended to `engine-spec.md` §25.3 / S6 in the same session to record this descope (pattern S2).
+The `engine-phase-minus-1-archive.md` S6 criterion calls for best-effort replay to remain functional after a `kill -9` of the runtime. In S6 this criterion is interpreted narrowly as **detection + restart + re-handshake + first post-restart command round-trips OK**. The replay of pending commands via a `CommandLog` and `SaveProject` ack mechanism (cf. `engine-tools-editor.md` §2.7.3 and `engine-ipc.md` §7) is **out of scope** for S6 and postponed to Phase 0.6. Rationale: the `CommandLog` depends on `SaveProject` acks which depend on a real save pipeline, none of which exist in Phase -1. Synthesizing a mini-CommandLog for S6 would be throwaway code. The hard part of the criterion — detecting the crash, killing orphan resources, spawning a new runtime, re-establishing the handshake, validating the connection is alive — is fully tested in G4 and `tests/ipc/crash_recovery.zig`. A design-precisions subsection is appended to `engine-phase-minus-1-archive.md` S6 in the same session to record this descope (pattern S2).
 
 ### Two binaries at canonical locations
 
@@ -241,7 +241,7 @@ The `engine-spec.md` §25.3 / S6 criterion calls for best-effort replay to remai
 
 ### No GAL, raw Vulkan
 
-The fullscreen blit pipeline uses raw Vulkan exactly like S2 — no GAL abstraction. The GAL is designed in Phase 0.4 when a second backend is on the horizon (cf. `engine-spec.md` §25.3 / S2 design precisions).
+The fullscreen blit pipeline uses raw Vulkan exactly like S2 — no GAL abstraction. The GAL is designed in Phase 0.4 when a second backend is on the horizon (cf. `engine-phase-minus-1-archive.md` S2 design precisions).
 
 ### Endianness invariant
 
