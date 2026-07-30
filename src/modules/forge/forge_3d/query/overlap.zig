@@ -49,7 +49,9 @@ pub const Probe = union(enum) {
         position: Vec3r,
         rotation: Quatr,
     },
-    /// Overlap of a world AABB: the body's TIGHT world AABB, faces included.
+    /// Overlap of a world AABB: the body's TIGHT world AABB, faces included — or, for
+    /// an unbounded body, the corner predicate, which has no box to compare
+    /// (`BodyManager.aabbOverlapsBody` dispatches).
     /// Deliberately not the leaf's stored box, which is FAT by
     /// `BroadphaseConfig.margin` — returning the candidate set would report bodies
     /// that do not overlap the query, and the error would be a function of a TUNING
@@ -79,10 +81,12 @@ pub const OverlapCollector = struct {
 
         const accepted = switch (self.probe) {
             .shape => |s| self.bm.overlapShapeBody(self.store, body, s.shape, s.position, s.rotation) orelse return,
-            .aabb => |query_box| blk: {
-                const tight = self.bm.bodyAabb(self.store, body) orelse return;
-                break :blk tight.overlaps(query_box);
-            },
+            // Through the adapter, NOT `bodyAabb`: a candidate may be a half-space, which
+            // has no world AABB at all, and `bodyAabb` asserts the convex class (E5 item
+            // 6). The adapter's convex arm is still the body's TIGHT world box — the fat
+            // leaf box would make the answer a function of a tuning constant (§1.11.12) —
+            // and its half-space arm is the corner predicate.
+            .aabb => |query_box| self.bm.aabbOverlapsBody(self.store, body, query_box) orelse return,
             .point => |p| self.bm.containsPointBody(self.store, body, p) orelse return,
         };
         if (!accepted) return;

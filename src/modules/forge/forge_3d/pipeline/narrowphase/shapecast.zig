@@ -12,9 +12,11 @@
 //!
 //! That is the core + inflation-radius convention of §1.11.3, never a second one,
 //! and it has a structural consequence worth stating: a sphere cast against a box is
-//! a ray against a ROUNDED box, precisely the shape `raycast.zig` rejects with
-//! `error.UnsupportedShape`. A cast is not expressible over the ray kernels — hence
-//! this file. And because a support map covers every BOUNDED convex, this kernel has
+//! a ray against a ROUNDED box, precisely the shape `raycast.zig` does not cover —
+//! its asserted precondition `raySupportsShape` is false there (a typed
+//! `error.UnsupportedShape` until M1.1.11, when the refusal moved to the query entries
+//! a caller can provoke it from, §1.11.7). A cast is not expressible over the ray
+//! kernels — hence this file. And because a support map covers every BOUNDED convex, this kernel has
 //! no shape to reject and so **no error channel at all**: the frozen signature
 //! carrying none is evidence for the design, not a constraint on it.
 //!
@@ -90,24 +92,10 @@ const unit_dir_k: comptime_int = 16;
 /// proximity into a contact.
 const noise_k: comptime_int = 2;
 
-/// One cast hit, in A's frame.
-pub fn CastHit(comptime T: type) type {
-    return struct {
-        /// Distance along the (unit) cast direction at first touch, in
-        /// `[0, max_distance]`. Zero when the shapes already overlap at the start
-        /// pose.
-        distance: T,
-        /// Witness point on B — the HIT body — on its INFLATED surface, A's frame.
-        /// Reconstructed from the terminal simplex's barycentric weights over B's
-        /// support points plus the `r_b` offset along the outward normal; no EPA is
-        /// involved. Beyond a zero distance this is also the witness on the moved A,
-        /// the two coinciding exactly (see `terminal`).
-        point: math.Vec(3, T),
-        /// Outward unit normal of the HIT body at the witness, A's frame. Satisfies
-        /// `normal · direction <= 0` on every hit.
-        normal: math.Vec(3, T),
-    };
-}
+/// One cast hit, in A's frame. Defined in `support.zig` since M1.1.11, for the reason
+/// `LocalHit` is: `plane.zig` produces the same type from a closed form and
+/// `BodyManager.castShapeBody` dispatches between the two by the hit body's class.
+const CastHit = support.CastHit;
 
 /// How the march terminated — one variant per row of §1.11.11's termination table.
 /// Mirrors `epa.zig`'s `EpaDiagnostics.Exit`.
@@ -177,7 +165,9 @@ pub fn castShape(
 ///
 /// The ceiling is a parameter for ONE reason: the normative fallback of §1.11.11 —
 /// exhaustion returns a hit at the current parameter — is unreachable in practice on
-/// the three cores the store builds, which converge in a handful of iterations. A
+/// the three cores the store builds — still three since M1.1.11, a half-space having
+/// no core at all and never reaching this kernel — which converge in a handful of
+/// iterations. A
 /// guard never observed to fire is a comment with extra syntax, so a test drives a
 /// small ceiling through the SAME code path and asserts both that the cap fired and
 /// that what came back is a hit at a parameter at or below the true time of impact.

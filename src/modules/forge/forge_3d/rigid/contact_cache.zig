@@ -32,13 +32,17 @@ const config = @import("../config.zig");
 const Real = config.Real;
 const Vec3r = config.Vec3r;
 
-/// A contact's warm-start identity. `subshape_id` is reserved at 0 for the
-/// Compound/Mesh sub-shape co-design flagged at M1.1.3 (zero-cost now); the full
-/// triple is the sort/match key so it extends without a format change.
+/// A contact's warm-start identity. `subshape_id` is 0 for every shape delivered so
+/// far, and the full triple is the sort/match key so it extends without a format
+/// change.
 pub const CacheKey = struct {
     /// Packed canonical body pair `min(BodyId)<<32 | max`.
     pair_key: u64,
-    /// Sub-shape index within a Compound/Mesh pair — always 0 in M1.1.6.
+    /// Sub-shape of the pair — an OPAQUE PATH decoded by the root shape, NOT a global
+    /// index (`engine-physics-forge.md` §1.11.16). A shape with no sub-shape consumes
+    /// zero bits, so this is 0 and unread for sphere, box, capsule and plane; a compound
+    /// (M1.1.20) shifts its own index up and inserts the child's below, which extends the
+    /// encoding without reinterpreting a value already cached.
     subshape_id: u32 = 0,
     /// Per-contact feature id (from the manifold), unique within a manifold.
     feature_id: u32,

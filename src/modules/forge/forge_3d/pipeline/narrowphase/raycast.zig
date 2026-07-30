@@ -5,12 +5,14 @@
 //! sphere is a point of radius `r`, a capsule a Y-segment of radius `r`, a box
 //! the box itself of radius 0 — exactly the `SupportShape(T).Core` split GJK/EPA
 //! and the fast paths already run on (`engine-physics-forge.md` §1.11.3). A
-//! rounded box (`radius > 0` on a box core) is **rejected**, never silently
-//! approximated: it FAILS LOUD with `error.UnsupportedShape` rather than miss a
-//! hit quietly, the same invariant `createShape` enforces. A core this file does
-//! not know cannot exist silently either — the `switch` is exhaustive, so a
-//! future `Core` case is a compile error here, which is fail-loud at the earliest
-//! possible moment.
+//! rounded box (`radius > 0` on a box core) is outside this kernel's shape set: it
+//! is an ASSERTED PRECONDITION (`raySupportsShape`), never silently approximated.
+//! The typed refusal lives where a CALLER can provoke one, at the two query entries
+//! taking a caller-supplied shape handle (§1.11.7, M1.1.11) — through this kernel
+//! the error was reachable by no path at all, every stored box converting with
+//! `radius = 0`. A core this file does not know cannot exist silently either — the
+//! `switch` is exhaustive, so a future `Core` case is a compile error here, which is
+//! fail-loud at the earliest possible moment.
 //!
 //! **Everything is in the shape's LOCAL frame.** The caller transports the ray
 //! by the inverse pose and rotates the returned normal back to world (that is
@@ -43,17 +45,11 @@ const std = @import("std");
 const math = @import("foundation").math;
 const support = @import("support.zig");
 
-/// A ray hit on one shape, in that shape's local frame.
-pub fn LocalHit(comptime T: type) type {
-    return struct {
-        /// Distance along the (unit) direction, `>= 0`. Zero when the origin is
-        /// inside the solid shape.
-        distance: T,
-        /// Outward unit surface normal at the hit point, local frame. At distance
-        /// zero it is `−direction` (§1.11.4).
-        normal: math.Vec(3, T),
-    };
-}
+/// A ray hit on one shape, in that shape's local frame. Defined in `support.zig`
+/// since M1.1.11: `plane.zig` produces the same type for the half-space, and the
+/// `BodyId`-level adapter that dispatches between the two by shape class returns one
+/// type rather than two identical ones.
+const LocalHit = support.LocalHit;
 
 /// Slack allowed on the unit-direction domain assert, in ULPs of 1. The caller
 /// normalises, then a quaternion inverse-rotation into the local frame costs a
@@ -61,25 +57,56 @@ pub fn LocalHit(comptime T: type) type {
 /// noise at scale 1 and not a geometric tolerance.
 const unit_k: comptime_int = 16;
 
+/// Whether the ray kernels cover `shape`: every core, EXCEPT a box carrying a
+/// non-zero inflation radius. A rounded box's inflated surface is measured by no arm
+/// below — the box arm would under-report it by the radius — so it is not part of
+/// this kernel's shape set.
+///
+/// **The PRECONDITION of `rayShape`, exposed as a predicate** (M1.1.11). Two things
+/// it makes structural rather than merely tested: it takes no origin, so the
+/// rejection provably belongs to the SHAPE and not to the trajectory; and the two
+/// callers that need to decide admissibility ahead of a call test the same condition
+/// the assert tests, instead of restating it.
+pub fn raySupportsShape(comptime T: type, shape: support.SupportShape(T)) bool {
+    return !(shape.core == .box and shape.radius != 0);
+}
+
 /// Nearest ray↔shape intersection, or `null` when the ray misses.
 ///
 /// `origin` and `direction` are in `shape`'s local frame and `direction` must be
-/// unit (asserted). A rounded box returns `error.UnsupportedShape` — see the file
-/// header on why that is an error and not an approximation.
+/// unit (asserted).
+///
+/// **PRECONDITION: `raySupportsShape(T, shape)`.** It was a typed
+/// `error.UnsupportedShape` until M1.1.11, and the error was reachable through no
+/// path at all: `shape.supportShape` gives every box `radius = 0` unconditionally, so
+/// no `SupportShape` built from a stored shape can be a rounded box, and a control
+/// that has never been seen to fire is a comment with syntax rather than a check
+/// (§1.11.3). The typed refusal moved to where a CALLER can cause it — the two query
+/// entries taking a caller-supplied shape handle (§1.11.7) — and what stays here is
+/// the assert. If Weld ever gives boxes a convex radius, as the reference does, this
+/// kernel gains the CASE; it does not regain an error.
 pub fn rayShape(
     comptime T: type,
     shape: support.SupportShape(T),
     origin: math.Vec(3, T),
     direction: math.Vec(3, T),
-) error{UnsupportedShape}!?LocalHit(T) {
+) ?LocalHit(T) {
     std.debug.assert(@abs(direction.lengthSq() - 1) <= unit_k * std.math.floatEps(T));
 
-    // The shape rejection comes FIRST, before anything looks at the origin: a
+    // The shape precondition comes FIRST, before anything looks at the origin: a
     // rounded box is unsupported as a SHAPE, and that answer cannot depend on
-    // where the ray starts. Placed after the membership test below, an origin
-    // inside the core would have returned a distance-zero hit and never reached
-    // the rejection — the exact silent miss this file promises not to allow.
-    if (shape.core == .box and shape.radius != 0) return error.UnsupportedShape;
+    // where the ray starts. When this was a typed error placed AFTER the membership
+    // test below, an origin inside the core returned a distance-zero hit and never
+    // reached the check — the exact silent miss this file promises not to allow.
+    //
+    // The placement is now REDUNDANTLY protected, and the redundancy is the point:
+    // `containsPoint`'s box arm carries its own unconditional `assert(r == 0)`, taken
+    // for ANY point, so moving this line below the membership test would not
+    // reintroduce a silent miss — it would panic one frame deeper, at every origin.
+    // That is a structural guarantee rather than a sampled one. It is also why
+    // `containsPoint`'s assert must not be deleted as redundant: it is what makes
+    // THIS line's position unable to fail silently.
+    std.debug.assert(raySupportsShape(T, shape));
 
     // Solid convex: inside — boundary included — is a hit at distance zero, and
     // the normal is `−direction` because no surface normal is defined there
@@ -117,7 +144,14 @@ pub fn containsPoint(comptime T: type, shape: support.SupportShape(T), p: math.V
     switch (shape.core) {
         .point => return p.lengthSq() <= r * r,
         .box => |half_extents| {
-            // rounded box: rejected by `rayShape`, unsupported here
+            // A rounded box is outside this shape set: the test below measures the
+            // CORE, so it would under-report the inflated volume by the radius.
+            //
+            // **DO NOT DELETE THIS AS REDUNDANT.** It is unconditional and taken for
+            // ANY point, which is precisely what makes `rayShape`'s precondition
+            // unable to fail silently if a future edit moves it below the membership
+            // test: the failure would land here, at every origin, instead of becoming
+            // a distance-zero hit. The two asserts are one mechanism.
             std.debug.assert(r == 0);
             const a = p.abs();
             return @reduce(.And, a.data <= half_extents.data);

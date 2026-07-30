@@ -1504,3 +1504,484 @@ test "queryCast is empty on an empty tree" {
     try std.testing.expectEqual(@as(u32, 0), bph.queryCast(ray, extent, &got));
     try std.testing.expectEqual(@as(usize, 0), got.items.items.len);
 }
+
+// ---------------------------------------------------------------------------
+// M1.1.11 / E5 — unbounded shapes live OUTSIDE the trees
+// ---------------------------------------------------------------------------
+//
+// An unbounded AABB does not degrade the BVH, it destroys it
+// (`engine-physics-forge.md` §1.11.15): the centre of an infinite box is
+// `(−inf + inf)·0.5`, i.e. NaN — and that centre is the ray origin a shape cast
+// derives from a box — the surface area is infinite so the SAH cost is infinite at
+// every candidate, and the union propagates the infinity to the root, after which
+// every query visits every node. A finite substitute box is refused too: it is a
+// tuning constant that changes a query's answer.
+//
+// So a half-space is never asked for a box. It is asked the corner PREDICATE, and it
+// lives in a flat per-layer list outside the trees, iterated by slot index.
+
+/// The ground half-space `{ y <= 0 }` in world space.
+const ground = BphF.UnboundedShape{ .normal = Vec3.unit_y, .distance = 0 };
+
+test "a plane inserted AFTER the bodies pairs with all of them" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+    var pairs: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pairs.deinit(gpa);
+
+    // THE DIRECTION A NAIVE SUITE OMITS, and the reason it omits it: pair generation is
+    // driven by the MOVED proxies, so a test that creates the plane first and then the
+    // bodies exercises only direction (1) — each body enters the moved log and is
+    // crossed with the unbounded list. Create the plane LAST and direction (1) never
+    // fires for it: the bodies moved before it existed, and their log was consumed. Only
+    // direction (2) — inserting an unbounded shape enumerates the existing leaves of the
+    // layers it may pair with — can produce these pairs, and without it a plane created
+    // after the bodies collides with NOTHING.
+    var bodies: [4]u32 = undefined;
+    for (0..4) |i| {
+        const x = @as(f32, @floatFromInt(i)) * 4;
+        // Each box straddles y = 0, so every one of them genuinely meets the half-space.
+        bodies[i] = (try bp.insert(gpa, .dynamic, boxCe(.{ x, 0, 0 }, 0.5), 100 + @as(u32, @intCast(i)))).id;
+        _ = bodies[i];
+    }
+    // Consume the moved log, exactly as a tick would: after this the bodies have no
+    // pending motion at all.
+    try bp.computePairs(gpa, &pairs);
+
+    // NOW the plane arrives.
+    const plane_ud: u32 = 7;
+    _ = try bp.insertUnbounded(gpa, .static, ground, plane_ud);
+    try bp.computePairs(gpa, &pairs);
+
+    // All four pairs, and nothing else involving the plane.
+    for (0..4) |i| {
+        try std.testing.expect(hasPair(pairs.items, plane_ud, 100 + @as(u32, @intCast(i))));
+    }
+    var involving: u32 = 0;
+    for (pairs.items) |p| {
+        if (p.a == plane_ud or p.b == plane_ud) involving += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 4), involving);
+}
+
+test "a body inserted AFTER the plane pairs with it" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+    var pairs: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pairs.deinit(gpa);
+
+    // The other direction, and the one a naive suite DOES cover: the plane exists, the
+    // body enters the moved log, and direction (1) crosses it with the unbounded list.
+    const plane_ud: u32 = 7;
+    _ = try bp.insertUnbounded(gpa, .static, ground, plane_ud);
+    try bp.computePairs(gpa, &pairs);
+    try std.testing.expectEqual(@as(usize, 0), pairs.items.len); // nothing to pair with yet
+
+    _ = try bp.insert(gpa, .dynamic, boxCe(.{ 0, 0, 0 }, 0.5), 100);
+    try bp.computePairs(gpa, &pairs);
+    try std.testing.expect(hasPair(pairs.items, plane_ud, 100));
+    try std.testing.expectEqual(@as(usize, 1), pairs.items.len);
+}
+
+test "an unbounded shape is crossed only with the layers the matrix allows" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+    var pairs: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pairs.deinit(gpa);
+
+    // `default_layer_pairs` applies to an unbounded shape with NO special case. Read off
+    // the matrix: static×dynamic is allowed, static×debris is allowed, and
+    // static×trigger is FORBIDDEN — which is the combination this test asserts emits
+    // nothing, in both insertion orders, so the refusal is not an artefact of one
+    // direction of the pairing.
+    try std.testing.expect(broadphase.default_layer_pairs[@intFromEnum(Layer.static)][@intFromEnum(Layer.dynamic)]);
+    try std.testing.expect(broadphase.default_layer_pairs[@intFromEnum(Layer.static)][@intFromEnum(Layer.debris)]);
+    try std.testing.expect(!broadphase.default_layer_pairs[@intFromEnum(Layer.static)][@intFromEnum(Layer.trigger)]);
+
+    // Plane on `static`; one body per layer, all straddling y = 0 so geometry never
+    // explains an absent pair.
+    _ = try bp.insertUnbounded(gpa, .static, ground, 7);
+    _ = try bp.insert(gpa, .dynamic, boxCe(.{ 0, 0, 0 }, 0.5), 100);
+    _ = try bp.insert(gpa, .debris, boxCe(.{ 4, 0, 0 }, 0.5), 200);
+    _ = try bp.insert(gpa, .trigger, boxCe(.{ 8, 0, 0 }, 0.5), 300);
+    try bp.computePairs(gpa, &pairs);
+
+    try std.testing.expect(hasPair(pairs.items, 7, 100)); // static × dynamic
+    try std.testing.expect(hasPair(pairs.items, 7, 200)); // static × debris
+    try std.testing.expect(!hasPair(pairs.items, 7, 300)); // static × trigger: FORBIDDEN
+
+    // The reverse insertion order, so direction (2) is the one under test as well.
+    var bp2 = BphF.init(.{});
+    defer bp2.deinit(gpa);
+    _ = try bp2.insert(gpa, .trigger, boxCe(.{ 8, 0, 0 }, 0.5), 300);
+    try bp2.computePairs(gpa, &pairs);
+    _ = try bp2.insertUnbounded(gpa, .static, ground, 7);
+    try bp2.computePairs(gpa, &pairs);
+    try std.testing.expect(!hasPair(pairs.items, 7, 300));
+}
+
+test "the tree is untouched by an unbounded shape" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+
+    // Three bodies on `static`, then a half-space on the SAME layer. The tree must be
+    // bit-for-bit unaffected: same leaf count, same height, and every stored box still
+    // finite. An infinite box would have propagated to the root and made `height` and
+    // the SAH costs meaningless; a NaN centre would have poisoned every shape cast.
+    for (0..3) |i| {
+        _ = try bp.insert(gpa, .static, boxAt(@as(f32, @floatFromInt(i)) * 4), 100 + @as(u32, @intCast(i)));
+    }
+    const tree = &bp.trees[@intFromEnum(Layer.static)];
+    const leaves_before = tree.leafCount();
+    const height_before = tree.height();
+
+    _ = try bp.insertUnbounded(gpa, .static, ground, 7);
+
+    try std.testing.expectEqual(leaves_before, tree.leafCount());
+    try std.testing.expectEqual(height_before, tree.height());
+    tree.validate(); // every structural and metric invariant, including AABB containment
+
+    // NO NaN and NO infinity anywhere in the node pool — checked on the stored boxes
+    // themselves rather than inferred from the counts above.
+    for (tree.nodes.items) |node| {
+        if (node.height == -1) continue; // free-list slot, its box is not live
+        for (node.aabb.min.toArray()) |v| try std.testing.expect(std.math.isFinite(v));
+        for (node.aabb.max.toArray()) |v| try std.testing.expect(std.math.isFinite(v));
+    }
+    // And the unbounded shape is where it belongs: in the layer's list, not the tree.
+    try std.testing.expectEqual(@as(usize, 1), bp.unbounded[@intFromEnum(Layer.static)].items.len);
+    try std.testing.expectEqual(@as(u32, 3), tree.leafCount());
+}
+
+test "queryAabb, queryRay and queryCast all visit the unbounded list" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+
+    // DISCRIMINATION GUARD: the scene holds exactly ONE unbounded shape and NO tree
+    // proxy at all, so a collected `user_data` of 7 can have come from nowhere else.
+    // With a body in the scene the tests would pass on the body and prove nothing about
+    // the list.
+    _ = try bp.insertUnbounded(gpa, .static, ground, 7);
+    for (&bp.trees) |*t| try std.testing.expectEqual(@as(u32, 0), t.leafCount());
+
+    const Collect = struct {
+        seen: [8]u32 = undefined,
+        count: u32 = 0,
+        bound: f32 = 1e9,
+        pub fn add(self: *@This(), ud: u32) void {
+            if (self.count < self.seen.len) {
+                self.seen[self.count] = ud;
+                self.count += 1;
+            }
+        }
+        pub fn maxDistance(self: *const @This()) f32 {
+            return self.bound;
+        }
+        pub fn shouldStop(_: *const @This()) bool {
+            return false;
+        }
+    };
+
+    // (1) queryAabb — a box straddling y = 0 meets the half-space.
+    var c1 = Collect{};
+    _ = bp.queryAabb(boxCe(.{ 0, 0, 0 }, 0.5), &c1);
+    try std.testing.expectEqual(@as(u32, 1), c1.count);
+    try std.testing.expectEqual(@as(u32, 7), c1.seen[0]);
+    // …and a box entirely ABOVE it does not, so the visit is a real test and not an
+    // unconditional add.
+    var c1b = Collect{};
+    _ = bp.queryAabb(boxCe(.{ 0, 10, 0 }, 0.5), &c1b);
+    try std.testing.expectEqual(@as(u32, 0), c1b.count);
+
+    // (2) queryRay — the list has no box to prune on, so it is offered to the collector
+    // and the exact kernel decides. The ray here points at the plane.
+    var c2 = Collect{};
+    _ = bp.queryRay(BphF.RayT.init(Vec3.fromArray(.{ 0, 5, 0 }), Vec3.unit_y.neg()), &c2);
+    try std.testing.expectEqual(@as(u32, 1), c2.count);
+    try std.testing.expectEqual(@as(u32, 7), c2.seen[0]);
+
+    // (3) queryCast — same, with a non-zero extent.
+    var c3 = Collect{};
+    _ = bp.queryCast(BphF.RayT.init(Vec3.fromArray(.{ 0, 5, 0 }), Vec3.unit_y.neg()), Vec3.splat(0.5), &c3);
+    try std.testing.expectEqual(@as(u32, 1), c3.count);
+    try std.testing.expectEqual(@as(u32, 7), c3.seen[0]);
+
+    // A collector that has stopped is honoured for the lists too, exactly as it is
+    // between the four trees.
+    const Stopper = struct {
+        count: u32 = 0,
+        pub fn add(self: *@This(), _: u32) void {
+            self.count += 1;
+        }
+        pub fn maxDistance(_: *const @This()) f32 {
+            return 1e9;
+        }
+        pub fn shouldStop(_: *const @This()) bool {
+            return true;
+        }
+    };
+    var s = Stopper{};
+    _ = bp.queryRay(BphF.RayT.init(Vec3.fromArray(.{ 0, 5, 0 }), Vec3.unit_y.neg()), &s);
+    try std.testing.expectEqual(@as(u32, 0), s.count);
+}
+
+test "removing an unbounded proxy retires it from the list and from pairing" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+    var pairs: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pairs.deinit(gpa);
+
+    const plane = try bp.insertUnbounded(gpa, .static, ground, 7);
+    _ = try bp.insert(gpa, .dynamic, boxCe(.{ 0, 0, 0 }, 0.5), 100);
+    try bp.computePairs(gpa, &pairs);
+    try std.testing.expect(hasPair(pairs.items, 7, 100));
+
+    // Removed: the slot is retired, not compacted — a live `Proxy` holds a slot index, so
+    // no surviving slot's index may shift, and the entry is marked dead in place (the
+    // `isLiveLeaf` discipline of the tree, one level up).
+    bp.remove(plane);
+    _ = try bp.insert(gpa, .dynamic, boxCe(.{ 4, 0, 0 }, 0.5), 200);
+    try bp.computePairs(gpa, &pairs);
+    for (pairs.items) |p| {
+        try std.testing.expect(p.a != 7 and p.b != 7);
+    }
+    // A query no longer sees it either.
+    const Collect = struct {
+        count: u32 = 0,
+        pub fn add(self: *@This(), _: u32) void {
+            self.count += 1;
+        }
+        pub fn maxDistance(_: *const @This()) f32 {
+            return 1e9;
+        }
+        pub fn shouldStop(_: *const @This()) bool {
+            return false;
+        }
+    };
+    var c = Collect{};
+    _ = bp.queryAabb(boxCe(.{ 100, 0, 100 }, 0.5), &c); // meets the half-space geometrically
+    try std.testing.expectEqual(@as(u32, 0), c.count);
+}
+
+test "the unbounded list stops growing with the total ever created; its bound is the live PEAK" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+    const list = &bp.unbounded[@intFromEnum(Layer.static)];
+
+    // MEASURED BOTH WAYS rather than asserted once (M1.1.11/E7-J3). Before the free-list,
+    // `remove` only cleared the `live` flag, so 64 create/destroy cycles left 64 slots in
+    // the list and `visitUnbounded` walked all of them for every query — a monotonic cost
+    // in the number of planes ever created. With the LIFO free-list the same sequence
+    // leaves exactly ONE, because the PEAK of simultaneously live slots is one throughout.
+    //
+    // The distinction is not pedantry and the last block of this test is what proves it:
+    // `items.len` never decreases, so the bound is that peak and NOT the live count. What
+    // the free-list removed is the dependence on the total, which was the pathology.
+    var live: BphF.Proxy = try bp.insertUnbounded(gpa, .static, ground, 0);
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    var i: u32 = 1;
+    while (i < 64) : (i += 1) {
+        bp.remove(live);
+        live = try bp.insertUnbounded(gpa, .static, ground, i);
+        // The list stays at the peak, at every point of the sequence — not just at the
+        // end, which a single final assertion would not distinguish from a list that grew
+        // and was compacted.
+        try std.testing.expectEqual(@as(usize, 1), list.items.len);
+        // …and the recycled slot is the SAME index every time: LIFO, one live entry.
+        try std.testing.expectEqual(@as(u32, 0), live.id);
+    }
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+
+    // The surviving shape is the LAST one inserted, not a stale earlier one: a query sees
+    // `user_data` 63 and nothing else. This is the discrimination that a reused slot
+    // carries its new occupant's payload and not the dead one's.
+    const Collect = struct {
+        seen: [8]u32 = undefined,
+        count: u32 = 0,
+        pub fn add(self: *@This(), ud: u32) void {
+            if (self.count < self.seen.len) {
+                self.seen[self.count] = ud;
+                self.count += 1;
+            }
+        }
+        pub fn maxDistance(_: *const @This()) f32 {
+            return 1e9;
+        }
+        pub fn shouldStop(_: *const @This()) bool {
+            return false;
+        }
+    };
+    var c = Collect{};
+    _ = bp.queryAabb(boxCe(.{ 0, 0, 0 }, 0.5), &c);
+    try std.testing.expectEqual(@as(u32, 1), c.count);
+    try std.testing.expectEqual(@as(u32, 63), c.seen[0]);
+
+    // THE PEAK, isolated. Nine live at once occupies nine slots — the free-list recycles,
+    // it does not merge.
+    var held: [8]BphF.Proxy = undefined;
+    for (&held, 0..) |*h, k| h.* = try bp.insertUnbounded(gpa, .static, ground, 100 + @as(u32, @intCast(k)));
+    try std.testing.expectEqual(@as(usize, 9), list.items.len); // 1 live + 8 new
+
+    // And it does not come back down. Freeing all eight leaves ONE live shape and NINE
+    // slots — the length tracks the peak, not the live count, which is the true bound
+    // stated on the `unbounded` field. A dense list would read 1 here; this one reads 9,
+    // and that is the deliberate design, not a defect.
+    for (held) |h| bp.remove(h);
+    try std.testing.expectEqual(@as(usize, 9), list.items.len);
+
+    // Re-inserting reuses a slot rather than appending a tenth: the peak is a ceiling the
+    // list returns to, never a floor it climbs past.
+    _ = try bp.insertUnbounded(gpa, .static, ground, 200);
+    try std.testing.expectEqual(@as(usize, 9), list.items.len);
+}
+
+test "a retired unbounded slot never surfaces in a pair after its index is reused" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+    var pairs: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pairs.deinit(gpa);
+
+    // The stale-index exposure a free-list carries, exercised at its worst point: the
+    // slot is logged as moved, then freed, then REUSED by a different shape, all before
+    // `computePairs` runs. The moved entry now names the new occupant — which was itself
+    // logged on insertion — so the effect is a duplicate log entry, and the output is
+    // sorted and adjacent-deduped. The pair set must therefore name the NEW shape once
+    // and the dead one never.
+    _ = try bp.insert(gpa, .dynamic, boxCe(.{ 0, 0, 0 }, 0.5), 100);
+    const doomed = try bp.insertUnbounded(gpa, .static, ground, 7);
+    bp.remove(doomed);
+    const reborn = try bp.insertUnbounded(gpa, .static, ground, 8);
+    try std.testing.expectEqual(doomed.id, reborn.id); // the same slot, reused
+    try bp.computePairs(gpa, &pairs);
+
+    try std.testing.expect(hasPair(pairs.items, 8, 100));
+    var involving_dead: u32 = 0;
+    var involving_live: u32 = 0;
+    for (pairs.items) |p| {
+        if (p.a == 7 or p.b == 7) involving_dead += 1;
+        if (p.a == 8 or p.b == 8) involving_live += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 0), involving_dead);
+    try std.testing.expectEqual(@as(u32, 1), involving_live); // once, not twice
+}
+
+test "at full capacity with a free slot, an insertion needs no allocation at all" {
+    const gpa = std.testing.allocator;
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+    const list = &bp.unbounded[@intFromEnum(Layer.static)];
+    var pairs: std.ArrayListUnmanaged(BphF.Pair) = .empty;
+    defer pairs.deinit(gpa);
+
+    // The ONE configuration that separates an unconditional reserve from a conditional
+    // one, and it is not reachable by accident: the slot list must be EXACTLY at capacity
+    // (so `ensureUnusedCapacity(gpa, 1)` would grow it) while a free slot is available (so
+    // no growth is actually needed). `ensureUnusedCapacity` guarantees room for `len + 1`,
+    // which is why "at capacity" is the discriminating state and "below capacity" is not.
+    var held: [64]BphF.Proxy = undefined;
+    var n: usize = 0;
+    while (list.items.len != list.capacity or n == 0) {
+        std.debug.assert(n < held.len);
+        held[n] = try bp.insertUnbounded(gpa, .static, ground, @intCast(n));
+        n += 1;
+    }
+    try std.testing.expectEqual(list.capacity, list.items.len);
+
+    // Drain the moved log so ITS unconditional reserve is genuinely free: it keeps its
+    // capacity across `clearRetainingCapacity`, so after this the only allocation the
+    // insertion could still want is the slot-list growth under test.
+    try bp.computePairs(gpa, &pairs);
+    try std.testing.expectEqual(@as(usize, 0), bp.moved_unbounded[@intFromEnum(Layer.static)].items.len);
+    try std.testing.expect(bp.moved_unbounded[@intFromEnum(Layer.static)].capacity >= 1);
+
+    // One free slot, list still exactly at capacity.
+    bp.remove(held[0]);
+    try std.testing.expectEqual(list.capacity, list.items.len);
+
+    // Fail the very next allocation. With the conditional reserve the insertion performs
+    // NONE, so it must succeed; with the unconditional one it grows the slot list and
+    // returns `error.OutOfMemory`.
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    const p = try bp.insertUnbounded(failing.allocator(), .static, ground, 999);
+    try std.testing.expectEqual(held[0].id, p.id); // the recycled slot, not a new one
+    try std.testing.expectEqual(list.capacity, list.items.len); // and nothing grew
+    try std.testing.expectEqual(@as(usize, 0), failing.allocations);
+}
+
+test "iteration follows the slot index, and an identical op sequence gives an identical order" {
+    const gpa = std.testing.allocator;
+
+    // The WANTED property, pinned — not insertion order, and not a tolerated side effect.
+    // §1.11.15's contract is three clauses: a slot's index never moves while a proxy holds
+    // it, a retired slot is recycled LIFO, iteration follows the index. So A, B, C, retire
+    // A, insert D iterates D, B, C — D took A's slot.
+    //
+    // It suffices because no observable result depends on this order: the query entries
+    // sort by the §1.11.14 key and `computePairs` sorts by the canonical pair key and
+    // adjacent-dedupes. What M1.1.14 requires is that the order be a DETERMINISTIC FUNCTION
+    // OF THE OPERATION SEQUENCE, which the second half of this test is.
+    const Order = struct {
+        fn of(bp: *const BphF, out: *[8]u32) usize {
+            var n: usize = 0;
+            for (bp.unbounded[@intFromEnum(Layer.static)].items) |slot| {
+                if (!slot.live) continue;
+                out[n] = slot.user_data;
+                n += 1;
+            }
+            return n;
+        }
+    };
+
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+    const a = try bp.insertUnbounded(gpa, .static, ground, 'A');
+    _ = try bp.insertUnbounded(gpa, .static, ground, 'B');
+    _ = try bp.insertUnbounded(gpa, .static, ground, 'C');
+    var seen: [8]u32 = undefined;
+    try std.testing.expectEqual(@as(usize, 3), Order.of(&bp, &seen));
+    try std.testing.expectEqualSlices(u32, &.{ 'A', 'B', 'C' }, seen[0..3]);
+
+    bp.remove(a);
+    _ = try bp.insertUnbounded(gpa, .static, ground, 'D');
+    // D, B, C — D occupies A's index 0. A dense list would give B, C, D here; a
+    // swap-removing one would give C, B or B, C, D depending on its own convention. This
+    // asserts the index rule, so it discriminates against both.
+    try std.testing.expectEqual(@as(usize, 3), Order.of(&bp, &seen));
+    try std.testing.expectEqualSlices(u32, &.{ 'D', 'B', 'C' }, seen[0..3]);
+
+    // THE ACTUAL REQUIREMENT (M1.1.14): the same operation sequence yields the same order.
+    // A second broadphase, driven identically, must iterate identically — including through
+    // the free-list, whose head is itself a function of that sequence.
+    var bp2 = BphF.init(.{});
+    defer bp2.deinit(gpa);
+    const a2 = try bp2.insertUnbounded(gpa, .static, ground, 'A');
+    _ = try bp2.insertUnbounded(gpa, .static, ground, 'B');
+    _ = try bp2.insertUnbounded(gpa, .static, ground, 'C');
+    bp2.remove(a2);
+    _ = try bp2.insertUnbounded(gpa, .static, ground, 'D');
+    var seen2: [8]u32 = undefined;
+    const n2 = Order.of(&bp2, &seen2);
+    try std.testing.expectEqualSlices(u32, seen[0..3], seen2[0..n2]);
+
+    // And a DIFFERENT sequence reaching the same live set gives a different order, which is
+    // what proves the previous assertion has power: retiring B instead of A puts D at
+    // index 1.
+    var bp3 = BphF.init(.{});
+    defer bp3.deinit(gpa);
+    _ = try bp3.insertUnbounded(gpa, .static, ground, 'A');
+    const b3 = try bp3.insertUnbounded(gpa, .static, ground, 'B');
+    _ = try bp3.insertUnbounded(gpa, .static, ground, 'C');
+    bp3.remove(b3);
+    _ = try bp3.insertUnbounded(gpa, .static, ground, 'D');
+    var seen3: [8]u32 = undefined;
+    const n3 = Order.of(&bp3, &seen3);
+    try std.testing.expectEqualSlices(u32, &.{ 'A', 'D', 'C' }, seen3[0..n3]);
+}

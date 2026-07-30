@@ -117,10 +117,36 @@ pub const BodyManager = struct {
     }
 
     /// Create a body from `desc`, resolving its shape in `store` for the
-    /// inertia. Returns the new handle. Velocity starts at zero. Fails with
-    /// `error.InvalidShape` on a stale/invalid `desc.shape`.
+    /// inertia. Returns the new handle. Velocity starts at zero.
+    ///
+    /// Three typed failures, in the order they are tested: `error.InvalidShape` on a
+    /// stale/invalid `desc.shape`; `error.ShapeMustBeStatic` when the shape is a
+    /// half-space and `desc.body_type` is not `.static` (§1.11.15); and
+    /// `error.InvalidCollisionLayer` outside `[0, collision_layer_count)` (§1.11.5).
+    /// On any of them nothing is mutated and no handle is allocated.
     pub fn addBody(self: *BodyManager, gpa: std.mem.Allocator, store: *const ShapeStore, desc: BodyDescriptor) !BodyId {
         const shape = store.get(desc.shape) orelse return error.InvalidShape;
+        // A HALF-SPACE FORCES A STATIC BODY, and the refusal is a TYPED error
+        // (`engine-physics-forge.md` §1.11.15). It has no finite volume, no inertia
+        // tensor and no local AABB, so mass, inertia and sleep radius are not defined
+        // on it — a dynamic or kinematic body carrying one is not a body with unusual
+        // numbers, it is a body whose numbers do not exist. Same invariant as the
+        // reference, whose plane declares `MustBeStatic`.
+        //
+        // **The ORDER is normative, not stylistic.** It sits immediately after the
+        // shape resolution — which it depends on — and BEFORE every computation
+        // derived from the local AABB or the inertia: both `computeMotion` (on its
+        // dynamic path) and the sleep radius live in the `Body` literal below, with no
+        // branch on body type of their own. Moved after that literal, a dynamic
+        // half-space would reach `computeMotion`'s class assert in a safe build and,
+        // in ReleaseFast where that assert is compiled out, would silently store a NaN
+        // inverse inertia.
+        //
+        // Named for the invariant rather than for the shape: `MeshShape` is static-only
+        // too (§2), so M1.1.11.1 reuses this error instead of minting a second one.
+        if (shape.class() == .half_space and desc.body_type != .static) {
+            return error.ShapeMustBeStatic;
+        }
         // A TYPED error, not a debug assert: the query mask is 32 bits, so a body
         // beyond that domain would be invisible to every query with no diagnostic
         // at all — the silent-miss class the shape invariant forbids
@@ -173,7 +199,20 @@ pub const BodyManager = struct {
             // widening error and report a phantom displacement — tiny against the
             // 15 mm bound, and wrong regardless.
             .sleep_ref_rotation = rotation_r,
-            .sleep_radius = body_mod.computeSleepRadius(shape),
+            // A switch on the CLASS, exhaustive and with no `else` arm, so the mesh
+            // (M1.1.11.1) is a compile error here and must state its own answer.
+            //
+            // A half-space has no local AABB, hence no sleep radius — and needs none:
+            // it can only be STATIC (rejected above otherwise), and nothing ever reads
+            // a static body's radius, both `sleep.updateWindows` and the island seeding
+            // skipping a non-dynamic body before they touch it. NaN rather than a
+            // plausible zero, for the reason the two shape fields it derives from carry
+            // NaN: the class asserts guarding them are compiled out of ReleaseFast, and
+            // a finite placeholder there would pass unnoticed.
+            .sleep_radius = switch (shape.class()) {
+                .convex => body_mod.computeSleepRadius(shape),
+                .half_space => std.math.nan(Real),
+            },
             .entity = desc.entity,
         };
         try self.alloc.ensureUnusedCapacity(gpa, 1);
@@ -281,7 +320,9 @@ pub const BodyManager = struct {
 
     /// Safe getter: the body's sleep radius (distance from its centre to the
     /// furthest corner of its shape's local AABB), or null if `id` is
-    /// stale/invalid. Pose-invariant, computed once at creation.
+    /// stale/invalid. Pose-invariant, computed once at creation. NaN for a body
+    /// carrying a half-space, which has no local AABB and no sleep window — see
+    /// `Body.sleep_radius`.
     pub fn sleepRadius(self: *const BodyManager, id: BodyId) ?Real {
         const idx = self.alloc.validate(id) orelse return null;
         return self.bodies.items(.sleep_radius)[idx];
@@ -433,16 +474,29 @@ pub const BodyManager = struct {
         const pos = self.bodies.items(.position)[idx];
         const rot = self.bodies.items(.rotation)[idx];
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
+        // The same precondition `worldAabb` carries, asserted again at the BODY grain
+        // — this is where a caller holds a `BodyId` and can be told which body it
+        // asked about. A body carrying a half-space is asked a PREDICATE ("do you
+        // overlap this box"), never a box (§1.11.15).
+        std.debug.assert(shape.class() == .convex);
         return worldAabb(shape, pos, rot);
     }
 
     /// Ray against one body's shape, resolving its world pose and support shape
     /// (via `store`). Returns null if the handle — or its shape — is
-    /// stale/invalid, or if the ray misses; `error.UnsupportedShape` if the shape
-    /// is outside the kernel's set (a rounded box). The `BodyId`-level ray
+    /// stale/invalid, or if the ray misses. The `BodyId`-level ray
     /// adapter for the broadphase→kernel flow, mirroring `gjkPair` /
     /// `collidePair`: unpack a `queryRay` candidate's `user_data` as a `BodyId`
     /// and call this per candidate.
+    ///
+    /// **No error channel since M1.1.11.** It carried `error.UnsupportedShape` from
+    /// the kernel's rounded-box latch, and no path could reach it: `supportShape`
+    /// gives every stored box `radius = 0`, so a `SupportShape` built from a body is
+    /// never a rounded box. The kernel's refusal is an asserted precondition now
+    /// (`narrowphase.raySupportsShape`) and the typed refusal lives at the two query
+    /// entries taking a caller-supplied shape handle (§1.11.7). What this adapter
+    /// resolves is a BODY's shape, which the store validated at creation, so there is
+    /// nothing here for a caller to get wrong.
     ///
     /// The hit comes back in the shape's LOCAL frame, which is enough: a rigid
     /// transform preserves distances and the direction is unit on both sides, so
@@ -460,13 +514,22 @@ pub const BodyManager = struct {
         store: *const ShapeStore,
         id: BodyId,
         ray: RayR,
-    ) error{UnsupportedShape}!?narrowphase.LocalHit(Real) {
+    ) ?narrowphase.LocalHit(Real) {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
         const inv_rot = self.bodies.items(.rotation)[idx].conjugate();
         const local_origin = inv_rot.rotateVec3(ray.origin.sub(self.bodies.items(.position)[idx]));
         const local_direction = inv_rot.rotateVec3(ray.direction);
-        return narrowphase.rayShape(Real, shape_mod.supportShape(shape), local_origin, local_direction);
+        // Dispatch by CATEGORY, above the support map and never inside it (§1.11.15).
+        // Exhaustive with no `else`: the mesh (M1.1.11.1) is a compile error here.
+        // The half-space arm needs no transport of its own — the plane is stored in
+        // this body's local frame, which is the frame the ray has just been brought
+        // into, and both kernels return the SAME `LocalHit` so this adapter has one
+        // return type rather than a union of two.
+        return switch (shape.class()) {
+            .convex => narrowphase.rayShape(Real, shape_mod.supportShape(shape), local_origin, local_direction),
+            .half_space => narrowphase.plane.rayShape(Real, shape_mod.halfSpace(shape), local_origin, local_direction),
+        };
     }
 
     /// Run distance-based GJK on the pair `a`/`b`, resolving each body's world
@@ -532,14 +595,32 @@ pub const BodyManager = struct {
             self.bodies.items(.rotation)[idx],
         );
         const local_dir = cast_rotation.conjugate().rotateVec3(direction);
-        const hit = narrowphase.castShape(
-            Real,
-            cast_shape,
-            relpose,
-            shape_mod.supportShape(shape),
-            local_dir,
-            max_distance,
-        ) orelse return null;
+        // The CAST shape is always a bounded convex — the query entry refuses an
+        // unbounded probe with a typed error (§1.11.7) — so only the HIT body's
+        // category is dispatched on. Exhaustive, no `else`.
+        //
+        // The half-space arm transports the plane INTO A's frame rather than
+        // transporting A: the sweep is a pure translation of A, so A's support in the
+        // fixed direction `−n` is a constant of the whole sweep, and one support call
+        // answers it in closed form. `RelativePose` already carries B-relative-to-A,
+        // which is exactly the pose the transport needs.
+        const hit = switch (shape.class()) {
+            .convex => narrowphase.castShape(
+                Real,
+                cast_shape,
+                relpose,
+                shape_mod.supportShape(shape),
+                local_dir,
+                max_distance,
+            ),
+            .half_space => narrowphase.plane.castShape(
+                Real,
+                shape_mod.halfSpace(shape).transformed(relpose.rot_rel, relpose.pos_rel),
+                cast_shape,
+                local_dir,
+                max_distance,
+            ),
+        } orelse return null;
         return .{
             // A distance is invariant under a rigid transform, so it needs no mapping.
             .distance = hit.distance,
@@ -566,16 +647,74 @@ pub const BodyManager = struct {
     ) ?bool {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
-        const result = narrowphase.gjk(
-            Real,
-            query_shape,
-            query_position,
-            query_rotation,
-            shape_mod.supportShape(shape),
-            self.bodies.items(.position)[idx],
-            self.bodies.items(.rotation)[idx],
-        );
-        return result.status != .separated;
+        switch (shape.class()) {
+            .convex => {
+                const result = narrowphase.gjk(
+                    Real,
+                    query_shape,
+                    query_position,
+                    query_rotation,
+                    shape_mod.supportShape(shape),
+                    self.bodies.items(.position)[idx],
+                    self.bodies.items(.rotation)[idx],
+                );
+                return result.status != .separated;
+            },
+            // The half-space is A and the probe is B, which is the orientation
+            // §1.11.15's separation formula is written in — `sep = n · supportCore_B(−n)
+            // − r_b − d`, one support call. The SIGN of that separation is the whole
+            // classification, exactly: no GJK margin enters, and none should, since
+            // there is no accumulated rounding here to absorb.
+            .half_space => return narrowphase.plane.separation(
+                Real,
+                shape_mod.halfSpace(shape),
+                narrowphase.RelativePose(Real).init(
+                    self.bodies.items(.position)[idx],
+                    self.bodies.items(.rotation)[idx],
+                    query_position,
+                    query_rotation,
+                ),
+                query_shape,
+            ) <= 0,
+        }
+    }
+
+    /// Whether body `id`'s exact geometry meets the world AABB `query_box`, faces
+    /// included. Null on a stale/invalid handle or shape — distinct from `false`, which
+    /// is a real answer.
+    ///
+    /// **A SIXTH adapter, and item 6 of E5 is why it exists.** `overlapAabb`'s collector
+    /// used to call `bodyAabb` on every candidate, which is correct for a bounded convex
+    /// and PANICS on a half-space — the class assert — and in ReleaseFast, where that
+    /// assert is compiled out, would fall through to `worldAabb`'s `unreachable`. Putting
+    /// the dispatch here rather than in the collector keeps all class dispatch in one
+    /// file, beside the other five, and keeps `query/overlap.zig` from needing the
+    /// half-space transport.
+    ///
+    /// The convex arm is the body's TIGHT world AABB and never the broadphase leaf's fat
+    /// box, so the answer is not a function of a tuning constant (§1.11.12). The
+    /// half-space arm is the corner PREDICATE, which never builds a box at all — the two
+    /// arms agree on what "meets" means without sharing a representation.
+    pub fn aabbOverlapsBody(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        id: BodyId,
+        query_box: Aabbr,
+    ) ?bool {
+        const idx = self.alloc.validate(id) orelse return null;
+        const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
+        return switch (shape.class()) {
+            .convex => worldAabb(shape, self.bodies.items(.position)[idx], self.bodies.items(.rotation)[idx])
+                .overlaps(query_box),
+            .half_space => narrowphase.plane.aabbOverlaps(
+                Real,
+                shape_mod.halfSpace(shape).transformed(
+                    self.bodies.items(.rotation)[idx],
+                    self.bodies.items(.position)[idx],
+                ),
+                query_box,
+            ),
+        };
     }
 
     /// Whether the world-space `point` lies inside body `id`, boundary INCLUDED —
@@ -594,7 +733,10 @@ pub const BodyManager = struct {
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
         const local = self.bodies.items(.rotation)[idx].conjugate()
             .rotateVec3(point.sub(self.bodies.items(.position)[idx]));
-        return narrowphase.containsPoint(Real, shape_mod.supportShape(shape), local);
+        return switch (shape.class()) {
+            .convex => narrowphase.containsPoint(Real, shape_mod.supportShape(shape), local),
+            .half_space => narrowphase.plane.containsPoint(Real, shape_mod.halfSpace(shape), local),
+        };
     }
 
     /// Closest point on body `id`'s SURFACE to the world-space `point`, with the
@@ -633,6 +775,26 @@ pub const BodyManager = struct {
     ) ?BodyClosestPoint {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
+
+        // The half-space answers in closed form, and it answers BOTH regimes at once:
+        // `closestPoint` carries the solidity convention itself, returning distance 0
+        // and the queried point for an interior point rather than projecting it onto
+        // the boundary. The point is transported into the body's local frame the way
+        // `containsPointBody` transports one, and only the POSITION needs mapping back
+        // — a distance is invariant under a rigid transform.
+        if (shape.class() == .half_space) {
+            const projection = narrowphase.plane.closestPoint(
+                Real,
+                shape_mod.halfSpace(shape),
+                self.bodies.items(.rotation)[idx].conjugate()
+                    .rotateVec3(point.sub(self.bodies.items(.position)[idx])),
+            );
+            return .{
+                .distance = projection.distance,
+                .position = self.bodies.items(.rotation)[idx].rotateVec3(projection.position)
+                    .add(self.bodies.items(.position)[idx]),
+            };
+        }
         const shape_b = shape_mod.supportShape(shape);
 
         // Inside the solid — boundary included — is distance 0 at the point itself.
@@ -728,15 +890,64 @@ pub const BodyManager = struct {
         const ib = self.alloc.validate(b) orelse return null;
         const shape_a = store.get(self.bodies.items(.shape)[ia]) orelse return null;
         const shape_b = store.get(self.bodies.items(.shape)[ib]) orelse return null;
-        return narrowphase.collideOrdered(
-            Real,
-            shape_mod.supportShape(shape_a),
-            self.bodies.items(.position)[ia],
-            self.bodies.items(.rotation)[ia],
-            shape_mod.supportShape(shape_b),
-            self.bodies.items(.position)[ib],
-            self.bodies.items(.rotation)[ib],
-        );
+        const pos_a = self.bodies.items(.position)[ia];
+        const rot_a = self.bodies.items(.rotation)[ia];
+        const pos_b = self.bodies.items(.position)[ib];
+        const rot_b = self.bodies.items(.rotation)[ib];
+
+        // Dispatch on the pair of CATEGORIES, nested and exhaustive with no `else` on
+        // either level: the mesh (M1.1.11.1) is a compile error at all four arms, each of
+        // which owes it a decision.
+        //
+        // The half-space arm is written with the PLANE as A, which is the orientation
+        // §1.11.15's formulas are stated in. When the plane is B — reachable, since this
+        // order is the body-id order and the plane may have been created either side —
+        // the pair is computed the other way round and the normal negated, which is
+        // exactly what `collidePair` does one level up for the caller's order. Position
+        // and penetration are order-independent, so nothing else needs mirroring, and
+        // `contact_constraint.prepare` reconstructs the two anchors from
+        // `position ± ½·penetration·normal` with no case for this shape.
+        switch (shape_a.class()) {
+            .convex => switch (shape_b.class()) {
+                .convex => return narrowphase.collideOrdered(
+                    Real,
+                    shape_mod.supportShape(shape_a),
+                    pos_a,
+                    rot_a,
+                    shape_mod.supportShape(shape_b),
+                    pos_b,
+                    rot_b,
+                ),
+                .half_space => {
+                    var m = narrowphase.collidePlane(
+                        Real,
+                        shape_mod.halfSpace(shape_b),
+                        pos_b,
+                        rot_b,
+                        narrowphase.RelativePose(Real).init(pos_b, rot_b, pos_a, rot_a),
+                        shape_mod.supportShape(shape_a),
+                    ) orelse return null;
+                    m.normal = m.normal.neg(); // computed B→A; the caller asked A→B
+                    return m;
+                },
+            },
+            .half_space => switch (shape_b.class()) {
+                .convex => return narrowphase.collidePlane(
+                    Real,
+                    shape_mod.halfSpace(shape_a),
+                    pos_a,
+                    rot_a,
+                    narrowphase.RelativePose(Real).init(pos_a, rot_a, pos_b, rot_b),
+                    shape_mod.supportShape(shape_b),
+                ),
+                // Two half-spaces have NO narrowphase kernel — §1.11.15's table is a
+                // half-space against a BOUNDED CONVEX — and the pair is unreachable: a
+                // half-space forces a static body (`error.ShapeMustBeStatic`) and
+                // `default_layer_pairs` has static×static false, so the broadphase never
+                // emits it. A dated unreachability, asserted rather than answered.
+                .half_space => unreachable,
+            },
+        }
     }
 };
 
@@ -774,7 +985,17 @@ fn deepCoreWitness(simplex: []const narrowphase.Simplex(Real).Vertex) Vec3r {
 /// `pub` since M1.1.10 / E5: a shape CAST needs the initial world AABB of a shape
 /// that is not a body — the query's own — to size the swept traversal
 /// (`engine-physics-forge.md` §1.11.10). `bodyAabb` is the body-level wrapper.
+///
+/// **PRECONDITION: the shape is a bounded CONVEX.** A half-space has no world AABB
+/// at all, and an infinite box does not degrade the BVH, it destroys it: its centre
+/// is `(−inf + inf)·0.5`, i.e. NaN, which is the ray origin a shape cast derives
+/// from a box; its surface area is infinite, so the SAH cost is infinite at every
+/// candidate; and the union carries the infinity to the root, after which every
+/// query visits every node (§1.11.15). The plane is asked a PREDICATE instead. The
+/// class is asserted rather than left to fall through to the `unreachable` below,
+/// because the class is the information the failure should carry.
 pub fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
+    std.debug.assert(shape.class() == .convex);
     switch (shape.shape_type) {
         .sphere => return Aabbr.fromCenterHalfExtents(pos, Vec3r.splat(shape.radius)),
         .box => {
@@ -801,8 +1022,10 @@ pub fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
             const cap1 = Aabbr.fromMinMax(p1.sub(rr), p1.add(rr));
             return cap0.merge(cap1);
         },
-        // ShapeStore only admits sphere/box/capsule (createShape rejects the
-        // rest with error.UnsupportedShape), so no other tag can reach here.
+        // The store admits sphere/box/capsule and — since M1.1.11 — the plane, and
+        // rejects every other variant with `error.UnsupportedShape`. The plane is
+        // excluded by the class precondition above, so the three arms are exhaustive
+        // over what can reach here.
         else => unreachable,
     }
 }

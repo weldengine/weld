@@ -56,6 +56,9 @@ pub const Aabbr = config.Aabbr;
 
 /// Immutable per-shape data (geometry + local AABB + unit-mass inertia).
 pub const Shape = shape.Shape;
+/// The narrowphase CATEGORY of a shape — bounded convex or half-space (M1.1.11,
+/// `engine-physics-forge.md` §1.11.15). Scalar-free, so re-exported as-is.
+pub const ShapeClass = shape.ShapeClass;
 /// Generational store of collision shapes.
 pub const ShapeStore = shape.ShapeStore;
 
@@ -151,6 +154,19 @@ pub fn collideOrderedGeneric(shape_a: SupportShape, pos_a: Vec3r, rot_a: Quatr, 
 /// The `(normal, closest points, base penetration)` fast-path seed at solver precision.
 pub const ContactSeed = narrowphase.ContactSeed(Real);
 
+// --- Half-space kernels (M1.1.11) ---
+
+/// A solid half-space `{ x : n·x <= d }` at solver precision — the geometry a `.plane`
+/// shape carries, and the input to every kernel of the `plane` namespace below.
+pub const HalfSpace = narrowphase.plane.HalfSpace(Real);
+
+/// The analytic half-space kernels (`engine-physics-forge.md` §1.11.15): separation
+/// against a bounded convex, ray, shape cast, solid membership, closest point, and the
+/// AABB corner predicate. Closed-form and iteration-free — a half-space has no support
+/// map, so it traverses neither GJK, EPA nor the cast march. Scalar-generic, so
+/// re-exported as a namespace; `BodyManager`'s five adapters bind it at `Real`.
+pub const plane = narrowphase.plane;
+
 // --- Ray kernels + queries ---
 
 /// A ray hit on one shape in that shape's LOCAL frame (distance + outward
@@ -160,8 +176,16 @@ pub const LocalHit = narrowphase.LocalHit(Real);
 /// Nearest ray↔shape intersection in the shape's local frame, at solver
 /// precision — the `Real`-bound kernel entry. `BodyManager.raycastBody` is the
 /// `BodyId`-level adapter the query traversal drives.
-pub fn rayShape(support_shape: SupportShape, origin: Vec3r, direction: Vec3r) error{UnsupportedShape}!?LocalHit {
+pub fn rayShape(support_shape: SupportShape, origin: Vec3r, direction: Vec3r) ?LocalHit {
     return narrowphase.rayShape(Real, support_shape, origin, direction);
+}
+
+/// Whether the ray kernels cover `support_shape` — `rayShape`'s asserted
+/// precondition at solver precision (M1.1.11). Every box the `ShapeStore` converts
+/// carries `radius = 0`, so this is false only for a `SupportShape` a caller built by
+/// hand.
+pub fn raySupportsShape(support_shape: SupportShape) bool {
+    return narrowphase.raySupportsShape(Real, support_shape);
 }
 
 /// Spatial queries at solver precision (`engine-physics-forge.md` §1.11): the
@@ -229,4 +253,5 @@ comptime {
     _ = @import("tests/raycast_test.zig");
     _ = @import("tests/shapecast_test.zig");
     _ = @import("tests/overlap_test.zig");
+    _ = @import("tests/plane_test.zig");
 }

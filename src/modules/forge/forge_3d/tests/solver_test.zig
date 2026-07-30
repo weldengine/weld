@@ -161,10 +161,29 @@ pub const World = struct {
     }
 
     /// Create a body and insert its broadphase proxy on the matching layer.
+    ///
+    /// **Dispatches on the shape CLASS since M1.1.11.** A half-space has no world AABB,
+    /// so `bodyAabb` asserts on one and there is no box to hand `insert`: an unbounded
+    /// shape goes into the layer's flat list instead, carrying the half-space transported
+    /// into WORLD space, which is the frame the broadphase's corner predicate works in
+    /// (`engine-physics-forge.md` §1.11.15). Exhaustive on the class, no `else`.
     pub fn addBody(self: *World, gpa: std.mem.Allocator, desc: api.BodyDescriptor) !BodyId {
         const id = try self.bm.addBody(gpa, &self.store, desc);
-        const aabb = self.bm.bodyAabb(&self.store, id).?;
-        const proxy = try self.bp.insert(gpa, broadphaseLayer(desc.body_type), aabb, id);
+        const layer = broadphaseLayer(desc.body_type);
+        const shape = self.store.get(desc.shape).?;
+        const proxy = switch (shape.class()) {
+            .convex => try self.bp.insert(gpa, layer, self.bm.bodyAabb(&self.store, id).?, id),
+            .half_space => blk: {
+                const world = shape_mod.halfSpace(shape).transformed(
+                    self.bm.rotation(id).?,
+                    self.bm.position(id).?,
+                );
+                break :blk try self.bp.insertUnbounded(gpa, layer, .{
+                    .normal = world.normal,
+                    .distance = world.distance,
+                }, id);
+            },
+        };
         try self.bodies.append(gpa, .{ .id = id, .proxy = proxy });
         return id;
     }
@@ -264,6 +283,11 @@ pub const World = struct {
         for (self.bodies.items) |b| {
             const sleeping = self.bm.isSleeping(b.id) orelse continue; // stale handle
             if (sleeping) continue; // a sleeper's AABB is unchanged by construction
+            // An UNBOUNDED proxy has no box to update and cannot move: a half-space
+            // forces a STATIC body, so its pairs are established once at insertion and
+            // then carried by the retention rule of step 2 (§1.11.15). `bp.update`
+            // asserts this rather than absorbing it, so the skip is explicit here.
+            if (b.proxy.kind == .unbounded) continue;
             if (self.bm.bodyAabb(&self.store, b.id)) |aabb| try self.bp.update(gpa, b.proxy, aabb);
         }
 

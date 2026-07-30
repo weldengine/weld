@@ -48,6 +48,47 @@ pub fn Vertex(comptime T: type) type {
     };
 }
 
+/// A hit on ONE shape, in that shape's local frame: how far along the (unit) query
+/// direction, and the outward unit surface normal there.
+///
+/// **Shared vocabulary, which is why it lives here** (M1.1.11). Two kernel files
+/// produce it — `raycast.zig` for the bounded convexes and `plane.zig` for the
+/// half-space — and the `BodyId`-level adapter that dispatches between them by shape
+/// CLASS must return ONE type, not two structurally identical ones. `plane.zig` may
+/// import only `foundation` and this file, so this is where the type can be common to
+/// both (§1.11.15's taxonomy is above the support map, and so is this).
+///
+/// At distance zero — an origin inside the solid — the normal is `−direction`, the only
+/// choice preserving `normal · direction <= 0` on every hit (§1.11.4).
+pub fn LocalHit(comptime T: type) type {
+    return struct {
+        /// Distance along the (unit) direction, `>= 0`. Zero when the origin is inside
+        /// the solid shape.
+        distance: T,
+        /// Outward unit surface normal at the hit point, local frame.
+        normal: math.Vec(3, T),
+    };
+}
+
+/// One shape-cast hit, in the frame the kernel computed in — A's frame, A being the
+/// shape being cast.
+///
+/// Shared for the same reason as `LocalHit`: `shapecast.zig` produces it from a GJK
+/// ray march on the Minkowski difference and `plane.zig` from a closed form, and
+/// `BodyManager.castShapeBody` dispatches between them by the hit body's class.
+pub fn CastHit(comptime T: type) type {
+    return struct {
+        /// Distance along the (unit) cast direction at first touch, in
+        /// `[0, max_distance]`. Zero when the shapes already overlap at the start pose.
+        distance: T,
+        /// Witness point on B — the HIT body — on its INFLATED surface.
+        point: math.Vec(3, T),
+        /// Outward unit normal of the HIT body at the witness. Satisfies
+        /// `normal · direction <= 0` on every hit.
+        normal: math.Vec(3, T),
+    };
+}
+
 /// The supporting **feature** of a core in a given direction: the polygon (or
 /// edge / vertex) whose points maximize `dir · p` on the core, in the core's
 /// local frame, radius excluded. Up to 4 vertices (a box face); `count` gives

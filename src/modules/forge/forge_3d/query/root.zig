@@ -26,12 +26,13 @@
 //! smallest prefers the bodies created first — the inverse of the invariance
 //! §1.11.6 claims.
 //!
-//! **The exact kernel can fail, and the collector contract cannot.**
-//! `queryRay`'s collector exposes `add(u32) void`, so a kernel error is LATCHED
-//! in a collector field and surfaced by the entry function — the `PairSink.err`
-//! pattern `computePairs` already uses for OOM. Never swallowed, never
-//! `catch unreachable`, and the collector contract stays as the traversal
-//! defines it.
+//! **Only the two entries taking a caller-supplied SHAPE HANDLE carry an error**
+//! (§1.11.7, M1.1.11): `shapeCast` and `overlapShape`. They separate a stale handle,
+//! an inadmissible probe and a real miss — three outcomes a single `null` conflated.
+//! The other six take no handle and are TOTAL. The three RAY entries carried
+//! `error{UnsupportedShape}` until M1.1.11, latched per collector and surfaced by the
+//! entry; the kernel's rounded-box refusal became an asserted precondition and the
+//! latch went with it, since no body's shape could ever reach it.
 //!
 //! **Precision.** Everything here is at the solver scalar. The public surface
 //! stays `f32` (§1.11.8); that boundary lives at the interface tier (M1.1.15),
@@ -74,9 +75,45 @@ pub const Ray = broadphase_mod.Ray(Real);
 /// defensive echo of that rejection.
 pub const layer_bits: u8 = api.collision_layer_count;
 
-/// Errors a query can surface. `UnsupportedShape` comes from the exact kernel —
-/// a rounded box today — and is propagated rather than read as a miss.
-pub const Error = error{UnsupportedShape};
+/// Errors the two entries taking a caller-supplied SHAPE HANDLE can surface —
+/// `shapeCast` and `overlapShape`, and no others (`engine-physics-forge.md`
+/// §1.11.7). Together with a `null` / `0` answer they separate three outcomes a
+/// single nullary value used to conflate, and each member is reachable from a
+/// public entry by a caller mistake the caller can then diagnose:
+///
+///   - `InvalidShape` — the handle is stale or was never valid. Reachable by
+///     destroying a shape and casting with its id; same name and same meaning as
+///     `addBody`'s, not a second vocabulary for one situation.
+///   - `UnsupportedShape` — the probe is a shape the exact kernel cannot express.
+///     Reachable TODAY by passing a plane handle: the cast kernel is a ray march on
+///     the Minkowski difference of the two cores (§1.11.11) and the shape overlap is
+///     GJK on those cores (§1.11.12), and a half-space has no bounded core.
+///
+/// A real miss is `null` / `0`, and a ZERO DIRECTION is a miss too — a degenerate
+/// query with an empty answer, not a malformed one (§1.11.11's domain table).
+///
+/// This is a RESHAPING, not an extension. Before E3 the set was
+/// `error{UnsupportedShape}` on the three RAY entries, where it came from the
+/// kernel's rounded-box latch and was reachable through no store shape at all; it
+/// now lives on the two handle-taking entries, where a caller can cause both
+/// members. The three members map one-for-one onto the frozen `WeldQueryStatus` of
+/// `engine-c-api.md` — `WELD_QUERY_OK`, `WELD_QUERY_INVALID_SHAPE`,
+/// `WELD_QUERY_UNSUPPORTED_SHAPE`.
+pub const Error = error{ InvalidShape, UnsupportedShape };
+
+/// Whether a caller-supplied probe shape is admissible for the two entries that take
+/// one, i.e. a bounded convex the support map describes.
+///
+/// Exhaustive on the CLASS with no `else` arm: the mesh (M1.1.11.1) is a compile
+/// error here and must state its own answer. A named function rather than an inline
+/// comparison so both entries test the SAME condition and the tests can exercise it
+/// on both answers without restating it.
+fn probeAdmissible(record: shape_mod.Shape) bool {
+    return switch (record.class()) {
+        .convex => true,
+        .half_space => false,
+    };
+}
 
 /// Query filtering, shared by the whole family (§1.11.5): a mask over OBJECT
 /// layers and a list of bodies to ignore.
@@ -126,7 +163,8 @@ pub const RayHit = struct {
     /// (§1.11.14), carried here rather than resolved at every comparison. The public
     /// `RaycastHit` carries it too, so the mirror is not widened by holding it.
     entity: EntityId,
-    /// Which sub-shape of that body was hit; 0 while one shape is one body.
+    /// Which sub-shape of that body was hit — an OPAQUE PATH decoded by the root shape,
+    /// zero bits wide for a shape with no sub-shape, so the `0` is not read (§1.11.16).
     subshape_id: u32 = 0,
     /// World-space hit point.
     position: Vec3r,
@@ -158,7 +196,7 @@ pub const CastHit = struct {
     body: BodyId,
     /// The ECS entity owning it — the ordering key's leading identity (§1.11.14).
     entity: EntityId,
-    /// Which sub-shape of the hit body; 0 while one shape is one body.
+    /// Which sub-shape of the hit body — an opaque path, zero bits wide here (§1.11.16).
     subshape_id: u32 = 0,
     /// Which sub-shape of the CAST shape; 0 for the same reason.
     cast_subshape_id: u32 = 0,
@@ -188,7 +226,7 @@ pub const ClosestPointHit = struct {
     body: BodyId,
     /// The ECS entity owning it.
     entity: EntityId,
-    /// Which sub-shape; 0 while one shape is one body.
+    /// Which sub-shape — an opaque path, zero bits wide here (§1.11.16).
     subshape_id: u32 = 0,
     /// World-space point on that body's surface, or the queried point when inside.
     position: Vec3r,
@@ -203,7 +241,7 @@ pub fn raycast(
     bm: *const BodyManager,
     store: *const ShapeStore,
     query: RayQuery,
-) Error!?RayHit {
+) ?RayHit {
     const ray = prepare(query) orelse return null;
     var collector = ClosestCollector{
         .bm = bm,
@@ -213,7 +251,6 @@ pub fn raycast(
         .bound = query.max_distance,
     };
     _ = bp.queryRay(ray, &collector);
-    if (collector.err) |e| return e;
     return collector.best;
 }
 
@@ -226,7 +263,7 @@ pub fn raycastAny(
     bm: *const BodyManager,
     store: *const ShapeStore,
     query: RayQuery,
-) Error!bool {
+) bool {
     const ray = prepare(query) orelse return false;
     var collector = AnyCollector{
         .bm = bm,
@@ -236,7 +273,6 @@ pub fn raycastAny(
         .bound = query.max_distance,
     };
     _ = bp.queryRay(ray, &collector);
-    if (collector.err) |e| return e;
     return collector.found;
 }
 
@@ -256,7 +292,7 @@ pub fn raycastAll(
     store: *const ShapeStore,
     query: RayQuery,
     out: []RayHit,
-) Error!u32 {
+) u32 {
     const ray = prepare(query) orelse return 0;
     var collector = AllCollector{
         .bm = bm,
@@ -267,7 +303,6 @@ pub fn raycastAll(
         .out = out,
     };
     _ = bp.queryRay(ray, &collector);
-    if (collector.err) |e| return e;
     const written = collector.count;
     std.mem.sort(RayHit, out[0..written], {}, hitLess);
     return written;
@@ -298,16 +333,18 @@ pub fn raycastAll(
 ///
 /// The traversal is the swept one (§1.11.10): each node's box is inflated by the
 /// half-extents of the cast shape's INITIAL world AABB, and the ray starts at that
-/// AABB's CENTRE — not at `query.origin`. The two coincide for the three shapes the
-/// store builds, whose local AABB is centred on the origin, but that is a property
-/// of those shapes and not of the model, so the centre is what is computed. The
-/// AABB is a constant of the query: a sweep is a pure translation.
+/// AABB's CENTRE — not at `query.origin`. The two coincide for the three bounded
+/// convexes the store builds, whose local AABB is centred on the origin, but that is a
+/// property of those shapes and not of the model, so the centre is what is computed.
+/// (The store also builds a plane since M1.1.11, which has no world AABB at all and is
+/// refused as a probe above, before this box is ever built.) The AABB is a constant of
+/// the query: a sweep is a pure translation.
 pub fn shapeCast(
     bp: *const Broadphase,
     bm: *const BodyManager,
     store: *const ShapeStore,
     query: CastQuery,
-) ?CastHit {
+) Error!?CastHit {
     // The full §1.11.11 domain, asserted BEFORE the handle is resolved so a stale
     // shape cannot short-circuit it: origin, rotation unitary, direction finite, bound
     // finite and non-negative.
@@ -315,7 +352,20 @@ pub fn shapeCast(
     assertFiniteVec(query.origin);
     assertFiniteVec(query.direction);
     assertUnitRotation(query.rotation);
-    const record = store.get(query.shape) orelse return null;
+    const record = store.get(query.shape) orelse return error.InvalidShape;
+    // PROBE ADMISSIBILITY, before ANY use of the record and before the direction is
+    // even looked at. Two reasons it cannot be moved later:
+    //
+    //   - `worldAabb` (below) and `shape_mod.supportShape` both carry a class
+    //     precondition, and a `std.debug.assert` is compiled OUT of ReleaseFast — so
+    //     without this check a plane probe is not a panic there but UNDEFINED
+    //     BEHAVIOUR, `worldAabb` falling through to its `unreachable`. The two
+    //     entries also touch those two in OPPOSITE orders, so no single downstream
+    //     guard covers both.
+    //   - A malformed probe outranks a degenerate direction. Both could hold at once,
+    //     and the shape being inexpressible is the caller's error, whereas a zero
+    //     direction is a legal query with an empty answer.
+    if (!probeAdmissible(record)) return error.UnsupportedShape;
     const direction = unitDirection(query.direction) orelse return null;
 
     const box = body_manager_mod.worldAabb(record, query.origin, query.rotation);
@@ -345,11 +395,15 @@ pub fn overlapShape(
     store: *const ShapeStore,
     request: OverlapRequest,
     out: []BodyId,
-) u32 {
+) Error!u32 {
     // Before the handle resolution, for the reason `assertFiniteVec` gives.
     assertFiniteVec(request.position);
     assertUnitRotation(request.rotation);
-    const record = store.get(request.shape) orelse return 0;
+    const record = store.get(request.shape) orelse return error.InvalidShape;
+    // PROBE ADMISSIBILITY, before any use of the record — see `shapeCast`, whose
+    // argument applies here with the two downstream guards in the opposite order
+    // (`supportShape` first, `worldAabb` second).
+    if (!probeAdmissible(record)) return error.UnsupportedShape;
     var collector = overlap_mod.OverlapCollector{
         .bm = bm,
         .store = store,
@@ -376,10 +430,14 @@ pub fn overlapShape(
 /// (`BroadphaseConfig.margin`, default 0.1 m), so returning the candidate set would
 /// report bodies that do not overlap the query — and the error would be a function
 /// of a TUNING CONSTANT, so changing the margin would change a query's answer. The
-/// exact kernel is therefore the body's tight world AABB, which `bodyAabb` computes
-/// from the shape and the pose and which consequently needs the store. The entry
-/// stops at AABB GRANULARITY, which is not the same thing as stopping at the
-/// broadphase (§1.11.12).
+/// exact kernel is therefore the body's tight world AABB, which
+/// `BodyManager.aabbOverlapsBody` computes from the shape and the pose and which
+/// consequently needs the store. The entry stops at AABB GRANULARITY, which is not the
+/// same thing as stopping at the broadphase (§1.11.12).
+///
+/// An UNBOUNDED candidate has no world AABB to compare, so that adapter answers it by
+/// the corner PREDICATE instead (§1.11.15). Both arms decide the same question — does
+/// this body meet the queried box — without sharing a representation of the body.
 pub fn overlapAabb(
     bp: *const Broadphase,
     bm: *const BodyManager,

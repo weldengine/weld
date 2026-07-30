@@ -91,7 +91,10 @@ const Scene = struct {
 /// 22 × 22 × 21 grid truncated to `n_bodies`, alternating spheres / boxes / capsules
 /// 3 m apart, all STATIC — which is the scene a query cares about, the tree being
 /// built once and never moved.
-fn buildScene(gpa: std.mem.Allocator) !Scene {
+/// With `with_plane`, one static half-space `{ y <= 0 }` joins the SAME scene — the
+/// M1.1.11 delta measurement (see `bench/forge_3d_raycast.zig` for the reasoning: an
+/// unbounded list has no box to prune on, so every query is offered it).
+fn buildScene(gpa: std.mem.Allocator, with_plane: bool) !Scene {
     var scene = Scene{ .bp = Broadphase.init(.{}) };
     const sphere = try scene.store.createShape(gpa, .{ .sphere = .{ .radius = 0.6 } });
     const box = try scene.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
@@ -125,6 +128,16 @@ fn buildScene(gpa: std.mem.Allocator) !Scene {
                 placed += 1;
             }
         }
+    }
+    if (with_plane) {
+        const plane = try scene.store.createShape(gpa, .{ .plane = .{ .normal = av3(0, 1, 0), .distance = 0 } });
+        const id = try scene.bm.addBody(gpa, &scene.store, .{
+            .shape = plane,
+            .body_type = .static,
+            .entity = .{ .index = n_bodies, .generation = 0 },
+        });
+        // Default pose ⇒ the world half-space is the local one, no transport needed.
+        _ = try scene.bp.insertUnbounded(gpa, .static, .{ .normal = Vec3r.unit_y, .distance = 0 }, id);
     }
     return scene;
 }
@@ -172,7 +185,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("warning: build mode is {s}; absolute ns are only meaningful in ReleaseFast\n", .{@tagName(builtin.mode)});
     }
 
-    var scene = try buildScene(gpa);
+    var scene = try buildScene(gpa, false);
     defer scene.deinit(gpa);
     std.debug.assert(scene.bm.count() == n_bodies);
 
@@ -230,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
                     .direction = d,
                     .max_distance = 200,
                 };
-                if (query.shapeCast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                if (try query.shapeCast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
                     hits += 1;
                     checksum += @floatCast(hit.distance);
                 }
@@ -249,7 +262,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..n_reps) |_| {
             const t0 = nowNs();
             for (centres) |c| {
-                const n = query.overlapShape(&scene.bp, &scene.bm, &scene.store, .{
+                const n = try query.overlapShape(&scene.bp, &scene.bm, &scene.store, .{
                     .shape = cast_sphere,
                     .position = c,
                 }, &out);
@@ -281,7 +294,7 @@ pub fn main(init: std.process.Init) !void {
                     .direction = d,
                     .max_distance = 200,
                 };
-                if (query.shapeCast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                if (try query.shapeCast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
                     hits += 1;
                     checksum += @floatCast(hit.distance);
                 }
@@ -298,7 +311,7 @@ pub fn main(init: std.process.Init) !void {
             const t0 = nowNs();
             for (origins, directions) |o, d| {
                 const q = query.RayQuery{ .origin = o, .direction = d, .max_distance = 200 };
-                if (try query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
+                if (query.raycast(&scene.bp, &scene.bm, &scene.store, q)) |hit| {
                     hits += 1;
                     checksum += @floatCast(hit.distance);
                 }
@@ -307,6 +320,87 @@ pub fn main(init: std.process.Init) !void {
             if (dt < best_ns) best_ns = dt;
         }
         measures[5] = report("raycast (same rays)", best_ns, n_queries, hits / n_reps);
+    }
+
+    // --- M1.1.11: the cost of one half-space in the scene, REPORTED, never gated ---
+    //
+    // The same queries, the same code, the same process — the grid alone against the grid
+    // plus one static half-space in the layer's unbounded list. Both measured here rather
+    // than across two runs, so the delta carries neither thermal drift nor a differently
+    // compiled path. Three entries, one per structure the list touches: a shape CAST (the
+    // swept traversal), a shape OVERLAP (the AABB traversal), and a POINT QUERY (the
+    // cheapest entry, where a fixed per-query cost shows up most clearly).
+    {
+        var scene_plane = try buildScene(gpa, true);
+        defer scene_plane.deinit(gpa);
+        std.debug.assert(scene_plane.bm.count() == n_bodies + 1);
+        std.debug.print("\n  half-space delta ({d} queries, same process, best of {d}):\n", .{ n_queries, n_reps });
+
+        // A shape handle is PER STORE: the probe must be created in the store it is used
+        // against. Passing `scene`'s handle to `scene_plane`'s store resolved the same slot
+        // index to a DIFFERENT shape — the plane — and the entry answered
+        // `error.UnsupportedShape`, which is the E3 channel doing exactly its job on a
+        // caller mistake. Found by running it, not by reading it.
+        const plane_probe = try scene_plane.store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+        var out_ns: [2]f64 = .{ 0, 0 };
+        // (a) sphere cast
+        for ([_]bool{ false, true }, 0..) |with, slot| {
+            const target = if (with) &scene_plane else &scene;
+            const probe = if (with) plane_probe else cast_sphere;
+            var best_ns: i64 = std.math.maxInt(i64);
+            for (0..n_reps) |_| {
+                const t0 = nowNs();
+                for (origins, directions) |o, d| {
+                    const q = query.CastQuery{ .shape = probe, .origin = o, .direction = d, .max_distance = 200 };
+                    if (try query.shapeCast(&target.bp, &target.bm, &target.store, q)) |hit| checksum += @floatCast(hit.distance);
+                }
+                const dt = nowNs() - t0;
+                if (dt < best_ns) best_ns = dt;
+            }
+            out_ns[slot] = @as(f64, @floatFromInt(best_ns)) / @as(f64, n_queries);
+        }
+        std.debug.print("    {s: <18} {d: >9.1} ns -> {d: >9.1} ns   delta {d: >8.1} ns  ({d: >5.2}x)\n", .{
+            "sphere cast", out_ns[0], out_ns[1], out_ns[1] - out_ns[0], out_ns[1] / out_ns[0],
+        });
+
+        // (b) point query — the cheapest entry, so a fixed per-query cost is most visible.
+        var ids: [32]api.BodyId = undefined;
+        for ([_]bool{ false, true }, 0..) |with, slot| {
+            const target = if (with) &scene_plane else &scene;
+            var best_ns: i64 = std.math.maxInt(i64);
+            for (0..n_reps) |_| {
+                const t0 = nowNs();
+                for (origins) |o| {
+                    checksum += @floatFromInt(query.pointQuery(&target.bp, &target.bm, &target.store, o, .{}, &ids));
+                }
+                const dt = nowNs() - t0;
+                if (dt < best_ns) best_ns = dt;
+            }
+            out_ns[slot] = @as(f64, @floatFromInt(best_ns)) / @as(f64, n_queries);
+        }
+        std.debug.print("    {s: <18} {d: >9.1} ns -> {d: >9.1} ns   delta {d: >8.1} ns  ({d: >5.2}x)\n", .{
+            "point query", out_ns[0], out_ns[1], out_ns[1] - out_ns[0], out_ns[1] / out_ns[0],
+        });
+
+        // (c) world-AABB overlap — the entry whose exact kernel the half-space arm replaces.
+        for ([_]bool{ false, true }, 0..) |with, slot| {
+            const target = if (with) &scene_plane else &scene;
+            var best_ns: i64 = std.math.maxInt(i64);
+            for (0..n_reps) |_| {
+                const t0 = nowNs();
+                for (origins) |o| {
+                    const lo = o.sub(Vec3r.splat(1));
+                    const hi = o.add(Vec3r.splat(1));
+                    checksum += @floatFromInt(query.overlapAabb(&target.bp, &target.bm, &target.store, lo, hi, .{}, &ids));
+                }
+                const dt = nowNs() - t0;
+                if (dt < best_ns) best_ns = dt;
+            }
+            out_ns[slot] = @as(f64, @floatFromInt(best_ns)) / @as(f64, n_queries);
+        }
+        std.debug.print("    {s: <18} {d: >9.1} ns -> {d: >9.1} ns   delta {d: >8.1} ns  ({d: >5.2}x)\n", .{
+            "overlapAabb", out_ns[0], out_ns[1], out_ns[1] - out_ns[0], out_ns[1] / out_ns[0],
+        });
     }
 
     const frame_ns: f64 = @as(f64, std.time.ns_per_s) / 60.0;

@@ -19,6 +19,7 @@ const manifold = @import("manifold.zig");
 const fast_paths = @import("fast_paths.zig");
 const raycast_mod = @import("raycast.zig");
 const shapecast_mod = @import("shapecast.zig");
+const plane_mod = @import("plane.zig");
 
 // --- Support layer (support.zig) ---
 
@@ -30,6 +31,12 @@ pub const RelativePose = support.RelativePose;
 pub const Vertex = support.Vertex;
 /// A shape's supporting feature (vertex / segment / quad) in a direction.
 pub const Face = support.Face;
+/// A hit on one shape in that shape's local frame (distance + outward normal) — the
+/// shared return type of the `raycast.zig` and `plane.zig` ray kernels.
+pub const LocalHit = support.LocalHit;
+/// One cast hit in the cast shape's frame — the shared return type of the
+/// `shapecast.zig` and `plane.zig` cast kernels.
+pub const CastHit = support.CastHit;
 /// Support point of the Minkowski difference of two cores (`pub` for EPA/manifold).
 pub const minkowskiSupport = support.minkowskiSupport;
 
@@ -70,6 +77,16 @@ pub const collide = manifold.collide;
 /// Dispatches the M1.1.4 analytic fast paths, falling through to
 /// `collideOrderedGeneric`.
 pub const collideOrdered = manifold.collideOrdered;
+/// The HALF-SPACE arm of the manifold generator — a half-space against a bounded
+/// convex, no clipping (`engine-physics-forge.md` §1.11.15). Null when separated.
+pub const collidePlane = manifold.collidePlane;
+/// The `feature_id` reference-class tag of the half-space producer, and the 2-bit class
+/// mask. Public so a test can assert the producer's disjointness BY MASK rather than by
+/// enumerating which of the existing pairs happen to be taken.
+pub const feature_class_plane = manifold.class_plane;
+/// The 2-bit `feature_id` class mask (see `feature_class_plane`).
+pub const feature_class_mask = manifold.class_mask;
+
 /// `collideOrdered` with the fast-path dispatcher bypassed — the generic GJK/EPA
 /// manifold path. The differential oracle + bench baseline for the M1.1.4 fast
 /// paths. (`generateManifold` stays package-internal — not re-exported here.)
@@ -87,18 +104,17 @@ pub const fastSeed = fast_paths.fastSeed;
 
 // --- Ray kernels (analytic ray↔core, raycast.zig) ---
 
-/// A ray hit on one shape, in that shape's local frame (distance + outward normal).
-pub const LocalHit = raycast_mod.LocalHit;
-/// Nearest ray↔shape intersection in the shape's local frame; `null` on a miss,
-/// `error.UnsupportedShape` for a rounded box.
+/// Nearest ray↔shape intersection in the shape's local frame; `null` on a miss.
+/// Precondition: `raySupportsShape` (no error channel since M1.1.11).
 pub const rayShape = raycast_mod.rayShape;
+/// Whether the ray kernels cover a support shape — `rayShape`'s precondition, exposed
+/// so a caller can decide admissibility instead of relying on a debug assert.
+pub const raySupportsShape = raycast_mod.raySupportsShape;
 /// Whether a point lies in the solid shape, boundary included.
 pub const containsPoint = raycast_mod.containsPoint;
 
 // --- Shape-cast kernel (GJK ray march on the Minkowski difference, shapecast.zig) ---
 
-/// One cast hit in A's frame: time of impact, witness on the hit body, outward normal.
-pub const CastHit = shapecast_mod.CastHit;
 /// Which row of `engine-physics-forge.md` §1.11.11's termination table ended a march.
 pub const CastExit = shapecast_mod.CastExit;
 /// Observability channel for the march (exit row, iterations, advances, restart).
@@ -113,6 +129,15 @@ pub const castShape = shapecast_mod.castShape;
 /// normative fallback observable rather than merely documented.
 pub const castShapeBounded = shapecast_mod.castShapeBounded;
 
+// --- Half-space kernels (analytic, closed-form, plane.zig) ---
+
+/// The half-space kernels, as a NAMESPACE rather than six flat re-exports
+/// (`engine-physics-forge.md` §1.11.15). Deliberate: `containsPoint`, `rayShape` and
+/// `castShape` all have a bounded-convex namesake in this package, and flattening
+/// them here would either collide or force six invented names. `narrowphase.plane.rayShape`
+/// says which category it serves, which is the whole point of the taxonomy.
+pub const plane = plane_mod;
+
 // Pins so every package sub-file is analysed when forge_3d is built as a test
 // target (engine-zig-conventions.md §13 lazy-analysis guard).
 comptime {
@@ -123,4 +148,5 @@ comptime {
     _ = fast_paths;
     _ = raycast_mod;
     _ = shapecast_mod;
+    _ = plane_mod;
 }

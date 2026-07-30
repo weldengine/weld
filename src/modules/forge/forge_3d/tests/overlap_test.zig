@@ -56,7 +56,7 @@ test "overlapShape returns the overlapping bodies and nothing else" {
 
     const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
     var out: [8]api.BodyId = undefined;
-    const n = query.overlapShape(&world.bp, &world.bm, &world.store, .{
+    const n = try query.overlapShape(&world.bp, &world.bm, &world.store, .{
         .shape = probe,
         .position = Vec3r.zero,
     }, &out);
@@ -66,7 +66,7 @@ test "overlapShape returns the overlapping bodies and nothing else" {
     try testing.expectEqual(grazing, out[1]);
 
     // A probe far from everything returns nothing rather than the candidate set.
-    const empty = query.overlapShape(&world.bp, &world.bm, &world.store, .{
+    const empty = try query.overlapShape(&world.bp, &world.bm, &world.store, .{
         .shape = probe,
         .position = v(100, 0, 0),
     }, &out);
@@ -162,7 +162,7 @@ test "overlapShape accepts bodies inside and touching, and rejects those clear o
 
     const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
     var out: [8]api.BodyId = undefined;
-    const n = query.overlapShape(&world.bp, &world.bm, &world.store, .{
+    const n = try query.overlapShape(&world.bp, &world.bm, &world.store, .{
         .shape = probe,
         .position = Vec3r.zero,
     }, &out);
@@ -375,9 +375,13 @@ fn buildCluster(gpa: std.mem.Allocator, world: *harness.World, order: []const us
     }
 }
 
-fn runEntry(world: *harness.World, entry: Entry, probe: api.ShapeId, filter: query.Filter, out: []api.BodyId) u32 {
+/// Fallible since M1.1.11/E3: `overlapShape` takes a caller-supplied shape handle and
+/// so carries `query.Error`, while the other two entries take none and stay total. The
+/// helper propagates rather than swallowing, so a stale probe or an inadmissible one
+/// would fail the calling test instead of reading as an empty answer.
+fn runEntry(world: *harness.World, entry: Entry, probe: api.ShapeId, filter: query.Filter, out: []api.BodyId) !u32 {
     return switch (entry) {
-        .shape => query.overlapShape(&world.bp, &world.bm, &world.store, .{
+        .shape => try query.overlapShape(&world.bp, &world.bm, &world.store, .{
             .shape = probe,
             .position = Vec3r.zero,
             .filter = filter,
@@ -405,12 +409,12 @@ test "the object mask filters every overlap entry" {
         var ents: [8]u32 = undefined;
 
         // FULL mask: all five, ordered by entity.
-        const all = runEntry(&world, entry, probe, .{}, &out);
+        const all = try runEntry(&world, entry, probe, .{}, &out);
         try testing.expectEqual(@as(u32, 5), all);
         try testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4 }, entitiesOf(&world, out[0..all], &ents));
 
         // A mask naming layers 1 and 3 — the layer IS the entity index here.
-        const two = runEntry(&world, entry, probe, .{ .layer_mask = (@as(u32, 1) << 1) | (@as(u32, 1) << 3) }, &out);
+        const two = try runEntry(&world, entry, probe, .{ .layer_mask = (@as(u32, 1) << 1) | (@as(u32, 1) << 3) }, &out);
         if (two != 2) {
             std.debug.print("{s}: masked to two layers, got {d}\n", .{ entry_names[ei], two });
             return error.MaskIgnored;
@@ -418,7 +422,7 @@ test "the object mask filters every overlap entry" {
         try testing.expectEqualSlices(u32, &.{ 1, 3 }, entitiesOf(&world, out[0..two], &ents));
 
         // EMPTY mask: nothing at all, which is the other end of the domain.
-        try testing.expectEqual(@as(u32, 0), runEntry(&world, entry, probe, .{ .layer_mask = 0 }, &out));
+        try testing.expectEqual(@as(u32, 0), try runEntry(&world, entry, probe, .{ .layer_mask = 0 }, &out));
     }
 }
 
@@ -433,11 +437,11 @@ test "exclusions are honoured by every overlap entry" {
         var out: [8]api.BodyId = undefined;
         var ents: [8]u32 = undefined;
 
-        const all = runEntry(&world, entry, probe, .{}, &out);
+        const all = try runEntry(&world, entry, probe, .{}, &out);
         try testing.expectEqual(@as(u32, 5), all);
         // Exclude two of them by handle — the dominant real case being "myself".
         const excluded = [_]api.BodyId{ out[0], out[2] };
-        const rest = runEntry(&world, entry, probe, .{ .exclude = &excluded }, &out);
+        const rest = try runEntry(&world, entry, probe, .{ .exclude = &excluded }, &out);
         try testing.expectEqual(@as(u32, 3), rest);
         try testing.expectEqualSlices(u32, &.{ 1, 3, 4 }, entitiesOf(&world, out[0..rest], &ents));
     }
@@ -460,14 +464,14 @@ test "a caller buffer that overflows keeps the best set under the ordering key" 
 
             var two: [2]api.BodyId = undefined;
             var ents: [2]u32 = undefined;
-            const n = runEntry(&world, entry, probe, .{}, &two);
+            const n = try runEntry(&world, entry, probe, .{}, &two);
             try testing.expectEqual(@as(u32, 2), n);
             try testing.expectEqualSlices(u32, &.{ 0, 1 }, entitiesOf(&world, two[0..n], &ents));
 
             // A zero-length buffer writes nothing and says so, rather than
             // overrunning or reporting what it could not store.
             var none: [0]api.BodyId = undefined;
-            try testing.expectEqual(@as(u32, 0), runEntry(&world, entry, probe, .{}, &none));
+            try testing.expectEqual(@as(u32, 0), try runEntry(&world, entry, probe, .{}, &none));
         }
     }
 }
@@ -490,12 +494,12 @@ test "every overlap entry is invariant under creation-order permutation" {
             const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
             var out: [8]api.BodyId = undefined;
             var ents: [8]u32 = undefined;
-            const n = runEntry(&world, entry, probe, .{}, &out);
+            const n = try runEntry(&world, entry, probe, .{}, &out);
             try testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4 }, entitiesOf(&world, out[0..n], &ents));
 
             // Two identical runs in the same world return bit-identical slices.
             var again: [8]api.BodyId = undefined;
-            const m = runEntry(&world, entry, probe, .{}, &again);
+            const m = try runEntry(&world, entry, probe, .{}, &again);
             try testing.expectEqual(n, m);
             try testing.expectEqualSlices(api.BodyId, out[0..n], again[0..m]);
         }
@@ -560,7 +564,7 @@ test "a sleeping body answers every overlap entry and stays asleep" {
         // not depend on where the solver left it.
         var out: [8]api.BodyId = undefined;
         const n = switch (entry) {
-            .shape => query.overlapShape(&world.bp, &world.bm, &world.store, .{ .shape = probe, .position = centre }, &out),
+            .shape => try query.overlapShape(&world.bp, &world.bm, &world.store, .{ .shape = probe, .position = centre }, &out),
             .aabb => query.overlapAabb(&world.bp, &world.bm, &world.store, centre.sub(v(0.1, 0.1, 0.1)), centre.add(v(0.1, 0.1, 0.1)), .{}, &out),
             .point => query.pointQuery(&world.bp, &world.bm, &world.store, centre, .{}, &out),
         };
@@ -759,4 +763,66 @@ test "overlapAabb rejects an inverted query box and returns nothing" {
     try testing.expectEqual(@as(u32, 1), query.overlapAabb(&world.bp, &world.bm, &world.store, Vec3r.zero, Vec3r.zero, .{}, &out));
     // Degenerate on ONE axis only, well-formed on the others: still legal.
     try testing.expectEqual(@as(u32, 1), query.overlapAabb(&world.bp, &world.bm, &world.store, v(0, -1, -1), v(0, 1, 1), .{}, &out));
+}
+
+// ---------------------------------------------------------------------------
+// M1.1.11 / E3 — the three-way outcome of `overlapShape`
+// ---------------------------------------------------------------------------
+
+test "overlapShape separates a stale handle, an inadmissible probe and an empty answer" {
+    const gpa = std.testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+
+    // The mirror of the `shapeCast` case (`engine-physics-forge.md` §1.11.7), and the
+    // conflation was the same one: MEASURED on the pre-E3 tree, a stale probe handle
+    // returned `0` and a live probe overlapping nothing returned `0`. A count cannot
+    // carry a diagnosis, so the entry gains the channel instead of overloading its
+    // return value.
+    const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    const plane = try world.store.createShape(gpa, .{ .plane = .{} });
+    const doomed = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    world.store.destroyShape(doomed);
+    _ = try addSphere(gpa, &world, .{ 0, 0, 0 }, 1, 0);
+
+    var out: [4]api.BodyId = undefined;
+
+    // (1) STALE HANDLE → typed error.
+    try testing.expectError(error.InvalidShape, query.overlapShape(
+        &world.bp,
+        &world.bm,
+        &world.store,
+        .{ .shape = doomed, .position = Vec3r.zero },
+        &out,
+    ));
+
+    // (2) INADMISSIBLE PROBE → a distinct typed error. The exact kernel is GJK on the
+    // cores (§1.11.12) and a half-space has no bounded core, so the probe is not
+    // expressible — never an empty set, which would read as "nothing overlaps".
+    try testing.expectError(error.UnsupportedShape, query.overlapShape(
+        &world.bp,
+        &world.bm,
+        &world.store,
+        .{ .shape = plane, .position = Vec3r.zero },
+        &out,
+    ));
+
+    // (3) EMPTY ANSWER → `0`, and only now: a live probe 500 m away from the one body.
+    try testing.expectEqual(@as(u32, 0), try query.overlapShape(
+        &world.bp,
+        &world.bm,
+        &world.store,
+        .{ .shape = probe, .position = v(0, 500, 0) },
+        &out,
+    ));
+
+    // Positive control: the same probe on the body's own position finds it, so the
+    // three answers above are refusals and not a broken entry.
+    try testing.expectEqual(@as(u32, 1), try query.overlapShape(
+        &world.bp,
+        &world.bm,
+        &world.store,
+        .{ .shape = probe, .position = Vec3r.zero },
+        &out,
+    ));
 }

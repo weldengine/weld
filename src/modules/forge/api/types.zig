@@ -66,7 +66,9 @@ pub const BodyType = enum(u8) {
 /// Collision-shape kind. `u8`-backed (component tag). C1.1-complete set —
 /// the spec §1 enum is a subset; the extension (plane, tapered_cylinder,
 /// height_field, mutable_compound, empty) is additive and pre-freeze
-/// (Notes decision 3b). M1.1.0 constructs only sphere/box/capsule.
+/// (Notes decision 3b). `createShape` constructs sphere/box/capsule (M1.1.0) and
+/// plane (M1.1.11); every other variant returns `error.UnsupportedShape` until its
+/// own sub-milestone.
 pub const ShapeType = enum(u8) {
     /// Sphere (radius).
     sphere,
@@ -97,8 +99,11 @@ pub const ShapeType = enum(u8) {
 /// Shape parameters, a tagged union discriminated by `ShapeType`. The spec §1
 /// flat struct self-describes as a simplification of a discriminated union;
 /// the union IS the specified design (Notes decision 3a).
-/// M1.1.0 carries payloads for sphere/box/capsule; the rest are `void`
-/// placeholders whose payloads land at their own sub-milestones (pre-freeze).
+/// M1.1.0 carries payloads for sphere/box/capsule and M1.1.11 adds plane; the
+/// rest are `void` placeholders whose payloads land at their own sub-milestones —
+/// a pre-freeze extension of the union that `engine-tier-interfaces.md` §1
+/// explicitly permits, each payload-less variant receiving its payload at the
+/// sub-milestone that delivers the shape.
 pub const ShapeDescriptor = union(ShapeType) {
     /// Sphere of `radius` metres.
     sphere: struct { radius: f32 = 0.5 },
@@ -112,8 +117,37 @@ pub const ShapeDescriptor = union(ShapeType) {
     tapered_cylinder: void,
     /// Placeholder — payload lands at the convex-hull sub-milestone.
     convex_hull: void,
-    /// Placeholder — payload lands at the plane sub-milestone.
-    plane: void,
+    /// Solid half-space `n·x <= d`: `normal` unit, `distance` in metres, both in
+    /// the shape's local frame and transported by the body pose (M1.1.11,
+    /// `engine-physics-forge.md` §1.11.15).
+    ///
+    /// The body carrying it must be STATIC: a half-space has neither a finite
+    /// volume, nor an inertia tensor, nor a local AABB, so mass, inertia and sleep
+    /// radius are undefined on it. `addBody` rejects a dynamic or kinematic body
+    /// carrying one with `error.ShapeMustBeStatic`, BEFORE any computation derived
+    /// from a local AABB or an inertia — the ordering is normative, both of those
+    /// living in the body literal with no branch on body type of their own. Same
+    /// invariant as the reference, whose plane declares `MustBeStatic`.
+    ///
+    /// **Domain, asserted at creation.** Both fields carry a precondition and they are of
+    /// the same class, so they are declared TOGETHER and in the same place — on the public
+    /// surface the caller reads, not only at the site that checks them (§1.11.15).
+    /// `normal` is ALREADY unit, to the tolerance of its own precision — it is `f32`
+    /// whatever the solver scalar is — and `distance` is FINITE. Both are checked in
+    /// `createShape`; the stored normal is normalised once there, so no call site ever
+    /// re-normalises.
+    ///
+    /// `distance` earns its own clause because a non-finite one is not caught downstream
+    /// by anything — it is silently accepted, and two consumers then disagree about it.
+    /// MEASURED with a NaN distance, identically at f32 and f64: the contact generator
+    /// reported a contact point for a unit sphere 1000 m OUTSIDE the solid, since its
+    /// `sep > 0` skip is FALSE when `sep` is NaN; while the broadphase corner predicate
+    /// reported no overlap for a box at the origin AND for a box 5000 m INSIDE, since its
+    /// `<=` is false in the other direction. One malformed field, two silent behaviours
+    /// that contradict each other, and no diagnostic — which is why this is a precondition
+    /// and not a tolerance, the same pattern the typed rejection of a `collision_layer`
+    /// outside `[0, 32)` exists to close (§1.11.4).
+    plane: struct { normal: Vec3 = Vec3.unit_y, distance: f32 = 0 },
     /// Placeholder — payload lands at the triangle-mesh sub-milestone.
     triangle_mesh: void,
     /// Placeholder — payload lands at the height-field sub-milestone.
@@ -248,16 +282,27 @@ pub const OverlapQuery = struct {
     filter: PhysicsQueryFilter = .{},
 };
 
-/// One ray hit. `subshape_id` identifies the sub-shape hit and is 0 while one
-/// shape is one body; the service derives `physics_material` from it, because the
-/// solver result carries the sub-shape identity and never the material itself
-/// (§1.11.7 — the same construction as the reference's `CastResult.h`).
+/// One ray hit.
+///
+/// `subshape_id` is an OPAQUE PATH decoded by the ROOT shape, never a global index: its
+/// width is a property of the SHAPE and not of the value, and a shape with no sub-shape
+/// consumes ZERO BITS, so the `0` default is not read at all (§1.11.16). Sphere, box,
+/// capsule and plane all carry zero sub-shapes. That is NOT the same statement as the
+/// M1.1.9/M1.1.10 wording it replaces ("0 while one shape is one body"), and the
+/// difference is what makes the encoding forward-compatible: wrapping a shape in a
+/// compound shifts its index up and inserts the child's below, extending the encoding
+/// without reinterpreting any value already written.
+///
+/// The service derives `physics_material` from it, because the solver result carries the
+/// sub-shape identity and never the material itself (§1.11.7 — the same construction as
+/// the reference's `CastResult.h`).
 pub const RaycastHit = struct {
     /// Entity owning the body hit.
     entity: EntityId,
     /// The body hit.
     body: BodyId,
-    /// Sub-shape hit; 0 while one shape is one body.
+    /// Sub-shape hit — an opaque path, zero bits wide for a shape with no sub-shape,
+    /// so the `0` is not read (§1.11.16; the type doc above carries the reasoning).
     subshape_id: u32 = 0,
     /// World-space hit point.
     position: Vec3,
@@ -338,6 +383,15 @@ test "ShapeDescriptor payload defaults" {
     const c = ShapeDescriptor{ .capsule = .{} };
     try testing.expectEqual(@as(f32, 0.3), c.capsule.radius);
     try testing.expectEqual(@as(f32, 0.5), c.capsule.half_height);
+
+    // The plane payload (M1.1.11), on the same footing as the other three: its
+    // default is `{x : y <= 0}`, a ground plane through the origin, and the default
+    // normal is EXACTLY unit — which is what lets `.plane = .{}` pass the
+    // creation-time domain assert of `forge_3d/shape.zig` unchanged.
+    const p = ShapeDescriptor{ .plane = .{} };
+    try testing.expect(p.plane.normal.eql(Vec3.unit_y));
+    try testing.expectEqual(@as(f32, 0), p.plane.distance);
+    try testing.expectEqual(@as(f32, 1), p.plane.normal.lengthSq());
 }
 
 test "BodyDescriptor defaults match the brief" {
@@ -384,8 +438,10 @@ test "the frozen query family mirrors engine-tier-interfaces.md §1" {
     const overlap = OverlapQuery{ .shape = 0, .position = Vec3.zero };
     try testing.expect(overlap.rotation.approxEql(Quatf.identity, 0));
 
-    // `subshape_id` defaults to 0 — one shape is one body today, and it is by this
-    // field that the service derives the material, never from the solver result.
+    // `subshape_id` defaults to 0, and §1.11.16 is why that default is safe rather than
+    // provisional: it is an opaque PATH whose width the shape declares, and a shape with
+    // no sub-shape consumes zero bits, so the value is not read. It is by this field that
+    // the service derives the material, never from the solver result.
     const hit = RaycastHit{
         .entity = .{ .index = 0, .generation = 0 },
         .body = 0,
