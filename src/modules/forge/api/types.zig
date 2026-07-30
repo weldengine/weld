@@ -129,9 +129,13 @@ pub const ShapeDescriptor = union(ShapeType) {
     /// living in the body literal with no branch on body type of their own. Same
     /// invariant as the reference, whose plane declares `MustBeStatic`.
     ///
-    /// **Domain, asserted at creation.** `normal` must be unit and `distance` must be
-    /// finite. Both are checked in `createShape`; the stored normal is normalised once
-    /// there, so no call site ever re-normalises.
+    /// **Domain, asserted at creation.** Both fields carry a precondition and they are of
+    /// the same class, so they are declared TOGETHER and in the same place — on the public
+    /// surface the caller reads, not only at the site that checks them (§1.11.15).
+    /// `normal` is ALREADY unit, to the tolerance of its own precision — it is `f32`
+    /// whatever the solver scalar is — and `distance` is FINITE. Both are checked in
+    /// `createShape`; the stored normal is normalised once there, so no call site ever
+    /// re-normalises.
     ///
     /// `distance` earns its own clause because a non-finite one is not caught downstream
     /// by anything — it is silently accepted, and two consumers then disagree about it.
@@ -140,8 +144,9 @@ pub const ShapeDescriptor = union(ShapeType) {
     /// `sep > 0` skip is FALSE when `sep` is NaN; while the broadphase corner predicate
     /// reported no overlap for a box at the origin AND for a box 5000 m INSIDE, since its
     /// `<=` is false in the other direction. One malformed field, two silent behaviours
-    /// that contradict each other — which is why this is a precondition and not a
-    /// tolerance.
+    /// that contradict each other, and no diagnostic — which is why this is a precondition
+    /// and not a tolerance, the same pattern the typed rejection of a `collision_layer`
+    /// outside `[0, 32)` exists to close (§1.11.4).
     plane: struct { normal: Vec3 = Vec3.unit_y, distance: f32 = 0 },
     /// Placeholder — payload lands at the triangle-mesh sub-milestone.
     triangle_mesh: void,
