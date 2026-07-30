@@ -892,9 +892,24 @@ pub fn Broadphase(comptime T: type) type {
         /// `computePairs`; may hold duplicates or stale ids — both are handled
         /// there (pair-set dedup; `isLiveLeaf` skip for a freed id).
         moved: [layer_count]std.ArrayListUnmanaged(u32),
-        /// Per-layer flat list of UNBOUNDED shapes, insertion-ordered, outside the
-        /// trees (§1.11.15). No hashed container, here as everywhere on this path
-        /// (determinism by construction, M1.1.14).
+        /// Per-layer flat list of UNBOUNDED shapes, outside the trees (§1.11.15). No hashed
+        /// container, here as everywhere on this path (determinism by construction,
+        /// M1.1.14).
+        ///
+        /// **Iteration follows the slot INDEX, which is not insertion order.** The contract
+        /// §1.11.15 states is exactly three clauses: a slot's index never moves while a
+        /// proxy holds it, a retired slot is recycled LIFO, and iteration follows the
+        /// index. So `A, B, C`, retire `A`, insert `D` iterates `D, B, C` — `D` took `A`'s
+        /// slot. That is the WANTED behaviour, not a tolerated side effect of the
+        /// free-list.
+        ///
+        /// It suffices because what M1.1.14 requires is not insertion order but that the
+        /// iteration order be a DETERMINISTIC FUNCTION OF THE OPERATION SEQUENCE — which
+        /// LIFO recycling satisfies exactly, the free-list head being itself a function of
+        /// that sequence. And no observable result depends on the order in the first place:
+        /// the query entries sort their hits by the §1.11.14 key `(distance, entity,
+        /// BodyId)`, and `computePairs` sorts by the canonical packed pair key and
+        /// adjacent-dedupes. The list order reaches no answer.
         ///
         /// **The length is the PEAK of SIMULTANEOUSLY live slots in this layer, not the
         /// live count.** `items.len` never decreases: retirement recycles a slot, it does
@@ -910,14 +925,13 @@ pub fn Broadphase(comptime T: type) type {
         /// is a quantity the scene author controls directly. MEASURED at 1 in every scene
         /// in this repo, including the two benches.
         ///
-        /// A DENSE list was considered and deliberately NOT built. The only form that
-        /// keeps iteration O(live) *and* the insertion order §1.11.15 makes normative is
-        /// an ORDERED dense list with O(n) removal — shifting the tail down. A
-        /// swap-remove would be O(1) and is what one reaches for first; it moves the last
-        /// element into the hole and therefore destroys that order, which is the one
-        /// property the model does not let us trade. The trigger for paying the O(n)
-        /// removal is a real scene that CHURNS half-spaces — creating and destroying them
-        /// during play rather than at load — and no such scene exists yet.
+        /// A DENSE list was considered and deliberately NOT built. Making the list dense
+        /// means compacting on removal, which moves a surviving slot's index — and that
+        /// index is what a live `Proxy` holds, so every held proxy would have to be
+        /// rewritten, or the list would need a second level of indirection to keep them
+        /// valid. That is the cost, and it buys iteration in O(live) rather than O(peak).
+        /// The trigger for paying it is a real scene that CHURNS half-spaces — creating and
+        /// destroying them during play rather than at load — and no such scene exists yet.
         unbounded: [layer_count]std.ArrayListUnmanaged(UnboundedSlot),
         /// Per-layer LIFO free-list head over `unbounded`, or `null_slot` when empty. A
         /// dead slot's `user_data` is the link to the next (see `UnboundedSlot`).

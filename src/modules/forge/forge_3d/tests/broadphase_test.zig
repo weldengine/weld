@@ -1518,7 +1518,7 @@ test "queryCast is empty on an empty tree" {
 // tuning constant that changes a query's answer.
 //
 // So a half-space is never asked for a box. It is asked the corner PREDICATE, and it
-// lives in a flat insertion-ordered list per broad layer.
+// lives in a flat per-layer list outside the trees, iterated by slot index.
 
 /// The ground half-space `{ y <= 0 }` in world space.
 const ground = BphF.UnboundedShape{ .normal = Vec3.unit_y, .distance = 0 };
@@ -1742,8 +1742,8 @@ test "removing an unbounded proxy retires it from the list and from pairing" {
     try bp.computePairs(gpa, &pairs);
     try std.testing.expect(hasPair(pairs.items, 7, 100));
 
-    // Removed: the slot is retired, not compacted — the list is insertion-ordered and a
-    // later slot's index must not shift, so the entry is marked dead in place (the
+    // Removed: the slot is retired, not compacted — a live `Proxy` holds a slot index, so
+    // no surviving slot's index may shift, and the entry is marked dead in place (the
     // `isLiveLeaf` discipline of the tree, one level up).
     bp.remove(plane);
     _ = try bp.insert(gpa, .dynamic, boxCe(.{ 4, 0, 0 }, 0.5), 200);
@@ -1914,4 +1914,74 @@ test "at full capacity with a free slot, an insertion needs no allocation at all
     try std.testing.expectEqual(held[0].id, p.id); // the recycled slot, not a new one
     try std.testing.expectEqual(list.capacity, list.items.len); // and nothing grew
     try std.testing.expectEqual(@as(usize, 0), failing.allocations);
+}
+
+test "iteration follows the slot index, and an identical op sequence gives an identical order" {
+    const gpa = std.testing.allocator;
+
+    // The WANTED property, pinned — not insertion order, and not a tolerated side effect.
+    // §1.11.15's contract is three clauses: a slot's index never moves while a proxy holds
+    // it, a retired slot is recycled LIFO, iteration follows the index. So A, B, C, retire
+    // A, insert D iterates D, B, C — D took A's slot.
+    //
+    // It suffices because no observable result depends on this order: the query entries
+    // sort by the §1.11.14 key and `computePairs` sorts by the canonical pair key and
+    // adjacent-dedupes. What M1.1.14 requires is that the order be a DETERMINISTIC FUNCTION
+    // OF THE OPERATION SEQUENCE, which the second half of this test is.
+    const Order = struct {
+        fn of(bp: *const BphF, out: *[8]u32) usize {
+            var n: usize = 0;
+            for (bp.unbounded[@intFromEnum(Layer.static)].items) |slot| {
+                if (!slot.live) continue;
+                out[n] = slot.user_data;
+                n += 1;
+            }
+            return n;
+        }
+    };
+
+    var bp = BphF.init(.{});
+    defer bp.deinit(gpa);
+    const a = try bp.insertUnbounded(gpa, .static, ground, 'A');
+    _ = try bp.insertUnbounded(gpa, .static, ground, 'B');
+    _ = try bp.insertUnbounded(gpa, .static, ground, 'C');
+    var seen: [8]u32 = undefined;
+    try std.testing.expectEqual(@as(usize, 3), Order.of(&bp, &seen));
+    try std.testing.expectEqualSlices(u32, &.{ 'A', 'B', 'C' }, seen[0..3]);
+
+    bp.remove(a);
+    _ = try bp.insertUnbounded(gpa, .static, ground, 'D');
+    // D, B, C — D occupies A's index 0. A dense list would give B, C, D here; a
+    // swap-removing one would give C, B or B, C, D depending on its own convention. This
+    // asserts the index rule, so it discriminates against both.
+    try std.testing.expectEqual(@as(usize, 3), Order.of(&bp, &seen));
+    try std.testing.expectEqualSlices(u32, &.{ 'D', 'B', 'C' }, seen[0..3]);
+
+    // THE ACTUAL REQUIREMENT (M1.1.14): the same operation sequence yields the same order.
+    // A second broadphase, driven identically, must iterate identically — including through
+    // the free-list, whose head is itself a function of that sequence.
+    var bp2 = BphF.init(.{});
+    defer bp2.deinit(gpa);
+    const a2 = try bp2.insertUnbounded(gpa, .static, ground, 'A');
+    _ = try bp2.insertUnbounded(gpa, .static, ground, 'B');
+    _ = try bp2.insertUnbounded(gpa, .static, ground, 'C');
+    bp2.remove(a2);
+    _ = try bp2.insertUnbounded(gpa, .static, ground, 'D');
+    var seen2: [8]u32 = undefined;
+    const n2 = Order.of(&bp2, &seen2);
+    try std.testing.expectEqualSlices(u32, seen[0..3], seen2[0..n2]);
+
+    // And a DIFFERENT sequence reaching the same live set gives a different order, which is
+    // what proves the previous assertion has power: retiring B instead of A puts D at
+    // index 1.
+    var bp3 = BphF.init(.{});
+    defer bp3.deinit(gpa);
+    _ = try bp3.insertUnbounded(gpa, .static, ground, 'A');
+    const b3 = try bp3.insertUnbounded(gpa, .static, ground, 'B');
+    _ = try bp3.insertUnbounded(gpa, .static, ground, 'C');
+    bp3.remove(b3);
+    _ = try bp3.insertUnbounded(gpa, .static, ground, 'D');
+    var seen3: [8]u32 = undefined;
+    const n3 = Order.of(&bp3, &seen3);
+    try std.testing.expectEqualSlices(u32, &.{ 'A', 'D', 'C' }, seen3[0..n3]);
 }
