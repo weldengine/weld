@@ -10,10 +10,10 @@ knowledge base — see § Quick links spec.
 | Field | Value |
 |---|---|
 | Phase | 1 (Etch ↔ ECS) |
-| Current milestone | M1.1.10 — queries: shapecast + overlap + point query + closest point — code-complete, PR open. M1.1.9 is CLOSED, squash-merged to `main` (commit `dd7fa1f`, tag `v0.11.9-queries-raycast`). |
-| Last released tag | `v0.11.9-queries-raycast` (posted by Guy after merge) |
-| Active branch | `phase-1/forge/queries-shapecast-overlap` (PR open, not merged) |
-| Next planned milestone | M1.1.11 — core shapes: infinite Plane + static MeshShape. M1.1.0–M1.1.9 CLOSED. |
+| Current milestone | M1.1.11 — Forge 3D shapes: the infinite plane (half-space) — code-complete, PR open. M1.1.10 is CLOSED, squash-merged to `main` (commit `712e4b5`, tag `v0.11.10-queries-shapecast-overlap`). |
+| Last released tag | `v0.11.10-queries-shapecast-overlap` (posted by Guy after merge) |
+| Active branch | `phase-1/forge/plane-halfspace` (PR open, not merged) |
+| Next planned milestone | M1.1.11.1 — core shapes: static MeshShape. The plan row that grouped Plane and MeshShape is SPLIT (`engine-phase-1-plan.md`): the mesh half carries a rigid-solver change (several contact constraints per body pair — `ContactConstraint` identity, the warm-start cache key, island constraint ordering), an active/internal-edge policy, per-triangle `raycastAll` results with the fourth ordering-key term §1.11.14 would then need, `ShapeStore` owned memory, back-face mode on the two query structs, and the third `ShapeClass` variant. M1.1.0–M1.1.10 CLOSED. |
 
 ## Tags
 
@@ -267,6 +267,36 @@ The `briefs/` directory is the source of truth for milestone state. The brief's 
   (`engine-phase-0-criteria.md` § bench methodology). For Phase 0
   old-protocol baselines, the first measurement compliant with the
   thermal-aware protocol is a more robust candidate than the inherited value.
+
+### `pre-commit` lint scope is narrower than its reputation
+
+`zig build lint` caught four public constants carrying `//` where the project
+requires `///`; the `pre-commit` hook could not have. The hook runs `weld-lint`
+on STAGED FILES ONLY, so an unstaged change is invisible to it and a file staged
+in one commit is invisible to the next commit's run. The tree-wide
+`zig build lint` is what catches this class, and no hook runs it. Run
+`zig build lint` on the tree before every gate signal, not the hook.
+
+### `failed command:` does not mean a command failed
+
+`zig build` prints `failed command: ...` for every `Run` step whose tests PASS
+but write to stderr. Read on the Zig 0.16.0 source, not inferred:
+`Build/Step/Run.zig:1540-1541` sets `result_failed_command` BEFORE the spawn
+("If an error occurs, it's caused by this command:") and nothing clears it on
+success; `compiler/build_runner.zig:1381` gates printing on a condition whose
+own comment is "No matter the result, we want to display error/warning
+messages.", satisfied by `result_stderr.len > 0` alone; line 1516 then prints
+the field. Proven both ways at `v0.11.10`: `test-forge-3d` gives `306 pass` /
+`success` with NO such line, and adding one `std.debug.print` to the first
+passing test keeps `306/306`, `success` and exit 0 while the line APPEARS.
+Seven emitters exist and existed before M1.1.11 — cook-consolidate, hot-reload,
+the `rule r_*` corpus, plugin_loader, the EBNF harness, event drop-saturation,
+and the `ref500` median. This supersedes the earlier characterisation of the
+phenomenon as a macOS flake on plugin_loader / events / etch-cache: it is
+neither spurious, nor macOS-specific, nor variable — it is deterministic, and
+what varied was the length of the `tail` used to look at it. Judge a build on
+`--summary all` step counts and the exit code, never on the presence of that
+line, and never on a `tail`.
 
 ---
 
