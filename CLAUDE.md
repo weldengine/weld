@@ -117,7 +117,7 @@ Hotfix milestones are merged to `main` without a tag (Guy decision,
 - **M1.0.12 scope boundary (concurrency algebra)** — the four constructs (`race`/`sync`/`branch`/`spawn { }`) parse, type-check, and execute as CHILD TASKS in the interpreter's pointer-stable monotonic pool (heap records, husk parking, no slot reuse — a pool index IS the Phase-1 `TaskHandle`, no generations), driven by-origin at the creating rule's position in creation order. **Recorded deviation (STOP round-trip 2026-07-02, `etch-resolver-types.md` §9.2 revision 2):** the brief's "calls inside the four construct bodies count as consumed launch sites" is SUPERSEDED — `await` is the SOLE call-grain consumer of the `{async}` effect (`E0905` applies recursively inside the construct bodies; the constructs relocate the suspension into a child task, they do not replace the `await`). Return asymmetry (Guy's ruling 2026-07-02): `return` legal only in a `race` branch (winner-return re-raised at the race site); `sync`/`branch`/`spawn` bodies reject it (`E0906`). Documented one-tick construct latency: a race/sync parent precedes its children in pool-creation order, so it resumes the tick AFTER its wake fires — which guarantees losers are canceled before their own wakes can fire (zero-admitted constructs have no latency). Cancellation is NON-transitive (Phase 1, `etch-bytecode.md` §9.5). Failed tasks (uncaught `throw` / runtime failure) park `.canceled` — never a race winner, never block a `sync` join, `await`ing them fails loud (§9.8 amended). Fix-as-you-go: `return await <wake-target>` dropped its return at resume (M1.0.11 gap) — fixed. **Out (later):** `wait_unscaled` + timers (M1.0.13), `entity_event` (M1.0.14), entity-bound `async rule`, Phase-2 bytecode lowering (`etch-bytecode.md` §9.4), transitive cancellation (Phase 2+), task-pool slot reuse / generations (Phase-2 refcounted model), value-producing spawn bodies (no EBNF v0.6 value channel).
 - **M1.0.13 scope boundary (time subsystem and timers)** — the three builtin time resources (`GameTime`/`UnscaledTime`/`RealTime`) are auto-registered from the single `pub const builtin_resources` descriptor table in `types.zig` (the `TagSet` injection-point precedent — no `.etch` prelude, no separate module) and resolve AMBIENTLY (`get(GameTime).dt` needs no `when resource` clause — the spec examples read them without one). `await wait` re-plumbed onto scaled game time and `await wait_unscaled` onto unscaled time with **byte-identical wake ticks at `time_scale = 1`** — realized by the E5 recorded deviation: the two internal clock accumulators advance in TICK units (game `+= time_scale`, 0 under `paused`; unscaled `+= 1`; deadlines `clock + round(secs * 60)`), seconds derived only at resource publication (exact integer f64 sums at `scale = 1`; a seconds accumulator would accrue rounding that can shift a wake by one tick). Both waits KEEP the M1.0.11 literal-only Duration restriction; only the timer family evaluates a full `Duration` expression. The timer registry mirrors the M1.0.12 task-pool discipline (heap records, monotone pointer-stable, husk parking, `TimerHandle` = bare index, no generations) but is a DISTINCT mechanism — a timer is not a task: `cancel()` only, not awaitable, body is a synchronous context (E0901 on `await`/async calls inside). Timer callbacks fire at the head of `stepOnce` (after the clock advance and event-store clear, before rule dispatch) in registration order; `every` re-arms at a fixed period (no drift correction Phase 1). `Value` gained `timer_handle` + `duration` (`value.zig` — outside the brief's per-file list, justified: `Value.timer_handle` is the E6 deliverable and the `task_handle` precedent lives there). **Out (later, not debt):** `quantize` (stays reserved; needs the Sequencer/Pulse beat/bar clock — later Sequencer-adjacent milestone), `time.*` stdlib sugar (later stdlib milestone; `etch-stdlib.md §20` reconciliation deferred with it), `dt` as an injected rule parameter, per-entity `TimeDilation` / selective pause / `WorldClock` (need the phase scheduler), lifting `wait`'s literal-only restriction, Phase-2 bytecode lowering.
 - **M1.0.14 scope boundary (entity-scoped events + entity-bound async rules)** — `entity_event` = `global_event` + predicates (same wake path, same per-tick store, producer-before-awaiter order unchanged). Designated-field convention, filter semantics (equality-only, capture-once), and resume-unit are normative in `etch-reference-part1.md §9.4`; the four entity-bound lifecycle rulings in `§9.2`; realization in `§9.12` (Claude.ai KB re-uploads at open + at the E2 amendment). The M1.0.11/12 out-list mentions "entity-bound `async rule` → later" are **superseded** (delivered here — absorbed at the E2 round-trip: the construct is inexpressible end-to-end without an entity-scoped awaiter). String stabilization at the event/filter escape boundaries fixed a PRE-EXISTING observer-side use-after-free (fix-as-you-go, two STOP round-trips). **Out (later, NOT debt):** `future`/`Future<T>` (the last await gap); implicit `event` binding / payload delivery at resume (unit is normative); entity-keyed event index (Phase-2 typed bus); emit-side targeting (grammar v0.6 frozen); non-equality filter predicates; cancel-on-despawn (Phase 2+); `dt`/non-entity rule-parameter injection; Phase-2 bytecode async lowering.
-- **M1.0.15 scope boundary (test-runner + identity)** — `test "X" { }` executes end-to-end (parse+validate+register existed since M1.0.8; zero execution surface until now). **Resolves the M1.0.8 open residual** (a string-named `test "X"` sharing the identifier namespace via `registerSymbol` → `test "Foo"`/`component Foo` collision): test names now live in a SEPARATE `test_symbols` table; intra-namespace uniqueness reuses `E0101` with a contextual message (precedent: `collectImplMethods`, E1900 double-usage §24.1) — no new code minted for the duplicate. Semantics normative in `etch-reference-part2.md §32` (Phase-1 realization block, Claude.ai KB re-upload) + `etch-grammar.md §17` (`measure_expr` erratum). Realization: test bodies are SYNC (`await` → `E0901`); FRESH World per test (`bindToWorld`); `test_world()` is **mono-world** (repeated calls return the same handle — the multi-world shape is spec'd but not v0.6); `spawn_with` is an IMMEDIATE spawn (does not borrow the deferred structural-spawn command buffer — that is what lets it return a handle) reusing the shared observer-firing primitive; `measure` is the SOLE wall-clock surface, confined to test bodies (`E0910`) to keep gameplay deterministic. Runner is a library (`src/etch/test_runner.zig`) consumed in-proc by the `etch_test` shim + `zig build test-etch`; the future `weld test` (`engine-spec.md §26.1`) consumes the same library — no CLI-weld scaffolding minted for one subcommand. **Out (later, NOT debt):** multi-world (`test_world()` creating independent worlds); async test bodies (`await` stays `E0901`, spec'd v0.6 restriction — async exercised through rules + `tick(n)`); the `weld` CLI proper; test filtering flags (`--filter`, tag selection — `@only` covers focusing); GPU/session integration-test helpers (`create_test_session`, replay-driven runs — `engine-debug.md §13`, Phase 2+ module surface). **KB reconciliation done here (fix-as-you-go):** `etch-reference-part2.md §32` (dangling `engine-testing.md` ref removed → `engine-debug.md §13`); `engine-debug.md §13` realigned on §32 + grammar (`test_world`/`spawn_with`/`tick(n)`; the `capture_events` helper and a dedicated `integration_test` construct removed — never existed in EBNF v0.6); `etch-grammar.md §17` `measure_expr` erratum + `@tag(.perf)`; `engine-development-workflow.md §4.7` tag-scheme + multi-paragraph tag-message reconciliation.
+- **M1.0.15 scope boundary (test-runner + identity)** — `test "X" { }` executes end-to-end (parse+validate+register existed since M1.0.8; zero execution surface until now). **Resolves the M1.0.8 open residual** (a string-named `test "X"` sharing the identifier namespace via `registerSymbol` → `test "Foo"`/`component Foo` collision): test names now live in a SEPARATE `test_symbols` table; intra-namespace uniqueness reuses `E0101` with a contextual message (precedent: `collectImplMethods`, E1900 double-usage §24.1) — no new code minted for the duplicate. Semantics normative in `etch-reference-part2.md §32` (Phase-1 realization block, Claude.ai KB re-upload) + `etch-grammar.md §17` (`measure_expr` erratum). Realization: test bodies are SYNC (`await` → `E0901`); FRESH World per test (`bindToWorld`); `test_world()` is **mono-world** (repeated calls return the same handle — the multi-world shape is spec'd but not v0.6); `spawn_with` is an IMMEDIATE spawn (does not borrow the deferred structural-spawn command buffer — that is what lets it return a handle) reusing the shared observer-firing primitive; `measure` is the SOLE wall-clock surface, confined to test bodies (`E0910`) to keep gameplay deterministic. Runner is a library (`src/etch/test_runner.zig`) consumed in-proc by the `etch_test` shim + `zig build test-etch`; the future `weld test` (`engine-platform.md`) consumes the same library — no CLI-weld scaffolding minted for one subcommand. **Out (later, NOT debt):** multi-world (`test_world()` creating independent worlds); async test bodies (`await` stays `E0901`, spec'd v0.6 restriction — async exercised through rules + `tick(n)`); the `weld` CLI proper; test filtering flags (`--filter`, tag selection — `@only` covers focusing); GPU/session integration-test helpers (`create_test_session`, replay-driven runs — `engine-debug.md §13`, Phase 2+ module surface). **KB reconciliation done here (fix-as-you-go):** `etch-reference-part2.md §32` (dangling `engine-testing.md` ref removed → `engine-debug.md §13`); `engine-debug.md §13` realigned on §32 + grammar (`test_world`/`spawn_with`/`tick(n)`; the `capture_events` helper and a dedicated `integration_test` construct removed — never existed in EBNF v0.6); `etch-grammar.md §17` `measure_expr` erratum + `@tag(.perf)`; `engine-development-workflow.md §4.7` tag-scheme + multi-paragraph tag-message reconciliation.
 - **M1.0.16 scope boundary (qualified imports + private visibility)** — the write-only `imported_aliases` binding (D-F since M1.0.7) is now consumed: `m.Type` resolves as a type-name at exact parity with the selective import form. **Re-scoped after an E1 blocker round-trip (Recorded deviation):** the original brief anchored acceptance on field-type / struct-literal positions, which do NOT consult imports even for the selective form (a `component` is no valid field type; a component struct-literal is rejected as "not a struct type") — acceptance re-anchored on the type-alias target (the one proven selective-resolution position, M1.0.7), and the grammar addition narrowed to TYPE POSITION ONLY. **Resolves the M1.0.8-deferred `private` items:** `etch-resolver-types.md §10.2` visibility inheritance (found STRUCTURAL — no active code; impls are never exported and a private type is unnameable cross-module via E0107) + `W0902 PrivateTypeInPublicImpl` (public trait impl for a private local type). **Finding (journaled):** of the three `imported_symbols` consult sites, only two (`namedTypeToResolved`, `validateTypeAliases`) are reachable by a `.path` node in type-position-only scope; `checkComponentInstance` is unreachable (component instances parse as bare `TYPE_IDENT`; qualified struct-literals are out of scope) — left intact to avoid unexercisable dead code. **Out (NOT debt):** expression-position qualified access (`m.Type { … }`, `m.func()`, `m.Type.CONST`) — not a proven selective capability, a separate import-usability concern; uppercase associated access `Vec3.UP` (a `TYPE_IDENT . TYPE_IDENT` gap unrelated to aliases); broad `private_in_public` signature leakage (Rust-style — §10.2 literal only); imported-trait-impl W0902 (imported-trait impls do not resolve today — pre-existing orthogonal gap). **KB reconciliation (Claude.ai re-upload):** `etch-grammar.md §2.1` (`qualified_path` production, type position); `etch-resolver-types.md §3.3` (`resolve_path` distinguishes absent E0104 / present-private E0107) + §3.1 note; `etch-diagnostics.md §25` (W0902 added to Phase 1 coverage).
 - **M1.0.17 scope boundary (resource collection fields)** — `T[]`/`[K: V]`/`Set<T>` execute as `resource` fields in the tree-walker. **Decision A (persistent representation):** distinct persistent `Value` tags mirroring the `.string_run`/`.string_persistent` split (zone at the tag, no runtime discriminant); rejected the "persistent bit on the existing handle". **Decision a (Tier-0 drop registry):** `persistent.zig` exposes `DropFn` + `registerDrop`; the interp registers collection drops at init; `runDrop` never reinterprets a payload as an Etch type (Tier-0 stays Etch-decoupled). **Element bound:** value-POD + `string` + enum, on `resource` ONLY; **`Entity` element REFUSED** (E0222 — cross-reference-table remap not wired in persistent collections); nested collections refused (E0222). **Closures long-life REFUSED (no gap, NOT debt):** recon proved only synchronous same-body closure consumers; escaping is a Phase-2 HIR/bytecode lowering. **Recorded deviations (Claude.ai round-trips):** FROZEN element bound refined to exclude `Entity`; the brief's `.array` kind corrected to `.slice` (`T[]` is `.slice`); `descriptor.zig` NOT touched (resource field layout lives in `interp.compileTypeDecl`, shared with `scene_cook.zig`); **E5 gate added mid-milestone** (scene-cook Etch parity + Tier-0 loader guard — deferring the Etch renderers would re-open Etch after M1.0.x, forbidden); set `for-in` and a `.set_lit` renderer were forward-predicted then refuted by recon. **Out (frontiers, NOT debt):** full persistent-block reconstruction of a collection `resource` instance at scene-**load** = `src/core/scene/loader.zig`, Tier-0 → scene-serialization / asset-pipeline milestone (**M1.6**), never Etch; collection semantics in **codegen** = Phase 2 (`etch-ast-ir.md`). **Open decision (plan):** `for x in set` is type-rejected ("not in the M0.8 minimal subset") — C1.6 gap for a later M1.0.x milestone, or a stdlib feature outside C1.6? Unlocking touches every rule-arena set + the differential corpus, so it stays OUT of M1.0.17. New diagnostic: E0222.
 - **M1.1.0 scope boundary (Forge 3D foundations)**: `src/interfaces/PhysicsModule.zig` + the `PhysicsModule(Impl)` comptime wrapper + `core.ModuleContext` are DEFERRED to the milestone that wires forge_3d as a stepping module — instantiating the wrapper needs `ModuleContext`, whose spec carries an unresolved Tier-0→Tier-1 reference (`asset_loader: *AssetLoader`), and the repo precedent (RenderModule, C0.5) froze a module-root namespace, not a `src/interfaces/` file: the location ruling belongs to the interface-landing milestone. The day-1 contract is carried by the `api/` descriptor types (mirrored verbatim); when the interface file lands, declarations move there and `api/` re-exports — zero call sites. `Velocity` stays a core component (`api/` re-exports; moving it would invert core→Tier-1). `Mat4` and a math-level `Transform` pose type: excluded, purely additive (first consumers later). Shapes beyond sphere/box/capsule: `error.UnsupportedShape` until their sub-milestones (pre-freeze, additive). Descriptor validation policy (typed errors on degenerate mass/geometry) is a later milestone — M1.1.0 guards the dynamic path with a `mass > 0` debug assert only. Pending KB spec patch on `engine-tier-interfaces.md` §1 (ShapeType set, damping default, `foundation.math`, union-form `ShapeDescriptor`), produced at milestone close.
@@ -147,49 +147,72 @@ Hotfix milestones are merged to `main` without a tag (Guy decision,
 - **Never use** `git commit --no-verify` or `git push --no-verify`. If a hook fails, fix the underlying cause — do not bypass.
 - **Conventional Commits** mandatory on every commit. Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`, `breaking`. Optional scope `[a-z0-9-]+`. Optional `!` for breaking change. Description 1–72 chars, lowercase first letter, no trailing period. The `commit-msg` hook enforces this locally; CI rejects offending commits.
 - **Squash-and-merge** as the default merge strategy on `main`. One milestone = one commit on `main`.
-- **No external dependency** beyond the 7 authorized C keepers (cf. `engine-spec.md` §1.6): ONNX Runtime, Opus, Assimp, KTX/Basis Universal, libdatachannel, ACL compressor, HarfBuzz. Plus the standards adapted automatically (Vulkan/Wayland/OpenXR XML) and Apple frameworks where relevant. Anything else requires a dedicated derogation in `engine-spec.md`.
+- **No external dependency** beyond the 7 authorized C keepers (cf. `ARCH-024`; detail `engine-c-bindings.md`): ONNX Runtime, Opus, Assimp, KTX/Basis Universal, libdatachannel, ACL compressor, HarfBuzz. Plus the standards adapted automatically (Vulkan/Wayland/OpenXR XML) and Apple frameworks where relevant. Anything else requires a dedicated derogation in `ARCH-024` and `engine-c-bindings.md`.
 
 ## Quick links spec
 
-The full specification is in the claude.ai knowledge base. Files referenced by name (no repo path — `spec/` is not in the repo).
+The full specification lives in the claude.ai knowledge base — 75 files
+(54 `engine-*`, 17 `etch-*`, 4 others), referenced by name (no repo path —
+`spec/` is not in the repo).
 
-Core docs (must read first for most milestones):
+Reading order is not free: it follows ownership.
 
-- `engine-spec.md` — top-level architecture, modules, roadmap (§22)
-- `engine-development-workflow.md` — milestone model, brief format, git conventions, review cycle
-- `engine-zig-conventions.md` — Zig style for the whole engine (§17 build system, §18 migration policy)
-- `engine-phase-0-criteria.md` — measurable exit criteria for Phase 0
+1. `engine-corpus-map.md` — which file owns which domain (§2) and what spec
+   status it carries (§1). Entry point of every recon.
+2. `engine-invariants.md` — the 28 cross-cutting decisions, citable as
+   `ARCH-001` … `ARCH-028`. Where every `ARCH-nnn` used in this repo is
+   defined.
+3. the owner document — all detailed normative content for its domain.
+4. `engine-spec.md` — constitution only (architecture, ECS, tiers, plugins)
+   plus the canonical catalogue of the 18 Tier 1 modules. It holds no module
+   mini-spec and no roadmap.
 
-Module / topic docs available in the knowledge base:
+**Never cite `engine-spec.md §x`.** The master's numbering has shifted several
+times and silently invalidated references — that is why the `ARCH-nnn` registry
+exists. Cross-cutting decision → `ARCH-nnn`. Domain detail → canonical filename
++ named anchor. Roadmap → `engine-roadmap.md` + phase id. History → the relevant
+archive.
 
-- Tier 0 / API : `engine-tier-interfaces.md`, `engine-c-api.md`
-- Modules Tier 1 : `engine-render.md`, `engine-physics-forge.md`,
-  `engine-physics-forge-2d.md`, `engine-audio-pulse.md`,
-  `engine-ai-cortex.md`, `engine-vfx-ember.md`,
-  `engine-animation-kinesis.md`, `engine-networking-relay.md`,
-  `engine-ui.md`, `engine-tools-editor.md`, `engine-sequencer.md`,
-  `engine-sprite.md`, `engine-input-system.md`, `engine-debug.md`,
-  `engine-media.md`, `engine-asset-pipeline.md`
-- Subsystems: `engine-c-bindings.md`, `engine-ipc.md`,
-  `engine-ecs-internals.md`, `engine-coordinate-system.md`,
-  `engine-units.md`, `engine-color-picker.md`,
-  `engine-collaboration.md`, `engine-platform.md`, `engine-vr-ar.md`,
-  `engine-movement.md`, `engine-motion-design.md`,
-  `engine-scene-serialization.md`, `engine-gameplay-systems.md`,
-  `engine-mach-reference.md`, `engine-project-settings.md`,
-  `engine-directory-structure.md`, `engine-terminologie.md`,
-  `engine-phase-1-criteria.md`
-- Etch : `etch-grammar.md`, `etch-visual-scripting.md`
-- Templates : `brief-milestone_template.md`,
-  `prompt-claude-code_template.md`
-- Mockups : `prompt-editor-mockups.md`
+Process and conventions: `engine-development-workflow.md`,
+`engine-zig-conventions.md`, `engine-audit-checklist.md`,
+`engine-directory-structure.md`, `engine-terminologie.md`, `spec-changelog.md`
 
-The full set of `engine-*.md`, `etch-*.md`, `weld-*.md`, and template
-files lives in the claude.ai project. **Never guess a spec filename.**
-If a spec referenced in a brief or in conversation is not in the list
-above and you are uncertain of its exact name, stop and ask Guy — do
-not invent a plausible-looking filename. Hallucinated filenames cause
-friction in subsequent sessions.
+Phases: `engine-roadmap.md`, `engine-phase-minus-1-archive.md`,
+`engine-phase-0-criteria.md`, `engine-phase-0-plan.md`,
+`engine-phase-1-criteria.md`, `engine-phase-1-plan.md`,
+`engine-phase-2-criteria.md`
+
+Tier 0 and foundation: `engine-tier-interfaces.md`, `engine-c-api.md`,
+`engine-c-bindings.md`, `engine-ecs-internals.md`, `engine-ipc.md`,
+`engine-platform.md`, `engine-coordinate-system.md`, `engine-units.md`,
+`engine-simd.md`, `engine-layout.md`
+
+Tier 1 owner documents: `engine-render.md`, `engine-physics-forge.md`,
+`engine-physics-forge-2d.md`, `engine-audio-pulse.md`, `engine-ai-cortex.md`,
+`engine-animation-kinesis.md`, `engine-vfx-ember.md`,
+`engine-networking-relay.md`, `engine-ui.md`, `engine-tools-editor.md`,
+`engine-sequencer.md`, `engine-sprite.md`, `engine-input-system.md`,
+`engine-debug.md`, `engine-media.md`, `engine-asset-pipeline.md`,
+`engine-synapse.md`, `engine-conduit.md`, `engine-git-integration.md`
+
+Etch — 17 files: `etch-grammar.md`, `etch-reference-part1.md`,
+`etch-reference-part2.md`, `etch-reference-part3.md`, `etch-parser.md`,
+`etch-ast-ir.md`, `etch-bytecode.md`, `etch-resolver-types.md`,
+`etch-diagnostics.md`, `etch-stdlib.md`, `etch-memory-model.md`,
+`etch-abi-zig.md`, `etch-validation-ecs.md`, `etch-style-guide.md`,
+`etch-language-server.md`, `etch-visual-scripting.md`, `etch-crdt-ops.md`
+
+Cross-cutting topics: `engine-scene-serialization.md`,
+`engine-gameplay-systems.md`, `engine-movement.md`, `engine-vr-ar.md`,
+`engine-collaboration.md`, `engine-compression-zlc.md`,
+`engine-motion-design.md`, `engine-project-settings.md`,
+`engine-color-picker.md`, `engine-mach-reference.md`
+
+Templates and mockups: `brief-milestone_template.md`,
+`prompt-claude-code_template.md`, `prompt-editor-mockups.md`
+
+**Never guess a spec filename.** The list above is the whole corpus; if a spec
+named in a brief or in conversation is not in it, stop and ask Guy.
 
 ## Workflow reminder (Claude Code protocol)
 
