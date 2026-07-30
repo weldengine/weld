@@ -5,7 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .weld = .{
-            // Path local — Phase 0 monolithic (cf. ARCH-017).
+            // Local path — Phase 0 monolithic (cf. ARCH-017).
             .path = "../..",
         },
     },
