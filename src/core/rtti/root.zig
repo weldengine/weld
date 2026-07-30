@@ -7,7 +7,8 @@
 //! standalone surface without any metier consumer wired yet (the S6
 //! IPC swap is E2, resources are E3, events are E4).
 //!
-//! Re-exports follow the `engine-spec.md` §3.1 Tier 0 convention:
+//! Re-exports follow the Tier 0 convention of `engine-zig-conventions.md`
+//! § "Fichier racine : `root.zig` (module) vs `main.zig` (exécutable)":
 //! flat surface (`rtti.Registry`, `rtti.TypeInfo`, …) with sub-module
 //! aliases (`rtti.type_info`, `rtti.hash`, …) for tests and internal
 //! consumers that need to address private symbols.

@@ -1,5 +1,5 @@
 //! `forge_3d` — the native Zig 3D physics solver (Tier 1, in-tree per
-//! `engine-spec.md` §3.5). M1.1.0 laid the foundations: the `Real` scalar, the
+//! `ARCH-017`). M1.1.0 laid the foundations: the `Real` scalar, the
 //! `ShapeStore`, per-body `MotionProperties` with analytic inertia, and the SoA
 //! `BodyManager`. M1.1.1 added the shared `pipeline/broadphase.zig` (a dynamic
 //! multi-layer AABB tree — BVH); M1.1.2 added `pipeline/narrowphase/`

@@ -2,7 +2,7 @@
 //!
 //! Resources are singleton instances of POD types — exactly one
 //! value of each resource type lives in the world at any given
-//! time (cf. `engine-spec.md` §2.9). The implementation routes
+//! time (cf. `ARCH-006`). The implementation routes
 //! through the ECS dynamic archetype path: each `setResource(T)`
 //! spawns a dedicated entity holding the component `T` plus a
 //! `ResourceMarker` marker. The marker keeps the resource's

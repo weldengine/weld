@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
 
     // Dependency on the Weld engine (local path in the Phase 0 monolithic
     // repo). Phase 5+: potentially url + hash if separable extraction
-    // is validated (cf. engine-spec.md §3.5).
+    // is validated (cf. ARCH-017).
     const weld = b.dependency("weld", .{
         .target = target,
         .optimize = optimize,

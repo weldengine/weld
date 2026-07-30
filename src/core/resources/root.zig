@@ -3,8 +3,8 @@
 //! Public surface of the M0.2 / E3 resource subsystem.
 //!
 //! Resources are singleton-entity components — exactly one value of
-//! each resource type lives in the world (cf. `engine-spec.md`
-//! §2.9). Wired into the ECS via the dynamic archetype path:
+//! each resource type lives in the world (cf. `ARCH-006`).
+//! Wired into the ECS via the dynamic archetype path:
 //! `setResource(world, gpa, value)` spawns a dedicated entity in a
 //! singleton-flagged archetype, `getResource` / `getResourceMut`
 //! route through the existing component access machinery, and

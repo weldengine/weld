@@ -49,7 +49,7 @@ pub const FieldKind = enum {
     /// `StringSlot`). **Resource-only by construction** (M1.0.3): the Etch
     /// validator rejects `string` on `component` and `fieldKindFromTypeName`
     /// only emits this kind for the `.resource` origin, so no component can ever
-    /// carry it — the component SoA/POD invariant (`engine-spec.md` §4) is
+    /// carry it — the component SoA/POD invariant (`ARCH-004`) is
     /// untouched. Tier-0 stays string-agnostic: it stores/copies the 16 raw
     /// slot bytes; the Etch runtime owns the pointed-to bytes' lifetime.
     string_,
@@ -62,7 +62,7 @@ pub const FieldKind = enum {
     enum_,
     /// An `Entity` field slot: an `EntityId` (`packed struct(u64)`, 8 bytes,
     /// 8-aligned). POD — no heap, no teardown — so the component SoA/POD invariant
-    /// (`engine-spec.md` §4) is untouched. **Component-only by construction**
+    /// (`ARCH-004`) is untouched. **Component-only by construction**
     /// (M1.0.6 D-A): the exact mirror of `.string_`/`.enum_` (resource-only) —
     /// `fieldKindFromTypeName` emits `.entity_` only for the `.component` origin.
     /// An unassigned / dangling slot holds `EntityId.dead` (all-ones); at scene
@@ -74,7 +74,7 @@ pub const FieldKind = enum {
     /// holding the persistent-heap pointer of the owned container block. Like
     /// `.string_`, **resource-only by construction** — the Etch validator gates
     /// collection fields to resources, so no component SoA slot ever carries one
-    /// (the POD invariant, `engine-spec.md` §4, is untouched). Tier 0 stores/
+    /// (the POD invariant, `ARCH-004`, is untouched). Tier 0 stores/
     /// copies the 8 raw slot bytes; the Etch runtime owns the container's lifetime.
     array_,
     /// A map field slot (`[K: V]`, M1.0.17). Same 8-byte `CollectionSlot`
