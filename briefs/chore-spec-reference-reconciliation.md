@@ -371,7 +371,7 @@ dropped everywhere — a shifting number is the failure mode being repaired, and
 | Target | Anchor, read | Sites |
 |---|---|---|
 | `engine-platform.md` | § "Build System — CLI `weld`" | `test_runner.zig:20` · `tools/etch_test:4` · `CLAUDE.md:120` · `M1.0.15:39` |
-| `engine-scene-serialization.md` | § "Resources de scène — install-or-overwrite" | `loader.zig:714` · `M1.0.5:163` · `:173` |
+| `engine-scene-serialization.md` | § "Resources de scène — install-or-overwrite" | `loader.zig:716` · `M1.0.5:163` · `:173` |
 | `engine-scene-serialization.md` | § "Architecture" | `M1.0.4:66` · `M1.0.5:62` · `M1.0.6:136` |
 | `engine-ecs-internals.md` | § "Archetype Chunk Layout (SoA par composant)" | `chunk.zig:56` |
 | `engine-ecs-internals.md` | § "Architecture" | `S1:55` |
@@ -385,35 +385,37 @@ dropped everywhere — a shifting number is the failure mode being repaired, and
 | `engine-tools-editor.md` | § "Panneau Etch Text — éditeur de code" | `S3:158` |
 | `engine-simd.md` | § "Relation avec `foundation/math/`" | `foundation/root.zig:3` |
 
-The last two were already anchored and carried no number, so the withdrawal took
-nothing back from them.
+`engine-zig-conventions.md` and `engine-tools-editor.md` were already anchored
+and carried no number, so the withdrawal took nothing back from them. They are
+named rather than pointed at by position: the table has since grown twice, and a
+positional reference into a growing table is this chore's own fault in miniature.
 
 **An anchor must be unique in its file, and that is checked, not assumed.**
 `engine-render.md` carries **four** headings titled "Architecture" (lines 29, 634,
 1036, 1351), so § "Architecture" localises nothing there — `M0.4:80` cites the two
 named sections its own gloss designates instead. Every anchor in the table above
-was then counted mechanically in its owning document: all eleven resolve to
-exactly one heading, including the three remaining § "Architecture" targets, which
-are unique in `engine-scene-serialization.md`, `engine-ecs-internals.md` and
-`engine-asset-pipeline.md`. One site, not a class.
+was then counted mechanically in its owning document. The table holds **fifteen
+anchors over fourteen rows** — the `engine-render.md` row carries two — and **all
+fifteen resolve to exactly one heading**, including the three remaining
+§ "Architecture" targets, which are unique in `engine-scene-serialization.md`,
+`engine-ecs-internals.md` and `engine-asset-pipeline.md`. One site, not a class.
 
-**Two of the anchors are asserted on a provenance the next reader cannot
-reproduce, and that is stated rather than smoothed over.** The count above was
-run against the twelve files supplied to the gate, so:
+The count was run against the `weld-spec/` mirror after the two anchors this work
+introduced were synchronised into it, so **all fifteen rest on the same warrant**
+— counted here, in the published corpus, not cited from someone else's reading.
+That closes two caveats an earlier revision of this section carried: the
+install-or-overwrite anchor, which the corpus did not yet publish, and the
+`engine-simd.md` anchor, which had been attested by the reviewer rather than
+measured.
 
-- § "Resources de scène — install-or-overwrite" was counted in the **amended**
-  `engine-scene-serialization.md` produced for this gate. The published corpus
-  carries zero occurrences of it until that file is re-uploaded, so the three
-  references pointing at it (`loader.zig:714`, `M1.0.5:163`, `:173`) resolve only
-  once it is. **Re-uploading it — to the knowledge base and to the `weld-spec/`
-  mirror — is a precondition of merging, not a follow-up:** three references
-  pointing at an anchor published nowhere is precisely the fault this chore
-  repairs.
-- § "Relation avec `foundation/math/`" on `engine-simd.md` was **not** measured
-  here: that file was not in the supplied set. Its title and its uniqueness come
-  from the reviewer's own reading (`engine-simd.md:102`). Recorded as a citation
-  of someone else's measurement, which is a weaker warrant than the other eleven
-  and should be re-counted at the next corpus audit.
+**The instrument was proven before its result was trusted.** A first count
+returned 14 of 15, reporting § "Panneau Etch Text — éditeur de code" absent. The
+heading is present — `## 6 bis. Panneau Etch Text — éditeur de code` — and the
+count was wrong: the ordinal strip choked on "6 bis", which is exactly the number
+this section notes has already moved once. The corrected pass also verifies that a
+deliberately wrong anchor still returns zero, so the tool can distinguish absence
+from a normalisation bug. A measurement that cannot fail on purpose is not a
+measurement.
 
 Three exemptions, each motivated rather than granted:
 
@@ -507,10 +509,11 @@ only if the decision AND the `Portée` both hold.**
 No invariant carries the Tier 0 import graph, so the remedy is to **stop citing**
 for that half rather than find a third id — the same call already made on
 `rtti/type_info.zig:48`. A comment may state a local discipline without invoking
-an invariant. `foundation/root.zig` keeps `engine-simd.md` §4, which carries the
-sister-module clause on the same line; the two scene files keep `ARCH-013`
-(`Portée : Global`) for tier membership, and their import constraint stays stated
-by the sentence, uncited.
+an invariant. `foundation/root.zig` keeps `engine-simd.md`, which carries the
+sister-module clause on the same line and takes its named anchor at E7; the two
+scene files keep `ARCH-013` (`Portée : Global`) for tier membership, and their
+import constraint is attributed to the M1.0.4 brief Notes rather than to an
+invariant — see the sibling-comment paragraph of A9 for the final form.
 
 The sweep this produced was run over every id used as a target, cross-checking
 each `Portée` against the tier of the cited subject. Six registry entries have a
@@ -561,7 +564,8 @@ Gate by gate, each ending at a STOP with an explicit GO before the next.
 | E3 | `feebb78` | 52 references over 51 lines, 21 briefs + the S5 record |
 | E5 | `2b9c0cc` | named anchors (A9), the 8 gloss defects (A10) |
 | E6 | `229b13d` | `ARCH-016` out of scope (A10), two stale glosses qualified (A11), the render anchor (A9) |
-| E7 | this commit | the two sibling comments agree, the `engine-simd.md` anchor, the anchor-count caveats (A9) |
+| E7 | `155c0f6` | the two sibling comments agree, the `engine-simd.md` anchor (A9) |
+| E8 | this commit | the anchor count corrected to fifteen and re-measured against the synchronised mirror (A9) |
 
 **77 references repaired.** `engine-spec.md` occurrences across the tree: 97 in
 38 files at open, 37 in 18 files at close. Twelve distinct ARCH ids used as
