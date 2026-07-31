@@ -376,17 +376,25 @@ dropped everywhere — a shifting number is the failure mode being repaired, and
 | `engine-ecs-internals.md` | § "Archetype Chunk Layout (SoA par composant)" | `chunk.zig:56` |
 | `engine-ecs-internals.md` | § "Architecture" | `S1:55` |
 | `engine-c-bindings.md` | § "Liste des `.api.zig` manuels" | `CLAUDE.md:150` ×2 · `M0.2:191` · `S2:67` |
-| `engine-render.md` | § "Architecture" | `M0.4:80` |
+| `engine-render.md` | § "GPU Abstraction Layer (GAL)" + § "V-Buffer (Visibility Buffer)" | `M0.4:80` |
 | `engine-asset-pipeline.md` | § "Architecture" | `m0.6:84` |
 | `etch-reference-part1.md` | § "`async fn` et `async rule`" | `M1.0.13:57` |
 | `engine-roadmap.md` | § "Contenu des phases" | `M0.0:38` · `M0.2:191` |
 | `engine-roadmap.md` | § "Carte globale des phases par module" | `M0.8:109` |
-| `engine-directory-structure.md` | § "Structure interne du repo Weld lui-même" | `M0.2:364` · `M1.1.5:19` |
 | `engine-zig-conventions.md` | § "Fichier racine : `root.zig` (module) vs `main.zig` (exécutable)" | `rtti/root.zig:10` |
 | `engine-tools-editor.md` | § "Panneau Etch Text — éditeur de code" | `S3:158` |
 
 The last two were already anchored and carried no number, so the withdrawal took
 nothing back from them.
+
+**An anchor must be unique in its file, and that is checked, not assumed.**
+`engine-render.md` carries **four** headings titled "Architecture" (lines 29, 634,
+1036, 1351), so § "Architecture" localises nothing there — `M0.4:80` cites the two
+named sections its own gloss designates instead. Every anchor in the table above
+was then counted mechanically in its owning document: all eleven resolve to
+exactly one heading, including the three remaining § "Architecture" targets, which
+are unique in `engine-scene-serialization.md`, `engine-ecs-internals.md` and
+`engine-asset-pipeline.md`. One site, not a class.
 
 Three exemptions, each motivated rather than granted:
 
@@ -437,13 +445,14 @@ The eight, and what each one shows:
 | `S0:52` | `ARCH-017` "in-tree default, no `spec/` in repo" | `ARCH-017` carries the in-tree default and the absence of `libs/`, nothing about `spec/`. Verified: `spec/` appears nowhere in `engine-directory-structure.md`. There is no KB owner — the decision lives in `CLAUDE.md` § *Open / deferred decisions* — so the clause is qualified as historical rather than given an invented target |
 | `M1.1.5:19` | `ARCH-017` "the spec directory tree … reserves for 'semi-implicit Euler, sleep, CCD'" | `ARCH-017` carries no directory tree at all: the bullets of `§3.5` that named `src/modules/forge/solvers_{2d,3d}/<backend>/` — a path itself made stale by the M1.1.1 flatten — did not survive into the invariant. `engine-directory-structure.md`, already cited on the same line, is the owner, and the `ARCH-017` half is dropped as a mis-attribution |
 | `S1:55` | `ARCH-005` "ECS overview" | An overview of the ECS spans `ARCH-003` to `ARCH-010`. The gloss reattaches to the owner, `engine-ecs-internals.md` § "Architecture"; `ARCH-005` stays alongside, unglossed |
-| `foundation/root.zig:3` | `ARCH-017` "sibling submodules with no mutual dependency" | → `ARCH-016` |
-| `scene/root.zig:8` | `ARCH-017` "tier discipline, imports `weld_core` only, never `weld_etch`" | → `ARCH-013` + `ARCH-016` |
-| `scene/loader.zig:12` | `ARCH-017` "Tier discipline: imports `weld_core` internals only" | → `ARCH-013` + `ARCH-016` |
+| `foundation/root.zig:3` | `ARCH-017` "sibling submodules with no mutual dependency" | → no id at all (see below) |
+| `scene/root.zig:8` | `ARCH-017` "tier discipline, imports `weld_core` only, never `weld_etch`" | → `ARCH-013` alone |
+| `scene/loader.zig:12` | `ARCH-017` "Tier discipline: imports `weld_core` internals only" | → `ARCH-013` alone |
 
-**The last three revoke the GO given at the source gate**, and that is worth
-recording plainly because it is the only arbitration of this chore that had to be
-taken back. At E1 the three were verified against the *source text* of the
+**The last three revoke the GO given at the source gate** — twice over, as it
+turned out, and that is worth recording plainly.
+
+*First revocation.* At E1 the three were verified against the *source text* of the
 27-section `§3.5`, whose "Discipline d'API in-tree" literally requires "Zero
 coupling avec d'autres modules Weld", and `ARCH-017` was accepted on that
 measurement. The rule written afterwards is stricter and asks whether the gloss
@@ -455,6 +464,58 @@ resolves, so the stricter rule wins and `ARCH-016` — "un module n'accède qu'�
 `b.addModule`" — is what those three sentences actually assert. What made the
 revocation possible was raising the tension rather than silently applying
 whichever rule was most recent.
+
+*Second revocation — `ARCH-016` does not apply either.* Its **`Portée`** field
+reads "Tier 1, Tier 3". `foundation` and `core/scene` are Tier 0, so the id was
+out of scope at all three sites. The cause is the same one three times running,
+and naming it is the point of this entry: an id had been validated on its
+**decision text alone** — `ARCH-024` on its subject without its perimeter,
+`ARCH-017` on a clause it delegates, `ARCH-016` on a decision that describes the
+constraint exactly while its scope excludes the tier. **A citation is admissible
+only if the decision AND the `Portée` both hold.**
+
+No invariant carries the Tier 0 import graph, so the remedy is to **stop citing**
+for that half rather than find a third id — the same call already made on
+`rtti/type_info.zig:48`. A comment may state a local discipline without invoking
+an invariant. `foundation/root.zig` keeps `engine-simd.md` §4, which carries the
+sister-module clause on the same line; the two scene files keep `ARCH-013`
+(`Portée : Global`) for tier membership, and their import constraint stays stated
+by the sentence, uncited.
+
+The sweep this produced was run over every id used as a target, cross-checking
+each `Portée` against the tier of the cited subject. Six registry entries have a
+`Portée` that excludes Tier 0 (`ARCH-014`, `-015`, `-016`, `-019`, `-020`, `-021`);
+two of them are used here. `ARCH-016` was the only violation. `ARCH-014` surfaces
+as a mechanical candidate and is resolved by reading: it is cited for the **Tier
+1** half of "Tier 0/1 catalog", so its scope is satisfied, with `ARCH-013`
+(Global) carrying the Tier 0 half on the same line.
+
+### A11 — A stale gloss is QUALIFIED as historical, never retargeted
+
+Two sites carried a gloss that was true when written and is false against today's
+corpus. Retargeting them to the living owner makes the gloss *testable* against
+that owner — and it fails, so repairing the pointer would have manufactured the
+contradiction:
+
+- `M0.2:364` whitelisted two documents for a `tools/vk_gen/` reference. Today
+  `vk_gen` is named in five KB files. The C4 retarget of the previous gate is
+  **annulled**: the recorded text is restored verbatim and marked "historical
+  whitelist".
+- `M1.1.5:19` states that the directory tree reserves one file for "semi-implicit
+  Euler, sleep, CCD". Today `engine-directory-structure.md` gives
+  `integration.zig # semi-implicit Euler (M1.1.5), CCD` with a **separate**
+  `sleep.zig`. The pointer is dropped for that half and the claim marked "as read
+  at M1.1.5 — historical".
+
+**Rule, a generalisation of drift pattern D4:** when the gloss of a closed record
+is stale against the living owner, qualify it as historical; do not retarget.
+Retargeting would make the record assert a falsehood about today's corpus, while
+the qualification tells the truth about both dates. The recorded words do not
+move in either case — only a short marker is added.
+
+This also settles a residual the previous gate left implicit: `engine-directory-
+structure.md` is no longer a target of this chore at all, and `ARCH-016` is no
+longer used anywhere in the tree.
 
 ## Execution notes
 
@@ -468,16 +529,19 @@ Gate by gate, each ending at a STOP with an explicit GO before the next.
 | E1ter | `4efe8ad` | the second language fix (A1) |
 | E2 | `88c2b1c` | `CLAUDE.md` — 4 references + § *Quick links spec* rewritten |
 | E3 | `feebb78` | 52 references over 51 lines, 21 briefs + the S5 record |
-| E5 | this commit | named anchors (A9), the 8 gloss defects (A10), `M0.2:364` (A5) |
+| E5 | `2b9c0cc` | named anchors (A9), the 8 gloss defects (A10) |
+| E6 | this commit | `ARCH-016` out of scope (A10), two stale glosses qualified (A11), the render anchor (A9) |
 
 **77 references repaired.** `engine-spec.md` occurrences across the tree: 97 in
 38 files at open, 37 in 18 files at close. Twelve distinct ARCH ids used as
 targets — `ARCH-004`, `-005`, `-006`, `-007`, `-008`, `-011`, `-012`, `-013`,
-`-014`, `-016`, `-017`, `-024` — plus the `ARCH-001`–`ARCH-006` range at
-`S2:67`. `ARCH-014` and `ARCH-016` enter at E5 through the gloss audit (A10),
-not through the substitution table.
+`-014`, `-017`, `-024` — plus the `ARCH-001`–`ARCH-006` range at `S2:67`.
+`ARCH-014` enters at E5 through the gloss audit (A10), not through the
+substitution table; `ARCH-016` entered there too and left again at E6 on its
+`Portée` (A10), so it is used nowhere in the tree.
 
-**A2 and A9 were rewritten in place** rather than corrected by a second append:
+**A2, A9 and A10 were rewritten in place** rather than corrected by further
+appends:
 the body's anchor policy is withdrawn, so the section that recorded it had to
 state the withdrawal, and a patch of a patch would have left two contradictory
 renderings of the same rule in the same file. The frozen body is untouched

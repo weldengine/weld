@@ -1,6 +1,6 @@
 //! Foundation — transversal sibling submodules consumed across the engine.
 //!
-//! Per `ARCH-016` and `engine-simd.md` §4, `math` and `simd` are
+//! Per `engine-simd.md` §4, `math` and `simd` are
 //! sibling submodules with no mutual dependency. M0.6 shipped `simd` (the
 //! batched-kernel module); M1.1.0 adds `math` — its first consumer is Forge 3D.
 

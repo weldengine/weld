@@ -10,7 +10,7 @@
 //! `world.addResource`).
 //!
 //! Tier discipline: imports `weld_core` internals only — never `weld_etch`
-//! (`ARCH-013` + `ARCH-016`). The cook driver's Etch coupling lives in
+//! (`ARCH-013`). The cook driver's Etch coupling lives in
 //! `src/etch/scene_cook.zig`; the loader consumes only the neutral byte image.
 //!
 //! ## Stages (gate-split, see `briefs/M1.0.5-scene-load.md`)
