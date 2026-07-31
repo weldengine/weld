@@ -383,6 +383,7 @@ dropped everywhere — a shifting number is the failure mode being repaired, and
 | `engine-roadmap.md` | § "Carte globale des phases par module" | `M0.8:109` |
 | `engine-zig-conventions.md` | § "Fichier racine : `root.zig` (module) vs `main.zig` (exécutable)" | `rtti/root.zig:10` |
 | `engine-tools-editor.md` | § "Panneau Etch Text — éditeur de code" | `S3:158` |
+| `engine-simd.md` | § "Relation avec `foundation/math/`" | `foundation/root.zig:3` |
 
 The last two were already anchored and carried no number, so the withdrawal took
 nothing back from them.
@@ -395,6 +396,24 @@ was then counted mechanically in its owning document: all eleven resolve to
 exactly one heading, including the three remaining § "Architecture" targets, which
 are unique in `engine-scene-serialization.md`, `engine-ecs-internals.md` and
 `engine-asset-pipeline.md`. One site, not a class.
+
+**Two of the anchors are asserted on a provenance the next reader cannot
+reproduce, and that is stated rather than smoothed over.** The count above was
+run against the twelve files supplied to the gate, so:
+
+- § "Resources de scène — install-or-overwrite" was counted in the **amended**
+  `engine-scene-serialization.md` produced for this gate. The published corpus
+  carries zero occurrences of it until that file is re-uploaded, so the three
+  references pointing at it (`loader.zig:714`, `M1.0.5:163`, `:173`) resolve only
+  once it is. **Re-uploading it — to the knowledge base and to the `weld-spec/`
+  mirror — is a precondition of merging, not a follow-up:** three references
+  pointing at an anchor published nowhere is precisely the fault this chore
+  repairs.
+- § "Relation avec `foundation/math/`" on `engine-simd.md` was **not** measured
+  here: that file was not in the supplied set. Its title and its uniqueness come
+  from the reviewer's own reading (`engine-simd.md:102`). Recorded as a citation
+  of someone else's measurement, which is a weaker warrant than the other eleven
+  and should be re-counted at the next corpus audit.
 
 Three exemptions, each motivated rather than granted:
 
@@ -420,6 +439,17 @@ are stated in `ARCH-006`'s own decision ("Trois tags de cycle de vie — `@confi
 réplication"), so it is not disclaimed detail and needs no owner. It also has no
 anchor available — the tag table is not in `engine-ecs-internals.md`, and
 `engine-project-settings.md` was not in the attached set.
+
+**Two sibling comments state the same rule and must attribute it the same way.**
+`scene/root.zig` and `scene/loader.zig` both declare that the module imports
+`weld_core` only and never `weld_etch`. After the `ARCH-016` removal of A10, the
+first read "(tier discipline, `ARCH-013` / the M1.0.4 brief Notes)" while the
+second read "(`ARCH-013`)" placed *after* the import sentence — where the bare id
+reads as covering the import rule, which A10 had just declared it does not. The
+divergence between the two mattered more than either variant: `loader.zig` now
+carries the same form as its sibling. Citing where a decision was taken is not
+the same act as citing a normative owner, and the provenance is worth keeping —
+so the M1.0.4 brief is named rather than the sentence left uncited.
 
 Two textual side effects, both visible in the diff: the word "table" was dropped
 from "§2.9 table" because `ARCH-006` carries none, and `rtti/root.zig` reads
@@ -530,7 +560,8 @@ Gate by gate, each ending at a STOP with an explicit GO before the next.
 | E2 | `88c2b1c` | `CLAUDE.md` — 4 references + § *Quick links spec* rewritten |
 | E3 | `feebb78` | 52 references over 51 lines, 21 briefs + the S5 record |
 | E5 | `2b9c0cc` | named anchors (A9), the 8 gloss defects (A10) |
-| E6 | this commit | `ARCH-016` out of scope (A10), two stale glosses qualified (A11), the render anchor (A9) |
+| E6 | `229b13d` | `ARCH-016` out of scope (A10), two stale glosses qualified (A11), the render anchor (A9) |
+| E7 | this commit | the two sibling comments agree, the `engine-simd.md` anchor, the anchor-count caveats (A9) |
 
 **77 references repaired.** `engine-spec.md` occurrences across the tree: 97 in
 38 files at open, 37 in 18 files at close. Twelve distinct ARCH ids used as
