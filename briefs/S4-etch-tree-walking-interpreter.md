@@ -16,7 +16,7 @@
 
 ## Context
 
-Fifth Phase −1 derisking spike. Validates the hypothesis stated in `engine-spec.md` §22.3 / S4: that the AST emitted by S3 is correctly executable by a tree-walking interpreter, and that a functional bridge can be built between this interpreter and the comptime SoA archetype storage delivered by S1. The deliverable is twofold: (a) the interpreter itself and (b) a shared differential test harness that S5 (Etch → Zig codegen) will reuse verbatim to prove behavioural equivalence between the two backends.
+Fifth Phase −1 derisking spike. Validates the hypothesis stated in `engine-phase-minus-1-archive.md` S4: that the AST emitted by S3 is correctly executable by a tree-walking interpreter, and that a functional bridge can be built between this interpreter and the comptime SoA archetype storage delivered by S1. The deliverable is twofold: (a) the interpreter itself and (b) a shared differential test harness that S5 (Etch → Zig codegen) will reuse verbatim to prove behavioural equivalence between the two backends.
 
 ## Scope
 
@@ -73,7 +73,7 @@ The following are explicitly **not** to be touched, added, or extended in S4. Ea
 
 In the listed order. Mandatory before writing any production code — Claude Code ticks each entry in the LIVING SECTION with a real timestamp.
 
-1. `engine-spec.md` — §22.3 / sub-section S4 (canonical scope), §22.3.0 (Phase −1 modus operandi), §3.5 (in-tree Phase 1-4, no separable libs).
+1. `engine-phase-minus-1-archive.md` — S4 (canonical scope) and the Phase −1 modus operandi; `ARCH-017` (in-tree Phase 1-4, no separable libs).
 2. `etch-grammar.md` — §3 (expressions, operators, precedence), §5 (constructs: component, resource, rule, when), §6 (when clause grammar), §18 (annotations — captured only, not honored at execution in S4), §19 (v0.6 design decisions).
 3. `etch-reference-part1.md` — §3 (type system: polymorphic literal defaulting, int/float defaulting rules already applied by S3), §4 (variables, mutability, shadowing), §5 (memory model: surface invariants — S4 does not need the deeper internals), §6 (expressions: arithmetic semantics, division by zero, integer overflow, compound assignments, comparison, logical operators).
 4. `etch-resolver-types.md` — §11 (const evaluation: contexts where const is required, defaulting rules), §12 (ECS rule validations: when clause compilation to archetype set, archetype matching), §19 (phasing — confirms S4 is Phase 0.5 boundary, AST-direct execution).

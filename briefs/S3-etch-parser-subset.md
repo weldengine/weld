@@ -155,7 +155,7 @@ Five constructs only. Every position below tracks a decision taken in the conver
 
 ## Spec documents to read first
 
-1. `engine-spec.md` — §22.3 sub-section S3 (canonical definition), §3.5 (in-tree Phase 1-4), §22 Layer 2 (parsing layer context).
+1. `engine-phase-minus-1-archive.md` S3 (canonical definition), `ARCH-017` (in-tree Phase 1-4), `engine-tools-editor.md` § "Panneau Etch Text — éditeur de code", Layer 2 (parsing layer context).
 2. `etch-grammar.md` — entire file, with special attention to §1 lexicon, §3 expressions and precedence, §5.4 component_decl, §5.5 resource_decl, §6 when clauses, §7 rule_decl, §19 ambiguities resolved.
 3. `etch-reference-part1.md` — §2 lexicon, §3 type system primitives and engine builtins, §6 expressions and operator precedence.
 4. `etch-ast-ir.md` — §1 pipeline overview, §3 entire (AST tabular layout, NodeId/StableId, kinds catalog, annotations, doc comments), §10 invariants.

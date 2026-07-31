@@ -17,9 +17,9 @@
 //! builtins underneath it).
 //!
 //! `RunReport` OWNS its strings (an internal arena); the caller need only keep
-//! `ast` alive for the duration of `run`. The `weld test` CLI (`engine-spec.md`
-//! §26.1) will consume this same library — the `etch_test` shim (E5) is its
-//! Phase-1 driver.
+//! `ast` alive for the duration of `run`. The `weld test` CLI
+//! (`engine-platform.md` § "Build System — CLI `weld`") will consume this same
+//! library — the `etch_test` shim (E5) is its Phase-1 driver.
 
 const std = @import("std");
 const weld_core = @import("weld_core");

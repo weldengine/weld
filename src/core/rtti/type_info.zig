@@ -13,7 +13,7 @@
 //! E2, resources are E3, events are E4 — those land on top of this
 //! file without changing its public surface.
 //!
-//! See `engine-spec.md` §2.5 and `briefs/M0.2-rtti-resources-events-bindgen.md`.
+//! See `ARCH-007` and `briefs/M0.2-rtti-resources-events-bindgen.md`.
 
 const std = @import("std");
 
@@ -45,9 +45,8 @@ pub const Category = enum(u8) {
 
 /// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Lifecycle hint for resources. Drives the serialization /
-/// replication policy (cf. `engine-spec.md` §2.9 table). Only carries
-/// meaning when `TypeInfo.category == .resource`; `null` for the other
-/// categories.
+/// replication policy (cf. `ARCH-006`). Only carries meaning when
+/// `TypeInfo.category == .resource`; `null` for the other categories.
 pub const Lifecycle = enum(u8) {
     /// `@config` — serialized in scene files, not in saves, not
     /// replicated.

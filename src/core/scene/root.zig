@@ -5,7 +5,7 @@
 //! verbatim by the M1.0.5 loader).
 //!
 //! **Imports `weld_core` internals only — never `weld_etch`** (tier discipline,
-//! `engine-spec.md` §3.5 / the M1.0.4 brief Notes). The Etch coupling
+//! `ARCH-013` / the M1.0.4 brief Notes). The Etch coupling
 //! (descriptors, const-eval, `writeValueAsBytes`) lives in
 //! `src/etch/scene_cook.zig`, which consumes this surface.
 

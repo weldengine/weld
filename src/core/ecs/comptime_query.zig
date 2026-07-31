@@ -103,7 +103,7 @@ pub fn ComptimeQuery(comptime tuple: anytype) type {
                 while (self.arch_idx < self.world.archetypes.items.len) : (self.arch_idx += 1) {
                     const arch = self.world.archetypes.items[self.arch_idx];
                     // M0.2 / E3 — singleton resources are invisible to
-                    // user queries (cf. `engine-spec.md` §2.9).
+                    // user queries (cf. `ARCH-006`).
                     if (arch.is_singleton) continue;
                     var all_present = true;
                     for (self.comp_ids) |cid| {

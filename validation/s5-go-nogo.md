@@ -76,7 +76,7 @@ component is reachable by both keys. Tested in
 - `zig fmt --check` clean across hand-written sources (generated
   cooked.zig is under `zig-out/etch-bench/`, excluded by `.gitignore`).
 - `zig build lint` not present at the time of the milestone (deferred
-  per the post-S1 lint milestone note in `engine-spec.md` §25.3 / S0).
+  per the post-S1 lint milestone note in `engine-phase-minus-1-archive.md` S0).
 - `commit-msg` hook green on every commit of the branch (Conventional
   Commits).
 

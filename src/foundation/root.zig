@@ -1,7 +1,7 @@
 //! Foundation — transversal sibling submodules consumed across the engine.
 //!
-//! Per `engine-spec.md` §3.5 and `engine-simd.md` §4, `math` and `simd` are
-//! sibling submodules with no mutual dependency. M0.6 shipped `simd` (the
+//! Per `engine-simd.md` § "Relation avec `foundation/math/`", `math` and `simd`
+//! are sibling submodules with no mutual dependency. M0.6 shipped `simd` (the
 //! batched-kernel module); M1.1.0 adds `math` — its first consumer is Forge 3D.
 
 /// General-purpose math types (Vec/Quat/Mat3/Aabb, generic over the scalar;

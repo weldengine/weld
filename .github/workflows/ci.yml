@@ -114,6 +114,27 @@ jobs:
     # windows-2025 ReleaseSafe recompile now exceeds 40 min. The restore/save
     # split below fixes the refresh mechanism; 55 min covers the residual
     # near-cold case on the slowest runner (Debug still fits in 20).
+    # E9 of the spec-reference reconciliation chore — the Zig cache is now
+    # restricted to the ReleaseSafe legs, and "Debug still fits in 20" is
+    # retired. It fell to the cost of SAVING, not of building. Measured on
+    # windows-2025 / Debug over two consecutive runs, both killed at the 20-min
+    # ceiling (25m0s then 25m1s — reproducible, not variance): the work is FLAT
+    # against the last green run of the same leg — `zig build` ~3 min,
+    # `zig build test` ~8 min — while `Save Zig cache (post-build)` went
+    # 39s -> 5m23s -> 7m39s. Cache steps ate ~8m40s for ~10m52s of useful work,
+    # and the bench.yml log on the same head names the mechanism: `Zig cache
+    # exceeded 2147483648 bytes (was 6214569092); purged contents before save`
+    # — 6.2 GB purged down to a 2 GB cap on every save. The two failures had
+    # different victims (the first died in the final save with every build and
+    # test step green, the second lost `zig build test` to the ceiling), which
+    # is what budget exhaustion looks like rather than a defect.
+    # The budget was NOT raised. This very comment block records the assumption
+    # breaking three times already — 10 -> 20 at M0.1, 20 -> 40 at M0.8 close,
+    # 40 -> 55 at the cache refresh chore — and a cache that does not fit under
+    # its own cap is not a cache, it is a tax. A cold Debug leg is ~11 min of
+    # work, ~45 % inside the 20-min budget on the slowest runner. ReleaseSafe
+    # keeps the cache: its near-cold recompile is what the 55-min budget exists
+    # for, and it is the leg the cache was added for in the first place.
     timeout-minutes: ${{ matrix.mode == 'ReleaseSafe' && 55 || 20 }}
     steps:
       - uses: actions/checkout@v6
@@ -156,7 +177,12 @@ jobs:
       # §7.3 whitelist note: actions/cache/restore@v5 and actions/cache/save@v5
       # are sub-actions of the already-whitelisted actions/cache@v5 (same
       # repo, same major, same portability notes).
+      # E9 — ReleaseSafe legs only, cf. the budget comment above: on Debug the
+      # save cost exceeded the build it protected and pushed the job past its
+      # ceiling. The Debug legs now run fully cold by design, so their build and
+      # test wall-times are the honest cold numbers rather than a cache lottery.
       - name: Restore Zig cache
+        if: matrix.mode == 'ReleaseSafe'
         id: zig-cache
         uses: actions/cache/restore@v5
         with:
@@ -193,6 +219,7 @@ jobs:
       # zon-level prefix fallback of the restore step matches both, newest
       # first.
       - name: Save Zig cache (post-build)
+        if: matrix.mode == 'ReleaseSafe'
         uses: actions/cache/save@v5
         with:
           path: .zig-cache
@@ -234,7 +261,10 @@ jobs:
       # With the restore/save split, `cache-hit` is true only on an exact
       # primary-key hit — per-sha, effectively never — so the diagnostic
       # signal is `cache_matched_key`: which fallback level actually seeded
-      # the run ('none' = fully cold).
+      # the run ('none' = fully cold). E9 — `cache_enabled` is reported
+      # alongside it, because since the cache is ReleaseSafe-only a Debug leg
+      # reports 'none' by design; without that line a future reader would read
+      # a deliberately cold leg as a broken cache.
       - name: Write CI timing report
         if: always()
         shell: bash
@@ -247,6 +277,7 @@ jobs:
             echo "mode=${{ matrix.mode }}"
             echo "zig_version=${{ env.ZIG_VERSION }}"
             echo "cache_key=zig-${{ matrix.os }}-${{ matrix.mode }}-${{ env.ZIG_VERSION }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}"
+            echo "cache_enabled=${{ matrix.mode == 'ReleaseSafe' }}"
             echo "cache_hit=${{ steps.zig-cache.outputs.cache-hit || 'false' }}"
             echo "cache_matched_key=${{ steps.zig-cache.outputs.cache-matched-key || 'none' }}"
             echo "build_seconds=${BUILD_SECONDS:-NA}"
@@ -270,7 +301,7 @@ jobs:
       # newer than the post-build save of the same run, so the zon-level
       # prefix fallback serves it first to the next run.
       - name: Save Zig cache (final)
-        if: always()
+        if: always() && matrix.mode == 'ReleaseSafe'
         uses: actions/cache/save@v5
         with:
           path: .zig-cache

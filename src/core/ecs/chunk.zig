@@ -53,7 +53,8 @@ const EntityId = entity_mod.EntityId;
 const Tick = tick_mod.Tick;
 
 /// Total chunk size — locked to 16 KiB to fit comfortably in L1D on modern
-/// x86-64, Apple Silicon, and ARM Cortex CPUs (cf. `engine-spec.md` §2.3).
+/// x86-64, Apple Silicon, and ARM Cortex CPUs (cf. `ARCH-005`; detail
+/// `engine-ecs-internals.md` § "Archetype Chunk Layout (SoA par composant)").
 pub const ChunkSize: usize = 16 * 1024;
 
 /// Required alignment of the chunk and of every SoA column within it.
