@@ -45,9 +45,8 @@ pub const Category = enum(u8) {
 
 /// FROZEN — see engine-phase-0-criteria.md C0.5 (M0.2)
 /// Lifecycle hint for resources. Drives the serialization /
-/// replication policy (cf. `ARCH-006`; detail `engine-ecs-internals.md`).
-/// Only carries meaning when `TypeInfo.category == .resource`; `null` for
-/// the other categories.
+/// replication policy (cf. `ARCH-006`). Only carries meaning when
+/// `TypeInfo.category == .resource`; `null` for the other categories.
 pub const Lifecycle = enum(u8) {
     /// `@config` — serialized in scene files, not in saves, not
     /// replicated.

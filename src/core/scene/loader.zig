@@ -10,7 +10,7 @@
 //! `world.addResource`).
 //!
 //! Tier discipline: imports `weld_core` internals only — never `weld_etch`
-//! (`ARCH-017`). The cook driver's Etch coupling lives in
+//! (`ARCH-013` + `ARCH-016`). The cook driver's Etch coupling lives in
 //! `src/etch/scene_cook.zig`; the loader consumes only the neutral byte image.
 //!
 //! ## Stages (gate-split, see `briefs/M1.0.5-scene-load.md`)
@@ -712,10 +712,10 @@ pub fn runtimeDeactivate(world: *World, gpa: std.mem.Allocator, entity: EntityId
 /// transactional (D2). An empty string keeps the zeroed slot (`ptr == 0`).
 ///
 /// Scene resources are *injected into the resource map at load*
-/// (`engine-scene-serialization.md`): the scene value is authoritative and
-/// overrides a value the running program already installed (e.g. a declared
-/// resource's defaults) rather than erroring; the overridden value's old
-/// string blocks are decreffed at commit.
+/// (`engine-scene-serialization.md` § "Resources de scène — install-or-overwrite"):
+/// the scene value is authoritative and overrides a value the running program
+/// already installed (e.g. a declared resource's defaults) rather than
+/// erroring; the overridden value's old string blocks are decreffed at commit.
 fn loadResources(
     world: *World,
     gpa: std.mem.Allocator,

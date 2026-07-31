@@ -64,7 +64,7 @@ Third spike of Phase −1. Validates the hypothesis that a Win32 window, a Wayla
 
 ## Spec documents to read first
 
-1. `engine-phase-minus-1-archive.md` Phase −1 / S2 (full canonical definition including post-conversation refinements), `ARCH-001`–`ARCH-006` (overview), `ARCH-017` (in-tree vs separable libs criterion), `ARCH-024` (8 keepers list — none added in S2).
+1. `engine-phase-minus-1-archive.md` Phase −1 / S2 (full canonical definition including post-conversation refinements), `ARCH-001`–`ARCH-006` (overview), `ARCH-017` (in-tree vs separable libs criterion), `engine-c-bindings.md` § "Liste des `.api.zig` manuels" (8 keepers list — none added in S2).
 2. `engine-c-bindings.md` — §1.1 to §1.4 (rationale registry-driven and S2 carve-out), §4.2 (idiomatic mapping rules — these are the conformance target for the S2 generators), §10.1 (S2→S3 sequencing).
 3. `engine-platform.md` — §1 (architecture, what belongs to the platform layer), §2 windowing and HiDPI subsections.
 4. `engine-mach-reference.md` — §5 (native windowing inspiration: Win32 ~800 lines direct, Wayland ~2100 lines + a tiny C callbacks file). Read as design inspiration, **not** as a code template — Weld's S2 attempts pure Zig callbacks via `callconv(.c)`.

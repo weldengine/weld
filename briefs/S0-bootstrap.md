@@ -49,7 +49,7 @@ S0 is the first milestone of Phase −1 and the first milestone of the entire We
 
 ## Spec documents to read first
 
-1. `engine-phase-minus-1-archive.md` (Phase −1 spike list, S0 entry) and `ARCH-017` (in-tree default, no `spec/` in repo)
+1. `engine-phase-minus-1-archive.md` (Phase −1 spike list, S0 entry) and `ARCH-017` (in-tree default; "no `spec/` in repo" — historical, no KB owner)
 2. `engine-development-workflow.md` — §2 (milestone model), §3 (brief format), §3.4 (`CLAUDE.md` lifecycle), §4 (git conventions: branches, tags, Conventional Commits, PRs, lefthook, squash-and-merge)
 3. `engine-zig-conventions.md` — §17 (Zig version policy: 0.16.x strict, patches accepted, minor refused)
 4. `engine-phase-0-criteria.md` — context on what comes next (informs `CLAUDE.md` content; no implementation impact at S0)
