@@ -506,13 +506,20 @@ test "a mesh world aabb transports its off-centre local box" {
         .entity = entityOf(1),
         .body_type = .static,
         .shape = corner,
-        .rotation = foundation.math.Quatf.fromAxisAngle(
-            foundation.math.Vec3.unit_z,
-            std.math.pi / @as(f32, 4),
-        ),
     });
+    // The rotation is set at SOLVER precision, not carried in the descriptor. The
+    // descriptor's rotation is `f32` by design (§1.11.8), so under `-Dphysics_f64` a
+    // pose that arrived that way is only `f32`-accurate — measured, an eighth turn built
+    // at `f32` lands about `1e-8` from the exact one, which swamps any tolerance
+    // expressed in ULPs of `Real` and would make this test measure the descriptor
+    // widening instead of the box construction it is written for. The eighth turn about
+    // `+Y` above is set the same way, and for the same reason.
+    bm.setRotation(corner_body, Quatr.fromAxisAngle(Vec3r.unit_z, std.math.pi / @as(Real, 4)));
     const corner_box = bm.bodyAabb(&store, corner_body).?;
-    const corner_tol: Real = 8 * std.math.floatEps(Real);
+    // The matrix entries are of order 1 and reached through a handful of operations
+    // (half-angle trigonometry, then `1 − 2·sin²`), so sixteen ULPs of `Real` is a pure
+    // float-noise budget on a unit-scale quantity — not a geometric tolerance.
+    const corner_tol: Real = 16 * std.math.floatEps(Real);
     try testing.expect(corner_box.min.approxEql(vr(-root_half, 0, 0), corner_tol));
     try testing.expect(corner_box.max.approxEql(vr(root_half, root_half, 1), corner_tol));
     try testing.expect(corner_box.max.toArray()[1] < @sqrt(@as(Real, 2)) - 0.5);
