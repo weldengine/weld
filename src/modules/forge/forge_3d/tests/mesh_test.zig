@@ -2534,11 +2534,12 @@ test "the shared query invariants hold with a mesh in the scene" {
     {
         var world = harness.World.init(vr(0, -9.81, 0), 1.0 / 60.0);
         defer world.deinit(gpa);
-        // The mesh is IN THE SCENE but OUT OF CONTACT, at `x = 1000`. Deliberate: mesh↔convex
-        // contact generation is gate E, so a mesh in contact would reach a `@panic` in
-        // `collidePair` and this test would be measuring that instead of the query. Far enough
-        // that no fat AABB ever overlaps, so `computePairs` never emits the pair at all — and
-        // the mesh still answers queries, which is the property under test.
+        // The mesh is IN THE SCENE but OUT OF CONTACT, at `x = 1000`, and that isolation is
+        // deliberate: the property under test is that a query reaches a SLEEPING body and
+        // leaves it asleep, so the mesh must not also be feeding the contact path. Far enough
+        // that no fat AABB ever overlaps, so `computePairs` never emits the pair at all, and a
+        // future change to mesh contact generation cannot move this test's result. The dynamic
+        // body rests on a static box pad instead, exercising the convex contact path.
         const mesh_vertices = [_]ApiVec3{
             av3(-4, 0, -4), av3(-4, 0, 4), av3(4, 0, -4), av3(4, 0, 4),
         };
