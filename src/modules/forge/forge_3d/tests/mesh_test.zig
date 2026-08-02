@@ -1895,3 +1895,798 @@ test "the frozen query surface carries the back-face mode and a filled subshape 
     const local: narrowphase.LocalHit(Real) = .{ .distance = 0, .normal = Vec3r.unit_y };
     try testing.expectEqual(@as(u32, 0), local.subshape_id);
 }
+
+// ---------------------------------------------------------------------------
+// The five remaining entries
+// ---------------------------------------------------------------------------
+
+/// The unit cube `[−1, 1]³` as twelve triangles, every one wound counter-clockwise seen
+/// from OUTSIDE so its outward normal points away from the centre. A CLOSED surface — which
+/// is what makes it the witness for the categorical rules: it encloses a volume, and the
+/// engine still refuses to call any point of that volume "inside".
+///
+/// Face by face, with the cross product `(v₁−v₀) × (v₂−v₀)` checked on the first triangle
+/// of each: `−Z` gives `(0,2,0) × (2,2,0) = (0,0,−4)`; `+Z` gives `(2,0,0) × (2,2,0) =
+/// `(0,0,4)`; `−X` gives `(0,0,2) × (0,2,2) = (−4,0,0)`; `+X` gives `(0,2,0) × (0,2,2) =
+/// `(4,0,0)`; `−Y` gives `(2,0,0) × (2,0,2) = (0,−4,0)`; `+Y` gives `(0,0,2) × (2,0,2) =
+/// `(0,4,0)`.
+const cube_vertices = [_]ApiVec3{
+    av3(-1, -1, -1), av3(1, -1, -1), av3(1, 1, -1), av3(-1, 1, -1),
+    av3(-1, -1, 1),  av3(1, -1, 1),  av3(1, 1, 1),  av3(-1, 1, 1),
+};
+const cube_indices = [_]u32{
+    0, 3, 2, 0, 2, 1, // −Z
+    4, 5, 6, 4, 6, 7, // +Z
+    0, 4, 7, 0, 7, 3, // −X
+    1, 2, 6, 1, 6, 5, // +X
+    0, 1, 5, 0, 5, 4, // −Y
+    3, 7, 6, 3, 6, 2, // +Y
+};
+
+/// A static body carrying the closed cube mesh, at the world origin.
+fn addCubeMesh(gpa: std.mem.Allocator, world: *harness.World, layer: u8, entity: u32) !api.BodyId {
+    const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{
+        .vertices = &cube_vertices,
+        .indices = &cube_indices,
+    } });
+    return world.addBody(gpa, .{
+        .shape = shape,
+        .body_type = .static,
+        .collision_layer = layer,
+        .entity = entityOf(entity),
+    });
+}
+
+test "shapeCast against a mesh gives the closed-form time of impact" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const body = try addCubeMesh(gpa, &world, 0, 0);
+
+    // Each probe is swept along `+X` from `x = −10` through the origin. The cube's `−X` face
+    // is at `x = −1`, so contact happens when the probe's own extent along `−X` reaches it:
+    //   sphere `r = 0.5`   → centre at `−1.5` → distance `−1.5 − (−10) = 8.5`
+    //   box `he = 0.5`     → face at `−1.5`   → distance `8.5`
+    //   capsule `r = 0.3`  → radial extent 0.3, so centre at `−1.3` → distance `8.7`
+    // The expected value is `9 − extent` where `extent` is the probe's reach along `−X`, and
+    // it is taken from the DESCRIPTOR's own `f32` field rather than written as a decimal.
+    // Measured at f64: `0.3` is not binary-exact, so `f32(0.3) = 0.30000001192092896` and the
+    // true answer is `8.699999988079071` — a decimal `8.7` fails by `1.2e-8`, which is the
+    // descriptor's quantisation and not the kernel's error. Same class as the far-field bound:
+    // a closed form over `f32` inputs must be computed from the `f32` values.
+    const probes = [_]struct { desc: api.ShapeDescriptor, x_extent: f32 }{
+        .{ .desc = .{ .sphere = .{ .radius = 0.5 } }, .x_extent = 0.5 },
+        .{ .desc = .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } }, .x_extent = 0.5 },
+        // A capsule's `half_height` is along `+Y` and contributes nothing along `+X`, which is
+        // why its answer differs from the sphere's: reading the extent off the wrong axis
+        // would give `0.5` here too.
+        .{ .desc = .{ .capsule = .{ .radius = 0.3, .half_height = 0.5 } }, .x_extent = 0.3 },
+    };
+    // The cast kernel is an iterative march, so the time of impact converges rather than
+    // landing bit-exact: the tolerance is the kernel's own convergence budget at unit scale,
+    // not a geometric slack.
+    const cast_tol: Real = if (Real == f32) 1e-4 else 1e-9;
+    for (probes) |probe| {
+        const shape = try world.store.createShape(gpa, probe.desc);
+        const hit = (try query.shapeCast(&world.bp, &world.bm, &world.store, .{
+            .shape = shape,
+            .origin = vr(-10, 0, 0),
+            .direction = Vec3r.unit_x,
+            .max_distance = 100,
+        })).?;
+        try testing.expectEqual(body, hit.body);
+        try testing.expectApproxEqAbs(9 - @as(Real, probe.x_extent), hit.distance, cast_tol);
+        // The normal FACES the sweep on every hit (§1.11.4), and the `−X` face's outward
+        // normal is `(−1, 0, 0)`, which already does.
+        try testing.expect(hit.normal.dot(Vec3r.unit_x) <= 0);
+        // The sub-shape is a real triangle index, in range and NOT the default. The index
+        // array lists the faces in order `−Z, +Z, −X, +X, −Y, +Y`, two triangles each, so the
+        // `−X` face is triangles 4 and 5.
+        try testing.expect(hit.subshape_id == 4 or hit.subshape_id == 5);
+
+        // RECEDING: the same probe cast the other way never reaches the cube.
+        try testing.expect((try query.shapeCast(&world.bp, &world.bm, &world.store, .{
+            .shape = shape,
+            .origin = vr(-10, 0, 0),
+            .direction = vr(-1, 0, 0),
+            .max_distance = 100,
+        })) == null);
+
+        // A ZERO DIRECTION is degenerate, not malformed: the guard is at TRUE ZERO and the
+        // answer is an empty result rather than an error (§1.11.11's domain table).
+        try testing.expect((try query.shapeCast(&world.bp, &world.bm, &world.store, .{
+            .shape = shape,
+            .origin = vr(-10, 0, 0),
+            .direction = Vec3r.zero,
+            .max_distance = 100,
+        })) == null);
+    }
+
+    // GRAZING, as a pair either side of the tangency so the verdict is a GEOMETRIC one and
+    // not a threshold's. A sphere of radius 0.5 swept along `+X` clears the cube exactly when
+    // its lowest point stays above the `+Y` face at `y = 1`, i.e. when its centre is above
+    // `1.5`:
+    //   centre `y = 1.55` → lowest point `1.05 > 1` → MISS
+    //   centre `y = 1.45` → lowest point `0.95 < 1` → HIT
+    // The two are 0.1 apart, five orders past any float noise at this scale, so neither
+    // verdict is a coin toss. The exact tangency at `1.5` is a measure-zero configuration the
+    // M1.1.2 classification notes already document and is deliberately not asserted.
+    const grazer = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+    try testing.expect((try query.shapeCast(&world.bp, &world.bm, &world.store, .{
+        .shape = grazer,
+        .origin = vr(-10, 1.55, 0),
+        .direction = Vec3r.unit_x,
+        .max_distance = 100,
+    })) == null);
+    const striker = (try query.shapeCast(&world.bp, &world.bm, &world.store, .{
+        .shape = grazer,
+        .origin = vr(-10, 1.45, 0),
+        .direction = Vec3r.unit_x,
+        .max_distance = 100,
+    })).?;
+    try testing.expect(striker.normal.dot(Vec3r.unit_x) <= 0);
+}
+
+test "a cast and an overlap from behind honour the mode, and the cast normal is flipped" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    _ = try addWallMesh(gpa, &world, 0, 0);
+    const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.25 } });
+    const cast_tol: Real = if (Real == f32) 1e-4 else 1e-9;
+
+    // The three walls face `−X`. A probe swept along `−X` from `x = 10` meets them from
+    // BEHIND. Under the DEFAULT `.ignore` nothing answers; under `.collide` the nearest wall
+    // at `x = 6` answers, at `10 − 6 − 0.25 = 3.75`.
+    try testing.expect((try query.shapeCast(&world.bp, &world.bm, &world.store, .{
+        .shape = probe,
+        .origin = vr(10, 0, 0),
+        .direction = vr(-1, 0, 0),
+        .max_distance = 100,
+    })) == null);
+    const behind = (try query.shapeCast(&world.bp, &world.bm, &world.store, .{
+        .shape = probe,
+        .origin = vr(10, 0, 0),
+        .direction = vr(-1, 0, 0),
+        .max_distance = 100,
+        .back_face_mode = .collide,
+    })).?;
+    try testing.expectApproxEqAbs(@as(Real, 3.75), behind.distance, cast_tol);
+    try testing.expectEqual(@as(u32, 2), behind.subshape_id);
+    // THE FLIP, asserted: the wall's outward normal is `(−1, 0, 0)` and the sweep runs along
+    // `(−1, 0, 0)`, so an unflipped normal would give `+1` here. The kernel's axis is the one
+    // facing the probe, so the returned normal is `(+1, 0, 0)` — the negation of the
+    // triangle's own — and the `normal · direction <= 0` invariant holds.
+    try testing.expect(behind.normal.approxEql(vr(1, 0, 0), 1e-3));
+    try testing.expectApproxEqAbs(@as(Real, -1), behind.normal.dot(vr(-1, 0, 0)), 1e-3);
+
+    // The SAME geometry approached from the FRONT answers in both modes, and there the normal
+    // is the triangle's own — which is what shows the flip is conditional on the facing.
+    inline for (.{ api.BackFaceMode.ignore, api.BackFaceMode.collide }) |mode| {
+        const front = (try query.shapeCast(&world.bp, &world.bm, &world.store, .{
+            .shape = probe,
+            .origin = vr(-10, 0, 0),
+            .direction = Vec3r.unit_x,
+            .max_distance = 100,
+            .back_face_mode = mode,
+        })).?;
+        // The nearest wall from the front is the one at `x = 2`, reached when the probe's
+        // surface touches it, i.e. its centre at `1.75`: `1.75 − (−10) = 11.75`.
+        try testing.expectApproxEqAbs(@as(Real, 11.75), front.distance, cast_tol);
+        try testing.expect(front.normal.approxEql(vr(-1, 0, 0), 1e-3));
+    }
+
+    // OVERLAP from behind — and the finding this measures is that the mode changes NOTHING
+    // observable here. A probe ENTIRELY behind a triangle's plane cannot intersect the
+    // triangle, which lies IN that plane, so every triangle the predicate discards is one GJK
+    // rejects anyway; and a probe that does overlap a triangle necessarily crosses its plane,
+    // so it STRADDLES and counts in both modes. Measured on both cases:
+    var buf: [4]api.BodyId = undefined;
+    inline for (.{ api.BackFaceMode.ignore, api.BackFaceMode.collide }) |mode| {
+        // Entirely behind the wall at `x = 6`, and 0.25 clear of it: nothing, either mode.
+        try testing.expectEqual(@as(u32, 0), try query.overlapShape(&world.bp, &world.bm, &world.store, .{
+            .shape = probe,
+            .position = vr(6.5, 0, 0),
+            .back_face_mode = mode,
+        }, &buf));
+        // Straddling that same wall: the body, either mode.
+        try testing.expectEqual(@as(u32, 1), try query.overlapShape(&world.bp, &world.bm, &world.store, .{
+            .shape = probe,
+            .position = vr(6.1, 0, 0),
+            .back_face_mode = mode,
+        }, &buf));
+    }
+}
+
+test "an overlap probe entirely behind is discarded, straddling is not" {
+    // **At the PREDICATE grain, which is the only grain where the two modes differ.**
+    //
+    // The finding, stated first because it governs what this test can assert: for
+    // `overlapShape` the back-face mode has NO observable effect outside GJK's own contact
+    // margin. A probe entirely in the rear half-space of a triangle's plane cannot intersect
+    // the triangle — the triangle lies in that plane — so every triangle the predicate
+    // discards is one GJK classifies `separated` regardless; and any probe that does overlap
+    // a triangle crosses its plane, hence STRADDLES, hence counts in both modes. What remains
+    // is a band a few ULPs wide: a probe whose core sits just behind the plane can be
+    // `.shallow` to GJK, and there `.ignore` drops it where `.collide` keeps it. The entry
+    // test above measures the two ends; this one measures the predicate itself, where the
+    // sign of the radius term is decidable.
+    //
+    // `n = +Z`, `v₀` on the plane `z = 0`, and a POINT core whose support IS its centre —
+    // chosen deliberately, because then the whole verdict rests on the radius term.
+    const n = vr(0, 0, 1);
+    const v0 = Vec3r.zero;
+
+    // ENTIRELY BEHIND: centre `z = −2`, `r = 1` → the probe reaches `z = −1`, short of the
+    // plane. Behind.
+    try testing.expect(narrowphase.triangle.probeIsBehind(Real, n, v0, vr(0, 0, -2), 1));
+
+    // STRADDLING: centre EXACTLY on the plane, `r = 1` → reach `+1`. NOT behind, and this is
+    // the assertion that decides the SIGN of the radius term. §1.11.17 and the brief write the
+    // predicate as `n · support_core − r < n · v₀`; with that form a point core on the plane
+    // gives `n·v₀ − 1 < n·v₀`, TRUE, so this probe would be classified BEHIND — which the same
+    // paragraph forbids one line later ("a probe straddling the plane touches from the front
+    // and counts in both modes"). With `+ r` it gives `n·v₀ + 1 < n·v₀`, FALSE. See the
+    // recorded deviation at `triangle.probeIsBehind`.
+    try testing.expect(!narrowphase.triangle.probeIsBehind(Real, n, v0, Vec3r.zero, 1));
+
+    // The BOUNDARY is on the front side: a probe reaching EXACTLY the plane is not behind,
+    // `< n·v₀` being strict.
+    try testing.expect(!narrowphase.triangle.probeIsBehind(Real, n, v0, vr(0, 0, -1), 1));
+
+    // And with a NON-POINT core the support point moves and the radius is zero — the other
+    // half of the term's job. A box core reaching `z = −0.5` is behind; reaching `z = +0.5` is
+    // not; reaching exactly `0` is not.
+    try testing.expect(narrowphase.triangle.probeIsBehind(Real, n, v0, vr(0, 0, -0.5), 0));
+    try testing.expect(!narrowphase.triangle.probeIsBehind(Real, n, v0, vr(0, 0, 0.5), 0));
+    try testing.expect(!narrowphase.triangle.probeIsBehind(Real, n, v0, Vec3r.zero, 0));
+
+    // WITHOUT the radius term the point-core cases collapse: a sphere would be judged by its
+    // CENTRE, so a probe straddling by up to its radius would read as behind. Restated here as
+    // the counter-factual the brief's Notes name — right for a box, wrong for a sphere and a
+    // capsule by exactly the radius.
+    try testing.expect(narrowphase.triangle.probeIsBehind(Real, n, v0, vr(0, 0, -0.5), 0));
+    try testing.expect(!narrowphase.triangle.probeIsBehind(Real, n, v0, vr(0, 0, -0.5), 1));
+}
+
+test "pointQuery never returns a mesh body" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    _ = try addCubeMesh(gpa, &world, 0, 0);
+    // A convex body beside it, so the entry is demonstrably working and the empty answer for
+    // the mesh is a decision rather than a broken query.
+    const sphere = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    const sphere_body = try world.addBody(gpa, .{
+        .shape = sphere,
+        .body_type = .static,
+        .position = harness.av3(10, 0, 0),
+        .entity = entityOf(1),
+    });
+
+    var buf: [8]api.BodyId = undefined;
+    // THE CATEGORICAL RULE. The cube is CLOSED and encloses `[−1, 1]³`, so the origin is
+    // inside the volume it bounds — and the mesh is still not returned, because a mesh is a
+    // SURFACE and membership is false everywhere (§1.11.17). This is the test that fails if
+    // someone adds solidity later, which is exactly what it is for.
+    try testing.expectEqual(@as(u32, 0), query.pointQuery(&world.bp, &world.bm, &world.store, Vec3r.zero, .{}, &buf));
+    // Not just at the centre: on a face, on an edge, on a vertex, and just inside each.
+    for ([_]Vec3r{
+        vr(0, 0, 0),       vr(0.999, 0, 0), vr(1, 0, 0),
+        vr(1, 1, 0),       vr(1, 1, 1),     vr(-1, -1, -1),
+        vr(0.5, 0.5, 0.5),
+    }) |point| {
+        try testing.expectEqual(@as(u32, 0), query.pointQuery(&world.bp, &world.bm, &world.store, point, .{}, &buf));
+    }
+    // The convex body DOES answer for a point inside it, so the entry itself works.
+    try testing.expectEqual(@as(u32, 1), query.pointQuery(&world.bp, &world.bm, &world.store, vr(10, 0, 0), .{}, &buf));
+    try testing.expectEqual(sphere_body, buf[0]);
+}
+
+test "closestPoint measures to the surface, outside and inside" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const body = try addCubeMesh(gpa, &world, 0, 0);
+    const surface_tol: Real = if (Real == f32) 1e-5 else 1e-12;
+
+    // OUTSIDE, on the `+X` axis at `x = 4`: the nearest surface is the `+X` face at `x = 1`,
+    // so the distance is exactly 3 and the closest point is `(1, 0, 0)`.
+    const outside = query.closestPoint(&world.bp, &world.bm, &world.store, vr(4, 0, 0), 100, .{}).?;
+    try testing.expectEqual(body, outside.body);
+    try testing.expectApproxEqAbs(@as(Real, 3), outside.distance, surface_tol);
+    try testing.expect(outside.position.approxEql(vr(1, 0, 0), surface_tol));
+
+    // INSIDE the volume the closed cube encloses, at `(0.5, 0, 0)`: the nearest surface is
+    // still the `+X` face, at distance `1 − 0.5 = 0.5`. NOT zero — a mesh has no interior, so
+    // there is no interiority for the distance to collapse through (§1.11.17). This is the
+    // assertion that separates a surface from a solid.
+    const inside = query.closestPoint(&world.bp, &world.bm, &world.store, vr(0.5, 0, 0), 100, .{}).?;
+    try testing.expectApproxEqAbs(@as(Real, 0.5), inside.distance, surface_tol);
+    try testing.expect(inside.position.approxEql(vr(1, 0, 0), surface_tol));
+
+    // At the CENTRE the six faces are equidistant at 1, so the distance is 1 whichever face
+    // wins — and it is still not zero.
+    const centre = query.closestPoint(&world.bp, &world.bm, &world.store, Vec3r.zero, 100, .{}).?;
+    try testing.expectApproxEqAbs(@as(Real, 1), centre.distance, surface_tol);
+
+    // ON the surface the distance IS zero, and that is a surface answer rather than an
+    // interior one — which is what makes the two previous assertions meaningful.
+    const on_face = query.closestPoint(&world.bp, &world.bm, &world.store, vr(1, 0, 0), 100, .{}).?;
+    try testing.expectApproxEqAbs(@as(Real, 0), on_face.distance, surface_tol);
+
+    // The bound is CLOSED and it prunes: nothing within 2 of a point 4 m from the surface.
+    try testing.expect(query.closestPoint(&world.bp, &world.bm, &world.store, vr(5, 0, 0), 2, .{}) == null);
+    try testing.expect(query.closestPoint(&world.bp, &world.bm, &world.store, vr(5, 0, 0), 4, .{}) != null);
+}
+
+test "overlapAabb stops at AABB granularity" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const body = try addCubeMesh(gpa, &world, 0, 0);
+    var buf: [8]api.BodyId = undefined;
+
+    // A box hugging the cube's `+X+Y+Z` CORNER from outside, `[1.5, 2]³`, does not meet the
+    // mesh's own box `[−1, 1]³` — so nothing is returned, and the entry is not simply
+    // answering "yes" to everything.
+    try testing.expectEqual(@as(u32, 0), query.overlapAabb(
+        &world.bp,
+        &world.bm,
+        &world.store,
+        vr(1.5, 1.5, 1.5),
+        vr(2, 2, 2),
+        .{},
+        &buf,
+    ));
+
+    // **THE DOCUMENTED APPROXIMATION, PINNED.** The cube is HOLLOW — twelve triangles, no
+    // interior geometry — so a small box strictly inside it, `[−0.2, 0.2]³`, touches NO
+    // triangle at all. It does meet the mesh's world AABB, and this entry stops at AABB
+    // GRANULARITY without descending into the mesh (§1.11.17), so the body IS returned.
+    //
+    // Pinned rather than tightened by accident: someone descending into the tree here would
+    // "fix" this to zero and silently change the entry's cost class and its contract.
+    try testing.expectEqual(@as(u32, 1), query.overlapAabb(
+        &world.bp,
+        &world.bm,
+        &world.store,
+        vr(-0.2, -0.2, -0.2),
+        vr(0.2, 0.2, 0.2),
+        .{},
+        &buf,
+    ));
+    try testing.expectEqual(body, buf[0]);
+    // And `overlapShape` on the same region does NOT return it, which is what proves the
+    // difference is the granularity and not the geometry: a small sphere at the centre of the
+    // hollow cube touches nothing.
+    const small = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.2 } });
+    try testing.expectEqual(@as(u32, 0), try query.overlapShape(&world.bp, &world.bm, &world.store, .{
+        .shape = small,
+        .position = Vec3r.zero,
+    }, &buf));
+}
+
+test "the cached world box answers as the pass does, and a teleport poisons it" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    // Built here rather than through `addCubeMesh` because the test needs the SHAPE handle to
+    // recompute the reference pass.
+    const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{
+        .vertices = &cube_vertices,
+        .indices = &cube_indices,
+    } });
+    const body = try world.addBody(gpa, .{
+        .shape = shape,
+        .body_type = .static,
+        .entity = entityOf(0),
+    });
+
+    // The cache is filled at `addBody`, and it must answer EXACTLY as the O(V) pass does —
+    // it IS that value, computed once. Measured at 72.8 µs against 11.5 ns on a
+    // 16 000-triangle mesh (`bench/forge_3d_mesh.zig`), which is why it exists at all.
+    // The cube spans `[−1, 1]³` and the body sits at the origin unrotated, so the pass is that
+    // box exactly.
+    const pass = bm_mod.worldAabb(world.store.get(shape).?, world.bm.position(body).?, world.bm.rotation(body).?);
+    try testing.expect(pass.min.eql(vr(-1, -1, -1)));
+    try testing.expect(pass.max.eql(vr(1, 1, 1)));
+
+    // The two answers agree on both sides of that bound, which is the equivalence the cache
+    // owes: a box meeting `[−1, 1]³` is accepted, one clear of it is not.
+    try testing.expect(world.bm.aabbOverlapsBody(&world.store, body, Aabbr.fromMinMax(vr(0.5, 0.5, 0.5), vr(3, 3, 3))).?);
+    try testing.expect(!world.bm.aabbOverlapsBody(&world.store, body, Aabbr.fromMinMax(vr(2, 2, 2), vr(3, 3, 3))).?);
+
+    // A TELEPORT of the static body POISONS the cache — `setPosition` cannot recompute it,
+    // holding no store — and the mesh arm falls back to the pass. So the answer stays CORRECT
+    // at the new pose, which is the whole point of poisoning rather than trusting: the cache's
+    // correctness rests on no promise about a milestone that does not exist yet.
+    world.bm.setPosition(body, vr(10, 0, 0));
+    try testing.expect(world.bm.aabbOverlapsBody(&world.store, body, Aabbr.fromMinMax(vr(9, -1, -1), vr(11, 1, 1))).?);
+    try testing.expect(!world.bm.aabbOverlapsBody(&world.store, body, Aabbr.fromMinMax(vr(-1, -1, -1), vr(1, 1, 1))).?);
+
+    // A DYNAMIC body's cache is NaN from creation and is never read, so the poisoning branch
+    // must leave it alone — which is what keeps the pose setters free on the solver's hot
+    // path. Observed through the answer, which stays correct as the sphere moves.
+    const sphere = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    const mover = try world.addBody(gpa, .{
+        .shape = sphere,
+        .body_type = .dynamic,
+        .entity = entityOf(1),
+    });
+    try testing.expect(world.bm.aabbOverlapsBody(&world.store, mover, Aabbr.fromMinMax(vr(-1, -1, -1), vr(1, 1, 1))).?);
+    world.bm.setPosition(mover, vr(50, 0, 0));
+    try testing.expect(!world.bm.aabbOverlapsBody(&world.store, mover, Aabbr.fromMinMax(vr(-1, -1, -1), vr(1, 1, 1))).?);
+    try testing.expect(world.bm.aabbOverlapsBody(&world.store, mover, Aabbr.fromMinMax(vr(49, -1, -1), vr(51, 1, 1))).?);
+}
+
+test "the five remaining entries agree exactly with brute force over the mesh" {
+    const gpa = testing.allocator;
+
+    for ([_]u64{ 101, 202, 303, 404 }) |seed| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        const shape = try randomMesh(gpa, &world.store, seed, 90);
+        const body = try world.addBody(gpa, .{
+            .shape = shape,
+            .body_type = .static,
+            .entity = entityOf(0),
+        });
+        const data = world.store.get(shape).?.mesh.?;
+        const n = data.triangleCount();
+        const probe_shape = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.6 } });
+        const probe = shape_mod.supportShape(world.store.get(probe_shape).?);
+
+        var prng = std.Random.DefaultPrng.init(seed ^ 0xD00D);
+        const rand = prng.random();
+        var buf: [8]api.BodyId = undefined;
+        var cast_answers: u32 = 0;
+        var overlap_answers: u32 = 0;
+        var aabb_answers: u32 = 0;
+        var closest_answers: u32 = 0;
+
+        for (0..40) |_| {
+            const target = data.triangleCentroid(rand.intRangeLessThan(u32, 0, n));
+            const away = vr(
+                rand.float(Real) * 2 - 1,
+                rand.float(Real) * 2 - 1,
+                rand.float(Real) * 2 - 1,
+            );
+            if (@reduce(.Max, @abs(away.data)) == 0) continue;
+            const offset = away.scale(1 / away.length());
+            const origin = target.add(offset.scale(25));
+            const raw_direction = offset.neg();
+            const direction = query.unitDirection(raw_direction).?;
+            const max_distance: Real = 60;
+
+            // --- shapeCast. The oracle is the SAME kernel over every triangle, in the same
+            // frames the adapter builds — `relpose` maps the body into the probe's frame and
+            // the direction is the probe-frame one — with the same `(distance, index)`
+            // tie-break the collector uses.
+            {
+                const relpose = narrowphase.RelativePose(Real).init(
+                    origin,
+                    Quatr.identity,
+                    world.bm.position(body).?,
+                    world.bm.rotation(body).?,
+                );
+                const dir_in_a = direction; // the probe's rotation is the identity here
+                var brute_best: ?Real = null;
+                var brute_index: u32 = 0;
+                var t: u32 = 0;
+                while (t < n) : (t += 1) {
+                    const hit = narrowphase.castShape(
+                        Real,
+                        probe,
+                        relpose,
+                        shape_mod.triangleSupportShape(data, t),
+                        dir_in_a,
+                        max_distance,
+                    ) orelse continue;
+                    if (brute_best == null or hit.distance < brute_best.? or
+                        (hit.distance == brute_best.? and t < brute_index))
+                    {
+                        brute_best = hit.distance;
+                        brute_index = t;
+                    }
+                }
+                const got = try query.shapeCast(&world.bp, &world.bm, &world.store, .{
+                    .shape = probe_shape,
+                    .origin = origin,
+                    .direction = raw_direction,
+                    .max_distance = max_distance,
+                    .back_face_mode = .collide,
+                });
+                if (brute_best) |expected| {
+                    try testing.expect(got != null);
+                    try testing.expectEqual(expected, got.?.distance);
+                    try testing.expectEqual(brute_index, got.?.subshape_id);
+                    cast_answers += 1;
+                } else {
+                    try testing.expect(got == null);
+                }
+            }
+
+            // --- overlapShape, at the probe's own pose: the body is returned exactly when SOME
+            // triangle is not `separated` from the probe.
+            {
+                var brute_any = false;
+                var t: u32 = 0;
+                while (t < n) : (t += 1) {
+                    const result = narrowphase.gjk(
+                        Real,
+                        probe,
+                        target,
+                        Quatr.identity,
+                        shape_mod.triangleSupportShape(data, t),
+                        world.bm.position(body).?,
+                        world.bm.rotation(body).?,
+                    );
+                    if (result.status != .separated) {
+                        brute_any = true;
+                        break;
+                    }
+                }
+                const count = try query.overlapShape(&world.bp, &world.bm, &world.store, .{
+                    .shape = probe_shape,
+                    .position = target,
+                    .back_face_mode = .collide,
+                }, &buf);
+                try testing.expectEqual(@as(u32, if (brute_any) 1 else 0), count);
+                if (brute_any) overlap_answers += 1;
+            }
+
+            // --- overlapAabb. The oracle is the mesh's own world box, WITHOUT descending —
+            // which is the documented granularity of this entry (§1.11.17), so the oracle is
+            // the contract rather than a tighter computation.
+            {
+                const half: Real = 3;
+                const query_min = target.sub(Vec3r.splat(half));
+                const query_max = target.add(Vec3r.splat(half));
+                const brute = bm_mod.worldAabb(
+                    world.store.get(shape).?,
+                    world.bm.position(body).?,
+                    world.bm.rotation(body).?,
+                ).overlaps(Aabbr.fromMinMax(query_min, query_max));
+                const count = query.overlapAabb(&world.bp, &world.bm, &world.store, query_min, query_max, .{}, &buf);
+                try testing.expectEqual(@as(u32, if (brute) 1 else 0), count);
+                if (brute) aabb_answers += 1;
+            }
+
+            // --- pointQuery. The oracle is the CATEGORICAL rule: never, for any point.
+            {
+                try testing.expectEqual(@as(u32, 0), query.pointQuery(&world.bp, &world.bm, &world.store, target, .{}, &buf));
+                try testing.expectEqual(@as(u32, 0), query.pointQuery(&world.bp, &world.bm, &world.store, origin, .{}, &buf));
+            }
+
+            // --- closestPoint. The oracle is the shared per-triangle kernel over every
+            // triangle, with the same tie-break.
+            {
+                var brute_best: ?Real = null;
+                var brute_index: u32 = 0;
+                var t: u32 = 0;
+                while (t < n) : (t += 1) {
+                    const candidate = bm_mod.closestPointOnCore(
+                        origin,
+                        shape_mod.triangleSupportShape(data, t),
+                        world.bm.position(body).?,
+                        world.bm.rotation(body).?,
+                    );
+                    if (brute_best == null or candidate.distance < brute_best.? or
+                        (candidate.distance == brute_best.? and t < brute_index))
+                    {
+                        brute_best = candidate.distance;
+                        brute_index = t;
+                    }
+                }
+                const got = query.closestPoint(&world.bp, &world.bm, &world.store, origin, 1000, .{});
+                try testing.expect(got != null);
+                try testing.expectEqual(brute_best.?, got.?.distance);
+                try testing.expectEqual(brute_index, got.?.subshape_id);
+                closest_answers += 1;
+            }
+        }
+
+        // Non-vacuous on every family that CAN answer: agreeing on the empty set proves
+        // nothing, and `pointQuery`'s answer is empty by design so it is excluded from this
+        // guard rather than silently counted.
+        try testing.expect(cast_answers > 20);
+        try testing.expect(overlap_answers > 20);
+        try testing.expect(aabb_answers > 20);
+        try testing.expect(closest_answers > 20);
+    }
+}
+
+test "the shared query invariants hold with a mesh in the scene" {
+    const gpa = testing.allocator;
+    var buf: [8]api.BodyId = undefined;
+    var hits: [8]query.RayHit = undefined;
+
+    // --- OBJECT MASK and EXCLUSIONS, on the mesh itself.
+    {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        const body = try addWallMesh(gpa, &world, 3, 0);
+        const q = query.RayQuery{ .origin = Vec3r.zero, .direction = Vec3r.unit_x, .max_distance = 100 };
+
+        // Layer 3 is in the mask, so the mesh answers; take it out and it does not. The mask
+        // is on the SUB-SHAPE's layer, which for one shape per body is the body's.
+        try testing.expect(query.raycast(&world.bp, &world.bm, &world.store, q) != null);
+        var masked = q;
+        masked.filter.layer_mask = ~(@as(u32, 1) << 3);
+        try testing.expect(query.raycast(&world.bp, &world.bm, &world.store, masked) == null);
+        try testing.expect(!query.raycastAny(&world.bp, &world.bm, &world.store, masked));
+        try testing.expectEqual(@as(u32, 0), query.raycastAll(&world.bp, &world.bm, &world.store, masked, &hits));
+
+        // EXCLUSIONS, tested on the body upstream of the kernel — the dominant case being
+        // "myself".
+        var excluded = q;
+        const exclude_list = [_]api.BodyId{body};
+        excluded.filter.exclude = &exclude_list;
+        try testing.expect(query.raycast(&world.bp, &world.bm, &world.store, excluded) == null);
+        // And the other entries honour both, so the filter is shared rather than reimplemented.
+        try testing.expectEqual(@as(u32, 0), query.pointQuery(&world.bp, &world.bm, &world.store, vr(2, 0, 0), .{ .layer_mask = 0 }, &buf));
+        try testing.expectEqual(@as(u32, 0), query.overlapAabb(&world.bp, &world.bm, &world.store, vr(-1, -1, -1), vr(7, 1, 1), .{ .exclude = &exclude_list }, &buf));
+        try testing.expect(query.closestPoint(&world.bp, &world.bm, &world.store, vr(0, 0, 0), 100, .{ .exclude = &exclude_list }) == null);
+    }
+
+    // --- A SLEEPING BODY ANSWERS AND STAYS ASLEEP, with a mesh in the scene.
+    {
+        var world = harness.World.init(vr(0, -9.81, 0), 1.0 / 60.0);
+        defer world.deinit(gpa);
+        // The mesh is IN THE SCENE but OUT OF CONTACT, at `x = 1000`. Deliberate: mesh↔convex
+        // contact generation is gate E, so a mesh in contact would reach a `@panic` in
+        // `collidePair` and this test would be measuring that instead of the query. Far enough
+        // that no fat AABB ever overlaps, so `computePairs` never emits the pair at all — and
+        // the mesh still answers queries, which is the property under test.
+        const mesh_vertices = [_]ApiVec3{
+            av3(-4, 0, -4), av3(-4, 0, 4), av3(4, 0, -4), av3(4, 0, 4),
+        };
+        const mesh_indices = [_]u32{ 0, 1, 2, 2, 1, 3 };
+        const mesh_shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{
+            .vertices = &mesh_vertices,
+            .indices = &mesh_indices,
+        } });
+        const mesh_body = try world.addBody(gpa, .{
+            .shape = mesh_shape,
+            .body_type = .static,
+            .position = harness.av3(1000, 0, 0),
+            .entity = entityOf(0),
+        });
+        // A static box pad the dynamic body actually rests on, so the contact path is the
+        // convex one.
+        const pad_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(4, 0.5, 4) } });
+        _ = try world.addBody(gpa, .{
+            .shape = pad_shape,
+            .body_type = .static,
+            .position = harness.av3(0, -0.5, 0),
+            .restitution = 0,
+            .entity = entityOf(1),
+        });
+        const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+        const box = try world.addBody(gpa, .{
+            .shape = box_shape,
+            .position = harness.av3(0, 0.6, 0),
+            .body_type = .dynamic,
+            .mass = 1,
+            .restitution = 0,
+            .entity = entityOf(2),
+        });
+
+        var t: u32 = 0;
+        const asleep = while (t < 600) : (t += 1) {
+            try world.step(gpa);
+            if (world.bm.isSleeping(box).?) break true;
+        } else false;
+        try testing.expect(asleep);
+
+        // The sleeper ANSWERS — its proxy is still in the tree, step 10 skips its update and
+        // not its presence — and being read is not a solicitation (§1.8.4), so it stays asleep.
+        // Structural, not merely observed: every entry takes `*const BodyManager` and could
+        // not wake anything if it tried.
+        const down = query.RayQuery{ .origin = vr(0, 5, 0), .direction = vr(0, -1, 0), .max_distance = 100 };
+        try testing.expect(query.raycast(&world.bp, &world.bm, &world.store, down) != null);
+        try testing.expect(world.bm.isSleeping(box).?);
+        // The MESH answers too, from its own place, and the sleeper is still asleep after.
+        const at_mesh = query.RayQuery{ .origin = vr(1000, 5, 0), .direction = vr(0, -1, 0), .max_distance = 100 };
+        const mesh_hit = query.raycast(&world.bp, &world.bm, &world.store, at_mesh).?;
+        try testing.expectEqual(mesh_body, mesh_hit.body);
+        try testing.expectEqual(@as(Real, 5), mesh_hit.distance);
+        try testing.expect(world.bm.isSleeping(box).?);
+        _ = query.raycastAll(&world.bp, &world.bm, &world.store, down, &hits);
+        _ = query.pointQuery(&world.bp, &world.bm, &world.store, vr(0, 0.5, 0), .{}, &buf);
+        _ = query.overlapAabb(&world.bp, &world.bm, &world.store, vr(-1, 0, -1), vr(1, 1, 1), .{}, &buf);
+        _ = query.closestPoint(&world.bp, &world.bm, &world.store, vr(0, 3, 0), 100, .{});
+        try testing.expect(world.bm.isSleeping(box).?);
+    }
+
+    // --- INVARIANCE UNDER CREATION-ORDER PERMUTATION, and two BIT-IDENTICAL runs.
+    {
+        // Two mesh bodies on distinct ENTITIES, built in both orders. The answer is keyed on
+        // `(distance, entity, BodyId)` (§1.11.14), so it must not follow the order the scene
+        // was assembled in — `BodyId` being a slot index, it encodes exactly that order.
+        const Answer = struct { entity: api.EntityId, distance: Real, subshape: u32 };
+        var answers: [2]Answer = undefined;
+        for (0..2) |order| {
+            var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+            defer world.deinit(gpa);
+            // The NEAR mesh is at the origin (walls at 2, 4, 6) and the FAR one is 20 m out.
+            const near_first = order == 0;
+            const first_entity: u32 = if (near_first) 0 else 1;
+            const second_entity: u32 = if (near_first) 1 else 0;
+            const first_x: f32 = if (near_first) 0 else 20;
+            const second_x: f32 = if (near_first) 20 else 0;
+            inline for (.{ 0, 1 }) |slot| {
+                const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{
+                    .vertices = &wall_vertices,
+                    .indices = &wall_indices,
+                } });
+                _ = try world.addBody(gpa, .{
+                    .shape = shape,
+                    .body_type = .static,
+                    .position = harness.av3(if (slot == 0) first_x else second_x, 0, 0),
+                    .entity = entityOf(if (slot == 0) first_entity else second_entity),
+                });
+            }
+            const q = query.RayQuery{ .origin = Vec3r.zero, .direction = Vec3r.unit_x, .max_distance = 100 };
+            const hit = query.raycast(&world.bp, &world.bm, &world.store, q).?;
+            answers[order] = .{ .entity = world.bm.entity(hit.body).?, .distance = hit.distance, .subshape = hit.subshape_id };
+
+            // TWO IDENTICAL RUNS on the same world are bit-identical, on every field.
+            const again = query.raycast(&world.bp, &world.bm, &world.store, q).?;
+            try testing.expectEqual(hit.distance, again.distance);
+            try testing.expectEqual(hit.subshape_id, again.subshape_id);
+            try testing.expectEqual(hit.body, again.body);
+            try testing.expect(hit.position.eql(again.position));
+            try testing.expect(hit.normal.eql(again.normal));
+        }
+        // The nearest mesh is the one at the origin, entity 0 in both orders — the ENTITY, not
+        // the `BodyId`, which differs between the two runs by construction.
+        try testing.expectEqual(answers[0].entity.index, answers[1].entity.index);
+        try testing.expectEqual(answers[0].distance, answers[1].distance);
+        try testing.expectEqual(answers[0].subshape, answers[1].subshape);
+        try testing.expectEqual(@as(u32, 0), answers[0].entity.index);
+    }
+}
+
+test "the frozen surface carries the back-face mode on the two probe entries" {
+    // EXTENDED field by field on top of the gate C pin, which stays as it is.
+    const cast = api.ShapeCastQuery{ .shape = 0, .origin = ApiVec3.zero, .direction = ApiVec3.unit_x, .max_distance = 1 };
+    try testing.expectEqual(api.BackFaceMode.ignore, cast.back_face_mode);
+    try testing.expectEqual(api.BackFaceMode, @TypeOf(cast.back_face_mode));
+
+    const overlap = api.OverlapQuery{ .shape = 0, .position = ApiVec3.zero };
+    try testing.expectEqual(api.BackFaceMode.ignore, overlap.back_face_mode);
+    try testing.expectEqual(api.BackFaceMode, @TypeOf(overlap.back_face_mode));
+
+    // THE THREE ENTRIES THAT DO NOT CARRY IT, asserted as an ABSENCE so the omission is a
+    // decision on the record rather than something a later reader might "complete for
+    // symmetry" (§1.11.17): `overlapAabb` sees no triangle, `pointQuery` never returns a mesh,
+    // and `closestPoint`'s distance to a surface is not signed. The first two take loose
+    // arguments rather than a query struct, so the assertion is on the one that has a struct.
+    try testing.expect(!@hasField(api.ClosestPointResult, "back_face_mode"));
+
+    // The solver-side mirrors carry it at the same name and default, and the hit types carry
+    // `subshape_id` — which the mesh is the first shape to FILL, on all three families.
+    const solver_cast = query.CastQuery{ .shape = 0, .origin = Vec3r.zero, .direction = Vec3r.unit_x, .max_distance = 1 };
+    try testing.expectEqual(api.BackFaceMode.ignore, solver_cast.back_face_mode);
+    const solver_overlap = query.OverlapRequest{ .shape = 0, .position = Vec3r.zero };
+    try testing.expectEqual(api.BackFaceMode.ignore, solver_overlap.back_face_mode);
+
+    const cast_hit = api.ShapeCastHit{
+        .entity = entityOf(0),
+        .body = 0,
+        .position = ApiVec3.zero,
+        .normal = ApiVec3.unit_y,
+        .distance = 1,
+    };
+    try testing.expectEqual(@as(u32, 0), cast_hit.subshape_id);
+    try testing.expectEqual(@as(u32, 0), cast_hit.cast_subshape_id);
+    const closest = api.ClosestPointResult{ .entity = entityOf(0), .body = 0, .position = ApiVec3.zero, .distance = 1 };
+    try testing.expectEqual(@as(u32, 0), closest.subshape_id);
+    // And the body-grained adapters gained it too, which is where the value comes from.
+    const body_cast: bm_mod.BodyCastHit = .{ .distance = 0, .position = Vec3r.zero, .normal = Vec3r.unit_y };
+    try testing.expectEqual(@as(u32, 0), body_cast.subshape_id);
+    const body_closest: bm_mod.BodyClosestPoint = .{ .distance = 0, .position = Vec3r.zero };
+    try testing.expectEqual(@as(u32, 0), body_closest.subshape_id);
+}

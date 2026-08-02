@@ -48,6 +48,10 @@ pub const Probe = union(enum) {
         shape: narrowphase.SupportShape(Real),
         position: Vec3r,
         rotation: Quatr,
+        /// Which side of a mesh TRIANGLE answers. For an overlap the test is whether the
+        /// probe lies ENTIRELY in the rear half-space of the triangle's plane; a probe
+        /// STRADDLING it touches from the front and counts in both modes (§1.11.17).
+        back_face_mode: api.BackFaceMode = .ignore,
     },
     /// Overlap of a world AABB: the body's TIGHT world AABB, faces included — or, for
     /// an unbounded body, the corner predicate, which has no box to compare
@@ -80,7 +84,7 @@ pub const OverlapCollector = struct {
         if (!self.filter.accepts(layer, body)) return;
 
         const accepted = switch (self.probe) {
-            .shape => |s| self.bm.overlapShapeBody(self.store, body, s.shape, s.position, s.rotation) orelse return,
+            .shape => |s| self.bm.overlapShapeBody(self.store, body, s.shape, s.position, s.rotation, s.back_face_mode) orelse return,
             // Through the adapter, NOT `bodyAabb`: a candidate may be a half-space, which
             // has no world AABB at all, and `bodyAabb` asserts the convex class (E5 item
             // 6). The adapter's convex arm is still the body's TIGHT world box — the fat
@@ -158,6 +162,8 @@ pub const ClosestPointCollector = struct {
         const hit: ClosestPointHit = .{
             .body = body,
             .entity = owner,
+            // The sub-shape carrying the closest point — a mesh's triangle index (§1.11.16).
+            .subshape_id = local.subshape_id,
             .position = local.position,
             .distance = local.distance,
         };

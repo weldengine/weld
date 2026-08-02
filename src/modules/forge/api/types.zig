@@ -347,6 +347,10 @@ pub const ShapeCastQuery = struct {
     max_distance: f32,
     /// Object-layer mask + exclusions.
     filter: PhysicsQueryFilter = .{},
+    /// Which side of a mesh triangle answers. Vacuous on every other shape. Under
+    /// `.collide` the normal a back-face hit returns FACES the sweep, which is what the two
+    /// real consumers — slope and ground probe — read.
+    back_face_mode: BackFaceMode = .ignore,
 };
 
 /// An overlap test of an arbitrary shape. Same construction as the cast: the
@@ -360,6 +364,11 @@ pub const OverlapQuery = struct {
     rotation: Quatf = Quatf.identity,
     /// Object-layer mask + exclusions.
     filter: PhysicsQueryFilter = .{},
+    /// Which side of a mesh triangle answers, and here it is SIGNIFICANT rather than
+    /// incidental: under `.ignore` a triangle whose probe lies ENTIRELY in the rear
+    /// half-space of its plane is discarded and the body is not returned, while a probe
+    /// STRADDLING the plane touches from the front and counts in both modes (§1.11.17).
+    back_face_mode: BackFaceMode = .ignore,
 };
 
 /// One ray hit.

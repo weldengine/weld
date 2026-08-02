@@ -83,6 +83,11 @@ pub const Body = body.Body;
 /// SoA store of rigid bodies with generational handles.
 pub const BodyManager = body_manager.BodyManager;
 
+/// Exact world AABB of a shape at a pose — the body-free form `BodyManager.bodyAabb` wraps.
+/// Re-exported at `Real` for the mesh bench, which measures its O(V) pass against the
+/// per-body cache that could replace it (M1.1.11.1).
+pub const worldAabb = body_manager.worldAabb;
+
 // --- Pipeline (shared by both solver branches) ---
 
 /// Dynamic AABB tree (BVH) at solver precision.

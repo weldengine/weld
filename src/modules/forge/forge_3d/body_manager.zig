@@ -78,6 +78,9 @@ const ApiQuat = @import("foundation").math.Quatf;
 pub const BodyCastHit = struct {
     /// Distance along the cast direction at first touch, in `[0, max_distance]`.
     distance: Real,
+    /// Which SUB-SHAPE of the hit body was touched — a mesh's triangle index, and `0` for a
+    /// shape with no sub-shape, which consumes zero bits of the path (§1.11.16).
+    subshape_id: u32 = 0,
     /// World-space witness on the HIT BODY's inflated surface.
     position: Vec3r,
     /// World-space outward unit normal of the hit body; `normal · direction <= 0`.
@@ -91,6 +94,9 @@ pub const BodyCastHit = struct {
 pub const BodyClosestPoint = struct {
     /// Distance from the queried point to the body's solid; 0 inside it.
     distance: Real,
+    /// Which SUB-SHAPE carries the closest point — a mesh's triangle index, `0` otherwise
+    /// (§1.11.16).
+    subshape_id: u32 = 0,
     /// World-space point on the body's surface, or the queried point when inside.
     position: Vec3r,
 };
@@ -233,6 +239,17 @@ pub const BodyManager = struct {
                 .half_space => std.math.nan(Real),
             },
             .entity = desc.entity,
+            // Filled ONLY for a mesh, whose pose is frozen by `error.ShapeMustBeStatic` and
+            // whose world box is an O(V) pass the query path would otherwise repeat per
+            // candidate (see `Body.world_aabb` for the measurement). NaN elsewhere, so a
+            // wrong read is loud rather than plausible. Exhaustive on the class, no `else`.
+            .world_aabb = switch (shape.class()) {
+                .triangle_soup => worldAabb(shape, convVec3(desc.position), rotation_r),
+                .convex, .half_space => Aabbr.fromMinMax(
+                    Vec3r.splat(std.math.nan(Real)),
+                    Vec3r.splat(std.math.nan(Real)),
+                ),
+            },
         };
         try self.alloc.ensureUnusedCapacity(gpa, 1);
         try self.bodies.ensureUnusedCapacity(gpa, 1);
@@ -429,6 +446,7 @@ pub const BodyManager = struct {
     pub fn setPosition(self: *BodyManager, id: BodyId, new_position: Vec3r) void {
         const idx = self.alloc.validate(id) orelse return;
         self.bodies.items(.position)[idx] = new_position;
+        self.poisonCachedBox(idx);
     }
 
     /// Set the world-space orientation (mirror of `setPosition`; the caller owns
@@ -439,6 +457,23 @@ pub const BodyManager = struct {
     pub fn setRotation(self: *BodyManager, id: BodyId, new_rotation: Quatr) void {
         const idx = self.alloc.validate(id) orelse return;
         self.bodies.items(.rotation)[idx] = new_rotation;
+        self.poisonCachedBox(idx);
+    }
+
+    /// Invalidate the cached world box of a NON-DYNAMIC body whose pose has just been
+    /// written — see `Body.world_aabb`.
+    ///
+    /// Gated on the body type so the hot path pays nothing that matters: the two pose
+    /// setters are called every tick by the NGS pass, and always on DYNAMIC bodies, whose
+    /// cache is NaN already and is left untouched. A non-dynamic body reaching here means an
+    /// external teleport, which is the one thing that can stale the cache; poisoning it makes
+    /// the mesh arm fall back to the O(V) pass, which is correct and merely slower.
+    fn poisonCachedBox(self: *BodyManager, idx: u24) void {
+        if (self.bodies.items(.body_type)[idx] == .dynamic) return;
+        self.bodies.items(.world_aabb)[idx] = Aabbr.fromMinMax(
+            Vec3r.splat(std.math.nan(Real)),
+            Vec3r.splat(std.math.nan(Real)),
+        );
     }
 
     /// Accumulate a world-space force (N) into the body's per-tick force
@@ -630,6 +665,7 @@ pub const BodyManager = struct {
         cast_rotation: Quatr,
         direction: Vec3r,
         max_distance: Real,
+        back_face_mode: api.BackFaceMode,
     ) ?BodyCastHit {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
@@ -649,6 +685,9 @@ pub const BodyManager = struct {
         // fixed direction `−n` is a constant of the whole sweep, and one support call
         // answers it in closed form. `RelativePose` already carries B-relative-to-A,
         // which is exactly the pose the transport needs.
+        // The sub-shape the mesh arm resolves, and zero for the two arms whose shapes carry
+        // no sub-shape at all (§1.11.16).
+        var subshape_id: u32 = 0;
         const hit = switch (shape.class()) {
             .convex => narrowphase.castShape(
                 Real,
@@ -665,11 +704,46 @@ pub const BodyManager = struct {
                 local_dir,
                 max_distance,
             ),
-            .triangle_soup => @panic("mesh shape cast: not yet wired"),
+            // THREE FRAMES are in play here, and naming them is what keeps the arm readable:
+            // the KERNEL works in the cast shape's frame (A's), where `relpose` and
+            // `local_dir` already live; the TRAVERSAL works in the BODY's local frame, where
+            // the mesh's vertices and node boxes live; and the caller works in WORLD. So the
+            // probe's box and the sweep direction are transported into the body's frame for
+            // the traversal, while the kernel call is untouched — `castShape` takes B in B's
+            // own frame plus `relpose`, which is exactly what a triangle support shape is.
+            //
+            // The swept traversal is §1.11.10's, verbatim: nodes inflated by the probe's
+            // half-extents, the ray starting at the CENTRE of the probe's box — not at its
+            // position, which for a decentred probe is a different point.
+            .triangle_soup => blk: {
+                const data = shape.mesh.?;
+                const inv_rot = self.bodies.items(.rotation)[idx].conjugate();
+                const probe_box = supportShapeAabb(
+                    cast_shape,
+                    inv_rot.rotateVec3(cast_origin.sub(self.bodies.items(.position)[idx])),
+                    inv_rot.mul(cast_rotation),
+                );
+                const sweep_dir = inv_rot.rotateVec3(direction);
+                var collector = MeshCastCollector{
+                    .data = data,
+                    .cast_shape = cast_shape,
+                    .relpose = relpose,
+                    .direction_in_a = local_dir,
+                    .sweep_direction_local = sweep_dir,
+                    .back_face_mode = back_face_mode,
+                    .bound = max_distance,
+                };
+                _ = data.traverseCast(RayR.init(probe_box.center(), sweep_dir), probe_box.halfExtents(), &collector);
+                subshape_id = collector.best_triangle;
+                break :blk collector.best;
+            },
         } orelse return null;
         return .{
             // A distance is invariant under a rigid transform, so it needs no mapping.
             .distance = hit.distance,
+            // The mesh arm is the only one that fills this; the other two carry zero
+            // sub-shapes, so the default IS the value there (§1.11.16).
+            .subshape_id = subshape_id,
             .position = cast_rotation.rotateVec3(hit.point).add(cast_origin),
             .normal = cast_rotation.rotateVec3(hit.normal),
         };
@@ -690,6 +764,7 @@ pub const BodyManager = struct {
         query_shape: narrowphase.SupportShape(Real),
         query_position: Vec3r,
         query_rotation: Quatr,
+        back_face_mode: api.BackFaceMode,
     ) ?bool {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
@@ -722,7 +797,39 @@ pub const BodyManager = struct {
                 ),
                 query_shape,
             ) <= 0,
-            .triangle_soup => @panic("mesh shape overlap: not yet wired"),
+            // The candidate set is the probe's box in the BODY's local frame and the exact
+            // kernel is GJK on the cores, one triangle at a time — the probe against
+            // `Core.triangle`, with no kernel of its own and no threshold of its own
+            // (§1.11.12: the contact margin is GJK's classification margin).
+            .triangle_soup => {
+                const data = shape.mesh.?;
+                const inv_rot = self.bodies.items(.rotation)[idx].conjugate();
+                const probe_box = supportShapeAabb(
+                    query_shape,
+                    inv_rot.rotateVec3(query_position.sub(self.bodies.items(.position)[idx])),
+                    inv_rot.mul(query_rotation),
+                );
+                var collector = MeshOverlapCollector{
+                    .data = data,
+                    .probe = query_shape,
+                    .probe_position = query_position,
+                    .probe_rotation = query_rotation,
+                    // B is the PROBE expressed in A = the body's frame, which is the frame the
+                    // triangle's normal and its `v₀` are in — so the back-face predicate's
+                    // three operands all live in one frame and none is converted twice.
+                    .probe_in_body = narrowphase.RelativePose(Real).init(
+                        self.bodies.items(.position)[idx],
+                        self.bodies.items(.rotation)[idx],
+                        query_position,
+                        query_rotation,
+                    ),
+                    .body_position = self.bodies.items(.position)[idx],
+                    .body_rotation = self.bodies.items(.rotation)[idx],
+                    .back_face_mode = back_face_mode,
+                };
+                _ = data.traverseAabb(probe_box, &collector);
+                return collector.found;
+            },
         }
     }
 
@@ -751,8 +858,30 @@ pub const BodyManager = struct {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
         return switch (shape.class()) {
+            // A MESH ANSWERS EXACTLY AS A BOUNDED CONVEX DOES, and the two arms are written
+            // as one because they are one answer: the body's TIGHT world AABB against the
+            // queried box, faces included. This entry stops at AABB GRANULARITY and does NOT
+            // descend into the mesh (§1.11.17) — so a box that meets the mesh's own box
+            // without touching a triangle DOES return the body, and that approximation is
+            // pinned by a test rather than tightened by accident. What §1.11.12 forbids is an
+            // answer that depends on a tuning constant, and the mesh's own box is not one.
+            // A CONVEX recomputes: its pose moves every tick, so a cache would need an
+            // invalidation this design deliberately does not have, and the four primitives
+            // cost a handful of operations anyway.
             .convex => worldAabb(shape, self.bodies.items(.position)[idx], self.bodies.items(.rotation)[idx])
                 .overlaps(query_box),
+            // A MESH reads its CACHE, and falls back to the pass when that cache has been
+            // poisoned by an external teleport. Measured at 72.8 µs against 11.5 ns on a
+            // 16 000-triangle mesh (`Body.world_aabb`), which is why the fast path is the
+            // default and the slow one the exception rather than the reverse.
+            .triangle_soup => blk: {
+                const cached = self.bodies.items(.world_aabb)[idx];
+                const box = if (std.math.isNan(cached.min.toArray()[0]))
+                    worldAabb(shape, self.bodies.items(.position)[idx], self.bodies.items(.rotation)[idx])
+                else
+                    cached;
+                break :blk box.overlaps(query_box);
+            },
             .half_space => narrowphase.plane.aabbOverlaps(
                 Real,
                 shape_mod.halfSpace(shape).transformed(
@@ -761,7 +890,6 @@ pub const BodyManager = struct {
                 ),
                 query_box,
             ),
-            .triangle_soup => @panic("mesh aabb overlap: not yet wired"),
         };
     }
 
@@ -784,7 +912,17 @@ pub const BodyManager = struct {
         return switch (shape.class()) {
             .convex => narrowphase.containsPoint(Real, shape_mod.supportShape(shape), local),
             .half_space => narrowphase.plane.containsPoint(Real, shape_mod.halfSpace(shape), local),
-            .triangle_soup => @panic("mesh point membership: not yet wired"),
+            // A MESH IS A SURFACE: membership is FALSE everywhere, and that is CATEGORICAL
+            // rather than a setting (§1.11.17). It holds for a point inside the volume a
+            // CLOSED mesh encloses too — nothing validates closure, so there is no volume to
+            // be inside of. There is no mesh counterpart to `treat_convex_as_solid`: the
+            // reference has one, by hit-count parity along a `+Y` ray, and Weld refuses it
+            // because parity presumes closure, on an open mesh the answer would depend on an
+            // arbitrary ray direction, and a membership test would cost a full raycast.
+            //
+            // The consequence a caller sees: `pointQuery` never returns a body carrying a
+            // mesh. This one line is what makes that true.
+            .triangle_soup => false,
         };
     }
 
@@ -854,7 +992,31 @@ pub const BodyManager = struct {
                         .add(self.bodies.items(.position)[idx]),
                 };
             },
-            .triangle_soup => @panic("mesh closest point: not yet wired"),
+            // A MESH MEASURES TO ITS SURFACE, and never zero by interiority — there is no
+            // interior (§1.11.17). So there is no membership test on this arm at all: the
+            // convex path below runs one FIRST because a convex is solid, and a mesh has
+            // nothing for it to answer. A distance of zero here means the point is ON a
+            // triangle, which is a surface answer and not an interior one.
+            //
+            // The traversal is the bounded-distance one, tightening from infinity to the best
+            // triangle found (§1.11.13's branch-and-bound analogue for a distance). The
+            // per-triangle kernel is `closestPointOnCore`, the same one the convex arm uses
+            // below — a point core against a `Core.triangle`, no new kernel.
+            .triangle_soup => {
+                const data = shape.mesh.?;
+                var collector = MeshClosestPointCollector{
+                    .data = data,
+                    .point = point,
+                    .body_position = self.bodies.items(.position)[idx],
+                    .body_rotation = self.bodies.items(.rotation)[idx],
+                };
+                _ = data.traverseDistance(
+                    self.bodies.items(.rotation)[idx].conjugate()
+                        .rotateVec3(point.sub(self.bodies.items(.position)[idx])),
+                    &collector,
+                );
+                return collector.best;
+            },
         }
         const shape_b = shape_mod.supportShape(shape);
 
@@ -865,57 +1027,14 @@ pub const BodyManager = struct {
             return .{ .distance = 0, .position = point };
         }
 
-        // Outside: a degenerate point core at the queried point against the body.
-        const probe: narrowphase.SupportShape(Real) = .{ .core = .point, .radius = 0 };
-        const result = narrowphase.gjk(
-            Real,
-            probe,
+        // Outside: the shared point-core kernel, which is also what the mesh arm above runs
+        // per triangle.
+        return closestPointOnCore(
             point,
-            Quatr.identity,
             shape_b,
             self.bodies.items(.position)[idx],
             self.bodies.items(.rotation)[idx],
         );
-
-        // The closest point on B's CORE, and the core distance to it — one pair per
-        // regime, because `gjk.zig` specifies different fields in each. `closest_a`
-        // never needs a lookup: A's core is a single point, so it IS `point`.
-        const CoreWitness = struct { b: Vec3r, distance: Real };
-        const core: CoreWitness = switch (result.status) {
-            // Both specified.
-            .separated, .shallow => .{ .b = result.closest_b, .distance = result.distance },
-            // NEITHER specified: `closest_b` is the zero vector and `distance` is 0.
-            // The terminal simplex is what `.deep` does carry, and its vertices hold
-            // `support_b` — points on B's core, in the PROBE's frame, which for a
-            // point core at `point` with identity rotation is world translated by
-            // `point`. So the witness comes from there, and the distance is measured
-            // against it rather than read from a field that does not hold one.
-            .deep => blk: {
-                const b = deepCoreWitness(result.simplex[0..result.simplex_count]).add(point);
-                break :blk .{ .b = b, .distance = point.sub(b).length() };
-            },
-        };
-
-        const radius_b = shape_b.radius;
-        const surface_distance = @max(0, core.distance - radius_b);
-        if (radius_b == 0) {
-            // A hard core IS its own surface: no projection, and in particular no
-            // normalisation to guard.
-            return .{ .distance = surface_distance, .position = core.b };
-        }
-        const away = point.sub(core.b);
-        const scale = @reduce(.Max, @abs(away.data));
-        if (scale == 0) {
-            // The queried point coincides with the core witness. Reachable only in the
-            // deep band, where the two are within float noise of each other; the
-            // witness is still a point of the core, hence of the surface for a hard
-            // core, so answering it keeps the exterior contract. Guarded at TRUE ZERO
-            // because `foundation`'s `normalize` is unguarded and would answer NaN.
-            return .{ .distance = surface_distance, .position = core.b };
-        }
-        const reduced: Vec3r = .{ .data = away.data / @as(@Vector(3, Real), @splat(scale)) };
-        const unit = reduced.scale(1 / reduced.length());
-        return .{ .distance = surface_distance, .position = core.b.add(unit.scale(radius_b)) };
     }
 
     /// Full narrowphase (GJK → shallow/deep contact manifold) for the pair
@@ -1070,6 +1189,233 @@ const MeshRayCollector = struct {
     }
 };
 
+/// Keeps the nearest ACCEPTED triangle of one mesh for `castShapeBody`, and tightens the
+/// swept traversal's bound to it — the mesh sibling of `MeshRayCollector`.
+///
+/// **The facing is decided in the BODY's local frame, on the triangle's own normal**, and
+/// not on the normal the kernel returns. The cast kernel's normal is the separating axis
+/// oriented TOWARD the probe, so for a back approach it is already `−n` and carries no
+/// information about which side was met — asking it would answer "front" always. The
+/// triangle's outward normal against the sweep direction, both in the body's frame, is what
+/// answers.
+///
+/// That also settles what the `.collide` normal FLIP means here: the kernel's contract
+/// already guarantees `normal · direction <= 0` on every hit, so on this family the flip is
+/// STRUCTURAL rather than applied — a back-face hit's normal IS the negated triangle normal
+/// because that is the axis facing the probe. Asserted rather than assumed, in the suite.
+const MeshCastCollector = struct {
+    data: *const MeshData,
+    /// The probe, in its own frame — the caller owns it, it is not a body.
+    cast_shape: narrowphase.SupportShape(Real),
+    /// The body relative to the probe: the pose the kernel works in.
+    relpose: narrowphase.RelativePose(Real),
+    /// Sweep direction in the PROBE's frame — what the kernel takes.
+    direction_in_a: Vec3r,
+    /// Sweep direction in the BODY's local frame — what the facing test takes.
+    sweep_direction_local: Vec3r,
+    back_face_mode: api.BackFaceMode,
+    bound: Real,
+    /// The KERNEL's hit type, in the probe's frame — not `BodyCastHit`. The shared mapping
+    /// at the end of `castShapeBody` carries every class's answer to world in one place, so
+    /// this arm must hand it the same frame the other two do.
+    best: ?narrowphase.CastHit(Real) = null,
+    best_triangle: u32 = 0,
+
+    pub fn add(self: *MeshCastCollector, triangle_index: u32) void {
+        if (self.back_face_mode == .ignore and narrowphase.triangle.isBackFace(
+            Real,
+            self.data.faceNormal(triangle_index),
+            self.sweep_direction_local,
+        )) return;
+        const hit = narrowphase.castShape(
+            Real,
+            self.cast_shape,
+            self.relpose,
+            shape_mod.triangleSupportShape(self.data, triangle_index),
+            self.direction_in_a,
+            self.bound,
+        ) orelse return;
+        if (self.best) |best| {
+            if (hit.distance > best.distance) return;
+            // Equal time of impact: the smaller triangle index wins, so the answer is a
+            // function of the mesh and the sweep and not of the tree's shape.
+            if (hit.distance == best.distance and triangle_index >= self.best_triangle) return;
+        }
+        self.best = hit;
+        self.best_triangle = triangle_index;
+        self.bound = hit.distance;
+    }
+
+    pub fn maxDistance(self: *const MeshCastCollector) Real {
+        return self.bound;
+    }
+
+    /// Never stops early: the nearest time of impact is only known once the walk is done.
+    pub fn shouldStop(_: *const MeshCastCollector) bool {
+        return false;
+    }
+};
+
+/// Latches whether ANY triangle of one mesh overlaps the probe, for `overlapShapeBody`.
+///
+/// **The back-face predicate for an overlap is not the ray's.** A sweep or a ray has a
+/// direction to compare against; an overlap has none, so the question becomes whether the
+/// probe lies ENTIRELY in the rear half-space of the triangle's plane — one support call,
+/// §1.11.15's construction applied to that plane (§1.11.17). A probe STRADDLING the plane
+/// touches from the front and counts in both modes, which is the case that fails if the
+/// predicate is written as a sign test on the closest point instead of on the support.
+const MeshOverlapCollector = struct {
+    data: *const MeshData,
+    probe: narrowphase.SupportShape(Real),
+    probe_position: Vec3r,
+    probe_rotation: Quatr,
+    /// The probe expressed in the BODY's frame — the frame the triangle's normal and its
+    /// `v₀` are in, so the back-face predicate's three operands share one frame.
+    probe_in_body: narrowphase.RelativePose(Real),
+    body_position: Vec3r,
+    body_rotation: Quatr,
+    back_face_mode: api.BackFaceMode,
+    found: bool = false,
+
+    pub fn add(self: *MeshOverlapCollector, triangle_index: u32) void {
+        if (self.found) return;
+        if (self.back_face_mode == .ignore) {
+            const normal = self.data.faceNormal(triangle_index);
+            if (narrowphase.triangle.probeIsBehind(
+                Real,
+                normal,
+                self.data.triangle(triangle_index)[0],
+                // The probe's CORE support along the triangle's normal, in the body's frame.
+                // The radius is carried separately and ADDED by the predicate, which is what
+                // makes the test right for a sphere and a capsule and not only for a box.
+                self.probe_in_body.supportB(self.probe, normal),
+                self.probe.radius,
+            )) return;
+        }
+        const result = narrowphase.gjk(
+            Real,
+            self.probe,
+            self.probe_position,
+            self.probe_rotation,
+            shape_mod.triangleSupportShape(self.data, triangle_index),
+            self.body_position,
+            self.body_rotation,
+        );
+        if (result.status != .separated) self.found = true;
+    }
+};
+
+/// Keeps the nearest point on any triangle of one mesh, for `closestPointBody`, and tightens
+/// the bounded-distance traversal to it.
+///
+/// No membership test anywhere on this path: a mesh has no interior, so a distance of zero
+/// means the queried point is ON a triangle — a SURFACE answer, never an interior one
+/// (§1.11.17).
+const MeshClosestPointCollector = struct {
+    data: *const MeshData,
+    /// The queried point in WORLD space — the frame the kernel works in.
+    point: Vec3r,
+    body_position: Vec3r,
+    body_rotation: Quatr,
+    best: ?BodyClosestPoint = null,
+    best_triangle: u32 = 0,
+
+    pub fn add(self: *MeshClosestPointCollector, triangle_index: u32) void {
+        const candidate = closestPointOnCore(
+            self.point,
+            shape_mod.triangleSupportShape(self.data, triangle_index),
+            self.body_position,
+            self.body_rotation,
+        );
+        if (self.best) |best| {
+            if (candidate.distance > best.distance) return;
+            // Equal distance: the smaller triangle index wins — a shared edge of a closed
+            // mesh is equidistant from both its triangles, so without a fixed tie-break the
+            // answer would follow the SAH cut.
+            if (candidate.distance == best.distance and triangle_index >= self.best_triangle) return;
+        }
+        self.best = .{
+            .distance = candidate.distance,
+            .position = candidate.position,
+            .subshape_id = triangle_index,
+        };
+        self.best_triangle = triangle_index;
+    }
+
+    /// The bound the traversal prunes on, tightened to the best surface distance so far.
+    pub fn maxDistance(self: *const MeshClosestPointCollector) Real {
+        if (self.best) |best| return best.distance;
+        return std.math.inf(Real);
+    }
+};
+
+/// Closest point on ONE convex core's surface to `point`, with the distance to that
+/// surface — the kernel `closestPointBody` runs on a whole convex and, since M1.1.11.1, on
+/// each candidate triangle of a mesh.
+///
+/// **PRECONDITION: `point` is OUTSIDE the solid**, which the CALLER establishes — by the
+/// membership test for a convex, and by the categorical surface rule for a triangle, which
+/// has no interior to be inside of. Factored out so the mesh arm reuses the regime handling
+/// and the radius projection verbatim instead of restating them; two copies of this
+/// `.deep`-witness reconstruction is exactly how the two grains would come to disagree.
+pub fn closestPointOnCore(
+    point: Vec3r,
+    shape_b: narrowphase.SupportShape(Real),
+    pos_b: Vec3r,
+    rot_b: Quatr,
+) BodyClosestPoint {
+    const probe: narrowphase.SupportShape(Real) = .{ .core = .point, .radius = 0 };
+    const result = narrowphase.gjk(
+        Real,
+        probe,
+        point,
+        Quatr.identity,
+        shape_b,
+        pos_b,
+        rot_b,
+    );
+
+    // The closest point on B's CORE, and the core distance to it — one pair per
+    // regime, because `gjk.zig` specifies different fields in each. `closest_a`
+    // never needs a lookup: A's core is a single point, so it IS `point`.
+    const CoreWitness = struct { b: Vec3r, distance: Real };
+    const core: CoreWitness = switch (result.status) {
+        // Both specified.
+        .separated, .shallow => .{ .b = result.closest_b, .distance = result.distance },
+        // NEITHER specified: `closest_b` is the zero vector and `distance` is 0.
+        // The terminal simplex is what `.deep` does carry, and its vertices hold
+        // `support_b` — points on B's core, in the PROBE's frame, which for a
+        // point core at `point` with identity rotation is world translated by
+        // `point`. So the witness comes from there, and the distance is measured
+        // against it rather than read from a field that does not hold one.
+        .deep => blk: {
+            const b = deepCoreWitness(result.simplex[0..result.simplex_count]).add(point);
+            break :blk .{ .b = b, .distance = point.sub(b).length() };
+        },
+    };
+
+    const radius_b = shape_b.radius;
+    const surface_distance = @max(0, core.distance - radius_b);
+    if (radius_b == 0) {
+        // A hard core IS its own surface: no projection, and in particular no
+        // normalisation to guard.
+        return .{ .distance = surface_distance, .position = core.b };
+    }
+    const away = point.sub(core.b);
+    const scale = @reduce(.Max, @abs(away.data));
+    if (scale == 0) {
+        // The queried point coincides with the core witness. Reachable only in the
+        // deep band, where the two are within float noise of each other; the
+        // witness is still a point of the core, hence of the surface for a hard
+        // core, so answering it keeps the exterior contract. Guarded at TRUE ZERO
+        // because `foundation`'s `normalize` is unguarded and would answer NaN.
+        return .{ .distance = surface_distance, .position = core.b };
+    }
+    const reduced: Vec3r = .{ .data = away.data / @as(@Vector(3, Real), @splat(scale)) };
+    const unit = reduced.scale(1 / reduced.length());
+    return .{ .distance = surface_distance, .position = core.b.add(unit.scale(radius_b)) };
+}
+
 /// Closest point on B's CORE reconstructed from a `.deep` terminal simplex, in the
 /// PROBE's frame.
 ///
@@ -1097,6 +1443,56 @@ fn deepCoreWitness(simplex: []const narrowphase.Simplex(Real).Vertex) Vec3r {
         acc = acc.add(simplex[i].support_b.scale(weight));
     }
     return acc;
+}
+
+/// Exact AABB of a SUPPORT SHAPE — core plus inflation radius — at pose (`pos`, `rot`), in
+/// the frame that pose is expressed in.
+///
+/// The sibling of `worldAabb` at the CORE grain, and it exists because the two entries that
+/// take a caller-supplied probe receive a `SupportShape` and not a `Shape`: a mesh's
+/// internal traversal needs that probe's box in the BODY's local frame, which no world box
+/// can supply once the body is rotated.
+///
+/// **Deliberately NOT merged with `worldAabb`.** Its convex arms compute the same
+/// quantities, but not by the same operation order — the capsule arm merges two transported
+/// end-cap boxes where this one adds the radius to a transported half-extent — and M1.1.9 /
+/// M1.1.10 pin exact world AABBs for those shapes. Unifying them would be a behaviour
+/// change measured in ULPs on inherited envelopes, for no gain; the two grains are also
+/// genuinely different, `worldAabb`'s mesh arm bounding a WHOLE mesh where this one bounds
+/// ONE triangle.
+pub fn supportShapeAabb(shape: narrowphase.SupportShape(Real), pos: Vec3r, rot: Quatr) Aabbr {
+    const r = Vec3r.splat(shape.radius);
+    switch (shape.core) {
+        .point => return Aabbr.fromCenterHalfExtents(pos, r),
+        .segment => |half_height| {
+            // The axis is transported, then the box spans both endpoints and grows by the
+            // radius on every side.
+            const axis = Mat3r.fromQuat(rot).cols[1].scale(half_height);
+            const p0 = pos.add(axis);
+            const p1 = pos.sub(axis);
+            return Aabbr.fromMinMax(p0.min(p1), p0.max(p1)).inflate(r);
+        },
+        .box => |half_extents| {
+            // `extent_i = Σ_j |R_ij| · he_j`, the absolute rotation matrix times the
+            // half-extents — the exact box of a rotated box.
+            const m = Mat3r.fromQuat(rot);
+            const c0 = m.cols[0].toArray();
+            const c1 = m.cols[1].toArray();
+            const c2 = m.cols[2].toArray();
+            const he = half_extents.toArray();
+            var ext: [3]Real = undefined;
+            inline for (0..3) |i| {
+                ext[i] = @abs(c0[i]) * he[0] + @abs(c1[i]) * he[1] + @abs(c2[i]) * he[2];
+            }
+            return Aabbr.fromCenterHalfExtents(pos, Vec3r.fromArray(ext).add(r));
+        },
+        .triangle => |verts| {
+            const first = pos.add(rot.rotateVec3(verts[0]));
+            var box = Aabbr.fromMinMax(first, first);
+            inline for (1..3) |i| box = box.expand(pos.add(rot.rotateVec3(verts[i])));
+            return box.inflate(r);
+        },
+    }
 }
 
 /// Exact world-space AABB of a shape at pose (`pos`, `rot`).

@@ -198,6 +198,8 @@ pub const CastQuery = struct {
     direction: Vec3r,
     max_distance: Real,
     filter: Filter = .{},
+    /// Which side of a mesh TRIANGLE answers (§1.11.17). Vacuous on every other shape.
+    back_face_mode: api.BackFaceMode = .ignore,
 };
 
 /// One cast hit at solver precision — the mirror of the public `ShapeCastHit`.
@@ -228,6 +230,9 @@ pub const OverlapRequest = struct {
     position: Vec3r,
     rotation: Quatr = Quatr.identity,
     filter: Filter = .{},
+    /// Which side of a mesh TRIANGLE answers (§1.11.17). The overlap form of the test is
+    /// whether the probe lies ENTIRELY in the rear half-space of the triangle's plane.
+    back_face_mode: api.BackFaceMode = .ignore,
 };
 
 /// The closest point on the closest body at solver precision — the mirror of the
@@ -393,6 +398,7 @@ pub fn shapeCast(
         .rotation = query.rotation,
         .direction = direction,
         .bound = query.max_distance,
+        .back_face_mode = query.back_face_mode,
     };
     _ = bp.queryCast(Ray.init(box.center(), direction), box.halfExtents(), &collector);
     return collector.best;
@@ -427,6 +433,7 @@ pub fn overlapShape(
             .shape = shape_mod.supportShape(record),
             .position = request.position,
             .rotation = request.rotation,
+            .back_face_mode = request.back_face_mode,
         } },
         .out = out,
     };

@@ -757,6 +757,7 @@ test "castShapeBody sweeps onto the world boundary" {
         Quatr.identity,
         Vec3r.unit_x,
         100,
+        .ignore,
     ).?;
     try testing.expectApproxEqAbs(@as(Real, 9.5), hit.distance, tol);
     try testing.expect(hit.position.approxEql(vr(10, 1, 2), tol));
@@ -764,11 +765,11 @@ test "castShapeBody sweeps onto the world boundary" {
     try testing.expect(hit.normal.dot(Vec3r.unit_x) <= 0);
 
     // Receding and grazing both miss, at the body grain as at the kernel grain.
-    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_x.neg(), 1e6) == null);
-    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_z, 1e6) == null);
+    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_x.neg(), 1e6, .ignore) == null);
+    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_z, 1e6, .ignore) == null);
     // A bound shorter than the answer misses; one exactly at it hits (closed interval).
-    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_x, 9.5 - 8 * tol) == null);
-    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_x, 9.5 + 8 * tol) != null);
+    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_x, 9.5 - 8 * tol, .ignore) == null);
+    try testing.expect(scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(0, 1, 2), Quatr.identity, Vec3r.unit_x, 9.5 + 8 * tol, .ignore) != null);
 }
 
 test "overlapShapeBody answers by the sign of the separation" {
@@ -794,13 +795,14 @@ test "overlapShapeBody answers by the sign of the separation" {
             probe,
             vr(c.x, 1, 2),
             Quatr.identity,
+            .ignore,
         ).?);
     }
     // A BOX probe, so the answer is not a property of the point core alone: half-extents
     // (2, 1, 1) at `x = 7` reach `x = 9`, one metre short; at `x = 8.5` they reach 10.5.
     const box_probe = narrowphase.SupportShape(Real){ .core = .{ .box = vr(2, 1, 1) }, .radius = 0 };
-    try testing.expect(!scene.bm.overlapShapeBody(&scene.store, scene.body, box_probe, vr(7, 1, 2), Quatr.identity).?);
-    try testing.expect(scene.bm.overlapShapeBody(&scene.store, scene.body, box_probe, vr(8.5, 1, 2), Quatr.identity).?);
+    try testing.expect(!scene.bm.overlapShapeBody(&scene.store, scene.body, box_probe, vr(7, 1, 2), Quatr.identity, .ignore).?);
+    try testing.expect(scene.bm.overlapShapeBody(&scene.store, scene.body, box_probe, vr(8.5, 1, 2), Quatr.identity, .ignore).?);
 }
 
 // ---------------------------------------------------------------------------
@@ -1415,6 +1417,7 @@ test "overlapShapeBody and collidePlane agree to the bit on whether a pair touch
                 probe,
                 vr(0, h, 0),
                 Quatr.identity,
+                .ignore,
             ).?;
             const by_manifold = world.bm.collidePair(&world.store, ground, body) != null;
             try testing.expectEqual(by_overlap, by_manifold);
@@ -1532,7 +1535,7 @@ test "castShapeBody transports the normal without disturbing the invariant" {
     // deep inside it and every direction below is an initial overlap.
     const probe = narrowphase.SupportShape(Real){ .core = .point, .radius = 0.5 };
     for ([_]Vec3r{ Vec3r.unit_x, Vec3r.unit_x.neg(), Vec3r.unit_y, vr(1, 1, 1).normalize() }) |d| {
-        const hit = scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(50, 1, 2), Quatr.identity, d, 100).?;
+        const hit = scene.bm.castShapeBody(&scene.store, scene.body, probe, vr(50, 1, 2), Quatr.identity, d, 100, .ignore).?;
         try testing.expectEqual(@as(Real, 0), hit.distance);
         try testing.expect(hit.normal.dot(d) <= 0);
         try testing.expect(hit.normal.approxEql(d.neg(), 8 * std.math.floatEps(Real)));

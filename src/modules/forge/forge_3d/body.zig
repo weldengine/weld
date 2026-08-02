@@ -134,6 +134,33 @@ pub const Body = struct {
     sleep_radius: Real,
     /// Owning ECS entity.
     entity: EntityId,
+    /// The body's TIGHT world AABB, cached at creation — **valid ONLY while the shape is a
+    /// `.triangle_soup`**, NaN on every other body.
+    ///
+    /// **Why it exists, and it is a measured decision and not a precaution.** A mesh's world
+    /// box is the tight bound over its TRANSPORTED VERTICES, an O(V) pass, and
+    /// `aabbOverlapsBody` runs it once per candidate body per query. Measured in ReleaseFast
+    /// on `bench/forge_3d_mesh.zig`: 9.0 µs at 1 000 triangles, 20.4 µs at 4 000 and
+    /// **72.8 µs at 16 000**, against **11.5 ns** for the same value read back — some 6 300×
+    /// — with `overlapAabb` end to end at 85.8 µs, i.e. dominated by that one pass. The
+    /// cheapest entry of the family was the most expensive.
+    ///
+    /// **Why it needs no invalidation LOGIC.** A mesh forces a STATIC body
+    /// (`error.ShapeMustBeStatic`), whose pose no solver pass writes: both integrators skip
+    /// a non-dynamic body, and the NGS position pass guards its pose writes at EXACT ZERO
+    /// precisely so a non-dynamic body stays bit-unchanged. So the cached box cannot go
+    /// stale from inside the simulation.
+    ///
+    /// **What it does instead of invalidating: it POISONS.** The only way the pose can move
+    /// is an external teleport, and `setPosition` / `setRotation` set this field back to NaN
+    /// for any non-dynamic body rather than trying to recompute it — they hold no store and
+    /// could not. The mesh arm then falls back to the O(V) pass, which is the pre-cache
+    /// behaviour: slower, never wrong. That is what keeps the correctness of this cache from
+    /// resting on a promise about a milestone that does not exist yet.
+    ///
+    /// NaN and not a sentinel box, for the reason `local_aabb` and `sleep_radius` carry NaN:
+    /// a plausible finite value would be read by mistake and never noticed.
+    world_aabb: config.Aabbr,
 };
 
 /// The body's sleep radius: the distance from its centre to the furthest corner

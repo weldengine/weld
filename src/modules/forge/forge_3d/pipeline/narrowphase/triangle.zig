@@ -71,6 +71,41 @@ pub fn isBackFace(comptime T: type, normal: math.Vec(3, T), direction: math.Vec(
     return normal.dot(direction) > 0;
 }
 
+/// Whether an overlap PROBE lies ENTIRELY in the rear half-space of a triangle's plane —
+/// the back-face predicate for the overlap family, the sibling of `isBackFace`
+/// (`engine-physics-forge.md` §1.11.17).
+///
+/// `support_core` is the probe's CORE support point in direction `normal`, expressed in the
+/// TRIANGLE's frame, and `probe_radius` its inflation radius. The caller owns the frame
+/// conversion, which is why the support point arrives computed rather than the probe
+/// itself: this file may not import `RelativePose`'s consumers, and pushing the conversion
+/// out keeps the predicate a pure arithmetic statement.
+///
+/// **The radius EXTENDS the probe toward the front, so it is added.** The probe's furthest
+/// reach along `normal` is `normal · support_core + radius`, since `support` returns the
+/// CORE and the inflated surface stands `radius` beyond it; the probe is entirely behind
+/// exactly when that reach falls short of the plane. Written WITHOUT the radius term the
+/// predicate is right for a box and wrong for a sphere and a capsule by exactly the
+/// radius — which is the failure the term exists to prevent.
+///
+/// **RECORDED DEVIATION on the sign.** §1.11.17 and the milestone brief both write this as
+/// `n · support_probe(n) − r_probe < n · v₀`, with the radius SUBTRACTED. That contradicts
+/// their own normative sentence one line later — "a probe straddling the plane touches from
+/// the front and counts in both modes" — and the contradiction is decidable on the case
+/// they name: a unit sphere centred exactly ON the plane has `n · support_core = n · v₀`,
+/// so the subtracted form yields `n·v₀ − 1 < n·v₀`, TRUE, and discards a probe the same
+/// paragraph requires to count. The added form yields `n·v₀ + 1 < n·v₀`, FALSE, and keeps
+/// it. The straddling test is therefore the discriminator, and it is written.
+pub fn probeIsBehind(
+    comptime T: type,
+    normal: math.Vec(3, T),
+    v0: math.Vec(3, T),
+    support_core: math.Vec(3, T),
+    probe_radius: T,
+) bool {
+    return normal.dot(support_core) + probe_radius < normal.dot(v0);
+}
+
 /// The `LocalHit` a query returns for a triangle hit, carrying its `subshape_id`.
 ///
 /// **The normal is FLIPPED on a back-face hit**, and that is an invariant rather than a
