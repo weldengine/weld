@@ -61,15 +61,21 @@ const ApiVec3 = @import("foundation").math.Vec3;
 /// compile error into a silent wrong answer, which is exactly the failure mode the
 /// taxonomy exists to prevent.
 ///
-/// M1.1.11 advertised that net while leaving FOUR HOLES in it, and M1.1.11.1 closed
-/// them: `addBody`'s static-only refusal, `bodyAabb`, `closestPointBody` and
-/// `worldAabb` each decided by an `if` on one variant or by a class ASSERT, neither
-/// of which a new variant breaks. `closestPointBody` was the dangerous one — a
-/// third-category shape fell through its `if` into the convex path, which panics in a
-/// safe build and is undefined behaviour in ReleaseFast. The two class asserts of
-/// `body.zig` became exhaustive switches for the same reason. This paragraph is the
-/// docstring saying what the code DOES, which is what an advertised safety net has
-/// to be checkable against.
+/// M1.1.11 advertised that net while leaving FIVE HOLES in it, and M1.1.11.1 closed them all.
+/// Four were found at the start: `addBody`'s static-only refusal, `bodyAabb`,
+/// `closestPointBody` and `worldAabb` each decided by an `if` on one variant or by a class
+/// ASSERT, neither of which a new variant breaks. `closestPointBody` was the dangerous one — a
+/// third-category shape fell through its `if` into the convex path, which panics in a safe build
+/// and is undefined behaviour in ReleaseFast. The two class asserts of `body.zig` became
+/// exhaustive switches for the same reason.
+///
+/// The FIFTH was found at the closing review: `gjkPair` passed either shape straight to
+/// `supportShape` and inherited that function's precondition in silence, so a half-space broke it
+/// identically from M1.1.11 onward. It now asserts "both bodies carry bounded convexes" AT ITS OWN
+/// SITE, which is the only place a caller can read the requirement against the handles it holds.
+///
+/// This paragraph is the docstring saying what the code DOES, which is what an advertised safety
+/// net has to be checkable against — and the enumeration is the check.
 pub const ShapeClass = enum {
     /// A bounded convex, described by a support map: sphere, box, capsule (and
     /// later cylinder, tapered cylinder, convex hull). GJK, EPA, the cast kernel

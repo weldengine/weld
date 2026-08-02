@@ -697,8 +697,8 @@ fn assertUnitRotation(rotation: Quatr) void {
 /// the defect reappears at the other end of the range. The `scale == 0` test is at
 /// TRUE ZERO — the largest absolute component is zero exactly when all three are.
 pub fn unitDirection(direction: Vec3r) ?Vec3r {
-    const scale = @reduce(.Max, @abs(direction.data));
-    if (scale == 0) return null;
-    const reduced: Vec3r = .{ .data = direction.data / @as(@Vector(3, Real), @splat(scale)) };
-    return reduced.scale(1 / reduced.length());
+    // `foundation`'s shared form since the M1.1.11.1 closure — the same three operations in the
+    // same order, so this is BIT-IDENTICAL to the body it replaces, and the reasoning above is
+    // now stated once at the declaration instead of at each of its three consumers.
+    return direction.normalizeScaled();
 }

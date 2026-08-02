@@ -3554,3 +3554,284 @@ test "two runs of the slider are bit-identical" {
     try testing.expectEqual(rough_first, rough_second);
     try testing.expect(rough_first < 4.95);
 }
+
+// ---------------------------------------------------------------------------
+// Closing-review findings
+// ---------------------------------------------------------------------------
+
+/// One triangle spanning `[−1, 1]²` in the plane `y = 0`, outward normal `+Y`:
+/// `(v₁−v₀) × (v₂−v₀) = (0,0,2) × (2,0,0) = (0, 4, 0)`.
+const wide_triangle_vertices = [_]ApiVec3{ av3(-1, 0, -1), av3(-1, 0, 1), av3(1, 0, -1) };
+
+/// The GJK contact margin for a box probe of half-extent `he` hovering `gap` above that
+/// triangle, computed through the SAME public helpers the filter and the classification both use
+/// — so the test states the band rather than hardcoding a number that would be wrong at the other
+/// precision.
+fn wideTriangleMargin(data: *const MeshData, he: Real, gap: Real) Real {
+    const probe: narrowphase.SupportShape(Real) = .{ .core = .{ .box = Vec3r.splat(he) }, .radius = 0 };
+    const scale = narrowphase.coordScale(Real, he + gap, probe, .{ .core = .point, .radius = 0 }) +
+        data.maxVertexMagnitude();
+    return narrowphase.contactMargin(Real, scale);
+}
+
+test "F1 the mesh candidate filter is conservative with respect to the GJK margin" {
+    const gpa = testing.allocator;
+    // The descriptor's precision, and the solver's widening of it — the half-extent crosses the
+    // `f32` boundary, so it is declared there and widened once (the class of finding the closed
+    // forms of gates C and D kept turning up).
+    const he_f32: f32 = 0.2;
+    const he: Real = he_f32;
+
+    // A box probe hovering a HAIR above one triangle. Two gaps, both derived from the normative
+    // margin rather than written as literals:
+    //   * HALF the margin — GJK classifies the pair as not `separated`, so §1.11.12's predicate
+    //     says the body overlaps. The two boxes do NOT touch (the gap is strictly positive), so an
+    //     unhardened filter drops the triangle before the kernel ever sees it.
+    //   * TEN TIMES the margin — genuinely `separated`, so the answer is false. This is what makes
+    //     the inflation bounded rather than a blanket widening.
+    for ([_]bool{ true, false }) |inside_band| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{
+            .vertices = &wide_triangle_vertices,
+            .indices = &one_triangle_indices,
+        } });
+        const body = try world.addBody(gpa, .{
+            .shape = shape,
+            .body_type = .static,
+            .entity = entityOf(0),
+        });
+        const data = world.store.get(shape).?.mesh.?;
+        // The margin depends on the probe's height, which depends on the gap; one iteration of the
+        // fixed point is ample, the gap being some seven orders below the geometry.
+        const seed_margin = wideTriangleMargin(data, he, 0);
+        const gap: Real = if (inside_band) seed_margin / 2 else seed_margin * 10;
+        try testing.expect(gap > 0);
+
+        const probe_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(he_f32, he_f32, he_f32) } });
+        const probe = shape_mod.supportShape(world.store.get(probe_shape).?);
+        const probe_position = vr(0, he + gap, 0);
+
+        // The KERNEL's own verdict, taken directly, so the entry is compared against the
+        // predicate §1.11.12 states and not against a second opinion.
+        const regime = narrowphase.gjk(
+            Real,
+            probe,
+            probe_position,
+            Quatr.identity,
+            shape_mod.triangleSupportShape(data, 0),
+            world.bm.position(body).?,
+            world.bm.rotation(body).?,
+        ).status;
+        try testing.expectEqual(inside_band, regime != .separated);
+
+        // --- PATH 1: the shape overlap. The entry must agree with the kernel.
+        var buf: [4]api.BodyId = undefined;
+        const overlaps = try query.overlapShape(&world.bp, &world.bm, &world.store, .{
+            .shape = probe_shape,
+            .position = probe_position,
+            .back_face_mode = .collide,
+        }, &buf);
+        try testing.expectEqual(@as(u32, if (inside_band) 1 else 0), overlaps);
+
+        // --- PATH 2: contact generation. Its predicate is `collideOrdered` returning non-null,
+        // which it does for a `shallow` pair, so the same band applies and the same filter feeds it.
+        // The pose is set at SOLVER precision, not carried in the descriptor. The descriptor's
+        // position is `f32` by design (§1.11.8), and at `f64` this gap is `3.5e-15` — six orders
+        // below `f32`'s resolution at 0.2 — so it would narrow away to zero and the probe would
+        // land exactly touching, making the out-of-band branch report a contact. Measured; the
+        // same class as the eighth-turn rotation at gate A and the `f32(0.3)` extent at gate D.
+        const dynamic_probe = try world.addBody(gpa, .{
+            .shape = probe_shape,
+            .body_type = .dynamic,
+            .entity = entityOf(1),
+        });
+        world.bm.setPosition(dynamic_probe, probe_position);
+        var tally = ManifoldTally{};
+        world.bm.collidePairEach(&world.store, body, dynamic_probe, &tally);
+        try testing.expectEqual(@as(u32, if (inside_band) 1 else 0), tally.count);
+
+        // The BOXES do not overlap in either case — which is the whole point: without the
+        // inflation the traversal offers nothing and both paths answer false, band or no band.
+        const probe_box = bm_mod.supportShapeAabb(probe, probe_position, Quatr.identity);
+        const triangle_box = data.triangleAabb(0);
+        try testing.expect(!probe_box.overlaps(triangle_box));
+    }
+}
+
+test "F2 a face normal stays unit for legal vertices whose cross product overflows" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+
+    // **THE DOMAIN IS LEGAL AND THE OLD FORM RETURNED A ZERO-LENGTH NORMAL.** Vertices at `1e10`
+    // are finite, so `MeshData.init` admits them; the cross product `(v₁−v₀) × (v₂−v₀)` of
+    // `(1e10,0,0)` and `(0,1e10,0)` is `(0, 0, 1e20)`, whose squared length is `1e40` — INFINITY at
+    // `f32`. A plain `normalize` then computes `1 / inf = 0` and scales the vector to `(0, 0, 0)`:
+    // a normal of length zero, and §1.11.17's unit-length invariant punctured.
+    //
+    // Note what does NOT cover this: the true-zero degeneracy refusal at creation. That one rules
+    // out a cross product of exactly zero, hence a NaN; this is an OVERFLOW at the other end of the
+    // range, and the guard has nothing to say about it.
+    const huge = [_]ApiVec3{ av3(0, 0, 0), av3(1e10, 0, 0), av3(0, 1e10, 0) };
+    const big = try store.createShape(gpa, .{ .triangle_mesh = .{
+        .vertices = &huge,
+        .indices = &one_triangle_indices,
+    } });
+    const big_normal = store.get(big).?.mesh.?.faceNormal(0);
+    // Exactly `+Z`, and its length asserted TIGHT: the reduction by the largest absolute component
+    // makes the arithmetic scale-free, so this is not a tolerance being met but an exact answer.
+    try testing.expect(big_normal.eql(vr(0, 0, 1)));
+    try testing.expectEqual(@as(Real, 1), big_normal.lengthSq());
+
+    // THE OTHER END: vertices so small that the cross product's square UNDERFLOWS. `2⁻⁷⁰` cubed
+    // territory — the cross product is `(0, 0, 2⁻¹⁴⁰)`, whose square is `2⁻²⁸⁰`, zero at `f32`. A
+    // plain `normalize` divides by zero and answers infinities; the scaled form is exact.
+    const tiny_side: f32 = std.math.pow(f32, 2, -70);
+    const tiny = [_]ApiVec3{ av3(0, 0, 0), av3(tiny_side, 0, 0), av3(0, tiny_side, 0) };
+    const small = try store.createShape(gpa, .{ .triangle_mesh = .{
+        .vertices = &tiny,
+        .indices = &one_triangle_indices,
+    } });
+    const small_normal = store.get(small).?.mesh.?.faceNormal(0);
+    try testing.expect(small_normal.eql(vr(0, 0, 1)));
+    try testing.expectEqual(@as(Real, 1), small_normal.lengthSq());
+
+    // And the RAY kernel, which normalises the same cross product, answers a unit normal on the
+    // same geometry — the second consumer the shared helper exists for.
+    const hit = narrowphase.triangle.rayTriangle(
+        Real,
+        store.get(big).?.mesh.?.triangle(0),
+        vr(1e9, 1e9, 5),
+        vr(0, 0, -1),
+    ).?;
+    try testing.expectEqual(@as(Real, 1), hit.normal.lengthSq());
+    try testing.expect(hit.normal.eql(vr(0, 0, 1)));
+
+    // The COUNTER-FACTUAL, stated as arithmetic rather than by editing the code: the squared
+    // length the old form fed to `sqrt` really is infinite at `f32`, so its `1 / length` really is
+    // zero. `normalizeScaled` never forms that quantity.
+    if (Real == f32) {
+        const overflowing: Real = @as(Real, 1e20) * @as(Real, 1e20);
+        try testing.expect(!std.math.isFinite(overflowing));
+        try testing.expectEqual(@as(Real, 0), 1 / @sqrt(overflowing));
+    }
+}
+
+test "F3 gjkPair states its convex precondition at its own site" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+
+    // The assert cannot be caught in a Zig test, so what is checked is the PREDICATE it rests on —
+    // that the two refused categories really are what the assert names — together with the
+    // admitted pair still answering. The hole was real and pre-dated this milestone: a half-space
+    // reached `supportShape` through this entry from M1.1.11 onward, panicking in a safe build and
+    // undefined in ReleaseFast.
+    const sphere = try store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+    const plane = try store.createShape(gpa, .{ .plane = .{} });
+    const mesh = try store.createShape(gpa, .{ .triangle_mesh = .{
+        .vertices = &cube_vertices,
+        .indices = &cube_indices,
+    } });
+    try testing.expect(store.get(sphere).?.class() == .convex);
+    try testing.expect(store.get(plane).?.class() != .convex);
+    try testing.expect(store.get(mesh).?.class() != .convex);
+
+    // The ADMITTED pair answers, so the precondition is a restriction and not a refusal of
+    // everything.
+    const a = try bm.addBody(gpa, &store, .{ .entity = entityOf(0), .body_type = .dynamic, .shape = sphere });
+    const b = try bm.addBody(gpa, &store, .{
+        .entity = entityOf(1),
+        .body_type = .dynamic,
+        .shape = sphere,
+        .position = harness.av3(1.5, 0, 0),
+    });
+    const result = bm.gjkPair(&store, a, b);
+    try testing.expect(result != null);
+    try testing.expect(result.?.status != .separated); // two unit spheres 1.5 apart overlap
+
+    // A stale handle still short-circuits BEFORE the precondition, which is what keeps the assert
+    // from firing on a caller whose only mistake was holding a dead id.
+    bm.removeBody(b);
+    try testing.expect(bm.gjkPair(&store, a, b) == null);
+}
+
+test "F4 the constraint order is a total key, not the sort's tie-handling" {
+    const gpa = testing.allocator;
+    var scene = try FloorScene.init(gpa, av3(0, 0.5, 0), false);
+    defer scene.deinit(gpa);
+    const key = (@as(u64, @min(scene.ground, scene.box)) << 32) | @max(scene.ground, scene.box);
+
+    var constraints: std.ArrayListUnmanaged(rigid.ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    try rigid.build(gpa, &constraints, &scene.world.bm, &scene.world.store, &.{key});
+    // Several constraints on ONE pair — the configuration that made `pair_key` alone a
+    // non-total key, and `std.mem.sort` being `std.sort.block` it is UNSTABLE, so their relative
+    // order was the algorithm's internal behaviour rather than a contract.
+    try testing.expect(constraints.items.len >= 4);
+    for (constraints.items) |c| try testing.expectEqual(key, c.pair_key);
+
+    // **TOTALITY, ASSERTED ON THE COMPARATOR ITSELF — not on a restatement of it, and not on the
+    // output being sorted.** Measured: with the sub-shape term removed, an output-order assertion
+    // still passes, because `std.sort.block` happens to leave equal keys where it found them on
+    // this input. Order preserved by luck is not order preserved by contract, so what the test
+    // calls is the comparator the sort calls.
+    //
+    // For any two distinct constraints, EXACTLY ONE of `less(x, y)` and `less(y, x)` holds:
+    // antisymmetric, and never equal. On `pair_key` alone both are false for two constraints of
+    // one pair, and this fails at the first such couple.
+    for (constraints.items, 0..) |x, i| {
+        for (constraints.items[i + 1 ..]) |y| {
+            const x_first = rigid.lessByPairKey({}, x, y);
+            const y_first = rigid.lessByPairKey({}, y, x);
+            try testing.expect(x_first != y_first);
+        }
+    }
+
+    // The ISLAND comparator carries the same third term, and the same totality claim: two
+    // constraints of one pair share `rank` AND `pair_key`, so without the sub-shape they compare
+    // equal and the permutation becomes the sort's business. The keys are built the way
+    // `orderConstraints` builds them, with one rank since there is one island here.
+    {
+        var keys: [8]rigid.ConstraintKey = undefined;
+        var count: usize = 0;
+        for (constraints.items) |c| {
+            if (count == keys.len) break;
+            keys[count] = .{
+                .rank = 0,
+                .pair_key = c.pair_key,
+                .subshape_id = c.subshape_id,
+                .source_index = @intCast(count),
+            };
+            count += 1;
+        }
+        try testing.expect(count >= 4);
+        for (keys[0..count], 0..) |x, i| {
+            for (keys[i + 1 .. count]) |y| {
+                const x_first = rigid.lessByCompositeKey({}, x, y);
+                const y_first = rigid.lessByCompositeKey({}, y, x);
+                try testing.expect(x_first != y_first);
+            }
+        }
+    }
+    // And the array really is in that order, ascending on the sub-shape within the shared pair.
+    for (constraints.items[1..], 0..) |c, i| {
+        const prev = constraints.items[i];
+        try testing.expect(prev.pair_key < c.pair_key or
+            (prev.pair_key == c.pair_key and prev.subshape_id < c.subshape_id));
+    }
+
+    // The ISLAND ordering carries the same third term. Driving a full tick exercises it, and the
+    // per-island ranges must still be contiguous over an array whose order no longer depends on
+    // the sort's tie-handling.
+    for (0..30) |_| try scene.world.step(gpa);
+    try testing.expect(scene.world.constraints.items.len >= 4);
+    for (scene.world.constraints.items[1..], 0..) |c, i| {
+        const prev = scene.world.constraints.items[i];
+        if (prev.pair_key != c.pair_key) continue;
+        try testing.expect(prev.subshape_id < c.subshape_id);
+    }
+}

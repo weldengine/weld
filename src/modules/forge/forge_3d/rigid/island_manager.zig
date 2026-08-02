@@ -80,9 +80,15 @@ const Member = struct {
 
 /// The composite sort key of one constraint — `(rank, pair_key)` — plus where the
 /// constraint currently sits, so the array can be permuted into key order.
-const ConstraintKey = struct {
+pub const ConstraintKey = struct {
     rank: u32,
     pair_key: u64,
+    /// The constraint's SUB-SHAPE — the third term of the composite key, and load-bearing since
+    /// M1.1.11.1 (closure finding F4). A mesh pair contributes one constraint per contacting
+    /// triangle, all sharing `rank` and `pair_key`; on those two alone their relative order would
+    /// be `std.sort.block`'s internal behaviour, which is UNSTABLE, and this file's own docstring
+    /// promises the opposite — that the ordering "never leans on the sort algorithm being stable".
+    subshape_id: u32,
     source_index: u32,
 };
 
@@ -345,6 +351,7 @@ pub const IslandManager = struct {
             self.keys.appendAssumeCapacity(.{
                 .rank = self.rankOfConstraint(bm, c),
                 .pair_key = c.pair_key,
+                .subshape_id = c.subshape_id,
                 .source_index = @intCast(i),
             });
         }
@@ -424,9 +431,16 @@ fn lessByBodyId(_: void, x: Member, y: Member) bool {
     return x.id < y.id;
 }
 
-fn lessByCompositeKey(_: void, x: ConstraintKey, y: ConstraintKey) bool {
+/// TOTAL order over constraint keys — `(rank, pair_key, subshape_id)`.
+///
+/// Total, and not merely a grouping: two constraints of one pair cannot share a `subshape_id`,
+/// the sub-shape being the triangle index and each triangle being offered at most once. That is
+/// what lets the permutation below be a function of the keys alone rather than of the sort's
+/// tie-handling — the invariant M1.1.8 wrote down and several constraints per pair had annulled.
+pub fn lessByCompositeKey(_: void, x: ConstraintKey, y: ConstraintKey) bool {
     if (x.rank != y.rank) return x.rank < y.rank;
-    return x.pair_key < y.pair_key;
+    if (x.pair_key != y.pair_key) return x.pair_key < y.pair_key;
+    return x.subshape_id < y.subshape_id;
 }
 
 /// Permute `items` in place so that whatever entered at position `s` ends up at

@@ -100,6 +100,35 @@ pub fn Vec(comptime N: usize, comptime T: type) type {
         pub fn normalize(self: Self) Self {
             return self.scale(1.0 / self.length());
         }
+
+        /// Unit vector in the same direction, or `null` when `self` is EXACTLY zero.
+        ///
+        /// **The overflow-safe form, and `normalize` above is not it.** The vector is reduced
+        /// by its LARGEST ABSOLUTE COMPONENT before anything is squared, which is what keeps
+        /// both ends of the float range usable: `(1e20, 0, 0)` is perfectly finite yet its
+        /// squared length overflows to infinity at `f32`, so `normalize` divides by infinity and
+        /// answers the ZERO VECTOR; and a vector so small that its square underflows would read
+        /// as zero although it normalises exactly. After the reduction every component is in
+        /// `[0, 1]`, so the squared length lies in `[1, N]` and can do neither.
+        ///
+        /// The reduction is a component-wise DIVISION, deliberately not a multiplication by
+        /// `1 / scale`: for a denormal input that reciprocal overflows to infinity and the
+        /// defect reappears at the other end of the range. The `== 0` test is at TRUE ZERO —
+        /// the largest absolute component is zero exactly when every component is.
+        ///
+        /// **Why it lives here.** Three consumers need it and each arrived at it separately:
+        /// the query family's direction normalisation, which introduced the form at M1.1.9 for
+        /// exactly this overflow; a mesh triangle's face normal, which is a cross product of
+        /// vertex differences and reaches `1e20` from vertices at `1e10`; and the ray↔triangle
+        /// kernel, which normalises the same cross product. Same placement rule as
+        /// `surfaceArea`, `rayInterval`, `inflate` and `overlapsHalfSpace` — pure vector
+        /// arithmetic, no threshold, no physical semantics.
+        pub fn normalizeScaled(self: Self) ?Self {
+            const largest = @reduce(.Max, @abs(self.data));
+            if (largest == 0) return null;
+            const reduced: Self = .{ .data = self.data / @as(Simd, @splat(largest)) };
+            return reduced.scale(1 / reduced.length());
+        }
         /// Linear interpolation `self + (other - self) * t`.
         pub fn lerp(self: Self, other: Self, t: T) Self {
             return .{ .data = self.data + (other.data - self.data) * @as(Simd, @splat(t)) };

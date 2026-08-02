@@ -622,6 +622,19 @@ pub const BodyManager = struct {
         const ib = self.alloc.validate(b) orelse return null;
         const shape_a = store.get(self.bodies.items(.shape)[ia]) orelse return null;
         const shape_b = store.get(self.bodies.items(.shape)[ib]) orelse return null;
+        // **PRECONDITION, ASSERTED AT THIS SITE: both bodies carry BOUNDED CONVEXES.** It was
+        // inherited in silence from `supportShape` three levels down, which meant a half-space or
+        // a mesh reaching here panicked in a safe build and was UNDEFINED BEHAVIOUR in ReleaseFast
+        // — the FIFTH hole in the `ShapeClass` net, of the same class as the four closed at the
+        // start of M1.1.11.1, and open for a half-space since M1.1.11.
+        //
+        // A precondition and not an error channel, because neither refused shape has an answer to
+        // give: a mesh has no single GJK result — one per contacting triangle, which is what
+        // `collidePairEach` is for — and a half-space has no bounded support map at all. Same form
+        // as `supportShape`'s own, now stated where a caller can read it against the handles it
+        // holds.
+        std.debug.assert(shape_a.class() == .convex);
+        std.debug.assert(shape_b.class() == .convex);
         return narrowphase.gjk(
             Real,
             shape_mod.supportShape(shape_a),
@@ -804,7 +817,8 @@ pub const BodyManager = struct {
             .triangle_soup => {
                 const data = shape.mesh.?;
                 const inv_rot = self.bodies.items(.rotation)[idx].conjugate();
-                const probe_box = supportShapeAabb(
+                const probe_box = meshCandidateBox(
+                    data,
                     query_shape,
                     inv_rot.rotateVec3(query_position.sub(self.bodies.items(.position)[idx])),
                     inv_rot.mul(query_rotation),
@@ -1223,7 +1237,12 @@ pub const BodyManager = struct {
     ) void {
         _ = self;
         const inv_rot = mesh_rotation.conjugate();
-        const box = supportShapeAabb(
+        // The SAME hardened filter the shape-overlap arm uses, and for the same reason: contact
+        // generation's own predicate is `collideOrdered` returning non-null, which it does for a
+        // `shallow` pair, so a box that dropped a triangle inside the contact margin would lose a
+        // contact the convex↔convex path would have made (finding F1).
+        const box = meshCandidateBox(
+            data,
             convex,
             inv_rot.rotateVec3(convex_position.sub(mesh_position)),
             inv_rot.mul(convex_rotation),
@@ -1296,6 +1315,46 @@ const MeshRayCollector = struct {
         return false;
     }
 };
+
+/// The candidate box a mesh traversal must offer the exact kernel, inflated so the filter is
+/// CONSERVATIVE with respect to GJK's own contact margin (M1.1.11.1 closure, finding F1).
+///
+/// **Why an unhardened box is a wrong answer and not merely a tight one.** The exact predicate of
+/// §1.11.12 is "the GJK regime is not `separated`", and that regime's boundary sits at
+/// `conv_k · floatEps(T) · coordScale` BEYOND touching — a triangle separated by less than that
+/// is `shallow`, which counts. A box filter accepts only triangles whose own box meets the
+/// probe's, so a triangle inside that band but outside the box is dropped BEFORE the kernel can
+/// classify it, and the entry answers `false` where the same probe against a bounded convex —
+/// which no box filters at all — answers `true`. The convex arm calls GJK unfiltered; the mesh arm
+/// must not be stricter than the kernel it feeds.
+///
+/// The inflation is the NORMATIVE margin, reused: `narrowphase.contactMargin` is the very
+/// expression the classification evaluates, and `coordScale` is its symmetric pair scale. No
+/// second epsilon is introduced — inventing one is what the discipline forbids, and one already
+/// exists for exactly this band.
+///
+/// The mesh side of the scale is an upper BOUND over all candidate triangles
+/// (`MeshData.maxVertexMagnitude`), because the box has to be fixed before the traversal chooses
+/// which triangles it will offer. Over-estimating widens the box, which costs candidates the
+/// kernel then rejects — the direction §1.11.2 already assigns that cost to.
+fn meshCandidateBox(
+    data: *const MeshData,
+    probe: narrowphase.SupportShape(Real),
+    probe_local_position: Vec3r,
+    probe_local_rotation: Quatr,
+) Aabbr {
+    const scale = narrowphase.coordScale(
+        Real,
+        probe_local_position.length(),
+        probe,
+        // The mesh side enters through the bound, so a synthetic support shape carrying it as a
+        // core extent would be a second way of saying the same thing; the sum is written out.
+        .{ .core = .point, .radius = 0 },
+    ) + data.maxVertexMagnitude();
+    const margin = narrowphase.contactMargin(Real, scale);
+    return supportShapeAabb(probe, probe_local_position, probe_local_rotation)
+        .inflate(Vec3r.splat(margin));
+}
 
 /// Negates the normal of every manifold on its way through — the `a > b` half of
 /// `collidePairEach`'s canonicalisation.

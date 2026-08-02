@@ -34,6 +34,16 @@ pub const build = contact_constraint.build;
 
 /// The Sequential Impulses warm-start cache (double-buffered, sorted flat).
 pub const ContactCache = contact_cache.ContactCache;
+/// The TOTAL orders the two constraint sorts run on — `(pair_key, subshape_id)` here and
+/// `(rank, pair_key, subshape_id)` for the island permutation. `pub` since the M1.1.11.1 closure:
+/// with several constraints per pair, totality is the property that keeps the ordering from
+/// resting on `std.sort.block`'s tie-handling, and totality is a claim about the COMPARATOR that
+/// only a caller of it can check (closure finding F4).
+pub const lessByPairKey = contact_constraint.lessByPairKey;
+/// The island permutation's total order, `(rank, pair_key, subshape_id)`.
+pub const lessByCompositeKey = island_manager.lessByCompositeKey;
+/// One constraint's island sort key plus where it currently sits.
+pub const ConstraintKey = island_manager.ConstraintKey;
 /// A warm-start cache key (pair + sub-shape + feature).
 pub const CacheKey = contact_cache.CacheKey;
 /// A warm-start cache value (accumulated normal + world tangent impulse).

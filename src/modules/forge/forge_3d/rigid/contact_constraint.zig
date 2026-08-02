@@ -468,8 +468,25 @@ const ConstraintCollector = struct {
     }
 };
 
-fn lessByPairKey(_: void, x: ContactConstraint, y: ContactConstraint) bool {
-    return x.pair_key < y.pair_key;
+/// Total order over constraints — `(pair_key, subshape_id)`, and the second term is load-bearing
+/// (M1.1.11.1 closure, finding F4).
+///
+/// `std.mem.sort` is `std.sort.block`, which is UNSTABLE. While a pair produced at most one
+/// constraint, `pair_key` alone was a total order and the instability could not be observed. A mesh
+/// pair produces one per contacting triangle, and on `pair_key` alone their relative order becomes
+/// neither the traversal's nor a contract of any kind: it is the sort algorithm's internal
+/// behaviour. Sequential Impulses is ORDER-SENSITIVE — it is a Gauss-Seidel sweep — so that is the
+/// determinism path, not a cosmetic one.
+///
+/// M1.1.8 stated the invariant this restores, in these words: the constraints are ordered by an
+/// explicit composite key "so contiguity never rests on sort stability". Several constraints per
+/// pair had quietly annulled it, in the island ordering as well as here.
+///
+/// TOTAL because two constraints of one pair cannot share a `subshape_id`: the sub-shape is the
+/// triangle index, and `collidePairEach` offers each triangle at most once.
+pub fn lessByPairKey(_: void, x: ContactConstraint, y: ContactConstraint) bool {
+    if (x.pair_key != y.pair_key) return x.pair_key < y.pair_key;
+    return x.subshape_id < y.subshape_id;
 }
 
 // --- tests -------------------------------------------------------------------

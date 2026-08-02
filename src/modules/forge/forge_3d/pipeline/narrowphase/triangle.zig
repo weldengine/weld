@@ -188,7 +188,12 @@ pub fn rayTriangle(
     const t_num = sign * e1.dot(rvec);
     if (t_num < 0) return null; // the triangle is behind the origin
 
-    const normal = e0.cross(e1).normalize();
+    // The OVERFLOW-SAFE normalisation, for the reason `MeshData.faceNormal` gives: the cross
+    // product of two vertex differences grows as their square, so legal vertices at `1e10` give
+    // `1e20`, whose squared length overflows to infinity at `f32` and makes a plain `normalize`
+    // answer the zero vector. Never empty here — a determinant of exactly zero already returned
+    // above, and a non-zero determinant means a non-zero cross product.
+    const normal = e0.cross(e1).normalizeScaled() orelse unreachable;
     return .{
         .distance = t_num / abs_det,
         .normal = normal,

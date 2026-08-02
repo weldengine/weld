@@ -342,6 +342,18 @@ pub const MeshData = struct {
         self.* = undefined;
     }
 
+    /// An UPPER BOUND on `coreExtent` over every triangle of this mesh: the distance from the
+    /// local origin to the furthest corner of the local AABB, which is at least the magnitude of
+    /// the furthest vertex.
+    ///
+    /// O(1), read off the cached box rather than swept over the vertices — a candidate filter
+    /// that has to be conservative with respect to GJK's contact margin needs the pair's
+    /// coordinate scale BEFORE the traversal, hence a bound over all candidates and not the exact
+    /// value for one. Being an over-estimate is the safe direction: it widens the candidate box.
+    pub fn maxVertexMagnitude(self: MeshData) Real {
+        return self.local_aabb.min.abs().max(self.local_aabb.max.abs()).length();
+    }
+
     /// Number of triangles — and therefore the exclusive upper bound on a valid
     /// `subshape_id` for this shape (§1.11.16: a mesh is root, so its path IS its
     /// triangle index).
@@ -369,11 +381,22 @@ pub const MeshData = struct {
     /// improve the conditioning, the same cancellation happening at build time, it would
     /// only freeze the value and cost memory on the heaviest shape in the store.
     ///
-    /// Total on a stored mesh: `init` refused every exactly-degenerate triangle, so the
-    /// cross product is non-zero and `normalize` cannot answer NaN.
+    /// **The normalisation is the OVERFLOW-SAFE one, and the true-zero refusal at creation does
+    /// NOT cover what would go wrong otherwise.** That refusal rules out a cross product of
+    /// exactly zero, hence a NaN; the failure mode here is the other end of the range. The cross
+    /// product of vertex differences grows as their SQUARE — legal vertices at `1e10`, well
+    /// inside the finite domain `init` admits, give a cross product of `1e20`, whose squared
+    /// length overflows to infinity at `f32`. A plain `normalize` then divides by infinity and
+    /// returns the ZERO VECTOR: a normal of length zero from an input the domain accepts, and the
+    /// unit-length invariant of §1.11.17 punctured. `normalizeScaled` reduces by the largest
+    /// absolute component before squaring anything, so neither end of the range can break it.
+    ///
+    /// Total on a stored mesh: `init` refused every exactly-degenerate triangle, so the cross
+    /// product is non-zero and the optional is never empty — asserted rather than unwrapped
+    /// blindly, so the guarantee is stated where it is relied upon.
     pub fn faceNormal(self: MeshData, index: u32) Vec3r {
         const v = self.triangle(index);
-        return faceCross(v[0], v[1], v[2]).normalize();
+        return faceCross(v[0], v[1], v[2]).normalizeScaled() orelse unreachable;
     }
 
     /// Tight local-space bound of triangle `index`.
