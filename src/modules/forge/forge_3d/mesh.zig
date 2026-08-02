@@ -68,7 +68,8 @@ const Aabbr = config.Aabbr;
 const RayR = broadphase_mod.Ray(Real);
 /// The descriptor's `f32` `Vec3` — the precision mesh vertices arrive in
 /// (`engine-physics-forge.md` §1.11.8: the public surface stays `f32`).
-const ApiVec3 = @import("foundation").math.Vec3;
+const math = @import("foundation").math;
+const ApiVec3 = math.Vec3;
 
 /// The five ways a triangle-mesh descriptor can be malformed, each distinguishable
 /// from the others so a caller can act on the one it caused
@@ -381,15 +382,20 @@ pub const MeshData = struct {
     /// improve the conditioning, the same cancellation happening at build time, it would
     /// only freeze the value and cost memory on the heaviest shape in the store.
     ///
-    /// **The normalisation is the OVERFLOW-SAFE one, and the true-zero refusal at creation does
-    /// NOT cover what would go wrong otherwise.** That refusal rules out a cross product of
-    /// exactly zero, hence a NaN; the failure mode here is the other end of the range. The cross
-    /// product of vertex differences grows as their SQUARE — legal vertices at `1e10`, well
-    /// inside the finite domain `init` admits, give a cross product of `1e20`, whose squared
-    /// length overflows to infinity at `f32`. A plain `normalize` then divides by infinity and
-    /// returns the ZERO VECTOR: a normal of length zero from an input the domain accepts, and the
-    /// unit-length invariant of §1.11.17 punctured. `normalizeScaled` reduces by the largest
-    /// absolute component before squaring anything, so neither end of the range can break it.
+    /// **Both overflows on this path are closed, and they are two and not one.** The true-zero
+    /// refusal at creation rules out a cross product of exactly zero, hence a NaN from dividing
+    /// by it; the failures here are at the other end of the range, and each needed its own fix.
+    /// `normalizeScaled` closes the SQUARED LENGTH: a cross product of `1e20`, which `f32`
+    /// vertices at `1e10` produce and the finite domain admits, squares to infinity, and a plain
+    /// `normalize` then divides by infinity and answers the ZERO VECTOR. `math.triangleCross`
+    /// closes the CROSS PRODUCT ITSELF and the EDGE behind it, which `normalizeScaled` never
+    /// could, being handed the damage already done: vertices at `1e20` cross to `1e40`, which is
+    /// infinity, and `normalizeScaled` then divides infinity by infinity and answers NaN — a
+    /// worse outcome than the zero vector, since it propagates. Vertices at `±3e38` overflow one
+    /// step earlier still, in the SUBTRACTION, and that one breaks at `f64` as well. Reducing the
+    /// three vertices by a common power of two before subtracting is what puts every step back in
+    /// range at both precisions; §1.11.17's unit-length invariant holds across the whole domain
+    /// only with the two together.
     ///
     /// Total on a stored mesh: `init` refused every exactly-degenerate triangle, so the cross
     /// product is non-zero and the optional is never empty — asserted rather than unwrapped
@@ -983,10 +989,19 @@ pub fn edgeIsActive(normal_a: Vec3r, normal_b: Vec3r, edge_direction: Vec3r, cos
     return cos_angle < 0; // parallel: active exactly when opposite
 }
 
-/// The un-normalised face normal `(v₁−v₀) × (v₂−v₀)` — twice the triangle's area vector,
-/// in the fixed evaluation order the winding convention fixes.
+/// The un-normalised face normal `(v₁−v₀) × (v₂−v₀)`, in the fixed evaluation order the
+/// winding convention fixes.
+///
+/// **SCALED, and deliberately so — the magnitude is no longer twice the area.** The shared
+/// `math.triangleCross` reduces the three vertices by one common power of two BEFORE
+/// subtracting, which is what keeps both the edge and the cross product inside the float range
+/// for every vertex the domain admits. Its result is an exact `2^k` multiple of the true area
+/// vector, and the two consumers here need only the direction and the exactly-zero verdict, on
+/// which such a factor has no effect. It is shared with the ray↔triangle kernel for the reason
+/// stated at `isDegenerate`: the guard that refuses a triangle and the normal that describes it
+/// must be computed from the same geometry.
 pub fn faceCross(v0: Vec3r, v1: Vec3r, v2: Vec3r) Vec3r {
-    return v1.sub(v0).cross(v2.sub(v0));
+    return math.triangleCross(Real, v0, v1, v2);
 }
 
 /// Whether a triangle is EXACTLY degenerate — its cross product's largest absolute
@@ -999,6 +1014,16 @@ pub fn faceCross(v0: Vec3r, v1: Vec3r, v2: Vec3r) Vec3r {
 /// area is minuscule and non-zero normalises exactly and must be SERVED — which is why
 /// no area threshold appears here, and why a suite that only rejects degenerates would
 /// pass just as well with one.
+///
+/// **The power-of-two reduction inside `faceCross` is what lets this guard stay at true zero
+/// while remaining meaningful across the whole domain.** An arbitrary scale factor would round
+/// each division, and two exactly-collinear edges could stop being exactly collinear — which
+/// is precisely a verdict this guard would then get wrong. An exact power of two changes no
+/// mantissa, so collinearity is preserved bit for bit and the verdict is unmoved for every
+/// input that already worked. What the reduction adds is the two ends: vertices whose edge or
+/// whose cross product used to overflow now reduce into range, so a legal triangle is no longer
+/// read as degenerate through an infinity, and a triangle whose area underflowed to zero in its
+/// own units is now SERVED, which is what the paragraph above always claimed.
 pub fn isDegenerate(v0: Vec3r, v1: Vec3r, v2: Vec3r) bool {
     return @reduce(.Max, @abs(faceCross(v0, v1, v2).data)) == 0;
 }

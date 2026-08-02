@@ -24,6 +24,10 @@ pub const Vec3 = vec.Vec3;
 pub const Vec4 = vec.Vec4;
 /// Reinterpret `[]const Vec3` as a flat `[]const f32` for the SIMD kernels.
 pub const asFloatSlice = vec.asFloatSlice;
+/// Overflow-free un-normalised triangle area vector, in a power-of-two-reduced space.
+pub const triangleCross = vec.triangleCross;
+/// The power-of-two exponent that reduces three points below unit magnitude.
+pub const pow2ReductionExponent = vec.pow2ReductionExponent;
 
 /// Generic quaternion constructor `Quat(T)`.
 pub const Quat = quat.Quat;

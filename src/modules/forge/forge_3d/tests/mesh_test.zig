@@ -26,7 +26,8 @@ const BodyManager = bm_mod.BodyManager;
 const ShapeStore = shape_mod.ShapeStore;
 const ShapeClass = shape_mod.ShapeClass;
 const MeshData = mesh_mod.MeshData;
-const ApiVec3 = foundation.math.Vec3;
+const math = foundation.math;
+const ApiVec3 = math.Vec3;
 const testing = std.testing;
 
 /// A descriptor-precision (`f32`) `Vec3` literal — the mesh descriptor's own type.
@@ -3716,6 +3717,282 @@ test "F2 a face normal stays unit for legal vertices whose cross product overflo
         const overflowing: Real = @as(Real, 1e20) * @as(Real, 1e20);
         try testing.expect(!std.math.isFinite(overflowing));
         try testing.expectEqual(@as(Real, 0), 1 / @sqrt(overflowing));
+    }
+}
+
+test "F5 the normal and the ray parameter survive both ends of the vertex domain" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+
+    // **F2 CLOSED ONLY THE SQUARE OF THE NORM. The cross product overflows one step EARLIER, and
+    // the edge one step before that.** Three failures on the same path, measured on this branch
+    // before the fix:
+    //
+    //   legs `1e20`   → cross `(0,0,1e40)` = `(0,0,inf)` at `f32`; `normalizeScaled` divides
+    //                   `inf` by its own largest component `inf` and answers `(NaN,NaN,NaN)`.
+    //                   Worse than F2's zero vector, a NaN propagating instead of sitting still.
+    //   legs `3e38`   → the same.
+    //   `±0.9·max`    → the SUBTRACTION overflows: `e0 = (inf,0,0)`, cross `(0,NaN,inf)`. This one
+    //                   is precision-INDEPENDENT and reproduced at `f64` as well.
+    //
+    // The fix reduces the three vertices by one common power of two BEFORE subtracting, so every
+    // component lands below 1, every difference below 2, every cross component below 4. Each case
+    // below asserts the EXACT normal and a length of exactly 1 — not a tolerance met, an exact
+    // answer, because a power-of-two factor cancels bit-for-bit inside `normalizeScaled`.
+    const legs = [_]f32{ 1e20, 3e38 };
+    for (legs) |leg| {
+        const verts = [_]ApiVec3{ av3(0, 0, 0), av3(leg, 0, 0), av3(0, leg, 0) };
+        const id = try store.createShape(gpa, .{ .triangle_mesh = .{
+            .vertices = &verts,
+            .indices = &one_triangle_indices,
+        } });
+        const data = store.get(id).?.mesh.?;
+        // Counter-clockwise seen from +Z: `(leg,0,0) × (0,leg,0) = (0,0,leg²)`, so `+Z`.
+        const n = data.faceNormal(0);
+        try testing.expect(n.eql(vr(0, 0, 1)));
+        try testing.expectEqual(@as(Real, 1), n.lengthSq());
+
+        // THE RAY KERNEL, which is the second finding: its own Möller–Trumbore arithmetic
+        // returned `t = NaN` here, and a NaN distance passes every bound the kernel tests. The
+        // ray drops from `+Z` straight through the point `(leg/4, leg/4, 0)`, which is inside the
+        // triangle since `1/4 + 1/4 < 1`, so the closed-form distance is the drop height itself.
+        const drop: Real = 8;
+        const hit = narrowphase.triangle.rayTriangle(
+            Real,
+            data.triangle(0),
+            vr(@as(Real, leg) / 4, @as(Real, leg) / 4, drop),
+            vr(0, 0, -1),
+        ).?;
+        try testing.expect(std.math.isFinite(hit.distance));
+        try testing.expectEqual(drop, hit.distance);
+        try testing.expect(hit.normal.eql(vr(0, 0, 1)));
+        try testing.expectEqual(@as(Real, 1), hit.normal.lengthSq());
+        try testing.expect(!hit.back_face);
+    }
+
+    // THE SUBTRACTION END, the one that fails at BOTH precisions. Two finite vertices whose
+    // difference is not finite: `0.9·floatMax − (−0.9·floatMax) = 1.8·floatMax`, i.e. infinity.
+    // Reducing first makes the same difference `1.8·m` with `m < 1`, hence under 2.
+    {
+        const big: f32 = std.math.floatMax(f32) * 0.9;
+        const verts = [_]ApiVec3{ av3(-big, 0, 0), av3(big, 0, 0), av3(-big, big, 0) };
+        const id = try store.createShape(gpa, .{ .triangle_mesh = .{
+            .vertices = &verts,
+            .indices = &one_triangle_indices,
+        } });
+        const data = store.get(id).?.mesh.?;
+        // `(v₁−v₀) × (v₂−v₀) = (2·big,0,0) × (0,big,0) = (0, 0, 2·big²)`, so `+Z` again.
+        const n = data.faceNormal(0);
+        try testing.expect(n.eql(vr(0, 0, 1)));
+        try testing.expectEqual(@as(Real, 1), n.lengthSq());
+
+        // Inside the triangle: the legs run `+X` by `2·big` and `+Y` by `big` from `(−big, 0)`,
+        // so `(−big + big/2, big/4)` has barycentrics `1/4` and `1/4`.
+        const drop: Real = 4;
+        const hit = narrowphase.triangle.rayTriangle(
+            Real,
+            data.triangle(0),
+            vr(-@as(Real, big) / 2, @as(Real, big) / 4, drop),
+            vr(0, 0, -1),
+        ).?;
+        try testing.expect(std.math.isFinite(hit.distance));
+        try testing.expectEqual(drop, hit.distance);
+        try testing.expectEqual(@as(Real, 1), hit.normal.lengthSq());
+    }
+
+    // THE DENORMAL END. Legs of `4 · floatTrueMin` cross to `16 · floatTrueMin²`, which underflows
+    // to EXACTLY ZERO in the vertices' own units — so before the fix `MeshData.init` refused this
+    // descriptor as degenerate, contradicting `isDegenerate`'s own claim that a sliver of
+    // minuscule non-zero area must be served. After the reduction the same triangle is an ordinary
+    // right triangle with legs of `0.5` and normalises exactly. Note the reduction LIFTS here
+    // rather than shrinking, which is why the scale factor is applied in two halves: the exponent
+    // needed is around `2^148`, itself unrepresentable at `f32`.
+    {
+        const tiny: f32 = std.math.floatTrueMin(f32) * 4;
+        const verts = [_]ApiVec3{ av3(0, 0, 0), av3(tiny, 0, 0), av3(0, tiny, 0) };
+        const id = try store.createShape(gpa, .{ .triangle_mesh = .{
+            .vertices = &verts,
+            .indices = &one_triangle_indices,
+        } });
+        const data = store.get(id).?.mesh.?;
+        const n = data.faceNormal(0);
+        try testing.expect(n.eql(vr(0, 0, 1)));
+        try testing.expectEqual(@as(Real, 1), n.lengthSq());
+
+        // The kernel too, on a COMMENSURATE ray: the drop is twice the leg, so the whole
+        // configuration lives at one scale and the reduction lifts all of it together. This case
+        // is a GAIN — the unreduced form missed it, its cross product having underflowed.
+        const drop: Real = @as(Real, tiny) * 2;
+        const hit = narrowphase.triangle.rayTriangle(
+            Real,
+            data.triangle(0),
+            vr(@as(Real, tiny) / 4, @as(Real, tiny) / 4, drop),
+            vr(0, 0, -1),
+        ).?;
+        try testing.expect(std.math.isFinite(hit.distance));
+        try testing.expectEqual(drop, hit.distance);
+        try testing.expectEqual(@as(Real, 1), hit.normal.lengthSq());
+
+        // **THE MEASURED LIMIT, and it is a PRECISION limit rather than a design one — which is
+        // why the two precisions are asserted to differ here instead of one of them being
+        // skipped.** An ORDINARY-magnitude origin against this same triangle spans some forty
+        // orders of magnitude. `det` is the leg squared, and at `f32` `(4·floatTrueMin)²` is zero
+        // at the input's own scale while at the reduced scale the offset no longer fits, so every
+        // form measured — unreduced, reduced, and the composition — answers a MISS. The
+        // information is not in the inputs, exactly as §1.11.4 bis records for the convex
+        // kernels, and what matters is the DIRECTION of the failure: a miss, never a NaN and
+        // never a false hit. At `f64` the same descriptor is unremarkable — the legs are an `f32`
+        // value widened, so `leg²` is about `3.1e-89` and perfectly normal — and the kernel
+        // answers the exact distance. That contrast is the evidence that nothing here is
+        // structural.
+        const ordinary = narrowphase.triangle.rayTriangle(
+            Real,
+            data.triangle(0),
+            vr(@as(Real, tiny) / 4, @as(Real, tiny) / 4, 2),
+            vr(0, 0, -1),
+        );
+        if (Real == f32) {
+            try testing.expect(ordinary == null);
+        } else {
+            try testing.expectEqual(@as(Real, 2), ordinary.?.distance);
+            try testing.expectEqual(@as(Real, 1), ordinary.?.normal.lengthSq());
+        }
+    }
+
+    // THE COUNTER-FACTUAL, as arithmetic rather than by editing the code: the two overflows the
+    // unscaled form really does produce, and what each one becomes downstream. `inf / inf` is the
+    // NaN, and the reduced forms of the same quantities are ordinary small numbers.
+    if (Real == f32) {
+        const cross_overflow: Real = @as(Real, 1e20) * @as(Real, 1e20);
+        try testing.expect(std.math.isInf(cross_overflow));
+        try testing.expect(std.math.isNan(cross_overflow / cross_overflow));
+
+        const big: Real = std.math.floatMax(Real) * 0.9;
+        try testing.expect(std.math.isInf(big - (-big)));
+    }
+    // The subtraction end is NOT precision-dependent, so it is asserted at both.
+    {
+        const big: Real = std.math.floatMax(Real) * 0.9;
+        try testing.expect(std.math.isInf(big - (-big)));
+        // Reduced by the power of two `frexp` picks, the same difference is finite and under 2.
+        const exp = -std.math.frexp(big).exponent;
+        const reduced = vr(big, 0, 0).scalePow2(exp);
+        const rx = reduced.toArray()[0];
+        try testing.expect(@abs(rx - (-rx)) < 2);
+    }
+}
+
+test "F5 the power-of-two reduction is exact, so no verdict and no normal moves" {
+    // The reduction's whole licence is that it changes NOTHING for inputs that already worked.
+    // Two properties carry that, and both are asserted rather than argued.
+
+    // (1) EXACTNESS. Scaling by a power of two rewrites the exponent field and leaves the
+    // mantissa alone, so a value scaled down and back up is bit-identical — including for a
+    // denormal, where the intermediate would be unrepresentable if the factor were materialised
+    // once instead of in halves.
+    {
+        const cases = [_]Real{ 1, 0.1, 3, std.math.floatMax(Real) * 0.9, std.math.floatTrueMin(Real) * 4 };
+        for (cases) |c| {
+            const v = vr(c, -c * 0.5, c * 0.25);
+            const exp = -std.math.frexp(c).exponent;
+            const round_trip = v.scalePow2(exp).scalePow2(-exp);
+            try testing.expect(round_trip.eql(v));
+        }
+    }
+
+    // (2) COLLINEARITY. This is the property the true-zero degeneracy guard rests on, and the
+    // one an arbitrary scale factor would break by rounding each division: three exactly
+    // collinear points must still give an exactly zero cross product after reduction, at any
+    // magnitude. A non-power-of-two factor is shown failing the same case just below.
+    {
+        // Every magnitude's TRIPLE must stay finite, the third point being exactly `3 ×` the
+        // second — `floatMax * 0.9` would make `v2` an infinity and the assert inside
+        // `pow2ReductionExponent` would fire on a malformed input rather than on a defect.
+        const magnitudes = [_]Real{ 1, 1e20, std.math.floatMax(Real) / 4, std.math.floatTrueMin(Real) * 8 };
+        for (magnitudes) |m| {
+            // Collinear by construction: `v₂ − v₀` is exactly three times `v₁ − v₀`.
+            const v0 = vr(0, 0, 0);
+            const v1 = vr(m, m, m);
+            const v2 = vr(m * 3, m * 3, m * 3);
+            const c = math.triangleCross(Real, v0, v1, v2);
+            try testing.expectEqual(@as(Real, 0), c.maxAbsComponent());
+        }
+    }
+
+    // (3) The NORMAL is invariant under the choice of exponent — which is what makes "the shared
+    // form" a real claim and not a hope, the mesh reducing by its vertices while the ray kernel
+    // reduces by its vertices AND its origin, hence in general by a different power of two.
+    {
+        const v0 = vr(0.25, -3, 7);
+        const v1 = vr(11, 2, -0.5);
+        const v2 = vr(-4, 9, 3);
+        const reference = math.triangleCross(Real, v0, v1, v2).normalizeScaled().?;
+        for ([_]i32{ -37, -8, -1, 0, 1, 8, 37 }) |k| {
+            const scaled = math.triangleCross(
+                Real,
+                v0.scalePow2(k),
+                v1.scalePow2(k),
+                v2.scalePow2(k),
+            ).normalizeScaled().?;
+            try testing.expect(scaled.eql(reference));
+        }
+    }
+
+    // (4) The COUNTER-FACTUAL for the power-of-two requirement itself. Reducing by the largest
+    // absolute component — the obvious choice, and the one `normalizeScaled` makes for a purpose
+    // where it is harmless — rounds each division, and the collinear triple above then has a
+    // NON-zero cross product: the degeneracy guard's verdict moves, which is exactly what the
+    // power of two buys and what a comment alone would not have caught.
+    {
+        const m: Real = 1;
+        const v0 = vr(0, 0, 0);
+        const v1 = vr(m, m, m);
+        const v2 = vr(m * 3, m * 3, m * 3);
+        // The scale that a plain reduction would use, deliberately not a power of two.
+        const s: Real = 3 * m;
+        const a = v0.scale(1 / s);
+        const b = v1.scale(1 / s);
+        const c = v2.scale(1 / s);
+        const rounded = b.sub(a).cross(c.sub(a));
+        // Still zero for this particular triple — `1/3` rounds the SAME way in all three
+        // components, so proportionality survives. The failure needs components that round
+        // differently from one another, which is the point: the property holds by luck, not by
+        // construction, and only the power of two makes it structural.
+        try testing.expectEqual(@as(Real, 0), rounded.maxAbsComponent());
+
+        const q0 = vr(0, 0, 0);
+        const q1 = vr(1, 3, 7);
+        const q2 = vr(3, 9, 21); // exactly 3 × q1, hence exactly collinear
+        try testing.expectEqual(@as(Real, 0), math.triangleCross(Real, q0, q1, q2).maxAbsComponent());
+
+        // A non-power-of-two divisor rounds each component independently, and a triple where the
+        // three roundings do not stay proportional loses the collinearity. WHICH divisor does
+        // that depends on the precision, so it is SEARCHED rather than hard-coded — a hard-coded
+        // 7 breaks the property at `f32` and preserves it at `f64`, which would have made this
+        // counter-factual silently vacuous at one of the two precisions. The assertion is that
+        // such a divisor exists, which is the actual claim being made about power-of-two scaling.
+        var broken = false;
+        var d: Real = 3;
+        while (d < 200) : (d += 1) {
+            const w0 = q0.scale(1 / d);
+            const w1 = q1.scale(1 / d);
+            const w2 = q2.scale(1 / d);
+            if (w1.sub(w0).cross(w2.sub(w0)).maxAbsComponent() > 0) {
+                broken = true;
+                break;
+            }
+        }
+        try testing.expect(broken);
+        // And the power-of-two form never loses it, at the same magnitudes.
+        for ([_]i32{ -60, -3, 0, 3, 60 }) |k| {
+            try testing.expectEqual(@as(Real, 0), math.triangleCross(
+                Real,
+                q0.scalePow2(k),
+                q1.scalePow2(k),
+                q2.scalePow2(k),
+            ).maxAbsComponent());
+        }
     }
 }
 
