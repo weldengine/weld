@@ -1069,38 +1069,36 @@ pub fn worldAabb(shape: Shape, pos: Vec3r, rot: Quatr) Aabbr {
             return cap0.merge(cap1);
         },
         .triangle_mesh => {
-            // A MESH IS THE ONE SHAPE WHOSE LOCAL BOX IS NOT CENTRED ON THE ORIGIN, so
-            // the centre is transported too — the three primitives above get away with
-            // `pos` alone only because theirs is. Forgetting this is not a small error:
-            // a mesh authored around `(0, 0, 100)` would have its world box placed a
-            // hundred metres away from its triangles.
+            // The TIGHT box over the TRANSPORTED VERTICES, like every other arm of this
+            // function: the box arm applies the absolute rotation matrix to its own
+            // half-extents, which for a box IS the tight box; the capsule arm merges the
+            // two transported end-cap spheres, which for a capsule IS the tight box.
+            // §1.11.12 words this entry's exact kernel as the body's TIGHT world AABB,
+            // and the mesh is not the one shape in the family allowed to be loose.
             //
-            // The extent is the box arm's formula, `extent_i = Σ_j |R_ij| · he_j`,
-            // applied to the local box's half-extents.
+            // The enclosure of the transported LOCAL box is the construction this is
+            // not, and the two differ strictly under a rotation that is not axis-aligned
+            // — measured on a single triangle at 45° about `+Y`, the enclosure reaches
+            // `√2` below the body on the Z axis where the tight box reaches `√2/2`.
             //
-            // **This is the enclosure of the TRANSFORMED LOCAL BOX, not the tight box
-            // over the transformed vertices**, and the two differ under a non-identity
-            // rotation (they coincide exactly at identity). Recorded deviation: §1.11.12
-            // calls this entry's exact kernel "the body's tight world AABB", and for the
-            // three primitives it is; for a mesh the tight box would cost a pass over
-            // every vertex, on a path the broadphase drives per proxy update, which
-            // would make `overlapAabb` — the cheapest entry of the family — linear in
-            // triangle count. What §1.11.12 actually FORBIDS is an answer that depends
-            // on a tuning constant, and this one does not: it is a function of the
-            // geometry and the pose alone.
-            const m = Mat3r.fromQuat(rot);
-            const c0 = m.cols[0].toArray();
-            const c1 = m.cols[1].toArray();
-            const c2 = m.cols[2].toArray();
-            const he = shape.local_aabb.halfExtents().toArray();
-            var ext: [3]Real = undefined;
-            inline for (0..3) |i| {
-                ext[i] = @abs(c0[i]) * he[0] + @abs(c1[i]) * he[1] + @abs(c2[i]) * he[2];
-            }
-            return Aabbr.fromCenterHalfExtents(
-                pos.add(rot.rotateVec3(shape.local_aabb.center())),
-                Vec3r.fromArray(ext),
-            );
+            // **O(V), and that costs nothing here**: a mesh forces a STATIC body
+            // (`error.ShapeMustBeStatic` above), whose pose never changes and whose
+            // broadphase proxy is therefore never updated — there is no per-tick path
+            // through this arm at all. What remains is the per-candidate call from
+            // `aabbOverlapsBody`; should that ever measure as hot, the answer is a
+            // per-body box cached at `addBody`, with no invalidation logic precisely
+            // because the shape is static-only, decided on figures rather than guessed.
+            //
+            // TIGHT OVER THE STORED VERTEX SET, which is the same rule `local_aabb`
+            // follows: a vertex no index references still counts, because the engine does
+            // not silently drop what the caller supplied — the same doctrine that refuses
+            // to sanitise away a degenerate triangle. The two definitions coincide for
+            // any mesh whose vertices are all referenced.
+            const data = shape.mesh.?;
+            const first = pos.add(rot.rotateVec3(data.vertices[0]));
+            var box = Aabbr.fromMinMax(first, first);
+            for (data.vertices[1..]) |v| box = box.expand(pos.add(rot.rotateVec3(v)));
+            return box;
         },
         // The store admits sphere/box/capsule, the plane since M1.1.11 and the triangle
         // mesh since M1.1.11.1, and rejects every other variant with

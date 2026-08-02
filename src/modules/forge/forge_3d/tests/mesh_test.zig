@@ -450,6 +450,72 @@ test "a mesh world aabb transports its off-centre local box" {
     const tol: Real = 8 * std.math.floatEps(Real) * 30;
     try testing.expect(rotated.min.approxEql(vr(9, 20, 29), tol));
     try testing.expect(rotated.max.approxEql(vr(10, 20, 30), tol));
+
+    // ---- The box is TIGHT over the transported vertices, not the enclosure of the
+    // transported local box. The two agree at identity and at the quarter turn above —
+    // the triangle's own vertices are the corners of its local box in those poses — so
+    // neither case above discriminates, and this one is written because that is exactly
+    // what makes a regression here invisible.
+    //
+    // An EIGHTH turn about `+Y`, `c = s = √2/2`: `R·(x, y, z) = (c·x + s·z, y, −s·x + c·z)`.
+    //
+    // TIGHT — the three vertices transported:
+    //   `(0,0,0)  → (0, 0, 0)`
+    //   `(1,0,0)  → (c, 0, −s)`
+    //   `(0,0,−1) → (−s, 0, −c)`
+    // so the local-frame box is `(−√2/2, 0, −√2/2) … (√2/2, 0, 0)` and, at the body
+    // position, `(10−√2/2, 20, 30−√2/2) … (10+√2/2, 20, 30)`.
+    //
+    // ENCLOSURE — the refused construction, for comparison: the local centre
+    // `(0.5, 0, −0.5)` transports to `(0, 0, −√2/2)` and the extent is
+    // `ext_i = Σ_j |R_ij|·he_j` on `he = (0.5, 0, 0.5)`, i.e. `(√2/2, 0, √2/2)`, giving
+    // `(10−√2/2, 20, 30−√2) … (10+√2/2, 20, 30)`. It agrees on five of the six bounds
+    // and reaches `√2 ≈ 1.41421356` below the body on Z where the tight box reaches
+    // `√2/2 ≈ 0.70710678` — a gap of 0.707 m, some fourteen orders of magnitude past the
+    // tolerance, so the assertion below cannot pass under it.
+    const root_half = @sqrt(@as(Real, 2)) / 2;
+    const eighth = Quatr.fromAxisAngle(Vec3r.unit_y, std.math.pi / @as(Real, 4));
+    bm.setRotation(id, eighth);
+    const oblique = bm.bodyAabb(&store, id).?;
+    try testing.expect(oblique.min.approxEql(vr(10 - root_half, 20, 30 - root_half), tol));
+    try testing.expect(oblique.max.approxEql(vr(10 + root_half, 20, 30), tol));
+    // Stated as its own assertion so the failure names the thing that regressed: the
+    // enclosure would answer `30 − √2` here, and it does not.
+    try testing.expect(oblique.min.toArray()[2] > 30 - @sqrt(@as(Real, 2)) + 0.5);
+
+    // ---- And once more on a mesh with a NON-ZERO extent on all three axes, since the
+    // triangle above is flat in Y and a formula could be tight only in the degenerate
+    // direction. The corner triangle `(1,0,0)`, `(0,1,0)`, `(0,0,1)`: its cross product
+    // `(−1,1,0) × (−1,0,1) = (1, 1, 1)` is non-zero, and its local box is the unit cube
+    // `[0,1]³`, whose corners are NOT its vertices.
+    //
+    // An eighth turn about `+Z`: `R·(x, y, z) = (c·x − s·y, s·x + c·y, z)`.
+    //
+    // TIGHT: `(1,0,0) → (c, s, 0)`, `(0,1,0) → (−s, c, 0)`, `(0,0,1) → (0, 0, 1)`, so
+    // the box is `(−√2/2, 0, 0) … (√2/2, √2/2, 1)`.
+    //
+    // ENCLOSURE: centre `(0.5,0.5,0.5) → (0, √2/2, 0.5)`, extent
+    // `(√2/2, √2/2, 0.5)`, giving `(−√2/2, 0, 0) … (√2/2, √2, 1)`. It agrees on five
+    // bounds again and reaches `√2` on `max.y` where the tight box reaches `√2/2`.
+    const corner_vertices = [_]ApiVec3{ av3(1, 0, 0), av3(0, 1, 0), av3(0, 0, 1) };
+    const corner = try store.createShape(gpa, .{ .triangle_mesh = .{
+        .vertices = &corner_vertices,
+        .indices = &one_triangle_indices,
+    } });
+    const corner_body = try bm.addBody(gpa, &store, .{
+        .entity = entityOf(1),
+        .body_type = .static,
+        .shape = corner,
+        .rotation = foundation.math.Quatf.fromAxisAngle(
+            foundation.math.Vec3.unit_z,
+            std.math.pi / @as(f32, 4),
+        ),
+    });
+    const corner_box = bm.bodyAabb(&store, corner_body).?;
+    const corner_tol: Real = 8 * std.math.floatEps(Real);
+    try testing.expect(corner_box.min.approxEql(vr(-root_half, 0, 0), corner_tol));
+    try testing.expect(corner_box.max.approxEql(vr(root_half, root_half, 1), corner_tol));
+    try testing.expect(corner_box.max.toArray()[1] < @sqrt(@as(Real, 2)) - 0.5);
 }
 
 // ---------------------------------------------------------------------------

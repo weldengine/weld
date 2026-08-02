@@ -135,8 +135,8 @@ pub const Shape = struct {
     /// **VALID for a mesh**, and this is where the mesh and the half-space part
     /// company: a mesh is bounded, so this is the tight bound over its vertices — the
     /// same value `MeshData.local_aabb` carries. It is also the one shape whose local
-    /// box is NOT centred on the origin, which `worldAabb`'s mesh arm is what it is
-    /// because of.
+    /// box is NOT centred on the origin, which is why `worldAabb`'s mesh arm transports
+    /// the vertices rather than the box.
     ///
     /// An infinite box is not the alternative — its centre is `(−inf + inf)·0.5`,
     /// i.e. NaN, which is the ray origin a shape cast derives from a box; its
