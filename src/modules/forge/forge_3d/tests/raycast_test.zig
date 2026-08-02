@@ -601,7 +601,7 @@ test "raycastBody transports the ray by the inverse pose" {
     });
 
     const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
-    const local = (world.bm.raycastBody(&world.store, id, ray)).?;
+    const local = (world.bm.raycastBody(&world.store, id, ray, .ignore)).?;
     // World entry at x = 10 − 3 = 7 (the local +Y extent faces −X).
     try testing.expectApproxEqAbs(@as(Real, 7), local.distance, tol);
     // The LOCAL normal is +Y; rotating it by the body's rotation gives world −X.
@@ -616,7 +616,7 @@ test "raycastBody transports the ray by the inverse pose" {
 
     // A stale handle answers null rather than reading garbage.
     world.removeBody(id);
-    try testing.expect((world.bm.raycastBody(&world.store, id, ray)) == null);
+    try testing.expect((world.bm.raycastBody(&world.store, id, ray, .ignore)) == null);
 }
 
 test "only an exactly zero direction is empty; both float extremes work" {
@@ -990,8 +990,8 @@ test "equal distance is broken by the owning entity" {
 
         // PRECONDITION: the two exact distances are bit-identical.
         const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
-        const hit_a = (world.bm.raycastBody(&world.store, a, ray)).?;
-        const hit_b = (world.bm.raycastBody(&world.store, b, ray)).?;
+        const hit_a = (world.bm.raycastBody(&world.store, a, ray, .ignore)).?;
+        const hit_b = (world.bm.raycastBody(&world.store, b, ray, .ignore)).?;
         try testing.expectEqual(hit_a.distance, hit_b.distance);
 
         // Only then does the winner mean anything: the LOWER ENTITY.
@@ -1298,8 +1298,8 @@ test "all returns every hit sorted by distance then BodyId" {
 
         // The premise, asserted rather than assumed: `big` really is hit LATER.
         const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
-        const big_hit = (skew.bm.raycastBody(&skew.store, big, ray)).?;
-        const small_hit = (skew.bm.raycastBody(&skew.store, small_sphere, ray)).?;
+        const big_hit = (skew.bm.raycastBody(&skew.store, big, ray, .ignore)).?;
+        const small_hit = (skew.bm.raycastBody(&skew.store, small_sphere, ray, .ignore)).?;
         try testing.expect(small_hit.distance < big_hit.distance);
         // ...and its AABB really is entered EARLIER, which is what makes the
         // traversal offer it first.
@@ -1752,8 +1752,8 @@ test "an exact distance tie is broken by entity, not by creation order" {
         // PRECONDITION 2 — the two exact distances are bit-identical, and both equal
         // the closed form.
         const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
-        const d_first = (world.bm.raycastBody(&world.store, first, ray)).?.distance;
-        const d_second = (world.bm.raycastBody(&world.store, second, ray)).?.distance;
+        const d_first = (world.bm.raycastBody(&world.store, first, ray, .ignore)).?.distance;
+        const d_second = (world.bm.raycastBody(&world.store, second, ray, .ignore)).?.distance;
         try testing.expectEqual(d_first, d_second);
         try testing.expectEqual(tieDistance(), d_first);
 
@@ -1794,8 +1794,8 @@ test "an exact distance tie is broken by entity, not by creation order" {
         const a = try addSphereAt(gpa, &world, .{ 20, tie_offset, 0 }, 0, low_entity);
         const b = try addSphereAt(gpa, &world, .{ 20, -0.6, 0 }, 0, high_entity);
         const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
-        const d_a = (world.bm.raycastBody(&world.store, a, ray)).?.distance;
-        const d_b = (world.bm.raycastBody(&world.store, b, ray)).?.distance;
+        const d_a = (world.bm.raycastBody(&world.store, a, ray, .ignore)).?.distance;
+        const d_b = (world.bm.raycastBody(&world.store, b, ray, .ignore)).?.distance;
         try testing.expect(d_a != d_b);
     }
 }
@@ -1830,8 +1830,8 @@ test "two bodies on the same entity fall back on BodyId" {
         try testing.expectEqual(world.bm.entity(first).?, world.bm.entity(second).?);
 
         const ray = query.Ray.init(Vec3r.zero, v(1, 0, 0));
-        const d_first = (world.bm.raycastBody(&world.store, first, ray)).?.distance;
-        const d_second = (world.bm.raycastBody(&world.store, second, ray)).?.distance;
+        const d_first = (world.bm.raycastBody(&world.store, first, ray, .ignore)).?.distance;
+        const d_second = (world.bm.raycastBody(&world.store, second, ray, .ignore)).?.distance;
         try testing.expectEqual(d_first, d_second);
 
         // Entities equal ⇒ the smaller `BodyId` decides, which here is the

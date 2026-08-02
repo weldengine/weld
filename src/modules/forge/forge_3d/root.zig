@@ -190,6 +190,16 @@ pub fn rayShape(support_shape: SupportShape, origin: Vec3r, direction: Vec3r) ?L
     return narrowphase.rayShape(Real, support_shape, origin, direction);
 }
 
+/// The analytic ray↔triangle kernel and the shared back-face predicate (M1.1.11.1,
+/// `engine-physics-forge.md` §1.11.17): `rayTriangle`, `isBackFace`, and `localHit`, which
+/// is where the back-face normal FLIP lives. Scalar-generic, so re-exported as a namespace;
+/// `BodyManager.raycastBody`'s mesh arm binds it at `Real`.
+///
+/// Only the RAY gains a kernel. A triangle is a bounded convex, so GJK, EPA, the manifold
+/// generator and the cast kernel serve a mesh through `SupportShape.Core.triangle`
+/// unchanged — one variant against four reused families.
+pub const triangle = narrowphase.triangle;
+
 /// Whether the ray kernels cover `support_shape` — `rayShape`'s asserted
 /// precondition at solver precision (M1.1.11). Every box the `ShapeStore` converts
 /// carries `radius = 0`, so this is false only for a `SupportShape` a caller built by

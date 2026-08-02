@@ -158,6 +158,11 @@ pub const RayQuery = struct {
     direction: Vec3r,
     max_distance: Real,
     filter: Filter = .{},
+    /// Which side of a mesh TRIANGLE answers (M1.1.11.1, `engine-physics-forge.md`
+    /// §1.11.17). Vacuous on every other shape: a convex is SOLID and has no back, and
+    /// neither has a half-space. Under `.collide` the returned normal is FLIPPED on a
+    /// back-face hit, because §1.11.4 declares `normal · direction <= 0` on EVERY hit.
+    back_face_mode: api.BackFaceMode = .ignore,
 };
 
 /// One ray hit at solver precision — the mirror of the public `RaycastHit`
@@ -256,6 +261,7 @@ pub fn raycast(
         .filter = query.filter,
         .ray = ray,
         .bound = query.max_distance,
+        .back_face_mode = query.back_face_mode,
     };
     _ = bp.queryRay(ray, &collector);
     return collector.best;
@@ -278,6 +284,7 @@ pub fn raycastAny(
         .filter = query.filter,
         .ray = ray,
         .bound = query.max_distance,
+        .back_face_mode = query.back_face_mode,
     };
     _ = bp.queryRay(ray, &collector);
     return collector.found;
@@ -307,6 +314,7 @@ pub fn raycastAll(
         .filter = query.filter,
         .ray = ray,
         .bound = query.max_distance,
+        .back_face_mode = query.back_face_mode,
         .out = out,
     };
     _ = bp.queryRay(ray, &collector);

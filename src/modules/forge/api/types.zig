@@ -285,6 +285,35 @@ pub const PhysicsQueryFilter = struct {
     exclude: []const BodyId = &.{},
 };
 
+/// Which side of a TRIANGLE an entry answers on (`engine-physics-forge.md` §1.11.17).
+/// The front face is the side the outward normal points to.
+///
+/// Carried only by the entries whose ANSWER differs between the two modes. It is
+/// meaningless outside a mesh: a convex is SOLID and has no back (§1.11.4), and neither
+/// has a half-space. It is absent from `overlapAabb`, which sees no triangle, from
+/// `pointQuery`, which never returns a mesh, and from `closestPoint`, whose distance to
+/// a surface is not signed.
+///
+/// Weld carries ONE field where the reference carries two — `RayCastSettings` and
+/// `ShapeCastSettings` each declare a triangle mode AND a convex mode, both at
+/// `IgnoreBackFaces`. The convex half is already settled here, and not by a setting.
+///
+/// PRE-FREEZE EXTENSION, last window: after the M1.1.15 freeze of `PhysicsModule` this
+/// field could not land at all.
+pub const BackFaceMode = enum(u8) {
+    /// A triangle met from behind does not answer. The default, aligned with the
+    /// reference and with the three real consumers — line of sight, ground probe,
+    /// step probe.
+    ignore,
+    /// It answers, and the returned normal is FLIPPED. §1.11.4 declares
+    /// `normal · direction <= 0` on EVERY hit, and the `−direction` choice at distance
+    /// zero draws its justification from that invariant; returning the outward normal
+    /// unchanged would puncture it. Assumed divergence from the reference, which returns
+    /// it unchanged. Nothing is lost — the caller ASKED for this mode, and the real side
+    /// stays reachable through `subshape_id`.
+    collide,
+};
+
 /// A world-space ray query. `direction` need not be normalised — it is at the
 /// entry. The tested interval is CLOSED, `[0, max_distance]`, and an origin
 /// inside a shape produces a hit at distance zero (convexes are solid, §1.11.4).
@@ -297,6 +326,8 @@ pub const RaycastQuery = struct {
     max_distance: f32,
     /// Object-layer mask + exclusions.
     filter: PhysicsQueryFilter = .{},
+    /// Which side of a mesh triangle answers. Vacuous on every other shape.
+    back_face_mode: BackFaceMode = .ignore,
 };
 
 /// A cast of an arbitrary shape. Replaces the former `SphereCastQuery`: ONE entry

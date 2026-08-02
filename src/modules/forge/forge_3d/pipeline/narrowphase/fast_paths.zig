@@ -108,6 +108,7 @@ pub fn fastSeed(
             // sphere (A) / box (B).
             .box => |he_b| return sphereBox(T, pos_a, shape_a.radius, pos_b, rot_b, he_b, shape_b.radius, .sphere_is_a),
             .segment => return .not_handled, // sphere/capsule stays generic
+            .triangle => return .not_handled, // sphere/triangle stays generic
         },
         .box => |he_a| switch (shape_b.core) {
             // box (A) / sphere (B).
@@ -118,12 +119,19 @@ pub fn fastSeed(
                 return boxBox(T, pos_a, rot_a, he_a, pos_b, rot_b, he_b);
             },
             .segment => return .not_handled, // box/capsule stays generic
+            .triangle => return .not_handled, // box/triangle stays generic
         },
         .segment => |ha| switch (shape_b.core) {
             // capsule/capsule.
             .segment => |hb| return capsuleCapsule(T, pos_a, rot_a, ha, shape_a.radius, pos_b, rot_b, hb, shape_b.radius),
             else => return .not_handled, // capsule/sphere, capsule/box stay generic
         },
+        // NO analytic fast path against a triangle, in either position. The generic
+        // GJK/EPA path serves it exactly, which is the whole return on making the triangle
+        // a core rather than a family of kernels; a swept or contact fast path against one
+        // would owe a geometric-equivalence proof against that generic path, which is the
+        // M1.1.4 pattern and not this milestone's work.
+        .triangle => return .not_handled,
     }
 }
 

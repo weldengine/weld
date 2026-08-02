@@ -20,6 +20,9 @@ const fast_paths = @import("fast_paths.zig");
 const raycast_mod = @import("raycast.zig");
 const shapecast_mod = @import("shapecast.zig");
 const plane_mod = @import("plane.zig");
+// M1.1.11.1 — the analytic ray↔triangle kernel + the back-face predicate. Re-exported as
+// a namespace below; the comptime pin analyses its inline tests.
+const triangle_mod = @import("triangle.zig");
 
 // --- Support layer (support.zig) ---
 
@@ -107,6 +110,10 @@ pub const fastSeed = fast_paths.fastSeed;
 /// Nearest ray↔shape intersection in the shape's local frame; `null` on a miss.
 /// Precondition: `raySupportsShape` (no error channel since M1.1.11).
 pub const rayShape = raycast_mod.rayShape;
+/// The analytic ray↔triangle kernel and the shared back-face predicate (M1.1.11.1,
+/// `engine-physics-forge.md` §1.11.17). Scalar-generic, so re-exported as a namespace;
+/// `BodyManager.raycastBody`'s mesh arm binds it at `Real`.
+pub const triangle = triangle_mod;
 /// Whether the ray kernels cover a support shape — `rayShape`'s precondition, exposed
 /// so a caller can decide admissibility instead of relying on a debug assert.
 pub const raySupportsShape = raycast_mod.raySupportsShape;
@@ -149,4 +156,5 @@ comptime {
     _ = raycast_mod;
     _ = shapecast_mod;
     _ = plane_mod;
+    _ = triangle_mod;
 }

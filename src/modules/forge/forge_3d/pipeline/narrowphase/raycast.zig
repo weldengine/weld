@@ -44,6 +44,12 @@
 const std = @import("std");
 const math = @import("foundation").math;
 const support = @import("support.zig");
+// The analytic ray↔triangle kernel, one sibling wider than the M1.1.9 dependency set and
+// deliberately so: the triangle is a `Core` variant, so its arm is reached through the
+// switch below rather than by a class dispatch above, and the kernel belongs beside the
+// back-face predicate it shares a convention with (§1.11.17). No cycle — `triangle.zig`
+// imports `foundation` and `support.zig` only.
+const triangle_mod = @import("triangle.zig");
 
 /// A ray hit on one shape, in that shape's local frame. Defined in `support.zig`
 /// since M1.1.11: `plane.zig` produces the same type for the half-space, and the
@@ -68,7 +74,14 @@ const unit_k: comptime_int = 16;
 /// callers that need to decide admissibility ahead of a call test the same condition
 /// the assert tests, instead of restating it.
 pub fn raySupportsShape(comptime T: type, shape: support.SupportShape(T)) bool {
-    return !(shape.core == .box and shape.radius != 0);
+    return switch (shape.core) {
+        // A rounded box and a rounded TRIANGLE are the same refusal: the arm below
+        // measures the CORE, so it would under-report the inflated volume by the radius.
+        // Exhaustive on the core with no `else`, so a fifth variant is a compile error
+        // here and must say whether the ray kernels cover it.
+        .box, .triangle => shape.radius == 0,
+        .point, .segment => true,
+    };
 }
 
 /// Nearest ray↔shape intersection, or `null` when the ray misses.
@@ -127,6 +140,20 @@ pub fn rayShape(
             return rayBox(T, half_extents, origin, direction);
         },
         .segment => |half_height| return rayCapsule(T, half_height, shape.radius, origin, direction),
+        .triangle => |verts| {
+            // Defensive, mirroring the box arm and for the same reason.
+            std.debug.assert(shape.radius == 0);
+            // BOTH FACES answer here, and the normal is flipped on a back-face hit so the
+            // `normal · direction <= 0` invariant holds either way. This arm reports
+            // GEOMETRY: a triangle is a surface, so which side answers is a QUERY POLICY
+            // and it lives on the query (`api.BackFaceMode`), which this file may not
+            // import. The mesh path does not come through here at all — it traverses its
+            // own tree and applies the policy per candidate triangle — so the only caller
+            // this arm has is one that built a triangle `SupportShape` by hand and asked
+            // for the nearest intersection, which is what it is given.
+            const hit = triangle_mod.rayTriangle(T, verts, origin, direction) orelse return null;
+            return triangle_mod.localHit(T, hit, 0);
+        },
     }
 }
 
@@ -143,6 +170,20 @@ pub fn containsPoint(comptime T: type, shape: support.SupportShape(T), p: math.V
     const r = shape.radius;
     switch (shape.core) {
         .point => return p.lengthSq() <= r * r,
+        .triangle => {
+            // A triangle is a SURFACE: it encloses nothing, so membership is FALSE
+            // everywhere, for every point, including the vertices. This is §1.11.17's
+            // categorical rule at the grain of one triangle, and it is what makes the
+            // membership short-circuit in `rayShape` never fire for a triangle — every
+            // triangle hit is a real crossing at a real distance, never a
+            // distance-zero-from-inside.
+            //
+            // The radius assert is the same unconditional guard the box arm carries, for
+            // the same reason: it is what keeps `rayShape`'s hoisted precondition from
+            // being able to fail silently if a future edit moves it below this call.
+            std.debug.assert(r == 0);
+            return false;
+        },
         .box => |half_extents| {
             // A rounded box is outside this shape set: the test below measures the
             // CORE, so it would under-report the inflated volume by the radius.

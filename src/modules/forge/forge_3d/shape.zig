@@ -310,6 +310,22 @@ fn descriptorNormalIsUnit(normal: ApiVec3) bool {
     return @abs(norm_sq - 1) <= descriptor_normal_unit_k * std.math.floatEps(f32);
 }
 
+/// The `SupportShape` of ONE triangle of a mesh, at solver precision — the third arm of
+/// the category conversion, at the grain of a sub-shape rather than of a shape.
+///
+/// **This is why the mesh needs no kernel of its own** (§1.11.17): a triangle is a bounded
+/// convex, so GJK, EPA, the manifold generator and the cast kernel all take it unchanged,
+/// and what the mesh contributes is the traversal that decides WHICH triangles they see.
+/// The radius is 0 unconditionally — a mesh triangle carries no convex radius, the same way
+/// a stored box carries none — which is also what keeps every ray-kernel precondition
+/// satisfied by construction.
+///
+/// The vertices come out in the shape's LOCAL frame, so the body pose applies to this
+/// support shape exactly as it does to a whole convex.
+pub fn triangleSupportShape(data: *const MeshData, index: u32) narrowphase.SupportShape(Real) {
+    return .{ .core = .{ .triangle = data.triangle(index) }, .radius = 0 };
+}
+
 /// Convert an immutable `Shape` to the narrowphase `HalfSpace` at solver precision,
 /// in the shape's LOCAL frame — the sibling of `supportShape`, one per category.
 ///

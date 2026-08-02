@@ -61,6 +61,8 @@ const EntityId = api.EntityId;
 /// importing `shape.zig` directly (import-discipline boundary).
 pub const ShapeStore = shape_mod.ShapeStore;
 const Shape = shape_mod.Shape;
+/// The owned triangle-mesh payload, for the mesh arms below (M1.1.11.1).
+const MeshData = @import("mesh.zig").MeshData;
 const Body = body_mod.Body;
 const MotionProperties = body_mod.MotionProperties;
 const GjkResult = narrowphase.GjkResult(Real);
@@ -535,6 +537,7 @@ pub const BodyManager = struct {
         store: *const ShapeStore,
         id: BodyId,
         ray: RayR,
+        back_face_mode: api.BackFaceMode,
     ) ?narrowphase.LocalHit(Real) {
         const idx = self.alloc.validate(id) orelse return null;
         const shape = store.get(self.bodies.items(.shape)[idx]) orelse return null;
@@ -542,15 +545,35 @@ pub const BodyManager = struct {
         const local_origin = inv_rot.rotateVec3(ray.origin.sub(self.bodies.items(.position)[idx]));
         const local_direction = inv_rot.rotateVec3(ray.direction);
         // Dispatch by CATEGORY, above the support map and never inside it (§1.11.15).
-        // Exhaustive with no `else`: the mesh (M1.1.11.1) is a compile error here.
+        // Exhaustive with no `else`.
         // The half-space arm needs no transport of its own — the plane is stored in
         // this body's local frame, which is the frame the ray has just been brought
-        // into, and both kernels return the SAME `LocalHit` so this adapter has one
-        // return type rather than a union of two.
+        // into, and all three kernels return the SAME `LocalHit` so this adapter has one
+        // return type rather than a union of three.
         return switch (shape.class()) {
             .convex => narrowphase.rayShape(Real, shape_mod.supportShape(shape), local_origin, local_direction),
             .half_space => narrowphase.plane.rayShape(Real, shape_mod.halfSpace(shape), local_origin, local_direction),
-            .triangle_soup => @panic("mesh raycast: not yet wired"),
+            // ONE HIT PER BODY, decided HERE, which is where the body's identity lives —
+            // so the three collectors above are untouched by the mesh and receive one hit
+            // per candidate as they always have (§1.11.17). It is not an optimisation: the
+            // §1.11.14 ordering key `(distance, entity, BodyId)` does not discriminate two
+            // triangles of one body, so two hits would be neither ordered nor invariant
+            // and their truncation would be arbitrary.
+            //
+            // The traversal's bound starts at infinity and tightens to the best accepted
+            // hit, so branch and bound prunes WITHIN the body too; the kernel-level
+            // contract is unchanged — no `max_distance` here, the caller intersects with
+            // its own window, exactly as for a convex.
+            .triangle_soup => blk: {
+                var collector = MeshRayCollector{
+                    .data = shape.mesh.?,
+                    .origin = local_origin,
+                    .direction = local_direction,
+                    .back_face_mode = back_face_mode,
+                };
+                _ = collector.data.traverseRay(RayR.init(local_origin, local_direction), &collector);
+                break :blk collector.best;
+            },
         };
     }
 
@@ -989,6 +1012,61 @@ pub const BodyManager = struct {
             },
             .triangle_soup => @panic("mesh contact generation: not yet wired"),
         }
+    }
+};
+
+/// Keeps the nearest ACCEPTED triangle of one mesh for `raycastBody`, and tightens the
+/// traversal's bound to it.
+///
+/// **Where the back-face POLICY is applied.** The kernel reports which side was met and
+/// never decides whether that side answers — it may not, `triangle.zig` being forbidden
+/// from importing the query vocabulary. This is the one place that knows both the mode and
+/// the geometry, so it is where `.ignore` drops a hit and `.collide` keeps it; the normal
+/// flip that `.collide` owes the `normal · direction <= 0` invariant is `localHit`'s, since
+/// that flip is an invariant and not a choice.
+///
+/// **The tie-break is the SMALLER triangle index**, not the traversal order. A ray through
+/// a shared edge of a closed mesh hits both its triangles at the same distance — the
+/// kernel's boundary is face-inclusive — and without a fixed tie-break the answer would
+/// depend on the SAH cut, hence on the order the triangles were authored in.
+const MeshRayCollector = struct {
+    data: *const MeshData,
+    /// Ray origin in the body's LOCAL frame — the frame the mesh's vertices are in.
+    origin: Vec3r,
+    /// Unit ray direction in that same frame.
+    direction: Vec3r,
+    back_face_mode: api.BackFaceMode,
+    best: ?narrowphase.LocalHit(Real) = null,
+    bound: Real = std.math.inf(Real),
+
+    pub fn add(self: *MeshRayCollector, triangle_index: u32) void {
+        const hit = narrowphase.triangle.rayTriangle(
+            Real,
+            self.data.triangle(triangle_index),
+            self.origin,
+            self.direction,
+        ) orelse return;
+        if (hit.back_face and self.back_face_mode == .ignore) return;
+        if (hit.distance > self.bound) return;
+        if (self.best) |best| {
+            if (hit.distance > best.distance) return;
+            // Equal distance: the smaller triangle index wins, so the answer is a function
+            // of the mesh and the ray and not of the tree's shape.
+            if (hit.distance == best.distance and triangle_index >= best.subshape_id) return;
+        }
+        self.best = narrowphase.triangle.localHit(Real, hit, triangle_index);
+        // Tightened TO the distance, not below it, so a triangle at exactly the same
+        // distance still reaches the index tie-break above.
+        self.bound = hit.distance;
+    }
+
+    pub fn maxDistance(self: *const MeshRayCollector) Real {
+        return self.bound;
+    }
+
+    /// Never stops early: the nearest triangle is only known once the walk is done.
+    pub fn shouldStop(_: *const MeshRayCollector) bool {
+        return false;
     }
 };
 

@@ -579,6 +579,12 @@ fn coreExtent(comptime T: type, shape: support.SupportShape(T)) T {
         .point => 0,
         .segment => |half_height| half_height,
         .box => |half_extents| half_extents.length(),
+        // A triangle's core extent is its furthest vertex from the local origin — the same
+        // quantity as a box's `|half_extents|`, read off three explicit points instead of
+        // a symmetry. Note it is NOT the edge length: what this bounds is the coordinate
+        // scale of the support subtraction, which a triangle far from its own local origin
+        // has regardless of how small it is.
+        .triangle => |verts| @max(@max(verts[0].length(), verts[1].length()), verts[2].length()),
     };
 }
 

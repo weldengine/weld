@@ -670,7 +670,7 @@ test "raycastBody hits the world half-space and its normal rotates back to n_wor
 
     // A world ray from `(0, 1, 2)` along `+X` reaches the boundary `x = 10` after 10 m.
     const ray = broadphase_mod.Ray(Real).init(vr(0, 1, 2), Vec3r.unit_x);
-    const hit = scene.bm.raycastBody(&scene.store, scene.body, ray).?;
+    const hit = scene.bm.raycastBody(&scene.store, scene.body, ray, .ignore).?;
     try testing.expectApproxEqAbs(@as(Real, 10), hit.distance, tol);
     // The kernel answers in the BODY's local frame; the query layer rotates the normal
     // to world. Doing that here shows the local normal IS the transported plane's.
@@ -680,7 +680,7 @@ test "raycastBody hits the world half-space and its normal rotates back to n_wor
 
     // Away from the solid: `+X` reversed recedes, so no hit.
     const receding = broadphase_mod.Ray(Real).init(vr(0, 1, 2), Vec3r.unit_x.neg());
-    try testing.expect(scene.bm.raycastBody(&scene.store, scene.body, receding) == null);
+    try testing.expect(scene.bm.raycastBody(&scene.store, scene.body, receding, .ignore) == null);
     // PARALLEL to the boundary, from outside — and §1.11.15 is explicit about what this
     // composition does: **a true-zero guard is exact in the frame it is evaluated in, and
     // that does not compose.** A rigid transform does not preserve EXACT orthogonality:
@@ -712,11 +712,11 @@ test "raycastBody hits the world half-space and its normal rotates back to n_wor
     // business inventing a geometric epsilon to fabricate one. The EXACTLY-parallel
     // case, where the guard does fire, is the kernel-level test above.
     const parallel = broadphase_mod.Ray(Real).init(vr(0, 1, 2), Vec3r.unit_y);
-    const grazing = scene.bm.raycastBody(&scene.store, scene.body, parallel).?;
+    const grazing = scene.bm.raycastBody(&scene.store, scene.body, parallel, .ignore).?;
     try testing.expect(grazing.distance >= 10 / (8 * std.math.floatEps(Real)));
     // From INSIDE the solid: distance 0, normal `−direction` once back in world.
     const inside = broadphase_mod.Ray(Real).init(vr(50, 1, 2), Vec3r.unit_y);
-    const in_hit = scene.bm.raycastBody(&scene.store, scene.body, inside).?;
+    const in_hit = scene.bm.raycastBody(&scene.store, scene.body, inside, .ignore).?;
     try testing.expectEqual(@as(Real, 0), in_hit.distance);
     try testing.expect(scene.bm.rotation(scene.body).?.rotateVec3(in_hit.normal).approxEql(Vec3r.unit_y.neg(), tol));
 }

@@ -1391,3 +1391,507 @@ test "a caller-supplied threshold changes the classification in both directions"
         try testing.expectEqual(c.flags, data.edgeFlags(1));
     }
 }
+
+// ---------------------------------------------------------------------------
+// The ray family through a mesh
+// ---------------------------------------------------------------------------
+
+const harness = @import("solver_test.zig");
+const narrowphase = @import("../pipeline/narrowphase/root.zig");
+
+/// Three parallel triangles in the YZ plane at `x = 2`, `4`, `6`, each spanning
+/// `y, z ∈ [−1, 1]` around the axis — so a ray along `+X` through the origin crosses ALL
+/// THREE. Wound so the outward normal is `−X`, i.e. facing the incoming ray.
+///
+/// `v₀ = (x, −1, −1)`, `v₁ = (x, −1, 1)`, `v₂ = (x, 1, −1)`:
+/// `(v₁−v₀) × (v₂−v₀) = (0,0,2) × (0,2,0) = (0·0 − 2·2, 2·0 − 0·0, 0·2 − 0·0) = (−4, 0, 0)`,
+/// so the normal is `(−1, 0, 0)` — exactly, the cross product being a pure axis vector.
+/// The point `(x, 0, 0)` is inside each triangle (`u = v = 0.5`, on the hypotenuse).
+const wall_vertices = [_]ApiVec3{
+    av3(2, -1, -1), av3(2, -1, 1), av3(2, 1, -1),
+    av3(4, -1, -1), av3(4, -1, 1), av3(4, 1, -1),
+    av3(6, -1, -1), av3(6, -1, 1), av3(6, 1, -1),
+};
+const wall_indices = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+
+/// A static body carrying the three-wall mesh, at the world origin, on layer `layer`.
+fn addWallMesh(gpa: std.mem.Allocator, world: *harness.World, layer: u8, entity: u32) !api.BodyId {
+    const shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{
+        .vertices = &wall_vertices,
+        .indices = &wall_indices,
+    } });
+    return world.addBody(gpa, .{
+        .shape = shape,
+        .body_type = .static,
+        .collision_layer = layer,
+        .entity = entityOf(entity),
+    });
+}
+
+test "raycast hits the nearest triangle and reports its index" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const body = try addWallMesh(gpa, &world, 0, 0);
+
+    // The ray runs from the origin along `+X`. The three walls sit at `x = 2`, `4`, `6`,
+    // so the nearest is the FIRST triangle of the index array — index 0 — at distance
+    // EXACTLY 2, with the outward normal `(−1, 0, 0)` exactly.
+    const q = query.RayQuery{ .origin = Vec3r.zero, .direction = Vec3r.unit_x, .max_distance = 100 };
+    const hit = query.raycast(&world.bp, &world.bm, &world.store, q).?;
+    try testing.expectEqual(body, hit.body);
+    try testing.expectEqual(@as(Real, 2), hit.distance);
+    try testing.expect(hit.normal.eql(vr(-1, 0, 0)));
+    try testing.expect(hit.position.eql(vr(2, 0, 0)));
+    // The `subshape_id` IS the triangle index (§1.11.16: a mesh is root, so its path is
+    // that index), and it is 0 here because the nearest wall is the first triangle.
+    try testing.expectEqual(@as(u32, 0), hit.subshape_id);
+
+    // Fired from the far side, the nearest wall is the LAST triangle — index 2 — and the
+    // index therefore discriminates: a `subshape_id` left at its default would answer 0
+    // here too, and this is the assertion that catches it.
+    const back = query.RayQuery{
+        .origin = vr(10, 0, 0),
+        .direction = vr(-1, 0, 0),
+        .max_distance = 100,
+        // The walls face `−X`, so from `+X` they are met from BEHIND.
+        .back_face_mode = .collide,
+    };
+    const back_hit = query.raycast(&world.bp, &world.bm, &world.store, back).?;
+    try testing.expectEqual(@as(Real, 4), back_hit.distance); // 10 − 6
+    try testing.expectEqual(@as(u32, 2), back_hit.subshape_id);
+
+    // And the MIDDLE wall is reachable, so all three indices are observable rather than
+    // just the two extremes: starting past the first wall, the nearest is index 1.
+    const mid = query.RayQuery{ .origin = vr(3, 0, 0), .direction = Vec3r.unit_x, .max_distance = 100 };
+    const mid_hit = query.raycast(&world.bp, &world.bm, &world.store, mid).?;
+    try testing.expectEqual(@as(Real, 1), mid_hit.distance); // 4 − 3
+    try testing.expectEqual(@as(u32, 1), mid_hit.subshape_id);
+}
+
+test "raycastAll returns one entry per body, not one per triangle" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const mesh_body = try addWallMesh(gpa, &world, 0, 0);
+
+    // The ray crosses THREE triangles of ONE body. `raycastAll` must answer with ONE
+    // entry, the nearest accepted triangle, and it is not an optimisation: §1.11.14's key
+    // `(distance, entity, BodyId)` does not discriminate two triangles of one body, so two
+    // entries would be neither ordered nor invariant and their truncation arbitrary.
+    var buf: [8]query.RayHit = undefined;
+    const q = query.RayQuery{ .origin = Vec3r.zero, .direction = Vec3r.unit_x, .max_distance = 100 };
+    const n = query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf);
+    try testing.expectEqual(@as(u32, 1), n);
+    try testing.expectEqual(mesh_body, buf[0].body);
+    try testing.expectEqual(@as(Real, 2), buf[0].distance);
+    try testing.expectEqual(@as(u32, 0), buf[0].subshape_id);
+
+    // A SECOND mesh body further along gives two entries — one per BODY — which is what
+    // shows the rule is per body and not "at most one entry ever". Placed at `x = 20`, its
+    // nearest wall is at `20 + 2 = 22`.
+    const second_shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{
+        .vertices = &wall_vertices,
+        .indices = &wall_indices,
+    } });
+    _ = try world.addBody(gpa, .{
+        .shape = second_shape,
+        .body_type = .static,
+        .position = harness.av3(20, 0, 0),
+        .entity = entityOf(1),
+    });
+    const two = query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf);
+    try testing.expectEqual(@as(u32, 2), two);
+    try testing.expectEqual(@as(Real, 2), buf[0].distance);
+    try testing.expectEqual(@as(Real, 22), buf[1].distance);
+
+    // `raycastAny` stops at the first accepted candidate; `raycast` agrees with the
+    // truncated `all`.
+    try testing.expect(query.raycastAny(&world.bp, &world.bm, &world.store, q));
+    const closest = query.raycast(&world.bp, &world.bm, &world.store, q).?;
+    try testing.expectEqual(buf[0].body, closest.body);
+    try testing.expectEqual(buf[0].distance, closest.distance);
+    try testing.expectEqual(buf[0].subshape_id, closest.subshape_id);
+}
+
+test "a ray from behind is ignored by default and hit under collide" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    _ = try addWallMesh(gpa, &world, 0, 0);
+
+    // The three walls face `−X`. A ray travelling `−X` from `x = 10` therefore meets every
+    // one of them from BEHIND: `n · direction = (−1,0,0) · (−1,0,0) = +1 > 0`.
+    const from_behind = query.RayQuery{
+        .origin = vr(10, 0, 0),
+        .direction = vr(-1, 0, 0),
+        .max_distance = 100,
+    };
+    // DEFAULT is `.ignore`: nothing answers, on all three entries.
+    try testing.expect(query.raycast(&world.bp, &world.bm, &world.store, from_behind) == null);
+    try testing.expect(!query.raycastAny(&world.bp, &world.bm, &world.store, from_behind));
+    var buf: [8]query.RayHit = undefined;
+    try testing.expectEqual(@as(u32, 0), query.raycastAll(&world.bp, &world.bm, &world.store, from_behind, &buf));
+
+    // Under `.collide` the SAME geometry answers, at the nearest wall — `10 − 6 = 4`.
+    var collide = from_behind;
+    collide.back_face_mode = .collide;
+    const hit = query.raycast(&world.bp, &world.bm, &world.store, collide).?;
+    try testing.expectEqual(@as(Real, 4), hit.distance);
+    try testing.expectEqual(@as(u32, 2), hit.subshape_id);
+    try testing.expect(query.raycastAny(&world.bp, &world.bm, &world.store, collide));
+    try testing.expectEqual(@as(u32, 1), query.raycastAll(&world.bp, &world.bm, &world.store, collide, &buf));
+
+    // And a FRONT hit answers in both modes, which is what keeps the two assertions above
+    // from passing under a predicate that simply rejects everything.
+    const from_front = query.RayQuery{ .origin = Vec3r.zero, .direction = Vec3r.unit_x, .max_distance = 100 };
+    var front_collide = from_front;
+    front_collide.back_face_mode = .collide;
+    try testing.expectEqual(
+        @as(Real, 2),
+        query.raycast(&world.bp, &world.bm, &world.store, from_front).?.distance,
+    );
+    try testing.expectEqual(
+        @as(Real, 2),
+        query.raycast(&world.bp, &world.bm, &world.store, front_collide).?.distance,
+    );
+}
+
+test "a back-face hit returns a flipped normal" {
+    const gpa = testing.allocator;
+    var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+    defer world.deinit(gpa);
+    _ = try addWallMesh(gpa, &world, 0, 0);
+
+    // §1.11.4 declares `normal · direction <= 0` on EVERY hit, and the `−direction` choice
+    // at distance zero draws its justification from it. A back-face hit returning the
+    // outward normal unchanged would give `+1` and puncture it. So the returned normal is
+    // `−n = (+1, 0, 0)` against a `−X` ray, exactly.
+    var collide = query.RayQuery{
+        .origin = vr(10, 0, 0),
+        .direction = vr(-1, 0, 0),
+        .max_distance = 100,
+    };
+    collide.back_face_mode = .collide;
+    const back = query.raycast(&world.bp, &world.bm, &world.store, collide).?;
+    try testing.expect(back.normal.eql(vr(1, 0, 0)));
+    try testing.expectEqual(@as(Real, -1), back.normal.dot(collide.direction));
+
+    // The FRONT hit keeps the outward normal, and the invariant holds there too — which is
+    // what shows the flip is conditional on the facing and not applied blindly.
+    const front = query.RayQuery{ .origin = Vec3r.zero, .direction = Vec3r.unit_x, .max_distance = 100 };
+    const front_hit = query.raycast(&world.bp, &world.bm, &world.store, front).?;
+    try testing.expect(front_hit.normal.eql(vr(-1, 0, 0)));
+    try testing.expectEqual(@as(Real, -1), front_hit.normal.dot(front.direction));
+
+    // The invariant asserted on EVERY hit of a sweep over both modes and many directions,
+    // oblique included, and on the norm as well: unit tight, everywhere.
+    var prng = std.Random.DefaultPrng.init(0x51DE);
+    const rand = prng.random();
+    var hits: u32 = 0;
+    for (0..200) |_| {
+        const raw = vr(
+            rand.float(Real) * 2 - 1,
+            rand.float(Real) * 2 - 1,
+            rand.float(Real) * 2 - 1,
+        );
+        if (@reduce(.Max, @abs(raw.data)) == 0) continue;
+        const direction = raw.scale(1 / raw.length());
+        const origin = vr(4, 0, 0).sub(direction.scale(20));
+        inline for (.{ api.BackFaceMode.ignore, api.BackFaceMode.collide }) |mode| {
+            const q = query.RayQuery{
+                .origin = origin,
+                .direction = direction,
+                .max_distance = 100,
+                .back_face_mode = mode,
+            };
+            if (query.raycast(&world.bp, &world.bm, &world.store, q)) |h| {
+                hits += 1;
+                try testing.expect(h.normal.dot(direction) <= 0);
+                try testing.expect(@abs(h.normal.lengthSq() - 1) <= 8 * std.math.floatEps(Real));
+            }
+        }
+    }
+    // Non-vacuous: the rays are aimed at the middle wall from 20 m out, so most connect.
+    try testing.expect(hits > 100);
+}
+
+test "a grazing ray is refused at true zero" {
+    const T = Real;
+    const V = Vec3r;
+    // The kernel grain, in the triangle's own frame — the only grain at which "exactly
+    // parallel" is expressible, since a rigid transform does not preserve exact
+    // orthogonality (§1.11.15's frame-local corollary, which applies verbatim here).
+    //
+    // The triangle lies in the XY plane with normal `+Z`. A ray along `+X` at `z = 0` is
+    // EXACTLY parallel to the plane: `det = −d · n = 0` exactly, since `d` has no Z
+    // component and `n` is a pure `+Z`. The guard is at TRUE ZERO and the answer is a
+    // miss — in the plane and out of it alike.
+    const tri = [3]V{ vr(0, 0, 0), vr(1, 0, 0), vr(0, 1, 0) };
+    try testing.expect(narrowphase.triangle.rayTriangle(T, tri, vr(-1, 0.25, 0), Vec3r.unit_x) == null);
+    try testing.expect(narrowphase.triangle.rayTriangle(T, tri, vr(-1, 0.25, 5), Vec3r.unit_x) == null);
+
+    // A ray ONE ULP off parallel is NOT refused — it is served, which is what shows the
+    // guard absorbs nothing but an exact zero. To hit at all it must start within an ULP
+    // of the plane: with `d_z ≈ floatEps` and the origin at `z = −floatEps`, the crossing
+    // is at `t ≈ 1`, and the ray is then still inside the triangle's footprint.
+    const tilt = std.math.floatEps(T);
+    const near_parallel = vr(1, 0, tilt).normalize();
+    const served = narrowphase.triangle.rayTriangle(T, tri, vr(-0.5, 0.25, -tilt), near_parallel);
+    try testing.expect(served != null);
+    try testing.expect(served.?.distance > 0.9 and served.?.distance < 1.1);
+
+    // **A TRIANGLE IS NOT A HALF-SPACE HERE, and the difference is worth stating.**
+    // §1.11.15 records that a near-parallel ray against a plane crosses at
+    // `sep / floatEps`, an enormous distance the entry's finite `max_distance` is what
+    // rejects. Against a triangle the BARYCENTRIC bound rejects it first: to travel far
+    // enough along the near-parallel direction to reach the plane, the ray leaves the
+    // triangle's footprint, so the answer is an ordinary miss and no bound is needed.
+    // Measured on this very case — the same direction, an origin half a unit below the
+    // plane instead of an ULP.
+    try testing.expect(narrowphase.triangle.rayTriangle(T, tri, vr(-1, 0.25, -0.5), near_parallel) == null);
+}
+
+test "an oblique far-field configuration keeps a unit normal" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+
+    // §1.11.17: the ratio that governs a triangle's orientation error is its EDGE LENGTH
+    // against its own offset from the SHAPE'S LOCAL ORIGIN — not against the world origin,
+    // which the body pose absorbs. So the case is a small triangle authored FAR OUT IN
+    // LOCAL COORDINATES, and the degradation is a quantisation of the DESCRIPTOR: at
+    // `L = 2¹⁸ = 262144` the `f32` grid spacing is `2¹⁸⁻²³ = 0.03125`, so an intended edge
+    // of length 1 lands on that grid and its direction is perturbed by up to
+    // `floatEps(f32) · L / 1 = 0.03125`.
+    //
+    // Intended: `v₀ = (L, 0, 0)`, `v₁ = v₀ + (0.6, 0.8, 0)`, `v₂ = v₀ + (0, 0, 1)`, whose
+    // cross product `(0.6,0.8,0) × (0,0,1) = (0.8·1 − 0, 0 − 0.6·1, 0) = (0.8, −0.6, 0)` is
+    // EXACTLY unit. That is the normal the stored triangle approximates.
+    const l: f32 = 262144;
+    const far_vertices = [_]ApiVec3{ av3(l, 0, 0), av3(l + 0.6, 0.8, 0), av3(l, 0, 1) };
+    const far = try store.createShape(gpa, .{ .triangle_mesh = .{
+        .vertices = &far_vertices,
+        .indices = &one_triangle_indices,
+    } });
+    const far_normal = store.get(far).?.mesh.?.faceNormal(0);
+
+    // THE NORM IS ASSERTED TIGHT, AND EVERYWHERE. It is a structural invariant — the
+    // kernel normalises — so a short or degenerate normal is always a defect and never an
+    // effect of distance (§1.11.4 bis). No distance-dependent slack here.
+    try testing.expect(@abs(far_normal.lengthSq() - 1) <= 8 * std.math.floatEps(Real));
+
+    // Only the ORIENTATION carries the residue, and its bound is the ratio above. Both
+    // bounds below are expressed in the DESCRIPTOR's precision, `floatEps(f32)`, and not in
+    // `Real`'s — the quantisation happens where the vertices are authored, so these numbers
+    // are the SAME in an `f32` and an `f64` build, which is also why one bound serves both.
+    const intended = vr(0.8, -0.6, 0);
+    const far_error = far_normal.sub(intended).length();
+    const bound: Real = 4 * std.math.floatEps(f32) * l;
+    try testing.expect(far_error <= bound);
+
+    // DISCRIMINATION GUARD: the same intended triangle authored AT the local origin has an
+    // orientation error some five orders smaller. Without this the bound above would pass
+    // just as well on an implementation whose normals were exact, and the test would be
+    // measuring nothing about the far field.
+    const near_vertices = [_]ApiVec3{ av3(0, 0, 0), av3(0.6, 0.8, 0), av3(0, 0, 1) };
+    const near = try store.createShape(gpa, .{ .triangle_mesh = .{
+        .vertices = &near_vertices,
+        .indices = &one_triangle_indices,
+    } });
+    const near_normal = store.get(near).?.mesh.?.faceNormal(0);
+    try testing.expect(@abs(near_normal.lengthSq() - 1) <= 8 * std.math.floatEps(Real));
+    const near_envelope: Real = 8 * std.math.floatEps(f32);
+    const near_error = near_normal.sub(intended).length();
+    try testing.expect(near_error <= near_envelope);
+    // The far error is REAL: two orders of magnitude past the whole near-field ENVELOPE,
+    // so the bound above is not slack absorbing nothing. Compared against the envelope
+    // rather than against `near_error` itself, which is exactly zero at `f32` — where the
+    // quantised `(0.8, −0.6)` and the literal one are the same `f32` value — and would make
+    // a ratio test degenerate.
+    try testing.expect(far_error > 100 * near_envelope);
+    try testing.expect(far_error > near_error);
+
+    // A ray fired OBLIQUELY at the far triangle still hits it, and its normal is unit and
+    // opposes the ray — the far field degrades the orientation, never the norm and never
+    // the hit itself (§1.11.4 bis: a sweep that skips the non-hits lets the false negatives
+    // it is meant to find go by).
+    // OBLIQUE TO THIS TRIANGLE'S PLANE, which is not the same thing as oblique to the
+    // axes. This triangle's normal is `≈ (0.803, −0.596, 0)` — it has no Z component at all,
+    // `v₀` and `v₂` differing only in Z — so a direction dominated by `−Z` would be nearly
+    // PARALLEL to the plane and the test would measure the grazing regime instead of the
+    // far field. Measured on the first attempt, `(−0.4, −0.5, −0.7)` gave a determinant of
+    // `0.025`, a 40× amplification of the centroid's own quantisation, and an ordinary miss.
+    // `(−0.7, 0.5, −0.5)` has `n · d ≈ −0.84`: oblique on all three axes AND well
+    // conditioned against the plane.
+    const target = store.get(far).?.mesh.?.triangleCentroid(0);
+    const oblique = vr(-0.7, 0.5, -0.5).normalize();
+    const ray_hit = narrowphase.triangle.rayTriangle(
+        Real,
+        store.get(far).?.mesh.?.triangle(0),
+        target.sub(oblique.scale(50)),
+        oblique,
+    );
+    try testing.expect(ray_hit != null);
+    try testing.expect(@abs(ray_hit.?.normal.lengthSq() - 1) <= 8 * std.math.floatEps(Real));
+    const oriented = narrowphase.triangle.localHit(Real, ray_hit.?, 0);
+    try testing.expect(oriented.normal.dot(oblique) <= 0);
+}
+
+test "the ray family agrees exactly with brute force over the mesh" {
+    const gpa = testing.allocator;
+
+    // The QUERY-level answer against a brute force over every triangle, on several seeds
+    // and in BOTH back-face modes. The oracle runs the same kernel the traversal runs, in
+    // the body's local frame, over all triangles with no tree at all — so what is being
+    // compared is the TRAVERSAL and the nearest-triangle selection, not the kernel against
+    // itself.
+    for ([_]u64{ 11, 22, 33, 44, 55 }) |seed| {
+        var world = harness.World.initNoSleep(Vec3r.zero, 1.0 / 60.0);
+        defer world.deinit(gpa);
+        const shape = try randomMesh(gpa, &world.store, seed, 120);
+        const body = try world.addBody(gpa, .{
+            .shape = shape,
+            .body_type = .static,
+            .entity = entityOf(0),
+        });
+        const data = world.store.get(shape).?.mesh.?;
+        const n = data.triangleCount();
+
+        var prng = std.Random.DefaultPrng.init(seed ^ 0xA5A5);
+        const rand = prng.random();
+        var answered: u32 = 0;
+
+        for (0..60) |_| {
+            const target = data.triangleCentroid(rand.intRangeLessThan(u32, 0, n));
+            const away = vr(
+                rand.float(Real) * 2 - 1,
+                rand.float(Real) * 2 - 1,
+                rand.float(Real) * 2 - 1,
+            );
+            if (@reduce(.Max, @abs(away.data)) == 0) continue;
+            const offset = away.scale(1 / away.length());
+            const origin = target.add(offset.scale(30));
+            // The direction the ENTRY will use, and the query is given the RAW one so the
+            // entry normalises exactly ONCE. Two traps here, both measured rather than
+            // reasoned about: `prepare` re-normalises whatever it is handed, and
+            // `unitDirection(unitDirection(x))` is not `unitDirection(x)` — feeding an
+            // already-normalised direction makes the oracle and the entry work on values one
+            // ULP apart, which showed up as `29.999998` against `29.999996` on the SAME
+            // triangle. So the oracle applies the entry's own normalisation, once, to the
+            // same raw input the entry receives.
+            const raw_direction = offset.neg();
+            const direction = query.unitDirection(raw_direction).?;
+            const max_distance: Real = 60;
+
+            inline for (.{ api.BackFaceMode.ignore, api.BackFaceMode.collide }) |mode| {
+                // BRUTE FORCE: every triangle, the same kernel, the same accept rule, and
+                // the same `(distance, triangle index)` tie-break the collector uses.
+                //
+                // The ray is transported into the body's LOCAL frame exactly as the adapter
+                // transports it — the same conjugate rotation, the same subtraction. Not a
+                // detail: a conjugate rotation by the identity quaternion is not bit-neutral,
+                // so transporting differently makes the two distances disagree in the last
+                // bits and turns an exact comparison into noise. With the transport shared,
+                // what remains under test is precisely the TRAVERSAL and the
+                // nearest-triangle selection — which is what this oracle is for.
+                const inv_rot = world.bm.rotation(body).?.conjugate();
+                const local_origin = inv_rot.rotateVec3(origin.sub(world.bm.position(body).?));
+                const local_direction = inv_rot.rotateVec3(direction);
+                var brute_best: ?u32 = null;
+                var brute_distance: Real = 0;
+                var t: u32 = 0;
+                while (t < n) : (t += 1) {
+                    const hit = narrowphase.triangle.rayTriangle(
+                        Real,
+                        data.triangle(t),
+                        local_origin,
+                        local_direction,
+                    ) orelse continue;
+                    if (hit.back_face and mode == .ignore) continue;
+                    if (hit.distance > max_distance) continue;
+                    if (brute_best == null or hit.distance < brute_distance or
+                        (hit.distance == brute_distance and t < brute_best.?))
+                    {
+                        brute_best = t;
+                        brute_distance = hit.distance;
+                    }
+                }
+
+                const q = query.RayQuery{
+                    .origin = origin,
+                    .direction = raw_direction,
+                    .max_distance = max_distance,
+                    .back_face_mode = mode,
+                };
+                const got = query.raycast(&world.bp, &world.bm, &world.store, q);
+                if (brute_best) |expected| {
+                    try testing.expect(got != null);
+                    try testing.expectEqual(body, got.?.body);
+                    try testing.expectEqual(expected, got.?.subshape_id);
+                    try testing.expectEqual(brute_distance, got.?.distance);
+                    // `any` must agree on EXISTENCE, and `all` on the nearest entry — one
+                    // per body — so a traversal that lost the nearest triangle could not
+                    // pass all three.
+                    try testing.expect(query.raycastAny(&world.bp, &world.bm, &world.store, q));
+                    var buf: [4]query.RayHit = undefined;
+                    try testing.expectEqual(@as(u32, 1), query.raycastAll(&world.bp, &world.bm, &world.store, q, &buf));
+                    try testing.expectEqual(expected, buf[0].subshape_id);
+                    if (mode == .ignore) answered += 1;
+                } else {
+                    try testing.expect(got == null);
+                    try testing.expect(!query.raycastAny(&world.bp, &world.bm, &world.store, q));
+                }
+            }
+        }
+        // Non-vacuous: the rays are aimed at triangle centroids, so `.ignore` — the
+        // stricter mode — still answers most of them. A suite of misses would agree with
+        // brute force on the empty set and prove nothing.
+        try testing.expect(answered > 20);
+    }
+}
+
+test "the frozen query surface carries the back-face mode and a filled subshape id" {
+    // Field NAMES, TYPES and defaults are the contract, and this pin EXTENDS the M1.1.9 /
+    // M1.1.10 one field by field rather than replacing any part of it.
+    const ray = api.RaycastQuery{ .origin = ApiVec3.zero, .direction = ApiVec3.unit_x, .max_distance = 10 };
+    try testing.expectEqual(api.BackFaceMode.ignore, ray.back_face_mode);
+    try testing.expectEqual(api.BackFaceMode, @TypeOf(ray.back_face_mode));
+    // `u8`-backed with `ignore` first, so the DEFAULT is the zero value — the same
+    // discipline `BodyType` and `ShapeType` follow.
+    try testing.expectEqual(@as(u8, 0), @intFromEnum(api.BackFaceMode.ignore));
+    try testing.expectEqual(@as(u8, 1), @intFromEnum(api.BackFaceMode.collide));
+    try testing.expectEqual(u8, @typeInfo(api.BackFaceMode).@"enum".tag_type);
+    // Exactly TWO states. A third would be a silent widening of a frozen surface.
+    try testing.expectEqual(@as(usize, 2), @typeInfo(api.BackFaceMode).@"enum".fields.len);
+
+    // The two entries that do NOT carry it yet are named here so their absence is a
+    // DECISION and not an omission: `overlapAabb` sees no triangle, `pointQuery` never
+    // returns a mesh, and `closestPoint`'s distance to a surface is not signed (§1.11.17).
+    // `ShapeCastQuery` and `OverlapQuery` DO carry it in the spec and gain it with the
+    // entries that read it.
+    try testing.expect(!@hasField(api.ClosestPointResult, "back_face_mode"));
+
+    // `subshape_id` still DEFAULTS to 0 — the public default is unchanged — and the solver
+    // mirror carries it at the same name. What changed is that something finally writes it.
+    const hit = api.RaycastHit{
+        .entity = entityOf(0),
+        .body = 0,
+        .position = ApiVec3.zero,
+        .normal = ApiVec3.unit_y,
+        .distance = 1,
+    };
+    try testing.expectEqual(@as(u32, 0), hit.subshape_id);
+    try testing.expectEqual(u32, @TypeOf(hit.subshape_id));
+    const solver_hit = query.RayHit{
+        .body = 0,
+        .entity = entityOf(0),
+        .position = Vec3r.zero,
+        .normal = Vec3r.unit_y,
+        .distance = 1,
+    };
+    try testing.expectEqual(@as(u32, 0), solver_hit.subshape_id);
+    // And the kernel-level `LocalHit` gained it too, which is where the value comes from.
+    const local: narrowphase.LocalHit(Real) = .{ .distance = 0, .normal = Vec3r.unit_y };
+    try testing.expectEqual(@as(u32, 0), local.subshape_id);
+}
