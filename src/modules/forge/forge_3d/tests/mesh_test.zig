@@ -1321,3 +1321,73 @@ test "the ray bound prunes and still finds the nearest triangle" {
         try testing.expect(total_bounded < total_unbounded);
     }
 }
+
+test "the descriptor default is the mesh constant, and it is f32 in both builds" {
+    // ONE value, two declarations — the public default and the solver-side name — pinned
+    // equal here, which is the only place that can see both (`api/` must not import the
+    // solver). A drift between them would otherwise be silent.
+    const verts = one_triangle_vertices;
+    const idx = one_triangle_indices;
+    const d = api.ShapeDescriptor{ .triangle_mesh = .{ .vertices = &verts, .indices = &idx } };
+    try testing.expectEqual(mesh_mod.default_active_edge_cos_threshold, d.triangle_mesh.active_edge_cos_threshold);
+
+    // `f32` and NOT `Real`, and the assertion is on the TYPE because that is the defect:
+    // typed `Real` the constant renders as `0.9961947202682495` in an `f32` build and
+    // `0.9961946980917455` in an `f64` one, so the same authored mesh would be classified
+    // against two different thresholds depending on how the engine was compiled. The
+    // value is therefore pinned as an exact `f32` bit pattern, identical in both builds.
+    try testing.expectEqual(f32, @TypeOf(mesh_mod.default_active_edge_cos_threshold));
+    try testing.expectEqual(f32, @TypeOf(d.triangle_mesh.active_edge_cos_threshold));
+    try testing.expectEqual(
+        @as(u32, @bitCast(@as(f32, 0.9961947202682495))),
+        @as(u32, @bitCast(mesh_mod.default_active_edge_cos_threshold)),
+    );
+    // And the widening the solver performs is EXACT — `Real` back to `f32` round-trips.
+    const widened: Real = mesh_mod.default_active_edge_cos_threshold;
+    try testing.expectEqual(mesh_mod.default_active_edge_cos_threshold, @as(f32, @floatCast(widened)));
+}
+
+test "a caller-supplied threshold changes the classification in both directions" {
+    const gpa = testing.allocator;
+
+    // The same two folds as the threshold test above, driven by the DESCRIPTOR's field
+    // rather than by the default. This is what makes the parameter configurable at all:
+    // `createShape` is the only path to the flags, so without the field there would be no
+    // way to reach them, and after the M1.1.15 freeze there could be none.
+    //
+    // `A(0,0,0)`, `B(1,0,0)`, `C(0,1,0)`, `D(0, −cos α, −sin α)`; the shared edge `(0,1)`
+    // is edge 0 of both triangles, so the verdict lands in bit 0 and the four boundary
+    // edges are always active: SMOOTH reads `0b110 = 6`, SHARP reads `0b111 = 7`.
+    //
+    // A 4° fold, `cos α = 0.99756405`:
+    //   against `cos 5° = 0.99619472` it is smoother than required → INACTIVE;
+    //   against `cos 3° = 0.99862953` it is sharper than required → ACTIVE.
+    // A 6° fold, `cos α = 0.99452190`:
+    //   against `cos 5°` → ACTIVE;
+    //   against `cos 8° = 0.99026807` → INACTIVE.
+    // So the field moves the verdict in BOTH directions, on BOTH folds — a field that was
+    // read but ignored, or read only in one branch, fails half of these.
+    const cos5: f32 = 0.99619472;
+    const cos3: f32 = 0.9986295347545738;
+    const cos8: f32 = 0.9902680687415704;
+    const cases = [_]struct { cos_a: f32, sin_a: f32, threshold: f32, flags: u8 }{
+        .{ .cos_a = 0.9975640502598242, .sin_a = 0.06975647374412530, .threshold = cos5, .flags = 0b110 },
+        .{ .cos_a = 0.9975640502598242, .sin_a = 0.06975647374412530, .threshold = cos3, .flags = 0b111 },
+        .{ .cos_a = 0.9945218953682733, .sin_a = 0.10452846326765347, .threshold = cos5, .flags = 0b111 },
+        .{ .cos_a = 0.9945218953682733, .sin_a = 0.10452846326765347, .threshold = cos8, .flags = 0b110 },
+    };
+    for (cases) |c| {
+        var store = ShapeStore{};
+        defer store.deinit(gpa);
+        const verts = [_]ApiVec3{ av3(0, 0, 0), av3(1, 0, 0), av3(0, 1, 0), av3(0, -c.cos_a, -c.sin_a) };
+        const idx = [_]u32{ 0, 1, 2, 1, 0, 3 };
+        const id = try store.createShape(gpa, .{ .triangle_mesh = .{
+            .vertices = &verts,
+            .indices = &idx,
+            .active_edge_cos_threshold = c.threshold,
+        } });
+        const data = store.get(id).?.mesh.?;
+        try testing.expectEqual(c.flags, data.edgeFlags(0));
+        try testing.expectEqual(c.flags, data.edgeFlags(1));
+    }
+}

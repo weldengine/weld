@@ -141,13 +141,32 @@ const stack_capacity: usize = max_tree_depth + 2;
 /// It is declared HERE, and not beside those two in `rigid/solver_config.zig`, for a
 /// reason that is structural rather than stylistic: the flags are BAKED AT CREATION, so
 /// a solver-side field would be read long after the decision it governs had been taken,
-/// and changing it at runtime would silently not rebuild anything. `MeshData.init` takes
-/// it as a parameter so a caller can override it per mesh; the store passes this default.
+/// and changing it at runtime would silently not rebuild anything. What makes it
+/// CONFIGURABLE is `ShapeDescriptor.triangle_mesh.active_edge_cos_threshold`, whose
+/// default this is: `createShape` passes the descriptor's field and never this constant,
+/// so a caller of the public surface can override it per mesh. Without that field there
+/// would be no path to it at all, and after the M1.1.15 freeze there could be none.
+///
+/// **`f32`, and NOT `Real` — the descriptor's precision is what fixes the value.** Typed
+/// `Real` it renders as `0.9961947202682495` in an `f32` build and `0.9961946980917455` in
+/// an `f64` one, so the same authored mesh would be classified against two different
+/// thresholds depending on the build. That is not a type detail: it makes a build
+/// configuration an input to the geometry, which is exactly what `-Dphysics_f64` parity
+/// exists to keep from happening. Widened once at `MeshData.init`, exactly.
+///
+/// What this does NOT achieve, MEASURED rather than assumed: it does not make a given
+/// descriptor's flags bit-identical across the two builds. The compared cosine is
+/// `normalize((v₁−v₀) × (v₂−v₀)) · n_neighbour`, whose own value is build-dependent —
+/// measured on a 5° fold, `0.9961947202682495` at `f32` against `0.9961946974669479` at
+/// `f64`, a gap of `2.3e-8` of the same order as the `2.2e-8` between the two renderings
+/// of the constant. Removing one of the two divergent terms is right, and it is the term
+/// that had no business being there; the other is inherent to computing a normal at two
+/// precisions and no threshold typing touches it.
 ///
 /// The literal is written out rather than computed from `@cos`, so the value is a
 /// constant of the source and not of the host's compile-time trigonometry
-/// (`cos(5°) = 0.99619469809174553229…`).
-pub const default_active_edge_cos_threshold: Real = 0.9961946980917455;
+/// (`cos(5°) = 0.99619469809174553229…`, whose nearest `f32` is `0.9961947202682495`).
+pub const default_active_edge_cos_threshold: f32 = 0.99619472;
 
 /// One node of the flat acceleration structure.
 ///
@@ -222,14 +241,14 @@ pub const MeshData = struct {
     /// at any point unwinds in LIFO order and this returns owning nothing — which is what
     /// `ShapeStore.createShape`'s transaction rests on.
     ///
-    /// `active_edge_cos_threshold` is a per-mesh override of
-    /// `default_active_edge_cos_threshold`; see that declaration for why the parameter is
-    /// here and not on the solver config.
+    /// `active_edge_cos_threshold` is the descriptor's own field — `f32`, widened here
+    /// exactly — and `default_active_edge_cos_threshold` is only its default; see that
+    /// declaration for why it is neither `Real` nor a field of the solver config.
     pub fn init(
         gpa: std.mem.Allocator,
         vertices: []const ApiVec3,
         indices: []const u32,
-        active_edge_cos_threshold: Real,
+        active_edge_cos_threshold: f32,
     ) (std.mem.Allocator.Error || MeshError)!MeshData {
         // (1) The index count describes whole triangles. Tested first because every
         // check after it reads indices three at a time.
@@ -306,7 +325,9 @@ pub const MeshData = struct {
 
         mesh.edge_flags = try gpa.alloc(u8, triangle_count);
         errdefer gpa.free(mesh.edge_flags);
-        try mesh.buildEdgeFlags(gpa, active_edge_cos_threshold);
+        // Widened ONCE, here, and exactly: the descriptor's `f32` is what fixes the value
+        // in both builds (see `default_active_edge_cos_threshold`).
+        try mesh.buildEdgeFlags(gpa, @as(Real, active_edge_cos_threshold));
 
         return mesh;
     }

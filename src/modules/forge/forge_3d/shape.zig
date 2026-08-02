@@ -441,12 +441,9 @@ fn buildShape(
             // Validation and the owned copy, in that order and both inside `init`. The
             // descriptor's arrays are BORROWED for the duration of the call: the caller
             // may release them the moment this returns.
-            var data = try MeshData.init(
-                gpa,
-                m.vertices,
-                m.indices,
-                mesh_mod.default_active_edge_cos_threshold,
-            );
+            // The DESCRIPTOR's threshold, never the constant: the constant is only its
+            // default, and this field is the caller's only path to the flags.
+            var data = try MeshData.init(gpa, m.vertices, m.indices, m.active_edge_cos_threshold);
             errdefer data.deinit(gpa);
             const owned = try gpa.create(MeshData);
             owned.* = data;

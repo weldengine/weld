@@ -180,7 +180,25 @@ pub const ShapeDescriptor = union(ShapeType) {
     /// (§1.11.16) — caller and engine would then designate different triangles with no
     /// diagnostic at all, the same silent-wrong-answer class the `[0, 32)` bound on
     /// `collision_layer` already exists to close.
-    triangle_mesh: struct { vertices: []const Vec3, indices: []const u32 },
+    ///
+    /// `active_edge_cos_threshold` is the cosine below which a CONVEX edge is treated as
+    /// ACTIVE, and it is authored HERE because the flags are baked at creation: this is
+    /// the only path a caller has to them, and after the M1.1.15 freeze the field could
+    /// not land at all. Same pre-freeze window as `BackFaceMode`, and it closes at this
+    /// shape. A named PHYSICAL parameter of the same class as `restitution_threshold` and
+    /// `penetration_slop` — it selects a modelling behaviour, not a numerical tolerance,
+    /// so §1.11.2's `k · floatEps(T) · coordScale` discipline does not apply to it. It is
+    /// `f32` like the rest of this surface (§1.11.8), so the same descriptor names the
+    /// same threshold in an `f32` and an `f64` build; the solver widens it once.
+    /// `forge_3d/mesh.zig`'s `default_active_edge_cos_threshold` is the source of truth
+    /// for this default, and the equality of the two is pinned by a test there.
+    triangle_mesh: struct {
+        vertices: []const Vec3,
+        indices: []const u32,
+        /// `cos(5°)`, whose nearest `f32` is `0.9961947202682495` — the reference's
+        /// `mActiveEdgeCosThresholdAngle` default.
+        active_edge_cos_threshold: f32 = 0.99619472,
+    },
     /// Placeholder — payload lands at the height-field sub-milestone.
     height_field: void,
     /// Placeholder — payload lands at the compound sub-milestone.
