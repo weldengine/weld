@@ -1330,6 +1330,105 @@ const SingleManifoldCollector = struct {
     }
 };
 
+/// Slack, in ULPs of 1, on the test that a contact normal ALREADY IS the face normal — and on
+/// the tie band that decides which edges a contact could have come from. Both compare
+/// quantities of order 1 (a dot product of two unit vectors) or a length against the triangle's
+/// own extent, so this is float noise and not a geometric tolerance: the MODELLING parameter of
+/// this mechanism is `mesh.default_active_edge_cos_threshold`, and it lives on the descriptor.
+const internal_edge_noise_k: comptime_int = 16;
+
+/// The triangle's FACE normal when the contact came from an INACTIVE edge, or `null` when the
+/// normal is to be left alone (`engine-physics-forge.md` §1.11.17).
+///
+/// **Why a contact normal can differ from the face normal at all.** Against a convex, a contact
+/// in the triangle's INTERIOR has the face as its supporting feature, so its normal IS the face
+/// normal. A normal that differs therefore comes from the triangle's BOUNDARY — an edge or a
+/// vertex — and it is free to tilt anywhere in the fan between the two adjacent faces. On a seam
+/// between two coplanar triangles that tilt is pure artefact: the surface is flat, and a slider
+/// crossing the seam is decelerated by a normal that has no business having a lateral component.
+/// Correcting it to the face normal is what removes the catch.
+///
+/// **Which edges the contact "could have come from", without inventing a classification.** The
+/// evidence is the contact's own surface point ON THE MESH, which §3 makes exactly recoverable:
+/// the manifold point is the MIDPOINT of the two surface points, so `position ± ½·penetration·n`
+/// gives each of them. The distance from that point to each of the three edge SEGMENTS is then
+/// computed, and the candidates are those within float noise of the minimum. Using the SEGMENT
+/// rather than the line is what makes a VERTEX contact fall out for free: a point near `v₀` is
+/// equidistant from edge `v₀v₁` and edge `v₂v₀`, so both enter the candidate set and both must be
+/// inactive for the snap to happen — which errs toward KEEPING a catch at a sharp corner, the
+/// safe direction.
+///
+/// **What is deliberately NOT changed: the penetration.** §1.11.17 prescribes correcting the
+/// normal, and only that. Measured along the old normal, the depth slightly over-states the
+/// separation along the new one, by the cosine of the angle between them; the position pass then
+/// pushes marginally harder than needed, bounded by that angle. Recomputing it would mean
+/// re-running the generator against the corrected axis, which is a different manifold and not a
+/// correction of this one.
+fn internalEdgeNormal(
+    data: *const MeshData,
+    triangle_index: u32,
+    mesh_position: Vec3r,
+    mesh_rotation: Quatr,
+    manifold: ContactManifold,
+    mesh_is_a: bool,
+) ?Vec3r {
+    const face_local = data.faceNormal(triangle_index);
+    const face_world = mesh_rotation.rotateVec3(face_local);
+    const mesh_to_convex = if (mesh_is_a) manifold.normal else manifold.normal.neg();
+
+    // Already a FACE contact: nothing to correct, and no edge to consult. Compared against 1,
+    // both vectors being unit, so the slack is pure float noise.
+    const noise: Real = internal_edge_noise_k * std.math.floatEps(Real);
+    if (mesh_to_convex.dot(face_world) >= 1 - noise) return null;
+
+    const verts = data.triangle(triangle_index);
+    // The tie band scales with the triangle's own extent — the only scale this geometry has.
+    var extent: Real = 0;
+    inline for (0..3) |i| {
+        extent = @max(extent, verts[(i + 1) % 3].sub(verts[i]).length());
+    }
+    const band = noise * extent;
+
+    const inv_rot = mesh_rotation.conjugate();
+    // The mesh's own surface point, per manifold point: `surface_a = position + ½·p·n` and
+    // `surface_b = position − ½·p·n` (§3), and the mesh is whichever of the two it is.
+    const half: Real = if (mesh_is_a) 0.5 else -0.5;
+
+    var any_candidate = false;
+    for (manifold.points[0..manifold.count]) |point| {
+        const surface_world = point.position.add(manifold.normal.scale(half * point.penetration));
+        const surface_local = inv_rot.rotateVec3(surface_world.sub(mesh_position));
+
+        var distances: [3]Real = undefined;
+        var closest: Real = std.math.inf(Real);
+        for (&distances, 0..) |*slot, edge| {
+            slot.* = distanceToSegment(surface_local, verts[edge], verts[(edge + 1) % 3]);
+            closest = @min(closest, slot.*);
+        }
+        for (distances, 0..) |distance, edge| {
+            if (distance > closest + band) continue;
+            any_candidate = true;
+            // One ACTIVE candidate edge and the normal stands: the fold is sharp enough that a
+            // slider is meant to catch on it.
+            if (data.edgeIsActiveAt(triangle_index, @intCast(edge))) return null;
+        }
+    }
+    if (!any_candidate) return null;
+    return face_world;
+}
+
+/// Distance from `p` to the segment `[a, b]`. The `length_sq == 0` guard is at TRUE ZERO and is
+/// unreachable on a stored mesh — `MeshData.init` refuses an exactly degenerate triangle, so no
+/// edge of one has zero length — but a zero-length segment would divide, so the guard states
+/// what the refusal guarantees rather than trusting it silently.
+fn distanceToSegment(p: Vec3r, a: Vec3r, b: Vec3r) Real {
+    const ab = b.sub(a);
+    const length_sq = ab.dot(ab);
+    if (length_sq == 0) return p.sub(a).length();
+    const t = std.math.clamp(p.sub(a).dot(ab) / length_sq, 0, 1);
+    return p.sub(a.add(ab.scale(t))).length();
+}
+
 /// Runs the ordinary convex narrowphase against each candidate triangle of a mesh and forwards
 /// every accepted manifold, tagged with its TRIANGLE INDEX — which is the `subshape_id` of a
 /// mesh, it being root (§1.11.16).
@@ -1387,7 +1486,23 @@ fn MeshContactCollector(comptime Sink: type) type {
             const outward = self.mesh_rotation.rotateVec3(self.data.faceNormal(triangle_index));
             const mesh_to_convex = if (self.mesh_is_a) found.normal else found.normal.neg();
             if (mesh_to_convex.dot(outward) <= 0) return; // a back-face contact, culled
-            self.sink.add(triangle_index, found);
+
+            // INTERNAL-EDGE CORRECTION, the consumer of the flags baked at creation
+            // (§1.11.17). Applied AFTER the cull, so the cull decides on the raw geometry and
+            // the correction only ever moves an accepted contact's normal toward the face it
+            // already faces — the two cannot fight.
+            var corrected = found;
+            if (internalEdgeNormal(
+                self.data,
+                triangle_index,
+                self.mesh_position,
+                self.mesh_rotation,
+                found,
+                self.mesh_is_a,
+            )) |face_world| {
+                corrected.normal = if (self.mesh_is_a) face_world else face_world.neg();
+            }
+            self.sink.add(triangle_index, corrected);
         }
     };
 }

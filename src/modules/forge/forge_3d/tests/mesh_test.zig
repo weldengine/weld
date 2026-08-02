@@ -3197,3 +3197,360 @@ test "the contact answer is invariant under creation-order permutation" {
     try testing.expect(trajectories[0][1] > 0.4);
     try testing.expect(trajectories[1][1] > 0.4);
 }
+
+// ---------------------------------------------------------------------------
+// Internal edges
+// ---------------------------------------------------------------------------
+
+/// A strip of `quads` quads along `+X`, spanning `z ∈ [−1, 1]`, every triangle wound with its
+/// outward normal up.
+///
+/// `share` decides the TOPOLOGY and nothing else. With it, adjacent triangles reference the same
+/// corner vertices, so every interior edge PAIRS and a flat seam comes out INACTIVE. Without it
+/// each triangle carries its own three vertices, so every edge is the BOUNDARY of an open mesh
+/// and therefore ACTIVE (§1.11.17). **The vertex COORDINATES are identical either way** — the
+/// same numbers, to the bit — which is what makes the pair a counter-factual on the MECHANISM
+/// and not on the shape.
+///
+/// `fold_sin` tilts every second quad by that sine, turning each seam into a fold of that angle;
+/// zero leaves the strip flat.
+fn slideStrip(gpa: std.mem.Allocator, quads: u32, share: bool, fold_sin: f32) !struct { vertices: []ApiVec3, indices: []u32 } {
+    var vertices: std.ArrayListUnmanaged(ApiVec3) = .empty;
+    var indices: std.ArrayListUnmanaged(u32) = .empty;
+    const fold_cos: f32 = @sqrt(1 - fold_sin * fold_sin);
+
+    const heights = try gpa.alloc(f32, quads + 1);
+    defer gpa.free(heights);
+    const xs = try gpa.alloc(f32, quads + 1);
+    defer gpa.free(xs);
+    heights[0] = 0;
+    xs[0] = 0;
+    for (1..quads + 1) |i| {
+        heights[i] = heights[i - 1] + (if ((i % 2) == 1) fold_sin else -fold_sin);
+        xs[i] = xs[i - 1] + (if (fold_sin == 0) 1 else fold_cos);
+    }
+
+    if (share) {
+        for (0..quads + 1) |i| {
+            try vertices.append(gpa, av3(xs[i], heights[i], -1));
+            try vertices.append(gpa, av3(xs[i], heights[i], 1));
+        }
+        for (0..quads) |q| {
+            const a: u32 = @intCast(q * 2);
+            try indices.appendSlice(gpa, &.{ a, a + 1, a + 2 });
+            try indices.appendSlice(gpa, &.{ a + 2, a + 1, a + 3 });
+        }
+    } else {
+        for (0..quads) |q| {
+            const p0 = av3(xs[q], heights[q], -1);
+            const p1 = av3(xs[q], heights[q], 1);
+            const p2 = av3(xs[q + 1], heights[q + 1], -1);
+            const p3 = av3(xs[q + 1], heights[q + 1], 1);
+            const base: u32 = @intCast(vertices.items.len);
+            try vertices.appendSlice(gpa, &.{ p0, p1, p2, p2, p1, p3 });
+            try indices.appendSlice(gpa, &.{ base, base + 1, base + 2, base + 3, base + 4, base + 5 });
+        }
+    }
+    return .{
+        .vertices = try vertices.toOwnedSlice(gpa),
+        .indices = try indices.toOwnedSlice(gpa),
+    };
+}
+
+/// Drive a FRICTIONLESS, UNDAMPED sphere across the strip and report the `+X` velocity it
+/// retains after `steps` ticks.
+///
+/// Every source of lateral loss other than the internal-edge catch is removed, so the retained
+/// velocity IS the measurement: friction is zero on both bodies (the combine rule `√μ_a · √μ_b`
+/// makes the pair frictionless), and `linear_damping` is zeroed — measured, the default 0.05 alone
+/// costs `5 · (1 − 0.05/60)⁶⁰ = 4.756049` m/s over sixty ticks, which would swamp the effect
+/// under test and did on the first attempt.
+///
+/// A SPHERE and not a box, and that is where the artefact lives. A box resting flat contacts a
+/// triangle FACE against FACE, so its normal is the face normal and there is nothing to correct
+/// — measured, zero edge contacts over the whole run. A sphere whose centre has passed a seam
+/// projects OUTSIDE the triangle behind it, so the closest feature of that triangle is the seam
+/// EDGE and the normal it yields is TILTED. That is the internal-edge artefact, and `y0` is the
+/// penetration: at 5 cm it appears reliably, and flush against the surface it does not appear at
+/// all.
+fn slideSphere(
+    gpa: std.mem.Allocator,
+    share: bool,
+    fold_sin: f32,
+    threshold: f32,
+    y0: f32,
+    steps: u32,
+) !Real {
+    const arrays = try slideStrip(gpa, 12, share, fold_sin);
+    defer gpa.free(arrays.vertices);
+    defer gpa.free(arrays.indices);
+
+    var world = harness.World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
+    defer world.deinit(gpa);
+    const ground = try world.store.createShape(gpa, .{ .triangle_mesh = .{
+        .vertices = arrays.vertices,
+        .indices = arrays.indices,
+        .active_edge_cos_threshold = threshold,
+    } });
+    _ = try world.addBody(gpa, .{
+        .shape = ground,
+        .body_type = .static,
+        .friction = 0,
+        .restitution = 0,
+        .entity = entityOf(0),
+    });
+    const sphere = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+    const slider = try world.addBody(gpa, .{
+        .shape = sphere,
+        .position = harness.av3(1, y0, 0),
+        .body_type = .dynamic,
+        .mass = 1,
+        .friction = 0,
+        .restitution = 0,
+        .linear_damping = 0,
+        .angular_damping = 0,
+        .entity = entityOf(1),
+    });
+    world.bm.setLinearVelocity(slider, vr(5, 0, 0));
+    var n: u32 = 0;
+    while (n < steps) : (n += 1) {
+        try world.step(gpa);
+        if (world.bm.position(slider).?.toArray()[0] >= 9) break;
+    }
+    return world.bm.linearVelocity(slider).?.toArray()[0];
+}
+
+/// `cos(5°)`, the descriptor default — spelled out so a test that overrides it reads against a
+/// named baseline.
+const cos_5_deg: f32 = 0.99619472;
+/// `cos(0.5°)` — a threshold TIGHTER than the default, under which a 2° fold counts as sharp.
+const cos_half_deg: f32 = 0.9999619230641713;
+
+test "a slider does not catch on a flat seam, and catches when that seam is active" {
+    const gpa = testing.allocator;
+
+    // A frictionless, undamped sphere launched at 5 m/s across a FLAT tessellated strip, 5 cm
+    // into it so the trailing triangle's seam edge is reliably in contact.
+    //
+    // WITH the seams PAIRED they are flat, hence INACTIVE, hence the edge-derived normals are
+    // snapped to the face normal — and the slider keeps its speed exactly. MEASURED: 5.000001
+    // m/s, i.e. the loss is below a millionth of the speed, which on a frictionless flat plane is
+    // the physically correct answer.
+    const corrected = try slideSphere(gpa, true, 0, cos_5_deg, 0.45, 60);
+    // A PHYSICAL bound, not an ULP one — the same class as RD-5's: 1% of the launch speed, forty
+    // thousand times the measured loss.
+    try testing.expect(corrected >= 4.95);
+
+    // **THE COUNTER-FACTUAL, and it is an assertion in the same test rather than a manual
+    // experiment.** The SAME geometry, vertex for vertex, with each triangle carrying its own
+    // copies so no edge pairs: every seam is then a BOUNDARY edge of an open mesh and therefore
+    // ACTIVE, the correction never fires, and the tilted normals decelerate the slider.
+    // MEASURED: 4.647478 m/s, a 7% loss — and it FAILS the bound above, which is what makes the
+    // first assertion a test of the MECHANISM and not of the geometry.
+    const uncorrected = try slideSphere(gpa, false, 0, cos_5_deg, 0.45, 60);
+    try testing.expect(uncorrected < 4.95);
+    // Stated as a gap as well, so a future change that merely narrowed the difference could not
+    // pass by drifting both numbers together.
+    try testing.expect(corrected - uncorrected > 0.2);
+
+    // **AND THE COUNTER-FACTUAL ON THE CODE, run and recorded.** Making `internalEdgeNormal`
+    // return `null` unconditionally — the correction disabled, everything else untouched — takes
+    // down FOUR tests of this suite: this one, the sharp-edge complement, the manifold-grain snap
+    // test, and the bit-identity pair. So the bound above is load-bearing on the MECHANISM and
+    // not only on the topology the second run varies.
+    try testing.expect(corrected > uncorrected);
+}
+
+test "a sharp edge still catches, and the descriptor threshold is what decides" {
+    const gpa = testing.allocator;
+
+    // **THE COMPLEMENT, and the reason it is required.** The slider test above, with its
+    // counter-factual, proves the mechanism FIRES. It does NOT refuse an implementation that
+    // snapped EVERY normal to the face normal — that one would glide across the flat seam and
+    // fail no counter-factual. What refuses it is this: an edge that is genuinely SHARP must
+    // still catch.
+    //
+    // A 30° fold at the default `cos(5°)`: convex and far past the threshold, so ACTIVE, so no
+    // correction. MEASURED: 0.769745 m/s retained of 5 — it catches hard, as a 30° ridge should.
+    const fold_30 = @sin(std.math.degreesToRadians(@as(f32, 30)));
+    const sharp = try slideSphere(gpa, true, fold_30, cos_5_deg, 0.5, 60);
+    try testing.expect(sharp < 1.5);
+
+    // **THE THRESHOLD MOVES THE BEHAVIOUR, IN BOTH DIRECTIONS, ON ONE GEOMETRY.** This is what
+    // ties the configurability the descriptor gained to an OBSERVABLE: without it the field is
+    // proved only by its type.
+    //
+    // A 2° fold, `cos 2° = 0.99939`:
+    //   against the default `cos 5° = 0.99619` → `cos α < threshold` is FALSE → INACTIVE →
+    //   corrected → MEASURED 4.969233 m/s;
+    //   against `cos 0.5° = 0.99996` → TRUE → ACTIVE → not corrected → MEASURED 4.833944 m/s.
+    // Same vertices, same slider, same ticks; only the threshold on the descriptor differs.
+    const fold_2 = @sin(std.math.degreesToRadians(@as(f32, 2)));
+    const smooth = try slideSphere(gpa, true, fold_2, cos_5_deg, 0.5, 60);
+    const treated_as_sharp = try slideSphere(gpa, true, fold_2, cos_half_deg, 0.5, 60);
+    try testing.expect(smooth > treated_as_sharp);
+    try testing.expect(smooth - treated_as_sharp > 0.05);
+    // And the smoothed run really is close to gliding, while the sharp-treated one is not — so
+    // the ordering above is not two nearly-equal numbers happening to sort.
+    try testing.expect(smooth > 4.9);
+    try testing.expect(treated_as_sharp < 4.9);
+}
+
+/// Two quads meeting along the seam `x = 0`, `z ∈ [−1, 1]`, as four triangles.
+///
+/// Vertices `0..5` are `(−1,·,−1)`, `(−1,·,1)`, `(0,0,−1)`, `(0,0,1)`, `(1,0,−1)`, `(1,0,1)`, and
+/// the LEFT quad's far edge is raised by `left_lift` so the seam becomes a fold. Triangles, in
+/// order: `(0,1,2)`, `(2,1,3)`, `(2,3,4)`, `(4,3,5)` — each with `(v₁−v₀) × (v₂−v₀)` pointing up
+/// on the flat variant. **Triangle 1 and triangle 2 share the seam `(2,3)`**, so with shared
+/// indices that edge PAIRS; with a per-triangle copy it does not.
+fn seamMesh(gpa: std.mem.Allocator, share: bool, left_lift: f32) !struct { vertices: []ApiVec3, indices: []u32 } {
+    const p = [_]ApiVec3{
+        av3(-1, left_lift, -1), av3(-1, left_lift, 1), av3(0, 0, -1),
+        av3(0, 0, 1),           av3(1, 0, -1),         av3(1, 0, 1),
+    };
+    const tris = [_][3]u32{ .{ 0, 1, 2 }, .{ 2, 1, 3 }, .{ 2, 3, 4 }, .{ 4, 3, 5 } };
+    var vertices: std.ArrayListUnmanaged(ApiVec3) = .empty;
+    var indices: std.ArrayListUnmanaged(u32) = .empty;
+    if (share) {
+        try vertices.appendSlice(gpa, &p);
+        for (tris) |t| try indices.appendSlice(gpa, &t);
+    } else {
+        for (tris) |t| {
+            const base: u32 = @intCast(vertices.items.len);
+            for (t) |v| try vertices.append(gpa, p[v]);
+            try indices.appendSlice(gpa, &.{ base, base + 1, base + 2 });
+        }
+    }
+    return .{
+        .vertices = try vertices.toOwnedSlice(gpa),
+        .indices = try indices.toOwnedSlice(gpa),
+    };
+}
+
+test "the correction snaps an edge normal to the face normal, and only for an inactive edge" {
+    const gpa = testing.allocator;
+
+    // **THE MECHANISM AT THE MANIFOLD GRAIN, in closed form.** A unit-diameter sphere centred at
+    // `(0.2, 0.45, −0.5)` sits 5 cm into a flat two-quad surface. Its centre projects at
+    // `(x, z) = (0.2, −0.5)`:
+    //   - INSIDE triangle 2, whose `(x, z)` corners are `(0,−1)`, `(0,1)`, `(1,−1)` — the
+    //     hypotenuse being `2x + z = 1` and `2(0.2) + (−0.5) = −0.1 < 1`. So that contact is a
+    //     FACE contact and its normal is `+Y` with nothing to correct.
+    //   - OUTSIDE triangle 1, whose corners are `(0,−1)`, `(−1,1)`, `(0,1)`, all at `x <= 0`. The
+    //     closest feature of triangle 1 is therefore the SEAM EDGE, at `(0, 0, −0.5)`, and the
+    //     vector from it to the sphere centre is `(0.2, 0.45, 0)`, of length
+    //     `√(0.04 + 0.2025) = 0.4924 < 0.5` — so it really is in contact, and the normal it
+    //     yields is TILTED: `(0.2, 0.45, 0) / 0.4924 = (0.40614, 0.91382, 0)`.
+    //
+    // Triangles 0 and 3 are out of reach — 0.702 m and 0.667 m from the centre against a 0.5 m
+    // radius — so exactly two triangles answer, which the count below pins.
+    const tilted = vr(0.40614, 0.91382, 0);
+    const face = vr(0, 1, 0);
+    const tol: Real = 1e-4;
+
+    for ([_]bool{ true, false }) |share| {
+        const arrays = try seamMesh(gpa, share, 0);
+        defer gpa.free(arrays.vertices);
+        defer gpa.free(arrays.indices);
+        var store = ShapeStore{};
+        defer store.deinit(gpa);
+        var bm = BodyManager{};
+        defer bm.deinit(gpa);
+
+        const ground_shape = try store.createShape(gpa, .{ .triangle_mesh = .{
+            .vertices = arrays.vertices,
+            .indices = arrays.indices,
+        } });
+        const ground = try bm.addBody(gpa, &store, .{ .entity = entityOf(0), .body_type = .static, .shape = ground_shape });
+        const sphere_shape = try store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
+        const sphere = try bm.addBody(gpa, &store, .{
+            .entity = entityOf(1),
+            .body_type = .dynamic,
+            .shape = sphere_shape,
+            .position = harness.av3(0.2, 0.45, -0.5),
+        });
+
+        var tally = ManifoldTally{};
+        bm.collidePairEach(&store, ground, sphere, &tally);
+        try testing.expectEqual(@as(u32, 2), tally.count);
+
+        // The seam-edge contact is triangle 1's; the face contact is triangle 2's.
+        var seam_normal: ?Vec3r = null;
+        var face_normal: ?Vec3r = null;
+        for (tally.ids[0..tally.count], tally.normals[0..tally.count]) |id, n| {
+            if (id == 1) seam_normal = n;
+            if (id == 2) face_normal = n;
+        }
+        try testing.expect(seam_normal != null);
+        try testing.expect(face_normal != null);
+        // The FACE contact is `+Y` whatever the topology — it was never a candidate for
+        // correction, which is what shows the correction is targeted and not blanket.
+        try testing.expect(face_normal.?.approxEql(face, tol));
+
+        if (share) {
+            // The seam PAIRS, both triangles are coplanar, so the edge is INACTIVE and the
+            // tilted normal is snapped to the face normal.
+            try testing.expect(seam_normal.?.approxEql(face, tol));
+        } else {
+            // Nothing pairs, so the seam is a BOUNDARY edge — ACTIVE — and the tilted normal
+            // stands, at the closed-form value derived above.
+            try testing.expect(seam_normal.?.approxEql(tilted, tol));
+        }
+    }
+}
+
+test "a concave seam is never active, whatever the threshold" {
+    const gpa = testing.allocator;
+
+    // A CONCAVE edge is inactive ALWAYS — the rule carries no threshold at all (§1.11.17) — so
+    // the discriminating test pins it against a threshold TIGHT enough to activate a convex fold
+    // of the same angle. Without that the answer could be explained by the angle alone.
+    //
+    // The left quad is lifted by `sin 10°` at its far edge, and then dropped by the same amount,
+    // giving one convex seam and one concave seam of the same 10° from the same numbers. At
+    // `cos(0.5°)` a 10° convex fold is far past the threshold and ACTIVE; the concave one is
+    // inactive regardless.
+    const lift = @sin(std.math.degreesToRadians(@as(f32, 10)));
+    for ([_]struct { lift: f32, expect_active: bool }{
+        .{ .lift = -lift, .expect_active = true }, // left quad DOWN → convex ridge at the seam
+        .{ .lift = lift, .expect_active = false }, // left quad UP → concave valley at the seam
+    }) |c| {
+        const arrays = try seamMesh(gpa, true, c.lift);
+        defer gpa.free(arrays.vertices);
+        defer gpa.free(arrays.indices);
+        var store = ShapeStore{};
+        defer store.deinit(gpa);
+        const id = try store.createShape(gpa, .{ .triangle_mesh = .{
+            .vertices = arrays.vertices,
+            .indices = arrays.indices,
+            .active_edge_cos_threshold = cos_half_deg,
+        } });
+        const data = store.get(id).?.mesh.?;
+        // The seam is triangle 1's edge 2 — `(v₂, v₀)` = indices `(3, 2)` — and triangle 2's
+        // edge 0 — `(v₀, v₁)` = indices `(2, 3)`. Both must report the same verdict, the flag
+        // being set on both members of a pair or on neither.
+        try testing.expectEqual(c.expect_active, data.edgeIsActiveAt(1, 2));
+        try testing.expectEqual(c.expect_active, data.edgeIsActiveAt(2, 0));
+    }
+}
+
+test "two runs of the slider are bit-identical" {
+    const gpa = testing.allocator;
+    // The slider scene has a mesh in it, per-triangle contacts, per-triangle warm starting AND
+    // the internal-edge correction on the path — every mechanism this milestone added. Two
+    // independent runs must agree bit for bit: no hashed container anywhere, and the constraint
+    // order carried by `(pair_key, subshape_id)` rather than by the traversal.
+    const first = try slideSphere(gpa, true, 0, cos_5_deg, 0.45, 60);
+    const second = try slideSphere(gpa, true, 0, cos_5_deg, 0.45, 60);
+    try testing.expectEqual(first, second);
+    // Non-vacuous: the slider actually ran and kept its speed rather than never starting.
+    try testing.expect(first > 4.95);
+
+    // And with the seams ACTIVE, where the trajectory is genuinely perturbed, the two runs still
+    // agree bit for bit — which is the harder half, the perturbation being what a
+    // non-deterministic order would show up in.
+    const rough_first = try slideSphere(gpa, false, 0, cos_5_deg, 0.45, 60);
+    const rough_second = try slideSphere(gpa, false, 0, cos_5_deg, 0.45, 60);
+    try testing.expectEqual(rough_first, rough_second);
+    try testing.expect(rough_first < 4.95);
+}
