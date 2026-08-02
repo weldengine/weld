@@ -32,17 +32,23 @@ const config = @import("../config.zig");
 const Real = config.Real;
 const Vec3r = config.Vec3r;
 
-/// A contact's warm-start identity. `subshape_id` is 0 for every shape delivered so
-/// far, and the full triple is the sort/match key so it extends without a format
-/// change.
+/// A contact's warm-start identity. The full triple is the sort/match key, so it extended
+/// without a format change when the mesh arrived — which is exactly what it was reserved for.
+///
+/// `subshape_id` held `0` from M1.1.6 until M1.1.11.1; the MESH is the first shape to fill it,
+/// with its triangle index. It has to be part of the key rather than beside it: a mesh pair
+/// produces one constraint per contacting triangle, and `feature_id` is a LOCAL identity —
+/// unique within a manifold, not across manifolds — so two triangles of one body would collide
+/// on `(pair, feature)` alone and reheat from each other's history.
 pub const CacheKey = struct {
     /// Packed canonical body pair `min(BodyId)<<32 | max`.
     pair_key: u64,
     /// Sub-shape of the pair — an OPAQUE PATH decoded by the root shape, NOT a global
     /// index (`engine-physics-forge.md` §1.11.16). A shape with no sub-shape consumes
-    /// zero bits, so this is 0 and unread for sphere, box, capsule and plane; a compound
-    /// (M1.1.20) shifts its own index up and inserts the child's below, which extends the
-    /// encoding without reinterpreting a value already cached.
+    /// zero bits, so this is 0 and unread for sphere, box, capsule and plane; a MESH is root,
+    /// so its path IS its triangle index (M1.1.11.1); a compound (M1.1.20) shifts its own index
+    /// up and inserts the child's below, which extends the encoding without reinterpreting a
+    /// value already cached.
     subshape_id: u32 = 0,
     /// Per-contact feature id (from the manifold), unique within a manifold.
     feature_id: u32,

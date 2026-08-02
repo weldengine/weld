@@ -153,6 +153,21 @@ pub const ContactConstraint = struct {
     /// Packed canonical pair key `min(BodyId)<<32 | max` — the deterministic sort
     /// key (ascending iteration order; M1.1.14).
     pair_key: u64,
+    /// The SUB-SHAPE this constraint came from — a mesh's triangle index, and `0` when
+    /// neither body carries sub-shapes (§1.11.16).
+    ///
+    /// **The second term of the warm-start cache key, which held `0` from M1.1.6 until
+    /// M1.1.11.1.** A mesh pair produces one constraint per contacting triangle, so without it
+    /// every triangle of one body would warm-start from whichever neighbour happened to share a
+    /// `feature_id` — and `feature_id` is a LOCAL identity, unique within a manifold and not
+    /// across them. Filling it makes the reheating per triangle and makes it survive a
+    /// re-traversal that offers the candidates in a different order.
+    ///
+    /// ONE term suffices while at most one side of a pair carries sub-shapes, which is exactly
+    /// the case today: mesh↔mesh is an asserted precondition. Compounds (M1.1.20) put sub-shapes
+    /// on both sides and are the milestone that owes the key its second axis; the frozen spec
+    /// key has one.
+    subshape_id: u32 = 0,
     /// World-space contact normal A→B, shared by all points.
     normal: Vec3r,
     /// Orthonormal tangent basis spanning the contact plane.
@@ -204,7 +219,7 @@ fn effectiveMass(
 /// Build and precompute one contact constraint for the canonical pair `(a, b)`
 /// from `manifold`: tangent basis, combined material, cached inverse mass/inertia,
 /// and per-point lever arms, effective masses, and pre-solve normal velocity.
-fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, manifold: ContactManifold) ?ContactConstraint {
+fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, subshape_id: u32, manifold: ContactManifold) ?ContactConstraint {
     const mp_a = bm.motionProperties(a).?;
     const mp_b = bm.motionProperties(b).?;
 
@@ -236,6 +251,7 @@ fn prepare(bm: *const BodyManager, a: BodyId, b: BodyId, pair_key: u64, manifold
         .body_a = a,
         .body_b = b,
         .pair_key = pair_key,
+        .subshape_id = subshape_id,
         .normal = normal,
         .tangent1 = tb.t1,
         .tangent2 = tb.t2,
@@ -393,23 +409,64 @@ fn emitPair(
     // Pairs arrive canonical; the solver asserts the order, never re-derives it.
     std.debug.assert(a <= b);
 
-    const manifold = bm.collidePair(store, a, b) orelse return false; // separated
+    // SEVERAL constraints per pair since M1.1.11.1: a mesh↔convex pair produces one manifold
+    // per contacting triangle, and that is the only shape change the mesh imposes on this
+    // solver (§1.11.17). A pair with no sub-shapes still produces at most one, so the
+    // convex↔convex path is unchanged in everything but the shape of the call.
+    var collector = ConstraintCollector{
+        .gpa = gpa,
+        .out = out,
+        .bm = bm,
+        .a = a,
+        .b = b,
+        .key = key,
+    };
+    bm.collidePairEach(store, a, b, &collector);
+    if (collector.err) |e| return e;
 
-    // Wake BEFORE preparing, so the constraint is prepared against a body that is
-    // already a simulation participant. Waking changes no velocity — only the flag
-    // and the sleep window — so `prepare`'s inputs are the same either way.
+    // Wake if ANY manifold appeared. The wake now follows `prepare` instead of preceding it,
+    // and the two are PROVABLY equivalent rather than merely believed to be: `prepare` reads
+    // `motionProperties`, `position`, `rotation`, the two velocities, `friction` and
+    // `restitution`, while `wakeBody` writes `flags.sleeping`, `sleep_time` and the two
+    // `sleep_ref_*` columns. The two field sets are DISJOINT, so no constraint's contents can
+    // depend on the order. Reordering was forced by the collector: waking from inside it would
+    // mean holding a mutable `BodyManager` while `collidePairEach` walks it through a `*const`.
     var woke = false;
-    for ([_]BodyId{ a, b }) |id| {
-        if (bm.isSleeping(id) orelse false) {
-            bm.wakeBody(id);
-            woke = true;
+    if (collector.emitted > 0) {
+        for ([_]BodyId{ a, b }) |id| {
+            if (bm.isSleeping(id) orelse false) {
+                bm.wakeBody(id);
+                woke = true;
+            }
         }
     }
-
-    const constraint = prepare(bm, a, b, key, manifold) orelse return woke;
-    try out.append(gpa, constraint);
     return woke;
 }
+
+/// Prepares and appends one `ContactConstraint` per manifold `collidePairEach` offers, latching
+/// an allocation failure rather than propagating it — the collector contract being infallible.
+const ConstraintCollector = struct {
+    gpa: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(ContactConstraint),
+    bm: *const BodyManager,
+    a: BodyId,
+    b: BodyId,
+    key: u64,
+    /// How many manifolds arrived, whether or not each produced a constraint — the wake signal
+    /// is "the pair touches", not "the pair produced solver work": a pair of infinite masses
+    /// touches and `prepare` skips it at true zero.
+    emitted: u32 = 0,
+    err: ?std.mem.Allocator.Error = null,
+
+    pub fn add(self: *ConstraintCollector, subshape_id: u32, manifold: ContactManifold) void {
+        self.emitted += 1;
+        if (self.err != null) return;
+        const constraint = prepare(self.bm, self.a, self.b, self.key, subshape_id, manifold) orelse return;
+        self.out.append(self.gpa, constraint) catch |e| {
+            self.err = e;
+        };
+    }
+};
 
 fn lessByPairKey(_: void, x: ContactConstraint, y: ContactConstraint) bool {
     return x.pair_key < y.pair_key;

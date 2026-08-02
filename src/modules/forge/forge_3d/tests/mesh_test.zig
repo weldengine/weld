@@ -2690,3 +2690,510 @@ test "the frozen surface carries the back-face mode on the two probe entries" {
     const body_closest: bm_mod.BodyClosestPoint = .{ .distance = 0, .position = Vec3r.zero };
     try testing.expectEqual(@as(u32, 0), body_closest.subshape_id);
 }
+
+// ---------------------------------------------------------------------------
+// Contacts
+// ---------------------------------------------------------------------------
+
+const rigid = @import("../rigid/root.zig");
+
+/// A flat mesh floor at `y = 0`: a 2 × 2 grid of quads over `[−2, 2]²`, so EIGHT triangles,
+/// every one wound with its outward normal `+Y` (up).
+///
+/// The winding is `(v₀, v₁, v₂)` with `(v₁−v₀) × (v₂−v₀)` pointing up. For the quad whose
+/// corners are `(x, z)`, `(x+2, z)`, `(x, z+2)`, `(x+2, z+2)`, the first triangle is
+/// `(x,z), (x,z+2), (x+2,z)` and `(0,0,2) × (2,0,0) = (0·0 − 2·0, 2·2 − 0·0, 0) = (0, 4, 0)`.
+/// Four quads, two triangles each, so a box resting on the seam of the middle four touches
+/// several of them at once — which is what makes it a multi-manifold witness.
+fn floorMesh(gpa: std.mem.Allocator) !struct { vertices: []ApiVec3, indices: []u32 } {
+    var vertices: std.ArrayListUnmanaged(ApiVec3) = .empty;
+    var indices: std.ArrayListUnmanaged(u32) = .empty;
+    var qx: i32 = -2;
+    while (qx < 2) : (qx += 2) {
+        var qz: i32 = -2;
+        while (qz < 2) : (qz += 2) {
+            const x: f32 = @floatFromInt(qx);
+            const z: f32 = @floatFromInt(qz);
+            const base: u32 = @intCast(vertices.items.len);
+            try vertices.append(gpa, av3(x, 0, z));
+            try vertices.append(gpa, av3(x, 0, z + 2));
+            try vertices.append(gpa, av3(x + 2, 0, z));
+            try vertices.append(gpa, av3(x + 2, 0, z + 2));
+            try indices.appendSlice(gpa, &.{ base, base + 1, base + 2 });
+            try indices.appendSlice(gpa, &.{ base + 2, base + 1, base + 3 });
+        }
+    }
+    return .{
+        .vertices = try vertices.toOwnedSlice(gpa),
+        .indices = try indices.toOwnedSlice(gpa),
+    };
+}
+
+/// A world whose ground is the eight-triangle mesh floor, plus a dynamic box above it.
+const FloorScene = struct {
+    world: harness.World,
+    ground: api.BodyId,
+    box: api.BodyId,
+    vertices: []ApiVec3,
+    indices: []u32,
+
+    fn init(gpa: std.mem.Allocator, box_position: ApiVec3, sleeping: bool) !FloorScene {
+        const arrays = try floorMesh(gpa);
+        var world = if (sleeping)
+            harness.World.init(vr(0, -9.81, 0), 1.0 / 60.0)
+        else
+            harness.World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
+        const ground_shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{
+            .vertices = arrays.vertices,
+            .indices = arrays.indices,
+        } });
+        const ground = try world.addBody(gpa, .{
+            .shape = ground_shape,
+            .body_type = .static,
+            .restitution = 0,
+            .entity = entityOf(0),
+        });
+        const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+        const box = try world.addBody(gpa, .{
+            .shape = box_shape,
+            .position = box_position,
+            .body_type = .dynamic,
+            .mass = 1,
+            .restitution = 0,
+            .entity = entityOf(1),
+        });
+        return .{ .world = world, .ground = ground, .box = box, .vertices = arrays.vertices, .indices = arrays.indices };
+    }
+
+    fn deinit(self: *FloorScene, gpa: std.mem.Allocator) void {
+        self.world.deinit(gpa);
+        gpa.free(self.vertices);
+        gpa.free(self.indices);
+    }
+};
+
+/// Every manifold `collidePairEach` offers for one pair, tagged with its sub-shape.
+const ManifoldTally = struct {
+    ids: [32]u32 = @splat(0),
+    normals: [32]Vec3r = @splat(Vec3r.zero),
+    count: u32 = 0,
+
+    pub fn add(self: *ManifoldTally, subshape_id: u32, manifold: narrowphase.ContactManifold(Real)) void {
+        self.ids[self.count] = subshape_id;
+        self.normals[self.count] = manifold.normal;
+        self.count += 1;
+    }
+
+    fn has(self: *const ManifoldTally, subshape_id: u32) bool {
+        for (self.ids[0..self.count]) |id| {
+            if (id == subshape_id) return true;
+        }
+        return false;
+    }
+};
+
+test "a mesh and a convex produce one manifold per contacting triangle" {
+    const gpa = testing.allocator;
+
+    // The box is 1 m on a side and sits centred on the mesh floor's ORIGIN, which is the corner
+    // shared by all four quads. Its footprint `[−0.5, 0.5]²` therefore overlaps ALL FOUR quads,
+    // and within each quad only the triangle containing that quad's inner corner — the eight
+    // triangles are laid out two per quad, and the box's footprint reaches `0.5` into each.
+    //
+    // Closed form on the count: four quads touched, and in each the box's footprint covers the
+    // quad's inner corner, which both of that quad's triangles share along their common
+    // diagonal — so BOTH triangles of each quad are reachable and the manifold count is between
+    // four and eight. What is asserted exactly is stronger than a count: EVERY manifold's
+    // sub-shape is a distinct triangle index in `[0, 8)`, no index repeats, and every normal is
+    // `+Y` — the floor's outward direction, since the box is above it and the mesh is A.
+    var scene = try FloorScene.init(gpa, av3(0, 0.5, 0), false);
+    defer scene.deinit(gpa);
+
+    var tally = ManifoldTally{};
+    scene.world.bm.collidePairEach(&scene.world.store, scene.ground, scene.box, &tally);
+
+    // SEVERAL manifolds, which is the shape change the mesh imposes — a convex pair yields one.
+    try testing.expect(tally.count >= 4);
+    try testing.expect(tally.count <= 8);
+    // Each from a DISTINCT triangle, and each index in range: `subshape_id` is the triangle
+    // index (§1.11.16), so a duplicate would mean two manifolds claiming one triangle and a
+    // warm-start cache key collision.
+    var seen: [8]bool = @splat(false);
+    for (tally.ids[0..tally.count]) |id| {
+        try testing.expect(id < 8);
+        try testing.expect(!seen[id]);
+        seen[id] = true;
+    }
+    // The ground is A (its `BodyId` is the smaller — it was created first), so every normal is
+    // A→B, i.e. from the floor up toward the box: `+Y`, to the rounding of a normalised cross
+    // product on exact integer coordinates.
+    for (tally.normals[0..tally.count]) |n| {
+        try testing.expect(n.approxEql(vr(0, 1, 0), 1e-5));
+    }
+
+    // A CONVEX pair still yields exactly one manifold, so the multi-manifold shape is the mesh's
+    // and not a change to the convex path.
+    const pad = try scene.world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(2, 0.5, 2) } });
+    const pad_body = try scene.world.addBody(gpa, .{
+        .shape = pad,
+        .body_type = .static,
+        .position = harness.av3(0, -0.5, 0),
+        .entity = entityOf(2),
+    });
+    var convex_tally = ManifoldTally{};
+    scene.world.bm.collidePairEach(&scene.world.store, pad_body, scene.box, &convex_tally);
+    try testing.expectEqual(@as(u32, 1), convex_tally.count);
+    try testing.expectEqual(@as(u32, 0), convex_tally.ids[0]);
+    // And `collidePair`, the single-manifold wrapper, answers that pair — its precondition being
+    // that neither body carries sub-shapes.
+    try testing.expect(scene.world.bm.collidePair(&scene.world.store, pad_body, scene.box) != null);
+
+    // ORDER-INDEPENDENCE, at the multi-manifold grain: asking with the arguments swapped gives
+    // the same triangles and the NEGATED normals.
+    var swapped = ManifoldTally{};
+    scene.world.bm.collidePairEach(&scene.world.store, scene.box, scene.ground, &swapped);
+    try testing.expectEqual(tally.count, swapped.count);
+    for (tally.ids[0..tally.count]) |id| try testing.expect(swapped.has(id));
+    for (swapped.normals[0..swapped.count]) |n| {
+        try testing.expect(n.approxEql(vr(0, -1, 0), 1e-5));
+    }
+}
+
+test "the constraint build emits one constraint per contacting triangle" {
+    const gpa = testing.allocator;
+    var scene = try FloorScene.init(gpa, av3(0, 0.5, 0), false);
+    defer scene.deinit(gpa);
+
+    // The build loop consumes the collection: one `ContactConstraint` per manifold, each
+    // carrying its own `subshape_id`. Every constraint of this pair shares the pair key and
+    // differs in the sub-shape, which is precisely what the warm-start cache needs.
+    var tally = ManifoldTally{};
+    scene.world.bm.collidePairEach(&scene.world.store, scene.ground, scene.box, &tally);
+
+    var constraints: std.ArrayListUnmanaged(rigid.ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    const key = (@as(u64, @min(scene.ground, scene.box)) << 32) | @max(scene.ground, scene.box);
+    try rigid.build(gpa, &constraints, &scene.world.bm, &scene.world.store, &.{key});
+
+    try testing.expectEqual(tally.count, @as(u32, @intCast(constraints.items.len)));
+    var constraint_ids: [8]bool = @splat(false);
+    for (constraints.items) |c| {
+        try testing.expectEqual(key, c.pair_key);
+        try testing.expect(c.subshape_id < 8);
+        try testing.expect(!constraint_ids[c.subshape_id]);
+        constraint_ids[c.subshape_id] = true;
+        try testing.expect(tally.has(c.subshape_id));
+    }
+}
+
+test "warm starting is per triangle and survives a reordered re-traversal" {
+    const gpa = testing.allocator;
+    var scene = try FloorScene.init(gpa, av3(0, 0.5, 0), false);
+    defer scene.deinit(gpa);
+    const key = (@as(u64, @min(scene.ground, scene.box)) << 32) | @max(scene.ground, scene.box);
+
+    var constraints: std.ArrayListUnmanaged(rigid.ContactConstraint) = .empty;
+    defer constraints.deinit(gpa);
+    var cache = rigid.ContactCache{};
+    defer cache.deinit(gpa);
+
+    // ONE tick of the solve, so the cache holds a per-triangle history.
+    cache.beginTick();
+    try rigid.build(gpa, &constraints, &scene.world.bm, &scene.world.store, &.{key});
+    try testing.expect(constraints.items.len >= 4);
+    rigid.warmStart(&scene.world.bm, &cache, constraints.items);
+    rigid.solveRange(&scene.world.bm, constraints.items, 0, constraints.items.len, .{});
+    try rigid.storeContacts(gpa, &cache, constraints.items);
+    cache.endTick();
+
+    // Every stored key carries its own triangle index — the cache is keyed per triangle, not per
+    // pair. Without the sub-shape term the entries of different triangles would collide on
+    // `(pair, feature_id)`, `feature_id` being unique only WITHIN a manifold.
+    var stored_ids: [8]bool = @splat(false);
+    var stored: u32 = 0;
+    for (constraints.items) |c| {
+        for (c.points[0..c.count]) |pt| {
+            const found = cache.lookup(.{
+                .pair_key = c.pair_key,
+                .subshape_id = c.subshape_id,
+                .feature_id = pt.feature_id,
+            });
+            try testing.expect(found != null);
+            stored_ids[c.subshape_id] = true;
+            stored += 1;
+        }
+    }
+    try testing.expect(stored >= 4);
+
+    // **THE DECISIVE PROPERTY: no two triangles share a cache key.** `feature_id` is a LOCAL
+    // identity — unique inside a manifold, not across them — and the floor's triangles are
+    // geometrically similar, so the SAME feature_id really does recur on several of them. With
+    // the sub-shape term every stored key is distinct; WITHOUT it, those recurrences would
+    // become duplicate identical keys and a binary search would reheat one triangle from
+    // another's history. Both halves are asserted: all keys pairwise distinct, AND at least one
+    // feature_id present under two different sub-shapes, so the case is live and not
+    // hypothetical.
+    var recurring = false;
+    for (cache.prev.items, 0..) |x, xi| {
+        for (cache.prev.items[xi + 1 ..]) |y| {
+            const same_key = x.key.pair_key == y.key.pair_key and
+                x.key.subshape_id == y.key.subshape_id and
+                x.key.feature_id == y.key.feature_id;
+            try testing.expect(!same_key);
+            if (x.key.feature_id == y.key.feature_id and x.key.subshape_id != y.key.subshape_id) {
+                recurring = true;
+            }
+        }
+    }
+    try testing.expect(recurring);
+
+    // **THE RE-TRAVERSAL, REORDERED.** The second tick's constraints are handed to the warm start
+    // in REVERSE order — which is what a different SAH cut, or a different candidate order, would
+    // produce. Each contact must still reheat from ITS OWN history: the lookup is keyed on
+    // `(pair, subshape_id, feature_id)`, so the answer cannot depend on a position in the array.
+    var reordered: std.ArrayListUnmanaged(rigid.ContactConstraint) = .empty;
+    defer reordered.deinit(gpa);
+    cache.beginTick();
+    try rigid.build(gpa, &reordered, &scene.world.bm, &scene.world.store, &.{key});
+    try testing.expectEqual(constraints.items.len, reordered.items.len);
+    std.mem.reverse(rigid.ContactConstraint, reordered.items);
+
+    // Every point of the reversed pass finds the entry of its OWN triangle, and the value it
+    // reads is the one stored for that triangle — read back by key, so a lookup that ignored the
+    // sub-shape would have to return some other triangle's impulse.
+    var matched: u32 = 0;
+    for (reordered.items) |c| {
+        for (c.points[0..c.count]) |pt| {
+            const own = cache.lookup(.{
+                .pair_key = c.pair_key,
+                .subshape_id = c.subshape_id,
+                .feature_id = pt.feature_id,
+            }) orelse continue;
+            // The stored entry for that exact key, found independently by a linear scan rather
+            // than by the binary search under test.
+            var expected: ?rigid.CacheValue = null;
+            for (cache.prev.items) |entry| {
+                if (entry.key.pair_key == c.pair_key and
+                    entry.key.subshape_id == c.subshape_id and
+                    entry.key.feature_id == pt.feature_id)
+                {
+                    expected = entry.value;
+                }
+            }
+            try testing.expect(expected != null);
+            try testing.expectEqual(expected.?.lambda_n, own.lambda_n);
+            try testing.expect(expected.?.tangent_impulse.eql(own.tangent_impulse));
+            matched += 1;
+        }
+    }
+    try testing.expect(matched >= 4);
+    // The cache reports HITS, not cold starts: reheating actually happened on the reordered pass.
+    const before = cache.hits;
+    rigid.warmStart(&scene.world.bm, &cache, reordered.items);
+    try testing.expect(cache.hits > before);
+    try testing.expectEqual(@as(u32, 0), cache.misses);
+}
+
+test "mesh versus mesh and mesh versus half-space are unreachable" {
+    // Both pairs are ASSERTED preconditions of the pair adapter, not answers. Exercised at the
+    // grain a Zig test can reach: the assert itself cannot be caught, so what is checked is the
+    // PREDICATE the assert rests on — that the two classes really are what the arms expect —
+    // together with the fact that such a pair is never created by anything in the repo.
+    //
+    // The motive, restated because it is easy to state wrongly: the adapter presumes its pair
+    // came from `computePairs` under a correct layer assignment, and a static↔static pair is a
+    // programming error at its call site. It is NOT that `BodyType` determines the broad layer —
+    // no such wiring exists, the layer being an insertion argument, and it arrives with
+    // `PhysicsWorld` at M1.1.15.
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+    var bm = BodyManager{};
+    defer bm.deinit(gpa);
+
+    const mesh = try store.createShape(gpa, .{ .triangle_mesh = .{
+        .vertices = &cube_vertices,
+        .indices = &cube_indices,
+    } });
+    const plane = try store.createShape(gpa, .{ .plane = .{} });
+    const sphere = try store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
+
+    try testing.expectEqual(ShapeClass.triangle_soup, store.get(mesh).?.class());
+    try testing.expectEqual(ShapeClass.half_space, store.get(plane).?.class());
+    try testing.expectEqual(ShapeClass.convex, store.get(sphere).?.class());
+
+    // Both static-only shapes really are static-only, which is what makes a pair of them a
+    // static↔static pair — the configuration the assertion calls a programming error.
+    const mesh_body = try bm.addBody(gpa, &store, .{ .entity = entityOf(0), .body_type = .static, .shape = mesh });
+    const plane_body = try bm.addBody(gpa, &store, .{ .entity = entityOf(1), .body_type = .static, .shape = plane });
+    try testing.expectError(error.ShapeMustBeStatic, bm.addBody(gpa, &store, .{
+        .entity = entityOf(2),
+        .body_type = .dynamic,
+        .shape = mesh,
+    }));
+    try testing.expectError(error.ShapeMustBeStatic, bm.addBody(gpa, &store, .{
+        .entity = entityOf(3),
+        .body_type = .dynamic,
+        .shape = plane,
+    }));
+
+    // And the ADMITTED pairs are reachable and answered, so the unreachable arms are the only
+    // ones left: a convex against either static-only shape produces contacts.
+    //
+    // The sphere is placed OUTSIDE the cube, penetrating its `+Y` face from above — a FRONT
+    // contact. Its centre at `y = 1.5` with radius 1 puts its lowest point at `0.5`, half a metre
+    // inside the face at `y = 1`.
+    const dynamic_sphere = try bm.addBody(gpa, &store, .{
+        .entity = entityOf(4),
+        .body_type = .dynamic,
+        .shape = sphere,
+        .position = harness.av3(0, 1.5, 0),
+    });
+    var mesh_tally = ManifoldTally{};
+    bm.collidePairEach(&store, mesh_body, dynamic_sphere, &mesh_tally);
+    try testing.expect(mesh_tally.count >= 1);
+    // The plane gets its OWN probe, placed to straddle it: the half-space is `{y <= 0}` by
+    // default, and a unit sphere centred at `y = 0.5` reaches `−0.5`. The sphere above is 1.5 m
+    // up and touches nothing of it — which is why one probe cannot serve both.
+    const plane_sphere = try bm.addBody(gpa, &store, .{
+        .entity = entityOf(5),
+        .body_type = .dynamic,
+        .shape = sphere,
+        .position = harness.av3(10, 0.5, 0),
+    });
+    var plane_tally = ManifoldTally{};
+    bm.collidePairEach(&store, plane_body, plane_sphere, &plane_tally);
+    try testing.expectEqual(@as(u32, 1), plane_tally.count);
+
+    // **THE BACK-FACE CULL, observed at the contact grain.** The same sphere moved to the
+    // CENTRE of the closed cube produces NO manifold at all: it pokes out through several faces,
+    // but always from BEHIND, and a contact generated on the back of a surface would resolve by
+    // pushing the body further through it. The mode is `ignore`, fixed and internal to the
+    // solver — contact generation takes no query as a parameter (§1.11.17).
+    const inside_sphere = try bm.addBody(gpa, &store, .{
+        .entity = entityOf(6),
+        .body_type = .dynamic,
+        .shape = sphere,
+        .position = harness.av3(0, 0, 0),
+    });
+    var inside_tally = ManifoldTally{};
+    bm.collidePairEach(&store, mesh_body, inside_sphere, &inside_tally);
+    try testing.expectEqual(@as(u32, 0), inside_tally.count);
+}
+
+test "a box rests on a mesh floor, sleeps, and its aabb stops moving" {
+    const gpa = testing.allocator;
+    // Dropped from `y = 1.2`, so it falls a little and settles on the floor at `y ≈ 0.5` — the
+    // box's half-extent — less the resting penetration the NGS pass leaves at the slop.
+    var scene = try FloorScene.init(gpa, av3(0, 1.2, 0), true);
+    defer scene.deinit(gpa);
+
+    var had_contact = false;
+    var t: u32 = 0;
+    const asleep = while (t < 900) : (t += 1) {
+        try scene.world.step(gpa);
+        if (scene.world.constraints.items.len > 0) had_contact = true;
+        if (scene.world.bm.isSleeping(scene.box).?) break true;
+    } else false;
+    // The box really did make contact with the mesh — otherwise it fell through and "asleep"
+    // would mean nothing.
+    try testing.expect(had_contact);
+    try testing.expect(asleep);
+
+    // It came to rest ON the floor, at the box's half-extent above it, within the resting
+    // penetration the position solver leaves — `penetration_slop = 0.005 m` approached from
+    // above (§1.7.2's fixed point).
+    const resting_y = scene.world.bm.position(scene.box).?.toArray()[1];
+    try testing.expect(resting_y < 0.5);
+    try testing.expect(resting_y > 0.5 - 0.02);
+
+    // ASLEEP means BIT-FROZEN: the body AABB does not move any more (§1.8.6's normative
+    // observable), and neither does the pose. Checked over enough ticks that a slow drift would
+    // show.
+    const frozen_box = scene.world.bm.bodyAabb(&scene.world.store, scene.box).?;
+    const frozen_pose = scene.world.bm.position(scene.box).?;
+    for (0..120) |_| try scene.world.step(gpa);
+    const later_box = scene.world.bm.bodyAabb(&scene.world.store, scene.box).?;
+    try testing.expect(later_box.min.eql(frozen_box.min));
+    try testing.expect(later_box.max.eql(frozen_box.max));
+    try testing.expect(scene.world.bm.position(scene.box).?.eql(frozen_pose));
+    try testing.expect(scene.world.bm.isSleeping(scene.box).?);
+}
+
+test "two runs with a mesh in the scene are bit-identical over many steps" {
+    const gpa = testing.allocator;
+    const steps = 300;
+
+    // Two independent worlds, the same construction, the same number of ticks. Every pose bit
+    // for bit — no hashed container on the contact path, and the per-triangle constraint order
+    // is carried by the `(pair_key, subshape_id)` sort rather than by the traversal.
+    var poses: [2][3]Real = undefined;
+    for (0..2) |run| {
+        var scene = try FloorScene.init(gpa, av3(0.25, 1.2, -0.3), false);
+        defer scene.deinit(gpa);
+        for (0..steps) |_| try scene.world.step(gpa);
+        poses[run] = scene.world.bm.position(scene.box).?.toArray();
+    }
+    try testing.expectEqual(poses[0][0], poses[1][0]);
+    try testing.expectEqual(poses[0][1], poses[1][1]);
+    try testing.expectEqual(poses[0][2], poses[1][2]);
+    // Non-vacuous: the box actually moved and settled rather than staying where it was put.
+    try testing.expect(poses[0][1] < 1.2);
+}
+
+test "the contact answer is invariant under creation-order permutation" {
+    const gpa = testing.allocator;
+
+    // The SAME pair, built in both creation orders, so the mesh is body A in one and body B in
+    // the other. The manifold set must be the same triangles with negated normals — which is
+    // what `collidePairEach`'s canonicalisation is for — and the simulated trajectory must be
+    // identical, since the solver iterates on the canonical `(pair_key, subshape_id)` order and
+    // not on the order the scene was assembled in.
+    var trajectories: [2][3]Real = undefined;
+    for (0..2) |order| {
+        const arrays = try floorMesh(gpa);
+        defer gpa.free(arrays.vertices);
+        defer gpa.free(arrays.indices);
+        var world = harness.World.initNoSleep(vr(0, -9.81, 0), 1.0 / 60.0);
+        defer world.deinit(gpa);
+
+        const ground_shape = try world.store.createShape(gpa, .{ .triangle_mesh = .{
+            .vertices = arrays.vertices,
+            .indices = arrays.indices,
+        } });
+        const box_shape = try world.store.createShape(gpa, .{ .box = .{ .half_extents = av3(0.5, 0.5, 0.5) } });
+
+        // The ENTITY of each body is fixed to its role, so only the `BodyId` — the slot index,
+        // hence the creation order — differs between the two runs.
+        var box: api.BodyId = undefined;
+        if (order == 0) {
+            _ = try world.addBody(gpa, .{ .shape = ground_shape, .body_type = .static, .restitution = 0, .entity = entityOf(0) });
+            box = try world.addBody(gpa, .{ .shape = box_shape, .position = harness.av3(0, 1.2, 0), .body_type = .dynamic, .mass = 1, .restitution = 0, .entity = entityOf(1) });
+        } else {
+            box = try world.addBody(gpa, .{ .shape = box_shape, .position = harness.av3(0, 1.2, 0), .body_type = .dynamic, .mass = 1, .restitution = 0, .entity = entityOf(1) });
+            _ = try world.addBody(gpa, .{ .shape = ground_shape, .body_type = .static, .restitution = 0, .entity = entityOf(0) });
+        }
+        for (0..300) |_| try world.step(gpa);
+        trajectories[order] = world.bm.position(box).?.toArray();
+    }
+    // **A PHYSICAL bound, and deliberately not a bit-exact one.** Swapping the creation order
+    // swaps which body is A, so `collideOrdered` runs with its arguments the other way round —
+    // and §3 guarantees only GEOMETRIC EQUIVALENCE between the two orders, never bit-exactness:
+    // the two compute in different frames, and the manifold's point count may differ at a
+    // topological contact boundary. C1.1 says the rest: a contact stack is chaotic, so two runs
+    // an ULP apart decorrelate, and a bound on continuous deviation after hundreds of frames is
+    // ill-posed.
+    //
+    // MEASURED over 300 steps: `Δy = 1.34e-4` m — and IDENTICALLY at f32 and f64, which is what
+    // shows it is the geometric difference and not float noise. The bound below is 1 mm, some
+    // seven times that, stated as a physical claim about where a box comes to rest.
+    const settle_tol: Real = 1e-3;
+    try testing.expectApproxEqAbs(trajectories[0][1], trajectories[1][1], settle_tol);
+    try testing.expectApproxEqAbs(trajectories[0][0], trajectories[1][0], settle_tol);
+    try testing.expectApproxEqAbs(trajectories[0][2], trajectories[1][2], settle_tol);
+    // Non-vacuous: both runs fell and settled ON the floor rather than staying put or falling
+    // through, so the agreement above is between two real simulations.
+    try testing.expect(trajectories[0][1] < 1.2);
+    try testing.expect(trajectories[0][1] > 0.4);
+    try testing.expect(trajectories[1][1] > 0.4);
+}

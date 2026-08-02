@@ -52,7 +52,15 @@ pub fn warmStart(bm: *BodyManager, cache: *ContactCache, constraints: []ContactC
     for (constraints) |*c| {
         for (0..c.count) |i| {
             const pt = &c.points[i];
-            const cached = cache.lookup(.{ .pair_key = c.pair_key, .feature_id = pt.feature_id }) orelse continue;
+            // The SUB-SHAPE is part of the key since M1.1.11.1, and it has to be: a mesh pair
+            // brings one constraint per contacting triangle, and `feature_id` is a LOCAL
+            // identity — unique inside a manifold, not across them — so without this term two
+            // triangles could collide on one key and reheat from each other's history.
+            const cached = cache.lookup(.{
+                .pair_key = c.pair_key,
+                .subshape_id = c.subshape_id,
+                .feature_id = pt.feature_id,
+            }) orelse continue;
             const lambda_n = cached.lambda_n;
 
             // Reproject the cached WORLD tangent onto the new tangent plane
@@ -87,7 +95,7 @@ pub fn storeContacts(gpa: std.mem.Allocator, cache: *ContactCache, constraints: 
             const tangent = c.tangent1.scale(pt.tangent1_impulse).add(c.tangent2.scale(pt.tangent2_impulse));
             try cache.store(
                 gpa,
-                .{ .pair_key = c.pair_key, .feature_id = pt.feature_id },
+                .{ .pair_key = c.pair_key, .subshape_id = c.subshape_id, .feature_id = pt.feature_id },
                 .{ .lambda_n = pt.normal_impulse, .tangent_impulse = tangent },
             );
         }

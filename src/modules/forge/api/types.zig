@@ -364,10 +364,27 @@ pub const OverlapQuery = struct {
     rotation: Quatf = Quatf.identity,
     /// Object-layer mask + exclusions.
     filter: PhysicsQueryFilter = .{},
-    /// Which side of a mesh triangle answers, and here it is SIGNIFICANT rather than
-    /// incidental: under `.ignore` a triangle whose probe lies ENTIRELY in the rear
-    /// half-space of its plane is discarded and the body is not returned, while a probe
-    /// STRADDLING the plane touches from the front and counts in both modes (§1.11.17).
+    /// Which side of a mesh triangle answers: under `.ignore` a triangle whose probe lies
+    /// ENTIRELY in the rear half-space of its plane is discarded, while a probe STRADDLING the
+    /// plane touches from the front and counts in both modes (§1.11.17).
+    ///
+    /// **MEASURED INERTIA, and you should know it before setting this.** On THIS entry the two
+    /// modes agree on the answer except inside GJK's own contact margin. A triangle lies IN its
+    /// plane, so any probe that overlaps a triangle necessarily reaches that plane and
+    /// straddles it; and a probe entirely behind the plane cannot overlap the triangle at all,
+    /// so every triangle the predicate discards is one GJK already classifies `separated`. What
+    /// is left is a band a few ULPs wide, where a core sitting just behind the plane reads as
+    /// `.shallow`. Setting this field expecting a different set of bodies back will disappoint.
+    ///
+    /// **It exists anyway, and not for symmetry.** This entry returns BODIES, which is a Weld
+    /// choice and not a fact of the world; the reference carries the same field on
+    /// `CollideShapeSettings` precisely because its equivalent returns points and normals. The
+    /// day this entry gains a normal, the field becomes load-bearing — and after the M1.1.15
+    /// freeze of `PhysicsModule` it could not be added at all. So the cost is one nearly inert
+    /// field, against a dead end that would be permanent.
+    ///
+    /// On the SWEEP (`ShapeCastQuery`) the mode is fully observable: a cast reaches a back face
+    /// from a distance, and the two modes return different answers on the same geometry.
     back_face_mode: BackFaceMode = .ignore,
 };
 

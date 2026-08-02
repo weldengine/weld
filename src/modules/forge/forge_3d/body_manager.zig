@@ -1037,67 +1037,104 @@ pub const BodyManager = struct {
         );
     }
 
-    /// Full narrowphase (GJK → shallow/deep contact manifold) for the pair
-    /// `a`/`b`, resolving each body's world pose and support shape (via `store`).
-    /// Returns null if the pair is separated, or if either handle — or its shape
-    /// — is stale/invalid. The `BodyId`-level manifold adapter for the
-    /// broadphase→narrowphase flow (mirror of `gjkPair`): unpack a `computePairs`
-    /// candidate's `user_data` as a `BodyId` and call this per pair.
+    /// Full narrowphase for the pair `a`/`b`, calling `collector.add(subshape_id, manifold)`
+    /// for EVERY manifold the pair produces. Nothing is called when the pair is separated, or
+    /// when either handle — or its shape — is stale/invalid.
     ///
-    /// The pipeline is driven in a canonical BODY-ID order (`min(a, b)` first),
-    /// negating the normal for the `a > b` caller. This makes the whole
-    /// narrowphase order-independent even for the measure-zero case `collide`'s
-    /// pose key cannot break — two bodies with bit-identical shape AND pose — and
-    /// gives a stable, body-id-keyed order for M1.1.6 warm-starting.
-    pub fn collidePair(self: *const BodyManager, store: *const ShapeStore, a: BodyId, b: BodyId) ?ContactManifold {
+    /// **A mesh pair produces SEVERAL manifolds, one per contacting triangle, and that is the
+    /// only shape change the mesh imposes on the rigid solver** (§1.11.17). A pair with no
+    /// sub-shapes produces at most one and tags it `0`, so `collidePair` below is this entry
+    /// with a single-slot collector — one implementation of the 3×3 dispatch, not two.
+    ///
+    /// The pipeline is driven in a canonical BODY-ID order (`min(a, b)` first), negating the
+    /// normal for the `a > b` caller. That makes the whole narrowphase order-independent even
+    /// for the measure-zero case `collide`'s pose key cannot break — two bodies with
+    /// bit-identical shape AND pose — and gives the body-id-keyed order M1.1.6 warm-starting
+    /// needs.
+    pub fn collidePairEach(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        a: BodyId,
+        b: BodyId,
+        collector: anytype,
+    ) void {
         if (a > b) {
-            var m = self.collidePairOrdered(store, b, a) orelse return null;
-            m.normal = m.normal.neg(); // caller wants a→b = −(b→a)
-            return m;
+            var negating = NegatingManifoldCollector(@TypeOf(collector)){ .inner = collector };
+            self.collidePairEachOrdered(store, b, a, &negating);
+            return;
         }
-        return self.collidePairOrdered(store, a, b);
+        self.collidePairEachOrdered(store, a, b, collector);
     }
 
-    /// `collidePair` for a fixed (already-canonical body-id) order — validates both
-    /// handles/shapes then runs the manifold pipeline in THIS order. Calls
-    /// `collideOrdered` (not `collide`): `collide` would re-canonicalize by pose,
-    /// so the `feature_id` reference/incident ownership would follow the pose and
-    /// flip across a lexicographic pose boundary (Codex P1b). Driving by the fixed
-    /// body-id order instead keeps the feature_id frame-stable; `collidePair`'s
-    /// normal negation still gives order-independence.
-    fn collidePairOrdered(self: *const BodyManager, store: *const ShapeStore, a: BodyId, b: BodyId) ?ContactManifold {
-        const ia = self.alloc.validate(a) orelse return null;
-        const ib = self.alloc.validate(b) orelse return null;
-        const shape_a = store.get(self.bodies.items(.shape)[ia]) orelse return null;
-        const shape_b = store.get(self.bodies.items(.shape)[ib]) orelse return null;
+    /// Full narrowphase (GJK → shallow/deep contact manifold) for the pair `a`/`b`, resolving
+    /// each body's world pose and support shape (via `store`). Returns null if the pair is
+    /// separated, or if either handle — or its shape — is stale/invalid.
+    ///
+    /// **PRECONDITION: neither body carries SUB-SHAPES**, i.e. neither is a mesh. A mesh pair
+    /// yields one manifold per contacting triangle and there is no single answer to return;
+    /// `collidePairEach` is the entry for it. Asserted rather than answered, because a caller
+    /// holding a mesh handle and asking for "the" manifold has a bug at its own call site, and
+    /// returning the first triangle's would be a silent wrong answer.
+    pub fn collidePair(self: *const BodyManager, store: *const ShapeStore, a: BodyId, b: BodyId) ?ContactManifold {
+        if (std.debug.runtime_safety) {
+            for ([_]BodyId{ a, b }) |id| {
+                const idx = self.alloc.validate(id) orelse continue;
+                const shape = store.get(self.bodies.items(.shape)[idx]) orelse continue;
+                std.debug.assert(shape.class() != .triangle_soup);
+            }
+        }
+        var single = SingleManifoldCollector{};
+        self.collidePairEach(store, a, b, &single);
+        return single.manifold;
+    }
+
+    /// `collidePairEach` for a fixed (already-canonical body-id) order — validates both
+    /// handles/shapes then runs the manifold pipeline in THIS order. Calls `collideOrdered`
+    /// (not `collide`): `collide` would re-canonicalize by pose, so the `feature_id`
+    /// reference/incident ownership would follow the pose and flip across a lexicographic pose
+    /// boundary (Codex P1b). Driving by the fixed body-id order instead keeps the feature_id
+    /// frame-stable; `collidePairEach`'s normal negation still gives order-independence.
+    fn collidePairEachOrdered(
+        self: *const BodyManager,
+        store: *const ShapeStore,
+        a: BodyId,
+        b: BodyId,
+        collector: anytype,
+    ) void {
+        const ia = self.alloc.validate(a) orelse return;
+        const ib = self.alloc.validate(b) orelse return;
+        const shape_a = store.get(self.bodies.items(.shape)[ia]) orelse return;
+        const shape_b = store.get(self.bodies.items(.shape)[ib]) orelse return;
         const pos_a = self.bodies.items(.position)[ia];
         const rot_a = self.bodies.items(.rotation)[ia];
         const pos_b = self.bodies.items(.position)[ib];
         const rot_b = self.bodies.items(.rotation)[ib];
 
-        // Dispatch on the pair of CATEGORIES, nested and exhaustive with no `else` on
-        // either level: the mesh (M1.1.11.1) is a compile error at all four arms, each of
-        // which owes it a decision.
+        // Dispatch on the pair of CATEGORIES, nested and exhaustive with no `else` on either
+        // level — nine arms, each owing its own decision.
         //
-        // The half-space arm is written with the PLANE as A, which is the orientation
-        // §1.11.15's formulas are stated in. When the plane is B — reachable, since this
-        // order is the body-id order and the plane may have been created either side —
-        // the pair is computed the other way round and the normal negated, which is
-        // exactly what `collidePair` does one level up for the caller's order. Position
-        // and penetration are order-independent, so nothing else needs mirroring, and
+        // The half-space arms are written with the PLANE as A, which is the orientation
+        // §1.11.15's formulas are stated in. When the plane is B — reachable, since this order
+        // is the body-id order and the plane may have been created either side — the pair is
+        // computed the other way round and the normal negated, which is exactly what
+        // `collidePairEach` does one level up for the caller's order. Position and penetration
+        // are order-independent, so nothing else needs mirroring, and
         // `contact_constraint.prepare` reconstructs the two anchors from
-        // `position ± ½·penetration·normal` with no case for this shape.
+        // `position ± ½·penetration·normal` with no case for either shape.
         switch (shape_a.class()) {
             .convex => switch (shape_b.class()) {
-                .convex => return narrowphase.collideOrdered(
-                    Real,
-                    shape_mod.supportShape(shape_a),
-                    pos_a,
-                    rot_a,
-                    shape_mod.supportShape(shape_b),
-                    pos_b,
-                    rot_b,
-                ),
+                .convex => {
+                    const m = narrowphase.collideOrdered(
+                        Real,
+                        shape_mod.supportShape(shape_a),
+                        pos_a,
+                        rot_a,
+                        shape_mod.supportShape(shape_b),
+                        pos_b,
+                        rot_b,
+                    ) orelse return;
+                    collector.add(0, m);
+                },
                 .half_space => {
                     var m = narrowphase.collidePlane(
                         Real,
@@ -1106,31 +1143,102 @@ pub const BodyManager = struct {
                         rot_b,
                         narrowphase.RelativePose(Real).init(pos_b, rot_b, pos_a, rot_a),
                         shape_mod.supportShape(shape_a),
-                    ) orelse return null;
+                    ) orelse return;
                     m.normal = m.normal.neg(); // computed B→A; the caller asked A→B
-                    return m;
+                    collector.add(0, m);
                 },
-                .triangle_soup => @panic("mesh contact generation: not yet wired"),
-            },
-            .half_space => switch (shape_b.class()) {
-                .convex => return narrowphase.collidePlane(
-                    Real,
-                    shape_mod.halfSpace(shape_a),
+                .triangle_soup => self.collideConvexMesh(
+                    shape_mod.supportShape(shape_a),
                     pos_a,
                     rot_a,
-                    narrowphase.RelativePose(Real).init(pos_a, rot_a, pos_b, rot_b),
-                    shape_mod.supportShape(shape_b),
+                    shape_b.mesh.?,
+                    pos_b,
+                    rot_b,
+                    false,
+                    collector,
                 ),
-                // Two half-spaces have NO narrowphase kernel — §1.11.15's table is a
-                // half-space against a BOUNDED CONVEX — and the pair is unreachable: a
-                // half-space forces a static body (`error.ShapeMustBeStatic`) and
-                // `default_layer_pairs` has static×static false, so the broadphase never
-                // emits it. A dated unreachability, asserted rather than answered.
-                .half_space => unreachable,
-                .triangle_soup => @panic("mesh contact generation: not yet wired"),
             },
-            .triangle_soup => @panic("mesh contact generation: not yet wired"),
+            .half_space => switch (shape_b.class()) {
+                .convex => {
+                    const m = narrowphase.collidePlane(
+                        Real,
+                        shape_mod.halfSpace(shape_a),
+                        pos_a,
+                        rot_a,
+                        narrowphase.RelativePose(Real).init(pos_a, rot_a, pos_b, rot_b),
+                        shape_mod.supportShape(shape_b),
+                    ) orelse return;
+                    collector.add(0, m);
+                },
+                // Two half-spaces, and a half-space against a MESH, have NO narrowphase kernel
+                // and will not get one — §1.11.15's table pairs a half-space with a BOUNDED
+                // CONVEX, and §1.11.17's with one too.
+                //
+                // **The motive is a PRECONDITION OF THIS ADAPTER, not a property of the
+                // engine.** It presumes its pair came from `computePairs` under a correct layer
+                // assignment, and a static↔static pair is a programming error at the call site.
+                // It is NOT that `BodyType` determines the broad layer: no
+                // `BodyType → BroadphaseLayer` wiring exists — the layer is an insertion
+                // argument, and `gjk_test.zig` inserts static bodies into `.dynamic` — and that
+                // wiring arrives with `PhysicsWorld` at M1.1.15. Justifying the assertion by a
+                // property the code does not carry would be the costliest defect class there
+                // is: the one that survives review by resembling an argument.
+                .half_space, .triangle_soup => unreachable,
+            },
+            .triangle_soup => switch (shape_b.class()) {
+                .convex => self.collideConvexMesh(
+                    shape_mod.supportShape(shape_b),
+                    pos_b,
+                    rot_b,
+                    shape_a.mesh.?,
+                    pos_a,
+                    rot_a,
+                    true,
+                    collector,
+                ),
+                // Mesh against mesh, and mesh against half-space — the same asserted
+                // precondition, for the same reason as the arm above.
+                .half_space, .triangle_soup => unreachable,
+            },
         }
+    }
+
+    /// The mesh↔convex arm, shared by both orders: traverse the mesh with the convex's box in
+    /// the MESH's local frame and run the ordinary convex narrowphase against each candidate
+    /// triangle's `Core.triangle`.
+    ///
+    /// `mesh_is_a` says which side of the canonical pair the mesh is on, which decides both the
+    /// argument order handed to `collideOrdered` — so the manifold normal comes out A→B without
+    /// a negation — and the sign of the back-face test.
+    fn collideConvexMesh(
+        self: *const BodyManager,
+        convex: narrowphase.SupportShape(Real),
+        convex_position: Vec3r,
+        convex_rotation: Quatr,
+        data: *const MeshData,
+        mesh_position: Vec3r,
+        mesh_rotation: Quatr,
+        mesh_is_a: bool,
+        collector: anytype,
+    ) void {
+        _ = self;
+        const inv_rot = mesh_rotation.conjugate();
+        const box = supportShapeAabb(
+            convex,
+            inv_rot.rotateVec3(convex_position.sub(mesh_position)),
+            inv_rot.mul(convex_rotation),
+        );
+        var per_triangle = MeshContactCollector(@TypeOf(collector)){
+            .data = data,
+            .convex = convex,
+            .convex_position = convex_position,
+            .convex_rotation = convex_rotation,
+            .mesh_position = mesh_position,
+            .mesh_rotation = mesh_rotation,
+            .mesh_is_a = mesh_is_a,
+            .sink = collector,
+        };
+        _ = data.traverseAabb(box, &per_triangle);
     }
 };
 
@@ -1188,6 +1296,101 @@ const MeshRayCollector = struct {
         return false;
     }
 };
+
+/// Negates the normal of every manifold on its way through — the `a > b` half of
+/// `collidePairEach`'s canonicalisation.
+///
+/// The normal is the only field that needs mirroring: position and penetration are
+/// order-independent, and `contact_constraint.prepare` reconstructs both surface points from
+/// `position ± ½·penetration·normal`, so the flip carries through to the anchors for free.
+fn NegatingManifoldCollector(comptime Inner: type) type {
+    return struct {
+        inner: Inner,
+
+        pub fn add(self: *@This(), subshape_id: u32, manifold: ContactManifold) void {
+            var mirrored = manifold;
+            mirrored.normal = mirrored.normal.neg(); // the caller wants a→b = −(b→a)
+            self.inner.add(subshape_id, mirrored);
+        }
+    };
+}
+
+/// Keeps the ONE manifold a sub-shape-free pair produces — what `collidePair` returns.
+///
+/// The second assert is what makes that function's precondition unable to fail quietly: a mesh
+/// pair reaching here would offer a manifold per contacting triangle, and the first extra one
+/// fires rather than being silently dropped.
+const SingleManifoldCollector = struct {
+    manifold: ?ContactManifold = null,
+
+    pub fn add(self: *SingleManifoldCollector, subshape_id: u32, manifold: ContactManifold) void {
+        std.debug.assert(subshape_id == 0);
+        std.debug.assert(self.manifold == null);
+        self.manifold = manifold;
+    }
+};
+
+/// Runs the ordinary convex narrowphase against each candidate triangle of a mesh and forwards
+/// every accepted manifold, tagged with its TRIANGLE INDEX — which is the `subshape_id` of a
+/// mesh, it being root (§1.11.16).
+///
+/// **The back-face mode is `ignore`, FIXED, and internal to the solver** (§1.11.17). Contact
+/// generation takes no query as a parameter, and there is nothing for a caller to choose here:
+/// a contact generated on the back of a wall pushes the body THROUGH it.
+///
+/// The cull compares the manifold normal, oriented from the MESH toward the CONVEX, against the
+/// triangle's own outward normal in world. That orientation is the one the resolution acts
+/// along: the convex is pushed out along `+n` exactly when the two agree, and a contact whose
+/// axis disagrees is one whose resolution would drive it through the surface. Strict `>`, the
+/// true-zero convention — a normal exactly perpendicular to the face is not a front contact and
+/// is not treated as one.
+///
+/// Active-edge correction is NOT applied here: the flags are baked, and the pass that reads
+/// them is a separate step. An edge-on contact whose raw normal is near-perpendicular therefore
+/// sits close to this cull's boundary, which is the interaction the active-edge step is written
+/// against.
+fn MeshContactCollector(comptime Sink: type) type {
+    return struct {
+        data: *const MeshData,
+        /// The convex, in its own frame.
+        convex: narrowphase.SupportShape(Real),
+        convex_position: Vec3r,
+        convex_rotation: Quatr,
+        mesh_position: Vec3r,
+        mesh_rotation: Quatr,
+        /// Whether the MESH is body A of the canonical pair.
+        mesh_is_a: bool,
+        sink: Sink,
+
+        pub fn add(self: *@This(), triangle_index: u32) void {
+            const tri = shape_mod.triangleSupportShape(self.data, triangle_index);
+            // The canonical order is preserved through the call, so the manifold's normal comes
+            // out A→B and needs no mirroring here.
+            const manifold = if (self.mesh_is_a) narrowphase.collideOrdered(
+                Real,
+                tri,
+                self.mesh_position,
+                self.mesh_rotation,
+                self.convex,
+                self.convex_position,
+                self.convex_rotation,
+            ) else narrowphase.collideOrdered(
+                Real,
+                self.convex,
+                self.convex_position,
+                self.convex_rotation,
+                tri,
+                self.mesh_position,
+                self.mesh_rotation,
+            );
+            const found = manifold orelse return;
+            const outward = self.mesh_rotation.rotateVec3(self.data.faceNormal(triangle_index));
+            const mesh_to_convex = if (self.mesh_is_a) found.normal else found.normal.neg();
+            if (mesh_to_convex.dot(outward) <= 0) return; // a back-face contact, culled
+            self.sink.add(triangle_index, found);
+        }
+    };
+}
 
 /// Keeps the nearest ACCEPTED triangle of one mesh for `castShapeBody`, and tightens the
 /// swept traversal's bound to it — the mesh sibling of `MeshRayCollector`.
