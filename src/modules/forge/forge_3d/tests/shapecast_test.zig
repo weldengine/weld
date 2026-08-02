@@ -714,7 +714,7 @@ test "every adapter answers null on a stale handle and on a stale shape" {
     try testing.expect(world.bm.closestPointBody(&world.store, doomed, v(20, 0, 0)) != null);
 
     // (a) STALE SHAPE, live handle: destroy the shape and leave the body alone.
-    world.store.destroyShape(doomed_body.shape);
+    world.store.destroyShape(gpa, doomed_body.shape);
     try testing.expect(world.bm.isValid(doomed)); // the handle really is still live
     try testing.expect(world.bm.castShapeBody(&world.store, doomed, sphere(1), Vec3r.zero, Quatr.identity, v(1, 0, 0), 100) == null);
     try testing.expect(world.bm.overlapShapeBody(&world.store, doomed, sphere(1), v(10, 0, 0), Quatr.identity) == null);
@@ -1127,7 +1127,7 @@ test "shapeCast separates a stale handle, an inadmissible probe and a miss" {
     const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
     const plane = try world.store.createShape(gpa, .{ .plane = .{} });
     const doomed = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 0.5 } });
-    world.store.destroyShape(doomed);
+    world.store.destroyShape(gpa, doomed);
     _ = try addSphereBody(gpa, &world, .{ 10, 0, 0 }, 1);
 
     // (1) STALE HANDLE → a typed error. The shape the caller named is gone.

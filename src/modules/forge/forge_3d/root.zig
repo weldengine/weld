@@ -12,6 +12,9 @@
 
 const config = @import("config.zig");
 const shape = @import("shape.zig");
+// M1.1.11.1 — the owned triangle-mesh payload a `.triangle_mesh` shape holds.
+// Re-exported below; the comptime pin analyses its acceptance suite.
+const mesh_mod = @import("mesh.zig");
 const body = @import("body.zig");
 const body_manager = @import("body_manager.zig");
 const broadphase = @import("pipeline/broadphase.zig");
@@ -61,6 +64,13 @@ pub const Shape = shape.Shape;
 pub const ShapeClass = shape.ShapeClass;
 /// Generational store of collision shapes.
 pub const ShapeStore = shape.ShapeStore;
+/// The OWNED triangle-mesh data a `.triangle_mesh` shape holds — vertices and indices
+/// at solver precision (M1.1.11.1, `engine-physics-forge.md` §1.11.17). The store owns
+/// it: `createShape` copies the borrowed descriptor arrays, `destroyShape` releases.
+pub const MeshData = mesh_mod.MeshData;
+/// The five ways a triangle-mesh descriptor can be malformed, each refused by its own
+/// typed error and never sanitised away.
+pub const MeshError = mesh_mod.MeshError;
 
 // --- Bodies ---
 
@@ -229,6 +239,7 @@ pub const rigid = rigid_mod;
 comptime {
     _ = config;
     _ = shape;
+    _ = mesh_mod;
     _ = body;
     _ = body_manager;
     _ = broadphase;
@@ -254,4 +265,5 @@ comptime {
     _ = @import("tests/shapecast_test.zig");
     _ = @import("tests/overlap_test.zig");
     _ = @import("tests/plane_test.zig");
+    _ = @import("tests/mesh_test.zig");
 }

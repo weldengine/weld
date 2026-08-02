@@ -167,12 +167,16 @@ pub const World = struct {
     /// shape goes into the layer's flat list instead, carrying the half-space transported
     /// into WORLD space, which is the frame the broadphase's corner predicate works in
     /// (`engine-physics-forge.md` §1.11.15). Exhaustive on the class, no `else`.
+    ///
+    /// A MESH takes the BOUNDED arm (M1.1.11.1): it is a surface, but a finite one, so it
+    /// has a world AABB and is an ordinary leaf of the tree. Only the unbounded category
+    /// leaves the trees.
     pub fn addBody(self: *World, gpa: std.mem.Allocator, desc: api.BodyDescriptor) !BodyId {
         const id = try self.bm.addBody(gpa, &self.store, desc);
         const layer = broadphaseLayer(desc.body_type);
         const shape = self.store.get(desc.shape).?;
         const proxy = switch (shape.class()) {
-            .convex => try self.bp.insert(gpa, layer, self.bm.bodyAabb(&self.store, id).?, id),
+            .convex, .triangle_soup => try self.bp.insert(gpa, layer, self.bm.bodyAabb(&self.store, id).?, id),
             .half_space => blk: {
                 const world = shape_mod.halfSpace(shape).transformed(
                     self.bm.rotation(id).?,

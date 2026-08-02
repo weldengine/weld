@@ -782,7 +782,7 @@ test "overlapShape separates a stale handle, an inadmissible probe and an empty 
     const probe = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
     const plane = try world.store.createShape(gpa, .{ .plane = .{} });
     const doomed = try world.store.createShape(gpa, .{ .sphere = .{ .radius = 1 } });
-    world.store.destroyShape(doomed);
+    world.store.destroyShape(gpa, doomed);
     _ = try addSphere(gpa, &world, .{ 0, 0, 0 }, 1, 0);
 
     var out: [4]api.BodyId = undefined;

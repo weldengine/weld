@@ -77,11 +77,15 @@ test "a plane carries the half_space class and sphere, box and capsule carry con
         try testing.expectEqual(ShapeClass.convex, store.get(id).?.class());
     }
 
-    // Two variants exactly. The mesh is the THIRD category of §1.11.15 and arrives
-    // at M1.1.11.1; pinning the count is what makes its arrival a deliberate act
-    // rather than a silent widening, since every switch on the class is exhaustive
-    // and will stop compiling.
-    try testing.expectEqual(@as(usize, 2), @typeInfo(ShapeClass).@"enum".fields.len);
+    // THREE variants exactly, since M1.1.11.1 brought the third category of §1.11.15.
+    // The count is pinned so a fourth arrival is a deliberate act rather than a silent
+    // widening; it fired on this line when the mesh landed, which is the whole reason
+    // it is written this way. The pin is EXTENDED and not relaxed: the count moved 2 → 3
+    // and the three variants are named, so a rename is caught as well as an addition.
+    try testing.expectEqual(@as(usize, 3), @typeInfo(ShapeClass).@"enum".fields.len);
+    try testing.expectEqual(ShapeClass.convex, @as(ShapeClass, @enumFromInt(0)));
+    try testing.expectEqual(ShapeClass.half_space, @as(ShapeClass, @enumFromInt(1)));
+    try testing.expectEqual(ShapeClass.triangle_soup, @as(ShapeClass, @enumFromInt(2)));
 }
 
 test "the stored plane normal is unit, and independent of distance" {
@@ -198,7 +202,7 @@ test "a plane shape occupies a store slot like any other and reuses it LIFO" {
     const b = try store.createShape(gpa, .{ .plane = .{ .normal = av3(1, 0, 0), .distance = -2 } });
     try testing.expectEqual(@as(u32, 2), store.count());
 
-    store.destroyShape(b);
+    store.destroyShape(gpa, b);
     try testing.expect(store.get(b) == null); // stale ⇒ the safe getter says so
     const c = try store.createShape(gpa, .{ .sphere = .{ .radius = 1 } }); // reuses b's slot
     try testing.expectEqual(api.PackedId.unpack(b).index, api.PackedId.unpack(c).index);

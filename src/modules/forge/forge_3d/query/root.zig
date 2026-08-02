@@ -85,9 +85,11 @@ pub const layer_bits: u8 = api.collision_layer_count;
 ///     destroying a shape and casting with its id; same name and same meaning as
 ///     `addBody`'s, not a second vocabulary for one situation.
 ///   - `UnsupportedShape` — the probe is a shape the exact kernel cannot express.
-///     Reachable TODAY by passing a plane handle: the cast kernel is a ray march on
-///     the Minkowski difference of the two cores (§1.11.11) and the shape overlap is
-///     GJK on those cores (§1.11.12), and a half-space has no bounded core.
+///     Reachable by passing a plane handle or, since M1.1.11.1, a MESH handle: the
+///     cast kernel is a ray march on the Minkowski difference of the two cores
+///     (§1.11.11) and the shape overlap is GJK on those cores (§1.11.12), so a
+///     half-space is not bounded there and a mesh is not convex (§1.11.7's fourth
+///     principle).
 ///
 /// A real miss is `null` / `0`, and a ZERO DIRECTION is a miss too — a degenerate
 /// query with an empty answer, not a malformed one (§1.11.11's domain table).
@@ -104,14 +106,19 @@ pub const Error = error{ InvalidShape, UnsupportedShape };
 /// Whether a caller-supplied probe shape is admissible for the two entries that take
 /// one, i.e. a bounded convex the support map describes.
 ///
-/// Exhaustive on the CLASS with no `else` arm: the mesh (M1.1.11.1) is a compile
-/// error here and must state its own answer. A named function rather than an inline
+/// Exhaustive on the CLASS with no `else` arm, so a fourth category is a compile error
+/// here and must state its own answer. A named function rather than an inline
 /// comparison so both entries test the SAME condition and the tests can exercise it
 /// on both answers without restating it.
+///
+/// A MESH is inadmissible, and the reason is not the half-space's: a half-space is not
+/// BOUNDED, a mesh is not CONVEX. Each triangle of it is a bounded convex, which is
+/// what lets a mesh be the TARGET of a cast or an overlap; being a probe would require
+/// the whole soup to have one support map, which it does not (§1.11.7, §1.11.17).
 fn probeAdmissible(record: shape_mod.Shape) bool {
     return switch (record.class()) {
         .convex => true,
-        .half_space => false,
+        .half_space, .triangle_soup => false,
     };
 }
 
