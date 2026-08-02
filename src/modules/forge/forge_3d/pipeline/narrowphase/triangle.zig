@@ -201,7 +201,11 @@ pub fn rayTriangle(
     // The reduced scale. The ORIGIN is reduced together with the vertices, which is what stops
     // `qvec = origin − v₀` from overflowing; a larger magnitude gives a larger `frexp` exponent
     // hence a smaller reduction exponent, so the one bringing all four below 1 is the MINIMUM.
-    // A zero exponent has nothing to offer — the first attempt already ran at that scale.
+    // A zero exponent has nothing to offer — the first attempt already ran at that scale. Passing
+    // `origin` three times is deliberate rather than clumsy: the helper takes the maximum over
+    // every component it is given, so one point repeated is that point's own exponent, and going
+    // through the shared helper keeps the finiteness assertion in ONE place instead of inlining a
+    // second copy of the same `frexp` here.
     const exp = @min(
         math.pow2ReductionExponent(T, verts[0], verts[1], verts[2]) orelse 0,
         math.pow2ReductionExponent(T, origin, origin, origin) orelse 0,
