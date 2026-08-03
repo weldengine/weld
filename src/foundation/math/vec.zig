@@ -244,83 +244,111 @@ pub fn pow2ReductionExponent(
     return -std.math.frexp(largest).exponent;
 }
 
-/// The exact power-of-two-reduced difference `to − from`, the reduction taken from the largest
-/// absolute component of the PAIR and applied BEFORE the subtraction.
+/// `to − from`, computed UNSCALED unless that subtraction leaves the float range.
 ///
-/// Reducing before subtracting is what keeps the difference itself in range: two finite `f32`
-/// vertices at `±3e38` differ by `6e38`, which is an infinity, and no amount of scaling
-/// afterwards recovers it. Reducing brings the largest of the six components into `[0.5, 1)`, so
-/// both operands are at most 1 and the difference at most 2.
-fn edgeReducedPow2(comptime T: type, from: Vec(3, T), to: Vec(3, T)) Vec(3, T) {
+/// The unscaled difference is the arithmetically exact answer whenever it is representable —
+/// correctly rounded, and exact by Sterbenz whenever the two operands are within a factor of two —
+/// so scaling it is a repair and not an improvement. The one way it fails is OVERFLOW: two finite
+/// `f32` vertices at `±3e38` differ by `6e38`, which is an infinity, and no scaling afterwards
+/// recovers it. `isFinite` on the result is the complete trigger, because the difference has no
+/// underflow failure to speak of — it is zero only when the two operands are equal, exactly.
+///
+/// The repair reduces the PAIR by one exact power of two before subtracting. That direction is
+/// forced: an overflowing difference means both operands sit near the top of the range, so there is
+/// nothing to scale up.
+fn edgeUnlessOverflow(comptime T: type, from: Vec(3, T), to: Vec(3, T)) Vec(3, T) {
+    const raw = to.sub(from);
+    if (std.math.isFinite(raw.maxAbsComponent())) return raw;
+
     const largest = @max(from.maxAbsComponent(), to.maxAbsComponent());
-    std.debug.assert(!std.math.isNan(largest) and !std.math.isInf(largest));
-    if (largest == 0) return Vec(3, T).zero;
+    std.debug.assert(std.math.isFinite(largest) and largest != 0);
     const exp = -std.math.frexp(largest).exponent;
     return to.scalePow2(exp).sub(from.scalePow2(exp));
 }
 
+/// Each vector brought into `[0.5, 1)` by its OWN exact power of two, or left alone when it is
+/// exactly zero. Used only on the cross's repair path.
+fn toUnitBinade(comptime T: type, v: Vec(3, T)) Vec(3, T) {
+    const largest = v.maxAbsComponent();
+    if (largest == 0 or !std.math.isFinite(largest)) return v;
+    return v.scalePow2(-std.math.frexp(largest).exponent);
+}
+
 /// Un-normalised area vector of the triangle `(v0, v1, v2)` — the cross product
-/// `(v₁−v₀) × (v₂−v₀)` in that FIXED order, which is what ties it to a winding convention —
-/// computed so that no step can overflow on any finite input.
+/// `(v₁−v₀) × (v₂−v₀)` in that FIXED order, which is what ties it to a winding convention.
 ///
-/// **SCALED, and the magnitude is therefore NOT twice the area.** The direction and the
-/// exactly-zero verdict are the whole contract; a caller wanting an area must compute it
-/// itself. What is returned is an exact `2^k` multiple of the true area vector, which is
-/// enough for both of this function's uses — a normalisation, where the factor cancels
-/// bit-exactly, and a degeneracy test at true zero, which a non-zero factor cannot move.
+/// **The magnitude is NOT a reliable multiple of twice the area.** The direction and the
+/// exactly-zero verdict are the whole contract; a caller wanting an area must compute it itself.
+/// On the common path the result IS twice the area vector exactly; on the repair path it is that
+/// vector times some power of two, which changes neither the direction nor the verdict.
 ///
-/// **Why the reduction comes FIRST, before the subtraction.** Two independent overflows sit on
-/// this path and scaling after the subtraction closes only one of them. The cross product of
-/// vertex differences grows as their SQUARE, so `f32` vertices at `1e20` — well inside the
-/// finite domain — give `1e40`, which is infinity; and an EDGE can overflow on its own, two
-/// finite vertices at `±3e38` differing by `6e38`, which is also infinity. Reducing puts every
-/// component below 1, hence every difference below 2 and every cross component below 4, after
-/// which neither step can leave the range at the top end. `Vec.scalePow2` explains why the
-/// factor must be a power of two and not merely a convenient scale.
+/// **The default path is UNSCALED, and that is the design rather than an omission.** Three rounds
+/// on this function established that no arrangement of power-of-two factors closes the problem, and
+/// for one reason: where a reduction is forced against overflow it must scale DOWN, and scaling
+/// down is exactly what loses a component only expressible at the input magnitude. So the unscaled
+/// form — the arithmetically most exact one available — runs first, and scaling becomes a repair
+/// applied only where it actually fails, in whichever direction loses nothing.
 ///
-/// **Why the factor is PER EDGE and not one factor over the three vertices.** A single factor
-/// cannot serve a triangle whose components span more than the format's exponent range, and the
-/// failure is the worst kind — silent, and dressed as a diagnostic. Measured: the perfectly
-/// ordinary right triangle `(0,0,0)`, `(2e38,0,0)`, `(0,2⁻⁶⁰,0)` reduces by `2⁻¹²⁸`, which sends
-/// the second leg to `2⁻¹⁸⁸`, below the subnormal floor, so that edge becomes exactly zero and
-/// the cross with it. `MeshData.init` then answers `error.MeshTriangleDegenerate` — a typed
-/// refusal ACCUSING valid caller data. The class is not `f32`-only: at `f64` the same happens for
-/// `2^920` against `2^-919`. Two independent factors fix it — the repro's edges become
-/// `(0.5877, 0, 0)` and `(0, 0.5, 0)` and their cross `(0, 0, 0.2939)` — and neither property the
-/// single factor bought is given up, because BOTH factors are powers of two: exact collinearity
-/// is still preserved bit for bit, so a guard at true zero keeps its verdict; and the two factors
-/// COMPOSE into one common factor on the cross, which `normalizeScaled` still cancels, so the unit
-/// normal stays bit-identical whatever the two exponents were.
+/// Two failures are repaired, and each is detected STRUCTURALLY, with no threshold anywhere:
 ///
-/// **What this closes and what it does not, MEASURED against an exact oracle rather than argued.**
-/// It closes the named case above and every case where the shared vertex is not itself the largest
-/// magnitude, and it strictly reduces the false-degenerate rate everywhere measured. It does NOT
-/// make a false degenerate impossible, and a tempting argument that it does — each reduced edge
-/// having a component in `[0.5, 1)`, so the cross being bounded below by their product times the
-/// sine of the angle — is FALSE: a near-coincident pair reduces to two nearly equal vertices whose
-/// difference is a single ulp, which is in no such interval. What is true is that a reduction by an
-/// exact power of two loses nothing the inputs expressed AT THE REDUCED MAGNITUDE; what it can
-/// still lose is a component that was expressible only at the ORIGINAL magnitude, which is what
-/// happens when the pair's two vertices differ by more than the exponent range.
+///   - **Overflow**, and it is NOT detectable on the largest component, which is the trap here and
+///     was found by measurement rather than reasoning. `f32` vertices at `1e20` cross to `1e40`,
+///     an infinity, and `normalizeScaled` then divides it by its own infinite largest component
+///     and answers NaN — strictly worse than a zero vector, since a NaN propagates. But a single
+///     LANE can also come out NaN from `inf − inf` while the other two stay finite and non-zero,
+///     `(2.81e14, NaN, −2.81e14)` being a measured example, and `@reduce(.Max, @abs(…))` lowers to
+///     a NaN-IGNORING maximum, so a guard written on the largest component sees a healthy `2.81e14`
+///     and lets the NaN through. The test is therefore lane-wise: `x == x` over all three, plus
+///     `isFinite` on the largest for the plain infinity. The edges are then brought into the unit
+///     binade and the cross recomputed; that direction is DOWN and is the one place where a
+///     component can be lost, which is the residual documented below.
+///   - **Underflow to exactly zero**, caught by the zero test that the caller was going to apply
+///     anyway. Two edges around `2⁻¹⁰⁰` have products around `2⁻²⁰⁰`, which is zero at `f32`, so a
+///     perfectly ordinary small triangle reads as degenerate. Here the repair scales UP and loses
+///     nothing at all.
 ///
-/// Measured with a big-integer exact oracle over triangles drawn across the whole exponent range,
-/// restricted to cases whose exact answer is REPRESENTABLE in `T` — the only cases any
-/// implementation working in `T` could be held to. One exponent per vertex, `f32` then `f64`:
-/// single factor 23.6 % / 33.0 % false degenerates, per edge 17.1 % / 22.0 %, and a
-/// scale-only-when-it-overflows variant 14.9 % / 20.9 %. So the class is NOT closed by any
-/// arrangement of power-of-two factors; closing it needs an intermediate whose exponent range
-/// exceeds the format's, which is a different decision with a different cost. Two things are
-/// nevertheless guaranteed and both are asserted: the failure direction is always a refusal of a
-/// valid triangle and never acceptance of a degenerate one — zero false accepts over every
-/// measured seed — and the per-edge form is strictly better than the single factor on every seed
-/// at both precisions. `tests/mesh_test.zig` carries the property and the figures.
+/// Both repairs are the same operation and share one path. A zero that survives it is a zero the
+/// format can defend.
+///
+/// **The power of two is load-bearing twice over.** It rewrites only the exponent field, so
+/// exactly-collinear points stay exactly collinear and a guard sitting at TRUE ZERO keeps its
+/// verdict, where an arbitrary divisor would round each division and could move it; and because
+/// `normalizeScaled` divides by a component of its own input, any common factor CANCELS, so the
+/// unit normal is bit-identical whatever exponents were chosen. `Vec.scalePow2` explains why the
+/// factor is applied in two halves.
+///
+/// **What is guaranteed, and what is not.** GUARANTEED: no false ACCEPT, ever — an exactly
+/// degenerate triangle is always reported degenerate, at both precisions, which is the
+/// safety-critical direction since accepting one would fire `MeshData.faceNormal`'s
+/// `orelse unreachable`. NOT guaranteed: agreement with exact arithmetic on a triangle whose
+/// component exponents span more than the format's range. The intermediate then needs an exponent
+/// range the format does not hold, and no power of two supplies one. The measured false-degenerate
+/// rate under ADVERSARIAL sampling is reported in `briefs/M1.1.11.1-mesh-shape.md` beside the
+/// caveat that must travel with it: that sampling is uniform over the whole exponent range and so
+/// is dominated by triangles whose exponent spread is absurd, whereas a real mesh lives inside a
+/// few orders of magnitude. It is a stress metric, never a field expectation.
 pub fn triangleCross(
     comptime T: type,
     v0: Vec(3, T),
     v1: Vec(3, T),
     v2: Vec(3, T),
 ) Vec(3, T) {
-    return edgeReducedPow2(T, v0, v1).cross(edgeReducedPow2(T, v0, v2));
+    // The common path scales NOTHING and tests ONCE. An overflowing edge subtraction cannot hide
+    // from this test either: an infinite edge makes the cross infinite or NaN, so the single check
+    // below covers the edge step as well and the hot path pays for one reduction pair rather than
+    // four. `x == x` is false exactly for a NaN, and that test is over LANES rather than over the
+    // largest magnitude for the reason given above.
+    const raw = v1.sub(v0).cross(v2.sub(v0));
+    const nan_free = @reduce(.And, raw.data == raw.data);
+    const largest = raw.maxAbsComponent();
+    if (nan_free and largest != 0 and std.math.isFinite(largest)) return raw;
+
+    // The repair, entered only on a structural failure. The differences are redone with a per-pair
+    // reduction, since the subtraction may be the step that left range, and each edge is then
+    // brought into the unit binade so the products cannot leave it again.
+    const e0 = toUnitBinade(T, edgeUnlessOverflow(T, v0, v1));
+    const e1 = toUnitBinade(T, edgeUnlessOverflow(T, v0, v2));
+    return e0.cross(e1);
 }
 
 /// Reinterpret a slice of `Vec3` as a flat `[]const f32` for the batched SIMD

@@ -4115,6 +4115,21 @@ fn singleFactorCross(v0: Vec3r, v1: Vec3r, v2: Vec3r) Vec3r {
     return b.sub(a).cross(c.sub(a));
 }
 
+/// The PER-EDGE form, kept here as the second reference in the differential ladder — this is what
+/// `math.triangleCross` did between F6 and its arbitration. One power of two per edge, taken from
+/// the largest of that pair's six components and applied before the subtraction.
+fn perEdgeCross(v0: Vec3r, v1: Vec3r, v2: Vec3r) Vec3r {
+    const edge = struct {
+        fn f(from: Vec3r, to: Vec3r) Vec3r {
+            const largest = @max(from.maxAbsComponent(), to.maxAbsComponent());
+            if (largest == 0) return Vec3r.zero;
+            const exp = -std.math.frexp(largest).exponent;
+            return to.scalePow2(exp).sub(from.scalePow2(exp));
+        }
+    }.f;
+    return edge(v0, v1).cross(edge(v0, v2));
+}
+
 fn asArrays(v0: Vec3r, v1: Vec3r, v2: Vec3r) [3][3]Real {
     return .{ v0.toArray(), v1.toArray(), v2.toArray() };
 }
@@ -4152,9 +4167,15 @@ test "F6 a triangle spanning the exponent range is not a false degenerate" {
         vr(0, @as(Real, leg_lo), 0),
     );
     if (Real == f32) try testing.expectEqual(@as(Real, 0), single.maxAbsComponent());
-    // The per-edge form does not, and the exact oracle agrees with the per-edge form.
-    const per_edge = math.triangleCross(Real, vr(0, 0, 0), vr(@as(Real, leg_hi), 0, 0), vr(0, @as(Real, leg_lo), 0));
+    // Neither the per-edge form nor the SHIPPED conditional one does, and the exact oracle agrees
+    // with both. The shipped form needs no scaling at all here: the unscaled difference of these
+    // vertices is finite and their cross is finite and non-zero, which is precisely why the
+    // conditional design answers this case without touching an exponent.
+    const per_edge = perEdgeCross(vr(0, 0, 0), vr(@as(Real, leg_hi), 0, 0), vr(0, @as(Real, leg_lo), 0));
     try testing.expect(per_edge.maxAbsComponent() > 0);
+    const shipped = math.triangleCross(Real, vr(0, 0, 0), vr(@as(Real, leg_hi), 0, 0), vr(0, @as(Real, leg_lo), 0));
+    try testing.expect(shipped.maxAbsComponent() > 0);
+    try testing.expect(shipped.normalizeScaled().?.eql(vr(0, 0, 1)));
     const truth = try exactTriangleCross(gpa, asArrays(vr(0, 0, 0), vr(@as(Real, leg_hi), 0, 0), vr(0, @as(Real, leg_lo), 0)));
     try testing.expect(!truth.zero);
 
@@ -4168,6 +4189,7 @@ test "F6 a triangle spanning the exponent range is not a false degenerate" {
         const wide1 = vr(std.math.ldexp(@as(Real, 1), hi_exp), 0, 0);
         const wide2 = vr(0, std.math.ldexp(@as(Real, 1), lo_exp), 0);
         try testing.expectEqual(@as(Real, 0), singleFactorCross(wide0, wide1, wide2).maxAbsComponent());
+        try testing.expect(perEdgeCross(wide0, wide1, wide2).maxAbsComponent() > 0);
         const wide_cross = math.triangleCross(Real, wide0, wide1, wide2);
         try testing.expect(wide_cross.maxAbsComponent() > 0);
         try testing.expect(wide_cross.normalizeScaled().?.eql(vr(0, 0, 1)));
@@ -4217,41 +4239,66 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
 
     var total_single: usize = 0;
     var total_per_edge: usize = 0;
+    var total_shipped: usize = 0;
     var total_cases: usize = 0;
     var degenerate_cases: usize = 0;
+    var strictly_better_seeds: usize = 0;
+    var false_accepts: usize = 0;
 
     for ([_]u64{ 0x5EED_0001, 0x5EED_0002, 0x5EED_0003 }) |seed| {
         var prng = std.Random.DefaultPrng.init(seed);
         const rnd = prng.random();
         var seed_single: usize = 0;
         var seed_per_edge: usize = 0;
+        var seed_shipped: usize = 0;
 
         var i: usize = 0;
-        while (i < 400) : (i += 1) {
-            const collinear = (i % 2) == 0;
+        while (i < 600) : (i += 1) {
             var v: [3]Vec3r = undefined;
-            if (collinear) {
-                // Family C. `3 × u` is exact for these small integer triples, so the triple is
-                // EXACTLY collinear and the oracle must say so.
-                const u = units[rnd.uintLessThan(usize, units.len)];
-                const e = rnd.intRangeAtMost(i32, lo, hi);
-                const d = vr(
-                    std.math.ldexp(u[0], e),
-                    std.math.ldexp(u[1], e),
-                    std.math.ldexp(u[2], e),
-                );
-                v = .{ Vec3r.zero, d, d.scale(3) };
-            } else {
-                // Family A.
-                for (&v) |*vertex| {
+            switch (i % 3) {
+                0 => {
+                    // Family C. `3 × u` is exact for these small integer triples, so the triple is
+                    // EXACTLY collinear and the oracle must say so. Note what this family CANNOT
+                    // do: `d × 3d` has every component of the form `a·b − b·a`, which is exactly
+                    // zero in float too, so no form can ever false-accept here. On its own it would
+                    // be a vacuous proof of (i) — which is why family D exists.
                     const u = units[rnd.uintLessThan(usize, units.len)];
                     const e = rnd.intRangeAtMost(i32, lo, hi);
-                    vertex.* = vr(
+                    const d = vr(
                         std.math.ldexp(u[0], e),
                         std.math.ldexp(u[1], e),
                         std.math.ldexp(u[2], e),
                     );
-                }
+                    v = .{ Vec3r.zero, d, d.scale(3) };
+                },
+                1 => {
+                    // Family D — EXACTLY collinear at MIXED magnitudes: the same direction scaled
+                    // by three INDEPENDENT powers of two, so all three points sit on one line
+                    // through the origin and the exact cross is zero, while the float products no
+                    // longer cancel bit for bit. This is the family that can produce a false
+                    // ACCEPT, and it does.
+                    const u = units[rnd.uintLessThan(usize, units.len)];
+                    for (&v) |*vertex| {
+                        const e = rnd.intRangeAtMost(i32, lo, hi);
+                        vertex.* = vr(
+                            std.math.ldexp(u[0], e),
+                            std.math.ldexp(u[1], e),
+                            std.math.ldexp(u[2], e),
+                        );
+                    }
+                },
+                else => {
+                    // Family A — one exponent per vertex, each internally commensurate.
+                    for (&v) |*vertex| {
+                        const u = units[rnd.uintLessThan(usize, units.len)];
+                        const e = rnd.intRangeAtMost(i32, lo, hi);
+                        vertex.* = vr(
+                            std.math.ldexp(u[0], e),
+                            std.math.ldexp(u[1], e),
+                            std.math.ldexp(u[2], e),
+                        );
+                    }
+                },
             }
             if (!std.math.isFinite(v[0].maxAbsComponent()) or
                 !std.math.isFinite(v[1].maxAbsComponent()) or
@@ -4259,44 +4306,84 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
 
             const truth = try exactTriangleCross(gpa, asArrays(v[0], v[1], v[2]));
             const single_zero = singleFactorCross(v[0], v[1], v[2]).maxAbsComponent() == 0;
-            const per_edge = math.triangleCross(Real, v[0], v[1], v[2]);
-            const per_edge_zero = per_edge.maxAbsComponent() == 0;
+            const per_edge_zero = perEdgeCross(v[0], v[1], v[2]).maxAbsComponent() == 0;
+            const shipped = math.triangleCross(Real, v[0], v[1], v[2]);
+            const shipped_zero = shipped.maxAbsComponent() == 0;
 
             total_cases += 1;
             if (truth.zero) {
                 degenerate_cases += 1;
-                // (i) NO FALSE ACCEPT.
-                try testing.expect(single_zero);
-                try testing.expect(per_edge_zero);
+                // (i) NO FALSE ACCEPT **INTRODUCED BY THE FIX** — which is what is achievable, and
+                // the absolute form is NOT. Measured over a 24 000-draw adversarial sweep: on
+                // exactly-degenerate input `f32` false-accepts 3 of 252 draws and `f64` 0 of 216,
+                // and the three forms agree CASE BY CASE with zero mismatches. The residue is
+                // therefore inherent to computing a cross in `Real` — three collinear points at
+                // mixed magnitudes whose float products do not cancel bit for bit — and not a
+                // property of any one form. So what is asserted is the AGREEMENT: the shipped form
+                // must answer degenerate exactly where its predecessors do, which is what protects
+                // the safety direction against this change without claiming something false about
+                // float arithmetic. Family C, whose float cross is structurally exact, additionally
+                // pins the zero itself.
+                try testing.expectEqual(single_zero, shipped_zero);
+                try testing.expectEqual(per_edge_zero, shipped_zero);
+                if (i % 3 == 0) try testing.expect(shipped_zero);
+                if (!shipped_zero) false_accepts += 1;
             } else {
                 if (single_zero) seed_single += 1;
                 if (per_edge_zero) seed_per_edge += 1;
+                if (shipped_zero) seed_shipped += 1;
                 // (iii) A tight unit normal wherever a non-degenerate verdict is given. TIGHT is
                 // a machine-epsilon budget and not a geometric tolerance: 16 ULP, the same
                 // `unit_k` the ray kernel asserts its incoming direction against. An EXACT 1 is
                 // reachable only for an axis-aligned cross, which the named pins assert and an
                 // arbitrary triangle cannot — measured here at `0.99999994`, one ULP below.
-                if (!per_edge_zero) {
-                    const n = per_edge.normalizeScaled().?;
+                if (!shipped_zero) {
+                    const n = shipped.normalizeScaled().?;
                     try testing.expect(@abs(n.lengthSq() - 1) <= 16 * std.math.floatEps(Real));
                 }
             }
         }
 
-        // (ii) DOMINANCE, per seed and STRICT — measured to hold on all three seeds at both
-        // precisions, so the weaker `<=` would have let a regression through on two of them.
-        // Counts on 200 non-collinear draws per seed: `f32` 47→38, 44→34, 40→32; `f64` 60→47,
-        // 50→37, 56→37. The counter-factual therefore fails on EVERY seed, not just in aggregate.
+        // (ii) DOMINANCE along the LADDER — and the two rungs do NOT get the same operator, because
+        // measurement says they are not the same shape. Rung one, per-edge against one common
+        // factor, is STRICT on every seed at both precisions: 47→38, 44→34, 40→32 at `f32` and
+        // 60→47, 50→37, 56→37 at `f64`, over 200 non-collinear draws per seed. Rung two, the
+        // SHIPPED conditional form against per-edge, is strict on three of three seeds at `f32`
+        // (38→36, 34→31, 32→30) but on only TWO of three at `f64` (47→43, 37→35, then 37→37 — a
+        // TIE on seed `0x5EED_0003`, not a regression). So that rung asserts `<=`, which still
+        // fails on any regression whatsoever, and the improvement is carried by the aggregate and
+        // by the majority check below. Writing `<` there would be asserting something false.
         try testing.expect(seed_per_edge < seed_single);
+        try testing.expect(seed_shipped <= seed_per_edge);
+        if (seed_shipped < seed_per_edge) strictly_better_seeds += 1;
         total_single += seed_single;
         total_per_edge += seed_per_edge;
+        total_shipped += seed_shipped;
     }
 
     // The degenerate side must be genuinely populated, or (i) proves nothing.
     try testing.expect(degenerate_cases * 3 > total_cases);
-    // (ii) DOMINANCE in aggregate, and STRICT — this is what the counter-factual breaks: with
-    // `math.triangleCross` back on the single factor the two counts are equal and this fails.
+    // And the false-accept residue must stay a RESIDUE. The bound is the measured rate with room,
+    // not a tolerance on geometry: it exists so a form that started accepting degenerates wholesale
+    // would fail here rather than pass by agreeing with an equally broken predecessor.
+    try testing.expect(false_accepts * 20 < degenerate_cases);
+
+    // (ii) DOMINANCE in aggregate, STRICT on both rungs. This is what the counter-factual breaks:
+    // putting `math.triangleCross` back on either earlier form makes the corresponding counts equal
+    // and takes these down. Measured false-degenerate counts over the NON-DEGENERATE draws —
+    // `f32` 131 / 104 / 97 of 597, i.e. 21.9 % → 17.4 % → 16.3 %; `f64` 166 / 121 / 115 of 596,
+    // i.e. 27.9 % → 20.3 % → 19.3 %.
+    //
+    // **THOSE PERCENTAGES ARE A STRESS METRIC, NOT A FIELD EXPECTATION, and the caveat has to
+    // travel with the number.** The sampling is ADVERSARIAL by construction — one exponent drawn
+    // UNIFORMLY over the format's entire range per vertex — so the draw is dominated by triangles
+    // whose vertices differ in magnitude by dozens or hundreds of binades. A real mesh lives inside
+    // a few orders of magnitude, where every one of these forms is exact. Read out of context the
+    // figure invites the conclusion that one mesh triangle in six is misjudged, which is false.
     try testing.expect(total_per_edge < total_single);
+    try testing.expect(total_shipped < total_per_edge);
+    // And the improvement is not carried by one lucky seed: strict on a MAJORITY of them.
+    try testing.expect(strictly_better_seeds * 2 > 3);
 }
 
 test "F3 gjkPair states its convex precondition at its own site" {
