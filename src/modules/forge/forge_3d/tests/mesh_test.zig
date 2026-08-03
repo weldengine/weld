@@ -4316,33 +4316,34 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
             const truth = try exactTriangleCross(gpa, asArrays(v[0], v[1], v[2]));
             const single_zero = singleFactorCross(v[0], v[1], v[2]).maxAbsComponent() == 0;
             const per_edge_zero = perEdgeCross(v[0], v[1], v[2]).maxAbsComponent() == 0;
+            // The VERDICT comes from the classifier `MeshData.init` actually consults, and NOT from
+            // the tiered direction. Deriving it from `shippedDirection` was the very dispatch defect
+            // already corrected in production, left standing in the test: the tiered form answers
+            // from whichever float tier first produces a non-zero, and on exactly proportional points
+            // that is a rounding residue. `shipped_opt` is now used for the DIRECTION only.
+            const shipped_zero = shippedZero(v[0], v[1], v[2]);
             const shipped_opt = shippedDirection(v[0], v[1], v[2]);
-            const shipped_zero = shipped_opt == null;
             const shipped = shipped_opt orelse Vec3r.zero;
 
             total_cases += 1;
             if (truth.zero) {
                 degenerate_cases += 1;
-                // (i) **NO FALSE ACCEPT, EVER — and the absolute form is assertable again.** For
-                // five rounds it was not: every float form answered non-zero on 3 of 252
-                // exactly-degenerate `f32` draws, all three agreeing case by case, because three
-                // collinear points at mixed magnitudes have float products that do not cancel bit
-                // for bit. The shipped form settles the verdict in EXACT INTEGER arithmetic, so it
-                // cannot be wrong about a zero at all, and the earlier agreement-based formulation
-                // is replaced by the real invariant. Accepting a degenerate would put a zero-area
-                // triangle in the store, where `faceNormal`'s `orelse unreachable` fires.
-                // (i) **FALSE ACCEPTS — what is measured, and it is not yet zero.** The exact
-                // integer verdict removes almost all of them: the three float forms each accept 4
-                // of 932 exactly-degenerate `f32` draws, the shipped form ONE, and all four are
-                // zero at `f64`. That remaining case is REPORTED in the milestone brief with its
-                // inputs rather than asserted away, because the absolute invariant is what the
-                // integer verdict was supposed to buy and one case says it does not yet. What IS
-                // asserted is the direction of the improvement — the shipped form must never accept
-                // where a float form refuses, and must accept STRICTLY fewer overall.
+                // (i) **NO FALSE ACCEPT, EVER — asserted absolutely, and the absolute form is
+                // finally true.** For five rounds it was not, and the reason turned out to be the
+                // test rather than the engine: the verdict was being derived from the TIERED
+                // direction, which answers from whichever float tier first produces a non-zero, and
+                // on three exactly proportional points that is a rounding residue. Measured that
+                // way, three `f32` draws in 932 looked like false accepts. Read from the classifier
+                // `MeshData.init` actually consults — `math.triangleIsFlat`, exact integer
+                // arithmetic throughout — the count is ZERO at both precisions, which is what exact
+                // against exact must give. The two float forms still accept 8 between them at `f32`,
+                // so the family is not vacuous and the assertion has something to bite on.
+                // Accepting a degenerate would put a zero-area triangle in the store, where
+                // `faceNormal`'s `orelse unreachable` fires.
                 if (!shipped_zero) shipped_false_accepts += 1;
                 if (!single_zero) legacy_false_accepts += 1;
                 if (!per_edge_zero) legacy_false_accepts += 1;
-                if (!shipped_zero) try testing.expect(!single_zero and !per_edge_zero);
+                try testing.expect(shipped_zero);
             } else {
                 if (single_zero) seed_single += 1;
                 if (per_edge_zero) seed_per_edge += 1;
@@ -4378,19 +4379,15 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
 
     // The degenerate side must be genuinely populated, or (i) proves nothing.
     try testing.expect(degenerate_cases * 3 > total_cases);
-    // The predecessors' false accepts are REPORTED, not bounded — they are what the exact verdict
-    // removes. Measured at `f32`: 4 of 932 degenerate draws for each float form, 0 for the shipped
-    // one. At `f64` all three are 0, the format being wide enough for these draws. The count is
-    // asserted non-zero at `f32` only, so the improvement cannot silently become vacuous.
-    // STRICTLY fewer, and non-vacuously so at `f32` where the residue exists at all: the two float
-    // forms contribute 8 between them against the shipped form's 1.
-    if (Real == f32) {
-        try testing.expect(legacy_false_accepts > 0);
-        try testing.expect(shipped_false_accepts * 2 < legacy_false_accepts);
-    } else {
-        try testing.expectEqual(@as(usize, 0), shipped_false_accepts);
-        try testing.expectEqual(@as(usize, 0), legacy_false_accepts);
-    }
+    // **ZERO false accepts from the shipped verdict, at BOTH precisions, with no tolerance of any
+    // kind.** This is the invariant the exact integer classifier buys, and for five rounds it was
+    // believed unreachable — measured against the TIERED direction instead of the classifier, which
+    // is the same dispatch defect already corrected in production, left standing in the test.
+    try testing.expectEqual(@as(usize, 0), shipped_false_accepts);
+    // And the family is NOT vacuous: the two float forms accept 8 between them at `f32`, so the
+    // assertion above has something to bite on. At `f64` all three are zero, the format being wide
+    // enough for these draws, so the non-vacuity check is `f32`-only rather than absolute.
+    if (Real == f32) try testing.expect(legacy_false_accepts > 0);
 
     // (ii) DOMINANCE in aggregate, STRICT on both rungs. This is what the counter-factual breaks:
     // putting `math.triangleCross` back on either earlier form makes the corresponding counts equal
