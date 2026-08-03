@@ -28,6 +28,8 @@ pub const asFloatSlice = vec.asFloatSlice;
 pub const triangleCross = vec.triangleCross;
 /// What `triangleCross` can conclude.
 pub const CrossOutcome = vec.CrossOutcome;
+/// Whether a triangle is EXACTLY flat, decided in integer arithmetic.
+pub const triangleIsFlat = @import("exact.zig").triangleIsFlat;
 /// The power-of-two exponent that reduces three points below unit magnitude.
 pub const pow2ReductionExponent = vec.pow2ReductionExponent;
 

@@ -4125,7 +4125,11 @@ fn perEdgeCross(v0: Vec3r, v1: Vec3r, v2: Vec3r) Vec3r {
 /// The shipped form's verdict as a plain bool, and its direction when it has one. Written once so
 /// the property test and the pins read the three-outcome result the same way.
 fn shippedZero(v0: Vec3r, v1: Vec3r, v2: Vec3r) bool {
-    return math.triangleCross(Real, v0, v1, v2) == .degenerate;
+    // The VERDICT source, which is the exact integer path and NOT the tiered `triangleCross` —
+    // exactly what `MeshData.init` consults. Measuring the tiered form here was itself the mistake
+    // that hid three false accepts: it answers from a float tier when that tier produces any
+    // non-zero, and a rounding residue on proportional points is such a non-zero.
+    return math.triangleIsFlat(Real, v0, v1, v2);
 }
 fn shippedDirection(v0: Vec3r, v1: Vec3r, v2: Vec3r) ?Vec3r {
     return switch (math.triangleCross(Real, v0, v1, v2)) {

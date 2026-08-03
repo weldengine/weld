@@ -98,68 +98,60 @@ fn laneTerms(
 
 /// Exact value of one determinant as `(m, e)`, or `null` when it is EXACTLY zero.
 ///
-/// **A term is dropped only when it is provably negligible against the ACCUMULATED SUM, never
-/// against the largest term, and that distinction is the whole correctness argument.** Retained
-/// terms can cancel one another almost entirely, after which a term negligible beside the top term
-/// is not negligible beside what survived. Measured: a window keyed on the top term left four lanes
-/// in 27 000 with a magnitude four times too large, and could in principle report a non-zero for an
-/// exactly-zero determinant, which is a false ACCEPT. So the window WIDENS until the largest dropped
-/// term cannot reach the sum's leading bits, or until every term is in — which terminates, there
-/// being eight of them.
+/// **ALL EIGHT TERMS ARE ALWAYS RETAINED. There is no truncation window, and removing it is the
+/// point.** An earlier version dropped terms it judged negligible, first against the largest term and
+/// then — after that was measured wrong — against the accumulated sum. Both are unsound here, and the
+/// second fails on exactly the case that matters most: three proportional points give a determinant
+/// that is exactly zero, which is TOTAL cancellation, so the accumulated sum tends to zero and a
+/// window calibrated on it has nothing left to calibrate against. The short-circuit then discards a
+/// term the exact cancellation needed, and the answer comes back non-zero for a flat triangle — a
+/// false ACCEPT, which is the one direction that must never fail.
+///
+/// The width was already sized for the worst case in which every term is retained, so the
+/// short-circuit bought nothing but an opportunity to be wrong. This is a COLD path behind the
+/// tier-1 test: it does not need to be fast, it needs to be exact. Shifts and additions only, no
+/// wide division and no wide integer-to-float, both of which are LLVM library calls that do not
+/// exist at these widths.
 fn exactLane(comptime T: type, terms: [8]Term) ?struct { m: Acc(T), e: i32 } {
-    const bits: i32 = @intCast(std.math.floatMantissaBits(T) + 1);
-    const guard: i32 = 2 * bits + 8;
-
-    var top: i32 = std.math.minInt(i32);
+    var emin: i32 = std.math.maxInt(i32);
     var any = false;
     for (terms) |t| {
         if (t.m == 0) continue;
-        const mag = t.e + @as(i32, @intCast(bitLen(i128, t.m)));
-        if (!any or mag > top) top = mag;
+        if (t.e < emin) emin = t.e;
         any = true;
     }
     if (!any) return null;
 
-    var window: i32 = guard;
-    while (true) {
-        var emin: i32 = std.math.maxInt(i32);
-        var dropped_top: i32 = std.math.minInt(i32);
-        var all_in = true;
-        for (terms) |t| {
-            if (t.m == 0) continue;
-            const mag = t.e + @as(i32, @intCast(bitLen(i128, t.m)));
-            if (mag + window < top) {
-                all_in = false;
-                if (mag > dropped_top) dropped_top = mag;
-                continue;
-            }
-            if (t.e < emin) emin = t.e;
-        }
-        var sum: Acc(T) = 0;
-        for (terms) |t| {
-            if (t.m == 0) continue;
-            const mag = t.e + @as(i32, @intCast(bitLen(i128, t.m)));
-            if (mag + window < top) continue;
-            sum += @as(Acc(T), t.m) << @intCast(t.e - emin);
-        }
-        if (all_in) return if (sum == 0) null else .{ .m = sum, .e = emin };
-
-        // Eight terms at `dropped_top` sum to less than `2^(dropped_top+3)`, so once the sum exceeds
-        // that by the mantissa width they cannot touch its leading bits — nor cancel it.
-        const sum_mag: i32 = if (sum == 0)
-            std.math.minInt(i32)
-        else
-            emin + @as(i32, @intCast(bitLen(Acc(T), sum)));
-        if (sum != 0 and dropped_top + guard < sum_mag) return .{ .m = sum, .e = emin };
-
-        // Not negligible. Widen; doubling brings every term in within a few rounds.
-        const span = top - dropped_top;
-        window = if (window > span) std.math.maxInt(i32) / 4 else window * 2;
+    var sum: Acc(T) = 0;
+    for (terms) |t| {
+        if (t.m == 0) continue;
+        sum += @as(Acc(T), t.m) << @intCast(t.e - emin);
     }
+    if (sum == 0) return null;
+    return .{ .m = sum, .e = emin };
 }
 
 /// Which lane of the cross reads which components: `x` is `(1,2)`, `y` is `(2,0)`, `z` is `(0,1)`.
 const lane_indices = [3][2]usize{ .{ 1, 2 }, .{ 2, 0 }, .{ 0, 1 } };
+
+/// Whether the triangle is EXACTLY flat — the exact area vector is the zero vector — decided in
+/// integer arithmetic with no tolerance and no float step anywhere in the decision.
+///
+/// **This is the only sound source of that verdict, and a float tier can never substitute for it.**
+/// A float cross that comes out non-zero is not evidence: three exactly proportional points have
+/// float products that need not cancel bit for bit, so the float answer is a rounding residue and
+/// reads as a valid direction. That is exactly how a false ACCEPT reached the store — the cheap
+/// tiers answered first and the exact tier was never consulted. So a caller that must not accept a
+/// flat triangle asks HERE, and the tiered `Vec.triangleCross` is for callers that only need a
+/// direction on geometry already validated.
+pub fn triangleIsFlat(
+    comptime T: type,
+    v0: vec.Vec(3, T),
+    v1: vec.Vec(3, T),
+    v2: vec.Vec(3, T),
+) bool {
+    return triangleCrossDirection(T, v0, v1, v2) == null;
+}
 
 /// A vector PARALLEL to the true area vector of `(v0, v1, v2)`, or `null` when that vector is
 /// EXACTLY zero — which is to say when the triangle is exactly flat, with no tolerance anywhere in
