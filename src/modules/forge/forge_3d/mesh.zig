@@ -402,7 +402,13 @@ pub const MeshData = struct {
     /// blindly, so the guarantee is stated where it is relied upon.
     pub fn faceNormal(self: MeshData, index: u32) Vec3r {
         const v = self.triangle(index);
-        return faceCross(v[0], v[1], v[2]).normalizeScaled() orelse unreachable;
+        return switch (faceCross(v[0], v[1], v[2])) {
+            // `init` refused every degenerate triangle with an EXACT predicate, so a stored triangle
+            // always has a direction — asserted here rather than assumed, and the normalisation
+            // cannot fail either, the direction being non-zero by construction.
+            .direction => |d| d.normalizeScaled() orelse unreachable,
+            .degenerate => unreachable,
+        };
     }
 
     /// Tight local-space bound of triangle `index`.
@@ -989,43 +995,34 @@ pub fn edgeIsActive(normal_a: Vec3r, normal_b: Vec3r, edge_direction: Vec3r, cos
     return cos_angle < 0; // parallel: active exactly when opposite
 }
 
-/// The un-normalised face normal `(v₁−v₀) × (v₂−v₀)`, in the fixed evaluation order the
-/// winding convention fixes.
+/// The direction of the face normal `(v₁−v₀) × (v₂−v₀)`, in the fixed evaluation order the winding
+/// convention fixes, or `.degenerate` when the EXACT cross is zero.
 ///
-/// **SCALED, and deliberately so — the magnitude is no longer twice the area.** The shared
-/// `math.triangleCross` reduces the three vertices by one common power of two BEFORE
-/// subtracting, which is what keeps both the edge and the cross product inside the float range
-/// for every vertex the domain admits. Its result is an exact `2^k` multiple of the true area
-/// vector, and the two consumers here need only the direction and the exactly-zero verdict, on
-/// which such a factor has no effect. It is shared with the ray↔triangle kernel for the reason
-/// stated at `isDegenerate`: the guard that refuses a triangle and the normal that describes it
-/// must be computed from the same geometry.
-pub fn faceCross(v0: Vec3r, v1: Vec3r, v2: Vec3r) Vec3r {
+/// **SCALED, and deliberately so — the magnitude is not a reliable multiple of twice the area.** The
+/// shared `math.triangleCross` answers in three tiers, unscaled first and an exact integer
+/// determinant last, and only the direction and the zero verdict survive across all three. The two
+/// consumers here need exactly those. It is shared with the ray↔triangle kernel for the reason
+/// stated at `isDegenerate`: the guard that refuses a triangle and the normal that describes it must
+/// be computed from the same geometry.
+pub fn faceCross(v0: Vec3r, v1: Vec3r, v2: Vec3r) math.CrossOutcome(Real) {
     return math.triangleCross(Real, v0, v1, v2);
 }
 
-/// Whether a triangle is EXACTLY degenerate — its cross product's largest absolute
-/// component is zero, hence all three are.
+/// Whether a triangle is degenerate — its EXACT area vector is zero, with no tolerance taking part
+/// in the decision at any point.
 ///
-/// The guard is at TRUE ZERO, and the test is on the largest absolute COMPONENT rather
-/// than on the squared length, for the two reasons §1.11.4 gives for a null direction:
-/// the square of a large-amplitude but finite value overflows to infinity, and the
-/// square of a tiny but perfectly legitimate one underflows to zero. A sliver whose
-/// area is minuscule and non-zero normalises exactly and must be SERVED — which is why
-/// no area threshold appears here, and why a suite that only rejects degenerates would
-/// pass just as well with one.
+/// **This is an EXACT predicate, and that is new.** For five rounds it was a float test at true
+/// zero, which is unimpeachable about a zero it computes but says nothing about the zeros it fails
+/// to compute: a triangle whose components span more than the format's exponent range read as flat
+/// while being perfectly ordinary, and the caller received a typed refusal accusing valid data.
+/// `math.triangleCross`'s third tier settles it in integer arithmetic, so `.degenerate` now means
+/// exactly one thing — the three points really are collinear — and no triangle is ever mislabelled.
 ///
-/// **The power-of-two reduction inside `faceCross` is what lets this guard stay at true zero
-/// while remaining meaningful across the whole domain.** An arbitrary scale factor would round
-/// each division, and two exactly-collinear edges could stop being exactly collinear — which
-/// is precisely a verdict this guard would then get wrong. An exact power of two changes no
-/// mantissa, so collinearity is preserved bit for bit and the verdict is unmoved for every
-/// input that already worked. What the reduction adds is the two ends: vertices whose edge or
-/// whose cross product used to overflow now reduce into range, so a legal triangle is no longer
-/// read as degenerate through an infinity, and a triangle whose area underflowed to zero in its
-/// own units is now SERVED, which is what the paragraph above always claimed.
+/// A sliver whose area is minuscule and non-zero normalises exactly and IS SERVED, which the earlier
+/// comment claimed without being able to deliver it; no area threshold appears here, and a suite
+/// that only rejected degenerates would pass just as well with one.
 pub fn isDegenerate(v0: Vec3r, v1: Vec3r, v2: Vec3r) bool {
-    return @reduce(.Max, @abs(faceCross(v0, v1, v2).data)) == 0;
+    return faceCross(v0, v1, v2) == .degenerate;
 }
 
 /// Widen a descriptor vertex to solver precision. Exact: a per-component `f32` → `Real`

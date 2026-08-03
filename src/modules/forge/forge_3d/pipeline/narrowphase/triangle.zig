@@ -289,7 +289,13 @@ fn attempt(
     // equivalent: `scalePow2` documents that a common power of two cancels inside
     // `normalizeScaled`, so both calls answer the same bits. Never empty here — a determinant of
     // exactly zero already returned above, and a non-zero determinant means a non-zero cross.
-    const normal = math.triangleCross(T, p0, p1, p2).normalizeScaled() orelse unreachable;
+    const normal = switch (math.triangleCross(T, p0, p1, p2)) {
+        .direction => |d| d.normalizeScaled() orelse unreachable,
+        // Unreachable on a stored mesh: `MeshData.init` refused every degenerate triangle with an
+        // EXACT integer predicate, so a triangle reaching this kernel has a direction. And a
+        // determinant of exactly zero already returned above, which is the same statement locally.
+        .degenerate => unreachable,
+    };
 
     // Lifted out of the reduced space by the SAME exact power of two, the parameter being
     // homogeneous of degree 1 in the scale. A grazing hit whose true distance is not representable

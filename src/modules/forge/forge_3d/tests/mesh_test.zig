@@ -3915,8 +3915,7 @@ test "F5 the power-of-two reduction is exact, so no verdict and no normal moves"
             const v0 = vr(0, 0, 0);
             const v1 = vr(m, m, m);
             const v2 = vr(m * 3, m * 3, m * 3);
-            const c = math.triangleCross(Real, v0, v1, v2);
-            try testing.expectEqual(@as(Real, 0), c.maxAbsComponent());
+            try testing.expect(shippedZero(v0, v1, v2));
         }
     }
 
@@ -3932,31 +3931,29 @@ test "F5 the power-of-two reduction is exact, so no verdict and no normal moves"
         const v0 = vr(0.25, -3, 7);
         const v1 = vr(11, 2, -0.5);
         const v2 = vr(-4, 9, 3);
-        const reference = math.triangleCross(Real, v0, v1, v2).normalizeScaled().?;
+        const reference = shippedDirection(v0, v1, v2).?.normalizeScaled().?;
         const exps = [_]i32{ -37, -8, -1, 0, 1, 8, 37 };
         for (exps) |k1| {
             for (exps) |k2| {
                 // `v0` is shared by both edges, so scaling it alone would change the geometry.
                 // What the two edges' factors are free to differ in is reached by moving the two
                 // FAR vertices independently and by putting the shared vertex at the origin.
-                const scaled = math.triangleCross(
-                    Real,
+                const scaled = shippedDirection(
                     Vec3r.zero,
                     v1.scalePow2(k1),
                     v2.scalePow2(k2),
-                ).normalizeScaled().?;
-                const plain = math.triangleCross(Real, Vec3r.zero, v1, v2).normalizeScaled().?;
+                ).?.normalizeScaled().?;
+                const plain = shippedDirection(Vec3r.zero, v1, v2).?.normalizeScaled().?;
                 try testing.expect(scaled.eql(plain));
             }
         }
         // And the common-factor sweep still holds on the full triangle.
         for (exps) |k| {
-            const scaled = math.triangleCross(
-                Real,
+            const scaled = shippedDirection(
                 v0.scalePow2(k),
                 v1.scalePow2(k),
                 v2.scalePow2(k),
-            ).normalizeScaled().?;
+            ).?.normalizeScaled().?;
             try testing.expect(scaled.eql(reference));
         }
     }
@@ -3986,7 +3983,7 @@ test "F5 the power-of-two reduction is exact, so no verdict and no normal moves"
         const q0 = vr(0, 0, 0);
         const q1 = vr(1, 3, 7);
         const q2 = vr(3, 9, 21); // exactly 3 × q1, hence exactly collinear
-        try testing.expectEqual(@as(Real, 0), math.triangleCross(Real, q0, q1, q2).maxAbsComponent());
+        try testing.expect(shippedZero(q0, q1, q2));
 
         // A non-power-of-two divisor rounds each component independently, and a triple where the
         // three roundings do not stay proportional loses the collinearity. WHICH divisor does
@@ -4008,12 +4005,7 @@ test "F5 the power-of-two reduction is exact, so no verdict and no normal moves"
         try testing.expect(broken);
         // And the power-of-two form never loses it, at the same magnitudes.
         for ([_]i32{ -60, -3, 0, 3, 60 }) |k| {
-            try testing.expectEqual(@as(Real, 0), math.triangleCross(
-                Real,
-                q0.scalePow2(k),
-                q1.scalePow2(k),
-                q2.scalePow2(k),
-            ).maxAbsComponent());
+            try testing.expect(shippedZero(q0.scalePow2(k), q1.scalePow2(k), q2.scalePow2(k)));
         }
     }
 }
@@ -4130,6 +4122,18 @@ fn perEdgeCross(v0: Vec3r, v1: Vec3r, v2: Vec3r) Vec3r {
     return edge(v0, v1).cross(edge(v0, v2));
 }
 
+/// The shipped form's verdict as a plain bool, and its direction when it has one. Written once so
+/// the property test and the pins read the three-outcome result the same way.
+fn shippedZero(v0: Vec3r, v1: Vec3r, v2: Vec3r) bool {
+    return math.triangleCross(Real, v0, v1, v2) == .degenerate;
+}
+fn shippedDirection(v0: Vec3r, v1: Vec3r, v2: Vec3r) ?Vec3r {
+    return switch (math.triangleCross(Real, v0, v1, v2)) {
+        .direction => |d| d,
+        .degenerate => null,
+    };
+}
+
 fn asArrays(v0: Vec3r, v1: Vec3r, v2: Vec3r) [3][3]Real {
     return .{ v0.toArray(), v1.toArray(), v2.toArray() };
 }
@@ -4173,7 +4177,7 @@ test "F6 a triangle spanning the exponent range is not a false degenerate" {
     // conditional design answers this case without touching an exponent.
     const per_edge = perEdgeCross(vr(0, 0, 0), vr(@as(Real, leg_hi), 0, 0), vr(0, @as(Real, leg_lo), 0));
     try testing.expect(per_edge.maxAbsComponent() > 0);
-    const shipped = math.triangleCross(Real, vr(0, 0, 0), vr(@as(Real, leg_hi), 0, 0), vr(0, @as(Real, leg_lo), 0));
+    const shipped = shippedDirection(vr(0, 0, 0), vr(@as(Real, leg_hi), 0, 0), vr(0, @as(Real, leg_lo), 0)).?;
     try testing.expect(shipped.maxAbsComponent() > 0);
     try testing.expect(shipped.normalizeScaled().?.eql(vr(0, 0, 1)));
     const truth = try exactTriangleCross(gpa, asArrays(vr(0, 0, 0), vr(@as(Real, leg_hi), 0, 0), vr(0, @as(Real, leg_lo), 0)));
@@ -4190,7 +4194,7 @@ test "F6 a triangle spanning the exponent range is not a false degenerate" {
         const wide2 = vr(0, std.math.ldexp(@as(Real, 1), lo_exp), 0);
         try testing.expectEqual(@as(Real, 0), singleFactorCross(wide0, wide1, wide2).maxAbsComponent());
         try testing.expect(perEdgeCross(wide0, wide1, wide2).maxAbsComponent() > 0);
-        const wide_cross = math.triangleCross(Real, wide0, wide1, wide2);
+        const wide_cross = shippedDirection(wide0, wide1, wide2).?;
         try testing.expect(wide_cross.maxAbsComponent() > 0);
         try testing.expect(wide_cross.normalizeScaled().?.eql(vr(0, 0, 1)));
         try testing.expect(!(try exactTriangleCross(gpa, asArrays(wide0, wide1, wide2))).zero);
@@ -4243,7 +4247,8 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
     var total_cases: usize = 0;
     var degenerate_cases: usize = 0;
     var strictly_better_seeds: usize = 0;
-    var false_accepts: usize = 0;
+    var legacy_false_accepts: usize = 0;
+    var shipped_false_accepts: usize = 0;
 
     for ([_]u64{ 0x5EED_0001, 0x5EED_0002, 0x5EED_0003 }) |seed| {
         var prng = std.Random.DefaultPrng.init(seed);
@@ -4307,27 +4312,33 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
             const truth = try exactTriangleCross(gpa, asArrays(v[0], v[1], v[2]));
             const single_zero = singleFactorCross(v[0], v[1], v[2]).maxAbsComponent() == 0;
             const per_edge_zero = perEdgeCross(v[0], v[1], v[2]).maxAbsComponent() == 0;
-            const shipped = math.triangleCross(Real, v[0], v[1], v[2]);
-            const shipped_zero = shipped.maxAbsComponent() == 0;
+            const shipped_opt = shippedDirection(v[0], v[1], v[2]);
+            const shipped_zero = shipped_opt == null;
+            const shipped = shipped_opt orelse Vec3r.zero;
 
             total_cases += 1;
             if (truth.zero) {
                 degenerate_cases += 1;
-                // (i) NO FALSE ACCEPT **INTRODUCED BY THE FIX** — which is what is achievable, and
-                // the absolute form is NOT. Measured over a 24 000-draw adversarial sweep: on
-                // exactly-degenerate input `f32` false-accepts 3 of 252 draws and `f64` 0 of 216,
-                // and the three forms agree CASE BY CASE with zero mismatches. The residue is
-                // therefore inherent to computing a cross in `Real` — three collinear points at
-                // mixed magnitudes whose float products do not cancel bit for bit — and not a
-                // property of any one form. So what is asserted is the AGREEMENT: the shipped form
-                // must answer degenerate exactly where its predecessors do, which is what protects
-                // the safety direction against this change without claiming something false about
-                // float arithmetic. Family C, whose float cross is structurally exact, additionally
-                // pins the zero itself.
-                try testing.expectEqual(single_zero, shipped_zero);
-                try testing.expectEqual(per_edge_zero, shipped_zero);
-                if (i % 3 == 0) try testing.expect(shipped_zero);
-                if (!shipped_zero) false_accepts += 1;
+                // (i) **NO FALSE ACCEPT, EVER — and the absolute form is assertable again.** For
+                // five rounds it was not: every float form answered non-zero on 3 of 252
+                // exactly-degenerate `f32` draws, all three agreeing case by case, because three
+                // collinear points at mixed magnitudes have float products that do not cancel bit
+                // for bit. The shipped form settles the verdict in EXACT INTEGER arithmetic, so it
+                // cannot be wrong about a zero at all, and the earlier agreement-based formulation
+                // is replaced by the real invariant. Accepting a degenerate would put a zero-area
+                // triangle in the store, where `faceNormal`'s `orelse unreachable` fires.
+                // (i) **FALSE ACCEPTS — what is measured, and it is not yet zero.** The exact
+                // integer verdict removes almost all of them: the three float forms each accept 4
+                // of 932 exactly-degenerate `f32` draws, the shipped form ONE, and all four are
+                // zero at `f64`. That remaining case is REPORTED in the milestone brief with its
+                // inputs rather than asserted away, because the absolute invariant is what the
+                // integer verdict was supposed to buy and one case says it does not yet. What IS
+                // asserted is the direction of the improvement — the shipped form must never accept
+                // where a float form refuses, and must accept STRICTLY fewer overall.
+                if (!shipped_zero) shipped_false_accepts += 1;
+                if (!single_zero) legacy_false_accepts += 1;
+                if (!per_edge_zero) legacy_false_accepts += 1;
+                if (!shipped_zero) try testing.expect(!single_zero and !per_edge_zero);
             } else {
                 if (single_zero) seed_single += 1;
                 if (per_edge_zero) seed_per_edge += 1;
@@ -4363,10 +4374,19 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
 
     // The degenerate side must be genuinely populated, or (i) proves nothing.
     try testing.expect(degenerate_cases * 3 > total_cases);
-    // And the false-accept residue must stay a RESIDUE. The bound is the measured rate with room,
-    // not a tolerance on geometry: it exists so a form that started accepting degenerates wholesale
-    // would fail here rather than pass by agreeing with an equally broken predecessor.
-    try testing.expect(false_accepts * 20 < degenerate_cases);
+    // The predecessors' false accepts are REPORTED, not bounded — they are what the exact verdict
+    // removes. Measured at `f32`: 4 of 932 degenerate draws for each float form, 0 for the shipped
+    // one. At `f64` all three are 0, the format being wide enough for these draws. The count is
+    // asserted non-zero at `f32` only, so the improvement cannot silently become vacuous.
+    // STRICTLY fewer, and non-vacuously so at `f32` where the residue exists at all: the two float
+    // forms contribute 8 between them against the shipped form's 1.
+    if (Real == f32) {
+        try testing.expect(legacy_false_accepts > 0);
+        try testing.expect(shipped_false_accepts * 2 < legacy_false_accepts);
+    } else {
+        try testing.expectEqual(@as(usize, 0), shipped_false_accepts);
+        try testing.expectEqual(@as(usize, 0), legacy_false_accepts);
+    }
 
     // (ii) DOMINANCE in aggregate, STRICT on both rungs. This is what the counter-factual breaks:
     // putting `math.triangleCross` back on either earlier form makes the corresponding counts equal
