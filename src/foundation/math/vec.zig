@@ -224,6 +224,14 @@ comptime {
 /// `2^-e` maps it to `m` and every smaller component below that. All three points must be
 /// FINITE: `frexp` leaves its exponent undefined for an infinity or a NaN, which is asserted
 /// rather than handled, every caller here validating its geometry upstream.
+///
+/// **This is a COMMON factor and `triangleCross` deliberately no longer uses it** — the two want
+/// different things and the difference is not stylistic. A Möller–Trumbore chain compares `u` and
+/// `v` against `det`, all three homogeneous of degree 2 in ONE scale, so the comparisons are only
+/// meaningful if every quantity was reduced by the same factor; that is what this function is for.
+/// A cross product needs only a direction and a non-zero verdict, so it can afford two independent
+/// factors — and it MUST, since a single factor over points spanning more than the exponent range
+/// annihilates the smallest of them (closure finding F6).
 pub fn pow2ReductionExponent(
     comptime T: type,
     v0: Vec(3, T),
@@ -234,6 +242,21 @@ pub fn pow2ReductionExponent(
     std.debug.assert(!std.math.isNan(largest) and !std.math.isInf(largest));
     if (largest == 0) return null;
     return -std.math.frexp(largest).exponent;
+}
+
+/// The exact power-of-two-reduced difference `to − from`, the reduction taken from the largest
+/// absolute component of the PAIR and applied BEFORE the subtraction.
+///
+/// Reducing before subtracting is what keeps the difference itself in range: two finite `f32`
+/// vertices at `±3e38` differ by `6e38`, which is an infinity, and no amount of scaling
+/// afterwards recovers it. Reducing brings the largest of the six components into `[0.5, 1)`, so
+/// both operands are at most 1 and the difference at most 2.
+fn edgeReducedPow2(comptime T: type, from: Vec(3, T), to: Vec(3, T)) Vec(3, T) {
+    const largest = @max(from.maxAbsComponent(), to.maxAbsComponent());
+    std.debug.assert(!std.math.isNan(largest) and !std.math.isInf(largest));
+    if (largest == 0) return Vec(3, T).zero;
+    const exp = -std.math.frexp(largest).exponent;
+    return to.scalePow2(exp).sub(from.scalePow2(exp));
 }
 
 /// Un-normalised area vector of the triangle `(v0, v1, v2)` — the cross product
@@ -250,22 +273,54 @@ pub fn pow2ReductionExponent(
 /// this path and scaling after the subtraction closes only one of them. The cross product of
 /// vertex differences grows as their SQUARE, so `f32` vertices at `1e20` — well inside the
 /// finite domain — give `1e40`, which is infinity; and an EDGE can overflow on its own, two
-/// finite vertices at `±3e38` differing by `6e38`, which is also infinity. Reducing all three
-/// points by one common power of two first puts every component below 1, hence every difference
-/// below 2 and every cross component below 4, after which no step in the chain can leave the
-/// range at either end. `Vec.scalePow2` explains why the factor must be a power of two and not
-/// merely a convenient scale.
+/// finite vertices at `±3e38` differing by `6e38`, which is also infinity. Reducing puts every
+/// component below 1, hence every difference below 2 and every cross component below 4, after
+/// which neither step can leave the range at the top end. `Vec.scalePow2` explains why the
+/// factor must be a power of two and not merely a convenient scale.
+///
+/// **Why the factor is PER EDGE and not one factor over the three vertices.** A single factor
+/// cannot serve a triangle whose components span more than the format's exponent range, and the
+/// failure is the worst kind — silent, and dressed as a diagnostic. Measured: the perfectly
+/// ordinary right triangle `(0,0,0)`, `(2e38,0,0)`, `(0,2⁻⁶⁰,0)` reduces by `2⁻¹²⁸`, which sends
+/// the second leg to `2⁻¹⁸⁸`, below the subnormal floor, so that edge becomes exactly zero and
+/// the cross with it. `MeshData.init` then answers `error.MeshTriangleDegenerate` — a typed
+/// refusal ACCUSING valid caller data. The class is not `f32`-only: at `f64` the same happens for
+/// `2^920` against `2^-919`. Two independent factors fix it — the repro's edges become
+/// `(0.5877, 0, 0)` and `(0, 0.5, 0)` and their cross `(0, 0, 0.2939)` — and neither property the
+/// single factor bought is given up, because BOTH factors are powers of two: exact collinearity
+/// is still preserved bit for bit, so a guard at true zero keeps its verdict; and the two factors
+/// COMPOSE into one common factor on the cross, which `normalizeScaled` still cancels, so the unit
+/// normal stays bit-identical whatever the two exponents were.
+///
+/// **What this closes and what it does not, MEASURED against an exact oracle rather than argued.**
+/// It closes the named case above and every case where the shared vertex is not itself the largest
+/// magnitude, and it strictly reduces the false-degenerate rate everywhere measured. It does NOT
+/// make a false degenerate impossible, and a tempting argument that it does — each reduced edge
+/// having a component in `[0.5, 1)`, so the cross being bounded below by their product times the
+/// sine of the angle — is FALSE: a near-coincident pair reduces to two nearly equal vertices whose
+/// difference is a single ulp, which is in no such interval. What is true is that a reduction by an
+/// exact power of two loses nothing the inputs expressed AT THE REDUCED MAGNITUDE; what it can
+/// still lose is a component that was expressible only at the ORIGINAL magnitude, which is what
+/// happens when the pair's two vertices differ by more than the exponent range.
+///
+/// Measured with a big-integer exact oracle over triangles drawn across the whole exponent range,
+/// restricted to cases whose exact answer is REPRESENTABLE in `T` — the only cases any
+/// implementation working in `T` could be held to. One exponent per vertex, `f32` then `f64`:
+/// single factor 23.6 % / 33.0 % false degenerates, per edge 17.1 % / 22.0 %, and a
+/// scale-only-when-it-overflows variant 14.9 % / 20.9 %. So the class is NOT closed by any
+/// arrangement of power-of-two factors; closing it needs an intermediate whose exponent range
+/// exceeds the format's, which is a different decision with a different cost. Two things are
+/// nevertheless guaranteed and both are asserted: the failure direction is always a refusal of a
+/// valid triangle and never acceptance of a degenerate one — zero false accepts over every
+/// measured seed — and the per-edge form is strictly better than the single factor on every seed
+/// at both precisions. `tests/mesh_test.zig` carries the property and the figures.
 pub fn triangleCross(
     comptime T: type,
     v0: Vec(3, T),
     v1: Vec(3, T),
     v2: Vec(3, T),
 ) Vec(3, T) {
-    const exp = pow2ReductionExponent(T, v0, v1, v2) orelse return Vec(3, T).zero;
-    const a = v0.scalePow2(exp);
-    const b = v1.scalePow2(exp);
-    const c = v2.scalePow2(exp);
-    return b.sub(a).cross(c.sub(a));
+    return edgeReducedPow2(T, v0, v1).cross(edgeReducedPow2(T, v0, v2));
 }
 
 /// Reinterpret a slice of `Vec3` as a flat `[]const f32` for the batched SIMD

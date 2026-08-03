@@ -3923,12 +3923,34 @@ test "F5 the power-of-two reduction is exact, so no verdict and no normal moves"
     // (3) The NORMAL is invariant under the choice of exponent — which is what makes "the shared
     // form" a real claim and not a hope, the mesh reducing by its vertices while the ray kernel
     // reduces by its vertices AND its origin, hence in general by a different power of two.
+    //
+    // Since F6 the reduction is PER EDGE, so there are TWO exponents and they are swept
+    // INDEPENDENTLY — 49 combinations, not 7. That is the stronger claim and the one the per-edge
+    // form actually needs: the two factors compose into a single common factor on the cross, which
+    // `normalizeScaled` cancels, so the unit normal cannot depend on either exponent.
     {
         const v0 = vr(0.25, -3, 7);
         const v1 = vr(11, 2, -0.5);
         const v2 = vr(-4, 9, 3);
         const reference = math.triangleCross(Real, v0, v1, v2).normalizeScaled().?;
-        for ([_]i32{ -37, -8, -1, 0, 1, 8, 37 }) |k| {
+        const exps = [_]i32{ -37, -8, -1, 0, 1, 8, 37 };
+        for (exps) |k1| {
+            for (exps) |k2| {
+                // `v0` is shared by both edges, so scaling it alone would change the geometry.
+                // What the two edges' factors are free to differ in is reached by moving the two
+                // FAR vertices independently and by putting the shared vertex at the origin.
+                const scaled = math.triangleCross(
+                    Real,
+                    Vec3r.zero,
+                    v1.scalePow2(k1),
+                    v2.scalePow2(k2),
+                ).normalizeScaled().?;
+                const plain = math.triangleCross(Real, Vec3r.zero, v1, v2).normalizeScaled().?;
+                try testing.expect(scaled.eql(plain));
+            }
+        }
+        // And the common-factor sweep still holds on the full triangle.
+        for (exps) |k| {
             const scaled = math.triangleCross(
                 Real,
                 v0.scalePow2(k),
@@ -3994,6 +4016,287 @@ test "F5 the power-of-two reduction is exact, so no verdict and no normal moves"
             ).maxAbsComponent());
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// F6 — the exact degeneracy oracle, and the property that closes the CLASS rather than a repro.
+// ---------------------------------------------------------------------------------------------
+
+/// `x == m · 2^e` with `m` an exact integer. Zero maps to `(0, 0)`.
+fn decomposeExact(comptime T: type, x: T) struct { m: i128, e: i32 } {
+    if (x == 0) return .{ .m = 0, .e = 0 };
+    const bits = std.math.floatMantissaBits(T) + 1;
+    const f = std.math.frexp(x);
+    return .{ .m = @intFromFloat(std.math.ldexp(f.significand, bits)), .e = f.exponent - bits };
+}
+
+/// The exact verdict, and the binary exponent of the exact cross's largest component.
+const ExactCross = struct { zero: bool, top_exp: i32 };
+
+/// EXACT `(v₁−v₀) × (v₂−v₀)` in integer arithmetic, so the zero test carries no tolerance and
+/// needs no wider float — `f128` is deliberately not used, being software-emulated on most
+/// targets and unnecessary here. Every component is written as an integer times ONE common
+/// `2^emin`, after which the differences and the whole cross are exact integer operations and the
+/// common factor is irrelevant to the verdict. The integers reach about `2^300` at `f32` and
+/// `2^2150` at `f64`, hence big integers.
+fn exactTriangleCross(gpa: std.mem.Allocator, v: [3][3]Real) !ExactCross {
+    const Big = std.math.big.int.Managed;
+    var emin: i32 = std.math.maxInt(i32);
+    var any = false;
+    for (v) |vertex| {
+        for (vertex) |component| {
+            const d = decomposeExact(Real, component);
+            if (d.m != 0) {
+                any = true;
+                if (d.e < emin) emin = d.e;
+            }
+        }
+    }
+    if (!any) return .{ .zero = true, .top_exp = 0 };
+
+    var x: [3][3]Big = undefined;
+    for (0..3) |i| {
+        for (0..3) |k| {
+            x[i][k] = try Big.init(gpa);
+            const d = decomposeExact(Real, v[i][k]);
+            try x[i][k].set(d.m);
+            if (d.m != 0) try x[i][k].shiftLeft(&x[i][k], @intCast(d.e - emin));
+        }
+    }
+    defer for (0..3) |i| {
+        for (0..3) |k| x[i][k].deinit();
+    };
+
+    var e0: [3]Big = undefined;
+    var e1: [3]Big = undefined;
+    for (0..3) |k| {
+        e0[k] = try Big.init(gpa);
+        e1[k] = try Big.init(gpa);
+        try e0[k].sub(&x[1][k], &x[0][k]);
+        try e1[k].sub(&x[2][k], &x[0][k]);
+    }
+    defer for (0..3) |k| {
+        e0[k].deinit();
+        e1[k].deinit();
+    };
+
+    var lhs = try Big.init(gpa);
+    defer lhs.deinit();
+    var rhs = try Big.init(gpa);
+    defer rhs.deinit();
+    var comp = try Big.init(gpa);
+    defer comp.deinit();
+
+    var zero = true;
+    var top: i32 = std.math.minInt(i32);
+    for ([3][2]usize{ .{ 1, 2 }, .{ 2, 0 }, .{ 0, 1 } }) |ij| {
+        try lhs.mul(&e0[ij[0]], &e1[ij[1]]);
+        try rhs.mul(&e0[ij[1]], &e1[ij[0]]);
+        try comp.sub(&lhs, &rhs);
+        if (!comp.eqlZero()) {
+            zero = false;
+            // The true value is `comp · 2^(2·emin)`.
+            const e: i32 = @as(i32, @intCast(comp.bitCountAbs())) - 1 + 2 * emin;
+            if (e > top) top = e;
+        }
+    }
+    return .{ .zero = zero, .top_exp = top };
+}
+
+/// The SINGLE-FACTOR form, kept here as the reference the fix is differentially measured against
+/// — this is what `math.triangleCross` did between F5 and F6.
+fn singleFactorCross(v0: Vec3r, v1: Vec3r, v2: Vec3r) Vec3r {
+    const largest = @max(v0.maxAbsComponent(), @max(v1.maxAbsComponent(), v2.maxAbsComponent()));
+    if (largest == 0) return Vec3r.zero;
+    const exp = -std.math.frexp(largest).exponent;
+    const a = v0.scalePow2(exp);
+    const b = v1.scalePow2(exp);
+    const c = v2.scalePow2(exp);
+    return b.sub(a).cross(c.sub(a));
+}
+
+fn asArrays(v0: Vec3r, v1: Vec3r, v2: Vec3r) [3][3]Real {
+    return .{ v0.toArray(), v1.toArray(), v2.toArray() };
+}
+
+test "F6 a triangle spanning the exponent range is not a false degenerate" {
+    const gpa = testing.allocator;
+    var store = ShapeStore{};
+    defer store.deinit(gpa);
+
+    // **THE REGRESSION F5 INTRODUCED, and the worst symptom of the three rounds: a typed refusal
+    // ACCUSING valid caller data.** One factor over the three vertices cannot serve a triangle
+    // whose components span more than the format's exponent range. This right triangle in the XY
+    // plane is entirely ordinary — every vertex finite, the area strictly positive — yet the
+    // single factor `2⁻¹²⁸` sends the second leg to `2⁻¹⁸⁸`, below the subnormal floor, so that
+    // edge becomes exactly zero and the cross with it, and `MeshData.init` answers
+    // `error.MeshTriangleDegenerate`. Silent, and dressed as a diagnostic.
+    const leg_hi: f32 = 2e38;
+    const leg_lo: f32 = std.math.ldexp(@as(f32, 1), -60);
+    const verts = [_]ApiVec3{ av3(0, 0, 0), av3(leg_hi, 0, 0), av3(0, leg_lo, 0) };
+    const id = try store.createShape(gpa, .{ .triangle_mesh = .{
+        .vertices = &verts,
+        .indices = &one_triangle_indices,
+    } });
+    const data = store.get(id).?.mesh.?;
+    // Counter-clockwise seen from `+Z`, so the normal is exactly `+Z` and its length exactly 1.
+    const n = data.faceNormal(0);
+    try testing.expect(n.eql(vr(0, 0, 1)));
+    try testing.expectEqual(@as(Real, 1), n.lengthSq());
+
+    // THE COUNTER-FACTUAL, on this very geometry: the single factor really does answer zero.
+    // Kept as arithmetic rather than by editing production, and it is what makes the pin a pin.
+    const single = singleFactorCross(
+        vr(0, 0, 0),
+        vr(@as(Real, leg_hi), 0, 0),
+        vr(0, @as(Real, leg_lo), 0),
+    );
+    if (Real == f32) try testing.expectEqual(@as(Real, 0), single.maxAbsComponent());
+    // The per-edge form does not, and the exact oracle agrees with the per-edge form.
+    const per_edge = math.triangleCross(Real, vr(0, 0, 0), vr(@as(Real, leg_hi), 0, 0), vr(0, @as(Real, leg_lo), 0));
+    try testing.expect(per_edge.maxAbsComponent() > 0);
+    const truth = try exactTriangleCross(gpa, asArrays(vr(0, 0, 0), vr(@as(Real, leg_hi), 0, 0), vr(0, @as(Real, leg_lo), 0)));
+    try testing.expect(!truth.zero);
+
+    // **THE CLASS IS NOT `f32`-ONLY**, so a second repro is scaled to whatever `Real` is: a span
+    // of nine tenths of the format's exponent range each way. At `f32` that is `2^114` against
+    // `2^-113`, at `f64` `2^920` against `2^-919`, and the single factor answers zero at BOTH.
+    {
+        const hi_exp: i32 = @intFromFloat(@as(f64, @floatFromInt(std.math.floatExponentMax(Real))) * 0.9);
+        const lo_exp: i32 = @intFromFloat(@as(f64, @floatFromInt(std.math.floatExponentMin(Real))) * 0.9);
+        const wide0 = Vec3r.zero;
+        const wide1 = vr(std.math.ldexp(@as(Real, 1), hi_exp), 0, 0);
+        const wide2 = vr(0, std.math.ldexp(@as(Real, 1), lo_exp), 0);
+        try testing.expectEqual(@as(Real, 0), singleFactorCross(wide0, wide1, wide2).maxAbsComponent());
+        const wide_cross = math.triangleCross(Real, wide0, wide1, wide2);
+        try testing.expect(wide_cross.maxAbsComponent() > 0);
+        try testing.expect(wide_cross.normalizeScaled().?.eql(vr(0, 0, 1)));
+        try testing.expect(!(try exactTriangleCross(gpa, asArrays(wide0, wide1, wide2))).zero);
+    }
+}
+
+test "F6 property: the exact oracle over the whole exponent range, on fixed seeds" {
+    const gpa = testing.allocator;
+
+    // **This is the property that closes the CLASS, and it is stated as what is TRUE rather than
+    // as what would be pleasant.** Three rounds on float extremes have shown that a named repro
+    // only closes itself, so the verdict is compared against an EXACT integer oracle over
+    // triangles whose component exponents are drawn across the entire representable range, on
+    // fixed seeds. Two families, because they fail for different reasons and only one of them is
+    // reachable by any rescaling:
+    //
+    //   A — one exponent PER VERTEX, so each vertex is internally commensurate while the three
+    //       magnitudes differ by up to the whole range. This is the family the per-edge factor
+    //       targets.
+    //   C — EXACTLY collinear by construction (`v₂ − v₀` an exact small-integer multiple of
+    //       `v₁ − v₀`), so the degenerate side is populated and the property is not vacuous there.
+    //
+    // What is asserted, and what is only measured, is decided by what a float implementation CAN
+    // guarantee — established by measurement, not assumed:
+    //
+    //   (i)  NO FALSE ACCEPT, ever. An exactly-degenerate triangle must be reported degenerate.
+    //        This is the safety-critical direction, since accepting one puts a zero-area triangle
+    //        in the store where `faceNormal`'s `orelse unreachable` would fire. Measured at zero
+    //        errors for both forms over every seed, and asserted exactly.
+    //   (ii) DOMINANCE. On identical inputs the per-edge form must produce no more false
+    //        degenerates than the single factor, and strictly fewer in aggregate. This is the
+    //        property that pins the fix, and reverting to the single factor breaks it.
+    //   (iii) A tight unit normal on every triangle either form calls non-degenerate.
+    //
+    // What is NOT asserted, because it is FALSE for any implementation working in `Real`: exact
+    // agreement on family A. The residual is reported in the milestone brief with its measured
+    // rate; the reason is that the intermediate needs an exponent range wider than the format
+    // holds, and no arrangement of power-of-two factors supplies one.
+    const units = [_][3]Real{
+        .{ 1, 0, 0 },  .{ 0, 1, 0 },   .{ 0, 0, 1 },
+        .{ 1, 2, 0 },  .{ 3, 0, 5 },   .{ 1, 1, 1 },
+        .{ 7, -3, 2 }, .{ -5, 1, 11 },
+    };
+    const lo = std.math.floatExponentMin(Real) + 8;
+    const hi = std.math.floatExponentMax(Real) - 8;
+
+    var total_single: usize = 0;
+    var total_per_edge: usize = 0;
+    var total_cases: usize = 0;
+    var degenerate_cases: usize = 0;
+
+    for ([_]u64{ 0x5EED_0001, 0x5EED_0002, 0x5EED_0003 }) |seed| {
+        var prng = std.Random.DefaultPrng.init(seed);
+        const rnd = prng.random();
+        var seed_single: usize = 0;
+        var seed_per_edge: usize = 0;
+
+        var i: usize = 0;
+        while (i < 400) : (i += 1) {
+            const collinear = (i % 2) == 0;
+            var v: [3]Vec3r = undefined;
+            if (collinear) {
+                // Family C. `3 × u` is exact for these small integer triples, so the triple is
+                // EXACTLY collinear and the oracle must say so.
+                const u = units[rnd.uintLessThan(usize, units.len)];
+                const e = rnd.intRangeAtMost(i32, lo, hi);
+                const d = vr(
+                    std.math.ldexp(u[0], e),
+                    std.math.ldexp(u[1], e),
+                    std.math.ldexp(u[2], e),
+                );
+                v = .{ Vec3r.zero, d, d.scale(3) };
+            } else {
+                // Family A.
+                for (&v) |*vertex| {
+                    const u = units[rnd.uintLessThan(usize, units.len)];
+                    const e = rnd.intRangeAtMost(i32, lo, hi);
+                    vertex.* = vr(
+                        std.math.ldexp(u[0], e),
+                        std.math.ldexp(u[1], e),
+                        std.math.ldexp(u[2], e),
+                    );
+                }
+            }
+            if (!std.math.isFinite(v[0].maxAbsComponent()) or
+                !std.math.isFinite(v[1].maxAbsComponent()) or
+                !std.math.isFinite(v[2].maxAbsComponent())) continue;
+
+            const truth = try exactTriangleCross(gpa, asArrays(v[0], v[1], v[2]));
+            const single_zero = singleFactorCross(v[0], v[1], v[2]).maxAbsComponent() == 0;
+            const per_edge = math.triangleCross(Real, v[0], v[1], v[2]);
+            const per_edge_zero = per_edge.maxAbsComponent() == 0;
+
+            total_cases += 1;
+            if (truth.zero) {
+                degenerate_cases += 1;
+                // (i) NO FALSE ACCEPT.
+                try testing.expect(single_zero);
+                try testing.expect(per_edge_zero);
+            } else {
+                if (single_zero) seed_single += 1;
+                if (per_edge_zero) seed_per_edge += 1;
+                // (iii) A tight unit normal wherever a non-degenerate verdict is given. TIGHT is
+                // a machine-epsilon budget and not a geometric tolerance: 16 ULP, the same
+                // `unit_k` the ray kernel asserts its incoming direction against. An EXACT 1 is
+                // reachable only for an axis-aligned cross, which the named pins assert and an
+                // arbitrary triangle cannot — measured here at `0.99999994`, one ULP below.
+                if (!per_edge_zero) {
+                    const n = per_edge.normalizeScaled().?;
+                    try testing.expect(@abs(n.lengthSq() - 1) <= 16 * std.math.floatEps(Real));
+                }
+            }
+        }
+
+        // (ii) DOMINANCE, per seed and STRICT — measured to hold on all three seeds at both
+        // precisions, so the weaker `<=` would have let a regression through on two of them.
+        // Counts on 200 non-collinear draws per seed: `f32` 47→38, 44→34, 40→32; `f64` 60→47,
+        // 50→37, 56→37. The counter-factual therefore fails on EVERY seed, not just in aggregate.
+        try testing.expect(seed_per_edge < seed_single);
+        total_single += seed_single;
+        total_per_edge += seed_per_edge;
+    }
+
+    // The degenerate side must be genuinely populated, or (i) proves nothing.
+    try testing.expect(degenerate_cases * 3 > total_cases);
+    // (ii) DOMINANCE in aggregate, and STRICT — this is what the counter-factual breaks: with
+    // `math.triangleCross` back on the single factor the two counts are equal and this fails.
+    try testing.expect(total_per_edge < total_single);
 }
 
 test "F3 gjkPair states its convex precondition at its own site" {
