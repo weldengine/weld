@@ -297,7 +297,13 @@ fn laneUnlessOverflow(comptime T: type, a: T, b: T, c: T, d: T) Lane {
 
 /// What `triangleCross` can conclude.
 ///
-/// **`triangleCross` IS NOT A CLASSIFIER, and `.degenerate` here is NOT a verdict of flatness.**
+/// **THE TWO OUTCOMES ARE NOT SYMMETRIC, and that asymmetry is the whole contract.** `.degenerate`
+/// is reached ONLY after the exact integer tier has answered zero, so it IS a reliable verdict of
+/// flatness. `.direction` proves nothing of the kind: it is returned by the first FLOAT tier that
+/// forms a finite non-zero vector, and on three exactly proportional points that vector can be a
+/// rounding RESIDUE — a good-looking direction for a triangle whose true area is zero.
+///
+/// **So `triangleCross` IS NOT A CLASSIFIER.**
 /// The contract is deliberately narrow, and the narrowing is a correction: the function returns a
 /// direction from the first float tier that produces a finite non-zero one, and on three exactly
 /// proportional points that can be a rounding RESIDUE — a perfectly good-looking direction for a

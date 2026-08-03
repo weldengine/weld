@@ -4323,9 +4323,18 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
             // that is a rounding residue. `shipped_opt` is now used for the DIRECTION only.
             const shipped_zero = shippedZero(v[0], v[1], v[2]);
             const shipped_opt = shippedDirection(v[0], v[1], v[2]);
+            const no_direction = shipped_opt == null;
             const shipped = shipped_opt orelse Vec3r.zero;
 
             total_cases += 1;
+
+            // **THE VERDICT AGREES WITH THE ORACLE IN BOTH DIRECTIONS, PER CASE.** Two exact
+            // integer arithmetics computing the same determinant must give the same answer, so this
+            // is an equality and not a one-sided bound. The FALSE REFUSAL half — oracle non-zero and
+            // the classifier calling it flat — is the direction §1.11.17 declares structurally
+            // impossible, and it had only ever been COUNTED, never asserted. A normative guarantee
+            // with no assertion behind it is what this milestone spent nine rounds removing.
+            try testing.expectEqual(truth.zero, shipped_zero);
             if (truth.zero) {
                 degenerate_cases += 1;
                 // (i) **NO FALSE ACCEPT, EVER — asserted absolutely, and the absolute form is
@@ -4347,13 +4356,16 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
             } else {
                 if (single_zero) seed_single += 1;
                 if (per_edge_zero) seed_per_edge += 1;
-                if (shipped_zero) seed_shipped += 1;
+                // Dominance is about whether a FLOAT form could form a direction, so it reads
+                // `no_direction` and not the verdict. Since F9 these are two different questions,
+                // and carrying both in one variable is precisely what produced F9.
+                if (no_direction) seed_shipped += 1;
                 // (iii) A tight unit normal wherever a non-degenerate verdict is given. TIGHT is
                 // a machine-epsilon budget and not a geometric tolerance: 16 ULP, the same
                 // `unit_k` the ray kernel asserts its incoming direction against. An EXACT 1 is
                 // reachable only for an axis-aligned cross, which the named pins assert and an
                 // arbitrary triangle cannot — measured here at `0.99999994`, one ULP below.
-                if (!shipped_zero) {
+                if (!no_direction) {
                     const n = shipped.normalizeScaled().?;
                     try testing.expect(@abs(n.lengthSq() - 1) <= 16 * std.math.floatEps(Real));
                 }

@@ -995,13 +995,19 @@ pub fn edgeIsActive(normal_a: Vec3r, normal_b: Vec3r, edge_direction: Vec3r, cos
     return cos_angle < 0; // parallel: active exactly when opposite
 }
 
-/// The direction of the face normal `(v₁−v₀) × (v₂−v₀)`, in the fixed evaluation order the winding
-/// convention fixes, or `.degenerate` when the EXACT cross is zero.
+/// The DIRECTION of the face normal `(v₁−v₀) × (v₂−v₀)`, in the fixed evaluation order the winding
+/// convention fixes. **NOT a flatness classifier** — that is `isDegenerate` below.
+///
+/// The two outcomes are ASYMMETRIC, exactly as `math.CrossOutcome` states: `.degenerate` is only
+/// reached after the exact integer tier has answered zero, so it is a reliable flatness verdict;
+/// `.direction` is returned by the first FLOAT tier that forms a finite non-zero vector, so it does
+/// NOT prove the triangle is non-flat — on exactly proportional points that vector can be a rounding
+/// residue. On a stored mesh the distinction costs nothing, `init` having already classified every
+/// triangle exactly, which is why this entry may stay on the cheap tiers.
 ///
 /// **SCALED, and deliberately so — the magnitude is not a reliable multiple of twice the area.** The
 /// shared `math.triangleCross` answers in three tiers, unscaled first and an exact integer
-/// determinant last, and only the direction and the zero verdict survive across all three. The two
-/// consumers here need exactly those. It is shared with the ray↔triangle kernel for the reason
+/// determinant last, and only the direction survives across all three unchanged. It is shared with the ray↔triangle kernel for the reason
 /// stated at `isDegenerate`: the guard that refuses a triangle and the normal that describes it must
 /// be computed from the same geometry.
 pub fn faceCross(v0: Vec3r, v1: Vec3r, v2: Vec3r) math.CrossOutcome(Real) {
@@ -1015,8 +1021,10 @@ pub fn faceCross(v0: Vec3r, v1: Vec3r, v2: Vec3r) math.CrossOutcome(Real) {
 /// zero, which is unimpeachable about a zero it computes but says nothing about the zeros it fails
 /// to compute: a triangle whose components span more than the format's exponent range read as flat
 /// while being perfectly ordinary, and the caller received a typed refusal accusing valid data.
-/// `math.triangleCross`'s third tier settles it in integer arithmetic, so `.degenerate` now means
-/// exactly one thing — the three points really are collinear — and no triangle is ever mislabelled.
+/// `math.triangleIsFlat` settles it in integer arithmetic with no float step anywhere, so the verdict
+/// means exactly one thing — the three points really are collinear — and no triangle is ever
+/// mislabelled. The agreement with an independent big-integer oracle is asserted in BOTH directions,
+/// per case, over the randomized property: no false accept and no false refusal, at both precisions.
 ///
 /// A sliver whose area is minuscule and non-zero normalises exactly and IS SERVED, which the earlier
 /// comment claimed without being able to deliver it; no area threshold appears here, and a suite
