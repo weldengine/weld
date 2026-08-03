@@ -1030,12 +1030,14 @@ pub fn faceCross(v0: Vec3r, v1: Vec3r, v2: Vec3r) math.CrossOutcome(Real) {
 /// comment claimed without being able to deliver it; no area threshold appears here, and a suite
 /// that only rejected degenerates would pass just as well with one.
 pub fn isDegenerate(v0: Vec3r, v1: Vec3r, v2: Vec3r) bool {
-    // The EXACT path directly, never through the tiered `faceCross`. Measured: the cheap tiers
-    // answer first, and a float cross that comes out non-zero on three exactly proportional points
-    // is a rounding residue rather than evidence — three of 932 exactly-degenerate draws at `f32`
-    // reached the store that way, the exact tier never having been consulted. The verdict is what
-    // must be exact; the direction is a separate question, asked of `faceCross` on geometry this
-    // predicate has already admitted.
+    // The EXACT path directly, never through the tiered `faceCross`. The reason is measured: the
+    // cheap tiers answer first, and a float cross that comes out non-zero on three exactly
+    // proportional points is a rounding residue rather than evidence, so routing the verdict through
+    // them admitted flat triangles — three of 932 exactly-degenerate `f32` draws, with the exact
+    // tier never consulted. Since the rewiring the verdict is exact and its agreement with an
+    // independent big-integer oracle is asserted in BOTH directions, per case, at both precisions.
+    // The direction is a separate question, asked of `faceCross` on geometry this predicate has
+    // already admitted.
     return math.triangleIsFlat(Real, v0, v1, v2);
 }
 

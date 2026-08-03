@@ -303,27 +303,21 @@ fn laneUnlessOverflow(comptime T: type, a: T, b: T, c: T, d: T) Lane {
 /// forms a finite non-zero vector, and on three exactly proportional points that vector can be a
 /// rounding RESIDUE — a good-looking direction for a triangle whose true area is zero.
 ///
-/// **So `triangleCross` IS NOT A CLASSIFIER.**
-/// The contract is deliberately narrow, and the narrowing is a correction: the function returns a
-/// direction from the first float tier that produces a finite non-zero one, and on three exactly
-/// proportional points that can be a rounding RESIDUE — a perfectly good-looking direction for a
-/// triangle whose true area is zero. So `.degenerate` means only "no float tier could form a
-/// direction", never "the area is zero".
-///
-/// The classifier is `math.triangleIsFlat`, which decides in integer arithmetic with no float step
-/// anywhere and cannot be wrong about a zero. Callers that must not admit a flat triangle ask THAT;
-/// `triangleCross` is for callers that need a direction on geometry already admitted. Keeping the
-/// two apart is what makes the cheap tiers usable at all — routing this function through the exact
-/// path would put integer arithmetic on the ray kernel's hot path and collapse the verdict/direction
-/// separation that `engine-physics-forge.md` §1.11.17 now makes normative.
+/// **So `triangleCross` IS NOT A CLASSIFIER.** The classifier is `math.triangleIsFlat`, which
+/// decides in integer arithmetic with no float step anywhere and cannot be wrong about a zero.
+/// Callers that must not admit a flat triangle ask THAT; `triangleCross` is for callers that need a
+/// direction on geometry already admitted. Keeping the two apart is what makes the cheap tiers usable
+/// at all — routing this function through the exact path would put integer arithmetic on the ray
+/// kernel's hot path and collapse the verdict/direction separation that `engine-physics-forge.md`
+/// §1.11.17 now makes normative.
 pub fn CrossOutcome(comptime T: type) type {
     return union(enum) {
         /// A non-zero vector whose direction is that of the true area vector, up to the float
-        /// error of whichever tier produced it. The magnitude carries no meaning.
+        /// error of whichever tier produced it. The magnitude carries no meaning, and this outcome
+        /// does NOT prove the triangle is non-flat.
         direction: Vec(3, T),
-        /// No tier could form a direction. On geometry a caller has already had classified by
-        /// `math.triangleIsFlat` this means the triangle is flat; on arbitrary input it means only
-        /// that, not that the exact area is zero.
+        /// The triangle is EXACTLY flat. Reached only after the exact integer tier has answered
+        /// zero, so it is a reliable verdict.
         degenerate,
     };
 }

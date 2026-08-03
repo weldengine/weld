@@ -4247,7 +4247,6 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
 
     var total_single: usize = 0;
     var total_per_edge: usize = 0;
-    var total_shipped: usize = 0;
     var total_cases: usize = 0;
     var degenerate_cases: usize = 0;
     var strictly_better_seeds: usize = 0;
@@ -4259,7 +4258,6 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
         const rnd = prng.random();
         var seed_single: usize = 0;
         var seed_per_edge: usize = 0;
-        var seed_shipped: usize = 0;
 
         var i: usize = 0;
         while (i < 600) : (i += 1) {
@@ -4352,20 +4350,22 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
                 if (!shipped_zero) shipped_false_accepts += 1;
                 if (!single_zero) legacy_false_accepts += 1;
                 if (!per_edge_zero) legacy_false_accepts += 1;
-                try testing.expect(shipped_zero);
             } else {
                 if (single_zero) seed_single += 1;
                 if (per_edge_zero) seed_per_edge += 1;
-                // Dominance is about whether a FLOAT form could form a direction, so it reads
-                // `no_direction` and not the verdict. Since F9 these are two different questions,
-                // and carrying both in one variable is precisely what produced F9.
-                if (no_direction) seed_shipped += 1;
+                // **THE SHIPPED FORM MUST PRODUCE A DIRECTION HERE, and that is a guarantee rather
+                // than a metric.** `.degenerate` is reached only after the exact integer tier answers
+                // zero, so a triangle the oracle calls non-flat cannot come back without one — and
+                // this is not a nicety: it is the precondition of `MeshData.faceNormal`'s
+                // `orelse unreachable`, which fires on a stored triangle if it ever fails. Counting
+                // it was the same mistake as counting the false refusal.
+                try testing.expect(!no_direction);
                 // (iii) A tight unit normal wherever a non-degenerate verdict is given. TIGHT is
                 // a machine-epsilon budget and not a geometric tolerance: 16 ULP, the same
                 // `unit_k` the ray kernel asserts its incoming direction against. An EXACT 1 is
                 // reachable only for an axis-aligned cross, which the named pins assert and an
                 // arbitrary triangle cannot — measured here at `0.99999994`, one ULP below.
-                if (!no_direction) {
+                {
                     const n = shipped.normalizeScaled().?;
                     try testing.expect(@abs(n.lengthSq() - 1) <= 16 * std.math.floatEps(Real));
                 }
@@ -4381,12 +4381,15 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
         // TIE on seed `0x5EED_0003`, not a regression). So that rung asserts `<=`, which still
         // fails on any regression whatsoever, and the improvement is carried by the aggregate and
         // by the majority check below. Writing `<` there would be asserting something false.
+        // The LADDER is between the two FLOAT forms, and only them. They are the historical
+        // metrics: allowed to fail, kept for the non-vacuity of the assertions above and for the
+        // dominance narrative. The shipped form has no rung here at all — a comparison would be
+        // meaningless now that it is asserted to produce a direction on EVERY non-flat draw, and
+        // pretending otherwise is what let a guarantee sit in a counter for a whole round.
         try testing.expect(seed_per_edge < seed_single);
-        try testing.expect(seed_shipped <= seed_per_edge);
-        if (seed_shipped < seed_per_edge) strictly_better_seeds += 1;
+        if (seed_per_edge < seed_single) strictly_better_seeds += 1;
         total_single += seed_single;
         total_per_edge += seed_per_edge;
-        total_shipped += seed_shipped;
     }
 
     // The degenerate side must be genuinely populated, or (i) proves nothing.
@@ -4402,10 +4405,13 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
     if (Real == f32) try testing.expect(legacy_false_accepts > 0);
 
     // (ii) DOMINANCE in aggregate, STRICT on both rungs. This is what the counter-factual breaks:
-    // putting `math.triangleCross` back on either earlier form makes the corresponding counts equal
-    // and takes these down. Measured false-degenerate counts over the NON-DEGENERATE draws —
-    // `f32` 131 / 104 / 97 of 597, i.e. 21.9 % → 17.4 % → 16.3 %; `f64` 166 / 121 / 115 of 596,
-    // i.e. 27.9 % → 20.3 % → 19.3 %.
+    // putting `math.triangleCross` back on the single factor makes the two counts equal and takes
+    // this down. Measured false-degenerate counts over the NON-DEGENERATE draws, FLOAT forms only —
+    // `f32` 131 then 104 of 597, i.e. 21.9 % then 17.4 %; `f64` 166 then 121 of 596, i.e. 27.9 %
+    // then 20.3 %. The SHIPPED form has no entry in this table and cannot have one: it is asserted
+    // per case to produce a direction on every non-flat draw, so its count is zero by assertion
+    // rather than by measurement, and listing it beside two forms that are allowed to fail would
+    // read as a comparison where there is none.
     //
     // **THOSE PERCENTAGES ARE A STRESS METRIC, NOT A FIELD EXPECTATION, and the caveat has to
     // travel with the number.** The sampling is ADVERSARIAL by construction — one exponent drawn
@@ -4414,8 +4420,7 @@ test "F6 property: the exact oracle over the whole exponent range, on fixed seed
     // a few orders of magnitude, where every one of these forms is exact. Read out of context the
     // figure invites the conclusion that one mesh triangle in six is misjudged, which is false.
     try testing.expect(total_per_edge < total_single);
-    try testing.expect(total_shipped < total_per_edge);
-    // And the improvement is not carried by one lucky seed: strict on a MAJORITY of them.
+    // And the float ladder's improvement is not carried by one lucky seed: strict on a MAJORITY.
     try testing.expect(strictly_better_seeds * 2 > 3);
 }
 
